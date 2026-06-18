@@ -159,6 +159,22 @@ Config lives in `~/.config/termora`, runtime state in `~/.local/state/termora`.
 > A native SEA embeds the host Node runtime, so build on the OS you target — a cross-platform binary
 > (e.g. the Windows hub) must be produced on that platform.
 
+### Release MSIX identity
+
+The release workflow only builds and uploads the MSIX installer when the repository has the Partner Center
+package identity configured as GitHub repository variables. Set these once under
+`Settings` -> `Secrets and variables` -> `Actions` -> `Variables`:
+
+| Variable | Value |
+|----------|-------|
+| `MSIX_IDENTITY_NAME` | Partner Center package/identity name |
+| `MSIX_PUBLISHER` | Partner Center publisher subject, for example `CN=...` |
+| `MSIX_PUBLISHER_DISPLAY_NAME` | Publisher display name shown for the app |
+
+If any of these variables are unset, `release.yml` skips the MSIX build and upload but still ships the NSIS
+and MSI desktop installers. The CI inspection build in `build.yml` still creates its placeholder MSIX artifact
+unconditionally.
+
 ---
 
 ## Configuration

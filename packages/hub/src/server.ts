@@ -603,8 +603,8 @@ async function registerUserWallpapers(server: FastifyInstance, configDir: string
 		root: wallpapersDir,
 		prefix: "/public/wallpapers/",
 		decorateReply: false,
-		setHeaders: (res) => {
-			res.setHeader("X-Content-Type-Options", "nosniff");
+		setHeaders: (reply) => {
+			reply.header("X-Content-Type-Options", "nosniff");
 		},
 	});
 

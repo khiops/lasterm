@@ -1,7 +1,7 @@
 <!--
 doc-meta:
   story_id: issue-94-quit-lifecycle
-  status: draft
+  status: canonical
   complexity: COMPLEX
   adversarial_applied: true
   llm_consensus_applied: true

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/khiops/termora/compare/v0.5.0...v0.6.0) (2026-07-31)
+
+
+### Features
+
+* **desktop:** clean shutdown / quit lifecycle ([#94](https://github.com/khiops/termora/issues/94)) ([#104](https://github.com/khiops/termora/issues/104)) ([3ab91f5](https://github.com/khiops/termora/commit/3ab91f5d10ebcd25d1fd411f48a5a62fcd9bae51))
+* **desktop:** Microsoft Store MSIX packaging in CI (MakeAppx) ([#106](https://github.com/khiops/termora/issues/106)) ([d98332b](https://github.com/khiops/termora/commit/d98332b69d471a081c779138161455bb80872493))
+
+
+### CI/CD
+
+* pass the desktop deny.toml as a global cargo-deny option ([#109](https://github.com/khiops/termora/issues/109)) ([2753165](https://github.com/khiops/termora/commit/2753165516f9a9b7798d5688692100ad92ad5a26))
+
 ## [0.5.0](https://github.com/khiops/termora/compare/v0.4.0...v0.5.0) (2026-06-18)
 
 

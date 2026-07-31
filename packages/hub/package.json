@@ -1,6 +1,6 @@
 {
 	"name": "@termora/hub",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "termora hub — Fastify daemon, session management, SSH transport, REST + WebSocket API",
 	"license": "AGPL-3.0-only",
 	"repository": {

@@ -234,6 +234,25 @@ jobs:
           Copy-Item dist\sea\termora-hub.exe "packages\clients\desktop\src-tauri\termora-hub-$triple.exe"
           pnpm -F @termora/shared build
           pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+      # Uses the real Partner Center identity when the repository variables are
+      # set, so the packaged identity is exercised before a tagged release;
+      # falls back to the manifest placeholders otherwise.
+      - name: Package unsigned MSIX
+        if: matrix.triple == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          # Hashtable splatting: an array splat would bind these positionally.
+          $packArgs = @{ SkipBuild = $true }
+          if ($env:MSIX_IDENTITY_NAME -and $env:MSIX_PUBLISHER -and $env:MSIX_PUBLISHER_DISPLAY_NAME) {
+            $packArgs.IdentityName = $env:MSIX_IDENTITY_NAME
+            $packArgs.Publisher = $env:MSIX_PUBLISHER
+            $packArgs.PublisherDisplayName = $env:MSIX_PUBLISHER_DISPLAY_NAME
+          }
+          .\packages\clients\desktop\msix\pack-msix.ps1 @packArgs
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.triple }}
@@ -242,4 +261,10 @@ jobs:
             packages/clients/desktop/src-tauri/target/release/bundle/nsis/*.exe
             packages/clients/desktop/src-tauri/target/release/bundle/**/*.dmg
             packages/clients/desktop/src-tauri/target/release/bundle/**/*.deb
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        if: matrix.triple == 'x86_64-pc-windows-msvc'
+        with:
+          name: desktop-msix-${{ matrix.triple }}
+          path: packages/clients/desktop/msix/out/*.msix
           retention-days: 1

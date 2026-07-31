@@ -343,15 +343,44 @@ jobs:
           Copy-Item "dist\sea\termora-agent-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\termora-agent-${env:TRIPLE}.exe"
           Copy-Item "dist\sea\termora-hub-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\termora-hub-${env:TRIPLE}.exe"
           pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+      - name: Package unsigned MSIX
+        if: >-
+          ${{
+            matrix.triple == 'x86_64-pc-windows-msvc' &&
+            vars.MSIX_IDENTITY_NAME != '' &&
+            vars.MSIX_PUBLISHER != '' &&
+            vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+          }}
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          .\packages\clients\desktop\msix\pack-msix.ps1 `
+            -SkipBuild `
+            -IdentityName $env:MSIX_IDENTITY_NAME `
+            -Publisher $env:MSIX_PUBLISHER `
+            -PublisherDisplayName $env:MSIX_PUBLISHER_DISPLAY_NAME
       - name: Upload desktop installers to release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          MSIX_RELEASE_ENABLED: >-
+            ${{
+              vars.MSIX_IDENTITY_NAME != '' &&
+              vars.MSIX_PUBLISHER != '' &&
+              vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+            }}
         run: |
           find packages/clients/desktop/src-tauri/target/release/bundle -type f \
             \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
             -exec gh release upload "$TAG_NAME" --clobber {} \;
+          if [ "$MSIX_RELEASE_ENABLED" = "true" ] && [ -d packages/clients/desktop/msix/out ]; then
+            find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" \
+              -exec gh release upload "$TAG_NAME" --clobber {} \;
+          fi
 
   publish-release:
     name: Publish Release

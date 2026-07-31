@@ -1,6 +1,6 @@
 [package]
 name = "termora-desktop"
-version = "0.5.0"
+version = "0.6.0"
 description = "Termora desktop app (Tauri v2)"
 authors = ["Termora contributors"]
 license = "AGPL-3.0-only"

@@ -1,6 +1,6 @@
 {
 	"name": "termora",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"private": false,
 	"type": "module",
 	"description": "Local-first session terminal platform — hub daemon + agent + SSH + PWA UI",

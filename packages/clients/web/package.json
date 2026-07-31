@@ -1,6 +1,6 @@
 {
 	"name": "@termora/web",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "termora web client — Vue 3 PWA (not published; embedded in hub static dir)",
 	"private": true,
 	"license": "AGPL-3.0-only",

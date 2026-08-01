@@ -152,14 +152,9 @@ primitives ship upstream first and termora consumes them by moving the pin.
 
 Until the pin moves, the agent cannot honestly answer `childrenExited: true`.
 
-**Identity.** The agent writes an identity file beside its socket at startup —
-pid, process creation time, executable path, instance nonce — mode 0600, in the
-0700 directory the launcher already creates, and **version-tagged so a newer hub
-can read an older agent's file**. The hub reads it and cross-checks it against
-`HELLO`. The agent writes it, not the hub, because the daemon outlives hubs: a
-fresh hub attaching to a pre-existing daemon has recorded nothing.
-
-A bare pid is never sufficient — pids are reused; identity is pid *plus*
+**Identity.** See §4.3 step 3: the agent publishes a version-tagged
+`agent.identity` record at startup and an `agent.last-exit` record before a clean
+exit. A bare pid is never sufficient — pids are reused; identity is pid *plus*
 creation time.
 
 ### §4.3 Stopping cleanly
@@ -189,17 +184,60 @@ Order matters, and C1 dictates it:
    is how `restartChannel` and `respawnDeadChannel` work, so a teardown that
    held an id back would break both.
 
-2. Stop the **hub**, confirmed by recorded identity (reuse
-   `confirm_hub_stopped_or_kill`; do not derive a third variant).
-3. Stop the **agent**: `SHUTDOWN { reason }` on the protocol — a daemon-level
-   message, not overloaded `DESTROY`. Acknowledgement is two-phase:
-   `SHUTDOWN_ACCEPTED` (received) then `SHUTDOWN_COMPLETE { childrenExited }`.
-   Receipt is not exit.
-4. Confirm exit **by pid + creation time** (authoritative); pipe disappearance is
-   a fast-path hint, not proof.
+2. Stop the **agent**, then the hub. The agent goes first because the latch is
+   what makes that safe, and because the hub is the component that knows how to
+   reach it. A hub that stopped first would leave the agent to be stopped by the
+   desktop, which would have to learn the agent's socket, auth and identity for
+   no gain.
+
+   **Asking is an OS mechanism, not a protocol message.** On Unix an
+   identity-checked `SIGTERM` already enters the daemon's shutdown path and runs
+   the full bounded sweep. On Windows the agent creates a per-instance named
+   event in the `Local\` namespace with an owner-only DACL, waits on it, and
+   treats it exactly as it treats a signal; the stopper opens it by name and sets
+   it. Both live behind one stopper so there is a single place that knows how to
+   ask a local agent to stop.
+
+   A wire message was considered and rejected. It buys a reason string and an
+   in-band result, at the cost of a message type, its codec, pending-response
+   machinery on both sides, and a hub that must keep its connection alive while
+   waiting to die. It is also *sendable to a remote agent*, which is never ours
+   to stop, so the capability would have to be fenced off from the one direction
+   the protocol makes easiest.
+
+3. Confirm exit **by process identity**, never by a file disappearing. The agent
+   publishes an `agent.identity` record at startup — format version, pid,
+   OS creation-time fingerprint, executable path, and the socket and event
+   nonces — written atomically, mode 0600, in the 0700 directory the launcher
+   already creates. **The agent writes it**, because the daemon outlives hubs: a
+   fresh hub attaching to a pre-existing daemon has recorded nothing.
+
+   A stop succeeds only when *that* process is gone. Absence of the record is a
+   hint, not proof: a crash leaves it stale, and a stale record is exactly the
+   case a force-stop must not act on blindly.
+
+4. Before a clean exit the agent writes a separate `agent.last-exit` record —
+   the same identity fields plus whether the stop was requested or forced, the
+   outcome, and the terminals it could not confirm — and only then removes
+   `agent.identity`. A force-killed agent therefore leaves a live-looking record
+   and no exit record, which is itself the diagnosis.
+
+   **`childrenExited` does not gate applying an update.** At cold start the agent
+   is gone; on Unix it cannot prove an escaped descendant is gone anyway. The
+   installer already has to fail cleanly on a locked file (§4.6), so that is the
+   check that decides. The outcome is kept for diagnosis, not for permission.
+
 5. If exit cannot be confirmed within the bound, force-terminate by recorded
-   identity — the Job Object makes that clean. This is a normal repair path
-   (C7), not an exotic fallback.
+   identity — on Windows the job objects make that tree-clean by construction.
+   This is a normal repair path (C7), not an exotic fallback.
+
+**On identity strength.** The hub's own stop validates by matching the process
+command line, and that is adequate *there* because it only runs after an
+authenticated owner-token shutdown has already been attempted. It is not adequate
+as authorisation for a new force-stop path: a substring match passes for anything
+whose command line contains it, and pids are reused. The agent gets the stronger
+record now; giving the hub runtime the same creation-time fingerprint is worth
+doing and belongs in its own change.
 
 ### §4.4 Applying an update
 
@@ -371,15 +409,23 @@ Scenario: Store builds do none of this
 |-------|---------|-----------|
 | **S1a** Containment primitives (`async-xpty`) | Job Object at creation (Windows), process-group signal (Unix), bounded `wait()`, new `kill_tree()` leaving `kill()` semantics intact | — |
 | **S1b** Consume the primitives | Move the rev pin; `destroy_all()` uses `kill_tree()` and waits, bounded | S1a |
-| **S1c** Lifecycle | Shutdown channel owned by the daemon loop, agent-written versioned identity file, `SHUTDOWN` two-phase protocol, no-relaunch latch, identity-confirmed stop | S1b |
+| **S1c** Daemon teardown | The daemon loops own shutdown, stop listening on request, sweep on any exit; the registry refuses to spawn once shutdown began; exit status is zero iff the agent ran and stopped with every terminal confirmed | S1b |
+| **S1d** Stopping a local agent | `agent.identity` and `agent.last-exit` records, the Windows named event, one stopper that asks by the platform's own mechanism and confirms by identity, and a CLI verb that **refuses while a hub is live** and says why | S1c |
+| **S1e** Local quit | the no-relaunch latch over all three respawn paths, a hub-owned coordinator that latches, stops the agent through S1d's stopper, then stops itself, behind a CLI verb. Plain `stop` keeps today's "hub stops, sessions survive" meaning | S1d |
+| **S1f** Quit gestures | window close, tray and OS logoff call the same coordinator; the desktop keeps an identity-validated force-stop as its repair path | S1e |
 | **S2** Release publication | release-only `createUpdaterArtifacts`, signed upload with real asset names, `latest.json`, key-pair and per-signature pipeline gates, post-publish URL assertion | — |
 | **S0** Notify only | check the endpoint, surface "0.8.0 is available" with a link. No download, no staging, no code-execution path | S2 |
 | **S3** Stage | preflight, download (reusing `agent-fetch` hardening), verify, stage, journal, renderer contract | S2 to ship; buildable and testable against the §7 fixture endpoint without it |
-| **S4a** Cold-start applier | re-verification, apply-at-launch, recovery classification, terminal-failure handling — headless, driven by the harness | S1c, S3 |
+| **S4a** Cold-start applier | re-verification, apply-at-launch, recovery classification, terminal-failure handling — headless, driven by the harness | S1f, S3 |
 | **S4b** Gestures & UI | `ask`/`hide`/`quit` rename + migration, one coordinator in Rust with webview and native presenters, staged-update surfacing | S4a |
 
-The S1 chain and S2 run in parallel; inside the chain, S1a→S1b→S1c is strictly
-ordered because S1a lands in another repo and S1b is what moves the pin.
+The S1 chain and S2 run in parallel; inside the chain the order is strict.
+S1a lands in another repo and S1b moves the pin. From S1c on, each link is a
+vertical someone can use rather than a layer waiting for its caller: a daemon
+that stops properly, then a way to stop one, then a quit that uses it, then the
+gestures that trigger it. That shape is deliberate — a summary type built ahead
+of its consumer turned out to be lying in three ways nobody could see until a
+caller existed.
 **S0 ships first user value** and exercises the manifest end-to-end with real
 users before anything trusts it for code execution.
 
@@ -465,8 +511,25 @@ last one is the reason to run the consult against code rather than against the
 document: every reviewer so far had read "every spawned process is gone" without
 checking whether `killpg` can deliver it.
 
-Adopted: Windows Job Object containment, two-phase shutdown acknowledgement,
-TOCTOU hardening with re-verification before execution, monotonic anti-downgrade,
-staged-update status surfaced beyond the desktop renderer. Rejected: a separate
-updater helper process — with apply-at-cold-start there is no transaction that
-must outlive the app.
+A third consult, run once the agent could already stop itself, removed the
+shutdown protocol message from the design. Two premises had stopped holding: Unix
+`SIGTERM` now performs the whole graceful teardown, and Windows force-termination
+is already tree-clean because the job objects close with the agent. What a wire
+message still bought — a reason and an in-band result — does not change what the
+updater does, costs a message type with codec and pending-response machinery on
+both sides, forces the hub to keep a connection alive while it dies, and is
+sendable to a remote agent that is never ours to stop. An OS-level ask replaces
+it: `SIGTERM` on Unix, a named event on Windows, one stopper over both.
+
+The same pass moved confirmation off the identity file's absence and onto process
+identity, split the record in two so a crash is distinguishable from a clean
+exit, and refuted the plan to ship a bare agent-stop command first: while a hub
+is alive it observes the close and relaunches the agent, so such a command would
+appear to do nothing (C1, again).
+
+Adopted: Windows Job Object containment, TOCTOU hardening with re-verification
+before execution, monotonic anti-downgrade, staged-update status surfaced beyond
+the desktop renderer. Rejected: a separate updater helper process — with
+apply-at-cold-start there is no transaction that must outlive the app. The
+two-phase shutdown acknowledgement was adopted here and later dropped, for the
+reasons above.

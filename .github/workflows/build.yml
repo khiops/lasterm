@@ -114,8 +114,13 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      # Skip only the target we cannot execute: aarch64 is cross-compiled and
+      # its binaries do not run on the x86 runner. `shell_sh` describes which
+      # shell the build script below needs; cargo test does not care, and
+      # gating on it left every cfg(windows) path compiled, linted and never
+      # once executed.
       - name: Test
-        if: matrix.shell_sh && matrix.triple != 'aarch64-unknown-linux-gnu'
+        if: matrix.triple != 'aarch64-unknown-linux-gnu'
         run: cargo test
       - name: Build (bash)
         if: matrix.shell_sh

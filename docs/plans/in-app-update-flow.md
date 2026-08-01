@@ -98,7 +98,7 @@ went*, not what happened to the user's work.
 | Gesture | Meaning |
 |---------|---------|
 | **Hide** | The window closes. The hub, the agent and every terminal keep running. Reopen from the tray. |
-| **Quit** | Everything local stops: window, hub, agent, and every process they spawned. Terminals end. |
+| **Quit** | Everything local stops: window, hub, agent, and the processes they spawned — the whole tree on Windows, the shell's process group on Unix (§4.2). Terminals end. |
 
 Persisted values migrate `tray → hide` on read; an unknown value falls back to
 `ask`. Every quit path — window close, tray menu, `termora stop`, OS logoff —
@@ -109,17 +109,48 @@ Remote agents are untouched by either gesture: they are peers, not children.
 
 ### §4.2 Process ownership and containment (the enabling work)
 
-**Windows.** Each locally spawned PTY workload is assigned to a **Job Object**
-with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Closing the handle ends the entire
-tree, including grandchildren, **even when the agent itself is force-killed**.
-That makes cleanup correct by construction rather than dependent on the agent
-running its own shutdown code.
+Containment is a property of *spawning*, so it lives where the spawn lives: in
+`async-xpty`, which owns `CreateProcessW` and the primary-thread handle. The
+agent cannot retrofit it — see §4.2.1.
 
-**Unix.** Terminate the shell's process group (`killpg`) — the group already
-exists because `child_setup()` calls `setsid()`.
+**Windows.** Each locally spawned PTY workload is born inside a **Job Object**
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assigned at creation through
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` on the attribute list the spawn already builds
+for the pseudoconsole. Closing the handle ends the entire tree, including
+grandchildren, **even when the agent itself is force-killed**. One job per PTY
+process, so one terminal can be torn down without touching its siblings.
 
-**Both.** `destroy_all()` kills *and* `wait()`s, bounded. The agent's signal
-handler tears the PTY manager down instead of calling `exit(0)` directly.
+**Unix — best effort, and the spec says so.** Terminate the shell's process
+group; the group exists because `child_setup()` calls `setsid()`. This is *not*
+a process-tree primitive. An interactive shell puts each job in its **own**
+process group, and any child may `setpgid`/`setsid` itself out of the group. So
+a background job started from the terminal, and a daemonizing grandchild, can
+survive. Unix teardown reaches the shell's process group — nothing broader is
+claimed, and Windows is deliberately the stronger platform here. Strong Linux
+containment (cgroup v2 scope, or a subreaper walking descendants) is a separate
+follow-up, not a prerequisite for the update flow.
+
+**Both.** `destroy_all()` kills *and* `wait()`s, bounded.
+
+**Shutdown ownership.** The daemon loop owns the `PtyManager` exclusively and
+selects on a shutdown channel: the signal task only *requests* shutdown, and the
+loop stops accepting work, runs the bounded teardown, reports completion, then
+exits. A hard deadline still reaches the emergency exit, so a wedged teardown
+delays exit by a bound rather than preventing it. Sharing the manager through a
+lock instead would put teardown in a race with message handling and blur which
+side owns the exit.
+
+#### §4.2.1 Where the work lands
+
+`async-xpty` is consumed as a rev-pinned git dependency, so the containment
+primitives ship upstream first and termora consumes them by moving the pin.
+
+| Repo | Change |
+|------|--------|
+| `khiops/async-xpty` | Job Object at creation (Windows), process-group signal (Unix), bounded `wait()`, exposed as a **new** `kill_tree()` — `kill()` keeps meaning "terminate the direct process". Widening `kill()` in place would be a silent semantic break for every other consumer of a general-purpose crate. The job handle is owned by the process value, and `Drop` closes it. |
+| `khiops/termora` | Move the rev pin; `destroy_all()` calls `kill_tree()` and waits, bounded; identity file; `SHUTDOWN` protocol; no-relaunch latch; the shutdown channel above. |
+
+Until the pin moves, the agent cannot honestly answer `childrenExited: true`.
 
 **Identity.** The agent writes an identity file beside its socket at startup —
 pid, process creation time, executable path, instance nonce — mode 0600, in the
@@ -254,10 +285,18 @@ Scenario: Hide keeps everything running
   When the user closes the window
   Then the window hides and the hub, agent and terminals keep running
 
-Scenario: Quit ends the whole local tree
+Scenario: Quit ends the contained tree on Windows
   Given terminals are running with background grandchildren
   When the user quits
-  Then the hub stops, then the agent stops, and every spawned process is gone
+  Then the hub stops, then the agent stops, and the job object ends every
+       descendant, grandchildren included
+
+Scenario: Quit ends the shell's process group on Unix
+  Given a terminal is running a child in the shell's own process group
+  When the user quits
+  Then the hub stops, then the agent stops, and that group is terminated
+  And a child that moved itself to another process group is documented as
+      surviving — Unix teardown claims the group, not the tree
 
 Scenario: The hub does not resurrect the agent during teardown
   Given the hub is running
@@ -308,15 +347,19 @@ Scenario: Store builds do none of this
 
 | Slice | Content | Depends on |
 |-------|---------|-----------|
-| **S1** Ownership & containment | Job Object (Windows), `killpg` (Unix), `kill`+`wait` in `destroy_all`, signal handler tears down the PTY manager, agent-written versioned identity file, `SHUTDOWN` two-phase protocol, no-relaunch latch, identity-confirmed stop | — |
+| **S1a** Containment primitives (`async-xpty`) | Job Object at creation (Windows), process-group signal (Unix), bounded `wait()`, new `kill_tree()` leaving `kill()` semantics intact | — |
+| **S1b** Consume the primitives | Move the rev pin; `destroy_all()` uses `kill_tree()` and waits, bounded | S1a |
+| **S1c** Lifecycle | Shutdown channel owned by the daemon loop, agent-written versioned identity file, `SHUTDOWN` two-phase protocol, no-relaunch latch, identity-confirmed stop | S1b |
 | **S2** Release publication | release-only `createUpdaterArtifacts`, signed upload with real asset names, `latest.json`, key-pair and per-signature pipeline gates, post-publish URL assertion | — |
 | **S0** Notify only | check the endpoint, surface "0.8.0 is available" with a link. No download, no staging, no code-execution path | S2 |
 | **S3** Stage | preflight, download (reusing `agent-fetch` hardening), verify, stage, journal, renderer contract | S2 to ship; buildable and testable against the §7 fixture endpoint without it |
-| **S4a** Cold-start applier | re-verification, apply-at-launch, recovery classification, terminal-failure handling — headless, driven by the harness | S1, S3 |
+| **S4a** Cold-start applier | re-verification, apply-at-launch, recovery classification, terminal-failure handling — headless, driven by the harness | S1c, S3 |
 | **S4b** Gestures & UI | `ask`/`hide`/`quit` rename + migration, one coordinator in Rust with webview and native presenters, staged-update surfacing | S4a |
 
-S1 and S2 run in parallel. **S0 ships first user value** and exercises the
-manifest end-to-end with real users before anything trusts it for code execution.
+The S1 chain and S2 run in parallel; inside the chain, S1a→S1b→S1c is strictly
+ordered because S1a lands in another repo and S1b is what moves the pin.
+**S0 ships first user value** and exercises the manifest end-to-end with real
+users before anything trusts it for code execution.
 
 ## §7 Test strategy
 
@@ -337,7 +380,11 @@ No throwaway releases.
    failure injection at every transition, each naming the mutation it catches.
 4. **Tree-containment tests** — spawn a grandchild holding a handle in a fixture
    install directory; assert quit ends it, and that an install blocked by a
-   surviving lock fails *cleanly* rather than half-applying.
+   surviving lock fails *cleanly* rather than half-applying. Per platform: on
+   Windows the grandchild dies because the job closes; on Unix the test asserts
+   the documented bound — a grandchild in the shell's group dies, one that
+   `setsid`s away survives. A test that asserts the Unix escapee dies would be
+   asserting a promise §4.2 does not make.
 5. **Windows CI install job** — install release N, point the updater at a fixture
    endpoint serving N+1, apply, assert the version, hub reachability and agent
    spawnability. This converts the highest-risk surface from manual-once to
@@ -359,6 +406,10 @@ quit trigger, and dual-instance racing beyond the journal lock.
   tested downgrade migrations.
 - **Cross-grading installer kinds** (NSIS ↔ MSI) or changing per-user vs
   per-machine scope during an update.
+- **Strong Unix containment.** cgroup v2 scope, or `PR_SET_CHILD_SUBREAPER` plus a
+  descendant walk, to reach what a process group cannot (§4.2). Linux-specific;
+  macOS would need its own design. Tracked in #113 — the update flow does not
+  wait on it, because apply-at-cold-start never needs to end a live tree.
 - **Beta channel.** `/releases/latest/` never resolves to a prerelease, so a beta
   manifest needs its own URL. Worth doing once the stable path works.
 - macOS / Linux channels.
@@ -378,6 +429,17 @@ S0 notify-first and the S4a/S4b split (§6), harness must not fake the coordinat
 (§7.3), Windows CI install job (§7.5).
 
 ## §12.6 Consensus ledger
+
+A second consult, run against the code before implementation, moved four things:
+containment belongs upstream in `async-xpty` at process creation rather than as a
+post-spawn assignment (the race makes the invariant unprovable, not merely
+unlikely); `kill_tree()` is added instead of widening `kill()`; the daemon loop
+owns teardown through a shutdown channel rather than sharing the manager under a
+lock; and the Unix promise was **false as written** — a process group is not a
+process tree, so §4.1/§4.2/§5/§7.4 now claim the group and nothing more. That
+last one is the reason to run the consult against code rather than against the
+document: every reviewer so far had read "every spawned process is gone" without
+checking whether `killpg` can deliver it.
 
 Adopted: Windows Job Object containment, two-phase shutdown acknowledgement,
 TOCTOU hardening with re-verification before execution, monotonic anti-downgrade,

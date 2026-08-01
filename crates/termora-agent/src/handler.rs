@@ -9,7 +9,10 @@ use crate::expand::expand_vars;
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
-use crate::pty::PtyManager;
+use crate::pty::{
+    log_teardown_outcome, spawn_teardown_confirmation, PtyManager, TeardownConfirmation,
+    TeardownStart,
+};
 use crate::shell;
 use async_xpty::PtySize;
 
@@ -29,6 +32,18 @@ pub(crate) type FrameSender = mpsc::UnboundedSender<Vec<u8>>;
 /// Per-channel sender for ChannelCommand.
 pub(crate) type SnapshotSenders =
     Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ChannelCommand>>>>;
+
+/// Preserve the pre-existing manager-lock lifetime around `wait()`.
+async fn wait_for_reader_exit(
+    pty_manager: &Arc<Mutex<PtyManager>>,
+    channel_id: &str,
+) -> Option<async_xpty::ExitStatus> {
+    let mut mgr = pty_manager.lock().await;
+    match mgr.channels.get_mut(channel_id) {
+        Some(channel) => channel.process.wait().await.ok(),
+        None => None,
+    }
+}
 
 /// Run the agent in stdio mode (stdin/stdout MessagePack framing).
 /// Run the agent in stdio mode (stdin/stdout MessagePack framing).
@@ -109,7 +124,19 @@ pub async fn run_stdio() -> std::io::Result<()> {
     }
 
     // Shutdown: kill all channels
-    pty_manager.lock().await.destroy_all().await;
+    let teardown = pty_manager.lock().await.destroy_all().await;
+    if teardown.unresolved.is_empty() {
+        tracing::info!(
+            confirmed_shell_exits = teardown.confirmed_shell_exits,
+            "terminal shutdown complete"
+        );
+    } else {
+        tracing::warn!(
+            confirmed_shell_exits = teardown.confirmed_shell_exits,
+            unresolved = ?teardown.unresolved,
+            "terminal shutdown could not confirm every shell"
+        );
+    }
 
     // Shutdown: clean up any leftover ASKPASS temp files
     crate::elevation::cleanup_all();
@@ -223,7 +250,9 @@ pub(crate) async fn handle_message(
             // Get writer before dropping lock to avoid holding across await
             let writer_opt = {
                 let mgr = pty_manager.lock().await;
-                mgr.channels.get(&channel_id).map(|ch| ch.process.writer())
+                mgr.channels
+                    .get(&channel_id)
+                    .map(|channel| channel.process.writer())
             };
             if let Some(mut writer) = writer_opt {
                 writer.write_all(&data).await?;
@@ -248,17 +277,20 @@ pub(crate) async fn handle_message(
             let size = PtySize { cols, rows };
             {
                 let mgr = pty_manager.lock().await;
-                if let Some(ch) = mgr.channels.get(&channel_id) {
-                    let _ = ch.process.resize(size).await;
-                } else {
-                    send_frame(
-                        &frame_tx,
-                        &AgentToHub::Error {
-                            code: error_codes::CHANNEL_NOT_FOUND.into(),
-                            message: format!("channel {} not found", channel_id),
-                            channel_id: Some(channel_id.clone()),
-                        },
-                    )?;
+                match mgr.channels.get(&channel_id) {
+                    Some(channel) => {
+                        let _ = channel.process.resize(size).await;
+                    }
+                    None => {
+                        send_frame(
+                            &frame_tx,
+                            &AgentToHub::Error {
+                                code: error_codes::CHANNEL_NOT_FOUND.into(),
+                                message: format!("channel {} not found", channel_id),
+                                channel_id: Some(channel_id.clone()),
+                            },
+                        )?;
+                    }
                 }
             }
             // Also notify the mirror in the reader task
@@ -273,10 +305,37 @@ pub(crate) async fn handle_message(
 
         HubToAgent::Destroy { channel_id } => {
             tracing::debug!("DESTROY received for channel {}", channel_id);
-            let mut mgr = pty_manager.lock().await;
-            if let Some(ch) = mgr.remove(&channel_id) {
-                let _ = ch.process.kill();
-                tracing::info!("destroyed channel: {}", channel_id);
+            let confirmation = {
+                let mut mgr = pty_manager.lock().await;
+                match mgr.channels.contains_key(&channel_id) {
+                    true => match mgr.start_teardown(&channel_id) {
+                        Ok(TeardownStart::Signalled { pid }) => {
+                            let process = mgr
+                                .remove(&channel_id)
+                                .expect("signalled channel must remain registered until removal");
+                            let confirmation =
+                                TeardownConfirmation::new(channel_id.clone(), pid, process);
+                            tracing::info!(%channel_id, pid, "signalled channel for destruction");
+                            Some(confirmation)
+                        }
+                        Ok(TeardownStart::AlreadyExited(outcome)) => {
+                            mgr.remove(&channel_id);
+                            log_teardown_outcome(outcome, "DESTROY");
+                            None
+                        }
+                        Err(outcome) => {
+                            // Nothing retries a failed teardown today; keep the
+                            // only PtyProcess handle registered so a live workload
+                            // does not become unreachable.
+                            log_teardown_outcome(outcome, "DESTROY");
+                            None
+                        }
+                    },
+                    false => None,
+                }
+            };
+            if let Some(confirmation) = confirmation {
+                spawn_teardown_confirmation(confirmation, "DESTROY");
             }
             // Idempotent: no error if channel doesn't exist
         }
@@ -293,7 +352,10 @@ pub(crate) async fn handle_message(
                         // Get the current seq from the pty_manager
                         let last_seq = {
                             let mgr = pty_manager.lock().await;
-                            mgr.channels.get(&channel_id).map(|ch| ch.seq).unwrap_or(0)
+                            match mgr.channels.get(&channel_id) {
+                                Some(channel) => channel.seq,
+                                None => 0,
+                            }
                         };
                         let msg = AgentToHub::SnapshotRes {
                             channel_id: channel_id.clone(),
@@ -332,7 +394,10 @@ pub(crate) async fn handle_message(
                     if let Ok(info) = reply_rx.await {
                         let last_seq = {
                             let mgr = pty_manager.lock().await;
-                            mgr.channels.get(&channel_id).map(|ch| ch.seq).unwrap_or(0)
+                            match mgr.channels.get(&channel_id) {
+                                Some(channel) => channel.seq,
+                                None => 0,
+                            }
                         };
                         let msg = AgentToHub::AttachOk {
                             channel_id: channel_id.clone(),
@@ -566,7 +631,9 @@ async fn handle_spawn(
             // Get a reader for the new channel before releasing the broader context
             let pty_reader_opt = {
                 let mgr = pty_manager.lock().await;
-                mgr.channels.get(&ch_id).map(|ch| ch.process.reader())
+                mgr.channels
+                    .get(&ch_id)
+                    .map(|channel| channel.process.reader())
             };
 
             if let Some(pty_reader) = pty_reader_opt {
@@ -808,21 +875,9 @@ fn spawn_reader_task(
             senders.remove(&channel_id);
         }
 
-        // PTY EOF: wait for exit status
-        let exit_status = {
-            let mut mgr = pty_manager.lock().await;
-            if let Some(ch) = mgr.channels.get_mut(&channel_id) {
-                ch.process.wait().await.ok()
-            } else {
-                None
-            }
-        };
-
-        // Remove channel from manager
-        {
-            let mut mgr = pty_manager.lock().await;
-            mgr.remove(&channel_id);
-        }
+        let exit_status = wait_for_reader_exit(&pty_manager, &channel_id).await;
+        let mut mgr = pty_manager.lock().await;
+        mgr.remove(&channel_id);
 
         let (exit_code, signal) = match exit_status {
             Some(s) => (s.code().unwrap_or(-1), s.signal().map(|n| format!("{}", n))),
@@ -924,4 +979,64 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests {
+    use super::*;
+    use crate::pty::PtyChannelState;
+
+    async fn spawn_channel(manager: &Arc<Mutex<PtyManager>>, channel_id: &str) -> u32 {
+        manager
+            .lock()
+            .await
+            .spawn(
+                Some(channel_id.to_owned()),
+                "/bin/sh",
+                &["-c".to_owned(), "sleep 30".to_owned()],
+                None,
+                None,
+                80,
+                24,
+            )
+            .await
+            .expect("spawn test channel")
+            .1
+    }
+
+    #[tokio::test]
+    async fn failed_destroy_keeps_active_channel_registered() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let channel_id = "destroy-retry";
+        spawn_channel(&manager, channel_id).await;
+        manager.lock().await.fail_next_teardown_signal();
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
+        let (output_tx, _output_rx) = mpsc::unbounded_channel();
+        let senders = Arc::new(Mutex::new(HashMap::new()));
+
+        handle_message(
+            crate::protocol::HubToAgent::Destroy {
+                channel_id: channel_id.to_owned(),
+            },
+            Arc::clone(&manager),
+            frame_tx.clone(),
+            output_tx.clone(),
+            Arc::clone(&senders),
+        )
+        .await
+        .expect("first DESTROY");
+
+        assert!(matches!(
+            manager.lock().await.channels.get(channel_id),
+            Some(PtyChannelState { .. })
+        ));
+
+        let channel = manager
+            .lock()
+            .await
+            .remove(channel_id)
+            .expect("failed teardown must leave its handle registered");
+        let _ = channel.kill_tree();
+    }
 }

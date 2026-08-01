@@ -13,7 +13,7 @@ path = "src/main.rs"
 # Extracted to its own repo (khiops/async-xpty, #87). Git dep pinned to an
 # immutable rev during co-development; switches to a crates.io version once
 # published. Bumping the rev is a deliberate, reviewable change.
-async-xpty = { git = "https://github.com/khiops/async-xpty", rev = "10423351e093f4c83f7935d49e42243e51263db7" }
+async-xpty = { git = "https://github.com/khiops/async-xpty", rev = "fa6ed33b5fe86128fb89b63bfdc5cd5e1c5f1598" }
 tokio = { version = "1", features = ["full"] }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
@@ -40,3 +40,6 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 rmpv = { version = "1", features = ["with-serde"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"

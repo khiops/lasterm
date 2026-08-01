@@ -37,9 +37,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 rmpv = { version = "1", features = ["with-serde"] }
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-libc = "0.2"

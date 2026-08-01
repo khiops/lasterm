@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use crate::batch::{batch_loop, BatchedOutput, OutputEvent};
 use crate::framing::{encode_frame, FrameReader};
 use crate::handler::{handle_message, iso_now, FrameSender, SnapshotSenders};
 use crate::protocol::AgentToHub;
-use crate::pty::PtyManager;
+use crate::pty::{DestroyAllSummary, PtyManager};
 
 #[cfg(unix)]
 const BIND_RETRY_MAX: u32 = 3;
@@ -23,6 +23,75 @@ const BIND_RETRY_MAX: u32 = 3;
 const BIND_RETRY_DELAY_MS: u64 = 300;
 const MAX_FRAME_QUEUE: usize = 1000;
 static CONNECTION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Receiver held by each daemon accept loop. `true` means it must stop
+/// accepting connections and tear down every terminal it owns.
+pub(crate) type ShutdownReceiver = watch::Receiver<bool>;
+
+/// Build the one-way shutdown request channel shared by the platform-specific
+/// accept loops. The signal task owns the sender; the loop owns teardown.
+pub(crate) fn shutdown_channel() -> (watch::Sender<bool>, ShutdownReceiver) {
+    watch::channel(false)
+}
+
+/// Wait until a shutdown has been requested. A dropped sender is not a
+/// shutdown request: it can happen in a test that intentionally has no signal
+/// task, and must not make a daemon stop by surprise.
+async fn shutdown_requested(shutdown: &mut ShutdownReceiver) {
+    loop {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Tear down the manager owned by the accept loop and make the result usable
+/// to an operator investigating a blocked update.
+async fn teardown_daemon_terminals(pty_manager: &Arc<Mutex<PtyManager>>) -> DestroyAllSummary {
+    // Mark refusal and collect the sweep while holding the same manager lock:
+    // detached handlers cannot register a workload after this sweep begins.
+    let summary = {
+        let mut manager = pty_manager.lock().await;
+        manager.begin_shutdown();
+        manager.destroy_all().await
+    };
+    if summary.unresolved.is_empty() {
+        tracing::info!(
+            confirmed_shell_exits = summary.confirmed_shell_exits,
+            unresolved_channels = 0,
+            "daemon terminal teardown complete"
+        );
+    } else {
+        tracing::warn!(
+            confirmed_shell_exits = summary.confirmed_shell_exits,
+            unresolved_channels = summary.unresolved.len(),
+            "daemon terminal teardown complete with unresolved channels"
+        );
+    }
+    for unresolved in &summary.unresolved {
+        tracing::warn!(
+            channel_id = %unresolved.channel_id,
+            pid = unresolved.pid,
+            reason = ?unresolved.reason,
+            "daemon terminal teardown unresolved channel"
+        );
+    }
+    summary
+}
+
+/// A completed agent mode exits successfully only when every terminal present
+/// at shutdown was confirmed gone. Startup and runtime errors are mapped by
+/// the top-level process as failures before this function is called.
+pub(crate) fn teardown_exit_status(summary: &DestroyAllSummary) -> i32 {
+    if summary.unresolved.is_empty() {
+        0
+    } else {
+        1
+    }
+}
 
 /// Tracks the active hub connection so it can be displaced by a new one.
 struct ActiveConnection {
@@ -81,8 +150,11 @@ fn get_config_dir() -> String {
 /// (last-writer-wins: new connections displace the previous one).
 /// PTY channels persist across hub reconnections.
 #[cfg(unix)]
-pub async fn run_daemon(socket_path: String) -> std::io::Result<()> {
-    run_daemon_impl(socket_path, get_config_dir(), get_state_dir()).await
+pub(crate) async fn run_daemon(
+    socket_path: String,
+    shutdown: ShutdownReceiver,
+) -> std::io::Result<DestroyAllSummary> {
+    run_daemon_impl(socket_path, get_config_dir(), get_state_dir(), shutdown).await
 }
 
 /// Internal implementation — takes an explicit config_dir so tests can inject a temp dir
@@ -92,7 +164,28 @@ async fn run_daemon_impl(
     socket_path: String,
     config_dir: String,
     state_dir: PathBuf,
-) -> std::io::Result<()> {
+    shutdown: ShutdownReceiver,
+) -> std::io::Result<DestroyAllSummary> {
+    run_daemon_impl_with_manager(
+        socket_path,
+        config_dir,
+        state_dir,
+        shutdown,
+        Arc::new(Mutex::new(PtyManager::new())),
+    )
+    .await
+}
+
+/// Internal test seam for exercising daemon teardown with a short confirmation
+/// bound, without changing the production shutdown deadline.
+#[cfg(unix)]
+async fn run_daemon_impl_with_manager(
+    socket_path: String,
+    config_dir: String,
+    state_dir: PathBuf,
+    mut shutdown: ShutdownReceiver,
+    pty_manager: Arc<Mutex<PtyManager>>,
+) -> std::io::Result<DestroyAllSummary> {
     let path = PathBuf::from(&socket_path);
 
     // Validate path length (Unix socket limit: 104-108 bytes depending on platform)
@@ -112,7 +205,7 @@ async fn run_daemon_impl(
     }
 
     // Bind with retry (handles transient EADDRINUSE after cleanup)
-    let listener = bind_with_retry(&path).await?;
+    let mut listener = Some(bind_with_retry(&path).await?);
 
     // Set socket permissions to 0600 (owner-only)
     {
@@ -132,9 +225,6 @@ async fn run_daemon_impl(
         );
     }
 
-    // Shared PTY manager — channels survive hub disconnections
-    let pty_manager = Arc::new(Mutex::new(PtyManager::new()));
-
     // Per-channel command senders (snapshot/resize) — shared across connections
     let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
@@ -150,9 +240,19 @@ async fn run_daemon_impl(
     // Output router: drains batched frames, forwards to active connection (or buffers)
     spawn_output_router(batched_rx, Arc::clone(&active_conn));
 
-    // Accept loop — spawn each connection handler so we can accept the next immediately
-    loop {
-        match listener.accept().await {
+    // Accept loop — spawn each connection handler so we can accept the next immediately.
+    let result = loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_requested(&mut shutdown) => {
+                tracing::info!("daemon shutdown requested; tearing down terminals");
+                // Stop routing new work before teardown can block on a slow
+                // terminal. Existing connection handlers may finish their own
+                // cancellation paths while the manager is swept.
+                drop(listener.take());
+                break Ok(teardown_daemon_terminals(&pty_manager).await);
+            }
+            accepted = listener.as_ref().expect("listener remains live until shutdown").accept() => match accepted {
             Ok((stream, _addr)) => {
                 let connection_id = next_connection_id();
                 tracing::debug!(connection_id, "hub connection accepted");
@@ -199,8 +299,20 @@ async fn run_daemon_impl(
             Err(e) => {
                 tracing::error!("accept error: {}", e);
             }
+            }
+        }
+    };
+
+    // The listener owner removes its endpoint after it has stopped accepting.
+    // Pathname removal cannot prove this still refers to
+    // the inode we bound if another process interfered with the socket path.
+    drop(listener);
+    if let Err(error) = std::fs::remove_file(&path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, path = ?path, "failed to remove daemon socket after shutdown");
         }
     }
+    result
 }
 
 // ─── Windows (named pipe) implementation ──────────────────────────────────────
@@ -220,7 +332,10 @@ fn get_pipe_name() -> String {
 /// (last-writer-wins: new connections displace the previous one).
 /// PTY channels persist across hub reconnections.
 #[cfg(windows)]
-pub async fn run_daemon(socket_path: String) -> std::io::Result<()> {
+pub(crate) async fn run_daemon(
+    socket_path: String,
+    mut shutdown: ShutdownReceiver,
+) -> std::io::Result<DestroyAllSummary> {
     let pipe_name = if socket_path.starts_with(r"\\.\pipe\") {
         socket_path.clone()
     } else {
@@ -266,12 +381,21 @@ pub async fn run_daemon(socket_path: String) -> std::io::Result<()> {
     //   2. Wait for client to connect
     //   3. Create next server instance BEFORE handing off the current pipe
     //   4. Spawn handler task, repeat
-    let mut server = create_secure_pipe(&pipe_name, true)?;
+    let mut server = Some(create_secure_pipe(&pipe_name, true)?);
 
-    loop {
+    let result = loop {
         // Block until a client connects to this pipe instance
         // Use match instead of ? to avoid crashing the daemon on transient OS errors
-        if let Err(e) = server.connect().await {
+        let connected_result = tokio::select! {
+            biased;
+            _ = shutdown_requested(&mut shutdown) => {
+                tracing::info!("daemon shutdown requested");
+                drop(server.take());
+                break Ok(());
+            }
+            result = server.as_mut().expect("pipe server remains live until shutdown").connect() => result,
+        };
+        if let Err(e) = connected_result {
             tracing::warn!("named pipe connect error: {} — retrying", e);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
@@ -281,8 +405,11 @@ pub async fn run_daemon(socket_path: String) -> std::io::Result<()> {
 
         // Swap in the next server instance so the pipe name stays open for future clients
         let connected = {
-            let next = create_secure_pipe(&pipe_name, false)?;
-            std::mem::replace(&mut server, next)
+            let next = match create_secure_pipe(&pipe_name, false) {
+                Ok(next) => next,
+                Err(error) => break Err(error),
+            };
+            std::mem::replace(server.as_mut().expect("pipe server remains live"), next)
         };
 
         // Create cancellation notifier for this connection
@@ -323,7 +450,13 @@ pub async fn run_daemon(socket_path: String) -> std::io::Result<()> {
             expected_token.clone(),
             connection_id,
         ));
-    }
+    };
+
+    // Every loop exit, including a replacement pipe creation failure, sweeps
+    // the manager before this daemon reports its result to the caller.
+    let summary = teardown_daemon_terminals(&pty_manager).await;
+    result?;
+    Ok(summary)
 }
 
 // ─── Shared connection logic ──────────────────────────────────────────────────
@@ -857,6 +990,10 @@ mod tests {
         dir
     }
 
+    fn no_shutdown_request() -> ShutdownReceiver {
+        shutdown_channel().1
+    }
+
     /// Verify short socket paths pass the length guard (Unix).
     #[cfg(unix)]
     #[test]
@@ -912,6 +1049,7 @@ mod tests {
             path_str.clone(),
             config_dir.clone(),
             state_dir.clone(),
+            no_shutdown_request(),
         ));
 
         // Wait for daemon to bind
@@ -961,6 +1099,7 @@ mod tests {
             path_str.clone(),
             config_dir.clone(),
             state_dir.clone(),
+            no_shutdown_request(),
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1019,6 +1158,7 @@ mod tests {
             path_str.clone(),
             config_dir.clone(),
             state_dir.clone(),
+            no_shutdown_request(),
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1057,6 +1197,7 @@ mod tests {
             path_str.clone(),
             config_dir.clone(),
             state_dir.clone(),
+            no_shutdown_request(),
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1135,6 +1276,366 @@ mod tests {
         let _ = std::fs::remove_file(&path_str);
         let _ = tokio::fs::remove_dir_all(&empty_config).await;
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    mod daemon_shutdown_tests {
+        use std::fs;
+        use std::io::{self, Write};
+        use std::path::{Path, PathBuf};
+        use std::sync::{Arc, Mutex as StdMutex};
+        use std::time::{Duration, Instant};
+
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        use super::*;
+        use crate::framing::encode_frame;
+        use crate::protocol::HubToAgent;
+
+        const FIXTURE_DEADLINE: Duration = Duration::from_secs(3);
+
+        struct ProcessCleanup {
+            pid: i32,
+            armed: bool,
+        }
+
+        impl ProcessCleanup {
+            fn disarm(mut self) {
+                self.armed = false;
+            }
+        }
+
+        impl Drop for ProcessCleanup {
+            fn drop(&mut self) {
+                if self.armed {
+                    // SAFETY: `pid` was written by the short-lived shell this
+                    // test spawned, and this is test-fixture cleanup only.
+                    unsafe {
+                        libc::kill(self.pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        struct TracedProcessCleanup {
+            pid: i32,
+            armed: bool,
+        }
+
+        impl TracedProcessCleanup {
+            fn release(mut self) {
+                // SAFETY: the test successfully seized this process and has
+                // left it stopped at its exit event.
+                unsafe {
+                    libc::ptrace(
+                        libc::PTRACE_CONT,
+                        self.pid,
+                        std::ptr::null_mut::<libc::c_void>(),
+                        std::ptr::null_mut::<libc::c_void>(),
+                    );
+                    let mut status = 0;
+                    libc::waitpid(self.pid, &mut status, 0);
+                }
+                self.armed = false;
+            }
+        }
+
+        impl Drop for TracedProcessCleanup {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                // SAFETY: this test owns the seized fixture process. Resume it
+                // after SIGKILL so an assertion failure cannot strand it.
+                unsafe {
+                    libc::kill(self.pid, libc::SIGKILL);
+                    libc::ptrace(
+                        libc::PTRACE_CONT,
+                        self.pid,
+                        std::ptr::null_mut::<libc::c_void>(),
+                        std::ptr::null_mut::<libc::c_void>(),
+                    );
+                    let mut status = 0;
+                    libc::waitpid(self.pid, &mut status, libc::WNOHANG);
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct LogCapture(Arc<StdMutex<Vec<u8>>>);
+
+        struct LogCaptureWriter(LogCapture);
+
+        impl Write for LogCaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0 .0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for LogCapture {
+            type Writer = LogCaptureWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                LogCaptureWriter(self.clone())
+            }
+        }
+
+        fn pid_file(prefix: &str) -> PathBuf {
+            std::env::temp_dir().join(format!(
+                "termora-daemon-shutdown-{}-{}.pid",
+                prefix,
+                ulid::Ulid::new().to_string().to_lowercase()
+            ))
+        }
+
+        fn shell_quote(value: &str) -> String {
+            format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+        }
+
+        async fn wait_for_pid(path: &Path) -> i32 {
+            let deadline = Instant::now() + FIXTURE_DEADLINE;
+            loop {
+                if let Ok(contents) = fs::read_to_string(path) {
+                    if let Ok(pid) = contents.trim().parse() {
+                        return pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "spawned workload did not write its PID to {}",
+                    path.display()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn wait_for_socket(path: &Path) {
+            let deadline = Instant::now() + FIXTURE_DEADLINE;
+            loop {
+                if path.exists() {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "daemon did not bind socket at {}",
+                    path.display()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn pid_is_alive(pid: i32) -> bool {
+            // SAFETY: signal 0 checks liveness without delivering a signal.
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == 0 {
+                return true;
+            }
+            io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
+
+        async fn wait_until_gone(pid: i32) {
+            let deadline = Instant::now() + FIXTURE_DEADLINE;
+            while pid_is_alive(pid).await {
+                assert!(
+                    Instant::now() < deadline,
+                    "terminal workload PID {pid} survived daemon shutdown"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn spawn_sleeping_workload(
+            socket_path: &str,
+            channel_id: &str,
+            pid_path: &Path,
+        ) -> (UnixStream, i32) {
+            let mut stream = UnixStream::connect(socket_path)
+                .await
+                .expect("connect to daemon");
+            let quoted_pid_path = shell_quote(&pid_path.to_string_lossy());
+            let spawn = HubToAgent::Spawn {
+                request_id: format!("request-{channel_id}"),
+                channel_id: Some(channel_id.to_string()),
+                shell: Some("/bin/sh".to_string()),
+                args: Some(vec![
+                    "-c".to_string(),
+                    format!("printf '%s\\n' \"$$\" > {}; exec sleep 30", quoted_pid_path),
+                ]),
+                cwd: None,
+                env: None,
+                cols: 80,
+                rows: 24,
+                direct_process: None,
+                elevated: None,
+                elevation_secret: None,
+                elevation_method: None,
+                custom_command: None,
+            };
+            stream
+                .write_all(&encode_frame(&spawn).expect("encode SPAWN"))
+                .await
+                .expect("send SPAWN");
+            let pid = wait_for_pid(pid_path).await;
+            (stream, pid)
+        }
+
+        async fn daemon_paths(label: &str) -> (String, String, PathBuf) {
+            let config_dir = temp_dir(&format!("termora-daemon-shutdown-config-{label}")).await;
+            let state_dir = temp_dir(&format!("termora-daemon-shutdown-state-{label}")).await;
+            let socket_path = temp_path(&format!("termora-daemon-shutdown-{label}"));
+            (
+                socket_path.to_string_lossy().to_string(),
+                config_dir.to_string_lossy().to_string(),
+                state_dir,
+            )
+        }
+
+        async fn cleanup_paths(socket_path: &str, config_dir: &str, state_dir: &Path) {
+            let _ = fs::remove_file(socket_path);
+            let _ = tokio::fs::remove_dir_all(config_dir).await;
+            let _ = tokio::fs::remove_dir_all(state_dir).await;
+        }
+
+        #[tokio::test]
+        async fn shutdown_request_runs_destroy_all_for_daemon_owned_channels() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("destroy-all").await;
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let daemon = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                shutdown_rx,
+            ));
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            let pid_path = pid_file("destroy-all");
+            let (_stream, pid) =
+                spawn_sleeping_workload(&socket_path, "destroy-all-daemon-channel", &pid_path)
+                    .await;
+            let cleanup = ProcessCleanup { pid, armed: true };
+
+            shutdown_tx.send(true).expect("request daemon shutdown");
+            tokio::time::timeout(Duration::from_secs(3), daemon)
+                .await
+                .expect("daemon shutdown must return")
+                .expect("daemon task must not panic")
+                .expect("daemon shutdown must succeed");
+            wait_until_gone(pid).await;
+            cleanup.disarm();
+
+            // Mutation caught: removing `destroy_all()` from the daemon
+            // shutdown path returns the loop but leaves this PID alive.
+            let _ = fs::remove_file(pid_path);
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+        }
+
+        #[tokio::test]
+        async fn shutdown_with_an_unconfirmed_workload_returns_failing_status() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("unresolved").await;
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let captured = LogCapture(Arc::new(StdMutex::new(Vec::new())));
+            let dispatch = tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .without_time()
+                    .with_writer(captured.clone())
+                    .finish(),
+            );
+            let manager = Arc::new(Mutex::new(PtyManager::with_teardown_wait_timeout(
+                Duration::from_millis(25),
+            )));
+            let daemon = tokio::spawn(
+                run_daemon_impl_with_manager(
+                    socket_path.clone(),
+                    config_dir.clone(),
+                    state_dir.clone(),
+                    shutdown_rx,
+                    manager,
+                )
+                .with_subscriber(dispatch),
+            );
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            let pid_path = pid_file("unresolved");
+            let (_stream, pid) =
+                spawn_sleeping_workload(&socket_path, "unresolved-daemon-channel", &pid_path).await;
+            // Keep cleanup armed even if ptrace setup is unavailable or a later
+            // assertion fails before the traced-fixture guard takes ownership.
+            let cleanup = ProcessCleanup { pid, armed: true };
+            // PTRACE_O_TRACEEXIT leaves the fixture stopped after SIGKILL until
+            // the test releases it, so destroy_all records the injected wait bound.
+            // SAFETY: `pid` belongs to the fixture this test just spawned.
+            let seize = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_SEIZE,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    libc::PTRACE_O_TRACEEXIT as *mut libc::c_void,
+                )
+            };
+            if seize != 0 {
+                let error = io::Error::last_os_error();
+                // Containers and seccomp profiles can forbid PTRACE_SEIZE even
+                // when teardown is correct, so skip this ptrace-only fixture.
+                // `writeln!` writes directly to stderr rather than the test
+                // harness's captured output, so a constrained environment
+                // reports this as an explicit SKIP instead of a silent pass.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "SKIP shutdown_with_an_unconfirmed_workload_returns_failing_status: PTRACE_SEIZE is unavailable: {error}"
+                );
+                shutdown_tx.send(true).expect("request daemon shutdown");
+                tokio::time::timeout(Duration::from_secs(3), daemon)
+                    .await
+                    .expect("daemon shutdown must return")
+                    .expect("daemon task must not panic")
+                    .expect("daemon shutdown must succeed");
+                wait_until_gone(pid).await;
+                cleanup.disarm();
+                let _ = fs::remove_file(pid_path);
+                cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+                return;
+            }
+            cleanup.disarm();
+            let cleanup = TracedProcessCleanup { pid, armed: true };
+
+            shutdown_tx.send(true).expect("request daemon shutdown");
+            let summary = tokio::time::timeout(Duration::from_secs(3), daemon)
+                .await
+                .expect("daemon returns after unresolved workload wait bound")
+                .expect("daemon task must not panic")
+                .expect("daemon shutdown must succeed");
+
+            assert_eq!(
+                teardown_exit_status(&summary),
+                1,
+                "an unresolved terminal must make daemon shutdown report failure"
+            );
+
+            let logs = String::from_utf8(captured.0.lock().unwrap().clone())
+                .expect("captured tracing output is UTF-8");
+            assert!(logs.contains("daemon terminal teardown complete"), "{logs}");
+            assert!(logs.contains("unresolved_channels=1"));
+            assert!(logs.contains("daemon terminal teardown unresolved channel"));
+            assert!(logs.contains("channel_id=unresolved-daemon-channel"));
+            assert!(logs.contains(&format!("pid={pid}")));
+            assert!(logs.contains("reason=TimedOut"));
+
+            cleanup.release();
+            // Mutation caught: returning success whenever the daemon loop ends
+            // makes this unconfirmed workload look clean to the parent process.
+            let _ = fs::remove_file(pid_path);
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+        }
     }
 
     /// Verify a named pipe server instance can be created successfully on Windows.
@@ -1376,6 +1877,7 @@ mod tests {
             path_str.clone(),
             config_dir.clone(),
             state_dir.clone(),
+            no_shutdown_request(),
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1450,6 +1952,7 @@ mod tests {
             path_str.clone(),
             config_dir.clone(),
             state_dir.clone(),
+            no_shutdown_request(),
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1539,7 +2042,7 @@ mod tests {
             ulid::Ulid::new().to_string().to_lowercase()
         );
 
-        let daemon_handle = tokio::spawn(run_daemon(pipe_name.clone()));
+        let daemon_handle = tokio::spawn(run_daemon(pipe_name.clone(), no_shutdown_request()));
 
         // Wait for daemon to create the pipe
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

@@ -14,8 +14,12 @@ pub(crate) struct PtyChannelState {
 
 pub struct PtyManager {
     pub(crate) channels: HashMap<String, PtyChannelState>,
+    shutting_down: bool,
+    teardown_wait_timeout: Duration,
     #[cfg(test)]
     fail_next_teardown_signal: bool,
+    #[cfg(test)]
+    sweep_next_reader_lookup: bool,
 }
 
 /// The result of trying to end a terminal workload.
@@ -45,7 +49,7 @@ pub(crate) enum TeardownOutcome {
 #[derive(Debug)]
 pub(crate) enum UnconfirmedTeardown {
     WaitFailed(io::Error),
-    TimedOut,
+    TimedOut { timeout: Duration },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -78,6 +82,7 @@ pub(crate) struct TeardownConfirmation {
     channel_id: String,
     pid: u32,
     process: PtyProcess,
+    wait_timeout: Duration,
 }
 
 pub(crate) enum TeardownStart {
@@ -102,7 +107,7 @@ impl TeardownOutcome {
             Self::SignalledButUnconfirmed {
                 channel_id,
                 pid,
-                reason: UnconfirmedTeardown::TimedOut,
+                reason: UnconfirmedTeardown::TimedOut { .. },
             } => (channel_id, *pid, UnresolvedTeardown::TimedOut),
             Self::SignallingFailed {
                 channel_id, pid, ..
@@ -147,9 +152,52 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             channels: HashMap::new(),
+            shutting_down: false,
+            teardown_wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
             #[cfg(test)]
             fail_next_teardown_signal: false,
+            #[cfg(test)]
+            sweep_next_reader_lookup: false,
         }
+    }
+
+    /// Construct a manager with a custom confirmation bound. Daemon tests use
+    /// this to exercise unresolved-workload reporting without waiting for the
+    /// production five-second shutdown bound.
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn with_teardown_wait_timeout(teardown_wait_timeout: Duration) -> Self {
+        Self {
+            teardown_wait_timeout,
+            ..Self::new()
+        }
+    }
+
+    /// Prevent future workload creation before the daemon sweeps existing
+    /// channels. This is irreversible for this manager's lifetime.
+    pub(crate) fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+    }
+
+    /// Take a reader only while its channel remains registered. A daemon sweep
+    /// can remove the channel between spawn and reader registration.
+    pub(crate) fn reader_for(&mut self, channel_id: &str) -> Option<async_xpty::PtyReader> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.sweep_next_reader_lookup) {
+            self.remove(channel_id);
+            return None;
+        }
+        self.channels
+            .get(channel_id)
+            .map(|channel| channel.process.reader())
+    }
+
+    /// Test seam for the spawn-versus-shutdown handoff: the channel is swept
+    /// after `spawn` succeeds but before handler reader registration.
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn sweep_next_reader_lookup(&mut self) {
+        self.sweep_next_reader_lookup = true;
     }
 
     /// Spawn a new PTY channel. Returns (channel_id, pid).
@@ -164,6 +212,12 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> std::io::Result<(String, u32)> {
+        if self.shutting_down {
+            return Err(std::io::Error::other(
+                "agent is shutting down; refusing to spawn a terminal",
+            ));
+        }
+
         if let Some(ref id) = channel_id {
             if self.channels.contains_key(id) {
                 return Err(std::io::Error::new(
@@ -283,6 +337,7 @@ impl PtyManager {
                         channel_id: channel_id.clone(),
                         pid,
                         process,
+                        wait_timeout: self.teardown_wait_timeout,
                     };
                     teardown_waits.push(TeardownWait {
                         channel_id,
@@ -340,13 +395,14 @@ impl TeardownConfirmation {
             channel_id,
             pid,
             process,
+            wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
         }
     }
 
     async fn confirm(mut self) -> TeardownOutcome {
         // On Windows a timed-out `wait()` retains a blocking-pool worker; one
         // detached task per channel is intentional. See khiops/async-xpty#5.
-        match tokio::time::timeout(CHANNEL_TEARDOWN_WAIT_TIMEOUT, self.process.wait()).await {
+        match tokio::time::timeout(self.wait_timeout, self.process.wait()).await {
             Ok(Ok(status)) => TeardownOutcome::Exited {
                 channel_id: self.channel_id,
                 pid: self.pid,
@@ -360,7 +416,9 @@ impl TeardownConfirmation {
             Err(_) => TeardownOutcome::SignalledButUnconfirmed {
                 channel_id: self.channel_id,
                 pid: self.pid,
-                reason: UnconfirmedTeardown::TimedOut,
+                reason: UnconfirmedTeardown::TimedOut {
+                    timeout: self.wait_timeout,
+                },
             },
         }
     }
@@ -396,9 +454,9 @@ pub(crate) fn log_teardown_outcome(outcome: TeardownOutcome, site: &'static str)
         TeardownOutcome::SignalledButUnconfirmed {
             channel_id,
             pid,
-            reason: UnconfirmedTeardown::TimedOut,
+            reason: UnconfirmedTeardown::TimedOut { timeout },
         } => {
-            tracing::warn!(%site, %channel_id, pid, timeout = ?CHANNEL_TEARDOWN_WAIT_TIMEOUT, "terminal workload was signalled but its exit was not confirmed before the timeout")
+            tracing::warn!(%site, %channel_id, pid, ?timeout, "terminal workload was signalled but its exit was not confirmed before the timeout")
         }
         TeardownOutcome::SignallingFailed {
             channel_id,
@@ -459,6 +517,31 @@ mod tests {
         if let Some(ch) = mgr.remove(&fixed_id) {
             let _ = ch.kill();
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_is_refused_after_shutdown_begins() {
+        let mut manager = PtyManager::new();
+        manager.begin_shutdown();
+
+        let error = manager
+            .spawn(
+                Some("post-shutdown-spawn".to_owned()),
+                "/bin/sh",
+                &[],
+                None,
+                None,
+                80,
+                24,
+            )
+            .await
+            .expect_err("a manager being swept must refuse a later spawn");
+
+        assert!(error.to_string().contains("agent is shutting down"));
+        assert!(manager.channels.is_empty());
+
+        // Mutation caught: removing the shutting_down guard permits a detached
+        // daemon handler to create a workload after the shutdown sweep began.
     }
 
     #[tokio::test]

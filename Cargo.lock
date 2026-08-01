@@ -70,7 +70,7 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 [[package]]
 name = "async-xpty"
 version = "0.1.0"
-source = "git+https://github.com/khiops/async-xpty?rev=10423351e093f4c83f7935d49e42243e51263db7#10423351e093f4c83f7935d49e42243e51263db7"
+source = "git+https://github.com/khiops/async-xpty?rev=fa6ed33b5fe86128fb89b63bfdc5cd5e1c5f1598#fa6ed33b5fe86128fb89b63bfdc5cd5e1c5f1598"
 dependencies = [
  "libc",
  "nix",
@@ -571,10 +571,11 @@ dependencies = [
 
 [[package]]
 name = "termora-agent"
-version = "0.3.4"
+version = "0.6.0"
 dependencies = [
  "async-xpty",
  "clap",
+ "libc",
  "rmp-serde",
  "rmpv",
  "serde",

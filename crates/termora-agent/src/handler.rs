@@ -10,8 +10,8 @@ use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
 use crate::pty::{
-    log_teardown_outcome, spawn_teardown_confirmation, PtyManager, TeardownConfirmation,
-    TeardownStart,
+    log_teardown_outcome, spawn_teardown_confirmation, DestroyAllSummary, PtyManager,
+    TeardownConfirmation, TeardownStart,
 };
 use crate::shell;
 use async_xpty::PtySize;
@@ -47,7 +47,7 @@ async fn wait_for_reader_exit(
 
 /// Run the agent in stdio mode (stdin/stdout MessagePack framing).
 /// Run the agent in stdio mode (stdin/stdout MessagePack framing).
-pub async fn run_stdio() -> std::io::Result<()> {
+pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
     // 1. Build a FrameSender — frames go to a channel, writer task drains to stdout
     let stdout_raw = tokio::io::stdout();
     let stdout = Arc::new(Mutex::new(stdout_raw));
@@ -123,7 +123,10 @@ pub async fn run_stdio() -> std::io::Result<()> {
         }
     }
 
-    // Shutdown: kill all channels
+    Ok(teardown_stdio_terminals(&pty_manager).await)
+}
+
+async fn teardown_stdio_terminals(pty_manager: &Arc<Mutex<PtyManager>>) -> DestroyAllSummary {
     let teardown = pty_manager.lock().await.destroy_all().await;
     if teardown.unresolved.is_empty() {
         tracing::info!(
@@ -141,7 +144,11 @@ pub async fn run_stdio() -> std::io::Result<()> {
     // Shutdown: clean up any leftover ASKPASS temp files
     crate::elevation::cleanup_all();
 
-    Ok(())
+    teardown
+}
+
+pub(crate) fn stdio_exit_status(summary: &DestroyAllSummary) -> i32 {
+    crate::daemon::teardown_exit_status(summary)
 }
 
 /// Build the HELLO message sent to the hub at connection start.
@@ -620,20 +627,10 @@ async fn handle_spawn(
 
     match spawn_result {
         Ok((ch_id, pty_pid)) => {
-            tracing::info!(
-                channel_id = %ch_id,
-                pid = pty_pid,
-                program = %effective_program,
-                args = ?effective_args,
-                cwd = ?expanded_cwd,
-                "SPAWN_OK — PTY created"
-            );
             // Get a reader for the new channel before releasing the broader context
             let pty_reader_opt = {
-                let mgr = pty_manager.lock().await;
-                mgr.channels
-                    .get(&ch_id)
-                    .map(|channel| channel.process.reader())
+                let mut mgr = pty_manager.lock().await;
+                mgr.reader_for(&ch_id)
             };
 
             if let Some(pty_reader) = pty_reader_opt {
@@ -668,6 +665,14 @@ async fn handle_spawn(
                         channel_id: ch_id.clone(),
                     },
                 )?;
+                tracing::info!(
+                    channel_id = %ch_id,
+                    pid = pty_pid,
+                    program = %effective_program,
+                    args = ?effective_args,
+                    cwd = ?expanded_cwd,
+                    "SPAWN_OK — PTY created"
+                );
 
                 spawn_reader_task(
                     ch_id,
@@ -680,6 +685,19 @@ async fn handle_spawn(
                     Arc::clone(&pty_manager),
                     Arc::clone(&cmd_senders),
                 );
+            } else {
+                let error = std::io::Error::other(
+                    "terminal channel was gone before its reader could be registered",
+                );
+                tracing::warn!(channel_id = %ch_id, "SPAWN_ERR — channel was gone before reader registration");
+                send_frame(
+                    &frame_tx,
+                    &AgentToHub::SpawnErr {
+                        request_id,
+                        code: map_spawn_error(&error).into(),
+                        message: error.to_string(),
+                    },
+                )?;
             }
         }
 
@@ -1038,5 +1056,70 @@ mod tests {
             .remove(channel_id)
             .expect("failed teardown must leave its handle registered");
         let _ = channel.kill_tree();
+    }
+
+    #[tokio::test]
+    async fn stdio_teardown_with_an_unresolved_workload_has_a_failing_status() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let channel_id = "stdio-unresolved";
+        spawn_channel(&manager, channel_id).await;
+        manager.lock().await.fail_next_teardown_signal();
+
+        let summary = teardown_stdio_terminals(&manager).await;
+
+        assert_eq!(summary.unresolved.len(), 1);
+        assert_eq!(stdio_exit_status(&summary), 1);
+
+        let channel = manager
+            .lock()
+            .await
+            .remove(channel_id)
+            .expect("failed stdio teardown must keep its handle registered");
+        let _ = channel.kill_tree();
+    }
+
+    #[tokio::test]
+    async fn spawn_swept_during_reader_registration_sends_spawn_error() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        manager.lock().await.sweep_next_reader_lookup();
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (output_tx, _output_rx) = mpsc::unbounded_channel();
+        let senders = Arc::new(Mutex::new(HashMap::new()));
+
+        handle_spawn(
+            "swept-spawn-request".into(),
+            Some("swept-spawn-channel".into()),
+            Some("/bin/true".into()),
+            Vec::new(),
+            None,
+            None,
+            80,
+            24,
+            Some(false),
+            None,
+            None,
+            None,
+            manager,
+            frame_tx,
+            output_tx,
+            senders,
+        )
+        .await
+        .expect("swept spawn must resolve its protocol request");
+
+        let frame = frame_rx
+            .recv()
+            .await
+            .expect("swept spawn must send a response frame");
+        let expected = encode_frame(&AgentToHub::SpawnErr {
+            request_id: "swept-spawn-request".into(),
+            code: error_codes::PTY_SPAWN_FAILED.into(),
+            message: "terminal channel was gone before its reader could be registered".into(),
+        })
+        .expect("expected spawn error frame must encode");
+        assert_eq!(frame, expected);
+
+        // Mutation caught: removing the `None` response arm leaves the frame
+        // receiver empty after a shutdown sweep wins this registration race.
     }
 }

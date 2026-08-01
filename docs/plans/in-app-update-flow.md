@@ -166,7 +166,29 @@ creation time.
 
 Order matters, and C1 dictates it:
 
-1. Set the **no-relaunch latch** so the hub cannot respawn the agent.
+1. Set the **no-relaunch latch**. The hub is the only component that brings
+   things back, so the latch lives there and covers **three** paths, not one:
+
+   | Path | What it revives | Trigger |
+   |------|-----------------|---------|
+   | `reconnectDaemon` / `warmRestartLocal` | the agent | the agent's connection closes (C1) |
+   | `respawnDeadChannel` | a terminal, under its **old channel id** | a client reattaches to a dead channel |
+   | `restartChannel` | a terminal, under its **old channel id** | the user asks for a restart |
+
+   The middle one matters most because nothing initiates it: a client that
+   reattaches during a quit resurrects a terminal that was just torn down, with
+   no user action to blame it on.
+
+   The latch belongs to the hub for the same reason it does in every process
+   supervisor: systemd declines to apply `Restart=` when the death was its own
+   doing, supervisord's `STOPPED` state suppresses `autorestart`, and neither
+   asks the supervised process to remember that it should stay dead — the thing
+   being stopped may be the thing that is broken. Note also what none of them
+   do: reserve the stopped entity's identity while it dies. Kubernetes gives the
+   replacement a new name rather than blocking the old one. Reusing a channel id
+   is how `restartChannel` and `respawnDeadChannel` work, so a teardown that
+   held an id back would break both.
+
 2. Stop the **hub**, confirmed by recorded identity (reuse
    `confirm_hub_stopped_or_kill`; do not derive a third variant).
 3. Stop the **agent**: `SHUTDOWN { reason }` on the protocol — a daemon-level
@@ -411,7 +433,9 @@ quit trigger, and dual-instance racing beyond the journal lock.
   macOS would need its own design. Tracked in #113 — the update flow does not
   wait on it, because apply-at-cold-start never needs to end a live tree.
 - **Beta channel.** `/releases/latest/` never resolves to a prerelease, so a beta
-  manifest needs its own URL. Worth doing once the stable path works.
+  manifest needs its own URL. Deferred, but movable: no stable release ships
+  until the update path is trustworthy end to end, and a beta channel is the way
+  to exercise it against real installs without making everyone the test.
 - macOS / Linux channels.
 - The agent-binary fetch path is SHA-256-only and can skip the checksum for
   legacy versions; that asymmetry with minisign-signed desktop updates is known

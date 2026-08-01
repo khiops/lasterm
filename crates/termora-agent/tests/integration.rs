@@ -14,6 +14,19 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A shell this platform actually has, and the flag that makes it run one
+/// command and exit. These tests spawn the real binary, so they cannot share the
+/// equivalent helper in `pty.rs`'s unit tests — the crate has no lib target.
+/// Hardcoding `/bin/sh` failed every one of these on Windows for as long as they
+/// existed, unnoticed because CI never ran the Rust suite there.
+fn test_shell() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        ("cmd.exe", "/C")
+    } else {
+        ("/bin/sh", "-c")
+    }
+}
+
 async fn spawn_agent() -> Child {
     let binary = env!("CARGO_BIN_EXE_termora-agent");
     Command::new(binary)
@@ -158,7 +171,7 @@ async fn test_spawn_ok() {
     let spawn_msg = msgmap(vec![
         ("type", sv("SPAWN")),
         ("request_id", sv("req-1")),
-        ("shell", sv("/bin/sh")),
+        ("shell", sv(test_shell().0)),
         ("cols", iv(80)),
         ("rows", iv(24)),
     ]);
@@ -249,10 +262,12 @@ async fn test_full_lifecycle() {
     let spawn_msg = msgmap(vec![
         ("type", sv("SPAWN")),
         ("request_id", sv("req-lc")),
-        ("shell", sv("/bin/sh")),
+        ("shell", sv(test_shell().0)),
         (
             "args",
-            rmpv::Value::Array(vec![sv("-c"), sv("echo lifecycle_test && exit 0")]),
+            // Both shells exit on their own after a `-c` / `/C` command, so the
+            // explicit `&& exit 0` this used to carry was doing nothing.
+            rmpv::Value::Array(vec![sv(test_shell().1), sv("echo lifecycle_test")]),
         ),
         ("cols", iv(80)),
         ("rows", iv(24)),
@@ -490,8 +505,11 @@ async fn test_spawn_ok_precedes_channel_exit() {
     let spawn_msg = msgmap(vec![
         ("type", sv("SPAWN")),
         ("request_id", sv("req-ordering")),
-        ("shell", sv("/bin/sh")),
-        ("args", rmpv::Value::Array(vec![sv("-c"), sv("exit 0")])),
+        ("shell", sv(test_shell().0)),
+        (
+            "args",
+            rmpv::Value::Array(vec![sv(test_shell().1), sv("exit 0")]),
+        ),
         ("cols", iv(80)),
         ("rows", iv(24)),
     ]);

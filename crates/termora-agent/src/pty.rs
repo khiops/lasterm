@@ -481,11 +481,23 @@ impl Default for PtyManager {
 mod tests {
     use super::*;
 
+    /// A shell that exists on this platform and, attached to a PTY with nobody
+    /// typing, blocks on input rather than exiting. Tests that hardcoded
+    /// `/bin/sh` failed everywhere on Windows for as long as they existed,
+    /// unnoticed because CI never ran the Rust suite there.
+    fn test_shell() -> &'static str {
+        if cfg!(windows) {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        }
+    }
+
     #[tokio::test]
     async fn test_spawn_channel() {
         let mut mgr = PtyManager::new();
         let (id, pid) = mgr
-            .spawn(None, "/bin/sh", &[], None, None, 80, 24)
+            .spawn(None, test_shell(), &[], None, None, 80, 24)
             .await
             .unwrap();
         assert!(!id.is_empty());
@@ -502,13 +514,29 @@ mod tests {
         let mut mgr = PtyManager::new();
         let fixed_id = "test-channel-01".to_string();
         let (id, _) = mgr
-            .spawn(Some(fixed_id.clone()), "/bin/sh", &[], None, None, 80, 24)
+            .spawn(
+                Some(fixed_id.clone()),
+                test_shell(),
+                &[],
+                None,
+                None,
+                80,
+                24,
+            )
             .await
             .unwrap();
         assert_eq!(id, fixed_id);
 
         let err = mgr
-            .spawn(Some(fixed_id.clone()), "/bin/sh", &[], None, None, 80, 24)
+            .spawn(
+                Some(fixed_id.clone()),
+                test_shell(),
+                &[],
+                None,
+                None,
+                80,
+                24,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
@@ -527,7 +555,7 @@ mod tests {
         let error = manager
             .spawn(
                 Some("post-shutdown-spawn".to_owned()),
-                "/bin/sh",
+                test_shell(),
                 &[],
                 None,
                 None,
@@ -547,10 +575,10 @@ mod tests {
     #[tokio::test]
     async fn test_destroy_all() {
         let mut mgr = PtyManager::new();
-        mgr.spawn(None, "/bin/sh", &[], None, None, 80, 24)
+        mgr.spawn(None, test_shell(), &[], None, None, 80, 24)
             .await
             .unwrap();
-        mgr.spawn(None, "/bin/sh", &[], None, None, 80, 24)
+        mgr.spawn(None, test_shell(), &[], None, None, 80, 24)
             .await
             .unwrap();
         assert_eq!(mgr.channel_ids().len(), 2);
@@ -567,8 +595,10 @@ mod tests {
         let (spawned_channel_id, pid) = manager
             .spawn(
                 Some(channel_id.clone()),
-                "/bin/sh",
-                &["-c".to_string(), "sleep 30".to_string()],
+                test_shell(),
+                // No args: an idle shell on a PTY blocks reading input, which is
+                // all this needs, and the sleep had no portable equivalent.
+                &[],
                 None,
                 None,
                 80,

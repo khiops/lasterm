@@ -17,6 +17,89 @@ static TRAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_CALLER_CLIENT_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
+#[cfg(any(target_os = "windows", test))]
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+#[cfg(any(target_os = "windows", test))]
+const ERROR_PROC_NOT_FOUND: u32 = 127;
+#[cfg(any(target_os = "windows", test))]
+const APPMODEL_ERROR_NO_PACKAGE: u32 = 15_700;
+
+/// The package-identity probe must explicitly establish either state before
+/// changing updater behavior. Unexpected API statuses remain fail-closed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageIdentityProbe {
+    Packaged { status: u32 },
+    Unpackaged,
+    Inconclusive { status: u32 },
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn classify_package_identity_status(status: u32) -> PackageIdentityProbe {
+    match status {
+        APPMODEL_ERROR_NO_PACKAGE => PackageIdentityProbe::Unpackaged,
+        0 | ERROR_INSUFFICIENT_BUFFER => PackageIdentityProbe::Packaged { status },
+        _ => PackageIdentityProbe::Inconclusive { status },
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn classify_package_identity_lookup_error(error: u32) -> PackageIdentityProbe {
+    match error {
+        // GetCurrentPackageFullName does not exist on Windows 7. A missing
+        // symbol therefore establishes that this process is unpackaged.
+        ERROR_PROC_NOT_FOUND => PackageIdentityProbe::Unpackaged,
+        _ => PackageIdentityProbe::Inconclusive { status: error },
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn current_package_identity_probe() -> PackageIdentityProbe {
+    type Hmodule = *mut std::ffi::c_void;
+    type GetCurrentPackageFullName = unsafe extern "system" fn(*mut u32, *mut u16) -> u32;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(module_name: *const u16) -> Hmodule;
+        fn GetProcAddress(module: Hmodule, procedure_name: *const u8) -> *mut std::ffi::c_void;
+        fn GetLastError() -> u32;
+    }
+
+    // GetCurrentPackageFullName was introduced after Windows 7. Resolving it
+    // dynamically keeps the executable loadable there; no symbol means this
+    // process cannot be packaged as MSIX, so the updater remains available.
+    let kernel32_name: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+    let kernel32 = unsafe { GetModuleHandleW(kernel32_name.as_ptr()) };
+    if kernel32.is_null() {
+        return PackageIdentityProbe::Inconclusive {
+            status: std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default() as u32,
+        };
+    }
+    let procedure =
+        unsafe { GetProcAddress(kernel32, c"GetCurrentPackageFullName".as_ptr().cast()) };
+    if procedure.is_null() {
+        // GetProcAddress sets the thread's last-error code. Read it before any
+        // other operation can overwrite it, then fail closed unless the symbol
+        // is genuinely absent (as on Windows 7).
+        let error = unsafe { GetLastError() };
+        return classify_package_identity_lookup_error(error);
+    }
+
+    let get_current_package_full_name: GetCurrentPackageFullName =
+        unsafe { std::mem::transmute(procedure) };
+    let mut package_full_name_length = 0;
+    let status = unsafe {
+        get_current_package_full_name(&mut package_full_name_length, std::ptr::null_mut())
+    };
+    classify_package_identity_status(status)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_package_identity_probe() -> PackageIdentityProbe {
+    PackageIdentityProbe::Unpackaged
+}
 
 #[derive(Clone, Copy)]
 enum AgentFileKind {
@@ -930,10 +1013,28 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_os::init());
+    let builder = match current_package_identity_probe() {
+        PackageIdentityProbe::Unpackaged => {
+            builder.plugin(tauri_plugin_updater::Builder::new().build())
+        }
+        PackageIdentityProbe::Packaged { status } => {
+            eprintln!(
+                "[termora] updater disabled: application has an MSIX package identity (GetCurrentPackageFullName status {status})"
+            );
+            builder
+        }
+        PackageIdentityProbe::Inconclusive { status } => {
+            eprintln!(
+                "[termora] updater disabled: package identity probe was inconclusive (Windows error {status})"
+            );
+            builder
+        }
+    };
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_hub_auth_token,
@@ -995,5 +1096,44 @@ mod tests {
 
         assert_eq!(summary.chars().count(), 160);
         assert_eq!(summary, format!("{}...", "a".repeat(157)));
+    }
+
+    #[test]
+    fn msix_package_identity_statuses_are_classified_fail_closed() {
+        assert_eq!(
+            classify_package_identity_status(ERROR_INSUFFICIENT_BUFFER),
+            PackageIdentityProbe::Packaged {
+                status: ERROR_INSUFFICIENT_BUFFER
+            }
+        );
+        assert_eq!(
+            classify_package_identity_status(0),
+            PackageIdentityProbe::Packaged { status: 0 }
+        );
+        // APPMODEL_ERROR_NO_PACKAGE: an unpackaged Win32 process.
+        assert_eq!(
+            classify_package_identity_status(APPMODEL_ERROR_NO_PACKAGE),
+            PackageIdentityProbe::Unpackaged
+        );
+        assert_eq!(
+            classify_package_identity_status(5),
+            PackageIdentityProbe::Inconclusive { status: 5 }
+        );
+    }
+
+    #[test]
+    fn missing_package_identity_symbol_is_unpacked_for_windows_7_support() {
+        assert_eq!(
+            classify_package_identity_lookup_error(ERROR_PROC_NOT_FOUND),
+            PackageIdentityProbe::Unpackaged
+        );
+    }
+
+    #[test]
+    fn unexpected_package_identity_lookup_failure_is_inconclusive() {
+        assert_eq!(
+            classify_package_identity_lookup_error(5),
+            PackageIdentityProbe::Inconclusive { status: 5 }
+        );
     }
 }

@@ -49,7 +49,9 @@ describe("tauri.conf.json", () => {
 		expect(resolved).toMatch(/packages[/\\]clients[/\\]web[/\\]dist$/);
 	});
 
-	it("bundle.createUpdaterArtifacts is false", () => {
+	// Enabling this requires the signing key at build time, which would break
+	// every unsigned build path. A signed-release workflow must opt into it.
+	it("bundle.createUpdaterArtifacts is disabled", () => {
 		const bundle = conf.bundle as Record<string, unknown>;
 		expect(bundle.createUpdaterArtifacts).toBe(false);
 	});
@@ -82,6 +84,13 @@ describe("tauri.conf.json", () => {
 		expect(Array.isArray(endpoints)).toBe(true);
 		expect(endpoints.length).toBeGreaterThan(0);
 		expect(endpoints[0]).toContain("github.com");
+		// Pinned deliberately: this key must stay in step with the
+		// TAURI_SIGNING_PRIVATE_KEY CI secret. Signatures produced with a
+		// different key are rejected by installed clients, so rotating it is a
+		// conscious act that updates this expectation too.
+		expect(updater.pubkey).toBe(
+			"dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwRTI3QUYwRDI1MjgxNUUKUldSZWdWTFM4SHJpc0ZjcVR5UXdGSDUwK3RpZmRiZlRFZzJRUTd4SFNTekkwVnpLQ2hEYWJTdkQK",
+		);
 	});
 });
 

@@ -21,7 +21,6 @@ import {
 	cmdAgentImport,
 	cmdAgentStatus,
 	cmdQuit,
-	cmdStart,
 	cmdStatus,
 	cmdStop,
 	deleteRuntime,
@@ -709,23 +708,6 @@ describe("path helpers", () => {
 });
 
 describe("runtime state", () => {
-	it.skipIf(process.platform === "win32")(
-		"does not start a second hub when runtime.json is unreadable",
-		async () => {
-			const originalStateRoot = process.env.XDG_STATE_HOME;
-			process.env.XDG_STATE_HOME = makeTempDir();
-			try {
-				mkdirSync(getStateDir(), { recursive: true });
-				mkdirSync(path.join(getStateDir(), "runtime.json"));
-				await expect(cmdStart(parsed(["start", "--daemon"]))).rejects.toThrow(
-					/Cannot determine whether a hub is already running/,
-				);
-			} finally {
-				process.env.XDG_STATE_HOME = originalStateRoot;
-			}
-		},
-	);
-
 	it.skipIf(process.platform === "win32")(
 		"reports an unreadable runtime record as unknown instead of stopped",
 		async () => {

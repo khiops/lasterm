@@ -32,7 +32,7 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type BuildOptions, build, type Plugin } from "esbuild";
+import { type BuildOptions, build, buildSync, type Plugin } from "esbuild";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -80,6 +80,7 @@ const SEA_VERSION = resolveHubVersion();
 const MIGRATIONS_BASE = join(ROOT, "packages", "hub", "src", "storage", "migrations");
 const OUT_DIR = join(ROOT, "dist", "sea");
 const OUT_FILE = join(OUT_DIR, "termora-hub.cjs");
+const SEA_SQLITE_BOOTSTRAP_ENTRY = join(ROOT, "scripts", "sea-sqlite-bootstrap.ts");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin: migrations embed
@@ -288,67 +289,27 @@ function importMetaShimPlugin(): Plugin {
 // ─────────────────────────────────────────────────────────────────────────────
 // SEA bootstrap banner
 //
-// Bootstraps the better-sqlite3 native addon BEFORE any module code runs.
-// In non-SEA mode this is a complete no-op — all branches are guarded by
-// the isSea() check at the top.
-//
-// NOTE: This extraction logic mirrors packages/hub/src/sea-addon-loader.ts
-// (canonical source). Changes here must be reflected there, and vice versa.
+// The prelude must execute before the bundled better-sqlite3 wrapper. Bundle a
+// normal TypeScript entry here instead of restating extraction as banner strings;
+// its extraction call is therefore the same shared implementation as the
+// runtime loader.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Banner written as an array of lines to prevent the security hook from
-// misidentifying static string literals as dynamic command construction.
-const SEA_BANNER_LINES = [
-	"// -- SEA native addon bootstrap --",
-	"var __seaSqliteExports;",
-	"(function __seaBootstrap() {",
-	"  var _sea;",
-	"  try { _sea = require('node:sea'); } catch (_) {}",
-	"  if (!_sea || typeof _sea.isSea !== 'function' || !_sea.isSea()) return;",
-	"  var _fs   = require('node:fs');",
-	"  var _os   = require('node:os');",
-	"  var _path = require('node:path');",
-	"  var _version = '0.0.0';",
-	"  try {",
-	"    if (typeof _sea.getAsset === 'function') {",
-	"      _version = _sea.getAsset('VERSION', 'utf8').trim();",
-	"    }",
-	"  } catch (_) {}",
-	"  var _cb = process.env['XDG_CACHE_HOME'] ||",
-	"    (process.platform === 'win32'",
-	"      ? _path.join(process.env['LOCALAPPDATA'] || _os.homedir(), 'termora', 'cache')",
-	"      : _path.join(_os.homedir(), '.cache', 'termora'));",
-	"  var _cacheDir   = _path.join(_cb, 'addons', _version);",
-	"  var _sqlitePath = _path.join(_cacheDir, 'better_sqlite3.node');",
-	"  try {",
-	"    var _blob = _sea.getRawAsset('better_sqlite3.node');",
-	"    var _data = Buffer.from(_blob);",
-	"    var _sw = true;",
-	"    if (_fs.existsSync(_sqlitePath)) {",
-	"      try { if (_fs.statSync(_sqlitePath).size === _data.byteLength) _sw = false; }",
-	"      catch (_) {}",
-	"    }",
-	"    if (_sw) {",
-	"      _fs.mkdirSync(_cacheDir, { recursive: true });",
-	"      _fs.writeFileSync(_sqlitePath, _data, { mode: 0o755 });",
-	"    }",
-	"  } catch (err) {",
-	"    process.stderr.write('[termora-hub] fatal: cannot extract better_sqlite3.node: ' + err + '\\n');",
-	"    process.exit(1);",
-	"  }",
-	"  var _mod = { id: _sqlitePath, filename: _sqlitePath, loaded: true, exports: {} };",
-	"  try {",
-	"    process['dlopen'](_mod, _sqlitePath);",
-	"  } catch (err) {",
-	"    process.stderr.write('[termora-hub] fatal: dlopen better_sqlite3.node failed: ' + err + '\\n');",
-	"    process.exit(1);",
-	"  }",
-	"  __seaSqliteExports = _mod.exports;",
-	"})();",
-	"// -- end SEA bootstrap --",
-];
+function buildSeaBootstrapBanner(): string {
+	const result = buildSync({
+		entryPoints: [SEA_SQLITE_BOOTSTRAP_ENTRY],
+		bundle: true,
+		platform: "node",
+		target: "node22",
+		format: "cjs",
+		write: false,
+	});
+	const output = result.outputFiles[0]?.text;
+	if (!output) throw new Error("[build-sea-hub] SEA SQLite bootstrap produced no output");
+	return `// -- SEA native addon bootstrap (generated) --\n${output}\n// -- end SEA bootstrap --`;
+}
 
-const SEA_BOOTSTRAP_BANNER = SEA_BANNER_LINES.join("\n");
+const SEA_BOOTSTRAP_BANNER = buildSeaBootstrapBanner();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin: better-sqlite3 bindings shim
@@ -392,12 +353,12 @@ function betterSqliteBindingsPlugin(): Plugin {
 			buildContext.onLoad({ filter: /^bindings$/, namespace: "sea-bindings-shim" }, () => ({
 				contents: `
 					module.exports = function(name) {
-						// __seaSqliteExports is populated by the SEA bootstrap banner
+						// globalThis.__seaSqliteExports is populated by the generated SEA bootstrap
 						// in build-sea-hub.ts (process.dlopen on the extracted .node file).
 						// This shim is only reached in the SEA bundle — in development the
 						// real 'bindings' package resolves the .node file from node_modules.
-						if (typeof __seaSqliteExports !== 'undefined') {
-							return __seaSqliteExports;
+						if (typeof globalThis.__seaSqliteExports !== 'undefined') {
+							return globalThis.__seaSqliteExports;
 						}
 						// Guard: if somehow reached outside SEA (should not happen in prod),
 						// throw a clear error rather than silently returning undefined.

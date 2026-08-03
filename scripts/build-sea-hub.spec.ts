@@ -174,10 +174,12 @@ describe("migrations are embedded inline", () => {
 		expect(content).not.toContain("/migrations/spool");
 	});
 
-	it("SEA bootstrap banner is present and references __seaSqliteExports", () => {
+	it("SEA bootstrap banner is generated from the shared addon loader", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
 		expect(content).toContain("__seaSqliteExports");
-		expect(content).toContain("__seaBootstrap");
+		// Mutation caught: restoring a string-built bootstrap removes this normal
+		// prelude entry and reintroduces a second extraction implementation.
+		expect(content).toContain("bootstrapSeaSqlite");
 	});
 });
 

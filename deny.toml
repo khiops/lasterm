@@ -9,9 +9,11 @@ allow = [
 	"MIT",
 	"Apache-2.0",
 	"BSD-2-Clause",
+	"ISC",
 	"Unicode-3.0",
 ]
 exceptions = [
-	# Our own application crate — AGPL by decision (#78), never a dependency of the libs.
+	# Our own application crates — AGPL by decision (#78), never a dependency of the libs.
 	{ name = "termora-agent", allow = ["AGPL-3.0-only"] },
+	{ name = "termora-hub-lock", allow = ["AGPL-3.0-only"] },
 ]

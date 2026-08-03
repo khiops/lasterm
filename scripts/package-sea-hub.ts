@@ -185,6 +185,53 @@ export function locateBetterSqlite3(): string {
 	);
 }
 
+/** The build script passes the target-qualified N-API artefact directly to packaging. */
+export function locateHubLockAddon(): string {
+	const addonPath = process.env.TERMORA_HUB_LOCK_ADDON;
+	if (!addonPath || !existsSync(addonPath)) {
+		throw new Error(
+			"[package-sea-hub] hub lock addon path was not supplied or does not exist. " +
+				"Run scripts/build-hub.sh or scripts/build-hub.ps1 instead of package:sea-hub directly.",
+		);
+	}
+	loadHubLockAddon(addonPath, isCrossBuild());
+	return addonPath;
+}
+
+/**
+ * True when this build targets something the host cannot execute.
+ *
+ * `build-hub.sh` and `build-hub.ps1` cross-compile whenever the requested triple
+ * differs from the host's, so a build for another architecture produces an addon
+ * this process could never load. The check below is skipped there rather than
+ * failing a legitimate cross-build.
+ */
+function isCrossBuild(): boolean {
+	const triple = process.env.TERMORA_TARGET_TRIPLE;
+	if (!triple) return false;
+	const arch = tripleToNodeArch(triple);
+	const targetPlatform = tripleToNodePlatform(triple);
+	// An unrecognised triple is not evidence of a cross-build; load and let the
+	// loader answer.
+	if (arch === undefined || targetPlatform === undefined) return false;
+	return arch !== process.arch || targetPlatform !== process.platform;
+}
+
+/**
+ * Loading proves the file is a usable Node addon, which is the only packaging
+ * check bytes cannot fake — and the only one available, since a cross-built
+ * artefact cannot be loaded here at all.
+ */
+export function loadHubLockAddon(addonPath: string, skip = false): void {
+	if (skip) return;
+	try {
+		process.dlopen({ exports: {} }, addonPath);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error(`[package-sea-hub] hub lock addon cannot be loaded: ${addonPath}: ${detail}`);
+	}
+}
+
 /** Read the hub package version from its package.json. */
 function readHubVersion(): string {
 	const pkgPath = join(ROOT, "packages", "hub", "package.json");
@@ -329,10 +376,12 @@ async function main(): Promise<void> {
 	console.log("[package-sea-hub] step 5/5: SEA binary packaging");
 
 	const betterSqlite3Path = locateBetterSqlite3();
+	const hubLockAddonPath = locateHubLockAddon();
 	const tomlWasmPath = locateTomlWasm();
 	const version = readHubVersion();
 
 	console.log(`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path}`);
+	console.log(`[package-sea-hub] hub lock addon:      ${hubLockAddonPath}`);
 	console.log(`[package-sea-hub] toml-edit WASM:        ${tomlWasmPath}`);
 	console.log(`[package-sea-hub] hub version: ${version}`);
 
@@ -348,6 +397,7 @@ async function main(): Promise<void> {
 		name: "termora-hub",
 		nativeAddons: {
 			"better_sqlite3.node": betterSqlite3Path,
+			"termora_hub_lock.node": hubLockAddonPath,
 		},
 		extraAssets: {
 			VERSION: versionFilePath,

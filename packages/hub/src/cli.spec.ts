@@ -897,6 +897,146 @@ describe("runtime state", () => {
 		expect(observed).toEqual(["response", "waited"]);
 	});
 
+	// Mutation: recognise a conflict by its body rather than its status, and a
+	// truncated 409 falls through to the teardown wait — fifteen seconds spent
+	// observing a shutdown that a refusal never started.
+	it("treats a 409 as a refusal even when its body says nothing", async () => {
+		const errors: string[] = [];
+		const observed: string[] = [];
+		await expect(
+			cmdQuit({
+				loadRuntime: () => ({
+					kind: "present",
+					runtime: {
+						pid: 123,
+						port: 4100,
+						started_at: "2026-08-03T00:00:00.000Z",
+						instanceId: "target",
+						ownerToken: "a".repeat(64),
+					},
+				}),
+				isPidAlive: () => true,
+				fetch: (async () => new Response("{trunc", { status: 409 })) as typeof fetch,
+				isInteractive: () => false,
+				waitForHubQuit: async () => {
+					observed.push("waited");
+				},
+				writeError: (message) => errors.push(message),
+			}),
+		).rejects.toThrow("Refusing to override quit without an interactive confirmation");
+		expect(observed).toEqual([]);
+		expect(errors.join(" ")).toContain("did not say how many");
+	});
+
+	// Mutation: cast the parsed body to an object without checking, and a 409 whose
+	// body is the valid JSON `null` throws a TypeError instead of refusing.
+	it("treats a 409 whose body is valid non-object JSON as a refusal", async () => {
+		const errors: string[] = [];
+		await expect(
+			cmdQuit({
+				loadRuntime: () => ({
+					kind: "present",
+					runtime: {
+						pid: 123,
+						port: 4100,
+						started_at: "2026-08-03T00:00:00.000Z",
+						instanceId: "target",
+						ownerToken: "a".repeat(64),
+					},
+				}),
+				isPidAlive: () => true,
+				fetch: (async () => new Response("null", { status: 409 })) as typeof fetch,
+				isInteractive: () => false,
+				writeError: (message) => errors.push(message),
+			}),
+		).rejects.toThrow("Refusing to override quit without an interactive confirmation");
+		expect(errors.join(" ")).toContain("did not say how many");
+	});
+
+	// Mutation: let a transport rejection escape, and a quit the hub committed to —
+	// latched, agent stopped, response lost — is reported as a failure that never
+	// looked at whether the hub actually went.
+	it("observes teardown when the quit response never arrives", async () => {
+		const observed: string[] = [];
+		await expect(
+			cmdQuit({
+				loadRuntime: () => ({
+					kind: "present",
+					runtime: {
+						pid: 123,
+						port: 4100,
+						started_at: "2026-08-03T00:00:00.000Z",
+						instanceId: "target",
+						ownerToken: "a".repeat(64),
+					},
+				}),
+				isPidAlive: () => true,
+				fetch: (async () => {
+					throw new Error("socket hang up");
+				}) as typeof fetch,
+				waitForHubQuit: async () => {
+					observed.push("waited");
+				},
+				writeError: () => {},
+			}),
+		).rejects.toThrow("Quit request did not complete");
+		expect(observed).toEqual(["waited"]);
+	});
+
+	it("reports connected clients and refuses to override quit when non-interactive", async () => {
+		const errors: string[] = [];
+		const request = vi.fn(async () => new Response(JSON.stringify({ others: 2 }), { status: 409 }));
+
+		await expect(
+			cmdQuit({
+				loadRuntime: () => ({ kind: "present", runtime: runtimeRecord({ instanceId: "target" }) }),
+				isPidAlive: () => true,
+				fetch: request as typeof fetch,
+				isInteractive: () => false,
+				writeError: (message) => errors.push(message),
+			}),
+		).rejects.toThrow("Refusing to override quit without an interactive confirmation");
+
+		expect(errors).toEqual([
+			"Quit would end terminals for 2 connected client(s); this count is a snapshot.",
+		]);
+		expect(request).toHaveBeenCalledTimes(1);
+	});
+
+	it("sends the explicit quit override only after interactive confirmation", async () => {
+		const urls: string[] = [];
+		const output: string[] = [];
+		const log = vi
+			.spyOn(console, "log")
+			.mockImplementation((message: string) => output.push(message));
+		try {
+			await cmdQuit({
+				loadRuntime: () => ({ kind: "present", runtime: runtimeRecord({ instanceId: "target" }) }),
+				isPidAlive: () => true,
+				fetch: (async (url) => {
+					urls.push(String(url));
+					return urls.length === 1
+						? new Response(JSON.stringify({ others: 1 }), { status: 409 })
+						: new Response(
+								JSON.stringify({ message: "Local agent stopped; hub is shutting down" }),
+							);
+				}) as typeof fetch,
+				isInteractive: () => true,
+				confirmQuit: async (others) => others === 1,
+				writeError: () => {},
+				waitForHubQuit: async () => {},
+			});
+		} finally {
+			log.mockRestore();
+		}
+
+		expect(urls).toEqual([
+			"http://127.0.0.1:456/api/quit",
+			"http://127.0.0.1:456/api/quit?force=1",
+		]);
+		expect(output).toEqual(["Local agent stopped; hub is shutting down"]);
+	});
+
 	it("treats an unsignalable existing pid as alive", () => {
 		const permissionError = Object.assign(new Error("operation not permitted"), { code: "EPERM" });
 		vi.spyOn(process, "kill").mockImplementation((() => {

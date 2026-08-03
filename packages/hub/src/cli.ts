@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline/promises";
 import {
 	buildDaemonSpawnPlan,
 	type ChildExitState,
@@ -890,12 +891,19 @@ export async function cmdQuit(
 		isPidAlive?: (pid: number) => boolean;
 		fetch?: typeof fetch;
 		waitForHubQuit?: (target: Required<Pick<RuntimeInfo, "pid" | "instanceId">>) => Promise<void>;
+		isInteractive?: () => boolean;
+		/** `null` when the hub refused without saying how many clients are connected. */
+		confirmQuit?: (others: number | null) => Promise<boolean>;
+		writeError?: (message: string) => void;
 	} = {},
 ): Promise<void> {
 	const readRuntime = options.loadRuntime ?? loadRuntime;
 	const alive = options.isPidAlive ?? isPidAlive;
 	const request = options.fetch ?? fetch;
 	const wait = options.waitForHubQuit ?? waitForHubQuit;
+	const interactive = options.isInteractive ?? (() => process.stdin.isTTY && process.stdout.isTTY);
+	const confirm = options.confirmQuit ?? confirmQuit;
+	const writeError = options.writeError ?? console.error;
 	const runtimeResult = readRuntime();
 	if (runtimeResult.kind === "absent") throw new Error("Hub is not running (no runtime.json)");
 	if (runtimeResult.kind === "unreadable") {
@@ -916,17 +924,65 @@ export async function cmdQuit(
 	}
 	const target = { pid: runtime.pid, instanceId: runtime.instanceId };
 
-	const response = await request(`http://127.0.0.1:${runtime.port}/api/quit`, {
-		method: "POST",
-		headers: { "X-Termora-Owner": runtime.ownerToken },
-		signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
-	});
-	const body = (await response.json().catch(() => ({}))) as { message?: string };
+	// Sending the request commits the hub: it may latch, stop the agent and exit
+	// whether or not the answer ever arrives here. So a lost or timed-out response
+	// is not a failed quit, it is an unobserved one, and the only honest next move
+	// is to go and look.
+	const postQuit = async (query: string): Promise<QuitResponse> => {
+		try {
+			const res = await request(`http://127.0.0.1:${runtime.port}/api/quit${query}`, {
+				method: "POST",
+				headers: { "X-Termora-Owner": runtime.ownerToken as string },
+				signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
+			});
+			return { status: res.status, ok: res.ok, body: await readQuitBody(res) };
+		} catch (error) {
+			return { status: null, ok: false, body: {}, transportError: error };
+		}
+	};
+
+	let answer = await postQuit("");
+	// A 409 is a refusal whatever its body says. Reading the count is how the
+	// message gets a number in it, not how the refusal is recognised — a truncated
+	// body, or one that is valid JSON but not an object, must not turn a conflict
+	// into something to wait out.
+	if (answer.status === 409) {
+		const others = quitClientCount(answer.body.others);
+		writeError(
+			others === null
+				? "Quit would end terminals for other connected clients; the hub did not say how many."
+				: `Quit would end terminals for ${others} connected client(s); this count is a snapshot.`,
+		);
+		if (!interactive()) {
+			throw new Error("Refusing to override quit without an interactive confirmation");
+		}
+		if (!(await confirm(others))) {
+			throw new Error("Quit cancelled");
+		}
+		answer = await postQuit("?force=1");
+		// A refusal latches nothing, so a second refusal leaves nothing to observe.
+		if (answer.status === 409) {
+			throw new Error(answer.body.message ?? "Quit was refused again; nothing was stopped");
+		}
+	}
+	const response = { ok: answer.ok, status: answer.status };
+	const body = answer.body;
+	if (answer.transportError !== undefined) {
+		writeError(
+			`Quit request did not complete: ${answer.transportError instanceof Error ? answer.transportError.message : String(answer.transportError)}. Checking whether the hub stopped anyway.`,
+		);
+	}
 	const failure = response.ok
 		? null
-		: new Error(body.message ?? `Quit failed (HTTP ${response.status})`);
-	// The hub schedules teardown after every stopper result, including a 503.
-	// Observe that teardown before reporting the stopper failure to the caller.
+		: new Error(
+				body.message ??
+					(response.status === null
+						? "Quit request did not complete"
+						: `Quit failed (HTTP ${response.status})`),
+			);
+	// The hub schedules teardown after every stopper result, including a 503, and
+	// including one whose answer never arrived. Observe that teardown before
+	// reporting anything to the caller.
 	try {
 		await wait(target);
 	} catch (err) {
@@ -934,6 +990,42 @@ export async function cmdQuit(
 	}
 	if (failure) throw failure;
 	console.log(body.message ?? "Local agent stopped; hub is shutting down");
+}
+
+interface QuitResponseBody {
+	message?: string;
+	others?: unknown;
+}
+
+interface QuitResponse {
+	/** `null` when the request never produced one. */
+	readonly status: number | null;
+	readonly ok: boolean;
+	readonly body: QuitResponseBody;
+	readonly transportError?: unknown;
+}
+
+/** Valid JSON is not necessarily an object: `null`, a number and a string all parse. */
+async function readQuitBody(response: Response): Promise<QuitResponseBody> {
+	const parsed: unknown = await response.json().catch(() => null);
+	if (typeof parsed !== "object" || parsed === null) return {};
+	return parsed as QuitResponseBody;
+}
+
+/** A count the hub did not give, or gave nonsensically, names nobody rather than lying. */
+function quitClientCount(value: unknown): number | null {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+async function confirmQuit(others: number | null): Promise<boolean> {
+	const subject = others === null ? "other connected clients" : `${others} connected client(s)`;
+	const prompt = createInterface({ input: process.stdin, output: process.stdout });
+	try {
+		const answer = await prompt.question(`Type quit to end terminals for ${subject}: `);
+		return answer.trim() === "quit";
+	} finally {
+		prompt.close();
+	}
 }
 
 /**

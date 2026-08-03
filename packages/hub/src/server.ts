@@ -489,10 +489,30 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 			return reply.code(503).send({ ok: false, message: "Quit is unavailable" });
 		}
 
+		const url = new URL(request.url, "http://localhost");
+		const force = url.searchParams.get("force") === "1";
+		const callerClientId = getHeaderValue(
+			request.headers["x-termora-client-id"] ?? request.headers["x-termora-client"],
+		);
+		// The guard is about STARTING a quit. Once one has begun, the terminals this
+		// would have protected are already ending, and refusing would tell a caller
+		// the quit was declined while the hub is in fact dying. An in-flight quit is
+		// joined instead, which is what it did before this guard existed.
+		const alreadyQuitting = sessionManager?.isQuitting() ?? false;
+		const others = alreadyQuitting ? 0 : (sessionManager?.getOthersCount(callerClientId) ?? 0);
+		if (others > 0 && !force) {
+			return reply.code(409).send({
+				others,
+				message: `Quit would end terminals for ${others} other connected client(s); this count is a snapshot.`,
+			});
+		}
+
 		const result = await options.onQuit(sessionManager);
 		reply.code(result.ok ? 200 : 503).send({
 			ok: result.ok,
 			message: result.ok ? "Local agent stopped; hub is shutting down" : result.message,
+			// This records the request-scoped override, not proof of a human confirmation or an audit.
+			...(force ? { override: true } : {}),
 			...(result.stdout ? { stdout: result.stdout } : {}),
 			...(result.stderr ? { stderr: result.stderr } : {}),
 		});

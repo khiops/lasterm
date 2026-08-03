@@ -7,7 +7,12 @@ import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeInfo } from "./cli.js";
 import { createServer, startServer } from "./server.js";
-import { gracefulShutdown, QuitCoordinator, resetGracefulShutdownForTests } from "./shutdown.js";
+import {
+	createQuitLifecycle,
+	gracefulShutdown,
+	QuitCoordinator,
+	resetGracefulShutdownForTests,
+} from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
 
@@ -259,6 +264,42 @@ describe("QuitCoordinator", () => {
 		]);
 		dbs.close();
 	});
+
+	it("joins two quit requests into one stop and teardown", async () => {
+		const server = Fastify({ logger: false });
+		await server.ready();
+		const dbs = openTestDatabases();
+		const calls: string[] = [];
+		const lifecycle = createQuitLifecycle(() => ({
+			server,
+			dbManager: dbs,
+			runtime: runtimeRecord(),
+			deleteRuntime: () => {
+				calls.push("runtime.delete");
+				return true;
+			},
+			exit: () => calls.push("exit"),
+		}));
+		const session = {
+			beginQuit: () => calls.push("beginQuit"),
+			stopLocalAgent: async () => ({
+				stopped: true,
+				diagnostic: "stopped",
+				stdout: "",
+				stderr: "",
+			}),
+		};
+
+		const first = lifecycle.onQuit(session);
+		const second = lifecycle.onQuit(session);
+		await Promise.all([first, second]);
+
+		const firstTeardown = lifecycle.onQuitDelivered();
+		const secondTeardown = lifecycle.onQuitDelivered();
+		expect(secondTeardown).toBe(firstTeardown);
+		await Promise.all([firstTeardown, secondTeardown]);
+		expect(calls).toEqual(["beginQuit", "runtime.delete", "exit"]);
+	});
 });
 
 describe("POST /api/shutdown", () => {
@@ -340,6 +381,149 @@ describe("POST /api/shutdown", () => {
 		expect(calls).toEqual(["stop-agent"]);
 		await tick();
 		expect(calls).toEqual(["stop-agent", "teardown"]);
+	});
+
+	it("refuses quit around another connected client without latching teardown", async () => {
+		dbs = openTestDatabases();
+		const calls: string[] = [];
+		server = await createServer({
+			logger: false,
+			authToken: TEST_TOKEN,
+			ownerToken: OWNER_TOKEN,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			onQuit: async () => {
+				calls.push("stop-agent");
+				return { ok: true, message: "stopped", stdout: "", stderr: "" };
+			},
+			onQuitDelivered: () => calls.push("teardown"),
+		});
+		const address = await startServer(server, { port: 0 });
+		const first = await connectAuthedWebSocket(address, TEST_TOKEN);
+		const second = await connectAuthedWebSocket(address, TEST_TOKEN);
+
+		const refused = await fetch(`${address}/api/quit`, {
+			method: "POST",
+			headers: {
+				"X-Termora-Owner": OWNER_TOKEN,
+				"X-Termora-Client-Id": first.clientId,
+			},
+		});
+
+		expect(refused.status).toBe(409);
+		expect(await refused.json()).toMatchObject({
+			others: 1,
+			message: expect.stringContaining("snapshot"),
+		});
+		expect(calls).toEqual([]);
+		expect((await fetch(`${address}/api/health`)).status).toBe(200);
+
+		const forced = await fetch(`${address}/api/quit?force=1`, {
+			method: "POST",
+			headers: {
+				"X-Termora-Owner": OWNER_TOKEN,
+				"X-Termora-Client-Id": first.clientId,
+			},
+		});
+		expect(forced.status).toBe(200);
+		expect(await forced.json()).toMatchObject({ ok: true, override: true });
+		await tick();
+		expect(calls).toEqual(["stop-agent", "teardown"]);
+
+		await Promise.all([first.close(), second.close()]);
+	});
+
+	// Mutation: count other clients unconditionally, and a second request during a
+	// quit already under way is told the quit was refused while the hub is dying.
+	// The guard is about starting a quit, not about observing one.
+	it("joins a quit already under way instead of refusing it", async () => {
+		dbs = openTestDatabases();
+		let quitCalls = 0;
+		let releaseQuit: () => void = () => {};
+		const quitInFlight = new Promise<void>((resolve) => {
+			releaseQuit = resolve;
+		});
+		let announceLatched: () => void = () => {};
+		// A scheduler tick does not prove the first handler reached the latch. This
+		// does, so the joiner cannot win the race and pass for the wrong reason.
+		const latched = new Promise<void>((resolve) => {
+			announceLatched = resolve;
+		});
+		server = await createServer({
+			logger: false,
+			authToken: TEST_TOKEN,
+			ownerToken: OWNER_TOKEN,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			onQuit: async (sessionManager) => {
+				quitCalls++;
+				// What the real coordinator does first: latch, then stop the agent.
+				sessionManager?.beginQuit();
+				announceLatched();
+				await quitInFlight;
+				return { ok: true, message: "stopped", stdout: "", stderr: "" };
+			},
+			onQuitDelivered: () => {},
+		});
+		const address = await startServer(server, { port: 0 });
+		const first = await connectAuthedWebSocket(address, TEST_TOKEN);
+		const second = await connectAuthedWebSocket(address, TEST_TOKEN);
+
+		const forced = fetch(`${address}/api/quit?force=1`, {
+			method: "POST",
+			headers: { "X-Termora-Owner": OWNER_TOKEN, "X-Termora-Client-Id": first.clientId },
+		});
+		await latched;
+
+		// Both are in flight before either can settle, which is the shape being
+		// tested; releasing afterwards keeps the joiner from waiting on itself.
+		const joiner = fetch(`${address}/api/quit`, {
+			method: "POST",
+			headers: { "X-Termora-Owner": OWNER_TOKEN, "X-Termora-Client-Id": first.clientId },
+		});
+		await tick();
+		releaseQuit();
+
+		// The contract is that the joiner gets the same answer, not merely that it
+		// escapes the refusal — a 500 would also have escaped it.
+		const joined = await joiner;
+		expect(joined.status).toBe(200);
+		expect(await joined.json()).toMatchObject({ ok: true });
+		expect((await forced).status).toBe(200);
+		expect(quitCalls).toBe(2);
+
+		await Promise.all([first.close(), second.close()]);
+	});
+
+	it("allows quit when its only connected client identifies itself", async () => {
+		dbs = openTestDatabases();
+		let quitCalls = 0;
+		server = await createServer({
+			logger: false,
+			authToken: TEST_TOKEN,
+			ownerToken: OWNER_TOKEN,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			onQuit: async () => {
+				quitCalls++;
+				return { ok: true, message: "stopped", stdout: "", stderr: "" };
+			},
+			onQuitDelivered: () => {},
+		});
+		const address = await startServer(server, { port: 0 });
+		const client = await connectAuthedWebSocket(address, TEST_TOKEN);
+
+		const response = await fetch(`${address}/api/quit`, {
+			method: "POST",
+			headers: {
+				"X-Termora-Owner": OWNER_TOKEN,
+				"X-Termora-Client-Id": client.clientId,
+			},
+		});
+
+		expect(response.status).toBe(200);
+		expect(quitCalls).toBe(1);
+		await client.close();
 	});
 
 	it("does not run shutdown when no owner token is configured", async () => {

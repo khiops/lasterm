@@ -207,6 +207,8 @@ jobs:
           node-version: "22"
           cache: "pnpm"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/clients/desktop/src-tauri
@@ -232,13 +234,24 @@ jobs:
           cp dist/sea/termora-hub "packages/clients/desktop/src-tauri/termora-hub-${TRIPLE}"
           pnpm -F @termora/shared build
           pnpm -F @termora/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
-      - name: Place sidecars + build (pwsh)
+      - name: Place sidecars (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: |
           $triple = "${{ matrix.triple }}"
           Copy-Item dist\sea\termora-agent.exe "packages\clients\desktop\src-tauri\termora-agent-$triple.exe"
           Copy-Item dist\sea\termora-hub.exe "packages\clients\desktop\src-tauri\termora-hub-$triple.exe"
+      # The pull-request gate lives in ci.yml. Keep this release/manual path as
+      # defense in depth, and lint before the expensive Tauri package build.
+      - name: Clippy (desktop crate)
+        if: matrix.triple == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        working-directory: packages/clients/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build desktop (pwsh)
+        if: ${{ !matrix.shell_sh }}
+        shell: pwsh
+        run: |
           pnpm -F @termora/shared build
           pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
       # Uses the real Partner Center identity when the repository variables are

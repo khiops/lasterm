@@ -11,6 +11,30 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
 
+  lint-desktop-windows:
+    name: Clippy (desktop, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/clients/desktop/src-tauri
+      # Tauri resolves externalBin while compiling. Clippy neither executes nor
+      # packages the sidecars, so empty files are sufficient for that lookup.
+      - name: Prepare Tauri sidecar placeholders
+        shell: pwsh
+        working-directory: packages/clients/desktop/src-tauri
+        run: |
+          foreach ($sidecar in @("termora-agent-x86_64-pc-windows-msvc.exe", "termora-hub-x86_64-pc-windows-msvc.exe")) {
+            if (!(Test-Path $sidecar)) { [System.IO.File]::WriteAllBytes($sidecar, [byte[]]@()) }
+          }
+      - name: Clippy
+        working-directory: packages/clients/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
   licenses:
     name: License compliance
     runs-on: ubuntu-latest

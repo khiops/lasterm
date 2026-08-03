@@ -101,9 +101,33 @@ went*, not what happened to the user's work.
 | **Quit** | Everything local stops: window, hub, agent, and the processes they spawned — the whole tree on Windows, the shell's process group on Unix (§4.2). Terminals end. |
 
 Persisted values migrate `tray → hide` on read; an unknown value falls back to
-`ask`. Every quit path — window close, tray menu, `termora stop`, OS logoff —
-means the same thing, so the coordinator lives in Rust with the webview as one
-presenter among several rather than as the owner of the decision.
+`ask`. Window close, the tray menu and `termora quit` mean the same thing, so the
+coordinator lives in Rust with the webview as one presenter among several rather
+than as the owner of the decision. The setting lives with the coordinator, in
+per-user native config: a tray click with the window hidden has no webview to ask,
+and the value has to outlive a hub that is not running.
+
+`ask` means *ask where something can ask* — the modal on a window close, a native
+dialog from the tray. It never becomes a silent quit on a gesture with no surface
+to prompt on, because the fallback for a destructive action without a
+confirmation is to not take it.
+
+**OS logoff is not a quit path, and this section used to claim it was.** No
+mechanism spans the platforms: Tauri's `RunEvent` has no session-end variant,
+Windows terminates the session's processes after a short policy-bounded exchange,
+macOS asks the app and then terminates it while a separately spawned daemon is not
+the app, and Linux with logind's default `KillUserProcesses=no` leaves the hub
+running past the logoff that started it. What each platform can honestly offer:
+
+| Platform | On logoff |
+|----------|-----------|
+| Windows | The session ends the processes. A best-effort quit request may be sent if it never delays or vetoes the OS, and must not wait for confirmation. |
+| macOS | Same shape — the app is asked, the daemon is not, and the wait is the OS's to bound. |
+| Linux | Nothing observable from the app. The hub may survive the session. Bounding it belongs to a service manager (a session-scoped unit), not to this feature. |
+
+The promise is therefore "explicit quit ends everything local", not "logging out
+does". Anything stronger on Linux is a packaging contract and is out of this
+spec's scope.
 
 Remote agents are untouched by either gesture: they are peers, not children.
 
@@ -412,7 +436,7 @@ Scenario: Store builds do none of this
 | **S1c** Daemon teardown | The daemon loops own shutdown, stop listening on request, sweep on any exit; the registry refuses to spawn once shutdown began; exit status is zero iff the agent ran and stopped with every terminal confirmed | S1b |
 | **S1d** Stopping a local agent | `agent.identity` and `agent.last-exit` records, the Windows named event, one stopper that asks by the platform's own mechanism and confirms by identity, and a CLI verb that **refuses while a hub is live** and says why | S1c |
 | **S1e** Local quit | the no-relaunch latch over all three respawn paths, a hub-owned coordinator that latches, stops the agent through S1d's stopper, then stops itself, behind a CLI verb. Plain `stop` keeps today's "hub stops, sessions survive" meaning | S1d |
-| **S1f** Quit gestures | window close, tray and OS logoff call the same coordinator; the desktop keeps an identity-validated force-stop as its repair path | S1e |
+| **S1f** Quit gestures | one native coordinator behind window close, the tray and the CLI; `closeBehavior` becomes `ask`/`hide`/`quit` in per-user native config, with the webview as a presenter; the multi-client guard moves onto quit and `force` becomes an escalation a human answers; the desktop keeps an identity-validated force-stop as its repair path. **Not** OS logoff (§4.1) | S1e |
 | **S2** Release publication | release-only `createUpdaterArtifacts`, signed upload with real asset names, `latest.json`, key-pair and per-signature pipeline gates, post-publish URL assertion | — |
 | **S0** Notify only | check the endpoint, surface "0.8.0 is available" with a link. No download, no staging, no code-execution path | S2 |
 | **S3** Stage | preflight, download (reusing `agent-fetch` hardening), verify, stage, journal, renderer contract | S2 to ship; buildable and testable against the §7 fixture endpoint without it |
@@ -464,8 +488,10 @@ No throwaway releases.
 7. **Regression locks proven RED→GREEN by reverting the fix**: the relaunch
    latch, apply-time re-verification, and the absent `version_comparator`.
 
-Still uncovered and accepted for now: disk-full mid-install, OS logoff as the
-quit trigger, and dual-instance racing beyond the journal lock.
+Still uncovered and accepted for now: disk-full mid-install, and dual-instance
+racing beyond the journal lock. OS logoff is no longer listed here as a testing
+gap, because §4.1 no longer claims it as a quit trigger — on Linux the app cannot
+observe it at all, and where it can the OS bounds the response.
 
 ## §8 Deferred
 

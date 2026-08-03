@@ -6,7 +6,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	copyFileSync,
@@ -54,7 +54,7 @@ import {
 	computeTargetStatus,
 	getHubPlatform,
 } from "./session/agent-status.js";
-import { createOwnerToken, gracefulShutdown } from "./shutdown.js";
+import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 
 // ─── Platform paths ────────────────────────────────────────────────────────────
 
@@ -78,16 +78,27 @@ export interface RuntimeInfo {
 	pid: number;
 	port: number;
 	started_at: string;
+	/** Unique per hub process; prevents a quit waiter mistaking a replacement for its target. */
+	instanceId?: string;
 	ownerToken?: string;
 }
 
-export function loadRuntime(): RuntimeInfo | null {
+const HUB_QUIT_OBSERVE_TIMEOUT_MS = 15_000;
+const HUB_QUIT_OBSERVE_POLL_MS = 50;
+
+export type RuntimeLoadResult =
+	| { kind: "absent" }
+	| { kind: "present"; runtime: RuntimeInfo }
+	| { kind: "unreadable"; error: unknown };
+
+/** Read absence is distinct from every failure to read or parse the record. */
+export function loadRuntime(): RuntimeLoadResult {
 	const p = join(getStateDir(), "runtime.json");
-	if (!existsSync(p)) return null;
 	try {
-		return JSON.parse(readFileSync(p, "utf-8")) as RuntimeInfo;
-	} catch {
-		return null;
+		return { kind: "present", runtime: JSON.parse(readFileSync(p, "utf-8")) as RuntimeInfo };
+	} catch (error) {
+		if (isFileNotFound(error)) return { kind: "absent" };
+		return { kind: "unreadable", error };
 	}
 }
 
@@ -119,17 +130,56 @@ function createRuntimeTempPath(runtimePath: string): string {
 	throw new Error(`Could not allocate a unique temp file beside ${runtimePath}`);
 }
 
-export function deleteRuntime(): void {
-	const p = join(getStateDir(), "runtime.json");
-	if (existsSync(p)) rmSync(p);
+/**
+ * Legacy records have no instanceId. They match only another legacy record with
+ * every persisted identity field equal; a modern replacement can never match it.
+ */
+export function runtimeMatches(expected: RuntimeInfo, current: RuntimeInfo): boolean {
+	if (expected.instanceId !== undefined) return current.instanceId === expected.instanceId;
+	return (
+		current.instanceId === undefined &&
+		current.pid === expected.pid &&
+		current.port === expected.port &&
+		current.started_at === expected.started_at &&
+		current.ownerToken === expected.ownerToken
+	);
 }
 
-function isPidAlive(pid: number): boolean {
+/** Remove the record only if a fresh read still identifies this runtime. */
+export function deleteRuntime(expected: RuntimeInfo): boolean {
+	const p = join(getStateDir(), "runtime.json");
+	const current = loadRuntime();
+	if (current.kind !== "present" || !runtimeMatches(expected, current.runtime)) return false;
+	rmSync(p);
+	return true;
+}
+
+function isFileNotFound(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		(error as { code?: unknown }).code === "ENOENT"
+	);
+}
+
+function describeRuntimeReadFailure(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+export function isPidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
-	} catch {
-		return false;
+	} catch (err) {
+		// ESRCH is the only definite absence. EPERM proves the process exists;
+		// every other failure is ambiguous and must fail closed as live.
+		return !(
+			typeof err === "object" &&
+			err !== null &&
+			"code" in err &&
+			(err as { code?: unknown }).code === "ESRCH"
+		);
 	}
 }
 
@@ -204,10 +254,16 @@ function loadAuthToken(): string | null {
 // ─── HTTP client ───────────────────────────────────────────────────────────────
 
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
-	const runtime = loadRuntime();
-	if (!runtime) {
+	const runtimeResult = loadRuntime();
+	if (runtimeResult.kind === "absent") {
 		throw new Error("Hub is not running (no runtime.json found)");
 	}
+	if (runtimeResult.kind === "unreadable") {
+		throw new Error(
+			`Cannot read hub runtime record: ${describeRuntimeReadFailure(runtimeResult.error)}`,
+		);
+	}
+	const { runtime } = runtimeResult;
 
 	const token = loadAuthToken();
 	const headers: Record<string, string> = {};
@@ -349,6 +405,8 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 		result.command = "start";
 	} else if (sub0 === "stop") {
 		result.command = "stop";
+	} else if (sub0 === "quit") {
+		result.command = "quit";
 	} else if (sub0 === "status") {
 		result.command = "status";
 	} else if (sub0 === "host") {
@@ -662,9 +720,15 @@ function printAgentStatusTable(
 
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
-async function cmdStart(args: ParsedArgs): Promise<void> {
-	const existing = loadRuntime();
-	if (existing && isPidAlive(existing.pid)) {
+export async function cmdStart(args: ParsedArgs): Promise<void> {
+	const existingResult = loadRuntime();
+	if (existingResult.kind === "unreadable") {
+		throw new Error(
+			`Cannot determine whether a hub is already running: ${describeRuntimeReadFailure(existingResult.error)}`,
+		);
+	}
+	if (existingResult.kind === "present" && isPidAlive(existingResult.runtime.pid)) {
+		const { runtime: existing } = existingResult;
 		console.error(`Hub already running (pid ${existing.pid} on port ${existing.port})`);
 		process.exit(1);
 	}
@@ -765,22 +829,28 @@ async function cmdStart(args: ParsedArgs): Promise<void> {
 
 	const { BUILD_HASH } = await import("./build-version.js");
 
-	let shutdown: () => Promise<void> = async () => {};
-	const server = await createServer({
+	let server: Awaited<ReturnType<typeof createServer>>;
+	let runtime!: RuntimeInfo;
+	const quit = createQuitLifecycle(() => ({ server, dbManager, runtime, deleteRuntime }));
+	server = await createServer({
 		port,
 		authToken,
 		ownerToken,
 		dbManager,
-		onShutdown: () => shutdown(),
+		onShutdown: () => quit.shutdown(),
+		onQuit: quit.onQuit,
+		onQuitDelivered: quit.onQuitDelivered,
 	});
 	const address = await startServer(server, { port });
 	const actualPort = addStartupCorsOrigins(address, port);
-	persistRuntime({
+	runtime = {
 		pid: process.pid,
 		port: actualPort,
 		started_at: new Date().toISOString(),
+		instanceId: randomUUID(),
 		ownerToken,
-	});
+	};
+	persistRuntime(runtime);
 
 	console.log(`termora hub listening on ${address} (build: ${BUILD_HASH})`);
 	console.log(`Config dir : ${configDir}`);
@@ -794,7 +864,7 @@ async function cmdStart(args: ParsedArgs): Promise<void> {
 		openBrowser(url);
 	}
 
-	shutdown = () => gracefulShutdown({ server, dbManager, deleteRuntime });
+	const shutdown = () => quit.shutdown();
 	process.on("SIGTERM", () => {
 		void shutdown();
 	});
@@ -803,15 +873,32 @@ async function cmdStart(args: ParsedArgs): Promise<void> {
 	});
 }
 
-export async function cmdStop(args: ParsedArgs = { command: "stop" }): Promise<void> {
-	const runtime = loadRuntime();
-	if (!runtime) {
+export async function cmdStop(
+	args: ParsedArgs = { command: "stop" },
+	options: {
+		loadRuntime?: () => RuntimeLoadResult;
+		isPidAlive?: (pid: number) => boolean;
+	} = {},
+): Promise<void> {
+	const readRuntime = options.loadRuntime ?? loadRuntime;
+	const alive = options.isPidAlive ?? isPidAlive;
+	const runtimeResult = readRuntime();
+	if (runtimeResult.kind === "absent") {
 		console.error("Hub is not running (no runtime.json)");
 		process.exit(1);
 	}
-	if (!isPidAlive(runtime.pid)) {
-		console.log("Hub process is gone — cleaning up stale runtime.json");
-		deleteRuntime();
+	if (runtimeResult.kind === "unreadable") {
+		throw new Error(
+			`Cannot determine whether the hub is running: ${describeRuntimeReadFailure(runtimeResult.error)}`,
+		);
+	}
+	const { runtime } = runtimeResult;
+	if (!alive(runtime.pid)) {
+		if (deleteRuntime(runtime)) {
+			console.log("Hub process is gone — cleaned up stale runtime.json");
+		} else {
+			console.log("Hub process is gone — runtime.json changed, leaving it alone");
+		}
 		return;
 	}
 
@@ -839,7 +926,7 @@ export async function cmdStop(args: ParsedArgs = { command: "stop" }): Promise<v
 			}
 			throw new Error(`HTTP ${res.status}`);
 		} catch (err) {
-			if (!isPidAlive(runtime.pid)) {
+			if (!alive(runtime.pid)) {
 				console.log(`Hub process stopped before shutdown confirmation (pid ${runtime.pid})`);
 				return;
 			}
@@ -855,9 +942,129 @@ export async function cmdStop(args: ParsedArgs = { command: "stop" }): Promise<v
 	console.log(`Sent SIGTERM to hub (pid ${runtime.pid})`);
 }
 
-async function cmdStatus(args: ParsedArgs): Promise<void> {
-	const runtime = loadRuntime();
-	if (!runtime) {
+/** Stop the validated local agent and then the hub. Unlike `stop`, sessions do not survive. */
+export async function cmdQuit(
+	options: {
+		loadRuntime?: () => RuntimeLoadResult;
+		isPidAlive?: (pid: number) => boolean;
+		fetch?: typeof fetch;
+		waitForHubQuit?: (target: Required<Pick<RuntimeInfo, "pid" | "instanceId">>) => Promise<void>;
+	} = {},
+): Promise<void> {
+	const readRuntime = options.loadRuntime ?? loadRuntime;
+	const alive = options.isPidAlive ?? isPidAlive;
+	const request = options.fetch ?? fetch;
+	const wait = options.waitForHubQuit ?? waitForHubQuit;
+	const runtimeResult = readRuntime();
+	if (runtimeResult.kind === "absent") throw new Error("Hub is not running (no runtime.json)");
+	if (runtimeResult.kind === "unreadable") {
+		throw new Error(
+			`Cannot determine whether the hub is running: ${describeRuntimeReadFailure(runtimeResult.error)}`,
+		);
+	}
+	const { runtime } = runtimeResult;
+	if (!alive(runtime.pid)) {
+		deleteRuntime(runtime);
+		throw new Error("Hub process is gone");
+	}
+	if (!runtime.ownerToken) {
+		throw new Error("Hub runtime has no owner token; refusing unauthenticated quit");
+	}
+	if (!runtime.instanceId) {
+		throw new Error("Hub runtime has no instance identity; refusing an unobservable quit");
+	}
+	const target = { pid: runtime.pid, instanceId: runtime.instanceId };
+
+	const response = await request(`http://127.0.0.1:${runtime.port}/api/quit`, {
+		method: "POST",
+		headers: { "X-Termora-Owner": runtime.ownerToken },
+		signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
+	});
+	const body = (await response.json().catch(() => ({}))) as { message?: string };
+	const failure = response.ok
+		? null
+		: new Error(body.message ?? `Quit failed (HTTP ${response.status})`);
+	// The hub schedules teardown after every stopper result, including a 503.
+	// Observe that teardown before reporting the stopper failure to the caller.
+	try {
+		await wait(target);
+	} catch (err) {
+		if (!failure) throw err;
+	}
+	if (failure) throw failure;
+	console.log(body.message ?? "Local agent stopped; hub is shutting down");
+}
+
+/**
+ * Confirm the specific hub that accepted /api/quit has both removed its runtime
+ * record (its final teardown action) and exited.  A recycled PID is never
+ * sufficient: a different runtime instance is an explicit non-success.
+ */
+export async function waitForHubQuit(
+	target: Required<Pick<RuntimeInfo, "pid" | "instanceId">>,
+	options: {
+		loadRuntime?: () => RuntimeLoadResult;
+		isPidAlive?: (pid: number) => boolean;
+		sleep?: (ms: number) => Promise<void>;
+		timeoutMs?: number;
+	} = {},
+): Promise<void> {
+	const readRuntime = options.loadRuntime ?? loadRuntime;
+	const alive = options.isPidAlive ?? isPidAlive;
+	const sleep =
+		options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+	const timeoutMs = options.timeoutMs ?? HUB_QUIT_OBSERVE_TIMEOUT_MS;
+	const deadline = Date.now() + timeoutMs;
+
+	for (;;) {
+		let current = readRuntime();
+		if (current.kind === "unreadable") {
+			throw new Error(
+				`Hub teardown could not be confirmed because runtime.json cannot be read: ${describeRuntimeReadFailure(current.error)}`,
+			);
+		}
+		if (
+			current.kind === "present" &&
+			current.runtime.instanceId !== undefined &&
+			current.runtime.instanceId !== target.instanceId
+		) {
+			throw new Error("Hub quit target exited, but runtime.json now belongs to a replacement hub");
+		}
+		if (current.kind === "absent" && !alive(target.pid)) {
+			// Confirm the record after the liveness observation. Without this, an
+			// absent record and a dead PID from different moments can report success
+			// while a replacement has already published its own runtime record.
+			current = readRuntime();
+			if (current.kind === "unreadable") {
+				throw new Error(
+					`Hub teardown could not be confirmed because runtime.json cannot be read: ${describeRuntimeReadFailure(current.error)}`,
+				);
+			}
+			if (
+				current.kind === "present" &&
+				current.runtime.instanceId !== undefined &&
+				current.runtime.instanceId !== target.instanceId
+			) {
+				throw new Error(
+					"Hub quit target exited, but runtime.json now belongs to a replacement hub",
+				);
+			}
+			if (current.kind === "absent") return;
+		}
+		if (Date.now() >= deadline) {
+			const detail =
+				current.kind === "absent"
+					? "runtime record was removed but its PID remains live"
+					: "runtime record remains";
+			throw new Error(`Hub teardown was not confirmed within ${timeoutMs}ms: ${detail}`);
+		}
+		await sleep(HUB_QUIT_OBSERVE_POLL_MS);
+	}
+}
+
+export async function cmdStatus(args: ParsedArgs): Promise<void> {
+	const runtimeResult = loadRuntime();
+	if (runtimeResult.kind === "absent") {
 		if (args.json) {
 			console.log(JSON.stringify({ running: false }));
 		} else {
@@ -865,6 +1072,18 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
 		}
 		return;
 	}
+	if (runtimeResult.kind === "unreadable") {
+		const error = describeRuntimeReadFailure(runtimeResult.error);
+		if (args.json) {
+			console.log(
+				JSON.stringify({ running: "unknown", error: `runtime.json cannot be read: ${error}` }),
+			);
+		} else {
+			console.log(`Hub: unknown (runtime.json cannot be read: ${error})`);
+		}
+		return;
+	}
+	const { runtime } = runtimeResult;
 
 	const alive = isPidAlive(runtime.pid);
 	if (!alive) {
@@ -1037,6 +1256,7 @@ Usage:
   termora start [--port 4100] [--daemon]       Start hub (foreground or daemon)
               [--open]                          Open browser after start
   termora stop                                  Stop running hub
+  termora quit                                  Stop local agent, then hub
   termora status [--json]                       Show hub status
 
   termora host add --label X --host user@Y      Add an SSH host
@@ -1083,6 +1303,9 @@ export async function main(argv: string[]): Promise<void> {
 				break;
 			case "stop":
 				await cmdStop(parsed);
+				break;
+			case "quit":
+				await cmdQuit();
 				break;
 			case "status":
 				await cmdStatus(parsed);

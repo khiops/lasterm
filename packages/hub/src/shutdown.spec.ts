@@ -5,8 +5,9 @@ import { decodeMessage, encodeMessage, type ProtocolMessage } from "@termora/sha
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeInfo } from "./cli.js";
 import { createServer, startServer } from "./server.js";
-import { gracefulShutdown, resetGracefulShutdownForTests } from "./shutdown.js";
+import { gracefulShutdown, QuitCoordinator, resetGracefulShutdownForTests } from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
 
@@ -38,7 +39,11 @@ describe("gracefulShutdown", () => {
 		const options = {
 			server,
 			dbManager: dbs,
-			deleteRuntime: () => order.push("runtime.delete"),
+			runtime: runtimeRecord(),
+			deleteRuntime: () => {
+				order.push("runtime.delete");
+				return true;
+			},
 			exit: (code: number) => {
 				order.push(`exit:${code}`);
 				exits.push(code);
@@ -71,7 +76,11 @@ describe("gracefulShutdown", () => {
 		await gracefulShutdown({
 			server,
 			dbManager: dbs,
-			deleteRuntime: () => rmSync(runtimePath, { force: true }),
+			runtime: runtimeRecord(),
+			deleteRuntime: () => {
+				rmSync(runtimePath, { force: true });
+				return true;
+			},
 			exit: (code) => {
 				exits.push(code);
 			},
@@ -83,6 +92,172 @@ describe("gracefulShutdown", () => {
 
 		dbs.close();
 		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("leaves a replacement runtime record during normal teardown", async () => {
+		const server = Fastify({ logger: false });
+		const dbs = openTestDatabases();
+		const target = runtimeRecord({ instanceId: "target" });
+		let current = target;
+		let deleted = false;
+		server.addHook("onClose", () => {
+			current = runtimeRecord({ instanceId: "replacement" });
+		});
+		await server.ready();
+
+		await gracefulShutdown({
+			server,
+			dbManager: dbs,
+			runtime: target,
+			deleteRuntime: (expected) => {
+				if (expected.instanceId !== current.instanceId) return false;
+				deleted = true;
+				return true;
+			},
+			exit: () => {},
+		});
+
+		expect(deleted).toBe(false);
+		expect(current.instanceId).toBe("replacement");
+		dbs.close();
+	});
+
+	it("leaves a replacement runtime record on the teardown failure path", async () => {
+		const server = Fastify({ logger: false });
+		const dbs = openTestDatabases();
+		const target = runtimeRecord({ instanceId: "target" });
+		const current = runtimeRecord({ instanceId: "replacement" });
+		let deleted = false;
+		server.addHook("onClose", () => new Promise<void>(() => {}));
+		await server.ready();
+
+		await gracefulShutdown({
+			server,
+			dbManager: dbs,
+			runtime: target,
+			deleteRuntime: (expected) => {
+				if (expected.instanceId !== current.instanceId) return false;
+				deleted = true;
+				return true;
+			},
+			exit: () => {},
+			timeoutMs: 10,
+		});
+
+		expect(deleted).toBe(false);
+		expect(current.instanceId).toBe("replacement");
+		dbs.close();
+	});
+});
+
+describe("QuitCoordinator", () => {
+	afterEach(() => {
+		resetGracefulShutdownForTests();
+	});
+
+	it("latches first, reports a failed agent stop, then still tears the hub down with exit 1", async () => {
+		const server = Fastify({ logger: false });
+		await server.ready();
+		const dbs = openTestDatabases();
+		const calls: string[] = [];
+		const coordinator = new QuitCoordinator(
+			{
+				beginQuit: () => calls.push("beginQuit"),
+				stopLocalAgent: async () => ({
+					stopped: false,
+					diagnostic: "record mismatch",
+					stdout: "",
+					stderr: "mismatch",
+				}),
+			},
+			{
+				server,
+				dbManager: dbs,
+				runtime: runtimeRecord(),
+				deleteRuntime: () => {
+					calls.push("runtime.delete");
+					return true;
+				},
+				exit: (code) => calls.push(`exit:${code}`),
+			},
+		);
+
+		await expect(coordinator.beginQuit()).resolves.toMatchObject({
+			ok: false,
+			message: "record mismatch",
+		});
+		await coordinator.finishQuit();
+		expect(calls).toEqual(["beginQuit", "runtime.delete", "exit:1"]);
+		dbs.close();
+	});
+
+	it("an ordinary shutdown joins a pending quit without running a second teardown", async () => {
+		const server = Fastify({ logger: false });
+		await server.ready();
+		const dbs = openTestDatabases();
+		let resolveStop!: (value: import("./session/agent-launcher.js").AgentStopResult) => void;
+		const stop = new Promise<import("./session/agent-launcher.js").AgentStopResult>((resolve) => {
+			resolveStop = resolve;
+		});
+		let beginCalls = 0;
+		const coordinator = new QuitCoordinator(
+			{ beginQuit: () => beginCalls++, stopLocalAgent: () => stop },
+			{
+				server,
+				dbManager: dbs,
+				runtime: runtimeRecord(),
+				deleteRuntime: () => true,
+				exit: () => {},
+			},
+		);
+
+		void coordinator.beginQuit();
+		const ordinaryStop = coordinator.shutdown();
+		resolveStop({ stopped: true, diagnostic: "stopped", stdout: "", stderr: "" });
+		await Promise.resolve();
+		expect(beginCalls).toBe(1);
+		// The ordinary stop has joined but cannot close the HTTP response early.
+		let settled = false;
+		void ordinaryStop.then(() => (settled = true));
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		await coordinator.finishQuit();
+		await ordinaryStop;
+		dbs.close();
+	});
+
+	it("resolves quit joiners when ordinary teardown started first", async () => {
+		const server = Fastify({ logger: false });
+		await server.ready();
+		const dbs = openTestDatabases();
+		const coordinator = new QuitCoordinator(
+			{
+				beginQuit: () => {},
+				stopLocalAgent: async () => ({
+					stopped: false,
+					diagnostic: "stopper failed",
+					stdout: "",
+					stderr: "",
+				}),
+			},
+			{
+				server,
+				dbManager: dbs,
+				runtime: runtimeRecord(),
+				deleteRuntime: () => true,
+				exit: () => {},
+			},
+		);
+
+		const ordinary = coordinator.shutdown();
+		await expect(coordinator.beginQuit()).resolves.toMatchObject({ ok: false });
+		const joiner = coordinator.shutdown();
+		await expect(Promise.all([ordinary, joiner, coordinator.finishQuit()])).resolves.toEqual([
+			undefined,
+			undefined,
+			undefined,
+		]);
+		dbs.close();
 	});
 });
 
@@ -139,6 +314,32 @@ describe("POST /api/shutdown", () => {
 		expect(ok.statusCode).toBe(200);
 		await tick();
 		expect(shutdownCalls).toBe(1);
+	});
+
+	it("POST /api/quit waits for the stopper result, then schedules teardown", async () => {
+		const calls: string[] = [];
+		server = await createServer({
+			logger: false,
+			ownerToken: OWNER_TOKEN,
+			onQuit: async () => {
+				calls.push("stop-agent");
+				return { ok: false, message: "agent still running", stdout: "", stderr: "still running" };
+			},
+			onQuitDelivered: () => {
+				calls.push("teardown");
+			},
+		});
+
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/quit",
+			headers: { "x-termora-owner": OWNER_TOKEN },
+		});
+		expect(response.statusCode).toBe(503);
+		expect(response.json()).toMatchObject({ ok: false, message: "agent still running" });
+		expect(calls).toEqual(["stop-agent"]);
+		await tick();
+		expect(calls).toEqual(["stop-agent", "teardown"]);
 	});
 
 	it("does not run shutdown when no owner token is configured", async () => {
@@ -329,4 +530,14 @@ async function closeWebSocket(ws: WebSocket): Promise<void> {
 
 function tick(): Promise<void> {
 	return new Promise((resolve) => setImmediate(resolve));
+}
+
+function runtimeRecord(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
+	return {
+		pid: 123,
+		port: 456,
+		started_at: "2026-08-03T00:00:00.000Z",
+		instanceId: "target",
+		...overrides,
+	};
 }

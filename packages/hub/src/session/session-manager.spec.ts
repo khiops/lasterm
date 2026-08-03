@@ -2,6 +2,7 @@ import type { AuthPromptMessage, ProtocolMessage } from "@termora/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConfigResolver } from "../config.js";
 import { openTestDatabases } from "../storage/db.js";
+import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
@@ -316,6 +317,61 @@ describe("SessionManager", () => {
 		sm.addClient(client);
 		expect(() => sm.removeClient("non-existent")).not.toThrow();
 		expect(() => sm.removeClient("c1")).not.toThrow();
+	});
+
+	it("fences an in-flight local SPAWN when quit begins before its send", async () => {
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("quit-race", received));
+
+		// handleSpawn has crossed its public boundary but is awaiting host resolution.
+		const inFlight = sm.handleSpawn("quit-race", { type: "SPAWN", hostId: "local" });
+		sm.beginQuit();
+
+		await expect(inFlight).resolves.toBeNull();
+		expect(localSpawnCount).toBe(0);
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "ERROR", code: "HUB_QUITTING" }),
+		);
+		// Mutation caught: no SPAWN frame and therefore no channel row is committed.
+		expect(sm.getStateSnapshot().channels).toHaveLength(0);
+	});
+
+	it("refuses every revival entry after quit while leaving DESTROY available", async () => {
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("quit-entries", received));
+		const channelId = await sm.handleSpawn("quit-entries", { type: "SPAWN", hostId: "local" });
+		expect(channelId).not.toBeNull();
+
+		sm.beginQuit();
+		await expect(
+			sm.handleSpawn("quit-entries", { type: "SPAWN", hostId: "local" }),
+		).resolves.toBeNull();
+		await expect(sm.restartChannel(channelId!)).resolves.toBe(false);
+		await expect(sm.handleAttach("quit-entries", channelId!)).resolves.toBe(false);
+		await expect(
+			(
+				sm as unknown as { agentMgr: { reconnectDaemon: () => Promise<void> } }
+			).agentMgr.reconnectDaemon(),
+		).rejects.toMatchObject({ code: "HUB_QUITTING" });
+		await expect(
+			(
+				sm as unknown as { agentMgr: { warmRestartLocal: () => Promise<void> } }
+			).agentMgr.warmRestartLocal(),
+		).rejects.toMatchObject({ code: "HUB_QUITTING" });
+
+		// Output is draining work, not revival; it is still delivered while quitting.
+		(
+			mockLocalAgents[0] as unknown as { emit: (event: string, message: ProtocolMessage) => void }
+		).emit("message", {
+			type: "OUTPUT",
+			channelId: channelId!,
+			data: new TextEncoder().encode("still-draining"),
+		} as ProtocolMessage);
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "OUTPUT", channelId: channelId! }),
+		);
+		// DESTROY is teardown, not revival, and remains deliberately allowed.
+		expect(sm.destroyChannel(channelId!)).toBe(true);
 	});
 
 	it("getStateSnapshot returns current sessions and channels after SPAWN", async () => {
@@ -2557,7 +2613,7 @@ describe("SessionManager — _resolveDisplayTitle", () => {
 		const hostId = await sm.ensureLocalHost();
 
 		// Create a session then a channel with a custom title via proper MetaDAL methods
-		const metaDal = sm.getMetaDal();
+		const metaDal = new MetaDAL(dbManager.meta);
 		const sessionId = "sess-rename-test";
 		const channelId = "ch-rename-test";
 		metaDal.createSession({ id: sessionId, hostId, status: "active" });
@@ -2744,7 +2800,7 @@ describe("SessionManager — title broadcast wiring", () => {
 		sm = new SessionManager(dbManager, undefined, undefined, makeMockConfigResolver("dynamic"));
 
 		const hostId = await sm.ensureLocalHost();
-		const metaDal = sm.getMetaDal();
+		const metaDal = new MetaDAL(dbManager.meta);
 		const sessionId = "sess-b2-rename";
 		const channelId = "ch-b2-rename-01AAAAAAAAAAAAAAAAAAAAAAAAAA";
 		metaDal.createSession({ id: sessionId, hostId, status: "active" });
@@ -2794,7 +2850,7 @@ describe("SessionManager — title broadcast wiring", () => {
 		sm = new SessionManager(dbManager, undefined, undefined, makeMockConfigResolver("dynamic"));
 
 		const hostId = await sm.ensureLocalHost();
-		const metaDal = sm.getMetaDal();
+		const metaDal = new MetaDAL(dbManager.meta);
 		const sessionId = "sess-b2-notify";
 		const channelId = "ch-b2-notify-01AAAAAAAAAAAAAAAAAAAAAAAAA";
 		metaDal.createSession({ id: sessionId, hostId, status: "active" });

@@ -29,6 +29,7 @@ import type { MetaDAL } from "../storage/meta.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch } from "./agent-launcher.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
@@ -66,7 +67,13 @@ async function seedRemoteShellProfiles(
 	availableShells: string[],
 	defaultShell: string | undefined,
 	os: string | null,
-	metaDal: MetaDAL,
+	metaDal: Pick<
+		MetaDAL,
+		| "listHostProfiles"
+		| "getLaunchProfileByName"
+		| "createLaunchProfile"
+		| "upsertHostProfileOverride"
+	>,
 ): Promise<void> {
 	const supportedOs = remoteOsToSupportedOs(os);
 
@@ -142,7 +149,11 @@ export class AgentConnectionManager {
 		return requestedId;
 	}
 
-	async getOrCreateSession(hostId: string, isSsh: boolean): Promise<SessionState> {
+	async getOrCreateSession(
+		hostId: string,
+		isSsh: boolean,
+		fence = captureQuitFence(this.ctx),
+	): Promise<SessionState> {
 		const existing = this.ctx.sessions.get(hostId);
 		if (
 			existing &&
@@ -155,10 +166,11 @@ export class AgentConnectionManager {
 
 		const sessionId = generateId();
 		const initialStatus: SessionStatus = "starting";
-		this.ctx.metaDal.createSession({ id: sessionId, hostId, status: initialStatus });
-
 		const state: SessionState = { id: sessionId, hostId, status: initialStatus };
-		this.ctx.sessions.set(hostId, state);
+		// These two commits independently revalidate the same opaque capability.
+		// A quit between them leaves neither a context session nor a database row.
+		this.ctx.commits.createSession(fence, { id: sessionId, hostId, status: initialStatus });
+		this.ctx.commits.persistSession(fence, hostId, state);
 		return state;
 	}
 
@@ -277,7 +289,8 @@ export class AgentConnectionManager {
 			}
 
 			this.ctx.metaDal.markHostSessionDisconnected(hostId);
-			this.ctx.sessions.set(hostId, {
+			const fence = captureQuitFence(this.ctx);
+			this.ctx.commits.persistSession(fence, hostId, {
 				id: session.id,
 				hostId,
 				status: "disconnected",
@@ -492,6 +505,7 @@ export class AgentConnectionManager {
 	// ─── Daemon agent ─────────────────────────────────────────────────────────
 
 	private async attachDaemon(hostId: string, sessionId: string): Promise<TermoraAgent> {
+		captureQuitFence(this.ctx);
 		const existing = this.ctx.agents.get(hostId);
 		if (existing?.connected) {
 			this.ctx.hubLogger?.log("debug", "agent-connection-manager: reusing live daemon agent", {
@@ -532,6 +546,7 @@ export class AgentConnectionManager {
 	}
 
 	private async attachDaemonFresh(hostId: string, sessionId: string): Promise<TermoraAgent> {
+		const quitEpoch = captureQuitFence(this.ctx);
 		const socketPath = getSocketPath(this.ctx.agentConfig.socketPath);
 		this.ctx.hubLogger?.log("debug", "agent-connection-manager: attachDaemon", {
 			hostId,
@@ -545,7 +560,10 @@ export class AgentConnectionManager {
 				this.ctx.agentConfig,
 				undefined,
 				this.ctx.hubLogger ?? undefined,
+				() => assertQuitFence(this.ctx, quitEpoch),
 			);
+			// A connect which completed after quit began is not adopted.
+			assertQuitFence(this.ctx, quitEpoch);
 			this.ctx.hubLogger?.log("debug", "agent-connection-manager: connectOrLaunch succeeded", {
 				hostId,
 				connected: agent.connected,
@@ -565,13 +583,15 @@ export class AgentConnectionManager {
 				hostId,
 			});
 			const states = await agent.waitForChannelState();
+			assertQuitFence(this.ctx, quitEpoch);
 			this.ctx.hubLogger?.log("debug", "agent-connection-manager: got channel states", {
 				hostId,
 				count: states.length,
 			});
 			this.lifecycle.reconcileChannelState(hostId, states);
 
-			this.ctx.agents.set(hostId, agent);
+			assertQuitFence(this.ctx, quitEpoch);
+			this.ctx.commits.adoptAgent(quitEpoch, hostId, agent);
 			this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 			this.ctx.hubLogger?.log("info", "agent-connection-manager: agent active", { hostId });
 
@@ -601,12 +621,14 @@ export class AgentConnectionManager {
 	}
 
 	async reconnectDaemon(hostId: string, sessionId: string): Promise<void> {
+		captureQuitFence(this.ctx);
 		await this.attachDaemon(hostId, sessionId);
 	}
 
 	// ─── Warm restart (local) ─────────────────────────────────────────────────
 
 	async warmRestartLocal(hostId: string, sessionId: string): Promise<void> {
+		captureQuitFence(this.ctx);
 		// Crash-loop protection: max 3 restarts in 60s
 		const now = Date.now();
 		const tracking = this.ctx.restartTracking.get(hostId) ?? { count: 0, windowStart: now };

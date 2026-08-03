@@ -10,6 +10,7 @@ import {
 	PROTOCOL_VERSION,
 } from "@termora/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HubQuittingError } from "./quit-fence.js";
 import type { TermoraAgent } from "./termora-agent.js";
 import { getTestSocketPath } from "./test-socket-path.js";
 
@@ -31,7 +32,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 // Import AFTER vi.mock so the mock is in place
-const { connectOrLaunch, readBoundedLogTail } = await import("./agent-launcher.js");
+const { connectOrLaunch, readBoundedLogTail, stopLocalAgent } = await import("./agent-launcher.js");
 
 const TEST_TIMEOUT = 15_000;
 
@@ -138,17 +139,17 @@ describe("connectOrLaunch", () => {
 
 	describe.skipIf(process.platform === "win32")("Given stale socket file", () => {
 		it(
-			"unlinks stale socket and connects to newly started daemon",
+			"connects to a newly started daemon after the previous endpoint closes",
 			async () => {
-				// Create a server, then close it to leave a stale socket file
+				// Node closes and unlinks its Unix endpoint before the replacement binds.
 				const staleServer = net.createServer();
 				await new Promise<void>((resolve) => {
 					staleServer.listen(socketPath, () => resolve());
 				});
 				await closeServer(staleServer);
 
-				// connectOrLaunch will unlink it, call spawn, then poll with the
-				// authoritative TermoraAgent connection.
+				// connectOrLaunch calls spawn, then polls with the authoritative
+				// TermoraAgent connection.
 				// Our mock spawn starts the mock daemon instead of a real process.
 				mockSpawnImpl = () => {
 					setImmediate(async () => {
@@ -168,6 +169,19 @@ describe("connectOrLaunch", () => {
 			},
 			TEST_TIMEOUT,
 		);
+	});
+
+	it("leaves the endpoint intact when its operation is invalidated before connect", async () => {
+		await writeFile(socketPath, "not a socket");
+		const dummyBinary = path.join(tmpDir, "fake-agent.js");
+		await writeFile(dummyBinary, "// placeholder");
+
+		await expect(
+			connectOrLaunch(socketPath, config, dummyBinary, undefined, () => {
+				throw new HubQuittingError();
+			}),
+		).rejects.toThrow("Hub is quitting");
+		expect(existsSync(socketPath)).toBe(true);
 	});
 
 	describe("Given no agent running (ENOENT)", () => {
@@ -381,6 +395,35 @@ describe("connectOrLaunch", () => {
 		},
 		TEST_TIMEOUT,
 	);
+});
+
+describe("stopLocalAgent", () => {
+	it("runs the resolved executable with explicit stop arguments and no shell", async () => {
+		const child = new (
+			await import("node:events")
+		).EventEmitter() as import("node:child_process").ChildProcess;
+		Object.assign(child, {
+			stdout: new (await import("node:events")).EventEmitter(),
+			stderr: new (await import("node:events")).EventEmitter(),
+			kill: vi.fn(),
+		});
+		const run = vi.fn(() => {
+			setImmediate(() => child.emit("close", 0, null));
+			return child;
+		});
+
+		const result = await stopLocalAgent("/tmp/termora-agent.sock", {
+			agentPath: "/opt/termora-agent",
+			spawn: run as unknown as typeof import("node:child_process").spawn,
+		});
+
+		expect(result).toMatchObject({ stopped: true, diagnostic: "Local agent stopped" });
+		expect(run).toHaveBeenCalledWith(
+			"/opt/termora-agent",
+			["--stop", "--socket", "/tmp/termora-agent.sock"],
+			expect.objectContaining({ shell: false }),
+		);
+	});
 });
 
 /**

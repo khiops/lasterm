@@ -1,14 +1,33 @@
+import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
-import { access, unlink } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AGENT_SOCKET_POLL_MS, AGENT_SOCKET_TIMEOUT, type AgentConfig } from "@termora/shared";
+import {
+	AGENT_SOCKET_POLL_MS,
+	AGENT_SOCKET_TIMEOUT,
+	type AgentConfig,
+	getSocketPath,
+} from "@termora/shared";
 import { detectSea } from "@termora/shared/dist/sea-addon-loader.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { resolveAgentBinaryPath } from "../sea-agent-resolver.js";
+import { HubQuittingError } from "./quit-fence.js";
 import { TermoraAgent } from "./termora-agent.js";
+
+// The agent itself waits ten seconds before reporting its own terminal result.
+// Leave delivery slack so the hub does not kill a truthful stopper at its bound.
+const AGENT_STOP_TIMEOUT_MS = 12_000;
+const AGENT_STOP_OUTPUT_LIMIT = 8_192;
+
+export interface AgentStopResult {
+	readonly stopped: boolean;
+	readonly diagnostic: string;
+	readonly stdout: string;
+	readonly stderr: string;
+}
 
 /**
  * Resolve the path to the agent binary.
@@ -41,6 +60,81 @@ export function isAgentBinary(agentPath: string): boolean {
 }
 
 /**
+ * Ask the identity-validating agent stopper to stop the exact daemon at socketPath.
+ * This deliberately never signals an agent PID itself: only the agent can validate
+ * its own process record before stopping it.
+ */
+export function stopLocalAgent(
+	socketPathOverride: string | undefined,
+	options: {
+		agentPath?: string;
+		timeoutMs?: number;
+		spawn?: typeof spawn;
+	} = {},
+): Promise<AgentStopResult> {
+	const agentPath = options.agentPath ?? resolveAgentPath();
+	const socketPath = getSocketPath(socketPathOverride);
+	const spawnProcess = options.spawn ?? spawn;
+	const timeoutMs = options.timeoutMs ?? AGENT_STOP_TIMEOUT_MS;
+
+	return new Promise((resolve) => {
+		let stdout = "";
+		let stderr = "";
+		let settled = false;
+		let child: ChildProcess | undefined;
+		const append = (current: string, chunk: Buffer | string): string =>
+			`${current}${chunk.toString()}`.slice(-AGENT_STOP_OUTPUT_LIMIT);
+		const finish = (stopped: boolean, diagnostic: string): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ stopped, diagnostic, stdout, stderr });
+		};
+
+		const timer = setTimeout(() => {
+			// This only stops our bounded stopper process, never the daemon itself.
+			child?.kill();
+			finish(false, `Agent stop timed out after ${timeoutMs}ms`);
+		}, timeoutMs);
+
+		try {
+			child = spawnProcess(agentPath, ["--stop", "--socket", socketPath], {
+				shell: false,
+				stdio: ["ignore", "pipe", "pipe"],
+				windowsHide: true,
+			});
+		} catch (err) {
+			finish(
+				false,
+				`Could not run agent stopper: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return;
+		}
+
+		child.stdout?.on("data", (chunk: Buffer | string) => {
+			stdout = append(stdout, chunk);
+		});
+		child.stderr?.on("data", (chunk: Buffer | string) => {
+			stderr = append(stderr, chunk);
+		});
+		child.once("error", (err) => {
+			finish(false, `Could not run agent stopper: ${err.message}`);
+		});
+		child.once("close", (code, signal) => {
+			if (code === 0) {
+				finish(true, "Local agent stopped");
+				return;
+			}
+			const detail = stderr || stdout;
+			finish(
+				false,
+				`Agent stop was not confirmed (exit ${code ?? "null"}${signal ? `, signal ${signal}` : ""})${detail ? `: ${detail}` : ""}`,
+			);
+		});
+	});
+}
+
+/**
  * Connect to an existing agent daemon or spawn a new one.
  *
  * Flow:
@@ -55,6 +149,7 @@ export async function connectOrLaunch(
 	config: AgentConfig,
 	agentBinaryPath?: string,
 	hubLogger?: HubLogger,
+	assertRunning: () => void = () => {},
 ): Promise<TermoraAgent> {
 	const agentPath = agentBinaryPath ?? resolveAgentPath();
 
@@ -68,30 +163,45 @@ export async function connectOrLaunch(
 	}
 
 	// Try direct connect first — avoids a throwaway probe connection that
-	// confuses the agent's AUTH handshake on Windows named pipes.
+	// confuses the agent's AUTH handshake on Windows named pipes.  Keep
+	// invalidation distinct from a failed transport: a fenced operation is not
+	// allowed to enter *any* recovery path, particularly endpoint deletion.
 	try {
-		return await TermoraAgent.connectLocal(socketPath, hubLogger);
+		assertRunning();
+		const connected = await TermoraAgent.connectLocal(socketPath, hubLogger);
+		// Do not hand a post-quit connection back to a caller which could adopt it.
+		try {
+			assertRunning();
+		} catch (err) {
+			connected.close();
+			throw err;
+		}
+		return connected;
 	} catch (err) {
+		if (err instanceof HubQuittingError) throw err;
 		if ((err as NodeJS.ErrnoException).code === "EACCES") {
 			throw new Error(`Permission denied connecting to socket: ${socketPath}`);
 		}
-		// Connection failed — agent not running or stale socket
-	}
-
-	// Clean up stale socket file if present (no-op on named pipes)
-	try {
-		await unlink(socketPath);
-	} catch {
-		// ENOENT is fine — file doesn't exist
+		// A connection failure says nothing about the socket's recorded owner.
+		// Do not unlink here: only the agent's identity-validating lifecycle may
+		// retire an endpoint.  The daemon bind path owns stale-endpoint recovery.
 	}
 
 	// Spawn daemon
+	assertRunning();
 	const daemonLogPath = launchDaemon(agentPath, socketPath, config);
 
 	// Connect by polling the real agent handshake. Do not use a throwaway
 	// socket probe here: the daemon treats every accepted connection as the
 	// active hub and will displace the previous one before AUTH completes.
-	return connectWhenReady(socketPath, daemonLogPath, hubLogger);
+	const connected = await connectWhenReady(socketPath, daemonLogPath, hubLogger);
+	try {
+		assertRunning();
+	} catch (err) {
+		connected.close();
+		throw err;
+	}
+	return connected;
 }
 
 /**

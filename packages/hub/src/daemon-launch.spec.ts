@@ -56,7 +56,7 @@ describe("waitForDaemonReady", () => {
 			childPid: 123,
 			loadRuntime: () => {
 				loadCount += 1;
-				return loadCount >= 2 ? runtime : null;
+				return loadCount >= 2 ? { kind: "present" as const, runtime } : { kind: "absent" as const };
 			},
 			fetchHealth: async (port) => {
 				healthPorts.push(port);
@@ -84,7 +84,7 @@ describe("waitForDaemonReady", () => {
 		let killCount = 0;
 		const result = await waitForDaemonReady({
 			childPid: 123,
-			loadRuntime: () => null,
+			loadRuntime: () => ({ kind: "absent" }),
 			fetchHealth: async () => ({ status: "ok" }),
 			getChildExit: () => ({ exited: true, code: 42, signal: null }),
 			readLogTail: () => "first\nlast",
@@ -112,7 +112,7 @@ describe("waitForDaemonReady", () => {
 		let killCount = 0;
 		const result = await waitForDaemonReady({
 			childPid: 123,
-			loadRuntime: () => null,
+			loadRuntime: () => ({ kind: "absent" }),
 			fetchHealth: async () => ({ status: "ok" }),
 			getChildExit: () => ({ exited: false }),
 			readLogTail: () => "timeout log",
@@ -149,7 +149,7 @@ describe("waitForDaemonReady", () => {
 
 		const result = await waitForDaemonReady({
 			childPid: 123,
-			loadRuntime: () => runtime,
+			loadRuntime: () => ({ kind: "present", runtime }),
 			// Accepts the connection but never responds.
 			fetchHealth: () => new Promise<never>(() => {}),
 			getChildExit: () => ({ exited: false }),
@@ -179,7 +179,7 @@ describe("waitForDaemonReady", () => {
 
 		const result = await waitForDaemonReady({
 			childPid: 123,
-			loadRuntime: () => null,
+			loadRuntime: () => ({ kind: "absent" }),
 			fetchHealth: async () => ({ status: "ok" }),
 			getChildExit: () => childExit,
 			readLogTail: () => lines.join("\n"),

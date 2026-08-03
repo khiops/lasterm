@@ -29,6 +29,12 @@ import {
 	prompt as promptCtx,
 	trackElevationContext,
 } from "./prompt-context.js";
+import {
+	captureQuitFence,
+	HubQuittingError,
+	isQuitFenceCurrent,
+	type QuitFence,
+} from "./quit-fence.js";
 import type {
 	ChannelState,
 	ElevationPromptOwner,
@@ -74,6 +80,17 @@ export class ChannelLifecycleManager {
 		private readonly broadcaster: StateBroadcaster,
 	) {}
 
+	/** The only primitive allowed to emit a SPAWN frame. */
+	private sendGuardedSpawn(
+		agent: AgentConnection,
+		spawnMsg: AgentSpawnMessage,
+		quitEpoch = captureQuitFence(this.ctx),
+	): QuitFence {
+		if (!isQuitFenceCurrent(this.ctx, quitEpoch)) throw new HubQuittingError();
+		agent.send(spawnMsg);
+		return quitEpoch;
+	}
+
 	// ─── Spawn ───────────────────────────────────────────────────────────────
 
 	/**
@@ -108,7 +125,21 @@ export class ChannelLifecycleManager {
 			shell: spawnMsg.shell,
 			agentConnected: agent.connected,
 		});
-		agent.send(spawnMsg);
+		let quitEpoch: QuitFence;
+		try {
+			// The send is the irreversible side effect; fence it immediately before it.
+			quitEpoch = this.sendGuardedSpawn(agent, spawnMsg);
+		} catch (err) {
+			if (err instanceof HubQuittingError) {
+				client.send({
+					type: "ERROR",
+					code: err.code,
+					message: err.message,
+				} satisfies ErrorMessage);
+				return { channelId: null, errCode: err.code };
+			}
+			throw err;
+		}
 		this.ctx.hubLogger?.log("debug", "channel-lifecycle: SPAWN sent, awaiting SPAWN_OK", {
 			requestId: spawnMsg.requestId,
 			timeoutMs: SPAWN_TIMEOUT_MS,
@@ -125,6 +156,17 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(spawnMsg.requestId, (incoming: ProtocolMessage) => {
+				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
+					clearTimeout(timer);
+					this.ctx.pendingRequests.delete(spawnMsg.requestId);
+					client.send({
+						type: "ERROR",
+						code: "HUB_QUITTING",
+						message: "Hub is quitting; SPAWN response was discarded",
+					} satisfies ErrorMessage);
+					resolve({ channelId: null, errCode: "HUB_QUITTING" });
+					return;
+				}
 				this.ctx.hubLogger?.log("debug", "channel-lifecycle: pendingRequest handler fired", {
 					msgType: incoming.type,
 					requestId: spawnMsg.requestId,
@@ -291,6 +333,12 @@ export class ChannelLifecycleManager {
 	 * Returns true on success.
 	 */
 	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean> {
+		try {
+			captureQuitFence(this.ctx);
+		} catch (err) {
+			if (err instanceof HubQuittingError) return false;
+			throw err;
+		}
 		const info = this.ctx.metaDal.getChannelWithHost(channelId);
 		if (!info) return false;
 
@@ -591,7 +639,15 @@ export class ChannelLifecycleManager {
 		agent: AgentConnection,
 		spawnMsg: AgentSpawnMessage,
 	): Promise<RestartSpawnResult> {
-		agent.send(spawnMsg);
+		let quitEpoch: QuitFence;
+		try {
+			quitEpoch = this.sendGuardedSpawn(agent, spawnMsg);
+		} catch (err) {
+			if (err instanceof HubQuittingError) {
+				return { ok: false, channelId: null, errCode: err.code };
+			}
+			throw err;
+		}
 		return new Promise<RestartSpawnResult>((resolve) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
@@ -599,6 +655,12 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(spawnMsg.requestId, (incoming: ProtocolMessage) => {
+				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
+					clearTimeout(timer);
+					this.ctx.pendingRequests.delete(spawnMsg.requestId);
+					resolve({ ok: false, channelId: null, errCode: "HUB_QUITTING" });
+					return;
+				}
 				clearTimeout(timer);
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
 				if (incoming.type === "SPAWN_OK") {
@@ -637,6 +699,8 @@ export class ChannelLifecycleManager {
 		rows: number,
 		directProcess?: boolean,
 	): void {
+		// A SPAWN_OK received after quit must never recreate channel state.
+		captureQuitFence(this.ctx);
 		const clients = ch?.clients ?? new Set<string>();
 		const channelIdChanged = channelId !== previousChannelId;
 
@@ -808,6 +872,12 @@ export class ChannelLifecycleManager {
 		client: WsClient,
 		clientId: string,
 	): Promise<boolean> {
+		try {
+			captureQuitFence(this.ctx);
+		} catch (err) {
+			if (err instanceof HubQuittingError) return false;
+			throw err;
+		}
 		const info = this.ctx.metaDal.getChannelWithHost(deadChannelId);
 		if (!info) return false;
 		const { channel: deadChannel, hostId } = info;
@@ -834,7 +904,7 @@ export class ChannelLifecycleManager {
 			cols,
 			rows,
 		};
-		agent.send(agentSpawn);
+		const quitEpoch = this.sendGuardedSpawn(agent, agentSpawn);
 
 		const spawnOk = await new Promise<boolean>((resolve) => {
 			const timer = setTimeout(() => {
@@ -843,6 +913,12 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(requestId, (incoming: ProtocolMessage) => {
+				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
+					clearTimeout(timer);
+					this.ctx.pendingRequests.delete(requestId);
+					resolve(false);
+					return;
+				}
 				if (incoming.type === "SPAWN_OK") {
 					clearTimeout(timer);
 					this.ctx.pendingRequests.delete(requestId);
@@ -855,7 +931,7 @@ export class ChannelLifecycleManager {
 			});
 		});
 
-		if (!spawnOk) return false;
+		if (!spawnOk || !isQuitFenceCurrent(this.ctx, quitEpoch)) return false;
 
 		this.ctx.metaDal.updateChannelStatus(deadChannelId, "live");
 
@@ -942,22 +1018,35 @@ export class ChannelLifecycleManager {
 			if (pending === 0) resolve?.();
 		};
 
+		let quitEpoch: QuitFence;
+		try {
+			quitEpoch = captureQuitFence(this.ctx);
+		} catch (err) {
+			if (err instanceof HubQuittingError) return Promise.resolve();
+			throw err;
+		}
+
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId || ch.status === "dead") continue;
 
 			pending++;
 			const requestId = generateId();
-			agent.send({
-				type: "SPAWN",
-				requestId,
-				channelId,
-				shell: ch.shell,
-				...(ch.args !== undefined && ch.args.length > 0 && { args: ch.args }),
-				cwd: ch.cwd ?? process.env.HOME ?? process.env.USERPROFILE ?? "/",
-				env: {},
-				cols: ch.cols,
-				rows: ch.rows,
-			});
+			if (!isQuitFenceCurrent(this.ctx, quitEpoch)) break;
+			this.sendGuardedSpawn(
+				agent,
+				{
+					type: "SPAWN",
+					requestId,
+					channelId,
+					shell: ch.shell,
+					...(ch.args !== undefined && ch.args.length > 0 && { args: ch.args }),
+					cwd: ch.cwd ?? process.env.HOME ?? process.env.USERPROFILE ?? "/",
+					env: {},
+					cols: ch.cols,
+					rows: ch.rows,
+				},
+				quitEpoch,
+			);
 
 			const timeout = setTimeout(() => {
 				this.ctx.pendingRequests.delete(requestId);
@@ -971,6 +1060,12 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(requestId, (incoming: ProtocolMessage) => {
+				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
+					clearTimeout(timeout);
+					this.ctx.pendingRequests.delete(requestId);
+					settle();
+					return;
+				}
 				clearTimeout(timeout);
 				this.ctx.pendingRequests.delete(requestId);
 				if (incoming.type === "SPAWN_OK") {

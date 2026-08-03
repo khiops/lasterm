@@ -20,14 +20,20 @@ import {
 	cmdAgentFetch,
 	cmdAgentImport,
 	cmdAgentStatus,
+	cmdQuit,
+	cmdStart,
+	cmdStatus,
 	cmdStop,
 	deleteRuntime,
 	getConfigDir,
 	getStateDir,
+	isPidAlive,
 	loadRuntime,
 	type ParsedArgs,
 	parseArgs,
 	persistRuntime,
+	runtimeMatches,
+	waitForHubQuit,
 } from "./cli.js";
 import {
 	AGENT_TARGET_TRIPLES,
@@ -103,6 +109,11 @@ describe("parseArgs", () => {
 			expect(r?.command).toBe("status");
 			expect(r?.json).toBe(true);
 		});
+	});
+
+	it("parses quit", () => {
+		const r = parseArgs(["quit"]);
+		expect(r?.command).toBe("quit");
 	});
 
 	describe("host add", () => {
@@ -699,6 +710,221 @@ describe("path helpers", () => {
 
 describe("runtime state", () => {
 	it.skipIf(process.platform === "win32")(
+		"does not start a second hub when runtime.json is unreadable",
+		async () => {
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = makeTempDir();
+			try {
+				mkdirSync(getStateDir(), { recursive: true });
+				mkdirSync(path.join(getStateDir(), "runtime.json"));
+				await expect(cmdStart(parsed(["start", "--daemon"]))).rejects.toThrow(
+					/Cannot determine whether a hub is already running/,
+				);
+			} finally {
+				process.env.XDG_STATE_HOME = originalStateRoot;
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"reports an unreadable runtime record as unknown instead of stopped",
+		async () => {
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			const output: string[] = [];
+			process.env.XDG_STATE_HOME = makeTempDir();
+			const log = vi.spyOn(console, "log").mockImplementation((line: string) => output.push(line));
+			try {
+				mkdirSync(getStateDir(), { recursive: true });
+				mkdirSync(path.join(getStateDir(), "runtime.json"));
+				await cmdStatus(parsed(["status", "--json"]));
+				expect(output).toEqual([expect.stringContaining('"running":"unknown"')]);
+				await expect(cmdStop({ command: "stop" })).rejects.toThrow(
+					/Cannot determine whether the hub is running/,
+				);
+			} finally {
+				log.mockRestore();
+				process.env.XDG_STATE_HOME = originalStateRoot;
+			}
+		},
+	);
+
+	it("does not confirm quit when the runtime record becomes unreadable", async () => {
+		await expect(
+			waitForHubQuit(
+				{ pid: 123, instanceId: "target" },
+				{
+					loadRuntime: () => ({ kind: "unreadable", error: new Error("EIO") }),
+					isPidAlive: () => false,
+				},
+			),
+		).rejects.toThrow(/cannot be read/);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not delete a replacement runtime from the stale stop path",
+		async () => {
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = makeTempDir();
+			const target = runtimeRecord({ instanceId: "target" });
+			const replacement = runtimeRecord({ instanceId: "replacement" });
+			try {
+				persistRuntime(replacement);
+				await cmdStop(
+					{ command: "stop" },
+					{ loadRuntime: () => ({ kind: "present", runtime: target }), isPidAlive: () => false },
+				);
+				expect(readRuntimeFile()).toMatchObject({ instanceId: "replacement" });
+			} finally {
+				deleteCurrentRuntime();
+				process.env.XDG_STATE_HOME = originalStateRoot;
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"does not delete a replacement runtime from the stale quit path",
+		async () => {
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = makeTempDir();
+			const target = runtimeRecord({ instanceId: "target" });
+			const replacement = runtimeRecord({ instanceId: "replacement" });
+			try {
+				persistRuntime(replacement);
+				await expect(
+					cmdQuit({
+						loadRuntime: () => ({ kind: "present", runtime: target }),
+						isPidAlive: () => false,
+					}),
+				).rejects.toThrow("Hub process is gone");
+				expect(readRuntimeFile()).toMatchObject({ instanceId: "replacement" });
+			} finally {
+				deleteCurrentRuntime();
+				process.env.XDG_STATE_HOME = originalStateRoot;
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"deletes a matching legacy record, whose identity is its complete legacy fields",
+		() => {
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = makeTempDir();
+			const legacy = runtimeRecord({ instanceId: undefined, ownerToken: undefined });
+			try {
+				persistRuntime(legacy);
+				expect(runtimeMatches(legacy, legacy)).toBe(true);
+				expect(deleteRuntime(legacy)).toBe(true);
+				expect(loadRuntime()).toEqual({ kind: "absent" });
+			} finally {
+				process.env.XDG_STATE_HOME = originalStateRoot;
+			}
+		},
+	);
+
+	it("waitForHubQuit rejects a replacement published between its absence and liveness observations", async () => {
+		let reads = 0;
+		await expect(
+			waitForHubQuit(
+				{ pid: 123, instanceId: "target" },
+				{
+					loadRuntime: () => {
+						reads++;
+						return reads === 1
+							? { kind: "absent" as const }
+							: {
+									kind: "present" as const,
+									runtime: {
+										pid: 456,
+										port: 4100,
+										started_at: "2026-08-03T00:00:00.000Z",
+										instanceId: "replacement",
+									},
+								};
+					},
+					isPidAlive: () => false,
+				},
+			),
+		).rejects.toThrow(/replacement hub/);
+	});
+
+	it("waitForHubQuit rejects a replacement runtime instead of mistaking it for its target", async () => {
+		await expect(
+			waitForHubQuit(
+				{ pid: 123, instanceId: "target" },
+				{
+					loadRuntime: () => ({
+						kind: "present",
+						runtime: {
+							pid: 456,
+							port: 4100,
+							started_at: "2026-08-03T00:00:00.000Z",
+							instanceId: "replacement",
+						},
+					}),
+					isPidAlive: () => false,
+				},
+			),
+		).rejects.toThrow(/replacement hub/);
+	});
+
+	it("waitForHubQuit times out when teardown removes no runtime record", async () => {
+		await expect(
+			waitForHubQuit(
+				{ pid: 123, instanceId: "target" },
+				{
+					loadRuntime: () => ({
+						kind: "present",
+						runtime: {
+							pid: 123,
+							port: 4100,
+							started_at: "2026-08-03T00:00:00.000Z",
+							instanceId: "target",
+						},
+					}),
+					isPidAlive: () => true,
+					timeoutMs: 0,
+				},
+			),
+		).rejects.toThrow(/teardown was not confirmed/);
+	});
+
+	it("cmdQuit waits for teardown before reporting a failed agent stop", async () => {
+		const observed: string[] = [];
+		await expect(
+			cmdQuit({
+				loadRuntime: () => ({
+					kind: "present",
+					runtime: {
+						pid: 123,
+						port: 4100,
+						started_at: "2026-08-03T00:00:00.000Z",
+						instanceId: "target",
+						ownerToken: "a".repeat(64),
+					},
+				}),
+				isPidAlive: () => true,
+				fetch: (async () => {
+					observed.push("response");
+					return new Response(JSON.stringify({ message: "agent stop failed" }), { status: 503 });
+				}) as typeof fetch,
+				waitForHubQuit: async () => {
+					observed.push("waited");
+				},
+			}),
+		).rejects.toThrow("agent stop failed");
+		expect(observed).toEqual(["response", "waited"]);
+	});
+
+	it("treats an unsignalable existing pid as alive", () => {
+		const permissionError = Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+		vi.spyOn(process, "kill").mockImplementation((() => {
+			throw permissionError;
+		}) as never);
+		expect(isPidAlive(123)).toBe(true);
+		vi.restoreAllMocks();
+	});
+
+	it.skipIf(process.platform === "win32")(
 		"persistRuntime writes ownerToken via a 0600 atomic replacement",
 		() => {
 			const orig = process.env.XDG_STATE_HOME;
@@ -713,11 +939,14 @@ describe("runtime state", () => {
 				});
 
 				const runtimePath = path.join(getStateDir(), "runtime.json");
-				expect(loadRuntime()?.ownerToken).toBe("b".repeat(64));
+				const runtime = loadRuntime();
+				expect(runtime.kind === "present" ? runtime.runtime.ownerToken : undefined).toBe(
+					"b".repeat(64),
+				);
 				expect(statSync(runtimePath).mode & 0o777).toBe(0o600);
 				expect(readdirSync(getStateDir()).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 			} finally {
-				deleteRuntime();
+				deleteCurrentRuntime();
 				process.env.XDG_STATE_HOME = orig;
 			}
 		},
@@ -752,7 +981,7 @@ describe("runtime state", () => {
 				child.kill("SIGKILL");
 				await waitForExit(child);
 			}
-			deleteRuntime();
+			deleteCurrentRuntime();
 			process.env.XDG_STATE_HOME = orig;
 		}
 	});
@@ -782,7 +1011,7 @@ describe("runtime state", () => {
 				child.kill("SIGKILL");
 				await waitForExit(child);
 			}
-			deleteRuntime();
+			deleteCurrentRuntime();
 			process.env.XDG_STATE_HOME = orig;
 		}
 	});
@@ -798,6 +1027,25 @@ function makeTempDir(): string {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "termora-cli-agent-fetch-"));
 	tempDirs.push(dir);
 	return dir;
+}
+
+function deleteCurrentRuntime(): void {
+	const result = loadRuntime();
+	if (result.kind === "present") deleteRuntime(result.runtime);
+}
+
+function runtimeRecord(overrides: Partial<import("./cli.js").RuntimeInfo> = {}) {
+	return {
+		pid: 123,
+		port: 456,
+		started_at: "2026-08-03T00:00:00.000Z",
+		ownerToken: "a".repeat(64),
+		...overrides,
+	};
+}
+
+function readRuntimeFile(): unknown {
+	return JSON.parse(readFileSync(path.join(getStateDir(), "runtime.json"), "utf-8"));
 }
 
 function getUnusedPort(): Promise<number> {

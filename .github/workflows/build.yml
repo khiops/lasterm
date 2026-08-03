@@ -87,8 +87,10 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
+      - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @termora/shared build
+      - run: cargo build --release -p termora-hub-lock
       - run: pnpm test:run
 
   build-agent:

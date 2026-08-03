@@ -60,7 +60,7 @@ export type DaemonReadyResult =
 	  }
 	| {
 			ok: false;
-			reason: "child-exited" | "runtime-unreadable" | "timeout";
+			reason: "already-running" | "child-exited" | "timeout";
 			message: string;
 	  };
 
@@ -104,11 +104,11 @@ export function tailText(
 	return lineTail.slice(-maxChars);
 }
 
-// Truncate on every daemon start (the log documents the current daemon only,
-// so repeated starts cannot accumulate unbounded disk usage) and keep it
-// owner-only: daemon stdout/stderr can leak sensitive startup details.
+// Keep daemon output owner-only without changing an incumbent's log before a
+// child has established authority. A losing launch may share this descriptor,
+// but it cannot erase the running hub's evidence.
 export function openDaemonLog(logPath: string): number {
-	const fd = openSync(logPath, "w", 0o600);
+	const fd = openSync(logPath, "a", 0o600);
 	// The creation mode only applies to new files — clamp pre-existing ones too.
 	fchmodSync(fd, 0o600);
 	return fd;
@@ -139,6 +139,11 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 	while (true) {
 		const childExit = deps.getChildExit();
 		if (childExit.exited) {
+			if (childExit.code === 73) {
+				// Contention is an answer, not a malfunction: say who holds the lock and
+				// do not print the incumbent's log, which the loser now shares with it.
+				return { ok: false, reason: "already-running", message: describeIncumbent(deps) };
+			}
 			return {
 				ok: false,
 				reason: "child-exited",
@@ -147,17 +152,6 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 		}
 
 		const runtime = deps.loadRuntime();
-		if (runtime.kind === "unreadable") {
-			deps.killChild();
-			return {
-				ok: false,
-				reason: "runtime-unreadable",
-				message: formatFailureMessage(
-					`Daemon runtime record could not be read: ${describeRuntimeReadFailure(runtime.error)}; the daemon process was terminated`,
-					deps.readLogTail(),
-				),
-			};
-		}
 		if (runtime.kind === "present" && runtime.runtime.pid === deps.childPid) {
 			try {
 				await fetchHealthBounded(deps, runtime.runtime.port);
@@ -183,10 +177,6 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 	}
 }
 
-function describeRuntimeReadFailure(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 async function fetchHealthBounded(deps: WaitForDaemonReadyDeps, port: number): Promise<unknown> {
 	const timeoutMs = deps.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS;
 	let timer: NodeJS.Timeout | undefined;
@@ -203,6 +193,25 @@ async function fetchHealthBounded(deps: WaitForDaemonReadyDeps, port: number): P
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * Name the hub that already holds the lock. The runtime record is discovery, so
+ * it is exactly the right source here and exactly the wrong one for deciding
+ * whether to start: an unreadable or absent record costs the reader a name, not
+ * the answer.
+ */
+function describeIncumbent(deps: WaitForDaemonReadyDeps): string {
+	const runtime = deps.loadRuntime();
+	if (runtime.kind !== "present") return "Hub already running";
+	const { pid, port } = runtime.runtime;
+	// A record is a file anyone can leave behind: it names the incumbent only when
+	// it actually carries a pid and port, and when that pid is not the child that
+	// just lost. Anything else names nobody rather than "pid undefined".
+	if (!Number.isInteger(pid) || !Number.isInteger(port) || pid === deps.childPid) {
+		return "Hub already running";
+	}
+	return `Hub already running (pid ${pid} on port ${port})`;
 }
 
 function describeChildExit(exit: Extract<ChildExitState, { exited: true }>): string {

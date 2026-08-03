@@ -58,6 +58,28 @@ describe("locateBetterSqlite3", () => {
 	});
 });
 
+describe("loadHubLockAddon", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `termora-hub-lock-addon-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("refuses a file that is not a loadable Node addon", async () => {
+		const { loadHubLockAddon } = await import("./package-sea-hub.js");
+		const addon = join(tempDir, "termora_hub_lock.node");
+		writeFileSync(addon, "not a Node addon");
+		// Mutation caught: header sniffing would accept a merely well-formed
+		// container; process.dlopen proves this exact file is loadable.
+		expect(() => loadHubLockAddon(addon)).toThrow("cannot be loaded");
+	});
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // Test 2: static manifest generation
 // ────────────────────────────────────────────────────────────────────────────

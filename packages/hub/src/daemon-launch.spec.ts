@@ -41,7 +41,61 @@ describe("buildDaemonSpawnPlan", () => {
 });
 
 describe("waitForDaemonReady", () => {
-	it("returns ready after pid-matched runtime and health check on the actual port", async () => {
+	it("preserves the native lock contention exit status", async () => {
+		const result = await waitForDaemonReady({
+			childPid: 123,
+			loadRuntime: () => ({ kind: "absent" }),
+			fetchHealth: async () => ({}),
+			getChildExit: () => ({ exited: true, code: 73, signal: null }),
+			readLogTail: () => "TERMORA_HUB_ALREADY_RUNNING: another hub holds hub.lock",
+			killChild: () => {},
+			now: () => 0,
+			sleep: async () => {},
+		});
+		expect(result).toMatchObject({ ok: false, reason: "already-running" });
+	});
+
+	// Mutation: build the contention message the way a child-exit is built, and the
+	// incumbent's own log comes back instead of its identity — which is what happened
+	// once the loser started sharing that log in append mode.
+	it("names the incumbent on contention and does not print its log", async () => {
+		const result = await waitForDaemonReady({
+			childPid: 123,
+			loadRuntime: () => ({
+				kind: "present",
+				runtime: { pid: 456, port: 4100, started_at: "2026-08-03T00:00:00.000Z" },
+			}),
+			fetchHealth: async () => ({}),
+			getChildExit: () => ({ exited: true, code: 73, signal: null }),
+			readLogTail: () => "incumbent log line that must not be echoed",
+			killChild: () => {},
+			now: () => 0,
+			sleep: async () => {},
+		});
+		expect(result).toMatchObject({
+			ok: false,
+			reason: "already-running",
+			message: "Hub already running (pid 456 on port 4100)",
+		});
+	});
+
+	// Mutation: name the incumbent from the record unconditionally, and a start that
+	// lost to a hub which had not yet published claims the loser's own pid.
+	it("falls back to an unqualified message when the record cannot name an incumbent", async () => {
+		const result = await waitForDaemonReady({
+			childPid: 123,
+			loadRuntime: () => ({ kind: "unreadable", error: new Error("EACCES") }),
+			fetchHealth: async () => ({}),
+			getChildExit: () => ({ exited: true, code: 73, signal: null }),
+			readLogTail: () => "",
+			killChild: () => {},
+			now: () => 0,
+			sleep: async () => {},
+		});
+		expect(result).toMatchObject({ reason: "already-running", message: "Hub already running" });
+	});
+
+	it("returns ready after an unreadable record when the free-lock child publishes its runtime", async () => {
 		let now = 0;
 		let loadCount = 0;
 		let killCount = 0;
@@ -56,7 +110,9 @@ describe("waitForDaemonReady", () => {
 			childPid: 123,
 			loadRuntime: () => {
 				loadCount += 1;
-				return loadCount >= 2 ? { kind: "present" as const, runtime } : { kind: "absent" as const };
+				return loadCount >= 2
+					? { kind: "present" as const, runtime }
+					: { kind: "unreadable" as const, error: new Error("partial runtime record") };
 			},
 			fetchHealth: async (port) => {
 				healthPorts.push(port);
@@ -77,6 +133,8 @@ describe("waitForDaemonReady", () => {
 
 		expect(result).toEqual({ ok: true, pid: 123, port: 49152 });
 		expect(healthPorts).toEqual([49152]);
+		// Mutation caught: restoring the unreadable-record veto kills this child
+		// before it can publish its own runtime record.
 		expect(killCount).toBe(0);
 	});
 
@@ -233,11 +291,11 @@ describe("readDaemonLogTail", () => {
 });
 
 describe("openDaemonLog", () => {
-	it("truncates a pre-existing log and clamps it owner-only", () => {
+	it("preserves a pre-existing log for a losing daemon launch and clamps it owner-only", () => {
 		const dir = mkdtempSync(join(tmpdir(), "termora-daemon-log-"));
 		try {
 			const logPath = join(dir, "hub-daemon.log");
-			writeFileSync(logPath, "stale content from a previous daemon\n", { mode: 0o644 });
+			writeFileSync(logPath, "incumbent daemon log\n", { mode: 0o644 });
 
 			const fd = openDaemonLog(logPath);
 			try {
@@ -247,8 +305,9 @@ describe("openDaemonLog", () => {
 			}
 
 			const stat = statSync(logPath);
-			// Truncated: only the fresh write remains, stale content is gone.
-			expect(stat.size).toBe("fresh\n".length);
+			// Mutation caught: changing the open mode back to "w" erases the
+			// incumbent before the child has proved it owns the lock.
+			expect(stat.size).toBe("incumbent daemon log\nfresh\n".length);
 			if (process.platform !== "win32") {
 				expect(stat.mode & 0o777).toBe(0o600);
 			}

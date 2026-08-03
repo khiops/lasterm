@@ -16,7 +16,8 @@
  * SEA_ADDON_ASSETS list + initSeaAddons() entry point.
  */
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
@@ -50,6 +51,9 @@ export function getAddonCacheDir(version: string): string {
 /**
  * Extract a single .node asset from the SEA binary to disk.
  * Skips extraction if a file with the correct size already exists (idempotent).
+ * New bytes are written beside the destination and atomically renamed into
+ * place, so a concurrent loader can only observe the old complete file or the
+ * new complete file, never a partially-written addon.
  *
  * @param assetName  - The asset key used in the SEA config (e.g. "better_sqlite3.node").
  * @param cacheDir   - Target directory (created if absent).
@@ -76,22 +80,45 @@ export function extractAddonToDir(assetName: string, cacheDir: string, assetData
 
 	if (shouldWrite) {
 		mkdirSync(cacheDir, { recursive: true });
-		// Write atomically-ish: concurrent processes writing identical bytes
-		// is safe — both produce the same valid .node file.
-		writeFileSync(destPath, assetData, { mode: 0o755 });
+		const tempPath = createAddonTempPath(destPath);
+		try {
+			writeFileSync(tempPath, assetData, { mode: 0o755, flag: "wx" });
+			renameSync(tempPath, destPath);
+		} catch (error) {
+			// On platforms where rename cannot replace an already-loaded file, a
+			// racing writer may have already published the identical complete blob.
+			// Accept only that exact complete result; never fall back to a direct write.
+			try {
+				if (statSync(destPath).size === assetData.byteLength) return destPath;
+			} catch {
+				// Keep the original extraction error below.
+			}
+			throw error;
+		} finally {
+			rmSync(tempPath, { force: true });
+		}
 	}
 
 	return destPath;
+}
+
+function createAddonTempPath(destPath: string): string {
+	for (let attempt = 0; attempt < 32; attempt++) {
+		const candidate = `${destPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+		if (!existsSync(candidate)) return candidate;
+	}
+	throw new Error(`Could not allocate a temporary addon path beside ${destPath}`);
 }
 
 /**
  * Load a native .node addon from an absolute path using process.dlopen().
  * This is equivalent to require('./addon.node') for native modules.
  */
-export function dlopenAddon(addonPath: string): void {
+export function dlopenAddon(addonPath: string): Record<string, unknown> {
 	// process.dlopen expects a module-like object and modifies its exports.
 	const mod = { exports: {} as Record<string, unknown> };
 	process.dlopen(mod, addonPath);
+	return mod.exports;
 }
 
 /**
@@ -105,9 +132,9 @@ export function loadNativeAddon(
 	name: string,
 	cacheDir: string,
 	seaModule: { getRawAsset: (name: string) => ArrayBuffer },
-): void {
+): Record<string, unknown> {
 	const blob = seaModule.getRawAsset(name);
 	const data = Buffer.from(blob);
 	const addonPath = extractAddonToDir(name, cacheDir, data);
-	dlopenAddon(addonPath);
+	return dlopenAddon(addonPath);
 }

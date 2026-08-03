@@ -6,7 +6,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
 	closeSync,
 	copyFileSync,
@@ -54,7 +54,6 @@ import {
 	computeTargetStatus,
 	getHubPlatform,
 } from "./session/agent-status.js";
-import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 
 // ─── Platform paths ────────────────────────────────────────────────────────────
 
@@ -721,18 +720,6 @@ function printAgentStatusTable(
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
 export async function cmdStart(args: ParsedArgs): Promise<void> {
-	const existingResult = loadRuntime();
-	if (existingResult.kind === "unreadable") {
-		throw new Error(
-			`Cannot determine whether a hub is already running: ${describeRuntimeReadFailure(existingResult.error)}`,
-		);
-	}
-	if (existingResult.kind === "present" && isPidAlive(existingResult.runtime.pid)) {
-		const { runtime: existing } = existingResult;
-		console.error(`Hub already running (pid ${existing.pid} on port ${existing.port})`);
-		process.exit(1);
-	}
-
 	const port = args.port ?? 4100;
 
 	if (args.daemon) {
@@ -809,67 +796,21 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 		}
 
 		console.error(result.message);
-		process.exit(1);
+		process.exit(result.reason === "already-running" ? 73 : 1);
 	}
 
-	// Foreground — dynamic import keeps heavy deps out of parse-time module graph
-	const { addStartupCorsOrigins, createServer, startServer } = await import("./server.js");
-	const { initAuth } = await import("./auth.js");
-	const { openDatabases } = await import("./storage/db.js");
-	const { openBrowser } = await import("./open-browser.js");
-
-	const configDir = getConfigDir();
-	const stateDir = getStateDir();
-	mkdirSync(configDir, { recursive: true });
-	mkdirSync(stateDir, { recursive: true });
-
-	const authToken = initAuth(configDir);
-	const ownerToken = createOwnerToken();
-	const dbManager = openDatabases(stateDir);
-
+	// Foreground — the shared startup function owns the lock and the complete
+	// server lifecycle, so this path cannot diverge from daemon startup.
+	const { startHub } = await import("./hub-startup.js");
 	const { BUILD_HASH } = await import("./build-version.js");
-
-	let server: Awaited<ReturnType<typeof createServer>>;
-	let runtime!: RuntimeInfo;
-	const quit = createQuitLifecycle(() => ({ server, dbManager, runtime, deleteRuntime }));
-	server = await createServer({
+	await startHub({
 		port,
-		authToken,
-		ownerToken,
-		dbManager,
-		onShutdown: () => quit.shutdown(),
-		onQuit: quit.onQuit,
-		onQuitDelivered: quit.onQuitDelivered,
-	});
-	const address = await startServer(server, { port });
-	const actualPort = addStartupCorsOrigins(address, port);
-	runtime = {
-		pid: process.pid,
-		port: actualPort,
-		started_at: new Date().toISOString(),
-		instanceId: randomUUID(),
-		ownerToken,
-	};
-	persistRuntime(runtime);
-
-	console.log(`termora hub listening on ${address} (build: ${BUILD_HASH})`);
-	console.log(`Config dir : ${configDir}`);
-	console.log(`State dir  : ${stateDir}`);
-
-	// Open browser if requested via --open flag or TERMORA_OPEN env (set by daemon spawner)
-	const shouldOpen = args.open === true || process.env.TERMORA_OPEN === "1";
-	if (shouldOpen) {
-		const url = `http://127.0.0.1:${actualPort}`;
-		console.log(`Opening browser: ${url}`);
-		openBrowser(url);
-	}
-
-	const shutdown = () => quit.shutdown();
-	process.on("SIGTERM", () => {
-		void shutdown();
-	});
-	process.on("SIGINT", () => {
-		void shutdown();
+		openBrowser: args.open === true || process.env.TERMORA_OPEN === "1",
+		announce: ({ address, configDir, stateDir }) => {
+			console.log(`termora hub listening on ${address} (build: ${BUILD_HASH})`);
+			console.log(`Config dir : ${configDir}`);
+			console.log(`State dir  : ${stateDir}`);
+		},
 	});
 }
 
@@ -1349,6 +1290,8 @@ export async function main(argv: string[]): Promise<void> {
 		}
 	} catch (err) {
 		console.error(`Error: ${(err as Error).message}`);
-		process.exit(1);
+		process.exit(
+			err instanceof Error && "code" in err && err.code === "TERMORA_HUB_ALREADY_RUNNING" ? 73 : 1,
+		);
 	}
 }

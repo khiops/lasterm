@@ -87,9 +87,414 @@ fn iv(n: i64) -> rmpv::Value {
     rmpv::Value::Integer(n.into())
 }
 
+#[cfg(unix)]
+fn daemon_fixture_dir(label: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let dir = std::env::temp_dir().join(format!("termora-agent-{label}-{}", ulid::Ulid::new()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .expect("create private daemon fixture directory");
+    dir
+}
+
+#[cfg(unix)]
+async fn wait_for_record(socket: &std::path::Path, prefix: &str) -> std::path::PathBuf {
+    let directory = socket.parent().expect("socket has parent directory");
+    let socket = socket.to_str().expect("UTF-8 socket path");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        for entry in std::fs::read_dir(directory).expect("read daemon state directory") {
+            let path = entry.expect("read daemon state entry").path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".json"))
+                && serde_json::from_slice::<serde_json::Value>(
+                    &std::fs::read(&path).expect("read identity record"),
+                )
+                .ok()
+                .and_then(|record| record["socket"].as_str().map(str::to_owned))
+                .as_deref()
+                    == Some(socket)
+            {
+                return path;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {prefix} record for {socket}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_replacement_record(
+    socket: &std::path::Path,
+    previous_pid: u64,
+) -> std::path::PathBuf {
+    let record = wait_for_record(socket, "agent.identity-").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let current_pid = serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&record).expect("read identity record"),
+        )
+        .expect("parse identity record")["pid"]
+            .as_u64()
+            .expect("identity record pid");
+        if current_pid != previous_pid {
+            return record;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for replacement identity record"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn spawn_daemon(socket: &std::path::Path) -> Child {
+    spawn_daemon_from(env!("CARGO_BIN_EXE_termora-agent"), socket).await
+}
+
+#[cfg(unix)]
+async fn spawn_daemon_from(binary: &str, socket: &std::path::Path) -> Child {
+    let state_home = socket.parent().expect("socket has parent directory");
+    Command::new(binary)
+        .args([
+            "--daemon",
+            "--socket",
+            socket.to_str().expect("UTF-8 socket path"),
+        ])
+        .env("XDG_STATE_HOME", state_home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("spawn daemon")
+}
+
+#[cfg(unix)]
+struct DaemonGuard(Child);
+
+#[cfg(unix)]
+impl std::ops::Deref for DaemonGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl std::ops::DerefMut for DaemonGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill();
+    }
+}
+
+#[cfg(unix)]
+async fn invoke_stop(socket: &std::path::Path) -> String {
+    let output = invoke_stop_output(socket).await;
+    assert!(output.status.success(), "stop process failed: {output:?}");
+    String::from_utf8(output.stdout).expect("stop output is UTF-8")
+}
+
+#[cfg(unix)]
+async fn invoke_stop_output(socket: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+        .args([
+            "--stop",
+            "--socket",
+            socket.to_str().expect("UTF-8 socket path"),
+        ])
+        .output()
+        .await
+        .expect("run stop mode")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Stop validates the daemon identity before SIGTERM and only reports success
+/// once that exact identity has disappeared.
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_mode_stops_a_real_daemon_and_leaves_its_clean_exit_record() {
+    let dir = daemon_fixture_dir("stop-clean");
+    let socket = dir.join("agent.socket");
+    let mut daemon = DaemonGuard(spawn_daemon(&socket).await);
+    let live = wait_for_record(&socket, "agent.identity-").await;
+
+    assert_eq!(invoke_stop(&socket).await.trim(), "stopped");
+    assert!(daemon.wait().await.expect("wait daemon").success());
+    assert!(
+        !live.exists(),
+        "clean shutdown removes the live identity record"
+    );
+    let exit = wait_for_record(&socket, "agent.exit-").await;
+    let exit_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&exit).expect("exit record"))
+            .expect("valid exit record JSON");
+    assert_eq!(exit_json["outcome"], "stopped");
+    assert_eq!(exit_json["stop_requested"], true);
+    assert_eq!(exit_json["forced"], false);
+
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+    // Mutation caught: publishing as soon as the signal task is spawned lets
+    // this immediate stop take SIGTERM's default disposition instead of the
+    // daemon's graceful teardown path.
+}
+
+/// A hard kill cannot run the exit-record path, so its live identity remains
+/// as evidence that a later stopper must validate rather than trust it.
+#[cfg(unix)]
+#[tokio::test]
+async fn forced_kill_leaves_live_identity_and_no_exit_record() {
+    let dir = daemon_fixture_dir("forced-kill");
+    let socket = dir.join("agent.socket");
+    let mut daemon = DaemonGuard(spawn_daemon(&socket).await);
+    let live = wait_for_record(&socket, "agent.identity-").await;
+    let killed_pid = serde_json::from_slice::<serde_json::Value>(
+        &std::fs::read(&live).expect("read live identity record"),
+    )
+    .expect("parse live identity record")["pid"]
+        .as_u64()
+        .expect("live identity pid");
+
+    daemon.kill().await.expect("force kill daemon");
+    let _ = daemon.wait().await.expect("wait forced daemon");
+    assert!(
+        live.exists(),
+        "forced kill must leave the live record behind"
+    );
+    assert!(
+        std::fs::read_dir(&dir)
+            .expect("read state directory")
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("agent.exit-")),
+        "forced kill cannot leave a clean exit record"
+    );
+
+    // SIGKILL skips all cleanup. The next daemon removes the stale endpoint
+    // and starts, replacing the stale record after it has bound.
+    let mut replacement = DaemonGuard(spawn_daemon(&socket).await);
+    let replacement_live = wait_for_replacement_record(&socket, killed_pid).await;
+    assert_eq!(invoke_stop(&socket).await.trim(), "stopped");
+    assert!(replacement
+        .wait()
+        .await
+        .expect("wait replacement daemon")
+        .success());
+    assert!(
+        !replacement_live.exists(),
+        "the replacement's clean shutdown removes its live record"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stopping_one_sibling_socket_leaves_the_other_daemon_running() {
+    let dir = daemon_fixture_dir("sibling-sockets");
+    let first_socket = dir.join("first.socket");
+    let second_socket = dir.join("second.socket");
+    let mut first = DaemonGuard(spawn_daemon(&first_socket).await);
+    let mut second = DaemonGuard(spawn_daemon(&second_socket).await);
+    let first_record = wait_for_record(&first_socket, "agent.identity-").await;
+    let second_record = wait_for_record(&second_socket, "agent.identity-").await;
+    assert_ne!(first_record, second_record, "each socket owns its record");
+
+    assert_eq!(invoke_stop(&first_socket).await.trim(), "stopped");
+    assert!(first.wait().await.expect("wait first daemon").success());
+    assert!(
+        second.try_wait().expect("inspect second daemon").is_none(),
+        "stopping the first socket must not stop its sibling"
+    );
+
+    assert_eq!(invoke_stop(&second_socket).await.trim(), "stopped");
+    assert!(second.wait().await.expect("wait second daemon").success());
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+    // Mutation caught: restoring a fixed record name makes the second daemon
+    // overwrite the first, so stopping first.socket stops second.socket.
+}
+
+// A test for "the daemon exits between the pidfd liveness check and the /proc
+// read, and stop reports it as gone rather than as an I/O error" lived here and
+// was removed. It started the stopper, slept 10 ms and killed the daemon, hoping
+// the stopper had already read and validated the record. When it had not, stop
+// correctly reported a stale record and the assertion failed — so the test was
+// red at random, which is worse for the suite than the coverage was worth.
+//
+// The window it aimed at is between two syscalls in one function and cannot be
+// pinned from another process. Covering it needs a seam inside `identity`, not
+// an integration test. Until someone adds one, the ESRCH and ENOENT arms around
+// `identity.rs`'s probe are unverified: reverting them to propagate the error
+// would make an already-exited daemon look like a failure, and nothing here
+// would notice.
+
+#[tokio::test]
+async fn contradictory_stop_modes_are_rejected() {
+    for mode in [
+        "--daemon",
+        "--stdio",
+        "--buffer-per-channel",
+        "--buffer-global",
+    ] {
+        let mut args = vec![mode, "--stop"];
+        if mode.starts_with("--buffer-") {
+            args.insert(1, "1");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+            .args(args)
+            .output()
+            .await
+            .expect("run contradictory CLI modes");
+        assert!(!output.status.success(), "{mode} with --stop must fail");
+    }
+    // Mutation caught: accepting a daemon-only option with --stop silently
+    // ignores the selected daemon configuration.
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn planted_record_in_world_writable_directory_does_not_signal_a_process() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = daemon_fixture_dir("world-writable-identity");
+    let socket = dir.join("agent.socket");
+    let mut daemon = DaemonGuard(spawn_daemon(&socket).await);
+    let record = wait_for_record(&socket, "agent.identity-").await;
+    let planted = std::fs::read(&record).expect("read live daemon record");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+        .expect("make fixture directory world writable");
+    std::fs::remove_file(&record).expect("remove original record before planting");
+    std::fs::write(&record, planted).expect("plant a valid-looking record");
+
+    let output = invoke_stop_output(&socket).await;
+    assert!(
+        !output.status.success(),
+        "untrusted record must not be acted on"
+    );
+    assert!(
+        daemon.try_wait().expect("inspect daemon").is_none(),
+        "a planted record in a writable directory must not signal its process"
+    );
+
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .expect("restore private fixture directory");
+    assert_eq!(invoke_stop(&socket).await.trim(), "stopped");
+    assert!(daemon.wait().await.expect("wait daemon").success());
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+    // Mutation caught: removing the reader-side directory check causes --stop
+    // to signal the process named by an attacker-planted record.
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_normalizes_relative_socket_spellings() {
+    let dir = daemon_fixture_dir("relative-socket-identity");
+    let raw_socket = "agent.socket";
+    let absolute_socket = dir.join(raw_socket);
+    let mut daemon = DaemonGuard(
+        Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+            .args(["--daemon", "--socket", raw_socket])
+            .current_dir(&dir)
+            .env("XDG_STATE_HOME", &dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("spawn daemon with a relative socket spelling"),
+    );
+    let _record = wait_for_record(&absolute_socket, "agent.identity-").await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+        .args(["--stop", "--socket", "./agent.socket"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("stop daemon with an equivalent relative spelling");
+    assert!(output.status.success(), "stop process failed: {output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "stopped");
+    assert!(daemon.wait().await.expect("wait daemon").success());
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+    // Mutation caught: deriving the record directory from raw input makes
+    // `agent.socket` and `./agent.socket` select different state locations.
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn executable_mismatch_is_not_reported_as_stopped() {
+    let dir = daemon_fixture_dir("executable-mismatch");
+    let socket = dir.join("agent.socket");
+    let mut daemon = DaemonGuard(spawn_daemon(&socket).await);
+    let record = wait_for_record(&socket, "agent.identity-").await;
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).expect("read identity record"))
+            .expect("parse identity record");
+    json["executable_file_identity"]["inode"] = serde_json::Value::from(u64::MAX);
+    std::fs::write(&record, serde_json::to_vec(&json).expect("encode record"))
+        .expect("mutate identity record");
+
+    let output = invoke_stop_output(&socket).await;
+    assert!(
+        !output.status.success(),
+        "a mismatch is not a successful stop"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .expect("stop output is UTF-8")
+            .trim(),
+        "record does not match a live process"
+    );
+    assert!(daemon.try_wait().expect("inspect daemon").is_none());
+    daemon.kill().await.expect("clean up daemon");
+    let _ = daemon.wait().await.expect("wait daemon");
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+    // Mutation caught: treating a post-validation mismatch as disappearance
+    // reports `stopped` while the daemon continues running.
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn replaced_daemon_binary_remains_stoppable() {
+    let dir = daemon_fixture_dir("replaced-binary");
+    let socket = dir.join("agent.socket");
+    let running_binary = dir.join("termora-agent-running");
+    std::fs::copy(env!("CARGO_BIN_EXE_termora-agent"), &running_binary)
+        .expect("copy running agent binary");
+    let mut daemon = DaemonGuard(
+        spawn_daemon_from(running_binary.to_str().expect("UTF-8 binary path"), &socket).await,
+    );
+    let _record = wait_for_record(&socket, "agent.identity-").await;
+    let replacement = dir.join("termora-agent-replacement");
+    std::fs::copy(env!("CARGO_BIN_EXE_termora-agent"), &replacement)
+        .expect("copy replacement agent binary");
+    std::fs::rename(&replacement, &running_binary).expect("replace daemon binary atomically");
+
+    assert_eq!(invoke_stop(&socket).await.trim(), "stopped");
+    assert!(daemon.wait().await.expect("wait daemon").success());
+    std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
+    // Mutation caught: comparing /proc/<pid>/exe's deleted pathname instead of
+    // the opened executable inode refuses an upgraded-but-live daemon.
+}
 
 /// SC-09: Agent sends HELLO as the very first frame on stdout.
 #[tokio::test]

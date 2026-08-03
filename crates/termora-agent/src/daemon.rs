@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -153,8 +153,16 @@ fn get_config_dir() -> String {
 pub(crate) async fn run_daemon(
     socket_path: String,
     shutdown: ShutdownReceiver,
+    bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
-    run_daemon_impl(socket_path, get_config_dir(), get_state_dir(), shutdown).await
+    run_daemon_impl(
+        socket_path,
+        get_config_dir(),
+        get_state_dir(),
+        shutdown,
+        bound,
+    )
+    .await
 }
 
 /// Internal implementation — takes an explicit config_dir so tests can inject a temp dir
@@ -165,6 +173,7 @@ async fn run_daemon_impl(
     config_dir: String,
     state_dir: PathBuf,
     shutdown: ShutdownReceiver,
+    bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
     run_daemon_impl_with_manager(
         socket_path,
@@ -172,6 +181,7 @@ async fn run_daemon_impl(
         state_dir,
         shutdown,
         Arc::new(Mutex::new(PtyManager::new())),
+        bound,
     )
     .await
 }
@@ -185,6 +195,7 @@ async fn run_daemon_impl_with_manager(
     state_dir: PathBuf,
     mut shutdown: ShutdownReceiver,
     pty_manager: Arc<Mutex<PtyManager>>,
+    bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
     let path = PathBuf::from(&socket_path);
 
@@ -214,6 +225,9 @@ async fn run_daemon_impl_with_manager(
     }
 
     tracing::info!("daemon listening on {:?}", path);
+    if let Some(bound) = bound {
+        let _ = bound.send(());
+    }
 
     // Load auth token once at startup (None → first-run, skip auth)
     let expected_token = read_auth_token_with_state_dir(&config_dir, &state_dir).await;
@@ -334,7 +348,17 @@ fn get_pipe_name() -> String {
 #[cfg(windows)]
 pub(crate) async fn run_daemon(
     socket_path: String,
+    shutdown: ShutdownReceiver,
+    bound: Option<oneshot::Sender<()>>,
+) -> std::io::Result<DestroyAllSummary> {
+    run_daemon_impl(socket_path, shutdown, bound).await
+}
+
+#[cfg(windows)]
+async fn run_daemon_impl(
+    socket_path: String,
     mut shutdown: ShutdownReceiver,
+    bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
     let pipe_name = if socket_path.starts_with(r"\\.\pipe\") {
         socket_path.clone()
@@ -382,6 +406,9 @@ pub(crate) async fn run_daemon(
     //   3. Create next server instance BEFORE handing off the current pipe
     //   4. Spawn handler task, repeat
     let mut server = Some(create_secure_pipe(&pipe_name, true)?);
+    if let Some(bound) = bound {
+        let _ = bound.send(());
+    }
 
     let result = loop {
         // Block until a client connects to this pipe instance
@@ -1050,6 +1077,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
         ));
 
         // Wait for daemon to bind
@@ -1100,6 +1128,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1159,6 +1188,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1198,6 +1228,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1513,6 +1544,7 @@ mod tests {
                 config_dir.clone(),
                 state_dir.clone(),
                 shutdown_rx,
+                None,
             ));
             wait_for_socket(Path::new(&socket_path)).await;
 
@@ -1559,6 +1591,7 @@ mod tests {
                     state_dir.clone(),
                     shutdown_rx,
                     manager,
+                    None,
                 )
                 .with_subscriber(dispatch),
             );
@@ -1878,6 +1911,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1953,6 +1987,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -2042,7 +2077,8 @@ mod tests {
             ulid::Ulid::new().to_string().to_lowercase()
         );
 
-        let daemon_handle = tokio::spawn(run_daemon(pipe_name.clone(), no_shutdown_request()));
+        let daemon_handle =
+            tokio::spawn(run_daemon(pipe_name.clone(), no_shutdown_request(), None));
 
         // Wait for daemon to create the pipe
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

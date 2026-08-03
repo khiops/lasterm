@@ -5,6 +5,7 @@ mod expand;
 mod framing;
 mod handler;
 mod headless;
+mod identity;
 mod logging;
 mod process;
 mod protocol;
@@ -36,6 +37,13 @@ struct Cli {
     /// Global output buffer size (daemon mode)
     #[arg(long)]
     buffer_global: Option<usize>,
+
+    /// Stop the process described by the matching local daemon record. This does not prove that process still owns the endpoint. Unix requests graceful shutdown; Windows terminates it, so no exit record is written. This does not check for a hub; a live hub may relaunch it.
+    #[arg(
+        long,
+        conflicts_with_all = ["daemon", "stdio", "buffer_per_channel", "buffer_global"]
+    )]
+    stop: bool,
 
     /// Agent tracing level from the shared [logging] contract
     #[arg(long = "log-level", value_enum, default_value = "info")]
@@ -174,32 +182,29 @@ async fn main() -> std::io::Result<()> {
 
     init_tracing(logging_config, cli.daemon)?;
 
+    if cli.stop {
+        let socket = cli.socket.unwrap_or_else(default_socket_path);
+        let socket_identity = identity::socket_identity(&socket);
+        let outcome = identity::stop(
+            &identity::state_dir_for_socket(&socket_identity),
+            &socket_identity,
+            DAEMON_GRACEFUL_SHUTDOWN_DEADLINE,
+        )?;
+        println!("{}", outcome.words());
+        if outcome == identity::StopOutcome::Stopped {
+            return Ok(());
+        }
+        // A request only succeeds after the record's exact identity is gone;
+        // delivery, a missing record, and a stale record are not success.
+        std::process::exit(1);
+    }
+
     if cli.daemon {
         // Daemon mode writes to its own log file; stdio mode writes to stderr.
         let log_path = logging::daemon_log_path();
         tracing::info!(log_path = %log_path.display(), "daemon log file opened");
         // Resolve socket path — platform-specific default when not provided via --socket
-        let socket = cli.socket.unwrap_or_else(|| {
-            #[cfg(unix)]
-            {
-                let state_dir = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                    format!("{}/.local/state", home)
-                });
-                let dir = format!("{}/termora", state_dir);
-                let _ = std::fs::create_dir_all(&dir);
-                format!("{}/agent.socket", dir)
-            }
-            #[cfg(windows)]
-            {
-                let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-                format!(r"\\.\pipe\termora-agent-{}", username)
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                "/tmp/termora-agent.socket".into()
-            }
-        });
+        let socket = cli.socket.unwrap_or_else(default_socket_path);
 
         // Ensure the socket's parent directory exists when --socket is provided.
         // The unwrap_or_else default branch already calls create_dir_all for its
@@ -223,23 +228,36 @@ async fn main() -> std::io::Result<()> {
             }
         }
 
+        let socket_identity = identity::socket_identity(&socket);
+        let identity_state_dir = identity::state_dir_for_socket(&socket_identity);
+        let daemon_identity = daemon_identity_for_endpoint(socket_identity, &identity_state_dir)?;
+
         let (shutdown_tx, shutdown_rx) = daemon::shutdown_channel();
+        let cleanup_shutdown_tx = shutdown_tx.clone();
+        let stop_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        #[cfg(unix)]
+        // A record must never advertise SIGTERM stoppability before the handler
+        // exists. SIGINT is useful for an interactive operator, but SIGTERM is
+        // the protocol the stopper sends, so its installation is mandatory.
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        #[cfg(unix)]
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .map_err(|error| {
+                tracing::error!(%error, "SIGINT handler unavailable; SIGTERM remains available for daemon shutdown");
+                error
+            })
+            .ok();
 
         // The signal task only asks the daemon loop to stop. The loop owns the
         // PtyManager, so it is the only place that can perform its full sweep.
+        let signal_stop_requested = std::sync::Arc::clone(&stop_requested);
         let mut signal_task = tokio::spawn(async move {
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{signal, SignalKind};
-                let mut sigterm = signal(SignalKind::terminate()).map_err(|error| {
-                    tracing::error!(%error, "SIGTERM handler unavailable; SIGINT may still request daemon shutdown");
-                }).ok();
-                let mut sigint = signal(SignalKind::interrupt()).map_err(|error| {
-                    tracing::error!(%error, "SIGINT handler unavailable; SIGTERM may still request daemon shutdown");
-                }).ok();
-
                 let Some(first_signal) = wait_for_available_signal(
-                    sigterm.as_mut().map(|signal| signal.recv()),
+                    Some(sigterm.recv()),
                     sigint.as_mut().map(|signal| signal.recv()),
                 )
                 .await
@@ -254,6 +272,7 @@ async fn main() -> std::io::Result<()> {
                 );
                 let deadline = tokio::time::sleep(DAEMON_GRACEFUL_SHUTDOWN_DEADLINE);
                 tokio::pin!(deadline);
+                signal_stop_requested.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = shutdown_tx.send(true);
                 crate::elevation::cleanup_all();
 
@@ -263,7 +282,7 @@ async fn main() -> std::io::Result<()> {
                 wait_for_second_signal_or_deadline(
                     async {
                         let _ = wait_for_available_signal(
-                            sigterm.as_mut().map(|signal| signal.recv()),
+                            Some(sigterm.recv()),
                             sigint.as_mut().map(|signal| signal.recv()),
                         )
                         .await;
@@ -281,6 +300,7 @@ async fn main() -> std::io::Result<()> {
                 tracing::info!("Ctrl+C received, requesting daemon shutdown");
                 let deadline = tokio::time::sleep(DAEMON_GRACEFUL_SHUTDOWN_DEADLINE);
                 tokio::pin!(deadline);
+                signal_stop_requested.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = shutdown_tx.send(true);
                 crate::elevation::cleanup_all();
                 wait_for_second_signal_or_deadline(
@@ -296,17 +316,65 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
-        let mut daemon_task = tokio::spawn(daemon::run_daemon(socket, shutdown_rx));
+        let (endpoint_bound_tx, endpoint_bound_rx) = tokio::sync::oneshot::channel();
+        let mut daemon_task = tokio::spawn(daemon::run_daemon(
+            socket,
+            shutdown_rx,
+            Some(endpoint_bound_tx),
+        ));
+        if endpoint_bound_rx.await.is_err() {
+            signal_task.abort();
+            return match daemon_task.await {
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(_)) => Err(std::io::Error::other(
+                    "daemon exited before reporting its bound endpoint",
+                )),
+                Err(error) => Err(std::io::Error::other(format!(
+                    "daemon task failed before binding its endpoint: {error}"
+                ))),
+            };
+        }
+        if let Some(daemon_identity) = daemon_identity.as_ref() {
+            if let Err(error) = identity::write_live_record(&identity_state_dir, daemon_identity) {
+                signal_task.abort();
+                let _ = cleanup_shutdown_tx.send(true);
+                let _ = daemon_task.await;
+                // An atomic publication can report a post-rename directory
+                // sync failure. Remove only a record that still names this
+                // attempt.
+                let _ = identity::remove_live_record(&identity_state_dir, daemon_identity);
+                return Err(error);
+            }
+        }
         tokio::select! {
             biased;
             result = &mut daemon_task => {
                 signal_task.abort();
                 match result {
-                    Ok(result) => {
-                        if let Err(error) = &result {
-                            tracing::error!(%error, "daemon failed before clean shutdown could be confirmed");
-                        }
-                        std::process::exit(daemon_process_exit_status(&result));
+                    Ok(Ok(summary)) => {
+                        let result = Ok(summary);
+                        let identity_cleanup_status = match daemon_identity {
+                            Some(daemon_identity) => match write_clean_exit_record(
+                                &identity_state_dir,
+                                daemon_identity,
+                                stop_requested.load(std::sync::atomic::Ordering::SeqCst),
+                                &result,
+                            ) {
+                                Ok(()) => 0,
+                                Err(error) => {
+                                    tracing::error!(%error, "daemon identity cleanup was not confirmed");
+                                    1
+                                }
+                            },
+                            None => 0,
+                        };
+                        std::process::exit(
+                            daemon_process_exit_status(&result).max(identity_cleanup_status),
+                        );
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "daemon failed before clean shutdown could be confirmed");
+                        std::process::exit(1);
                     }
                     Err(error) => {
                         tracing::error!(%error, "daemon task failed before terminal teardown could be confirmed");
@@ -318,7 +386,7 @@ async fn main() -> std::io::Result<()> {
                 let forced_shutdown = forced_shutdown.expect("signal task must not panic");
                 let status = match forced_shutdown {
                     ForcedShutdown::SecondSignal => {
-                        tracing::warn!("second shutdown signal received before teardown completion; exiting unconfirmed");
+                        tracing::warn!("second shutdown signal received before teardown completion; exiting unconfirmed without an exit record");
                         1
                     }
                     ForcedShutdown::DeadlineElapsed => {
@@ -342,6 +410,79 @@ async fn main() -> std::io::Result<()> {
         let summary = handler::run_stdio().await?;
         std::process::exit(handler::stdio_exit_status(&summary));
     }
+}
+
+fn default_socket_path() -> String {
+    #[cfg(unix)]
+    {
+        let state_dir = identity::state_dir_for_socket("");
+        let _ = std::fs::create_dir_all(&state_dir);
+        state_dir
+            .join("agent.socket")
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(windows)]
+    {
+        let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
+        format!(r"\\.\pipe\termora-agent-{username}")
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        "/tmp/termora-agent.socket".into()
+    }
+}
+
+/// A daemon may run without an identity when this platform cannot make a safe
+/// process fingerprint or its requested record directory is not account-private.
+fn daemon_identity_for_endpoint(
+    socket_identity: String,
+    state_dir: &std::path::Path,
+) -> std::io::Result<Option<identity::IdentityRecord>> {
+    match identity::create_identity(socket_identity) {
+        Ok(identity) => match identity::ensure_private_state_dir(state_dir) {
+            Ok(()) => Ok(Some(identity)),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::warn!(%error, "daemon identity will not be published; --stop is unavailable for this endpoint");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            tracing::warn!(%error, "daemon identity will not be published because this platform has no safe process fingerprint; --stop is unavailable");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn write_clean_exit_record(
+    state_dir: &std::path::Path,
+    daemon_identity: identity::IdentityRecord,
+    stop_requested: bool,
+    result: &std::io::Result<pty::DestroyAllSummary>,
+) -> std::io::Result<()> {
+    let (outcome, unconfirmed_terminals) = match result {
+        Ok(summary) if summary.unresolved.is_empty() => ("stopped".to_string(), Vec::new()),
+        Ok(summary) => (
+            "unconfirmed terminals".to_string(),
+            summary
+                .unresolved
+                .iter()
+                .map(|channel| format!("{}:{}", channel.channel_id, channel.pid))
+                .collect(),
+        ),
+        Err(error) => (format!("daemon error: {error}"), Vec::new()),
+    };
+    let exit = identity::ExitRecord {
+        identity: daemon_identity,
+        stop_requested,
+        forced: false,
+        outcome,
+        unconfirmed_terminals,
+    };
+    identity::write_exit_record(state_dir, &exit)?;
+    identity::remove_live_record(state_dir, &exit.identity)
 }
 
 fn init_tracing(config: LoggingConfig, daemon: bool) -> std::io::Result<()> {
@@ -513,12 +654,25 @@ mod tests {
     #[tokio::test]
     async fn daemon_that_cannot_start_has_a_failing_process_status() {
         let (_shutdown_tx, shutdown_rx) = daemon::shutdown_channel();
-        let result = daemon::run_daemon("x".repeat(101), shutdown_rx).await;
+        let result = daemon::run_daemon("x".repeat(101), shutdown_rx, None).await;
 
         assert!(
             result.is_err(),
             "overlong socket path must prevent daemon startup"
         );
         assert_eq!(daemon_process_exit_status(&result), 1);
+    }
+
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    #[test]
+    fn daemon_without_a_safe_fingerprint_starts_without_an_identity() {
+        let state_dir = std::env::temp_dir().join(format!("termora-agent-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&state_dir).expect("create state directory");
+        assert!(daemon_identity_for_endpoint("socket".into(), &state_dir)
+            .expect("unsupported fingerprint must not fail daemon startup")
+            .is_none());
+        std::fs::remove_dir_all(state_dir).expect("remove state directory");
+        // Mutation caught: propagating an unsupported process fingerprint
+        // rejects daemon mode instead of merely disabling --stop.
     }
 }

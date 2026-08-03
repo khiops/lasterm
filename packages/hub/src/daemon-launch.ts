@@ -38,6 +38,11 @@ export interface DaemonRuntimeInfo {
 	started_at: string;
 }
 
+export type DaemonRuntimeLoadResult =
+	| { kind: "absent" }
+	| { kind: "present"; runtime: DaemonRuntimeInfo }
+	| { kind: "unreadable"; error: unknown };
+
 export type ChildExitState =
 	| { exited: false }
 	| {
@@ -55,13 +60,13 @@ export type DaemonReadyResult =
 	  }
 	| {
 			ok: false;
-			reason: "child-exited" | "timeout";
+			reason: "child-exited" | "runtime-unreadable" | "timeout";
 			message: string;
 	  };
 
 export interface WaitForDaemonReadyDeps {
 	childPid: number;
-	loadRuntime: () => DaemonRuntimeInfo | null;
+	loadRuntime: () => DaemonRuntimeLoadResult;
 	fetchHealth: (port: number) => Promise<unknown>;
 	getChildExit: () => ChildExitState;
 	readLogTail: () => string;
@@ -142,10 +147,21 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 		}
 
 		const runtime = deps.loadRuntime();
-		if (runtime?.pid === deps.childPid) {
+		if (runtime.kind === "unreadable") {
+			deps.killChild();
+			return {
+				ok: false,
+				reason: "runtime-unreadable",
+				message: formatFailureMessage(
+					`Daemon runtime record could not be read: ${describeRuntimeReadFailure(runtime.error)}; the daemon process was terminated`,
+					deps.readLogTail(),
+				),
+			};
+		}
+		if (runtime.kind === "present" && runtime.runtime.pid === deps.childPid) {
 			try {
-				await fetchHealthBounded(deps, runtime.port);
-				return { ok: true, pid: runtime.pid, port: runtime.port };
+				await fetchHealthBounded(deps, runtime.runtime.port);
+				return { ok: true, pid: runtime.runtime.pid, port: runtime.runtime.port };
 			} catch {
 				// The runtime file can appear before Fastify is accepting requests.
 			}
@@ -165,6 +181,10 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 
 		await deps.sleep(Math.min(pollMs, Math.max(0, deadlineAt - deps.now())));
 	}
+}
+
+function describeRuntimeReadFailure(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 async function fetchHealthBounded(deps: WaitForDaemonReadyDeps, port: number): Promise<unknown> {

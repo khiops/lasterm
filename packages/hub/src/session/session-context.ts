@@ -10,8 +10,28 @@ import type { MetaDAL } from "../storage/meta.js";
 import type { SpoolDAL } from "../storage/spool.js";
 import type { AgentConnection } from "./agent-connection.js";
 import type { OutputChunker } from "./output-chunker.js";
+import type { QuitFence } from "./quit-fence.js";
 import type { WsClient } from "./session-manager.js";
 import type { SnapshotScheduler } from "./snapshot-scheduler.js";
+
+/**
+ * Maps remain readable and teardown can remove dead state, but revival writes
+ * are private to commits. ReadonlyMap also makes forEach expose a readonly map.
+ */
+export type CommitProtectedMap<K, V> = ReadonlyMap<K, V> & Pick<Map<K, V>, "delete" | "clear">;
+/** The session DAL is narrowed too; otherwise it re-exposes createSession. */
+export type SessionMetaDAL = Omit<MetaDAL, "createSession" | "sessions"> & {
+	readonly sessions: Omit<MetaDAL["sessions"], "createSession">;
+};
+
+export interface RevivalCommits {
+	adoptAgent(fence: QuitFence, hostId: string, agent: AgentConnection): void;
+	persistSession(fence: QuitFence, hostId: string, state: SessionState): void;
+	createSession(
+		fence: QuitFence,
+		input: { id: string; hostId: string; status: SessionStatus },
+	): void;
+}
 
 // ─── Session-acquisition state machine types ──────────────────────────────────
 
@@ -155,10 +175,16 @@ export interface SessionState {
 }
 
 export interface SharedSessionContext {
+	/** Hub-owned latch. Once QUITTING, revival work can never be committed again. */
+	quitState: "RUNNING" | "QUITTING";
+	/** Incremented synchronously with quitState so async revival work can fence itself. */
+	quitEpoch: number;
 	/** hostId → AgentConnection */
-	agents: Map<string, AgentConnection>;
+	agents: CommitProtectedMap<string, AgentConnection>;
 	/** hostId → SessionState */
-	sessions: Map<string, SessionState>;
+	sessions: CommitProtectedMap<string, SessionState>;
+	/** The only route by which a local revival becomes externally visible. */
+	commits: RevivalCommits;
 	/** channelId → ChannelState */
 	channels: Map<string, ChannelState>;
 	/** clientId → WsClient */
@@ -197,7 +223,7 @@ export interface SharedSessionContext {
 	/** Optional callback to resolve the current write-lock holder for a channel */
 	getWriteLockHolder: ((channelId: string) => string | null) | null;
 	/** DALs */
-	metaDal: MetaDAL;
+	metaDal: SessionMetaDAL;
 	spoolDal: SpoolDAL;
 	/** Scheduler, chunker */
 	scheduler: SnapshotScheduler;

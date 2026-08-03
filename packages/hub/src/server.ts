@@ -39,6 +39,7 @@ import type { LoggerRegistry } from "./logging/index.js";
 import { registerSeaStaticServing } from "./sea-static-server.js";
 import { SessionManager } from "./session/session-manager.js";
 import { seedShellProfiles } from "./shell-discovery.js";
+import type { QuitResult } from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
 import { migrateLegacyShellDefaults } from "./storage/migrate-launch-profiles.js";
@@ -92,7 +93,7 @@ export function addStartupCorsOrigins(address: string, requestedPort: number): n
 	return actualPort;
 }
 
-export interface ServerOptions {
+interface ServerBaseOptions {
 	host?: string; // default: "127.0.0.1"
 	port?: number; // default: DEFAULT_PORT (4100)
 	logger?: boolean; // default: true
@@ -100,6 +101,7 @@ export interface ServerOptions {
 	authToken?: string; // when provided, Bearer auth is enforced on all routes except /api/health
 	ownerToken?: string; // shutdown-only owner token from runtime.json
 	onShutdown?: () => Promise<void> | void; // called after POST /api/shutdown has replied
+	/** Called by owner-token POST /api/quit while its response remains open. */
 	authConfig?: AuthConfig; // override auth config (bypasses config.toml, useful for tests)
 	configDir?: string; // override config directory (defaults to getConfigDir())
 	corsOrigins?: string[]; // override CORS allowlist (bypasses config.toml, useful for tests)
@@ -108,6 +110,19 @@ export interface ServerOptions {
 	loggerRegistry?: LoggerRegistry; // per-channel log registry
 	logsDir?: string; // base logs directory (e.g. ~/.local/state/termora/logs)
 }
+
+/** The response and teardown halves of quit are one capability, never independent hooks. */
+export type ServerOptions =
+	| (ServerBaseOptions & {
+			ownerToken: string;
+			onQuit: (sessionManager: SessionManager | null) => Promise<QuitResult>;
+			onQuitDelivered: () => Promise<void> | void;
+	  })
+	| (Omit<ServerBaseOptions, "ownerToken"> & {
+			ownerToken?: never;
+			onQuit?: never;
+			onQuitDelivered?: never;
+	  });
 
 export async function createServer(options?: ServerOptions): Promise<FastifyInstance> {
 	const server = Fastify({
@@ -204,7 +219,8 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 
 	server.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
 		const pathname = new URL(request.url, "http://localhost").pathname;
-		if (request.method !== "POST" || pathname !== "/api/shutdown") return;
+		if (request.method !== "POST" || (pathname !== "/api/shutdown" && pathname !== "/api/quit"))
+			return;
 
 		if (!hasValidShutdownOwnerToken(request, options?.ownerToken)) {
 			return sendOwnerTokenRequired(reply);
@@ -238,7 +254,8 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 			// Unauthenticated endpoints — exact pathname match
 			if (pathname === "/api/health") return;
 			if (pathname === "/api/pair/verify") return;
-			if (request.method === "POST" && pathname === "/api/shutdown") return;
+			if (request.method === "POST" && (pathname === "/api/shutdown" || pathname === "/api/quit"))
+				return;
 
 			// WebSocket auth is handled at the message level (AUTH → AUTH_OK/AUTH_FAIL),
 			// not at the HTTP upgrade level.
@@ -347,7 +364,7 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		if (options?.authToken) {
 			activeSessionManager.setPrimaryToken(options.authToken);
 		}
-		const metaDal = activeSessionManager.getMetaDal();
+		const metaDal = new MetaDAL(options.dbManager.meta);
 		metaDal.migrateHostGroupData();
 		migrateLegacyShellDefaults(metaDal, configResolver);
 
@@ -455,6 +472,35 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		setImmediate(() => {
 			Promise.resolve(options?.onShutdown?.()).catch((err) => {
 				server.log.error({ err }, "shutdown request failed after response");
+			});
+		});
+	});
+
+	server.post("/api/quit", async (request, reply) => {
+		if (!hasValidShutdownOwnerToken(request, options?.ownerToken)) {
+			sendOwnerTokenRequired(reply);
+			return;
+		}
+		if (!isLoopbackAddress(request.ip)) {
+			sendLoopbackRequired(reply);
+			return;
+		}
+		if (!options?.onQuit) {
+			return reply.code(503).send({ ok: false, message: "Quit is unavailable" });
+		}
+
+		const result = await options.onQuit(sessionManager);
+		reply.code(result.ok ? 200 : 503).send({
+			ok: result.ok,
+			message: result.ok ? "Local agent stopped; hub is shutting down" : result.message,
+			...(result.stdout ? { stdout: result.stdout } : {}),
+			...(result.stderr ? { stderr: result.stderr } : {}),
+		});
+		// Keep the request alive through the stopper, then allow Fastify to flush it
+		// before the same coordinator tears the hub down.
+		setImmediate(() => {
+			Promise.resolve(options.onQuitDelivered?.()).catch((err) => {
+				server.log.error({ err }, "quit request failed after response");
 			});
 		});
 	});

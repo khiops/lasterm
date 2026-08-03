@@ -1,13 +1,20 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { initAuth } from "./auth.js";
-import { deleteRuntime, getConfigDir, getStateDir, persistRuntime } from "./cli.js";
+import {
+	deleteRuntime,
+	getConfigDir,
+	getStateDir,
+	persistRuntime,
+	type RuntimeInfo,
+} from "./cli.js";
 import { ConfigResolver } from "./config.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
 import { openBrowser } from "./open-browser.js";
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
-import { createOwnerToken, gracefulShutdown } from "./shutdown.js";
+import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 import { openDatabases } from "./storage/db.js";
 
 async function main() {
@@ -42,25 +49,31 @@ async function main() {
 	const ownerToken = createOwnerToken();
 	const dbManager = openDatabases(stateDir);
 
-	let shutdown: () => Promise<void> = async () => {};
-	const server = await createServer({
+	let server: Awaited<ReturnType<typeof createServer>>;
+	let runtime!: RuntimeInfo;
+	const quit = createQuitLifecycle(() => ({ server, dbManager, runtime, deleteRuntime }));
+	server = await createServer({
 		port,
 		authToken,
 		ownerToken,
 		dbManager,
 		hubLogger,
 		logsDir,
-		onShutdown: () => shutdown(),
+		onShutdown: () => quit.shutdown(),
+		onQuit: quit.onQuit,
+		onQuitDelivered: quit.onQuitDelivered,
 	});
 	const address = await startServer(server, { port });
 	const actualPort = addStartupCorsOrigins(address, port);
 
-	persistRuntime({
+	runtime = {
 		pid: process.pid,
 		port: actualPort,
 		started_at: new Date().toISOString(),
+		instanceId: randomUUID(),
 		ownerToken,
-	});
+	};
+	persistRuntime(runtime);
 
 	hubLogger.log("info", "hub started", { port: actualPort, address, configDir });
 
@@ -80,7 +93,7 @@ async function main() {
 		openBrowser(`http://127.0.0.1:${actualPort}`);
 	}
 
-	shutdown = () => gracefulShutdown({ server, dbManager, deleteRuntime });
+	const shutdown = () => quit.shutdown();
 
 	process.on("SIGTERM", () => {
 		void shutdown();

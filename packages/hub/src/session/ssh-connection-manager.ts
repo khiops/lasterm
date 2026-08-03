@@ -28,6 +28,7 @@ import {
 	reconnectSessionId,
 	respond as respondCtx,
 } from "./prompt-context.js";
+import { captureQuitFence } from "./quit-fence.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import {
@@ -437,6 +438,10 @@ export class SshConnectionManager {
 		attemptIndex: number,
 		startTime: number,
 	): void {
+		// This can be called directly from an agent "close" listener. A quit refusal
+		// is normal control flow there, not an exception escaping the listener.
+		if (this.ctx.quitState === "QUITTING") return;
+		const reconnectFence = captureQuitFence(this.ctx);
 		const elapsed = Date.now() - startTime;
 		if (elapsed >= RECONNECT_TIMEOUT_MS) {
 			this.lifecycle.closeSession(hostId, sessionId);
@@ -536,7 +541,7 @@ export class SshConnectionManager {
 
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
-				this.ctx.agents.set(hostId, sshAgent);
+				this.ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
 
 				this.lifecycle.reAttachChannels(hostId, sessionId, sshAgent);
 			} catch {

@@ -39,6 +39,7 @@ import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { DeployError, getBinaryCacheDir } from "./agent-deployer.js";
+import { stopLocalAgent } from "./agent-launcher.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { OutputChunker } from "./output-chunker.js";
 import {
@@ -50,8 +51,19 @@ import {
 	reconnectContextId,
 	trackElevationContext,
 } from "./prompt-context.js";
+import {
+	assertQuitFence,
+	captureQuitFence,
+	HubQuittingError,
+	type QuitFence,
+} from "./quit-fence.js";
 import * as Acq from "./session-acquisition.js";
-import type { Lease, SessionAcquisition, SharedSessionContext } from "./session-context.js";
+import type {
+	Lease,
+	SessionAcquisition,
+	SessionMetaDAL,
+	SharedSessionContext,
+} from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { SpoolGarbageCollector } from "./spool-gc.js";
 import type { SshAgentDeployOptions } from "./ssh-agent.js";
@@ -80,6 +92,8 @@ function isAgentChannelNotFoundError(err: unknown, channelId: string): err is Er
 export class SessionManager {
 	// ─── Shared runtime state ─────────────────────────────────────────────────
 	private readonly ctx: SharedSessionContext;
+	/** Full DAL facade stays private; shared and public paths cannot create sessions unfenced. */
+	private readonly metaDal: MetaDAL;
 
 	// ─── Sub-managers ─────────────────────────────────────────────────────────
 	private readonly broadcaster: StateBroadcaster;
@@ -100,6 +114,7 @@ export class SessionManager {
 		_logsDir?: string,
 	) {
 		const metaDal = new MetaDAL(dbManager.meta);
+		this.metaDal = metaDal;
 		const spoolDal = new SpoolDAL(dbManager.spool);
 		const resolvedAgentConfig: AgentConfig = agentConfig ?? { ...DEFAULT_AGENT_CONFIG };
 
@@ -109,10 +124,29 @@ export class SessionManager {
 		});
 		const chunker = new OutputChunker(spoolDal);
 
+		const agents = new Map<string, import("./agent-connection.js").AgentConnection>();
+		const sessions = new Map<string, import("./session-context.js").SessionState>();
+
 		// Build the shared context — all sub-managers share these Maps
 		const ctx: SharedSessionContext = {
-			agents: new Map(),
-			sessions: new Map(),
+			quitState: "RUNNING",
+			quitEpoch: 0,
+			agents,
+			sessions,
+			commits: {
+				adoptAgent(fence, hostId, agent) {
+					assertQuitFence(ctx, fence);
+					agents.set(hostId, agent);
+				},
+				persistSession(fence, hostId, state) {
+					assertQuitFence(ctx, fence);
+					sessions.set(hostId, state);
+				},
+				createSession(fence, input) {
+					assertQuitFence(ctx, fence);
+					metaDal.createSession(input);
+				},
+			},
 			channels: new Map(),
 			clients: new Map(),
 			reconnectTimers: new Map(),
@@ -157,6 +191,7 @@ export class SessionManager {
 
 		// Wire reconnect callback for restartChannel on SSH hosts
 		this.lifecycle.onReconnectAgent = async (hostId: string): Promise<boolean> => {
+			const reconnectFence = captureQuitFence(ctx);
 			const host = ctx.metaDal.getHost(hostId);
 			if (host?.type !== "ssh") return false;
 
@@ -223,7 +258,7 @@ export class SessionManager {
 
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
-				ctx.agents.set(hostId, sshAgent);
+				ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
 				return true;
 			} catch {
 				// Clear the controller on failure (identity-guarded so a newer concurrent
@@ -253,6 +288,30 @@ export class SessionManager {
 
 	async startup(): Promise<void> {
 		return this.agentMgr.startup();
+	}
+
+	/**
+	 * Atomically latch this hub against revival, then abort work which was already
+	 * acquiring a session or reconnecting. The latch is deliberately owned by the
+	 * hub/session supervisor, never by the agent it is about to stop.
+	 */
+	beginQuit(): void {
+		if (this.ctx.quitState === "QUITTING") return;
+		this.ctx.quitState = "QUITTING";
+		this.ctx.quitEpoch++;
+		Acq.shutdownAll(this.ctx);
+		for (const timer of this.ctx.reconnectTimers.values()) clearTimeout(timer);
+		this.ctx.reconnectTimers.clear();
+		for (const controller of this.ctx.reconnectAbortControllers.values()) controller.abort();
+		this.ctx.reconnectAbortControllers.clear();
+	}
+
+	async stopLocalAgent(): Promise<import("./agent-launcher.js").AgentStopResult> {
+		return stopLocalAgent(this.ctx.agentConfig.socketPath);
+	}
+
+	isQuitting(): boolean {
+		return this.ctx.quitState === "QUITTING";
 	}
 
 	async shutdown(): Promise<void> {
@@ -303,8 +362,8 @@ export class SessionManager {
 		this.ctx.primaryToken = token;
 	}
 
-	getMetaDal(): MetaDAL {
-		return this.ctx.metaDal;
+	getMetaDal(): SessionMetaDAL {
+		return this.metaDal;
 	}
 
 	getSpoolDal(): SpoolDAL {
@@ -374,6 +433,7 @@ export class SessionManager {
 	}
 
 	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean> {
+		if (this.isQuitting()) return false;
 		return this.lifecycle.restartChannel(channelId, requestingClientId);
 	}
 
@@ -486,6 +546,18 @@ export class SessionManager {
 		const client = this.ctx.clients.get(clientId);
 		if (!client) {
 			this.ctx.hubLogger?.log("debug", "handleSpawn: client not found", { clientId });
+			return null;
+		}
+		let spawnFence: QuitFence;
+		try {
+			spawnFence = captureQuitFence(this.ctx);
+		} catch (err) {
+			if (!(err instanceof HubQuittingError)) throw err;
+			client.send({
+				type: "ERROR",
+				code: "HUB_QUITTING",
+				message: "Hub is quitting; local work cannot be started or restarted",
+			} satisfies ErrorMessage);
 			return null;
 		}
 
@@ -604,7 +676,7 @@ export class SessionManager {
 						);
 					try {
 						// getOrCreateSession is async; the session object is created here.
-						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true);
+						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true, spawnFence);
 						// B4 fix: _connectSshAgent returns the wired agent WITHOUT setting
 						// ctx.agents — we set it here, atomically with commit(), so no
 						// concurrent SPAWN can observe "agent live + acq live" simultaneously.
@@ -645,7 +717,7 @@ export class SessionManager {
 						) {
 							// P2: set agent + commit atomically — agent becomes visible only when
 							// the acq is simultaneously deleted (no dual-authority window).
-							this.ctx.agents.set(hostId, connectedAgent);
+							this.ctx.commits.adoptAgent(spawnFence, hostId, connectedAgent);
 							Acq.commit(this.ctx, connectingAcq, sessionState);
 							clearContext(this.ctx, connectingAcq.id);
 							agent = connectedAgent;
@@ -697,7 +769,19 @@ export class SessionManager {
 				}
 			} else {
 				// ── Non-SSH or SSH with live agent — fast path ────────────────────────
-				session = await this.agentMgr.getOrCreateSession(hostId, host.type === "ssh");
+				try {
+					session = await this.agentMgr.getOrCreateSession(hostId, host.type === "ssh", spawnFence);
+				} catch (err) {
+					if (err instanceof HubQuittingError) {
+						client.send({
+							type: "ERROR",
+							code: err.code,
+							message: err.message,
+						} satisfies ErrorMessage);
+						return null;
+					}
+					throw err;
+				}
 			}
 
 			// ── Post-acquisition spawn body ───────────────────────────────────────────
@@ -755,7 +839,19 @@ export class SessionManager {
 								hostId,
 							},
 						);
-						agent = await this.agentMgr.connectDaemonAgent(hostId, session.id);
+						try {
+							agent = await this.agentMgr.connectDaemonAgent(hostId, session.id);
+						} catch (err) {
+							if (err instanceof HubQuittingError) {
+								client.send({
+									type: "ERROR",
+									code: err.code,
+									message: err.message,
+								} satisfies ErrorMessage);
+								return null;
+							}
+							throw err;
+						}
 						this.ctx.hubLogger?.log("debug", "handleSpawn: daemon agent connected", { hostId });
 					}
 				}
@@ -1052,6 +1148,14 @@ export class SessionManager {
 	async handleAttach(clientId: string, channelId: string): Promise<boolean> {
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return false;
+		if (this.isQuitting()) {
+			client.send({
+				type: "ERROR",
+				code: "HUB_QUITTING",
+				message: "Hub is quitting; channels cannot be revived",
+			} satisfies ErrorMessage);
+			return false;
+		}
 
 		const channel = this.ctx.channels.get(channelId);
 		if (!channel) {

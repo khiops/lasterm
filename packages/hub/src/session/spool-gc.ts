@@ -13,7 +13,7 @@ export class SpoolGarbageCollector {
 
 	constructor(
 		private spoolDal: SpoolDAL,
-		private metaDal: MetaDAL,
+		private metaDal: Pick<MetaDAL, "listStaleDeadChannelIds">,
 		gcConfig?: GcConfig,
 	) {
 		const config = gcConfig ?? DEFAULT_GC_CONFIG;

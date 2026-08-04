@@ -161,17 +161,16 @@ Scope: the **local** hub and the **local** agent — the binaries a new
 installation replaces. Remote agents are peers the hub deployed elsewhere; no
 local install touches them, and no gesture stops them.
 
-The API chain reaches only what cooperates: hub → agent → shell. It stops there.
-The shell's descendants — a dev server, a compose stack, anything detached — get
-nothing, and on Windows they are what holds handles on the files an update
-replaces. So `kill_tree()` and the Job Object are load-bearing, not belt-and-braces:
-without them a cold start cannot replace the binaries.
+The API chain reaches only what cooperates: hub → agent → shell, and it stops
+there — `DestroyAllSummary::confirmed_shell_exits` says as much in code. The
+shell's descendants (a dev server, a compose stack, anything detached) get
+nothing, and on Windows they hold the handles on the files an update replaces.
+`kill_tree()` and the Job Object are therefore load-bearing: without them a cold
+start cannot replace the binaries.
 
-`DestroyAllSummary::confirmed_shell_exits` says so in code — it confirms shells,
-not descendants. On Unix the promise is only the shell's **process group**, so a
-`setsid` escapee survives (#113); Windows is strictly stronger. That asymmetry is
-deliberate, and the identity-validated stop is what turns "asked it to go" into
-"confirmed it went".
+On Unix the promise is only the shell's **process group**, so a `setsid` escapee
+survives (#113); Windows is strictly stronger, and that asymmetry is chosen. The
+identity-validated stop is what turns "asked it to go" into "confirmed it went".
 
 ## Entity Model
 

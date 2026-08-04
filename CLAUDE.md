@@ -135,6 +135,26 @@ Agent (local or remote, same binary):
   Hub never touches PTY directly — agent is the universal PTY manager.
 ```
 
+### Three tiers, and what "local" means
+
+| Tier | Relationship |
+|------|--------------|
+| GUI client | Bundles a hub and launches it, **and** can pair to a hub on another machine with a pairing code (`termora pair`). |
+| Hub | The client drives one hub, its own or a paired one. It asks *that hub* to reach a host the hub can see. |
+| Agent | Deployed **by the hub** onto the target, matched to its OS and architecture. |
+
+**"Local" is relative to the hub, never to the client.** The hub a client drives
+may not be the hub it launched. A gesture that ends things — quit, stop — acts on
+the hub the client *owns*, i.e. launched; never on one it merely connected to,
+whose terminals belong to other people. That rule is not yet enforced anywhere
+(#142) and today only holds because the code happens to target the local runtime
+record.
+
+The hub binds `127.0.0.1` today. That is a stopgap, not the design: pairing
+exists because clients are meant to reach a hub across the network, and #96
+covers hardening it for a non-local interface. Do not read the current binding as
+the architecture.
+
 ## Entity Model
 
 Host (permanent) → Session (runtime) → Channel (PTY instance)

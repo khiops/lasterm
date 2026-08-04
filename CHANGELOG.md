@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.7.0](https://github.com/khiops/termora/compare/v0.6.0...v0.7.0) (2026-08-04)
+
+
+### Features
+
+* **agent:** end a terminal's whole workload, not just its shell ([#115](https://github.com/khiops/termora/issues/115)) ([78351a2](https://github.com/khiops/termora/commit/78351a2306c73d2f81804fee2dba249a51378eb5))
+* **agent:** publish who the daemon is, and let it be asked to stop ([#123](https://github.com/khiops/termora/issues/123)) ([9833e11](https://github.com/khiops/termora/commit/9833e1105dba3e4160c251bdfd39d50a6dadfa47))
+* **agent:** tear down terminals when the daemon is asked to stop ([#118](https://github.com/khiops/termora/issues/118)) ([023c3a3](https://github.com/khiops/termora/commit/023c3a300cfd562432b13fa2ccf12c25a5898320))
+* **desktop:** keep the updater out of Store builds, record its public key ([#112](https://github.com/khiops/termora/issues/112)) ([3626f92](https://github.com/khiops/termora/commit/3626f92d3591ab81afe96059ba74955f5cddd1fd))
+* **desktop:** the close preference moves where the gestures arrive ([#137](https://github.com/khiops/termora/issues/137)) ([36cb07f](https://github.com/khiops/termora/commit/36cb07fbb9b4add08072fa2b651ad063e7180c16))
+* **desktop:** the gestures quit, and one place decides it ([#138](https://github.com/khiops/termora/issues/138)) ([fdb8fc6](https://github.com/khiops/termora/commit/fdb8fc67d943099f55abcdb022842d633d4febfa))
+* **hub:** let the hub quit — stop reviving, stop the agent, stop itself ([#126](https://github.com/khiops/termora/issues/126)) ([11a7055](https://github.com/khiops/termora/commit/11a70551cf3530e00fc0d25d529312d41cd87566))
+* **hub:** make a second hub impossible, with a lock the kernel releases ([#133](https://github.com/khiops/termora/issues/133)) ([014e3f2](https://github.com/khiops/termora/commit/014e3f22d06d9dad39dd24de34ba713f396e8d16))
+* **hub:** quit ends everyone's terminals, so it asks first ([#135](https://github.com/khiops/termora/issues/135)) ([0dc17e0](https://github.com/khiops/termora/commit/0dc17e0f2248062a7f02c990f76a703fd65e0d77))
+
+
+### Documentation
+
+* ask a local agent to stop with the OS, not with a protocol message ([40d2b59](https://github.com/khiops/termora/commit/40d2b59cdcc58d34063a344856266a1091a8816e))
+* mark the quit lifecycle plan as canonical ([7af2b75](https://github.com/khiops/termora/commit/7af2b75011562cd9f63ca4747bb8a20ab0c455ea))
+* narrow the update flow's Unix teardown promise to the process group ([5eefa5c](https://github.com/khiops/termora/commit/5eefa5cf9d54de0622f453d06920aae4c3077cae))
+* **plans:** stop promising that logging out quits termora ([9407c2c](https://github.com/khiops/termora/commit/9407c2c88a03589b00aba2f2546ae09de4029637))
+* put the no-relaunch latch in the hub and give it all three paths ([53f51bb](https://github.com/khiops/termora/commit/53f51bbf15948b598e2da125e4e4a217d2fc0bf8))
+* spec the in-app update flow ([2b16a8c](https://github.com/khiops/termora/commit/2b16a8c03df6cb3d4118b082e816fb53e5ee27c6))
+
+
+### CI/CD
+
+* run the Rust tests on Windows, and make them pass there ([#120](https://github.com/khiops/termora/issues/120)) ([1eaf1c9](https://github.com/khiops/termora/commit/1eaf1c931ed05424064733798cb41a7d2b3bff81))
+
 ## [0.6.0](https://github.com/khiops/termora/compare/v0.5.0...v0.6.0) (2026-07-31)
 
 

@@ -155,6 +155,24 @@ exists because clients are meant to reach a hub across the network, and #96
 covers hardening it for a non-local interface. Do not read the current binding as
 the architecture.
 
+### Why quitting kills process trees when an API exists
+
+Scope: the **local** hub and the **local** agent — the binaries a new
+installation replaces. Remote agents are peers the hub deployed elsewhere; no
+local install touches them, and no gesture stops them.
+
+The API chain reaches only what cooperates: hub → agent → shell. It stops there.
+The shell's descendants — a dev server, a compose stack, anything detached — get
+nothing, and on Windows they are what holds handles on the files an update
+replaces. So `kill_tree()` and the Job Object are load-bearing, not belt-and-braces:
+without them a cold start cannot replace the binaries.
+
+`DestroyAllSummary::confirmed_shell_exits` says so in code — it confirms shells,
+not descendants. On Unix the promise is only the shell's **process group**, so a
+`setsid` escapee survives (#113); Windows is strictly stronger. That asymmetry is
+deliberate, and the identity-validated stop is what turns "asked it to go" into
+"confirmed it went".
+
 ## Entity Model
 
 Host (permanent) → Session (runtime) → Channel (PTY instance)

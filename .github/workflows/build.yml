@@ -182,6 +182,20 @@ jobs:
           TERMORA_SKIP_WEB: "true"
           TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
           TERMORA_BUILD_HASH: ${{ github.sha }}
+      # A binary that has never been run is not known to work. The bundle that
+      # loads the SQLite addon at startup broke once and reached a tagged release,
+      # because every job until packaging only ever produced the executable.
+      # `agent status` is enough: it goes through the native-addon bootstrap and
+      # prints, so a startup failure is an exit code rather than a surprise later.
+      - name: Smoke — the built hub starts
+        if: matrix.shell_sh && matrix.triple == 'x86_64-unknown-linux-gnu'
+        run: ./dist/sea/termora-hub agent status --json > /dev/null
+      - name: Smoke — the built hub starts (pwsh)
+        if: ${{ !matrix.shell_sh }}
+        shell: pwsh
+        run: |
+          .\dist\sea\termora-hub.exe agent status --json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the built hub failed to start ($LASTEXITCODE)" }
       - uses: actions/upload-artifact@v7
         with:
           name: hub-${{ matrix.triple }}

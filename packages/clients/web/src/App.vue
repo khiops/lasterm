@@ -396,10 +396,12 @@ import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
 import {
+	closeBehaviorWriteError,
 	readCloseBehavior,
 	resolveCloseAction,
 	writeCloseBehavior,
 } from './utils/close-behavior.js';
+import { createCloseGestureGuard } from './utils/close-gesture.js';
 import {
 	forceShutdownMessage,
 	quitCompletely,
@@ -507,6 +509,7 @@ const showSettings = ref(false);
 const desktopVersion = ref<string | undefined>(undefined);
 const closeModalVisible = ref(false);
 const closeInProgress = ref(false);
+const closeGestureGuard = createCloseGestureGuard();
 const shutdownForceOthers = ref<number | null>(null);
 const showConfigureDialog = ref(false);
 const configureChannelId = ref<string | null>(null);
@@ -841,27 +844,56 @@ async function handleDesktopCloseRequested(): Promise<void> {
 	if (closeInProgress.value || closeModalVisible.value || shutdownForceOthers.value !== null) {
 		return;
 	}
+	if (!closeGestureGuard.tryEnter()) return;
 
-	const action = resolveCloseAction(readCloseBehavior());
-	if (action === 'hide') {
-		await minimizeWindowToTray();
-		return;
-	}
-	if (action === 'quit') {
-		await runQuitCompletely();
-		return;
-	}
+	// Set this before the asynchronous read so a second close event cannot
+	// enter while the native preference is still pending.
+	closeInProgress.value = true;
+	try {
+		let behavior;
+		try {
+			behavior = await readCloseBehavior();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error('[desktop] failed to read close preference:', error);
+			toastStore.show('error', `Close preference could not be loaded: ${message}`, 10_000);
+			behavior = 'ask';
+		}
 
-	closeModalVisible.value = true;
+		const action = resolveCloseAction(behavior);
+		if (action === 'hide') {
+			await minimizeWindowToTray();
+			return;
+		}
+		if (action === 'quit') {
+			await runQuitCompletely();
+			return;
+		}
+
+		closeModalVisible.value = true;
+	} finally {
+		closeInProgress.value = false;
+		closeGestureGuard.leave();
+	}
 }
 
 async function onCloseModalSelect(decision: { action: 'quit' | 'tray'; remember: boolean }): Promise<void> {
+	closeInProgress.value = true;
 	if (decision.remember) {
-		writeCloseBehavior(decision.action);
+		try {
+			await writeCloseBehavior(decision.action === 'tray' ? 'hide' : decision.action);
+		} catch (error) {
+			console.error('[desktop] failed to save close preference:', error);
+			toastStore.show('error', closeBehaviorWriteError(error), 10_000);
+		}
 	}
 	if (decision.action === 'tray') {
 		closeModalVisible.value = false;
-		await minimizeWindowToTray();
+		try {
+			await minimizeWindowToTray();
+		} finally {
+			closeInProgress.value = false;
+		}
 		return;
 	}
 

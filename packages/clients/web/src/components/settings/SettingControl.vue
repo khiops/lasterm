@@ -32,6 +32,7 @@
 			<option
 				v-for="opt in options"
 				:key="String(opt.value)"
+				:disabled="opt.disabled"
 				:value="opt.value"
 			>
 				{{ opt.label }}
@@ -94,7 +95,7 @@ import FontPicker from "./FontPicker.vue";
 const props = defineProps<{
 	modelValue: unknown;
 	type: "text" | "number" | "select" | "toggle" | "range" | "color" | "font";
-	options?: { label: string; value: string | number }[];
+	options?: { disabled?: boolean; label: string; value: string | number }[];
 	min?: number;
 	max?: number;
 	step?: number;

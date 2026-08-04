@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-#[cfg(not(dev))]
-use std::io::Write;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -15,6 +15,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 static HUB_PORT: AtomicU16 = AtomicU16::new(4100);
 static TRAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_CALLER_CLIENT_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static CLOSE_BEHAVIOR_TEMP_COUNTER: AtomicU16 = AtomicU16::new(0);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
 #[cfg(any(target_os = "windows", test))]
@@ -167,16 +168,15 @@ enum ShutdownRequestResult {
     Failed(String),
 }
 
-/// Resolves the hub config directory and reads the auth token from auth.json.
-/// Returns `Some(token)` only if the token is a valid 64-char lowercase hex string.
-fn read_hub_auth_token() -> Option<String> {
+/// Resolves the per-user Termora configuration directory.
+fn termora_config_dir() -> Option<PathBuf> {
     let config_dir = {
         #[cfg(target_os = "windows")]
         {
             std::env::var("APPDATA")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .or_else(|| dirs::config_dir())?
+                .or_else(dirs::config_dir)?
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -187,7 +187,15 @@ fn read_hub_auth_token() -> Option<String> {
         }
     };
 
-    let auth_path = config_dir.join("termora").join("auth.json");
+    Some(config_dir.join("termora"))
+}
+
+/// Resolves the hub config directory and reads the auth token from auth.json.
+/// Returns `Some(token)` only if the token is a valid 64-char lowercase hex string.
+fn read_hub_auth_token() -> Option<String> {
+    let config_dir = termora_config_dir()?;
+
+    let auth_path = config_dir.join("auth.json");
     eprintln!("[termora] checking auth.json at: {}", auth_path.display());
     let contents = std::fs::read_to_string(&auth_path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&contents).ok()?;
@@ -200,6 +208,151 @@ fn read_hub_auth_token() -> Option<String> {
     } else {
         None
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CloseBehavior {
+    Ask,
+    #[serde(alias = "tray")]
+    Hide,
+    Quit,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CloseBehaviorConfig {
+    #[serde(rename = "closeBehavior")]
+    close_behavior: CloseBehavior,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseBehaviorConfigState {
+    Missing,
+    Stored(CloseBehavior),
+    Unreadable,
+}
+
+fn close_behavior_command_result(state: CloseBehaviorConfigState) -> Result<CloseBehavior, String> {
+    match state {
+        CloseBehaviorConfigState::Stored(behavior) => Ok(behavior),
+        CloseBehaviorConfigState::Missing => Ok(CloseBehavior::Ask),
+        CloseBehaviorConfigState::Unreadable => Err("failed to read close preference".to_string()),
+    }
+}
+
+fn close_behavior_config_path() -> Option<PathBuf> {
+    termora_config_dir().map(|config_dir| config_dir.join("close-behavior.json"))
+}
+
+fn read_close_behavior_from_path(path: &std::path::Path) -> CloseBehaviorConfigState {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CloseBehaviorConfigState::Missing;
+        }
+        Err(_) => return CloseBehaviorConfigState::Unreadable,
+    };
+
+    match serde_json::from_str::<CloseBehaviorConfig>(&contents) {
+        Ok(config) => CloseBehaviorConfigState::Stored(config.close_behavior),
+        Err(_) => CloseBehaviorConfigState::Unreadable,
+    }
+}
+
+fn read_close_behavior() -> CloseBehaviorConfigState {
+    let Some(path) = close_behavior_config_path() else {
+        return CloseBehaviorConfigState::Unreadable;
+    };
+    read_close_behavior_from_path(&path)
+}
+
+fn write_close_behavior_to_path(
+    path: &std::path::Path,
+    behavior: CloseBehavior,
+) -> Result<(), String> {
+    write_close_behavior_to_path_with_replace(path, behavior, |source, target| {
+        std::fs::rename(source, target)
+    })
+}
+
+fn write_close_behavior_to_path_with_replace<F>(
+    path: &std::path::Path,
+    behavior: CloseBehavior,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .ok_or_else(|| "close preference path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create close preference directory: {error}"))?;
+    let contents = serde_json::to_string(&CloseBehaviorConfig {
+        close_behavior: behavior,
+    })
+    .map_err(|error| format!("failed to serialize close preference: {error}"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "close preference path has no file name".to_string())?;
+
+    let (mut temp_file, temp_path) = (0..32)
+        .find_map(|_| {
+            let suffix = CLOSE_BEHAVIOR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                ".{file_name}.{}.{}.tmp",
+                std::process::id(),
+                suffix
+            ));
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&candidate)
+            {
+                Ok(file) => Some(Ok((file, candidate))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(format!(
+                    "failed to create close preference temporary file: {error}"
+                ))),
+            }
+        })
+        .ok_or_else(|| "failed to allocate close preference temporary file".to_string())??;
+
+    let write_result = (|| -> Result<(), String> {
+        temp_file
+            .write_all(contents.as_bytes())
+            .map_err(|error| format!("failed to write close preference: {error}"))?;
+        #[cfg(unix)]
+        temp_file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("failed to set close preference permissions: {error}"))?;
+        temp_file
+            .sync_all()
+            .map_err(|error| format!("failed to flush close preference: {error}"))
+    })();
+    drop(temp_file);
+
+    let result = write_result.and_then(|()| {
+        replace(&temp_path, path)
+            .map_err(|error| format!("failed to replace close preference: {error}"))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+#[tauri::command]
+fn get_close_behavior() -> Result<CloseBehavior, String> {
+    close_behavior_command_result(read_close_behavior())
+}
+
+#[tauri::command]
+fn set_close_behavior(behavior: CloseBehavior) -> Result<(), String> {
+    let path = close_behavior_config_path()
+        .ok_or_else(|| "failed to resolve close preference directory".to_string())?;
+    write_close_behavior_to_path(&path, behavior)
 }
 
 /// Resolves the termora state directory:
@@ -1041,6 +1194,8 @@ pub fn run() {
             get_hub_port,
             get_hub_runtime,
             is_tray_available,
+            get_close_behavior,
+            set_close_behavior,
             exit_app,
             set_shutdown_caller_client_id,
             stop_hub,
@@ -1055,6 +1210,98 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static CLOSE_BEHAVIOR_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    fn close_behavior_test_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "termora-close-behavior-{name}-{}-{}",
+            std::process::id(),
+            CLOSE_BEHAVIOR_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        std::env::temp_dir()
+            .join(unique)
+            .join("close-behavior.json")
+    }
+
+    #[test]
+    fn stored_tray_behavior_reads_as_hide() {
+        let path = close_behavior_test_path("tray");
+        std::fs::create_dir_all(path.parent().expect("test path parent")).expect("create test dir");
+        std::fs::write(&path, r#"{"closeBehavior":"tray"}"#).expect("write test config");
+
+        assert_eq!(
+            read_close_behavior_from_path(&path),
+            CloseBehaviorConfigState::Stored(CloseBehavior::Hide)
+        );
+
+        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
+    }
+
+    #[test]
+    fn unknown_or_unreadable_close_behavior_is_not_a_decision() {
+        let path = close_behavior_test_path("invalid");
+        std::fs::create_dir_all(path.parent().expect("test path parent")).expect("create test dir");
+        std::fs::write(&path, r#"{"closeBehavior":"destroy"}"#).expect("write test config");
+
+        assert_eq!(
+            read_close_behavior_from_path(&path),
+            CloseBehaviorConfigState::Unreadable
+        );
+        assert_eq!(
+            close_behavior_command_result(read_close_behavior_from_path(&path)),
+            Err("failed to read close preference".to_string())
+        );
+
+        std::fs::remove_file(&path).expect("remove test config");
+        assert_eq!(
+            read_close_behavior_from_path(&path),
+            CloseBehaviorConfigState::Missing
+        );
+        assert_eq!(
+            close_behavior_command_result(read_close_behavior_from_path(&path)),
+            Ok(CloseBehavior::Ask)
+        );
+
+        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
+    }
+
+    #[test]
+    fn written_close_behavior_is_readable_without_a_window() {
+        let path = close_behavior_test_path("round-trip");
+
+        write_close_behavior_to_path(&path, CloseBehavior::Quit).expect("write close preference");
+
+        assert_eq!(
+            read_close_behavior_from_path(&path),
+            CloseBehaviorConfigState::Stored(CloseBehavior::Quit)
+        );
+
+        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
+    }
+
+    #[test]
+    fn interrupted_close_behavior_replace_keeps_the_previous_preference() {
+        let path = close_behavior_test_path("interrupted-replace");
+        write_close_behavior_to_path(&path, CloseBehavior::Ask).expect("write initial preference");
+
+        let error =
+            write_close_behavior_to_path_with_replace(&path, CloseBehavior::Quit, |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "simulated interrupted replace",
+                ))
+            })
+            .expect_err("interrupted replace must fail");
+
+        assert!(error.contains("failed to replace close preference"));
+        assert_eq!(
+            read_close_behavior_from_path(&path),
+            CloseBehaviorConfigState::Stored(CloseBehavior::Ask)
+        );
+
+        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
+    }
 
     #[test]
     fn command_looks_like_termora_hub_matches_known_hub_invocations() {

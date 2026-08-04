@@ -6,38 +6,72 @@
 			scope="global"
 			:is-overridden="true"
 		>
-			<SettingControl
-				:model-value="closeBehavior"
-				type="select"
-				:options="closeBehaviorOptions"
-				@update:model-value="onCloseBehaviorChange"
-			/>
+			<div>
+				<SettingControl
+					:model-value="closeBehavior"
+					type="select"
+					:options="closeBehaviorOptions"
+					@update:model-value="onCloseBehaviorChange"
+				/>
+				<p v-if="closeBehaviorError" class="close-behavior-error" role="alert">
+					{{ closeBehaviorError }}
+				</p>
+			</div>
 		</SettingRow>
 	</div>
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import {
 	type CloseBehavior,
+	closeBehaviorOptionsForTray,
 	isCloseBehavior,
 	readCloseBehavior,
-	writeCloseBehavior,
+	saveCloseBehavior,
 } from "../../../utils/close-behavior.js";
 import SettingControl from "../SettingControl.vue";
 import SettingRow from "../SettingRow.vue";
 
-const closeBehaviorOptions = [
-	{ label: "Ask every time", value: "ask" },
-	{ label: "Minimize to tray", value: "tray" },
-	{ label: "Quit completely", value: "quit" },
-];
+const trayAvailable = ref(false);
+const closeBehavior = ref<CloseBehavior>("ask");
+const closeBehaviorError = ref<string | null>(null);
+const closeBehaviorOptions = computed(() =>
+	closeBehaviorOptionsForTray(trayAvailable.value, closeBehavior.value),
+);
 
-const closeBehavior = ref<CloseBehavior>(readCloseBehavior());
+onMounted(async () => {
+	try {
+		closeBehavior.value = await readCloseBehavior();
+	} catch (error) {
+		closeBehaviorError.value = `Close preference could not be loaded: ${errorMessage(error)}`;
+	}
+	try {
+		const { invoke } = await import("@tauri-apps/api/core");
+		trayAvailable.value = await invoke<boolean>("is_tray_available");
+	} catch {
+		trayAvailable.value = false;
+	}
+});
 
-function onCloseBehaviorChange(value: unknown): void {
+async function onCloseBehaviorChange(value: unknown): Promise<void> {
 	if (!isCloseBehavior(value)) return;
-	closeBehavior.value = value;
-	writeCloseBehavior(value);
+	const previous = closeBehavior.value;
+	closeBehaviorError.value = null;
+	const result = await saveCloseBehavior(previous, value);
+	closeBehavior.value = result.behavior;
+	closeBehaviorError.value = result.error;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 </script>
+
+<style scoped>
+.close-behavior-error {
+	margin: 4px 0 0;
+	color: var(--nt-danger);
+	font-size: 12px;
+}
+</style>

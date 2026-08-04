@@ -306,7 +306,18 @@ function buildSeaBootstrapBanner(): string {
 	});
 	const output = result.outputFiles[0]?.text;
 	if (!output) throw new Error("[build-sea-hub] SEA SQLite bootstrap produced no output");
-	return `// -- SEA native addon bootstrap (generated) --\n${output}\n// -- end SEA bootstrap --`;
+	// Wrapped so its bindings are its own. A banner is text prepended to another
+	// bundle, and esbuild names imports predictably — `import_node_fs` here and
+	// `import_node_fs` there — so sharing one top-level scope let the main bundle's
+	// lazily-initialised declaration of the same name reach the prelude, which then
+	// read `existsSync` off `undefined` and killed the executable at startup.
+	return [
+		"// -- SEA native addon bootstrap (generated) --",
+		"(function(){",
+		output,
+		"})();",
+		"// -- end SEA bootstrap --",
+	].join("\n");
 }
 
 const SEA_BOOTSTRAP_BANNER = buildSeaBootstrapBanner();

@@ -218,7 +218,35 @@ mod tests {
         let first = KernelLock::acquire(&path).unwrap().unwrap();
         assert!(KernelLock::acquire(&path).unwrap().is_none());
         drop(first);
-        assert!(KernelLock::acquire(&path).unwrap().is_some());
+        // This assertion has failed twice on CI and never in 74 local runs
+        // (#139), so a bare `assert!` would report only that it failed again.
+        // Name who still has the file open instead: releasing a flock needs
+        // every descriptor for that open file description to close, so a
+        // descriptor that outlived the drop is the shape the evidence would take.
+        if KernelLock::acquire(&path).unwrap().is_none() {
+            panic!(
+                "the lock was still held after its only handle was dropped.\n\
+                 path: {}\n\
+                 descriptors in this process referring to it: {:?}",
+                path.display(),
+                open_descriptors_for(&path)
+            );
+        }
+    }
+
+    /// Descriptors in this process whose target is `path`. Linux only; elsewhere
+    /// the failure message simply carries less.
+    fn open_descriptors_for(path: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+            return vec!["/proc/self/fd unavailable on this platform".to_string()];
+        };
+        entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let target = std::fs::read_link(entry.path()).ok()?;
+                (target == path).then(|| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect()
     }
 
     #[test]

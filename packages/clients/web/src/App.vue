@@ -31,19 +31,9 @@
 
 		<CloseModal
 			:visible="closeModalVisible"
-			:busy="closeInProgress"
+			:busy="false"
 			@select="onCloseModalSelect"
-			@cancel="closeModalVisible = false"
-		/>
-
-		<ConfirmDialog
-			:visible="shutdownForceOthers !== null"
-			title="Other Clients Connected"
-			:message="shutdownForceMessage"
-			confirm-label="Stop anyway"
-			:show-remember="false"
-			@confirm="onForceShutdownConfirm"
-			@cancel="onForceShutdownCancel"
+			@cancel="onCloseModalCancel"
 		/>
 
 		<!-- Configure Command dialog — opened from tab context menu or exit overlay -->
@@ -395,17 +385,6 @@ import { useThemeStore } from './stores/theme.js';
 import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
-import {
-	closeBehaviorWriteError,
-	readCloseBehavior,
-	resolveCloseAction,
-	writeCloseBehavior,
-} from './utils/close-behavior.js';
-import { createCloseGestureGuard } from './utils/close-gesture.js';
-import {
-	forceShutdownMessage,
-	quitCompletely,
-} from './utils/desktop-lifecycle.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 
 const authStore = useAuthStore();
@@ -508,9 +487,7 @@ const profilesStore = useProfilesStore();
 const showSettings = ref(false);
 const desktopVersion = ref<string | undefined>(undefined);
 const closeModalVisible = ref(false);
-const closeInProgress = ref(false);
-const closeGestureGuard = createCloseGestureGuard();
-const shutdownForceOthers = ref<number | null>(null);
+const desktopCloseAttempt = ref<number | null>(null);
 const showConfigureDialog = ref(false);
 const configureChannelId = ref<string | null>(null);
 const showHostModal = ref(false);
@@ -519,11 +496,8 @@ const deleteHostId = ref<string | null>(null);
 const showBatchImport = ref(false);
 
 const showPairingGenerator = ref(false);
-let closeUnlisten: (() => void) | null = null;
-let shutdownForceResolver: ((confirmed: boolean) => void) | null = null;
-const shutdownForceMessage = computed(() =>
-	shutdownForceOthers.value === null ? '' : forceShutdownMessage(shutdownForceOthers.value),
-);
+let desktopCloseUnlisten: (() => void) | null = null;
+let desktopCloseExpiryUnlisten: (() => void) | null = null;
 
 watch(
 	() => authStore.clientId,
@@ -763,9 +737,28 @@ onMounted(async () => {
 	// Ctrl+K / Cmd+K must be captured before Chrome's omnibox intercepts it (SC-14)
 	window.addEventListener('keydown', onGlobalKeydown, { capture: true });
 	try {
-		await registerDesktopCloseHandler();
+		const { listen } = await import('@tauri-apps/api/event');
+		desktopCloseUnlisten = await listen<{ attemptId: number }>(
+			'desktop-close-requested',
+			async (event) => {
+				try {
+					const { invoke } = await import('@tauri-apps/api/core');
+					await invoke('acknowledge_desktop_close', { attemptId: event.payload.attemptId });
+					desktopCloseAttempt.value = event.payload.attemptId;
+					closeModalVisible.value = true;
+				} catch (error) {
+					console.warn('[desktop] failed to acknowledge close presentation:', error);
+				}
+			},
+		);
+		desktopCloseExpiryUnlisten = await listen<{ attemptId: number }>('desktop-close-expired', (event) => {
+			if (desktopCloseAttempt.value === event.payload.attemptId) {
+				desktopCloseAttempt.value = null;
+				closeModalVisible.value = false;
+			}
+		});
 	} catch (error) {
-		console.warn('[desktop] failed to register close handler:', error);
+		console.warn('[desktop] failed to register close presentations:', error);
 	}
 
 	// In Tauri desktop, resolve the hub port BEFORE any API calls so that
@@ -828,93 +821,35 @@ onMounted(async () => {
 
 onUnmounted(() => {
 	window.removeEventListener('keydown', onGlobalKeydown, { capture: true });
-	closeUnlisten?.();
+	desktopCloseUnlisten?.();
+	desktopCloseExpiryUnlisten?.();
 });
 
-async function registerDesktopCloseHandler(): Promise<void> {
-	if (!isTauriRuntime()) return;
-	const { getCurrentWindow } = await import('@tauri-apps/api/window');
-	closeUnlisten = await getCurrentWindow().onCloseRequested((event) => {
-		event.preventDefault();
-		void handleDesktopCloseRequested();
-	});
-}
-
-async function handleDesktopCloseRequested(): Promise<void> {
-	if (closeInProgress.value || closeModalVisible.value || shutdownForceOthers.value !== null) {
-		return;
-	}
-	if (!closeGestureGuard.tryEnter()) return;
-
-	// Set this before the asynchronous read so a second close event cannot
-	// enter while the native preference is still pending.
-	closeInProgress.value = true;
-	try {
-		let behavior;
-		try {
-			behavior = await readCloseBehavior();
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			console.error('[desktop] failed to read close preference:', error);
-			toastStore.show('error', `Close preference could not be loaded: ${message}`, 10_000);
-			behavior = 'ask';
-		}
-
-		const action = resolveCloseAction(behavior);
-		if (action === 'hide') {
-			await minimizeWindowToTray();
-			return;
-		}
-		if (action === 'quit') {
-			await runQuitCompletely();
-			return;
-		}
-
-		closeModalVisible.value = true;
-	} finally {
-		closeInProgress.value = false;
-		closeGestureGuard.leave();
-	}
-}
-
 async function onCloseModalSelect(decision: { action: 'quit' | 'tray'; remember: boolean }): Promise<void> {
-	closeInProgress.value = true;
-	if (decision.remember) {
-		try {
-			await writeCloseBehavior(decision.action === 'tray' ? 'hide' : decision.action);
-		} catch (error) {
-			console.error('[desktop] failed to save close preference:', error);
-			toastStore.show('error', closeBehaviorWriteError(error), 10_000);
-		}
-	}
-	if (decision.action === 'tray') {
+	try {
+		const { invoke } = await import('@tauri-apps/api/core');
+		await invoke('answer_desktop_close', {
+			attemptId: desktopCloseAttempt.value,
+			action: decision.action,
+			remember: decision.remember,
+		});
 		closeModalVisible.value = false;
-		try {
-			await minimizeWindowToTray();
-		} finally {
-			closeInProgress.value = false;
-		}
-		return;
+		desktopCloseAttempt.value = null;
+	} catch (error) {
+		console.error('[desktop] failed to answer close choice:', error);
+		const message = error instanceof Error ? error.message : String(error);
+		toastStore.show('error', `Close choice failed: ${message}`, 10_000);
 	}
-
-	await runQuitCompletely();
 }
 
-async function minimizeWindowToTray(): Promise<void> {
-	const { invoke } = await import('@tauri-apps/api/core');
-	const { getCurrentWindow } = await import('@tauri-apps/api/window');
-	const currentWindow = getCurrentWindow();
-	let trayAvailable = false;
-	try {
-		trayAvailable = await invoke<boolean>('is_tray_available');
-	} catch {
-		trayAvailable = false;
-	}
-	if (trayAvailable) {
-		await currentWindow.hide();
-	} else {
-		await currentWindow.minimize();
-	}
+function onCloseModalCancel(): void {
+	const attemptId = desktopCloseAttempt.value;
+	closeModalVisible.value = false;
+	desktopCloseAttempt.value = null;
+	if (attemptId === null) return;
+	void import('@tauri-apps/api/core').then(({ invoke }) =>
+		invoke('cancel_desktop_close', { attemptId }),
+	);
 }
 
 async function syncShutdownCallerClientId(clientId: string | null): Promise<void> {
@@ -927,50 +862,7 @@ async function syncShutdownCallerClientId(clientId: string | null): Promise<void
 	}
 }
 
-function confirmForceShutdown(others: number): Promise<boolean> {
-	shutdownForceOthers.value = others;
-	return new Promise((resolve) => {
-		shutdownForceResolver = resolve;
-	});
-}
 
-function resolveForceShutdown(confirmed: boolean): void {
-	const resolver = shutdownForceResolver;
-	shutdownForceResolver = null;
-	shutdownForceOthers.value = null;
-	resolver?.(confirmed);
-}
-
-function onForceShutdownConfirm(): void {
-	resolveForceShutdown(true);
-}
-
-function onForceShutdownCancel(): void {
-	resolveForceShutdown(false);
-}
-
-async function runQuitCompletely(): Promise<void> {
-	closeInProgress.value = true;
-	try {
-		const { invoke } = await import('@tauri-apps/api/core');
-		const outcome = await quitCompletely({
-			confirmForce: confirmForceShutdown,
-			exitApp: () => invoke('exit_app'),
-		});
-		if (outcome.status === 'failed') {
-			console.error('[desktop] shutdown failed:', outcome.error);
-			toastStore.show('error', `Quit failed: ${outcome.error.message}`, 10_000);
-		} else {
-			closeModalVisible.value = false;
-		}
-	} catch (error) {
-		console.error('[desktop] quit failed:', error);
-		const message = error instanceof Error ? error.message : String(error);
-		toastStore.show('error', `Quit failed: ${message}`, 10_000);
-	} finally {
-		closeInProgress.value = false;
-	}
-}
 
 /**
  * When the selected host changes, fetch the channel list for that host.

@@ -8,14 +8,30 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 /// Stores the resolved hub port after startup (default 4100).
 static HUB_PORT: AtomicU16 = AtomicU16::new(4100);
 static TRAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_CALLER_CLIENT_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static QUIT_COORDINATOR: OnceLock<Mutex<QuitCoordinator>> = OnceLock::new();
+static WINDOW_CLOSE_COORDINATOR: OnceLock<Mutex<WindowCloseCoordinator>> = OnceLock::new();
 static CLOSE_BEHAVIOR_TEMP_COUNTER: AtomicU16 = AtomicU16::new(0);
+// These mirror the bounds in the hub. A request can take the full client
+// timeout, then the hub's agent stopper can use its bound, then graceful
+// shutdown has its own bound before it deletes runtime.json.
+const HUB_AGENT_STOP_TIMEOUT_MS: u64 = 12_000;
+const HUB_QUIT_RESPONSE_SLACK_MS: u64 = 3_000;
+const HUB_QUIT_REQUEST_TIMEOUT_MS: u64 = HUB_AGENT_STOP_TIMEOUT_MS + HUB_QUIT_RESPONSE_SLACK_MS;
+const HUB_QUIT_REQUEST_TIMEOUT: Duration = Duration::from_millis(HUB_QUIT_REQUEST_TIMEOUT_MS);
+const HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
+const HUB_QUIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(
+    HUB_QUIT_REQUEST_TIMEOUT_MS + HUB_AGENT_STOP_TIMEOUT_MS + HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+);
+const HUB_QUIT_OBSERVE_POLL: Duration = Duration::from_millis(50);
+const WINDOW_CLOSE_PRESENTATION_ACK_TIMEOUT: Duration = Duration::from_secs(1);
+const WINDOW_CLOSE_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
 #[cfg(any(target_os = "windows", test))]
@@ -135,37 +151,285 @@ struct PickedAgentFile {
     bytes: Vec<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct RuntimeInfo {
     pid: Option<u32>,
     port: u16,
+    #[serde(rename = "instanceId")]
+    instance_id: Option<String>,
     #[serde(rename = "ownerToken")]
     owner_token: Option<String>,
 }
 
-#[derive(Serialize)]
-struct HubRuntime {
-    pid: Option<u32>,
-    port: u16,
-}
-
-#[derive(Serialize)]
-struct StopHubCommandResult {
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    others: Option<usize>,
+enum RuntimeLoadResult {
+    Absent,
+    Present(RuntimeInfo),
+    Unreadable(String),
 }
 
 #[derive(Deserialize)]
-struct ShutdownConflictBody {
+struct QuitResponseBody {
+    message: Option<String>,
     others: Option<usize>,
 }
 
-enum ShutdownRequestResult {
-    Stopped,
-    Conflict(usize),
-    HubUnavailable,
+#[derive(Clone)]
+struct HubQuitTarget {
+    pid: u32,
+    instance_id: String,
+}
+
+/// A quit is longer lived than the gesture which began it. Keeping its identity
+/// here prevents a cancelled presentation or an old network callback from
+/// completing a newer (or no longer active) attempt.
+#[derive(Debug, PartialEq, Eq)]
+enum QuitAttemptState {
+    Requested { force: bool },
+    WaitingForNativeConsent,
+    ConfirmingHubGone,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct QuitAttempt {
+    id: u64,
+    state: QuitAttemptState,
+}
+
+#[derive(Default)]
+struct QuitCoordinator {
+    next_id: u64,
+    active: Option<QuitAttempt>,
+}
+
+enum QuitStart {
+    Started(u64),
+    InProgress,
+}
+
+enum QuitRequestResult {
+    Committed {
+        target: HubQuitTarget,
+        diagnostic: Option<String>,
+    },
+    Conflict(Option<usize>),
+    Unobserved(HubQuitTarget),
     Failed(String),
+}
+
+enum QuitAction {
+    AskNative {
+        others: Option<usize>,
+    },
+    SendForced {
+        attempt_id: u64,
+    },
+    Observe {
+        attempt_id: u64,
+        target: HubQuitTarget,
+        diagnostic: Option<String>,
+    },
+    Exit,
+    ExitWithDiagnostic(String),
+    Failed(String),
+    Ignore,
+}
+
+impl QuitCoordinator {
+    fn begin(&mut self) -> QuitStart {
+        if self.active.is_some() {
+            return QuitStart::InProgress;
+        }
+        self.next_id += 1;
+        let id = self.next_id;
+        self.active = Some(QuitAttempt {
+            id,
+            state: QuitAttemptState::Requested { force: false },
+        });
+        QuitStart::Started(id)
+    }
+
+    fn request_finished(&mut self, id: u64, force: bool, result: QuitRequestResult) -> QuitAction {
+        let Some(attempt) = self.active.as_mut() else {
+            return QuitAction::Ignore;
+        };
+        if attempt.id != id
+            || !matches!(attempt.state, QuitAttemptState::Requested { force: expected } if expected == force)
+        {
+            return QuitAction::Ignore;
+        }
+
+        match result {
+            QuitRequestResult::Conflict(others) if !force => {
+                attempt.state = QuitAttemptState::WaitingForNativeConsent;
+                QuitAction::AskNative { others }
+            }
+            QuitRequestResult::Conflict(_) => {
+                self.active = None;
+                QuitAction::Failed("Quit was refused again; nothing was stopped.".to_string())
+            }
+            QuitRequestResult::Committed { target, diagnostic } => {
+                attempt.state = QuitAttemptState::ConfirmingHubGone;
+                QuitAction::Observe {
+                    attempt_id: id,
+                    target,
+                    diagnostic,
+                }
+            }
+            QuitRequestResult::Unobserved(target) => {
+                attempt.state = QuitAttemptState::ConfirmingHubGone;
+                QuitAction::Observe {
+                    attempt_id: id,
+                    target,
+                    diagnostic: None,
+                }
+            }
+            QuitRequestResult::Failed(message) => {
+                self.active = None;
+                QuitAction::Failed(message)
+            }
+        }
+    }
+
+    fn resolve_native_consent(&mut self, confirmed: bool) -> QuitAction {
+        let Some(attempt) = self.active.as_mut() else {
+            return QuitAction::Ignore;
+        };
+        if !matches!(attempt.state, QuitAttemptState::WaitingForNativeConsent) {
+            return QuitAction::Ignore;
+        }
+        if !confirmed {
+            // A refusal ends this attempt. Any callback which carries its id is
+            // stale from this point on and therefore cannot exit the app.
+            self.active = None;
+            return QuitAction::Ignore;
+        }
+        attempt.state = QuitAttemptState::Requested { force: true };
+        QuitAction::SendForced {
+            attempt_id: attempt.id,
+        }
+    }
+
+    fn observation_finished(
+        &mut self,
+        id: u64,
+        observed: Result<(), String>,
+        diagnostic: Option<String>,
+    ) -> QuitAction {
+        let Some(attempt) = self.active.as_ref() else {
+            return QuitAction::Ignore;
+        };
+        if attempt.id != id || attempt.state != QuitAttemptState::ConfirmingHubGone {
+            return QuitAction::Ignore;
+        }
+        self.active = None;
+        match observed {
+            Ok(()) => diagnostic.map_or(QuitAction::Exit, QuitAction::ExitWithDiagnostic),
+            Err(message) => QuitAction::Failed(message),
+        }
+    }
+}
+
+fn quit_coordinator() -> &'static Mutex<QuitCoordinator> {
+    QUIT_COORDINATOR.get_or_init(|| Mutex::new(QuitCoordinator::default()))
+}
+
+/// A native close is never owned by the webview. The webview may render the
+/// choice, but acknowledgement and expiry are native so a dead renderer cannot
+/// permanently hold the close gesture.
+#[derive(Debug, PartialEq, Eq)]
+enum WindowCloseState {
+    WaitingForPresentation,
+    WaitingForAnswer,
+}
+
+#[derive(Default)]
+struct WindowCloseCoordinator {
+    next_id: u64,
+    active: Option<(u64, WindowCloseState)>,
+}
+
+enum WindowCloseStart {
+    Started(u64),
+    InProgress,
+}
+
+impl WindowCloseCoordinator {
+    fn begin(&mut self) -> WindowCloseStart {
+        if self.active.is_some() {
+            return WindowCloseStart::InProgress;
+        }
+        self.next_id += 1;
+        let id = self.next_id;
+        self.active = Some((id, WindowCloseState::WaitingForPresentation));
+        WindowCloseStart::Started(id)
+    }
+
+    fn acknowledged(&mut self, id: u64) -> bool {
+        let Some((active_id, state)) = self.active.as_mut() else {
+            return false;
+        };
+        if *active_id != id || *state != WindowCloseState::WaitingForPresentation {
+            return false;
+        }
+        *state = WindowCloseState::WaitingForAnswer;
+        true
+    }
+
+    /// Returns true only when the presentation was never acknowledged, so the
+    /// native fallback must be shown. An unanswered acknowledged presentation
+    /// simply expires, making a later gesture startable again.
+    fn timed_out(&mut self, id: u64) -> bool {
+        let Some((active_id, state)) = self.active.as_ref() else {
+            return false;
+        };
+        if *active_id != id {
+            return false;
+        }
+        let unacknowledged = *state == WindowCloseState::WaitingForPresentation;
+        if unacknowledged {
+            self.active = None;
+        }
+        unacknowledged
+    }
+
+    fn answer_timed_out(&mut self, id: u64) -> bool {
+        let Some((active_id, state)) = self.active.as_ref() else {
+            return false;
+        };
+        if *active_id != id || *state != WindowCloseState::WaitingForAnswer {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
+    fn answer(&mut self, id: u64) -> bool {
+        let Some((active_id, state)) = self.active.as_ref() else {
+            return false;
+        };
+        if *active_id != id || *state != WindowCloseState::WaitingForAnswer {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+}
+
+fn window_close_coordinator() -> &'static Mutex<WindowCloseCoordinator> {
+    WINDOW_CLOSE_COORDINATOR.get_or_init(|| Mutex::new(WindowCloseCoordinator::default()))
+}
+
+#[derive(Clone, Serialize)]
+struct WindowCloseRequest {
+    #[serde(rename = "attemptId")]
+    attempt_id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WindowCloseChoice {
+    Quit,
+    Tray,
 }
 
 /// Resolves the per-user Termora configuration directory.
@@ -375,12 +639,26 @@ fn get_state_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Reads runtime.json in the state dir.
-fn read_runtime_info() -> Option<RuntimeInfo> {
-    let state_dir = get_state_dir()?;
+/// Mirrors the hub CLI's three-way runtime observation: absence, a usable
+/// record, and every failure to read or parse it are deliberately distinct.
+fn load_runtime_info() -> RuntimeLoadResult {
+    let Some(state_dir) = get_state_dir() else {
+        return RuntimeLoadResult::Unreadable(
+            "failed to resolve the hub state directory".to_string(),
+        );
+    };
     let runtime_path = state_dir.join("runtime.json");
-    let contents = std::fs::read_to_string(&runtime_path).ok()?;
-    serde_json::from_str(&contents).ok()
+    let contents = match std::fs::read_to_string(&runtime_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return RuntimeLoadResult::Absent
+        }
+        Err(error) => return RuntimeLoadResult::Unreadable(error.to_string()),
+    };
+    match serde_json::from_str(&contents) {
+        Ok(runtime) => RuntimeLoadResult::Present(runtime),
+        Err(error) => RuntimeLoadResult::Unreadable(error.to_string()),
+    }
 }
 
 fn shutdown_caller_client_id() -> &'static Mutex<Option<String>> {
@@ -394,7 +672,10 @@ fn current_shutdown_caller_client_id() -> Option<String> {
 /// Reads the hub port from runtime.json in the state dir.
 #[cfg(not(dev))]
 fn read_runtime_port() -> Option<u16> {
-    read_runtime_info().map(|runtime| runtime.port)
+    match load_runtime_info() {
+        RuntimeLoadResult::Present(runtime) => Some(runtime.port),
+        RuntimeLoadResult::Absent | RuntimeLoadResult::Unreadable(_) => None,
+    }
 }
 
 /// Checks whether a hub is alive by probing its /api/health endpoint.
@@ -427,27 +708,8 @@ fn get_hub_port() -> u16 {
 }
 
 #[tauri::command]
-fn get_hub_runtime() -> HubRuntime {
-    match read_runtime_info() {
-        Some(runtime) => HubRuntime {
-            pid: runtime.pid,
-            port: runtime.port,
-        },
-        None => HubRuntime {
-            pid: None,
-            port: HUB_PORT.load(Ordering::Relaxed),
-        },
-    }
-}
-
-#[tauri::command]
 fn is_tray_available() -> bool {
     TRAY_AVAILABLE.load(Ordering::Relaxed)
-}
-
-#[tauri::command]
-fn exit_app(app: tauri::AppHandle) {
-    app.exit(0);
 }
 
 #[allow(non_snake_case)]
@@ -465,323 +727,187 @@ fn set_shutdown_caller_client_id(clientId: Option<String>) {
     }
 }
 
-#[tauri::command]
-fn stop_legacy_hub() -> Result<bool, String> {
-    let Some(runtime) = read_runtime_info() else {
-        return Ok(true);
-    };
-
-    match stop_legacy_hub_from_runtime(&runtime) {
-        ShutdownRequestResult::Stopped | ShutdownRequestResult::HubUnavailable => Ok(true),
-        ShutdownRequestResult::Conflict(_) => {
-            Err("legacy hub shutdown unexpectedly conflicted".to_string())
+/// Requests the hub-owned quit sequence. This
+/// never repairs a successful request by killing a PID: `/api/quit` owns the
+/// agent and terminal teardown, and a missing response is only observed.
+fn request_hub_quit(force: bool) -> QuitRequestResult {
+    let runtime = match load_runtime_info() {
+        RuntimeLoadResult::Absent => return missing_runtime_record_quit_result(),
+        RuntimeLoadResult::Unreadable(error) => {
+            return QuitRequestResult::Failed(format!(
+                "cannot determine whether the hub stopped because runtime.json cannot be read: {error}"
+            ));
         }
-        ShutdownRequestResult::Failed(message) => Err(message),
-    }
-}
-
-#[tauri::command]
-fn stop_hub(force: bool) -> Result<StopHubCommandResult, String> {
-    match request_hub_shutdown(force) {
-        ShutdownRequestResult::Stopped | ShutdownRequestResult::HubUnavailable => {
-            Ok(StopHubCommandResult {
-                status: "stopped",
-                others: None,
-            })
-        }
-        ShutdownRequestResult::Conflict(others) => Ok(StopHubCommandResult {
-            status: "conflict",
-            others: Some(others),
-        }),
-        ShutdownRequestResult::Failed(message) => Err(message),
-    }
-}
-
-fn request_hub_shutdown(force: bool) -> ShutdownRequestResult {
-    let Some(runtime) = read_runtime_info() else {
-        return ShutdownRequestResult::HubUnavailable;
+        RuntimeLoadResult::Present(runtime) => runtime,
     };
     let Some(owner_token) = runtime.owner_token.clone() else {
-        return stop_legacy_hub_from_runtime(&runtime);
+        return QuitRequestResult::Failed(
+            "the running hub does not support the authenticated quit endpoint".to_string(),
+        );
     };
+    let Some(pid) = runtime
+        .pid
+        .filter(|pid| *pid != 0 && *pid != std::process::id())
+    else {
+        return QuitRequestResult::Failed("runtime.json is missing a valid hub pid".to_string());
+    };
+    let Some(instance_id) = runtime.instance_id.clone() else {
+        return QuitRequestResult::Failed(
+            "runtime.json is missing the hub instance identity; refusing an unobservable quit"
+                .to_string(),
+        );
+    };
+    let target = HubQuitTarget { pid, instance_id };
 
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(HUB_QUIT_REQUEST_TIMEOUT)
         .build()
     {
         Ok(client) => client,
-        Err(error) => return ShutdownRequestResult::Failed(error.to_string()),
+        Err(error) => return QuitRequestResult::Failed(error.to_string()),
     };
-    let force_query = if force { "?force=1" } else { "" };
-    let url = format!(
-        "http://127.0.0.1:{}/api/shutdown{}",
-        runtime.port, force_query
-    );
-    let mut request = client.post(url).header("X-Termora-Owner", owner_token);
+    let owner_header = match owner_token.parse::<reqwest::header::HeaderValue>() {
+        Ok(header) => header,
+        Err(error) => {
+            return QuitRequestResult::Failed(format!(
+                "quit request was not sent because its owner header is invalid: {error}"
+            ))
+        }
+    };
+    let url = hub_quit_url(runtime.port, force);
+    let mut request = client.post(url).header("X-Termora-Owner", owner_header);
     if let Some(client_id) = current_shutdown_caller_client_id() {
         request = request.header("X-Termora-Client-Id", client_id);
     }
 
     let response = match request.send() {
         Ok(response) => response,
-        Err(error) => {
-            eprintln!(
-                "[termora] owner-token shutdown request failed; refusing PID fallback: {}",
-                error
-            );
-            return owner_token_shutdown_failed(&runtime, error.to_string());
-        }
+        Err(error) => return classify_quit_transport_error(error, target),
     };
-
     if response.status().is_success() {
-        return confirm_hub_stopped_or_kill(&runtime);
-    }
-
-    if response.status().as_u16() == 409 {
-        let body_text = response.text().unwrap_or_else(|error| {
-            eprintln!(
-                "[termora] failed to read shutdown conflict response: {}",
-                error
-            );
-            String::new()
-        });
-        let others = match serde_json::from_str::<ShutdownConflictBody>(&body_text) {
-            Ok(body) => body.others.unwrap_or_else(|| {
-                eprintln!(
-                    "[termora] shutdown conflict response missing others count: {}",
-                    body_text
-                );
-                1
-            }),
-            Err(error) => {
-                eprintln!(
-                    "[termora] malformed shutdown conflict response: {}; body={}",
-                    error, body_text
-                );
-                1
-            }
+        return QuitRequestResult::Committed {
+            target,
+            diagnostic: None,
         };
-        return ShutdownRequestResult::Conflict(others);
     }
-
-    eprintln!(
-        "[termora] owner-token shutdown failed with HTTP {}; refusing PID fallback",
-        response.status()
-    );
-    owner_token_shutdown_failed(&runtime, format!("HTTP {}", response.status()))
+    let status = response.status().as_u16();
+    let body = response.text().unwrap_or_default();
+    classify_quit_response(status, &body, target)
 }
 
-fn owner_token_shutdown_failed(runtime: &RuntimeInfo, reason: String) -> ShutdownRequestResult {
-    if let Some(pid) = runtime.pid {
-        if pid != 0 && pid != std::process::id() && !is_pid_alive(pid) {
-            eprintln!(
-                "[termora] hub pid {} is already stopped after owner-token shutdown failure",
-                pid
-            );
-            return ShutdownRequestResult::HubUnavailable;
-        }
-    }
-
-    ShutdownRequestResult::Failed(format!(
-        "owner-token shutdown request failed; refusing PID fallback: {}",
-        reason
-    ))
+fn missing_runtime_record_quit_result() -> QuitRequestResult {
+    QuitRequestResult::Failed("cannot quit because the hub runtime record is missing".to_string())
 }
 
-fn stop_legacy_hub_from_runtime(runtime: &RuntimeInfo) -> ShutdownRequestResult {
-    let Some(pid) = runtime.pid else {
-        return ShutdownRequestResult::Failed("legacy runtime.json is missing pid".to_string());
-    };
-
-    if pid == 0 || pid == std::process::id() {
-        return ShutdownRequestResult::Failed(format!("refusing to kill invalid hub pid {}", pid));
+fn classify_quit_transport_error(
+    error: reqwest::Error,
+    target: HubQuitTarget,
+) -> QuitRequestResult {
+    // A connect or request-build error happens before an HTTP request exists.
+    // Timeouts and read failures can happen after the hub accepted it, so only
+    // those remain ambiguous and must be observed.
+    if error.is_connect() || error.is_builder() {
+        return QuitRequestResult::Failed(format!("quit request was not sent: {error}"));
     }
-
-    if !is_pid_alive(pid) {
-        return ShutdownRequestResult::HubUnavailable;
-    }
-
-    if let Err(message) = validate_hub_process_identity(pid) {
-        return ShutdownRequestResult::Failed(message);
-    }
-
-    match signal_hub_pid(pid) {
-        Ok(()) => {
-            if wait_for_pid_exit(pid, Duration::from_secs(5)) {
-                ShutdownRequestResult::Stopped
-            } else {
-                ShutdownRequestResult::Failed(format!(
-                    "hub pid {} is still alive after PID-kill fallback",
-                    pid
-                ))
-            }
-        }
-        Err(message) => {
-            if !is_pid_alive(pid) {
-                ShutdownRequestResult::Stopped
-            } else {
-                ShutdownRequestResult::Failed(message)
-            }
-        }
-    }
+    eprintln!("[termora] quit response was not observed: {error}");
+    QuitRequestResult::Unobserved(target)
 }
 
-fn confirm_hub_stopped_or_kill(runtime: &RuntimeInfo) -> ShutdownRequestResult {
-    let Some(pid) = runtime.pid else {
-        return ShutdownRequestResult::Failed(
-            "runtime.json is missing pid; cannot confirm hub stopped".to_string(),
-        );
-    };
-
-    if pid == 0 || pid == std::process::id() {
-        return ShutdownRequestResult::Failed(format!("refusing to kill invalid hub pid {}", pid));
+fn classify_quit_response(status: u16, body: &str, target: HubQuitTarget) -> QuitRequestResult {
+    if status == 409 {
+        let others = serde_json::from_str::<QuitResponseBody>(body)
+            .ok()
+            .and_then(|body| body.others)
+            .filter(|others| *others > 0);
+        return QuitRequestResult::Conflict(others);
     }
-
-    if wait_for_pid_exit(pid, Duration::from_secs(10)) {
-        eprintln!("[termora] confirmed hub pid {} is stopped", pid);
-        return ShutdownRequestResult::Stopped;
+    if status == 503 {
+        let diagnostic = serde_json::from_str::<QuitResponseBody>(body)
+            .ok()
+            .and_then(|body| body.message)
+            .unwrap_or_else(|| "The local agent was not confirmed stopped.".to_string());
+        // /api/quit schedules teardown after it sends this 503. The stopped
+        // agent is uncertain; the hub teardown is not, so observe first.
+        return QuitRequestResult::Committed {
+            target,
+            diagnostic: Some(diagnostic),
+        };
     }
-
-    if let Err(message) = validate_hub_process_identity(pid) {
-        return ShutdownRequestResult::Failed(message);
-    }
-
-    eprintln!(
-        "[termora] hub pid {} still alive after graceful shutdown; killing by PID",
-        pid
-    );
-    match signal_hub_pid(pid) {
-        Ok(()) => {
-            if wait_for_pid_exit(pid, Duration::from_secs(5)) {
-                eprintln!(
-                    "[termora] confirmed hub pid {} is stopped after PID kill",
-                    pid
-                );
-                ShutdownRequestResult::Stopped
-            } else {
-                ShutdownRequestResult::Failed(format!(
-                    "hub pid {} is still alive after PID-kill fallback",
-                    pid
-                ))
-            }
-        }
-        Err(message) => {
-            if !is_pid_alive(pid) {
-                ShutdownRequestResult::Stopped
-            } else {
-                ShutdownRequestResult::Failed(message)
-            }
-        }
-    }
+    QuitRequestResult::Failed(format!("quit request failed with HTTP {status}"))
 }
 
-fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+fn hub_quit_url(port: u16, force: bool) -> String {
+    let force_query = if force { "?force=1" } else { "" };
+    format!("http://127.0.0.1:{port}/api/quit{force_query}")
+}
+
+fn observe_hub_quit(target: &HubQuitTarget) -> Result<(), String> {
+    observe_hub_quit_with(
+        target,
+        load_runtime_info,
+        is_pid_alive,
+        HUB_QUIT_OBSERVE_TIMEOUT,
+    )
+}
+
+fn observe_hub_quit_with<Load, Alive>(
+    target: &HubQuitTarget,
+    load_runtime: Load,
+    is_pid_alive: Alive,
+    timeout: Duration,
+) -> Result<(), String>
+where
+    Load: Fn() -> RuntimeLoadResult,
+    Alive: Fn(u32) -> bool,
+{
     let deadline = Instant::now() + timeout;
     loop {
-        if !is_pid_alive(pid) {
-            return true;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        std::thread::sleep(remaining.min(Duration::from_millis(100)));
-    }
-}
-
-fn validate_hub_process_identity(pid: u32) -> Result<(), String> {
-    let Some(command) = read_process_command_line(pid) else {
-        return Err(format!(
-            "refusing to kill hub pid {} because process identity could not be verified",
-            pid
-        ));
-    };
-
-    if command_looks_like_termora_hub(&command) {
-        return Ok(());
-    }
-
-    Err(format!(
-        "refusing to kill hub pid {} because process does not look like termora-hub: {}",
-        pid,
-        summarize_command(&command)
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn read_process_command_line(pid: u32) -> Option<String> {
-    let script = format!(
-        "(Get-CimInstance Win32_Process -Filter \"ProcessId = {}\" | Select-Object -ExpandProperty CommandLine)",
-        pid
-    );
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if command.is_empty() {
-        None
-    } else {
-        Some(command)
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn read_process_command_line(pid: u32) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
-            let command = String::from_utf8_lossy(&raw)
-                .replace('\0', " ")
-                .trim()
-                .to_string();
-            if !command.is_empty() {
-                return Some(command);
+        let current = load_runtime();
+        match &current {
+            RuntimeLoadResult::Unreadable(error) => {
+                return Err(format!(
+                    "Hub teardown could not be confirmed because runtime.json cannot be read: {error}"
+                ));
             }
+            RuntimeLoadResult::Present(runtime)
+                if runtime.instance_id.as_deref() != Some(&target.instance_id) =>
+            {
+                return Err(
+                    "Hub quit target exited, but runtime.json now belongs to a replacement hub"
+                        .to_string(),
+                );
+            }
+            RuntimeLoadResult::Absent if !is_pid_alive(target.pid) => {
+                // Re-read after liveness so an absent record and dead PID from
+                // different moments cannot prove a replacement has gone too.
+                match load_runtime() {
+                    RuntimeLoadResult::Absent => return Ok(()),
+                    RuntimeLoadResult::Unreadable(error) => return Err(format!(
+                        "Hub teardown could not be confirmed because runtime.json cannot be read: {error}"
+                    )),
+                    RuntimeLoadResult::Present(runtime)
+                        if runtime.instance_id.as_deref() != Some(&target.instance_id) =>
+                    {
+                        return Err("Hub quit target exited, but runtime.json now belongs to a replacement hub".to_string());
+                    }
+                    RuntimeLoadResult::Present(_) => {}
+                }
+            }
+            RuntimeLoadResult::Absent | RuntimeLoadResult::Present(_) => {}
         }
+        if Instant::now() >= deadline {
+            let detail = match current {
+                RuntimeLoadResult::Absent => "runtime record was removed but its PID remains live",
+                RuntimeLoadResult::Present(_) => "runtime record remains",
+                RuntimeLoadResult::Unreadable(_) => unreachable!(),
+            };
+            return Err(format!(
+                "Hub teardown was not confirmed within {}ms: {detail}",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(HUB_QUIT_OBSERVE_POLL);
     }
-
-    let pid_text = pid.to_string();
-    let output = std::process::Command::new("ps")
-        .args(["-p", pid_text.as_str(), "-o", "command="])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if command.is_empty() {
-        None
-    } else {
-        Some(command)
-    }
-}
-
-fn command_looks_like_termora_hub(command: &str) -> bool {
-    let normalized = command.to_ascii_lowercase();
-    normalized.contains("termora-hub")
-        || normalized.contains("termora_hub")
-        || normalized.contains("@termora/hub")
-        || normalized.contains("packages/hub/src")
-        || normalized.contains("packages\\hub\\src")
-}
-
-fn summarize_command(command: &str) -> String {
-    const MAX_COMMAND_CHARS: usize = 160;
-    if command.chars().count() <= MAX_COMMAND_CHARS {
-        return command.to_string();
-    }
-
-    let mut summary = command
-        .chars()
-        .take(MAX_COMMAND_CHARS.saturating_sub(3))
-        .collect::<String>();
-    summary.push_str("...");
-    summary
 }
 
 #[cfg(target_os = "windows")]
@@ -791,63 +917,54 @@ fn is_pid_alive(pid: u32) -> bool {
         .args(["/FI", &filter, "/FO", "CSV", "/NH"])
         .output();
     let Ok(output) = output else {
-        return false;
+        return true;
     };
     if !output.status.success() {
-        return false;
+        return true;
     }
     let expected = pid.to_string();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split(',').nth(1))
-        .any(|field| field.trim().trim_matches('"') == expected)
+    let mut parsed_a_row = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(field) = line.split(',').nth(1) else {
+            continue;
+        };
+        parsed_a_row = true;
+        if field.trim().trim_matches('"') == expected {
+            return true;
+        }
+    }
+    // A command failure, localized no-match text, or malformed CSV cannot
+    // establish ESRCH's equivalent. Only a successfully parsed task list does.
+    !parsed_a_row
 }
 
 #[cfg(not(target_os = "windows"))]
 fn is_pid_alive(pid: u32) -> bool {
-    matches!(
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status(),
-        Ok(status) if status.success()
-    )
-}
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
 
-#[cfg(target_os = "windows")]
-fn signal_hub_pid(pid: u32) -> Result<(), String> {
-    let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status()
-        .map_err(|error| {
-            format!(
-                "failed to run taskkill for legacy hub pid {}: {}",
-                pid, error
-            )
-        })?;
-    if status.success() {
+    // POSIX reserves signal 0 for existence/permission probing. ESRCH is the
+    // only definite absence; EPERM and every other error fail closed as live,
+    // matching packages/hub/src/cli.ts:isPidAlive.
+    let result = unsafe { kill(pid as i32, 0) };
+    let probe = if result == 0 {
         Ok(())
     } else {
-        Err(format!(
-            "taskkill failed for legacy hub pid {}: {}",
-            pid, status
-        ))
-    }
+        Err(std::io::Error::last_os_error().raw_os_error())
+    };
+    pid_probe_reports_alive(probe)
 }
 
+/// Converts a POSIX PID probe to liveness. Only ESRCH establishes absence; an
+/// unavailable probe, EPERM, and every other error remain live.
+///
+/// Unix only, because Windows has no errno to read: there the same rule is
+/// expressed over `tasklist` output, where only a successfully parsed listing
+/// that does not contain the pid can mean it is gone.
 #[cfg(not(target_os = "windows"))]
-fn signal_hub_pid(pid: u32) -> Result<(), String> {
-    let status = std::process::Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status()
-        .map_err(|error| format!("failed to signal legacy hub pid {}: {}", pid, error))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "kill failed for legacy hub pid {}: {}",
-            pid, status
-        ))
-    }
+fn pid_probe_reports_alive(probe: Result<(), Option<i32>>) -> bool {
+    !matches!(probe, Err(Some(3)))
 }
 
 fn show_shutdown_error(app: &tauri::AppHandle, message: String) {
@@ -859,53 +976,244 @@ fn show_shutdown_error(app: &tauri::AppHandle, message: String) {
         .show(|_| {});
 }
 
-fn handle_tray_quit(app: tauri::AppHandle) {
-    std::thread::spawn(move || match request_hub_shutdown(false) {
-        ShutdownRequestResult::Stopped | ShutdownRequestResult::HubUnavailable => {
-            app.exit(0);
-        }
-        ShutdownRequestResult::Conflict(others) => {
-            let suffix = if others == 1 {
-                "client is"
-            } else {
-                "clients are"
-            };
-            let confirmed = app
-                .dialog()
-                .message(format!(
-                    "{} other {} connected. Stop the hub anyway?",
-                    others, suffix
-                ))
-                .title("Other Clients Connected")
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom(
-                    "Stop anyway".to_string(),
-                    "Cancel".to_string(),
-                ))
-                .blocking_show();
-            if !confirmed {
-                return;
-            }
+fn show_quit_diagnostic_then_exit(app: tauri::AppHandle, diagnostic: String) {
+    app.dialog()
+        .message(format!(
+            "The hub shut down, but the local agent was not confirmed stopped: {diagnostic}"
+        ))
+        .title("Agent Stop Not Confirmed")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(0));
+}
 
-            match request_hub_shutdown(true) {
-                ShutdownRequestResult::Stopped | ShutdownRequestResult::HubUnavailable => {
-                    app.exit(0);
-                }
-                ShutdownRequestResult::Conflict(_) => {
-                    show_shutdown_error(
-                        &app,
-                        "The hub still reports other connected clients.".to_string(),
-                    );
-                }
-                ShutdownRequestResult::Failed(message) => {
-                    show_shutdown_error(&app, message);
-                }
-            }
+fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
+    let subject = match others {
+        Some(1) => "1 other client".to_string(),
+        Some(others) => format!("{others} other clients"),
+        None => "other connected clients (the hub did not provide a count)".to_string(),
+    };
+    let confirmed = app
+        .dialog()
+        .message(format!("{subject} are connected. Quit Termora anyway?"))
+        .title("Other Clients Connected")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Quit anyway".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show();
+    if confirmed {
+        let action = quit_coordinator()
+            .lock()
+            .expect("quit coordinator lock poisoned")
+            .resolve_native_consent(true);
+        apply_quit_action(app, action);
+    } else {
+        let action = quit_coordinator()
+            .lock()
+            .expect("quit coordinator lock poisoned")
+            .resolve_native_consent(false);
+        apply_quit_action(app, action);
+    }
+}
+
+fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
+    match action {
+        QuitAction::AskNative { others } => present_native_quit_consent(app, others),
+        QuitAction::SendForced { attempt_id } => {
+            std::thread::spawn(move || {
+                let result = request_hub_quit(true);
+                let action = quit_coordinator()
+                    .lock()
+                    .expect("quit coordinator lock poisoned")
+                    .request_finished(attempt_id, true, result);
+                apply_quit_action(app, action);
+            });
         }
-        ShutdownRequestResult::Failed(message) => {
-            show_shutdown_error(&app, message);
+        QuitAction::Observe {
+            attempt_id,
+            target,
+            diagnostic,
+        } => {
+            std::thread::spawn(move || {
+                let observed = observe_hub_quit(&target);
+                let action = quit_coordinator()
+                    .lock()
+                    .expect("quit coordinator lock poisoned")
+                    .observation_finished(attempt_id, observed, diagnostic);
+                apply_quit_action(app, action);
+            });
         }
+        QuitAction::Exit => app.exit(0),
+        QuitAction::ExitWithDiagnostic(diagnostic) => {
+            show_quit_diagnostic_then_exit(app, diagnostic)
+        }
+        QuitAction::Failed(message) => show_shutdown_error(&app, message),
+        QuitAction::Ignore => {}
+    }
+}
+
+fn request_app_quit(app: tauri::AppHandle) {
+    let started = quit_coordinator()
+        .lock()
+        .expect("quit coordinator lock poisoned")
+        .begin();
+    match started {
+        QuitStart::Started(attempt_id) => {
+            let request_app = app.clone();
+            std::thread::spawn(move || {
+                let result = request_hub_quit(false);
+                let action = quit_coordinator()
+                    .lock()
+                    .expect("quit coordinator lock poisoned")
+                    .request_finished(attempt_id, false, result);
+                apply_quit_action(request_app, action);
+            });
+        }
+        QuitStart::InProgress => {
+            // The native dialog is synchronous, so there is no renderer-owned
+            // acknowledgement or expiry path to manage here.
+        }
+    }
+}
+
+fn handle_tray_quit(app: tauri::AppHandle) {
+    request_app_quit(app);
+}
+
+fn hide_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if TRAY_AVAILABLE.load(Ordering::Relaxed) {
+        let _ = window.hide();
+    } else {
+        let _ = window.minimize();
+    }
+}
+
+fn present_native_window_close_choice(app: tauri::AppHandle) {
+    let confirmed = app
+        .dialog()
+        .message("Quit Termora completely?")
+        .title("Quit Termora")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Quit completely".to_string(),
+            "Keep running".to_string(),
+        ))
+        .blocking_show();
+    if confirmed {
+        request_app_quit(app);
+    }
+}
+
+fn expire_window_close_presentation(app: tauri::AppHandle, attempt_id: u64) {
+    let fallback = window_close_coordinator()
+        .lock()
+        .expect("window close coordinator lock poisoned")
+        .timed_out(attempt_id);
+    if fallback {
+        present_native_window_close_choice(app);
+    }
+}
+
+fn begin_window_close_presentation(app: tauri::AppHandle) {
+    let started = window_close_coordinator()
+        .lock()
+        .expect("window close coordinator lock poisoned")
+        .begin();
+    let WindowCloseStart::Started(attempt_id) = started else {
+        return;
+    };
+    let delivered = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+        && app
+            .emit("desktop-close-requested", WindowCloseRequest { attempt_id })
+            .is_ok();
+    if !delivered {
+        expire_window_close_presentation(app, attempt_id);
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(WINDOW_CLOSE_PRESENTATION_ACK_TIMEOUT);
+        expire_window_close_presentation(app, attempt_id);
     });
+}
+
+fn handle_native_window_close(app: tauri::AppHandle) {
+    match close_behavior_command_result(read_close_behavior()) {
+        Ok(CloseBehavior::Hide) => hide_main_window(&app),
+        Ok(CloseBehavior::Quit) => {
+            request_app_quit(app);
+        }
+        Ok(CloseBehavior::Ask) => begin_window_close_presentation(app),
+        Err(message) => show_shutdown_error(
+            &app,
+            format!("Close preference could not be loaded: {message}"),
+        ),
+    }
+}
+
+#[tauri::command]
+fn acknowledge_desktop_close(app: tauri::AppHandle, attempt_id: u64) {
+    let acknowledged = window_close_coordinator()
+        .lock()
+        .expect("window close coordinator lock poisoned")
+        .acknowledged(attempt_id);
+    if acknowledged {
+        std::thread::spawn(move || {
+            std::thread::sleep(WINDOW_CLOSE_ANSWER_TIMEOUT);
+            let expired = window_close_coordinator()
+                .lock()
+                .expect("window close coordinator lock poisoned")
+                .answer_timed_out(attempt_id);
+            if expired {
+                let _ = app.emit("desktop-close-expired", WindowCloseRequest { attempt_id });
+            }
+        });
+    }
+}
+
+#[tauri::command]
+fn answer_desktop_close(
+    app: tauri::AppHandle,
+    attempt_id: u64,
+    action: WindowCloseChoice,
+    remember: bool,
+) -> Result<(), String> {
+    let accepted = window_close_coordinator()
+        .lock()
+        .expect("window close coordinator lock poisoned")
+        .answer(attempt_id);
+    if !accepted {
+        return Ok(());
+    }
+    if remember {
+        let behavior = match action {
+            WindowCloseChoice::Quit => CloseBehavior::Quit,
+            WindowCloseChoice::Tray => CloseBehavior::Hide,
+        };
+        set_close_behavior(behavior)?;
+    }
+    match action {
+        WindowCloseChoice::Quit => {
+            request_app_quit(app);
+        }
+        WindowCloseChoice::Tray => hide_main_window(&app),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_desktop_close(attempt_id: u64) {
+    let _ = window_close_coordinator()
+        .lock()
+        .expect("window close coordinator lock poisoned")
+        .answer(attempt_id);
 }
 
 #[tauri::command]
@@ -1192,16 +1500,23 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_hub_auth_token,
             get_hub_port,
-            get_hub_runtime,
             is_tray_available,
             get_close_behavior,
             set_close_behavior,
-            exit_app,
             set_shutdown_caller_client_id,
-            stop_hub,
-            stop_legacy_hub,
+            acknowledge_desktop_close,
+            answer_desktop_close,
+            cancel_desktop_close,
             pick_and_read_agent_file
         ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    handle_native_window_close(window.app_handle().clone());
+                }
+            }
+        })
         .setup(setup_app)
         .run(tauri::generate_context!())
         .expect("error while running termora");
@@ -1304,48 +1619,6 @@ mod tests {
     }
 
     #[test]
-    fn command_looks_like_termora_hub_matches_known_hub_invocations() {
-        assert!(command_looks_like_termora_hub("termora-hub --port 4130"));
-        assert!(command_looks_like_termora_hub(
-            "TERMORA_HUB.exe --port 4130"
-        ));
-        assert!(command_looks_like_termora_hub(
-            "node packages/hub/src/index.ts"
-        ));
-        assert!(command_looks_like_termora_hub(
-            "node packages\\hub\\src\\index.ts"
-        ));
-        assert!(command_looks_like_termora_hub(
-            "pnpm --filter @termora/hub dev"
-        ));
-    }
-
-    #[test]
-    fn command_looks_like_termora_hub_rejects_unrelated_commands() {
-        assert!(!command_looks_like_termora_hub(""));
-        assert!(!command_looks_like_termora_hub("termora-agent --version"));
-        assert!(!command_looks_like_termora_hub(
-            "node packages/web/src/main.ts"
-        ));
-    }
-
-    #[test]
-    fn summarize_command_keeps_short_commands_unchanged() {
-        let command = "termora-hub --port 4130";
-
-        assert_eq!(summarize_command(command), command);
-    }
-
-    #[test]
-    fn summarize_command_truncates_long_commands_with_ellipsis() {
-        let command = "a".repeat(161);
-        let summary = summarize_command(&command);
-
-        assert_eq!(summary.chars().count(), 160);
-        assert_eq!(summary, format!("{}...", "a".repeat(157)));
-    }
-
-    #[test]
     fn msix_package_identity_statuses_are_classified_fail_closed() {
         assert_eq!(
             classify_package_identity_status(ERROR_INSUFFICIENT_BUFFER),
@@ -1382,5 +1655,231 @@ mod tests {
             classify_package_identity_lookup_error(5),
             PackageIdentityProbe::Inconclusive { status: 5 }
         );
+    }
+
+    fn test_target() -> HubQuitTarget {
+        HubQuitTarget {
+            pid: 42,
+            instance_id: "target".to_string(),
+        }
+    }
+
+    #[test]
+    fn declined_native_conflict_keeps_the_hub_and_app_open() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("first gesture must start an attempt");
+        };
+        assert!(matches!(
+            coordinator.request_finished(id, false, QuitRequestResult::Conflict(Some(2))),
+            QuitAction::AskNative { others: Some(2) }
+        ));
+
+        assert!(matches!(
+            coordinator.resolve_native_consent(false),
+            QuitAction::Ignore
+        ));
+        assert!(matches!(
+            coordinator.request_finished(
+                id,
+                false,
+                QuitRequestResult::Committed {
+                    target: test_target(),
+                    diagnostic: None
+                }
+            ),
+            QuitAction::Ignore
+        ));
+        assert!(coordinator.active.is_none());
+    }
+
+    #[test]
+    fn a_second_gesture_joins_the_active_attempt() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(_) = coordinator.begin() else {
+            panic!("first gesture must start an attempt");
+        };
+        assert!(matches!(coordinator.begin(), QuitStart::InProgress));
+        assert_eq!(coordinator.next_id, 1);
+    }
+
+    #[test]
+    fn native_conflict_confirmation_sends_the_override() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("first gesture must start an attempt");
+        };
+        assert!(matches!(
+            coordinator.resolve_native_consent(true),
+            QuitAction::Ignore
+        ));
+        assert!(matches!(
+            coordinator.request_finished(id, false, QuitRequestResult::Conflict(Some(3))),
+            QuitAction::AskNative { others: Some(3) }
+        ));
+        assert!(matches!(
+            coordinator.resolve_native_consent(true),
+            QuitAction::SendForced { attempt_id } if attempt_id == id
+        ));
+    }
+
+    #[test]
+    fn lost_quit_response_is_observed_instead_of_reported_as_a_failure() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("first gesture must start an attempt");
+        };
+
+        assert!(matches!(
+            coordinator.request_finished(id, false, QuitRequestResult::Unobserved(test_target())),
+            QuitAction::Observe { attempt_id, .. } if attempt_id == id
+        ));
+    }
+
+    #[test]
+    fn missing_runtime_record_fails_instead_of_exiting_the_app() {
+        assert!(matches!(
+            missing_runtime_record_quit_result(),
+            QuitRequestResult::Failed(message) if message.contains("runtime record is missing")
+        ));
+    }
+
+    #[test]
+    fn desktop_quit_uses_the_hub_quit_endpoint_that_ends_the_agent() {
+        assert_eq!(hub_quit_url(4100, false), "http://127.0.0.1:4100/api/quit");
+        assert_eq!(
+            hub_quit_url(4100, true),
+            "http://127.0.0.1:4100/api/quit?force=1"
+        );
+    }
+
+    #[test]
+    fn unreadable_runtime_never_proves_the_hub_stopped() {
+        let error = observe_hub_quit_with(
+            &test_target(),
+            || RuntimeLoadResult::Unreadable("corrupt JSON".to_string()),
+            |_| false,
+            Duration::ZERO,
+        )
+        .expect_err("unreadable runtime must fail observation");
+        assert!(error.contains("cannot be read"));
+    }
+
+    // Unix only: the helper it exercises is the POSIX errno rule. Windows
+    // expresses the same fail-closed rule over parsed `tasklist` output.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn inconclusive_pid_probe_never_proves_the_hub_stopped() {
+        assert!(pid_probe_reports_alive(Err(None)));
+        let error = observe_hub_quit_with(
+            &test_target(),
+            || RuntimeLoadResult::Absent,
+            |_| true,
+            Duration::ZERO,
+        )
+        .expect_err("a probe error is live, not proof of teardown");
+        assert!(error.contains("PID remains live"));
+    }
+
+    #[test]
+    fn connection_refusal_is_reported_as_a_transport_failure_not_observation() {
+        let error = reqwest::blocking::Client::builder()
+            .build()
+            .expect("client")
+            .post("http://127.0.0.1:0/api/quit")
+            .send()
+            .expect_err("port zero refuses connections");
+        assert!(matches!(
+            classify_quit_transport_error(error, test_target()),
+            QuitRequestResult::Failed(message) if message.contains("was not sent")
+        ));
+    }
+
+    #[test]
+    fn observation_window_covers_request_stopper_and_graceful_shutdown_bounds() {
+        assert_eq!(
+            HUB_QUIT_OBSERVE_TIMEOUT,
+            HUB_QUIT_REQUEST_TIMEOUT
+                + Duration::from_millis(HUB_AGENT_STOP_TIMEOUT_MS)
+                + Duration::from_millis(HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn replacement_hub_is_not_the_target_having_stopped() {
+        let error = observe_hub_quit_with(
+            &test_target(),
+            || {
+                RuntimeLoadResult::Present(RuntimeInfo {
+                    pid: Some(99),
+                    port: 4101,
+                    instance_id: Some("replacement".to_string()),
+                    owner_token: None,
+                })
+            },
+            |_| false,
+            Duration::ZERO,
+        )
+        .expect_err("replacement must fail observation");
+        assert!(error.contains("replacement hub"));
+    }
+
+    #[test]
+    fn a_503_observes_teardown_then_reports_the_hub_diagnostic() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts")
+        };
+        let result = classify_quit_response(
+            503,
+            r#"{"message":"agent socket did not answer"}"#,
+            test_target(),
+        );
+        let action = coordinator.request_finished(id, false, result);
+        let QuitAction::Observe { diagnostic, .. } = action else {
+            panic!("must observe")
+        };
+        assert_eq!(diagnostic.as_deref(), Some("agent socket did not answer"));
+        assert!(matches!(
+            coordinator.observation_finished(id, Ok(()), diagnostic),
+            QuitAction::ExitWithDiagnostic(message) if message == "agent socket did not answer"
+        ));
+    }
+
+    #[test]
+    fn forced_refusal_fails_instead_of_asking_a_second_time() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts")
+        };
+        let _ = coordinator.request_finished(id, false, QuitRequestResult::Conflict(None));
+        let _ = coordinator.resolve_native_consent(true);
+        assert!(matches!(
+            coordinator.request_finished(id, true, QuitRequestResult::Conflict(None)),
+            QuitAction::Failed(message) if message.contains("refused again")
+        ));
+    }
+
+    #[test]
+    fn native_close_has_an_attempt_before_any_webview_acknowledges_it() {
+        let mut coordinator = WindowCloseCoordinator::default();
+        assert!(matches!(coordinator.begin(), WindowCloseStart::Started(1)));
+        assert!(matches!(coordinator.begin(), WindowCloseStart::InProgress));
+    }
+
+    #[test]
+    fn tray_quit_without_a_window_uses_native_dialog_flow() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts")
+        };
+        assert!(matches!(
+            coordinator.request_finished(id, false, QuitRequestResult::Conflict(None)),
+            QuitAction::AskNative { others: None }
+        ));
+        assert!(matches!(
+            coordinator.resolve_native_consent(true),
+            QuitAction::SendForced { attempt_id } if attempt_id == id
+        ));
     }
 }

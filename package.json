@@ -1,7 +1,7 @@
 {
 	"name": "termora",
 	"version": "0.7.0",
-	"private": false,
+	"private": true,
 	"type": "module",
 	"description": "Local-first session terminal platform — hub daemon + agent + SSH + PWA UI",
 	"license": "AGPL-3.0-only",

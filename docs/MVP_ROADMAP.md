@@ -191,7 +191,7 @@ $ curl -X POST localhost:4100/api/hosts \
 | 5.4 | Command palette | web | Ctrl+P fuzzy search (hosts, channels, actions), keyboard navigation |
 | 5.5 | Config cascade | hub, web | 4-layer deep merge (defaults→TOML→host profile→channel profile), settings UI, remote visual hints (trust policy) |
 | 5.6 | CLI commands | hub | `termora start/stop`, `termora host add/list/test`, `termora pair`, `termora session list`, `termora config` |
-| 5.7 | Onboarding + packaging | root, web | First-run UX (local terminal auto-opens), `npx termora` works, npm publish ready |
+| 5.7 | Onboarding + packaging | root, web | First-run UX (local terminal auto-opens), the built executable starts and serves. npm was dropped as a channel — the unscoped name belongs to another project and the executable embeds its own Node |
 
 **Dependencies:** M4 complete for auth-dependent features. M1 sufficient for UI blocks (can be parallelized).
 
@@ -199,7 +199,7 @@ $ curl -X POST localhost:4100/api/hosts \
 - Discord-style 3-column layout fully functional
 - Host icons, channel groups, tab bar, split panes all working
 - `termora pair` generates pairing code from CLI
-- `npx termora` starts hub and opens browser
+- the built `termora-hub` binary starts the hub and opens the browser (npm is not a channel — the unscoped name belongs to another project)
 - Config cascade resolves correctly (layer 1→2→3→3.5→4)
 - Remote visual hints applied when agent sends HELLO with hints
 - Command palette finds hosts, channels, and actions
@@ -324,6 +324,6 @@ The MVP is ready for release when ALL of the following are true:
 7. **Config cascade:** Defaults → TOML → host → channel — merge correct
 8. **Remote hints:** Agent HELLO with badge/theme → applied in UI
 9. **CLI:** `termora start/stop/pair/host add/host list` all work
-10. **`npx termora`** works as zero-install entry point
+10. **the built `termora-hub` binary** starts and serves without a separate runtime install
 11. **Tests pass** on Linux + macOS (Windows P1)
 12. **No known CRITICAL or HIGH bugs**

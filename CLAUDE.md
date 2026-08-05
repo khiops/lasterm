@@ -45,20 +45,35 @@ Sessions survive client disconnects and device switches; local sessions also sur
 ## Monorepo Structure
 
 ```
-termora (root)        → npm: termora (CLI entrypoint, `npx termora`)
+termora (root)        → workspace root + CLI entrypoint. NOT published.
 packages/
-├── shared/           → npm: @termora/shared (published)
-├── agent/            → npm: @termora/agent  (published)
-├── hub/              → npm: @termora/hub    (published)
+├── shared/           → @termora/shared (name reserved on npm, placeholder only)
+├── hub/              → @termora/hub    (name reserved on npm, placeholder only)
 └── clients/
-    ├── web/          → @termora/web (NOT published, embedded by hub)
-    └── desktop/      → @termora/desktop (P1, Tauri)
+    ├── web/          → @termora/web (not published, embedded by hub)
+    └── desktop/      → @termora/desktop (Tauri)
+crates/
+├── termora-agent/    → the agent. A Rust binary, not an npm package.
+└── termora-hub-lock/ → napi-rs addon holding the single-hub lock
 ```
 
-Dependencies: shared ← agent, shared ← hub, shared ← web.
-hub depends on agent (spawns it locally via child_process for local sessions).
+**No working Termora reaches users through npm, and nothing here publishes.** What
+exists on npm is three `@termora/*` names holding 0.0.1 placeholders, reserved
+against squatting; the unscoped `termora` belongs to an unrelated project. No
+workflow runs `npm publish`, and every package is marked private so a recursive
+publish cannot release one by accident.
+
+The hub ships as a single executable that embeds its own Node, so an npm install
+would reintroduce the runtime requirement that executable exists to remove. Today the
+only channel that works end to end is **building from this repository or downloading
+a release asset**. The Microsoft Store path has packaging in CI but submission is
+manual and not yet done (#110), and winget is a plan with no manifest — note that the
+`Termora` currently findable there (`TermoraDev.Termora`) is a different product.
+
+Dependencies: shared ← hub, shared ← web.
+The hub spawns the agent binary for local sessions and deploys it over SSH for remote
+ones, fetching it from GitHub Releases version-matched to itself (SPEC.md §3.5).
 hub embeds web build output as static files.
-Root `termora` CLI wraps `@termora/hub`.
 Hub does NOT depend on node-pty — all PTY management is in the agent.
 
 ## Commands

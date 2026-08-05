@@ -300,7 +300,7 @@ function buildSeaBootstrapBanner(): string {
 		entryPoints: [SEA_SQLITE_BOOTSTRAP_ENTRY],
 		bundle: true,
 		platform: "node",
-		target: "node22",
+		target: "node24",
 		format: "cjs",
 		write: false,
 	});
@@ -390,7 +390,7 @@ export const buildOptions: BuildOptions = {
 	entryPoints: [HUB_ENTRY],
 	bundle: true,
 	platform: "node",
-	target: "node22",
+	target: "node24",
 	format: "cjs",
 	outfile: OUT_FILE,
 	sourcemap: false,

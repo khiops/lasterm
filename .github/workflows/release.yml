@@ -138,7 +138,8 @@ jobs:
           version: 10
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
+          check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @termora/shared build
@@ -226,7 +227,8 @@ jobs:
           version: 10
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
+          check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @termora/shared build
@@ -289,7 +291,8 @@ jobs:
           version: 10
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
+          check-latest: true
           cache: "pnpm"
       - uses: dtolnay/rust-toolchain@stable
         with:

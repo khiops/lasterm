@@ -260,6 +260,45 @@ jobs:
         run: |
           $env:TERMORA_BUILD_HASH = (git rev-parse HEAD)
           .\scripts\build-hub.ps1
+      # Nothing here ran the binary before publishing it, so a hub whose SQLite
+      # bootstrap was broken reached a tagged release once: every job up to
+      # packaging only ever produced the executable. `agent status` goes through
+      # that bootstrap and prints.
+      #
+      # What it does NOT prove: it never calls startHub(), so the hub lock addon,
+      # the server, the databases and the port binding stay untested here. That is
+      # #147's job. This step's scope is the bootstrap that broke.
+      #
+      # Exit status alone is not enough either. A bundle that never reaches its
+      # entry point exits 0 having printed nothing, so the output must parse and
+      # carry a version-shaped value.
+      #
+      # Version-SHAPED, not semver-valid. The question here is whether the bundle
+      # reached its entry point and reported, and digits-and-dots answers it. That
+      # the version is the right one is asserted against the tag by this workflow's
+      # own version check above, and what the artefacts contain is #155.
+      #
+      # Gated on the shell alone, so every hub row runs one of the two. Every hub
+      # target in .github/build-matrix.json is native to its runner, and a condition
+      # for a non-native row that does not exist would only add a way to skip: a
+      # skipped step is green, so an inconsistent matrix row would publish untested.
+      # A future non-native hub row needs an explicit refusal here, not a predicate.
+      - name: Smoke — the built hub runs and reports its version
+        if: matrix.shell_sh
+        timeout-minutes: 2
+        run: |
+          ./dist/sea/termora-hub agent status --json > status.json
+          node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
+      - name: Smoke — the built hub runs and reports its version (pwsh)
+        if: ${{ !matrix.shell_sh }}
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          .\dist\sea\termora-hub.exe agent status --json > status.json
+          if ($LASTEXITCODE -ne 0) { throw "the built hub failed to run ($LASTEXITCODE)" }
+          # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
+          # so [{"hub_version":"x"}] would pass here and fail the check above.
+          node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
       - name: Upload hub to release
         shell: bash
         env:

@@ -22,7 +22,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 
 | Key | Value |
 |-----|-------|
-| Runtime | Node.js >= 20 LTS |
+| Runtime | Node.js >= 24 LTS (hub, web, desktop shell — the agent is a Rust binary and needs none) |
 | Language | TypeScript strict (all packages) |
 | Monorepo | pnpm workspaces |
 | Package manager | pnpm |

@@ -57,7 +57,8 @@ jobs:
           version: 10
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
+          check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
       - name: npm dependency licenses (allowlist)

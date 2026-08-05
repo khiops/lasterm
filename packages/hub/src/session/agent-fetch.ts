@@ -177,7 +177,7 @@ function defaultFetchImpl(): AgentFetchImpl {
 		return async () => {
 			throw new FetchError(
 				"NETWORK",
-				"Node fetch is unavailable. Run Termora hub on Node 20+ or manually download the agent binary into the cache.",
+				"This runtime has no global fetch, so the agent binary cannot be downloaded. Every supported Node provides it, so something in this process removed or replaced it; otherwise, download the agent binary manually into the cache.",
 			);
 		};
 	}

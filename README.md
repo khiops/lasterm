@@ -4,7 +4,7 @@ A local-first session terminal platform. Hub daemon + remote agents + SSH transp
 Sessions survive client disconnects and device switches; local sessions also survive hub restarts.
 
 ![Status](https://img.shields.io/badge/status-under%20active%20development-yellow)
-![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)
+![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 
 > **Not yet published to npm.** Under active development.
@@ -87,7 +87,7 @@ over SFTP, so the remote host never needs outbound internet. Pre-populate with `
 
 ### Prerequisites
 
-- Node.js >= 20 LTS
+- Node.js >= 24 LTS
 - pnpm >= 9
 
 ### Setup

@@ -895,7 +895,7 @@ Hub spawns agent locally (child_process) or remotely (SSH).
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Runtime | Node.js ≥ 20 LTS | Hub + Agent |
+| Runtime | Node.js ≥ 24 LTS | Hub (the agent is a standalone Rust binary and needs no Node) |
 | Language | TypeScript (strict) | All packages |
 | Monorepo | pnpm workspaces | Package management |
 | PTY | node-pty | Terminal spawn/resize (agent only — hub delegates to agent) |

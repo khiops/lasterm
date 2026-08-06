@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AppearanceConfig } from "@termora/shared";
-import { DEFAULT_APPEARANCE, deepMerge } from "@termora/shared";
+import type { AppearanceConfig } from "@lasterm/shared";
+import { DEFAULT_APPEARANCE, deepMerge } from "@lasterm/shared";
 
 export class AppearanceManager {
 	private readonly filePath: string;

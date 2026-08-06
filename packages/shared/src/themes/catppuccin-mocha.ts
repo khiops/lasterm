@@ -1,6 +1,6 @@
-import type { TermoraTheme } from "../theme.js";
+import type { LastermTheme } from "../theme.js";
 
-export const catppuccinMocha: TermoraTheme = {
+export const catppuccinMocha: LastermTheme = {
 	name: "catppuccin-mocha",
 	author: "Catppuccin",
 	type: "dark",

@@ -146,8 +146,8 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Installer pages, must be ordered as they appear
 ; 1. Welcome Page
-!define MUI_WELCOMEPAGE_TITLE "Welcome to the Termora Setup"
-!define MUI_WELCOMEPAGE_TEXT "This wizard will install Termora on your computer.$\r$\n$\r$\nTermora is a local-first session terminal platform with hub, agent, and desktop components.$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TITLE "Welcome to the Lasterm Setup"
+!define MUI_WELCOMEPAGE_TEXT "This wizard will install Lasterm on your computer.$\r$\n$\r$\nLasterm is a local-first session terminal platform with hub, agent, and desktop components.$\r$\n$\r$\nClick Next to continue."
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
 !insertmacro MUI_PAGE_WELCOME
 
@@ -373,7 +373,7 @@ Function PageComponents
   ${IfThen} $PassiveMode = 1 ${|} Abort ${|}
   ${IfThen} $UpdateMode = 1 ${|} Abort ${|}
 
-  !insertmacro MUI_HEADER_TEXT "Choose Components" "Select which Termora components to install."
+  !insertmacro MUI_HEADER_TEXT "Choose Components" "Select which Lasterm components to install."
 
   nsDialogs::Create 1018
   Pop $0
@@ -382,16 +382,16 @@ Function PageComponents
   ${NSD_CreateLabel} 0 0 100% 24u "Select the components you want to install. The desktop app is always required."
   Pop $0
 
-  ${NSD_CreateCheckbox} 20u 35u -20u 12u "Termora Desktop (required)"
+  ${NSD_CreateCheckbox} 20u 35u -20u 12u "Lasterm Desktop (required)"
   Pop $0
   ${NSD_SetState} $0 ${BST_CHECKED}
   EnableWindow $0 0 ; Always required — grayed out
 
-  ${NSD_CreateCheckbox} 20u 55u -20u 12u "Termora Hub — local session server"
+  ${NSD_CreateCheckbox} 20u 55u -20u 12u "Lasterm Hub — local session server"
   Pop $HubCheckbox
   ${NSD_SetState} $HubCheckbox ${BST_CHECKED}
 
-  ${NSD_CreateCheckbox} 20u 75u -20u 12u "Termora Agent — PTY manager (local and remote)"
+  ${NSD_CreateCheckbox} 20u 75u -20u 12u "Lasterm Agent — PTY manager (local and remote)"
   Pop $AgentCheckbox
   ${NSD_SetState} $AgentCheckbox ${BST_CHECKED}
 
@@ -688,10 +688,10 @@ Section Install
 
   ; Remove unchecked optional components
   ${If} $InstallHub <> ${BST_CHECKED}
-    Delete "$INSTDIR\termora-hub.exe"
+    Delete "$INSTDIR\lasterm-hub.exe"
   ${EndIf}
   ${If} $InstallAgent <> ${BST_CHECKED}
-    Delete "$INSTDIR\termora-agent.exe"
+    Delete "$INSTDIR\lasterm-agent.exe"
   ${EndIf}
 
   ; Create file associations

@@ -16,7 +16,7 @@ use clap::Parser;
 use clap::ValueEnum;
 
 #[derive(Parser)]
-#[command(name = "termora-agent", version)]
+#[command(name = "lasterm-agent", version)]
 struct Cli {
     /// Run in stdio mode (default, used by hub LocalAgent)
     #[arg(long)]
@@ -209,7 +209,7 @@ async fn main() -> std::io::Result<()> {
         // Ensure the socket's parent directory exists when --socket is provided.
         // The unwrap_or_else default branch already calls create_dir_all for its
         // own path; an explicit --socket value may point to a directory that was
-        // never created (e.g. /run/user/1000/termora/ under XDG_RUNTIME_DIR on
+        // never created (e.g. /run/user/1000/lasterm/ under XDG_RUNTIME_DIR on
         // a freshly-booted WSL2 instance), causing UnixListener::bind to fail
         // with ENOENT and the daemon to exit silently.
         // On Windows the socket is a named pipe (\\.\pipe\...) with no real
@@ -425,11 +425,11 @@ fn default_socket_path() -> String {
     #[cfg(windows)]
     {
         let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-        format!(r"\\.\pipe\termora-agent-{username}")
+        format!(r"\\.\pipe\lasterm-agent-{username}")
     }
     #[cfg(not(any(unix, windows)))]
     {
-        "/tmp/termora-agent.socket".into()
+        "/tmp/lasterm-agent.socket".into()
     }
 }
 
@@ -523,7 +523,7 @@ fn init_tracing(config: LoggingConfig, daemon: bool) -> std::io::Result<()> {
 
 fn env_filter(level: LogLevel) -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| format!("termora_agent={}", level.as_str()).into())
+        .unwrap_or_else(|_| format!("lasterm_agent={}", level.as_str()).into())
 }
 
 /// Replace stdout/stderr with non-inheritable duplicates.
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn logging_config_defaults_to_jsonl_info() {
-        let cli = Cli::try_parse_from(["termora-agent"]).unwrap();
+        let cli = Cli::try_parse_from(["lasterm-agent"]).unwrap();
         let config = LoggingConfig::from(&cli);
 
         assert_eq!(config.level, LogLevel::Info);
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn logging_config_reads_cli_level_and_format() {
         let cli = Cli::try_parse_from([
-            "termora-agent",
+            "lasterm-agent",
             "--daemon",
             "--log-level",
             "debug",
@@ -666,7 +666,7 @@ mod tests {
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     #[test]
     fn daemon_without_a_safe_fingerprint_starts_without_an_identity() {
-        let state_dir = std::env::temp_dir().join(format!("termora-agent-{}", ulid::Ulid::new()));
+        let state_dir = std::env::temp_dir().join(format!("lasterm-agent-{}", ulid::Ulid::new()));
         std::fs::create_dir_all(&state_dir).expect("create state directory");
         assert!(daemon_identity_for_endpoint("socket".into(), &state_dir)
             .expect("unsupported fingerprint must not fail daemon startup")

@@ -21,7 +21,7 @@ const dest = join(root, 'packages', 'hub', 'static');
 
 if (!existsSync(src)) {
 	console.error(`[embed-web] Source not found: ${src}`);
-	console.error('[embed-web] Run: pnpm -F @termora/web build');
+	console.error('[embed-web] Run: pnpm -F @lasterm/web build');
 	process.exit(1);
 }
 

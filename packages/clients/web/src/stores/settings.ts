@@ -1,4 +1,4 @@
-import type { CascadeResponse, ElevationConfig } from "@termora/shared";
+import type { CascadeResponse, ElevationConfig } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { hubBaseUrl } from "../utils/hub-url.js";

@@ -6,7 +6,7 @@ export interface SearchHistoryEntry {
 }
 
 export function useSearchHistory(maxSize: MaybeRef<number> = 20) {
-	const STORAGE_KEY = "termora:search-history";
+	const STORAGE_KEY = "lasterm:search-history";
 
 	// Load from localStorage on init
 	const history = ref<SearchHistoryEntry[]>(loadFromStorage());

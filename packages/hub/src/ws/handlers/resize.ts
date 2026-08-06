@@ -1,5 +1,5 @@
-import type { ResizeMessage } from "@termora/shared";
-import { isValidDimensions, isValidUlid } from "@termora/shared";
+import type { ResizeMessage } from "@lasterm/shared";
+import { isValidDimensions, isValidUlid } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleResize(msg: ResizeMessage, ctx: WsHandlerContext): void {

@@ -79,7 +79,7 @@ describe("useRecentPaletteItems", () => {
 	it("persists to localStorage on pushRecent", () => {
 		const { pushRecent } = useRecentPaletteItems();
 		pushRecent("host:h1");
-		const stored = JSON.parse(localStorage.getItem("termora:palette-recent") ?? "[]") as string[];
+		const stored = JSON.parse(localStorage.getItem("lasterm:palette-recent") ?? "[]") as string[];
 		expect(stored).toContain("host:h1");
 	});
 
@@ -101,7 +101,7 @@ describe("useRecentPaletteItems", () => {
 	});
 
 	it("SC-25: handles malformed localStorage JSON gracefully", () => {
-		localStorage.setItem("termora:palette-recent", "not-valid-json{{");
+		localStorage.setItem("lasterm:palette-recent", "not-valid-json{{");
 		const { recentIds } = useRecentPaletteItems();
 		// Should not throw, returns empty
 		expect(Array.isArray(recentIds.value)).toBe(true);

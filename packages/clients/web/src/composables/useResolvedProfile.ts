@@ -1,4 +1,4 @@
-import { DEFAULT_PROFILE, type TerminalProfile } from "@termora/shared";
+import { DEFAULT_PROFILE, type TerminalProfile } from "@lasterm/shared";
 import { onMounted, onUnmounted, type Ref, ref, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useConfigStore } from "../stores/config.js";

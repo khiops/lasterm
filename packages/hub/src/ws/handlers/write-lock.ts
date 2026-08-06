@@ -4,8 +4,8 @@ import type {
 	WriteForceMessage,
 	WriteGrantMessage,
 	WriteReleaseMessage,
-} from "@termora/shared";
-import { isValidUlid } from "@termora/shared";
+} from "@lasterm/shared";
+import { isValidUlid } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleWriteClaim(msg: WriteClaimMessage, ctx: WsHandlerContext): void {

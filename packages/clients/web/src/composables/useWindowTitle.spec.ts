@@ -6,47 +6,47 @@ import { formatWindowTitle, useWindowTitle } from "./useWindowTitle.js";
 
 describe("formatWindowTitle", () => {
 	it("replaces all tokens when all vars are provided", () => {
-		const result = formatWindowTitle("termora - {prefix}{host} - {title}", {
+		const result = formatWindowTitle("lasterm - {prefix}{host} - {title}", {
 			prefix: "PROD ",
 			host: "server-1",
 			title: "htop",
 		});
-		expect(result).toBe("termora - PROD server-1 - htop");
+		expect(result).toBe("lasterm - PROD server-1 - htop");
 	});
 
 	it("trims trailing separator when title is empty", () => {
-		const result = formatWindowTitle("termora - {prefix}{host} - {title}", {
+		const result = formatWindowTitle("lasterm - {prefix}{host} - {title}", {
 			prefix: "PROD ",
 			host: "myhost",
 			title: "",
 		});
-		expect(result).toBe("termora - PROD myhost");
+		expect(result).toBe("lasterm - PROD myhost");
 	});
 
 	it("trims trailing em dash separator", () => {
-		const result = formatWindowTitle("termora \u2014 {host} \u2014 {title}", {
+		const result = formatWindowTitle("lasterm \u2014 {host} \u2014 {title}", {
 			host: "myhost",
 			title: "",
 		});
-		expect(result).toBe("termora \u2014 myhost");
+		expect(result).toBe("lasterm \u2014 myhost");
 	});
 
 	it("handles empty prefix without double space", () => {
-		const result = formatWindowTitle("termora - {prefix}{host} - {title}", {
+		const result = formatWindowTitle("lasterm - {prefix}{host} - {title}", {
 			prefix: "",
 			host: "server-1",
 			title: "vim",
 		});
-		expect(result).toBe("termora - server-1 - vim");
+		expect(result).toBe("lasterm - server-1 - vim");
 	});
 
-	it("returns 'termora' when all tokens are empty and format collapses", () => {
+	it("returns 'lasterm' when all tokens are empty and format collapses", () => {
 		const result = formatWindowTitle("{prefix}{host} - {title}", {
 			prefix: "",
 			host: "",
 			title: "",
 		});
-		expect(result).toBe("termora");
+		expect(result).toBe("lasterm");
 	});
 
 	it("supports {channel} and {shell} tokens", () => {
@@ -98,7 +98,7 @@ describe("useWindowTitle", () => {
 		scope.run(() => {
 			useWindowTitle({
 				enabled: ref(true),
-				format: ref("termora - {host} - {title}"),
+				format: ref("lasterm - {host} - {title}"),
 				activeTitle: ref("vim"),
 				activeHost: ref("prod"),
 				activePrefix: ref(""),
@@ -106,20 +106,20 @@ describe("useWindowTitle", () => {
 		});
 
 		vi.advanceTimersByTime(150);
-		expect(document.title).toBe("termora - prod - vim");
+		expect(document.title).toBe("lasterm - prod - vim");
 
 		scope.stop();
 		vi.useRealTimers();
 	});
 
-	it("sets document.title to 'termora' when disabled", () => {
+	it("sets document.title to 'lasterm' when disabled", () => {
 		vi.useFakeTimers();
 		const scope = effectScope();
 
 		scope.run(() => {
 			useWindowTitle({
 				enabled: ref(false),
-				format: ref("termora - {host} - {title}"),
+				format: ref("lasterm - {host} - {title}"),
 				activeTitle: ref("vim"),
 				activeHost: ref("prod"),
 				activePrefix: ref(""),
@@ -127,20 +127,20 @@ describe("useWindowTitle", () => {
 		});
 
 		vi.advanceTimersByTime(150);
-		expect(document.title).toBe("termora");
+		expect(document.title).toBe("lasterm");
 
 		scope.stop();
 		vi.useRealTimers();
 	});
 
-	it("restores 'termora' on scope dispose", () => {
+	it("restores 'lasterm' on scope dispose", () => {
 		vi.useFakeTimers();
 		const scope = effectScope();
 
 		scope.run(() => {
 			useWindowTitle({
 				enabled: ref(true),
-				format: ref("termora - {title}"),
+				format: ref("lasterm - {title}"),
 				activeTitle: ref("vim"),
 				activeHost: ref(""),
 				activePrefix: ref(""),
@@ -148,10 +148,10 @@ describe("useWindowTitle", () => {
 		});
 
 		vi.advanceTimersByTime(150);
-		expect(document.title).toBe("termora - vim");
+		expect(document.title).toBe("lasterm - vim");
 
 		scope.stop();
-		expect(document.title).toBe("termora");
+		expect(document.title).toBe("lasterm");
 
 		vi.useRealTimers();
 	});
@@ -164,7 +164,7 @@ describe("useWindowTitle", () => {
 		scope.run(() => {
 			useWindowTitle({
 				enabled: ref(true),
-				format: ref("termora - {title}"),
+				format: ref("lasterm - {title}"),
 				activeTitle: title,
 				activeHost: ref(""),
 				activePrefix: ref(""),
@@ -172,12 +172,12 @@ describe("useWindowTitle", () => {
 		});
 
 		vi.advanceTimersByTime(150);
-		expect(document.title).toBe("termora - vim");
+		expect(document.title).toBe("lasterm - vim");
 
 		title.value = "htop";
 		await nextTick(); // flush Vue watcher queue
 		vi.advanceTimersByTime(150);
-		expect(document.title).toBe("termora - htop");
+		expect(document.title).toBe("lasterm - htop");
 
 		scope.stop();
 		vi.useRealTimers();
@@ -223,7 +223,7 @@ describe("useWindowTitle", () => {
 		scope.run(() => {
 			useWindowTitle({
 				enabled: ref(true),
-				format: ref("termora - {prefix}{host} - {title}"),
+				format: ref("lasterm - {prefix}{host} - {title}"),
 				activeTitle: ref("vim"),
 				activeHost: ref("server"),
 				activePrefix: ref("PROD "),
@@ -231,7 +231,7 @@ describe("useWindowTitle", () => {
 		});
 
 		vi.advanceTimersByTime(150);
-		expect(document.title).toBe("termora - PROD server - vim");
+		expect(document.title).toBe("lasterm - PROD server - vim");
 
 		scope.stop();
 		vi.useRealTimers();

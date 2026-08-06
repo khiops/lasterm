@@ -19,18 +19,18 @@ describe("tauri.conf.json", () => {
 	const conf = readJson("src-tauri/tauri.conf.json") as Record<string, unknown>;
 
 	it("is valid JSON with required top-level fields", () => {
-		expect(conf).toHaveProperty("productName", "Termora");
-		expect(conf).toHaveProperty("identifier", "app.termora.desktop");
+		expect(conf).toHaveProperty("productName", "Lasterm");
+		expect(conf).toHaveProperty("identifier", "app.lasterm.desktop");
 		expect(conf).toHaveProperty("version");
 		expect(conf.version).toMatch(/^\d+\.\d+\.\d+$/);
 	});
 
-	it("externalBin includes termora-hub", () => {
+	it("externalBin includes lasterm-hub", () => {
 		const bundle = conf.bundle as Record<string, unknown>;
 		expect(bundle).toBeDefined();
 		const externalBin = bundle.externalBin as string[];
 		expect(Array.isArray(externalBin)).toBe(true);
-		expect(externalBin).toContain("termora-hub");
+		expect(externalBin).toContain("lasterm-hub");
 	});
 
 	it("frontendDist points to web dist", () => {
@@ -113,7 +113,7 @@ describe("capabilities/default.json", () => {
 		const allow = shellExec?.allow as Array<Record<string, unknown>>;
 		expect(Array.isArray(allow)).toBe(true);
 
-		const hubRule = allow.find((a) => a.name === "termora-hub");
+		const hubRule = allow.find((a) => a.name === "lasterm-hub");
 		expect(hubRule).toBeDefined();
 		expect(hubRule?.sidecar).toBe(true);
 	});
@@ -165,7 +165,7 @@ describe("Cargo.toml", () => {
 	});
 
 	it("has correct package name", () => {
-		expect(cargo).toMatch(/name\s*=\s*"termora-desktop"/);
+		expect(cargo).toMatch(/name\s*=\s*"lasterm-desktop"/);
 	});
 });
 
@@ -173,7 +173,7 @@ describe("package.json", () => {
 	const pkg = readJson("package.json") as Record<string, unknown>;
 
 	it("has correct name", () => {
-		expect(pkg.name).toBe("@termora/desktop");
+		expect(pkg.name).toBe("@lasterm/desktop");
 	});
 
 	it("depends on @tauri-apps/api", () => {

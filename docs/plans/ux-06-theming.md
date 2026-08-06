@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: ui
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-07
   updated: 2026-03-07
   complexity: COMPLEX
@@ -76,14 +76,14 @@ scrollbar settings apply immediately.
 
 ### 3.2 Preconditions (required before action)
 
-- PRE-01: Hub must copy bundled themes to `~/.config/termora/themes/` on first launch if the directory is empty or missing.
-- PRE-02: Theme files must be valid JSON conforming to `TermoraTheme` schema to appear in listings.
+- PRE-01: Hub must copy bundled themes to `~/.config/lasterm/themes/` on first launch if the directory is empty or missing.
+- PRE-02: Theme files must be valid JSON conforming to `LastermTheme` schema to appear in listings.
 - PRE-03: Web client must load available themes from hub before rendering the theme picker.
 
 ### 3.3 Effects (what changes)
 
 - EFF-01: Applying a theme updates `:root` CSS variables AND calls `terminal.options.theme = ...` on every mounted xterm.js instance.
-- EFF-02: Saving a custom theme writes a JSON file to `~/.config/termora/themes/` and the theme appears in listings immediately.
+- EFF-02: Saving a custom theme writes a JSON file to `~/.config/lasterm/themes/` and the theme appears in listings immediately.
 - EFF-03: Deleting a custom theme removes the file. If it was active, the app falls back to the default theme (`catppuccin-mocha`).
 - EFF-04: Auto-switch reactively changes the active theme when OS `prefers-color-scheme` changes.
 - EFF-05: Opacity and scrollbar settings apply immediately via CSS (no terminal restart).
@@ -112,7 +112,7 @@ scrollbar settings apply immediately.
 
 | Entity | Change | Migration needed |
 |--------|--------|------------------|
-| `TermoraTheme` (new interface, shared) | Theme file schema: name, author, type, colors, ui | No (new type) |
+| `LastermTheme` (new interface, shared) | Theme file schema: name, author, type, colors, ui | No (new type) |
 | `AppearanceConfig` (new interface, shared) | Auto-switch, opacity, scrollbar settings | No (new type) |
 | `config.toml` | New `[appearance]` section | No (config file, not DB) |
 | No DB schema changes | Themes are files, not rows | No |
@@ -121,18 +121,18 @@ scrollbar settings apply immediately.
 
 | Endpoint | Method | Auth | Request | Response |
 |----------|--------|------|---------|----------|
-| `/api/themes` | GET | Yes | - | `TermoraTheme[]` |
-| `/api/themes/:name` | GET | Yes | - | `TermoraTheme` |
-| `/api/themes` | POST | Yes | `TermoraTheme` body | `201 { name }` |
-| `/api/themes/:name` | PUT | Yes | `TermoraTheme` body | `200 { name }` |
+| `/api/themes` | GET | Yes | - | `LastermTheme[]` |
+| `/api/themes/:name` | GET | Yes | - | `LastermTheme` |
+| `/api/themes` | POST | Yes | `LastermTheme` body | `201 { name }` |
+| `/api/themes/:name` | PUT | Yes | `LastermTheme` body | `200 { name }` |
 | `/api/themes/:name` | DELETE | Yes | - | `204` |
 | `/api/config/appearance` | GET | Yes | - | `AppearanceConfig` |
 | `/api/config/appearance` | PATCH | Yes | Partial `AppearanceConfig` | `200 AppearanceConfig` |
 
-### 4.4 TermoraTheme Interface
+### 4.4 LastermTheme Interface
 
 ```typescript
-interface TermoraThemeColors {
+interface LastermThemeColors {
   foreground: string
   background: string
   cursor: string
@@ -157,7 +157,7 @@ interface TermoraThemeColors {
   brightWhite: string
 }
 
-interface TermoraThemeUi {
+interface LastermThemeUi {
   tabBar: string
   tabActive: string
   tabInactive: string
@@ -175,12 +175,12 @@ interface TermoraThemeUi {
   searchHighlightActive: string
 }
 
-interface TermoraTheme {
+interface LastermTheme {
   name: string
   author?: string
   type: 'dark' | 'light'
-  colors: TermoraThemeColors
-  ui: TermoraThemeUi
+  colors: LastermThemeColors
+  ui: LastermThemeUi
 }
 ```
 
@@ -301,7 +301,7 @@ Scenario: SC-07 — Edit and save existing custom theme
 Scenario: SC-08 — Import external theme file
   Given the user has a valid theme JSON file on disk
   When they click "Import theme file" and select the file
-  Then the theme is validated against TermoraTheme schema
+  Then the theme is validated against LastermTheme schema
   And POST /api/themes stores it in the themes directory
   And the theme appears in the picker
 
@@ -310,7 +310,7 @@ Scenario: SC-09 — Export theme as JSON
   Given "My Theme" is the active theme
   When the user clicks "Export JSON" in the editor
   Then a JSON file named "my-theme.json" is downloaded
-  And the file content matches the TermoraTheme schema
+  And the file content matches the LastermTheme schema
 
 @priority:high @type:error
 Scenario: SC-10 — Invalid theme JSON rejected on import
@@ -408,14 +408,14 @@ Scenario: SC-17 — Auto-switch disabled by default
 **Packages:** shared
 
 **Files:**
-- `packages/shared/src/theme.ts` — `TermoraTheme`, `TermoraThemeColors`, `TermoraThemeUi` interfaces, `validateTheme()` function, `BUNDLED_THEME_NAMES` set
+- `packages/shared/src/theme.ts` — `LastermTheme`, `LastermThemeColors`, `LastermThemeUi` interfaces, `validateTheme()` function, `BUNDLED_THEME_NAMES` set
 - `packages/shared/src/themes/` — directory with 9 bundled theme JSON files (imported as const objects)
-- `packages/shared/src/themes/index.ts` — re-exports all bundled themes as `Record<string, TermoraTheme>`
+- `packages/shared/src/themes/index.ts` — re-exports all bundled themes as `Record<string, LastermTheme>`
 - `packages/shared/src/appearance.ts` — `AppearanceConfig` interface, `DEFAULT_APPEARANCE` const
 - `packages/shared/src/index.ts` — re-export new types
 
 **Exit criteria:**
-- [ ] `TermoraTheme` interface exported from shared
+- [ ] `LastermTheme` interface exported from shared
 - [ ] `validateTheme()` returns `{ valid: boolean, errors: string[] }`
 - [ ] All 9 bundled themes pass validation
 - [ ] `AppearanceConfig` interface + defaults exported
@@ -475,12 +475,12 @@ Scenario: SC-17 — Auto-switch disabled by default
 **Packages:** web
 
 **Files:**
-- `packages/clients/web/src/composables/useTerminal.ts` — remove hardcoded theme, add `applyTheme(theme: TermoraThemeColors)`, watch theme store changes
+- `packages/clients/web/src/composables/useTerminal.ts` — remove hardcoded theme, add `applyTheme(theme: LastermThemeColors)`, watch theme store changes
 - `packages/clients/web/src/stores/theme.ts` — emit event / expose reactive ref for terminal consumers
 
 **Key implementation details:**
 - `useTerminal.init()`: get theme from `useThemeStore().currentTheme.colors` instead of hardcoded object
-- `useTerminal.applyTheme(colors)`: map `TermoraThemeColors` to xterm.js `ITheme`, set `terminal.options.theme`
+- `useTerminal.applyTheme(colors)`: map `LastermThemeColors` to xterm.js `ITheme`, set `terminal.options.theme`
 - Watch `useThemeStore().currentTheme` — on change, call `applyTheme()` on all mounted terminals
 - Per-host override: if `TerminalProfile.theme` differs from global, resolve that theme from store and apply to that terminal only
 
@@ -645,6 +645,6 @@ The `AppearancePanel.vue`, `ThemePicker.vue`, `ThemeCard.vue`, and `ThemeEditor.
 
 The `theme` field already exists in `TerminalProfile`. This story does NOT change the cascade logic — it adds:
 1. Theme file storage + API (hub)
-2. Theme resolution (name -> full TermoraTheme object) on the client
+2. Theme resolution (name -> full LastermTheme object) on the client
 3. CSS variable application layer
 4. Appearance config (separate from TerminalProfile, global-only)

@@ -69,7 +69,7 @@
 </template>
 
 <script setup lang="ts">
-import type { LaunchProfile } from "@termora/shared";
+import type { LaunchProfile } from "@lasterm/shared";
 import type { HostVisibleProfile } from "../stores/profiles.js";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useProfilesStore } from "../stores/profiles.js";

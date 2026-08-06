@@ -1,4 +1,4 @@
-import { generateId } from "@termora/shared";
+import { generateId } from "@lasterm/shared";
 import { type Ref, triggerRef } from "vue";
 import { useConfigStore } from "../stores/config.js";
 import type { PaneNode } from "./usePaneTree.js";

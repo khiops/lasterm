@@ -323,8 +323,8 @@
 </template>
 
 <script setup lang="ts">
-import type { Host } from '@termora/shared';
-import { generateId } from '@termora/shared';
+import type { Host } from '@lasterm/shared';
+import { generateId } from '@lasterm/shared';
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
 import AgentBinaryVerify from './components/AgentBinaryVerify.vue';
 import AgentDeployFailed from './components/AgentDeployFailed.vue';
@@ -640,7 +640,7 @@ watch(
 const windowTitleEnabled = computed(() => configStore.uiConfig.title?.windowTitle !== false);
 
 const windowTitleFormat = computed(
-	() => configStore.uiConfig.title?.windowFormat ?? 'termora - {prefix}{host} - {title}',
+	() => configStore.uiConfig.title?.windowFormat ?? 'lasterm - {prefix}{host} - {title}',
 );
 
 const activeChannelId = computed(() => {
@@ -687,10 +687,10 @@ const confirmDialog = ref({
  * Check if a confirmation should be skipped based on localStorage preferences.
  */
 function shouldSkipConfirm(action: string): boolean {
-	if (localStorage.getItem(`termora:skip${action}`) === 'true') return true;
+	if (localStorage.getItem(`lasterm:skip${action}`) === 'true') return true;
 	const hostId = channelsStore.activeHostId;
 	if (hostId) {
-		if (localStorage.getItem(`termora:skip${action}:${hostId}`) === 'true') return true;
+		if (localStorage.getItem(`lasterm:skip${action}:${hostId}`) === 'true') return true;
 	}
 	return false;
 }
@@ -703,10 +703,10 @@ function onConfirmAction(remember: { host: boolean; global: boolean }): void {
 	const actionKey = confirmDialog.value.actionKey;
 
 	if (remember.global) {
-		localStorage.setItem(`termora:skip${actionKey}`, 'true');
+		localStorage.setItem(`lasterm:skip${actionKey}`, 'true');
 	}
 	if (remember.host && channelsStore.activeHostId) {
-		localStorage.setItem(`termora:skip${actionKey}:${channelsStore.activeHostId}`, 'true');
+		localStorage.setItem(`lasterm:skip${actionKey}:${channelsStore.activeHostId}`, 'true');
 	}
 
 	action?.();
@@ -1625,7 +1625,7 @@ body,
 	font-style: italic;
 }
 
-body.termora-dragging * {
+body.lasterm-dragging * {
 	cursor: grabbing !important;
 }
 

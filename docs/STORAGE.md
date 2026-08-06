@@ -1,4 +1,4 @@
-# termora — Storage Specification
+# lasterm — Storage Specification
 
 > Version: 0.1.0 (MVP)
 > Status: draft
@@ -10,10 +10,10 @@ Two SQLite databases, both in WAL mode:
 
 | Database | Path | Purpose | Size profile |
 |----------|------|---------|-------------|
-| **meta.db** | `$TERMORA_DATA_DIR/meta.db` | Config + relational data | Small (KB–MB) |
-| **spool.db** | `$TERMORA_DATA_DIR/spool.db` | Output chunks + snapshots | Large (MB–GB) |
+| **meta.db** | `$LASTERM_DATA_DIR/meta.db` | Config + relational data | Small (KB–MB) |
+| **spool.db** | `$LASTERM_DATA_DIR/spool.db` | Output chunks + snapshots | Large (MB–GB) |
 
-Platform paths for `$TERMORA_DATA_DIR`: see SPEC.md § 7 (Linux: `~/.local/share/termora/`, Windows: `%LOCALAPPDATA%\termora\`).
+Platform paths for `$LASTERM_DATA_DIR`: see SPEC.md § 7 (Linux: `~/.local/share/lasterm/`, Windows: `%LOCALAPPDATA%\lasterm\`).
 
 **Why 2 databases:**
 - VACUUM spool without blocking meta reads
@@ -394,12 +394,12 @@ Each migration is a **SQL file**, run inside a transaction. Files are discovered
 
 ```bash
 # Full backup (both DBs) — paths shown for Linux, see SPEC.md § 7 for Windows
-cp ~/.local/share/termora/meta.db backup/meta.db
-cp ~/.local/share/termora/spool.db backup/spool.db
+cp ~/.local/share/lasterm/meta.db backup/meta.db
+cp ~/.local/share/lasterm/spool.db backup/spool.db
 
 # Config-only backup (tiny, recommended for sync)
-cp ~/.local/share/termora/meta.db backup/meta.db
-cp ~/.config/termora/config.toml backup/config.toml
+cp ~/.local/share/lasterm/meta.db backup/meta.db
+cp ~/.config/lasterm/config.toml backup/config.toml
 # Spool is regeneratable — no need to backup
 ```
 
@@ -412,8 +412,8 @@ db.backup('backup/meta.db');
 ### 10.2 Workspace Export/Import
 
 ```bash
-termora workspace export my-workspace -o workspace.json
-termora workspace import workspace.json
+lasterm workspace export my-workspace -o workspace.json
+lasterm workspace import workspace.json
 ```
 
 Export format:

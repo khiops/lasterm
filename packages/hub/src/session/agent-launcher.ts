@@ -10,12 +10,12 @@ import {
 	AGENT_SOCKET_TIMEOUT,
 	type AgentConfig,
 	getSocketPath,
-} from "@termora/shared";
-import { detectSea } from "@termora/shared/dist/sea-addon-loader.js";
+} from "@lasterm/shared";
+import { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { resolveAgentBinaryPath } from "../sea-agent-resolver.js";
+import { LastermAgent } from "./lasterm-agent.js";
 import { HubQuittingError } from "./quit-fence.js";
-import { TermoraAgent } from "./termora-agent.js";
 
 // The agent itself waits ten seconds before reporting its own terminal result.
 // Leave delivery slack so the hub does not kill a truthful stopper at its bound.
@@ -32,11 +32,11 @@ export interface AgentStopResult {
 /**
  * Resolve the path to the agent binary.
  *
- * In SEA mode: looks for a co-located termora-agent binary next to the hub
+ * In SEA mode: looks for a co-located lasterm-agent binary next to the hub
  * executable. Falls back to PATH resolution via resolveAgentBinaryPath().
  *
  * In dev mode: returns the Rust agent binary built by cargo at
- *   <project-root>/target/release/termora-agent[.exe]
+ *   <project-root>/target/release/lasterm-agent[.exe]
  */
 export function resolveAgentPath(): string {
 	const sea = detectSea();
@@ -48,7 +48,7 @@ export function resolveAgentPath(): string {
 	const __dirname = dirname(fileURLToPath(import.meta.url));
 	// This file is at packages/hub/src/session/ — go up 4 levels to project root
 	const ext = process.platform === "win32" ? ".exe" : "";
-	return join(__dirname, "../../../..", `target/release/termora-agent${ext}`);
+	return join(__dirname, "../../../..", `target/release/lasterm-agent${ext}`);
 }
 
 /**
@@ -142,7 +142,7 @@ export function stopLocalAgent(
  * 2. Try the authoritative local connection directly
  * 3. If EACCES → throw (different user's socket — do NOT unlink)
  * 4. Spawn: child_process.spawn with detached + unref
- * 5. Poll with TermoraAgent.connectLocal until the daemon accepts
+ * 5. Poll with LastermAgent.connectLocal until the daemon accepts
  */
 export async function connectOrLaunch(
 	socketPath: string,
@@ -150,7 +150,7 @@ export async function connectOrLaunch(
 	agentBinaryPath?: string,
 	hubLogger?: HubLogger,
 	assertRunning: () => void = () => {},
-): Promise<TermoraAgent> {
+): Promise<LastermAgent> {
 	const agentPath = agentBinaryPath ?? resolveAgentPath();
 
 	// Verify agent binary exists
@@ -168,7 +168,7 @@ export async function connectOrLaunch(
 	// allowed to enter *any* recovery path, particularly endpoint deletion.
 	try {
 		assertRunning();
-		const connected = await TermoraAgent.connectLocal(socketPath, hubLogger);
+		const connected = await LastermAgent.connectLocal(socketPath, hubLogger);
 		// Do not hand a post-quit connection back to a caller which could adopt it.
 		try {
 			assertRunning();
@@ -236,8 +236,8 @@ function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig
 
 	const stateDir =
 		process.platform === "win32"
-			? join(process.env.LOCALAPPDATA ?? homedir(), "termora")
-			: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "termora");
+			? join(process.env.LOCALAPPDATA ?? homedir(), "lasterm")
+			: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
 	mkdirSync(stateDir, { recursive: true });
 
 	// Ensure the socket's parent directory exists — on WSL / XDG_RUNTIME_DIR
@@ -327,7 +327,7 @@ export function readBoundedLogTail(
 /**
  * Poll until the daemon accepts the authoritative hub connection.
  *
- * This intentionally uses TermoraAgent.connectLocal instead of probeSocket.
+ * This intentionally uses LastermAgent.connectLocal instead of probeSocket.
  * A probe opens a real socket, and the daemon's single-active-connection
  * policy treats that as a hub connection that displaces the previous one.
  *
@@ -340,13 +340,13 @@ async function connectWhenReady(
 	socketPath: string,
 	daemonLogPath?: string,
 	hubLogger?: HubLogger,
-): Promise<TermoraAgent> {
+): Promise<LastermAgent> {
 	const deadline = Date.now() + AGENT_SOCKET_TIMEOUT;
 	let lastErr: unknown;
 
 	while (Date.now() < deadline) {
 		try {
-			return await TermoraAgent.connectLocal(socketPath, hubLogger);
+			return await LastermAgent.connectLocal(socketPath, hubLogger);
 		} catch (err) {
 			lastErr = err;
 			if ((err as NodeJS.ErrnoException).code === "EACCES") {

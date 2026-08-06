@@ -47,7 +47,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import type { HostLaunchProfileOverride } from "@termora/shared";
+import type { HostLaunchProfileOverride } from "@lasterm/shared";
 import { hubBaseUrl } from "../../utils/hub-url.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useAuthStore } from "../../stores/auth.js";

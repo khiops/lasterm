@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
-const TOKEN_KEY = "termora_token";
+const TOKEN_KEY = "lasterm_token";
 
 /**
  * Auth store — holds authentication state for the current WS session.

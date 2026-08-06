@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: ui
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-07
   updated: 2026-03-07
   complexity: COMPLEX
@@ -28,7 +28,7 @@ doc-meta:
 Users cannot search terminal scrollback. When output scrolls past, the only
 option is manual scrolling. Every major terminal (iTerm2, WezTerm, Windows
 Terminal, VS Code) has Ctrl+F or Ctrl+Shift+F search. xterm.js provides
-SearchAddon but termora does not integrate it. This is a baseline feature gap.
+SearchAddon but lasterm does not integrate it. This is a baseline feature gap.
 
 ## 2. User Stories
 
@@ -101,7 +101,7 @@ last 20 searches; regex searches show badge.
 
 **xterm.js SearchAddon is the search engine.** No custom search implementation.
 The addon handles scrollback traversal, match finding, decoration rendering,
-and scroll-to-match. termora provides the overlay UI, keyboard shortcuts,
+and scroll-to-match. lasterm provides the overlay UI, keyboard shortcuts,
 multi-pane scope, scrollbar markers, and history.
 
 **Overlay position is configurable** with 3 options: top-right (default),
@@ -113,7 +113,7 @@ not per-pane.
 | Entity | Change | Migration needed |
 |--------|--------|------------------|
 | No DB changes | Search is entirely client-side | No |
-| localStorage | `termora:search-history` key (JSON array) | No |
+| localStorage | `lasterm:search-history` key (JSON array) | No |
 
 ### 4.3 SearchAddon API
 

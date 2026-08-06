@@ -1,10 +1,10 @@
 /**
  * sea-hub-e2e.spec.ts
  *
- * End-to-end tests that validate the termora-hub SEA binary works correctly.
+ * End-to-end tests that validate the lasterm-hub SEA binary works correctly.
  *
  * Prerequisites:
- *   pnpm run package:sea-hub   (builds dist/sea/termora-hub)
+ *   pnpm run package:sea-hub   (builds dist/sea/lasterm-hub)
  *
  * All tests skip gracefully when the binary has not been built yet.
  */
@@ -29,10 +29,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const SEA_DIR = join(ROOT, "dist", "sea");
-const SEA_BINARY = join(SEA_DIR, process.platform === "win32" ? "termora-hub.exe" : "termora-hub");
+const SEA_BINARY = join(SEA_DIR, process.platform === "win32" ? "lasterm-hub.exe" : "lasterm-hub");
 const AGENT_BINARY = join(
 	SEA_DIR,
-	process.platform === "win32" ? "termora-agent.exe" : "termora-agent",
+	process.platform === "win32" ? "lasterm-agent.exe" : "lasterm-agent",
 );
 
 // ─── Availability ─────────────────────────────────────────────────────────────
@@ -98,21 +98,21 @@ async function pollUntilReady(
 }
 
 /**
- * Spawn the termora-hub SEA binary in foreground mode on a random port,
+ * Spawn the lasterm-hub SEA binary in foreground mode on a random port,
  * wait for /api/health to respond, then return a handle.
  */
 async function startHub(extraEnv: Record<string, string> = {}): Promise<HubProcess> {
 	const port = randomPort();
-	const stateDir = mkdtempSync(join(tmpdir(), "termora-hub-state-"));
-	const configDir = mkdtempSync(join(tmpdir(), "termora-hub-config-"));
+	const stateDir = mkdtempSync(join(tmpdir(), "lasterm-hub-state-"));
+	const configDir = mkdtempSync(join(tmpdir(), "lasterm-hub-config-"));
 
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		XDG_STATE_HOME: stateDir,
 		XDG_CONFIG_HOME: configDir,
-		TERMORA_PORT: String(port),
+		LASTERM_PORT: String(port),
 		// Disable browser opening during tests
-		TERMORA_OPEN: "0",
+		LASTERM_OPEN: "0",
 		// Suppress any TTY-related output noise
 		NO_COLOR: "1",
 		...extraEnv,
@@ -168,8 +168,8 @@ async function startHub(extraEnv: Record<string, string> = {}): Promise<HubProce
 
 /** Read the auth token from the config dir that the hub wrote at startup. */
 function readAuthToken(configDir: string): string {
-	// configDir is XDG_CONFIG_HOME; hub appends "termora/auth.json"
-	const authPath = join(configDir, "termora", "auth.json");
+	// configDir is XDG_CONFIG_HOME; hub appends "lasterm/auth.json"
+	const authPath = join(configDir, "lasterm", "auth.json");
 	const raw = readFileSync(authPath, "utf-8");
 	const parsed = JSON.parse(raw) as { token: string };
 	return parsed.token;
@@ -209,7 +209,7 @@ async function pairHub(hub: HubProcess): Promise<string> {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("termora-hub SEA binary E2E", { timeout: 120_000 }, () => {
+describe("lasterm-hub SEA binary E2E", { timeout: 120_000 }, () => {
 	let hub: HubProcess | null = null;
 
 	beforeEach(() => {
@@ -365,7 +365,7 @@ describe("termora-hub SEA binary E2E", { timeout: 120_000 }, () => {
 		async () => {
 			hub = await startHub();
 
-			const authPath = join(hub.configDir, "termora", "auth.json");
+			const authPath = join(hub.configDir, "lasterm", "auth.json");
 			expect(existsSync(authPath)).toBe(true);
 
 			const raw = readFileSync(authPath, "utf-8");
@@ -385,8 +385,8 @@ describe("termora-hub SEA binary E2E", { timeout: 120_000 }, () => {
 		async () => {
 			hub = await startHub();
 
-			const metaDb = join(hub.stateDir, "termora", "meta.db");
-			const spoolDb = join(hub.stateDir, "termora", "spool.db");
+			const metaDb = join(hub.stateDir, "lasterm", "meta.db");
+			const spoolDb = join(hub.stateDir, "lasterm", "spool.db");
 
 			expect(existsSync(metaDb)).toBe(true);
 			expect(existsSync(spoolDb)).toBe(true);

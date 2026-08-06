@@ -58,7 +58,7 @@ on that host (e.g., 3 channels x 5 bells = badge "15").
 
 ```
 +--------------------------------------+
-| termora - prod-server                |
+| lasterm - prod-server                |
 |                                      |
 | Build finished!                      |
 | Channel: build (Terminal 3)          |
@@ -232,5 +232,5 @@ autoThreshold = 100                # lines threshold for auto mode
 - P2: Per-channel notification settings (mute specific noisy channels)
 - P2: Notification history panel (list of past bells/alerts)
 - P2: Notification actions (e.g., "Run command on bell")
-- P2: Badge count in browser tab title: "termora (3)"
+- P2: Badge count in browser tab title: "lasterm (3)"
 - P2: Tray icon with badge count (Tauri)

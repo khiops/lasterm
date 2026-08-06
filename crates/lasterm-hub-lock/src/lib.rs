@@ -173,7 +173,7 @@ mod tests {
         let base = env::temp_dir();
         let pid = std::process::id();
         for attempt in 0..1024 {
-            let dir = base.join(format!("termora-hub-lock-{name}-{pid}-{attempt}"));
+            let dir = base.join(format!("lasterm-hub-lock-{name}-{pid}-{attempt}"));
             match create_dir(&dir) {
                 Ok(()) => return dir,
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -205,9 +205,9 @@ mod tests {
                 "tests::process_death_releases_lock",
                 "--nocapture",
             ])
-            .env("TERMORA_HUB_LOCK_TEST_ROLE", role)
-            .env("TERMORA_HUB_LOCK_TEST_PATH", path)
-            .env("TERMORA_HUB_LOCK_TEST_READY", ready)
+            .env("LASTERM_HUB_LOCK_TEST_ROLE", role)
+            .env("LASTERM_HUB_LOCK_TEST_PATH", path)
+            .env("LASTERM_HUB_LOCK_TEST_READY", ready)
             .spawn()
             .unwrap()
     }
@@ -251,10 +251,10 @@ mod tests {
 
     #[test]
     fn process_death_releases_lock() {
-        let role = env::var("TERMORA_HUB_LOCK_TEST_ROLE").ok();
+        let role = env::var("LASTERM_HUB_LOCK_TEST_ROLE").ok();
         if role.as_deref() == Some("holder") {
-            let path = PathBuf::from(env::var("TERMORA_HUB_LOCK_TEST_PATH").unwrap());
-            let ready = PathBuf::from(env::var("TERMORA_HUB_LOCK_TEST_READY").unwrap());
+            let path = PathBuf::from(env::var("LASTERM_HUB_LOCK_TEST_PATH").unwrap());
+            let ready = PathBuf::from(env::var("LASTERM_HUB_LOCK_TEST_READY").unwrap());
             let _lock = KernelLock::acquire(&path).unwrap().unwrap();
             write(ready, "ready").unwrap();
             loop {
@@ -262,14 +262,14 @@ mod tests {
             }
         }
         if role.as_deref() == Some("grandchild") {
-            let ready = PathBuf::from(env::var("TERMORA_HUB_LOCK_TEST_READY").unwrap());
+            let ready = PathBuf::from(env::var("LASTERM_HUB_LOCK_TEST_READY").unwrap());
             write(ready, "ready").unwrap();
             sleep(Duration::from_secs(2));
             return;
         }
         if role.as_deref() == Some("parent") {
-            let path = PathBuf::from(env::var("TERMORA_HUB_LOCK_TEST_PATH").unwrap());
-            let ready = PathBuf::from(env::var("TERMORA_HUB_LOCK_TEST_READY").unwrap());
+            let path = PathBuf::from(env::var("LASTERM_HUB_LOCK_TEST_PATH").unwrap());
+            let ready = PathBuf::from(env::var("LASTERM_HUB_LOCK_TEST_READY").unwrap());
             let _lock = KernelLock::acquire(&path).unwrap().unwrap();
             // This process must exit without waiting: the test proves that the
             // still-running grandchild did not inherit the close-on-exec lock fd.
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn descriptor_is_not_inherited_by_spawned_child() {
-        if env::var("TERMORA_HUB_LOCK_TEST_ROLE").ok().as_deref() != Some("parent") {
+        if env::var("LASTERM_HUB_LOCK_TEST_ROLE").ok().as_deref() != Some("parent") {
             let dir = test_dir("descriptor-inheritance");
             let path = dir.join("hub.lock");
             let ready = dir.join("ready");

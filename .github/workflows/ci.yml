@@ -28,7 +28,7 @@ jobs:
         shell: pwsh
         working-directory: packages/clients/desktop/src-tauri
         run: |
-          foreach ($sidecar in @("termora-agent-x86_64-pc-windows-msvc.exe", "termora-hub-x86_64-pc-windows-msvc.exe")) {
+          foreach ($sidecar in @("lasterm-agent-x86_64-pc-windows-msvc.exe", "lasterm-hub-x86_64-pc-windows-msvc.exe")) {
             if (!(Test-Path $sidecar)) { [System.IO.File]::WriteAllBytes($sidecar, [byte[]]@()) }
           }
       - name: Clippy

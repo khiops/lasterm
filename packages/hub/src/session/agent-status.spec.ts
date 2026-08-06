@@ -12,7 +12,7 @@ import {
 
 const HUB_VERSION = "0.4.1";
 const HUB_PLATFORM = { os: "linux", arch: "x64" } as const satisfies HubPlatform;
-const BUNDLED_PATH = "/tmp/termora-agent-test";
+const BUNDLED_PATH = "/tmp/lasterm-agent-test";
 
 type AgentTargetEntry = {
 	readonly triple: string | null;
@@ -195,7 +195,7 @@ function targetRow(
 }
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(tmpdir(), "termora-agent-status-"));
+	const dir = mkdtempSync(path.join(tmpdir(), "lasterm-agent-status-"));
 	chmodSync(dir, 0o700);
 	tempDirs.push(dir);
 	return dir;
@@ -208,5 +208,5 @@ function agentCachePath(
 	version: string,
 ): string {
 	const target = AGENT_TARGET_TABLE[osName][arch];
-	return path.join(cacheDir, `termora-agent-${osName}-${arch}-${version}${target.ext}`);
+	return path.join(cacheDir, `lasterm-agent-${osName}-${arch}-${version}${target.ext}`);
 }

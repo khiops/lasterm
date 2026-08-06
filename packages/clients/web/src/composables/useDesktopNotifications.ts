@@ -20,7 +20,7 @@ export function showSimpleNotification(title: string, body: string, channelId: s
 	try {
 		const notification = new Notification(title, {
 			body,
-			tag: `termora-${channelId}`,
+			tag: `lasterm-${channelId}`,
 			silent: true,
 		});
 
@@ -69,7 +69,7 @@ export function useDesktopNotifications(opts?: {
 		// Only show when document is hidden (user is not looking at this tab)
 		if (!document.hidden) return;
 
-		const effectiveTag = tag ?? `termora-bell-${channelId}`;
+		const effectiveTag = tag ?? `lasterm-bell-${channelId}`;
 		const groupKey = effectiveTag;
 
 		const existing = pendingGroups.get(groupKey);

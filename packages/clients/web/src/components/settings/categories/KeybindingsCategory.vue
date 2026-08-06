@@ -1,7 +1,7 @@
 <template>
 	<div class="keybindings-category">
 		<p class="keybindings-description">
-			Keyboard shortcuts available in termora. Editing is not supported in
+			Keyboard shortcuts available in lasterm. Editing is not supported in
 			this version.
 		</p>
 		<div

@@ -39,7 +39,7 @@ let server: FastifyInstance;
 let configDir: string;
 
 beforeEach(async () => {
-	configDir = join(tmpdir(), `termora-config-spec-${Date.now()}-${Math.random()}`);
+	configDir = join(tmpdir(), `lasterm-config-spec-${Date.now()}-${Math.random()}`);
 	mkdirSync(configDir, { recursive: true });
 	dbs = openTestDatabases();
 	server = await createServer({
@@ -261,7 +261,7 @@ describe("PUT /api/config/ui — broadcastDisplayTitles integration", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `termora-bdt-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-bdt-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		testDbs = openTestDatabases();
 		miniServer = Fastify({ logger: false });

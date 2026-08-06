@@ -3,7 +3,7 @@ doc-meta:
   status: draft
   scope: hub+web
   type: specification
-  target_project: /mnt/disk/dev/termora/termora
+  target_project: /mnt/disk/dev/lasterm/lasterm
   created: 2026-06-16
   updated: 2026-06-17
   complexity: COMPLEX
@@ -34,7 +34,7 @@ doc-meta:
 
 ## 1. Problem Statement
 
-Seeding/refreshing the remote-host agent binaries the hub deploys requires the `termora-hub agent fetch` CLI (#77); the cache state is invisible in the GUI-first desktop client, and air-gapped transfers have no GUI home. #77 shipped the engine but no addressable agent-cache-state API. This spec adds a thin REST + WS surface over the existing module, a Settings → Agents panel, and a desktop/hub/agent version diagnostic.
+Seeding/refreshing the remote-host agent binaries the hub deploys requires the `lasterm-hub agent fetch` CLI (#77); the cache state is invisible in the GUI-first desktop client, and air-gapped transfers have no GUI home. #77 shipped the engine but no addressable agent-cache-state API. This spec adds a thin REST + WS surface over the existing module, a Settings → Agents panel, and a desktop/hub/agent version diagnostic.
 
 ## 2. User Stories
 
@@ -70,13 +70,13 @@ ACCEPTANCE: the panel reads hub version (REST), bundled-agent version (--version
 ## 3. Business Rules
 
 ### 3.1 Invariants
-- INV-01: An imported binary is placed in the cache ONLY after its computed SHA256 matches the entry for `termora-agent-<triple>-<version><ext>` in the supplied `SHA256SUMS-<version>.txt`.
+- INV-01: An imported binary is placed in the cache ONLY after its computed SHA256 matches the entry for `lasterm-agent-<triple>-<version><ext>` in the supplied `SHA256SUMS-<version>.txt`.
 - INV-02: Every cache write requires `isCacheDirSecure(cacheDir)` (0700, user-owned, non-symlink); an insecure cache dir fails the write closed.
 - INV-03: Remote-target status is computed as cache-contents-vs-hub-version ONLY — no remote SSH round-trip, no remote-host agent version detection.
 - INV-04: Only built targets (`AGENT_TARGET_TRIPLES` with a non-null triple → `linux-x64`, `linux-arm64`, `windows-x64`) are fetchable/importable. Non-built targets are read-only and reject with `UNSUPPORTED_TARGET`. The hub's OWN platform target rejects fetch/import/prune with `BUNDLED_TARGET` (it is served by the bundled agent, never the cache).
 - INV-05: All `/api/agents/*` routes require valid `Bearer` auth **unconditionally** (not only in daemon mode). In addition, mutation routes (`fetch`/`prune`/`import`) reject browser requests whose `Origin`/`Host` is not in the approved set at the route level — defense-in-depth against DNS-rebinding/CSRF that does not rely on global CORS config staying strict. The token is never available cross-origin.
 - INV-06: A placed binary is `chmod 755` and written via atomic temp→final move (reuse of the fetch-path placement).
-- INV-07: The hub's OWN platform target shows status `bundled` — presence via `resolveAgentBinaryPath`, version via `termora-agent --version`. Absent binary → `error`; present but version unreadable → `error` ("version unreadable").
+- INV-07: The hub's OWN platform target shows status `bundled` — presence via `resolveAgentBinaryPath`, version via `lasterm-agent --version`. Absent binary → `error`; present but version unreadable → `error` ("version unreadable").
 - INV-08: Per-target status ∈ `{ bundled, error, cached, stale, missing, untrusted, unsupported }`, derived per §4.5.
 - INV-09 (network-agnostic): the panel addresses the hub via `hubBaseUrl()` and assumes nothing about the bind address — loopback, SSH tunnel, or future hardened non-local interface behave identically. The current loopback-only bind is an existing-state constraint; hardened non-local exposure is a separate track (§10, #96).
 - INV-10 (canonical version validation): a single exported `validateAgentVersion()` — strict semver AND rejecting the `0.0.0` fallback (matching the backend) — is reused by fetch/import/prune/status. Untrusted `os`/`arch` validate via `resolveTarget` (the whitelist) BEFORE any cache path is constructed (anti path-traversal).
@@ -92,8 +92,8 @@ ACCEPTANCE: the panel reads hub version (REST), bundled-agent version (--version
 - PRE-02: Import requires BOTH files, the `os`/`arch`/`version` fields, and `attested: true`.
 
 ### 3.3 Effects
-- EFF-01: Successful fetch/import places a verified binary at `termora-agent-<os>-<arch>-<version><ext>` (under the placement lock).
-- EFF-02: Prune removes all `termora-agent-*` entries whose version ≠ the requested version (default = hub version, validated) and returns the count.
+- EFF-01: Successful fetch/import places a verified binary at `lasterm-agent-<os>-<arch>-<version><ext>` (under the placement lock).
+- EFF-02: Prune removes all `lasterm-agent-*` entries whose version ≠ the requested version (default = hub version, validated) and returns the count.
 - EFF-03: Fetch emits `agent_fetch_progress` over `/ws` keyed by `job_id`, terminating with `agent_fetch_done` or `agent_fetch_error`; an already-current target returns `200 { status: "already_cached" }` with no job.
 
 ### 3.4 Error Handling
@@ -151,14 +151,14 @@ if T == hostPlatform(hub):
 else remote:
     triple == null → "unsupported"
     else built:
-        entries = cache files matching termora-agent-<os>-<arch>-*, kept ONLY if isCacheDirSecure(dir) && isTrustedCacheBinary(file)
+        entries = cache files matching lasterm-agent-<os>-<arch>-*, kept ONLY if isCacheDirSecure(dir) && isTrustedCacheBinary(file)
         a matching name that exists but fails the trust check → "untrusted"
         trusted entries: validateAgentVersion each; current(==hub) → "cached"; else newest-by-numeric-semver → "stale"; none → "missing"
 ```
 `bundled` derives from *T == hub platform AND co-located binary present*, independent of the `built` flag. Exactly one `bundled`/`error` row; the rest `cached`/`stale`/`missing`/`untrusted`/`unsupported`.
 
 ### 4.6 Version triplet diagnostic
-Surfaces **hub** (`/api/health` / `targets.hub_version`), **bundled agent** (`termora-agent --version`, clap, memoized on SUCCESS only — failures stay retryable), **desktop** (Tauri `app.getVersion()`; N/A in the browser PWA). A mismatch raises a non-blocking warning pointing to the update path (#94). Diagnostic only.
+Surfaces **hub** (`/api/health` / `targets.hub_version`), **bundled agent** (`lasterm-agent --version`, clap, memoized on SUCCESS only — failures stay retryable), **desktop** (Tauri `app.getVersion()`; N/A in the browser PWA). A mismatch raises a non-blocking warning pointing to the update path (#94). Diagnostic only.
 
 ### 4.7 Import trust model — integrity vs provenance (honest)
 Manifest-only verification proves the uploaded binary is **intact** (matches the operator-supplied SHA256SUMS); it does **not** prove **provenance** — the binary and its manifest share one operator-controlled channel, so a self-consistent *(malicious binary + matching SHA256SUMS)* pair passes, and a stolen Bearer token or GUI XSS is a residual vector. The fetch path avoids this because its manifest comes from GitHub Releases over HTTPS. Import deliberately accepts the weaker **operator-verified** model of SPEC §3.5.
@@ -194,7 +194,7 @@ Bounding invariants: GUI ⇒ local hub (INV-09); CLI ≡ GUI on the same cache (
 ```gherkin
 @priority:high @type:nominal
 Scenario: SC-01 Targets endpoint reports accurate per-target status
-  Given the cache holds a trusted termora-agent-linux-arm64-<hubVersion> and the hub platform is linux-x64
+  Given the cache holds a trusted lasterm-agent-linux-arm64-<hubVersion> and the hub platform is linux-x64
   When an authorized client GETs /api/agents/targets
   Then linux-x64 is "bundled", linux-arm64 "cached", windows-x64 "missing", darwin-* and windows-arm64 "unsupported"
 ```
@@ -207,7 +207,7 @@ Scenario: SC-02 Empty cache lists built remote targets as missing
 ```gherkin
 @priority:medium @type:edge
 Scenario: SC-03 Older cached version is reported stale
-  Given a trusted termora-agent-windows-x64-<olderVersion> and hub version <hubVersion>
+  Given a trusted lasterm-agent-windows-x64-<olderVersion> and hub version <hubVersion>
   Then windows-x64 is "stale" with version=<olderVersion>, expected_version=<hubVersion>
 ```
 ```gherkin
@@ -219,21 +219,21 @@ Scenario: SC-04 Unauthorized status request is rejected
 ```gherkin
 @priority:high @type:security
 Scenario: SC-23 A present-but-untrusted cache entry is not reported as cached
-  Given a termora-agent-linux-arm64-<hubVersion> that is a symlink (or wrong-owner / not a regular file)
+  Given a lasterm-agent-linux-arm64-<hubVersion> that is a symlink (or wrong-owner / not a regular file)
   When an authorized client GETs /api/agents/targets
   Then linux-arm64 status is "untrusted" (never "cached"), matching what the deployer would reject
 ```
 ```gherkin
 @priority:medium @type:edge
 Scenario: SC-26 Stale selection uses numeric semver, not string order
-  Given trusted termora-agent-linux-arm64-2.9.0 and -2.10.0, neither equal to hub version
+  Given trusted lasterm-agent-linux-arm64-2.9.0 and -2.10.0, neither equal to hub version
   Then linux-arm64 is "stale" with version=2.10.0 (numeric semver, not "2.9.0" by string order)
 ```
 ```gherkin
 @priority:high @type:nominal
 Scenario: SC-15 The hub platform shows bundled with its version
   Given hub platform linux-x64 with a co-located agent that reports a version
-  Then linux-x64 is "bundled" with version from `termora-agent --version`
+  Then linux-x64 is "bundled" with version from `lasterm-agent --version`
 ```
 ```gherkin
 @priority:high @type:edge
@@ -272,13 +272,13 @@ Scenario: SC-07 Fetch failure surfaces FetchError and routes to import, not manu
 ```gherkin
 @priority:medium @type:nominal
 Scenario: SC-08 Prune removes non-current versions and keeps the current one
-  Given trusted termora-agent-linux-arm64-<old> and -<hubVersion>
+  Given trusted lasterm-agent-linux-arm64-<old> and -<hubVersion>
   Then POST /api/agents/prune {} returns { removed: 1 } and only the <hubVersion> entry remains
 ```
 ```gherkin
 @priority:medium @type:nominal
 Scenario: SC-17 Fetch of an already-current target is a no-op
-  Given a trusted termora-agent-linux-arm64-<hubVersion>
+  Given a trusted lasterm-agent-linux-arm64-<hubVersion>
   When POST /api/agents/fetch {os:"linux",arch:"arm64"}
   Then 200 { status:"already_cached" }, no download, no job
 ```
@@ -308,7 +308,7 @@ Scenario: SC-10 Import with matching SHA256SUMS and attestation is verified and 
 @priority:high @type:security
 Scenario: SC-11 Mismatched-hash import is rejected and never cached
   Given a binary whose SHA256 does not match its SHA256SUMS entry
-  Then POST /api/agents/import (attested:true) → 422 CHECKSUM_MISMATCH and no termora-agent-* for that target/version exists afterward
+  Then POST /api/agents/import (attested:true) → 422 CHECKSUM_MISMATCH and no lasterm-agent-* for that target/version exists afterward
 ```
 ```gherkin
 @priority:high @type:error
@@ -343,7 +343,7 @@ Scenario: SC-22 Import without an explicit attestation is rejected
 ```gherkin
 @priority:high @type:security
 Scenario: SC-27 Import does not silently overwrite a trusted current binary
-  Given a trusted termora-agent-windows-x64-<hubVersion> already present (e.g. from a verified fetch)
+  Given a trusted lasterm-agent-windows-x64-<hubVersion> already present (e.g. from a verified fetch)
   When an import for windows-x64 <hubVersion> is submitted without force
   Then 409 ALREADY_CURRENT and the existing fetch-verified binary is unchanged
 ```
@@ -374,7 +374,7 @@ Scenario: SC-25 Mutation routes reject a disallowed Origin
 @priority:medium @type:nominal
 Scenario: SC-28 CLI `agent status` mirrors the panel status
   Given a cache state and hub platform as in SC-01
-  When the operator runs `termora-hub agent status`
+  When the operator runs `lasterm-hub agent status`
   Then it prints the same per-target statuses computeTargetStatus produces for /api/agents/targets
        (bundled / cached / stale / missing / untrusted / unsupported), via the shared API
 ```
@@ -382,7 +382,7 @@ Scenario: SC-28 CLI `agent status` mirrors the panel status
 @priority:high @type:security
 Scenario: SC-29 CLI `agent import` verifies like the route
   Given a binary + SHA256SUMS for a remote built target and an explicit --attest
-  When the operator runs `termora-hub agent import` with a mismatched binary
+  When the operator runs `lasterm-hub agent import` with a mismatched binary
   Then it reuses verifyAndPlace, fails with the same CHECKSUM_MISMATCH semantics, and places nothing
   And a matching binary with --attest is verified and cached
 ```

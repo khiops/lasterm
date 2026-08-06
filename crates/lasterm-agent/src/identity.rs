@@ -139,12 +139,12 @@ fn default_state_dir() -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
             format!("{home}/.local/state")
         });
-        PathBuf::from(base).join("termora")
+        PathBuf::from(base).join("lasterm")
     }
     #[cfg(windows)]
     {
-        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\termora-state".into());
-        PathBuf::from(base).join("termora")
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\lasterm-state".into());
+        PathBuf::from(base).join("lasterm")
     }
 }
 
@@ -962,7 +962,7 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("termora-identity-test-{}", ulid::Ulid::new()));
+            std::env::temp_dir().join(format!("lasterm-identity-test-{}", ulid::Ulid::new()));
         fs::create_dir_all(&path).unwrap();
         path
     }

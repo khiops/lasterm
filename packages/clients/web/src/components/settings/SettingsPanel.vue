@@ -89,7 +89,7 @@
 								type="button"
 								@click="showAbout = true"
 							>
-								About Termora
+								About Lasterm
 							</button>
 						</div>
 					</div>
@@ -102,7 +102,7 @@
 </template>
 
 <script setup lang="ts">
-import { DEFAULT_CHANNEL_NAME } from '@termora/shared';
+import { DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
 import { computed, ref, watch } from 'vue';
 import { useChannelsStore } from '../../stores/channels.js';
 import { useHostsStore } from '../../stores/hosts.js';

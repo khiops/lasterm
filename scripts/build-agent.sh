@@ -12,22 +12,22 @@ case "$(uname -s)" in
   *)      echo "❌ Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
 
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
-TERMORA_DIST_DIR="${TERMORA_DIST_DIR:-$ROOT/dist/sea}"
-TERMORA_CARGO_TARGET_DIR="${TERMORA_CARGO_TARGET_DIR:-$ROOT/target}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
+LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
+LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-$ROOT/target}"
 
-echo "🔨 Building Rust agent (triple: $TERMORA_TARGET_TRIPLE)..."
+echo "🔨 Building Rust agent (triple: $LASTERM_TARGET_TRIPLE)..."
 
-mkdir -p "$TERMORA_DIST_DIR"
+mkdir -p "$LASTERM_DIST_DIR"
 cd "$ROOT"
 # Use --target for cross-compilation, skip for native builds
-if [ "$TERMORA_TARGET_TRIPLE" != "$DETECTED_TRIPLE" ]; then
-  echo "  Cross-compiling for $TERMORA_TARGET_TRIPLE (native: $DETECTED_TRIPLE)"
-  cargo build -p termora-agent --release --target "$TERMORA_TARGET_TRIPLE" --target-dir "$TERMORA_CARGO_TARGET_DIR"
-  BINARY="$TERMORA_CARGO_TARGET_DIR/$TERMORA_TARGET_TRIPLE/release/termora-agent"
+if [ "$LASTERM_TARGET_TRIPLE" != "$DETECTED_TRIPLE" ]; then
+  echo "  Cross-compiling for $LASTERM_TARGET_TRIPLE (native: $DETECTED_TRIPLE)"
+  cargo build -p lasterm-agent --release --target "$LASTERM_TARGET_TRIPLE" --target-dir "$LASTERM_CARGO_TARGET_DIR"
+  BINARY="$LASTERM_CARGO_TARGET_DIR/$LASTERM_TARGET_TRIPLE/release/lasterm-agent"
 else
-  cargo build -p termora-agent --release --target-dir "$TERMORA_CARGO_TARGET_DIR"
-  BINARY="$TERMORA_CARGO_TARGET_DIR/release/termora-agent"
+  cargo build -p lasterm-agent --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
+  BINARY="$LASTERM_CARGO_TARGET_DIR/release/lasterm-agent"
 fi
 
 # Copy binary to dist
@@ -35,8 +35,8 @@ if [ ! -f "$BINARY" ]; then
   echo "❌ Binary not found at $BINARY" >&2
   exit 1
 fi
-cp "$BINARY" "$TERMORA_DIST_DIR/termora-agent"
-chmod +x "$TERMORA_DIST_DIR/termora-agent"
+cp "$BINARY" "$LASTERM_DIST_DIR/lasterm-agent"
+chmod +x "$LASTERM_DIST_DIR/lasterm-agent"
 
-SIZE=$(du -h "$TERMORA_DIST_DIR/termora-agent" | cut -f1)
-echo "✅ Rust agent built → $TERMORA_DIST_DIR/termora-agent ($SIZE)"
+SIZE=$(du -h "$LASTERM_DIST_DIR/lasterm-agent" | cut -f1)
+echo "✅ Rust agent built → $LASTERM_DIST_DIR/lasterm-agent ($SIZE)"

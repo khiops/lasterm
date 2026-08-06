@@ -22,25 +22,25 @@ import type {
 	ProtocolMessage,
 	SessionStatus,
 	SupportedOs,
-} from "@termora/shared";
-import { DEFAULT_CHANNEL_NAME, generateId, getSocketPath } from "@termora/shared";
+} from "@lasterm/shared";
+import { DEFAULT_CHANNEL_NAME, generateId, getSocketPath } from "@lasterm/shared";
 import { HUB_VERSION } from "../build-version.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch } from "./agent-launcher.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { LastermAgent } from "./lasterm-agent.js";
 import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
-import { TermoraAgent } from "./termora-agent.js";
 
 export class AgentVersionMismatchError extends Error {
 	readonly code = "AGENT_VERSION_MISMATCH" as const;
 
 	constructor(agentVersion: string, hubVersion: string) {
 		super(
-			`Agent version mismatch after deploy: agent=${agentVersion} hub=${hubVersion}. Re-fetch or install the matching Termora agent binary, then reconnect.`,
+			`Agent version mismatch after deploy: agent=${agentVersion} hub=${hubVersion}. Re-fetch or install the matching Lasterm agent binary, then reconnect.`,
 		);
 		this.name = "AgentVersionMismatchError";
 	}
@@ -118,14 +118,14 @@ async function seedRemoteShellProfiles(
 		metaDal.upsertHostProfileOverride(hostId, defaultProfileId, "default");
 	}
 
-	console.error(`[termora-ssh] seeded ${seededCount} remote shell profiles for host ${hostId}`);
+	console.error(`[lasterm-ssh] seeded ${seededCount} remote shell profiles for host ${hostId}`);
 }
 
 export class AgentConnectionManager {
 	/** Lazy ref to SshConnectionManager — set after construction to break circular dep */
 	sshMgr!: SshConnectionManager;
 
-	private readonly daemonAttachPromises = new Map<string, Promise<TermoraAgent>>();
+	private readonly daemonAttachPromises = new Map<string, Promise<LastermAgent>>();
 
 	constructor(
 		private readonly ctx: SharedSessionContext,
@@ -177,7 +177,7 @@ export class AgentConnectionManager {
 	private warnAgentVersionMismatch(helloMsg: HelloMessage): void {
 		if (helloMsg.agentVersion !== HUB_VERSION) {
 			console.warn(
-				`[termora] Agent version mismatch: agent=${helloMsg.agentVersion} hub=${HUB_VERSION}`,
+				`[lasterm] Agent version mismatch: agent=${helloMsg.agentVersion} hub=${HUB_VERSION}`,
 			);
 		}
 	}
@@ -249,7 +249,7 @@ export class AgentConnectionManager {
 					host?.os ?? null,
 					this.ctx.metaDal,
 				).catch((err: unknown) => {
-					console.error("[termora-ssh] seedRemoteShellProfiles failed:", err);
+					console.error("[lasterm-ssh] seedRemoteShellProfiles failed:", err);
 				});
 			}
 		}
@@ -483,7 +483,7 @@ export class AgentConnectionManager {
 
 			if (!session) return;
 
-			if (agent instanceof TermoraAgent) {
+			if (agent instanceof LastermAgent) {
 				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
 				this.reconnectDaemon(hostId, session.id).catch(() => {
 					this.lifecycle.closeSession(hostId, session.id);
@@ -504,7 +504,7 @@ export class AgentConnectionManager {
 
 	// ─── Daemon agent ─────────────────────────────────────────────────────────
 
-	private async attachDaemon(hostId: string, sessionId: string): Promise<TermoraAgent> {
+	private async attachDaemon(hostId: string, sessionId: string): Promise<LastermAgent> {
 		captureQuitFence(this.ctx);
 		const existing = this.ctx.agents.get(hostId);
 		if (existing?.connected) {
@@ -512,7 +512,7 @@ export class AgentConnectionManager {
 				hostId,
 				sessionId,
 			});
-			return existing as TermoraAgent;
+			return existing as LastermAgent;
 		}
 		if (existing !== undefined) {
 			this.ctx.hubLogger?.log("debug", "agent-connection-manager: evicting stale daemon agent", {
@@ -545,7 +545,7 @@ export class AgentConnectionManager {
 		return attachPromise;
 	}
 
-	private async attachDaemonFresh(hostId: string, sessionId: string): Promise<TermoraAgent> {
+	private async attachDaemonFresh(hostId: string, sessionId: string): Promise<LastermAgent> {
 		const quitEpoch = captureQuitFence(this.ctx);
 		const socketPath = getSocketPath(this.ctx.agentConfig.socketPath);
 		this.ctx.hubLogger?.log("debug", "agent-connection-manager: attachDaemon", {
@@ -553,7 +553,7 @@ export class AgentConnectionManager {
 			sessionId,
 			socketPath,
 		});
-		let agent: TermoraAgent | null = null;
+		let agent: LastermAgent | null = null;
 		try {
 			agent = await connectOrLaunch(
 				socketPath,
@@ -573,7 +573,7 @@ export class AgentConnectionManager {
 			this.wireAgentEvents(hostId, sessionId, agent);
 
 			// Send AUTH to daemon agent (required before CHANNEL_STATE handshake).
-			// The TermoraAgent channel-state collector is installed in the constructor,
+			// The LastermAgent channel-state collector is installed in the constructor,
 			// so the CHANNEL_STATE listener is already armed before AUTH can trigger it.
 			if (this.ctx.primaryToken) {
 				agent.send({ type: "AUTH", token: this.ctx.primaryToken });
@@ -612,7 +612,7 @@ export class AgentConnectionManager {
 		}
 	}
 
-	async connectDaemonAgent(hostId: string, sessionId: string): Promise<TermoraAgent> {
+	async connectDaemonAgent(hostId: string, sessionId: string): Promise<LastermAgent> {
 		this.ctx.hubLogger?.log("debug", "agent-connection-manager: connectDaemonAgent", {
 			hostId,
 			sessionId,
@@ -644,7 +644,7 @@ export class AgentConnectionManager {
 			return;
 		}
 
-		let agent: TermoraAgent;
+		let agent: LastermAgent;
 		try {
 			agent = await this.attachDaemon(hostId, sessionId);
 		} catch {

@@ -1,4 +1,4 @@
-import type { TestConnectMessage } from "@termora/shared";
+import type { TestConnectMessage } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleTestConnect(msg: TestConnectMessage, ctx: WsHandlerContext): void {

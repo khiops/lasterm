@@ -131,13 +131,13 @@ implementation-time guards (each closes a specific interleaving):
 
 Not hub-only. Mandatory coordinated changes across three packages:
 
-- **`@termora/shared`** (`protocol.ts`): add required `promptId` (+ `deliveryEpoch`) to
+- **`@lasterm/shared`** (`protocol.ts`): add required `promptId` (+ `deliveryEpoch`) to
   `AUTH_PROMPT` and `AUTH_PROMPT_RESPONSE`; add a `PROMPT_CANCEL { promptId }` message so the
   client dismisses a stale dialog on `clearContext`/old-route retarget. (Host-key/agent-verify
   already carry a prompt id — align them.)
-- **`@termora/hub`** (`session/*`): the PromptContext model, the operations, owner/route
+- **`@lasterm/hub`** (`session/*`): the PromptContext model, the operations, owner/route
   lifecycle, response routing by `promptId`, retarget, deterministic chooser, the guards A–F.
-- **`@termora/web`** (Vue stores `auth-prompt.ts`, `session.ts`, host-key/agent-verify stores +
+- **`@lasterm/web`** (Vue stores `auth-prompt.ts`, `session.ts`, host-key/agent-verify stores +
   their components): echo `promptId`+`deliveryEpoch` back on responses; QUEUE prompts by
   `promptId` (today the store holds a single prompt — two contexts routed to one client would
   overwrite locally); handle `PROMPT_CANCEL` to drop a stale dialog.

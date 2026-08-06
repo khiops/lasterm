@@ -1,6 +1,6 @@
 import { onScopeDispose, type Ref, watch } from "vue";
 
-const DEFAULT_TITLE = "termora";
+const DEFAULT_TITLE = "lasterm";
 
 /**
  * Replace {prefix}, {host}, {title}, {channel}, {shell} tokens in a format string.
@@ -42,7 +42,7 @@ export function formatWindowTitle(
 /**
  * Reactively update `document.title` based on the currently active terminal.
  *
- * When `enabled` is false, resets to "termora".
+ * When `enabled` is false, resets to "lasterm".
  * Debounces updates by 100ms to avoid excessive reflow from rapid title changes.
  * Cleans up on scope disposal (restores default title).
  */

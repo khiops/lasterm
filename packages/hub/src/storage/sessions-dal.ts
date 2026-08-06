@@ -1,4 +1,4 @@
-import type { Session, SessionStatus } from "@termora/shared";
+import type { Session, SessionStatus } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 
 import type { CreateSessionInput } from "./meta-types.js";

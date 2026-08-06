@@ -518,7 +518,7 @@
 
 <script setup lang="ts">
 import { computed, ref, type PropType } from "vue";
-import type { Host, VisualProfile } from "@termora/shared";
+import type { Host, VisualProfile } from "@lasterm/shared";
 import { useHostForm } from "../composables/useHostForm.js";
 import { getColorFromLabel } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";

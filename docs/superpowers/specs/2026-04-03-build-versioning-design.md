@@ -10,7 +10,7 @@ doc-meta:
 
 ## Context
 
-termora uses unified versioning (single version across all monorepo packages, bumped by Release Please). The CI already injects `TERMORA_BUILD_HASH` (7-char git SHA) into hub and web builds. However:
+lasterm uses unified versioning (single version across all monorepo packages, bumped by Release Please). The CI already injects `LASTERM_BUILD_HASH` (7-char git SHA) into hub and web builds. However:
 
 - `/api/health` returns only `{ status, build }` — no version
 - No version/build display in the UI
@@ -57,7 +57,7 @@ Hub can log version mismatch warnings (non-blocking — just a log line).
 
 ### 1c. Shared version constant
 
-Add `VERSION` export to `@termora/shared` so both hub and web can import it.
+Add `VERSION` export to `@lasterm/shared` so both hub and web can import it.
 Source: read from root `package.json` at build time.
 
 ## Bloc 2: About Modal
@@ -69,8 +69,8 @@ Source: read from root `package.json` at build time.
 | Version | `VERSION` from shared |
 | Build | `BUILD_HASH` (7-char SHA) |
 | Website | https://o2csi.com |
-| Repository | https://github.com/khiops/termora |
-| Issues | https://github.com/khiops/termora/issues |
+| Repository | https://github.com/khiops/lasterm |
+| Issues | https://github.com/khiops/lasterm/issues |
 | License | MIT (from package.json) |
 
 ### UI
@@ -91,8 +91,8 @@ Source: read from root `package.json` at build time.
 - `packages/shared/src/version.ts` — new, exports VERSION + BUILD_HASH
 - `packages/hub/src/build-version.ts` — import VERSION from shared, add to health
 - `packages/hub/src/server.ts` — return version in /api/health
-- `crates/termora-agent/src/protocol.rs` — add version to HelloPayload
-- `crates/termora-agent/src/handler.rs` — include version in HELLO
+- `crates/lasterm-agent/src/protocol.rs` — add version to HelloPayload
+- `crates/lasterm-agent/src/handler.rs` — include version in HELLO
 - `packages/hub/src/agents/base-agent.ts` — log agent version from HELLO
 
 ### Bloc 2

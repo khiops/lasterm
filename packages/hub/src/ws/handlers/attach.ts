@@ -1,5 +1,5 @@
-import type { UiAttachMessage } from "@termora/shared";
-import { isValidUlid } from "@termora/shared";
+import type { UiAttachMessage } from "@lasterm/shared";
+import { isValidUlid } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleAttach(msg: UiAttachMessage, ctx: WsHandlerContext): void {

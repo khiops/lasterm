@@ -15,7 +15,7 @@
  * work identically on RECONNECTING acqs. No rework required in this module.
  */
 
-import { generateId } from "@termora/shared";
+import { generateId } from "@lasterm/shared";
 import type {
 	Lease,
 	SessionAcquisition,

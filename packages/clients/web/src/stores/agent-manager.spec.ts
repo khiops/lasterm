@@ -50,7 +50,7 @@ const targetsResponse = {
 describe("useAgentManagerStore", () => {
 	beforeEach(() => {
 		localStorageMap.clear();
-		localStorageMap.set("termora_token", "test-token");
+		localStorageMap.set("lasterm_token", "test-token");
 		setActivePinia(createPinia());
 		mockFetch.mockReset();
 	});
@@ -151,7 +151,7 @@ describe("useAgentManagerStore", () => {
 						store.handleAgentFetchDone({
 							type: "AGENT_FETCH_DONE",
 							jobId: "job-done-first",
-							path: "/tmp/termora-agent-linux-arm64",
+							path: "/tmp/lasterm-agent-linux-arm64",
 						});
 					},
 				);
@@ -234,7 +234,7 @@ describe("useAgentManagerStore", () => {
 		store.handleAgentFetchDone({
 			type: "AGENT_FETCH_DONE",
 			jobId: "job-normal",
-			path: "/tmp/termora-agent-linux-arm64",
+			path: "/tmp/lasterm-agent-linux-arm64",
 		});
 
 		expect(store.progressFor("linux", "arm64")).toBeNull();
@@ -250,7 +250,7 @@ describe("useAgentManagerStore", () => {
 				{
 					error: {
 						code: "UNSUPPORTED_TARGET",
-						message: "No Termora agent release is built for darwin/arm64.",
+						message: "No Lasterm agent release is built for darwin/arm64.",
 					},
 				},
 				400,
@@ -260,7 +260,7 @@ describe("useAgentManagerStore", () => {
 		const store = useAgentManagerStore();
 
 		await expect(store.fetchTarget("darwin", "arm64")).rejects.toThrow(
-			"Failed to fetch agent target: UNSUPPORTED_TARGET: No Termora agent release is built for darwin/arm64.",
+			"Failed to fetch agent target: UNSUPPORTED_TARGET: No Lasterm agent release is built for darwin/arm64.",
 		);
 	});
 
@@ -270,7 +270,7 @@ describe("useAgentManagerStore", () => {
 			.mockResolvedValueOnce(makeJsonResponse(targetsResponse));
 
 		const store = useAgentManagerStore();
-		const binary = new File(["binary"], "termora-agent-linux-arm64");
+		const binary = new File(["binary"], "lasterm-agent-linux-arm64");
 		const manifest = new File(["checksum"], "SHA256SUMS-1.2.3.txt");
 
 		await store.importAgent({
@@ -307,7 +307,7 @@ describe("useAgentManagerStore", () => {
 		);
 
 		const store = useAgentManagerStore();
-		const binary = new File(["binary"], "termora-agent-linux-arm64");
+		const binary = new File(["binary"], "lasterm-agent-linux-arm64");
 		const manifest = new File(["checksum"], "SHA256SUMS-1.2.3.txt");
 
 		const result = await store.importAgent({

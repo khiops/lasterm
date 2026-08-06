@@ -692,7 +692,7 @@ mod tests {
 
         fn pid_file() -> PathBuf {
             std::env::temp_dir().join(format!(
-                "termora-agent-tree-teardown-{}-{}.pid",
+                "lasterm-agent-tree-teardown-{}-{}.pid",
                 std::process::id(),
                 ulid::Ulid::new()
             ))

@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: agent, hub, shared, web
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-07
   updated: 2026-03-07
   complexity: COMPLEX
@@ -32,7 +32,7 @@ Users have no way to know when background terminals produce output or receive be
 ## 2. User Stories
 
 ### US-01: Activity & Bell Awareness
-AS A termora user running multiple terminals
+AS A lasterm user running multiple terminals
 I WANT to see which background tabs have new output or bell alerts
 SO THAT I can notice important events without constantly switching tabs
 
@@ -64,7 +64,7 @@ ACCEPTANCE: Configurable scroll mode (auto/alwaysBottom/alwaysResume), unread li
 - INV-06: Sound plays only on bell, never on activity
 - INV-07: Badge counts are per-channel, host rail shows aggregated sum across channels
 - INV-08: Unread lines bar only appears on tab switch, not on scroll-up from bottom
-- INV-09: Custom sound file MUST be a filename only (no path separators), resolved relative to ~/.config/termora/sounds/. Hub serves at /public/sounds/. Absolute paths and URLs rejected.
+- INV-09: Custom sound file MUST be a filename only (no path separators), resolved relative to ~/.config/lasterm/sounds/. Hub serves at /public/sounds/. Absolute paths and URLs rejected.
 - INV-10: Agent MUST throttle BELL messages to at most 1 per 100ms per channel. OSC 9 NOTIFICATION messages throttled to 1 per 500ms per channel.
 - INV-11: Hub MUST rate-limit BELL forwarding to at most 10 per second per channel. NOTIFICATION messages rate-limited to 5 per second per channel.
 - INV-12: OSC 9 message text MUST be sanitized agent-side: strip control characters, strip HTML tags, truncate to 256 chars, trim whitespace.
@@ -237,7 +237,7 @@ Scenario: SC-04 OSC 9 triggers desktop notification
   Given desktop notifications are enabled and permitted
   And channel "build" is running in a background tab
   When the PTY outputs '\e]9;Build finished!\a'
-  Then a desktop notification shows: title "termora - prod-server", body "Build finished!"
+  Then a desktop notification shows: title "lasterm - prod-server", body "Build finished!"
 
 @priority:medium @type:edge
 Scenario: SC-05 OSC 9 with empty message
@@ -292,7 +292,7 @@ Scenario: SC-11 Desktop notification on bell (window hidden)
   Given the browser tab is hidden (document.hidden = true)
   And bell desktop notification is enabled
   When a BELL arrives for channel "build"
-  Then a desktop notification shows: "termora - host", "Bell in build"
+  Then a desktop notification shows: "lasterm - host", "Bell in build"
 
 @priority:medium @type:nominal
 Scenario: SC-12 Notification grouping within window
@@ -554,7 +554,7 @@ Scenario: SC-32 Hub rate-limits bell forwarding
 
 **Files:**
 - `packages/hub/src/session/session-manager.ts` — wire BELL/NOTIFICATION from agent events to _broadcastToChannel
-- `packages/hub/src/api/server.ts` — register @fastify/static for `~/.config/termora/sounds/` at `/public/sounds/` (same pattern as `/public/fonts/`, `decorateReply: false`). Auth bypass for `/public/sounds/` path.
+- `packages/hub/src/api/server.ts` — register @fastify/static for `~/.config/lasterm/sounds/` at `/public/sounds/` (same pattern as `/public/fonts/`, `decorateReply: false`). Auth bypass for `/public/sounds/` path.
 
 **Exit criteria:**
 - [ ] BELL messages from agent forwarded to all connected UI WS clients
@@ -562,7 +562,7 @@ Scenario: SC-32 Hub rate-limits bell forwarding
 - [ ] Messages include channelId for UI routing
 - [ ] Hub rate-limits BELL to 10/sec/channel, NOTIFICATION to 5/sec/channel
 - [ ] BELL and NOTIFICATION branches added to _wireAgentEvents if/else chain
-- [ ] Hub serves custom sound files from ~/.config/termora/sounds/ at /public/sounds/
+- [ ] Hub serves custom sound files from ~/.config/lasterm/sounds/ at /public/sounds/
 - [ ] Sound file validation: filename-only (no path separators), .wav/.mp3/.ogg extensions only
 
 ### Block 4: Notification Store + Activity Tracking — 1h
@@ -620,7 +620,7 @@ Scenario: SC-32 Hub rate-limits bell forwarding
 - [ ] Sound only on bell, not on activity
 - [ ] AudioContext created lazily on first user interaction (click/keypress) — not on first bell
 - [ ] OSC 9 message HTML-stripped before Notification API body (defense-in-depth for Linux daemons)
-- [ ] Grouping uses Notification API tag parameter: termora-bell-${channelId}. BELL and OSC 9 have separate tags.
+- [ ] Grouping uses Notification API tag parameter: lasterm-bell-${channelId}. BELL and OSC 9 have separate tags.
 - [ ] Grouping timers cleared on: channel removal, WS disconnect, composable unmount. dispose() returned.
 
 ### Block 7: Unread Lines Bar + Scroll Behavior — 1.5h

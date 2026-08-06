@@ -147,7 +147,7 @@
 </template>
 
 <script setup lang="ts">
-import type { BackgroundMode, WindowEffect } from "@termora/shared";
+import type { BackgroundMode, WindowEffect } from "@lasterm/shared";
 import { computed, onMounted, ref } from "vue";
 import { useFileDrop } from "../../../composables/useFileDrop.js";
 import {

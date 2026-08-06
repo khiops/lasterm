@@ -75,7 +75,7 @@ Decisions archived from workflow — newest first.
 - File permissions: 0o600 (owner read/write only) on all log files
 - HubLogger serialized writes: single writer task/mutex to prevent interleaved JSON lines
 - Daemon reattach: reopen existing channel log in append mode, read first line's `created_at` to recover offset baseline
-- Windows daemon: tokio NamedPipeServer at `\\.\pipe\termora-agent-<username>`, cfg-gated (no trait abstraction)
+- Windows daemon: tokio NamedPipeServer at `\\.\pipe\lasterm-agent-<username>`, cfg-gated (no trait abstraction)
 - Named pipe ACL: SecurityDescriptor restricting access to current user SID (defense layer 1)
 - Auth token on daemon connections: hub sends AUTH with token on connect, agent rejects after 5s timeout if invalid (defense layer 2, works on both UDS and named pipe)
 - Cross-platform signals: tokio::signal::ctrl_c() replaces Unix-only SIGTERM/SIGINT for daemon shutdown
@@ -86,7 +86,7 @@ Decisions archived from workflow — newest first.
 
 ---
 
-## RUST-AGENT — Full Rust agent rewrite (async-xpty + termora-agent) (2026-03-21)
+## RUST-AGENT — Full Rust agent rewrite (async-xpty + lasterm-agent) (2026-03-21)
 
 - New public crate async-xpty: direct OS APIs (nix + windows-sys), not a fork of portable-pty (sync-only, broken v0.9.0)
 - Full agent scope (all 17 message types, daemon mode, elevation, snapshots, process title) — not MVP subset
@@ -133,7 +133,7 @@ Decisions archived from workflow — newest first.
 
 ## PKG — Full Packaging Pipeline: SEA Binaries + CI + Auto-Deploy + Tauri (2026-03-13)
 
-- Two separate SEA binaries: termora-agent (node-pty) + termora-hub (better-sqlite3)
+- Two separate SEA binaries: lasterm-agent (node-pty) + lasterm-hub (better-sqlite3)
 - Hub finds agent binary in same directory or PATH (sea-agent-resolver.ts)
 - Node SEA assets + getRawAsset() + process.dlopen() for native addon loading
 - --experimental-sea-config + postject workflow (Node 20+ compatible)
@@ -143,7 +143,7 @@ Decisions archived from workflow — newest first.
 - Hub SQL migrations embedded inline via esbuild plugin (no filesystem reads at runtime)
 - Host os/arch: nullable fields with auto-detect fallback (migration 012, uname + PROCESSOR_ARCHITECTURE)
 - Auto-deploy: best-effort, SshAgentDeployOptions opt-in, SFTP fastPut for large binaries
-- Binary cache: ~/.local/state/termora/binaries/termora-agent-{os}-{arch}
+- Binary cache: ~/.local/state/lasterm/binaries/lasterm-agent-{os}-{arch}
 - sshExec utility: generic SSH command execution with configurable timeout
 - checkRemoteAgent: which/where first, then common paths fallback
 - CI: 3-job pipeline (build-web → build-sea 5-platform matrix → release), GitHub Releases
@@ -254,7 +254,7 @@ Decisions archived from workflow — newest first.
 ## SC-22 — Host group DnD reorder in host rail (2026-03-09)
 
 - localStorage-based group ordering (not API) — host rail groups are derived from host.hostGroup strings, not ChannelGroup entities. Existing PUT /api/groups/reorder is for channel groups per host, not rail sections
-- HTML5 DnD with text/x-termora-group dataTransfer type — same pattern as SC-21 tab reorder
+- HTML5 DnD with text/x-lasterm-group dataTransfer type — same pattern as SC-21 tab reorder
 - Splice index adjustment for forward drag: insertIdx = toIdx > fromIdx ? toIdx - 1 : toIdx (same pattern as TabBar.vue)
 
 ---
@@ -262,7 +262,7 @@ Decisions archived from workflow — newest first.
 ## SC-21 — Tab DnD reorder in tab bar (2026-03-09)
 
 - Client-side only — no server API for tab order (localStorage via useLayout persist)
-- dataTransfer type 'text/x-termora-tab' distinguishes tab DnD from pane DnD
+- dataTransfer type 'text/x-lasterm-tab' distinguishes tab DnD from pane DnD
 - Reuse existing getDropInsertIndex() and CSS drop indicators
 - reorderTab(from, to) splices tabs.value — existing watch auto-persists
 - Guard against drag-during-rename (editingTabIndex check in onTabDragStart)
@@ -291,7 +291,7 @@ Decisions archived from workflow — newest first.
 ## WALLPAPER — Configurable terminal wallpaper with cascade (2026-03-08)
 
 - Wallpaper fields in TerminalProfile (cascades via existing 4-layer system)
-- Upload to ~/.config/termora/wallpapers/, served at signed /public/wallpapers/ URLs (same pattern as fonts)
+- Upload to ~/.config/lasterm/wallpapers/, served at signed /public/wallpapers/ URLs (same pattern as fonts)
 - Cover only (no contain/tile), blur 0-20px, dim 0-100%
 - Layer stack: wallpaper-bg (z0) → wallpaper-dim (z1) → terminal (z2) → tint (z3)
 - Upload validation: jpg/jpeg/png/webp/gif/avif, max 10MB via @fastify/multipart
@@ -363,10 +363,10 @@ Decisions archived from workflow — newest first.
 - Route ordering: static routes before parameterized :id routes in Fastify
 - Duplicate host: -copy suffix, auto-increment, cannot duplicate local
 - sortedHosts computed: use server order directly (no client re-sorting)
-- Host groups: collapse state persisted in localStorage (termora:collapsed-host-groups)
+- Host groups: collapse state persisted in localStorage (lasterm:collapsed-host-groups)
 - HostRail: DnD via HTML5 drag/drop, reorder API call + fetchHosts on drop
 - BatchImportModal: snake_case wire → camelCase conversion, ProxyJump auto-check, 409 conflict display
-- HostRailSettings: singleton composable with localStorage persistence (termora:host-rail-settings)
+- HostRailSettings: singleton composable with localStorage persistence (lasterm:host-rail-settings)
 - Rate limiting: in-memory sliding window 5/60s on test connection endpoints (INV-11)
 
 ---
@@ -389,7 +389,7 @@ Decisions archived from workflow — newest first.
 - Cross-pane navigation with wrap-around, skip zero-match panes
 - Scope toggle visible only when countPanes > 1
 - shallowRef for handle registry
-- Search history: localStorage termora:search-history, MRU order, dedup by query+regex
+- Search history: localStorage lasterm:search-history, MRU order, dedup by query+regex
 - SearchConfig: position, highlightOnClose (clear/fade/persist), scrollbarMarkers, historySize
 - Hub [search] section parser with DEFAULT_SEARCH_CONFIG
 - highlightOnClose=fade uses 300ms setTimeout before clearDecorations
@@ -449,7 +449,7 @@ Decisions archived from workflow — newest first.
 - Channel sidebar: context menu inline in ChannelItem (no separate component — reduces indirection)
 - Open in Current Tab: uses replaceChannelId to swap active tab content
 - ConfirmDialog: generic reusable component with "Remember for host" / "Remember globally" checkboxes
-- Remember preferences: localStorage termora:skipConfirm* keys with explicit actionKey (not title parsing)
+- Remember preferences: localStorage lasterm:skipConfirm* keys with explicit actionKey (not title parsing)
 - Config sections: [tabs] [panes] [channels] [startup] in config.toml
 - Config defaults: confirmCloseAll=true, confirmCloseOthers=true, maxPanes=4, autoOpenWelcome=true
 - Welcome endpoint cross-host check: verifies channel.hostId matches path param host ID
@@ -459,13 +459,13 @@ Decisions archived from workflow — newest first.
 ## UX-06 — Theming & Color Schemes (2026-03-07)
 
 - CSS custom properties as single source of truth for all chrome colors (--nt-* prefix, 48+ vars in 3 tiers)
-- Theme files on disk (~/.config/termora/themes/), not DB — portable, git-friendly
+- Theme files on disk (~/.config/lasterm/themes/), not DB — portable, git-friendly
 - 9 bundled presets (6 dark, 3 light), default catppuccin-mocha, copy-if-missing strategy
 - AppearanceConfig = global only; theme NAME = per-host via TerminalProfile cascade
 - AppearanceConfig persisted in appearance.json (not config.toml) — simpler read/write
 - Theme name validation: /^[a-z0-9-]+$/ with path traversal prevention in get/delete
-- TermoraTheme = colors (22 terminal) + ui (15 chrome), validateTheme returns {valid, errors[]}
-- BUNDLED_THEMES as Record<string, TermoraTheme> in shared/themes/index.ts
+- LastermTheme = colors (22 terminal) + ui (15 chrome), validateTheme returns {valid, errors[]}
+- BUNDLED_THEMES as Record<string, LastermTheme> in shared/themes/index.ts
 - ThemeManager uses fs/promises (async), ThemeError for structured errors
 - Terminal theme propagation via callback Set in theme store — toXtermTheme() + onTerminalThemeChange()
 - Per-host theme override: useTerminal checks profile.theme, resolves from availableThemes (SC-03)
@@ -483,22 +483,22 @@ Decisions archived from workflow — newest first.
 ## AGENT-DAEMON — Standalone agent daemon with UDS/named pipe transport (2026-03-06)
 
 - Node.js net module for cross-platform socket transport (UDS + named pipes, same API)
-- Socket path per-user: $XDG_RUNTIME_DIR/termora/agent.sock (Linux) / \\.\pipe\termora-agent-<username> (Windows)
+- Socket path per-user: $XDG_RUNTIME_DIR/lasterm/agent.sock (Linux) / \\.\pipe\lasterm-agent-<username> (Windows)
 - Socket probing for agent discovery (net.connect then close) — no PID file for liveness
 - Hub auto-starts agent as detached process (spawn + unref) if socket not found
 - --daemon (new, socket) / --stdio (unchanged, kept for SshAgent until Phase 2)
 - Same MessagePack framing over socket as over stdio — only transport layer changes
 - AGENT_CHANNEL_STATE + CHANNEL_STATE_END messages for reconnect reconciliation
 - Output buffering: configurable per-channel cap (1MB default) + global cap (20MB default), ring buffer
-- TermoraAgent: single concrete class replacing AgentConnection abstract, constructor(Duplex), factory methods
-- LocalAgent + SshAgent untouched — used until Phase 2 replaces SshAgent with SSH tunnel + TermoraAgent
+- LastermAgent: single concrete class replacing AgentConnection abstract, constructor(Duplex), factory methods
+- LocalAgent + SshAgent untouched — used until Phase 2 replaces SshAgent with SSH tunnel + LastermAgent
 - Last-connection-wins: new hub connection displaces previous
 - Warm restart (agent died) vs reconnect (hub died) — distinct documented flows
 - Agent daemon logs to <stateDir>/agent.log when detached
 - EACCES on probe: don't unlink, throw (different user's socket)
 - [agent] section in config.toml for buffer caps, socket_path override, log_level
 - Tests use real UDS in temp dirs, NOT stdio mocks
-- Phase 2 = remote agent daemon via SSH tunnel (TermoraAgent.connectTunnel) — separate story
+- Phase 2 = remote agent daemon via SSH tunnel (LastermAgent.connectTunnel) — separate story
 
 ---
 
@@ -575,7 +575,7 @@ Decisions archived from workflow — newest first.
 ## [backfill] Custom fonts & config cascade wiring (2026-03-04)
 
 - Cross-platform font stack: Consolas → Liberation Mono → Courier New → monospace (no embedding, licensing)
-- User fonts: drop .woff2/.woff/.ttf/.otf in ~/.config/termora/fonts/, auto-discovered
+- User fonts: drop .woff2/.woff/.ttf/.otf in ~/.config/lasterm/fonts/, auto-discovered
 - Font serving: second @fastify/static at signed /public/fonts/ URLs (decorateReply: false for multi-static)
 - Font filename heuristic: family slug from first segment, camelCase→spaces, suffixes→weight (Regular=400, Bold=700)
 - GET /api/fonts requires auth because returned font URLs carry the per-boot asset token
@@ -586,7 +586,7 @@ Decisions archived from workflow — newest first.
 
 ---
 
-## MVP-TERMORA — Implement full termora MVP (2026-03-03)
+## MVP-LASTERM — Implement full lasterm MVP (2026-03-03)
 
 - Plan-provided mode: specs in docs/
 - Continuous mode: no pauses between stages
@@ -612,7 +612,7 @@ Decisions archived from workflow — newest first.
 - HTTP server: Fastify (perf + TS-first + plugin ecosystem)
 - Database: SQLite via better-sqlite3 with WAL mode — meta.db (state) + spool.db (output chunks/snapshots)
 - PTY: node-pty for local spawn, agent-only PTY control (hub never touches PTY directly)
-- SSH: ssh2 library, agent launched via `termora-agent --stdio` over SSH
+- SSH: ssh2 library, agent launched via `lasterm-agent --stdio` over SSH
 - WebSocket codec: MessagePack binary serialization (snake_case on wire, camelCase in TS)
 - UI: Vue 3 + Vite SPA with Pinia state management
 - Terminal: xterm.js (browser rendering) + @xterm/headless (snapshot capture without DOM)

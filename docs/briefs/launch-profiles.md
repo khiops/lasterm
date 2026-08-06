@@ -8,7 +8,7 @@
 
 **Root cause:** The profile concept was designed for visual customization only (fonts, theme, cursor), not as a "launch configuration" that defines the full terminal experience. Shell/command config is separate and disconnected from the UI spawn flow.
 
-**Target users:** All termora users, especially power users with multiple workflows per host.
+**Target users:** All lasterm users, especially power users with multiple workflows per host.
 
 **Current solutions:**
 - Windows Terminal: named profiles (shell+icon+colorScheme), dropdown on "+", auto-detect installed shells

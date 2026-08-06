@@ -187,19 +187,19 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onUnmounted } from "vue";
-import type { TermoraTheme, TermoraThemeColors, TermoraThemeUi } from "@termora/shared";
-import { THEME_NAME_REGEX } from "@termora/shared";
+import type { LastermTheme, LastermThemeColors, LastermThemeUi } from "@lasterm/shared";
+import { THEME_NAME_REGEX } from "@lasterm/shared";
 import { useThemeStore } from "../../stores/theme.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { hubBaseUrl } from "../../utils/hub-url.js";
 
 const props = defineProps<{
-	theme?: TermoraTheme;
-	baseTheme?: TermoraTheme;
+	theme?: LastermTheme;
+	baseTheme?: LastermTheme;
 }>();
 
 const emit = defineEmits<{
-	saved: [theme: TermoraTheme];
+	saved: [theme: LastermTheme];
 	close: [];
 }>();
 
@@ -210,7 +210,7 @@ const isNew = computed(() => props.theme === undefined);
 
 // ── Draft state ─────────────────────────────────────────────────────
 
-function getSourceTheme(): TermoraTheme {
+function getSourceTheme(): LastermTheme {
 	const fallback = themeStore.availableThemes[0];
 	if (fallback === undefined) {
 		throw new Error("No themes available to base editor on");
@@ -218,12 +218,12 @@ function getSourceTheme(): TermoraTheme {
 	return props.theme ?? props.baseTheme ?? fallback;
 }
 
-function cloneTheme(t: TermoraTheme): {
+function cloneTheme(t: LastermTheme): {
 	name: string;
 	author: string;
 	type: "dark" | "light";
-	colors: TermoraThemeColors;
-	ui: TermoraThemeUi;
+	colors: LastermThemeColors;
+	ui: LastermThemeUi;
 } {
 	return {
 		name: t.name,
@@ -254,7 +254,7 @@ const nameError = computed(() => {
 
 function handleBasedOnChange(event: Event) {
 	const name = (event.target as HTMLSelectElement).value;
-	const base = themeStore.availableThemes.find((t: TermoraTheme) => t.name === name);
+	const base = themeStore.availableThemes.find((t: LastermTheme) => t.name === name);
 	if (!base) return;
 	basedOnName.value = name;
 	const cloned = cloneTheme(base);
@@ -339,7 +339,7 @@ function setUiValue(key: string, value: string) {
 
 // ── Live preview ────────────────────────────────────────────────────
 
-function buildThemeFromDraft(): TermoraTheme {
+function buildThemeFromDraft(): LastermTheme {
 	return {
 		name: draft.name,
 		...(draft.author !== "" && { author: draft.author }),

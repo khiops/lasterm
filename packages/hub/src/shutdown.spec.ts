@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodeMessage, encodeMessage, type ProtocolMessage } from "@termora/shared";
+import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -70,7 +70,7 @@ describe("gracefulShutdown", () => {
 	it("deletes runtime and exits nonzero when server.close hangs", async () => {
 		const server = Fastify({ logger: false });
 		const dbs = openTestDatabases();
-		const dir = mkdtempSync(join(tmpdir(), "termora-shutdown-"));
+		const dir = mkdtempSync(join(tmpdir(), "lasterm-shutdown-"));
 		const runtimePath = join(dir, "runtime.json");
 		const exits: number[] = [];
 
@@ -342,7 +342,7 @@ describe("POST /api/shutdown", () => {
 		const remote = await server.inject({
 			method: "POST",
 			url: "/api/shutdown",
-			headers: { "x-termora-owner": OWNER_TOKEN },
+			headers: { "x-lasterm-owner": OWNER_TOKEN },
 			remoteAddress: "203.0.113.10",
 		});
 		expect(remote.statusCode).toBe(403);
@@ -350,7 +350,7 @@ describe("POST /api/shutdown", () => {
 		const ok = await server.inject({
 			method: "POST",
 			url: "/api/shutdown",
-			headers: { "x-termora-owner": OWNER_TOKEN },
+			headers: { "x-lasterm-owner": OWNER_TOKEN },
 		});
 		expect(ok.statusCode).toBe(200);
 		await tick();
@@ -374,7 +374,7 @@ describe("POST /api/shutdown", () => {
 		const response = await server.inject({
 			method: "POST",
 			url: "/api/quit",
-			headers: { "x-termora-owner": OWNER_TOKEN },
+			headers: { "x-lasterm-owner": OWNER_TOKEN },
 		});
 		expect(response.statusCode).toBe(503);
 		expect(response.json()).toMatchObject({ ok: false, message: "agent still running" });
@@ -405,8 +405,8 @@ describe("POST /api/shutdown", () => {
 		const refused = await fetch(`${address}/api/quit`, {
 			method: "POST",
 			headers: {
-				"X-Termora-Owner": OWNER_TOKEN,
-				"X-Termora-Client-Id": first.clientId,
+				"X-Lasterm-Owner": OWNER_TOKEN,
+				"X-Lasterm-Client-Id": first.clientId,
 			},
 		});
 
@@ -421,8 +421,8 @@ describe("POST /api/shutdown", () => {
 		const forced = await fetch(`${address}/api/quit?force=1`, {
 			method: "POST",
 			headers: {
-				"X-Termora-Owner": OWNER_TOKEN,
-				"X-Termora-Client-Id": first.clientId,
+				"X-Lasterm-Owner": OWNER_TOKEN,
+				"X-Lasterm-Client-Id": first.clientId,
 			},
 		});
 		expect(forced.status).toBe(200);
@@ -471,7 +471,7 @@ describe("POST /api/shutdown", () => {
 
 		const forced = fetch(`${address}/api/quit?force=1`, {
 			method: "POST",
-			headers: { "X-Termora-Owner": OWNER_TOKEN, "X-Termora-Client-Id": first.clientId },
+			headers: { "X-Lasterm-Owner": OWNER_TOKEN, "X-Lasterm-Client-Id": first.clientId },
 		});
 		await latched;
 
@@ -479,7 +479,7 @@ describe("POST /api/shutdown", () => {
 		// tested; releasing afterwards keeps the joiner from waiting on itself.
 		const joiner = fetch(`${address}/api/quit`, {
 			method: "POST",
-			headers: { "X-Termora-Owner": OWNER_TOKEN, "X-Termora-Client-Id": first.clientId },
+			headers: { "X-Lasterm-Owner": OWNER_TOKEN, "X-Lasterm-Client-Id": first.clientId },
 		});
 		await tick();
 		releaseQuit();
@@ -516,8 +516,8 @@ describe("POST /api/shutdown", () => {
 		const response = await fetch(`${address}/api/quit`, {
 			method: "POST",
 			headers: {
-				"X-Termora-Owner": OWNER_TOKEN,
-				"X-Termora-Client-Id": client.clientId,
+				"X-Lasterm-Owner": OWNER_TOKEN,
+				"X-Lasterm-Client-Id": client.clientId,
 			},
 		});
 
@@ -538,7 +538,7 @@ describe("POST /api/shutdown", () => {
 		const response = await server.inject({
 			method: "POST",
 			url: "/api/shutdown",
-			headers: { "x-termora-owner": OWNER_TOKEN },
+			headers: { "x-lasterm-owner": OWNER_TOKEN },
 		});
 
 		expect(response.statusCode).toBe(401);
@@ -612,8 +612,8 @@ describe("POST /api/shutdown", () => {
 		const guarded = await fetch(`${address}/api/shutdown`, {
 			method: "POST",
 			headers: {
-				"X-Termora-Owner": OWNER_TOKEN,
-				"X-Termora-Client-Id": first.clientId,
+				"X-Lasterm-Owner": OWNER_TOKEN,
+				"X-Lasterm-Client-Id": first.clientId,
 			},
 		});
 
@@ -624,8 +624,8 @@ describe("POST /api/shutdown", () => {
 		const forced = await fetch(`${address}/api/shutdown?force=1`, {
 			method: "POST",
 			headers: {
-				"X-Termora-Owner": OWNER_TOKEN,
-				"X-Termora-Client-Id": first.clientId,
+				"X-Lasterm-Owner": OWNER_TOKEN,
+				"X-Lasterm-Client-Id": first.clientId,
 			},
 		});
 

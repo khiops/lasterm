@@ -4,7 +4,7 @@
 [licenses]
 version = 2
 # Permissive licenses acceptable for dependencies of the AGPL-3.0-only
-# termora-agent crate (async-xpty extracted to its own repo, #87).
+# lasterm-agent crate (async-xpty extracted to its own repo, #87).
 allow = [
 	"MIT",
 	"Apache-2.0",
@@ -14,6 +14,6 @@ allow = [
 ]
 exceptions = [
 	# Our own application crates — AGPL by decision (#78), never a dependency of the libs.
-	{ name = "termora-agent", allow = ["AGPL-3.0-only"] },
-	{ name = "termora-hub-lock", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-agent", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-hub-lock", allow = ["AGPL-3.0-only"] },
 ]

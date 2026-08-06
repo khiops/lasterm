@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { unlink, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
-import type { FontFamily, FontFile } from "@termora/shared";
+import type { FontFamily, FontFile } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { fileTypeFromBuffer } from "file-type";
 import { buildSignedPublicAssetUrl } from "../asset-token.js";

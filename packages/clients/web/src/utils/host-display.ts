@@ -1,4 +1,4 @@
-import type { Host } from "@termora/shared";
+import type { Host } from "@lasterm/shared";
 
 export function formatConnectionString(host: Host): string {
 	let conn = "";

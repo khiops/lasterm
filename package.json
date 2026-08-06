@@ -1,5 +1,5 @@
 {
-	"name": "termora",
+	"name": "lasterm",
 	"version": "0.7.0",
 	"private": true,
 	"type": "module",
@@ -7,22 +7,22 @@
 	"license": "AGPL-3.0-only",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/khiops/termora.git"
+		"url": "https://github.com/khiops/lasterm.git"
 	},
 	"engines": {
 		"node": ">=24.0.0"
 	},
 	"bin": {
-		"termora": "./bin/termora.js"
+		"lasterm": "./bin/lasterm.js"
 	},
 	"files": [
 		"bin",
 		"LICENSE"
 	],
 	"scripts": {
-		"dev": "concurrently -n hub,web -c blue,green \"pnpm -F @termora/hub dev\" \"pnpm -F @termora/web dev\"",
+		"dev": "concurrently -n hub,web -c blue,green \"pnpm -F @lasterm/hub dev\" \"pnpm -F @lasterm/web dev\"",
 		"build": "pnpm -r build",
-		"build:embed": "pnpm -F @termora/web build && node scripts/embed-web.js",
+		"build:embed": "pnpm -F @lasterm/web build && node scripts/embed-web.js",
 		"test": "vitest",
 		"test:run": "vitest run",
 		"lint": "biome check .",
@@ -33,7 +33,7 @@
 		"build:desktop": "bash scripts/build-desktop.sh"
 	},
 	"dependencies": {
-		"@termora/hub": "workspace:*"
+		"@lasterm/hub": "workspace:*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "catalog:",

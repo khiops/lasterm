@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: agent
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-21
   updated: 2026-06-09
   complexity: COMPLEX
@@ -11,7 +11,7 @@ doc-meta:
   adversarial_applied: true
 ---
 
-# Specification: Rust Agent Rewrite (async-xpty + termora-agent)
+# Specification: Rust Agent Rewrite (async-xpty + lasterm-agent)
 
 ## 0. Quick Reference
 
@@ -23,7 +23,7 @@ doc-meta:
 | Blocks | 10 |
 | BDD scenarios | 42 |
 | Risk level | MEDIUM |
-| Deliverables | `async-xpty` crate (public) + `termora-agent` binary |
+| Deliverables | `async-xpty` crate (public) + `lasterm-agent` binary |
 | Adversarial | Applied (19 challenges, 18 valid, 1 deferred) |
 
 ## 1. Problem Statement
@@ -37,9 +37,9 @@ Additionally, no production-quality async PTY crate exists in the Rust ecosystem
 ### US-1: Reliable Windows Agent
 
 ```
-AS A termora user on Windows
+AS A lasterm user on Windows
 I WANT the agent binary to work without crashes or hangs
-SO THAT I can use termora on Windows with the same reliability as Linux
+SO THAT I can use lasterm on Windows with the same reliability as Linux
 
 ACCEPTANCE: Agent spawns PTY via ConPTY, handles I/O, resize, and exit
             without deadlocks or garbage reads on Windows 10+
@@ -48,18 +48,18 @@ ACCEPTANCE: Agent spawns PTY via ConPTY, handles I/O, resize, and exit
 ### US-2: Single Native Binary
 
 ```
-AS A termora developer/operator
+AS A lasterm developer/operator
 I WANT a single native binary per platform for the agent
 SO THAT distribution is trivial (no Node.js, no native addon hacks, no SEA)
 
-ACCEPTANCE: `termora-agent` binary runs standalone on linux-x64, windows-x64,
+ACCEPTANCE: `lasterm-agent` binary runs standalone on linux-x64, windows-x64,
             darwin-arm64 with zero runtime dependencies
 ```
 
 ### US-3: Protocol Compatibility
 
 ```
-AS A termora hub
+AS A lasterm hub
 I WANT the Rust agent to speak the exact same MessagePack protocol
 SO THAT zero hub modifications are needed — drop-in replacement
 
@@ -121,16 +121,16 @@ ACCEPTANCE: Hub cannot distinguish Rust agent from TS agent.
 
 Two Rust crates in a Cargo workspace at monorepo root:
 
-1. **async-xpty** — Public crate. Cross-platform async PTY. Direct OS API calls via `nix` (Unix) and `windows-sys` (Windows). Tokio AsyncRead/AsyncWrite. Not coupled to termora.
+1. **async-xpty** — Public crate. Cross-platform async PTY. Direct OS API calls via `nix` (Unix) and `windows-sys` (Windows). Tokio AsyncRead/AsyncWrite. Not coupled to lasterm.
 
-2. **termora-agent** — Binary crate. Full protocol implementation. Depends on async-xpty for PTY, rmp-serde for MessagePack, vt100 for terminal state mirror.
+2. **lasterm-agent** — Binary crate. Full protocol implementation. Depends on async-xpty for PTY, rmp-serde for MessagePack, vt100 for terminal state mirror.
 
 **Why new crate vs portable-pty dependency:** portable-pty is sync-only (requires spawn_blocking for every read), has a critical unpatched Windows regression (#6783), is tightly coupled to the wezterm monorepo with no independent release cycle, and no maintained fork exists. Building async-native from OS APIs is ~1000 LoC for both platforms, which is less maintenance burden than working around a broken dependency.
 
 ### 4.2 Monorepo Layout
 
 ```
-termora/
+lasterm/
 ├── Cargo.toml              ← workspace { members = ["crates/*"] }
 ├── crates/
 │   ├── async-xpty/
@@ -140,8 +140,8 @@ termora/
 │   │       ├── command.rs   ← CommandBuilder (shell, args, cwd, env)
 │   │       ├── unix.rs      ← openpty + forkpty + tokio::io
 │   │       └── windows.rs   ← CreatePseudoConsole + tokio::io + \x1b[6n fix
-│   └── termora-agent/
-│       ├── Cargo.toml       ← [[bin]] name = "termora-agent"
+│   └── lasterm-agent/
+│       ├── Cargo.toml       ← [[bin]] name = "lasterm-agent"
 │       └── src/
 │           ├── main.rs       ← CLI args, stdio/daemon mode selection
 │           ├── framing.rs    ← 4-byte LE + MessagePack encode/decode
@@ -484,9 +484,9 @@ Scenario: SC-33 — PROCESS_TITLE polling
 ```gherkin
 @priority:high @type:nominal
 Scenario: SC-34 — Daemon startup and UDS listen
-  Given agent started with --daemon --socket /tmp/termora.sock
+  Given agent started with --daemon --socket /tmp/lasterm.sock
   When initialization completes
-  Then agent listens on Unix domain socket at /tmp/termora.sock
+  Then agent listens on Unix domain socket at /tmp/lasterm.sock
   And socket file has restricted permissions
 
 @priority:high @type:nominal
@@ -623,21 +623,21 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] SC-07 passes
 - [ ] Cross-platform CI: `cargo test` on Linux + Windows
 
-### Block 3: termora-agent — Scaffold + Framing + HELLO (S, ~3h)
+### Block 3: lasterm-agent — Scaffold + Framing + HELLO (S, ~3h)
 
 **Type:** Feature slice (agent foundation)
 **Dependencies:** Block 1
 
 **Files:**
-- `crates/termora-agent/Cargo.toml` — binary crate, depends on async-xpty
-- `crates/termora-agent/src/main.rs` — CLI args (clap): `--daemon`, `--socket`, `--version`; stdio mode entry
-- `crates/termora-agent/src/protocol.rs` — all message structs with serde `#[serde(tag = "type")]`, snake_case rename
-- `crates/termora-agent/src/framing.rs` — `FrameReader` (4-byte LE prefix + msgpack decode, handles partial frames across reads), `encode_frame()` (length prefix + msgpack encode)
-- `crates/termora-agent/src/shell.rs` — `detect_available_shells()`, `get_default_shell()` per OS
-- `crates/termora-agent/src/handler.rs` — `AgentHandler` stub with `send_hello()`
+- `crates/lasterm-agent/Cargo.toml` — binary crate, depends on async-xpty
+- `crates/lasterm-agent/src/main.rs` — CLI args (clap): `--daemon`, `--socket`, `--version`; stdio mode entry
+- `crates/lasterm-agent/src/protocol.rs` — all message structs with serde `#[serde(tag = "type")]`, snake_case rename
+- `crates/lasterm-agent/src/framing.rs` — `FrameReader` (4-byte LE prefix + msgpack decode, handles partial frames across reads), `encode_frame()` (length prefix + msgpack encode)
+- `crates/lasterm-agent/src/shell.rs` — `detect_available_shells()`, `get_default_shell()` per OS
+- `crates/lasterm-agent/src/handler.rs` — `AgentHandler` stub with `send_hello()`
 
 **Exit criteria:**
-- [ ] `termora-agent --version` prints version
+- [ ] `lasterm-agent --version` prints version
 - [ ] Agent started in stdio mode sends HELLO as first frame
 - [ ] HELLO contains correct version, capabilities, available_shells
 - [ ] Frame encoding uses `rmp_serde::to_vec_named()` (map serialization, NOT array)
@@ -645,16 +645,16 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] Frame encoding matches TS agent format (verified with `@msgpack/msgpack` decode)
 - [ ] SC-09, SC-10 pass
 
-### Block 4: termora-agent — SPAWN + I/O (M, ~5h)
+### Block 4: lasterm-agent — SPAWN + I/O (M, ~5h)
 
 **Type:** Feature slice (core functionality)
 **Dependencies:** Block 3
 
 **Files:**
-- `crates/termora-agent/src/handler.rs` — SPAWN, INPUT, RESIZE, DESTROY dispatch
-- `crates/termora-agent/src/pty.rs` — `PtyManager`: channel registry (`HashMap<String, PtyChannel>`), spawn, write, resize, destroy
-- `crates/termora-agent/src/batch.rs` — output batching: single global timer loop flushes all channels (NOT per-channel timers), 16ms interval or 4KB per channel threshold
-- `crates/termora-agent/src/expand.rs` — `expand_vars()`: `${VAR}` syntax, one-pass, no recursion, case-insensitive on Windows
+- `crates/lasterm-agent/src/handler.rs` — SPAWN, INPUT, RESIZE, DESTROY dispatch
+- `crates/lasterm-agent/src/pty.rs` — `PtyManager`: channel registry (`HashMap<String, PtyChannel>`), spawn, write, resize, destroy
+- `crates/lasterm-agent/src/batch.rs` — output batching: single global timer loop flushes all channels (NOT per-channel timers), 16ms interval or 4KB per channel threshold
+- `crates/lasterm-agent/src/expand.rs` — `expand_vars()`: `${VAR}` syntax, one-pass, no recursion, case-insensitive on Windows
 
 **Exit criteria:**
 - [ ] SPAWN creates PTY, returns SPAWN_OK with ULID channel_id
@@ -667,14 +667,14 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] Variable expansion works (`${HOME}` → value, `\${HOME}` → literal, shell NOT expanded, no recursive expansion)
 - [ ] SC-11, SC-12, SC-13, SC-14, SC-18, SC-19, SC-20, SC-21, SC-25, SC-26, SC-39, SC-40, SC-41, SC-42 pass
 
-### Block 5: termora-agent — Terminal Mirror + Snapshots (M, ~4h)
+### Block 5: lasterm-agent — Terminal Mirror + Snapshots (M, ~4h)
 
 **Type:** Feature slice (terminal state)
 **Dependencies:** Block 4
 
 **Files:**
-- `crates/termora-agent/src/headless.rs` — `HeadlessMirror`: wraps `vt100::Parser` (scrollback: 1000 lines default, configurable), feeds PTY output, extracts title (OSC 0/2), bell (`\x07`), notification (OSC 9), produces snapshot
-- `crates/termora-agent/src/pty.rs` — integrate HeadlessMirror into PtyChannel
+- `crates/lasterm-agent/src/headless.rs` — `HeadlessMirror`: wraps `vt100::Parser` (scrollback: 1000 lines default, configurable), feeds PTY output, extracts title (OSC 0/2), bell (`\x07`), notification (OSC 9), produces snapshot
+- `crates/lasterm-agent/src/pty.rs` — integrate HeadlessMirror into PtyChannel
 
 **Exit criteria:**
 - [ ] All PTY output is mirrored to vt100 parser
@@ -686,13 +686,13 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] **Snapshot compatibility test:** vt100-produced snapshot renders correctly in xterm.js
 - [ ] SC-22, SC-23, SC-30, SC-31, SC-32 pass
 
-### Block 6: termora-agent — Process Title + Events (S, ~3h)
+### Block 6: lasterm-agent — Process Title + Events (S, ~3h)
 
 **Type:** Feature slice (OS integration)
 **Dependencies:** Block 4
 
 **Files:**
-- `crates/termora-agent/src/process.rs` — `ProcessTitlePoller`: periodic foreground process name detection
+- `crates/lasterm-agent/src/process.rs` — `ProcessTitlePoller`: periodic foreground process name detection
   - Linux: read `/proc/{pid}/comm` + `/proc/{pid}/cmdline`
   - macOS: `ps -p {pid} -o comm=`
   - Windows: `wmic process where ProcessId={pid} get Name`
@@ -704,13 +704,13 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] Works on Linux (proc filesystem), macOS (ps), Windows (wmic)
 - [ ] SC-33 passes
 
-### Block 7: termora-agent — Elevation (M, ~4h)
+### Block 7: lasterm-agent — Elevation (M, ~4h)
 
 **Type:** Feature slice (privilege escalation)
 **Dependencies:** Block 4
 
 **Files:**
-- `crates/termora-agent/src/elevation.rs` — all elevation methods: sudo, doas, pkexec, gsudo, custom
+- `crates/lasterm-agent/src/elevation.rs` — all elevation methods: sudo, doas, pkexec, gsudo, custom
   - Passwordless detection (sudo -n, doas -n)
   - ASKPASS script creation: `O_EXCL` + mode 0700, in user-private tmpdir (not world-readable /tmp)
   - Secret zeroing via `zeroize` crate (`Zeroizing<String>`) — NOT `String::clear()`
@@ -725,13 +725,13 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] ELEVATION_PASSWORD_REQUIRED returned when password needed but not provided
 - [ ] SC-15, SC-16, SC-17 pass
 
-### Block 8: termora-agent — Daemon Mode (M, ~5h)
+### Block 8: lasterm-agent — Daemon Mode (M, ~5h)
 
 **Type:** Feature slice (persistence)
 **Dependencies:** Block 4
 
 **Files:**
-- `crates/termora-agent/src/daemon.rs` — UDS server:
+- `crates/lasterm-agent/src/daemon.rs` — UDS server:
   - Socket bind with retry (3 attempts, random backoff 100-500ms)
   - Stale socket cleanup
   - **Socket permissions: 0600** (owner-only, no group/other access)
@@ -745,7 +745,7 @@ Scenario: SC-42 — Variable expansion no recursion
   - **Windows:** UDS on Windows 10 1803+ (same as TS agent); named pipes as fallback if UDS unavailable
 
 **Exit criteria:**
-- [ ] `termora-agent --daemon --socket /tmp/test.sock` starts UDS server
+- [ ] `lasterm-agent --daemon --socket /tmp/test.sock` starts UDS server
 - [ ] Socket file has permissions 0600 (owner-only)
 - [ ] Hub connects, receives HELLO + channel state + CHANNEL_STATE_END
 - [ ] New connection displaces old (last-writer-wins)
@@ -754,14 +754,14 @@ Scenario: SC-42 — Variable expansion no recursion
 - [ ] SIGTERM triggers clean shutdown
 - [ ] SC-34, SC-35, SC-36, SC-37 pass
 
-### Block 9: termora-agent — Robustness (S, ~3h)
+### Block 9: lasterm-agent — Robustness (S, ~3h)
 
 **Type:** Feature slice (reliability)
 **Dependencies:** Block 4
 
 **Files:**
-- `crates/termora-agent/src/handler.rs` — HEARTBEAT/ACK, ATTACH/ATTACH_OK, ERROR handling, unknown message handling
-- `crates/termora-agent/src/main.rs` — stdin EOF detection, SIGTERM handler, graceful shutdown
+- `crates/lasterm-agent/src/handler.rs` — HEARTBEAT/ACK, ATTACH/ATTACH_OK, ERROR handling, unknown message handling
+- `crates/lasterm-agent/src/main.rs` — stdin EOF detection, SIGTERM handler, graceful shutdown
 
 **Exit criteria:**
 - [ ] HEARTBEAT_ACK echoes ts from HEARTBEAT
@@ -778,9 +778,9 @@ Scenario: SC-42 — Variable expansion no recursion
 **Dependencies:** Blocks 1–9
 
 **Files:**
-- `crates/termora-agent/tests/integration/` — end-to-end tests: spawn Rust agent as child process, send MessagePack frames, verify responses
+- `crates/lasterm-agent/tests/integration/` — end-to-end tests: spawn Rust agent as child process, send MessagePack frames, verify responses
 - `.github/workflows/rust-agent.yml` — CI: build + test on linux-x64, windows-x64, darwin-arm64
-- `crates/termora-agent/tests/protocol_compat.rs` — decode/encode compatibility with TS `@msgpack/msgpack`
+- `crates/lasterm-agent/tests/protocol_compat.rs` — decode/encode compatibility with TS `@msgpack/msgpack`
 - `scripts/build-rust-agent.sh` — cross-compilation helper
 
 **Exit criteria:**
@@ -804,7 +804,7 @@ Scenario: SC-42 — Variable expansion no recursion
 ### Test Framework
 
 - **Rust tests:** `cargo test` with `#[tokio::test]` for async
-- **Integration:** spawn `termora-agent` binary, communicate via stdin/stdout pipes
+- **Integration:** spawn `lasterm-agent` binary, communicate via stdin/stdout pipes
 - **Protocol compat:** encode frames in Rust, decode in TS (and vice versa) using shared test vectors
 
 ### Test Data

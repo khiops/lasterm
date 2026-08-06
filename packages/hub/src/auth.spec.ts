@@ -23,7 +23,7 @@ describe("initAuth", () => {
 	let testDir: string;
 
 	beforeEach(() => {
-		testDir = join(tmpdir(), `termora-auth-test-${randomBytes(8).toString("hex")}`);
+		testDir = join(tmpdir(), `lasterm-auth-test-${randomBytes(8).toString("hex")}`);
 	});
 
 	it("generates a 64-hex-char token on first call", () => {
@@ -60,7 +60,7 @@ describe("checkPermissions", () => {
 	let testDir: string;
 
 	beforeEach(() => {
-		testDir = join(tmpdir(), `termora-perm-test-${randomBytes(8).toString("hex")}`);
+		testDir = join(tmpdir(), `lasterm-perm-test-${randomBytes(8).toString("hex")}`);
 	});
 
 	it("throws if auth.json is world-readable (non-Windows)", () => {

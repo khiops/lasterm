@@ -132,8 +132,8 @@ mod tests {
     fn test_expand_undefined_kept() {
         let e = env(&[]);
         assert_eq!(
-            expand_vars("${UNDEFINED_TERMORA_TEST_VAR_XYZ}", Some(&e)),
-            "${UNDEFINED_TERMORA_TEST_VAR_XYZ}"
+            expand_vars("${UNDEFINED_LASTERM_TEST_VAR_XYZ}", Some(&e)),
+            "${UNDEFINED_LASTERM_TEST_VAR_XYZ}"
         );
     }
 

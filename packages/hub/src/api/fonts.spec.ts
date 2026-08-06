@@ -73,7 +73,7 @@ describe("Font endpoints", () => {
 	beforeEach(async () => {
 		configDir = join(
 			tmpdir(),
-			`termora-fonts-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			`lasterm-fonts-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(join(configDir, "fonts"), { recursive: true });
 		dbs = openTestDatabases();

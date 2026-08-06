@@ -8,10 +8,10 @@ import {
 	DEFAULT_AGENT_CONFIG,
 	encodeFrame,
 	PROTOCOL_VERSION,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LastermAgent } from "./lasterm-agent.js";
 import { HubQuittingError } from "./quit-fence.js";
-import type { TermoraAgent } from "./termora-agent.js";
 import { getTestSocketPath } from "./test-socket-path.js";
 
 /**
@@ -37,7 +37,7 @@ const { connectOrLaunch, readBoundedLogTail, stopLocalAgent } = await import("./
 const TEST_TIMEOUT = 15_000;
 
 /**
- * Create a mock agent daemon that speaks the termora protocol.
+ * Create a mock agent daemon that speaks the lasterm protocol.
  * On each connection it sends HELLO + CHANNEL_STATE_END immediately.
  */
 function createMockDaemon(socketPath: string): Promise<{
@@ -78,14 +78,14 @@ describe("connectOrLaunch", () => {
 	let tmpDir: string;
 	let socketPath: string;
 	let daemon: { server: net.Server; connections: net.Socket[] } | null = null;
-	let agent: TermoraAgent | null = null;
+	let agent: LastermAgent | null = null;
 	let oldXdgStateHome: string | undefined;
 
 	const config: AgentConfig = { ...DEFAULT_AGENT_CONFIG };
 
 	beforeEach(async () => {
 		oldXdgStateHome = process.env.XDG_STATE_HOME;
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "termora-launcher-test-"));
+		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-launcher-test-"));
 		process.env.XDG_STATE_HOME = tmpDir;
 		socketPath = getTestSocketPath();
 
@@ -149,7 +149,7 @@ describe("connectOrLaunch", () => {
 				await closeServer(staleServer);
 
 				// connectOrLaunch calls spawn, then polls with the authoritative
-				// TermoraAgent connection.
+				// LastermAgent connection.
 				// Our mock spawn starts the mock daemon instead of a real process.
 				mockSpawnImpl = () => {
 					setImmediate(async () => {
@@ -283,7 +283,7 @@ describe("connectOrLaunch", () => {
 				};
 
 				// Create a fake SEA binary (no .js extension)
-				const seaBinary = path.join(tmpDir, "termora-agent");
+				const seaBinary = path.join(tmpDir, "lasterm-agent");
 				await writeFile(seaBinary, "#!/bin/sh\n");
 
 				agent = await connectOrLaunch(socketPath, config, seaBinary);
@@ -318,7 +318,7 @@ describe("connectOrLaunch", () => {
 		"[socket parent dir] creates missing parent directory before spawning the agent",
 		async () => {
 			// Use a separate temp base so cleanup is independent of the outer tmpDir.
-			const isolatedBase = mkdtempSync(path.join(os.tmpdir(), "termora-sockdir-test-"));
+			const isolatedBase = mkdtempSync(path.join(os.tmpdir(), "lasterm-sockdir-test-"));
 			try {
 				// Point the socket at a two-level-deep path that does not exist yet.
 				// Neither `isolatedBase/missing/` nor `isolatedBase/missing/nested/` exists.
@@ -365,7 +365,7 @@ describe("connectOrLaunch", () => {
 	it.skipIf(process.platform === "win32")(
 		"[socket parent dir] creates parent directory with owner-only mode 0o700",
 		async () => {
-			const isolatedBase = mkdtempSync(path.join(os.tmpdir(), "termora-sockmode-test-"));
+			const isolatedBase = mkdtempSync(path.join(os.tmpdir(), "lasterm-sockmode-test-"));
 			try {
 				const socketParent = path.join(isolatedBase, "sockdir");
 				const testSocketPath = path.join(socketParent, "agent.sock");
@@ -412,15 +412,15 @@ describe("stopLocalAgent", () => {
 			return child;
 		});
 
-		const result = await stopLocalAgent("/tmp/termora-agent.sock", {
-			agentPath: "/opt/termora-agent",
+		const result = await stopLocalAgent("/tmp/lasterm-agent.sock", {
+			agentPath: "/opt/lasterm-agent",
 			spawn: run as unknown as typeof import("node:child_process").spawn,
 		});
 
 		expect(result).toMatchObject({ stopped: true, diagnostic: "Local agent stopped" });
 		expect(run).toHaveBeenCalledWith(
-			"/opt/termora-agent",
-			["--stop", "--socket", "/tmp/termora-agent.sock"],
+			"/opt/lasterm-agent",
+			["--stop", "--socket", "/tmp/lasterm-agent.sock"],
 			expect.objectContaining({ shell: false }),
 		);
 	});
@@ -445,7 +445,7 @@ describe("readBoundedLogTail", () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "termora-logtail-test-"));
+		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-logtail-test-"));
 	});
 
 	afterEach(async () => {

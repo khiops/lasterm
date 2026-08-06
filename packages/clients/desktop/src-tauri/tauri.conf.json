@@ -1,7 +1,7 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
-	"productName": "Termora",
-	"identifier": "app.termora.desktop",
+	"productName": "Lasterm",
+	"identifier": "app.lasterm.desktop",
 	"version": "0.7.0",
 	"build": {
 		"devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
 		"windows": [
 			{
 				"label": "main",
-				"title": "Termora",
+				"title": "Lasterm",
 				"width": 1280,
 				"height": 800,
 				"minWidth": 800,
@@ -41,14 +41,14 @@
 			"icons/icon.ico"
 		],
 		"externalBin": [
-			"termora-hub",
-			"termora-agent"
+			"lasterm-hub",
+			"lasterm-agent"
 		],
 		"createUpdaterArtifacts": false,
 		"resources": {},
 		"shortDescription": "Local-first session terminal platform",
 		"category": "DeveloperTool",
-		"copyright": "© 2026 Termora contributors",
+		"copyright": "© 2026 Lasterm contributors",
 		"licenseFile": "../../../../LICENSE",
 		"windows": {
 			"nsis": {
@@ -63,7 +63,7 @@
 	"plugins": {
 		"updater": {
 			"endpoints": [
-				"https://github.com/khiops/termora/releases/latest/download/latest.json"
+				"https://github.com/khiops/lasterm/releases/latest/download/latest.json"
 			],
 			"dialog": true,
 			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwRTI3QUYwRDI1MjgxNUUKUldSZWdWTFM4SHJpc0ZjcVR5UXdGSDUwK3RpZmRiZlRFZzJRUTd4SFNTekkwVnpLQ2hEYWJTdkQK"

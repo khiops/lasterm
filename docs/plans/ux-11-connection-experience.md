@@ -5,7 +5,7 @@ doc-meta:
   llm_reviewed: true
   scope: web
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-09
   updated: 2026-03-09
   complexity: COMPLEX
@@ -80,7 +80,7 @@ duration and channel count
   When editing, tab state persists within the session.
 - INV-06: Prefix filters are single-character: `>` (actions), `@` (hosts),
   `#` (channels). The prefix character is stripped from the search query.
-- INV-07: Recent items are stored in localStorage (key: `termora:palette-recent`)
+- INV-07: Recent items are stored in localStorage (key: `lasterm:palette-recent`)
   as an array of item IDs (not full objects — survives host renames), max 8
   entries, MRU eviction (most recently used moves to front).
 - INV-08: Fuzzy scoring uses named constants (EXACT_MATCH_SCORE,
@@ -667,7 +667,7 @@ SC-19b (word boundary), SC-05b (auth field clear — covered by INV-13)
 - [ ] All 37 BDD scenarios have passing tests
 - [ ] All tests pass (unit: ~48 new + existing)
 - [ ] `pnpm lint` clean
-- [ ] `pnpm -F @termora/web build` succeeds (vue-tsc)
+- [ ] `pnpm -F @lasterm/web build` succeeds (vue-tsc)
 - [ ] Manual smoke test: Cmd+K, fuzzy search, prefix filters, quick connect,
   modal tabs, host preview, rail subtitles
 - [ ] Code review clean (no blocking findings)

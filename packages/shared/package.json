@@ -1,12 +1,12 @@
 {
-	"name": "@termora/shared",
+	"name": "@lasterm/shared",
 	"private": true,
 	"version": "0.7.0",
-	"description": "Shared TypeScript types and codec for termora (wire protocol, entities)",
+	"description": "Shared TypeScript types and codec for lasterm (wire protocol, entities)",
 	"license": "MIT OR Apache-2.0",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/khiops/termora.git"
+		"url": "https://github.com/khiops/lasterm.git"
 	},
 	"engines": {
 		"node": ">=24.0.0"

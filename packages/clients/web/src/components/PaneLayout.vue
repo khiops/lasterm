@@ -254,7 +254,7 @@ function getDropZone(event: DragEvent, element: HTMLElement): DropZone {
 }
 
 function onDragOver(event: DragEvent): void {
-	if (!event.dataTransfer?.types.includes("text/x-termora-pane")) return;
+	if (!event.dataTransfer?.types.includes("text/x-lasterm-pane")) return;
 
 	showDropZones.value = true;
 
@@ -286,7 +286,7 @@ function onDrop(event: DragEvent): void {
 	dragEnterCount = 0;
 
 	if (!event.dataTransfer) return;
-	const raw = event.dataTransfer.getData("text/x-termora-pane");
+	const raw = event.dataTransfer.getData("text/x-lasterm-pane");
 	if (!raw) return;
 
 	let data: { channelId: string; paneId: string; hostId: string | null };

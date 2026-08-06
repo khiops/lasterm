@@ -4,11 +4,11 @@
  * Hub-specific SEA packaging script.
  *
  * Steps:
- *   1. Build web UI (pnpm -F @termora/web build) if static/ doesn't exist
+ *   1. Build web UI (pnpm -F @lasterm/web build) if static/ doesn't exist
  *   2. Embed web UI (scripts/embed-web.js) if static/ doesn't exist
- *   3. esbuild bundle (build-sea-hub.ts → termora-hub.cjs)
+ *   3. esbuild bundle (build-sea-hub.ts → lasterm-hub.cjs)
  *   4. Create static-files manifest (JSON of all web UI files → static-manifest.json)
- *   5. SEA binary packaging (build-sea-binary.ts → termora-hub binary)
+ *   5. SEA binary packaging (build-sea-binary.ts → lasterm-hub binary)
  *
  * Usage:
  *   pnpm run package:sea-hub
@@ -28,7 +28,7 @@ const ROOT = resolve(__dirname, "..");
 
 /**
  * Map a Rust-style target triple (e.g. "x86_64-unknown-linux-gnu") to a Node.js
- * platform string. Used to interpret TERMORA_TARGET_TRIPLE env var.
+ * platform string. Used to interpret LASTERM_TARGET_TRIPLE env var.
  */
 function tripleToNodePlatform(triple: string | undefined): NodeJS.Platform | undefined {
 	if (!triple) return undefined;
@@ -40,7 +40,7 @@ function tripleToNodePlatform(triple: string | undefined): NodeJS.Platform | und
 
 /**
  * Map a Rust-style target triple to a Node.js arch string.
- * Used to interpret TERMORA_TARGET_TRIPLE env var.
+ * Used to interpret LASTERM_TARGET_TRIPLE env var.
  */
 function tripleToNodeArch(triple: string | undefined): string | undefined {
 	if (!triple) return undefined;
@@ -57,17 +57,17 @@ const targetArchArg = process.argv.find((a) => a.startsWith("--target-arch="))?.
 const targetNodeVersionArg = process.argv
 	.find((a) => a.startsWith("--node-version="))
 	?.split("=")[1];
-// Priority: CLI arg > TERMORA_TARGET_TRIPLE env var > host process defaults.
+// Priority: CLI arg > LASTERM_TARGET_TRIPLE env var > host process defaults.
 const effectivePlatform =
 	(targetPlatformArg as NodeJS.Platform | undefined) ??
-	tripleToNodePlatform(process.env.TERMORA_TARGET_TRIPLE) ??
+	tripleToNodePlatform(process.env.LASTERM_TARGET_TRIPLE) ??
 	process.platform;
 const effectiveArch =
-	targetArchArg ?? tripleToNodeArch(process.env.TERMORA_TARGET_TRIPLE) ?? process.arch;
+	targetArchArg ?? tripleToNodeArch(process.env.LASTERM_TARGET_TRIPLE) ?? process.arch;
 const effectiveNodeVersion =
-	targetNodeVersionArg ?? process.env.TERMORA_NODE_VERSION ?? process.version;
-/** Output directory for SEA artefacts. Override with TERMORA_DIST_DIR env var. */
-const distDir = process.env.TERMORA_DIST_DIR ?? join(ROOT, "dist", "sea");
+	targetNodeVersionArg ?? process.env.LASTERM_NODE_VERSION ?? process.version;
+/** Output directory for SEA artefacts. Override with LASTERM_DIST_DIR env var. */
+const distDir = process.env.LASTERM_DIST_DIR ?? join(ROOT, "dist", "sea");
 
 /** Binary extension — empty on Linux/macOS, .exe on Windows. */
 const EXE_EXT = effectivePlatform === "win32" ? ".exe" : "";
@@ -187,7 +187,7 @@ export function locateBetterSqlite3(): string {
 
 /** The build script passes the target-qualified N-API artefact directly to packaging. */
 export function locateHubLockAddon(): string {
-	const addonPath = process.env.TERMORA_HUB_LOCK_ADDON;
+	const addonPath = process.env.LASTERM_HUB_LOCK_ADDON;
 	if (!addonPath || !existsSync(addonPath)) {
 		throw new Error(
 			"[package-sea-hub] hub lock addon path was not supplied or does not exist. " +
@@ -207,7 +207,7 @@ export function locateHubLockAddon(): string {
  * failing a legitimate cross-build.
  */
 function isCrossBuild(): boolean {
-	const triple = process.env.TERMORA_TARGET_TRIPLE;
+	const triple = process.env.LASTERM_TARGET_TRIPLE;
 	if (!triple) return false;
 	const arch = tripleToNodeArch(triple);
 	const targetPlatform = tripleToNodePlatform(triple);
@@ -305,8 +305,8 @@ async function main(): Promise<void> {
 	// Step 1 & 2: Build + embed web UI if static/ doesn't exist
 	// ------------------------------------------------------------------
 	if (!existsSync(staticDir)) {
-		console.log("[package-sea-hub] step 1/5: building web UI (pnpm -F @termora/web build)");
-		const webBuild = spawnSync("pnpm", ["-F", "@termora/web", "build"], {
+		console.log("[package-sea-hub] step 1/5: building web UI (pnpm -F @lasterm/web build)");
+		const webBuild = spawnSync("pnpm", ["-F", "@lasterm/web", "build"], {
 			stdio: "inherit",
 			cwd: ROOT,
 			shell: false,
@@ -333,7 +333,7 @@ async function main(): Promise<void> {
 	}
 
 	// ------------------------------------------------------------------
-	// Step 3: esbuild bundle (hub TS → termora-hub.cjs)
+	// Step 3: esbuild bundle (hub TS → lasterm-hub.cjs)
 	// ------------------------------------------------------------------
 	console.log("[package-sea-hub] step 3/5: esbuild bundle");
 	const esbuildResult = await build(buildOptions);
@@ -385,19 +385,19 @@ async function main(): Promise<void> {
 	console.log(`[package-sea-hub] toml-edit WASM:        ${tomlWasmPath}`);
 	console.log(`[package-sea-hub] hub version: ${version}`);
 
-	const outputBinary = join(distDir, `termora-hub${EXE_EXT}`);
+	const outputBinary = join(distDir, `lasterm-hub${EXE_EXT}`);
 
 	// Write VERSION asset file.
 	const versionFilePath = join(distDir, "VERSION");
 	writeFileSync(versionFilePath, version, "utf8");
 
 	const seaCfg: SeaBuildConfig = {
-		entryScript: join(ROOT, "dist", "sea", "termora-hub.cjs"),
+		entryScript: join(ROOT, "dist", "sea", "lasterm-hub.cjs"),
 		outputBinary,
-		name: "termora-hub",
+		name: "lasterm-hub",
 		nativeAddons: {
 			"better_sqlite3.node": betterSqlite3Path,
-			"termora_hub_lock.node": hubLockAddonPath,
+			"lasterm_hub_lock.node": hubLockAddonPath,
 		},
 		extraAssets: {
 			VERSION: versionFilePath,

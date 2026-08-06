@@ -5,7 +5,7 @@ import type {
 	AgentFetchProgressPhase,
 	HostArch,
 	HostOs,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { hubBaseUrl } from "../utils/hub-url.js";

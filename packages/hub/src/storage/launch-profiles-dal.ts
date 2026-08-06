@@ -3,8 +3,8 @@ import type {
 	LaunchProfile,
 	LaunchProfileMode,
 	SupportedOs,
-} from "@termora/shared";
-import { generateId } from "@termora/shared";
+} from "@lasterm/shared";
+import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 
 // ─── Row types ───────────────────────────────────────────────────────────────

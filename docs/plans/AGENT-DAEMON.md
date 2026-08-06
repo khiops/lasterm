@@ -4,7 +4,7 @@ doc-meta:
   adversarial_applied: true
   scope: agent, hub, shared
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-06
   updated: 2026-03-06
   complexity: COMPLEX
@@ -34,14 +34,14 @@ The agent must run as an independent daemon communicating over a Unix domain soc
 ## 2. User Stories
 
 ### US-1: PTY Survival
-AS A developer running long-running tasks in termora
+AS A developer running long-running tasks in lasterm
 I WANT my local terminals to survive hub restarts
 SO THAT I never lose work when the hub is restarted or crashes
 
 ACCEPTANCE: After hub restart, all local channels reconnect automatically with full scrollback preserved.
 
 ### US-2: Transparent Agent Management
-AS A termora user
+AS A lasterm user
 I WANT the hub to auto-start the agent daemon if it's not running
 SO THAT I don't have to manually manage the agent lifecycle
 
@@ -74,11 +74,11 @@ ACCEPTANCE: Agent listens on UDS (Linux/macOS) or named pipe (Windows); hub conn
 
 - PRE-01: Before spawning a daemon agent, the hub MUST probe the socket path to check if an agent is already running.
 - PRE-02: Before connecting, the socket file (UDS) or pipe name (Windows) must exist and accept connections.
-- PRE-03: The agent's runtime directory (`$XDG_RUNTIME_DIR/termora/` or equivalent) must be created with `0700` permissions.
+- PRE-03: The agent's runtime directory (`$XDG_RUNTIME_DIR/lasterm/` or equivalent) must be created with `0700` permissions.
 
 ### 3.3 Effects (what changes)
 
-- EFF-01: New `TermoraAgent` class replaces `AgentConnection` abstract + `LocalAgent`. Single concrete class that accepts any `Duplex` stream. Factory methods for transport variants.
+- EFF-01: New `LastermAgent` class replaces `AgentConnection` abstract + `LocalAgent`. Single concrete class that accepts any `Duplex` stream. Factory methods for transport variants.
 - EFF-02: Agent entry point (`main.ts`) gains `--daemon` mode: listens on a socket, stays alive indefinitely.
 - EFF-03: Hub startup sequence: probe socket → if alive, connect → if dead/absent, spawn detached agent, wait for socket, connect.
 - EFF-04: On hub disconnect, agent keeps all PTYs alive and buffers output (up to configurable limit).
@@ -106,14 +106,14 @@ ACCEPTANCE: Agent listens on UDS (Linux/macOS) or named pipe (Windows); hub conn
 
 **Agent as detached process** spawned via `child_process.spawn` with `{ detached: true, stdio: 'ignore' }` and `unref()`. The agent writes its PID to the socket directory for diagnostics (not for discovery — socket probing is the canonical liveness check).
 
-**Single agent class: `TermoraAgent`.** Replaces the `AgentConnection` abstract class and `LocalAgent`/`DaemonAgent` hierarchy. `TermoraAgent` accepts any `Duplex` stream — the transport concern is separated into factory methods:
+**Single agent class: `LastermAgent`.** Replaces the `AgentConnection` abstract class and `LocalAgent`/`DaemonAgent` hierarchy. `LastermAgent` accepts any `Duplex` stream — the transport concern is separated into factory methods:
 
 ```typescript
-class TermoraAgent extends EventEmitter {
+class LastermAgent extends EventEmitter {
   constructor(stream: Duplex)
 
-  static connectLocal(socketPath: string): Promise<TermoraAgent>
-  // Phase 2: static connectTunnel(sshChannel: Channel): TermoraAgent
+  static connectLocal(socketPath: string): Promise<LastermAgent>
+  // Phase 2: static connectTunnel(sshChannel: Channel): LastermAgent
 }
 ```
 
@@ -133,14 +133,14 @@ This design means:
 
 | Platform | Path |
 |----------|------|
-| Linux/macOS | `$XDG_RUNTIME_DIR/termora/agent.sock` (fallback: `/tmp/termora-$UID/agent.sock`) |
-| Windows | `\\.\pipe\termora-agent-<username>` |
+| Linux/macOS | `$XDG_RUNTIME_DIR/lasterm/agent.sock` (fallback: `/tmp/lasterm-$UID/agent.sock`) |
+| Windows | `\\.\pipe\lasterm-agent-<username>` |
 
 Both paths are per-user by construction:
 - Linux: `$XDG_RUNTIME_DIR` = `/run/user/<UID>/` (per-user), fallback includes `$UID`
 - Windows: named pipe includes `<username>` for multi-user isolation
 
-The path is computed by a shared `getSocketPath()` function in `@termora/shared` so both hub and agent agree. It can be overridden via `config.toml` `[agent].socket_path`.
+The path is computed by a shared `getSocketPath()` function in `@lasterm/shared` so both hub and agent agree. It can be overridden via `config.toml` `[agent].socket_path`.
 
 ### 4.3 Agent Configuration
 
@@ -159,7 +159,7 @@ log_level = "info"
 ```
 
 The hub reads `config.toml` and passes relevant config to the agent at spawn via CLI flags:
-`termora-agent --daemon --socket <path> --buffer-per-channel 1048576 --buffer-global 20971520`
+`lasterm-agent --daemon --socket <path> --buffer-per-channel 1048576 --buffer-global 20971520`
 
 The agent also reads `config.toml` directly (shared `getConfigDir()`) as a fallback when CLI flags are not provided (e.g., manually started daemon).
 
@@ -168,12 +168,12 @@ The agent also reads `config.toml` directly (shared `getConfigDir()`) as a fallb
 | Entity | Change | Migration needed |
 |--------|--------|-----------------|
 | Agent entry point | Add `--daemon` flag + config flags | No |
-| `AgentConnection` abstract | Replaced by `TermoraAgent` concrete class | No |
-| New `TermoraAgent` class | `Duplex` stream + factory methods | No (runtime only) |
+| `AgentConnection` abstract | Replaced by `LastermAgent` concrete class | No |
+| New `LastermAgent` class | `Duplex` stream + factory methods | No (runtime only) |
 | `LocalAgent` | Unchanged — used by SshAgent until Phase 2 | No |
 | `SshAgent` | Unchanged — uses --stdio until Phase 2 | No |
 | Agent `main.ts` | Add socket server mode alongside stdio mode | No |
-| `@termora/shared` | Add `getSocketPath()`, `probeSocket()` | No |
+| `@lasterm/shared` | Add `getSocketPath()`, `probeSocket()` | No |
 | `config.toml` | Add `[agent]` section | No (additive) |
 
 ### 4.5 Agent Daemon Lifecycle
@@ -181,14 +181,14 @@ The agent also reads `config.toml` directly (shared `getConfigDir()`) as a fallb
 ```
 Hub startup:
   1. getSocketPath() (from config or auto-detect)
-  2. probeSocket(path)  →  success? → TermoraAgent.connectLocal(path) → HELLO (check protocolVersion) → done
+  2. probeSocket(path)  →  success? → LastermAgent.connectLocal(path) → HELLO (check protocolVersion) → done
                          →  ECONNREFUSED? → unlink(path) → goto 3
                          →  ENOENT? → goto 3
                          →  EACCES? → throw (permission denied, different user)
   3. spawnDaemon(agentBinaryPath, socketPath, config)
      →  EADDRINUSE? → wait 100-500ms random backoff → retry probeSocket
   4. waitForSocket(path, timeout=5s, poll=100ms)
-  5. TermoraAgent.connectLocal(path) → HELLO exchange → done
+  5. LastermAgent.connectLocal(path) → HELLO exchange → done
 
 Hub shutdown:
   - Close socket connection (agent keeps running)
@@ -213,7 +213,7 @@ Agent daemon shutdown (SIGTERM/SIGINT):
 
 When hub reconnects to a running agent:
 
-1. Hub connects to socket via `TermoraAgent.connectLocal(path)`.
+1. Hub connects to socket via `LastermAgent.connectLocal(path)`.
 2. Agent sends HELLO (protocolVersion, capabilities, platform info). Hub checks protocolVersion compatibility.
 3. Agent sends CHANNEL_STATE for each alive channel: `{ channelId, title, pid, alive }`.
 4. Agent sends CHANNEL_STATE_END sentinel: `{ type: "channel_state_end" }`. Hub now knows enumeration is complete.
@@ -235,7 +235,7 @@ When the hub is disconnected, the agent buffers PTY output per channel:
 
 No new REST endpoints. Changes are internal (agent ↔ hub transport).
 
-New shared exports from `@termora/shared`:
+New shared exports from `@lasterm/shared`:
 
 | Export | Signature | Purpose |
 |--------|-----------|---------|
@@ -270,9 +270,9 @@ Scenario: SC-01 Agent starts as daemon and listens on socket
   And it logs to <stateDir>/agent.log
 
 @priority:high @type:nominal
-Scenario: SC-02 Hub connects to running agent via TermoraAgent
+Scenario: SC-02 Hub connects to running agent via LastermAgent
   Given the agent daemon is listening on the socket
-  When the hub calls TermoraAgent.connectLocal(socketPath)
+  When the hub calls LastermAgent.connectLocal(socketPath)
   Then the connection succeeds
   And the agent sends a HELLO message with protocolVersion
 
@@ -283,7 +283,7 @@ Scenario: SC-03 Hub auto-starts agent when not running
   When the hub starts
   Then the hub spawns the agent as a detached process
   And waits for the socket to become available (max 5s)
-  And connects via TermoraAgent.connectLocal()
+  And connects via LastermAgent.connectLocal()
   And receives HELLO
 
 @priority:high @type:nominal
@@ -330,21 +330,21 @@ Scenario: SC-07 Buffered output is flushed on reconnect
 Scenario: SC-08 Socket path follows platform convention (Linux)
   Given the platform is Linux with XDG_RUNTIME_DIR set
   When getSocketPath() is called
-  Then it returns "$XDG_RUNTIME_DIR/termora/agent.sock"
+  Then it returns "$XDG_RUNTIME_DIR/lasterm/agent.sock"
 
 @priority:high @type:nominal
 Scenario: SC-09 Named pipe path on Windows includes username
   Given the platform is Windows
   And the current username is "alice"
   When getSocketPath() is called
-  Then it returns "\\.\pipe\termora-agent-alice"
+  Then it returns "\\.\pipe\lasterm-agent-alice"
 
 @priority:medium @type:edge
 Scenario: SC-10 Fallback when XDG_RUNTIME_DIR is unset
   Given the platform is Linux
   And XDG_RUNTIME_DIR is not set
   When getSocketPath() is called
-  Then it returns "/tmp/termora-<UID>/agent.sock"
+  Then it returns "/tmp/lasterm-<UID>/agent.sock"
 
 @priority:medium @type:nominal
 Scenario: SC-11 Socket path overridden via config
@@ -489,7 +489,7 @@ Scenario: SC-21 Buffered output flushed with backpressure
 
 **Exit criteria:**
 - [ ] `getSocketPath()` returns correct path on Linux (with and without XDG_RUNTIME_DIR)
-- [ ] `getSocketPath()` returns `\\.\pipe\termora-agent-<username>` on Windows (mocked)
+- [ ] `getSocketPath()` returns `\\.\pipe\lasterm-agent-<username>` on Windows (mocked)
 - [ ] `probeSocket()` returns true for listening socket, false for absent/stale, throws on EACCES
 - [ ] `AgentConfig` parsed from TOML with defaults
 - [ ] All tests pass, typecheck clean
@@ -523,18 +523,18 @@ Scenario: SC-21 Buffered output flushed with backpressure
 - [ ] HELLO includes protocolVersion
 - [ ] All tests pass (real UDS, no mock transport)
 
-### Block 3: TermoraAgent (hub-side unified agent class) — ~25 min
+### Block 3: LastermAgent (hub-side unified agent class) — ~25 min
 **Type:** Feature slice
 **Dependencies:** Block 1, Block 2
 **Packages:** hub
 **Files:**
-- `packages/hub/src/session/termora-agent.ts` — `TermoraAgent` class (replaces AgentConnection abstract)
-- `packages/hub/src/session/termora-agent.spec.ts` — unit tests (real UDS in temp dir)
+- `packages/hub/src/session/lasterm-agent.ts` — `LastermAgent` class (replaces AgentConnection abstract)
+- `packages/hub/src/session/lasterm-agent.spec.ts` — unit tests (real UDS in temp dir)
 
 **What:**
-- `TermoraAgent extends EventEmitter`: takes any `Duplex` stream
+- `LastermAgent extends EventEmitter`: takes any `Duplex` stream
   - `constructor(stream: Duplex)`: attaches SendQueue + FrameReader
-  - `static connectLocal(socketPath: string): Promise<TermoraAgent>` — `net.connect()`, returns connected agent
+  - `static connectLocal(socketPath: string): Promise<LastermAgent>` — `net.connect()`, returns connected agent
   - `send(msg)`: encode + send frame
   - `close()`: close stream (agent keeps running)
   - `get connected()`: stream not destroyed
@@ -542,7 +542,7 @@ Scenario: SC-21 Buffered output flushed with backpressure
 - `LocalAgent` and `SshAgent` remain untouched (used until Phase 2)
 
 **Exit criteria:**
-- [ ] TermoraAgent.connectLocal() connects to a real agent daemon (temp UDS)
+- [ ] LastermAgent.connectLocal() connects to a real agent daemon (temp UDS)
 - [ ] Receives HELLO and emits 'ready'
 - [ ] close() disconnects without killing agent
 - [ ] send/receive framing works correctly
@@ -560,13 +560,13 @@ Scenario: SC-21 Buffered output flushed with backpressure
 **What:**
 - `connectOrLaunch(socketPath, agentBinaryPath, agentConfig)`:
   0. Verify `agentBinaryPath` exists → if missing, throw with clear error
-  1. `probeSocket(path)` → if alive → `TermoraAgent.connectLocal(path)` → return
+  1. `probeSocket(path)` → if alive → `LastermAgent.connectLocal(path)` → return
   2. If stale (ECONNREFUSED) → `unlink(path)`
   3. `launchDaemon(agentBinaryPath, path, config)` — `child_process.spawn` with `detached: true, stdio: 'ignore'`, `unref()`
   4. On EADDRINUSE → randomized backoff (100-500ms) → retry probeSocket
-  5. `waitForSocket(path, timeout=5s, poll=100ms)` → `TermoraAgent.connectLocal(path)` → return
+  5. `waitForSocket(path, timeout=5s, poll=100ms)` → `LastermAgent.connectLocal(path)` → return
 - SessionManager: use `connectOrLaunch()` for local hosts instead of `new LocalAgent()`
-- Handle reconnect: on TermoraAgent 'close' event → attempt reconnect
+- Handle reconnect: on LastermAgent 'close' event → attempt reconnect
 - Handle CHANNEL_STATE + CHANNEL_STATE_END: reconcile with meta.db
 
 **Exit criteria:**
@@ -585,7 +585,7 @@ Scenario: SC-21 Buffered output flushed with backpressure
 - `packages/shared/src/messages.ts` — add CHANNEL_STATE + CHANNEL_STATE_END message types
 - `packages/shared/src/index.ts` — re-export
 - `packages/agent/src/daemon.ts` — send CHANNEL_STATE on connect
-- `packages/hub/src/session/termora-agent.ts` — handle CHANNEL_STATE
+- `packages/hub/src/session/lasterm-agent.ts` — handle CHANNEL_STATE
 - `packages/hub/src/ws/ws-handler.ts` — minor: handle reconciled channels
 
 **What:**
@@ -631,12 +631,12 @@ Scenario: SC-21 Buffered output flushed with backpressure
 **Dependencies:** Block 6
 **Packages:** docs
 **Files:**
-- `docs/SPEC.md` — update architecture diagram, transport section, entity relationships, add TermoraAgent
+- `docs/SPEC.md` — update architecture diagram, transport section, entity relationships, add LastermAgent
 - `docs/PROTOCOL.md` — add CHANNEL_STATE + CHANNEL_STATE_END messages, protocolVersion in HELLO
 - `docs/SECURITY.md` — add UDS/named pipe security model, socket permissions
 
 **What:**
-- SPEC.md: update architecture diagram (hub → UDS → agent daemon), explain TermoraAgent class, config cascade with `[agent]` section
+- SPEC.md: update architecture diagram (hub → UDS → agent daemon), explain LastermAgent class, config cascade with `[agent]` section
 - PROTOCOL.md: document CHANNEL_STATE, CHANNEL_STATE_END, protocolVersion field in HELLO
 - SECURITY.md: document socket file permissions (0700 dir), per-user isolation, Windows named pipe per-username
 
@@ -650,7 +650,7 @@ Scenario: SC-21 Buffered output flushed with backpressure
 
 | Level | Count | Focus |
 |-------|-------|-------|
-| Unit | ~18 | Socket path, probe, buffer, config parsing, TermoraAgent, launcher |
+| Unit | ~18 | Socket path, probe, buffer, config parsing, LastermAgent, launcher |
 | Integration | ~8 | Real agent daemon + real UDS: connect, reconnect, channel state, buffer flush |
 | E2E | ~3 | Chrome DevTools: hub start → agent auto-start → create channel → hub restart → channel alive |
 

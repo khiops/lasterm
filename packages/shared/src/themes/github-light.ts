@@ -1,6 +1,6 @@
-import type { TermoraTheme } from "../theme.js";
+import type { LastermTheme } from "../theme.js";
 
-export const githubLight: TermoraTheme = {
+export const githubLight: LastermTheme = {
 	name: "github-light",
 	author: "GitHub",
 	type: "light",

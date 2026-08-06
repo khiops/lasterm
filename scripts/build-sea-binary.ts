@@ -32,7 +32,7 @@ import { dirname, join, resolve } from "node:path";
 export interface SeaBuildConfig {
 	/** Path to the bundled .cjs entry point */
 	entryScript: string;
-	/** Output binary path (e.g. dist/sea/termora-agent) */
+	/** Output binary path (e.g. dist/sea/lasterm-agent) */
 	outputBinary: string;
 	/** Name for the binary (used in logs) */
 	name: string;
@@ -118,7 +118,7 @@ function downloadNodeBinary(
 	destDir: string,
 	nodeVersion?: string,
 ): string {
-	const version = nodeVersion ?? process.env.TERMORA_NODE_VERSION ?? process.version; // e.g. "v22.14.0"
+	const version = nodeVersion ?? process.env.LASTERM_NODE_VERSION ?? process.version; // e.g. "v22.14.0"
 	const platformMap: Record<string, string> = { win32: "win", linux: "linux", darwin: "darwin" };
 	const archMap: Record<string, string> = { x64: "x64", arm64: "arm64" };
 	const plat = platformMap[targetPlatform] ?? targetPlatform;
@@ -171,7 +171,7 @@ export async function buildSeaBinary(cfg: SeaBuildConfig): Promise<void> {
 	// ------------------------------------------------------------------
 	// 1. Write sea-config.json to a temp location
 	// ------------------------------------------------------------------
-	const tmpBase = join(tmpdir(), `termora-sea-${randomBytes(8).toString("hex")}`);
+	const tmpBase = join(tmpdir(), `lasterm-sea-${randomBytes(8).toString("hex")}`);
 	mkdirSync(tmpBase, { recursive: true });
 
 	const configPath = join(tmpBase, "sea-config.json");

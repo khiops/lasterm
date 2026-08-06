@@ -2,7 +2,7 @@ import { ref } from "vue";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "termora:palette-recent";
+const STORAGE_KEY = "lasterm:palette-recent";
 const MAX_ITEMS = 8;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

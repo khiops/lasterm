@@ -7,18 +7,18 @@ doc-meta:
 
 # Packaging & Distribution Strategy
 
-> **Project:** termora
+> **Project:** lasterm
 
 ## Problem
 
-termora has three distinct runtime components:
+lasterm has three distinct runtime components:
 - **Agent** — PTY manager (node-pty, MessagePack codec). Runs on remote machines.
 - **Hub** — Orchestrator (Fastify, better-sqlite3, ssh2). Runs on the user's machine or a server.
 - **Web UI** — Vue 3 SPA (embedded by hub as static files, or served by Vite in dev)
 
 Distribution must support two parallel channels:
 1. ~~**npm** — full ecosystem support, every package installable via npm/npx~~
-   **Dropped (#158.)** The unscoped `termora` on npm belongs to an unrelated
+   **Dropped (#158.)** The unscoped `lasterm` on npm belongs to an unrelated
    project, so this channel was never available under that name; the standalone
    binary also embeds its own Node, which removes the requirement npm would add
    back. Every package is now marked private.
@@ -32,14 +32,14 @@ The agent binary is the highest-impact deliverable: remote machines should not r
 ┌─────────────────────────────────────────────────────────┐
 │  BINARIES                                               │
 │                                                         │
-│  termora-agent  (Node SEA, ~20-30MB)                    │
+│  lasterm-agent  (Node SEA, ~20-30MB)                    │
 │    └── node-pty, msgpack codec                          │
 │                                                         │
-│  termora-hub    (Node SEA, ~50-60MB)                    │
+│  lasterm-hub    (Node SEA, ~50-60MB)                    │
 │    └── fastify, better-sqlite3, web UI static           │
 │                                                         │
 │  Tauri app      (optional desktop shell)                │
-│    └── sidecar: termora-hub                             │
+│    └── sidecar: lasterm-hub                             │
 │    └── webview → hub's web UI                           │
 └──────────────────────┬──────────────────────────────────┘
                        │
@@ -57,7 +57,7 @@ The agent binary is the highest-impact deliverable: remote machines should not r
 | # | Decision | Chosen | Rejected | Why |
 |---|----------|--------|----------|-----|
 | D1 | Binary split | Two separate binaries (agent + hub) | Single combined binary | Independent deployment, agent on remote machines |
-| D2 | Hub ↔ Agent local | Hub finds `termora-agent` in PATH or same directory | Embedded/extracted agent | Simple, installer handles placement |
+| D2 | Hub ↔ Agent local | Hub finds `lasterm-agent` in PATH or same directory | Embedded/extracted agent | Simple, installer handles placement |
 | D3 | Native addons | Node SEA native `assets` field + `getRawAsset()` + `process.dlopen()` (tmpdir extraction) | Ship .node files alongside, @aspect/node-addon-loader (does not exist) | Official Node.js API, single file, tmpdir available on all platforms |
 | D4 | SEA engine | Node SEA (Node 22+) | pkg (abandoned), nexe (fragile), Bun compile (no native addons) | Official Node.js feature, maintained |
 | D5 | Desktop shell | Tauri v2 | Electron (150MB), Neutralino | Lightweight (~5MB), system webview, native features |
@@ -88,9 +88,9 @@ interface Host {
 **Goal:** Test on Windows immediately, no publishing required.
 
 ```bash
-cd /mnt/wsl/shared/dev/termora
-pnpm build && npm pack          # → termora-0.1.0.tgz
-# On target: npm i -g ./termora-0.1.0.tgz && termora
+cd /mnt/wsl/shared/dev/lasterm
+pnpm build && npm pack          # → lasterm-0.1.0.tgz
+# On target: npm i -g ./lasterm-0.1.0.tgz && lasterm
 ```
 
 Native addons mitigated via `prebuild-install` (both node-pty & better-sqlite3 support prebuilt binaries).
@@ -105,7 +105,7 @@ Native addons mitigated via `prebuild-install` (both node-pty & better-sqlite3 s
 |------------|----------|-----|
 | node-pty | yes (native addon via loader) | PTY management |
 | @msgpack/msgpack | yes (bundled JS) | Wire protocol |
-| @termora/shared (codec) | yes (bundled JS) | Framing, types |
+| @lasterm/shared (codec) | yes (bundled JS) | Framing, types |
 | better-sqlite3 | **no** | Agent has no DB |
 | fastify | **no** | Agent has no HTTP |
 
@@ -120,15 +120,15 @@ esbuild packages/agent/src/main.ts --bundle --platform=node --outfile=dist/agent
 
 # 3. Generate SEA blob + inject into Node binary
 node --experimental-sea-config sea-config-agent.json
-cp $(which node) dist/termora-agent
-npx postject dist/termora-agent NODE_SEA_BLOB dist/sea-prep.blob \
+cp $(which node) dist/lasterm-agent
+npx postject dist/lasterm-agent NODE_SEA_BLOB dist/sea-prep.blob \
   --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 ```
 
 ### Result
 
-- `termora-agent` / `termora-agent.exe` — ~20-30MB single file
-- Deploy: `scp termora-agent user@host:~/bin/ && chmod +x ~/bin/termora-agent`
+- `lasterm-agent` / `lasterm-agent.exe` — ~20-30MB single file
+- Deploy: `scp lasterm-agent user@host:~/bin/ && chmod +x ~/bin/lasterm-agent`
 - No Node.js, no npm, no build tools on the remote machine
 
 ## Phase 2b: Hub SEA Binary
@@ -142,14 +142,14 @@ npx postject dist/termora-agent NODE_SEA_BLOB dist/sea-prep.blob \
 | fastify + plugins | yes (bundled JS) | HTTP/WS server |
 | better-sqlite3 | yes (native addon via loader) | Storage |
 | ssh2 | yes (bundled JS) | Remote agent connections |
-| @termora/shared | yes (bundled JS) | Codec, types, config |
+| @lasterm/shared | yes (bundled JS) | Codec, types, config |
 | Web UI (dist/) | yes (embedded static) | Serves at / |
 | node-pty | **no** | Agent's responsibility |
 
 ### Result
 
-- `termora-hub` / `termora-hub.exe` — ~50-60MB single file
-- Requires `termora-agent` in PATH or same directory for local sessions
+- `lasterm-hub` / `lasterm-hub.exe` — ~50-60MB single file
+- Requires `lasterm-agent` in PATH or same directory for local sessions
 - Serves web UI at `http://localhost:4100`
 
 ## Phase 2c: CI Build Matrix
@@ -161,9 +161,9 @@ platform (`./scripts/build-hub.sh`), and macOS has no test hardware.
 
 | Platform | Agent | Hub | Desktop |
 |----------|-------|-----|---------|
-| Windows x64 | `termora-agent.exe` | `termora-hub.exe` | NSIS/MSI |
-| Linux x64 | `termora-agent` | local build only | — |
-| Linux arm64 | `termora-agent` | — | — |
+| Windows x64 | `lasterm-agent.exe` | `lasterm-hub.exe` | NSIS/MSI |
+| Linux x64 | `lasterm-agent` | local build only | — |
+| Linux arm64 | `lasterm-agent` | — | — |
 | macOS | disabled (no test hardware) | — | — |
 
 Artifacts uploaded to GitHub Releases per version tag.
@@ -178,8 +178,8 @@ Artifacts uploaded to GitHub Releases per version tag.
 2. User clicks "Connect" → hub opens SSH to host
 3. If agent not found on remote:
    a. Detect OS/arch if not set: `uname -sm` (Linux/macOS) or `echo %PROCESSOR_ARCHITECTURE%` (Windows cmd)
-   b. Select matching binary from local cache (`~/.local/state/termora/binaries/`)
-   c. Upload via SFTP: `~/.local/bin/termora-agent` (Linux/macOS) or `%LOCALAPPDATA%\termora\termora-agent.exe` (Windows)
+   b. Select matching binary from local cache (`~/.local/state/lasterm/binaries/`)
+   c. Upload via SFTP: `~/.local/bin/lasterm-agent` (Linux/macOS) or `%LOCALAPPDATA%\lasterm\lasterm-agent.exe` (Windows)
    d. `chmod +x` (Linux/macOS)
    e. Launch agent over SSH as usual
 
@@ -187,12 +187,12 @@ Artifacts uploaded to GitHub Releases per version tag.
 
 Hub downloads or ships with agent binaries for all platforms:
 ```
-~/.local/state/termora/binaries/
-├── termora-agent-linux-x64
-├── termora-agent-linux-arm64
-├── termora-agent-darwin-arm64
-├── termora-agent-darwin-x64
-└── termora-agent-windows-x64.exe
+~/.local/state/lasterm/binaries/
+├── lasterm-agent-linux-x64
+├── lasterm-agent-linux-arm64
+├── lasterm-agent-darwin-arm64
+├── lasterm-agent-darwin-x64
+└── lasterm-agent-windows-x64.exe
 ```
 
 Source: embedded in hub package, or downloaded from GitHub Releases on first need.
@@ -208,13 +208,13 @@ Source: embedded in hub package, or downloaded from GitHub Releases on first nee
 │  Tauri app (~5MB Rust shell)                    │
 │  ├── System webview (Edge/WebKit/WebKitGTK)     │
 │  │   └── loads hub web UI (localhost:4100)       │
-│  ├── Sidecar: termora-hub (Node SEA binary)     │
-│  │   └── spawns termora-agent for local sessions│
+│  ├── Sidecar: lasterm-hub (Node SEA binary)     │
+│  │   └── spawns lasterm-agent for local sessions│
 │  └── Native features:                           │
 │      ├── System tray icon + menu                │
 │      ├── Auto-updater (GitHub Releases)         │
 │      ├── Native notifications                   │
-│      ├── Deep links (termora://)                │
+│      ├── Deep links (lasterm://)                │
 │      └── Global keyboard shortcuts              │
 └─────────────────────────────────────────────────┘
 ```
@@ -237,12 +237,12 @@ No glue layer. Tauri's built-in sidecar API manages the hub process:
 // tauri.conf.json
 {
   "bundle": {
-    "externalBin": ["binaries/termora-hub"]
+    "externalBin": ["binaries/lasterm-hub"]
   }
 }
 ```
 
-Tauri start → spawn `termora-hub --port 4100` → webview loads `localhost:4100`.
+Tauri start → spawn `lasterm-hub --port 4100` → webview loads `localhost:4100`.
 Tauri close → kill hub gracefully.
 
 ### Build output
@@ -261,11 +261,11 @@ recursive publish releases nothing.
 
 | Package | npm name | bin | Use case |
 |---------|----------|-----|----------|
-| Root CLI | `termora` | not published | built from this repository — npm dropped, see #158 |
-| Agent | `@termora/agent` | `termora-agent` | `npm i -g` on remote machines with Node |
-| Hub | `@termora/hub` | — | `npm i -g` for Node.js users |
-| Shared | `@termora/shared` | — | Library for integrators/plugins |
-| Web | `@termora/web` | — | NOT published (embedded in hub) |
+| Root CLI | `lasterm` | not published | built from this repository — npm dropped, see #158 |
+| Agent | `@lasterm/agent` | `lasterm-agent` | `npm i -g` on remote machines with Node |
+| Hub | `@lasterm/hub` | — | `npm i -g` for Node.js users |
+| Shared | `@lasterm/shared` | — | Library for integrators/plugins |
+| Web | `@lasterm/web` | — | NOT published (embedded in hub) |
 
 ## Distribution Channels
 
@@ -274,7 +274,7 @@ recursive publish releases nothing.
 | Channel | Format | Priority |
 |---------|--------|----------|
 | GitHub Releases | Single-file per platform | P0 |
-| npm registry | All packages | P0 |
+| ~~npm registry~~ | ~~All packages~~ | Superseded, #158 — nothing publishes |
 | Scoop (Windows) | Bucket manifest | P1 |
 | Homebrew (macOS/Linux) | Tap formula | P1 |
 
@@ -292,8 +292,8 @@ recursive publish releases nothing.
 
 | Phase | What | Depends on | Deliverable |
 |-------|------|------------|-------------|
-| **2a** | Agent SEA binary | esbuild + postject + node-addon-loader | `termora-agent` single file |
-| **2b** | Hub SEA binary | 2a + embed web build | `termora-hub` single file |
+| **2a** | Agent SEA binary | esbuild + postject + node-addon-loader | `lasterm-agent` single file |
+| **2b** | Hub SEA binary | 2a + embed web build | `lasterm-hub` single file |
 | **2c** | CI matrix | 2a + 2b | GitHub Actions → Releases |
 | **2d** | Auto-deploy agent | 2a + 2c + host os/arch field | Hub deploys agent via SSH |
 | **3** | Tauri desktop app | 2b | Native app + installers |

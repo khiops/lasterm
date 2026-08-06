@@ -1,4 +1,4 @@
-# Codebase Audit: termora
+# Codebase Audit: lasterm
 
 **Date:** 2026-03-18
 **Mode:** full
@@ -71,7 +71,7 @@ The architecture is clean (correct dependency direction, clear separation of con
 ### Short-term (P1)
 - Update PROTOCOL.md: add missing WS messages and REST routes
 - Update SPEC.md entity model (Host, Channel, LaunchProfile)
-- Extract sea-addon-loader to @termora/shared
+- Extract sea-addon-loader to @lasterm/shared
 - Fix error response format inconsistency in pair.ts and wallpapers.ts
 
 ### Medium-term (P2-P3)

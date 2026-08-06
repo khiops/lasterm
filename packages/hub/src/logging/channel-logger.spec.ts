@@ -1,14 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { LogConfig } from "@termora/shared";
+import type { LogConfig } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ChannelLogger } from "./channel-logger.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeTmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "termora-channel-logger-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-channel-logger-"));
 }
 
 function makeConfig(overrides: Partial<LogConfig> = {}): LogConfig {

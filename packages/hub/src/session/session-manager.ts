@@ -29,8 +29,8 @@ import type {
 	TestConnectMessage,
 	UiAttachOkMessage,
 	UiSpawnMessage,
-} from "@termora/shared";
-import { DEFAULT_AGENT_CONFIG, generateId, validateCustomCommand } from "@termora/shared";
+} from "@lasterm/shared";
+import { DEFAULT_AGENT_CONFIG, generateId, validateCustomCommand } from "@lasterm/shared";
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { LoggerRegistry } from "../logging/index.js";
@@ -1034,10 +1034,10 @@ export class SessionManager {
 					const elevSend = (routeClientId: string, msg: Record<string, unknown>) => {
 						const target = this.ctx.clients.get(routeClientId);
 						if (!target) throw new Error("prompt route client disconnected");
-						target.send(msg as unknown as import("@termora/shared").AuthPromptMessage);
+						target.send(msg as unknown as import("@lasterm/shared").AuthPromptMessage);
 					};
 					const hostname = host.sshHost ?? host.label ?? hostId;
-					const elevPayload: import("@termora/shared").AuthPromptMessage = {
+					const elevPayload: import("@lasterm/shared").AuthPromptMessage = {
 						type: "AUTH_PROMPT",
 						hostId,
 						promptType: "elevation",
@@ -1436,7 +1436,7 @@ export class SessionManager {
 	 */
 	private async _connectSshAgent(
 		hostId: string,
-		host: import("@termora/shared").Host,
+		host: import("@lasterm/shared").Host,
 		client: WsClient,
 		sessionId: string,
 		signal?: AbortSignal,
@@ -1454,17 +1454,17 @@ export class SessionManager {
 
 		const deployOpts = this._buildDeployOpts(hostId, host, client, ownerAcqId);
 
-		console.error(`[termora-ssh] creating SshAgent for host ${host.id}`);
+		console.error(`[lasterm-ssh] creating SshAgent for host ${host.id}`);
 		const sshAgent = new SshAgent(host, promptAuth, deployOpts, this.ctx.agentConfig);
 
-		console.error(`[termora-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);
+		console.error(`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);
 		try {
-			console.error("[termora-ssh] deploying agent...");
+			console.error("[lasterm-ssh] deploying agent...");
 			await sshAgent.start(storedFingerprint, sessionTrustedFp, signal);
-			console.error("[termora-ssh] agent deployed, exec starting");
-			console.error("[termora-ssh] SSH connection established");
+			console.error("[lasterm-ssh] agent deployed, exec starting");
+			console.error("[lasterm-ssh] SSH connection established");
 		} catch (err) {
-			console.error(`[termora-ssh] SSH error: ${err instanceof Error ? err.message : String(err)}`);
+			console.error(`[lasterm-ssh] SSH error: ${err instanceof Error ? err.message : String(err)}`);
 			// Handle deploy errors (user rejection, binary not available)
 			if (err instanceof DeployError) {
 				client.send({
@@ -1515,22 +1515,22 @@ export class SessionManager {
 					this.ctx.trustedOnceFingerprints.set(hostKey, retryFp);
 				}
 				const retryAgent = new SshAgent(host, promptAuth, deployOpts, this.ctx.agentConfig);
-				console.error(`[termora-ssh] creating SshAgent for host ${host.id} (retry)`);
+				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);
 				console.error(
-					`[termora-ssh] starting SSH connection to ${host.sshHost ?? host.label} (retry)`,
+					`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label} (retry)`,
 				);
 				try {
-					console.error("[termora-ssh] deploying agent...");
+					console.error("[lasterm-ssh] deploying agent...");
 					await retryAgent.start(
 						action === "trust_permanent" ? retryFp : null,
 						action === "trust_once" ? retryFp : undefined,
 						signal,
 					);
-					console.error("[termora-ssh] agent deployed, exec starting");
-					console.error("[termora-ssh] SSH connection established");
+					console.error("[lasterm-ssh] agent deployed, exec starting");
+					console.error("[lasterm-ssh] SSH connection established");
 				} catch (retryErr) {
 					console.error(
-						`[termora-ssh] SSH error: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+						`[lasterm-ssh] SSH error: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
 					);
 					// Aborted during retry — don't send an error to the client.
 					if (signal?.aborted) {

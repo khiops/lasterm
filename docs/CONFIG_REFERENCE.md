@@ -1,11 +1,11 @@
-# termora — config.toml Reference
+# lasterm — config.toml Reference
 
 ## Location
 
 | Platform | Path |
 |----------|------|
-| Linux / macOS | `$XDG_CONFIG_HOME/termora/config.toml` (default: `~/.config/termora/config.toml`) |
-| Windows | `%APPDATA%\termora\config.toml` |
+| Linux / macOS | `$XDG_CONFIG_HOME/lasterm/config.toml` (default: `~/.config/lasterm/config.toml`) |
+| Windows | `%APPDATA%\lasterm\config.toml` |
 
 ## Config Cascade
 
@@ -93,7 +93,7 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | truncation | `"start"` \| `"middle"` \| `"end"` | `"end"` | Ellipsis placement when title is truncated |
 | prefix | string | — | Global prefix prepended to all tab titles |
 | window_title | boolean | `true` | Update browser / window title |
-| window_format | string | `"termora - {prefix}{host} - {title}"` | Window title format string |
+| window_format | string | `"lasterm - {prefix}{host} - {title}"` | Window title format string |
 
 ---
 
@@ -183,7 +183,7 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 ## Example config.toml
 
 ```toml
-# ~/.config/termora/config.toml
+# ~/.config/lasterm/config.toml
 
 [terminal]
 font_family = "JetBrains Mono, Consolas, monospace"
@@ -241,5 +241,5 @@ log_level = "info"
 - All keys use `snake_case` in TOML. TypeScript interfaces use `camelCase`. Conversion between the two happens automatically at codec boundaries.
 - Layers 3–4 (host/channel profiles) only support `[terminal]` keys. UI sections such as `[tabs]`, `[search]`, `[appearance]`, and `[gc]` are global-only.
 - Setting a key to `null` in a profile JSON removes that key, causing resolution to fall back to the previous layer.
-- The `[terminal].wallpaper` value is a filename, not a path. Files must be placed in `$XDG_CONFIG_HOME/termora/` (or the platform equivalent) and served by the hub.
+- The `[terminal].wallpaper` value is a filename, not a path. Files must be placed in `$XDG_CONFIG_HOME/lasterm/` (or the platform equivalent) and served by the hub.
 - `buffer_per_channel` and `buffer_global` accept plain integers (bytes) or strings with a unit suffix: `"512KB"`, `"2MB"`, `"1GB"`.

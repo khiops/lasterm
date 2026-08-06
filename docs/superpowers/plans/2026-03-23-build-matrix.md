@@ -37,8 +37,8 @@
 |------|--------|
 | `scripts/dev-start.sh` | Switch from Node agent to Rust agent daemon |
 | `scripts/dev-stop.sh` | Update agent cleanup for Rust daemon |
-| `scripts/package-sea-hub.ts` | Read `TERMORA_*` env vars |
-| `scripts/build-sea-binary.ts` | Read `TERMORA_NODE_VERSION` env var |
+| `scripts/package-sea-hub.ts` | Read `LASTERM_*` env vars |
+| `scripts/build-sea-binary.ts` | Read `LASTERM_NODE_VERSION` env var |
 | `.github/workflows/build.yml` | Rewrite: matrix-driven, calls scripts |
 | `.github/workflows/release.yml` | Update artifact download patterns |
 | `package.json` (root) | Remove dead scripts, update build:desktop |
@@ -78,11 +78,11 @@ case "$(uname -s)" in
   *)      echo "❌ Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
 
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
-TERMORA_DIST_DIR="${TERMORA_DIST_DIR:-$ROOT/dist/sea}"
-TERMORA_BUILD_HASH="${TERMORA_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
+LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
+LASTERM_BUILD_HASH="${LASTERM_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
 
-mkdir -p "$TERMORA_DIST_DIR"
+mkdir -p "$LASTERM_DIST_DIR"
 ```
 
 ## Shared Preamble (for all .ps1 build scripts)
@@ -96,13 +96,13 @@ $Root = Split-Path -Parent $ScriptDir
 
 # Auto-detect target triple
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$env:TERMORA_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
-$env:TERMORA_DIST_DIR ??= "$Root\dist\sea"
-if (-not $env:TERMORA_BUILD_HASH) {
-    $env:TERMORA_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
+$env:LASTERM_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
+$env:LASTERM_DIST_DIR ??= "$Root\dist\sea"
+if (-not $env:LASTERM_BUILD_HASH) {
+    $env:LASTERM_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
 }
 
-New-Item -ItemType Directory -Force -Path $env:TERMORA_DIST_DIR | Out-Null
+New-Item -ItemType Directory -Force -Path $env:LASTERM_DIST_DIR | Out-Null
 ```
 
 ---
@@ -121,13 +121,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TERMORA_BUILD_HASH="${TERMORA_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
+LASTERM_BUILD_HASH="${LASTERM_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
 
-echo "🔨 Building web UI (hash: $TERMORA_BUILD_HASH)..."
+echo "🔨 Building web UI (hash: $LASTERM_BUILD_HASH)..."
 
 cd "$ROOT"
-pnpm -F @termora/shared build
-TERMORA_BUILD_HASH="$TERMORA_BUILD_HASH" pnpm -F @termora/web build
+pnpm -F @lasterm/shared build
+LASTERM_BUILD_HASH="$LASTERM_BUILD_HASH" pnpm -F @lasterm/web build
 node scripts/embed-web.js
 
 echo "✅ Web built → packages/hub/static/"
@@ -143,16 +143,16 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
-if (-not $env:TERMORA_BUILD_HASH) {
-    $env:TERMORA_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
+if (-not $env:LASTERM_BUILD_HASH) {
+    $env:LASTERM_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
 }
 
-Write-Host "🔨 Building web UI (hash: $env:TERMORA_BUILD_HASH)..." -ForegroundColor Cyan
+Write-Host "🔨 Building web UI (hash: $env:LASTERM_BUILD_HASH)..." -ForegroundColor Cyan
 
 Set-Location $Root
-pnpm -F @termora/shared build
-# TERMORA_BUILD_HASH is already set in process env — pnpm inherits it
-pnpm -F @termora/web build
+pnpm -F @lasterm/shared build
+# LASTERM_BUILD_HASH is already set in process env — pnpm inherits it
+pnpm -F @lasterm/web build
 node scripts/embed-web.js
 
 Write-Host "✅ Web built → packages\hub\static\" -ForegroundColor Green
@@ -195,29 +195,29 @@ case "$(uname -s)" in
   *)      echo "❌ Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
 
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
-TERMORA_DIST_DIR="${TERMORA_DIST_DIR:-$ROOT/dist/sea}"
-TERMORA_CARGO_TARGET_DIR="${TERMORA_CARGO_TARGET_DIR:-$ROOT/target}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
+LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
+LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-$ROOT/target}"
 
-echo "🔨 Building Rust agent (triple: $TERMORA_TARGET_TRIPLE)..."
+echo "🔨 Building Rust agent (triple: $LASTERM_TARGET_TRIPLE)..."
 
-mkdir -p "$TERMORA_DIST_DIR"
+mkdir -p "$LASTERM_DIST_DIR"
 cd "$ROOT"
-# Note: native build only (no --target). Cross-compilation would need --target $TERMORA_TARGET_TRIPLE.
-# TERMORA_TARGET_TRIPLE is used for artifact naming and CI metadata.
-cargo build -p termora-agent --release --target-dir "$TERMORA_CARGO_TARGET_DIR"
+# Note: native build only (no --target). Cross-compilation would need --target $LASTERM_TARGET_TRIPLE.
+# LASTERM_TARGET_TRIPLE is used for artifact naming and CI metadata.
+cargo build -p lasterm-agent --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
 
 # Copy binary to dist
-BINARY="$TERMORA_CARGO_TARGET_DIR/release/termora-agent"
+BINARY="$LASTERM_CARGO_TARGET_DIR/release/lasterm-agent"
 if [ ! -f "$BINARY" ]; then
   echo "❌ Binary not found at $BINARY" >&2
   exit 1
 fi
-cp "$BINARY" "$TERMORA_DIST_DIR/termora-agent"
-chmod +x "$TERMORA_DIST_DIR/termora-agent"
+cp "$BINARY" "$LASTERM_DIST_DIR/lasterm-agent"
+chmod +x "$LASTERM_DIST_DIR/lasterm-agent"
 
-SIZE=$(du -h "$TERMORA_DIST_DIR/termora-agent" | cut -f1)
-echo "✅ Rust agent built → $TERMORA_DIST_DIR/termora-agent ($SIZE)"
+SIZE=$(du -h "$LASTERM_DIST_DIR/lasterm-agent" | cut -f1)
+echo "✅ Rust agent built → $LASTERM_DIST_DIR/lasterm-agent ($SIZE)"
 ```
 
 Run: `chmod +x scripts/build-agent.sh`
@@ -232,29 +232,29 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$env:TERMORA_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
-$env:TERMORA_DIST_DIR ??= "$Root\dist\sea"
-$env:TERMORA_CARGO_TARGET_DIR ??= "$Root\target"
+$env:LASTERM_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
+$env:LASTERM_DIST_DIR ??= "$Root\dist\sea"
+$env:LASTERM_CARGO_TARGET_DIR ??= "$Root\target"
 
-Write-Host "🔨 Building Rust agent (triple: $env:TERMORA_TARGET_TRIPLE)..." -ForegroundColor Cyan
+Write-Host "🔨 Building Rust agent (triple: $env:LASTERM_TARGET_TRIPLE)..." -ForegroundColor Cyan
 
-New-Item -ItemType Directory -Force -Path $env:TERMORA_DIST_DIR | Out-Null
+New-Item -ItemType Directory -Force -Path $env:LASTERM_DIST_DIR | Out-Null
 Set-Location $Root
-cargo build -p termora-agent --release --target-dir $env:TERMORA_CARGO_TARGET_DIR
+cargo build -p lasterm-agent --release --target-dir $env:LASTERM_CARGO_TARGET_DIR
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
-$binary = "$env:TERMORA_CARGO_TARGET_DIR\release\termora-agent.exe"
+$binary = "$env:LASTERM_CARGO_TARGET_DIR\release\lasterm-agent.exe"
 if (-not (Test-Path $binary)) { throw "Binary not found at $binary" }
-Copy-Item $binary "$env:TERMORA_DIST_DIR\termora-agent.exe" -Force
+Copy-Item $binary "$env:LASTERM_DIST_DIR\lasterm-agent.exe" -Force
 
-$size = [math]::Round((Get-Item "$env:TERMORA_DIST_DIR\termora-agent.exe").Length / 1MB, 1)
-Write-Host "✅ Rust agent built → $env:TERMORA_DIST_DIR\termora-agent.exe (${size}MB)" -ForegroundColor Green
+$size = [math]::Round((Get-Item "$env:LASTERM_DIST_DIR\lasterm-agent.exe").Length / 1MB, 1)
+Write-Host "✅ Rust agent built → $env:LASTERM_DIST_DIR\lasterm-agent.exe (${size}MB)" -ForegroundColor Green
 ```
 
 - [ ] **Step 3: Verify locally (Linux)**
 
 Run: `./scripts/build-agent.sh`
-Expected: `dist/sea/termora-agent` exists, is executable.
+Expected: `dist/sea/lasterm-agent` exists, is executable.
 
 - [ ] **Step 4: Commit**
 
@@ -298,45 +298,45 @@ Find where `process.platform`, `process.arch`, and output paths are used. Add en
 
 ```typescript
 // Near the top, after CLI arg parsing
-const effectivePlatform = tripleToNodePlatform(process.env.TERMORA_TARGET_TRIPLE)
+const effectivePlatform = tripleToNodePlatform(process.env.LASTERM_TARGET_TRIPLE)
   ?? targetPlatformArg
   ?? process.platform;
-const effectiveArch = tripleToNodeArch(process.env.TERMORA_TARGET_TRIPLE)
+const effectiveArch = tripleToNodeArch(process.env.LASTERM_TARGET_TRIPLE)
   ?? targetArchArg
   ?? process.arch;
-const effectiveNodeVersion = process.env.TERMORA_NODE_VERSION
+const effectiveNodeVersion = process.env.LASTERM_NODE_VERSION
   ?? targetNodeVersionArg
   ?? process.version;
-const distDir = process.env.TERMORA_DIST_DIR ?? join(root, 'dist', 'sea');
+const distDir = process.env.LASTERM_DIST_DIR ?? join(root, 'dist', 'sea');
 ```
 
 Use `effectivePlatform`, `effectiveArch`, `effectiveNodeVersion`, `distDir` throughout.
 
-- [ ] **Step 3: Add `TERMORA_NODE_VERSION` support in `build-sea-binary.ts`**
+- [ ] **Step 3: Add `LASTERM_NODE_VERSION` support in `build-sea-binary.ts`**
 
 In the `buildSeaBinary` function, add fallback:
 
 ```typescript
 const targetNodeVersion = cfg.targetNodeVersion
-  ?? process.env.TERMORA_NODE_VERSION
+  ?? process.env.LASTERM_NODE_VERSION
   ?? process.version;
 ```
 
 - [ ] **Step 4: Verify hub SEA still builds**
 
 Run: `pnpm run package:sea-hub`
-Expected: Hub SEA binary produced in `dist/sea/termora-hub`.
+Expected: Hub SEA binary produced in `dist/sea/lasterm-hub`.
 
 - [ ] **Step 5: Verify env var override works**
 
-Run: `TERMORA_DIST_DIR=/tmp/test-sea pnpm run package:sea-hub`
-Expected: Hub SEA binary produced in `/tmp/test-sea/termora-hub`.
+Run: `LASTERM_DIST_DIR=/tmp/test-sea pnpm run package:sea-hub`
+Expected: Hub SEA binary produced in `/tmp/test-sea/lasterm-hub`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/package-sea-hub.ts scripts/build-sea-binary.ts
-git commit -m "feat(scripts): add TERMORA_* env var support to SEA packaging scripts"
+git commit -m "feat(scripts): add LASTERM_* env var support to SEA packaging scripts"
 ```
 
 ---
@@ -366,28 +366,28 @@ case "$(uname -s)" in
   *)      echo "❌ Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
 
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
-TERMORA_DIST_DIR="${TERMORA_DIST_DIR:-$ROOT/dist/sea}"
-TERMORA_BUILD_HASH="${TERMORA_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
-TERMORA_SKIP_WEB="${TERMORA_SKIP_WEB:-false}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
+LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
+LASTERM_BUILD_HASH="${LASTERM_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
+LASTERM_SKIP_WEB="${LASTERM_SKIP_WEB:-false}"
 
-echo "🔨 Building hub SEA (triple: $TERMORA_TARGET_TRIPLE)..."
+echo "🔨 Building hub SEA (triple: $LASTERM_TARGET_TRIPLE)..."
 
 cd "$ROOT"
-pnpm -F @termora/shared build
+pnpm -F @lasterm/shared build
 
-if [ "$TERMORA_SKIP_WEB" != "true" ]; then
+if [ "$LASTERM_SKIP_WEB" != "true" ]; then
   echo "  → Building web UI first..."
   "$SCRIPT_DIR/build-web.sh"
 fi
 
-export TERMORA_TARGET_TRIPLE TERMORA_DIST_DIR TERMORA_BUILD_HASH
-# Also export TERMORA_NODE_VERSION if set (for cross-build Node version override)
-[ -n "${TERMORA_NODE_VERSION:-}" ] && export TERMORA_NODE_VERSION
+export LASTERM_TARGET_TRIPLE LASTERM_DIST_DIR LASTERM_BUILD_HASH
+# Also export LASTERM_NODE_VERSION if set (for cross-build Node version override)
+[ -n "${LASTERM_NODE_VERSION:-}" ] && export LASTERM_NODE_VERSION
 pnpm run package:sea-hub
 
-SIZE=$(du -h "$TERMORA_DIST_DIR/termora-hub" 2>/dev/null | cut -f1 || echo "?")
-echo "✅ Hub SEA built → $TERMORA_DIST_DIR/termora-hub ($SIZE)"
+SIZE=$(du -h "$LASTERM_DIST_DIR/lasterm-hub" 2>/dev/null | cut -f1 || echo "?")
+echo "✅ Hub SEA built → $LASTERM_DIST_DIR/lasterm-hub ($SIZE)"
 ```
 
 Run: `chmod +x scripts/build-hub.sh`
@@ -402,19 +402,19 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$env:TERMORA_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
-$env:TERMORA_DIST_DIR ??= "$Root\dist\sea"
-if (-not $env:TERMORA_BUILD_HASH) {
-    $env:TERMORA_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
+$env:LASTERM_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
+$env:LASTERM_DIST_DIR ??= "$Root\dist\sea"
+if (-not $env:LASTERM_BUILD_HASH) {
+    $env:LASTERM_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
 }
-$env:TERMORA_SKIP_WEB ??= "false"
+$env:LASTERM_SKIP_WEB ??= "false"
 
-Write-Host "🔨 Building hub SEA (triple: $env:TERMORA_TARGET_TRIPLE)..." -ForegroundColor Cyan
+Write-Host "🔨 Building hub SEA (triple: $env:LASTERM_TARGET_TRIPLE)..." -ForegroundColor Cyan
 
 Set-Location $Root
-pnpm -F @termora/shared build
+pnpm -F @lasterm/shared build
 
-if ($env:TERMORA_SKIP_WEB -ne "true") {
+if ($env:LASTERM_SKIP_WEB -ne "true") {
     Write-Host "  → Building web UI first..." -ForegroundColor DarkGray
     & "$ScriptDir\build-web.ps1"
 }
@@ -422,7 +422,7 @@ if ($env:TERMORA_SKIP_WEB -ne "true") {
 pnpm run package:sea-hub
 if ($LASTEXITCODE -ne 0) { throw "package:sea-hub failed" }
 
-$binary = "$env:TERMORA_DIST_DIR\termora-hub.exe"
+$binary = "$env:LASTERM_DIST_DIR\lasterm-hub.exe"
 if (Test-Path $binary) {
     $size = [math]::Round((Get-Item $binary).Length / 1MB, 1)
     Write-Host "✅ Hub SEA built → $binary (${size}MB)" -ForegroundColor Green
@@ -432,9 +432,9 @@ if (Test-Path $binary) {
 - [ ] **Step 3: Verify locally**
 
 Run: `./scripts/build-hub.sh`
-Expected: Hub SEA binary in `dist/sea/termora-hub`.
+Expected: Hub SEA binary in `dist/sea/lasterm-hub`.
 
-Run: `TERMORA_SKIP_WEB=true ./scripts/build-hub.sh`
+Run: `LASTERM_SKIP_WEB=true ./scripts/build-hub.sh`
 Expected: Skips web build (must have been built before).
 
 - [ ] **Step 4: Commit**
@@ -471,11 +471,11 @@ case "$(uname -s)" in
   *)      echo "❌ Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
 
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
-TERMORA_DIST_DIR="${TERMORA_DIST_DIR:-$ROOT/dist/sea}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
+LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
 TAURI_DIR="$ROOT/packages/clients/desktop/src-tauri"
 
-echo "🔨 Building desktop (triple: $TERMORA_TARGET_TRIPLE)..."
+echo "🔨 Building desktop (triple: $LASTERM_TARGET_TRIPLE)..."
 echo ""
 
 # Step 1: Web
@@ -490,24 +490,24 @@ echo ""
 
 # Step 3: Hub (skip web, already built)
 echo "━━━ [3/4] Hub SEA ━━━"
-TERMORA_SKIP_WEB=true "$SCRIPT_DIR/build-hub.sh"
+LASTERM_SKIP_WEB=true "$SCRIPT_DIR/build-hub.sh"
 echo ""
 
 # Step 4: Place sidecars and build Tauri
 echo "━━━ [4/4] Tauri Desktop ━━━"
 
 # .sh = Linux/macOS only — no .exe extension needed
-cp "$TERMORA_DIST_DIR/termora-agent" "$TAURI_DIR/termora-agent-${TERMORA_TARGET_TRIPLE}"
-cp "$TERMORA_DIST_DIR/termora-hub" "$TAURI_DIR/termora-hub-${TERMORA_TARGET_TRIPLE}"
+cp "$LASTERM_DIST_DIR/lasterm-agent" "$TAURI_DIR/lasterm-agent-${LASTERM_TARGET_TRIPLE}"
+cp "$LASTERM_DIST_DIR/lasterm-hub" "$TAURI_DIR/lasterm-hub-${LASTERM_TARGET_TRIPLE}"
 
 echo "  → Sidecars placed in src-tauri/"
 
 cd "$ROOT"
-pnpm -F @termora/desktop tauri build \
+pnpm -F @lasterm/desktop tauri build \
   --config '{"build":{"beforeBuildCommand":""}}'
 
 echo ""
-echo "✅ Desktop built for $TERMORA_TARGET_TRIPLE"
+echo "✅ Desktop built for $LASTERM_TARGET_TRIPLE"
 ```
 
 Run: `chmod +x scripts/build-desktop.sh`
@@ -522,11 +522,11 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$env:TERMORA_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
-$env:TERMORA_DIST_DIR ??= "$Root\dist\sea"
+$env:LASTERM_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
+$env:LASTERM_DIST_DIR ??= "$Root\dist\sea"
 $tauriDir = "$Root\packages\clients\desktop\src-tauri"
 
-Write-Host "🔨 Building desktop (triple: $env:TERMORA_TARGET_TRIPLE)..." -ForegroundColor Cyan
+Write-Host "🔨 Building desktop (triple: $env:LASTERM_TARGET_TRIPLE)..." -ForegroundColor Cyan
 Write-Host ""
 
 # Step 1: Web
@@ -541,22 +541,22 @@ Write-Host ""
 
 # Step 3: Hub (skip web, already built)
 Write-Host "━━━ [3/4] Hub SEA ━━━" -ForegroundColor Yellow
-$env:TERMORA_SKIP_WEB = "true"
+$env:LASTERM_SKIP_WEB = "true"
 & "$ScriptDir\build-hub.ps1"
-$env:TERMORA_SKIP_WEB = $null
+$env:LASTERM_SKIP_WEB = $null
 Write-Host ""
 
 # Step 4: Place sidecars and build Tauri
 Write-Host "━━━ [4/4] Tauri Desktop ━━━" -ForegroundColor Yellow
 
-$triple = $env:TERMORA_TARGET_TRIPLE
-Copy-Item "$env:TERMORA_DIST_DIR\termora-agent.exe" "$tauriDir\termora-agent-$triple.exe" -Force
-Copy-Item "$env:TERMORA_DIST_DIR\termora-hub.exe" "$tauriDir\termora-hub-$triple.exe" -Force
+$triple = $env:LASTERM_TARGET_TRIPLE
+Copy-Item "$env:LASTERM_DIST_DIR\lasterm-agent.exe" "$tauriDir\lasterm-agent-$triple.exe" -Force
+Copy-Item "$env:LASTERM_DIST_DIR\lasterm-hub.exe" "$tauriDir\lasterm-hub-$triple.exe" -Force
 
 Write-Host "  → Sidecars placed in src-tauri/" -ForegroundColor DarkGray
 
 Set-Location $Root
-pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
 
 Write-Host ""
@@ -586,7 +586,7 @@ git commit -m "feat(scripts): add build-desktop.sh/.ps1 — unified desktop orch
 In `start_agent()` function, replace:
 ```bash
 # OLD: Node agent
-pnpm -F @termora/agent build > $LOG_DIR/agent-build.log 2>&1
+pnpm -F @lasterm/agent build > $LOG_DIR/agent-build.log 2>&1
 AGENT_BIN=$ROOT/packages/agent/dist/main.js
 setsid node $AGENT_BIN --daemon --socket $AGENT_SOCK ...
 ```
@@ -595,14 +595,14 @@ With:
 ```bash
 # NEW: Rust agent
 echo "  Building Rust agent..."
-cargo build -p termora-agent --release > "$LOG_DIR/agent-build.log" 2>&1
-AGENT_BIN="$ROOT/target/release/termora-agent"
+cargo build -p lasterm-agent --release > "$LOG_DIR/agent-build.log" 2>&1
+AGENT_BIN="$ROOT/target/release/lasterm-agent"
 setsid "$AGENT_BIN" --daemon --socket "$AGENT_SOCK" \
   --buffer-per-channel 1048576 --buffer-global 20971520 \
   > "$LOG_DIR/agent.log" 2>&1 &
 ```
 
-Also update `start_hub()`: remove `pnpm -F @termora/agent build` step (no more Node agent).
+Also update `start_hub()`: remove `pnpm -F @lasterm/agent build` step (no more Node agent).
 
 - [ ] **Step 2: Update dev-stop.sh — update agent process finding**
 
@@ -620,9 +620,9 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
-$LogDir = "$env:TEMP\termora-dev"
+$LogDir = "$env:TEMP\lasterm-dev"
 $PidFile = "$LogDir\dev.pid"
-$PipeName = "termora-agent-$env:USERNAME"
+$PipeName = "lasterm-agent-$env:USERNAME"
 $PipePath = "\\.\pipe\$PipeName"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -636,7 +636,7 @@ function Start-Hub {
     # Build shared
     Write-Host "  Building shared..." -ForegroundColor DarkGray
     Set-Location $Root
-    pnpm -F @termora/shared build *> "$LogDir\shared-build.log"
+    pnpm -F @lasterm/shared build *> "$LogDir\shared-build.log"
 
     # Start hub + web (concurrently via pnpm dev)
     $proc = Start-Process -FilePath "pnpm" -ArgumentList "dev" `
@@ -684,13 +684,13 @@ function Start-Agent {
     # Build Rust agent
     Write-Host "  Building Rust agent..." -ForegroundColor DarkGray
     Set-Location $Root
-    cargo build -p termora-agent --release *> "$LogDir\agent-build.log"
+    cargo build -p lasterm-agent --release *> "$LogDir\agent-build.log"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ Agent build failed. Log: $LogDir\agent-build.log" -ForegroundColor Red
         exit 1
     }
 
-    $agentBin = "$Root\target\release\termora-agent.exe"
+    $agentBin = "$Root\target\release\lasterm-agent.exe"
     $proc = Start-Process -FilePath $agentBin `
         -ArgumentList "--daemon", "--socket", $PipePath, "--buffer-per-channel", "1048576", "--buffer-global", "20971520" `
         -WindowStyle Hidden -PassThru `
@@ -741,7 +741,7 @@ param(
 $ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
-$LogDir = "$env:TEMP\termora-dev"
+$LogDir = "$env:TEMP\lasterm-dev"
 $PidFile = "$LogDir\dev.pid"
 $AgentPidFile = "$LogDir\agent.pid"
 
@@ -789,11 +789,11 @@ function Stop-Agent {
         Remove-Item $AgentPidFile -Force
         Write-Host "✅ Agent stopped (PID $pid)" -ForegroundColor Green
     } else {
-        # Fallback: find termora-agent process
-        $agents = Get-Process -Name "termora-agent" -ErrorAction SilentlyContinue
+        # Fallback: find lasterm-agent process
+        $agents = Get-Process -Name "lasterm-agent" -ErrorAction SilentlyContinue
         foreach ($a in $agents) {
             Stop-Process -Id $a.Id -Force -ErrorAction SilentlyContinue
-            Write-Host "  Killed termora-agent PID $($a.Id)" -ForegroundColor DarkGray
+            Write-Host "  Killed lasterm-agent PID $($a.Id)" -ForegroundColor DarkGray
         }
         if (-not $agents) {
             Write-Host "  No agent daemon running" -ForegroundColor DarkGray
@@ -1072,7 +1072,7 @@ git add package.json pnpm-workspace.yaml pnpm-lock.yaml \
        packages/clients/desktop/src-tauri/tauri.conf.json
 git commit -m "chore: remove Node agent, node-pty, and obsolete build scripts
 
-BREAKING: @termora/agent package removed — Rust agent is the sole agent.
+BREAKING: @lasterm/agent package removed — Rust agent is the sole agent.
 Removed: node-pty, @xterm/headless, @xterm/addon-serialize from deps.
 Removed: SEA agent scripts, prepare-desktop.sh, rust-agent.yml.
 Updated: package.json scripts, pnpm-workspace.yaml, tauri.conf.json."
@@ -1090,11 +1090,11 @@ Note: `git rm` commands in steps 1-2 already staged those deletions.
 git clean -fd dist/sea/
 ./scripts/build-web.sh
 ./scripts/build-agent.sh
-TERMORA_SKIP_WEB=true ./scripts/build-hub.sh
+LASTERM_SKIP_WEB=true ./scripts/build-hub.sh
 ls -la dist/sea/
 ```
 
-Expected: `termora-agent` and `termora-hub` in `dist/sea/`.
+Expected: `lasterm-agent` and `lasterm-hub` in `dist/sea/`.
 
 - [ ] **Step 2: Dev workflow (Linux)**
 
@@ -1130,7 +1130,7 @@ The following must be tested on native Windows (not WSL):
 3. `pnpm test` (all tests pass?)
 4. `./scripts/build-hub.sh` (SEA blob works with Node 24?)
 5. Execute the resulting SEA binary — verify it starts and serves
-6. If pass: bump `"engines"` in `package.json`, CI `node-version: "24"`, `TERMORA_NODE_VERSION` defaults
+6. If pass: bump `"engines"` in `package.json`, CI `node-version: "24"`, `LASTERM_NODE_VERSION` defaults
 7. `pnpm install` again to regenerate lockfile
 8. Test Windows build (`.ps1` scripts with Node 24)
 

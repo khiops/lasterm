@@ -1,5 +1,5 @@
 #Requires -Version 7.0
-# Start termora dev servers in background with log capture.
+# Start lasterm dev servers in background with log capture.
 # Usage: .\scripts\dev-start.ps1 [-Target hub|agent|all]   (default: all)
 param(
     [ValidateSet("hub", "agent", "all")]
@@ -9,9 +9,9 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
-$LogDir = "$env:TEMP\termora-dev"
+$LogDir = "$env:TEMP\lasterm-dev"
 $PidFile = "$LogDir\dev.pid"
-$PipeName = "termora-agent-$env:USERNAME"
+$PipeName = "lasterm-agent-$env:USERNAME"
 $PipePath = "\\.\pipe\$PipeName"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -24,7 +24,7 @@ function Start-Hub {
     # Build shared
     Write-Host "Building shared..." -ForegroundColor DarkGray
     Set-Location $Root
-    pnpm -F @termora/shared build *> "$LogDir\shared-build.log"
+    pnpm -F @lasterm/shared build *> "$LogDir\shared-build.log"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "X Shared build failed. Log: $LogDir\shared-build.log" -ForegroundColor Red
         Get-Content "$LogDir\shared-build.log" -Tail 20
@@ -91,14 +91,14 @@ function Start-Agent {
     # Build Rust agent
     Write-Host "Building Rust agent..." -ForegroundColor DarkGray
     Set-Location $Root
-    cargo build -p termora-agent --release *> "$LogDir\agent-build.log"
+    cargo build -p lasterm-agent --release *> "$LogDir\agent-build.log"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "X Agent build failed. Log: $LogDir\agent-build.log" -ForegroundColor Red
         Get-Content "$LogDir\agent-build.log" -Tail 20
         exit 1
     }
 
-    $agentBin = "$Root\target\release\termora-agent.exe"
+    $agentBin = "$Root\target\release\lasterm-agent.exe"
     $proc = Start-Process -FilePath $agentBin `
         -ArgumentList "--daemon", "--socket", $PipePath, "--buffer-per-channel", "1048576", "--buffer-global", "20971520" `
         -WindowStyle Hidden -PassThru `

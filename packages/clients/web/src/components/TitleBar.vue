@@ -55,7 +55,7 @@ onUnmounted(() => {
 				<text x="380" y="620" font-family="monospace" font-weight="bold" font-size="480" fill="#7c6fef">></text>
 				<text x="570" y="600" font-family="monospace" font-weight="bold" font-size="260" fill="#a0e8af">_</text>
 			</svg>
-			<span class="titlebar-title">Termora</span>
+			<span class="titlebar-title">Lasterm</span>
 			<span class="titlebar-build">{{ BUILD_HASH }}</span>
 		</div>
 

@@ -1,6 +1,6 @@
-import type { TermoraTheme } from "../theme.js";
+import type { LastermTheme } from "../theme.js";
 
-export const tokyoNight: TermoraTheme = {
+export const tokyoNight: LastermTheme = {
 	name: "tokyo-night",
 	author: "Enkia",
 	type: "dark",

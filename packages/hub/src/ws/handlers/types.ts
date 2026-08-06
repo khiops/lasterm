@@ -1,4 +1,4 @@
-import type { ProtocolMessage } from "@termora/shared";
+import type { ProtocolMessage } from "@lasterm/shared";
 import type { FastifyBaseLogger } from "fastify";
 import type { SessionManager, WsClient } from "../../session/session-manager.js";
 import type { WriteLockManager } from "../../session/write-lock.js";

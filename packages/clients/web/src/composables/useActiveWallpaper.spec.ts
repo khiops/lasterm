@@ -1,4 +1,4 @@
-import { DEFAULT_PROFILE, type TerminalProfile } from "@termora/shared";
+import { DEFAULT_PROFILE, type TerminalProfile } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, nextTick, ref } from "vue";
@@ -32,7 +32,7 @@ async function flushAsync(): Promise<void> {
 }
 
 vi.mock("../stores/config.js", async () => {
-	const shared = await vi.importActual<typeof import("@termora/shared")>("@termora/shared");
+	const shared = await vi.importActual<typeof import("@lasterm/shared")>("@lasterm/shared");
 	const vue = await vi.importActual<typeof import("vue")>("vue");
 	let listeners = new Set<(e: ProfileChangeEvent) => void>();
 	const profile = vue.ref<TerminalProfile>({ ...shared.DEFAULT_PROFILE });

@@ -87,7 +87,7 @@ describe("SSH key endpoints", () => {
 		// mkdtempSync is the OS-atomic unique-temp-dir primitive (mode 0700) — guarantees
 		// per-test isolation with no possible name collision under parallel test load,
 		// unlike a hand-rolled Date.now()+Math.random() name.
-		sshDir = mkdtempSync(join(tmpdir(), "termora-ssh-test-"));
+		sshDir = mkdtempSync(join(tmpdir(), "lasterm-ssh-test-"));
 	});
 
 	afterEach(async () => {

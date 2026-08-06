@@ -1,4 +1,4 @@
-import { DEFAULT_CHANNEL_NAME, DEFAULT_NOTIFICATION_CONFIG, generateId } from "@termora/shared";
+import { DEFAULT_CHANNEL_NAME, DEFAULT_NOTIFICATION_CONFIG, generateId } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { markRaw, ref } from "vue";
 import { showSimpleNotification } from "../composables/useDesktopNotifications.js";

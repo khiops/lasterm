@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: ui
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-07
   updated: 2026-03-07
   complexity: COMPLEX
@@ -27,7 +27,7 @@ doc-meta:
 
 Terminal tabs show static names ("Terminal 1"). Processes like vim, htop, or
 shells with PROMPT_COMMAND emit OSC 0/2 escape sequences to set dynamic titles,
-but termora ignores them. Users cannot see what each tab is running at a glance.
+but lasterm ignores them. Users cannot see what each tab is running at a glance.
 Titles also need truncation, sanitization, per-host prefixes, and browser window
 title updates.
 
@@ -167,7 +167,7 @@ Ellipsis character: `\u2026` (single char).
 function formatWindowTitle(format: string, vars: { prefix: string, host: string, title: string, channel: string, shell: string }): string
 ```
 
-Default format: `"termora - {prefix}{host} - {title}"`
+Default format: `"lasterm - {prefix}{host} - {title}"`
 When title is empty, trailing ` - ` is trimmed.
 
 ## 5. Acceptance Criteria (BDD)
@@ -224,10 +224,10 @@ Scenario: SC-06 -- Per-host prefix in tab title
 
 @priority:medium @type:nominal
 Scenario: SC-07 -- Window title updates with format string
-  Given windowTitle is enabled with format "termora - {prefix}{host} - {title}"
+  Given windowTitle is enabled with format "lasterm - {prefix}{host} - {title}"
   And active terminal is on host "prod" with prefix "PROD " and title "vim"
   When focus is on that terminal
-  Then document.title updates to "termora - PROD prod - vim"
+  Then document.title updates to "lasterm - PROD prod - vim"
 
 @priority:medium @type:nominal
 Scenario: SC-08 -- Title truncation at end

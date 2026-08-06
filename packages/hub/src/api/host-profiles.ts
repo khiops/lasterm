@@ -1,5 +1,5 @@
-import type { Host } from "@termora/shared";
-import { toSnakeCase } from "@termora/shared";
+import type { Host } from "@lasterm/shared";
+import { toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 

@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { main } from '@termora/hub/cli';
+import { main } from '@lasterm/hub/cli';
 
 main(process.argv.slice(2));

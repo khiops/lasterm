@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { TermoraTheme } from "./theme.js";
+import type { LastermTheme } from "./theme.js";
 import { REQUIRED_COLOR_FIELDS, REQUIRED_UI_FIELDS, validateTheme } from "./theme.js";
 import { BUNDLED_THEMES } from "./themes/index.js";
 
 /** Minimal valid dark theme for testing. */
-function makeValidTheme(overrides?: Partial<TermoraTheme>): Record<string, unknown> {
+function makeValidTheme(overrides?: Partial<LastermTheme>): Record<string, unknown> {
 	const colors: Record<string, string> = {};
 	for (const field of REQUIRED_COLOR_FIELDS) {
 		colors[field] = "#aabbcc";
@@ -45,7 +45,7 @@ describe("validateTheme", () => {
 
 	it("rejects name with spaces", () => {
 		const result = validateTheme(
-			makeValidTheme({ name: "my theme" } as unknown as Partial<TermoraTheme>),
+			makeValidTheme({ name: "my theme" } as unknown as Partial<LastermTheme>),
 		);
 		expect(result.valid).toBe(false);
 		expect(result.errors).toContainEqual(expect.stringContaining("name"));
@@ -53,7 +53,7 @@ describe("validateTheme", () => {
 
 	it("rejects name with special characters", () => {
 		const result = validateTheme(
-			makeValidTheme({ name: "my_theme!" } as unknown as Partial<TermoraTheme>),
+			makeValidTheme({ name: "my_theme!" } as unknown as Partial<LastermTheme>),
 		);
 		expect(result.valid).toBe(false);
 		expect(result.errors).toContainEqual(expect.stringContaining("name"));
@@ -61,7 +61,7 @@ describe("validateTheme", () => {
 
 	it("rejects name with uppercase letters", () => {
 		const result = validateTheme(
-			makeValidTheme({ name: "MyTheme" } as unknown as Partial<TermoraTheme>),
+			makeValidTheme({ name: "MyTheme" } as unknown as Partial<LastermTheme>),
 		);
 		expect(result.valid).toBe(false);
 		expect(result.errors).toContainEqual(expect.stringContaining("name"));

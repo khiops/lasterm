@@ -1,4 +1,4 @@
-import type { TerminalProfile } from "@termora/shared";
+import type { TerminalProfile } from "@lasterm/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { nextTick, ref } from "vue";
 import { setAssetTokenForTests } from "../utils/hub-url.js";

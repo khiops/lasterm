@@ -3,7 +3,7 @@ import type {
 	WriteLockMessage,
 	WriteRequestMessage,
 	WriteRevokedMessage,
-} from "@termora/shared";
+} from "@lasterm/shared";
 
 export interface WriteLockManagerOpts {
 	sendToClient: (clientId: string, msg: unknown) => void;

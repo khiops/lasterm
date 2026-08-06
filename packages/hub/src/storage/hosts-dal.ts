@@ -5,8 +5,8 @@ import type {
 	HostGroup,
 	HostOs,
 	SshAuthMethod,
-} from "@termora/shared";
-import { generateId } from "@termora/shared";
+} from "@lasterm/shared";
+import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 
 import type { CreateHostInput } from "./meta-types.js";

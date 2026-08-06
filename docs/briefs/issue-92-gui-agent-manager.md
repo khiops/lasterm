@@ -7,7 +7,7 @@
 ## Problem statement
 
 **Problem:** Seeding or refreshing the remote-host agent binaries the hub deploys requires
-the `termora-hub agent fetch` CLI (#77); the cache state is invisible to the GUI-first
+the `lasterm-hub agent fetch` CLI (#77); the cache state is invisible to the GUI-first
 desktop client. Air-gapped transfers have no home in the UI.
 
 **Root cause:** #77 shipped the engine but no addressable *agent-cache-state* API — cache
@@ -67,7 +67,7 @@ routes, the Vue panel, the desktop native picker, and a progress callback.
   **`SHA256SUMS-<version>.txt`**, plus form fields `os`, `arch`, `version`.
 - Hub flow = the *exact* fetch-path verification, reused: resolve target →
   `parseChecksumManifest(manifest, expectedBasename)` where
-  `expectedBasename = termora-agent-{triple}-{version}{ext}` → compute SHA256 of the uploaded
+  `expectedBasename = lasterm-agent-{triple}-{version}{ext}` → compute SHA256 of the uploaded
   binary → match → atomic move into the secure cache with `chmod 755`. Reject with the existing
   `CHECKSUM_MISMATCH` / `CHECKSUM_MISSING` codes; the binary **never touches the cache** unless
   verified.

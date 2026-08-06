@@ -5,10 +5,10 @@
 				class="close-dialog"
 				role="dialog"
 				aria-modal="true"
-				aria-label="Close Termora"
+				aria-label="Close Lasterm"
 			>
 				<div class="close-header">
-					<h3 class="close-title">Close Termora</h3>
+					<h3 class="close-title">Close Lasterm</h3>
 					<button
 						class="close-x"
 						type="button"
@@ -21,7 +21,7 @@
 				</div>
 
 				<p class="close-message">
-					Choose whether Termora keeps running in the tray or stops the local hub.
+					Choose whether Lasterm keeps running in the tray or stops the local hub.
 				</p>
 
 				<label class="remember-row">

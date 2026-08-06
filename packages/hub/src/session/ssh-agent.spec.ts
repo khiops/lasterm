@@ -2,8 +2,8 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HelloMessage, Host } from "@termora/shared";
-import { encodeFrame, type ProtocolMessage } from "@termora/shared";
+import type { HelloMessage, Host } from "@lasterm/shared";
+import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
@@ -18,7 +18,7 @@ vi.mock("./agent-deployer.js", async (importOriginal) => {
 		deployAgentIfNeeded: vi.fn().mockResolvedValue({
 			deployed: false,
 			remoteMatchesHubVersionCache: false,
-			remotePath: "termora-agent",
+			remotePath: "lasterm-agent",
 			os: null,
 			arch: null,
 		}),
@@ -41,7 +41,7 @@ const { privateKey: CLIENT_PRIVATE_KEY_PEM } = generateKeyPairSync("rsa", {
 	publicKeyEncoding: { type: "pkcs1", format: "pem" },
 	privateKeyEncoding: { type: "pkcs1", format: "pem" },
 });
-const KEY_TMPDIR = mkdtempSync(join(tmpdir(), "termora-ssh-agent-test-"));
+const KEY_TMPDIR = mkdtempSync(join(tmpdir(), "lasterm-ssh-agent-test-"));
 const CLIENT_KEY_PATH = join(KEY_TMPDIR, "client.pem");
 writeFileSync(CLIENT_KEY_PATH, CLIENT_PRIVATE_KEY_PEM, { mode: 0o600 });
 
@@ -233,7 +233,7 @@ describe("SshAgent", () => {
 
 			await agent.start(fp);
 
-			expect(command).toBe("termora-agent --stdio");
+			expect(command).toBe("lasterm-agent --stdio");
 			expect(command).not.toContain("--log-level");
 			expect(command).not.toContain("--format");
 		},
@@ -247,7 +247,7 @@ describe("SshAgent", () => {
 			vi.mocked(deployAgentIfNeeded).mockResolvedValueOnce({
 				deployed: true,
 				remoteMatchesHubVersionCache: false,
-				remotePath: "/opt/Termora Agent/bin/agent's test$HOME",
+				remotePath: "/opt/Lasterm Agent/bin/agent's test$HOME",
 				os: "linux",
 				arch: "x64",
 			});
@@ -269,7 +269,7 @@ describe("SshAgent", () => {
 			await agent.start(fp);
 
 			expect(command).toBe(
-				"'/opt/Termora Agent/bin/agent'\\''s test$HOME' --stdio --log-level 'debug trace' --format 'jsonl;rm'",
+				"'/opt/Lasterm Agent/bin/agent'\\''s test$HOME' --stdio --log-level 'debug trace' --format 'jsonl;rm'",
 			);
 			expect(agent.deployedThisSession).toBe(true);
 			expect(agent.remoteMatchesHubVersionCache).toBe(false);
@@ -284,7 +284,7 @@ describe("SshAgent", () => {
 			vi.mocked(deployAgentIfNeeded).mockResolvedValueOnce({
 				deployed: true,
 				remoteMatchesHubVersionCache: false,
-				remotePath: "%LOCALAPPDATA%\\termora\\termora-agent.exe",
+				remotePath: "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
 				os: "windows",
 				arch: "x64",
 			});
@@ -311,7 +311,7 @@ describe("SshAgent", () => {
 			await agent.start(fp);
 
 			expect(command).toBe(
-				'"%LOCALAPPDATA%\\termora\\termora-agent.exe" --stdio --log-level "debug" --format "text"',
+				'"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe" --stdio --log-level "debug" --format "text"',
 			);
 			expect(command).not.toContain("'");
 		},
@@ -325,7 +325,7 @@ describe("SshAgent", () => {
 			vi.mocked(deployAgentIfNeeded).mockResolvedValueOnce({
 				deployed: false,
 				remoteMatchesHubVersionCache: false,
-				remotePath: "/usr/local/bin/termora-agent",
+				remotePath: "/usr/local/bin/lasterm-agent",
 				os: "linux",
 				arch: "x64",
 			});
@@ -351,7 +351,7 @@ describe("SshAgent", () => {
 
 			await agent.start(fp);
 
-			expect(command).toBe("/usr/local/bin/termora-agent --stdio");
+			expect(command).toBe("/usr/local/bin/lasterm-agent --stdio");
 			expect(command).not.toContain("--log-level");
 			expect(command).not.toContain("--format");
 			expect(agent.deployedThisSession).toBe(false);
@@ -367,7 +367,7 @@ describe("SshAgent", () => {
 			vi.mocked(deployAgentIfNeeded).mockResolvedValueOnce({
 				deployed: false,
 				remoteMatchesHubVersionCache: true,
-				remotePath: "/usr/local/bin/termora-agent",
+				remotePath: "/usr/local/bin/lasterm-agent",
 				os: "linux",
 				arch: "x64",
 			});
@@ -822,7 +822,7 @@ describe("SshAgent — TOFU host key verification", () => {
 // ─── Deploy failure rejects start() — no unverified-binary fallback ───────────
 //
 // On a non-DeployError infrastructure failure the deploy .catch() must REJECT.
-// It must NOT fall back to exec'ing whatever `termora-agent` is on the remote PATH:
+// It must NOT fall back to exec'ing whatever `lasterm-agent` is on the remote PATH:
 // the deployer may have detected a mismatched/unverified binary (the one the
 // replacement was meant to overwrite), so running it would be a security bypass on
 // first-use / unpinned hosts. DeployError (user rejection) propagates. Separately, a
@@ -917,7 +917,7 @@ describe("deploy failure rejects start() — no unverified-binary fallback", () 
 	it(
 		"channel closed before HELLO → start() rejects fast (no hang)",
 		async () => {
-			// No deployOptions → runAgent("termora-agent --stdio") runs directly. The server
+			// No deployOptions → runAgent("lasterm-agent --stdio") runs directly. The server
 			// ends the exec channel without sending HELLO (remote command exited / binary
 			// missing). start() must reject via the channel-close guard, not hang.
 			const { server, port } = await createMockSshServer((stream) => {

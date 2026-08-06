@@ -13,15 +13,15 @@ doc-meta:
 ## §1 Scope
 
 Connecting a remote SSH host requires the agent binary for that host's os/arch in the hub's
-binary cache (`~/.local/state/termora/binaries/`). Today nothing populates it and the cache
-naming (`termora-agent-<os>-<arch>`) differs from release asset naming
-(`termora-agent-<triple>`), so first contact with a new architecture dead-ends in
+binary cache (`~/.local/state/lasterm/binaries/`). Today nothing populates it and the cache
+naming (`lasterm-agent-<os>-<arch>`) differs from release asset naming
+(`lasterm-agent-<triple>`), so first contact with a new architecture dead-ends in
 `AGENT_NOT_AVAILABLE`.
 
 In scope:
 - **Auto-fetch on deploy**: when the deployer misses a binary, download the matching release
   asset, place it in the cache, continue the deploy.
-- **Explicit command**: `termora-hub agent fetch <os-arch>|--all` to pre-populate or force-refresh.
+- **Explicit command**: `lasterm-hub agent fetch <os-arch>|--all` to pre-populate or force-refresh.
 - **Version-aware naming on BOTH surfaces** (user decision): release assets gain a version
   suffix; cache filenames gain a version suffix; the deployer resolves the version matching
   the hub.
@@ -43,7 +43,7 @@ In scope:
 - **"Version in BOTH filename surfaces" (user decision)** — release assets AND cache files.
   Code constraint: release.yml's hub/desktop jobs download agent sidecars by glob; §3.5
   REPLACES those globs with exact versioned names (glob ambiguity bites once two assets match).
-- **HELLO already carries `agentVersion`** (`crates/termora-agent/src/handler.rs`,
+- **HELLO already carries `agentVersion`** (`crates/lasterm-agent/src/handler.rs`,
   `env!("CARGO_PKG_VERSION")`); since the release-please extra-files fix (#64/#68) hub and
   agent versions bump in lockstep. "Same version as hub" is a string equality, not a
   compatibility matrix — §3.5 adds a workflow guard asserting that lockstep at build time.
@@ -69,15 +69,15 @@ In scope:
 Every version entering the fetch path (auto: `HUB_VERSION`; manual: `--version`) is validated
 against strict semver `^\d+\.\d+\.\d+$` BEFORE any URL construction. `0.0.0` and non-matching
 values ⇒ `FetchError("BAD_VERSION")` (auto path: deployer skips fetch and falls through to the
-existing not-available error). Rationale: `TERMORA_VERSION` env flows into a network URL and
+existing not-available error). Rationale: `LASTERM_VERSION` env flows into a network URL and
 must be treated as untrusted input.
 
 ### §3.1 Naming & mapping
 
 | Surface | Format | Example (0.4.0, RPi) |
 |---|---|---|
-| Release asset | `termora-agent-<triple>-<version><ext>` | `termora-agent-aarch64-unknown-linux-gnu-0.4.0` |
-| Cache file | `termora-agent-<os>-<arch>-<version><ext>` | `termora-agent-linux-arm64-0.4.0` |
+| Release asset | `lasterm-agent-<triple>-<version><ext>` | `lasterm-agent-aarch64-unknown-linux-gnu-0.4.0` |
+| Cache file | `lasterm-agent-<os>-<arch>-<version><ext>` | `lasterm-agent-linux-arm64-0.4.0` |
 
 os-arch → triple mapping (ONE exported table, in the new `agent-fetch.ts`):
 
@@ -95,7 +95,7 @@ os-arch → triple mapping (ONE exported table, in the new `agent-fetch.ts`):
 
 1. Validate version (§3.0); resolve triple (unknown → `UNSUPPORTED_TARGET`).
 2. **HTTPS-only**: reject non-`https://` baseUrl (tests inject `fetchImpl`, never http URLs).
-3. Download `<base>/releases/download/v<version>/termora-agent-<triple>-<version><ext>` with
+3. Download `<base>/releases/download/v<version>/lasterm-agent-<triple>-<version><ext>` with
    redirect-following. Timeouts: total AND idle/stall (a slow-drip stream must abort).
    Node fetch does NOT honor proxy env vars — documented v1 limitation (`NETWORK` error text
    mentions it).
@@ -129,7 +129,7 @@ Every message is actionable (what to run / where to put what file).
 
 ### §3.3 Deployer integration (`agent-deployer.ts`)
 
-Lookup becomes `termora-agent-<os>-<arch>-<HUB_VERSION><ext>`. Miss ⇒ IF `detectSea()` AND
+Lookup becomes `lasterm-agent-<os>-<arch>-<HUB_VERSION><ext>`. Miss ⇒ IF `detectSea()` AND
 `HUB_VERSION` passes §3.0 → `fetchAgentBinary(version = HUB_VERSION)`; ELSE (source run) →
 current `AGENT_NOT_AVAILABLE` error unchanged. `FetchError` ⇒
 `DeployError("AGENT_NOT_AVAILABLE", <fetch message>)` (actionable text reaches the UI).
@@ -169,20 +169,20 @@ Every item below is **net-new** (no current anchor): today's upload loop produce
 basenames with no `VERSION` variable, `publish-release` only deletes the web tarballs and
 flips the draft, and draft reuse keeps assets verbatim.
 
-1. Agent upload step: basename `termora-agent-${TRIPLE}-${VERSION}${ext}` (`VERSION="${TAG_NAME#v}"`).
+1. Agent upload step: basename `lasterm-agent-${TRIPLE}-${VERSION}${ext}` (`VERSION="${TAG_NAME#v}"`).
 2. **Version-consistency guard** (new step in create-release, after checkout): assert
-   `${TAG_NAME#v}` == root package.json `.version` == `crates/termora-agent/Cargo.toml`
+   `${TAG_NAME#v}` == root package.json `.version` == `crates/lasterm-agent/Cargo.toml`
    package version; fail loudly otherwise (protects the HELLO lockstep assumption).
 3. **SHA256SUMS: computed ONLY in `publish-release`** (the single serialized job) — download
-   all `termora-agent-*-${VERSION}*` assets, verify COMPLETENESS against the matrix's enabled
+   all `lasterm-agent-*-${VERSION}*` assets, verify COMPLETENESS against the matrix's enabled
    agent targets (fail if any expected triple is missing), write `SHA256SUMS-${VERSION}.txt`,
    upload it, THEN flip the draft public. Matrix jobs never touch the sums file — a shared
    file written from parallel jobs is a lost-update hazard by construction.
 4. Hub/desktop sidecar downloads: replace globs with EXACT versioned asset names
-   (`termora-agent-${TRIPLE}-${VERSION}${ext}`); fail if the download doesn't yield exactly
+   (`lasterm-agent-${TRIPLE}-${VERSION}${ext}`); fail if the download doesn't yield exactly
    one file; rename at copy time to the fixed unversioned sidecar names Tauri expects.
-5. Draft-reuse hygiene: when reusing a draft, DELETE any legacy `termora-agent-${TRIPLE}` /
-   `termora-hub-${TRIPLE}` (unversioned) assets left by older runs, so stale binaries can
+5. Draft-reuse hygiene: when reusing a draft, DELETE any legacy `lasterm-agent-${TRIPLE}` /
+   `lasterm-hub-${TRIPLE}` (unversioned) assets left by older runs, so stale binaries can
    never be silently bundled or published alongside versioned ones.
 
 ## §4 BDD scenarios (annotated with their test seam)
@@ -246,7 +246,7 @@ Findings from the adversarial pass, all folded into the design above:
 | M | Size cap bypassable via Content-Encoding | Cap on bytes written, mid-stream abort (§3.2.5) |
 | M | Unauthenticated GitHub rate limit (60/h/IP) unhandled | `RATE_LIMITED` code + on-disk sums cache (§3.2.4/6) |
 | M | Stall timeout / disk-full / proxy behavior unaddressed | Idle+total timeouts, `DISK` code, proxy non-support documented (§3.2.3/5) |
-| M | `TERMORA_VERSION` env flows unvalidated into the URL | §3.0 strict semver gate, `BAD_VERSION` |
+| M | `LASTERM_VERSION` env flows unvalidated into the URL | §3.0 strict semver gate, `BAD_VERSION` |
 | M | Hub released while agent asset build failed ⇒ misleading error | `RELEASE_INCOMPLETE` distinct case (§3.2.4) |
 | M | Sidecar download glob can match multiple assets | Exact versioned names, exactly-one assertion, rename-at-copy (§3.5.4) |
 | M | `--all` partial-failure semantics and error-type home undefined | §3.4 attempt-all + per-target lines; `FetchError` in agent-fetch.ts |

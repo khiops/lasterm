@@ -81,8 +81,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import type { TermoraTheme } from "@termora/shared";
-import { BUNDLED_THEME_NAMES, validateTheme } from "@termora/shared";
+import type { LastermTheme } from "@lasterm/shared";
+import { BUNDLED_THEME_NAMES, validateTheme } from "@lasterm/shared";
 import { hubBaseUrl } from "../../utils/hub-url.js";
 import { useThemeStore } from "../../stores/theme.js";
 import { useAuthStore } from "../../stores/auth.js";
@@ -94,8 +94,8 @@ const props = defineProps<{
 
 defineEmits<{
 	"create-theme": [];
-	"edit-theme": [theme: TermoraTheme];
-	"select": [theme: TermoraTheme];
+	"edit-theme": [theme: LastermTheme];
+	"select": [theme: LastermTheme];
 }>();
 
 const themeStore = useThemeStore();
@@ -155,15 +155,15 @@ async function handleImport(event: Event) {
 const filteredThemes = computed(() => {
 	const query = searchQuery.value.toLowerCase().trim();
 	if (query === "") return themeStore.availableThemes;
-	return themeStore.availableThemes.filter((t: TermoraTheme) =>
+	return themeStore.availableThemes.filter((t: LastermTheme) =>
 		t.name.toLowerCase().includes(query),
 	);
 });
 
 const sections = computed(() => {
-	const dark: TermoraTheme[] = [];
-	const light: TermoraTheme[] = [];
-	const custom: TermoraTheme[] = [];
+	const dark: LastermTheme[] = [];
+	const light: LastermTheme[] = [];
+	const custom: LastermTheme[] = [];
 
 	for (const theme of filteredThemes.value) {
 		if (!BUNDLED_THEME_NAMES.has(theme.name)) {

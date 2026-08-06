@@ -135,7 +135,7 @@
 </template>
 
 <script setup lang="ts">
-import type { HostArch, HostOs } from "@termora/shared";
+import type { HostArch, HostOs } from "@lasterm/shared";
 import { computed, ref, watch } from "vue";
 import { useFileDrop } from "../../composables/useFileDrop.js";
 import { type AgentImportResult, useAgentManagerStore } from "../../stores/agent-manager.js";

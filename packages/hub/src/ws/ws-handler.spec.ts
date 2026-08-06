@@ -1,4 +1,4 @@
-import type { AuthPromptResponseMessage, ProtocolMessage } from "@termora/shared";
+import type { AuthPromptResponseMessage, ProtocolMessage } from "@lasterm/shared";
 import {
 	decodeMessage,
 	encodeMessage,
@@ -6,7 +6,7 @@ import {
 	isValidEnv,
 	isValidInputData,
 	isValidUlid,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { handleAuthPromptResponse as handleAuthPromptResponseMessage } from "./handlers/auth-prompt-response.js";
 import type { WsHandlerContext } from "./handlers/types.js";

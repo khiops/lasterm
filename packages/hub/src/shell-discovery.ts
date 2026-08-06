@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { LaunchProfile } from "@termora/shared";
+import type { LaunchProfile } from "@lasterm/shared";
 import type { MetaDAL } from "./storage/meta.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────

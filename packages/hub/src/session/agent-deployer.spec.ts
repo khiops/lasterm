@@ -100,7 +100,7 @@ function makeSftpClient(sftp: SFTPWrapper, sftpError?: Error): SshClient {
 let cacheDir: string;
 
 beforeEach(() => {
-	cacheDir = join(tmpdir(), `termora-deployer-test-${Date.now()}`);
+	cacheDir = join(tmpdir(), `lasterm-deployer-test-${Date.now()}`);
 	mkdirSync(cacheDir, { recursive: true });
 });
 
@@ -123,7 +123,7 @@ function agentCacheName(
 	version = HUB_VERSION,
 ): string {
 	const ext = os === "windows" ? ".exe" : "";
-	return `termora-agent-${os}-${arch}-${version}${ext}`;
+	return `lasterm-agent-${os}-${arch}-${version}${ext}`;
 }
 
 function writeCachedAgentBinary(
@@ -149,13 +149,13 @@ function makeOptions(overrides: Partial<DeployOptions> = {}): DeployOptions {
 
 /**
  * Create a mock SSH client that:
- *  - returns `existingPath` from `which termora-agent`
+ *  - returns `existingPath` from `which lasterm-agent`
  *  - returns `remoteSha` from `sha256sum '<existingPath>'`
  *  - fails all other commands
  */
 function makeAgentFoundClient(existingPath: string, remoteSha: string | null): SshClient {
 	const responses: Record<string, ExecResult> = {
-		"which termora-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+		"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
 	};
 	if (remoteSha !== null) {
 		responses[`sha256sum '${existingPath}'`] = {
@@ -180,24 +180,24 @@ function makeAgentNotFoundClient(sftp: SFTPWrapper): SshClient {
 	};
 	return makeMockClient(
 		{
-			"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
+			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
 			},
-			'test -x "/usr/local/bin/termora-agent" && echo "/usr/local/bin/termora-agent"': {
+			'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
 			},
-			'test -x "/usr/bin/termora-agent" && echo "/usr/bin/termora-agent"': {
+			'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
 			},
-			'test -x "/opt/termora/termora-agent" && echo "/opt/termora/termora-agent"': {
+			'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
@@ -213,37 +213,37 @@ function makeAgentNotFoundClient(sftp: SFTPWrapper): SshClient {
 describe("checkRemoteAgent", () => {
 	it("returns path when which succeeds", async () => {
 		const client = makeMockClient({
-			"which termora-agent": { stdout: "/usr/local/bin/termora-agent\n", stderr: "", exitCode: 0 },
+			"which lasterm-agent": { stdout: "/usr/local/bin/lasterm-agent\n", stderr: "", exitCode: 0 },
 		});
 		const result = await checkRemoteAgent(client);
-		expect(result).toBe("/usr/local/bin/termora-agent");
+		expect(result).toBe("/usr/local/bin/lasterm-agent");
 	});
 
 	it("returns path when where succeeds (Windows)", async () => {
 		const client = makeMockClient({
-			"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where termora-agent": {
-				stdout: "C:\\Users\\user\\AppData\\Local\\termora\\termora-agent.exe\n",
+			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where lasterm-agent": {
+				stdout: "C:\\Users\\user\\AppData\\Local\\lasterm\\lasterm-agent.exe\n",
 				stderr: "",
 				exitCode: 0,
 			},
 		});
 		const result = await checkRemoteAgent(client);
-		expect(result).toBe("C:\\Users\\user\\AppData\\Local\\termora\\termora-agent.exe");
+		expect(result).toBe("C:\\Users\\user\\AppData\\Local\\lasterm\\lasterm-agent.exe");
 	});
 
 	it("falls through to common Unix paths when which/where fail", async () => {
 		const client = makeMockClient({
-			"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
-				stdout: "/home/user/.local/bin/termora-agent\n",
+			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
+				stdout: "/home/user/.local/bin/lasterm-agent\n",
 				stderr: "",
 				exitCode: 0,
 			},
 		});
 		const result = await checkRemoteAgent(client);
-		expect(result).toBe("/home/user/.local/bin/termora-agent");
+		expect(result).toBe("/home/user/.local/bin/lasterm-agent");
 	});
 
 	it("returns null when agent is not found anywhere", async () => {
@@ -254,14 +254,14 @@ describe("checkRemoteAgent", () => {
 
 	it("returns trimmed path (strips trailing newline)", async () => {
 		const client = makeMockClient({
-			"which termora-agent": {
-				stdout: "/usr/bin/termora-agent\n\n",
+			"which lasterm-agent": {
+				stdout: "/usr/bin/lasterm-agent\n\n",
 				stderr: "",
 				exitCode: 0,
 			},
 		});
 		const result = await checkRemoteAgent(client);
-		expect(result).toBe("/usr/bin/termora-agent");
+		expect(result).toBe("/usr/bin/lasterm-agent");
 	});
 });
 
@@ -328,16 +328,16 @@ describe("uploadAgentBinary", () => {
 		const sftp = makeMockSftp();
 		const client = makeSftpClient(sftp);
 
-		await uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/termora-agent");
+		await uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/lasterm-agent");
 
 		expect(sftp.mkdir).toHaveBeenCalledWith("/remote/.local/bin", expect.any(Function));
 		expect(sftp.fastPut).toHaveBeenCalledWith(
 			"/local/binary",
-			"/remote/.local/bin/termora-agent",
+			"/remote/.local/bin/lasterm-agent",
 			expect.any(Function),
 		);
 		expect(sftp.chmod).toHaveBeenCalledWith(
-			"/remote/.local/bin/termora-agent",
+			"/remote/.local/bin/lasterm-agent",
 			0o755,
 			expect.any(Function),
 		);
@@ -348,7 +348,7 @@ describe("uploadAgentBinary", () => {
 		const client = makeSftpClient(sftp);
 
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/termora-agent"),
+			uploadAgentBinary(client, "/local/binary", "/remote/lasterm-agent"),
 		).rejects.toThrow("disk full");
 
 		expect(sftp.end).toHaveBeenCalled();
@@ -359,7 +359,7 @@ describe("uploadAgentBinary", () => {
 		const client = makeSftpClient(sftp, new Error("SFTP not available"));
 
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/termora-agent"),
+			uploadAgentBinary(client, "/local/binary", "/remote/lasterm-agent"),
 		).rejects.toThrow("SFTP not available");
 	});
 
@@ -368,7 +368,7 @@ describe("uploadAgentBinary", () => {
 		const client = makeSftpClient(sftp);
 
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/termora-agent"),
+			uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/lasterm-agent"),
 		).resolves.toBeUndefined();
 	});
 
@@ -378,18 +378,18 @@ describe("uploadAgentBinary", () => {
 
 		await uploadAgentBinary(
 			client,
-			"C:\\local\\termora-agent.exe",
-			"%LOCALAPPDATA%\\termora\\termora-agent.exe",
+			"C:\\local\\lasterm-agent.exe",
+			"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
 		);
 
-		expect(sftp.mkdir).toHaveBeenCalledWith("%LOCALAPPDATA%\\termora", expect.any(Function));
+		expect(sftp.mkdir).toHaveBeenCalledWith("%LOCALAPPDATA%\\lasterm", expect.any(Function));
 	});
 });
 
 // ---------- deployAgentIfNeeded — Branch A: agent found ----------------------
 
 describe("deployAgentIfNeeded — agent already present", () => {
-	const existingPath = "/usr/local/bin/termora-agent";
+	const existingPath = "/usr/local/bin/lasterm-agent";
 
 	it("1. SHA256 match (local cache) → deployed: false, no upload", async () => {
 		// Write a local binary and compute its real SHA256
@@ -400,7 +400,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 
 		// Remote returns the same hash
 		const client = makeMockClient({
-			"which termora-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+			"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
 			[`sha256sum '${existingPath}'`]: {
 				stdout: `${localSha}  ${existingPath}\n`,
 				stderr: "",
@@ -424,7 +424,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		};
 		const client = makeMockClient(
 			{
-				"which termora-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+				"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
 				[`sha256sum '${existingPath}'`]: {
 					stdout: `${REMOTE_SHA_DIFFERENT}  ${existingPath}\n`,
 					stderr: "",
@@ -459,7 +459,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		};
 		const client = makeMockClient(
 			{
-				"which termora-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+				"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
 				[`sha256sum '${existingPath}'`]: {
 					stdout: `${REMOTE_SHA_DIFFERENT}  ${existingPath}\n`,
 					stderr: "",
@@ -485,7 +485,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		};
 		const client = makeMockClient(
 			{
-				"which termora-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+				"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
 				[`sha256sum '${existingPath}'`]: { stdout: "", stderr: "error", exitCode: 1 },
 			},
 			sftpImpl,
@@ -652,12 +652,12 @@ describe("deployAgentIfNeeded — agent not found", () => {
 
 		expect(result.deployed).toBe(true);
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(result.remotePath).toBe("/home/user/.local/bin/termora-agent");
+		expect(result.remotePath).toBe("/home/user/.local/bin/lasterm-agent");
 		expect(result.os).toBe("linux");
 		expect(result.arch).toBe("x64");
 		expect(sftp.fastPut).toHaveBeenCalledWith(
 			join(cacheDir, binaryName),
-			"/home/user/.local/bin/termora-agent",
+			"/home/user/.local/bin/lasterm-agent",
 			expect.any(Function),
 		);
 	});
@@ -692,7 +692,7 @@ describe("deployAgentIfNeeded — agent not found", () => {
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
 		expect(sftp.fastPut).toHaveBeenCalledWith(
 			join(cacheDir, binaryName),
-			"/home/user/.local/bin/termora-agent",
+			"/home/user/.local/bin/lasterm-agent",
 			expect.any(Function),
 		);
 	});
@@ -725,7 +725,7 @@ describe("deployAgentIfNeeded — agent not found", () => {
 		const sftp = makeMockSftp();
 		const client = makeAgentNotFoundClient(sftp);
 		const fetchMessage =
-			"Download https://example.invalid/termora-agent and rename it into the binary cache.";
+			"Download https://example.invalid/lasterm-agent and rename it into the binary cache.";
 		const fetcher = vi.fn(async (): Promise<string> => {
 			throw new FetchError("PRIVATE_OR_FORBIDDEN", fetchMessage);
 		});
@@ -754,7 +754,7 @@ describe("deployAgentIfNeeded — agent not found", () => {
 		// Plant a binary at the exact path the lookup would resolve to (cacheDir/evil,
 		// outside `cache`). Without the strict-semver guard this file would be
 		// returned as a "trusted" cache binary and deployed.
-		const escaped = join(cache, `termora-agent-linux-x64-${maliciousVersion}`);
+		const escaped = join(cache, `lasterm-agent-linux-x64-${maliciousVersion}`);
 		writeFileSync(escaped, "evil-binary");
 
 		const sftp = makeMockSftp();
@@ -872,24 +872,24 @@ describe("deployAgentIfNeeded — agent not found", () => {
 		};
 		const client = makeMockClient(
 			{
-				"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-				"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-				'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
+				"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/usr/local/bin/termora-agent" && echo "/usr/local/bin/termora-agent"': {
+				'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/usr/bin/termora-agent" && echo "/usr/bin/termora-agent"': {
+				'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/opt/termora/termora-agent" && echo "/opt/termora/termora-agent"': {
+				'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
@@ -910,24 +910,24 @@ describe("deployAgentIfNeeded — agent not found", () => {
 
 	it("throws when OS/arch cannot be detected and they are unknown", async () => {
 		const client = makeMockClient({
-			"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-			'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
+			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
 			},
-			'test -x "/usr/local/bin/termora-agent" && echo "/usr/local/bin/termora-agent"': {
+			'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
 			},
-			'test -x "/usr/bin/termora-agent" && echo "/usr/bin/termora-agent"': {
+			'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
 			},
-			'test -x "/opt/termora/termora-agent" && echo "/opt/termora/termora-agent"': {
+			'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
 				exitCode: 1,
@@ -951,24 +951,24 @@ describe("deployAgentIfNeeded — agent not found", () => {
 		};
 		const client = makeMockClient(
 			{
-				"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-				"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-				'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
+				"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/usr/local/bin/termora-agent" && echo "/usr/local/bin/termora-agent"': {
+				'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/usr/bin/termora-agent" && echo "/usr/bin/termora-agent"': {
+				'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/opt/termora/termora-agent" && echo "/opt/termora/termora-agent"': {
+				'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
@@ -981,10 +981,10 @@ describe("deployAgentIfNeeded — agent not found", () => {
 
 		expect(result.deployed).toBe(true);
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(result.remotePath).toBe("%LOCALAPPDATA%\\termora\\termora-agent.exe");
+		expect(result.remotePath).toBe("%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe");
 		expect(sftp.fastPut).toHaveBeenCalledWith(
 			join(cacheDir, binaryName),
-			"%LOCALAPPDATA%\\termora\\termora-agent.exe",
+			"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
 			expect.any(Function),
 		);
 	});
@@ -998,7 +998,7 @@ describe("getBinaryCacheDir", () => {
 		process.env.XDG_STATE_HOME = "/custom/state";
 		try {
 			const result = getBinaryCacheDir();
-			expect(result).toBe("/custom/state/termora/binaries");
+			expect(result).toBe("/custom/state/lasterm/binaries");
 		} finally {
 			if (orig === undefined) delete process.env.XDG_STATE_HOME;
 			else process.env.XDG_STATE_HOME = orig;
@@ -1010,7 +1010,7 @@ describe("getBinaryCacheDir", () => {
 		delete process.env.XDG_STATE_HOME;
 		try {
 			const result = getBinaryCacheDir();
-			expect(result).toMatch(/termora[/\\]binaries$/);
+			expect(result).toMatch(/lasterm[/\\]binaries$/);
 			if (process.platform !== "win32") {
 				expect(result).toContain(".local/state");
 			}
@@ -1026,26 +1026,26 @@ describe("getRemoteSha256", () => {
 	it("parses sha256sum output on Linux", async () => {
 		const hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 		const client = makeMockClient({
-			"sha256sum '/usr/local/bin/termora-agent'": {
-				stdout: `${hash}  /usr/local/bin/termora-agent\n`,
+			"sha256sum '/usr/local/bin/lasterm-agent'": {
+				stdout: `${hash}  /usr/local/bin/lasterm-agent\n`,
 				stderr: "",
 				exitCode: 0,
 			},
 		});
-		const result = await getRemoteSha256(client, "/usr/local/bin/termora-agent", "linux");
+		const result = await getRemoteSha256(client, "/usr/local/bin/lasterm-agent", "linux");
 		expect(result).toBe(hash);
 	});
 
 	it("parses shasum -a 256 output on macOS (darwin)", async () => {
 		const hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 		const client = makeMockClient({
-			"shasum -a 256 '/usr/local/bin/termora-agent'": {
-				stdout: `${hash}  /usr/local/bin/termora-agent\n`,
+			"shasum -a 256 '/usr/local/bin/lasterm-agent'": {
+				stdout: `${hash}  /usr/local/bin/lasterm-agent\n`,
 				stderr: "",
 				exitCode: 0,
 			},
 		});
-		const result = await getRemoteSha256(client, "/usr/local/bin/termora-agent", "darwin");
+		const result = await getRemoteSha256(client, "/usr/local/bin/lasterm-agent", "darwin");
 		expect(result).toBe(hash);
 	});
 
@@ -1058,7 +1058,7 @@ describe("getRemoteSha256", () => {
 				exitCode: 0,
 			},
 		});
-		const result = await getRemoteSha256(client, "C:\\termora\\termora-agent.exe", "windows");
+		const result = await getRemoteSha256(client, "C:\\lasterm\\lasterm-agent.exe", "windows");
 		expect(result).toBe(hash);
 	});
 
@@ -1087,8 +1087,8 @@ describe("getRemoteSha256", () => {
 describe("getLocalSha256", () => {
 	it("computes SHA256 of a file", () => {
 		const filePath = join(cacheDir, "test-file.bin");
-		writeFileSync(filePath, "hello termora");
-		// sha256("hello termora") = known value
+		writeFileSync(filePath, "hello lasterm");
+		// sha256("hello lasterm") = known value
 		const result = getLocalSha256(filePath);
 		expect(result).toMatch(/^[a-f0-9]{64}$/);
 		// Verify determinism: same content → same hash
@@ -1115,24 +1115,24 @@ describe("deploy + verify integration", () => {
 		};
 		const clientFirst = makeMockClient(
 			{
-				"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-				"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-				'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
+				"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/usr/local/bin/termora-agent" && echo "/usr/local/bin/termora-agent"': {
+				'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/usr/bin/termora-agent" && echo "/usr/bin/termora-agent"': {
+				'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
 				},
-				'test -x "/opt/termora/termora-agent" && echo "/opt/termora/termora-agent"': {
+				'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
 					exitCode: 1,
@@ -1150,7 +1150,7 @@ describe("deploy + verify integration", () => {
 
 		expect(resultFirst.deployed).toBe(true);
 		expect(resultFirst.remoteMatchesHubVersionCache).toBe(false);
-		expect(resultFirst.remotePath).toBe("/home/user/.local/bin/termora-agent");
+		expect(resultFirst.remotePath).toBe("/home/user/.local/bin/lasterm-agent");
 		expect(sftp.fastPut).toHaveBeenCalledTimes(1);
 
 		// Second connect: agent IS found at deployed path, SHA256 matches local cache
@@ -1159,7 +1159,7 @@ describe("deploy + verify integration", () => {
 		if (!localSha) throw new Error("getLocalSha256 returned null");
 
 		const clientSecond = makeMockClient({
-			"which termora-agent": { stdout: `${deployedPath}\n`, stderr: "", exitCode: 0 },
+			"which lasterm-agent": { stdout: `${deployedPath}\n`, stderr: "", exitCode: 0 },
 			[`sha256sum '${deployedPath}'`]: {
 				stdout: `${localSha}  ${deployedPath}\n`,
 				stderr: "",
@@ -1186,10 +1186,10 @@ describe("deploy + verify integration", () => {
 		const sftpImpl = (cb: (err: Error | undefined, sftp: SFTPWrapper) => void): void => {
 			cb(undefined, sftp);
 		};
-		const existingPath = "/usr/local/bin/termora-agent";
+		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeMockClient(
 			{
-				"which termora-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+				"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
 				[`sha256sum '${existingPath}'`]: {
 					stdout: `${REMOTE_SHA_DIFFERENT}  ${existingPath}\n`,
 					stderr: "",
@@ -1214,7 +1214,7 @@ describe("deploy + verify integration", () => {
 
 	it("prompts user on first use (no pin, no cache), pins on trust_permanent", async () => {
 		// Remote agent found, no local binary, no pin — must prompt
-		const existingPath = "/usr/local/bin/termora-agent";
+		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
 		const onAgentPinned = vi.fn();
@@ -1245,7 +1245,7 @@ describe("deploy + verify integration", () => {
 	it("skips prompt when session-trusted SHA matches remote", async () => {
 		// Remote agent found with hash REMOTE_SHA_DIFFERENT;
 		// sessionTrustedSha256 matches → no prompt needed
-		const existingPath = "/usr/local/bin/termora-agent";
+		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
 		// No promptBinaryVerify provided — would throw AGENT_BINARY_UNTRUSTED if reached
@@ -1262,7 +1262,7 @@ describe("deploy + verify integration", () => {
 
 	it("prompts with mismatch=true when pinned SHA differs from remote", async () => {
 		// Remote agent exists with new hash; stored pin is the old LOCAL_SHA
-		const existingPath = "/usr/local/bin/termora-agent";
+		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
 		const onAgentPinned = vi.fn();

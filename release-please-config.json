@@ -5,7 +5,7 @@
 			"release-type": "node",
 			"draft": true,
 			"force-tag-creation": true,
-			"component": "termora",
+			"component": "lasterm",
 			"include-component-in-tag": false,
 			"changelog-path": "CHANGELOG.md",
 			"bump-minor-pre-major": true,
@@ -32,7 +32,7 @@
 				},
 				{
 					"type": "toml",
-					"path": "crates/termora-agent/Cargo.toml",
+					"path": "crates/lasterm-agent/Cargo.toml",
 					"jsonpath": "$.package.version"
 				},
 				{

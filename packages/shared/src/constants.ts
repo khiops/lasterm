@@ -1,4 +1,4 @@
-// Protocol and runtime constants for termora
+// Protocol and runtime constants for lasterm
 
 // PROTOCOL_VERSION is checked by AgentConnection.handleData with strict equality
 // (hub closes the connection if the Rust agent version does not match).

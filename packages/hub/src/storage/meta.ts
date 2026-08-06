@@ -10,7 +10,7 @@ import type {
 	LaunchProfile,
 	Session,
 	SessionStatus,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import type Database from "better-sqlite3";
 
 import { ChannelGroupsDAL } from "./channel-groups-dal.js";

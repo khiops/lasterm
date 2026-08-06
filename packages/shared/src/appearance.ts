@@ -1,4 +1,4 @@
-// Appearance configuration for termora UI chrome
+// Appearance configuration for lasterm UI chrome
 
 export interface AppearanceConfig {
 	theme: string;

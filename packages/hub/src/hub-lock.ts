@@ -7,10 +7,10 @@ import {
 	detectSea,
 	extractAddonToDir,
 	getAddonCacheDir,
-} from "@termora/shared/dist/sea-addon-loader.js";
+} from "@lasterm/shared/dist/sea-addon-loader.js";
 
 const LOCK_FILE_NAME = "hub.lock";
-const SEA_ASSET_NAME = "termora_hub_lock.node";
+const SEA_ASSET_NAME = "lasterm_hub_lock.node";
 
 interface NativeHubLock {
 	readonly path: string;
@@ -22,23 +22,23 @@ interface HubLockAddon {
 }
 
 export class HubAlreadyRunningError extends Error {
-	readonly code = "TERMORA_HUB_ALREADY_RUNNING";
+	readonly code = "LASTERM_HUB_ALREADY_RUNNING";
 
 	constructor(readonly lockPath: string) {
-		super(`TERMORA_HUB_ALREADY_RUNNING: another hub holds ${lockPath}`);
+		super(`LASTERM_HUB_ALREADY_RUNNING: another hub holds ${lockPath}`);
 		this.name = "HubAlreadyRunningError";
 	}
 }
 
 export class HubLockInitializationError extends Error {
-	readonly code = "TERMORA_HUB_LOCK_UNAVAILABLE";
+	readonly code = "LASTERM_HUB_LOCK_UNAVAILABLE";
 
 	constructor(
 		readonly lockPath: string,
 		cause: unknown,
 	) {
 		const detail = cause instanceof Error ? cause.message : String(cause);
-		super(`TERMORA_HUB_LOCK_UNAVAILABLE: cannot establish ${lockPath}: ${detail}`);
+		super(`LASTERM_HUB_LOCK_UNAVAILABLE: cannot establish ${lockPath}: ${detail}`);
 		this.name = "HubLockInitializationError";
 	}
 }
@@ -84,7 +84,7 @@ export function acquireHubLock(
 
 function loadHubLockAddon(): HubLockAddon {
 	if (detectSea()) return loadSeaAddon();
-	const override = process.env.TERMORA_HUB_LOCK_ADDON;
+	const override = process.env.LASTERM_HUB_LOCK_ADDON;
 	const addonPath = override && override.length > 0 ? override : localAddonPath();
 	return dlopenAddon(addonPath);
 }
@@ -112,7 +112,7 @@ function loadSeaAddon(): HubLockAddon {
 function localAddonPath(): string {
 	const extension = platform() === "win32" ? ".dll" : platform() === "darwin" ? ".dylib" : ".so";
 	const filename =
-		platform() === "win32" ? "termora_hub_lock.dll" : `libtermora_hub_lock${extension}`;
+		platform() === "win32" ? "lasterm_hub_lock.dll" : `liblasterm_hub_lock${extension}`;
 	const sourceDir = dirname(fileURLToPath(import.meta.url));
 	const targetDir = process.env.CARGO_TARGET_DIR ?? resolve(sourceDir, "../../../target");
 	return resolve(targetDir, "release", filename);

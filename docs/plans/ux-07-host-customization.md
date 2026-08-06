@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: web, shared, hub
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-07
   updated: 2026-03-07
   complexity: SIMPLE

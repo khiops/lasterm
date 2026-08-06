@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonMap } from "@iarna/toml";
-import type { CascadeResponse, ElevationMethod } from "@termora/shared";
+import type { CascadeResponse, ElevationMethod } from "@lasterm/shared";
 import {
 	DEFAULT_AGENT_CONFIG,
 	DEFAULT_APPEARANCE,
@@ -10,7 +10,7 @@ import {
 	DEFAULT_PROFILE,
 	deepMerge,
 	generateId,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -129,7 +129,7 @@ describe("ConfigResolver.resolve", () => {
 	});
 
 	it("layer 2: config.toml overrides defaults", () => {
-		const dir = join(tmpdir(), `termora-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -148,7 +148,7 @@ describe("ConfigResolver.resolve", () => {
 	});
 
 	it("layer 2: theme_overrides converted to themeOverrides", () => {
-		const dir = join(tmpdir(), `termora-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -169,7 +169,7 @@ describe("ConfigResolver.resolve", () => {
 	});
 
 	it("layer 3: host profile_json overrides layer 2", () => {
-		const dir = join(tmpdir(), `termora-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[terminal]\nfont_size = 16\n");
 
@@ -213,7 +213,7 @@ describe("ConfigResolver.resolve", () => {
 	});
 
 	it("full cascade order: layer 4 is final winner", () => {
-		const dir = join(tmpdir(), `termora-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[terminal]\nfont_size = 13\n");
 
@@ -266,7 +266,7 @@ describe("ConfigResolver.resolve", () => {
 	});
 
 	it("background mode and window effect cascade through resolve()", () => {
-		const dir = join(tmpdir(), `termora-bg-mode-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-bg-mode-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -296,7 +296,7 @@ describe("ConfigResolver.resolve", () => {
 	});
 
 	it("malformed host/channel profileJson does not block lower-layer background fields", () => {
-		const dir = join(tmpdir(), `termora-bg-malformed-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-bg-malformed-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -328,7 +328,7 @@ describe("loadGcConfig", () => {
 	});
 
 	it("returns defaults when config.toml has no [gc] section", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[terminal]\nfont_size = 16\n");
 
@@ -337,7 +337,7 @@ describe("loadGcConfig", () => {
 	});
 
 	it("parses dead_retention_hours from [gc] section", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[gc]\ndead_retention_hours = 48\n");
 
@@ -347,7 +347,7 @@ describe("loadGcConfig", () => {
 	});
 
 	it("parses max_size_per_channel_mb from [gc] section", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[gc]\nmax_size_per_channel_mb = 50\n");
 
@@ -357,7 +357,7 @@ describe("loadGcConfig", () => {
 	});
 
 	it("parses both gc keys together", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -370,7 +370,7 @@ describe("loadGcConfig", () => {
 	});
 
 	it("ignores non-number values in [gc] section", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), '[gc]\ndead_retention_hours = "not-a-number"\n');
 
@@ -379,7 +379,7 @@ describe("loadGcConfig", () => {
 	});
 
 	it("returns defaults for malformed TOML", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[gc\nbroken");
 
@@ -407,7 +407,7 @@ describe("ConfigResolver.gcConfig", () => {
 	});
 
 	it("returns overridden values after loadFromFile with [gc] section", () => {
-		const dir = join(tmpdir(), `termora-gc-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -453,7 +453,7 @@ describe("GET /api/config/cascade (resolved layer)", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		// Use tmpdir as configDir to avoid loading the real ~/.config/termora/config.toml
+		// Use tmpdir as configDir to avoid loading the real ~/.config/lasterm/config.toml
 		server = await createServer({
 			logger: false,
 			dbManager: dbs,
@@ -624,7 +624,7 @@ describe("loadUiConfig", () => {
 	});
 
 	it("returns defaults when config.toml has no [ui] section", () => {
-		const dir = join(tmpdir(), `termora-ui-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-ui-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[terminal]\nfont_size = 16\n");
 
@@ -633,7 +633,7 @@ describe("loadUiConfig", () => {
 	});
 
 	it('parses on_channel_dead = "readonly" from [ui] section', () => {
-		const dir = join(tmpdir(), `termora-ui-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-ui-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), '[ui]\non_channel_dead = "readonly"\n');
 
@@ -642,7 +642,7 @@ describe("loadUiConfig", () => {
 	});
 
 	it("returns defaults for malformed TOML", () => {
-		const dir = join(tmpdir(), `termora-ui-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-ui-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[ui\nbroken");
 
@@ -672,7 +672,7 @@ describe("ConfigResolver.uiConfig", () => {
 	});
 
 	it("returns overridden values after loadFromFile with [ui] section", () => {
-		const dir = join(tmpdir(), `termora-ui-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-ui-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), '[ui]\non_channel_dead = "readonly"\n');
 
@@ -829,7 +829,7 @@ describe("ConfigResolver.uiConfig — tabs/panes", () => {
 	});
 
 	it("returns overridden tabs values after loadFromFile", () => {
-		const dir = join(tmpdir(), `termora-tabs-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-tabs-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -845,7 +845,7 @@ describe("ConfigResolver.uiConfig — tabs/panes", () => {
 	});
 
 	it("returns overridden panes values after loadFromFile", () => {
-		const dir = join(tmpdir(), `termora-panes-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-panes-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -965,7 +965,7 @@ describe("ConfigResolver.uiConfig — title", () => {
 	});
 
 	it("returns overridden title values after loadFromFile", () => {
-		const dir = join(tmpdir(), `termora-title-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-title-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -1073,7 +1073,7 @@ describe("ConfigResolver.uiConfig — search", () => {
 	});
 
 	it("returns overridden search values after loadFromFile", () => {
-		const dir = join(tmpdir(), `termora-search-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-search-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -1172,7 +1172,7 @@ describe("ConfigResolver.appearance", () => {
 	});
 
 	it("loads appearance from config.toml", () => {
-		const dir = join(tmpdir(), `termora-appear-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-appear-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -1204,7 +1204,7 @@ describe("ConfigResolver.getCascade", () => {
 	});
 
 	it("returns all 4 layers with defaults when no overrides", () => {
-		const dir = join(tmpdir(), `termora-cascade-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-cascade-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1221,7 +1221,7 @@ describe("ConfigResolver.getCascade", () => {
 	});
 
 	it("includes host layer when hostId provided", () => {
-		const dir = join(tmpdir(), `termora-cascade-host-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-cascade-host-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1236,7 +1236,7 @@ describe("ConfigResolver.getCascade", () => {
 	});
 
 	it("includes channel layer when channelId provided", () => {
-		const dir = join(tmpdir(), `termora-cascade-chan-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-cascade-chan-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1258,7 +1258,7 @@ describe("ConfigResolver.getCascade", () => {
 	});
 
 	it("includes global terminal overrides from config.toml", () => {
-		const dir = join(tmpdir(), `termora-cascade-global-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-cascade-global-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[terminal]\nfont_size = 18\n");
 		const resolver = new ConfigResolver(metaDal);
@@ -1270,7 +1270,7 @@ describe("ConfigResolver.getCascade", () => {
 	});
 
 	it("includes background fields at every terminal cascade layer", () => {
-		const dir = join(tmpdir(), `termora-cascade-bg-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-cascade-bg-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -1339,7 +1339,7 @@ describe("ConfigResolver.getGlobalTerminalOverrides", () => {
 	});
 
 	it("returns fileConfig after loadFromFile", () => {
-		const dir = join(tmpdir(), `termora-overrides-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-overrides-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), '[terminal]\nfont_family = "Fira Code"\n');
 		const resolver = new ConfigResolver(metaDal);
@@ -1369,7 +1369,7 @@ describe("ConfigResolver.getGlobalUiOverrides", () => {
 	});
 
 	it("returns only non-default values", () => {
-		const dir = join(tmpdir(), `termora-ui-overrides-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-ui-overrides-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), "[tabs]\nclose_button = false\n");
 		const resolver = new ConfigResolver(metaDal);
@@ -1398,7 +1398,7 @@ describe("ConfigResolver.saveGlobalKey", () => {
 	});
 
 	it("creates config.toml if missing", async () => {
-		const dir = join(tmpdir(), `termora-save-create-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-save-create-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1413,7 +1413,7 @@ describe("ConfigResolver.saveGlobalKey", () => {
 	});
 
 	it("preserves comments when writing", async () => {
-		const dir = join(tmpdir(), `termora-save-comment-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-save-comment-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const original = "# My config\n[terminal]\nfont_size = 14  # default size\n";
 		writeFileSync(join(dir, "config.toml"), original);
@@ -1429,7 +1429,7 @@ describe("ConfigResolver.saveGlobalKey", () => {
 	});
 
 	it("null value removes key", async () => {
-		const dir = join(tmpdir(), `termora-save-null-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-save-null-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), '[terminal]\nfont_size = 16\ntheme = "dracula"\n');
 		const resolver = new ConfigResolver(metaDal);
@@ -1443,7 +1443,7 @@ describe("ConfigResolver.saveGlobalKey", () => {
 	});
 
 	it("saveGlobalTerminal rejects unknown keys", async () => {
-		const dir = join(tmpdir(), `termora-save-reject-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-save-reject-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1452,7 +1452,7 @@ describe("ConfigResolver.saveGlobalKey", () => {
 	});
 
 	it("saveGlobalUi rejects unknown sections", async () => {
-		const dir = join(tmpdir(), `termora-save-ui-reject-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-save-ui-reject-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1463,7 +1463,7 @@ describe("ConfigResolver.saveGlobalKey", () => {
 	});
 
 	it("round-trips terminal values through write and read", async () => {
-		const dir = join(tmpdir(), `termora-save-roundtrip-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-save-roundtrip-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1489,7 +1489,7 @@ describe("GET /api/config/cascade", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		const dir = join(tmpdir(), `termora-cascade-api-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-cascade-api-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		server = await createServer({
 			logger: false,
@@ -1554,7 +1554,7 @@ describe("PUT /api/config/global", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `termora-global-api-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-global-api-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		dbs = openTestDatabases();
 		server = await createServer({
@@ -1635,7 +1635,7 @@ describe("PUT /api/config/ui", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `termora-ui-api-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-ui-api-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		dbs = openTestDatabases();
 		server = await createServer({
@@ -1708,7 +1708,7 @@ describe("PUT /api/config/appearance", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `termora-appear-api-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-appear-api-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		dbs = openTestDatabases();
 		server = await createServer({
@@ -1864,7 +1864,7 @@ describe("Auth enforcement on cascade/config endpoints", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		const dir = join(tmpdir(), `termora-auth-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-auth-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		server = await createServer({
 			logger: false,
@@ -2046,7 +2046,7 @@ describe("ConfigResolver.elevationConfig", () => {
 	});
 
 	it("loads elevation config from config.toml", () => {
-		const dir = join(tmpdir(), `termora-elev-test-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-elev-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "config.toml"), '[elevation]\nmethod_linux = "doas"\n');
 
@@ -2059,7 +2059,7 @@ describe("ConfigResolver.elevationConfig", () => {
 	});
 
 	it("loads custom_command_linux from config.toml", () => {
-		const dir = join(tmpdir(), `termora-elev-custom-${Date.now()}`);
+		const dir = join(tmpdir(), `lasterm-elev-custom-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
@@ -2139,7 +2139,7 @@ describe("ConfigResolver.resolveCustomCommand", () => {
 	it.skipIf(process.platform === "win32")(
 		"falls back to global custom_command_linux when host not set (Linux)",
 		() => {
-			const dir = join(tmpdir(), `termora-custom-cmd-${Date.now()}`);
+			const dir = join(tmpdir(), `lasterm-custom-cmd-${Date.now()}`);
 			mkdirSync(dir, { recursive: true });
 			writeFileSync(
 				join(dir, "config.toml"),

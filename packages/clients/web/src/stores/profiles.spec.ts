@@ -1,4 +1,4 @@
-import type { LaunchProfile } from "@termora/shared";
+import type { LaunchProfile } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useProfilesStore } from "./profiles.js";
@@ -82,8 +82,8 @@ beforeEach(() => {
 	localStorageMap.clear();
 	mockFetch.mockReset();
 	setActivePinia(createPinia());
-	// Seed auth token (TOKEN_KEY = "termora_token")
-	localStorageMap.set("termora_token", "test-token");
+	// Seed auth token (TOKEN_KEY = "lasterm_token")
+	localStorageMap.set("lasterm_token", "test-token");
 });
 
 afterEach(() => {
@@ -134,7 +134,7 @@ describe("useProfilesStore — fetchProfiles", () => {
 	});
 
 	it("does nothing when not authenticated", async () => {
-		localStorageMap.delete("termora_token");
+		localStorageMap.delete("lasterm_token");
 		const store = useProfilesStore();
 		await store.fetchProfiles();
 		expect(mockFetch).not.toHaveBeenCalled();
@@ -160,7 +160,7 @@ describe("useProfilesStore — fetchHostProfiles", () => {
 	});
 
 	it("returns [] when not authenticated", async () => {
-		localStorageMap.delete("termora_token");
+		localStorageMap.delete("lasterm_token");
 		const store = useProfilesStore();
 		const result = await store.fetchHostProfiles("host-1");
 		expect(result).toEqual([]);

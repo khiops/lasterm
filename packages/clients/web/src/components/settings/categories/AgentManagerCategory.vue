@@ -29,7 +29,7 @@
 			<div v-if="versionMismatch" class="agent-warning">
 				Desktop, hub, and bundled agent versions do not match. Use the update path tracked in
 				<a
-					href="https://github.com/khiops/termora/issues/94"
+					href="https://github.com/khiops/lasterm/issues/94"
 					target="_blank"
 					rel="noreferrer"
 				>
@@ -149,7 +149,7 @@
 </template>
 
 <script setup lang="ts">
-import type { HostArch, HostOs } from "@termora/shared";
+import type { HostArch, HostOs } from "@lasterm/shared";
 import { computed, inject, onMounted, ref, watch } from "vue";
 import AgentImportModal from "../AgentImportModal.vue";
 import {

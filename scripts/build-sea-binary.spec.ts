@@ -15,8 +15,8 @@ describe("buildSeaConfigJson generates valid sea-config.json structure", () => {
 
 		const cfg = {
 			entryScript: "/abs/path/agent.cjs",
-			outputBinary: "/abs/path/termora-agent",
-			name: "termora-agent",
+			outputBinary: "/abs/path/lasterm-agent",
+			name: "lasterm-agent",
 			nativeAddons: { "pty.node": "/abs/path/pty.node" },
 			extraAssets: { VERSION: "/abs/path/VERSION" },
 			useCodeCache: true,

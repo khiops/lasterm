@@ -151,7 +151,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { ChannelGroup } from "@termora/shared";
+import type { ChannelGroup } from "@lasterm/shared";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useConfigStore } from "../stores/config.js";

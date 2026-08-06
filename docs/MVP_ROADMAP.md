@@ -1,4 +1,4 @@
-# termora — MVP Roadmap
+# lasterm — MVP Roadmap
 
 > Version: 0.1.0 (MVP)
 > Status: draft
@@ -88,7 +88,7 @@ $ pnpm dev
 
 | Block | Description | Package(s) | Exit Criteria |
 |-------|-------------|------------|---------------|
-| 2.1 | SSH connector (hub) | hub | ssh2 connect, launch `termora-agent --stdio`, frame I/O over SSH stdin/stdout |
+| 2.1 | SSH connector (hub) | hub | ssh2 connect, launch `lasterm-agent --stdio`, frame I/O over SSH stdin/stdout |
 | 2.2 | Session manager | hub | Session state machine (STARTING→ACTIVE→DISCONNECTED→CLOSED), channel state (BORN→LIVE→DEAD), DB persistence |
 | 2.3 | REST API: hosts + sessions | hub | CRUD /hosts, GET /sessions, POST /hosts/:id/test, host list in UI |
 
@@ -170,8 +170,8 @@ $ curl -X POST localhost:4100/api/hosts \
 
 **Demo scenario:**
 ```
-→ Device A: open termora, type commands (WRITER ✍)
-→ Device B: open termora, enter pairing code → authenticated
+→ Device A: open lasterm, type commands (WRITER ✍)
+→ Device B: open lasterm, enter pairing code → authenticated
 → Device B: click same channel → attached READ-ONLY (👁)
 → Device B: "Request write" → Device A gets notification
 → Device A: "Allow" → lock transfers → Device B now WRITER
@@ -190,7 +190,7 @@ $ curl -X POST localhost:4100/api/hosts \
 | 5.3 | Tabs + split panes | web | Tab bar, [+] new channel, split horizontal/vertical, drag divider, workspace layout persistence |
 | 5.4 | Command palette | web | Ctrl+P fuzzy search (hosts, channels, actions), keyboard navigation |
 | 5.5 | Config cascade | hub, web | 4-layer deep merge (defaults→TOML→host profile→channel profile), settings UI, remote visual hints (trust policy) |
-| 5.6 | CLI commands | hub | `termora start/stop`, `termora host add/list/test`, `termora pair`, `termora session list`, `termora config` |
+| 5.6 | CLI commands | hub | `lasterm start/stop`, `lasterm host add/list/test`, `lasterm pair`, `lasterm session list`, `lasterm config` |
 | 5.7 | Onboarding + packaging | root, web | First-run UX (local terminal auto-opens), the built executable starts and serves. npm was dropped as a channel — the unscoped name belongs to another project and the executable embeds its own Node |
 
 **Dependencies:** M4 complete for auth-dependent features. M1 sufficient for UI blocks (can be parallelized).
@@ -198,8 +198,8 @@ $ curl -X POST localhost:4100/api/hosts \
 **Exit criteria (milestone):**
 - Discord-style 3-column layout fully functional
 - Host icons, channel groups, tab bar, split panes all working
-- `termora pair` generates pairing code from CLI
-- the built `termora-hub` binary starts the hub and opens the browser (npm is not a channel — the unscoped name belongs to another project)
+- `lasterm pair` generates pairing code from CLI
+- the built `lasterm-hub` binary starts the hub and opens the browser (npm is not a channel — the unscoped name belongs to another project)
 - Config cascade resolves correctly (layer 1→2→3→3.5→4)
 - Remote visual hints applied when agent sends HELLO with hints
 - Command palette finds hosts, channels, and actions
@@ -295,7 +295,7 @@ M5: [5.1] → [5.2] → [5.3] → [5.4]  (UI progressive)
 | Throughput per channel | 10 MB/s sustained | `cat /dev/urandom | head -c 100M` |
 | Snapshot restore | < 200ms | Measure ATTACH→ATTACH_OK→rendered |
 | Hub RSS (20 idle channels) | < 100 MB | Process memory after idle |
-| Cold start (hub) | < 2s | Time from `termora start` to health endpoint responding |
+| Cold start (hub) | < 2s | Time from `lasterm start` to health endpoint responding |
 | Spool GC | No user-visible pause | GC runs incremental_vacuum, not full VACUUM |
 
 ## 8. Post-MVP Priorities
@@ -323,7 +323,7 @@ The MVP is ready for release when ALL of the following are true:
 6. **Discord UI:** Host rail, channel sidebar, tabs, split panes — functional
 7. **Config cascade:** Defaults → TOML → host → channel — merge correct
 8. **Remote hints:** Agent HELLO with badge/theme → applied in UI
-9. **CLI:** `termora start/stop/pair/host add/host list` all work
-10. **the built `termora-hub` binary** starts and serves without a separate runtime install
+9. **CLI:** `lasterm start/stop/pair/host add/host list` all work
+10. **the built `lasterm-hub` binary** starts and serves without a separate runtime install
 11. **Tests pass** on Linux + macOS (Windows P1)
 12. **No known CRITICAL or HIGH bugs**

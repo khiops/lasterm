@@ -20,5 +20,5 @@ allow = [
 ]
 exceptions = [
 	# Our own application crate — AGPL by decision (#78).
-	{ name = "termora-desktop", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-desktop", allow = ["AGPL-3.0-only"] },
 ]

@@ -1,7 +1,7 @@
 <template>
 	<Teleport to="body">
 		<div v-if="show" class="dialog-overlay" @click.self="emit('close')">
-			<div class="dialog-content about-modal" role="dialog" aria-modal="true" aria-label="About Termora">
+			<div class="dialog-content about-modal" role="dialog" aria-modal="true" aria-label="About Lasterm">
 				<!-- Header -->
 				<div class="dialog-header">
 					<h3 class="dialog-title">About</h3>
@@ -14,7 +14,7 @@
 				<div class="dialog-body">
 					<!-- App identity -->
 					<div class="about-identity">
-						<span class="about-appname">Termora</span>
+						<span class="about-appname">Lasterm</span>
 						<span class="about-tagline">Local-first session terminal platform</span>
 					</div>
 
@@ -53,7 +53,7 @@
 							<span class="ext-icon">↗</span>
 						</a>
 						<a
-							href="https://github.com/khiops/termora"
+							href="https://github.com/khiops/lasterm"
 							target="_blank"
 							rel="noopener noreferrer"
 							class="about-link"
@@ -62,7 +62,7 @@
 							<span class="ext-icon">↗</span>
 						</a>
 						<a
-							href="https://github.com/khiops/termora/issues"
+							href="https://github.com/khiops/lasterm/issues"
 							target="_blank"
 							rel="noopener noreferrer"
 							class="about-link"
@@ -135,7 +135,7 @@ const versionString = computed(() => {
 	return `v${version.value} (${BUILD_HASH})`;
 });
 
-const copyText = computed(() => `Termora ${versionString.value}`);
+const copyText = computed(() => `Lasterm ${versionString.value}`);
 
 // ─── Copy to clipboard ─────────────────────────────────────────────────
 

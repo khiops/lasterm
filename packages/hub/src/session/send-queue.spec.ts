@@ -2,12 +2,12 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// ─── Mock @termora/shared ────────────────────────────────────────────────────
+// ─── Mock @lasterm/shared ────────────────────────────────────────────────────
 // encodeFrame is called inside StubAgent.send() — return a predictable buffer each time.
 
 let encodeFrameCounter = 0;
 
-vi.mock("@termora/shared", () => {
+vi.mock("@lasterm/shared", () => {
 	class FakeFrameReader {
 		push(_data: Buffer) {
 			return [];
@@ -27,7 +27,7 @@ vi.mock("@termora/shared", () => {
 
 // ─── Import after mocks ─────────────────────────────────────────────────────
 
-import { encodeFrame } from "@termora/shared";
+import { encodeFrame } from "@lasterm/shared";
 import { SendQueue } from "./send-queue.js";
 
 // ─── Minimal stub that exercises SendQueue the same way LocalAgent did ────────

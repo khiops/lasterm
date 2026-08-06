@@ -1,7 +1,7 @@
 <template>
 	<div class="pairing-overlay">
 		<div class="pairing-card">
-			<div class="pairing-logo">termora</div>
+			<div class="pairing-logo">lasterm</div>
 			<h2 class="pairing-title">Authentication Required</h2>
 			<p class="pairing-subtitle">
 				Enter the 8-digit pairing code shown on the host machine, or the code

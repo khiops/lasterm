@@ -2,9 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { encodeFrame, PROTOCOL_VERSION, type ProtocolMessage } from "@termora/shared";
+import { encodeFrame, PROTOCOL_VERSION, type ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TermoraAgent } from "./termora-agent.js";
+import { LastermAgent } from "./lasterm-agent.js";
 import { getTestSocketPath } from "./test-socket-path.js";
 
 const TEST_TIMEOUT = 10_000;
@@ -17,7 +17,7 @@ interface MockDaemon {
 }
 
 /**
- * Create a mock agent daemon on UDS that speaks the termora protocol.
+ * Create a mock agent daemon on UDS that speaks the lasterm protocol.
  * On each connection: sends HELLO, optional AGENT_CHANNEL_STATE messages,
  * then CHANNEL_STATE_END.
  *
@@ -75,10 +75,10 @@ describe("Daemon integration", () => {
 	let tmpDir: string;
 	let socketPath: string;
 	let daemon: MockDaemon | null = null;
-	let agent: TermoraAgent | null = null;
+	let agent: LastermAgent | null = null;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "termora-daemon-int-"));
+		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-daemon-int-"));
 		socketPath = getTestSocketPath();
 	});
 
@@ -99,13 +99,13 @@ describe("Daemon integration", () => {
 
 	describe("Given a daemon agent listening on UDS", () => {
 		it(
-			"TermoraAgent connects and receives HELLO",
+			"LastermAgent connects and receives HELLO",
 			async () => {
 				daemon = await createMockDaemon(socketPath);
 
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 
-				expect(agent).toBeInstanceOf(TermoraAgent);
+				expect(agent).toBeInstanceOf(LastermAgent);
 				expect(agent.connected).toBe(true);
 			},
 			TEST_TIMEOUT,
@@ -116,7 +116,7 @@ describe("Daemon integration", () => {
 			async () => {
 				daemon = await createMockDaemon(socketPath);
 
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 				const states = await agent.waitForChannelState();
 
 				expect(states).toEqual([]);
@@ -139,7 +139,7 @@ describe("Daemon integration", () => {
 
 				daemon = await createMockDaemon(socketPath, channels);
 
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 				const states = await agent.waitForChannelState();
 
 				expect(states).toHaveLength(3);
@@ -174,7 +174,7 @@ describe("Daemon integration", () => {
 				daemon = await createMockDaemon(socketPath, channels);
 
 				// First connection
-				const agent1 = await TermoraAgent.connectLocal(socketPath);
+				const agent1 = await LastermAgent.connectLocal(socketPath);
 				const states1 = await agent1.waitForChannelState();
 				expect(states1).toHaveLength(1);
 
@@ -186,7 +186,7 @@ describe("Daemon integration", () => {
 				await closePromise;
 
 				// Second connection — daemon still running
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 				expect(agent.connected).toBe(true);
 
 				const states2 = await agent.waitForChannelState();
@@ -265,7 +265,7 @@ describe("Daemon integration", () => {
 				daemon = { server, connections };
 
 				// First connection — no OUTPUT expected beyond handshake
-				const agent1 = await TermoraAgent.connectLocal(socketPath);
+				const agent1 = await LastermAgent.connectLocal(socketPath);
 				await agent1.waitForChannelState();
 
 				// Disconnect
@@ -276,7 +276,7 @@ describe("Daemon integration", () => {
 				await closePromise;
 
 				// Second connection — should receive buffered OUTPUT
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 				await agent.waitForChannelState();
 
 				const outputMsg = await new Promise<ProtocolMessage>((resolve) => {
@@ -303,11 +303,11 @@ describe("Daemon integration", () => {
 
 	describe("Given a daemon that dies", () => {
 		it(
-			"TermoraAgent emits close event",
+			"LastermAgent emits close event",
 			async () => {
 				daemon = await createMockDaemon(socketPath);
 
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 				expect(agent.connected).toBe(true);
 
 				const closePromise = new Promise<void>((resolve) => {

@@ -1,11 +1,11 @@
-import type { TermoraTheme } from "@termora/shared";
-import { BUNDLED_THEMES } from "@termora/shared";
+import type { LastermTheme } from "@lasterm/shared";
+import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hexToRgb, readableForeground, useThemeStore } from "./theme.js";
 
-const catppuccinMocha = BUNDLED_THEMES["catppuccin-mocha"] as TermoraTheme;
-const nordTheme = BUNDLED_THEMES.nord as TermoraTheme;
+const catppuccinMocha = BUNDLED_THEMES["catppuccin-mocha"] as LastermTheme;
+const nordTheme = BUNDLED_THEMES.nord as LastermTheme;
 
 // Mock document.documentElement.style.setProperty
 const setPropertyMock = vi.fn();
@@ -426,7 +426,7 @@ describe("useThemeStore", () => {
 
 		it("applyTheme sets --nt-hover for light theme", () => {
 			const store = useThemeStore();
-			const lightTheme = BUNDLED_THEMES["one-half-light"] as TermoraTheme;
+			const lightTheme = BUNDLED_THEMES["one-half-light"] as LastermTheme;
 			store.applyTheme(lightTheme);
 
 			expect(setPropertyMock).toHaveBeenCalledWith("--nt-hover", "rgba(0, 0, 0, 0.06)");

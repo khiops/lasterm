@@ -1,12 +1,12 @@
 /**
  * sea-agent-resolver.ts
  *
- * Resolves the path to the termora-agent binary when the hub is running as a
+ * Resolves the path to the lasterm-agent binary when the hub is running as a
  * Node Single Executable Application (SEA).
  *
  * In normal Node.js mode the hub spawns the agent via its compiled JS entry
  * point (packages/agent/dist/main.js). In SEA mode that source tree is not
- * present, so we look for a co-located termora-agent binary instead.
+ * present, so we look for a co-located lasterm-agent binary instead.
  *
  * Search order:
  *   1. Same directory as the hub binary (process.execPath)
@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 const EXE_EXT = process.platform === "win32" ? ".exe" : "";
 
 /** Canonical agent binary name (without extension). */
-const AGENT_BINARY_NAME = `termora-agent${EXE_EXT}`;
+const AGENT_BINARY_NAME = `lasterm-agent${EXE_EXT}`;
 
 /**
  * Check whether PATH contains the given binary name.
@@ -53,7 +53,7 @@ function findInPath(binaryName: string): string | null {
 }
 
 /**
- * Resolve the absolute path to the termora-agent binary.
+ * Resolve the absolute path to the lasterm-agent binary.
  *
  * Search order:
  *   1. Same directory as the hub binary (process.execPath)

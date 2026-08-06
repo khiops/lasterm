@@ -1,6 +1,6 @@
-import type { TermoraTheme } from "../theme.js";
+import type { LastermTheme } from "../theme.js";
 
-export const solarizedLight: TermoraTheme = {
+export const solarizedLight: LastermTheme = {
 	name: "solarized-light",
 	author: "Ethan Schoonover",
 	type: "light",

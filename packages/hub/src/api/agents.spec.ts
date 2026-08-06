@@ -17,7 +17,7 @@ import type {
 	AgentFetchDoneMessage,
 	AgentFetchErrorMessage,
 	AgentFetchProgressMessage,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -29,8 +29,8 @@ import { registerAgentRoutes } from "./agents.js";
 const TEST_TOKEN = "a".repeat(64);
 const HUB_VERSION = "0.4.1";
 const HUB_PLATFORM = { os: "linux", arch: "x64" } as const satisfies HubPlatform;
-const BUNDLED_PATH = "/tmp/termora-agent-api-test";
-const DEFAULT_RELEASE_BASE_URL = "https://github.com/khiops/termora";
+const BUNDLED_PATH = "/tmp/lasterm-agent-api-test";
+const DEFAULT_RELEASE_BASE_URL = "https://github.com/khiops/lasterm";
 
 type AgentTargetEntry = {
 	readonly triple: string | null;
@@ -689,7 +689,7 @@ function targetStatus(
 }
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(tmpdir(), "termora-api-agents-"));
+	const dir = mkdtempSync(path.join(tmpdir(), "lasterm-api-agents-"));
 	chmodSync(dir, 0o700);
 	tempDirs.push(dir);
 	return dir;
@@ -772,7 +772,7 @@ function agentCachePath(
 	version: string,
 ): string {
 	const target = AGENT_TARGET_TABLE[osName][arch];
-	return path.join(cacheDir, `termora-agent-${osName}-${arch}-${version}${target.ext}`);
+	return path.join(cacheDir, `lasterm-agent-${osName}-${arch}-${version}${target.ext}`);
 }
 
 function agentAssetFetch(
@@ -796,7 +796,7 @@ function agentAssetFetch(
 function versionedAssetName(osName: AgentTargetOs, arch: AgentTargetArch, version: string): string {
 	const target = AGENT_TARGET_TABLE[osName][arch];
 	if (!target.triple) throw new Error(`unsupported test target ${osName}/${arch}`);
-	return `termora-agent-${target.triple}-${version}${target.ext}`;
+	return `lasterm-agent-${target.triple}-${version}${target.ext}`;
 }
 
 function versionedAssetUrl(osName: AgentTargetOs, arch: AgentTargetArch, version: string): string {
@@ -852,7 +852,7 @@ function buildAgentImportMultipart(args: {
 	}>;
 	readonly binaryFirst?: boolean;
 }): { readonly payload: Buffer; readonly headers: Record<string, string> } {
-	const boundary = `----TermoraAgentImport${Math.random().toString(16).slice(2)}`;
+	const boundary = `----LastermAgentImport${Math.random().toString(16).slice(2)}`;
 	const parts: Buffer[] = [];
 	const pushFields = () => {
 		for (const [name, value] of Object.entries(args.fields)) {
@@ -864,11 +864,11 @@ function buildAgentImportMultipart(args: {
 		}
 	};
 	if (args.binaryFirst) {
-		pushFilePart(parts, boundary, "binary", "termora-agent", args.binary);
+		pushFilePart(parts, boundary, "binary", "lasterm-agent", args.binary);
 		pushFields();
 	} else {
 		pushFields();
-		pushFilePart(parts, boundary, "binary", "termora-agent", args.binary);
+		pushFilePart(parts, boundary, "binary", "lasterm-agent", args.binary);
 	}
 	pushFilePart(parts, boundary, "manifest", "SHA256SUMS.txt", args.manifest);
 	for (const extra of args.extraFiles ?? []) {

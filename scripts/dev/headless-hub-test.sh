@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated Termora headless local-spawn harness.
+# Isolated Lasterm headless local-spawn harness.
 # Lifecycle uses PID files only; no ps/pgrep/ss/fuser probes.
 set -euo pipefail
 
@@ -11,9 +11,9 @@ export XDG_STATE_HOME="$TT/state"
 export XDG_RUNTIME_DIR="$TT/rt"
 export XDG_CONFIG_HOME="$TT/cfg"
 
-CONFIG_DIR="$XDG_CONFIG_HOME/termora"
-STATE_DIR="$XDG_STATE_HOME/termora"
-RUNTIME_DIR="$XDG_RUNTIME_DIR/termora"
+CONFIG_DIR="$XDG_CONFIG_HOME/lasterm"
+STATE_DIR="$XDG_STATE_HOME/lasterm"
+RUNTIME_DIR="$XDG_RUNTIME_DIR/lasterm"
 HUBLOG="$TT/hub.log"
 PIDF="$TT/hub.pid"
 SOCK="$RUNTIME_DIR/agent.sock"
@@ -50,7 +50,7 @@ case "${1:-}" in
 		sleep 1
 		ensure_dirs
 		write_debug_config
-		nohup bash -c 'cd "$1" && TERMORA_OPEN=0 TERMORA_PORT="$2" exec pnpm exec tsx src/main.ts' \
+		nohup bash -c 'cd "$1" && LASTERM_OPEN=0 LASTERM_PORT="$2" exec pnpm exec tsx src/main.ts' \
 			_ "$ROOT/packages/hub" "$PORT" >"$HUBLOG" 2>&1 &
 		echo $! >"$PIDF"
 		echo "[headless] hub starting pid $(<"$PIDF") on :$PORT"
@@ -72,7 +72,7 @@ case "${1:-}" in
 		;;
 	logs)
 		if [[ -f "$HUBLOG" ]]; then
-			grep -E 'termora-agent|agent-connection-manager|channel-lifecycle|spawn-handler|CHANNEL_STATE|SPAWN|hub started|error|warn' "$HUBLOG" 2>/dev/null | tail -80 || true
+			grep -E 'lasterm-agent|agent-connection-manager|channel-lifecycle|spawn-handler|CHANNEL_STATE|SPAWN|hub started|error|warn' "$HUBLOG" 2>/dev/null | tail -80 || true
 		else
 			echo "[headless] no hub log at $HUBLOG"
 		fi

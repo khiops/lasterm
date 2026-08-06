@@ -1,5 +1,5 @@
-import type { ProtocolMessage } from "@termora/shared";
-import { decodeMessage, encodeMessage } from "@termora/shared";
+import type { ProtocolMessage } from "@lasterm/shared";
+import { decodeMessage, encodeMessage } from "@lasterm/shared";
 
 type MessageListener = (msg: ProtocolMessage) => void;
 
@@ -23,7 +23,7 @@ export interface IWsClient {
 /**
  * WebSocket client for hub communication.
  * Messages are raw MessagePack (no length-prefix framing — that is TCP-only).
- * Encoding/decoding delegates to @termora/shared codec (browser-safe: no Buffer).
+ * Encoding/decoding delegates to @lasterm/shared codec (browser-safe: no Buffer).
  */
 export class WsClient implements IWsClient {
 	private ws: WebSocket | null = null;

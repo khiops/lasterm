@@ -1,4 +1,4 @@
-import type { AgentBinaryVerifyMessage } from "@termora/shared";
+import type { AgentBinaryVerifyMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IWsClient } from "../services/ws-client.js";
@@ -24,7 +24,7 @@ function makeVerifyMsg(
 		promptId: "pid-1",
 		hostId: "host-1",
 		hostname: "example.com",
-		remotePath: "/usr/bin/termora-agent",
+		remotePath: "/usr/bin/lasterm-agent",
 		remoteSha256: "abc123",
 		os: "linux",
 		arch: "x64",

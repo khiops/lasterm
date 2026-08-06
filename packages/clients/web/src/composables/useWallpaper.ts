@@ -1,4 +1,4 @@
-import type { TerminalProfile } from "@termora/shared";
+import type { TerminalProfile } from "@lasterm/shared";
 import type { CSSProperties } from "vue";
 import { computed, type Ref, ref } from "vue";
 import { assetTokenReady, namedPublicAssetUrl } from "../utils/hub-url.js";

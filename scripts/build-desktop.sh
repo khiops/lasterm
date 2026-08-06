@@ -12,11 +12,11 @@ case "$(uname -s)" in
   *)      echo "❌ Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
 
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
-TERMORA_DIST_DIR="${TERMORA_DIST_DIR:-$ROOT/dist/sea}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
+LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
 TAURI_DIR="$ROOT/packages/clients/desktop/src-tauri"
 
-echo "🔨 Building desktop (triple: $TERMORA_TARGET_TRIPLE)..."
+echo "🔨 Building desktop (triple: $LASTERM_TARGET_TRIPLE)..."
 echo ""
 
 # Step 1: Web
@@ -31,21 +31,21 @@ echo ""
 
 # Step 3: Hub (skip web, already built)
 echo "━━━ [3/4] Hub SEA ━━━"
-TERMORA_SKIP_WEB=true "$SCRIPT_DIR/build-hub.sh"
+LASTERM_SKIP_WEB=true "$SCRIPT_DIR/build-hub.sh"
 echo ""
 
 # Step 4: Place sidecars and build Tauri
 echo "━━━ [4/4] Tauri Desktop ━━━"
 
 # .sh = Linux/macOS only — no .exe extension needed
-cp "$TERMORA_DIST_DIR/termora-agent" "$TAURI_DIR/termora-agent-${TERMORA_TARGET_TRIPLE}"
-cp "$TERMORA_DIST_DIR/termora-hub" "$TAURI_DIR/termora-hub-${TERMORA_TARGET_TRIPLE}"
+cp "$LASTERM_DIST_DIR/lasterm-agent" "$TAURI_DIR/lasterm-agent-${LASTERM_TARGET_TRIPLE}"
+cp "$LASTERM_DIST_DIR/lasterm-hub" "$TAURI_DIR/lasterm-hub-${LASTERM_TARGET_TRIPLE}"
 
 echo "  → Sidecars placed in src-tauri/"
 
 cd "$ROOT"
-pnpm -F @termora/desktop tauri build \
+pnpm -F @lasterm/desktop tauri build \
   --config '{"build":{"beforeBuildCommand":""}}'
 
 echo ""
-echo "✅ Desktop built for $TERMORA_TARGET_TRIPLE"
+echo "✅ Desktop built for $LASTERM_TARGET_TRIPLE"

@@ -1,4 +1,4 @@
-import type { BellSound } from "@termora/shared";
+import type { BellSound } from "@lasterm/shared";
 import { namedPublicAssetUrl } from "../utils/hub-url.js";
 
 let audioContext: AudioContext | null = null;

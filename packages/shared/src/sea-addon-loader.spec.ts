@@ -49,7 +49,7 @@ describe("extractAddonToDir", () => {
 });
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "termora-sea-addon-"));
+	const dir = mkdtempSync(join(tmpdir(), "lasterm-sea-addon-"));
 	tempDirs.push(dir);
 	return dir;
 }

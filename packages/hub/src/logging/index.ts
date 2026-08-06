@@ -1,4 +1,4 @@
-export type { LogConfig } from "@termora/shared";
+export type { LogConfig } from "@lasterm/shared";
 export { ChannelLogger } from "./channel-logger.js";
 export { HubLogger } from "./hub-logger.js";
 export { LOG_SEVERITY, severityForLevel } from "./levels.js";

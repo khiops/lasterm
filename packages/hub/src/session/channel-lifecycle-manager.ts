@@ -18,8 +18,8 @@ import type {
 	ProtocolMessage,
 	UiAttachOkMessage,
 	UiSpawnOkMessage,
-} from "@termora/shared";
-import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@termora/shared";
+} from "@lasterm/shared";
+import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@lasterm/shared";
 import type { AgentConnection } from "./agent-connection.js";
 import {
 	clearContext,

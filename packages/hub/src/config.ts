@@ -13,7 +13,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import TOML from "@iarna/toml";
-import { edit, initSync } from "@rainbowatcher/toml-edit-js";
 import type {
 	AgentConfig,
 	AppearanceConfig,
@@ -30,7 +29,7 @@ import type {
 	TerminalProfile,
 	TitleConfig,
 	UiConfig,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import {
 	DEFAULT_AGENT_CONFIG,
 	DEFAULT_APPEARANCE,
@@ -45,7 +44,8 @@ import {
 	TERMINAL_PROFILE_KEYS,
 	UI_CONFIG_SECTIONS,
 	validateCustomCommand,
-} from "@termora/shared";
+} from "@lasterm/shared";
+import { edit, initSync } from "@rainbowatcher/toml-edit-js";
 import type { MetaDAL } from "./storage/meta.js";
 
 // Initialize toml-edit-js WASM (sync — called once at module load)
@@ -145,8 +145,8 @@ export function loadCorsOrigins(configDir: string): string[] {
 
 // ─── UI configuration ───────────────────────────────────────────────────────
 
-// UiConfig interface is now in @termora/shared — re-exported here for backward compat
-export type { UiConfig } from "@termora/shared";
+// UiConfig interface is now in @lasterm/shared — re-exported here for backward compat
+export type { UiConfig } from "@lasterm/shared";
 
 export const DEFAULT_TABS_CONFIG: TabsConfig = {
 	closeButton: true,
@@ -174,7 +174,7 @@ export const DEFAULT_TITLE_CONFIG: TitleConfig = {
 	maxLength: 50,
 	truncation: "end",
 	windowTitle: true,
-	windowFormat: "termora - {prefix}{host} - {title}",
+	windowFormat: "lasterm - {prefix}{host} - {title}",
 };
 
 export const DEFAULT_SEARCH_CONFIG: SearchConfig = {

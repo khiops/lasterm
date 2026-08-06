@@ -17,7 +17,7 @@ const port = process.argv[2] ?? "4100";
 const base = `http://127.0.0.1:${port}`;
 const authPath =
 	process.env.TT_AUTH ??
-	`${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/termora/auth.json`;
+	`${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/lasterm/auth.json`;
 const token = readToken(authPath);
 const hosts = await readHosts(base, token);
 const local = hosts.find((h) => h.type === "local") ?? hosts[0];

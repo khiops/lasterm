@@ -15,8 +15,8 @@ import type {
 	WriteForceMessage,
 	WriteGrantMessage,
 	WriteReleaseMessage,
-} from "@termora/shared";
-import { decodeMessage, encodeMessage, generateId } from "@termora/shared";
+} from "@lasterm/shared";
+import { decodeMessage, encodeMessage, generateId } from "@lasterm/shared";
 import type { Database } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import { touchToken, validateTokenRecord } from "../auth.js";

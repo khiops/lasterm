@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { LogConfig } from "@termora/shared";
+import type { LogConfig } from "@lasterm/shared";
 import { severityForLevel } from "./levels.js";
 
 const ROTATION_MAX_BYTES = 10 * 1024 * 1024; // 10 MB

@@ -95,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import { DEFAULT_CHANNEL_NAME } from '@termora/shared';
+import { DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
 import { computed, inject, onMounted, onUnmounted, ref, toRef, watch } from 'vue';
 import { useActivityTracker } from '../composables/useActivityTracker.js';
 import { playBellSound } from '../composables/useBellSound.js';
@@ -795,7 +795,7 @@ function onDragStart(event: DragEvent): void {
 	const hostId = channelsStore.activeHostId ?? null;
 
 	event.dataTransfer.setData(
-		'text/x-termora-pane',
+		'text/x-lasterm-pane',
 		JSON.stringify({
 			channelId: chId,
 			paneId: props.paneId,
@@ -803,11 +803,11 @@ function onDragStart(event: DragEvent): void {
 		}),
 	);
 
-	document.body.classList.add('termora-dragging');
+	document.body.classList.add('lasterm-dragging');
 }
 
 function onDragEnd(): void {
-	document.body.classList.remove('termora-dragging');
+	document.body.classList.remove('lasterm-dragging');
 }
 </script>
 

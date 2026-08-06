@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.1](https://github.com/khiops/termora/compare/v0.7.0...v0.7.1) (2026-08-06)
+
+
+### Documentation
+
+* say which hub a client drives, and what local means ([2eecbd5](https://github.com/khiops/termora/commit/2eecbd51818c7e6673e2dab3750cc9b17b0a6e76))
+* say why quitting kills process trees when an API already exists ([debcfe1](https://github.com/khiops/termora/commit/debcfe1d9af9b4a29dcf67db3840e227a5a0c4a3))
+* trim the process-tree rationale back under the line budget ([4eb4c21](https://github.com/khiops/termora/commit/4eb4c21f6d607be0812d5333f4d042e1c28d80df))
+
+
+### CI/CD
+
+* run the built hub before publishing it, and check what it printed ([#159](https://github.com/khiops/termora/issues/159)) ([29e9f53](https://github.com/khiops/termora/commit/29e9f53fb8df801fe6a5b8db0cf906f2f0101e88)), closes [#144](https://github.com/khiops/termora/issues/144)
+
 ## [0.7.0](https://github.com/khiops/termora/compare/v0.6.0...v0.7.0) (2026-08-04)
 
 

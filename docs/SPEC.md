@@ -777,7 +777,7 @@ CLI and UI read this file to find the hub. Deleted on clean shutdown; stale file
 
 | Package | npm name | Published? | Purpose |
 |---------|----------|-----------|---------|
-| Root | `termora` | Yes | CLI entrypoint (`npx termora`) |
+| Root | workspace root | No | CLI entrypoint, built from this repository. Not published — see #158 |
 | shared | `@termora/shared` | Yes | Types, codec, framing |
 | agent | `@termora/agent` | Yes | Remote PTY manager (installed on remotes) |
 | hub | `@termora/hub` | Yes | Local daemon (imported by root CLI) |
@@ -785,7 +785,7 @@ CLI and UI read this file to find the hub. Deleted on clean shutdown; stale file
 | desktop | `@termora/desktop` | No (P1) | Tauri desktop app |
 
 Root `termora` package is a thin CLI wrapper that depends on `@termora/hub`.
-`npx termora` launches the hub daemon. `npx @termora/agent` is available for remote install.
+The built `termora-hub` binary launches the hub daemon. The agent is a Rust binary the hub fetches from GitHub Releases and deploys over SFTP; neither is distributed through npm.
 
 ### 8.2 Directory Layout
 

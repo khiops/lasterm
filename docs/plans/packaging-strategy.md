@@ -17,7 +17,11 @@ termora has three distinct runtime components:
 - **Web UI** — Vue 3 SPA (embedded by hub as static files, or served by Vite in dev)
 
 Distribution must support two parallel channels:
-1. **npm** — full ecosystem support, every package installable via npm/npx
+1. ~~**npm** — full ecosystem support, every package installable via npm/npx~~
+   **Dropped (#158.)** The unscoped `termora` on npm belongs to an unrelated
+   project, so this channel was never available under that name; the standalone
+   binary also embeds its own Node, which removes the requirement npm would add
+   back. Every package is now marked private.
 2. **Standalone binaries** — zero-prerequisite deployment, no Node.js needed
 
 The agent binary is the highest-impact deliverable: remote machines should not require Node.js.
@@ -58,7 +62,7 @@ The agent binary is the highest-impact deliverable: remote machines should not r
 | D4 | SEA engine | Node SEA (Node 22+) | pkg (abandoned), nexe (fragile), Bun compile (no native addons) | Official Node.js feature, maintained |
 | D5 | Desktop shell | Tauri v2 | Electron (150MB), Neutralino | Lightweight (~5MB), system webview, native features |
 | D6 | Tauri sidecar | Hub binary directly (no glue) | Intermediate manager process | Tauri has native sidecar lifecycle API |
-| D7 | npm publishing | ALL packages published | Hub excluded | npm = full parallel channel for Node.js ecosystem |
+| D7 | npm publishing | ~~ALL packages published~~ — **superseded, #158** | Hub excluded | The unscoped name belongs to another project, and the binary embeds its own Node |
 | D8 | Auto-deploy agent | Hub deploys agent binary via SSH | Manual install only | Zero-setup remote machines, killer feature |
 | D9 | Remote OS detection | Host `os`/`arch` field in DB + auto-detect fallback | SSH-only detection | User knows target OS at host creation, more reliable |
 | D10 | Windows installer | NSIS .exe | .msix (requires signing cert) | No signing cert needed for MVP |
@@ -249,13 +253,15 @@ Tauri close → kill hub gracefully.
 | macOS | `.dmg` | ~60MB |
 | Linux | `.AppImage` + `.deb` | ~60MB |
 
-## npm Publishing (parallel channel)
+## npm Publishing (parallel channel) — SUPERSEDED, see #158
 
-All packages remain publishable on npm. Binary distribution does not replace npm.
+The decision below is kept as the record of what was decided; it no longer describes
+what happens. Nothing publishes to npm, every package is marked private, and a
+recursive publish releases nothing.
 
 | Package | npm name | bin | Use case |
 |---------|----------|-----|----------|
-| Root CLI | `termora` | `termora` | `npx termora` quick start |
+| Root CLI | `termora` | not published | built from this repository — npm dropped, see #158 |
 | Agent | `@termora/agent` | `termora-agent` | `npm i -g` on remote machines with Node |
 | Hub | `@termora/hub` | — | `npm i -g` for Node.js users |
 | Shared | `@termora/shared` | — | Library for integrators/plugins |

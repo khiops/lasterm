@@ -40,10 +40,10 @@ All messages (hub↔agent and hub↔UI) use the same framing:
 
 ```bash
 # Decode frames from a capture file
-npx termora decode < capture.bin
+./dist/sea/termora-hub decode < capture.bin
 
 # Pipe SSH stdio through decoder
-ssh user@host "termora-agent --stdio" | npx termora decode --hex
+ssh user@host "termora-agent --stdio" | ./dist/sea/termora-hub decode --hex
 ```
 
 ## 2. Transport Layers

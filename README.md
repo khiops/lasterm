@@ -27,13 +27,25 @@ Sessions survive client disconnects and device switches; local sessions also sur
 
 ## Quick Start
 
-Once published to npm:
+Build it from this repository:
 
 ```sh
-npx termora
+pnpm install
+./scripts/build-agent.sh        # Rust agent → dist/sea/termora-agent
+./scripts/build-hub.sh          # hub SEA    → dist/sea/termora-hub
+./dist/sea/termora-hub start
 ```
 
+Both binaries, in that order: `build-hub.sh` does not build the agent, and the hub
+resolves it next to its own executable. Without it the UI serves but the first local
+terminal fails. On Windows use `scripts\build-agent.ps1` and `scripts\build-hub.ps1`.
+
 Open `http://localhost:4100` in your browser.
+
+There is no `npx termora`, and there will not be one under that name: the unscoped
+`termora` on npm belongs to an unrelated project. The hub ships as a single
+executable that embeds its own Node, so npm would add a runtime requirement it
+exists to remove. Packaged builds land in the [releases](../../releases).
 
 ---
 
@@ -79,7 +91,7 @@ over SFTP, so the remote host never needs outbound internet. Pre-populate with `
 | `packages/hub` | `@termora/hub` | Fastify daemon — session manager, client manager, storage, SSH transport |
 | `packages/clients/web` | `@termora/web` | Vue 3 PWA — embedded in hub at build time, not published separately |
 | `packages/clients/desktop` | `@termora/desktop` | Tauri desktop app wrapping the hub as a sidecar (P1) |
-| root | `termora` | CLI entrypoint — thin wrapper around `@termora/hub` (`npx termora`) |
+| root | workspace root | CLI entrypoint — thin wrapper around `@termora/hub`. Not published |
 
 ---
 

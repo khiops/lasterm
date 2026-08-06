@@ -481,7 +481,7 @@ Remote reboot scenario:
 ### User Flows
 
 **Flow 1 — First launch (onboarding):**
-1. `npx termora` → hub starts → opens http://localhost:4100
+1. `termora-hub start` → hub starts → opens http://localhost:4100  *(originally written as `npx termora`; npm was dropped as a channel)*
 2. Local host (🟦 L) auto-created in host rail
 3. Default local channel #bash auto-opened in main area
 4. User types commands immediately — no setup needed

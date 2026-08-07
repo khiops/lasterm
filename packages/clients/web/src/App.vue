@@ -765,8 +765,17 @@ onMounted(async () => {
 	// hubBaseUrl() / hubWsUrl() use the correct port (zero_conf may pick != 4100).
 	try {
 		await initHubPort();
-	} catch {
-		// Not in Tauri context — ignore
+	} catch (error) {
+		// Outside the desktop runtime there is nothing to resolve and this cannot
+		// throw. Inside it, the shell resolves the port before showing this window
+		// and stops with a dialog when it cannot, so reaching here means the shell
+		// itself is broken. Logging loudly is the right response: throwing would
+		// leave an unhandled rejection and a spinner, and the layer that can explain
+		// the failure to the user has already had its turn.
+		console.error(
+			'[App] the desktop shell did not report a hub port; nothing will connect:',
+			error,
+		);
 	}
 
 	desktopVersion.value = await loadDesktopVersion();

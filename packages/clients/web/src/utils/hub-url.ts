@@ -21,32 +21,74 @@ export function isTauriRuntime(): boolean {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/**
+ * The hub's port, resolved once by the desktop shell and cached here.
+ *
+ * There is no default. A default here would be a second copy of a decision the
+ * shell already made — and the wrong copy: guessing 4100 when the real port is
+ * unknown is how a client comes to send its bearer token to whatever holds that
+ * port. Outside the desktop runtime there is no port to resolve at all, since the
+ * page is served by the hub and every URL stays relative.
+ */
 async function getHubPort(): Promise<number> {
 	if (_cachedPort !== null) return _cachedPort;
-	if (!isTauriRuntime()) return 4100;
+	if (!isTauriRuntime()) {
+		throw new Error("the hub port is only resolvable inside the desktop runtime");
+	}
 	const { invoke } = await import("@tauri-apps/api/core");
-	_cachedPort = await invoke<number>("get_hub_port");
+	const port = await invoke<number>("get_hub_port");
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		throw new Error(`the desktop shell reported an unusable hub port: ${port}`);
+	}
+	_cachedPort = port;
 	return _cachedPort;
 }
 
+/**
+ * The resolved port, or a failure naming what was skipped.
+ *
+ * Every caller of the two URL builders below runs after `initHubPort`, so an
+ * unresolved port is a missing await rather than a state to paper over. Saying so
+ * is the difference between a caller that gets fixed and a token sent to a port
+ * nobody chose.
+ */
+function requireResolvedPort(): number {
+	if (_cachedPort === null) {
+		throw new Error("hub port used before initHubPort() resolved it");
+	}
+	return _cachedPort;
+}
+
+// The literal address, never the name: the hub binds `127.0.0.1`, and `localhost`
+// can resolve to `::1` first. Another local process may hold `::1:<port>` while our
+// hub owns `127.0.0.1:<port>`, and this client would then send its bearer token
+// there. `localOrigin` below keeps the name because it serves the browser case,
+// where the origin is the page's own and no port of ours is involved.
 export function hubBaseUrl(): string {
 	if (isTauriRuntime()) {
-		return `http://localhost:${_cachedPort ?? 4100}`;
+		return `http://127.0.0.1:${requireResolvedPort()}`;
 	}
 	return "";
 }
 
 export function hubWsUrl(): string {
 	if (isTauriRuntime()) {
-		return `ws://localhost:${_cachedPort ?? 4100}`;
+		return `ws://127.0.0.1:${requireResolvedPort()}`;
 	}
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	return `${protocol}//${window.location.host}`;
 }
 
-/** Call once at app startup to cache the hub port from the Tauri invoke. */
+/**
+ * Call once at app startup. In the desktop runtime this caches the port the shell
+ * resolved; in a browser there is no port to resolve, and readiness means exactly
+ * that — nothing is pending. Reporting "not ready" there would stall every consumer
+ * watching `hubPortReady` for a value that is never coming.
+ */
 export async function initHubPort(): Promise<void> {
-	await getHubPort();
+	if (isTauriRuntime()) {
+		await getHubPort();
+	}
 	_hubPortReady.value = true;
 }
 
@@ -72,6 +114,16 @@ export function clearAssetToken(): void {
 export function setAssetTokenForTests(token: string | null): void {
 	_assetToken = token;
 	_assetTokenReady.value = token !== null;
+}
+
+/**
+ * Stands in for the desktop shell's resolution, so a test can exercise the URL
+ * builders. There is no production path that sets the port without asking the
+ * shell, which is the property the builders' failure protects.
+ */
+export function setHubPortForTests(port: number | null): void {
+	_cachedPort = port;
+	_hubPortReady.value = port !== null;
 }
 
 function localOrigin(): string {

@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "lasterm-desktop"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "dirs",
  "reqwest 0.12.28",

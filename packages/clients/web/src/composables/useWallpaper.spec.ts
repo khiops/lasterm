@@ -1,7 +1,7 @@
 import type { TerminalProfile } from "@lasterm/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { nextTick, ref } from "vue";
-import { setAssetTokenForTests } from "../utils/hub-url.js";
+import { setAssetTokenForTests, setHubPortForTests } from "../utils/hub-url.js";
 import { useWallpaper } from "./useWallpaper.js";
 
 function makeProfile(overrides: Partial<TerminalProfile> = {}): TerminalProfile {
@@ -24,6 +24,7 @@ describe("useWallpaper", () => {
 	afterEach(() => {
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 		setAssetTokenForTests(null);
+		setHubPortForTests(null);
 	});
 
 	describe("wallpaperStyle", () => {
@@ -134,6 +135,9 @@ describe("useWallpaper", () => {
 				value: {},
 				configurable: true,
 			});
+			// The desktop shell resolves the port before any URL is built; there is no
+			// default to fall back on, so a test that builds one must resolve it too.
+			setHubPortForTests(4100);
 			const profile = ref(makeProfile({ wallpaper: "desktop image.jpg" }));
 
 			// Act
@@ -141,7 +145,7 @@ describe("useWallpaper", () => {
 
 			// Assert
 			expect(wallpaperStyle.value?.backgroundImage).toContain(
-				`url(http://localhost:4100/public/wallpapers/${encodeURIComponent("desktop image.jpg")}`,
+				`url(http://127.0.0.1:4100/public/wallpapers/${encodeURIComponent("desktop image.jpg")}`,
 			);
 		});
 	});

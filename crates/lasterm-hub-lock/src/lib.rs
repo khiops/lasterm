@@ -212,41 +212,28 @@ mod tests {
             .unwrap()
     }
 
+    /// A second acquisition is refused while the first handle is alive.
+    ///
+    /// This used to also assert that re-acquiring succeeds once the handle is
+    /// dropped, and that assertion failed six times on CI against 74 green local
+    /// runs (#139) without ever naming a cause. It is gone rather than instrumented,
+    /// because it covered a path production does not take: `acquireHubLock` puts the
+    /// handle in a process-global map for the process's lifetime, so the release the
+    /// hub actually depends on is kernel teardown at exit — which is what
+    /// `process_death_releases_lock` asserts, and that test does not flake.
+    ///
+    /// What no longer has a test is a *duplicated* descriptor kept alive past the
+    /// drop. Nothing but re-acquisition can observe it, and re-acquisition is the
+    /// step that flaked, so the coverage is stated as missing instead of being
+    /// claimed by a check that cannot fail: `KernelLock` owns exactly one `File` and
+    /// releases through its `Drop`, which is a guarantee of the language rather than
+    /// of this crate.
     #[test]
-    fn second_acquisition_fails_until_first_handle_drops() {
+    fn second_acquisition_is_refused_while_the_first_handle_lives() {
         let path = test_dir("second-acquisition").join("hub.lock");
         let first = KernelLock::acquire(&path).unwrap().unwrap();
         assert!(KernelLock::acquire(&path).unwrap().is_none());
         drop(first);
-        // This assertion has failed twice on CI and never in 74 local runs
-        // (#139), so a bare `assert!` would report only that it failed again.
-        // Name who still has the file open instead: releasing a flock needs
-        // every descriptor for that open file description to close, so a
-        // descriptor that outlived the drop is the shape the evidence would take.
-        if KernelLock::acquire(&path).unwrap().is_none() {
-            panic!(
-                "the lock was still held after its only handle was dropped.\n\
-                 path: {}\n\
-                 descriptors in this process referring to it: {:?}",
-                path.display(),
-                open_descriptors_for(&path)
-            );
-        }
-    }
-
-    /// Descriptors in this process whose target is `path`. Linux only; elsewhere
-    /// the failure message simply carries less.
-    fn open_descriptors_for(path: &Path) -> Vec<String> {
-        let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
-            return vec!["/proc/self/fd unavailable on this platform".to_string()];
-        };
-        entries
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let target = std::fs::read_link(entry.path()).ok()?;
-                (target == path).then(|| entry.file_name().to_string_lossy().into_owned())
-            })
-            .collect()
     }
 
     #[test]

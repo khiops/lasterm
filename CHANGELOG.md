@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0](https://github.com/khiops/lasterm/compare/v0.7.0...v0.8.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* the executables, CLI command, environment variables, HTTP headers, application identifier, package scope and the config and state directories are all renamed. An existing installation is detected and refused rather than silently presented as empty.
+
+### Bug Fixes
+
+* **root:** take the published fixes for four advisories, on the supported majors ([f384aa7](https://github.com/khiops/lasterm/commit/f384aa7ec766c489a54030d823d6f6c3cc222176))
+
+
+### Refactoring
+
+* rename termora to lasterm, and refuse to start beside the old install ([117d9dc](https://github.com/khiops/lasterm/commit/117d9dcb43d25364c6c56db7c347a2c44a3afd0e)), closes [#166](https://github.com/khiops/lasterm/issues/166) [#167](https://github.com/khiops/lasterm/issues/167) [#158](https://github.com/khiops/lasterm/issues/158)
+
+
+### Documentation
+
+* say which hub a client drives, and what local means ([2eecbd5](https://github.com/khiops/lasterm/commit/2eecbd51818c7e6673e2dab3750cc9b17b0a6e76))
+* say why quitting kills process trees when an API already exists ([debcfe1](https://github.com/khiops/lasterm/commit/debcfe1d9af9b4a29dcf67db3840e227a5a0c4a3))
+* trim the process-tree rationale back under the line budget ([4eb4c21](https://github.com/khiops/lasterm/commit/4eb4c21f6d607be0812d5333f4d042e1c28d80df))
+
+
+### CI/CD
+
+* run the built hub before publishing it, and check what it printed ([#159](https://github.com/khiops/lasterm/issues/159)) ([29e9f53](https://github.com/khiops/lasterm/commit/29e9f53fb8df801fe6a5b8db0cf906f2f0101e88)), closes [#144](https://github.com/khiops/lasterm/issues/144)
+
 ## [0.7.0](https://github.com/khiops/lasterm/compare/v0.6.0...v0.7.0) (2026-08-04)
 
 

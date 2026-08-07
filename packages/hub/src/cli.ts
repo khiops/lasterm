@@ -20,7 +20,6 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
@@ -31,6 +30,7 @@ import {
 	readDaemonLogTail,
 	waitForDaemonReady,
 } from "./daemon-launch.js";
+import { getConfigDir, getStateDir } from "./platform-paths.js";
 import { detectSea } from "./sea-addon-loader.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -56,21 +56,9 @@ import {
 	getHubPlatform,
 } from "./session/agent-status.js";
 
+export { getConfigDir, getStateDir } from "./platform-paths.js";
+
 // ─── Platform paths ────────────────────────────────────────────────────────────
-
-export function getStateDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", "lasterm");
-	}
-	return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
-}
-
-export function getConfigDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.APPDATA ?? "", "lasterm");
-	}
-	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
-}
 
 // ─── Runtime state ─────────────────────────────────────────────────────────────
 
@@ -92,8 +80,8 @@ export type RuntimeLoadResult =
 	| { kind: "unreadable"; error: unknown };
 
 /** Read absence is distinct from every failure to read or parse the record. */
-export function loadRuntime(): RuntimeLoadResult {
-	const p = join(getStateDir(), "runtime.json");
+export function loadRuntime(stateDir = getStateDir()): RuntimeLoadResult {
+	const p = join(stateDir, "runtime.json");
 	try {
 		return { kind: "present", runtime: JSON.parse(readFileSync(p, "utf-8")) as RuntimeInfo };
 	} catch (error) {
@@ -102,8 +90,7 @@ export function loadRuntime(): RuntimeLoadResult {
 	}
 }
 
-export function persistRuntime(info: RuntimeInfo): void {
-	const stateDir = getStateDir();
+export function persistRuntime(info: RuntimeInfo, stateDir = getStateDir()): void {
 	mkdirSync(stateDir, { recursive: true });
 	const runtimePath = join(stateDir, "runtime.json");
 	const tempPath = createRuntimeTempPath(runtimePath);
@@ -146,9 +133,9 @@ export function runtimeMatches(expected: RuntimeInfo, current: RuntimeInfo): boo
 }
 
 /** Remove the record only if a fresh read still identifies this runtime. */
-export function deleteRuntime(expected: RuntimeInfo): boolean {
-	const p = join(getStateDir(), "runtime.json");
-	const current = loadRuntime();
+export function deleteRuntime(expected: RuntimeInfo, stateDir = getStateDir()): boolean {
+	const p = join(stateDir, "runtime.json");
+	const current = loadRuntime(stateDir);
 	if (current.kind !== "present" || !runtimeMatches(expected, current.runtime)) return false;
 	rmSync(p);
 	return true;

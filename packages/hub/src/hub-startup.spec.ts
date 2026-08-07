@@ -10,6 +10,8 @@ describe("startHub refuses beside a previous installation", () => {
 	it("throws instead of constructing, and takes no authority on the way out", async () => {
 		const acquireHubLock = vi.fn();
 		const getStateDir = vi.fn(() => "/nonexistent/state");
+		const getConfigDir = vi.fn(() => "/nonexistent/config");
+		const describePreviousInstallation = vi.fn(() => "Found a Termora installation.");
 		const openDatabases = vi.fn();
 		const createServer = vi.fn();
 
@@ -17,19 +19,26 @@ describe("startHub refuses beside a previous installation", () => {
 			startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => "Found a Termora installation.",
+					describePreviousInstallation,
 					acquireHubLock,
 					getStateDir,
+					getConfigDir,
 					openDatabases,
 					createServer,
 				},
 			),
 		).rejects.toThrow(PreviousInstallationError);
 
-		// The whole point of the ordering: nothing was claimed, opened or created.
+		// The whole point of the ordering: roots are resolved, but nothing is
+		// claimed, opened or created.
 		// If the check ever moves below the lock, this is what notices.
 		expect(acquireHubLock).not.toHaveBeenCalled();
-		expect(getStateDir).not.toHaveBeenCalled();
+		expect(getStateDir).toHaveBeenCalledTimes(1);
+		expect(getConfigDir).toHaveBeenCalledTimes(1);
+		expect(describePreviousInstallation).toHaveBeenCalledWith({
+			configDir: "/nonexistent/config",
+			stateDir: "/nonexistent/state",
+		});
 		expect(openDatabases).not.toHaveBeenCalled();
 		expect(createServer).not.toHaveBeenCalled();
 	});
@@ -41,11 +50,29 @@ describe("startHub refuses beside a previous installation", () => {
 		).rejects.toThrow(description);
 	});
 
-	it("consults the probe before anything else on every call", async () => {
+	it("consults the probe after resolving roots on every call", async () => {
+		const getStateDir = vi.fn(() => "/nonexistent/state");
+		const getConfigDir = vi.fn(() => "/nonexistent/config");
 		const describePreviousInstallation = vi.fn(() => "Found a Termora installation.");
-		await expect(startHub({ port: 4100 }, { describePreviousInstallation })).rejects.toThrow(
-			PreviousInstallationError,
-		);
+		await expect(
+			startHub({ port: 4100 }, { describePreviousInstallation, getConfigDir, getStateDir }),
+		).rejects.toThrow(PreviousInstallationError);
+		expect(getStateDir).toHaveBeenCalledTimes(1);
+		expect(getConfigDir).toHaveBeenCalledTimes(1);
 		expect(describePreviousInstallation).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports the absolute-path error before probing a previous installation", async () => {
+		const originalPlatform = process.platform;
+		const originalLocalAppData = process.env.LOCALAPPDATA;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		delete process.env.LOCALAPPDATA;
+		try {
+			await expect(startHub({ port: 4100 })).rejects.toThrow(/LOCALAPPDATA.*win32/);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+			else process.env.LOCALAPPDATA = originalLocalAppData;
+		}
 	});
 });

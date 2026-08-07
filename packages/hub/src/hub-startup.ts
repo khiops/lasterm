@@ -2,18 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { initAuth } from "./auth.js";
-import {
-	deleteRuntime,
-	getConfigDir,
-	getStateDir,
-	persistRuntime,
-	type RuntimeInfo,
-} from "./cli.js";
+import { deleteRuntime, persistRuntime, type RuntimeInfo } from "./cli.js";
 import { ConfigResolver } from "./config.js";
 import { acquireHubLock } from "./hub-lock.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
 import { openBrowser } from "./open-browser.js";
+import { getConfigDir, getStateDir } from "./platform-paths.js";
 import {
 	describePreviousInstallation,
 	PreviousInstallationError,
@@ -87,15 +82,15 @@ export async function startHub(
 	overrides: Partial<HubStartupDependencies> = {},
 ): Promise<void> {
 	const dependencies = { ...defaultDependencies, ...overrides };
-	// Before a directory is created, a port is bound or the lock is taken. The two
+	const stateDir = dependencies.getStateDir();
+	const configDir = dependencies.getConfigDir();
+	// Resolve the roots before the previous-installation probe, but before a
+	// directory is created, a port is bound or the lock is taken. The two
 	// generations share no lock, so this is the only thing standing between them.
-	const previous = dependencies.describePreviousInstallation();
+	const previous = dependencies.describePreviousInstallation({ configDir, stateDir });
 	if (previous !== undefined) throw new PreviousInstallationError(previous);
 
-	const stateDir = dependencies.getStateDir();
 	dependencies.acquireHubLock(stateDir);
-
-	const configDir = dependencies.getConfigDir();
 	mkdirSync(configDir, { recursive: true });
 	mkdirSync(stateDir, { recursive: true });
 
@@ -121,10 +116,17 @@ export async function startHub(
 		dbManager = databases;
 		const quit = createQuitLifecycle(() => {
 			if (!server || !runtime) throw new Error("hub shutdown requested before startup completed");
-			return { server, dbManager: databases, runtime, deleteRuntime: dependencies.deleteRuntime };
+			return {
+				server,
+				dbManager: databases,
+				runtime,
+				deleteRuntime: (record) => dependencies.deleteRuntime(record, stateDir),
+			};
 		});
 		server = await dependencies.createServer({
 			port: options.port,
+			configDir,
+			stateDir,
 			authToken,
 			ownerToken,
 			dbManager: databases,
@@ -143,7 +145,7 @@ export async function startHub(
 			instanceId: randomUUID(),
 			ownerToken,
 		};
-		dependencies.persistRuntime(runtime);
+		dependencies.persistRuntime(runtime, stateDir);
 		runtimePublished = true;
 
 		hubLogger?.log("info", "hub started", { port: actualPort, address, configDir });
@@ -186,7 +188,7 @@ export async function startHub(
 		}
 		if (runtimePublished && runtime) {
 			try {
-				dependencies.deleteRuntime(runtime);
+				dependencies.deleteRuntime(runtime, stateDir);
 			} catch {
 				// Preserve the startup error; the lock still prevents a second hub.
 			}

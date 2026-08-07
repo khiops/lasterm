@@ -1,6 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ─── The installation this one replaced ────────────────────────────────────────
 //
@@ -37,21 +36,8 @@ export class PreviousInstallationError extends Error {
 	}
 }
 
-function previousStateDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", PREVIOUS_NAME);
-	}
-	return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), PREVIOUS_NAME);
-}
-
-function previousConfigDir(): string {
-	if (process.platform === "win32") {
-		// `APPDATA` first, then `LOCALAPPDATA`, matching how the previous generation's
-		// agent resolved its own config directory. Reading only `APPDATA` would yield a
-		// relative path when it is unset, and miss a real `%LOCALAPPDATA%\termora`.
-		return join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? "", PREVIOUS_NAME);
-	}
-	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), PREVIOUS_NAME);
+function previousDirectory(currentDirectory: string): string {
+	return join(dirname(currentDirectory), PREVIOUS_NAME);
 }
 
 type Presence = "present" | "absent" | { readonly undecidable: string };
@@ -106,9 +92,15 @@ function previousRecordedPid(stateDir: string): number | undefined {
  * Describe a previous-generation installation, or undefined when none is visible
  * from this process. Exported for tests; `startHub` refuses on any description.
  */
-export function describePreviousInstallation(): string | undefined {
-	const config = previousConfigDir();
-	const state = previousStateDir();
+export function describePreviousInstallation({
+	configDir,
+	stateDir,
+}: {
+	readonly configDir: string;
+	readonly stateDir: string;
+}): string | undefined {
+	const config = previousDirectory(configDir);
+	const state = previousDirectory(stateDir);
 	const found: string[] = [];
 
 	for (const [dir, holds] of [

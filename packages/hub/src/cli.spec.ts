@@ -684,6 +684,28 @@ describe("cmdAgentImport", () => {
 });
 
 describe("path helpers", () => {
+	const originalPlatform = process.platform;
+
+	afterEach(() => {
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+	});
+
+	function setPlatform(platform: NodeJS.Platform): void {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+	}
+
+	function withEnvironment<T>(name: string, value: string | undefined, callback: () => T): T {
+		const original = process.env[name];
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+		try {
+			return callback();
+		} finally {
+			if (original === undefined) delete process.env[name];
+			else process.env[name] = original;
+		}
+	}
+
 	it("getStateDir returns a non-empty string", () => {
 		expect(getStateDir().length).toBeGreaterThan(0);
 		expect(getStateDir()).toContain("lasterm");
@@ -694,11 +716,81 @@ describe("path helpers", () => {
 		expect(getConfigDir()).toContain("lasterm");
 	});
 
+	it("throws on Windows when LOCALAPPDATA or APPDATA is unset", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", undefined, () => {
+			expect(() => getStateDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+		withEnvironment("APPDATA", undefined, () => {
+			expect(() => getConfigDir()).toThrow(/APPDATA.*win32/);
+		});
+	});
+
+	it("uses absolute Windows state and config directories", () => {
+		const root = "C:\\lasterm-path-helper";
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", root, () => {
+			expect(getStateDir()).toBe(path.join(root, "lasterm"));
+		});
+		withEnvironment("APPDATA", root, () => {
+			expect(getConfigDir()).toBe(path.join(root, "lasterm"));
+		});
+	});
+
+	it("throws on Windows when LOCALAPPDATA or APPDATA is relative", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", "relative-state", () => {
+			expect(() => getStateDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+		withEnvironment("APPDATA", "relative-config", () => {
+			expect(() => getConfigDir()).toThrow(/APPDATA.*win32/);
+		});
+	});
+
+	it("rejects drive-relative and UNC Windows roots", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", "\\state", () => {
+			expect(() => getStateDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+		withEnvironment("APPDATA", "\\\\server\\share", () => {
+			expect(() => getConfigDir()).toThrow(/APPDATA.*win32/);
+		});
+	});
+
+	it("throws when XDG state or config directories are relative", () => {
+		setPlatform("linux");
+		withEnvironment("XDG_STATE_HOME", "relative-state", () => {
+			expect(() => getStateDir()).toThrow(/XDG_STATE_HOME.*linux/);
+		});
+		withEnvironment("XDG_CONFIG_HOME", "relative-config", () => {
+			expect(() => getConfigDir()).toThrow(/XDG_CONFIG_HOME.*linux/);
+		});
+	});
+
+	it("keeps homedir-based paths when XDG directories are unset", () => {
+		setPlatform("linux");
+		withEnvironment("XDG_STATE_HOME", undefined, () => {
+			expect(getStateDir()).toBe(path.join(os.homedir(), ".local", "state", "lasterm"));
+		});
+		withEnvironment("XDG_CONFIG_HOME", undefined, () => {
+			expect(getConfigDir()).toBe(path.join(os.homedir(), ".config", "lasterm"));
+		});
+	});
+
+	it("keeps homedir-based paths when XDG directories are empty", () => {
+		setPlatform("linux");
+		withEnvironment("XDG_STATE_HOME", "", () => {
+			expect(getStateDir()).toBe(path.join(os.homedir(), ".local", "state", "lasterm"));
+		});
+		withEnvironment("XDG_CONFIG_HOME", "", () => {
+			expect(getConfigDir()).toBe(path.join(os.homedir(), ".config", "lasterm"));
+		});
+	});
+
 	it.skipIf(process.platform === "win32")("getStateDir uses XDG_STATE_HOME when set", () => {
-		const orig = process.env.XDG_STATE_HOME;
-		process.env.XDG_STATE_HOME = "/tmp/xdg-state";
-		expect(getStateDir()).toBe("/tmp/xdg-state/lasterm");
-		process.env.XDG_STATE_HOME = orig;
+		withEnvironment("XDG_STATE_HOME", "/tmp/xdg-state", () => {
+			expect(getStateDir()).toBe("/tmp/xdg-state/lasterm");
+		});
 	});
 
 	// The rename moved every namespace at once, so a Termora install and this one
@@ -725,13 +817,17 @@ describe("path helpers", () => {
 			rmSync(root, { recursive: true, force: true });
 		});
 
+		function describePrevious(): string | undefined {
+			return describePreviousInstallation({ configDir: getConfigDir(), stateDir: getStateDir() });
+		}
+
 		it("says nothing when there is no previous installation", () => {
-			expect(describePreviousInstallation()).toBeUndefined();
+			expect(describePrevious()).toBeUndefined();
 		});
 
 		it("names a previous config directory and refuses", () => {
 			mkdirSync(path.join(root, "config", "termora"), { recursive: true });
-			const message = describePreviousInstallation();
+			const message = describePrevious();
 			expect(message).toContain(path.join(root, "config", "termora"));
 			expect(message).toContain("Refusing to start");
 			expect(message).toContain("auth token");
@@ -739,7 +835,7 @@ describe("path helpers", () => {
 
 		it("names a previous state directory", () => {
 			mkdirSync(path.join(root, "state", "termora"), { recursive: true });
-			expect(describePreviousInstallation()).toContain(path.join(root, "state", "termora"));
+			expect(describePrevious()).toContain(path.join(root, "state", "termora"));
 		});
 
 		it("reports the recorded pid as in use, and claims no more than that", () => {
@@ -749,7 +845,7 @@ describe("path helpers", () => {
 				path.join(stateDir, "runtime.json"),
 				JSON.stringify({ pid: process.pid, port: 4100 }),
 			);
-			const message = describePreviousInstallation();
+			const message = describePrevious();
 			expect(message).toContain(`pid ${process.pid}`);
 			// The record is an ordinary file in a directory the old hub owned, so a
 			// stale or edited one can name any live pid. Liveness is all the probe
@@ -766,7 +862,7 @@ describe("path helpers", () => {
 			const stateDir = path.join(root, "state", "termora");
 			mkdirSync(stateDir, { recursive: true });
 			writeFileSync(path.join(stateDir, "runtime.json"), JSON.stringify({ pid, port: 4100 }));
-			const message = describePreviousInstallation();
+			const message = describePrevious();
 			expect(message).toContain(stateDir);
 			// `process.kill` accepts 0 and negatives and aims at whole groups, so an
 			// unvalidated record turns a liveness probe into a broadcast.
@@ -780,7 +876,7 @@ describe("path helpers", () => {
 			// for it — turning a permission error into permission to run.
 			chmodSync(path.join(root, "config"), 0o000);
 			try {
-				const message = describePreviousInstallation();
+				const message = describePrevious();
 				expect(message).toBeDefined();
 				expect(message).toContain("cannot be examined");
 			} finally {
@@ -797,7 +893,7 @@ describe("path helpers", () => {
 				path.join(stateDir, "runtime.json"),
 				JSON.stringify({ pid: 2 ** 30, port: 4100 }),
 			);
-			const message = describePreviousInstallation();
+			const message = describePrevious();
 			expect(message).toContain(stateDir);
 			expect(message).not.toContain("is running");
 		});
@@ -806,16 +902,24 @@ describe("path helpers", () => {
 			const configDir = path.join(root, "config", "termora");
 			mkdirSync(configDir, { recursive: true });
 			writeFileSync(path.join(configDir, "config.toml"), "port = 4100\n");
-			describePreviousInstallation();
+			describePrevious();
 			expect(existsSync(path.join(configDir, "config.toml"))).toBe(true);
 		});
 	});
 
 	it.skipIf(process.platform === "win32")("getConfigDir uses XDG_CONFIG_HOME when set", () => {
-		const orig = process.env.XDG_CONFIG_HOME;
-		process.env.XDG_CONFIG_HOME = "/tmp/xdg-cfg";
-		expect(getConfigDir()).toBe("/tmp/xdg-cfg/lasterm");
-		process.env.XDG_CONFIG_HOME = orig;
+		withEnvironment("XDG_CONFIG_HOME", "/tmp/xdg-cfg", () => {
+			expect(getConfigDir()).toBe("/tmp/xdg-cfg/lasterm");
+		});
+	});
+
+	it.skipIf(process.platform === "win32")("keeps default roots after XDG override tests", () => {
+		withEnvironment("XDG_STATE_HOME", undefined, () => {
+			expect(getStateDir()).toBe(path.join(os.homedir(), ".local", "state", "lasterm"));
+		});
+		withEnvironment("XDG_CONFIG_HOME", undefined, () => {
+			expect(getConfigDir()).toBe(path.join(os.homedir(), ".config", "lasterm"));
+		});
 	});
 });
 

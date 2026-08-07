@@ -230,6 +230,8 @@ export interface SharedSessionContext {
 	chunker: OutputChunker;
 	/** Config */
 	agentConfig: AgentConfig;
+	binaryCache: string;
+	stateDir: string;
 	configResolver: ConfigResolver | null;
 	/** Per-channel logger registry */
 	loggerRegistry: import("../logging/index.js").LoggerRegistry | null;

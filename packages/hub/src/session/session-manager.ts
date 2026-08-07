@@ -34,6 +34,7 @@ import { DEFAULT_AGENT_CONFIG, generateId, validateCustomCommand } from "@laster
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { LoggerRegistry } from "../logging/index.js";
+import { getStateDir } from "../platform-paths.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
@@ -112,6 +113,8 @@ export class SessionManager {
 		hubLogger?: HubLogger,
 		loggerRegistry?: LoggerRegistry,
 		_logsDir?: string,
+		binaryCache = getBinaryCacheDir(),
+		stateDir = getStateDir(),
 	) {
 		const metaDal = new MetaDAL(dbManager.meta);
 		this.metaDal = metaDal;
@@ -179,6 +182,8 @@ export class SessionManager {
 			loggerRegistry: loggerRegistry ?? null,
 			hubLogger: hubLogger ?? null,
 			primaryToken: null,
+			binaryCache,
+			stateDir,
 		};
 		this.ctx = ctx;
 
@@ -490,7 +495,7 @@ export class SessionManager {
 		const sshHostname = host.sshHost?.includes("@")
 			? (host.sshHost.split("@")[1] ?? host.sshHost)
 			: (host.sshHost ?? host.label);
-		const binaryCache = getBinaryCacheDir();
+		const binaryCache = this.ctx.binaryCache;
 		const pinnedSha256 = this.ctx.metaDal.getHostAgentSha256(hostId);
 		const sessionTrustedAgentSha = this.ctx.trustedAgentSha256.get(hostId);
 		return {

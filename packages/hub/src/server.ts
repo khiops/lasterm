@@ -24,7 +24,6 @@ import { registerWallpaperRoutes } from "./api/wallpapers.js";
 import { getBootAssetToken, requestHasValidAssetToken } from "./asset-token.js";
 import { touchToken, upsertPrimaryToken, validateTokenRecord } from "./auth.js";
 import { BUILD_HASH, HUB_VERSION } from "./build-version.js";
-import { getConfigDir, getStateDir } from "./cli.js";
 import type { AuthConfig } from "./config.js";
 import {
 	ConfigResolver,
@@ -36,6 +35,7 @@ import {
 } from "./config.js";
 import type { HubLogger } from "./logging/hub-logger.js";
 import type { LoggerRegistry } from "./logging/index.js";
+import { getConfigDir, getStateDir } from "./platform-paths.js";
 import { registerSeaStaticServing } from "./sea-static-server.js";
 import { SessionManager } from "./session/session-manager.js";
 import { seedShellProfiles } from "./shell-discovery.js";
@@ -104,6 +104,7 @@ interface ServerBaseOptions {
 	/** Called by owner-token POST /api/quit while its response remains open. */
 	authConfig?: AuthConfig; // override auth config (bypasses config.toml, useful for tests)
 	configDir?: string; // override config directory (defaults to getConfigDir())
+	stateDir?: string; // override state directory (defaults to getStateDir())
 	corsOrigins?: string[]; // override CORS allowlist (bypasses config.toml, useful for tests)
 	skipShellDiscovery?: boolean; // disable auto-shell-seeding (useful for tests)
 	hubLogger?: HubLogger; // global hub log sink
@@ -174,6 +175,7 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 	// SEC-020: No wildcard localhost origins in defaults. Exact port origins are injected
 	//          by addStartupCorsOrigins() after startServer() returns the actual port.
 	const configDir = options?.configDir ?? getConfigDir();
+	const stateDir = options?.stateDir ?? getStateDir();
 	// SEC-027: load auth config once and reuse across all call sites
 	const authConfig =
 		options?.authConfig !== undefined ? options.authConfig : loadAuthConfig(configDir);
@@ -330,6 +332,7 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		db: options?.dbManager?.meta ?? null,
 		tokenTtlDays: authConfig.tokenTtlDays,
 		isOriginAllowed: isCorsOriginAllowed,
+		getBinaryCacheDir: () => path.join(stateDir, "binaries"),
 	};
 	if (!options?.dbManager) {
 		registerAgentRoutes(server, agentRouteDeps);
@@ -359,6 +362,8 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 			options.hubLogger,
 			loggerRegistry,
 			options.logsDir,
+			path.join(stateDir, "binaries"),
+			stateDir,
 		);
 		const activeSessionManager = sessionManager;
 		if (options?.authToken) {
@@ -439,7 +444,7 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		await registerUserFonts(server, configDir);
 		await registerUserSounds(server, configDir);
 		await registerUserWallpapers(server, configDir);
-		const logsDir = options.logsDir ?? path.join(getStateDir(), "logs");
+		const logsDir = options.logsDir ?? path.join(stateDir, "logs");
 		await registerLogRoutes(server, logsDir);
 		server.addHook("onClose", async () => {
 			await activeSessionManager.shutdown();

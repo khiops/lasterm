@@ -561,6 +561,7 @@ export class AgentConnectionManager {
 				undefined,
 				this.ctx.hubLogger ?? undefined,
 				() => assertQuitFence(this.ctx, quitEpoch),
+				this.ctx.stateDir,
 			);
 			// A connect which completed after quit began is not adopted.
 			assertQuitFence(this.ctx, quitEpoch);

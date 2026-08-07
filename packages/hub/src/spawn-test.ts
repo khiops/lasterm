@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
+import { getConfigDir } from "./platform-paths.js";
 
-const auth = JSON.parse(readFileSync(join(homedir(), ".config/lasterm/auth.json"), "utf8"));
+const auth = JSON.parse(readFileSync(join(getConfigDir(), "auth.json"), "utf8"));
 const hostId = process.argv[2] || "local";
 
 const key = randomBytes(16).toString("base64");

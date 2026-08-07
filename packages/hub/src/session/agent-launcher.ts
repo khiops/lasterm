@@ -2,7 +2,6 @@ import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { access } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -13,6 +12,7 @@ import {
 } from "@lasterm/shared";
 import { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";
 import type { HubLogger } from "../logging/hub-logger.js";
+import { getStateDir } from "../platform-paths.js";
 import { resolveAgentBinaryPath } from "../sea-agent-resolver.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { HubQuittingError } from "./quit-fence.js";
@@ -150,6 +150,7 @@ export async function connectOrLaunch(
 	agentBinaryPath?: string,
 	hubLogger?: HubLogger,
 	assertRunning: () => void = () => {},
+	stateDir?: string,
 ): Promise<LastermAgent> {
 	const agentPath = agentBinaryPath ?? resolveAgentPath();
 
@@ -189,7 +190,7 @@ export async function connectOrLaunch(
 
 	// Spawn daemon
 	assertRunning();
-	const daemonLogPath = launchDaemon(agentPath, socketPath, config);
+	const daemonLogPath = launchDaemon(agentPath, socketPath, config, stateDir);
 
 	// Connect by polling the real agent handshake. Do not use a throwaway
 	// socket probe here: the daemon treats every accepted connection as the
@@ -214,7 +215,12 @@ export async function connectOrLaunch(
  * Returns the path to the daemon log file so the caller can include its tail
  * in error messages when the socket never becomes available.
  */
-function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig): string {
+function launchDaemon(
+	agentPath: string,
+	socketPath: string,
+	config: AgentConfig,
+	stateDir?: string,
+): string {
 	const daemonArgs = [
 		"--daemon",
 		"--socket",
@@ -234,11 +240,8 @@ function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig
 		? [agentPath, daemonArgs]
 		: [process.execPath, [agentPath, ...daemonArgs]];
 
-	const stateDir =
-		process.platform === "win32"
-			? join(process.env.LOCALAPPDATA ?? homedir(), "lasterm")
-			: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
-	mkdirSync(stateDir, { recursive: true });
+	const resolvedStateDir = stateDir ?? getStateDir();
+	mkdirSync(resolvedStateDir, { recursive: true });
 
 	// Ensure the socket's parent directory exists — on WSL / XDG_RUNTIME_DIR
 	// environments the directory may not yet exist, causing the agent's
@@ -255,7 +258,7 @@ function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig
 		// are untouched — matching the socket file's 0600 intent.
 		mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
 	}
-	const logPath = join(stateDir, "agent-daemon.log");
+	const logPath = join(resolvedStateDir, "agent-daemon.log");
 	const logFd = openSync(logPath, "a");
 
 	const child = spawn(cmd, args, {

@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HostArch, HostOs } from "@lasterm/shared";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
+import { getStateDir } from "../platform-paths.js";
 import { detectSea } from "../sea-addon-loader.js";
 import {
 	AGENT_TARGET_TRIPLES,
@@ -545,16 +545,9 @@ export async function deployAgentIfNeeded(
 	return { deployed: true, remoteMatchesHubVersionCache: false, remotePath, os, arch };
 }
 
-/**
- * Return the path to the binary cache directory inside the hub state dir.
- * Uses the same XDG / platform-aware logic as getStateDir() in cli.ts.
- */
-export function getBinaryCacheDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", "lasterm", "binaries");
-	}
-	const stateBase = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
-	return join(stateBase, "lasterm", "binaries");
+/** Return the path to the binary cache directory inside the hub state dir. */
+export function getBinaryCacheDir(stateDir = getStateDir()): string {
+	return join(stateDir, "binaries");
 }
 
 /**

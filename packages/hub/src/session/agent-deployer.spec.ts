@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
+import { getStateDir } from "../platform-paths.js";
 import type { DeployOptions } from "./agent-deployer.js";
 import {
 	checkRemoteAgent,
@@ -993,6 +994,50 @@ describe("deployAgentIfNeeded — agent not found", () => {
 // ---------- getBinaryCacheDir ------------------------------------------------
 
 describe("getBinaryCacheDir", () => {
+	const originalPlatform = process.platform;
+
+	afterEach(() => {
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+	});
+
+	function setPlatform(platform: NodeJS.Platform): void {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+	}
+
+	function withEnvironment<T>(name: string, value: string | undefined, callback: () => T): T {
+		const original = process.env[name];
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+		try {
+			return callback();
+		} finally {
+			if (original === undefined) delete process.env[name];
+			else process.env[name] = original;
+		}
+	}
+
+	it("throws on Windows when LOCALAPPDATA is unset", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", undefined, () => {
+			expect(() => getBinaryCacheDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+	});
+
+	it("throws on Windows when LOCALAPPDATA is relative", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", "relative-state", () => {
+			expect(() => getBinaryCacheDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+	});
+
+	it("derives the cache from the Windows state root", () => {
+		const root = "C:\\lasterm-cache-state-root";
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", root, () => {
+			expect(getBinaryCacheDir()).toBe(join(getStateDir(), "binaries"));
+		});
+	});
+
 	it.skipIf(process.platform === "win32")("returns path under XDG_STATE_HOME when set", () => {
 		const orig = process.env.XDG_STATE_HOME;
 		process.env.XDG_STATE_HOME = "/custom/state";
@@ -1005,19 +1050,22 @@ describe("getBinaryCacheDir", () => {
 		}
 	});
 
-	it("returns path under ~/.local/state when XDG_STATE_HOME is not set", () => {
-		const orig = process.env.XDG_STATE_HOME;
-		delete process.env.XDG_STATE_HOME;
-		try {
-			const result = getBinaryCacheDir();
-			expect(result).toMatch(/lasterm[/\\]binaries$/);
-			if (process.platform !== "win32") {
-				expect(result).toContain(".local/state");
+	it.skipIf(process.platform === "win32")(
+		"returns path under ~/.local/state when XDG_STATE_HOME is not set",
+		() => {
+			const orig = process.env.XDG_STATE_HOME;
+			delete process.env.XDG_STATE_HOME;
+			try {
+				const result = getBinaryCacheDir();
+				expect(result).toMatch(/lasterm[/\\]binaries$/);
+				if (process.platform !== "win32") {
+					expect(result).toContain(".local/state");
+				}
+			} finally {
+				if (orig !== undefined) process.env.XDG_STATE_HOME = orig;
 			}
-		} finally {
-			if (orig !== undefined) process.env.XDG_STATE_HOME = orig;
-		}
-	});
+		},
+	);
 });
 
 // ---------- getRemoteSha256 --------------------------------------------------

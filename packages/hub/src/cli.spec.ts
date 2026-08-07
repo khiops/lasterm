@@ -684,6 +684,28 @@ describe("cmdAgentImport", () => {
 });
 
 describe("path helpers", () => {
+	const originalPlatform = process.platform;
+
+	afterEach(() => {
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+	});
+
+	function setPlatform(platform: NodeJS.Platform): void {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+	}
+
+	function withEnvironment<T>(name: string, value: string | undefined, callback: () => T): T {
+		const original = process.env[name];
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+		try {
+			return callback();
+		} finally {
+			if (original === undefined) delete process.env[name];
+			else process.env[name] = original;
+		}
+	}
+
 	it("getStateDir returns a non-empty string", () => {
 		expect(getStateDir().length).toBeGreaterThan(0);
 		expect(getStateDir()).toContain("lasterm");
@@ -692,6 +714,57 @@ describe("path helpers", () => {
 	it("getConfigDir returns a non-empty string", () => {
 		expect(getConfigDir().length).toBeGreaterThan(0);
 		expect(getConfigDir()).toContain("lasterm");
+	});
+
+	it("throws on Windows when LOCALAPPDATA or APPDATA is unset", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", undefined, () => {
+			expect(() => getStateDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+		withEnvironment("APPDATA", undefined, () => {
+			expect(() => getConfigDir()).toThrow(/APPDATA.*win32/);
+		});
+	});
+
+	it("uses absolute Windows state and config directories", () => {
+		const root = path.join(os.tmpdir(), "lasterm-path-helper");
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", root, () => {
+			expect(getStateDir()).toBe(path.join(root, "lasterm"));
+		});
+		withEnvironment("APPDATA", root, () => {
+			expect(getConfigDir()).toBe(path.join(root, "lasterm"));
+		});
+	});
+
+	it("throws on Windows when LOCALAPPDATA or APPDATA is relative", () => {
+		setPlatform("win32");
+		withEnvironment("LOCALAPPDATA", "relative-state", () => {
+			expect(() => getStateDir()).toThrow(/LOCALAPPDATA.*win32/);
+		});
+		withEnvironment("APPDATA", "relative-config", () => {
+			expect(() => getConfigDir()).toThrow(/APPDATA.*win32/);
+		});
+	});
+
+	it("throws when XDG state or config directories are relative", () => {
+		setPlatform("linux");
+		withEnvironment("XDG_STATE_HOME", "relative-state", () => {
+			expect(() => getStateDir()).toThrow(/XDG_STATE_HOME.*linux/);
+		});
+		withEnvironment("XDG_CONFIG_HOME", "relative-config", () => {
+			expect(() => getConfigDir()).toThrow(/XDG_CONFIG_HOME.*linux/);
+		});
+	});
+
+	it("keeps homedir-based paths when XDG directories are unset", () => {
+		setPlatform("linux");
+		withEnvironment("XDG_STATE_HOME", undefined, () => {
+			expect(getStateDir()).toBe(path.join(os.homedir(), ".local", "state", "lasterm"));
+		});
+		withEnvironment("XDG_CONFIG_HOME", undefined, () => {
+			expect(getConfigDir()).toBe(path.join(os.homedir(), ".config", "lasterm"));
+		});
 	});
 
 	it.skipIf(process.platform === "win32")("getStateDir uses XDG_STATE_HOME when set", () => {

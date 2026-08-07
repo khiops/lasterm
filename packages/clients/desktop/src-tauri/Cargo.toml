@@ -1,6 +1,6 @@
 [package]
 name = "lasterm-desktop"
-version = "0.7.0"
+version = "0.8.0"
 description = "Lasterm desktop app (Tauri v2)"
 authors = ["Lasterm contributors"]
 license = "AGPL-3.0-only"

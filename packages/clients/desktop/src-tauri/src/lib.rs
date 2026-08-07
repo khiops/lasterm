@@ -1768,6 +1768,16 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        // On a second launch this plugin hands control to the first instance and
+        // terminates the new process during plugin initialization. It must run
+        // before every other plugin so setup cannot spawn a sidecar that races
+        // the hub lock before the second process exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init());
     let builder = match current_package_identity_probe() {

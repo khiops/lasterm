@@ -1,9 +1,9 @@
 [package]
-name = "termora-hub-lock"
+name = "lasterm-hub-lock"
 version = "0.6.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-repository = "https://github.com/khiops/termora"
+repository = "https://github.com/khiops/lasterm"
 
 [lib]
 crate-type = ["cdylib"]

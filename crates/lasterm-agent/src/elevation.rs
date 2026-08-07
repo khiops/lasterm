@@ -230,8 +230,8 @@ fn wrap_custom(custom_cmd: &str, shell: &str, args: &[String]) -> ElevatedComman
 /// SECURITY:
 /// - Uses O_EXCL to prevent race conditions
 /// - Mode 0700 (owner-only)
-/// - Secret passed via env var _TERMORA_ELEV (not written to script)
-/// - Returns (script_path, env_map with _TERMORA_ELEV)
+/// - Secret passed via env var _LASTERM_ELEV (not written to script)
+/// - Returns (script_path, env_map with _LASTERM_ELEV)
 #[cfg(unix)]
 async fn create_askpass_script(
     secret: &Zeroizing<String>,
@@ -246,7 +246,7 @@ async fn create_askpass_script(
     }
 
     let filename = format!(
-        "termora-askpass-{}",
+        "lasterm-askpass-{}",
         ulid::Ulid::new().to_string().to_lowercase()
     );
     let mut last_err = None;
@@ -279,11 +279,11 @@ async fn create_askpass_script(
     // Script echoes the env var, not the secret directly
     // Two writeln! calls: shebang line + echo line
     writeln!(file, "#!/bin/sh")?;
-    writeln!(file, r#"echo "$_TERMORA_ELEV""#)?;
+    writeln!(file, r#"echo "$_LASTERM_ELEV""#)?;
     drop(file);
 
     let mut env = HashMap::new();
-    env.insert("_TERMORA_ELEV".into(), secret.as_str().to_string());
+    env.insert("_LASTERM_ELEV".into(), secret.as_str().to_string());
 
     Ok((path, env))
 }
@@ -399,12 +399,12 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
 
         // Verify env contains the secret key
-        assert_eq!(env.get("_TERMORA_ELEV").unwrap(), "test_password");
+        assert_eq!(env.get("_LASTERM_ELEV").unwrap(), "test_password");
 
         // Verify script content
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("echo"));
-        assert!(content.contains("_TERMORA_ELEV"));
+        assert!(content.contains("_LASTERM_ELEV"));
         assert!(!content.contains("test_password")); // Secret NOT in file
 
         // Cleanup
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn test_cleanup_all() {
         // Register a fake path
-        let tmp = std::env::temp_dir().join("termora-test-cleanup");
+        let tmp = std::env::temp_dir().join("lasterm-test-cleanup");
         std::fs::write(&tmp, "test").unwrap();
         register_cleanup(&tmp);
         cleanup_all();

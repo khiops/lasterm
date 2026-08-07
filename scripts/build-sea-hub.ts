@@ -1,10 +1,10 @@
 /**
  * build-sea-hub.ts
  *
- * esbuild bundler for the termora-hub Node SEA binary.
+ * esbuild bundler for the lasterm-hub Node SEA binary.
  *
  * Bundles packages/hub/src/cli.ts into a single CJS file at
- * dist/sea/termora-hub.cjs suitable for embedding in a Node SEA blob.
+ * dist/sea/lasterm-hub.cjs suitable for embedding in a Node SEA blob.
  *
  * Key decisions:
  * - Format: CJS  — Node SEA requires a CJS entry for process.dlopen compat.
@@ -13,7 +13,7 @@
  *   betterSqliteBindingsPlugin() intercepts require('bindings') inside the
  *   better-sqlite3 source and returns __seaSqliteExports instead.
  * - cpu-features: external + optional — ssh2 optional dep, may not be present.
- * - @termora/shared: inlined — workspace package, not a published dep.
+ * - @lasterm/shared: inlined — workspace package, not a published dep.
  * - Fastify + plugins: inlined — pure JS, no native deps.
  * - ssh2: inlined — pure JS.
  * - Sourcemaps: disabled — SEA doesn't support source-mapped stack traces.
@@ -39,11 +39,11 @@ const ROOT = resolve(__dirname, "..");
 const HUB_ENTRY = join(ROOT, "packages", "hub", "src", "cli.ts");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Build hash — injected as TERMORA_BUILD_HASH so build-version.ts picks it up
+// Build hash — injected as LASTERM_BUILD_HASH so build-version.ts picks it up
 // ─────────────────────────────────────────────────────────────────────────────
 
 function resolveBuildHash(): string {
-	const env = process.env.TERMORA_BUILD_HASH;
+	const env = process.env.LASTERM_BUILD_HASH;
 	if (env && env.length > 0) return env.slice(0, 7);
 	try {
 		return execFileSync("git", ["rev-parse", "--short", "HEAD"], {
@@ -57,14 +57,14 @@ function resolveBuildHash(): string {
 
 const SEA_BUILD_HASH = resolveBuildHash();
 
-// Hub semver — injected as TERMORA_VERSION so build-version.ts resolves the
+// Hub semver — injected as LASTERM_VERSION so build-version.ts resolves the
 // release version INSIDE the SEA. build-version.ts's package.json fallback uses a
 // dynamic require that esbuild does not inline, so without this a packaged hub
 // falls back to "0.0.0" and version-aware agent fetch/deploy silently breaks.
-// Resolution: TERMORA_VERSION env → the hub package.json version (release CI pins
+// Resolution: LASTERM_VERSION env → the hub package.json version (release CI pins
 // it to the tag via the version-consistency guard).
 function resolveHubVersion(): string {
-	const env = process.env.TERMORA_VERSION;
+	const env = process.env.LASTERM_VERSION;
 	if (env && env.length > 0) return env;
 	try {
 		const pkg = JSON.parse(
@@ -79,7 +79,7 @@ function resolveHubVersion(): string {
 const SEA_VERSION = resolveHubVersion();
 const MIGRATIONS_BASE = join(ROOT, "packages", "hub", "src", "storage", "migrations");
 const OUT_DIR = join(ROOT, "dist", "sea");
-const OUT_FILE = join(OUT_DIR, "termora-hub.cjs");
+const OUT_FILE = join(OUT_DIR, "lasterm-hub.cjs");
 const SEA_SQLITE_BOOTSTRAP_ENTRY = join(ROOT, "scripts", "sea-sqlite-bootstrap.ts");
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -373,7 +373,7 @@ function betterSqliteBindingsPlugin(): Plugin {
 						}
 						// Guard: if somehow reached outside SEA (should not happen in prod),
 						// throw a clear error rather than silently returning undefined.
-						throw new Error('[termora-hub] better-sqlite3 bindings shim: __seaSqliteExports not set. Is the SEA bootstrap banner running?');
+						throw new Error('[lasterm-hub] better-sqlite3 bindings shim: __seaSqliteExports not set. Is the SEA bootstrap banner running?');
 					};
 				`,
 				loader: "js",
@@ -407,8 +407,8 @@ export const buildOptions: BuildOptions = {
 	// Also inject the build hash so build-version.ts reads it from the env shim.
 	define: {
 		"import.meta.url": "__importMetaUrl",
-		"process.env.TERMORA_BUILD_HASH": JSON.stringify(SEA_BUILD_HASH),
-		"process.env.TERMORA_VERSION": JSON.stringify(SEA_VERSION),
+		"process.env.LASTERM_BUILD_HASH": JSON.stringify(SEA_BUILD_HASH),
+		"process.env.LASTERM_VERSION": JSON.stringify(SEA_VERSION),
 	},
 	banner: {
 		js: [

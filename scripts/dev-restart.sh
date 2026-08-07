@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restart termora dev servers (stop + start).
+# Restart lasterm dev servers (stop + start).
 # Usage: ./scripts/dev-restart.sh [hub|agent|all]   (default: all)
 set -euo pipefail
 

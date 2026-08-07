@@ -1,4 +1,4 @@
-import { MAX_WALLPAPER_SIZE, WALLPAPER_EXTENSIONS } from "@termora/shared";
+import { MAX_WALLPAPER_SIZE, WALLPAPER_EXTENSIONS } from "@lasterm/shared";
 import { hubBaseUrl } from "../../../utils/hub-url.js";
 
 export const WALLPAPER_ACCEPTED_EXTENSIONS = new Set(WALLPAPER_EXTENSIONS.map((ext) => `.${ext}`));

@@ -19,7 +19,7 @@
 - Modal 560px max-width for metadata density
 
 **Plan review fixes applied:**
-- Task 2: CSS path corrected to `styles/base.css` (not `assets/`). Theme badge vars go in `TermoraThemeUi` (`theme.ui.badgeInfo`, not `theme.badgeInfo`). Type defined in `packages/shared/src/theme.ts`. ThemeEditor UI_FIELDS updated. Bundled themes rely on fallback defaults for MVP.
+- Task 2: CSS path corrected to `styles/base.css` (not `assets/`). Theme badge vars go in `LastermThemeUi` (`theme.ui.badgeInfo`, not `theme.badgeInfo`). Type defined in `packages/shared/src/theme.ts`. ThemeEditor UI_FIELDS updated. Bundled themes rely on fallback defaults for MVP.
 - Task 4: `registerSshKeyRoutes(server, sshDir?)` accepts optional `sshDir` param for test DI (defaults to `homedir()/.ssh`). Must be registered inside `dbManager` block (after multipart). `ssh2.utils.parseKey` API: `parsed.type` for algorithm, fingerprint computed via `crypto.createHash('sha256').update(parsed.getPublicSSH()).digest('base64')` prefixed `SHA256:`. Bits derived from algorithm type. Windows `execFileNoThrow` deferred — `fs.chmod(0o600)` for MVP.
 - Task 5-6: SshKeyPicker.vue and SshKeyCard.vue placed in root `components/` (used by HostModal, not settings panel).
 
@@ -269,7 +269,7 @@ Run: `pnpm vitest run --project web` then `pnpm exec biome check --write .`
 - Modify: `packages/hub/src/server.ts` (register routes)
 - Modify: `packages/shared/src/entities.ts` (add SshKeyEntry type)
 
-**Context:** Unlike fonts/wallpapers which use `configDir` (`~/.config/termora/`), SSH keys use `homedir()/.ssh`. The route function signature is `registerSshKeyRoutes(server: FastifyInstance)` — no configDir param needed, resolves `~/.ssh` internally.
+**Context:** Unlike fonts/wallpapers which use `configDir` (`~/.config/lasterm/`), SSH keys use `homedir()/.ssh`. The route function signature is `registerSshKeyRoutes(server: FastifyInstance)` — no configDir param needed, resolves `~/.ssh` internally.
 
 - [ ] **Step 1: Add SshKeyEntry type to entities.ts**
 
@@ -312,7 +312,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "nod
 import { chmod, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import type { SshKeyEntry } from "@termora/shared";
+import type { SshKeyEntry } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import ssh2 from "ssh2";
 import { sanitizeFilename } from "./upload-utils.js";
@@ -474,8 +474,8 @@ Run: `pnpm exec biome check --write .`
 - [ ] **Step 1: Sync to Windows and test**
 
 ```bash
-rsync -av --exclude='node_modules' --exclude='target' --exclude='.git' --exclude='dist' /mnt/wsl/shared/dev/termora/ /mnt/c/Temp/termora-build/
-pnpm -F @termora/shared build  # on Windows
+rsync -av --exclude='node_modules' --exclude='target' --exclude='.git' --exclude='dist' /mnt/wsl/shared/dev/lasterm/ /mnt/c/Temp/lasterm-build/
+pnpm -F @lasterm/shared build  # on Windows
 ```
 
 - [ ] **Step 2: Test SSH key picker**

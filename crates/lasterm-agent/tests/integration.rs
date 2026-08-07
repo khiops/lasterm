@@ -1,6 +1,6 @@
-/// End-to-end integration tests for termora-agent.
+/// End-to-end integration tests for lasterm-agent.
 ///
-/// Each test spawns the real binary via `CARGO_BIN_EXE_termora-agent`,
+/// Each test spawns the real binary via `CARGO_BIN_EXE_lasterm-agent`,
 /// communicates over stdin/stdout using 4-byte LE length-prefixed MessagePack
 /// frames, and verifies correct protocol behavior.
 ///
@@ -28,7 +28,7 @@ fn test_shell() -> (&'static str, &'static str) {
 }
 
 async fn spawn_agent() -> Child {
-    let binary = env!("CARGO_BIN_EXE_termora-agent");
+    let binary = env!("CARGO_BIN_EXE_lasterm-agent");
     Command::new(binary)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -37,7 +37,7 @@ async fn spawn_agent() -> Child {
         // deadlocking the tokio runtime (especially on Windows with ConPTY).
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .expect("failed to spawn termora-agent binary")
+        .expect("failed to spawn lasterm-agent binary")
 }
 
 /// Read one length-prefixed frame from stdout and decode as `rmpv::Value`.
@@ -91,7 +91,7 @@ fn iv(n: i64) -> rmpv::Value {
 fn daemon_fixture_dir(label: &str) -> std::path::PathBuf {
     use std::os::unix::fs::DirBuilderExt;
 
-    let dir = std::env::temp_dir().join(format!("termora-agent-{label}-{}", ulid::Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("lasterm-agent-{label}-{}", ulid::Ulid::new()));
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -158,7 +158,7 @@ async fn wait_for_replacement_record(
 
 #[cfg(unix)]
 async fn spawn_daemon(socket: &std::path::Path) -> Child {
-    spawn_daemon_from(env!("CARGO_BIN_EXE_termora-agent"), socket).await
+    spawn_daemon_from(env!("CARGO_BIN_EXE_lasterm-agent"), socket).await
 }
 
 #[cfg(unix)]
@@ -213,7 +213,7 @@ async fn invoke_stop(socket: &std::path::Path) -> String {
 
 #[cfg(unix)]
 async fn invoke_stop_output(socket: &std::path::Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+    Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
         .args([
             "--stop",
             "--socket",
@@ -361,7 +361,7 @@ async fn contradictory_stop_modes_are_rejected() {
         if mode.starts_with("--buffer-") {
             args.insert(1, "1");
         }
-        let output = Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+        let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
             .args(args)
             .output()
             .await
@@ -413,7 +413,7 @@ async fn stop_normalizes_relative_socket_spellings() {
     let raw_socket = "agent.socket";
     let absolute_socket = dir.join(raw_socket);
     let mut daemon = DaemonGuard(
-        Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+        Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
             .args(["--daemon", "--socket", raw_socket])
             .current_dir(&dir)
             .env("XDG_STATE_HOME", &dir)
@@ -425,7 +425,7 @@ async fn stop_normalizes_relative_socket_spellings() {
     );
     let _record = wait_for_record(&absolute_socket, "agent.identity-").await;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_termora-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
         .args(["--stop", "--socket", "./agent.socket"])
         .current_dir(&dir)
         .output()
@@ -477,15 +477,15 @@ async fn executable_mismatch_is_not_reported_as_stopped() {
 async fn replaced_daemon_binary_remains_stoppable() {
     let dir = daemon_fixture_dir("replaced-binary");
     let socket = dir.join("agent.socket");
-    let running_binary = dir.join("termora-agent-running");
-    std::fs::copy(env!("CARGO_BIN_EXE_termora-agent"), &running_binary)
+    let running_binary = dir.join("lasterm-agent-running");
+    std::fs::copy(env!("CARGO_BIN_EXE_lasterm-agent"), &running_binary)
         .expect("copy running agent binary");
     let mut daemon = DaemonGuard(
         spawn_daemon_from(running_binary.to_str().expect("UTF-8 binary path"), &socket).await,
     );
     let _record = wait_for_record(&socket, "agent.identity-").await;
-    let replacement = dir.join("termora-agent-replacement");
-    std::fs::copy(env!("CARGO_BIN_EXE_termora-agent"), &replacement)
+    let replacement = dir.join("lasterm-agent-replacement");
+    std::fs::copy(env!("CARGO_BIN_EXE_lasterm-agent"), &replacement)
         .expect("copy replacement agent binary");
     std::fs::rename(&replacement, &running_binary).expect("replace daemon binary atomically");
 

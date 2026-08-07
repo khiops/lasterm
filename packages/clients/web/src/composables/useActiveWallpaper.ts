@@ -3,7 +3,7 @@ import {
 	DEFAULT_PROFILE,
 	type TerminalProfile,
 	type WindowEffect,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import { computed, onUnmounted, type Ref, ref, watch } from "vue";
 import { useConfigStore } from "../stores/config.js";
 import { useResolvedProfile } from "./useResolvedProfile.js";

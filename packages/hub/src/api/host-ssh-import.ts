@@ -1,5 +1,5 @@
-import type { SshConfigImport } from "@termora/shared";
-import { toSnakeCase } from "@termora/shared";
+import type { SshConfigImport } from "@lasterm/shared";
+import { toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";

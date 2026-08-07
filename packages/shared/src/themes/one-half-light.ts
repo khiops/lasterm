@@ -1,6 +1,6 @@
-import type { TermoraTheme } from "../theme.js";
+import type { LastermTheme } from "../theme.js";
 
-export const oneHalfLight: TermoraTheme = {
+export const oneHalfLight: LastermTheme = {
 	name: "one-half-light",
 	author: "Son A. Pham",
 	type: "light",

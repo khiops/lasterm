@@ -1,5 +1,5 @@
-import type { Host, SshConfigEntry } from "@termora/shared";
-import { generateId } from "@termora/shared";
+import type { Host, SshConfigEntry } from "@lasterm/shared";
+import { generateId } from "@lasterm/shared";
 import { computed, ref, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";

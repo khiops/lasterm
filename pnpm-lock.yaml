@@ -119,7 +119,7 @@ importers:
 
   .:
     dependencies:
-      '@termora/hub':
+      '@lasterm/hub':
         specifier: workspace:*
         version: link:packages/hub
     devDependencies:
@@ -166,6 +166,9 @@ importers:
 
   packages/clients/web:
     dependencies:
+      '@lasterm/shared':
+        specifier: workspace:*
+        version: link:../../shared
       '@msgpack/msgpack':
         specifier: 'catalog:'
         version: 3.1.3
@@ -175,9 +178,6 @@ importers:
       '@tauri-apps/plugin-os':
         specifier: ^2.3.2
         version: 2.3.2
-      '@termora/shared':
-        specifier: workspace:*
-        version: link:../../shared
       '@xterm/addon-fit':
         specifier: 'catalog:'
         version: 0.10.0(@xterm/xterm@5.5.0)
@@ -230,15 +230,15 @@ importers:
       '@iarna/toml':
         specifier: 'catalog:'
         version: 3.0.0
+      '@lasterm/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@msgpack/msgpack':
         specifier: 'catalog:'
         version: 3.1.3
       '@rainbowatcher/toml-edit-js':
         specifier: 'catalog:'
         version: 0.6.5
-      '@termora/shared':
-        specifier: workspace:*
-        version: link:../shared
       better-sqlite3:
         specifier: 'catalog:'
         version: 12.11.1

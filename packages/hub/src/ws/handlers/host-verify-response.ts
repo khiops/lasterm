@@ -1,4 +1,4 @@
-import type { HostVerifyResponseMessage } from "@termora/shared";
+import type { HostVerifyResponseMessage } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleHostVerifyResponse(

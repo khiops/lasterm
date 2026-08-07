@@ -1,8 +1,8 @@
 {
-	"name": "@termora/desktop",
+	"name": "@lasterm/desktop",
 	"version": "0.7.0",
 	"private": true,
-	"description": "Termora desktop app (Tauri v2)",
+	"description": "Lasterm desktop app (Tauri v2)",
 	"license": "AGPL-3.0-only",
 	"scripts": {
 		"tauri": "tauri",

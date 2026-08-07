@@ -14,7 +14,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const OUT_FILE = join(ROOT, "dist", "sea", "termora-hub.cjs");
+const OUT_FILE = join(ROOT, "dist", "sea", "lasterm-hub.cjs");
 
 // ────────────────────────────────────────────────────────────────────────────
 // Test 1: esbuild bundle produces valid CJS output
@@ -104,22 +104,22 @@ describe("bundle includes fastify inline", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 4: @termora/shared is inlined
+// Test 4: @lasterm/shared is inlined
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("bundle includes @termora/shared inline", () => {
-	it("@termora/shared is inlined — no external require", () => {
+describe("bundle includes @lasterm/shared inline", () => {
+	it("@lasterm/shared is inlined — no external require", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		expect(content).not.toContain('require("@termora/shared")');
+		expect(content).not.toContain('require("@lasterm/shared")');
 	});
 
-	it("encodeFrame from @termora/shared appears in the bundle", () => {
+	it("encodeFrame from @lasterm/shared appears in the bundle", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
 		// encodeFrame is a core export used by the hub agent transport.
 		expect(content).toContain("encodeFrame");
 	});
 
-	it("FrameReader from @termora/shared appears in the bundle", () => {
+	it("FrameReader from @lasterm/shared appears in the bundle", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
 		expect(content).toContain("FrameReader");
 	});
@@ -264,11 +264,11 @@ describe("hub sea-addon-loader extraction logic", () => {
 		expect(readFileSync(destPath).equals(newData)).toBe(true);
 	});
 
-	it("getAddonCacheDir returns path containing version and termora", async () => {
+	it("getAddonCacheDir returns path containing version and lasterm", async () => {
 		const { getAddonCacheDir } = await import("../packages/hub/src/sea-addon-loader.js");
 		const dir = getAddonCacheDir("2.0.0");
 		expect(dir).toContain("2.0.0");
-		expect(dir).toContain("termora");
+		expect(dir).toContain("lasterm");
 		expect(dir).toContain("addons");
 	});
 

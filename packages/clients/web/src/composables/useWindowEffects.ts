@@ -1,4 +1,4 @@
-import type { WindowEffect } from "@termora/shared";
+import type { WindowEffect } from "@lasterm/shared";
 import { onMounted, onUnmounted, type Ref, ref, watch } from "vue";
 import { type DisplayedEffectState, normalizeBackgroundMode } from "./useActiveWallpaper.js";
 

@@ -1,4 +1,4 @@
-import type { VisualPreset, VisualProfile } from "@termora/shared";
+import type { VisualPreset, VisualProfile } from "@lasterm/shared";
 
 export const VISUAL_PRESETS: Record<Exclude<VisualPreset, "custom">, VisualProfile> = {
 	none: {

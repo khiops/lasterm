@@ -1,4 +1,4 @@
-# termora — Ideation Brief
+# lasterm — Ideation Brief
 
 > Session terminal platform — local-first, multi-OS, hub/agent architecture
 
@@ -129,7 +129,7 @@ Resolution order (deep merge, last wins):
 
 ```
 1. Built-in defaults         (code — sensible defaults, catppuccin-mocha)
-2. User global config        ($TERMORA_CONFIG_DIR/config.toml — XDG on Linux, %APPDATA% on Windows)
+2. User global config        ($LASTERM_CONFIG_DIR/config.toml — XDG on Linux, %APPDATA% on Windows)
 3. Host profile override     (meta.db hosts.profile_json — per-host)
 4. Channel profile override  (meta.db channels.profile_json — per-session)
 ```
@@ -139,15 +139,15 @@ Host "prod-web-01" overrides background=#2d0000 + badge="PROD" (layer 3).
 Result: JetBrains + catppuccin BUT red background + PROD badge on that pane.
 
 ```
-Config dir ($XDG_CONFIG_HOME/termora/ or %APPDATA%\termora\):
+Config dir ($XDG_CONFIG_HOME/lasterm/ or %APPDATA%\lasterm\):
 ├── config.toml          # Layer 2: theme, fonts, keybindings, defaults (user-editable)
 └── auth.json            # Token (chmod 600 / ACL, auto-generated)
 
-Data dir ($XDG_DATA_HOME/termora/ or %LOCALAPPDATA%\termora\):
+Data dir ($XDG_DATA_HOME/lasterm/ or %LOCALAPPDATA%\lasterm\):
 ├── meta.db              # Layers 3-4: host/channel profiles + relational data
 └── spool.db             # Output chunks, snapshots
 
-State dir ($XDG_STATE_HOME/termora/ or %LOCALAPPDATA%\termora\):
+State dir ($XDG_STATE_HOME/lasterm/ or %LOCALAPPDATA%\lasterm\):
 └── runtime.json         # { port, pid, started_at } — discovery for CLI/UI
 ```
 
@@ -379,12 +379,12 @@ Status: ● connected, ○ available, 🔴 error, ◐ reconnecting
 ```
 ┌──┬──────────────────────────────────────────────┐
 │  │                                               │
-│🟦│         Welcome to termora                   │
+│🟦│         Welcome to lasterm                   │
 │L │                                               │
 │  │   Your local terminal is ready.              │
 │  │   ┌─────────────────────────────────────┐    │
-│  │   │ $ echo "hello termora"              │    │
-│  │   │ hello termora                        │    │
+│  │   │ $ echo "hello lasterm"              │    │
+│  │   │ hello lasterm                        │    │
 │  │   │ $ █                                  │    │
 │  │   └─────────────────────────────────────┘    │
 │  │                                               │
@@ -481,7 +481,7 @@ Remote reboot scenario:
 ### User Flows
 
 **Flow 1 — First launch (onboarding):**
-1. `termora-hub start` → hub starts → opens http://localhost:4100  *(originally written as `npx termora`; npm was dropped as a channel)*
+1. `lasterm-hub start` → hub starts → opens http://localhost:4100  *(originally written as `npx lasterm`; npm was dropped as a channel)*
 2. Local host (🟦 L) auto-created in host rail
 3. Default local channel #bash auto-opened in main area
 4. User types commands immediately — no setup needed
@@ -491,7 +491,7 @@ Remote reboot scenario:
 1. Click [+] in host rail → "Add Remote Host" dialog
 2. Fill: label, user@host, port, auth method. Optional: icon/color.
 3. "Test connection" → SSH probe → success ✓ (agent check)
-4. If agent absent → "Install termora-agent? [Yes]" → scripts/install-agent.sh via scp (MVP; npx auto-install is P2)
+4. If agent absent → "Install lasterm-agent? [Yes]" → scripts/install-agent.sh via scp (MVP; npx auto-install is P2)
 5. "Save" → host icon (🟥 P) appears in host rail
 6. Click host → sidebar shows (empty channels list)
 7. Click [+ channel] → SSH → agent HELLO (with visual_hints) → SPAWN
@@ -507,8 +507,8 @@ Remote reboot scenario:
 
 **Flow 4 — Multi-device:**
 1. Device A working (WRITER ✍ on #bash@prod)
-2. Device B: opens termora, needs auth
-3. Device A: `termora pair` → 6-digit code (60s expiry)
+2. Device B: opens lasterm, needs auth
+3. Device A: `lasterm pair` → 6-digit code (60s expiry)
 4. Device B enters code → gets token → connected to same hub
 5. Device B sees same hosts/channels → clicks #bash@prod → ATTACH
 6. Device B is READER (👁)

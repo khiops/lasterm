@@ -33,7 +33,7 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
-import type { FontFamily } from "@termora/shared";
+import type { FontFamily } from "@lasterm/shared";
 
 const DEFAULT_PREVIEW = "$ ls -la ~/.config 0123456789";
 

@@ -4,8 +4,8 @@ import type {
 	AgentFetchDoneMessage,
 	AgentFetchErrorMessage,
 	AgentFetchProgressMessage,
-} from "@termora/shared";
-import { generateId } from "@termora/shared";
+} from "@lasterm/shared";
+import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { touchToken, validateTokenRecord } from "../auth.js";
@@ -258,7 +258,7 @@ export function registerAgentRoutes(server: FastifyInstance, deps: AgentRoutesDe
 					reply,
 					400,
 					"UNSUPPORTED_TARGET",
-					`No Termora agent release is built for ${os}/${arch}.`,
+					`No Lasterm agent release is built for ${os}/${arch}.`,
 				);
 			}
 
@@ -513,7 +513,7 @@ async function readAgentImportMultipart(
 			try {
 				cacheDir = await resolveBinaryCacheDir(deps);
 				ensureCacheDir(cacheDir);
-				binaryTempPath = createUniqueTempPath(join(cacheDir, "termora-agent-import"));
+				binaryTempPath = createUniqueTempPath(join(cacheDir, "lasterm-agent-import"));
 				tempPath = binaryTempPath;
 				setTempPath(binaryTempPath);
 			} catch (error) {
@@ -583,7 +583,7 @@ function validateAgentImportFields(
 		throw new RouteError(
 			400,
 			"UNSUPPORTED_TARGET",
-			`No Termora agent release is built for ${os}/${arch}.`,
+			`No Lasterm agent release is built for ${os}/${arch}.`,
 		);
 	}
 
@@ -625,7 +625,7 @@ function validateAgentImportFields(
 }
 
 function releaseAssetBasename(target: ResolvedTarget, version: string): string {
-	return `termora-agent-${target.triple}-${version}${target.ext}`;
+	return `lasterm-agent-${target.triple}-${version}${target.ext}`;
 }
 
 async function readManifestPart(
@@ -668,7 +668,7 @@ async function writeBinaryPartToTemp(part: MultipartFilePart, tempPath: string):
 				throw new RouteError(
 					413,
 					"TOO_LARGE",
-					"Uploaded agent binary exceeds the 64 MiB Termora agent limit.",
+					"Uploaded agent binary exceeds the 64 MiB Lasterm agent limit.",
 				);
 			}
 			let chunkOffset = 0;
@@ -681,7 +681,7 @@ async function writeBinaryPartToTemp(part: MultipartFilePart, tempPath: string):
 			throw new RouteError(
 				413,
 				"TOO_LARGE",
-				"Uploaded agent binary exceeds the 64 MiB Termora agent limit.",
+				"Uploaded agent binary exceeds the 64 MiB Lasterm agent limit.",
 			);
 		}
 		return written;

@@ -12,7 +12,7 @@
  *   - onTintField clamps opacity > 15 to 15
  */
 
-import type { BorderStyle, VisualPreset, VisualProfile } from "@termora/shared";
+import type { BorderStyle, VisualPreset, VisualProfile } from "@lasterm/shared";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_VISUAL_PROFILE, resolvePreset } from "../utils/visual-presets.js";
 

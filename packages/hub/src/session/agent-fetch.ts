@@ -75,12 +75,12 @@ interface FetchTarget {
 	readonly executable: boolean;
 }
 
-const DEFAULT_BASE_URL = "https://github.com/khiops/termora";
+const DEFAULT_BASE_URL = "https://github.com/khiops/lasterm";
 const LEGACY_VERSION_CUTOFF = "0.4.0";
 
 const FETCH_HEADERS = {
 	"accept-encoding": "identity",
-	"user-agent": "termora-hub-agent-fetch",
+	"user-agent": "lasterm-hub-agent-fetch",
 } as const;
 
 export async function fetchAgentBinary(options: FetchAgentBinaryOptions): Promise<string> {
@@ -90,7 +90,7 @@ export async function fetchAgentBinary(options: FetchAgentBinaryOptions): Promis
 	if (!target) {
 		throw new FetchError(
 			"UNSUPPORTED_TARGET",
-			`No Termora agent release is built for ${options.os}/${options.arch}. Build the agent locally for that target or choose one of the built targets in AGENT_TARGET_TRIPLES, then place the binary in ${options.cacheDir}.`,
+			`No Lasterm agent release is built for ${options.os}/${options.arch}. Build the agent locally for that target or choose one of the built targets in AGENT_TARGET_TRIPLES, then place the binary in ${options.cacheDir}.`,
 		);
 	}
 
@@ -159,13 +159,13 @@ function normalizeBaseUrl(baseUrl: string): string {
 	} catch {
 		throw new FetchError(
 			"NETWORK",
-			`Invalid Termora release base URL "${baseUrl}". Use an https:// GitHub repository URL or manually place the agent binary in the cache.`,
+			`Invalid Lasterm release base URL "${baseUrl}". Use an https:// GitHub repository URL or manually place the agent binary in the cache.`,
 		);
 	}
 	if (parsed.protocol !== "https:") {
 		throw new FetchError(
 			"NETWORK",
-			`Refusing non-HTTPS Termora release base URL "${baseUrl}". Use an https:// URL or manually place the agent binary in the cache.`,
+			`Refusing non-HTTPS Lasterm release base URL "${baseUrl}". Use an https:// URL or manually place the agent binary in the cache.`,
 		);
 	}
 	const pathname = parsed.pathname.replace(/\/+$/, "");
@@ -224,10 +224,18 @@ async function openAssetResponse(args: {
 		};
 	}
 
-	if (versioned.response.status === 404 && isLegacyVersion(args.version)) {
+	// Any 404 is retried under the former basename, on no version condition at all.
+	// A condition would have to name the first version released after the rename —
+	// a number that does not exist yet when this ships — and reusing
+	// `isLegacyVersion` for it is worse than wrong: that predicate also decides
+	// whether a MISSING CHECKSUM is tolerated, so widening it to fix a naming
+	// question would quietly relax verification for every release it newly covered.
+	// Observing the 404 instead costs one request on a path that is already failing,
+	// and retires itself once nothing fetches a pre-rename release.
+	if (versioned.response.status === 404) {
 		await closeResponse(versioned.response);
 		versioned.request.clear();
-		const legacyAssetName = getLegacyAssetName(args.target.triple, args.target.ext);
+		const legacyAssetName = getLegacyAssetName(args.target.triple, args.version, args.target.ext);
 		const legacyAssetUrl = buildReleaseAssetUrl(args.baseUrl, args.version, legacyAssetName);
 		const legacy = await fetchResponse(legacyAssetUrl, args.fetchImpl, args.fetchTarget);
 		await rejectPartialResponse(legacy.response, legacy.request, legacyAssetUrl);
@@ -239,14 +247,19 @@ async function openAssetResponse(args: {
 				assetUrl: legacyAssetUrl,
 			};
 		}
+		// Neither name is there. What the operator needs to hear about is the asset
+		// this build asks for, not the historical one that was also tried, so the
+		// retry must not hijack the diagnosis — unless it failed some other way,
+		// which is its own news and gets reported as itself.
 		return await throwHttpError({
 			response: legacy.response,
 			request: legacy.request,
-			url: legacyAssetUrl,
 			tagUrl: args.tagUrl,
 			fetchImpl: args.fetchImpl,
 			fetchTarget: args.fetchTarget,
-			assetName: legacyAssetName,
+			...(legacy.response.status === 404
+				? { url: args.versionedAssetUrl, assetName: args.versionedAssetName }
+				: { url: legacyAssetUrl, assetName: legacyAssetName }),
 		});
 	}
 
@@ -294,7 +307,7 @@ async function throwHttpError(args: {
 				if (tag.response.status === 404) {
 					throw new FetchError(
 						"NOT_FOUND",
-						`No Termora release tag exists at ${args.tagUrl}. Publish v${versionFromTagUrl(args.tagUrl)} or rerun termora-hub agent fetch --version <x.y.z> for an existing release.`,
+						`No Lasterm release tag exists at ${args.tagUrl}. Publish v${versionFromTagUrl(args.tagUrl)} or rerun lasterm-hub agent fetch --version <x.y.z> for an existing release.`,
 					);
 				}
 				throw networkStatusError(args.tagUrl, args.fetchTarget, tag.response);
@@ -430,7 +443,7 @@ function handleMissingChecksum(
 ): void {
 	if (isLegacyVersion(version)) {
 		console.warn(
-			`No SHA256SUMS-${version}.txt entry for ${assetName}; proceeding only because ${version} predates versioned Termora agent checksums. Manually verify ${assetUrl} before trusting ${finalPath}.`,
+			`No SHA256SUMS-${version}.txt entry for ${assetName}; proceeding only because ${version} predates versioned Lasterm agent checksums. Manually verify ${assetUrl} before trusting ${finalPath}.`,
 		);
 		return;
 	}
@@ -549,7 +562,7 @@ async function writeResponseToTemp(
 					request.abort();
 					throw new FetchError(
 						"TOO_LARGE",
-						`Downloaded ${basename(finalPath)} exceeds the 64 MiB Termora agent limit. Delete the bad release asset at ${url} and upload the correct binary, or manually place a valid binary at ${finalPath}.`,
+						`Downloaded ${basename(finalPath)} exceeds the 64 MiB Lasterm agent limit. Delete the bad release asset at ${url} and upload the correct binary, or manually place a valid binary at ${finalPath}.`,
 					);
 				}
 				// writeSync may write fewer bytes than requested; loop until the
@@ -701,15 +714,26 @@ function writeManifestCache(manifestPath: string, text: string): void {
 }
 
 function getCacheFileName(os: string, arch: string, version: string, ext: "" | ".exe"): string {
-	return `termora-agent-${os}-${arch}-${version}${ext}`;
+	return `lasterm-agent-${os}-${arch}-${version}${ext}`;
 }
 
 function getVersionedAssetName(triple: string, version: string, ext: "" | ".exe"): string {
-	return `termora-agent-${triple}-${version}${ext}`;
+	return `lasterm-agent-${triple}-${version}${ext}`;
 }
 
-function getLegacyAssetName(triple: string, ext: "" | ".exe"): string {
-	return `termora-agent-${triple}${ext}`;
+/**
+ * The basename an already-published release actually carries, for a version that
+ * predates the rename.
+ *
+ * `termora` here is not a product name — it is what is on GitHub. Every release up
+ * to the rename published assets under it, so asking for the current name would
+ * request a file that has never existed. Two shapes, because the versioned naming
+ * arrived at 0.4.0 and the releases below it are still unversioned.
+ */
+function getLegacyAssetName(triple: string, version: string, ext: "" | ".exe"): string {
+	return isLegacyVersion(version)
+		? `termora-agent-${triple}${ext}`
+		: `termora-agent-${triple}-${version}${ext}`;
 }
 
 function getChecksumManifestName(version: string): string {
@@ -772,8 +796,8 @@ function privateOrForbiddenError(url: string, target: FetchTarget): FetchError {
 	return new FetchError(
 		"PRIVATE_OR_FORBIDDEN",
 		target.executable
-			? `Termora could not download ${url}. The release may still be private or forbidden. Manually download that URL in a browser, save it in the cache as ${target.path}.download, chmod 755 it, then rename it to ${target.path}.`
-			: `Termora could not download ${url}. The release may still be private or forbidden. Manually download the ${target.noun} in a browser, save it in the cache as ${target.path}.download, then rename it to ${target.path}.`,
+			? `Lasterm could not download ${url}. The release may still be private or forbidden. Manually download that URL in a browser, save it in the cache as ${target.path}.download, chmod 755 it, then rename it to ${target.path}.`
+			: `Lasterm could not download ${url}. The release may still be private or forbidden. Manually download the ${target.noun} in a browser, save it in the cache as ${target.path}.download, then rename it to ${target.path}.`,
 	);
 }
 

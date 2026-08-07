@@ -3,7 +3,7 @@ import * as path from "node:path";
 import cors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
 import websocket from "@fastify/websocket";
-import { DEFAULT_PORT, MAX_WALLPAPER_SIZE } from "@termora/shared";
+import { DEFAULT_PORT, MAX_WALLPAPER_SIZE } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import Fastify from "fastify";
 import { registerAgentRoutes } from "./api/agents.js";
@@ -108,7 +108,7 @@ interface ServerBaseOptions {
 	skipShellDiscovery?: boolean; // disable auto-shell-seeding (useful for tests)
 	hubLogger?: HubLogger; // global hub log sink
 	loggerRegistry?: LoggerRegistry; // per-channel log registry
-	logsDir?: string; // base logs directory (e.g. ~/.local/state/termora/logs)
+	logsDir?: string; // base logs directory (e.g. ~/.local/state/lasterm/logs)
 }
 
 /** The response and teardown halves of quit are one capability, never independent hooks. */
@@ -210,9 +210,9 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		allowedHeaders: [
 			"Content-Type",
 			"Authorization",
-			"X-Termora-Owner",
-			"X-Termora-Client",
-			"X-Termora-Client-Id",
+			"X-Lasterm-Owner",
+			"X-Lasterm-Client",
+			"X-Lasterm-Client-Id",
 		],
 		credentials: true,
 	});
@@ -459,7 +459,7 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		const url = new URL(request.url, "http://localhost");
 		const force = url.searchParams.get("force") === "1";
 		const callerClientId = getHeaderValue(
-			request.headers["x-termora-client-id"] ?? request.headers["x-termora-client"],
+			request.headers["x-lasterm-client-id"] ?? request.headers["x-lasterm-client"],
 		);
 		const others = sessionManager?.getOthersCount(callerClientId) ?? 0;
 
@@ -492,7 +492,7 @@ export async function createServer(options?: ServerOptions): Promise<FastifyInst
 		const url = new URL(request.url, "http://localhost");
 		const force = url.searchParams.get("force") === "1";
 		const callerClientId = getHeaderValue(
-			request.headers["x-termora-client-id"] ?? request.headers["x-termora-client"],
+			request.headers["x-lasterm-client-id"] ?? request.headers["x-lasterm-client"],
 		);
 		// The guard is about STARTING a quit. Once one has begun, the terminals this
 		// would have protected are already ending, and refusing would tell a caller
@@ -543,7 +543,7 @@ function hasValidShutdownOwnerToken(
 	request: FastifyRequest,
 	ownerToken: string | undefined,
 ): boolean {
-	const candidate = getHeaderValue(request.headers["x-termora-owner"]);
+	const candidate = getHeaderValue(request.headers["x-lasterm-owner"]);
 	if (ownerToken === undefined || candidate === undefined) return false;
 
 	const expected = Buffer.from(ownerToken);
@@ -554,7 +554,7 @@ function hasValidShutdownOwnerToken(
 function sendOwnerTokenRequired(reply: FastifyReply): FastifyReply {
 	return reply.code(401).send({
 		error: "OWNER_TOKEN_REQUIRED",
-		message: "Valid X-Termora-Owner header required",
+		message: "Valid X-Lasterm-Owner header required",
 	});
 }
 

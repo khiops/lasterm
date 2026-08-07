@@ -1,6 +1,6 @@
-import type { TermoraTheme } from "../theme.js";
+import type { LastermTheme } from "../theme.js";
 
-export const dracula: TermoraTheme = {
+export const dracula: LastermTheme = {
 	name: "dracula",
 	author: "Zeno Rocha",
 	type: "dark",

@@ -233,7 +233,7 @@ function readCacheCandidates(
 		return [];
 	}
 
-	const prefix = `termora-agent-${os}-${arch}-`;
+	const prefix = `lasterm-agent-${os}-${arch}-`;
 	const candidates: CacheCandidate[] = [];
 	for (const name of names) {
 		if (!name.startsWith(prefix)) continue;

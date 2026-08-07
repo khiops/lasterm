@@ -59,3 +59,5 @@ msi/
 packages/hub/static/assets/
 packages/hub/static/index.html
 sea-config.json
+.workflow-state.*.json
+.superpowers/

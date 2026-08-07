@@ -2,12 +2,12 @@
  * build-version.ts
  *
  * Resolves the build hash at startup:
- *   1. TERMORA_BUILD_HASH env var (set by CI or SEA esbuild define)
+ *   1. LASTERM_BUILD_HASH env var (set by CI or SEA esbuild define)
  *   2. `git rev-parse --short HEAD` (dev mode fallback)
  *   3. "dev" (if git is unavailable)
  *
  * Resolves the semver version at startup:
- *   1. TERMORA_VERSION env var (set by CI or SEA esbuild define)
+ *   1. LASTERM_VERSION env var (set by CI or SEA esbuild define)
  *   2. package.json `version` field (dev mode fallback)
  */
 
@@ -30,7 +30,7 @@ function resolveGitHash(): string {
  * Cached after first call — safe to call repeatedly.
  */
 export const BUILD_HASH: string = (() => {
-	const env = process.env.TERMORA_BUILD_HASH;
+	const env = process.env.LASTERM_BUILD_HASH;
 	if (env && env.length > 0) {
 		// Trim to 7 chars in case a full SHA was passed
 		return env.slice(0, 7);
@@ -43,7 +43,7 @@ function resolvePackageVersion(): string {
 		const require = createRequire(import.meta.url);
 		// The hub package.json sits one level above this file (packages/hub/),
 		// from both src/ (dev/tsx) and dist/ (compiled). In the SEA the version is
-		// injected via the TERMORA_VERSION esbuild define, so this require is the
+		// injected via the LASTERM_VERSION esbuild define, so this require is the
 		// source-run path only.
 		const pkg = require("../package.json") as { version?: string };
 		return pkg.version ?? "0.0.0";
@@ -55,10 +55,10 @@ function resolvePackageVersion(): string {
 /**
  * Returns the semver version string for this hub process.
  * Cached after first call — safe to call repeatedly.
- * Resolution order: TERMORA_VERSION env → package.json → "0.0.0"
+ * Resolution order: LASTERM_VERSION env → package.json → "0.0.0"
  */
 export const HUB_VERSION: string = (() => {
-	const env = process.env.TERMORA_VERSION;
+	const env = process.env.LASTERM_VERSION;
 	if (env && env.length > 0) {
 		return env;
 	}

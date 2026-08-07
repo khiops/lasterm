@@ -265,8 +265,8 @@ function Assert-StagedSidecarVersions(
   [string]$StageDir,
   [string]$ExpectedVersion
 ) {
-  $hubPath = Join-Path $StageDir "termora-hub.exe"
-  $agentPath = Join-Path $StageDir "termora-agent.exe"
+  $hubPath = Join-Path $StageDir "lasterm-hub.exe"
+  $agentPath = Join-Path $StageDir "lasterm-agent.exe"
   foreach ($path in @($hubPath, $agentPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
       throw "Staged sidecar is missing: $path"
@@ -275,40 +275,40 @@ function Assert-StagedSidecarVersions(
 
   $agentResult = Invoke-NativeCapture -FilePath $agentPath -Arguments @("--version")
   if ($agentResult.ExitCode -ne 0) {
-    throw "Staged termora-agent.exe --version failed with exit code $($agentResult.ExitCode): $($agentResult.StdErr)$($agentResult.StdOut)"
+    throw "Staged lasterm-agent.exe --version failed with exit code $($agentResult.ExitCode): $($agentResult.StdErr)$($agentResult.StdOut)"
   }
-  $agentVersion = Read-VersionFromOutput -Output "$($agentResult.StdOut)`n$($agentResult.StdErr)" -BinaryName "termora-agent.exe"
+  $agentVersion = Read-VersionFromOutput -Output "$($agentResult.StdOut)`n$($agentResult.StdErr)" -BinaryName "lasterm-agent.exe"
   if ($agentVersion -ne $ExpectedVersion) {
-    throw "Staged termora-agent.exe version $agentVersion does not match packaged version $ExpectedVersion. Rebuild and restage the Windows sidecars before packing MSIX."
+    throw "Staged lasterm-agent.exe version $agentVersion does not match packaged version $ExpectedVersion. Rebuild and restage the Windows sidecars before packing MSIX."
   }
 
   $hubResult = Invoke-NativeCapture -FilePath $hubPath -Arguments @("agent", "status", "--json")
   if ($hubResult.ExitCode -ne 0) {
-    throw "Staged termora-hub.exe agent status --json failed with exit code $($hubResult.ExitCode): $($hubResult.StdErr)$($hubResult.StdOut)"
+    throw "Staged lasterm-hub.exe agent status --json failed with exit code $($hubResult.ExitCode): $($hubResult.StdErr)$($hubResult.StdOut)"
   }
 
   try {
     $snapshot = $hubResult.StdOut | ConvertFrom-Json
   } catch {
-    throw "Staged termora-hub.exe returned invalid agent status JSON: $($hubResult.StdOut)"
+    throw "Staged lasterm-hub.exe returned invalid agent status JSON: $($hubResult.StdOut)"
   }
 
   if ($snapshot.hub_version -ne $ExpectedVersion) {
-    throw "Staged termora-hub.exe version $($snapshot.hub_version) does not match packaged version $ExpectedVersion. Rebuild and restage the Windows sidecars before packing MSIX."
+    throw "Staged lasterm-hub.exe version $($snapshot.hub_version) does not match packaged version $ExpectedVersion. Rebuild and restage the Windows sidecars before packing MSIX."
   }
 
   $bundled = @($snapshot.targets | Where-Object { $_.os -eq "windows" -and $_.arch -eq "x64" }) | Select-Object -First 1
   if (-not $bundled) {
-    throw "Staged termora-hub.exe did not report a bundled agent row for windows/x64."
+    throw "Staged lasterm-hub.exe did not report a bundled agent row for windows/x64."
   }
   if ($bundled.status -ne "bundled") {
-    throw "Staged termora-hub.exe reported windows/x64 sidecar status '$($bundled.status)', expected 'bundled'. Rebuild and restage the Windows sidecars before packing MSIX."
+    throw "Staged lasterm-hub.exe reported windows/x64 sidecar status '$($bundled.status)', expected 'bundled'. Rebuild and restage the Windows sidecars before packing MSIX."
   }
   if ($bundled.version -ne $ExpectedVersion) {
-    throw "Staged termora-hub.exe reports bundled agent version $($bundled.version), expected packaged version $ExpectedVersion. Rebuild and restage the Windows sidecars before packing MSIX."
+    throw "Staged lasterm-hub.exe reports bundled agent version $($bundled.version), expected packaged version $ExpectedVersion. Rebuild and restage the Windows sidecars before packing MSIX."
   }
 
-  Write-Host "Sidecar version gate passed: termora-hub.exe=$ExpectedVersion termora-agent.exe=$ExpectedVersion"
+  Write-Host "Sidecar version gate passed: lasterm-hub.exe=$ExpectedVersion lasterm-agent.exe=$ExpectedVersion"
 }
 
 $scriptDir = Split-Path -Parent $PSCommandPath
@@ -333,7 +333,7 @@ $appxVersion = Convert-ToAppxVersion $Version
 $sidecarVersion = Convert-ToSidecarVersion $Version
 
 if (-not $Output) {
-  $Output = Join-Path $packageOutDir "Termora_$($appxVersion)_$msixArch.msix"
+  $Output = Join-Path $packageOutDir "Lasterm_$($appxVersion)_$msixArch.msix"
 }
 
 if (-not $SkipBuild) {
@@ -354,19 +354,19 @@ $mainExe = Resolve-DesktopExecutablePath `
   -Configuration $Configuration `
   -BinaryName $desktopBinaryName
 
-$hubSidecar = Join-Path $srcTauriDir "termora-hub-$windowsX64RustTarget.exe"
-$agentSidecar = Join-Path $srcTauriDir "termora-agent-$windowsX64RustTarget.exe"
+$hubSidecar = Join-Path $srcTauriDir "lasterm-hub-$windowsX64RustTarget.exe"
+$agentSidecar = Join-Path $srcTauriDir "lasterm-agent-$windowsX64RustTarget.exe"
 
 Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stageDir, $assetsDir -Force | Out-Null
 New-Item -ItemType Directory -Path $packageOutDir -Force | Out-Null
 
 Copy-RequiredFile $mainExe (Join-Path $stageDir $desktopBinaryName)
-Copy-RequiredFile $hubSidecar (Join-Path $stageDir "termora-hub.exe")
-Copy-RequiredFile $agentSidecar (Join-Path $stageDir "termora-agent.exe")
+Copy-RequiredFile $hubSidecar (Join-Path $stageDir "lasterm-hub.exe")
+Copy-RequiredFile $agentSidecar (Join-Path $stageDir "lasterm-agent.exe")
 Copy-RequiredFile $manifestPath (Join-Path $stageDir "AppxManifest.xml")
 
-foreach ($exe in @($desktopBinaryName, "termora-hub.exe", "termora-agent.exe")) {
+foreach ($exe in @($desktopBinaryName, "lasterm-hub.exe", "lasterm-agent.exe")) {
   Assert-PeMachineX64 (Join-Path $stageDir $exe)
 }
 

@@ -1,5 +1,5 @@
-import type { Channel, TitleConfig, TruncationPosition } from "@termora/shared";
-import { DEFAULT_CHANNEL_NAME, truncateTitle } from "@termora/shared";
+import type { Channel, TitleConfig, TruncationPosition } from "@lasterm/shared";
+import { DEFAULT_CHANNEL_NAME, truncateTitle } from "@lasterm/shared";
 import { type ComputedRef, computed, type Ref } from "vue";
 
 const DEFAULT_MAX_TITLE_LENGTH = 50;

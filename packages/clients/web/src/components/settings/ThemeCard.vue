@@ -35,19 +35,19 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import type { TermoraTheme } from "@termora/shared";
+import type { LastermTheme } from "@lasterm/shared";
 
 const props = defineProps<{
-	theme: TermoraTheme;
+	theme: LastermTheme;
 	isActive: boolean;
 	isCustom?: boolean;
 }>();
 
 defineEmits<{
-	preview: [theme: TermoraTheme];
+	preview: [theme: LastermTheme];
 	"preview-clear": [];
-	select: [theme: TermoraTheme];
-	edit: [theme: TermoraTheme];
+	select: [theme: LastermTheme];
+	edit: [theme: LastermTheme];
 }>();
 
 const cardStyle = computed(() => ({

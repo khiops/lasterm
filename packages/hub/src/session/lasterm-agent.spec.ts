@@ -2,15 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { encodeFrame, PROTOCOL_VERSION, type ProtocolMessage } from "@termora/shared";
+import { encodeFrame, PROTOCOL_VERSION, type ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TermoraAgent } from "./termora-agent.js";
+import { LastermAgent } from "./lasterm-agent.js";
 import { getTestSocketPath } from "./test-socket-path.js";
 
 const TEST_TIMEOUT = 10_000;
 
 /**
- * Create a mock agent daemon that speaks the termora protocol.
+ * Create a mock agent daemon that speaks the lasterm protocol.
  * On each connection it sends HELLO + CHANNEL_STATE_END immediately.
  * Returns the server and a list of connected sockets for assertions.
  */
@@ -91,14 +91,14 @@ function closeServer(server: net.Server): Promise<void> {
 	});
 }
 
-describe("TermoraAgent", () => {
+describe("LastermAgent", () => {
 	let tmpDir: string;
 	let socketPath: string;
 	let daemon: { server: net.Server; connections: net.Socket[] } | null = null;
-	let agent: TermoraAgent | null = null;
+	let agent: LastermAgent | null = null;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "termora-agent-test-"));
+		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-agent-test-"));
 		socketPath = getTestSocketPath();
 	});
 
@@ -123,13 +123,13 @@ describe("TermoraAgent", () => {
 					daemon = await createMockDaemon(socketPath);
 
 					const _readyMessages: ProtocolMessage[] = [];
-					const connectPromise = TermoraAgent.connectLocal(socketPath);
+					const connectPromise = LastermAgent.connectLocal(socketPath);
 
 					agent = await connectPromise;
 
 					// The ready event is emitted synchronously during connectLocal,
 					// so we verify by checking that the agent resolved successfully
-					expect(agent).toBeInstanceOf(TermoraAgent);
+					expect(agent).toBeInstanceOf(LastermAgent);
 
 					// Verify HELLO was received by collecting messages
 					const _messages = await new Promise<ProtocolMessage[]>((resolve) => {
@@ -157,7 +157,7 @@ describe("TermoraAgent", () => {
 				"exposes connected = true after connect",
 				async () => {
 					daemon = await createMockDaemon(socketPath);
-					agent = await TermoraAgent.connectLocal(socketPath);
+					agent = await LastermAgent.connectLocal(socketPath);
 					expect(agent.connected).toBe(true);
 				},
 				TEST_TIMEOUT,
@@ -169,7 +169,7 @@ describe("TermoraAgent", () => {
 				"rejects with connection error",
 				async () => {
 					const nonexistentPath = path.join(tmpDir, "nonexistent.sock");
-					await expect(TermoraAgent.connectLocal(nonexistentPath)).rejects.toThrow();
+					await expect(LastermAgent.connectLocal(nonexistentPath)).rejects.toThrow();
 				},
 				TEST_TIMEOUT,
 			);
@@ -202,7 +202,7 @@ describe("TermoraAgent", () => {
 					server.listen(socketPath, () => resolve());
 				});
 
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 
 				agent.send({
 					type: "HEARTBEAT",
@@ -230,7 +230,7 @@ describe("TermoraAgent", () => {
 			"disconnects without killing agent server",
 			async () => {
 				daemon = await createMockDaemon(socketPath);
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 
 				const closePromise = new Promise<void>((resolve) => {
 					agent?.once("close", () => resolve());
@@ -252,7 +252,7 @@ describe("TermoraAgent", () => {
 			"sets connected to false",
 			async () => {
 				daemon = await createMockDaemon(socketPath);
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 
 				expect(agent.connected).toBe(true);
 
@@ -294,7 +294,7 @@ describe("TermoraAgent", () => {
 					server.listen(socketPath, () => resolve());
 				});
 
-				agent = await TermoraAgent.connectLocal(socketPath);
+				agent = await LastermAgent.connectLocal(socketPath);
 
 				// Now send a HEARTBEAT_ACK from the "daemon"
 				const messagePromise = new Promise<ProtocolMessage>((resolve) => {
@@ -334,7 +334,7 @@ describe("TermoraAgent", () => {
 
 					daemon = await createMockDaemonWithChannels(socketPath, channels);
 
-					agent = await TermoraAgent.connectLocal(socketPath);
+					agent = await LastermAgent.connectLocal(socketPath);
 					const states = await agent.waitForChannelState();
 
 					expect(states).toHaveLength(3);
@@ -371,7 +371,7 @@ describe("TermoraAgent", () => {
 				async () => {
 					daemon = await createMockDaemon(socketPath);
 
-					agent = await TermoraAgent.connectLocal(socketPath);
+					agent = await LastermAgent.connectLocal(socketPath);
 					const states = await agent.waitForChannelState();
 
 					expect(states).toEqual([]);
@@ -400,7 +400,7 @@ describe("TermoraAgent", () => {
 						server.listen(socketPath, () => resolve());
 					});
 
-					agent = await TermoraAgent.connectLocal(socketPath);
+					agent = await LastermAgent.connectLocal(socketPath);
 
 					await expect(agent.waitForChannelState(1_000)).rejects.toThrow(
 						"CHANNEL_STATE connection closed before CHANNEL_STATE_END",
@@ -428,7 +428,7 @@ describe("TermoraAgent", () => {
 						server.listen(socketPath, () => resolve());
 					});
 
-					agent = await TermoraAgent.connectLocal(socketPath);
+					agent = await LastermAgent.connectLocal(socketPath);
 
 					await expect(agent.waitForChannelState(200)).rejects.toThrow("CHANNEL_STATE timeout");
 				},
@@ -455,7 +455,7 @@ describe("TermoraAgent", () => {
 						server.listen(socketPath, () => resolve());
 					});
 
-					agent = await TermoraAgent.connectLocal(socketPath);
+					agent = await LastermAgent.connectLocal(socketPath);
 
 					await expect(agent.waitForChannelState(100)).rejects.toThrow("CHANNEL_STATE timeout");
 

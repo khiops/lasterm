@@ -237,7 +237,7 @@ import {
 	getInitials,
 	getColorFromLabel,
 } from "../composables/useHostIcon.js";
-import type { Host } from "@termora/shared";
+import type { Host } from "@lasterm/shared";
 
 const emit = defineEmits<{
 	"toggle-settings": [];
@@ -332,7 +332,7 @@ function onDragStart(event: DragEvent, host: Host): void {
 	dragHostId.value = host.id;
 	if (event.dataTransfer) {
 		event.dataTransfer.effectAllowed = "move";
-		event.dataTransfer.setData("text/x-termora-host", host.id);
+		event.dataTransfer.setData("text/x-lasterm-host", host.id);
 	}
 }
 
@@ -398,13 +398,13 @@ function onGroupDragStart(event: DragEvent, groupId: string): void {
 	dragGroupId = groupId;
 	if (event.dataTransfer) {
 		event.dataTransfer.effectAllowed = "move";
-		event.dataTransfer.setData("text/x-termora-group", groupId);
+		event.dataTransfer.setData("text/x-lasterm-group", groupId);
 	}
 }
 
 function onGroupDragOver(event: DragEvent, groupId: string): void {
 	// Accept host drags (cross-group move) or group drags (reorder)
-	const isHostDrag = event.dataTransfer?.types.includes("text/x-termora-host") ?? false;
+	const isHostDrag = event.dataTransfer?.types.includes("text/x-lasterm-host") ?? false;
 	const isGroupDrag = dragGroupId !== null && dragGroupId !== groupId;
 
 	if (!isHostDrag && !isGroupDrag) {
@@ -426,7 +426,7 @@ function onGroupDragOver(event: DragEvent, groupId: string): void {
 function onUnifiedGroupDrop(event: DragEvent, targetGroupId: string): void {
 	dropTargetGroup.value = null;
 	// Host drag takes priority
-	const hostId = event.dataTransfer?.getData("text/x-termora-host");
+	const hostId = event.dataTransfer?.getData("text/x-lasterm-host");
 	if (hostId && !dragGroupId) {
 		hostsStore
 			.moveHostToGroup(hostId, targetGroupId)
@@ -450,7 +450,7 @@ function onGroupDragEnd(): void {
 function onGroupHeaderDragOver(event: DragEvent, groupId: string): void {
 	// Only accept host drags (not group drags)
 	if (dragGroupId) return;
-	if (!event.dataTransfer?.types.includes("text/x-termora-host")) return;
+	if (!event.dataTransfer?.types.includes("text/x-lasterm-host")) return;
 	event.preventDefault();
 	if (event.dataTransfer) {
 		event.dataTransfer.dropEffect = "move";
@@ -469,7 +469,7 @@ function onGroupHeaderDragLeave(event: DragEvent): void {
 function onGroupHeaderDrop(event: DragEvent, targetGroupId: string | null): void {
 	dropTargetGroup.value = null;
 	if (dragGroupId) return; // ignore group drags
-	const hostId = event.dataTransfer?.getData("text/x-termora-host");
+	const hostId = event.dataTransfer?.getData("text/x-lasterm-host");
 	if (!hostId) return;
 	hostsStore
 		.moveHostToGroup(hostId, targetGroupId)

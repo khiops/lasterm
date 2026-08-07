@@ -62,7 +62,7 @@ describe("loadHubLockAddon", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `termora-hub-lock-addon-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-hub-lock-addon-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 	});
 
@@ -72,7 +72,7 @@ describe("loadHubLockAddon", () => {
 
 	it("refuses a file that is not a loadable Node addon", async () => {
 		const { loadHubLockAddon } = await import("./package-sea-hub.js");
-		const addon = join(tempDir, "termora_hub_lock.node");
+		const addon = join(tempDir, "lasterm_hub_lock.node");
 		writeFileSync(addon, "not a Node addon");
 		// Mutation caught: header sniffing would accept a merely well-formed
 		// container; process.dlopen proves this exact file is loadable.
@@ -88,7 +88,7 @@ describe("buildStaticManifest", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `termora-manifest-test-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-manifest-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 	});
 
@@ -223,18 +223,18 @@ describe("hub SEA binary build integration", () => {
 		ROOT,
 		"dist",
 		"sea",
-		process.platform === "win32" ? "termora-hub.exe" : "termora-hub",
+		process.platform === "win32" ? "lasterm-hub.exe" : "lasterm-hub",
 	);
 
 	it("binary exists after build (or build produces valid CJS at minimum)", {
 		timeout: 120_000,
 	}, () => {
-		const cjsBundle = join(ROOT, "dist", "sea", "termora-hub.cjs");
+		const cjsBundle = join(ROOT, "dist", "sea", "lasterm-hub.cjs");
 
 		// The CJS bundle must exist (produced by build:sea-hub).
 		// The full SEA binary requires postject; we skip if not available.
 		if (!existsSync(cjsBundle)) {
-			console.log("[test] termora-hub.cjs not built yet — skipping SEA binary check");
+			console.log("[test] lasterm-hub.cjs not built yet — skipping SEA binary check");
 			return;
 		}
 
@@ -344,7 +344,7 @@ describe("sea-agent-resolver", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `termora-resolver-test-${Date.now()}`);
+		tempDir = join(tmpdir(), `lasterm-resolver-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 	});
 
@@ -360,12 +360,12 @@ describe("sea-agent-resolver", () => {
 
 		// Place a fake agent binary next to the mocked execPath
 		const fakeAgentPath = join(tempDir, _AGENT_BINARY_NAME);
-		writeFileSync(fakeAgentPath, "#!/bin/sh\necho termora-agent", { mode: 0o755 });
+		writeFileSync(fakeAgentPath, "#!/bin/sh\necho lasterm-agent", { mode: 0o755 });
 
 		// Override process.execPath to point at a fake hub binary in tempDir
 		const originalExecPath = process.execPath;
 		Object.defineProperty(process, "execPath", {
-			value: join(tempDir, "termora-hub"),
+			value: join(tempDir, "lasterm-hub"),
 			configurable: true,
 		});
 
@@ -385,7 +385,7 @@ describe("sea-agent-resolver", () => {
 		// Test _findInPath with a binary name that cannot be on any real PATH.
 		const { _findInPath } = await import("../packages/hub/src/sea-agent-resolver.js");
 
-		const impossibleName = `termora-agent-does-not-exist-${Date.now()}`;
+		const impossibleName = `lasterm-agent-does-not-exist-${Date.now()}`;
 		const result = _findInPath(impossibleName);
 		expect(result).toBeNull();
 	});

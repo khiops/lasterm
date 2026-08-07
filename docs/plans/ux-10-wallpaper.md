@@ -6,7 +6,7 @@
 
 Configurable background image per terminal pane. Wallpapers cascade through the
 existing 4-layer config system: defaults → config.toml → host profile → channel
-profile. Upload images to `~/.config/termora/wallpapers/`, served by the hub.
+profile. Upload images to `~/.config/lasterm/wallpapers/`, served by the hub.
 Blur and dim controls keep text readable.
 
 ## User Stories
@@ -54,7 +54,7 @@ converted via `snakeToCamel`. New keys: `wallpaper`, `wallpaper_blur`, `wallpape
 
 Same pattern as font serving:
 
-- **Directory**: `~/.config/termora/wallpapers/` (created on startup if missing)
+- **Directory**: `~/.config/lasterm/wallpapers/` (created on startup if missing)
 - **Static serving**: `@fastify/static` with prefix `/public/wallpapers/`,
   `decorateReply: false`
 - **Scan endpoint**: `GET /api/wallpapers` — no auth — returns `{ wallpapers: string[] }`
@@ -224,7 +224,7 @@ Then no wallpaper divs are rendered (blur/dim ignored without image)
 - `POST /api/wallpapers` endpoint (multipart upload, validate type+size, sanitize name)
 - `DELETE /api/wallpapers/:filename` endpoint (sanitize, verify within dir)
 - Tests: upload, scan, delete, validation (type, size, path traversal)
-- **Exit**: `pnpm -F @termora/hub test` green, endpoints functional
+- **Exit**: `pnpm -F @lasterm/hub test` green, endpoints functional
 
 ### Block 2: Hub cascade + Web rendering
 - Verify wallpaper fields cascade through `resolve()` (they should via deepMerge)
@@ -233,7 +233,7 @@ Then no wallpaper divs are rendered (blur/dim ignored without image)
 - TerminalPane.vue: add wallpaper-bg + wallpaper-dim divs
 - CSS: positioning, cover, blur filter (will-change: filter), dim overlay
 - Integration with terminal opacity (xterm canvas alpha)
-- **Exit**: `pnpm -F @termora/hub test` green, wallpaper renders in dev
+- **Exit**: `pnpm -F @lasterm/hub test` green, wallpaper renders in dev
 
 ### Block 3: Settings UI + polish
 - Wallpaper section in Settings (picker grid, upload with client-side size check,

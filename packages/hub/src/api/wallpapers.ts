@@ -1,6 +1,6 @@
 import { readdir, unlink, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
-import { WALLPAPER_EXTENSIONS } from "@termora/shared";
+import { WALLPAPER_EXTENSIONS } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { fileTypeFromBuffer } from "file-type";
 import { sanitizeFilename } from "./upload-utils.js";

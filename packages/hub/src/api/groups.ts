@@ -1,4 +1,4 @@
-import { isValidUlid, toSnakeCase } from "@termora/shared";
+import { isValidUlid, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 

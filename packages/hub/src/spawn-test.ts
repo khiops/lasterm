@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ProtocolMessage } from "@termora/shared";
-import { decodeMessage, encodeMessage } from "@termora/shared";
+import type { ProtocolMessage } from "@lasterm/shared";
+import { decodeMessage, encodeMessage } from "@lasterm/shared";
 
-const auth = JSON.parse(readFileSync(join(homedir(), ".config/termora/auth.json"), "utf8"));
+const auth = JSON.parse(readFileSync(join(homedir(), ".config/lasterm/auth.json"), "utf8"));
 const hostId = process.argv[2] || "local";
 
 const key = randomBytes(16).toString("base64");
@@ -67,7 +67,7 @@ req.on("upgrade", (_, socket) => {
 					} else if (msg.type === "SPAWN_OK") {
 						console.log(
 							"✅ SPAWN_OK! channelId:",
-							(msg as import("@termora/shared").UiSpawnOkMessage).channelId,
+							(msg as import("@lasterm/shared").UiSpawnOkMessage).channelId,
 						);
 						socket.end();
 						process.exit(0);

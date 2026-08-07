@@ -102,12 +102,12 @@ Updated on every TITLE_CHANGE from agent. Queried for:
 Configurable format string with tokens:
 
 ```
-Format: "termora - {prefix}{host} - {title}"
+Format: "lasterm - {prefix}{host} - {title}"
 
 Examples:
-  prefix=""      host="local"   title="vim"    -> "termora - local - vim"
-  prefix="PROD " host="srv-01"  title="htop"   -> "termora - PROD srv-01 - htop"
-  prefix=""      host="local"   title=""        -> "termora - local"
+  prefix=""      host="local"   title="vim"    -> "lasterm - local - vim"
+  prefix="PROD " host="srv-01"  title="htop"   -> "lasterm - PROD srv-01 - htop"
+  prefix=""      host="local"   title=""        -> "lasterm - local"
 ```
 
 Available tokens: `{prefix}`, `{host}`, `{title}`, `{channel}`, `{shell}`
@@ -216,7 +216,7 @@ fallback = "channel"               # "channel" | "shell" | "custom"
 fallbackCustom = ""                # when fallback = "custom"
 prefix = ""                        # per-host overridable via host profile
 windowTitle = true                 # update browser/window title
-windowTitleFormat = "termora - {prefix}{host} - {title}"
+windowTitleFormat = "lasterm - {prefix}{host} - {title}"
 maxLength = 30
 truncation = "end"                 # "end" | "middle" | "start"
 

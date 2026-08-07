@@ -1,4 +1,4 @@
-import { type Host, type HostGroup, type SessionStatus, toCamelCase } from "@termora/shared";
+import { type Host, type HostGroup, type SessionStatus, toCamelCase } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { hubBaseUrl } from "../utils/hub-url.js";

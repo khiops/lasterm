@@ -3,7 +3,7 @@ import vue from "@vitejs/plugin-vue";
 import { defineConfig } from "vite";
 
 function resolveBuildHash(): string {
-	const env = process.env.TERMORA_BUILD_HASH;
+	const env = process.env.LASTERM_BUILD_HASH;
 	if (env && env.length > 0) return env.slice(0, 7);
 	try {
 		return execFileSync("git", ["rev-parse", "--short", "HEAD"], {

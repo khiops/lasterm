@@ -46,9 +46,9 @@ This workflow implements volets **1 (gestures)** + **3 (multi-client guard)** of
 issue #94 and **defers volet 2 (updater stop→install→relaunch)** to **#86**
 (code-signing prerequisite); volet 2 is a design sketch only (§8).
 
-- **C1 — Windows has no graceful SIGTERM.** CLI `termora-hub stop`
+- **C1 — Windows has no graceful SIGTERM.** CLI `lasterm-hub stop`
   (`process.kill(pid,"SIGTERM")`, `cli.ts:721`) is non-graceful on Windows
-  (`TerminateProcess`). The issue's "wire `termora-hub stop`" intent is realized
+  (`TerminateProcess`). The issue's "wire `lasterm-hub stop`" intent is realized
   via a **REST shutdown endpoint the hub serves itself**, so teardown is
   identical on every OS. CLI `stop` is refactored to prefer HTTP, SIGTERM only as
   fallback. Do not revert the desktop to raw SIGTERM.
@@ -81,8 +81,8 @@ issue #94 and **defers volet 2 (updater stop→install→relaunch)** to **#86**
 
 | Area | Location | Current behavior |
 |------|----------|------------------|
-| Hub spawn (Rust, release) | `desktop/src-tauri/src/lib.rs:266-286` `setup_app()` `#[cfg(not(dev))]` | **already probes** `runtime.json` + `is_hub_alive` before spawning `termora-hub start`; `app.manage(_child)` |
-| Hub spawn (Vue) | `desktop/src/main.ts:8` → `desktop/src/lib.ts:6` `startHub()` | **unconditional** spawn `termora-hub --port N`, no gating → in release runs IN ADDITION to Rust = the real double-spawn |
+| Hub spawn (Rust, release) | `desktop/src-tauri/src/lib.rs:266-286` `setup_app()` `#[cfg(not(dev))]` | **already probes** `runtime.json` + `is_hub_alive` before spawning `lasterm-hub start`; `app.manage(_child)` |
+| Hub spawn (Vue) | `desktop/src/main.ts:8` → `desktop/src/lib.ts:6` `startHub()` | **unconditional** spawn `lasterm-hub --port N`, no gating → in release runs IN ADDITION to Rust = the real double-spawn |
 | Tray "Quit" | `desktop/src-tauri/src/lib.rs:254` | `app.exit(0)` — no stop, hub orphaned |
 | Window close | `desktop/src/main.ts:17` `onCloseRequested` | `preventDefault` → `stopHub()` (`child.kill()`) → `destroy()` |
 | CLI stop | `hub/src/cli.ts:710` `cmdStop()` | reads runtime, `process.kill(SIGTERM)` then **immediately** `deleteRuntime()` (delete-before-dead race, F15) |
@@ -107,7 +107,7 @@ opus F2/F3/F4/F8b/F9.)
    `onClose` hook → `await sessionManager.shutdown()` (which aborts in-flight
    acquisitions — `Acq.shutdownAll`, documented/asserted, not "a bug" — clears
    timers, and **`await`s each `agent.close()`**). Agent close must be made
-   awaitable: `AgentConnection.close()` becomes `Promise<void>`, `TermoraAgent`
+   awaitable: `AgentConnection.close()` becomes `Promise<void>`, `LastermAgent`
    resolves on the socket `close` event, with a per-agent timeout. **The local
    agent daemon is NOT killed** (C5 — persists; socket closed only). (F1, F4)
 3. **Close the database AFTER `server.close()`** — `sessionManager.shutdown()`
@@ -128,7 +128,7 @@ Ordered: latch → `server.close()` (→ shutdown→await agents) → `dbManager
 
 ### §4.2 `POST /api/shutdown` (hub) — privileged, loopback, server-side guard
 
-- **Owner token** required (header, e.g. `X-Termora-Owner: <token>`), NOT the
+- **Owner token** required (header, e.g. `X-Lasterm-Owner: <token>`), NOT the
   paired-client Bearer. Token generated at hub start, written to `runtime.json`
   (chmod 600). Missing/invalid → `401`. (C3, codex #1)
 - **Loopback enforced** — reject if `request.ip` not `127.0.0.1`/`::1`,
@@ -153,7 +153,7 @@ Ordered: latch → `server.close()` (→ shutdown→await agents) → `dbManager
 ### §4.4 closeBehavior — desktop-local pref (C4)
 
 Stored in desktop-local storage (Tauri store plugin or `localStorage` in the
-webview), key `termora.closeBehavior`, default `"ask"`. Surfaced as a
+webview), key `lasterm.closeBehavior`, default `"ask"`. Surfaced as a
 desktop-only entry in `SettingsPanel.vue` (gated on `isTauri()`), read/written
 directly to local storage — no hub `PUT /api/config`. The close modal's
 `[x] Remember` writes the same key. (F17)
@@ -262,9 +262,9 @@ Scenario: No double-spawn in release
 
 | Block | Package | Scope / files | Observable success | Deps |
 |-------|---------|---------------|--------------------|------|
-| **B1a** Graceful shutdown core | hub | extract shared `gracefulShutdown()`: idempotency latch; **fix inverted order** (`server.close()` → `dbManager.close()` → `deleteRuntime()` → exit); make `AgentConnection.close()` async (`Promise<void>`, `TermoraAgent` resolves on socket close), `sessionManager.shutdown()` awaits agents (**no daemon kill** — C5); add `wal_checkpoint(TRUNCATE)` in `db.ts close()`; force-exit watchdog; wire SIGTERM/SIGINT; refactor `cmdStop` (prefer HTTP, SIGTERM fallback NOT deleting runtime on live-kill) | Integration: double-call no-op; agents awaited (socket closed); DB checkpointed+closed AFTER server.close; runtime.json removed last; force-exits on hung close; cmdStop fallback | none |
-| **B1b** Shutdown route + owner token + guard | hub | `POST /api/shutdown` (branch in existing `onRequest`: `X-Termora-Owner` header + loopback `request.ip` check; server-side `409 {others}` guard, respond-then-teardown); generate `ownerToken` at start, add to `RuntimeInfo`, **apply chmod-600 to `persistRuntime`** (copy `auth.ts:103` fd pattern); `getOthersCount(callerId)` stale-prune; `/api/health` unchanged | Integration: 401 missing/invalid owner token; 403 non-loopback; 409 others>0 no force; 200+shutdown with force; runtime.json mode 600; health shape unchanged | B1a |
-| **B2** closeBehavior desktop pref | desktop/web | `localStorage` key `termora.closeBehavior` default ask (**no new dep**); desktop-only entry in `SettingsPanel.vue` gated on existing `isTauriRuntime()` (`hub-url.ts:20`); no hub config | Unit: get/set default ask; persists in localStorage; non-Tauri does not show it | none |
+| **B1a** Graceful shutdown core | hub | extract shared `gracefulShutdown()`: idempotency latch; **fix inverted order** (`server.close()` → `dbManager.close()` → `deleteRuntime()` → exit); make `AgentConnection.close()` async (`Promise<void>`, `LastermAgent` resolves on socket close), `sessionManager.shutdown()` awaits agents (**no daemon kill** — C5); add `wal_checkpoint(TRUNCATE)` in `db.ts close()`; force-exit watchdog; wire SIGTERM/SIGINT; refactor `cmdStop` (prefer HTTP, SIGTERM fallback NOT deleting runtime on live-kill) | Integration: double-call no-op; agents awaited (socket closed); DB checkpointed+closed AFTER server.close; runtime.json removed last; force-exits on hung close; cmdStop fallback | none |
+| **B1b** Shutdown route + owner token + guard | hub | `POST /api/shutdown` (branch in existing `onRequest`: `X-Lasterm-Owner` header + loopback `request.ip` check; server-side `409 {others}` guard, respond-then-teardown); generate `ownerToken` at start, add to `RuntimeInfo`, **apply chmod-600 to `persistRuntime`** (copy `auth.ts:103` fd pattern); `getOthersCount(callerId)` stale-prune; `/api/health` unchanged | Integration: 401 missing/invalid owner token; 403 non-loopback; 409 others>0 no force; 200+shutdown with force; runtime.json mode 600; health shape unchanged | B1a |
+| **B2** closeBehavior desktop pref | desktop/web | `localStorage` key `lasterm.closeBehavior` default ask (**no new dep**); desktop-only entry in `SettingsPanel.vue` gated on existing `isTauriRuntime()` (`hub-url.ts:20`); no hub config | Unit: get/set default ask; persists in localStorage; non-Tauri does not show it | none |
 | **B3** Desktop wiring | desktop | new `lifecycle.ts` (`resolveCloseAction` incl. undefined→modal, quit flow); `main.ts` close handler (preventDefault ALL branches, tray-availability fallback via new `is_tray_available` command); `CloseModal` + 409 confirm UI; `lib.rs`: **fix `_tray` drop bug (`app.manage(tray)`)** + `is_tray_available` command + tray-Quit → direct owner-token POST /api/shutdown + native confirm; gate `startHub()` dev-only (single-spawner) | Unit: `resolveCloseAction` truth table; quit flow handles 409→confirm→force and hub-dead→exit (fake fetch). Manual Windows+Linux smoke: §5 scenarios incl. tray actually visible | B1b, B2 |
 
 B1a→B1b sequential (hub). B2 independent. B3 depends on B1b + B2.
@@ -287,7 +287,7 @@ Force-exit, DB-close ordering, re-entrancy, loopback, count, spawn-gate, the
 
 Design sketch only. Post-#86 (signing): version check (already shown by #92) →
 user accepts → `POST /api/shutdown` (this PR, owner token) → installer replaces
-now-unlocked `termora-hub.exe`/`termora-agent.exe` (the DB-close in §4.1 ensures
+now-unlocked `lasterm-hub.exe`/`lasterm-agent.exe` (the DB-close in §4.1 ensures
 no lingering WAL locks) → relaunch. The clean stop here is the prerequisite.
 
 ## §12.5 Adversarial findings ledger (opus, 19 findings)
@@ -321,7 +321,7 @@ no lingering WAL locks) → relaunch. The clean stop here is the prerequisite.
 |-------|---------|---------------|
 | DB close/checkpoint | MISMATCH | `db.ts:103` `close()` exists but no WAL TRUNCATE; `main.ts:67-70` order INVERTED (DB closed before `server.close()`→`sessionManager.shutdown()` uses DB) → §4.1 reordered + `wal_checkpoint(TRUNCATE)` added |
 | Agent close awaitable | GAP | `close():void` sync; local agent detached/`unref`'d, no retained PID → §4.1.2 makes close async on socket; **daemon kill deferred to #86** (C5) |
-| Owner-token auth | GAP (clean) | single `onRequest` hook → add `/api/shutdown` branch (`X-Termora-Owner`+`request.ip`) |
+| Owner-token auth | GAP (clean) | single `onRequest` hook → add `/api/shutdown` branch (`X-Lasterm-Owner`+`request.ip`) |
 | runtime.json perms | MISMATCH | `persistRuntime` uses default-mode `writeFileSync` (no 600) → apply `auth.ts:103` fd pattern; `ownerToken` field safe (Rust serde ignores unknowns) |
 | Platform detect + store | EXISTS+GAP | `isTauriRuntime()` exists (`hub-url.ts:20`); `plugin-store` absent → use `localStorage` |
 | Tray availability + single-instance | MISMATCH+GAP | **`_tray` dropped immediately (`lib.rs:245`) → tray non-functional in prod**; fix `app.manage(tray)` + add `is_tray_available`; single-instance plugin deferred |

@@ -1,15 +1,15 @@
 [package]
-name = "termora-desktop"
+name = "lasterm-desktop"
 version = "0.7.0"
-description = "Termora desktop app (Tauri v2)"
-authors = ["Termora contributors"]
+description = "Lasterm desktop app (Tauri v2)"
+authors = ["Lasterm contributors"]
 license = "AGPL-3.0-only"
-repository = "https://github.com/khiops/termora"
+repository = "https://github.com/khiops/lasterm"
 edition = "2021"
 rust-version = "1.77.2"
 
 [lib]
-name = "termora_desktop_lib"
+name = "lasterm_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

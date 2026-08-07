@@ -1,4 +1,4 @@
-import type { ProtocolMessage } from "@termora/shared";
+import type { ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSessionStore } from "./session.js";
@@ -16,7 +16,7 @@ const wsHarness = vi.hoisted(() => ({
 }));
 
 vi.mock("../utils/hub-url.js", () => ({
-	hubWsUrl: () => "ws://termora.test",
+	hubWsUrl: () => "ws://lasterm.test",
 }));
 
 vi.mock("../services/ws-client.js", () => {
@@ -90,7 +90,7 @@ describe("useSessionStore — agent sync messages", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		localStorageMap.clear();
-		localStorageMap.set("termora_token", "test-token");
+		localStorageMap.set("lasterm_token", "test-token");
 		wsHarness.instances.length = 0;
 		setActivePinia(createPinia());
 	});

@@ -42,10 +42,10 @@ jobs:
           check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
+      - run: pnpm -F @lasterm/shared build
       - run: ./scripts/build-web.sh
         env:
-          TERMORA_BUILD_HASH: ${{ github.sha }}
+          LASTERM_BUILD_HASH: ${{ github.sha }}
       # Artifacts on tags (release) or manual dispatch (downstream hub/desktop jobs
       # need them) — plain PR pushes just verify build + tests
       - uses: actions/upload-artifact@v7
@@ -92,8 +92,8 @@ jobs:
           cache: "pnpm"
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
-      - run: cargo build --release -p termora-hub-lock
+      - run: pnpm -F @lasterm/shared build
+      - run: cargo build --release -p lasterm-hub-lock
       - run: pnpm test:run
 
   build-agent:
@@ -131,19 +131,19 @@ jobs:
         if: matrix.shell_sh
         run: ./scripts/build-agent.sh
         env:
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: .\scripts\build-agent.ps1
         env:
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
       - uses: actions/upload-artifact@v7
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           name: agent-${{ matrix.triple }}
-          path: dist/sea/termora-agent*
+          path: dist/sea/lasterm-agent*
           retention-days: 1
 
   build-hub:
@@ -166,7 +166,7 @@ jobs:
           check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
+      - run: pnpm -F @lasterm/shared build
       - uses: actions/download-artifact@v7
         with:
           name: web-dist-embedded
@@ -175,17 +175,17 @@ jobs:
         if: matrix.shell_sh
         run: ./scripts/build-hub.sh
         env:
-          TERMORA_SKIP_WEB: "true"
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
-          TERMORA_BUILD_HASH: ${{ github.sha }}
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_BUILD_HASH: ${{ github.sha }}
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: .\scripts\build-hub.ps1
         env:
-          TERMORA_SKIP_WEB: "true"
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
-          TERMORA_BUILD_HASH: ${{ github.sha }}
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_BUILD_HASH: ${{ github.sha }}
       # A binary that has never been run is not known to work. The bundle that
       # loads the SQLite addon at startup broke once and reached a tagged release,
       # because every job until packaging only ever produced the executable.
@@ -216,14 +216,14 @@ jobs:
         if: matrix.shell_sh
         timeout-minutes: 2
         run: |
-          ./dist/sea/termora-hub agent status --json > status.json
+          ./dist/sea/lasterm-hub agent status --json > status.json
           node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
       - name: Smoke — the built hub runs and reports its version (pwsh)
         if: ${{ !matrix.shell_sh }}
         timeout-minutes: 2
         shell: pwsh
         run: |
-          .\dist\sea\termora-hub.exe agent status --json > status.json
+          .\dist\sea\lasterm-hub.exe agent status --json > status.json
           if ($LASTEXITCODE -ne 0) { throw "the built hub failed to run ($LASTEXITCODE)" }
           # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
           # so [{"hub_version":"x"}] would pass here and fail the check above.
@@ -231,7 +231,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: hub-${{ matrix.triple }}
-          path: dist/sea/termora-hub*
+          path: dist/sea/lasterm-hub*
           retention-days: 1
 
   build-desktop:
@@ -260,7 +260,7 @@ jobs:
         with:
           workspaces: packages/clients/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
+      - run: pnpm -F @lasterm/shared build
       - uses: actions/download-artifact@v7
         with:
           name: agent-${{ matrix.triple }}
@@ -277,17 +277,17 @@ jobs:
         if: matrix.shell_sh
         run: |
           TRIPLE="${{ matrix.triple }}"
-          cp dist/sea/termora-agent "packages/clients/desktop/src-tauri/termora-agent-${TRIPLE}"
-          cp dist/sea/termora-hub "packages/clients/desktop/src-tauri/termora-hub-${TRIPLE}"
-          pnpm -F @termora/shared build
-          pnpm -F @termora/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
+          cp dist/sea/lasterm-agent "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
+          cp dist/sea/lasterm-hub "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
+          pnpm -F @lasterm/shared build
+          pnpm -F @lasterm/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
       - name: Place sidecars (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: |
           $triple = "${{ matrix.triple }}"
-          Copy-Item dist\sea\termora-agent.exe "packages\clients\desktop\src-tauri\termora-agent-$triple.exe"
-          Copy-Item dist\sea\termora-hub.exe "packages\clients\desktop\src-tauri\termora-hub-$triple.exe"
+          Copy-Item dist\sea\lasterm-agent.exe "packages\clients\desktop\src-tauri\lasterm-agent-$triple.exe"
+          Copy-Item dist\sea\lasterm-hub.exe "packages\clients\desktop\src-tauri\lasterm-hub-$triple.exe"
       # The pull-request gate lives in ci.yml. Keep this release/manual path as
       # defense in depth, and lint before the expensive Tauri package build.
       - name: Clippy (desktop crate)
@@ -299,8 +299,8 @@ jobs:
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: |
-          pnpm -F @termora/shared build
-          pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+          pnpm -F @lasterm/shared build
+          pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
       # Uses the real Partner Center identity when the repository variables are
       # set, so the packaged identity is exercised before a tagged release;
       # falls back to the manifest placeholders otherwise.

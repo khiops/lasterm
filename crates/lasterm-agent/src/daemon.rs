@@ -107,17 +107,17 @@ fn next_connection_id() -> u64 {
     CONNECTION_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Returns the XDG config directory for termora (`~/.config/termora` on Linux/macOS).
+/// Returns the XDG config directory for lasterm (`~/.config/lasterm` on Linux/macOS).
 /// This is where `auth.json` lives — NOT the socket or state directory.
 #[cfg(not(windows))]
 fn get_config_dir() -> String {
     std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         format!("{}/.config", home)
-    }) + "/termora"
+    }) + "/lasterm"
 }
 
-/// Returns the XDG state directory for termora (`~/.local/state/termora` on Linux/macOS).
+/// Returns the XDG state directory for lasterm (`~/.local/state/lasterm` on Linux/macOS).
 /// This is where `meta.db` and `spool.db` live.
 #[cfg(not(windows))]
 fn get_state_dir() -> std::path::PathBuf {
@@ -125,23 +125,23 @@ fn get_state_dir() -> std::path::PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         format!("{}/.local/state", home)
     });
-    std::path::PathBuf::from(base).join("termora")
+    std::path::PathBuf::from(base).join("lasterm")
 }
 
-/// Returns the LOCALAPPDATA state directory for termora (`%LOCALAPPDATA%\termora` on Windows).
+/// Returns the LOCALAPPDATA state directory for lasterm (`%LOCALAPPDATA%\lasterm` on Windows).
 #[cfg(windows)]
 fn get_state_dir() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\	ermora-state".into());
-    std::path::PathBuf::from(base).join("termora")
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\lasterm-state".into());
+    std::path::PathBuf::from(base).join("lasterm")
 }
 
-/// Returns the APPDATA config directory for termora (`%APPDATA%\termora` on Windows).
+/// Returns the APPDATA config directory for lasterm (`%APPDATA%\lasterm` on Windows).
 #[cfg(windows)]
 fn get_config_dir() -> String {
     std::env::var("APPDATA")
         .or_else(|_| std::env::var("LOCALAPPDATA"))
-        .unwrap_or_else(|_| "C:\\	ermora-config".into())
-        + "\\termora"
+        .unwrap_or_else(|_| "C:\\lasterm-config".into())
+        + "\\lasterm"
 }
 
 /// Run the agent in daemon mode.
@@ -333,11 +333,11 @@ async fn run_daemon_impl_with_manager(
 
 /// Returns the named pipe path for this agent instance.
 ///
-/// Format: `\\.\pipe\termora-agent-<username>`
+/// Format: `\\.\pipe\lasterm-agent-<username>`
 #[cfg(windows)]
 fn get_pipe_name() -> String {
     let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-    format!(r"\\.\pipe\termora-agent-{}", username)
+    format!(r"\\.\pipe\lasterm-agent-{}", username)
 }
 
 /// Run the agent in daemon mode (Windows named pipe).
@@ -369,7 +369,7 @@ async fn run_daemon_impl(
 
     tracing::info!("daemon listening on {}", pipe_name);
 
-    // Use the canonical Windows config dir (auth.json lives in %APPDATA%\termora\)
+    // Use the canonical Windows config dir (auth.json lives in %APPDATA%\lasterm\)
     let config_dir = get_config_dir();
 
     // Load auth token once at startup (None → first-run, skip auth)
@@ -1040,14 +1040,18 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_get_pipe_name_format() {
+        // One literal for the check, the diagnostic and the trim. It was written three
+        // times, and the diagnostic's copy had an unescaped backslash — so the compiler
+        // read `\t` as a tab and the message named a prefix nothing uses, which no
+        // rename of the product name could reach because the name was no longer in it.
+        const EXPECTED_PREFIX: &str = r"\\.\pipe\lasterm-agent-";
         let name = get_pipe_name();
         assert!(
-            name.starts_with(r"\\.\pipe\termora-agent-"),
-            "pipe name must start with \\\\.\\pipe\\	ermora-agent-, got: {}",
-            name
+            name.starts_with(EXPECTED_PREFIX),
+            "pipe name must start with {EXPECTED_PREFIX}, got: {name}"
         );
         // Must include at least one character of username after the dash
-        let suffix = name.trim_start_matches(r"\\.\pipe\termora-agent-");
+        let suffix = name.trim_start_matches(EXPECTED_PREFIX);
         assert!(!suffix.is_empty(), "pipe name must include username");
     }
 
@@ -1057,15 +1061,15 @@ mod tests {
         // Use an empty temp dir as config_dir — no auth.json → no auth required.
         // Pass directly to run_daemon_impl to avoid env var mutation races.
         let empty_config = std::env::temp_dir().join(format!(
-            "termora-test-cfg-noop-{}",
+            "lasterm-test-cfg-noop-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
-        let state_dir = temp_dir("termora-test-state-noop").await;
+        let state_dir = temp_dir("lasterm-test-state-noop").await;
 
         let sock_name = format!(
-            "termora-test-{}.sock",
+            "lasterm-test-{}.sock",
             ulid::Ulid::new().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
@@ -1109,15 +1113,15 @@ mod tests {
     #[tokio::test]
     async fn test_connection_displacement() {
         let empty_config = std::env::temp_dir().join(format!(
-            "termora-test-cfg-disp-{}",
+            "lasterm-test-cfg-disp-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
-        let state_dir = temp_dir("termora-test-state-disp").await;
+        let state_dir = temp_dir("lasterm-test-state-disp").await;
 
         let sock_name = format!(
-            "termora-test-displace-{}.sock",
+            "lasterm-test-displace-{}.sock",
             ulid::Ulid::new().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
@@ -1169,15 +1173,15 @@ mod tests {
     #[tokio::test]
     async fn test_socket_permissions() {
         let empty_config = std::env::temp_dir().join(format!(
-            "termora-test-cfg-perms-{}",
+            "lasterm-test-cfg-perms-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
-        let state_dir = temp_dir("termora-test-state-perms").await;
+        let state_dir = temp_dir("lasterm-test-state-perms").await;
 
         let sock_name = format!(
-            "termora-test-perms-{}.sock",
+            "lasterm-test-perms-{}.sock",
             ulid::Ulid::new().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
@@ -1209,15 +1213,15 @@ mod tests {
     #[tokio::test]
     async fn test_channel_state_end_sent_on_connect() {
         let empty_config = std::env::temp_dir().join(format!(
-            "termora-test-cfg-stateend-{}",
+            "lasterm-test-cfg-stateend-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
-        let state_dir = temp_dir("termora-test-state-stateend").await;
+        let state_dir = temp_dir("lasterm-test-state-stateend").await;
 
         let sock_name = format!(
-            "termora-test-state-end-{}.sock",
+            "lasterm-test-state-end-{}.sock",
             ulid::Ulid::new().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
@@ -1421,7 +1425,7 @@ mod tests {
 
         fn pid_file(prefix: &str) -> PathBuf {
             std::env::temp_dir().join(format!(
-                "termora-daemon-shutdown-{}-{}.pid",
+                "lasterm-daemon-shutdown-{}-{}.pid",
                 prefix,
                 ulid::Ulid::new().to_string().to_lowercase()
             ))
@@ -1519,9 +1523,9 @@ mod tests {
         }
 
         async fn daemon_paths(label: &str) -> (String, String, PathBuf) {
-            let config_dir = temp_dir(&format!("termora-daemon-shutdown-config-{label}")).await;
-            let state_dir = temp_dir(&format!("termora-daemon-shutdown-state-{label}")).await;
-            let socket_path = temp_path(&format!("termora-daemon-shutdown-{label}"));
+            let config_dir = temp_dir(&format!("lasterm-daemon-shutdown-config-{label}")).await;
+            let state_dir = temp_dir(&format!("lasterm-daemon-shutdown-state-{label}")).await;
+            let socket_path = temp_path(&format!("lasterm-daemon-shutdown-{label}"));
             (
                 socket_path.to_string_lossy().to_string(),
                 config_dir.to_string_lossy().to_string(),
@@ -1678,7 +1682,7 @@ mod tests {
         use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
 
         let pipe_name = format!(
-            r"\\.\pipe\termora-test-{}",
+            r"\\.\pipe\lasterm-test-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         );
 
@@ -1796,9 +1800,9 @@ mod tests {
     /// read_auth_token returns None for a non-existent file.
     #[tokio::test]
     async fn test_read_auth_token_missing_file() {
-        let state_dir = temp_dir("termora-test-state-missing-auth").await;
+        let state_dir = temp_dir("lasterm-test-state-missing-auth").await;
         let result =
-            read_auth_token_with_state_dir("/tmp/termora-nonexistent-99999/", &state_dir).await;
+            read_auth_token_with_state_dir("/tmp/lasterm-nonexistent-99999/", &state_dir).await;
         assert!(result.is_none(), "missing file must return None");
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
     }
@@ -1807,7 +1811,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_auth_token_valid() {
         let dir = std::env::temp_dir().join(format!(
-            "termora-auth-test-{}",
+            "lasterm-auth-test-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -1815,7 +1819,7 @@ mod tests {
         tokio::fs::write(&auth_path, r#"{"token":"deadbeef1234"}"#)
             .await
             .unwrap();
-        let state_dir = temp_dir("termora-auth-state").await;
+        let state_dir = temp_dir("lasterm-auth-state").await;
 
         let result = read_auth_token_with_state_dir(&dir.to_string_lossy(), &state_dir).await;
         assert_eq!(result, Some("deadbeef1234".to_string()));
@@ -1828,7 +1832,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_auth_token_malformed() {
         let dir = std::env::temp_dir().join(format!(
-            "termora-auth-bad-{}",
+            "lasterm-auth-bad-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -1836,7 +1840,7 @@ mod tests {
         tokio::fs::write(&auth_path, b"not json at all")
             .await
             .unwrap();
-        let state_dir = temp_dir("termora-auth-bad-state").await;
+        let state_dir = temp_dir("lasterm-auth-bad-state").await;
 
         let result = read_auth_token_with_state_dir(&dir.to_string_lossy(), &state_dir).await;
         // Fail-closed: file exists but is malformed → Some("") so auth always fails
@@ -1854,7 +1858,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_auth_token_missing_token_field() {
         let dir = std::env::temp_dir().join(format!(
-            "termora-auth-nofield-{}",
+            "lasterm-auth-nofield-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -1862,7 +1866,7 @@ mod tests {
         tokio::fs::write(&auth_path, br#"{"other":"value"}"#)
             .await
             .unwrap();
-        let state_dir = temp_dir("termora-auth-nofield-state").await;
+        let state_dir = temp_dir("lasterm-auth-nofield-state").await;
 
         let result = read_auth_token_with_state_dir(&dir.to_string_lossy(), &state_dir).await;
         // Fail-closed: file exists with valid JSON but no 'token' field
@@ -1886,7 +1890,7 @@ mod tests {
 
         // Write auth.json to a temp dir and pass it directly as config_dir to run_daemon_impl.
         let config_dir_path = std::env::temp_dir().join(format!(
-            "termora-test-cfg-auth-{}",
+            "lasterm-test-cfg-auth-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&config_dir_path).await.unwrap();
@@ -1896,10 +1900,10 @@ mod tests {
             .await
             .unwrap();
         let config_dir = config_dir_path.to_string_lossy().to_string();
-        let state_dir = temp_dir("termora-test-state-auth").await;
+        let state_dir = temp_dir("lasterm-test-state-auth").await;
 
         let sock_dir = std::env::temp_dir().join(format!(
-            "termora-daemon-auth-{}",
+            "lasterm-daemon-auth-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&sock_dir).await.unwrap();
@@ -1962,7 +1966,7 @@ mod tests {
         use crate::protocol::HubToAgent;
 
         let config_dir_path = std::env::temp_dir().join(format!(
-            "termora-test-cfg-authok-{}",
+            "lasterm-test-cfg-authok-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&config_dir_path).await.unwrap();
@@ -1972,10 +1976,10 @@ mod tests {
             .await
             .unwrap();
         let config_dir = config_dir_path.to_string_lossy().to_string();
-        let state_dir = temp_dir("termora-test-state-authok").await;
+        let state_dir = temp_dir("lasterm-test-state-authok").await;
 
         let sock_dir = std::env::temp_dir().join(format!(
-            "termora-daemon-authok-{}",
+            "lasterm-daemon-authok-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&sock_dir).await.unwrap();
@@ -2037,7 +2041,7 @@ mod tests {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let pipe_name = format!(
-            r"\\.\pipe\termora-test-secure-{}",
+            r"\\.\pipe\lasterm-test-secure-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         );
 
@@ -2073,7 +2077,7 @@ mod tests {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let pipe_name = format!(
-            r"\\.\pipe\termora-test-hello-{}",
+            r"\\.\pipe\lasterm-test-hello-{}",
             ulid::Ulid::new().to_string().to_lowercase()
         );
 

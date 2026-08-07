@@ -1,6 +1,6 @@
-// Theme type system and validation for termora
+// Theme type system and validation for lasterm
 
-export interface TermoraThemeColors {
+export interface LastermThemeColors {
 	foreground: string;
 	background: string;
 	cursor: string;
@@ -25,7 +25,7 @@ export interface TermoraThemeColors {
 	brightWhite: string;
 }
 
-export interface TermoraThemeUi {
+export interface LastermThemeUi {
 	tabBar: string;
 	tabActive: string;
 	tabInactive: string;
@@ -47,12 +47,12 @@ export interface TermoraThemeUi {
 	badgeDanger?: string;
 }
 
-export interface TermoraTheme {
+export interface LastermTheme {
 	name: string;
 	author?: string;
 	type: "dark" | "light";
-	colors: TermoraThemeColors;
-	ui: TermoraThemeUi;
+	colors: LastermThemeColors;
+	ui: LastermThemeUi;
 }
 
 export const THEME_NAME_REGEX = /^[a-z0-9-]+$/;

@@ -1,4 +1,4 @@
-import type { AgentBinaryVerifyMessage } from "@termora/shared";
+import type { AgentBinaryVerifyMessage } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { usePromptQueue } from "../composables/usePromptQueue.js";

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    termora_desktop_lib::run();
+    lasterm_desktop_lib::run();
 }

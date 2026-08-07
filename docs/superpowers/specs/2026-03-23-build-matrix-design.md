@@ -6,13 +6,13 @@
 
 ## Problem Statement
 
-The termora build pipeline has five gaps:
+The lasterm build pipeline has five gaps:
 
 1. **No macOS in CI** — SEA matrix only covers linux + windows
 2. **No Linux desktop in CI** — Tauri `build-tauri` job is Windows-only
 3. **No Windows dev scripts** — `dev-start.sh` is bash-only
 4. **Scripts != CI** — CI duplicates logic instead of calling scripts
-5. **Dead code** — Node TS agent (`@termora/agent`, `node-pty`, SEA agent scripts) superseded by Rust agent
+5. **Dead code** — Node TS agent (`@lasterm/agent`, `node-pty`, SEA agent scripts) superseded by Rust agent
 
 ## Goals
 
@@ -57,12 +57,12 @@ All `.sh` scripts target Linux + macOS only. Windows always uses `.ps1`.
 
 | Variable | Default | Used by |
 |----------|---------|---------|
-| `TERMORA_NODE_VERSION` | Current Node version | `build-hub` via SEA binary packaging |
-| `TERMORA_TARGET_TRIPLE` | Auto-detected via `uname` / PowerShell | All build scripts |
-| `TERMORA_DIST_DIR` | `dist/sea` | `build-agent`, `build-hub` |
-| `TERMORA_BUILD_HASH` | `git rev-parse --short=8 HEAD` | `build-web`, `build-hub` |
-| `TERMORA_SKIP_WEB` | `false` | `build-hub`, `build-desktop` |
-| `TERMORA_CARGO_TARGET_DIR` | `target` | `build-agent` |
+| `LASTERM_NODE_VERSION` | Current Node version | `build-hub` via SEA binary packaging |
+| `LASTERM_TARGET_TRIPLE` | Auto-detected via `uname` / PowerShell | All build scripts |
+| `LASTERM_DIST_DIR` | `dist/sea` | `build-agent`, `build-hub` |
+| `LASTERM_BUILD_HASH` | `git rev-parse --short=8 HEAD` | `build-web`, `build-hub` |
+| `LASTERM_SKIP_WEB` | `false` | `build-hub`, `build-desktop` |
+| `LASTERM_CARGO_TARGET_DIR` | `target` | `build-agent` |
 
 ### Auto-Detection
 
@@ -74,13 +74,13 @@ case "$(uname -s)" in
   Darwin) TRIPLE="${ARCH}-apple-darwin" ;;
   *)      echo "Unsupported OS. Use .ps1 on Windows." >&2; exit 1 ;;
 esac
-TERMORA_TARGET_TRIPLE="${TERMORA_TARGET_TRIPLE:-$TRIPLE}"
+LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$TRIPLE}"
 ```
 
 **PowerShell (Windows):**
 ```powershell
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$env:TERMORA_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
+$env:LASTERM_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
 ```
 
 ## Script Flows
@@ -88,9 +88,9 @@ $env:TERMORA_TARGET_TRIPLE ??= "$arch-pc-windows-msvc"
 ### build-web.sh / .ps1
 
 ```
-1. TERMORA_BUILD_HASH ?= git rev-parse --short HEAD
-2. pnpm -F @termora/shared build
-3. TERMORA_BUILD_HASH=$hash pnpm -F @termora/web build
+1. LASTERM_BUILD_HASH ?= git rev-parse --short HEAD
+2. pnpm -F @lasterm/shared build
+3. LASTERM_BUILD_HASH=$hash pnpm -F @lasterm/web build
 4. node scripts/embed-web.js    # dist/ -> packages/hub/static/
 ```
 
@@ -99,38 +99,38 @@ No native addons, no platform-specific logic. Identical everywhere.
 ### build-agent.sh / .ps1
 
 ```
-1. Auto-detect TERMORA_TARGET_TRIPLE
-2. cargo build -p termora-agent --release \
-     --target-dir ${TERMORA_CARGO_TARGET_DIR:-target}
-3. Copy binary -> ${TERMORA_DIST_DIR}/termora-agent{.exe}
+1. Auto-detect LASTERM_TARGET_TRIPLE
+2. cargo build -p lasterm-agent --release \
+     --target-dir ${LASTERM_CARGO_TARGET_DIR:-target}
+3. Copy binary -> ${LASTERM_DIST_DIR}/lasterm-agent{.exe}
 ```
 
-Pure Rust build. `TERMORA_CARGO_TARGET_DIR` allows CI cache redirection.
+Pure Rust build. `LASTERM_CARGO_TARGET_DIR` allows CI cache redirection.
 
 ### build-hub.sh / .ps1
 
 ```
-1. Auto-detect TERMORA_TARGET_TRIPLE, TERMORA_BUILD_HASH
-2. pnpm -F @termora/shared build
-3. if TERMORA_SKIP_WEB != "true":
+1. Auto-detect LASTERM_TARGET_TRIPLE, LASTERM_BUILD_HASH
+2. pnpm -F @lasterm/shared build
+3. if LASTERM_SKIP_WEB != "true":
      call build-web script
-4. TERMORA_DIST_DIR=$dist TERMORA_BUILD_HASH=$hash \
+4. LASTERM_DIST_DIR=$dist LASTERM_BUILD_HASH=$hash \
      tsx scripts/package-sea-hub.ts
 ```
 
-Hub depends on web — builds it automatically unless `TERMORA_SKIP_WEB=true`.
+Hub depends on web — builds it automatically unless `LASTERM_SKIP_WEB=true`.
 
 ### build-desktop.sh / .ps1 (orchestrator)
 
 ```
-1. Auto-detect TERMORA_TARGET_TRIPLE
+1. Auto-detect LASTERM_TARGET_TRIPLE
 2. call build-web script
 3. call build-agent script
-4. TERMORA_SKIP_WEB=true call build-hub script
+4. LASTERM_SKIP_WEB=true call build-hub script
 5. Copy sidecars -> packages/clients/desktop/src-tauri/
-     termora-agent-${TRIPLE}{.exe}
-     termora-hub-${TRIPLE}{.exe}
-6. pnpm -F @termora/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
+     lasterm-agent-${TRIPLE}{.exe}
+     lasterm-hub-${TRIPLE}{.exe}
+6. pnpm -F @lasterm/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
 ```
 
 Note: `tauri.conf.json`'s `beforeBuildCommand` points to the deleted `prepare-desktop.sh`.
@@ -141,21 +141,21 @@ to remove `beforeBuildCommand` entirely in B7 (cleanup block).
 
 ```
 1. Check: node, pnpm, cargo available
-2. pnpm -F @termora/shared build
-3. Start hub dev:  pnpm -F @termora/hub dev    (background, log -> .termora-hub.log)
-4. Start web dev:  pnpm -F @termora/web dev    (background, log -> .termora-web.log)
+2. pnpm -F @lasterm/shared build
+3. Start hub dev:  pnpm -F @lasterm/hub dev    (background, log -> .lasterm-hub.log)
+4. Start web dev:  pnpm -F @lasterm/web dev    (background, log -> .lasterm-web.log)
 5. Start agent daemon:
-     Linux/macOS: cargo run -p termora-agent -- daemon
-       Listens on UDS: ~/.local/state/termora/agent.sock
-     Windows:     cargo run -p termora-agent -- daemon
-       Listens on named pipe: \\.\pipe\termora-agent
+     Linux/macOS: cargo run -p lasterm-agent -- daemon
+       Listens on UDS: ~/.local/state/lasterm/agent.sock
+     Windows:     cargo run -p lasterm-agent -- daemon
+       Listens on named pipe: \\.\pipe\lasterm-agent
 6. Wait for agent readiness (poll socket/pipe existence, max 5s)
 ```
 
 The `.ps1` is new — fills the Windows dev gap.
 
-Agent daemon CLI: `termora-agent daemon [--socket <path>] [--buffer-per-channel <bytes>] [--buffer-global <bytes>]`.
-On Windows, `--socket` accepts a named pipe path. Readiness check: test pipe existence via PowerShell `Test-Path \\.\pipe\termora-agent`.
+Agent daemon CLI: `lasterm-agent daemon [--socket <path>] [--buffer-per-channel <bytes>] [--buffer-global <bytes>]`.
+On Windows, `--socket` accepts a named pipe path. Readiness check: test pipe existence via PowerShell `Test-Path \\.\pipe\lasterm-agent`.
 
 ### dev-stop.sh / .ps1
 
@@ -163,8 +163,8 @@ On Windows, `--socket` accepts a named pipe path. Readiness check: test pipe exi
 1. Kill hub dev (port 4100)
 2. Kill web dev (port 5173)
 3. Kill agent daemon (PID file / socket cleanup)
-     Linux/macOS: rm ~/.local/state/termora/agent.sock
-     Windows:     Stop-Process (agent PID from .termora-agent.pid)
+     Linux/macOS: rm ~/.local/state/lasterm/agent.sock
+     Windows:     Stop-Process (agent PID from .lasterm-agent.pid)
 ```
 
 ### dev-restart.sh / .ps1
@@ -287,17 +287,17 @@ jobs:
         if: matrix.shell_sh
         run: ./scripts/build-agent.sh
         env:
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: .\scripts\build-agent.ps1
         env:
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
       - uses: actions/upload-artifact@v4
         with:
           name: agent-${{ matrix.triple }}
-          path: dist/sea/termora-agent*
+          path: dist/sea/lasterm-agent*
 
   build-hub:
     needs: [matrix, build-web]
@@ -316,19 +316,19 @@ jobs:
         if: matrix.shell_sh
         run: ./scripts/build-hub.sh
         env:
-          TERMORA_SKIP_WEB: "true"
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: .\scripts\build-hub.ps1
         env:
-          TERMORA_SKIP_WEB: "true"
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
       - uses: actions/upload-artifact@v4
         with:
           name: hub-${{ matrix.triple }}
-          path: dist/sea/termora-hub*
+          path: dist/sea/lasterm-hub*
 
   build-desktop:
     needs: [matrix, build-agent, build-hub, build-web]
@@ -353,17 +353,17 @@ jobs:
         if: matrix.shell_sh
         run: |
           TRIPLE="${{ matrix.triple }}"
-          cp dist/sea/termora-agent "packages/clients/desktop/src-tauri/termora-agent-${TRIPLE}"
-          cp dist/sea/termora-hub "packages/clients/desktop/src-tauri/termora-hub-${TRIPLE}"
-          pnpm -F @termora/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
+          cp dist/sea/lasterm-agent "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
+          cp dist/sea/lasterm-hub "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
+          pnpm -F @lasterm/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
       - name: Place sidecars + build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: |
           $triple = "${{ matrix.triple }}"
-          Copy-Item dist\sea\termora-agent.exe "packages\clients\desktop\src-tauri\termora-agent-$triple.exe"
-          Copy-Item dist\sea\termora-hub.exe "packages\clients\desktop\src-tauri\termora-hub-$triple.exe"
-          pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+          Copy-Item dist\sea\lasterm-agent.exe "packages\clients\desktop\src-tauri\lasterm-agent-$triple.exe"
+          Copy-Item dist\sea\lasterm-hub.exe "packages\clients\desktop\src-tauri\lasterm-hub-$triple.exe"
+          pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.triple }}
@@ -396,12 +396,12 @@ Structure unchanged — calls `build.yml` then creates GitHub Release.
 
 Release assets naming:
 ```
-termora-agent-x86_64-unknown-linux-gnu
-termora-agent-x86_64-pc-windows-msvc.exe
-termora-hub-x86_64-unknown-linux-gnu
-termora-hub-x86_64-pc-windows-msvc.exe
-termora-desktop-x86_64-pc-windows-msvc.msi
-termora-desktop-x86_64-pc-windows-msvc-setup.exe
+lasterm-agent-x86_64-unknown-linux-gnu
+lasterm-agent-x86_64-pc-windows-msvc.exe
+lasterm-hub-x86_64-unknown-linux-gnu
+lasterm-hub-x86_64-pc-windows-msvc.exe
+lasterm-desktop-x86_64-pc-windows-msvc.msi
+lasterm-desktop-x86_64-pc-windows-msvc-setup.exe
 ```
 
 ## TS Script Modifications
@@ -411,14 +411,14 @@ termora-desktop-x86_64-pc-windows-msvc-setup.exe
 Add env var reading at the top:
 
 ```typescript
-const distDir = process.env.TERMORA_DIST_DIR ?? 'dist/sea';
-const buildHash = process.env.TERMORA_BUILD_HASH
+const distDir = process.env.LASTERM_DIST_DIR ?? 'dist/sea';
+const buildHash = process.env.LASTERM_BUILD_HASH
   ?? execFileSync('git', ['rev-parse', '--short', 'HEAD']).toString().trim();
-const targetPlatform = tripleToNodePlatform(process.env.TERMORA_TARGET_TRIPLE)
+const targetPlatform = tripleToNodePlatform(process.env.LASTERM_TARGET_TRIPLE)
   ?? process.platform;
-const targetArch = tripleToNodeArch(process.env.TERMORA_TARGET_TRIPLE)
+const targetArch = tripleToNodeArch(process.env.LASTERM_TARGET_TRIPLE)
   ?? process.arch;
-const nodeVersion = process.env.TERMORA_NODE_VERSION ?? process.version;
+const nodeVersion = process.env.LASTERM_NODE_VERSION ?? process.version;
 ```
 
 Helper function `tripleToNodePlatform`:
@@ -430,7 +430,7 @@ Existing CLI args (`--target-platform`, etc.) remain as overrides during transit
 
 ### `scripts/build-sea-binary.ts`
 
-Read `TERMORA_NODE_VERSION` as fallback for `targetNodeVersion`.
+Read `LASTERM_NODE_VERSION` as fallback for `targetNodeVersion`.
 
 ## Dead Code Cleanup
 
@@ -481,7 +481,7 @@ Steps:
 3. `pnpm test` (all tests pass?)
 4. `pnpm run package:sea-hub` (SEA blob works?)
 5. Execute resulting SEA binary
-6. If pass: bump `engines`, CI `node-version`, `TERMORA_NODE_VERSION` default
+6. If pass: bump `engines`, CI `node-version`, `LASTERM_NODE_VERSION` default
 
 ## Implementation Blocks
 

@@ -77,10 +77,10 @@ excluded by the merged guard), rollback (§8), macOS/Linux channels.
 | Store/MSIX builds skip the updater, fail-closed | merged in `3626f92` |
 | Public key embedded and pinned by a test; CI holds the private half | `tauri.conf.json`, `tauri-config.spec.ts` |
 | `createUpdaterArtifacts` disabled; nothing signed or published | `tauri.conf.json` |
-| No SHUTDOWN in the hub↔agent protocol; daemon loop never exits | `crates/termora-agent/src/protocol.rs`, `daemon.rs` |
+| No SHUTDOWN in the hub↔agent protocol; daemon loop never exits | `crates/lasterm-agent/src/protocol.rs`, `daemon.rs` |
 | Agent spawned detached + `unref()`; PID recorded nowhere | `hub/src/session/agent-launcher.ts` |
 | Hub auto-relaunches the agent on close | `agent-connection-manager.ts:454-489`, `:534` (C1) |
-| No process-tree termination on any platform | `crates/termora-agent/src/pty.rs`, `async-xpty` (C2) |
+| No process-tree termination on any platform | `crates/lasterm-agent/src/pty.rs`, `async-xpty` (C2) |
 | Hub stop is pid-confirmed by the caller, not by the route | `lib.rs` `confirm_hub_stopped_or_kill`; `POST /api/shutdown` returns then tears down |
 | Connected-client count excludes the caller only if it sends its client id | `session-manager.ts` `getOthersCount`; the CLI does not send it |
 | Four quit paths exist; only the window-close one reaches the webview | `App.vue`, `desktop-lifecycle.ts`, `lib.rs` `handle_tray_quit`, `cli.ts` `cmdStop`, OS shutdown |
@@ -101,7 +101,7 @@ went*, not what happened to the user's work.
 | **Quit** | Everything local stops: window, hub, agent, and the processes they spawned — the whole tree on Windows, the shell's process group on Unix (§4.2). Terminals end. |
 
 Persisted values migrate `tray → hide` on read; an unknown value falls back to
-`ask`. Window close, the tray menu and `termora quit` mean the same thing, so the
+`ask`. Window close, the tray menu and `lasterm quit` mean the same thing, so the
 coordinator lives in Rust with the webview as one presenter among several rather
 than as the owner of the decision. The setting lives with the coordinator, in
 per-user native config: a tray click with the window hidden has no webview to ask,
@@ -167,12 +167,12 @@ side owns the exit.
 #### §4.2.1 Where the work lands
 
 `async-xpty` is consumed as a rev-pinned git dependency, so the containment
-primitives ship upstream first and termora consumes them by moving the pin.
+primitives ship upstream first and lasterm consumes them by moving the pin.
 
 | Repo | Change |
 |------|--------|
 | `khiops/async-xpty` | Job Object at creation (Windows), process-group signal (Unix), bounded `wait()`, exposed as a **new** `kill_tree()` — `kill()` keeps meaning "terminate the direct process". Widening `kill()` in place would be a silent semantic break for every other consumer of a general-purpose crate. The job handle is owned by the process value, and `Drop` closes it. |
-| `khiops/termora` | Move the rev pin; `destroy_all()` calls `kill_tree()` and waits, bounded; identity file; `SHUTDOWN` protocol; no-relaunch latch; the shutdown channel above. |
+| `khiops/lasterm` | Move the rev pin; `destroy_all()` calls `kill_tree()` and waits, bounded; identity file; `SHUTDOWN` protocol; no-relaunch latch; the shutdown channel above. |
 
 Until the pin moves, the agent cannot honestly answer `childrenExited: true`.
 

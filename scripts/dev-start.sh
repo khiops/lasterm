@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Start termora dev servers in background with log capture.
+# Start lasterm dev servers in background with log capture.
 # Usage: ./scripts/dev-start.sh [hub|agent|all]   (default: all)
 set -euo pipefail
 
 TARGET="${1:-all}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOG_DIR="/tmp/termora-dev"
+LOG_DIR="/tmp/lasterm-dev"
 PID_FILE="$LOG_DIR/dev.pid"
-AGENT_SOCK="${XDG_RUNTIME_DIR:-/tmp/termora-$(id -u)}/termora/agent.sock"
+AGENT_SOCK="${XDG_RUNTIME_DIR:-/tmp/lasterm-$(id -u)}/lasterm/agent.sock"
 
 mkdir -p "$LOG_DIR"
 
@@ -18,7 +18,7 @@ start_hub() {
 	echo ""
 
 	echo "Building shared…"
-	(cd "$ROOT" && pnpm -F @termora/shared build) > "$LOG_DIR/shared-build.log" 2>&1
+	(cd "$ROOT" && pnpm -F @lasterm/shared build) > "$LOG_DIR/shared-build.log" 2>&1
 
 	echo "Starting hub + web…"
 	cd "$ROOT"
@@ -82,10 +82,10 @@ start_agent() {
 	echo ""
 
 	echo "Building Rust agent…"
-	(cd "$ROOT" && cargo build -p termora-agent --release) > "$LOG_DIR/agent-build.log" 2>&1
+	(cd "$ROOT" && cargo build -p lasterm-agent --release) > "$LOG_DIR/agent-build.log" 2>&1
 
 	echo "Starting agent daemon…"
-	local AGENT_BIN="$ROOT/target/release/termora-agent"
+	local AGENT_BIN="$ROOT/target/release/lasterm-agent"
 	setsid "$AGENT_BIN" --daemon --socket "$AGENT_SOCK" \
 		--buffer-per-channel 1048576 --buffer-global 20971520 \
 		> "$LOG_DIR/agent.log" 2>&1 &

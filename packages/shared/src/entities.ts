@@ -1,4 +1,4 @@
-// In-memory TypeScript entity types for termora
+// In-memory TypeScript entity types for lasterm
 // These represent the domain model; DB types are defined in hub/storage
 
 import type { BellSound } from "./config.js";

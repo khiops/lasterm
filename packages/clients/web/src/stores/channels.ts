@@ -1,4 +1,4 @@
-import type { Channel, ChannelCreatedMessage, ChannelGroup } from "@termora/shared";
+import type { Channel, ChannelCreatedMessage, ChannelGroup } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, nextTick, ref } from "vue";
 import { hubBaseUrl } from "../utils/hub-url.js";
@@ -6,7 +6,7 @@ import { useAuthStore } from "./auth.js";
 import { useConfigStore } from "./config.js";
 import { useSessionStore } from "./session.js";
 
-const COLLAPSED_KEY = "termora:collapsed-groups";
+const COLLAPSED_KEY = "lasterm:collapsed-groups";
 
 function loadCollapsedMap(): Record<string, boolean> {
 	try {

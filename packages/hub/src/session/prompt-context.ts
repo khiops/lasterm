@@ -14,7 +14,7 @@
  *   Guard F: clearContext is idempotent and called from terminal paths only.
  */
 
-import { generateId } from "@termora/shared";
+import { generateId } from "@lasterm/shared";
 import type {
 	ElevationPromptOwner,
 	PromptContext,
@@ -248,7 +248,7 @@ export function respond(
 
 	// Guard D: enforce epoch match only when the caller provides a defined epoch.
 	// Back-compat: the web client does not echo deliveryEpoch yet (that lands in a
-	// later step when @termora/web echoes promptId+deliveryEpoch). Until then, callers
+	// later step when @lasterm/web echoes promptId+deliveryEpoch). Until then, callers
 	// that cannot supply an epoch pass undefined and we skip the epoch check while
 	// still enforcing the SEC-003 clientId check above.
 	if (deliveryEpoch !== undefined && deliveryEpoch !== inFlight.deliveryEpoch) {

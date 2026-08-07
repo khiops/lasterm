@@ -25,7 +25,7 @@ describe("getSocketPath", () => {
 
 			const result = getSocketPath();
 
-			expect(result).toBe("/run/user/1000/termora/agent.sock");
+			expect(result).toBe("/run/user/1000/lasterm/agent.sock");
 		});
 
 		it("returns /tmp fallback when XDG_RUNTIME_DIR unset", () => {
@@ -40,7 +40,7 @@ describe("getSocketPath", () => {
 
 			const result = getSocketPath();
 
-			expect(result).toBe("/tmp/termora-1234/agent.sock");
+			expect(result).toBe("/tmp/lasterm-1234/agent.sock");
 		});
 
 		it("returns override path when provided", () => {
@@ -63,7 +63,7 @@ describe("getSocketPath", () => {
 
 			const result = getSocketPath();
 
-			expect(result).toBe("\\\\.\\pipe\\termora-agent-alice");
+			expect(result).toBe("\\\\.\\pipe\\lasterm-agent-alice");
 		});
 	});
 });
@@ -71,7 +71,7 @@ describe("getSocketPath", () => {
 /** Returns a platform-appropriate socket path for probeSocket tests. */
 function makeProbeSocketPath(name: string, tmpDir: string): string {
 	if (process.platform === "win32") {
-		return `\\\\.\\pipe\\termora-probe-${name}-${process.pid}`;
+		return `\\\\.\\pipe\\lasterm-probe-${name}-${process.pid}`;
 	}
 	return path.join(tmpDir, `${name}.sock`);
 }
@@ -80,7 +80,7 @@ describe("probeSocket", () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "termora-test-"));
+		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-test-"));
 	});
 
 	afterEach(async () => {

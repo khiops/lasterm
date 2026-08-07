@@ -152,7 +152,7 @@ Precondition: 2+ live channels with output, agent running as daemon.
 
 ### 17. Multiple browser tabs (write-lock contention)
 
-- Open termora in two browser tabs
+- Open lasterm in two browser tabs
 - Tab A has write lock on channel X
 - Tab B clicks channel X → sees "No lock" (reader mode)
 - Tab B force-takes write lock → Tab A loses lock, shows "No lock"
@@ -241,7 +241,7 @@ Precondition: 4 tabs open (A, B, C, D), tab B selected.
 - "Close All" triggers confirmation dialog (if confirmCloseAll enabled)
 - Dialog shows "Remember for host" and "Remember globally" checkboxes
 - Check "Remember globally" + confirm → next "Close All" skips dialog
-- Clear localStorage `termora:skipConfirm*` → dialogs return
+- Clear localStorage `lasterm:skipConfirm*` → dialogs return
 
 ### 29. Split panes — horizontal and vertical
 

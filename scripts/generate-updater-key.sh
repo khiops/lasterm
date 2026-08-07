@@ -22,7 +22,7 @@ fi
 
 # Generate key pair
 echo "Generating key pair..."
-npx tauri signer generate -w ~/.tauri/termora-updater.key 2>&1 || cargo tauri signer generate -w ~/.tauri/termora-updater.key
+npx tauri signer generate -w ~/.tauri/lasterm-updater.key 2>&1 || cargo tauri signer generate -w ~/.tauri/lasterm-updater.key
 
 echo ""
 echo "=== NEXT STEPS ==="
@@ -32,7 +32,7 @@ echo "   → plugins.updater.pubkey"
 echo ""
 echo "2. Store the PRIVATE key as a CI secret:"
 echo "   → GitHub: Settings > Secrets > TAURI_SIGNING_PRIVATE_KEY"
-echo "   → Value: contents of ~/.tauri/termora-updater.key"
+echo "   → Value: contents of ~/.tauri/lasterm-updater.key"
 echo ""
 echo "3. Store the PASSWORD as a CI secret:"
 echo "   → GitHub: Settings > Secrets > TAURI_SIGNING_PRIVATE_KEY_PASSWORD"

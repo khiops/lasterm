@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { HostArch, HostOs } from "@termora/shared";
+import type { HostArch, HostOs } from "@lasterm/shared";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
 import { detectSea } from "../sea-addon-loader.js";
@@ -77,15 +77,15 @@ export interface DeployResult {
 
 /** Common paths to check when which/where are not available */
 const COMMON_AGENT_PATHS_UNIX = [
-	"$HOME/.local/bin/termora-agent",
-	"/usr/local/bin/termora-agent",
-	"/usr/bin/termora-agent",
-	"/opt/termora/termora-agent",
+	"$HOME/.local/bin/lasterm-agent",
+	"/usr/local/bin/lasterm-agent",
+	"/usr/bin/lasterm-agent",
+	"/opt/lasterm/lasterm-agent",
 ];
 
 const COMMON_AGENT_PATHS_WINDOWS = [
-	"%LOCALAPPDATA%\\termora\\termora-agent.exe",
-	"%ProgramFiles%\\termora\\termora-agent.exe",
+	"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
+	"%ProgramFiles%\\lasterm\\lasterm-agent.exe",
 ];
 
 const STRICT_SEMVER = /^\d+\.\d+\.\d+$/;
@@ -96,7 +96,7 @@ function canAutoFetchVersion(version: string): boolean {
 
 function getAgentCacheFileName(os: HostOs, arch: HostArch, version: string): string {
 	const target = AGENT_TARGET_TRIPLES[os][arch];
-	return `termora-agent-${os}-${arch}-${version}${target.ext}`;
+	return `lasterm-agent-${os}-${arch}-${version}${target.ext}`;
 }
 
 async function resolveLocalAgentBinary(
@@ -106,7 +106,7 @@ async function resolveLocalAgentBinary(
 	hubVersion: string,
 ): Promise<string | null> {
 	// HUB_VERSION flows into the cache filename and can derive from the untrusted
-	// TERMORA_VERSION env. An unvalidated value (path separators, "..") could
+	// LASTERM_VERSION env. An unvalidated value (path separators, "..") could
 	// resolve OUTSIDE the cache dir and load a planted binary that is then deployed
 	// as a trusted local agent (cache binaries bypass the remote TOFU gate). Refuse
 	// anything that is not a strict semver BEFORE constructing any path.
@@ -141,13 +141,13 @@ async function resolveLocalAgentBinary(
 }
 
 /**
- * Check if termora-agent exists on the remote host.
+ * Check if lasterm-agent exists on the remote host.
  * Returns the remote path if found, null otherwise.
  */
 export async function checkRemoteAgent(client: SshClient): Promise<string | null> {
 	// 1. Try which (Linux/macOS)
 	try {
-		const { stdout, exitCode } = await sshExec(client, "which termora-agent");
+		const { stdout, exitCode } = await sshExec(client, "which lasterm-agent");
 		if (exitCode === 0) {
 			const p = stdout.trim();
 			if (p) return p;
@@ -158,7 +158,7 @@ export async function checkRemoteAgent(client: SshClient): Promise<string | null
 
 	// 2. Try where (Windows)
 	try {
-		const { stdout, exitCode } = await sshExec(client, "where termora-agent");
+		const { stdout, exitCode } = await sshExec(client, "where lasterm-agent");
 		if (exitCode === 0) {
 			const firstLine = stdout.split(/\r?\n/)[0]?.trim();
 			if (firstLine) return firstLine;
@@ -326,22 +326,22 @@ async function resolveRemoteHome(client: SshClient): Promise<string> {
  */
 async function resolveRemotePath(client: SshClient, os: HostOs): Promise<string> {
 	if (os === "windows") {
-		return "%LOCALAPPDATA%\\termora\\termora-agent.exe";
+		return "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe";
 	}
 	const home = await resolveRemoteHome(client);
-	return `${home}/.local/bin/termora-agent`;
+	return `${home}/.local/bin/lasterm-agent`;
 }
 
 /**
  * Full auto-deploy flow.
  *
- * 1. Check if termora-agent is already on the remote host.
+ * 1. Check if lasterm-agent is already on the remote host.
  * 2. If not found, detect OS/arch (or use known values from host record).
  * 3. Locate the correct pre-built binary in the local binary cache.
  * 4. Upload via SFTP.
  *
  * Auto-deploy is best-effort — callers should catch errors and fall back
- * to attempting termora-agent --stdio directly.
+ * to attempting lasterm-agent --stdio directly.
  */
 /**
  * Full auto-deploy flow with SHA256 integrity verification and TOFU support.
@@ -551,10 +551,10 @@ export async function deployAgentIfNeeded(
  */
 export function getBinaryCacheDir(): string {
 	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", "termora", "binaries");
+		return join(process.env.LOCALAPPDATA ?? "", "lasterm", "binaries");
 	}
 	const stateBase = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
-	return join(stateBase, "termora", "binaries");
+	return join(stateBase, "lasterm", "binaries");
 }
 
 /**

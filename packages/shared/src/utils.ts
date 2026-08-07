@@ -1,4 +1,4 @@
-// Utility helpers for termora packages
+// Utility helpers for lasterm packages
 import { ulid } from "ulid";
 
 /**

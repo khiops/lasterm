@@ -10,7 +10,7 @@ Replace the text input with a modal font picker that shows installed fonts with 
 
 ## Scope
 
-The picker works at all 3 levels of the config cascade: global, per-host, per-channel. Fonts are stored centrally in `~/.config/termora/fonts/` (no system font detection).
+The picker works at all 3 levels of the config cascade: global, per-host, per-channel. Fonts are stored centrally in `~/.config/lasterm/fonts/` (no system font detection).
 
 ## API
 
@@ -30,7 +30,7 @@ Upload a single font file. Multipart form data.
   - MIME check via `fileTypeFromBuffer()` from `file-type` package (already a hub dependency, same pattern as wallpapers.ts). Allowed MIME set: `font/sfnt`, `font/otf`, `font/woff`, `font/woff2`, `application/font-woff`, `application/font-woff2`
   - Size check: `buffer.byteLength > MAX_FONT_SIZE (10 MB)` in handler (not plugin config — `@fastify/multipart` is already registered globally in server.ts with wallpaper limits)
   - Reject duplicates: same filename already exists (case-insensitive on Windows, case-sensitive on Linux)
-- **Behavior**: writes file to `~/.config/termora/fonts/`, returns updated `FontFamily[]` (via `scanFonts()`)
+- **Behavior**: writes file to `~/.config/lasterm/fonts/`, returns updated `FontFamily[]` (via `scanFonts()`)
 - **Auth**: required — POST does not match the existing GET-only bypass in server.ts L168
 - **Errors**: 400 (bad format/size), 409 (duplicate filename)
 

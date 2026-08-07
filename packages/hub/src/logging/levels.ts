@@ -1,4 +1,4 @@
-import type { LogConfig } from "@termora/shared";
+import type { LogConfig } from "@lasterm/shared";
 
 export const LOG_SEVERITY: Record<LogConfig["level"], number> = {
 	trace: 0,

@@ -1,4 +1,4 @@
-# termora — Architecture Specification
+# lasterm — Architecture Specification
 
 > Version: 0.1.0 (MVP)
 > Status: draft
@@ -6,7 +6,7 @@
 
 ## 1. Vision
 
-termora is a **local-first session terminal platform** that lets developers and SREs manage persistent terminal sessions across local and remote machines from a modern web UI. Sessions survive client disconnects and device switches; local sessions also survive hub restarts. (Surviving a dropped SSH transport to a remote host is on the roadmap, not yet shipped.)
+lasterm is a **local-first session terminal platform** that lets developers and SREs manage persistent terminal sessions across local and remote machines from a modern web UI. Sessions survive client disconnects and device switches; local sessions also survive hub restarts. (Surviving a dropped SSH transport to a remote host is on the roadmap, not yet shipped.)
 
 **Core differentiators:**
 - Hub owns state (cache + snapshot) independently of UI clients
@@ -45,19 +45,19 @@ termora is a **local-first session terminal platform** that lets developers and 
 │   │          spool.db (output chunks, snapshots)              │  │
 │   └───────────────────────────────────────────────────────────┘  │
 └──────────┬──────────────────────────────────────────────────────┘
-           │ Local: child_process.spawn("termora-agent --stdio")
-           │   ─or─ UDS to standalone daemon ("termora-agent --daemon")
-           │ Remote: SSH (ssh2) → "termora-agent --stdio"
+           │ Local: child_process.spawn("lasterm-agent --stdio")
+           │   ─or─ UDS to standalone daemon ("lasterm-agent --daemon")
+           │ Remote: SSH (ssh2) → "lasterm-agent --stdio"
            │ Transport: MessagePack framed over stdio or UDS (all modes)
            │
 ┌──────────▼──────────────────────────────────────────────────────┐
-│                    Agent (Node.js, local or remote)             │
+│                    Agent (Rust, local or remote)                 │
 │   Universal PTY manager — same binary, same protocol            │
 │                                                                  │
 │   ┌──────────────┐ ┌────────────────┐ ┌──────────────────────┐  │
 │   │ PTY Manager  │ │ Screen Model   │ │ Protocol Handler     │  │
 │   │              │ │                │ │                      │  │
-│   │ node-pty     │ │ xterm.js       │ │ MessagePack framed   │  │
+│   │ async-xpty   │ │ vt100 crate    │ │ MessagePack framed   │  │
 │   │ spawn/resize │ │ headless       │ │ stdin/stdout         │  │
 │   │ N channels   │ │ serialize()    │ │ multiplexed channels │  │
 │   └──────────────┘ └────────────────┘ └──────────────────────┘  │
@@ -66,7 +66,7 @@ termora is a **local-first session terminal platform** that lets developers and 
 
 ## 3. Component Details
 
-### 3.1 Shared Package (`@termora/shared`)
+### 3.1 Shared Package (`@lasterm/shared`)
 
 TypeScript library used by hub, agent, and UI.
 
@@ -78,29 +78,29 @@ TypeScript library used by hub, agent, and UI.
 - Entity types (Host, Session, Channel, Workspace, ChannelGroup)
 - Constants (protocol version, default port, default config values)
 
-### 3.2 Agent (`@termora/agent`)
+### 3.2 Agent (`crates/lasterm-agent`)
 
 Universal PTY manager. Runs locally (child process) or remotely (via SSH). Same binary, same protocol.
 
 **Responsibilities:**
 - Protocol handshake (HELLO with version, capabilities, visual_hints)
-- PTY lifecycle: spawn, resize, destroy (via node-pty)
-- Screen model: xterm.js headless terminal per channel — maintains accurate screen state
+- PTY lifecycle: spawn, resize, destroy (via `async-xpty`)
+- Screen model: a `vt100` parser per channel in `headless.rs` — maintains accurate screen state
 - Snapshot: serialize() on demand or periodic (3s idle, 5s forced)
 - Channel multiplexing: N channels per agent process
 - Backpressure: pause PTY read when output buffer exceeds threshold
 - Daemon mode: standalone process listening on UDS, output buffering via `OutputBuffer` ring buffer
-- `DaemonServer` (`daemon.ts`): UDS listener, HELLO handshake, connection displacement (last-writer-wins)
-- `OutputBuffer` (`buffer.ts`): per-channel ring buffer with per-channel cap and global cap, evicts from largest channel
-- CLI: `termora-agent --daemon --socket <path> --buffer-per-channel <bytes> --buffer-global <bytes>`
+- `DaemonServer` (`daemon.rs`): UDS listener, HELLO handshake, connection displacement (last-writer-wins)
+- `OutputBuffer` (`batch.rs`): per-channel ring buffer with per-channel cap and global cap, evicts from largest channel
+- CLI: `lasterm-agent --daemon --socket <path> --buffer-per-channel <bytes> --buffer-global <bytes>`
 
 **Process model (local — stdio, legacy):**
 ```
-hub: child_process.spawn("termora-agent", ["--stdio"])
+hub: child_process.spawn("lasterm-agent", ["--stdio"])
   → Agent starts, writes HELLO to stdout
   → Hub reads HELLO, sends SPAWN commands
-  → Each SPAWN creates a PTY + headless xterm
-  → OUTPUT flows: PTY → headless xterm (for state) → framed stdout → Hub
+  → Each SPAWN creates a PTY + a vt100 screen model
+  → OUTPUT flows: PTY → vt100 model (for state) → framed stdout → Hub
   → INPUT flows: Hub → framed stdin → Agent → PTY
 ```
 
@@ -108,7 +108,7 @@ hub: child_process.spawn("termora-agent", ["--stdio"])
 ```
 hub: connectOrLaunch(socketPath, config, binaryPath)
   → Probes UDS socket via probeSocket()
-  → If no daemon running: spawn detached "termora-agent --daemon --socket <path>"
+  → If no daemon running: spawn detached "lasterm-agent --daemon --socket <path>"
   → Polls socket until ready (up to 5s)
   → Connects to UDS → Agent sends HELLO (with protocolVersion)
   → On reconnect: Agent sends N x AGENT_CHANNEL_STATE + CHANNEL_STATE_END
@@ -120,31 +120,31 @@ The `DaemonServer` class manages UDS connections with last-writer-wins displacem
 
 **Process model (remote):**
 ```
-hub: ssh2.exec("termora-agent --stdio")
+hub: ssh2.exec("lasterm-agent --stdio")
   → Agent starts, writes HELLO to stdout
   → Hub reads HELLO, sends SPAWN commands
-  → Each SPAWN creates a PTY + headless xterm
-  → OUTPUT flows: PTY → headless xterm (for state) → framed stdout → SSH → Hub
+  → Each SPAWN creates a PTY + a vt100 screen model
+  → OUTPUT flows: PTY → vt100 model (for state) → framed stdout → SSH → Hub
   → INPUT flows: Hub → SSH → framed stdin → Agent → PTY
 ```
 
 The protocol is identical in all modes. Only the transport differs (stdio pipe, UDS, or SSH channel).
 
-**Headless xterm.js (spike required):**
-- Needs minimal DOM polyfill (jsdom or custom shim)
-- Purpose: maintain accurate screen state for serialize()
-- Serialize addon: produces string that can restore full terminal state in UI xterm.js
-- **Spike success criteria:** polyfill bundle < 1 MB, serialize() < 100ms for 120×40 + 5000 scrollback
-- **Fallback if spike fails:** skip serialize addon, use raw screen buffer capture (cursor position + visible lines only, no scrollback restoration). This degrades reconnect UX but unblocks MVP.
+**Screen model:** the `vt100` crate parses the PTY stream into a screen the agent can
+serialize on demand, so a reconnecting client is handed a terminal already in the right
+state. This is what replaced the planned headless-xterm-plus-DOM-polyfill approach: the
+spike that section described was overtaken by rewriting the agent in Rust, where no DOM
+shim is needed at all.
 
-**Agent installation (MVP):**
-- Agent is NOT auto-installed via npx in MVP (chicken-egg: package not yet published)
-- MVP: hub runs `ssh user@host "termora-agent --stdio"` — agent must be pre-installed
-- `scripts/install-agent.sh` copies agent build to remote via scp
-- UI shows warning if agent not found: "termora-agent not found. [Install instructions]"
-- P2: auto-install via bundled single-file binary (Node SEA)
+**Agent installation:**
+- The hub fetches the agent from GitHub Releases, version-matched to itself, and deploys
+  it over SFTP; see §3.5. No npm package is involved, and nothing needs Node on the
+  remote host — the agent is a static Rust binary.
+- The hub runs `lasterm-agent --stdio` over SSH once the binary is in place.
+- If no build exists for the remote's OS and architecture, the fetch fails with a named
+  target rather than deploying something that cannot run.
 
-### 3.3 Hub (`@termora/hub`)
+### 3.3 Hub (`@lasterm/hub`)
 
 Local daemon, single process, binds to 127.0.0.1.
 
@@ -155,7 +155,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - WebSocket upgrade on `/ws` path
 - Static file serving for UI (production build)
 - Health endpoint (`GET /api/health`)
-- Port resolution: CLI flag > `TERMORA_PORT` env > config.toml `[server] port` > default 4100
+- Port resolution: CLI flag > `LASTERM_PORT` env > config.toml `[server] port` > default 4100
 - `zero_conf` mode (opt-in): if default port taken, auto-increment 4100→4199, write actual port to `runtime.json`
 
 **Session Manager:**
@@ -163,7 +163,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - Local sessions (fallback): spawn agent as child process (`child_process.spawn`, --stdio)
 - Remote sessions: open SSH via ssh2, launch agent, pipe stdio
 - Hub never spawns PTYs directly — agent is the universal PTY manager
-- `TermoraAgent` (`termora-agent.ts`): hub-side class extending `AgentConnection`, `connectLocal(socketPath)` factory, `waitForChannelState()` for reconnect reconciliation
+- `LastermAgent` (`lasterm-agent.ts`): hub-side class extending `AgentConnection`, `connectLocal(socketPath)` factory, `waitForChannelState()` for reconnect reconciliation
 - `connectOrLaunch` (`agent-launcher.ts`): probes socket, spawns detached daemon if needed, polls for readiness
 - Session state machine: STARTING → ACTIVE ↔ DISCONNECTED → CLOSED, with DETACHED branch
 - Reconnect (remote): exponential backoff (1s, 2s, 4s, ... 30s max, 5min total timeout)
@@ -185,24 +185,24 @@ Local daemon, single process, binds to 127.0.0.1.
 
 **Config Resolver:**
 - Layer 1: built-in defaults (code)
-- Layer 2: `$TERMORA_CONFIG_DIR/config.toml` (user file — see § 7 for platform paths)
+- Layer 2: `$LASTERM_CONFIG_DIR/config.toml` (user file — see § 7 for platform paths)
 - Layer 3: host.profile_json (meta.db)
 - Layer 3.5: agent visual_hints (from HELLO, if trust policy allows)
 - Layer 4: channel.profile_json (meta.db)
 - Resolution: deep merge in order, last wins
 
 **CLI:**
-- `termora start` — start daemon (foreground or background)
-- `termora stop` — stop daemon
-- `termora status` — show daemon status, active sessions
-- `termora host add|list|test|remove` — manage hosts
-- `termora session list|attach` — manage sessions
-- `termora workspace export|import` — workspace portability
-- `termora config edit` — open config.toml in $EDITOR
-- `termora pair` — generate pairing code for multi-device
-- `termora decode` — decode MessagePack frames from stdin (debug tool)
+- `lasterm start` — start daemon (foreground or background)
+- `lasterm stop` — stop daemon
+- `lasterm status` — show daemon status, active sessions
+- `lasterm host add|list|test|remove` — manage hosts
+- `lasterm session list|attach` — manage sessions
+- `lasterm workspace export|import` — workspace portability
+- `lasterm config edit` — open config.toml in $EDITOR
+- `lasterm pair` — generate pairing code for multi-device
+- `lasterm decode` — decode MessagePack frames from stdin (debug tool)
 
-### 3.4 Web Client (`@termora/web`)
+### 3.4 Web Client (`@lasterm/web`)
 
 Vue 3 SPA built with Vite. Served by hub in production, dev server in development.
 
@@ -252,9 +252,9 @@ this is never fetched.
 **Remote agents (other OS/arch, for SSH hosts) — fetched on demand.**
 The hub does **not** bundle agents for platforms other than its own. When deploying to a remote host whose
 `os/arch` is not yet cached, the hub downloads the matching release asset
-(`termora-agent-<triple>-<version>`) from GitHub Releases — version-matched to the hub, verified against
+(`lasterm-agent-<triple>-<version>`) from GitHub Releases — version-matched to the hub, verified against
 `SHA256SUMS-<version>.txt`, placed in a hardened (0700, owned, non-symlink) cache — then uploads it to the
-remote host over SFTP. Pre-population is available via `termora-hub agent fetch <os-arch>|--all`.
+remote host over SFTP. Pre-population is available via `lasterm-hub agent fetch <os-arch>|--all`.
 
 Two properties follow:
 - **The remote host never needs outbound internet** — the *hub* fetches on its behalf, and the binary
@@ -408,7 +408,7 @@ TabLayout (workspace persistence)
 
 ### 4.1 Naming Convention
 
-All protocol messages use **snake_case** for field names (e.g., `channel_id`, `cursor_x`). TypeScript interfaces in `@termora/shared` use **camelCase** (e.g., `channelId`, `cursorX`). The MessagePack codec layer handles conversion at encode/decode boundaries.
+All protocol messages use **snake_case** for field names (e.g., `channel_id`, `cursor_x`). TypeScript interfaces in `@lasterm/shared` use **camelCase** (e.g., `channelId`, `cursorX`). The MessagePack codec layer handles conversion at encode/decode boundaries.
 
 ### 4.2 State Transition Rules
 
@@ -493,7 +493,7 @@ User types "ls\n"
   │
   PTY → Agent: pty.onData(output)
   │
-  Agent: feed output to headless xterm (for screen state)
+  Agent: feed output to the vt100 screen model (for screen state)
   Agent → Hub (local stdio): [4-byte len][msgpack OUTPUT { channelId, seqNo, ts, data }]
   │
   Hub: write to spool.db (chunk)
@@ -521,7 +521,7 @@ User types "ls\n"
   │
   PTY → Agent: pty.onData(output)
   │
-  Agent: feed output to headless xterm (for screen state)
+  Agent: feed output to the vt100 screen model (for screen state)
   Agent → Hub (SSH stdio): [4-byte len][msgpack OUTPUT { channelId, seqNo, ts, data }]
   │
   Hub: write to spool.db (chunk), update cache_index
@@ -565,14 +565,14 @@ User clicks [+ channel] on local host
   │
   ├─ No → create Session (STARTING)
   │  Hub: connectOrLaunch(socketPath) → connect to daemon (or spawn it)
-  │  Fallback: child_process.spawn("termora-agent", ["--stdio"])
+  │  Fallback: child_process.spawn("lasterm-agent", ["--stdio"])
   │  Read HELLO from agent
   │  Session → ACTIVE
   │  Proceed to SPAWN
   │
   └─ Yes (ACTIVE) → reuse agent connection (daemon UDS or stdio)
      Hub → Agent: SPAWN { shell, cwd, env, cols, rows }
-     Agent: spawn PTY, create headless xterm
+     Agent: spawn PTY, create the vt100 screen model
      Agent → Hub: SPAWN_OK { channelId: "ch-new" }
      Hub: create Channel record (meta.db), status: BORN → LIVE
      Hub → UI: channel available, auto-ATTACH
@@ -587,7 +587,7 @@ User clicks [+ channel] on remote host
   ├─ No → create Session (STARTING)
   │  Hub: ssh2.connect(host.sshConfig)
   │  ├─ Success:
-  │  │  ssh2.exec("termora-agent --stdio")
+  │  │  ssh2.exec("lasterm-agent --stdio")
   │  │  Read HELLO from agent stdout
   │  │  Session → ACTIVE
   │  │  Proceed to SPAWN
@@ -597,7 +597,7 @@ User clicks [+ channel] on remote host
   │
   └─ Yes (ACTIVE) → reuse SSH connection
      Hub → Agent: SPAWN { shell, cwd, env, cols, rows }
-     Agent: spawn PTY, create headless xterm
+     Agent: spawn PTY, create the vt100 screen model
      Agent → Hub: SPAWN_OK { channelId: "ch-new" }
      Hub: create Channel record (meta.db), status: BORN → LIVE
      Hub → UI: channel available, auto-ATTACH
@@ -642,7 +642,7 @@ Hub starts (or reconnects after restart)
   │  Normal operation resumes
   │
   └─ probeSocket(socketPath) fails (no daemon):
-     Hub: spawn detached "termora-agent --daemon --socket <path>"
+     Hub: spawn detached "lasterm-agent --daemon --socket <path>"
      Hub: poll probeSocket() every 200ms (up to 5s)
      ├─ Socket appears → connect, receive HELLO (no AGENT_CHANNEL_STATE on fresh start)
      └─ Timeout → fall back to child_process stdio mode (warm restart)
@@ -711,7 +711,7 @@ Native effect resolution:
 
 ### 6.1 Agent Config (`[agent]` section in config.toml)
 
-The `[agent]` section configures the local daemon agent. These settings are defined in the `AgentConfig` interface (`@termora/shared/agent-config.ts`):
+The `[agent]` section configures the local daemon agent. These settings are defined in the `AgentConfig` interface (`@lasterm/shared/agent-config.ts`):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -737,9 +737,9 @@ The `[logging]` section is the single logging contract for both the hub and agen
 
 | Purpose | Linux / macOS (XDG) | Windows |
 |---------|---------------------|---------|
-| **Config** | `$XDG_CONFIG_HOME/termora/` → `~/.config/termora/` | `%APPDATA%\termora\` |
-| **Data** (DBs) | `$XDG_DATA_HOME/termora/` → `~/.local/share/termora/` | `%LOCALAPPDATA%\termora\` |
-| **State** (runtime) | `$XDG_STATE_HOME/termora/` → `~/.local/state/termora/` | `%LOCALAPPDATA%\termora\` |
+| **Config** | `$XDG_CONFIG_HOME/lasterm/` → `~/.config/lasterm/` | `%APPDATA%\lasterm\` |
+| **Data** (DBs) | `$XDG_DATA_HOME/lasterm/` → `~/.local/share/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
+| **State** (runtime) | `$XDG_STATE_HOME/lasterm/` → `~/.local/state/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
 
 All XDG variables respect user overrides. Fall back to defaults shown above.
 
@@ -775,23 +775,29 @@ CLI and UI read this file to find the hub. Deleted on clean shutdown; stale file
 
 ### 8.1 npm Naming Strategy
 
-| Package | npm name | Published? | Purpose |
-|---------|----------|-----------|---------|
-| Root | workspace root | No | CLI entrypoint, built from this repository. Not published — see #158 |
-| shared | `@termora/shared` | Yes | Types, codec, framing |
-| agent | `@termora/agent` | Yes | Remote PTY manager (installed on remotes) |
-| hub | `@termora/hub` | Yes | Local daemon (imported by root CLI) |
-| web | `@termora/web` | No | Vue SPA (built + served by hub) |
-| desktop | `@termora/desktop` | No (P1) | Tauri desktop app |
+**Nothing here is published.** Every package is marked private, no workflow runs
+`npm publish`, and the names below are workspace identifiers only.
 
-Root `termora` package is a thin CLI wrapper that depends on `@termora/hub`.
-The built `termora-hub` binary launches the hub daemon. The agent is a Rust binary the hub fetches from GitHub Releases and deploys over SFTP; neither is distributed through npm.
+| Package | npm name | Purpose |
+|---------|----------|---------|
+| Root | workspace root | CLI entrypoint, built from this repository |
+| shared | `@lasterm/shared` | Types, codec, framing |
+| hub | `@lasterm/hub` | Local daemon (imported by root CLI) |
+| web | `@lasterm/web` | Vue SPA (built + served by hub) |
+| desktop | `@lasterm/desktop` | Tauri desktop app |
+
+There is no `@lasterm/agent`: the agent is the Rust crate `crates/lasterm-agent`, and no
+npm package corresponds to it. The `@lasterm` scope itself is unclaimed on the registry —
+what exists there is three `@termora/*` 0.0.1 placeholders published before the rename.
+
+Root `lasterm` package is a thin CLI wrapper that depends on `@lasterm/hub`.
+The built `lasterm-hub` binary launches the hub daemon. The agent is a Rust binary the hub fetches from GitHub Releases and deploys over SFTP; neither is distributed through npm.
 
 ### 8.2 Directory Layout
 
 ```
-termora/
-├── package.json             # termora (root CLI entrypoint)
+lasterm/
+├── package.json             # lasterm (root CLI entrypoint)
 ├── pnpm-workspace.yaml
 ├── tsconfig.base.json       # Shared TS config (strict)
 ├── biome.json               # Linter/formatter config
@@ -802,7 +808,7 @@ termora/
 │   ├── SECURITY.md
 │   └── MVP_ROADMAP.md
 ├── packages/
-│   ├── shared/              # @termora/shared — types, codec, framing
+│   ├── shared/              # @lasterm/shared — types, codec, framing
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts     # Barrel export
@@ -814,17 +820,7 @@ termora/
 │   │       ├── constants.ts # Protocol version, defaults, error codes
 │   │       ├── socket-path.ts # getSocketPath(override?) + probeSocket(path) for UDS
 │   │       └── agent-config.ts # AgentConfig interface (daemon settings)
-│   ├── agent/               # @termora/agent — remote PTY manager
-│   │   ├── package.json
-│   │   └── src/
-│   │       ├── main.ts      # Entry point (--stdio, --daemon flags)
-│   │       ├── pty.ts       # PTY manager (node-pty wrapper)
-│   │       ├── screen.ts    # Headless xterm.js screen model
-│   │       ├── handler.ts   # Protocol message handler
-│   │       ├── config.ts    # Agent config (visual_hints)
-│   │       ├── daemon.ts    # DaemonServer: UDS listener, connection displacement, output buffering
-│   │       └── buffer.ts    # OutputBuffer: per-channel ring buffer with global cap
-│   ├── hub/                 # @termora/hub — local daemon
+│   ├── hub/                 # @lasterm/hub — local daemon
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── main.ts      # Daemon start (exported for root CLI)
@@ -832,7 +828,7 @@ termora/
 │   │       ├── api/         # REST route handlers
 │   │       ├── ws/          # WS message handlers
 │   │       ├── session/     # Session manager (local + SSH + daemon)
-│   │       │   ├── termora-agent.ts  # TermoraAgent: hub-side AgentConnection over UDS
+│   │       │   ├── lasterm-agent.ts  # LastermAgent: hub-side AgentConnection over UDS
 │   │       │   └── agent-launcher.ts # connectOrLaunch: probe, spawn, poll daemon
 │   │       ├── ssh.ts       # SSH connection manager
 │   │       ├── cache.ts     # Cache manager
@@ -844,7 +840,7 @@ termora/
 │   │       ├── auth.ts      # Token auth + pairing
 │   │       └── cli.ts       # CLI commands (start, stop, host, pair, ...)
 │   └── clients/
-│       ├── web/             # @termora/web — Vue 3 SPA (MVP)
+│       ├── web/             # @lasterm/web — Vue 3 SPA (MVP)
 │       │   ├── package.json
 │       │   ├── vite.config.ts
 │       │   └── src/
@@ -853,7 +849,7 @@ termora/
 │       │       ├── composables/ # useTerminal, useWs, useConfig
 │       │       ├── components/  # HostRail, ChannelSidebar, TerminalPane, ...
 │       │       └── services/    # API client, WS client
-│       └── desktop/         # @termora/desktop — Tauri v2 (P1, placeholder)
+│       └── desktop/         # @lasterm/desktop — Tauri v2 (P1, placeholder)
 │           └── README.md
 └── scripts/
     ├── dev.sh               # Start hub + web dev servers
@@ -863,32 +859,31 @@ termora/
 ### 8.3 Dependency Graph
 
 ```
-termora (root CLI)
-  └── @termora/hub
-        ├── @termora/shared
-        ├── @termora/web (build output embedded as static files)
-        ├── @termora/agent (spawned as child process for local sessions)
+lasterm (root CLI)
+  └── @lasterm/hub
+        ├── @lasterm/shared
+        ├── @lasterm/web (build output embedded as static files)
         ├── better-sqlite3
         ├── ssh2
         └── fastify + @fastify/websocket
 
-@termora/agent
-  ├── @termora/shared
-  ├── node-pty
-  └── xterm-headless + @xterm/addon-serialize
+crates/lasterm-agent (a Rust binary, not an npm package)
+  ├── async-xpty  (PTY, pinned by git rev)
+  ├── vt100       (screen model)
+  └── rmp-serde   (MessagePack framing)
 
-Note: Hub does NOT depend on node-pty — all PTY management is in the agent.
-Hub spawns agent locally (child_process) or remotely (SSH).
+Note: no Node process opens a PTY. Hub spawns the agent binary locally
+(child_process) or deploys and runs it over SSH.
 
-@termora/web
-  ├── @termora/shared (types only, tree-shaken)
+@lasterm/web
+  ├── @lasterm/shared (types only, tree-shaken)
   ├── vue 3
   ├── pinia
   ├── xterm + @xterm/addon-fit + @xterm/addon-serialize
   └── @msgpack/msgpack
 
-@termora/desktop (P1)
-  └── @termora/web (embedded in Tauri webview)
+@lasterm/desktop (P1)
+  └── @lasterm/web (embedded in Tauri webview)
 ```
 
 ## 9. Technology Stack
@@ -898,10 +893,10 @@ Hub spawns agent locally (child_process) or remotely (SSH).
 | Runtime | Node.js ≥ 24 LTS | Hub (the agent is a standalone Rust binary and needs no Node) |
 | Language | TypeScript (strict) | All packages |
 | Monorepo | pnpm workspaces | Package management |
-| PTY | node-pty | Terminal spawn/resize (agent only — hub delegates to agent) |
+| PTY | `async-xpty` (Rust) | Terminal spawn/resize — in the agent; no Node PTY exists |
 | SSH | ssh2 | Remote connections |
 | Terminal (UI) | xterm.js + addon-fit + addon-serialize | Rendering + restore |
-| Terminal (Agent) | xterm.js headless + addon-serialize | Screen model |
+| Terminal (Agent) | the `vt100` crate (Rust) | Screen model |
 | Codec | @msgpack/msgpack | Binary protocol framing |
 | Storage | better-sqlite3 | SQLite WAL persistence |
 | HTTP/WS | Fastify + @fastify/websocket | REST + WS server |

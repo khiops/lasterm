@@ -79,7 +79,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import type { SshKeyEntry } from "@termora/shared";
+import type { SshKeyEntry } from "@lasterm/shared";
 import SshKeyCard from "./SshKeyCard.vue";
 import { useFileDrop } from "../composables/useFileDrop.js";
 import { useToastStore } from "../stores/toast.js";

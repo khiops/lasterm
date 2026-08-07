@@ -1,4 +1,4 @@
-import { DEFAULT_PROFILE } from "@termora/shared";
+import { DEFAULT_PROFILE } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, nextTick, type Ref, ref } from "vue";
@@ -76,7 +76,7 @@ describe("useResolvedProfile", () => {
 
 	beforeEach(async () => {
 		setActivePinia(createPinia());
-		localStorage.setItem("termora_token", "test-token");
+		localStorage.setItem("lasterm_token", "test-token");
 		vi.clearAllMocks();
 		const mod = await import("./useResolvedProfile.js");
 		useResolvedProfile = mod.useResolvedProfile;
@@ -118,7 +118,7 @@ describe("useResolvedProfile", () => {
 	});
 
 	it("does not fetch while auth token is unavailable", async () => {
-		localStorage.removeItem("termora_token");
+		localStorage.removeItem("lasterm_token");
 		const fetchMock = vi.fn();
 		vi.stubGlobal("fetch", fetchMock);
 
@@ -179,7 +179,7 @@ describe("useResolvedProfile", () => {
 	});
 
 	it("fetches when auth token becomes available and re-fetches when it changes", async () => {
-		localStorage.removeItem("termora_token");
+		localStorage.removeItem("lasterm_token");
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
 			json: async () => ({ terminal: { resolved: { ...DEFAULT_PROFILE, fontSize: 22 } } }),

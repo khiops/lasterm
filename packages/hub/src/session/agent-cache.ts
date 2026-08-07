@@ -82,7 +82,7 @@ export function validateAgentVersion(version: string): void {
 	if (!STRICT_SEMVER.test(version) || version === "0.0.0") {
 		throw new FetchError(
 			"BAD_VERSION",
-			`Bad Termora agent version "${version}". Use a released strict semver like 0.4.0, or rerun termora-hub agent fetch --version <x.y.z> with a real release version before downloading.`,
+			`Bad Lasterm agent version "${version}". Use a released strict semver like 0.4.0, or rerun lasterm-hub agent fetch --version <x.y.z> with a real release version before downloading.`,
 		);
 	}
 }
@@ -185,7 +185,7 @@ export function pruneAgentBinaryCache(cacheDir: string, version: string): number
 	validateAgentVersion(version);
 
 	// Never prune through an untrusted/symlinked cache dir: readdirSync follows a
-	// directory symlink and would delete matching termora-agent-* files in the link
+	// directory symlink and would delete matching lasterm-agent-* files in the link
 	// target. isCacheDirSecure also returns false for a missing dir.
 	if (!isCacheDirSecure(cacheDir)) return 0;
 
@@ -215,7 +215,7 @@ export function ensureCacheDir(cacheDir: string): void {
 		if (isErrno(error, "ENOSPC")) throw diskError(cacheDir, cacheDir, error);
 		throw new FetchError(
 			"DISK",
-			`Could not create Termora agent cache directory ${cacheDir}. Fix permissions or create it with mode 0700, then rerun the agent fetch.`,
+			`Could not create Lasterm agent cache directory ${cacheDir}. Fix permissions or create it with mode 0700, then rerun the agent fetch.`,
 		);
 	}
 	assertSecureCacheDir(cacheDir);
@@ -229,7 +229,7 @@ export function ensureCacheDir(cacheDir: string): void {
 export function assertSecureCacheDir(cacheDir: string): void {
 	if (lstatSync(cacheDir).isSymbolicLink()) {
 		throw insecureCacheDirError(
-			`Termora agent cache ${cacheDir} is a symlink; refusing to place agent binaries there. Replace it with a real directory (mode 0700) and rerun the agent fetch.`,
+			`Lasterm agent cache ${cacheDir} is a symlink; refusing to place agent binaries there. Replace it with a real directory (mode 0700) and rerun the agent fetch.`,
 		);
 	}
 	// POSIX ownership/permission model only (skip on Windows).
@@ -238,7 +238,7 @@ export function assertSecureCacheDir(cacheDir: string): void {
 	const uid = process.getuid?.();
 	if (uid !== undefined && stat.uid !== uid) {
 		throw insecureCacheDirError(
-			`Termora agent cache ${cacheDir} is not owned by the current user; refusing to place agent binaries there. Fix its ownership (or point the cache elsewhere), then rerun the agent fetch.`,
+			`Lasterm agent cache ${cacheDir} is not owned by the current user; refusing to place agent binaries there. Fix its ownership (or point the cache elsewhere), then rerun the agent fetch.`,
 		);
 	}
 	// Owned by us but group/other-accessible — tighten to 0700.
@@ -248,7 +248,7 @@ export function assertSecureCacheDir(cacheDir: string): void {
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			throw insecureCacheDirError(
-				`Termora agent cache ${cacheDir} has loose permissions and could not be tightened to mode 0700: ${detail}. Fix permissions and rerun the agent fetch.`,
+				`Lasterm agent cache ${cacheDir} has loose permissions and could not be tightened to mode 0700: ${detail}. Fix permissions and rerun the agent fetch.`,
 			);
 		}
 	}
@@ -322,7 +322,7 @@ function parseAgentBinaryCacheName(name: string): { readonly version: string } |
 	for (const [os, arches] of Object.entries(AGENT_TARGET_TRIPLES)) {
 		if (!arches) continue;
 		for (const [arch, target] of Object.entries(arches)) {
-			const prefix = `termora-agent-${os}-${arch}-`;
+			const prefix = `lasterm-agent-${os}-${arch}-`;
 			if (!name.startsWith(prefix) || !name.endsWith(target.ext)) continue;
 			const versionEnd = target.ext.length > 0 ? name.length - target.ext.length : name.length;
 			const version = name.slice(prefix.length, versionEnd);
@@ -355,7 +355,7 @@ function assertTrustedTempBinary(path: string): void {
 	if (!info.isFile()) {
 		throw new FetchError(
 			"DISK",
-			`Termora agent temp binary ${path} is not a regular file; refusing to place it in the cache.`,
+			`Lasterm agent temp binary ${path} is not a regular file; refusing to place it in the cache.`,
 		);
 	}
 	if (process.platform === "win32") return;
@@ -363,7 +363,7 @@ function assertTrustedTempBinary(path: string): void {
 	if (uid !== undefined && info.uid !== uid) {
 		throw new FetchError(
 			"DISK",
-			`Termora agent temp binary ${path} is not owned by the current user; refusing to place it in the cache.`,
+			`Lasterm agent temp binary ${path} is not owned by the current user; refusing to place it in the cache.`,
 		);
 	}
 }
@@ -374,18 +374,18 @@ function assertCanPlaceWithoutForce(finalPath: string): void {
 		if (info.isSymbolicLink()) {
 			throw new FetchError(
 				"DISK",
-				`Termora agent cache entry ${finalPath} is a symlink; refusing to overwrite it. Remove it and retry.`,
+				`Lasterm agent cache entry ${finalPath} is a symlink; refusing to overwrite it. Remove it and retry.`,
 			);
 		}
 		if (isTrustedCacheBinary(finalPath)) {
 			throw new FetchError(
 				"ALREADY_CURRENT",
-				`Termora agent cache entry ${finalPath} already exists. Use force to replace it.`,
+				`Lasterm agent cache entry ${finalPath} already exists. Use force to replace it.`,
 			);
 		}
 		throw new FetchError(
 			"DISK",
-			`Termora agent cache entry ${finalPath} is not a trusted regular file; refusing to overwrite it. Remove it and retry.`,
+			`Lasterm agent cache entry ${finalPath} is not a trusted regular file; refusing to overwrite it. Remove it and retry.`,
 		);
 	} catch (error) {
 		if (error instanceof FetchError) throw error;
@@ -413,7 +413,7 @@ function cacheBasenameFromReleaseAsset(expectedBasename: string): string | null 
 		if (!arches) continue;
 		for (const [arch, target] of Object.entries(arches)) {
 			if (!target.built || !target.triple) continue;
-			const prefix = `termora-agent-${target.triple}-`;
+			const prefix = `lasterm-agent-${target.triple}-`;
 			if (!expectedBasename.startsWith(prefix) || !expectedBasename.endsWith(target.ext)) {
 				continue;
 			}
@@ -423,7 +423,7 @@ function cacheBasenameFromReleaseAsset(expectedBasename: string): string | null 
 					: expectedBasename.length;
 			const version = expectedBasename.slice(prefix.length, versionEnd);
 			validateAgentVersion(version);
-			return `termora-agent-${os}-${arch}-${version}${target.ext}`;
+			return `lasterm-agent-${os}-${arch}-${version}${target.ext}`;
 		}
 	}
 	return null;

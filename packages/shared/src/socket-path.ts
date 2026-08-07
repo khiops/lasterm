@@ -11,8 +11,8 @@ export const AGENT_SOCKET_POLL_MS = 100;
 /**
  * Get the platform-appropriate socket path for the agent daemon.
  *
- * - Linux/macOS: `$XDG_RUNTIME_DIR/termora/agent.sock` (fallback: `/tmp/termora-<UID>/agent.sock`)
- * - Windows: `\\.\pipe\termora-agent-<username>`
+ * - Linux/macOS: `$XDG_RUNTIME_DIR/lasterm/agent.sock` (fallback: `/tmp/lasterm-<UID>/agent.sock`)
+ * - Windows: `\\.\pipe\lasterm-agent-<username>`
  *
  * @param override Optional override path from config.toml [agent].socket_path
  */
@@ -21,17 +21,17 @@ export function getSocketPath(override?: string): string {
 
 	if (process.platform === "win32") {
 		const username = os.userInfo().username;
-		return `\\\\.\\pipe\\termora-agent-${username}`;
+		return `\\\\.\\pipe\\lasterm-agent-${username}`;
 	}
 
-	// Unix: prefer XDG_RUNTIME_DIR, fallback to /tmp/termora-<UID>
+	// Unix: prefer XDG_RUNTIME_DIR, fallback to /tmp/lasterm-<UID>
 	const xdgRuntime = process.env.XDG_RUNTIME_DIR;
 	if (xdgRuntime) {
-		return path.join(xdgRuntime, "termora", "agent.sock");
+		return path.join(xdgRuntime, "lasterm", "agent.sock");
 	}
 
 	const uid = os.userInfo().uid;
-	return path.join("/tmp", `termora-${uid}`, "agent.sock");
+	return path.join("/tmp", `lasterm-${uid}`, "agent.sock");
 }
 
 /**

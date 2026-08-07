@@ -1,5 +1,5 @@
-import type { TermoraTheme } from "@termora/shared";
-import { THEME_NAME_REGEX } from "@termora/shared";
+import type { LastermTheme } from "@lasterm/shared";
+import { THEME_NAME_REGEX } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { ThemeManager } from "../theme-manager.js";
 import { ThemeError } from "../theme-manager.js";
@@ -51,7 +51,7 @@ export function registerThemeRoutes(server: FastifyInstance, themeManager: Theme
 		}
 
 		try {
-			await themeManager.save(body as unknown as TermoraTheme);
+			await themeManager.save(body as unknown as LastermTheme);
 			return reply.code(201).send({ name });
 		} catch (err) {
 			if (err instanceof ThemeError) {
@@ -73,7 +73,7 @@ export function registerThemeRoutes(server: FastifyInstance, themeManager: Theme
 		}
 
 		try {
-			await themeManager.save({ ...body, name } as unknown as TermoraTheme);
+			await themeManager.save({ ...body, name } as unknown as LastermTheme);
 			return reply.code(200).send({ name });
 		} catch (err) {
 			if (err instanceof ThemeError) {

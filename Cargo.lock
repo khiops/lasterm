@@ -314,6 +314,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "lasterm-agent"
+version = "0.7.0"
+dependencies = [
+ "async-xpty",
+ "clap",
+ "libc",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "vt100",
+ "windows-sys 0.59.0",
+ "zeroize",
+]
+
+[[package]]
+name = "lasterm-hub-lock"
+version = "0.6.0"
+dependencies = [
+ "libc",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -761,38 +793,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "termora-agent"
-version = "0.7.0"
-dependencies = [
- "async-xpty",
- "clap",
- "libc",
- "rmp-serde",
- "rmpv",
- "serde",
- "serde_bytes",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "ulid",
- "vt100",
- "windows-sys 0.59.0",
- "zeroize",
-]
-
-[[package]]
-name = "termora-hub-lock"
-version = "0.6.0"
-dependencies = [
- "libc",
- "napi",
- "napi-build",
- "napi-derive",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

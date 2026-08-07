@@ -283,7 +283,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 	});
 
 	it("adds the actual bound loopback port so agent mutations are not blocked by Origin guard", async () => {
-		const configDir = mkdtempSync(join(tmpdir(), "termora-startup-cors-config-"));
+		const configDir = mkdtempSync(join(tmpdir(), "lasterm-startup-cors-config-"));
 		tempDirs.push(configDir);
 		dbs = openTestDatabases();
 		server = await createServer({
@@ -311,7 +311,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 		expect(response.statusCode).toBe(400);
 		expect(response.json().error).toEqual({
 			code: "UNSUPPORTED_TARGET",
-			message: "No Termora agent release is built for plan9/x64.",
+			message: "No Lasterm agent release is built for plan9/x64.",
 		});
 	});
 
@@ -389,7 +389,7 @@ describe("Hub Server — security headers", () => {
 	): Promise<string> {
 		configDir = join(
 			tmpdir(),
-			`termora-public-corp-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			`lasterm-public-corp-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(join(configDir, kind), { recursive: true });
 		writeFileSync(join(configDir, kind, filename), body);

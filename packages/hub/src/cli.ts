@@ -1,5 +1,5 @@
 /**
- * termora CLI
+ * lasterm CLI
  *
  * Parses process.argv and dispatches to hub commands.
  * No heavy deps — manual argv parsing only.
@@ -60,16 +60,16 @@ import {
 
 export function getStateDir(): string {
 	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", "termora");
+		return join(process.env.LOCALAPPDATA ?? "", "lasterm");
 	}
-	return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "termora");
+	return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
 }
 
 export function getConfigDir(): string {
 	if (process.platform === "win32") {
-		return join(process.env.APPDATA ?? "", "termora");
+		return join(process.env.APPDATA ?? "", "lasterm");
 	}
-	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "termora");
+	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
 }
 
 // ─── Runtime state ─────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ export function isPidAlive(pid: number): boolean {
 
 function assertHubProcessIdentity(pid: number): void {
 	const command = readProcessCommandLine(pid);
-	if (command !== null && commandLooksLikeTermoraHub(command)) return;
+	if (command !== null && commandLooksLikeLastermHub(command)) return;
 
 	const detail =
 		command === null ? "process command line could not be read" : summarizeCommand(command);
@@ -223,12 +223,12 @@ function readProcessCommandLine(pid: number): string | null {
 	}
 }
 
-function commandLooksLikeTermoraHub(command: string): boolean {
+function commandLooksLikeLastermHub(command: string): boolean {
 	const normalized = command.toLowerCase();
 	return (
-		normalized.includes("termora-hub") ||
-		normalized.includes("termora_hub") ||
-		normalized.includes("@termora/hub") ||
+		normalized.includes("lasterm-hub") ||
+		normalized.includes("lasterm_hub") ||
+		normalized.includes("@lasterm/hub") ||
 		normalized.includes("packages/hub/src") ||
 		normalized.includes("packages\\hub\\src")
 	);
@@ -522,7 +522,7 @@ function resolveAgentFetchTargets(args: ParsedArgs): AgentFetchTarget[] | string
 	}
 	if (args.all) return builtAgentTargets();
 	if (!args.target) {
-		return "Usage: termora agent fetch <os-arch>|--all [--version <x.y.z>] [--prune]";
+		return "Usage: lasterm agent fetch <os-arch>|--all [--version <x.y.z>] [--prune]";
 	}
 	const target = parseAgentTargetId(args.target);
 	if (!target) {
@@ -538,7 +538,7 @@ function cachePathForBuiltTarget(
 ): string | null {
 	const entry = resolveTarget(target.os, target.arch);
 	if (!entry) return null;
-	return join(cacheDir, `termora-agent-${target.os}-${target.arch}-${version}${entry.ext}`);
+	return join(cacheDir, `lasterm-agent-${target.os}-${target.arch}-${version}${entry.ext}`);
 }
 
 export async function cmdAgentFetch(
@@ -628,7 +628,7 @@ export async function cmdAgentImport(
 	const writeLine = deps.writeLine ?? ((line: string) => console.log(line));
 	const writeError = deps.writeError ?? ((line: string) => console.error(line));
 	const usage =
-		"Usage: termora agent import <binary> <manifest> --os <os> --arch <arch> --version <x.y.z> --attest [--force]";
+		"Usage: lasterm agent import <binary> <manifest> --os <os> --arch <arch> --version <x.y.z> --attest [--force]";
 
 	if (!args.binaryPath || !args.manifestPath || !args.agentOs || !args.agentArch || !args.version) {
 		writeError(usage);
@@ -641,7 +641,7 @@ export async function cmdAgentImport(
 
 	const target = resolveTarget(args.agentOs, args.agentArch);
 	if (!target) {
-		writeError(`No Termora agent release is built for ${args.agentOs}/${args.agentArch}.`);
+		writeError(`No Lasterm agent release is built for ${args.agentOs}/${args.agentArch}.`);
 		return 1;
 	}
 
@@ -666,7 +666,7 @@ export async function cmdAgentImport(
 
 	const binarySize = statSync(args.binaryPath).size;
 	if (binarySize > AGENT_FETCH_MAX_BYTES) {
-		writeError("Agent binary exceeds the 64 MiB Termora agent limit.");
+		writeError("Agent binary exceeds the 64 MiB Lasterm agent limit.");
 		return 1;
 	}
 	const manifestSize = statSync(args.manifestPath).size;
@@ -678,7 +678,7 @@ export async function cmdAgentImport(
 	const cacheDir = await (deps.getBinaryCacheDir ?? defaultBinaryCacheDir)();
 	const finalPath = join(
 		cacheDir,
-		`termora-agent-${args.agentOs}-${args.agentArch}-${args.version}${target.ext}`,
+		`lasterm-agent-${args.agentOs}-${args.agentArch}-${args.version}${target.ext}`,
 	);
 	let tempPath: string | null = null;
 	try {
@@ -687,7 +687,7 @@ export async function cmdAgentImport(
 		copyFileSync(args.binaryPath, tempPath);
 		const placed = verifyAndPlace(
 			tempPath,
-			`termora-agent-${target.triple}-${args.version}${target.ext}`,
+			`lasterm-agent-${target.triple}-${args.version}${target.ext}`,
 			readFileSync(args.manifestPath, "utf8"),
 			cacheDir,
 			{ force: args.force === true },
@@ -721,6 +721,9 @@ function printAgentStatusTable(
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
 export async function cmdStart(args: ParsedArgs): Promise<void> {
+	// A previous installation is refused by `startHub`, not here: the check belongs
+	// to the operation that constructs a hub, so the daemon child and `pnpm dev`
+	// cannot reach it by another door. This handler only renders the refusal.
 	const port = args.port ?? 4100;
 
 	if (args.daemon) {
@@ -804,15 +807,26 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	// server lifecycle, so this path cannot diverge from daemon startup.
 	const { startHub } = await import("./hub-startup.js");
 	const { BUILD_HASH } = await import("./build-version.js");
-	await startHub({
-		port,
-		openBrowser: args.open === true || process.env.TERMORA_OPEN === "1",
-		announce: ({ address, configDir, stateDir }) => {
-			console.log(`termora hub listening on ${address} (build: ${BUILD_HASH})`);
-			console.log(`Config dir : ${configDir}`);
-			console.log(`State dir  : ${stateDir}`);
-		},
-	});
+	const { PreviousInstallationError } = await import("./previous-installation.js");
+	try {
+		await startHub({
+			port,
+			openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
+			announce: ({ address, configDir, stateDir }) => {
+				console.log(`lasterm hub listening on ${address} (build: ${BUILD_HASH})`);
+				console.log(`Config dir : ${configDir}`);
+				console.log(`State dir  : ${stateDir}`);
+			},
+		});
+	} catch (err) {
+		// A refusal is a diagnosis, not a crash: print what it found, not a stack.
+		if (err instanceof PreviousInstallationError) {
+			console.error(err.message);
+			process.exitCode = 1;
+			return;
+		}
+		throw err;
+	}
 }
 
 export async function cmdStop(
@@ -850,7 +864,7 @@ export async function cmdStop(
 			const res = await fetch(`http://127.0.0.1:${runtime.port}/api/shutdown${force}`, {
 				method: "POST",
 				headers: {
-					"X-Termora-Owner": runtime.ownerToken,
+					"X-Lasterm-Owner": runtime.ownerToken,
 				},
 				signal: AbortSignal.timeout(2_000),
 			});
@@ -932,7 +946,7 @@ export async function cmdQuit(
 		try {
 			const res = await request(`http://127.0.0.1:${runtime.port}/api/quit${query}`, {
 				method: "POST",
-				headers: { "X-Termora-Owner": runtime.ownerToken as string },
+				headers: { "X-Lasterm-Owner": runtime.ownerToken as string },
 				signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
 			});
 			return { status: res.status, ok: res.ok, body: await readQuitBody(res) };
@@ -1161,7 +1175,7 @@ export async function cmdStatus(args: ParsedArgs): Promise<void> {
 async function cmdHostAdd(args: ParsedArgs): Promise<void> {
 	if (!args.label || !args.host) {
 		console.error(
-			"Usage: termora host add --label <label> --host <user@hostname> [--ssh-port 22] [--auth agent|key] [--key-path ~/.ssh/id_ed25519]",
+			"Usage: lasterm host add --label <label> --host <user@hostname> [--ssh-port 22] [--auth agent|key] [--key-path ~/.ssh/id_ed25519]",
 		);
 		process.exit(1);
 	}
@@ -1207,7 +1221,7 @@ async function cmdHostList(args: ParsedArgs): Promise<void> {
 
 async function cmdHostRemove(args: ParsedArgs): Promise<void> {
 	if (!args.label) {
-		console.error("Usage: termora host remove <label>");
+		console.error("Usage: lasterm host remove <label>");
 		process.exit(1);
 	}
 
@@ -1283,33 +1297,33 @@ async function cmdConfigEdit(): Promise<void> {
 // ─── Help ──────────────────────────────────────────────────────────────────────
 
 function printHelp(): void {
-	console.log(`termora — local-first session terminal platform
+	console.log(`lasterm — local-first session terminal platform
 
 Usage:
-  termora start [--port 4100] [--daemon]       Start hub (foreground or daemon)
+  lasterm start [--port 4100] [--daemon]       Start hub (foreground or daemon)
               [--open]                          Open browser after start
-  termora stop                                  Stop running hub
-  termora quit                                  Stop local agent, then hub
-  termora status [--json]                       Show hub status
+  lasterm stop                                  Stop running hub
+  lasterm quit                                  Stop local agent, then hub
+  lasterm status [--json]                       Show hub status
 
-  termora host add --label X --host user@Y      Add an SSH host
+  lasterm host add --label X --host user@Y      Add an SSH host
               [--ssh-port 22] [--auth agent|key]
               [--key-path ~/.ssh/id_ed25519]
-  termora host list [--json]                    List all hosts
-  termora host remove <label>                   Remove a host
+  lasterm host list [--json]                    List all hosts
+  lasterm host remove <label>                   Remove a host
 
-  termora agent fetch <os-arch>|--all           Populate the agent binary cache
+  lasterm agent fetch <os-arch>|--all           Populate the agent binary cache
               [--version x.y.z] [--prune]
-  termora agent status [--json]                 Show bundled/cache status by target
-  termora agent import <binary> <manifest>       Verify and cache an agent binary
+  lasterm agent status [--json]                 Show bundled/cache status by target
+  lasterm agent import <binary> <manifest>       Verify and cache an agent binary
               --os OS --arch ARCH --version x.y.z --attest [--force]
 
-  termora session list [--json]                 List active sessions
+  lasterm session list [--json]                 List active sessions
 
-  termora pair                                  Generate pairing code
-  termora pair --code XXXXXX                    Verify pairing code
+  lasterm pair                                  Generate pairing code
+  lasterm pair --code XXXXXX                    Verify pairing code
 
-  termora config edit                           Open config.toml in $EDITOR
+  lasterm config edit                           Open config.toml in $EDITOR
 `);
 }
 
@@ -1325,7 +1339,7 @@ export async function main(argv: string[]): Promise<void> {
 
 	if (!parsed) {
 		console.error(`Unknown command: ${argv.join(" ")}`);
-		console.error("Run 'termora --help' for usage.");
+		console.error("Run 'lasterm --help' for usage.");
 		process.exit(1);
 	}
 
@@ -1383,7 +1397,7 @@ export async function main(argv: string[]): Promise<void> {
 	} catch (err) {
 		console.error(`Error: ${(err as Error).message}`);
 		process.exit(
-			err instanceof Error && "code" in err && err.code === "TERMORA_HUB_ALREADY_RUNNING" ? 73 : 1,
+			err instanceof Error && "code" in err && err.code === "LASTERM_HUB_ALREADY_RUNNING" ? 73 : 1,
 		);
 	}
 }

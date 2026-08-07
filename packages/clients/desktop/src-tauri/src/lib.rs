@@ -432,8 +432,8 @@ enum WindowCloseChoice {
     Tray,
 }
 
-/// Resolves the per-user Termora configuration directory.
-fn termora_config_dir() -> Option<PathBuf> {
+/// Resolves the per-user Lasterm configuration directory.
+fn lasterm_config_dir() -> Option<PathBuf> {
     let config_dir = {
         #[cfg(target_os = "windows")]
         {
@@ -451,16 +451,16 @@ fn termora_config_dir() -> Option<PathBuf> {
         }
     };
 
-    Some(config_dir.join("termora"))
+    Some(config_dir.join("lasterm"))
 }
 
 /// Resolves the hub config directory and reads the auth token from auth.json.
 /// Returns `Some(token)` only if the token is a valid 64-char lowercase hex string.
 fn read_hub_auth_token() -> Option<String> {
-    let config_dir = termora_config_dir()?;
+    let config_dir = lasterm_config_dir()?;
 
     let auth_path = config_dir.join("auth.json");
-    eprintln!("[termora] checking auth.json at: {}", auth_path.display());
+    eprintln!("[lasterm] checking auth.json at: {}", auth_path.display());
     let contents = std::fs::read_to_string(&auth_path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let token = parsed.get("token")?.as_str()?.to_string();
@@ -505,7 +505,7 @@ fn close_behavior_command_result(state: CloseBehaviorConfigState) -> Result<Clos
 }
 
 fn close_behavior_config_path() -> Option<PathBuf> {
-    termora_config_dir().map(|config_dir| config_dir.join("close-behavior.json"))
+    lasterm_config_dir().map(|config_dir| config_dir.join("close-behavior.json"))
 }
 
 fn read_close_behavior_from_path(path: &std::path::Path) -> CloseBehaviorConfigState {
@@ -619,15 +619,15 @@ fn set_close_behavior(behavior: CloseBehavior) -> Result<(), String> {
     write_close_behavior_to_path(&path, behavior)
 }
 
-/// Resolves the termora state directory:
-/// - Linux/macOS: $XDG_STATE_HOME/termora or ~/.local/state/termora
-/// - Windows: %LOCALAPPDATA%\termora
+/// Resolves the lasterm state directory:
+/// - Linux/macOS: $XDG_STATE_HOME/lasterm or ~/.local/state/lasterm
+/// - Windows: %LOCALAPPDATA%\lasterm
 fn get_state_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
         std::env::var("LOCALAPPDATA")
             .ok()
-            .map(|p| std::path::PathBuf::from(p).join("termora"))
+            .map(|p| std::path::PathBuf::from(p).join("lasterm"))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -635,7 +635,7 @@ fn get_state_dir() -> Option<std::path::PathBuf> {
             .ok()
             .map(std::path::PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))
-            .map(|p| p.join("termora"))
+            .map(|p| p.join("lasterm"))
     }
 }
 
@@ -695,8 +695,8 @@ fn is_hub_alive(port: u16) -> bool {
 fn get_hub_auth_token() -> Option<String> {
     let result = read_hub_auth_token();
     match &result {
-        Some(_) => eprintln!("[termora] auto-auth: token found in auth.json"),
-        None => eprintln!("[termora] auto-auth: no valid token in auth.json"),
+        Some(_) => eprintln!("[lasterm] auto-auth: token found in auth.json"),
+        None => eprintln!("[lasterm] auto-auth: no valid token in auth.json"),
     }
     result
 }
@@ -775,9 +775,9 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
         }
     };
     let url = hub_quit_url(runtime.port, force);
-    let mut request = client.post(url).header("X-Termora-Owner", owner_header);
+    let mut request = client.post(url).header("X-Lasterm-Owner", owner_header);
     if let Some(client_id) = current_shutdown_caller_client_id() {
-        request = request.header("X-Termora-Client-Id", client_id);
+        request = request.header("X-Lasterm-Client-Id", client_id);
     }
 
     let response = match request.send() {
@@ -809,7 +809,7 @@ fn classify_quit_transport_error(
     if error.is_connect() || error.is_builder() {
         return QuitRequestResult::Failed(format!("quit request was not sent: {error}"));
     }
-    eprintln!("[termora] quit response was not observed: {error}");
+    eprintln!("[lasterm] quit response was not observed: {error}");
     QuitRequestResult::Unobserved(target)
 }
 
@@ -995,7 +995,7 @@ fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
     };
     let confirmed = app
         .dialog()
-        .message(format!("{subject} are connected. Quit Termora anyway?"))
+        .message(format!("{subject} are connected. Quit Lasterm anyway?"))
         .title("Other Clients Connected")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
@@ -1096,8 +1096,8 @@ fn hide_main_window(app: &tauri::AppHandle) {
 fn present_native_window_close_choice(app: tauri::AppHandle) {
     let confirmed = app
         .dialog()
-        .message("Quit Termora completely?")
-        .title("Quit Termora")
+        .message("Quit Lasterm completely?")
+        .title("Quit Lasterm")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Quit completely".to_string(),
@@ -1317,7 +1317,7 @@ fn set_windows_transparent_background(window: &tauri::WebviewWindow) -> tauri::R
 /// In dev builds, the hub is already running externally — just show the window.
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // System tray
-    let show = MenuItemBuilder::with_id("show", "Show Termora").build(app)?;
+    let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
 
@@ -1344,7 +1344,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => {
             TRAY_AVAILABLE.store(false, Ordering::Relaxed);
-            eprintln!("[termora] failed to initialize tray: {}", error);
+            eprintln!("[lasterm] failed to initialize tray: {}", error);
         }
     }
 
@@ -1361,7 +1361,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(port) = read_runtime_port() {
             if is_hub_alive(port) {
                 eprintln!(
-                    "[termora] found existing hub on port {} (from runtime.json)",
+                    "[lasterm] found existing hub on port {} (from runtime.json)",
                     port
                 );
                 hub_port = port;
@@ -1370,7 +1370,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if need_spawn {
-            let sidecar = app.shell().sidecar("termora-hub").unwrap().args(["start"]);
+            let sidecar = app.shell().sidecar("lasterm-hub").unwrap().args(["start"]);
             let (mut rx, _child) = sidecar.spawn().expect("failed to spawn hub sidecar");
 
             // Store the child handle so it stays alive for the app's lifetime
@@ -1380,7 +1380,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             // Capture sidecar stdout/stderr to a log file
             let log_dir = dirs::data_local_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("termora");
+                .join("lasterm");
             let _ = std::fs::create_dir_all(&log_dir);
             let log_path = log_dir.join("hub.log");
 
@@ -1454,7 +1454,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         HUB_PORT.store(hub_port, Ordering::Relaxed);
-        eprintln!("[termora] hub port resolved to {}", hub_port);
+        eprintln!("[lasterm] hub port resolved to {}", hub_port);
     }
 
     // Show the main window (hidden by default in config)
@@ -1483,13 +1483,13 @@ pub fn run() {
         }
         PackageIdentityProbe::Packaged { status } => {
             eprintln!(
-                "[termora] updater disabled: application has an MSIX package identity (GetCurrentPackageFullName status {status})"
+                "[lasterm] updater disabled: application has an MSIX package identity (GetCurrentPackageFullName status {status})"
             );
             builder
         }
         PackageIdentityProbe::Inconclusive { status } => {
             eprintln!(
-                "[termora] updater disabled: package identity probe was inconclusive (Windows error {status})"
+                "[lasterm] updater disabled: package identity probe was inconclusive (Windows error {status})"
             );
             builder
         }
@@ -1519,7 +1519,7 @@ pub fn run() {
         })
         .setup(setup_app)
         .run(tauri::generate_context!())
-        .expect("error while running termora");
+        .expect("error while running lasterm");
 }
 
 #[cfg(test)]
@@ -1530,7 +1530,7 @@ mod tests {
 
     fn close_behavior_test_path(name: &str) -> PathBuf {
         let unique = format!(
-            "termora-close-behavior-{name}-{}-{}",
+            "lasterm-close-behavior-{name}-{}-{}",
             std::process::id(),
             CLOSE_BEHAVIOR_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         );

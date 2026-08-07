@@ -1,4 +1,4 @@
-import type { AgentSpawnOkMessage, ChannelCreatedMessage, ProtocolMessage } from "@termora/shared";
+import type { AgentSpawnOkMessage, ChannelCreatedMessage, ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { clearContext, clientDisconnect, respond } from "./prompt-context.js";
@@ -317,7 +317,7 @@ describe("ChannelLifecycleManager — SEC-015 pending auth prompt security", () 
  * chunker, and hubLogger.
  */
 function makeSpawnCtx(overrides?: {
-	getChannel?: () => import("@termora/shared").Channel | undefined;
+	getChannel?: () => import("@lasterm/shared").Channel | undefined;
 }) {
 	const clients = new Map<string, ReturnType<typeof makeWsClient>>();
 	const channels = new Map<
@@ -414,7 +414,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 			channelId: "ch-1",
 			cols: 80,
 			rows: 24,
-		} as import("@termora/shared").AgentSpawnMessage;
+		} as import("@lasterm/shared").AgentSpawnMessage;
 
 		const session = { id: "sess-1" };
 		const hostId = "host-1";
@@ -536,7 +536,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 			channelId: "ch-f2",
 			cols: 80,
 			rows: 24,
-		} as import("@termora/shared").AgentSpawnMessage;
+		} as import("@lasterm/shared").AgentSpawnMessage;
 
 		const spawnPromise = manager.sendSpawnAndWait({
 			agent: { connected: true, send: vi.fn() } as never,
@@ -602,7 +602,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 			channelId: "ch-err",
 			cols: 80,
 			rows: 24,
-		} as import("@termora/shared").AgentSpawnMessage;
+		} as import("@lasterm/shared").AgentSpawnMessage;
 
 		const spawnPromise = manager.sendSpawnAndWait({
 			agent: { connected: true, send: vi.fn() } as never,
@@ -627,7 +627,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 			requestId: "req-err",
 			code: "SHELL_NOT_FOUND",
 			message: "shell not found",
-		} as import("@termora/shared").AgentSpawnErrMessage);
+		} as import("@lasterm/shared").AgentSpawnErrMessage);
 
 		await spawnPromise;
 

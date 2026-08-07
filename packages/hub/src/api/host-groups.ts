@@ -1,4 +1,4 @@
-import type { HostGroup } from "@termora/shared";
+import type { HostGroup } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 

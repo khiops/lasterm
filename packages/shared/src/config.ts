@@ -1,4 +1,4 @@
-// Config types and deep merge utility for termora config cascade
+// Config types and deep merge utility for lasterm config cascade
 import type { AppearanceConfig } from "./appearance.js";
 import type { ElevationMethod, TerminalProfile } from "./entities.js";
 import { isPlainObject } from "./utils.js";
@@ -112,7 +112,7 @@ export interface TitleConfig {
 	prefix?: string;
 	/** Whether to update the browser window/tab title. Default: true. */
 	windowTitle?: boolean;
-	/** Format string for the browser window title. Default: 'termora - {prefix}{host} - {title}'. */
+	/** Format string for the browser window title. Default: 'lasterm - {prefix}{host} - {title}'. */
 	windowFormat?: string;
 }
 

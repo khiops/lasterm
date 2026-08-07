@@ -1,4 +1,4 @@
-import type { BackgroundMode, WindowEffect } from "@termora/shared";
+import type { BackgroundMode, WindowEffect } from "@lasterm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, nextTick, ref } from "vue";
 import type { DisplayedEffectState } from "./useActiveWallpaper.js";

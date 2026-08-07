@@ -1,4 +1,4 @@
-# termora — Security Specification
+# lasterm — Security Specification
 
 > Version: 0.1.0 (MVP)
 > Status: draft
@@ -30,7 +30,7 @@
 ┌──────────────────────▼────────────────────────────────────┐
 │ Remote machine                                             │
 │                                                            │
-│  termora-agent ──── stdin/stdout ──── SSH server            │
+│  lasterm-agent ──── stdin/stdout ──── SSH server            │
 │  (no network listener)               (port 22, standard)  │
 │                                                            │
 │  PTY processes run as the SSH user                         │
@@ -77,7 +77,7 @@
 ```
 1. Generate 32 bytes of crypto-random data
 2. Encode as hex string (64 chars)
-3. Write to $TERMORA_CONFIG_DIR/auth.json: { "token": "<hex>" }
+3. Write to $LASTERM_CONFIG_DIR/auth.json: { "token": "<hex>" }
 4. Set file permissions: chmod 600 (Linux/macOS) or restrictive ACL (Windows)
 ```
 
@@ -87,7 +87,7 @@
 - Token comparison: constant-time (crypto.timingSafeEqual)
 
 **Token rotation:**
-- `termora token rotate` — generates new token, invalidates old
+- `lasterm token rotate` — generates new token, invalidates old
 - All connected clients receive AUTH_FAIL and must re-authenticate
 
 ### 2.2 Startup Security Check
@@ -116,7 +116,7 @@ On every hub start:
 
 ```
 Device A (has token):
-  $ termora pair
+  $ lasterm pair
   Pairing code: 847293
   Expires in 60 seconds.
   Enter this code on the other device.
@@ -158,18 +158,18 @@ Device B (needs token):
 
 | Method | How | Security level |
 |--------|-----|---------------|
-| **ssh-agent** (recommended) | Hub uses running ssh-agent via `SSH_AUTH_SOCK` | HIGH — keys never touch disk via termora |
-| Key file | Hub reads private key path | MEDIUM — key on disk, termora doesn't copy it |
+| **ssh-agent** (recommended) | Hub uses running ssh-agent via `SSH_AUTH_SOCK` | HIGH — keys never touch disk via lasterm |
+| Key file | Hub reads private key path | MEDIUM — key on disk, lasterm doesn't copy it |
 | Password | Hub sends password over SSH | LOW — password in memory (not stored) |
 
 **MVP:** Support all three. Recommend ssh-agent in UI. Never store passwords in meta.db.
 
 ### 3.2 SSH Key Handling
 
-- termora NEVER copies private keys
+- lasterm NEVER copies private keys
 - Key path stored in meta.db (hosts.ssh_key_path) — points to user's existing key
 - Passphrase: prompted by ssh2 library callback, never stored
-- ssh-agent: preferred — termora just requests signing, never sees key material
+- ssh-agent: preferred — lasterm just requests signing, never sees key material
 
 ### 3.3 Known Hosts
 
@@ -181,7 +181,7 @@ Device B (needs token):
 
 **Remote (SSH stdio):**
 ```
-ssh user@host "termora-agent --stdio"
+ssh user@host "lasterm-agent --stdio"
 ```
 
 - Agent runs as the SSH user (no privilege escalation)
@@ -191,7 +191,7 @@ ssh user@host "termora-agent --stdio"
 
 **Local (daemon mode):**
 ```
-termora-agent --daemon --socket $XDG_RUNTIME_DIR/termora/agent.sock
+lasterm-agent --daemon --socket $XDG_RUNTIME_DIR/lasterm/agent.sock
 ```
 
 - Daemon spawned detached by hub via `connectOrLaunch()` (survives hub restart)
@@ -204,11 +204,11 @@ termora-agent --daemon --socket $XDG_RUNTIME_DIR/termora/agent.sock
 The agent daemon communicates with the hub over a Unix domain socket (Linux/macOS) or named pipe (Windows).
 
 **Socket paths:**
-- Linux: `$XDG_RUNTIME_DIR/termora/agent.sock` (typically `/run/user/<uid>/termora/agent.sock`)
-- Windows: `\\.\pipe\termora-agent-<username>`
+- Linux: `$XDG_RUNTIME_DIR/lasterm/agent.sock` (typically `/run/user/<uid>/lasterm/agent.sock`)
+- Windows: `\\.\pipe\lasterm-agent-<username>`
 
 **Filesystem protection:**
-- Parent directory (`$XDG_RUNTIME_DIR/termora/`) created with mode 0700 — only the owning user can list or access contents
+- Parent directory (`$XDG_RUNTIME_DIR/lasterm/`) created with mode 0700 — only the owning user can list or access contents
 - `probeSocket(path)` throws on EACCES, preventing connection to another user's socket
 - No authentication on the UDS itself — OS filesystem permissions serve as the trust boundary (same model as Docker socket, ssh-agent socket)
 
@@ -321,14 +321,14 @@ All incoming messages (from agent or UI) must be validated:
 
 ## 8. Security Recommendations for Users
 
-Included in first-run output and `termora --help`:
+Included in first-run output and `lasterm --help`:
 
 ```
 Security notes:
   • Hub listens on 127.0.0.1 only (not exposed to network)
   • Use ssh-agent for key management (recommended over key files)
   • auth.json must be readable only by you (chmod 600)
-  • Do not share your auth token — use 'termora pair' for other devices
+  • Do not share your auth token — use 'lasterm pair' for other devices
   • Terminal output is stored locally in data dir (see SPEC.md § 7 for platform paths)
   • To encrypt stored data, enable SQLCipher (P2 feature)
 ```

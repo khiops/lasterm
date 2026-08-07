@@ -43,7 +43,7 @@ interface SeaModule {
 		);
 	} catch (error) {
 		process.stderr.write(
-			`[termora-hub] fatal: cannot extract or load better_sqlite3.node: ${String(error)}\n`,
+			`[lasterm-hub] fatal: cannot extract or load better_sqlite3.node: ${String(error)}\n`,
 		);
 		process.exit(1);
 	}

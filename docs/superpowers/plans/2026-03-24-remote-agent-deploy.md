@@ -87,7 +87,7 @@ agentSha256?: string | null;
 
 - [ ] **Step 4: Build shared to verify types compile**
 
-Run: `pnpm -F @termora/shared build`
+Run: `pnpm -F @lasterm/shared build`
 Expected: Clean build, no type errors.
 
 - [ ] **Step 5: Commit**
@@ -162,7 +162,7 @@ describe("agent SHA256 pinning", () => {
 
 - [ ] **Step 5: Run tests**
 
-Run: `pnpm -F @termora/hub test -- --run src/storage/hosts-dal.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/storage/hosts-dal.spec.ts`
 Expected: All pass including new tests.
 
 - [ ] **Step 6: Commit**
@@ -187,23 +187,23 @@ import { getRemoteSha256 } from "./agent-deployer.js";
 describe("getRemoteSha256", () => {
 	it("parses sha256sum output on Linux", async () => {
 		const mockClient = createMockSshClient({
-			"sha256sum /usr/local/bin/termora-agent": {
-				stdout: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /usr/local/bin/termora-agent\n",
+			"sha256sum /usr/local/bin/lasterm-agent": {
+				stdout: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /usr/local/bin/lasterm-agent\n",
 				exitCode: 0,
 			},
 		});
-		const result = await getRemoteSha256(mockClient, "/usr/local/bin/termora-agent", "linux");
+		const result = await getRemoteSha256(mockClient, "/usr/local/bin/lasterm-agent", "linux");
 		expect(result).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 	});
 
 	it("parses PowerShell Get-FileHash output on Windows", async () => {
 		const mockClient = createMockSshClient({
-			'powershell -c "(Get-FileHash \'C:\\termora\\termora-agent.exe\' -Algorithm SHA256).Hash.ToLower()"': {
+			'powershell -c "(Get-FileHash \'C:\\lasterm\\lasterm-agent.exe\' -Algorithm SHA256).Hash.ToLower()"': {
 				stdout: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n",
 				exitCode: 0,
 			},
 		});
-		const result = await getRemoteSha256(mockClient, "C:\\termora\\termora-agent.exe", "windows");
+		const result = await getRemoteSha256(mockClient, "C:\\lasterm\\lasterm-agent.exe", "windows");
 		expect(result).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 	});
 
@@ -219,7 +219,7 @@ describe("getRemoteSha256", () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pnpm -F @termora/hub test -- --run src/session/agent-deployer.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/session/agent-deployer.spec.ts`
 Expected: FAIL — `getRemoteSha256` not exported.
 
 - [ ] **Step 3: Implement getRemoteSha256**
@@ -268,7 +268,7 @@ Add a test:
 ```typescript
 describe("getLocalSha256", () => {
 	it("computes SHA256 of a file", () => {
-		const tmpFile = join(tmpdir(), "termora-test-binary");
+		const tmpFile = join(tmpdir(), "lasterm-test-binary");
 		writeFileSync(tmpFile, "test-binary-content");
 		const hash = getLocalSha256(tmpFile);
 		expect(hash).toMatch(/^[a-f0-9]{64}$/);
@@ -283,7 +283,7 @@ describe("getLocalSha256", () => {
 
 - [ ] **Step 5: Run all tests**
 
-Run: `pnpm -F @termora/hub test -- --run src/session/agent-deployer.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/session/agent-deployer.spec.ts`
 Expected: All pass.
 
 - [ ] **Step 6: Commit**
@@ -355,7 +355,7 @@ Write each as a separate test case. Use the existing mock SSH client pattern fro
 
 - [ ] **Step 4: Run tests to verify they fail**
 
-Run: `pnpm -F @termora/hub test -- --run src/session/agent-deployer.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/session/agent-deployer.spec.ts`
 Expected: Multiple failures — old signature doesn't match.
 
 - [ ] **Step 5: Implement the updated deployAgentIfNeeded**
@@ -372,7 +372,7 @@ Key logic:
 
 - [ ] **Step 6: Run tests**
 
-Run: `pnpm -F @termora/hub test -- --run src/session/agent-deployer.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/session/agent-deployer.spec.ts`
 Expected: All pass.
 
 - [ ] **Step 7: Commit**
@@ -490,7 +490,7 @@ handleAgentVerifyResponse(promptId: string, action: "trust_permanent" | "trust_o
 
 - [ ] **Step 5: Build hub to verify types compile**
 
-Run: `pnpm -F @termora/hub build`
+Run: `pnpm -F @lasterm/hub build`
 Expected: Clean build.
 
 - [ ] **Step 6: Commit**
@@ -513,7 +513,7 @@ In `ssh-agent.spec.ts`, add test that user-rejection errors propagate (not swall
 ```typescript
 it("propagates AGENT_BINARY_REJECTED without fallback", async () => {
 	// Setup: deploy rejects with AGENT_BINARY_REJECTED
-	// Expect: start() rejects with the same error, does NOT fall back to termora-agent --stdio
+	// Expect: start() rejects with the same error, does NOT fall back to lasterm-agent --stdio
 });
 ```
 
@@ -544,12 +544,12 @@ Then in `SshAgent.start()`, replace the generic catch (line ~338-342):
 		rejectOnce(deployErr);
 		return;
 	}
-	// Infrastructure failures: fall back to termora-agent --stdio
+	// Infrastructure failures: fall back to lasterm-agent --stdio
 	const msg = deployErr instanceof Error ? deployErr.message : String(deployErr);
 	process.stderr.write(
-		`[ssh-agent] auto-deploy failed for host ${this.host.id}: ${msg}. Trying termora-agent --stdio anyway.\n`,
+		`[ssh-agent] auto-deploy failed for host ${this.host.id}: ${msg}. Trying lasterm-agent --stdio anyway.\n`,
 	);
-	runAgent("termora-agent --stdio");
+	runAgent("lasterm-agent --stdio");
 });
 ```
 
@@ -571,7 +571,7 @@ deployAgentIfNeeded(client, this.host, this.deployOptions)
 
 - [ ] **Step 4: Run tests**
 
-Run: `pnpm -F @termora/hub test -- --run src/session/ssh-agent.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/session/ssh-agent.spec.ts`
 Expected: All pass.
 
 - [ ] **Step 5: Commit**
@@ -682,7 +682,7 @@ onAgentUpdated: (hostId: string) => {
 
 - [ ] **Step 7: Build hub to verify**
 
-Run: `pnpm -F @termora/hub build`
+Run: `pnpm -F @lasterm/hub build`
 Expected: Clean build.
 
 - [ ] **Step 8: Commit**
@@ -704,7 +704,7 @@ feat(hub): wire deployOptions in handleSpawn — auto-deploy is now active for S
 Mirror `host-verify-response.ts`:
 
 ```typescript
-import type { AgentBinaryVerifyResponseMessage } from "@termora/shared";
+import type { AgentBinaryVerifyResponseMessage } from "@lasterm/shared";
 import type { WsHandlerContext } from "../ws-handler.js";
 
 export function handleAgentBinaryVerifyResponse(
@@ -736,7 +736,7 @@ export { handleAgentBinaryVerifyResponse } from "./agent-binary-verify-response.
 
 - [ ] **Step 4: Build and verify**
 
-Run: `pnpm -F @termora/hub build`
+Run: `pnpm -F @lasterm/hub build`
 Expected: Clean build.
 
 - [ ] **Step 5: Commit**
@@ -760,7 +760,7 @@ Mirror `stores/host-verify.ts`:
 ```typescript
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import type { AgentBinaryVerifyMessage } from "@termora/shared";
+import type { AgentBinaryVerifyMessage } from "@lasterm/shared";
 import type { IWsClient } from "../composables/useWebSocket";
 
 export interface AgentVerifyRequest extends AgentBinaryVerifyMessage {
@@ -870,7 +870,7 @@ agentVerifyStore.setWsClient(ws);
 
 - [ ] **Step 5: Verify types compile**
 
-Run: `pnpm -F @termora/web build`
+Run: `pnpm -F @lasterm/web build`
 Expected: Clean build (modals not yet created, but stores compile).
 
 - [ ] **Step 6: Commit**
@@ -939,7 +939,7 @@ Find where `<HostKeyWarning />` is mounted. Add `<AgentBinaryVerify />` next to 
 
 - [ ] **Step 3: Verify renders**
 
-Run: `pnpm -F @termora/web dev`
+Run: `pnpm -F @lasterm/web dev`
 Manually verify: store has no pending prompt → modal not visible. Good.
 
 - [ ] **Step 4: Commit**
@@ -959,7 +959,7 @@ feat(web): AgentBinaryVerify.vue — binary TOFU modal
 
 Simpler than TOFU modal. Single mode:
 - Warning icon, title: "Remote Agent Not Available"
-- Body: "The termora agent was not found on **{hostname}** and could not be deployed automatically."
+- Body: "The lasterm agent was not found on **{hostname}** and could not be deployed automatically."
 - Help text with instructions (install manually or place in cache)
 - 2 buttons: Close / Retry
 
@@ -1049,7 +1049,7 @@ describe("deploy + verify integration", () => {
 	});
 
 	it("prompts user when no local binary and no pin", async () => {
-		// 1. Mock SSH client reports agent exists at /usr/local/bin/termora-agent
+		// 1. Mock SSH client reports agent exists at /usr/local/bin/lasterm-agent
 		// 2. No local binary in cache, no pinned SHA256
 		// 3. Provide promptBinaryVerify that returns "trust_permanent"
 		// 4. Verify pinSha256 is set in result
@@ -1066,7 +1066,7 @@ describe("deploy + verify integration", () => {
 
 - [ ] **Step 2: Run all tests**
 
-Run: `pnpm -F @termora/hub test -- --run src/session/agent-deployer.spec.ts`
+Run: `pnpm -F @lasterm/hub test -- --run src/session/agent-deployer.spec.ts`
 Expected: All pass.
 
 - [ ] **Step 3: Run full test suite**

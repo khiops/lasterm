@@ -1,4 +1,4 @@
-import type { AgentBinaryVerifyResponseMessage } from "@termora/shared";
+import type { AgentBinaryVerifyResponseMessage } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleAgentBinaryVerifyResponse(

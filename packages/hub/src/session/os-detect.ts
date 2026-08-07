@@ -1,4 +1,4 @@
-import type { HostArch, HostOs } from "@termora/shared";
+import type { HostArch, HostOs } from "@lasterm/shared";
 
 export interface OsDetectResult {
 	os: HostOs;

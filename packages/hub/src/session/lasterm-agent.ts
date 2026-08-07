@@ -1,5 +1,5 @@
 import net from "node:net";
-import { type AgentChannelStateMessage, encodeFrame, type ProtocolMessage } from "@termora/shared";
+import { type AgentChannelStateMessage, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { AgentConnection } from "./agent-connection.js";
 import { SendQueue } from "./send-queue.js";
@@ -13,9 +13,9 @@ const CLOSE_TIMEOUT_MS = 1_000;
  * Connects to a running agent daemon via Unix domain socket or Windows named pipe.
  * The agent remains alive independently — close() disconnects without killing it.
  *
- * Factory method: TermoraAgent.connectLocal(socketPath)
+ * Factory method: LastermAgent.connectLocal(socketPath)
  */
-export class TermoraAgent extends AgentConnection {
+export class LastermAgent extends AgentConnection {
 	private socket: net.Socket;
 	private sendQueue: SendQueue;
 	private connId: number;
@@ -35,16 +35,16 @@ export class TermoraAgent extends AgentConnection {
 		super();
 		this.socket = socket;
 		this.hubLogger = hubLogger;
-		this.connId = ++TermoraAgent._connSeq;
-		this.logDebug("termora-agent: connection created");
-		this.sendQueue = new SendQueue("termora-agent");
+		this.connId = ++LastermAgent._connSeq;
+		this.logDebug("lasterm-agent: connection created");
+		this.sendQueue = new SendQueue("lasterm-agent");
 		this.sendQueue.attach(socket);
 
 		this.on("message", (m: ProtocolMessage) => {
-			this.logDebug("termora-agent: received message", { messageType: m.type });
+			this.logDebug("lasterm-agent: received message", { messageType: m.type });
 		});
 		this.on("ready", () => {
-			this.logDebug("termora-agent: ready", {
+			this.logDebug("lasterm-agent: ready", {
 				agentVersion: this.helloMessage?.agentVersion,
 				capabilities: this.helloMessage?.capabilities,
 			});
@@ -56,13 +56,13 @@ export class TermoraAgent extends AgentConnection {
 
 		socket.on("close", () => {
 			this.socketClosed = true;
-			this.logDebug("termora-agent: socket closed");
+			this.logDebug("lasterm-agent: socket closed");
 			this.sendQueue.clear();
 			this.emit("close");
 		});
 
 		socket.on("error", (err) => {
-			this.logDebug("termora-agent: socket error", { message: err.message });
+			this.logDebug("lasterm-agent: socket error", { message: err.message });
 			this.emit("error", err);
 		});
 
@@ -177,13 +177,13 @@ export class TermoraAgent extends AgentConnection {
 	 * Resolves after HELLO is received (agent is ready).
 	 * Rejects on connection error or HELLO timeout (5s).
 	 */
-	static connectLocal(socketPath: string, hubLogger?: HubLogger): Promise<TermoraAgent> {
+	static connectLocal(socketPath: string, hubLogger?: HubLogger): Promise<LastermAgent> {
 		return new Promise((resolve, reject) => {
 			const socket = net.connect(socketPath);
 			let settled = false;
 
 			socket.once("connect", () => {
-				const agent = new TermoraAgent(socket, hubLogger);
+				const agent = new LastermAgent(socket, hubLogger);
 
 				const timer = setTimeout(() => {
 					if (!settled) {

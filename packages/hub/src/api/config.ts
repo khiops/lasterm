@@ -1,4 +1,4 @@
-import type { TerminalProfile } from "@termora/shared";
+import type { TerminalProfile } from "@lasterm/shared";
 import {
 	DEFAULT_PROFILE,
 	ELEVATION_CONFIG_KEYS,
@@ -8,7 +8,7 @@ import {
 	TERMINAL_PROFILE_KEYS,
 	UI_CONFIG_SECTIONS,
 	UI_SECTION_KEYS,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { ConfigResolver } from "../config.js";
 import type { MetaDAL } from "../storage/meta.js";

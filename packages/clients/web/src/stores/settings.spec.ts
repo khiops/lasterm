@@ -1,4 +1,4 @@
-import type { CascadeResponse } from "@termora/shared";
+import type { CascadeResponse } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getNestedValue, useSettingsStore } from "./settings.js";
@@ -59,7 +59,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					maxLength: 50,
 					truncation: "end",
 					windowTitle: true,
-					windowFormat: "termora - {prefix}{host} - {title}",
+					windowFormat: "lasterm - {prefix}{host} - {title}",
 				},
 				search: {
 					position: "top-right",
@@ -88,7 +88,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					maxLength: 50,
 					truncation: "end",
 					windowTitle: true,
-					windowFormat: "termora - {prefix}{host} - {title}",
+					windowFormat: "lasterm - {prefix}{host} - {title}",
 				},
 				search: {
 					position: "top-right",
@@ -139,7 +139,7 @@ describe("getNestedValue", () => {
 describe("useSettingsStore", () => {
 	beforeEach(() => {
 		localStorageMap.clear();
-		localStorageMap.set("termora_token", "test-token");
+		localStorageMap.set("lasterm_token", "test-token");
 		setActivePinia(createPinia());
 		mockFetch.mockReset();
 	});

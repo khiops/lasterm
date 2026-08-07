@@ -10,7 +10,7 @@ import {
 	writeSync,
 } from "node:fs";
 import { join } from "node:path";
-import { generateId } from "@termora/shared";
+import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 
 const AUTH_FILE = "auth.json";
@@ -70,7 +70,7 @@ export function checkPermissions(authFilePath: string): void {
 
 	if (mode & 0o040) {
 		process.stderr.write(
-			`[termora] WARNING: auth.json at ${authFilePath} is group-readable (mode ${(mode & 0o777).toString(8)}). Recommend: chmod 600 auth.json\n`,
+			`[lasterm] WARNING: auth.json at ${authFilePath} is group-readable (mode ${(mode & 0o777).toString(8)}). Recommend: chmod 600 auth.json\n`,
 		);
 	}
 }

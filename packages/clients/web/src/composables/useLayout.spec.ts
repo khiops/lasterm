@@ -1137,7 +1137,7 @@ describe("reorderTab", () => {
 		layout.reorderTab(1, 0);
 		// Flush the Vue watcher (deep watch runs post-flush)
 		await nextTick();
-		const stored = localStorage.getItem("termora:layout");
+		const stored = localStorage.getItem("lasterm:layout");
 		expect(stored).not.toBeNull();
 		if (!stored) return;
 		const parsed = JSON.parse(stored) as { tabs: { id: string }[] };
@@ -1257,7 +1257,7 @@ describe("localStorage migration (old format)", () => {
 				"ch-B": { type: "terminal", channelId: "ch-B", paneId: "p2" },
 			},
 		};
-		localStorage.setItem("termora:layout", JSON.stringify(oldState));
+		localStorage.setItem("lasterm:layout", JSON.stringify(oldState));
 
 		// Create a new layout instance — it should migrate
 		let migratedLayout: ReturnType<typeof useLayout> | undefined;

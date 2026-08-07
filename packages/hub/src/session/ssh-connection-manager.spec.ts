@@ -1,4 +1,4 @@
-import type { TestConnectMessage } from "@termora/shared";
+import type { TestConnectMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	clearContext,
@@ -671,7 +671,7 @@ describe("B3 regression: host-verify context cleared by ownerAcqId, newer prompt
 		void verifyFn(
 			"host-b3a",
 			"myhost.example.com",
-			"/usr/bin/termora-agent",
+			"/usr/bin/lasterm-agent",
 			"SHA256:abc",
 			"linux",
 			"x64",
@@ -818,10 +818,10 @@ describe("SshConnectionManager — hostId stored in pending verify maps", () => 
 		const _verifyPromise = promptFn(
 			"host-abv-1",
 			"myhost.example.com",
-			"/opt/termora-agent",
+			"/opt/lasterm-agent",
 			"SHA256:abc123",
-			"linux" as import("@termora/shared").HostOs,
-			"x64" as import("@termora/shared").HostArch,
+			"linux" as import("@lasterm/shared").HostOs,
+			"x64" as import("@lasterm/shared").HostArch,
 			false,
 		);
 
@@ -1147,7 +1147,7 @@ describe("handleAgentVerifyResponse — prompt-owner clientId enforcement", () =
 			type: "AGENT_BINARY_VERIFY",
 			hostId,
 			hostname: "myhost.example.com",
-			remotePath: "/usr/bin/termora-agent",
+			remotePath: "/usr/bin/lasterm-agent",
 			remoteSha256: "SHA256:abc",
 			os: "linux",
 			arch: "x64",

@@ -26,7 +26,7 @@ import {
 	parseChecksumManifest,
 } from "./agent-fetch.js";
 
-const BASE_URL = "https://example.test/termora";
+const BASE_URL = "https://example.test/lasterm";
 const VERSION = "0.4.1";
 const LINUX_X64_TRIPLE = AGENT_TARGET_TRIPLES.linux.x64.triple;
 
@@ -66,7 +66,7 @@ describe("agent target mapping", () => {
 });
 
 describe("parseChecksumManifest", () => {
-	const basename = `termora-agent-${LINUX_X64_TRIPLE}-${VERSION}`;
+	const basename = `lasterm-agent-${LINUX_X64_TRIPLE}-${VERSION}`;
 	const lower = "a".repeat(64);
 	const upper = "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890";
 
@@ -155,7 +155,7 @@ describe("fetchAgentBinary", () => {
 				arch: "x64",
 				version: VERSION,
 				cacheDir,
-				baseUrl: "http://example.test/termora",
+				baseUrl: "http://example.test/lasterm",
 				fetchImpl,
 			}),
 		).rejects.toMatchObject({ code: "NETWORK" });
@@ -165,7 +165,7 @@ describe("fetchAgentBinary", () => {
 	it("maps private or forbidden releases to an actionable manual gesture", async () => {
 		const cacheDir = makeTempDir();
 		const expectedUrl = versionedAssetUrl(VERSION);
-		const finalPath = path.join(cacheDir, `termora-agent-linux-x64-${VERSION}`);
+		const finalPath = path.join(cacheDir, `lasterm-agent-linux-x64-${VERSION}`);
 		const { fetchImpl } = routeFetch(() => response("", { status: 403 }));
 
 		await expect(
@@ -191,7 +191,7 @@ describe("fetchAgentBinary", () => {
 	it("removes temp files after checksum mismatch", async () => {
 		const cacheDir = makeTempDir();
 		const assetName = versionedAssetName(VERSION);
-		const finalPath = path.join(cacheDir, `termora-agent-linux-x64-${VERSION}`);
+		const finalPath = path.join(cacheDir, `lasterm-agent-linux-x64-${VERSION}`);
 		const { fetchImpl } = routeFetch((url) => {
 			if (url === versionedAssetUrl(VERSION)) return response("corrupt");
 			if (url === checksumUrl(VERSION)) return response(sums(assetName, "expected"));
@@ -240,9 +240,90 @@ describe("fetchAgentBinary", () => {
 			checksumUrl(version),
 		]);
 		expect(readFileSync(finalPath, "utf8")).toBe(body);
-		expect(path.basename(finalPath)).toBe("termora-agent-linux-x64-0.3.4");
+		expect(path.basename(finalPath)).toBe("lasterm-agent-linux-x64-0.3.4");
 		expect(statSync(finalPath).mode & 0o777).toBe(0o755);
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("predates"));
+	});
+
+	it("falls back to the versioned former basename for a release published before the rename", async () => {
+		const cacheDir = makeTempDir();
+		const body = "pre-rename-agent";
+		const legacyName = `termora-agent-${LINUX_X64_TRIPLE}-${VERSION}`;
+		const { fetchImpl, calls } = routeFetch((url) => {
+			if (url === versionedAssetUrl(VERSION)) return response("", { status: 404 });
+			if (url === legacyAssetUrl(VERSION)) return response(body);
+			if (url === checksumUrl(VERSION)) return response(sums(legacyName, body));
+			throw new Error(`unexpected URL ${url}`);
+		});
+
+		const finalPath = await fetchAgentBinary({
+			os: "linux",
+			arch: "x64",
+			version: VERSION,
+			cacheDir,
+			baseUrl: BASE_URL,
+			fetchImpl,
+		});
+
+		expect(calls.map((call) => call.url)).toEqual([
+			versionedAssetUrl(VERSION),
+			legacyAssetUrl(VERSION),
+			checksumUrl(VERSION),
+		]);
+		expect(readFileSync(finalPath, "utf8")).toBe(body);
+		expect(path.basename(finalPath)).toBe(`lasterm-agent-linux-x64-${VERSION}`);
+	});
+
+	it("still requires a checksum when it falls back for a version at or after 0.4.0", async () => {
+		const cacheDir = makeTempDir();
+		// The trap this guards: the naming fallback and the "a missing checksum is only
+		// a warning" relaxation used to share one predicate. Widening that predicate to
+		// reach these versions would have relaxed verification for every one of them.
+		const { fetchImpl } = routeFetch((url) => {
+			if (url === versionedAssetUrl(VERSION)) return response("", { status: 404 });
+			if (url === legacyAssetUrl(VERSION)) return response("pre-rename-agent");
+			if (url === checksumUrl(VERSION)) return response("", { status: 404 });
+			throw new Error(`unexpected URL ${url}`);
+		});
+
+		await expect(
+			fetchAgentBinary({
+				os: "linux",
+				arch: "x64",
+				version: VERSION,
+				cacheDir,
+				baseUrl: BASE_URL,
+				fetchImpl,
+			}),
+		).rejects.toMatchObject({ code: "CHECKSUM_MISSING" });
+		expect(listCache(cacheDir)).toEqual([]);
+	});
+
+	it("names the asset this build asks for when neither basename is present", async () => {
+		const cacheDir = makeTempDir();
+		const { fetchImpl } = routeFetch((url) => {
+			if (url === versionedAssetUrl(VERSION)) return response("", { status: 404 });
+			if (url === legacyAssetUrl(VERSION)) return response("", { status: 404 });
+			if (url === tagUrl(VERSION)) return response("release page");
+			throw new Error(`unexpected URL ${url}`);
+		});
+
+		await expect(
+			fetchAgentBinary({
+				os: "linux",
+				arch: "x64",
+				version: VERSION,
+				cacheDir,
+				baseUrl: BASE_URL,
+				fetchImpl,
+			}),
+		).rejects.toSatisfy((error: unknown) => {
+			// The retry is internal. Reporting its URL would send the operator looking
+			// for a file no build of this project has ever asked for.
+			expect(String((error as Error).message)).toContain(versionedAssetName(VERSION));
+			expect(String((error as Error).message)).not.toContain("termora-agent-");
+			return true;
+		});
 	});
 
 	it("rejects missing checksums for modern versions", async () => {
@@ -270,6 +351,7 @@ describe("fetchAgentBinary", () => {
 		const cacheDir = makeTempDir();
 		const { fetchImpl } = routeFetch((url) => {
 			if (url === versionedAssetUrl(VERSION)) return response("", { status: 404 });
+			if (url === legacyAssetUrl(VERSION)) return response("", { status: 404 });
 			if (url === tagUrl(VERSION)) return response("release page");
 			throw new Error(`unexpected URL ${url}`);
 		});
@@ -290,6 +372,7 @@ describe("fetchAgentBinary", () => {
 		const cacheDir = makeTempDir();
 		const { fetchImpl } = routeFetch((url) => {
 			if (url === versionedAssetUrl(VERSION)) return response("", { status: 404 });
+			if (url === legacyAssetUrl(VERSION)) return response("", { status: 404 });
 			if (url === tagUrl(VERSION)) return response("", { status: 404 });
 			throw new Error(`unexpected URL ${url}`);
 		});
@@ -402,7 +485,7 @@ describe("fetchAgentBinary", () => {
 		});
 		// fetchAgentBinary returns the os-arch cache path; the triple asset name is
 		// only the download/checksum-manifest key.
-		expect(path.basename(result)).toBe(`termora-agent-linux-x64-${VERSION}`);
+		expect(path.basename(result)).toBe(`lasterm-agent-linux-x64-${VERSION}`);
 		expect(statSync(result).size).toBe(AGENT_FETCH_MAX_BYTES);
 	});
 
@@ -493,7 +576,7 @@ describe("fetchAgentBinary", () => {
 		]);
 
 		expect(first).toBe(second);
-		expect(path.basename(first)).toBe(`termora-agent-linux-x64-${VERSION}`);
+		expect(path.basename(first)).toBe(`lasterm-agent-linux-x64-${VERSION}`);
 		expect(readFileSync(first, "utf8")).toBe(body);
 		// The cached binary must be executable (modern path chmod 755, not only legacy).
 		expect(statSync(first).mode & 0o777).toBe(0o755);
@@ -723,7 +806,7 @@ describe("fetchAgentBinary", () => {
 });
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(os.tmpdir(), "termora-agent-fetch-"));
+	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-agent-fetch-"));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -748,7 +831,7 @@ function response(
 }
 
 function versionedAssetName(version: string): string {
-	return `termora-agent-${LINUX_X64_TRIPLE}-${version}`;
+	return `lasterm-agent-${LINUX_X64_TRIPLE}-${version}`;
 }
 
 function versionedAssetUrl(version: string): string {
@@ -756,7 +839,18 @@ function versionedAssetUrl(version: string): string {
 }
 
 function legacyAssetUrl(version: string): string {
-	return `${BASE_URL}/releases/download/v${version}/termora-agent-${LINUX_X64_TRIPLE}`;
+	// Releases up to the rename were published under the project's former name; those
+	// basenames are historical facts about GitHub, not something the rename may update.
+	// Two shapes, because the versioned naming arrived at 0.4.0.
+	const unversioned =
+		version.startsWith("0.0.") ||
+		version.startsWith("0.1.") ||
+		version.startsWith("0.2.") ||
+		version.startsWith("0.3.");
+	const basename = unversioned
+		? `termora-agent-${LINUX_X64_TRIPLE}`
+		: `termora-agent-${LINUX_X64_TRIPLE}-${version}`;
+	return `${BASE_URL}/releases/download/v${version}/${basename}`;
 }
 
 function checksumUrl(version: string): string {

@@ -13,7 +13,7 @@ import type {
 	HostOs,
 	HostVerifyMessage,
 	TestConnectMessage,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import { Client as SshClient } from "ssh2";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
@@ -155,12 +155,12 @@ export class SshConnectionManager {
 			if (promptType === "passphrase") {
 				const cached = this.ctx.passphraseCache.get(hostId);
 				console.error(
-					`[termora-ssh] passphrase cache lookup for ${hostId}: ${cached ? "hit" : "miss"}`,
+					`[lasterm-ssh] passphrase cache lookup for ${hostId}: ${cached ? "hit" : "miss"}`,
 				);
 				if (cached) {
 					if (cached.expiresAt > Date.now()) {
 						console.error(
-							`[termora-ssh] returning cached passphrase (length ${cached.secret.length})`,
+							`[lasterm-ssh] returning cached passphrase (length ${cached.secret.length})`,
 						);
 						return cached.secret;
 					}

@@ -1,4 +1,4 @@
-//! Protocol compatibility tests for termora-agent.
+//! Protocol compatibility tests for lasterm-agent.
 //!
 //! These tests verify that the Rust MessagePack serialization output matches
 //! what the TypeScript hub expects: binary data fields use MsgPack Bin (not

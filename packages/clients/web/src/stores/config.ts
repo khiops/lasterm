@@ -9,7 +9,7 @@ import {
 	type TabsConfig,
 	type TerminalProfile,
 	type TitleConfig,
-} from "@termora/shared";
+} from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
@@ -31,7 +31,7 @@ type ProfileChangeListener = (event: ProfileChangeEvent) => void;
  */
 function injectFontFaces(families: FontFamily[]): void {
 	// Remove any previously injected style element
-	const existing = document.getElementById("termora-fonts");
+	const existing = document.getElementById("lasterm-fonts");
 	if (existing) existing.remove();
 
 	if (families.length === 0) return;
@@ -65,7 +65,7 @@ function injectFontFaces(families: FontFamily[]): void {
 	}
 
 	const style = document.createElement("style");
-	style.id = "termora-fonts";
+	style.id = "lasterm-fonts";
 	style.textContent = rules.join("\n");
 	document.head.appendChild(style);
 }

@@ -142,7 +142,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { SshConfigEntry } from "@termora/shared";
+import type { SshConfigEntry } from "@lasterm/shared";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "../stores/auth.js";
 

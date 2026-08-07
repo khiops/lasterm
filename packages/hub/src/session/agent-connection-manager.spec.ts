@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_AGENT_CONFIG, encodeFrame, PROTOCOL_VERSION } from "@termora/shared";
+import { DEFAULT_AGENT_CONFIG, encodeFrame, PROTOCOL_VERSION } from "@lasterm/shared";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
@@ -12,6 +12,7 @@ import type { SpoolDAL } from "../storage/spool.js";
 import { AgentConnectionManager, AgentVersionMismatchError } from "./agent-connection-manager.js";
 import { deployAgentIfNeeded } from "./agent-deployer.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { LastermAgent } from "./lasterm-agent.js";
 import type { OutputChunker } from "./output-chunker.js";
 import type {
 	CommitProtectedMap,
@@ -22,7 +23,6 @@ import type { SessionManager } from "./session-manager.js";
 import type { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
-import { TermoraAgent } from "./termora-agent.js";
 
 const HOST_ID = "host-1";
 const SESSION_ID = "session-1";
@@ -109,24 +109,24 @@ function makeMockSftp(): SFTPWrapper {
 
 function makeDeployingSshClient(): SshClient {
 	const responses: Record<string, ExecResult> = {
-		"which termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-		"where termora-agent": { stdout: "", stderr: "", exitCode: 1 },
-		'test -x "$HOME/.local/bin/termora-agent" && echo "$HOME/.local/bin/termora-agent"': {
+		"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+		"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+		'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 			stdout: "",
 			stderr: "",
 			exitCode: 1,
 		},
-		'test -x "/usr/local/bin/termora-agent" && echo "/usr/local/bin/termora-agent"': {
+		'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
 			stdout: "",
 			stderr: "",
 			exitCode: 1,
 		},
-		'test -x "/usr/bin/termora-agent" && echo "/usr/bin/termora-agent"': {
+		'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
 			stdout: "",
 			stderr: "",
 			exitCode: 1,
 		},
-		'test -x "/opt/termora/termora-agent" && echo "/opt/termora/termora-agent"': {
+		'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
 			stdout: "",
 			stderr: "",
 			exitCode: 1,
@@ -286,10 +286,10 @@ describe("AgentConnectionManager HELLO version check", () => {
 	let tmpDir: string;
 	let socketPath: string;
 	let daemon: { server: net.Server; connections: net.Socket[] } | null = null;
-	let agent: TermoraAgent | null = null;
+	let agent: LastermAgent | null = null;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(join(tmpdir(), "termora-agent-manager-test-"));
+		tmpDir = await mkdtemp(join(tmpdir(), "lasterm-agent-manager-test-"));
 		socketPath = join(tmpDir, "agent.sock");
 	});
 
@@ -307,9 +307,9 @@ describe("AgentConnectionManager HELLO version check", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function connectAgent(agentVersion: string): Promise<TermoraAgent> {
+	async function connectAgent(agentVersion: string): Promise<LastermAgent> {
 		daemon = await createHelloDaemon(socketPath, agentVersion);
-		const connected = await TermoraAgent.connectLocal(socketPath);
+		const connected = await LastermAgent.connectLocal(socketPath);
 		connected.on("error", () => {});
 		agent = connected;
 		return connected;
@@ -394,8 +394,8 @@ describe("AgentConnectionManager HELLO version check", () => {
 	});
 
 	it("does not inherit a stale deployed signal after an abandoned deploy attempt for the same host", async () => {
-		const abandonedCacheDir = await mkdtemp(join(tmpdir(), "termora-abandoned-deploy-"));
-		await writeFile(join(abandonedCacheDir, `termora-agent-linux-x64-${HUB_VERSION}`), "binary");
+		const abandonedCacheDir = await mkdtemp(join(tmpdir(), "lasterm-abandoned-deploy-"));
+		await writeFile(join(abandonedCacheDir, `lasterm-agent-linux-x64-${HUB_VERSION}`), "binary");
 		try {
 			const abandonedResult = await deployAgentIfNeeded(
 				makeDeployingSshClient(),

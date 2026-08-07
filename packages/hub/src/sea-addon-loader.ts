@@ -6,7 +6,7 @@
  * and calls initSeaAddons() once at startup.
  *
  * Shared helpers (detectSea, getAddonCacheDir, extractAddonToDir, dlopenAddon,
- * loadNativeAddon) live in @termora/shared.
+ * loadNativeAddon) live in @lasterm/shared.
  *
  * Must be called via initSeaAddons() BEFORE any module that imports
  * better-sqlite3.
@@ -17,7 +17,7 @@ import {
 	detectSea,
 	getAddonCacheDir,
 	loadNativeAddon,
-} from "@termora/shared/dist/sea-addon-loader.js";
+} from "@lasterm/shared/dist/sea-addon-loader.js";
 
 // Re-export shared helpers so existing callers/tests that import from this
 // file continue to work unchanged.
@@ -27,7 +27,7 @@ export {
 	extractAddonToDir,
 	getAddonCacheDir,
 	loadNativeAddon,
-} from "@termora/shared/dist/sea-addon-loader.js";
+} from "@lasterm/shared/dist/sea-addon-loader.js";
 
 /** Names of .node assets embedded in the hub SEA binary. */
 const SEA_ADDON_ASSETS: readonly string[] = ["better_sqlite3.node"] as const;
@@ -73,7 +73,7 @@ export function initSeaAddons(): void {
 			// without SQLite support. Let the process crash with a clear message.
 			const msg = err instanceof Error ? err.message : String(err);
 			process.stderr.write(
-				`[termora-hub] fatal: failed to load SEA addon '${assetName}': ${msg}\n`,
+				`[lasterm-hub] fatal: failed to load SEA addon '${assetName}': ${msg}\n`,
 			);
 			process.exit(1);
 		}

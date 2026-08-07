@@ -289,7 +289,7 @@ This means:
 - ProxyJump chains work automatically
 - IdentityFile paths from config are used
 - Any SSH config directive is honored
-- Changes to ~/.ssh/config take effect without editing termora
+- Changes to ~/.ssh/config take effect without editing lasterm
 
 Note: "Default shell" field = path on the **remote machine** (e.g., /bin/bash).
 Placeholder in the UI should clarify this.

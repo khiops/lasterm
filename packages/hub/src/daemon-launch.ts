@@ -15,8 +15,8 @@ export interface BuildDaemonSpawnPlanOptions {
 
 export function buildDaemonSpawnPlan(options: BuildDaemonSpawnPlanOptions): DaemonSpawnPlan {
 	const env: Record<string, string> = {
-		TERMORA_PORT: String(options.port),
-		...(options.open ? { TERMORA_OPEN: "1" } : {}),
+		LASTERM_PORT: String(options.port),
+		...(options.open ? { LASTERM_OPEN: "1" } : {}),
 	};
 
 	if (options.sea) {

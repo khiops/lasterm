@@ -1,6 +1,6 @@
-# termora — Architecture & Security Audit
+# lasterm — Architecture & Security Audit
 
-> **Project:** termora (local-first session terminal platform)
+> **Project:** lasterm (local-first session terminal platform)
 > **Date:** 2026-03-21
 > **Revision:** v1.5
 > **Scope:** Full audit — all packages (shared, agent, hub, web, desktop) + Rust crates
@@ -30,24 +30,24 @@
 
 | Package | Responsibility | Internal deps | Key external deps | Entry points |
 |---------|---------------|---------------|-------------------|--------------|
-| `termora` (root CLI) | CLI wrapper, spawns hub | `@termora/hub` | — | `bin/termora.js` |
-| `@termora/shared` | Wire protocol, types, codec, validation | — | `@msgpack/msgpack`, `ulid` | `src/index.ts` |
-| `@termora/agent` | PTY manager (local/remote), stdio/daemon modes | `@termora/shared` | `node-pty`, `@xterm/headless` | `src/main.ts` |
-| `@termora/hub` | Central daemon: Fastify, sessions, SSH, SQLite | `@termora/shared` | `fastify`, `ssh2`, `better-sqlite3` | `src/main.ts`, `src/cli.ts` |
-| `@termora/web` | Vue 3 PWA client (embedded in hub) | `@termora/shared` | `vue`, `pinia`, `@xterm/xterm` | `src/main.ts` |
-| `@termora/desktop` | Tauri v2 wrapper (sidecar hub) | — | `@tauri-apps/api` | `src-tauri/src/lib.rs` |
+| `lasterm` (root CLI) | CLI wrapper, spawns hub | `@lasterm/hub` | — | `bin/lasterm.js` |
+| `@lasterm/shared` | Wire protocol, types, codec, validation | — | `@msgpack/msgpack`, `ulid` | `src/index.ts` |
+| `@lasterm/agent` | PTY manager (local/remote), stdio/daemon modes | `@lasterm/shared` | `node-pty`, `@xterm/headless` | `src/main.ts` |
+| `@lasterm/hub` | Central daemon: Fastify, sessions, SSH, SQLite | `@lasterm/shared` | `fastify`, `ssh2`, `better-sqlite3` | `src/main.ts`, `src/cli.ts` |
+| `@lasterm/web` | Vue 3 PWA client (embedded in hub) | `@lasterm/shared` | `vue`, `pinia`, `@xterm/xterm` | `src/main.ts` |
+| `@lasterm/desktop` | Tauri v2 wrapper (sidecar hub) | — | `@tauri-apps/api` | `src-tauri/src/lib.rs` |
 
 ### B.2 Inter-Package Dependencies
 
 ```mermaid
 graph TD
     subgraph "Packages"
-        ROOT["termora (root CLI)"]
-        SHARED["@termora/shared"]
-        AGENT["@termora/agent"]
-        HUB["@termora/hub"]
-        WEB["@termora/web"]
-        DESKTOP["@termora/desktop"]
+        ROOT["lasterm (root CLI)"]
+        SHARED["@lasterm/shared"]
+        AGENT["@lasterm/agent"]
+        HUB["@lasterm/hub"]
+        WEB["@lasterm/web"]
+        DESKTOP["@lasterm/desktop"]
     end
 
     ROOT -->|"workspace:*"| HUB
@@ -189,8 +189,8 @@ graph TB
 | Token comparison | `crypto.timingSafeEqual` | ✅ Constant-time | `hub/src/auth.ts:244` |
 | Pairing code | `crypto.randomInt(0, 1M)` | ✅ CSPRNG | `hub/src/api/pair.ts:71` |
 | SSH fingerprint | SHA-256 digest | ✅ | `hub/src/session/ssh-agent.ts:209` |
-| Rust agent auth | `ct_eq` (subtle crate) | ✅ Constant-time | `crates/termora-agent/src/daemon.rs:390` |
-| Rust elevation secret | `Zeroizing<String>` | ✅ Auto-zeroed on drop | `crates/termora-agent/src/handler.rs` |
+| Rust agent auth | `ct_eq` (subtle crate) | ✅ Constant-time | `crates/lasterm-agent/src/daemon.rs:390` |
+| Rust elevation secret | `Zeroizing<String>` | ✅ Auto-zeroed on drop | `crates/lasterm-agent/src/handler.rs` |
 
 **No forbidden algorithms found.** No MD5, no SHA-1, no `Math.random()` for security.
 
@@ -292,7 +292,7 @@ sequenceDiagram
         H->>C: HOST_VERIFY prompt
     end
     RH-->>SA: ready
-    SA->>RH: launch termora-agent --stdio
+    SA->>RH: launch lasterm-agent --stdio
     RA-->>SA: HELLO frame
     H->>RA: SPAWN message
     RA-->>H: SPAWN_OK with channelId
@@ -521,7 +521,7 @@ The single fail-open is the Rust daemon's first-run mode (`daemon.rs:306`): when
 | ~~SEC-002~~ | ~~**HIGH**~~ | ~~A07~~ | ~~`pair.ts:28-42`~~ | ~~Pairing rate limiter: in-memory global counter, not per-IP, resets on hub restart~~ | ✅ **RESOLVED** (2026-03-22) — DB-backed per-IP rate limiter (migration 015), exponential backoff after 5 attempts |
 | ~~SEC-003~~ | ~~**HIGH**~~ | ~~A01~~ | ~~`session-manager.ts:753`, `channel-lifecycle-manager.ts:885`~~ | ~~AUTH_PROMPT_RESPONSE: no clientId verification — any authenticated WS client can inject credentials into another client's pending SSH prompt~~ | ✅ **RESOLVED** (2026-03-22) — `pending.clientId !== clientId` check added in `ssh-connection-manager.ts` + test |
 | ~~SEC-004~~ | ~~**HIGH**~~ | ~~A07~~ | ~~`session-manager.ts:547`~~ | ~~Elevation secret cache keyed by hostId only (not clientId) — shared across all WS clients for 15 minutes~~ | ✅ **RESOLVED** (2026-03-22) — cache key `${hostId}:${clientId}`, TTL 15m→5m |
-| ~~SEC-005~~ | ~~**HIGH**~~ | ~~A08~~ | ~~`ssh-agent.ts:359`, `session-manager.ts:363`~~ | ~~Remote agent binary falls back to PATH-relative `termora-agent` when deploy fails — compromised remote host can shadow with malicious binary~~ | ✅ **RESOLVED** (2026-03-22) — deploy failure rejects connection; deliberate no-deploy still allowed |
+| ~~SEC-005~~ | ~~**HIGH**~~ | ~~A08~~ | ~~`ssh-agent.ts:359`, `session-manager.ts:363`~~ | ~~Remote agent binary falls back to PATH-relative `lasterm-agent` when deploy fails — compromised remote host can shadow with malicious binary~~ | ✅ **RESOLVED** (2026-03-22) — deploy failure rejects connection; deliberate no-deploy still allowed |
 | ~~SEC-006~~ | ~~**HIGH**~~ | ~~A02~~ | ~~`server.ts:59`~~ | ~~No security response headers set (CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy)~~ | ✅ **RESOLVED** (2026-03-22) — `@fastify/helmet@12` registered with strict CSP in `server.ts` |
 | ~~SEC-007~~ | ~~MEDIUM~~ | ~~A04~~ | ~~`auth.ts:82-95`~~ | ~~auth.json write-then-chmod race~~ | ✅ **RESOLVED** (2026-03-22) — atomic `openSync` with mode 0o600 |
 | ~~SEC-008~~ | ~~MEDIUM~~ | ~~A07~~ | ~~`ssh-agent.ts:209`, `session-manager.ts:757`~~ | ~~SSH TOFU silent + trust_once=trust_permanent~~ | ✅ **RESOLVED** (2026-03-22) — TOFU prompts user, trust_once in-memory only, UI Trust Once button |
@@ -539,7 +539,7 @@ The single fail-open is the Rust daemon's first-run mode (`daemon.rs:306`): when
 | ~~SEC-020~~ | ~~LOW~~ | ~~A02~~ | ~~`config.ts:533`~~ | ~~CORS wildcard localhost~~ | ✅ **RESOLVED** (2026-03-22) — exact origins from actual port via `addCorsOrigins()` |
 | ~~SEC-021~~ | ~~LOW~~ | ~~A03~~ | ~~`pnpm-workspace.yaml:22`~~ | ~~Fastify 5.7.4: CVE-2026-3419 Content-Type validation bypass (CVSS 5.3)~~ | ✅ **RESOLVED** (2026-03-22) — fastify upgraded to `^5.8.1` (resolved to 5.8.2) |
 | ~~SEC-022~~ | ~~LOW~~ | ~~A01~~ | ~~`server.ts:117`~~ | ~~/api/fonts auth bypass is method-agnostic~~ | ✅ **RESOLVED** (2026-03-22) — GET-only check added |
-| ~~SEC-023~~ | ~~LOW~~ | ~~A02~~ | ~~`main.ts:13`~~ | ~~TERMORA_PORT env var parsed without range validation~~ | ✅ **RESOLVED** (2026-03-22) — integer [1,65535] validation |
+| ~~SEC-023~~ | ~~LOW~~ | ~~A02~~ | ~~`main.ts:13`~~ | ~~LASTERM_PORT env var parsed without range validation~~ | ✅ **RESOLVED** (2026-03-22) — integer [1,65535] validation |
 | ~~SEC-024~~ | ~~LOW~~ | ~~A07~~ | ~~`daemon.rs:306`~~ | ~~Daemon no-auth if auth.json deleted~~ | ✅ **RESOLVED** (2026-03-22) — checks meta.db existence (not first run → fail-closed) |
 | SEC-025 | LOW | A02 | `tauri.conf.json` | CSP fully disabled in Desktop/Tauri — XSS in webview has unrestricted Tauri IPC access | 🔵 **DEFERRED** — Tauri v2 limitation: requires `tauri://`, `ipc://` origins + xterm.js `unsafe-inline` styles. OS sandbox is the primary defense for desktop. |
 | ~~SEC-026~~ | ~~LOW~~ | ~~A01~~ | ~~`server.ts:112`~~ | ~~Static assets (UI) served unauthenticated~~ | ⚪ **OBSOLETE** — By design: SPA must load without auth to display login/pairing screen. Info leakage negligible on 127.0.0.1. |
@@ -609,7 +609,7 @@ The single fail-open is the Rust daemon's first-run mode (`daemon.rs:306`): when
 | ~~SEC-006~~ | ~~`pnpm add @fastify/helmet` + register in server.ts~~ | ✅ Done |
 | ~~SEC-019~~ | ~~Add hex validation in initAuth~~ | ✅ Done |
 | ~~SEC-022~~ | ~~Add method check to /api/fonts bypass~~ | ✅ Done |
-| ~~SEC-023~~ | ~~Validate TERMORA_PORT as int in [1, 65535]~~ | ✅ Done |
+| ~~SEC-023~~ | ~~Validate LASTERM_PORT as int in [1, 65535]~~ | ✅ Done |
 | ~~SEC-029~~ | ~~Add Fastify body schema to /api/pair/verify~~ | ✅ Done |
 | ~~SEC-030~~ | ~~Wrap touchToken in try/catch with warn log~~ | ✅ Done |
 
@@ -637,12 +637,12 @@ The single fail-open is the Rust daemon's first-run mode (`daemon.rs:306`): when
 
 | Package | Analyzed | Files read | Findings |
 |---------|----------|------------|----------|
-| `@termora/shared` | ✅ | 4 | 0 |
-| `@termora/agent` | ✅ | 18 | 2 |
-| `@termora/hub` | ✅ | 123 | 25 |
-| `@termora/web` | ✅ | 135 | 2 |
-| `@termora/desktop` | ✅ | 2 | 3 |
-| `termora` (root) | ✅ | 3 | 0 |
+| `@lasterm/shared` | ✅ | 4 | 0 |
+| `@lasterm/agent` | ✅ | 18 | 2 |
+| `@lasterm/hub` | ✅ | 123 | 25 |
+| `@lasterm/web` | ✅ | 135 | 2 |
+| `@lasterm/desktop` | ✅ | 2 | 3 |
+| `lasterm` (root) | ✅ | 3 | 0 |
 | Rust crates | ✅ | N/A | 2 |
 
 **Existing packages not analyzed: None**

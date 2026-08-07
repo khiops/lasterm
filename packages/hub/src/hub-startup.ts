@@ -14,6 +14,10 @@ import { acquireHubLock } from "./hub-lock.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
 import { openBrowser } from "./open-browser.js";
+import {
+	describePreviousInstallation,
+	PreviousInstallationError,
+} from "./previous-installation.js";
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
 import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 import { openDatabases } from "./storage/db.js";
@@ -37,6 +41,7 @@ type HubDatabases = ReturnType<typeof openDatabases>;
 export interface HubStartupDependencies {
 	readonly getStateDir: typeof getStateDir;
 	readonly getConfigDir: typeof getConfigDir;
+	readonly describePreviousInstallation: typeof describePreviousInstallation;
 	readonly acquireHubLock: typeof acquireHubLock;
 	readonly initAuth: typeof initAuth;
 	readonly createOwnerToken: typeof createOwnerToken;
@@ -51,6 +56,7 @@ export interface HubStartupDependencies {
 const defaultDependencies: HubStartupDependencies = {
 	getStateDir,
 	getConfigDir,
+	describePreviousInstallation,
 	acquireHubLock,
 	initAuth,
 	createOwnerToken,
@@ -63,15 +69,29 @@ const defaultDependencies: HubStartupDependencies = {
 };
 
 /**
- * The sole server-construction path. It takes the kernel lock before any port
- * bind or database open, so foreground, daemon, and future callers cannot
- * construct a serving hub without the same authority check.
+ * How every shipped entry point constructs a hub: the launcher, the daemon child
+ * and `main.ts` all arrive here, and none of them can skip the two authority
+ * checks below, which is what makes them uniform.
+ *
+ * Not a security boundary, and the difference is worth being exact about. The
+ * dependency table is injectable, so in-repository code can pass a probe that
+ * says "no previous installation" and `createServer` remains exported; a caller
+ * inside this process can therefore construct a hub without either check. That
+ * costs nothing to concede: such a caller already runs at this process's
+ * privilege and has cheaper ways to do anything the checks prevent. What the
+ * checks buy is that no *shipped path* reaches a serving hub without them, and
+ * that a new one added later inherits both by default rather than by memory.
  */
 export async function startHub(
 	options: HubStartupOptions,
 	overrides: Partial<HubStartupDependencies> = {},
 ): Promise<void> {
 	const dependencies = { ...defaultDependencies, ...overrides };
+	// Before a directory is created, a port is bound or the lock is taken. The two
+	// generations share no lock, so this is the only thing standing between them.
+	const previous = dependencies.describePreviousInstallation();
+	if (previous !== undefined) throw new PreviousInstallationError(previous);
+
 	const stateDir = dependencies.getStateDir();
 	dependencies.acquireHubLock(stateDir);
 

@@ -11,7 +11,7 @@
 Remote terminals cannot be opened because:
 
 1. `deployOptions` is never passed to `SshAgent` in `SessionManager.handleSpawn()` — auto-deploy code exists but is dead
-2. No binary in the local cache (`~/.local/state/termora/binaries/`) — even if deploy is wired, nothing to upload
+2. No binary in the local cache (`~/.local/state/lasterm/binaries/`) — even if deploy is wired, nothing to upload
 3. No CI target for `aarch64-unknown-linux-gnu` (Raspberry Pi)
 4. No UX feedback when agent is unavailable — user sees a cryptic timeout
 5. No version/integrity verification — stale or tampered remote binaries go undetected
@@ -152,13 +152,13 @@ sequenceDiagram
     participant Hub as Hub (SessionManager)
     participant SSH as Remote Host (SSH)
 
-    Hub->>SSH: ssh connect + exec termora-agent
+    Hub->>SSH: ssh connect + exec lasterm-agent
     Note over Hub: HELLO timeout — agent not running
 
-    Hub->>SSH: which termora-agent
-    SSH-->>Hub: /home/user/.local/bin/termora-agent
+    Hub->>SSH: which lasterm-agent
+    SSH-->>Hub: /home/user/.local/bin/lasterm-agent
 
-    Hub->>SSH: sha256sum /home/user/.local/bin/termora-agent
+    Hub->>SSH: sha256sum /home/user/.local/bin/lasterm-agent
     SSH-->>Hub: a1b2c3d4e5f6...
 
     Note over Hub: No local binary in cache<br>No pinned SHA256 on host
@@ -172,7 +172,7 @@ sequenceDiagram
 
     Note over Hub: Pin SHA256 in hosts.agent_sha256
 
-    Hub->>SSH: exec termora-agent --stdio
+    Hub->>SSH: exec lasterm-agent --stdio
     SSH-->>Hub: HELLO {protocol_version: 1, ...}
     Hub->>UI: SPAWN_OK {channelId}
 ```
@@ -242,7 +242,7 @@ The existing catch block in `SshAgent.start()` must distinguish error types:
 | `AGENT_BINARY_REJECTED` | Propagate to caller (user decision) — NO fallback |
 | `AGENT_BINARY_UNTRUSTED` | Propagate to caller — NO fallback |
 | `AGENT_NOT_AVAILABLE` | Propagate to caller — NO fallback |
-| Infrastructure errors (SFTP fail, upload fail) | Fall back to `termora-agent --stdio` (best-effort, existing behavior) |
+| Infrastructure errors (SFTP fail, upload fail) | Fall back to `lasterm-agent --stdio` (best-effort, existing behavior) |
 
 Implementation: check `err.message` for known codes before falling through to the generic catch.
 
@@ -252,10 +252,10 @@ Displayed when error code is `AGENT_NOT_AVAILABLE`.
 
 **Content:**
 - Warning icon + title: "Remote Agent Not Available"
-- Body: "The termora agent was not found on **{hostname}** and could not be deployed automatically."
+- Body: "The lasterm agent was not found on **{hostname}** and could not be deployed automatically."
 - Reason detail: "No pre-built binary for {os}/{arch} found in the local cache."
 - Help text: "To resolve this, either:
-  - Install the agent manually on the remote host (ensure `termora-agent` is in the PATH)
+  - Install the agent manually on the remote host (ensure `lasterm-agent` is in the PATH)
   - Place the pre-built binary in the local cache for automatic deployment"
 - **Retry** button (re-triggers SPAWN → re-triggers deploy check)
 - **Close** button

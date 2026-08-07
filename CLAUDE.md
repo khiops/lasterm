@@ -1,4 +1,4 @@
-# termora — CLAUDE.md
+# lasterm — CLAUDE.md
 
 ## Vision
 
@@ -29,10 +29,10 @@ Sessions survive client disconnects and device switches; local sessions also sur
 | Linter/formatter | biome |
 | Test framework | vitest |
 | Test pattern | `*.spec.ts` (colocated) |
-| PTY | node-pty |
+| PTY | `async-xpty` — Rust, inside the agent. No Node PTY anywhere |
 | SSH (client + mock server) | ssh2 (Client + Server) |
 | Terminal (UI) | xterm.js + addon-fit + addon-serialize |
-| Terminal (Agent) | xterm.js headless + addon-serialize |
+| Terminal (Agent) | the `vt100` crate — Rust screen model in `headless.rs` |
 | Codec | @msgpack/msgpack |
 | Storage | better-sqlite3 (WAL mode) |
 | HTTP/WS | Fastify + @fastify/websocket |
@@ -45,36 +45,41 @@ Sessions survive client disconnects and device switches; local sessions also sur
 ## Monorepo Structure
 
 ```
-termora (root)        → workspace root + CLI entrypoint. NOT published.
+lasterm (root)        → workspace root + CLI entrypoint. NOT published.
 packages/
-├── shared/           → @termora/shared (name reserved on npm, placeholder only)
-├── hub/              → @termora/hub    (name reserved on npm, placeholder only)
+├── shared/           → @lasterm/shared (private, never published)
+├── hub/              → @lasterm/hub    (private, never published)
 └── clients/
-    ├── web/          → @termora/web (not published, embedded by hub)
-    └── desktop/      → @termora/desktop (Tauri)
+    ├── web/          → @lasterm/web (not published, embedded by hub)
+    └── desktop/      → @lasterm/desktop (Tauri)
 crates/
-├── termora-agent/    → the agent. A Rust binary, not an npm package.
-└── termora-hub-lock/ → napi-rs addon holding the single-hub lock
+├── lasterm-agent/    → the agent. A Rust binary, not an npm package.
+└── lasterm-hub-lock/ → napi-rs addon holding the single-hub lock
 ```
 
-**No working Termora reaches users through npm, and nothing here publishes.** What
-exists on npm is three `@termora/*` names holding 0.0.1 placeholders, reserved
-against squatting; the unscoped `termora` belongs to an unrelated project. No
+**No working Lasterm reaches users through npm, and nothing here publishes.** No
 workflow runs `npm publish`, and every package is marked private so a recursive
 publish cannot release one by accident.
+
+**`@lasterm` is unclaimed on npm.** What exists there is three `@termora/*` names
+holding 0.0.1 placeholders, published before the rename, which now reserve a scope this
+product does not use. The unscoped `lasterm` belongs to an unrelated project. Since
+nothing here publishes, the only thing the scope buys is that nobody else takes it —
+worth an hour, and it is not done. Verified against the registry on 2026-08-07 rather
+than inferred: `npm view @termora/hub version` answers 0.0.1, `@lasterm/hub` answers
+that it does not exist.
 
 The hub ships as a single executable that embeds its own Node, so an npm install
 would reintroduce the runtime requirement that executable exists to remove. Today the
 only channel that works end to end is **building from this repository or downloading
 a release asset**. The Microsoft Store path has packaging in CI but submission is
-manual and not yet done (#110), and winget is a plan with no manifest — note that the
-`Termora` currently findable there (`TermoraDev.Termora`) is a different product.
+manual and not yet done (#110), and winget is a plan with no manifest.
 
 Dependencies: shared ← hub, shared ← web.
 The hub spawns the agent binary for local sessions and deploys it over SSH for remote
 ones, fetching it from GitHub Releases version-matched to itself (SPEC.md §3.5).
 hub embeds web build output as static files.
-Hub does NOT depend on node-pty — all PTY management is in the agent.
+No Node process opens a PTY: the agent does it in Rust, through `async-xpty`.
 
 ## Commands
 
@@ -85,22 +90,22 @@ pnpm build                # Build all packages
 pnpm test                 # Run all tests (vitest)
 pnpm lint                 # Lint + format check (biome)
 pnpm lint:fix             # Auto-fix lint issues
-pnpm -F @termora/hub test # Test single package
-pnpm -F @termora/web dev  # Dev single package
+pnpm -F @lasterm/hub test # Test single package
+pnpm -F @lasterm/web dev  # Dev single package
 ```
 
 ### Production build & run (local, Linux/macOS native)
 
 ```bash
-./scripts/build-agent.sh   # Rust agent → dist/sea/termora-agent (cargo --release)
-./scripts/build-hub.sh     # Hub SEA (builds+embeds web, bundles better-sqlite3) → dist/sea/termora-hub
-cd dist/sea && ./termora-hub start --port 4100   # serve PWA at http://127.0.0.1:4100 (--daemon/--open)
-./termora-hub pair         # 8-digit code to authorise a browser client; also: status | stop
+./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent (cargo --release)
+./scripts/build-hub.sh     # Hub SEA (builds+embeds web, bundles better-sqlite3) → dist/sea/lasterm-hub
+cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at http://127.0.0.1:4100 (--daemon/--open)
+./lasterm-hub pair         # 8-digit code to authorise a browser client; also: status | stop
 ```
 
 - Hub SEA resolves the agent **co-located** in the same dir (`dist/sea/`) via `sea-agent-resolver.ts`; the agent spawns lazily on first local session.
 - Native SEA embeds the host Node — build cross-platform binaries on their target OS (Windows hub on Windows). Rust agent verify must include `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` (cfg(windows) lints invisible to Linux clippy).
-- Config: `~/.config/termora` · State: `~/.local/state/termora`.
+- Config: `~/.config/lasterm` · State: `~/.local/state/lasterm`.
 
 ## Conventions
 
@@ -125,7 +130,7 @@ cd dist/sea && ./termora-hub start --port 4100   # serve PWA at http://127.0.0.1
 - Unit: vitest, colocated `*.spec.ts`
 - Integration: better-sqlite3 in-memory (`:memory:`)
 - E2E (remote): mock SSH server (never real SSH in CI)
-- PTY: real node-pty on all platforms
+- PTY: exercised by the agent's Rust tests (`cargo test`), Linux and Windows
 - WS: mock for UI tests, real for E2E
 
 ### Git
@@ -145,7 +150,7 @@ UI (Vue 3 + xterm.js) ──── WS + REST ──── Hub (Fastify, 127.0.0.
                                             └── spool.db (output, snapshots)
 
 Agent (local or remote, same binary):
-  stdin → MessagePack frames → PTY manager (node-pty) → N channels
+  stdin → MessagePack frames → PTY manager (async-xpty, Rust) → N channels
   stdout ← MessagePack frames ← OUTPUT/SNAPSHOT
   Hub never touches PTY directly — agent is the universal PTY manager.
 ```
@@ -154,7 +159,7 @@ Agent (local or remote, same binary):
 
 | Tier | Relationship |
 |------|--------------|
-| GUI client | Bundles a hub and launches it, **and** can pair to a hub on another machine with a pairing code (`termora pair`). |
+| GUI client | Bundles a hub and launches it, **and** can pair to a hub on another machine with a pairing code (`lasterm pair`). |
 | Hub | The client drives one hub, its own or a paired one. It asks *that hub* to reach a host the hub can see. |
 | Agent | Deployed **by the hub** onto the target, matched to its OS and architecture. |
 
@@ -201,12 +206,14 @@ Workspace (layout persistence)
 3.5. Agent visual hints (from HELLO, ephemeral)
 4. `channels.profile_json` (per-channel, meta.db)
 
-**Port:** default 4100, configurable via CLI flag > `TERMORA_PORT` env > config.toml > default.
+**Port:** default 4100, intended precedence CLI flag > `LASTERM_PORT` env > config.toml >
+default. **Only the flag and, on the `main.ts` entry point, the environment variable are
+actually read — `lasterm start` computes `args.port ?? 4100` and ignores both the variable
+and the configured value (#175).** Read that as the state of the code, not the design.
 `zero_conf` mode: auto-increment 4100→4199 if port taken, write `runtime.json` in state dir.
 
 ## Common Pitfalls
 
-- xterm.js headless needs DOM polyfill — see spike criteria in SPEC.md § 3.2
 - never store SSH passwords (prompt at connect, clear after auth)
 - spool.db writes are continuous/heavy — use INCREMENTAL auto_vacuum, not full VACUUM
 - MessagePack Uint8Array: use `@msgpack/msgpack` with `useBigInt64: false`

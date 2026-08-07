@@ -1,6 +1,6 @@
 import type { LogConfig } from "./entities.js";
 
-/** Resolved agent configuration used when launching termora-agent */
+/** Resolved agent configuration used when launching lasterm-agent */
 export interface AgentConfig {
 	/** Socket path override (empty = auto-detect per platform) */
 	socketPath?: string;

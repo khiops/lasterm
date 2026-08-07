@@ -1,4 +1,4 @@
-import { generateId } from "@termora/shared";
+import { generateId } from "@lasterm/shared";
 import { ref, watch } from "vue";
 import type { PaneNode } from "./usePaneTree.js";
 import {
@@ -32,7 +32,7 @@ export type { Tab } from "./useTabManager.js";
 // localStorage persistence key
 // ---------------------------------------------------------------------------
 
-const LAYOUT_KEY = "termora:layout";
+const LAYOUT_KEY = "lasterm:layout";
 
 interface PersistedState {
 	tabs: Tab[];

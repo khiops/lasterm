@@ -1,4 +1,4 @@
-import type { AuthPromptMessage, ProtocolMessage } from "@termora/shared";
+import type { AuthPromptMessage, ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConfigResolver } from "../config.js";
 import { openTestDatabases } from "../storage/db.js";
@@ -2335,7 +2335,7 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 
 // Mock ssh2 Client for _testSshConnectivity
 import { EventEmitter } from "node:events";
-import type { TestConnectMessage } from "@termora/shared";
+import type { TestConnectMessage } from "@lasterm/shared";
 
 let mockSsh2Client: EventEmitter & {
 	connect: ReturnType<typeof vi.fn>;
@@ -2836,13 +2836,13 @@ describe("SessionManager — title broadcast wiring", () => {
 		agent.emit("message", {
 			type: "TITLE_CHANGE",
 			channelId,
-			title: "zsh — ~/projects/termora",
+			title: "zsh — ~/projects/lasterm",
 		});
 
 		const titleMsg = received.find((m) => m.type === "TITLE_CHANGE") as
 			| (ProtocolMessage & { displayTitle?: string })
 			| undefined;
-		expect(titleMsg?.displayTitle).toBe("zsh — ~/projects/termora");
+		expect(titleMsg?.displayTitle).toBe("zsh — ~/projects/lasterm");
 	});
 
 	it("notifyChannelRenamed broadcasts updated displayTitle to channel clients", async () => {
@@ -3111,7 +3111,7 @@ describe("SessionManager — elevation support", () => {
 		// The agent should have received a SPAWN without elevated flag
 		const spawnMsg = mockSshAgentInstance?.send.mock.calls.find(
 			(c) => (c[0] as ProtocolMessage).type === "SPAWN",
-		)?.[0] as import("@termora/shared").AgentSpawnMessage | undefined;
+		)?.[0] as import("@lasterm/shared").AgentSpawnMessage | undefined;
 		expect(spawnMsg?.elevated).toBeFalsy();
 		expect(spawnMsg?.elevationSecret).toBeUndefined();
 	});
@@ -4521,10 +4521,10 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 				promptId: "",
 				hostId,
 				hostname: "test.example.com",
-				remotePath: "/usr/local/bin/termora-agent",
+				remotePath: "/usr/local/bin/lasterm-agent",
 				remoteSha256: "sha256:abc",
-				os: "linux" as import("@termora/shared").HostOs,
-				arch: "x64" as import("@termora/shared").HostArch,
+				os: "linux" as import("@lasterm/shared").HostOs,
+				arch: "x64" as import("@lasterm/shared").HostArch,
 				mismatch: false,
 			},
 			() => {},
@@ -4570,10 +4570,10 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 				promptId: "",
 				hostId: "host-shut-1",
 				hostname: "test.example.com",
-				remotePath: "/usr/local/bin/termora-agent",
+				remotePath: "/usr/local/bin/lasterm-agent",
 				remoteSha256: "sha256:abc",
-				os: "linux" as import("@termora/shared").HostOs,
-				arch: "x64" as import("@termora/shared").HostArch,
+				os: "linux" as import("@lasterm/shared").HostOs,
+				arch: "x64" as import("@lasterm/shared").HostArch,
 				mismatch: false,
 			},
 			() => {},
@@ -4649,7 +4649,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			sm as unknown as {
 				_connectSshAgent: (
 					hostId: string,
-					host: import("@termora/shared").Host,
+					host: import("@lasterm/shared").Host,
 					client: import("./session-manager.js").WsClient,
 					sessionId: string,
 					signal: AbortSignal,
@@ -5202,7 +5202,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	// all followers lose the session even though one was still connected.
 	it("removeClient re-targets a host-verify PromptContext to a live follower lease-holder", async () => {
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		const bReceived: import("@termora/shared").ProtocolMessage[] = [];
+		const bReceived: import("@lasterm/shared").ProtocolMessage[] = [];
 		const cA = makeClient("rt-clientA", []);
 		const cB = makeClient("rt-clientB", bReceived);
 		sm.addClient(cA);
@@ -5259,7 +5259,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			basePayload,
 			(routeClientId, msg) => {
 				const client = ctx.clients.get(routeClientId);
-				client?.send(msg as unknown as import("@termora/shared").HostVerifyMessage);
+				client?.send(msg as unknown as import("@lasterm/shared").HostVerifyMessage);
 			},
 		)!;
 		const promptId = [...ctx.pendingPrompts.keys()].find((k) => !before.has(k))!;
@@ -5302,9 +5302,9 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 
 	it("D3-1: reconnect owner disconnect retargets to an engaged channel client, not an unrelated connected client", async () => {
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		const ownerReceived: import("@termora/shared").ProtocolMessage[] = [];
-		const engagedReceived: import("@termora/shared").ProtocolMessage[] = [];
-		const unrelatedReceived: import("@termora/shared").ProtocolMessage[] = [];
+		const ownerReceived: import("@lasterm/shared").ProtocolMessage[] = [];
+		const engagedReceived: import("@lasterm/shared").ProtocolMessage[] = [];
+		const unrelatedReceived: import("@lasterm/shared").ProtocolMessage[] = [];
 		const owner = makeClient("d3-owner", ownerReceived);
 		const engaged = makeClient("z-d3-engaged", engagedReceived);
 		const unrelated = makeClient("a-d3-unrelated", unrelatedReceived);
@@ -5344,7 +5344,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 				promptId: "",
 			},
 			(routeClientId, msg) => {
-				ctx.clients.get(routeClientId)?.send(msg as import("@termora/shared").HostVerifyMessage);
+				ctx.clients.get(routeClientId)?.send(msg as import("@lasterm/shared").HostVerifyMessage);
 			},
 		)!;
 
@@ -5367,8 +5367,8 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 
 	it("D3-2: reconnect owner disconnect fails cleanly when only an unrelated connected client remains", async () => {
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		const ownerReceived: import("@termora/shared").ProtocolMessage[] = [];
-		const unrelatedReceived: import("@termora/shared").ProtocolMessage[] = [];
+		const ownerReceived: import("@lasterm/shared").ProtocolMessage[] = [];
+		const unrelatedReceived: import("@lasterm/shared").ProtocolMessage[] = [];
 		const owner = makeClient("d3b-owner", ownerReceived);
 		const unrelated = makeClient("a-d3b-unrelated", unrelatedReceived);
 		sm.addClient(owner);
@@ -5405,7 +5405,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 				promptId: "",
 			},
 			(routeClientId, msg) => {
-				ctx.clients.get(routeClientId)?.send(msg as import("@termora/shared").HostVerifyMessage);
+				ctx.clients.get(routeClientId)?.send(msg as import("@lasterm/shared").HostVerifyMessage);
 			},
 		)!;
 		const promptId = [...ctx.pendingPrompts.keys()][0]!;
@@ -5431,7 +5431,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	it("removeClient fails-closed on host-verify PromptContext when no live follower exists", async () => {
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
 
-		const aReceived: import("@termora/shared").ProtocolMessage[] = [];
+		const aReceived: import("@lasterm/shared").ProtocolMessage[] = [];
 		const cA = makeClient("rt2-clientA", aReceived);
 		sm.addClient(cA);
 

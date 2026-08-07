@@ -18,13 +18,13 @@ describe("buildDaemonSpawnPlan", () => {
 		const plan = buildDaemonSpawnPlan({
 			sea: true,
 			port: 4321,
-			moduleUrl: pathToFileURL("/tmp/termora/dist/cli.js").href,
+			moduleUrl: pathToFileURL("/tmp/lasterm/dist/cli.js").href,
 		});
 
 		expect(plan.args).toEqual(["start", "--port", "4321"]);
 		expect(plan.args).not.toContain("--daemon");
-		expect(plan.args).not.toContain("/tmp/termora/dist/main.js");
-		expect(plan.env).toEqual({ TERMORA_PORT: "4321" });
+		expect(plan.args).not.toContain("/tmp/lasterm/dist/main.js");
+		expect(plan.env).toEqual({ LASTERM_PORT: "4321" });
 	});
 
 	it("uses the compiled main.js sibling in dev mode and preserves open env", () => {
@@ -32,11 +32,11 @@ describe("buildDaemonSpawnPlan", () => {
 			sea: false,
 			port: 4100,
 			open: true,
-			moduleUrl: pathToFileURL("/tmp/termora/dist/cli.js").href,
+			moduleUrl: pathToFileURL("/tmp/lasterm/dist/cli.js").href,
 		});
 
-		expect(plan.args).toEqual(["/tmp/termora/dist/main.js"]);
-		expect(plan.env).toEqual({ TERMORA_PORT: "4100", TERMORA_OPEN: "1" });
+		expect(plan.args).toEqual(["/tmp/lasterm/dist/main.js"]);
+		expect(plan.env).toEqual({ LASTERM_PORT: "4100", LASTERM_OPEN: "1" });
 	});
 });
 
@@ -47,7 +47,7 @@ describe("waitForDaemonReady", () => {
 			loadRuntime: () => ({ kind: "absent" }),
 			fetchHealth: async () => ({}),
 			getChildExit: () => ({ exited: true, code: 73, signal: null }),
-			readLogTail: () => "TERMORA_HUB_ALREADY_RUNNING: another hub holds hub.lock",
+			readLogTail: () => "LASTERM_HUB_ALREADY_RUNNING: another hub holds hub.lock",
 			killChild: () => {},
 			now: () => 0,
 			sleep: async () => {},
@@ -267,7 +267,7 @@ describe("tailText", () => {
 
 describe("readDaemonLogTail", () => {
 	it("reads only the end of an oversized log file", () => {
-		const dir = mkdtempSync(join(tmpdir(), "termora-daemon-log-"));
+		const dir = mkdtempSync(join(tmpdir(), "lasterm-daemon-log-"));
 		try {
 			const logPath = join(dir, "hub-daemon.log");
 			// 200_000 numbered lines (~2.5 MB) — far beyond the 64 KiB read cap.
@@ -286,13 +286,13 @@ describe("readDaemonLogTail", () => {
 	});
 
 	it("returns empty string for a missing file", () => {
-		expect(readDaemonLogTail("/nonexistent/termora/hub-daemon.log")).toBe("");
+		expect(readDaemonLogTail("/nonexistent/lasterm/hub-daemon.log")).toBe("");
 	});
 });
 
 describe("openDaemonLog", () => {
 	it("preserves a pre-existing log for a losing daemon launch and clamps it owner-only", () => {
-		const dir = mkdtempSync(join(tmpdir(), "termora-daemon-log-"));
+		const dir = mkdtempSync(join(tmpdir(), "lasterm-daemon-log-"));
 		try {
 			const logPath = join(dir, "hub-daemon.log");
 			writeFileSync(logPath, "incumbent daemon log\n", { mode: 0o644 });

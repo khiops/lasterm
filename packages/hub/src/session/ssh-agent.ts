@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@termora/shared";
-import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@termora/shared";
+import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
+import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import ssh2, { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
 import { AgentConnection } from "./agent-connection.js";
 import {
@@ -95,7 +95,7 @@ function buildAgentCommandForDeployResult(
 }
 
 /**
- * SshAgent connects to a remote host over SSH, launches `termora-agent --stdio`
+ * SshAgent connects to a remote host over SSH, launches `lasterm-agent --stdio`
  * on the remote side, and communicates via length-prefixed MessagePack frames
  * over the SSH channel's stdin/stdout.
  *
@@ -155,13 +155,13 @@ export async function buildSshConnectConfig(
 		// legacy PEM ("ENCRYPTED" header) and modern OpenSSH format
 		const parsed = ssh2.utils.parseKey(keyContent);
 		if (parsed instanceof Error) {
-			console.error(`[termora-ssh] key needs passphrase (parseKey error: ${parsed.message})`);
+			console.error(`[lasterm-ssh] key needs passphrase (parseKey error: ${parsed.message})`);
 			if (!promptAuth || !hostId) {
 				throw new Error("Key is passphrase-protected but no prompt callback available");
 			}
 			const secret = await promptAuth(hostId, "passphrase", `Enter passphrase for ${auth.keyPath}`);
 			console.error(
-				`[termora-ssh] passphrase obtained: ${secret ? `yes (length ${secret.length})` : "null (cancelled)"}`,
+				`[lasterm-ssh] passphrase obtained: ${secret ? `yes (length ${secret.length})` : "null (cancelled)"}`,
 			);
 			if (secret === null) {
 				throw new Error("Authentication cancelled by user");
@@ -170,15 +170,15 @@ export async function buildSshConnectConfig(
 			// Verify first that the passphrase works, to give a clear error.
 			const verify = ssh2.utils.parseKey(keyContent, secret);
 			if (verify instanceof Error) {
-				console.error(`[termora-ssh] key decryption failed: ${verify.message}`);
+				console.error(`[lasterm-ssh] key decryption failed: ${verify.message}`);
 				throw new Error(`Failed to decrypt SSH key: ${verify.message}`);
 			}
 			const verifiedKey = Array.isArray(verify) ? verify[0] : verify;
-			console.error(`[termora-ssh] key verified (type: ${verifiedKey.type})`);
+			console.error(`[lasterm-ssh] key verified (type: ${verifiedKey.type})`);
 			connectConfig.privateKey = keyContent;
 			connectConfig.passphrase = secret;
 			console.error(
-				`[termora-ssh] connectConfig has privateKey (${keyContent.length}B) + passphrase (${secret.length}ch)`,
+				`[lasterm-ssh] connectConfig has privateKey (${keyContent.length}B) + passphrase (${secret.length}ch)`,
 			);
 		} else {
 			connectConfig.privateKey = keyContent;
@@ -191,7 +191,7 @@ export async function buildSshConnectConfig(
 /**
  * Options for auto-deploying the agent binary to a remote host.
  * When provided, SshAgent will attempt to upload the binary via SFTP
- * if termora-agent is not found on the remote host after SSH connect.
+ * if lasterm-agent is not found on the remote host after SSH connect.
  */
 export interface SshAgentDeployOptions {
 	/** Path to the local binary cache directory. */
@@ -265,7 +265,7 @@ export class SshAgent extends AgentConnection {
 	}
 
 	/**
-	 * Connect to the remote host over SSH, exec `termora-agent --stdio`,
+	 * Connect to the remote host over SSH, exec `lasterm-agent --stdio`,
 	 * and wait for the HELLO handshake.
 	 * Rejects if HELLO is not received within 5 seconds.
 	 *
@@ -299,7 +299,7 @@ export class SshAgent extends AgentConnection {
 		const hostname = parsed.hostname;
 		const port = this.host.sshPort ?? 22;
 		const authMethod = this.host.sshAuth ?? "key";
-		console.error(`[termora-ssh] resolved: ${username}@${hostname}:${port} auth=${authMethod}`);
+		console.error(`[lasterm-ssh] resolved: ${username}@${hostname}:${port} auth=${authMethod}`);
 
 		const client = new Client();
 		this.client = client;
@@ -353,7 +353,7 @@ export class SshAgent extends AgentConnection {
 			return false;
 		}) as SyncHostVerifier;
 
-		console.error(`[termora-ssh] connecting...`);
+		console.error(`[lasterm-ssh] connecting...`);
 		return new Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }>(
 			(resolve, reject) => {
 				let resolved = false;
@@ -419,7 +419,7 @@ export class SshAgent extends AgentConnection {
 				});
 
 				client.on("ready", () => {
-					console.error("[termora-ssh] SSH ready");
+					console.error("[lasterm-ssh] SSH ready");
 					// SEC-014: zero credentials immediately after successful auth
 					if (connectConfig.password) connectConfig.password = "";
 					if (connectConfig.passphrase) connectConfig.passphrase = "";
@@ -475,7 +475,7 @@ export class SshAgent extends AgentConnection {
 
 							// Wait for HELLO — emitted by AgentConnection.handleData once HELLO decoded
 							this.once("ready", (msg: HelloMessage) => {
-								console.error("[termora-ssh] agent HELLO received");
+								console.error("[lasterm-ssh] agent HELLO received");
 								clearTimeout(helloTimeout);
 								resolveOnce(msg);
 							});
@@ -486,7 +486,7 @@ export class SshAgent extends AgentConnection {
 						// Auto-deploy is best-effort: if it fails, we still try to run the agent
 						// (the user may have installed it manually in a non-standard path).
 						// DeployError (user-initiated rejection) propagates; infrastructure failures fall back.
-						console.error("[termora-ssh] deploy phase starting");
+						console.error("[lasterm-ssh] deploy phase starting");
 						deployAgentIfNeeded(
 							client,
 							this.host,
@@ -508,16 +508,16 @@ export class SshAgent extends AgentConnection {
 									return;
 								}
 								console.error(
-									`[termora-ssh] deploy result: remotePath=${result.remotePath} os=${result.os ?? "unknown"} arch=${result.arch ?? "unknown"}`,
+									`[lasterm-ssh] deploy result: remotePath=${result.remotePath} os=${result.os ?? "unknown"} arch=${result.arch ?? "unknown"}`,
 								);
-								console.error("[termora-ssh] exec termora-agent...");
+								console.error("[lasterm-ssh] exec lasterm-agent...");
 								runAgent(buildAgentCommandForDeployResult(result, this.loggingConfig));
 							})
 							.catch((deployErr: unknown) => {
 								// User-initiated rejections must propagate — no fallback.
 								if (deployErr instanceof DeployError) {
 									console.error(
-										`[termora-ssh] deploy result: rejected by user (${deployErr.code})`,
+										`[lasterm-ssh] deploy result: rejected by user (${deployErr.code})`,
 									);
 									this.cleanup();
 									rejectOnce(deployErr);
@@ -526,13 +526,13 @@ export class SshAgent extends AgentConnection {
 								// SECURITY: do NOT fall back to running a possibly-unverified binary after a
 								// deploy/replacement failure. The deployer may have detected a mismatched or
 								// unverifiable remote agent (the binary the replacement was meant to overwrite);
-								// exec'ing whatever `termora-agent` is on PATH would bypass the integrity/update
+								// exec'ing whatever `lasterm-agent` is on PATH would bypass the integrity/update
 								// policy on first-use and unpinned hosts. Reject with a clear error. (A best-effort
 								// fallback for manually-installed agents was considered but rejected — running an
 								// unverified binary is the larger risk. See #43.)
 								const deployErrMsg =
 									deployErr instanceof Error ? deployErr.message : String(deployErr);
-								console.error(`[termora-ssh] deploy result: failed — ${deployErrMsg}`);
+								console.error(`[lasterm-ssh] deploy result: failed — ${deployErrMsg}`);
 								console.warn(
 									`[ssh-agent] auto-deploy failed for host ${this.host.id}: ${deployErrMsg}`,
 								);
@@ -540,8 +540,8 @@ export class SshAgent extends AgentConnection {
 								rejectOnce(new Error(`Agent deployment failed: ${deployErrMsg}`));
 							});
 					} else {
-						console.error("[termora-ssh] exec termora-agent...");
-						runAgent(buildAgentCommand("termora-agent", this.host.os, this.loggingConfig, false));
+						console.error("[lasterm-ssh] exec lasterm-agent...");
+						runAgent(buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false));
 					}
 				});
 

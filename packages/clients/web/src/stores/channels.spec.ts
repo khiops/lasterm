@@ -1,4 +1,4 @@
-import type { ChannelCreatedMessage } from "@termora/shared";
+import type { ChannelCreatedMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "./channels.js";
@@ -21,7 +21,7 @@ vi.stubGlobal("localStorage", {
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-const COLLAPSED_KEY = "termora:collapsed-groups";
+const COLLAPSED_KEY = "lasterm:collapsed-groups";
 
 function makeGroupRow(id: string, name = "Group"): Record<string, unknown> {
 	return {
@@ -58,8 +58,8 @@ beforeEach(() => {
 	localStorageMap.clear();
 	mockFetch.mockReset();
 	setActivePinia(createPinia());
-	// Seed auth token so fetchGroups doesn't early-return (TOKEN_KEY = "termora_token")
-	localStorageMap.set("termora_token", "test-token");
+	// Seed auth token so fetchGroups doesn't early-return (TOKEN_KEY = "lasterm_token")
+	localStorageMap.set("lasterm_token", "test-token");
 });
 
 afterEach(() => {
@@ -412,7 +412,7 @@ describe("useChannelsStore — spawnChannel autoGroup", () => {
 	}
 
 	beforeEach(() => {
-		localStorageMap.set("termora_token", "test-token");
+		localStorageMap.set("lasterm_token", "test-token");
 	});
 
 	it("sends SPAWN without groupId when autoGroup is none", async () => {
@@ -523,7 +523,7 @@ describe("useChannelsStore — spawnChannel agent sync handling", () => {
 	}
 
 	beforeEach(() => {
-		localStorageMap.set("termora_token", "test-token");
+		localStorageMap.set("lasterm_token", "test-token");
 		mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
 	});
 

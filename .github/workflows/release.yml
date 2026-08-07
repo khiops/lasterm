@@ -62,10 +62,10 @@ jobs:
           VERSION="${TAG_NAME#v}"
           PKG_VERSION="$(jq -r '.version' package.json)"
           HUB_PKG_VERSION="$(jq -r '.version' packages/hub/package.json)"
-          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/termora-agent/Cargo.toml | head -1)"
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/lasterm-agent/Cargo.toml | head -1)"
           echo "tag=$VERSION root=$PKG_VERSION hub=$HUB_PKG_VERSION agent-cargo=$CARGO_VERSION"
           if [ "$VERSION" != "$PKG_VERSION" ] || [ "$VERSION" != "$HUB_PKG_VERSION" ] || [ "$VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Version mismatch — tag=$VERSION root=$PKG_VERSION hub=$HUB_PKG_VERSION termora-agent=$CARGO_VERSION (the hub HUB_VERSION reads packages/hub/package.json and the agent CARGO_PKG_VERSION must both equal the tag for the HELLO lockstep)"
+            echo "::error::Version mismatch — tag=$VERSION root=$PKG_VERSION hub=$HUB_PKG_VERSION lasterm-agent=$CARGO_VERSION (the hub HUB_VERSION reads packages/hub/package.json and the agent CARGO_PKG_VERSION must both equal the tag for the HELLO lockstep)"
             exit 1
           fi
       - name: Create or reuse release
@@ -107,16 +107,22 @@ jobs:
               # changelog body, and the tag-vs-HEAD guard above already
               # rules out building a commit the tag does not point at.
               echo "Reusing draft release $TAG_NAME id=$KEEP_DRAFT_ID"
-              # Remove legacy UNVERSIONED agent assets left by older runs so a stale
-              # binary can never be bundled or published next to the versioned ones
-              # (§3.5.5). Versioned asset names end in -<semver>[.ext].
+              # Every agent asset in a reused draft came from an earlier run — this run's
+              # build jobs have not started, and a re-run of them uploads again — so
+              # delete them all rather than describing which are legitimate (§3.5.5).
+              # Two shapes of that description have now been wrong: matching only the
+              # current basename left a pre-rename draft's binaries to be published
+              # beside this run's, and keeping "this version's" accepted anything whose
+              # tail merely looked like a version. There is nothing here to describe.
+              #
+              # A failed deletion fails the job. Suppressing it would turn "could not
+              # remove the stale binary" into publishing the stale binary, which is the
+              # one outcome this loop exists to prevent.
               for asset in $(gh release view "$TAG_NAME" --json assets -q '.assets[].name'); do
                 case "$asset" in
-                  termora-agent-*)
-                    if ! printf '%s' "$asset" | grep -Eq -- '-[0-9]+\.[0-9]+\.[0-9]+(\.[A-Za-z0-9]+)?$'; then
-                      echo "Deleting legacy unversioned asset $asset"
-                      gh release delete-asset "$TAG_NAME" "$asset" --yes || true
-                    fi
+                  *-agent-*)
+                    echo "Deleting agent asset left by an earlier run: $asset"
+                    gh release delete-asset "$TAG_NAME" "$asset" --yes
                     ;;
                 esac
               done
@@ -142,11 +148,11 @@ jobs:
           check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
+      - run: pnpm -F @lasterm/shared build
       - name: Build web
         run: |
-          TERMORA_BUILD_HASH="$(git rev-parse HEAD)"
-          export TERMORA_BUILD_HASH
+          LASTERM_BUILD_HASH="$(git rev-parse HEAD)"
+          export LASTERM_BUILD_HASH
           ./scripts/build-web.sh
       - name: Upload web assets to release
         env:
@@ -186,14 +192,14 @@ jobs:
       - name: Build (bash)
         if: matrix.shell_sh
         env:
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: ./scripts/build-agent.sh
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         env:
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
         run: .\scripts\build-agent.ps1
       - name: Upload agent to release
         shell: bash
@@ -203,10 +209,10 @@ jobs:
           TRIPLE: ${{ matrix.triple }}
         run: |
           VERSION="${TAG_NAME#v}"
-          for f in dist/sea/termora-agent*; do
+          for f in dist/sea/lasterm-agent*; do
             ext="${f##*.}"
             if [ "$ext" = "$f" ]; then ext=""; else ext=".$ext"; fi
-            base="termora-agent-${TRIPLE}-${VERSION}${ext}"
+            base="lasterm-agent-${TRIPLE}-${VERSION}${ext}"
             cp "$f" "$base"
             gh release upload "$TAG_NAME" --clobber "$base"
           done
@@ -231,7 +237,7 @@ jobs:
           check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
+      - run: pnpm -F @lasterm/shared build
       - name: Download web-embedded from release
         shell: bash
         env:
@@ -245,20 +251,20 @@ jobs:
       - name: Build (bash)
         if: matrix.shell_sh
         env:
-          TERMORA_SKIP_WEB: "true"
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
         run: |
-          TERMORA_BUILD_HASH="$(git rev-parse HEAD)"
-          export TERMORA_BUILD_HASH
+          LASTERM_BUILD_HASH="$(git rev-parse HEAD)"
+          export LASTERM_BUILD_HASH
           ./scripts/build-hub.sh
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         env:
-          TERMORA_SKIP_WEB: "true"
-          TERMORA_TARGET_TRIPLE: ${{ matrix.triple }}
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
         run: |
-          $env:TERMORA_BUILD_HASH = (git rev-parse HEAD)
+          $env:LASTERM_BUILD_HASH = (git rev-parse HEAD)
           .\scripts\build-hub.ps1
       # Nothing here ran the binary before publishing it, so a hub whose SQLite
       # bootstrap was broken reached a tagged release once: every job up to
@@ -287,14 +293,14 @@ jobs:
         if: matrix.shell_sh
         timeout-minutes: 2
         run: |
-          ./dist/sea/termora-hub agent status --json > status.json
+          ./dist/sea/lasterm-hub agent status --json > status.json
           node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
       - name: Smoke — the built hub runs and reports its version (pwsh)
         if: ${{ !matrix.shell_sh }}
         timeout-minutes: 2
         shell: pwsh
         run: |
-          .\dist\sea\termora-hub.exe agent status --json > status.json
+          .\dist\sea\lasterm-hub.exe agent status --json > status.json
           if ($LASTEXITCODE -ne 0) { throw "the built hub failed to run ($LASTEXITCODE)" }
           # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
           # so [{"hub_version":"x"}] would pass here and fail the check above.
@@ -306,10 +312,10 @@ jobs:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
           TRIPLE: ${{ matrix.triple }}
         run: |
-          for f in dist/sea/termora-hub*; do
+          for f in dist/sea/lasterm-hub*; do
             ext="${f##*.}"
             if [ "$ext" = "$f" ]; then ext=""; else ext=".$ext"; fi
-            base="termora-hub-${TRIPLE}${ext}"
+            base="lasterm-hub-${TRIPLE}${ext}"
             cp "$f" "$base"
             gh release upload "$TAG_NAME" --clobber "$base"
           done
@@ -340,7 +346,7 @@ jobs:
         with:
           workspaces: packages/clients/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @termora/shared build
+      - run: pnpm -F @lasterm/shared build
       - name: Align desktop versions with release tag
         shell: bash
         env:
@@ -365,9 +371,9 @@ jobs:
           # Exact asset names, not globs (a glob silently bundles the wrong asset
           # once two versioned files match). The agent asset is versioned; rename it
           # to the fixed unversioned sidecar name Tauri expects.
-          gh release download "$TAG_NAME" --pattern "termora-agent-${TRIPLE}-${VERSION}${EXT}" --dir dist/sea/
-          mv "dist/sea/termora-agent-${TRIPLE}-${VERSION}${EXT}" "dist/sea/termora-agent-${TRIPLE}${EXT}"
-          gh release download "$TAG_NAME" --pattern "termora-hub-${TRIPLE}${EXT}" --dir dist/sea/
+          gh release download "$TAG_NAME" --pattern "lasterm-agent-${TRIPLE}-${VERSION}${EXT}" --dir dist/sea/
+          mv "dist/sea/lasterm-agent-${TRIPLE}-${VERSION}${EXT}" "dist/sea/lasterm-agent-${TRIPLE}${EXT}"
+          gh release download "$TAG_NAME" --pattern "lasterm-hub-${TRIPLE}${EXT}" --dir dist/sea/
           gh release download "$TAG_NAME" --pattern web-dist.tar.gz --dir _tmp
           mkdir -p packages/clients/web/dist
           tar xzf _tmp/web-dist.tar.gz -C packages/clients/web/dist
@@ -375,17 +381,17 @@ jobs:
         if: matrix.shell_sh
         run: |
           TRIPLE="${{ matrix.triple }}"
-          cp dist/sea/termora-agent-${TRIPLE} "packages/clients/desktop/src-tauri/termora-agent-${TRIPLE}"
-          cp dist/sea/termora-hub-${TRIPLE} "packages/clients/desktop/src-tauri/termora-hub-${TRIPLE}"
-          pnpm -F @termora/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
+          cp dist/sea/lasterm-agent-${TRIPLE} "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
+          cp dist/sea/lasterm-hub-${TRIPLE} "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
+          pnpm -F @lasterm/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
       - name: Place sidecars (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         env:
           TRIPLE: ${{ matrix.triple }}
         run: |
-          Copy-Item "dist\sea\termora-agent-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\termora-agent-${env:TRIPLE}.exe"
-          Copy-Item "dist\sea\termora-hub-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\termora-hub-${env:TRIPLE}.exe"
+          Copy-Item "dist\sea\lasterm-agent-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\lasterm-agent-${env:TRIPLE}.exe"
+          Copy-Item "dist\sea\lasterm-hub-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\lasterm-hub-${env:TRIPLE}.exe"
       - name: Clippy (desktop crate)
         if: matrix.triple == 'x86_64-pc-windows-msvc'
         shell: pwsh
@@ -395,7 +401,7 @@ jobs:
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
         run: |
-          pnpm -F @termora/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+          pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
       - name: Package unsigned MSIX
         if: >-
           ${{
@@ -455,7 +461,7 @@ jobs:
           # while the real asset is missing.
           mapfile -t EXPECTED < <(
             jq -r --arg v "$VERSION" '.targets[] | select(.enabled and .agent)
-              | "termora-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
+              | "lasterm-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
               ../.github/build-matrix.json
           )
           # Download each exact asset; fail (never publish a partial-looking manifest)

@@ -1,4 +1,4 @@
-import type { Host, HostGroup } from "@termora/shared";
+import type { Host, HostGroup } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseManager } from "./db.js";
 import { openTestDatabases } from "./db.js";

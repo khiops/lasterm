@@ -1,12 +1,12 @@
 import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TermoraTheme } from "@termora/shared";
-import { BUNDLED_THEME_NAMES, BUNDLED_THEMES } from "@termora/shared";
+import type { LastermTheme } from "@lasterm/shared";
+import { BUNDLED_THEME_NAMES, BUNDLED_THEMES } from "@lasterm/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ThemeError, ThemeManager } from "./theme-manager.js";
 
-const VALID_CUSTOM_THEME: TermoraTheme = {
+const VALID_CUSTOM_THEME: LastermTheme = {
 	name: "test-custom",
 	type: "dark",
 	colors: {
@@ -54,7 +54,7 @@ let tempDir: string;
 let manager: ThemeManager;
 
 beforeEach(async () => {
-	tempDir = await mkdtemp(join(tmpdir(), "termora-theme-test-"));
+	tempDir = await mkdtemp(join(tmpdir(), "lasterm-theme-test-"));
 	manager = new ThemeManager(tempDir);
 });
 
@@ -86,7 +86,7 @@ describe("ThemeManager", () => {
 			await manager.init();
 
 			const raw = await readFile(draculaPath, "utf-8");
-			const parsed = JSON.parse(raw) as TermoraTheme;
+			const parsed = JSON.parse(raw) as LastermTheme;
 			expect(parsed.author).toBe("Modified");
 		});
 	});
@@ -150,7 +150,7 @@ describe("ThemeManager", () => {
 			await manager.save(VALID_CUSTOM_THEME);
 
 			const raw = await readFile(join(tempDir, "themes", "test-custom.json"), "utf-8");
-			const parsed = JSON.parse(raw) as TermoraTheme;
+			const parsed = JSON.parse(raw) as LastermTheme;
 			expect(parsed.name).toBe("test-custom");
 			expect(parsed.type).toBe("dark");
 		});
@@ -158,7 +158,7 @@ describe("ThemeManager", () => {
 		it("rejects invalid theme", async () => {
 			await manager.init();
 
-			const invalid = { name: "bad", type: "dark" } as unknown as TermoraTheme;
+			const invalid = { name: "bad", type: "dark" } as unknown as LastermTheme;
 			await expect(manager.save(invalid)).rejects.toThrow(ThemeError);
 		});
 

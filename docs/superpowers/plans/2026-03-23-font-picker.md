@@ -46,7 +46,7 @@ describe("POST /api/fonts", () => {
 	let configDir: string;
 
 	beforeEach(async () => {
-		configDir = mkdtempSync(join(tmpdir(), "termora-font-test-"));
+		configDir = mkdtempSync(join(tmpdir(), "lasterm-font-test-"));
 		fontsDir = join(configDir, "fonts");
 		mkdirSync(fontsDir, { recursive: true });
 		app = Fastify();
@@ -105,7 +105,7 @@ describe("POST /api/fonts", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm -F @termora/hub exec vitest run src/api/fonts.spec.ts`
+Run: `pnpm -F @lasterm/hub exec vitest run src/api/fonts.spec.ts`
 Expected: FAIL — POST route not defined
 
 - [ ] **Step 3: Implement POST /api/fonts**
@@ -217,7 +217,7 @@ server.post("/api/fonts", async (request, reply) => {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pnpm -F @termora/hub exec vitest run src/api/fonts.spec.ts`
+Run: `pnpm -F @lasterm/hub exec vitest run src/api/fonts.spec.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -264,7 +264,7 @@ describe("DELETE /api/fonts/:family", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm -F @termora/hub exec vitest run src/api/fonts.spec.ts`
+Run: `pnpm -F @lasterm/hub exec vitest run src/api/fonts.spec.ts`
 Expected: FAIL — DELETE route not defined
 
 - [ ] **Step 3: Implement DELETE /api/fonts/:family**
@@ -305,7 +305,7 @@ server.delete<{ Params: { family: string } }>(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pnpm -F @termora/hub exec vitest run src/api/fonts.spec.ts`
+Run: `pnpm -F @lasterm/hub exec vitest run src/api/fonts.spec.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -372,7 +372,7 @@ describe("useFontDrop", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm -F @termora/web exec vitest run src/composables/useFontDrop.spec.ts`
+Run: `pnpm -F @lasterm/web exec vitest run src/composables/useFontDrop.spec.ts`
 Expected: FAIL — module not found
 
 - [ ] **Step 3: Implement useFontDrop**
@@ -428,7 +428,7 @@ export function useFontDrop(onFiles: (files: File[]) => void): {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pnpm -F @termora/web exec vitest run src/composables/useFontDrop.spec.ts`
+Run: `pnpm -F @lasterm/web exec vitest run src/composables/useFontDrop.spec.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -452,7 +452,7 @@ No unit test — visual component, tested via integration in FontPicker.
 ```vue
 <script setup lang="ts">
 import { ref } from "vue";
-import type { FontFamily } from "@termora/shared";
+import type { FontFamily } from "@lasterm/shared";
 
 const props = withDefaults(
 	defineProps<{
@@ -641,7 +641,7 @@ git commit -m "feat(web): FontCard component with preview and inline delete"
 ```vue
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { FontFamily } from "@termora/shared";
+import type { FontFamily } from "@lasterm/shared";
 import { useConfigStore } from "../../stores/config.js";
 import { useNotificationStore } from "../../stores/notifications.js";
 import { useFontDrop } from "../../composables/useFontDrop.js";
@@ -667,7 +667,7 @@ const fonts = computed<FontFamily[]>(() => configStore.fonts);
 
 async function uploadFiles(files: File[]): Promise<void> {
 	uploading.value = true;
-	const token = localStorage.getItem("termora-token") ?? "";
+	const token = localStorage.getItem("lasterm-token") ?? "";
 
 	for (const file of files) {
 		const form = new FormData();
@@ -694,7 +694,7 @@ async function uploadFiles(files: File[]): Promise<void> {
 }
 
 async function deleteFamily(family: string): Promise<void> {
-	const token = localStorage.getItem("termora-token") ?? "";
+	const token = localStorage.getItem("lasterm-token") ?? "";
 
 	try {
 		const res = await fetch(`${hubBaseUrl()}/api/fonts/${encodeURIComponent(family)}`, {
@@ -1068,7 +1068,7 @@ git commit -m "feat(web): integrate FontPicker into settings via 'font' control 
 - [ ] **Step 1: Sync to Windows and test**
 
 ```bash
-rsync -av --exclude='node_modules' --exclude='target' --exclude='.git' --exclude='dist' /mnt/wsl/shared/dev/termora/ /mnt/c/Temp/termora-build/
+rsync -av --exclude='node_modules' --exclude='target' --exclude='.git' --exclude='dist' /mnt/wsl/shared/dev/lasterm/ /mnt/c/Temp/lasterm-build/
 ```
 
 - [ ] **Step 2: Open Settings in browser, verify font picker**

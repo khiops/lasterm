@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Stop termora dev servers and clean up orphan processes.
+# Stop lasterm dev servers and clean up orphan processes.
 # Usage: ./scripts/dev-stop.sh [hub|agent|all]   (default: all)
 set -euo pipefail
 
 TARGET="${1:-all}"
 
-LOG_DIR="/tmp/termora-dev"
+LOG_DIR="/tmp/lasterm-dev"
 PID_FILE="$LOG_DIR/dev.pid"
-AGENT_SOCK="${XDG_RUNTIME_DIR:-/tmp/termora-$(id -u)}/termora/agent.sock"
+AGENT_SOCK="${XDG_RUNTIME_DIR:-/tmp/lasterm-$(id -u)}/lasterm/agent.sock"
 
 # ── Helper: kill process(es) on a given port ─────────────────────────────────
 kill_port() {

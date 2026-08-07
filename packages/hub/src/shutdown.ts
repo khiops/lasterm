@@ -18,7 +18,7 @@ export interface GracefulShutdownOptions {
 	readonly timeoutMs?: number;
 	readonly setTimeout?: typeof setTimeout;
 	readonly clearTimeout?: typeof clearTimeout;
-	/** Exit status after teardown; defaults to zero for ordinary `termora stop`. */
+	/** Exit status after teardown; defaults to zero for ordinary `lasterm stop`. */
 	readonly exitCode?: number;
 }
 

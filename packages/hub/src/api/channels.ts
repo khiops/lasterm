@@ -1,4 +1,4 @@
-import { type Channel, isValidUlid, toSnakeCase } from "@termora/shared";
+import { type Channel, isValidUlid, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";

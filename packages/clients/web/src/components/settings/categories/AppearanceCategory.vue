@@ -114,7 +114,7 @@
 
 <script setup lang="ts">
 import { ref, computed, reactive, watch } from "vue";
-import type { AppearanceConfig, TermoraTheme } from "@termora/shared";
+import type { AppearanceConfig, LastermTheme } from "@lasterm/shared";
 import ThemePicker from "../ThemePicker.vue";
 import ThemeEditor from "../ThemeEditor.vue";
 import SettingRow from "../SettingRow.vue";
@@ -135,12 +135,12 @@ const autoSwitch = useAutoSwitch();
 // ── Editor state ──────────────────────────────────────────────────────
 
 const editorMode = ref<"picker" | "editor">("picker");
-const editingTheme = ref<TermoraTheme | undefined>(undefined);
-const baseTheme = ref<TermoraTheme | undefined>(undefined);
+const editingTheme = ref<LastermTheme | undefined>(undefined);
+const baseTheme = ref<LastermTheme | undefined>(undefined);
 
 /** Build props conditionally to satisfy exactOptionalPropertyTypes. */
 const editorProps = computed(() => {
-	const p: Record<string, TermoraTheme> = {};
+	const p: Record<string, LastermTheme> = {};
 	if (editingTheme.value !== undefined) {
 		p.theme = editingTheme.value;
 	}
@@ -156,13 +156,13 @@ function openNewTheme() {
 	editorMode.value = "editor";
 }
 
-function openEditTheme(theme: TermoraTheme) {
+function openEditTheme(theme: LastermTheme) {
 	editingTheme.value = theme;
 	baseTheme.value = undefined;
 	editorMode.value = "editor";
 }
 
-function handleEditorSaved(_theme: TermoraTheme) {
+function handleEditorSaved(_theme: LastermTheme) {
 	editorMode.value = "picker";
 	editingTheme.value = undefined;
 	baseTheme.value = undefined;
@@ -215,7 +215,7 @@ const activeThemeForScope = computed(() => {
 
 // ── Theme selection (scope-aware) ──────────────────────────────────────
 
-async function onThemeSelect(theme: TermoraTheme): Promise<void> {
+async function onThemeSelect(theme: LastermTheme): Promise<void> {
 	// Always apply immediately for visual feedback
 	themeStore.applyTheme(theme);
 

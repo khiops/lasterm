@@ -1,4 +1,4 @@
-import type { BackgroundMode, WindowEffect } from "@termora/shared";
+import type { BackgroundMode, WindowEffect } from "@lasterm/shared";
 import {
 	type WindowEffectOption,
 	type WindowEffectsPlatformInfo,

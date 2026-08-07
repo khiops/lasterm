@@ -1,14 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { LogConfig } from "@termora/shared";
+import type { LogConfig } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HubLogger } from "./hub-logger.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeTmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "termora-hub-logger-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-hub-logger-"));
 }
 
 function makeConfig(overrides: Partial<LogConfig> = {}): LogConfig {
@@ -127,13 +127,13 @@ describe("HubLogger", () => {
 
 	it("emits debug records when configured at debug level", () => {
 		const logger = new HubLogger(tmpDir, makeConfig({ level: "debug" }));
-		logger.log("debug", "local agent trace", { component: "termora-agent" });
+		logger.log("debug", "local agent trace", { component: "lasterm-agent" });
 
 		const lines = readLines(path.join(tmpDir, "hub.jsonl"));
 		expect(lines).toHaveLength(1);
 		expect(lines[0]?.lvl).toBe("debug");
 		expect(lines[0]?.msg).toBe("local agent trace");
-		expect(lines[0]?.component).toBe("termora-agent");
+		expect(lines[0]?.component).toBe("lasterm-agent");
 	});
 
 	it("suppresses debug records when configured at info level", () => {

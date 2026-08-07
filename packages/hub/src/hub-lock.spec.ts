@@ -22,7 +22,7 @@ describe.sequential("hub startup lock", () => {
 
 	it("refuses a second hub before it can bind a port", async () => {
 		const stateRoot = makeStateDir();
-		const stateDir = path.join(stateRoot, "termora");
+		const stateDir = path.join(stateRoot, "lasterm");
 		// A discovery record cannot authorize or veto serving; only this lock does.
 		mkdirSync(stateDir, { recursive: true });
 		writeFileSync(path.join(stateDir, "runtime.json"), "{");
@@ -30,13 +30,13 @@ describe.sequential("hub startup lock", () => {
 		const listener = await listen();
 		try {
 			const result = await runMain({
-				...stateRootEnv(stateRoot),
-				TERMORA_PORT: String((listener.address() as net.AddressInfo).port),
+				...hermeticRootsEnv(stateRoot),
+				LASTERM_PORT: String((listener.address() as net.AddressInfo).port),
 			});
 			// This catches a mutation that moves bind/openDatabases ahead of lock
 			// acquisition: the occupied port would then yield exit 1, not 73.
 			expect(result.code).toBe(73);
-			expect(result.stderr).toContain("TERMORA_HUB_ALREADY_RUNNING");
+			expect(result.stderr).toContain("LASTERM_HUB_ALREADY_RUNNING");
 			expect(readFileSync(path.join(stateDir, "runtime.json"), "utf8")).toBe("{");
 		} finally {
 			listener.close();
@@ -44,7 +44,7 @@ describe.sequential("hub startup lock", () => {
 	});
 
 	it("refuses a malformed addon before databases or a server can be opened", async () => {
-		const stateDir = path.join(makeStateDir(), "termora");
+		const stateDir = path.join(makeStateDir(), "lasterm");
 		let databasesOpened = 0;
 		let serversCreated = 0;
 		class FakeHubLock {}
@@ -59,6 +59,9 @@ describe.sequential("hub startup lock", () => {
 				{
 					getStateDir: () => stateDir,
 					getConfigDir: () => path.join(stateDir, "config"),
+					// This exercises the lock, not the previous-installation probe, whose real
+					// answer depends on whether the machine running the suite ever had Termora.
+					describePreviousInstallation: () => undefined,
 					acquireHubLock: (dir) =>
 						acquireHubLock(dir, { loadAddon: () => malformedAddon as never }),
 					openDatabases: (() => {
@@ -77,7 +80,7 @@ describe.sequential("hub startup lock", () => {
 	});
 
 	it.each([undefined, false, {}])("rejects the non-handle native result %#", (result) => {
-		const stateDir = path.join(makeStateDir(), "termora");
+		const stateDir = path.join(makeStateDir(), "lasterm");
 		class FakeHubLock {}
 		expect(() =>
 			acquireHubLock(stateDir, {
@@ -87,16 +90,16 @@ describe.sequential("hub startup lock", () => {
 	});
 
 	it("refuses a second startup entry in the same process", () => {
-		const stateDir = path.join(makeStateDir(), "termora");
+		const stateDir = path.join(makeStateDir(), "lasterm");
 		acquireHubLock(stateDir);
-		expect(() => acquireHubLock(stateDir)).toThrow("TERMORA_HUB_ALREADY_RUNNING");
+		expect(() => acquireHubLock(stateDir)).toThrow("LASTERM_HUB_ALREADY_RUNNING");
 	});
 
 	// Mutation: withdraw the runtime record before closing the server, and `status`
 	// reports a stopped hub while the socket and the databases are still live. The
 	// order is the assertion; the counts alone passed either way.
 	it("cleans databases, the listening server, and the runtime record after startup failure", async () => {
-		const stateDir = path.join(makeStateDir(), "termora");
+		const stateDir = path.join(makeStateDir(), "lasterm");
 		const order: string[] = [];
 		let databaseClosed = 0;
 		let serverClosed = 0;
@@ -126,6 +129,9 @@ describe.sequential("hub startup lock", () => {
 				{
 					getStateDir: () => stateDir,
 					getConfigDir: () => path.join(stateDir, "config"),
+					// This exercises the lock, not the previous-installation probe, whose real
+					// answer depends on whether the machine running the suite ever had Termora.
+					describePreviousInstallation: () => undefined,
 					acquireHubLock: () => ({ path: path.join(stateDir, "hub.lock") }) as never,
 					initAuth: () => "token",
 					createOwnerToken: () => "owner",
@@ -153,14 +159,13 @@ describe.sequential("hub startup lock", () => {
 
 	it("starts with an unreadable runtime record when the authoritative lock is free", async () => {
 		const stateRoot = makeStateDir();
-		const stateDir = path.join(stateRoot, "termora");
+		const stateDir = path.join(stateRoot, "lasterm");
 		const port = await unusedPort();
 		mkdirSync(stateDir, { recursive: true });
 		writeFileSync(path.join(stateDir, "runtime.json"), "{");
 		const child = spawnMain({
-			...stateRootEnv(stateRoot),
-			...configRootEnv(path.join(stateRoot, "config")),
-			TERMORA_PORT: String(port),
+			...hermeticRootsEnv(stateRoot),
+			LASTERM_PORT: String(port),
 		});
 		try {
 			await waitForPort(port, child);
@@ -172,21 +177,21 @@ describe.sequential("hub startup lock", () => {
 
 	it("fails closed when the native addon cannot be loaded", async () => {
 		const stateRoot = makeStateDir();
-		const missingAddon = path.join(stateRoot, "missing-termora_hub_lock.node");
+		const missingAddon = path.join(stateRoot, "missing-lasterm_hub_lock.node");
 		const result = await runMain({
-			...stateRootEnv(stateRoot),
-			TERMORA_HUB_LOCK_ADDON: missingAddon,
-			TERMORA_PORT: "4100",
+			...hermeticRootsEnv(stateRoot),
+			LASTERM_HUB_LOCK_ADDON: missingAddon,
+			LASTERM_PORT: "4100",
 		});
 		// Simulates extraction/load failure with a nonexistent addon path. The
 		// startup process must not proceed unlocked or publish a runtime record.
 		expect(result.code).toBe(1);
-		expect(result.stderr).toContain("TERMORA_HUB_LOCK_UNAVAILABLE");
-		expect(existsSync(path.join(stateRoot, "termora", "runtime.json"))).toBe(false);
+		expect(result.stderr).toContain("LASTERM_HUB_LOCK_UNAVAILABLE");
+		expect(existsSync(path.join(stateRoot, "lasterm", "runtime.json"))).toBe(false);
 	});
 
 	it("wraps a native loader failure as a fail-closed startup error", () => {
-		const stateDir = path.join(makeStateDir(), "termora");
+		const stateDir = path.join(makeStateDir(), "lasterm");
 		expect(() =>
 			acquireHubLock(stateDir, {
 				loadAddon: () => {
@@ -198,7 +203,7 @@ describe.sequential("hub startup lock", () => {
 });
 
 function makeStateDir(): string {
-	const dir = mkdtempSync(path.join(os.tmpdir(), "termora-hub-lock-"));
+	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-hub-lock-"));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -276,12 +281,20 @@ function waitForPort(port: number, child: ChildProcess): Promise<void> {
 	});
 }
 
-function stateRootEnv(stateRoot: string): NodeJS.ProcessEnv {
-	return process.platform === "win32" ? { LOCALAPPDATA: stateRoot } : { XDG_STATE_HOME: stateRoot };
-}
-
-function configRootEnv(configRoot: string): NodeJS.ProcessEnv {
-	return process.platform === "win32" ? { APPDATA: configRoot } : { XDG_CONFIG_HOME: configRoot };
+/**
+ * Both roots a spawned hub reads, from one temporary directory.
+ *
+ * One helper rather than two, because redirecting only the state root leaves the
+ * child reading the real config home: a machine that once ran Termora then has a
+ * previous installation in view, and `startHub` refuses before it ever reaches the
+ * lock these tests are about. That is the refusal working, and a test must not be
+ * able to ask for half of a hermetic environment.
+ */
+function hermeticRootsEnv(root: string): NodeJS.ProcessEnv {
+	const configRoot = path.join(root, "config");
+	return process.platform === "win32"
+		? { LOCALAPPDATA: root, APPDATA: configRoot }
+		: { XDG_STATE_HOME: root, XDG_CONFIG_HOME: configRoot };
 }
 
 function waitForExit(child: ChildProcess): Promise<void> {

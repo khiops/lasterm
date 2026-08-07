@@ -1,4 +1,4 @@
-import { type LaunchProfile, toCamelCase } from "@termora/shared";
+import { type LaunchProfile, toCamelCase } from "@lasterm/shared";
 
 /** Profile with host-specific override info (from GET /api/hosts/:id/profiles). */
 export type HostVisibleProfile = LaunchProfile & {

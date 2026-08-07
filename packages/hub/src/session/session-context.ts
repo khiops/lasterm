@@ -4,7 +4,7 @@
  * so they can read/write the same Maps without circular constructor deps.
  */
 
-import type { AgentConfig, ChannelStatus, SessionStatus } from "@termora/shared";
+import type { AgentConfig, ChannelStatus, SessionStatus } from "@lasterm/shared";
 import type { ConfigResolver } from "../config.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { SpoolDAL } from "../storage/spool.js";
@@ -201,7 +201,7 @@ export interface SharedSessionContext {
 	/** Crash-loop tracking for local agent restarts: hostId → { count, windowStart } */
 	restartTracking: Map<string, { count: number; windowStart: number }>;
 	/** requestId → callback for pending agent responses */
-	pendingRequests: Map<string, (msg: import("@termora/shared").ProtocolMessage) => void>;
+	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
 	/** '${hostname}:${port}' → fingerprint trusted for this session only (trust_once, not persisted) */
 	trustedOnceFingerprints: Map<string, string>;
 	/** Per-host SHA256 of agent binary trusted for this session only (trust_once). */

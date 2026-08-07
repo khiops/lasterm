@@ -1,5 +1,5 @@
-import type { ErrorMessage, InputMessage } from "@termora/shared";
-import { isValidInputData, isValidUlid } from "@termora/shared";
+import type { ErrorMessage, InputMessage } from "@lasterm/shared";
+import { isValidInputData, isValidUlid } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleInput(msg: InputMessage, ctx: WsHandlerContext): void {

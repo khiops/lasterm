@@ -1,4 +1,4 @@
-import { BUNDLED_THEMES } from "@termora/shared";
+import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { effectScope } from "vue";

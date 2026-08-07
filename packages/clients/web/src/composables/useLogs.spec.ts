@@ -61,7 +61,7 @@ function stubFetch(response: {
 beforeEach(() => {
 	localStorageMap.clear();
 	// Seed auth token so useLogs doesn't short-circuit with "Not authenticated"
-	localStorageMap.set("termora_token", "test-token");
+	localStorageMap.set("lasterm_token", "test-token");
 	setActivePinia(createPinia());
 	mockFetch.mockReset();
 });

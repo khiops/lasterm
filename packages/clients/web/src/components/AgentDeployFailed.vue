@@ -44,7 +44,7 @@
 						<li>
 							Download the matching agent binary from the
 							<a
-								href="https://github.com/khiops/termora/releases/latest"
+								href="https://github.com/khiops/lasterm/releases/latest"
 								target="_blank"
 								rel="noopener noreferrer"
 								class="adf-link"
@@ -80,13 +80,13 @@ const retrying = ref(false);
 
 /**
  * Parse the cache directory and expected binary name from the deployer error message.
- * Message format: "Agent binary not found in cache: /path/to/cache/termora-agent-<os>-<arch>[.exe]. ..."
+ * Message format: "Agent binary not found in cache: /path/to/cache/lasterm-agent-<os>-<arch>[.exe]. ..."
  */
 const parsedDetails = computed(() => {
 	const msg = error.value?.message ?? '';
 	const match = msg.match(/Agent binary not found in cache:\s*(.+?)(?:\s*\.|$)/);
 	if (!match) {
-		return { expectedBinary: 'termora-agent-<os>-<arch>', cacheDir: '(unknown)' };
+		return { expectedBinary: 'lasterm-agent-<os>-<arch>', cacheDir: '(unknown)' };
 	}
 	const fullPath = (match[1] ?? '').trim();
 	const lastSlash = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));

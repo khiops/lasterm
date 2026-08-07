@@ -4,7 +4,7 @@ doc-meta:
   adversarial_applied: true
   scope: hub, agent, shared
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-21
   updated: 2026-03-21
   complexity: COMPLEX
@@ -32,14 +32,14 @@ The hub and agent produce diagnostic output (console.log, tracing) that is lost 
 ## 2. User Stories
 
 ### US-1: Structured per-terminal logs
-AS A termora operator
+AS A lasterm operator
 I WANT diagnostic logs stored per terminal tab in structured files
 SO THAT I can troubleshoot a specific terminal session without correlating multiple log sources
 
 ACCEPTANCE: Each channel (terminal tab) has a JSONL log file with hub + agent events merged chronologically.
 
 ### US-2: Configurable logging
-AS A termora administrator
+AS A lasterm administrator
 I WANT to configure log level, line format, output target, and retention
 SO THAT I can balance diagnostic detail vs disk usage
 
@@ -50,7 +50,7 @@ AS A Windows user
 I WANT the agent to run in daemon mode (named pipes)
 SO THAT my terminal sessions survive hub restarts and client disconnects
 
-ACCEPTANCE: `termora-agent --daemon` works on Windows with named pipes, same connection displacement behavior as Unix UDS.
+ACCEPTANCE: `lasterm-agent --daemon` works on Windows with named pipes, same connection displacement behavior as Unix UDS.
 
 ## 3. Business Rules
 
@@ -78,7 +78,7 @@ ACCEPTANCE: `termora-agent --daemon` works on Windows with named pipes, same con
 - EFF-01: `logs/channels/<channel_id>.jsonl` created per channel in state dir
 - EFF-02: `logs/hub.jsonl` created for global hub events in state dir
 - EFF-03: Files older than `max_age_days` deleted at hub startup
-- EFF-04: On Windows, `termora-agent --daemon` listens on `\\.\pipe\termora-agent-<username>`
+- EFF-04: On Windows, `lasterm-agent --daemon` listens on `\\.\pipe\lasterm-agent-<username>`
 - EFF-05: When hub reattaches to a daemon agent channel, it reopens the existing channel log in append mode with a "hub reconnected" entry
 - EFF-06: hub.jsonl > 10MB at startup → rename to hub.jsonl.old and start fresh
 
@@ -165,7 +165,7 @@ No DB schema changes. Log files are filesystem-only (outside SQLite).
 | Aspect | Unix (existing) | Windows (new) |
 |--------|----------------|---------------|
 | Transport | `UnixListener` | `NamedPipeServer` (tokio) |
-| Path | `<state>/agent.socket` | `\\.\pipe\termora-agent-<username>` |
+| Path | `<state>/agent.socket` | `\\.\pipe\lasterm-agent-<username>` |
 | Permissions | chmod 0o600 | Default (ACL hardening deferred) |
 | Signals | SIGTERM/SIGINT | `tokio::signal::ctrl_c()` |
 | Path limit | 100 bytes | 256 chars |
@@ -277,8 +277,8 @@ Scenario: SC-10 GC deletes old log files
 @priority:high @type:nominal
 Scenario: SC-11 Agent starts daemon on Windows via named pipe
   Given the platform is Windows
-  When termora-agent --daemon is executed
-  Then a named pipe \\.\pipe\termora-agent-<username> is created
+  When lasterm-agent --daemon is executed
+  Then a named pipe \\.\pipe\lasterm-agent-<username> is created
   And the agent accepts connections
 
 @priority:high @type:nominal
@@ -442,9 +442,9 @@ Scenario: SC-21 Log search API returns filtered entries
 **Dependencies:** None (independent of blocks 1-3)
 **Packages:** agent (Rust)
 **Files:**
-- `crates/termora-agent/src/protocol.rs` — add `Log` variant to `AgentToHub`
-- `crates/termora-agent/src/handler.rs` — send LOG messages for key events (spawn, exit, errors)
-- `crates/termora-agent/src/main.rs` — daemon mode file fallback when no hub connected
+- `crates/lasterm-agent/src/protocol.rs` — add `Log` variant to `AgentToHub`
+- `crates/lasterm-agent/src/handler.rs` — send LOG messages for key events (spawn, exit, errors)
+- `crates/lasterm-agent/src/main.rs` — daemon mode file fallback when no hub connected
 
 **Exit criteria:**
 - [ ] Agent sends LOG messages with channel_id, level, msg (SC-18)
@@ -456,13 +456,13 @@ Scenario: SC-21 Log search API returns filtered entries
 **Dependencies:** Block 4
 **Packages:** agent (Rust)
 **Files:**
-- `crates/termora-agent/src/daemon.rs` — `#[cfg(windows)]` named pipe listener + accept loop
-- `crates/termora-agent/src/main.rs` — remove `#[cfg(not(unix))]` error, cross-platform signals
-- `crates/termora-agent/Cargo.toml` — tokio `net` feature for named pipe
+- `crates/lasterm-agent/src/daemon.rs` — `#[cfg(windows)]` named pipe listener + accept loop
+- `crates/lasterm-agent/src/main.rs` — remove `#[cfg(not(unix))]` error, cross-platform signals
+- `crates/lasterm-agent/Cargo.toml` — tokio `net` feature for named pipe
 
 **Exit criteria:**
-- [ ] `termora-agent --daemon` works on Windows (SC-11)
-- [ ] Named pipe at `\\.\pipe\termora-agent-<username>` (SC-11)
+- [ ] `lasterm-agent --daemon` works on Windows (SC-11)
+- [ ] Named pipe at `\\.\pipe\lasterm-agent-<username>` (SC-11)
 - [ ] Connection displacement works (SC-13)
 - [ ] CtrlC graceful shutdown (SC-14)
 - [ ] Integration tests on Windows
@@ -472,9 +472,9 @@ Scenario: SC-21 Log search API returns filtered entries
 **Dependencies:** Block 5
 **Packages:** agent (Rust), shared
 **Files:**
-- `crates/termora-agent/src/daemon.rs` — `SecurityDescriptor` restrict to current user SID
-- `crates/termora-agent/src/daemon.rs` — AUTH handshake on pipe/UDS connection (token from hub)
-- `crates/termora-agent/Cargo.toml` — windows-sys features for security APIs
+- `crates/lasterm-agent/src/daemon.rs` — `SecurityDescriptor` restrict to current user SID
+- `crates/lasterm-agent/src/daemon.rs` — AUTH handshake on pipe/UDS connection (token from hub)
+- `crates/lasterm-agent/Cargo.toml` — windows-sys features for security APIs
 
 **Exit criteria:**
 - [ ] Named pipe restricted to current user SID (SC-19)

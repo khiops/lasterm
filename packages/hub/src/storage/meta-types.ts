@@ -9,7 +9,7 @@ import type {
 	HostArch,
 	HostOs,
 	SessionStatus,
-} from "@termora/shared";
+} from "@lasterm/shared";
 
 export interface CreateHostInput {
 	type: "local" | "ssh";

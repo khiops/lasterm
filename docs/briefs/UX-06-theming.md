@@ -8,12 +8,12 @@ and live preview.
 
 ## Theme File Format
 
-JSON files stored in `~/.config/termora/themes/`. Two sections:
+JSON files stored in `~/.config/lasterm/themes/`. Two sections:
 - `colors`: standard terminal ANSI 16 + fg/bg/cursor/selection (xterm.js ITheme compatible)
-- `ui`: termora app chrome colors
+- `ui`: lasterm app chrome colors
 
 ```typescript
-interface TermoraTheme {
+interface LastermTheme {
   name: string
   author?: string
   type: "dark" | "light"
@@ -65,7 +65,7 @@ interface TermoraTheme {
 ## Theme Storage
 
 ```
-~/.config/termora/
+~/.config/lasterm/
   themes/
     one-half-dark.json         # bundled (copied on first launch)
     catppuccin-mocha.json
@@ -238,7 +238,7 @@ Live preview updates in real-time as colors change.
 
 ## Import / Export
 
-- Import: file picker -> validate JSON format -> copy to ~/.config/termora/themes/
+- Import: file picker -> validate JSON format -> copy to ~/.config/lasterm/themes/
   -> instant preview
 - Export: download current theme as .json file
 
@@ -370,12 +370,12 @@ When theme changes, update `terminal.options.theme` on all active terminals.
 
 ```typescript
 // useThemeStore
-const currentTheme = ref<TermoraTheme>(...)
-const availableThemes = ref<TermoraTheme[]>([])
-const previewTheme = ref<TermoraTheme | null>(null)  // hover preview
+const currentTheme = ref<LastermTheme>(...)
+const availableThemes = ref<LastermTheme[]>([])
+const previewTheme = ref<LastermTheme | null>(null)  // hover preview
 
-function applyTheme(theme: TermoraTheme) { /* set CSS vars */ }
-function previewHover(theme: TermoraTheme) { /* temporary apply */ }
+function applyTheme(theme: LastermTheme) { /* set CSS vars */ }
+function previewHover(theme: LastermTheme) { /* temporary apply */ }
 function clearPreview() { /* restore currentTheme */ }
 ```
 

@@ -1,5 +1,5 @@
 #Requires -Version 7.0
-# Restart termora dev servers (stop + start).
+# Restart lasterm dev servers (stop + start).
 # Usage: .\scripts\dev-restart.ps1 [-Target hub|agent|all]   (default: all)
 param(
     [ValidateSet("hub", "agent", "all")]

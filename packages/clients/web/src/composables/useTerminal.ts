@@ -1,5 +1,5 @@
-import type { TerminalProfile, UiAttachOkMessage } from "@termora/shared";
-import { sanitizeTitle } from "@termora/shared";
+import type { TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
+import { sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";

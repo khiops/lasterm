@@ -6,7 +6,7 @@
 
 **Root cause:** Node.js SEA is fundamentally unsuitable for distributing binaries with complex native addons like node-pty (which wraps conpty.dll / winpty.dll). As long as the agent is Node.js, packaged distribution will be fragile.
 
-**Target users:** All termora users — the agent is the universal PTY manager for local and remote sessions.
+**Target users:** All lasterm users — the agent is the universal PTY manager for local and remote sessions.
 
 **Current solutions tried:** conpty backend (hangs in SEA), winpty backend (crashes in SEA), PATH hacks for winpty.dll (fragile), cmd.exe-first shell order (workaround, not fix).
 
@@ -38,7 +38,7 @@ New cross-platform async PTY crate filling an ecosystem gap. No production-quali
 
 **Key dependencies:** tokio, nix (Unix), windows-sys (Windows)
 
-### 2. termora-agent — Full Rust agent binary
+### 2. lasterm-agent — Full Rust agent binary
 
 Complete rewrite of `packages/agent/` in Rust. Same MessagePack protocol — hub sees zero changes.
 
@@ -62,7 +62,7 @@ Complete rewrite of `packages/agent/` in Rust. Same MessagePack protocol — hub
 ### Monorepo integration
 
 ```
-termora/
+lasterm/
 ├── Cargo.toml              ← Rust workspace root
 ├── crates/
 │   ├── async-xpty/         ← public crate (crates.io)
@@ -71,7 +71,7 @@ termora/
 │   │       ├── lib.rs
 │   │       ├── unix.rs
 │   │       └── windows.rs
-│   └── termora-agent/      ← agent binary
+│   └── lasterm-agent/      ← agent binary
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs
@@ -115,11 +115,11 @@ Tauri = one client among others. Hub stays standalone, PWA = primary client. Des
 - snake_case on wire (rmp-serde with rename)
 - Hub = zero modifications
 - Cross-compile: linux-x64, windows-x64, darwin-arm64 (minimum)
-- Agent binary name: `termora-agent` (same as today)
+- Agent binary name: `lasterm-agent` (same as today)
 
 **ConPTY assessment (no fork needed):**
-- ConPTY limitations (DCS stripping, OSC reordering, grid caching) don't affect termora
-- termora is a PTY manager doing raw I/O, not shell-integrated UI like Warp
+- ConPTY limitations (DCS stripping, OSC reordering, grid caching) don't affect lasterm
+- lasterm is a PTY manager doing raw I/O, not shell-integrated UI like Warp
 - Warp forked ConPTY for advanced shell integration — we don't need that
 - portable-pty v0.9.0 `\x1b[6n` regression: fix built into async-xpty
 
@@ -128,7 +128,7 @@ Tauri = one client among others. Hub stays standalone, PWA = primary client. Des
 | Risk | Impact | Probability | Mitigation |
 |------|--------|-------------|------------|
 | ConPTY `\x1b[6n` deadlock | H | H (known bug) | Built-in detection + auto-response in async-xpty |
-| ConPTY escape seq limitations | M | L (raw I/O OK) | Acceptable for termora's use case |
+| ConPTY escape seq limitations | M | L (raw I/O OK) | Acceptable for lasterm's use case |
 | Snapshot format compatibility | M | M | `vt100` crate state → format compatible with xterm.js UI |
 | Process title polling cross-platform | L | L | Already solved in TS, direct port to Rust |
 | `vt100` crate gaps | M | L | Mature crate (used by alacritty/others), fallback: raw VT parser |
@@ -147,5 +147,5 @@ Tauri = one client among others. Hub stays standalone, PWA = primary client. Des
 
 ## Next Steps
 
-→ `/spec` for async-xpty crate + termora-agent implementation plan
+→ `/spec` for async-xpty crate + lasterm-agent implementation plan
 → Blocks, exit criteria, test strategy, CI cross-compilation

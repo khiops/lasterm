@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
@@ -15,7 +16,7 @@ import {
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	cmdAgentFetch,
 	cmdAgentImport,
@@ -34,6 +35,7 @@ import {
 	runtimeMatches,
 	waitForHubQuit,
 } from "./cli.js";
+import { describePreviousInstallation } from "./previous-installation.js";
 import {
 	AGENT_TARGET_TRIPLES,
 	type FetchAgentBinaryOptions,
@@ -377,14 +379,14 @@ describe("cmdAgentFetch", () => {
 		);
 		expect(lines).toHaveLength(builtTargets.length);
 		expect(lines[0]).toBe("manual gesture for linux-x64");
-		expect(lines.at(-1)).toContain("termora-agent-windows-x64");
+		expect(lines.at(-1)).toContain("lasterm-agent-windows-x64");
 	});
 
 	it("prints a FetchError actionable message and returns non-zero", async () => {
 		const cacheDir = makeTempDir();
 		const lines: string[] = [];
 		const message =
-			"Termora could not download https://example.test/asset. Manually download it, chmod 755 it, then rename it to the cache path.";
+			"Lasterm could not download https://example.test/asset. Manually download it, chmod 755 it, then rename it to the cache path.";
 		const fetcher = vi.fn(async () => {
 			throw new FetchError("PRIVATE_OR_FORBIDDEN", message);
 		});
@@ -406,8 +408,8 @@ describe("cmdAgentFetch", () => {
 		const staleLinux = agentCachePath(cacheDir, "linux", "x64", "0.3.4");
 		const staleWindows = agentCachePath(cacheDir, "windows", "x64", "0.3.4");
 		const checksum = path.join(cacheDir, "SHA256SUMS-0.3.4.txt");
-		const backup = path.join(cacheDir, "termora-agent-linux-x64-0.3.4.backup");
-		const matchingDirectory = path.join(cacheDir, "termora-agent-linux-arm64-0.3.4");
+		const backup = path.join(cacheDir, "lasterm-agent-linux-x64-0.3.4.backup");
+		const matchingDirectory = path.join(cacheDir, "lasterm-agent-linux-arm64-0.3.4");
 		mkdirSync(matchingDirectory, { recursive: true });
 		writeFileSync(current, "current");
 		writeFileSync(staleLinux, "stale");
@@ -449,7 +451,7 @@ describe("cmdAgentFetch", () => {
 			const outsideDir = makeTempDir();
 			const outsideTarget = path.join(outsideDir, "outside-binary");
 			writeFileSync(outsideTarget, "outside");
-			const symlinkName = path.join(cacheDir, "termora-agent-linux-x64-0.3.5");
+			const symlinkName = path.join(cacheDir, "lasterm-agent-linux-x64-0.3.5");
 			symlinkSync(outsideTarget, symlinkName);
 			const fetcher = vi.fn(async () => {
 				throw new Error("unexpected fetch");
@@ -538,7 +540,7 @@ describe("cmdAgentStatus", () => {
 			getBinaryCacheDir: () => cacheDir,
 			hubVersion: TEST_VERSION,
 			hubPlatform: HUB_PLATFORM,
-			resolveAgentBinaryPath: () => "/tmp/termora-agent-cli-test",
+			resolveAgentBinaryPath: () => "/tmp/lasterm-agent-cli-test",
 			versionReader: () => TEST_VERSION,
 		};
 		const expected = await computeTargetStatus({
@@ -568,7 +570,7 @@ describe("cmdAgentStatus", () => {
 describe("cmdAgentImport", () => {
 	it("SC-29 refuses without --attest", async () => {
 		const cacheDir = makeTempDir();
-		const binaryPath = path.join(makeTempDir(), "termora-agent");
+		const binaryPath = path.join(makeTempDir(), "lasterm-agent");
 		const manifestPath = path.join(makeTempDir(), "SHA256SUMS");
 		writeFileSync(binaryPath, "agent");
 		writeFileSync(manifestPath, "unused");
@@ -605,7 +607,7 @@ describe("cmdAgentImport", () => {
 	it("SC-29 rejects a mismatched binary and places nothing", async () => {
 		const cacheDir = makeTempDir();
 		const inputDir = makeTempDir();
-		const binaryPath = path.join(inputDir, "termora-agent");
+		const binaryPath = path.join(inputDir, "lasterm-agent");
 		const manifestPath = path.join(inputDir, "SHA256SUMS");
 		const assetName = versionedAssetName("windows", "x64", TEST_VERSION);
 		writeFileSync(binaryPath, "corrupt");
@@ -643,7 +645,7 @@ describe("cmdAgentImport", () => {
 	it("SC-29 verifies and caches a matching binary", async () => {
 		const cacheDir = makeTempDir();
 		const inputDir = makeTempDir();
-		const binaryPath = path.join(inputDir, "termora-agent");
+		const binaryPath = path.join(inputDir, "lasterm-agent");
 		const manifestPath = path.join(inputDir, "SHA256SUMS");
 		const assetName = versionedAssetName("windows", "x64", TEST_VERSION);
 		writeFileSync(binaryPath, "agent");
@@ -684,25 +686,135 @@ describe("cmdAgentImport", () => {
 describe("path helpers", () => {
 	it("getStateDir returns a non-empty string", () => {
 		expect(getStateDir().length).toBeGreaterThan(0);
-		expect(getStateDir()).toContain("termora");
+		expect(getStateDir()).toContain("lasterm");
 	});
 
 	it("getConfigDir returns a non-empty string", () => {
 		expect(getConfigDir().length).toBeGreaterThan(0);
-		expect(getConfigDir()).toContain("termora");
+		expect(getConfigDir()).toContain("lasterm");
 	});
 
 	it.skipIf(process.platform === "win32")("getStateDir uses XDG_STATE_HOME when set", () => {
 		const orig = process.env.XDG_STATE_HOME;
 		process.env.XDG_STATE_HOME = "/tmp/xdg-state";
-		expect(getStateDir()).toBe("/tmp/xdg-state/termora");
+		expect(getStateDir()).toBe("/tmp/xdg-state/lasterm");
 		process.env.XDG_STATE_HOME = orig;
+	});
+
+	// The rename moved every namespace at once, so a Termora install and this one
+	// cannot contend for the same lock: both hubs could serve terminals while
+	// quitting one leaves the other alive. Starting must refuse, not coexist.
+	describe.skipIf(process.platform === "win32")("previous-installation refusal", () => {
+		let root: string;
+		let origConfig: string | undefined;
+		let origState: string | undefined;
+
+		beforeEach(() => {
+			root = mkdtempSync(path.join(os.tmpdir(), "lasterm-previous-"));
+			origConfig = process.env.XDG_CONFIG_HOME;
+			origState = process.env.XDG_STATE_HOME;
+			process.env.XDG_CONFIG_HOME = path.join(root, "config");
+			process.env.XDG_STATE_HOME = path.join(root, "state");
+		});
+
+		afterEach(() => {
+			if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = origConfig;
+			if (origState === undefined) delete process.env.XDG_STATE_HOME;
+			else process.env.XDG_STATE_HOME = origState;
+			rmSync(root, { recursive: true, force: true });
+		});
+
+		it("says nothing when there is no previous installation", () => {
+			expect(describePreviousInstallation()).toBeUndefined();
+		});
+
+		it("names a previous config directory and refuses", () => {
+			mkdirSync(path.join(root, "config", "termora"), { recursive: true });
+			const message = describePreviousInstallation();
+			expect(message).toContain(path.join(root, "config", "termora"));
+			expect(message).toContain("Refusing to start");
+			expect(message).toContain("auth token");
+		});
+
+		it("names a previous state directory", () => {
+			mkdirSync(path.join(root, "state", "termora"), { recursive: true });
+			expect(describePreviousInstallation()).toContain(path.join(root, "state", "termora"));
+		});
+
+		it("reports the recorded pid as in use, and claims no more than that", () => {
+			const stateDir = path.join(root, "state", "termora");
+			mkdirSync(stateDir, { recursive: true });
+			writeFileSync(
+				path.join(stateDir, "runtime.json"),
+				JSON.stringify({ pid: process.pid, port: 4100 }),
+			);
+			const message = describePreviousInstallation();
+			expect(message).toContain(`pid ${process.pid}`);
+			// The record is an ordinary file in a directory the old hub owned, so a
+			// stale or edited one can name any live pid. Liveness is all the probe
+			// establishes, and the text must not hand the operator a signal to send.
+			expect(message).not.toContain(`kill ${process.pid}`);
+			expect(message).toContain("verify which process it is");
+		});
+
+		it.each([
+			["a process group", 0],
+			["every process the user owns", -1],
+			["a fractional pid", 12.5],
+		])("ignores a recorded pid naming %s", (_case, pid) => {
+			const stateDir = path.join(root, "state", "termora");
+			mkdirSync(stateDir, { recursive: true });
+			writeFileSync(path.join(stateDir, "runtime.json"), JSON.stringify({ pid, port: 4100 }));
+			const message = describePreviousInstallation();
+			expect(message).toContain(stateDir);
+			// `process.kill` accepts 0 and negatives and aims at whole groups, so an
+			// unvalidated record turns a liveness probe into a broadcast.
+			expect(message).not.toContain("in use");
+		});
+
+		it("refuses rather than passing when a directory cannot be examined", () => {
+			const configDir = path.join(root, "config", "termora");
+			mkdirSync(configDir, { recursive: true });
+			// Unsearchable parent: the path exists, and `existsSync` would answer false
+			// for it — turning a permission error into permission to run.
+			chmodSync(path.join(root, "config"), 0o000);
+			try {
+				const message = describePreviousInstallation();
+				expect(message).toBeDefined();
+				expect(message).toContain("cannot be examined");
+			} finally {
+				chmodSync(path.join(root, "config"), 0o755);
+			}
+		});
+
+		it("does not claim a hub is running when the recorded pid is gone", () => {
+			const stateDir = path.join(root, "state", "termora");
+			mkdirSync(stateDir, { recursive: true });
+			// A pid that cannot exist: the record is stale, so the directory is named
+			// but nothing is asserted about a live process.
+			writeFileSync(
+				path.join(stateDir, "runtime.json"),
+				JSON.stringify({ pid: 2 ** 30, port: 4100 }),
+			);
+			const message = describePreviousInstallation();
+			expect(message).toContain(stateDir);
+			expect(message).not.toContain("is running");
+		});
+
+		it("leaves the previous installation untouched", () => {
+			const configDir = path.join(root, "config", "termora");
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(path.join(configDir, "config.toml"), "port = 4100\n");
+			describePreviousInstallation();
+			expect(existsSync(path.join(configDir, "config.toml"))).toBe(true);
+		});
 	});
 
 	it.skipIf(process.platform === "win32")("getConfigDir uses XDG_CONFIG_HOME when set", () => {
 		const orig = process.env.XDG_CONFIG_HOME;
 		process.env.XDG_CONFIG_HOME = "/tmp/xdg-cfg";
-		expect(getConfigDir()).toBe("/tmp/xdg-cfg/termora");
+		expect(getConfigDir()).toBe("/tmp/xdg-cfg/lasterm");
 		process.env.XDG_CONFIG_HOME = orig;
 	});
 });
@@ -1146,7 +1258,7 @@ function parsed(argv: string[]): ParsedArgs {
 }
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(os.tmpdir(), "termora-cli-agent-fetch-"));
+	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-cli-agent-fetch-"));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -1207,13 +1319,13 @@ function waitForExit(child: ReturnType<typeof spawn>): Promise<void> {
 function agentCachePath(cacheDir: string, osName: string, arch: string, version: string): string {
 	const target = AGENT_TARGET_TABLE[osName]?.[arch];
 	if (!target) throw new Error(`unknown target ${osName}-${arch}`);
-	return path.join(cacheDir, `termora-agent-${osName}-${arch}-${version}${target.ext}`);
+	return path.join(cacheDir, `lasterm-agent-${osName}-${arch}-${version}${target.ext}`);
 }
 
 function versionedAssetName(osName: string, arch: string, version: string): string {
 	const target = AGENT_TARGET_TABLE[osName]?.[arch];
 	if (!target?.triple) throw new Error(`unsupported test target ${osName}-${arch}`);
-	return `termora-agent-${target.triple}-${version}${target.ext}`;
+	return `lasterm-agent-${target.triple}-${version}${target.ext}`;
 }
 
 function sums(fileName: string, body: string): string {

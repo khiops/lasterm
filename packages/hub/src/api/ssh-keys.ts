@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync }
 import { chmod, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { SshKeyEntry } from "@termora/shared";
+import type { SshKeyEntry } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import ssh2 from "ssh2";
 import { sanitizeFilename } from "./upload-utils.js";

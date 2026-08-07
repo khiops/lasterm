@@ -1,4 +1,4 @@
-import { ELEVATION_METHODS_ALL } from "@termora/shared";
+import { ELEVATION_METHODS_ALL } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 import { registerHostCrudRoutes } from "./host-crud.js";

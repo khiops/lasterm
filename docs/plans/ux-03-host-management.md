@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: web, hub, shared
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-07
   updated: 2026-03-07
   complexity: COMPLEX
@@ -32,7 +32,7 @@ Users cannot manage SSH hosts from the UI — no add/edit/delete modal, no SSH c
 ## 2. User Stories
 
 ### US-01: Host CRUD
-AS A termora user
+AS A lasterm user
 I WANT to add, edit, and delete SSH hosts through a modal dialog
 SO THAT I can manage my server connections without leaving the UI
 
@@ -161,7 +161,7 @@ interface SshConfigEntry {
 
 interface SshConfigImport {
   name: string        // SSH config host name
-  label: string       // termora display name
+  label: string       // lasterm display name
   hostGroup?: string  // optional group assignment
 }
 

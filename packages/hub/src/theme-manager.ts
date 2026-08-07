@@ -1,12 +1,12 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { TermoraTheme } from "@termora/shared";
+import type { LastermTheme } from "@lasterm/shared";
 import {
 	BUNDLED_THEME_NAMES,
 	BUNDLED_THEMES,
 	THEME_NAME_REGEX,
 	validateTheme,
-} from "@termora/shared";
+} from "@lasterm/shared";
 
 export class ThemeManager {
 	private readonly themesDir: string;
@@ -36,8 +36,8 @@ export class ThemeManager {
 	 * List all valid themes from the themes directory.
 	 * Invalid JSON files are silently skipped with a warning log.
 	 */
-	async list(): Promise<TermoraTheme[]> {
-		const themes: TermoraTheme[] = [];
+	async list(): Promise<LastermTheme[]> {
+		const themes: LastermTheme[] = [];
 
 		let entries: string[];
 		try {
@@ -54,7 +54,7 @@ export class ThemeManager {
 				const parsed: unknown = JSON.parse(raw);
 				const result = validateTheme(parsed);
 				if (result.valid) {
-					themes.push(parsed as TermoraTheme);
+					themes.push(parsed as LastermTheme);
 				}
 			} catch {
 				// skip invalid files
@@ -68,14 +68,14 @@ export class ThemeManager {
 	 * Get a specific theme by name.
 	 * Returns null if the file is missing or invalid.
 	 */
-	async get(name: string): Promise<TermoraTheme | null> {
+	async get(name: string): Promise<LastermTheme | null> {
 		if (!THEME_NAME_REGEX.test(name)) return null;
 		try {
 			const raw = await readFile(join(this.themesDir, `${name}.json`), "utf-8");
 			const parsed: unknown = JSON.parse(raw);
 			const result = validateTheme(parsed);
 			if (!result.valid) return null;
-			return parsed as TermoraTheme;
+			return parsed as LastermTheme;
 		} catch {
 			return null;
 		}
@@ -85,7 +85,7 @@ export class ThemeManager {
 	 * Save a theme to disk. Validates before writing.
 	 * Throws on invalid theme or invalid name.
 	 */
-	async save(theme: TermoraTheme): Promise<void> {
+	async save(theme: LastermTheme): Promise<void> {
 		if (!THEME_NAME_REGEX.test(theme.name)) {
 			throw new ThemeError("INVALID_NAME", `Theme name must match ${THEME_NAME_REGEX}`);
 		}

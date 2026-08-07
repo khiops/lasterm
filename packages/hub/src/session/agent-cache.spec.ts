@@ -50,8 +50,8 @@ describe("verifyAndPlace", () => {
 		const cacheDir = makeTempDir();
 		const body = "agent-binary";
 		const tempPath = path.join(cacheDir, "upload.tmp");
-		const expectedBasename = `termora-agent-${LINUX_ARM64_TRIPLE}-${VERSION}`;
-		const finalPath = path.join(cacheDir, `termora-agent-linux-arm64-${VERSION}`);
+		const expectedBasename = `lasterm-agent-${LINUX_ARM64_TRIPLE}-${VERSION}`;
+		const finalPath = path.join(cacheDir, `lasterm-agent-linux-arm64-${VERSION}`);
 		writeFileSync(tempPath, body);
 
 		const result = verifyAndPlace(
@@ -70,8 +70,8 @@ describe("verifyAndPlace", () => {
 	it("rejects a mismatched binary without placing it", () => {
 		const cacheDir = makeTempDir();
 		const tempPath = path.join(cacheDir, "upload.tmp");
-		const expectedBasename = `termora-agent-${LINUX_ARM64_TRIPLE}-${VERSION}`;
-		const finalPath = path.join(cacheDir, `termora-agent-linux-arm64-${VERSION}`);
+		const expectedBasename = `lasterm-agent-${LINUX_ARM64_TRIPLE}-${VERSION}`;
+		const finalPath = path.join(cacheDir, `lasterm-agent-linux-arm64-${VERSION}`);
 		writeFileSync(tempPath, "corrupt");
 
 		expectFetchError(
@@ -87,8 +87,8 @@ describe("verifyAndPlace", () => {
 	it("rejects a missing manifest entry", () => {
 		const cacheDir = makeTempDir();
 		const tempPath = path.join(cacheDir, "upload.tmp");
-		const expectedBasename = `termora-agent-${LINUX_ARM64_TRIPLE}-${VERSION}`;
-		const finalPath = path.join(cacheDir, `termora-agent-linux-arm64-${VERSION}`);
+		const expectedBasename = `lasterm-agent-${LINUX_ARM64_TRIPLE}-${VERSION}`;
+		const finalPath = path.join(cacheDir, `lasterm-agent-linux-arm64-${VERSION}`);
 		writeFileSync(tempPath, "agent-binary");
 
 		expectFetchError(
@@ -104,9 +104,9 @@ describe("verifyAndPlace", () => {
 describe("pruneAgentBinaryCache", () => {
 	it("keeps the requested version and removes other agent cache binaries", () => {
 		const cacheDir = makeTempDir();
-		const current = path.join(cacheDir, `termora-agent-linux-arm64-${VERSION}`);
-		const staleLinux = path.join(cacheDir, "termora-agent-linux-arm64-0.3.4");
-		const staleWindows = path.join(cacheDir, "termora-agent-windows-x64-0.3.4.exe");
+		const current = path.join(cacheDir, `lasterm-agent-linux-arm64-${VERSION}`);
+		const staleLinux = path.join(cacheDir, "lasterm-agent-linux-arm64-0.3.4");
+		const staleWindows = path.join(cacheDir, "lasterm-agent-windows-x64-0.3.4.exe");
 		const unrelated = path.join(cacheDir, "SHA256SUMS-0.3.4.txt");
 		writeFileSync(current, "current");
 		writeFileSync(staleLinux, "stale");
@@ -123,7 +123,7 @@ describe("pruneAgentBinaryCache", () => {
 });
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(os.tmpdir(), "termora-agent-cache-"));
+	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-agent-cache-"));
 	tempDirs.push(dir);
 	return dir;
 }

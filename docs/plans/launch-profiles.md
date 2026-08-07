@@ -3,7 +3,7 @@ doc-meta:
   status: canonical
   scope: launch-profiles
   type: specification
-  target_project: /mnt/wsl/shared/dev/termora
+  target_project: /mnt/wsl/shared/dev/lasterm
   created: 2026-03-12
   updated: 2026-03-12
   complexity: COMPLEX
@@ -337,12 +337,12 @@ Hub resolves agent OS + transport
 Agent receives AgentSpawnMessage with elevationSecret:
   1. Create temp script (chmod 700, user-only):
        #!/bin/sh
-       echo "$_TERMORA_ELEV"
-  2. Set env: SUDO_ASKPASS=<temp script>, _TERMORA_ELEV=<secret>
+       echo "$_LASTERM_ELEV"
+  2. Set env: SUDO_ASKPASS=<temp script>, _LASTERM_ELEV=<secret>
   3. Spawn PTY: sudo -A -E <shell> [args]
   4. sudo calls askpass script → gets password → authenticates
   5. Delete temp script immediately
-  6. Zero _TERMORA_ELEV and elevationSecret in memory
+  6. Zero _LASTERM_ELEV and elevationSecret in memory
   7. User sees elevated shell prompt — no password prompt in PTY
 ```
 
@@ -967,7 +967,7 @@ Scenario: SC-36 Env values masked in API response
 **Files:**
 - `packages/hub/src/session/session-manager.ts` — Update `handleSpawn()`: resolve from LaunchProfile when `launchProfileId` is set. Profile fields → UiSpawnMessage fields. Seed `channel.profileJson` with `profile_overrides`. Store `launch_profile_id` on channel. Check agent capabilities before sending `elevated`.
 - `packages/shared/src/var-expansion.ts` — New file: `expandVars(input: string, env: Record<string, string>): string`. One-pass, left-to-right. Handles `${VAR}`, `\${VAR}`, undefined vars. Single implementation in shared — agent and hub import from here.
-- `packages/agent/src/handler.ts` — Before spawning PTY, import `expandVars` from `@termora/shared` and run on args, cwd, env values.
+- `packages/agent/src/handler.ts` — Before spawning PTY, import `expandVars` from `@lasterm/shared` and run on args, cwd, env values.
 
 **Exit criteria:**
 - [ ] Spawning with launchProfileId resolves profile fields

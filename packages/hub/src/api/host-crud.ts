@@ -1,4 +1,4 @@
-import { ELEVATION_METHODS_ALL, toSnakeCase, validateCustomCommand } from "@termora/shared";
+import { ELEVATION_METHODS_ALL, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";

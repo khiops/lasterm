@@ -112,10 +112,7 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "refusing lock file reparse point",
-        ));
+        return Err(io::Error::other("refusing lock file reparse point"));
     }
     // A child must not retain the kernel lock after its desktop parent exits.
     let ok = unsafe { SetHandleInformation(file.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) };

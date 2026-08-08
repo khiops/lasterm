@@ -898,8 +898,8 @@ struct WindowsPipeReader<'a> {
 #[cfg(windows)]
 impl Read for WindowsPipeReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
         if buffer.is_empty() {
             return Ok(0);
@@ -2953,11 +2953,8 @@ mod tests {
         assert!(run_window_raise_actions(&partial_success).is_ok());
         assert_eq!(partial_success.attempts(), ["unminimize", "show", "focus"]);
 
-        let show_failed = TestWindowRaiseTarget::new(
-            Ok(()),
-            Err("show failed".to_string()),
-            Ok(()),
-        );
+        let show_failed =
+            TestWindowRaiseTarget::new(Ok(()), Err("show failed".to_string()), Ok(()));
         let error = run_window_raise_actions(&show_failed).unwrap_err();
 
         assert!(error.contains("cannot show window main"));
@@ -3270,7 +3267,7 @@ mod tests {
         std::fs::write(path, r#"{"closeBehavior":"tray"}"#).expect("write test config");
 
         assert_eq!(
-            read_close_behavior_from_path(&path),
+            read_close_behavior_from_path(path),
             CloseBehaviorConfigState::Stored(CloseBehavior::Hide)
         );
     }
@@ -3283,21 +3280,21 @@ mod tests {
         std::fs::write(path, r#"{"closeBehavior":"destroy"}"#).expect("write test config");
 
         assert_eq!(
-            read_close_behavior_from_path(&path),
+            read_close_behavior_from_path(path),
             CloseBehaviorConfigState::Unreadable
         );
         assert_eq!(
-            close_behavior_command_result(read_close_behavior_from_path(&path)),
+            close_behavior_command_result(read_close_behavior_from_path(path)),
             Err("failed to read close preference".to_string())
         );
 
         std::fs::remove_file(path).expect("remove test config");
         assert_eq!(
-            read_close_behavior_from_path(&path),
+            read_close_behavior_from_path(path),
             CloseBehaviorConfigState::Missing
         );
         assert_eq!(
-            close_behavior_command_result(read_close_behavior_from_path(&path)),
+            close_behavior_command_result(read_close_behavior_from_path(path)),
             Ok(CloseBehavior::Ask)
         );
     }
@@ -3307,10 +3304,10 @@ mod tests {
         let fixture = close_behavior_test_path("round-trip");
         let path = fixture.path();
 
-        write_close_behavior_to_path(&path, CloseBehavior::Quit).expect("write close preference");
+        write_close_behavior_to_path(path, CloseBehavior::Quit).expect("write close preference");
 
         assert_eq!(
-            read_close_behavior_from_path(&path),
+            read_close_behavior_from_path(path),
             CloseBehaviorConfigState::Stored(CloseBehavior::Quit)
         );
     }
@@ -3319,20 +3316,19 @@ mod tests {
     fn interrupted_close_behavior_replace_keeps_the_previous_preference() {
         let fixture = close_behavior_test_path("interrupted-replace");
         let path = fixture.path();
-        write_close_behavior_to_path(&path, CloseBehavior::Ask).expect("write initial preference");
+        write_close_behavior_to_path(path, CloseBehavior::Ask).expect("write initial preference");
 
-        let error =
-            write_close_behavior_to_path_with_replace(&path, CloseBehavior::Quit, |_, _| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "simulated interrupted replace",
-                ))
-            })
-            .expect_err("interrupted replace must fail");
+        let error = write_close_behavior_to_path_with_replace(path, CloseBehavior::Quit, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "simulated interrupted replace",
+            ))
+        })
+        .expect_err("interrupted replace must fail");
 
         assert!(error.contains("failed to replace close preference"));
         assert_eq!(
-            read_close_behavior_from_path(&path),
+            read_close_behavior_from_path(path),
             CloseBehaviorConfigState::Stored(CloseBehavior::Ask)
         );
     }

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/khiops/lasterm/compare/v0.8.0...v0.9.0) (2026-08-08)
+
+
+### Features
+
+* **desktop:** bring the running window back instead of starting a second process ([7042569](https://github.com/khiops/lasterm/commit/7042569a24b8b728fd798a0fd8a5d4be9a38cac0)), closes [#197](https://github.com/khiops/lasterm/issues/197)
+
+
+### Bug Fixes
+
+* **agent:** drop the lock assertion that covered a path production never takes ([aeaf4a6](https://github.com/khiops/lasterm/commit/aeaf4a66359ca02b8466b3b1bb397822d4fba926)), closes [#139](https://github.com/khiops/lasterm/issues/139)
+* **desktop:** talk only to the hub we launched, at the address it bound ([c26dfc8](https://github.com/khiops/lasterm/commit/c26dfc8748a6a0b8014bace0f1c8dd757a7de6da)), closes [#171](https://github.com/khiops/lasterm/issues/171) [#170](https://github.com/khiops/lasterm/issues/170) [#175](https://github.com/khiops/lasterm/issues/175)
+
 ## [0.8.0](https://github.com/khiops/lasterm/compare/v0.7.0...v0.8.0) (2026-08-07)
 
 

@@ -1,7 +1,7 @@
 {
 	"name": "@lasterm/hub",
 	"private": true,
-	"version": "0.8.0",
+	"version": "0.9.0",
 	"description": "lasterm hub — Fastify daemon, session management, SSH transport, REST + WebSocket API",
 	"license": "AGPL-3.0-only",
 	"repository": {

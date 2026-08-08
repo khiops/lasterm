@@ -21,4 +21,5 @@ allow = [
 exceptions = [
 	# Our own application crate — AGPL by decision (#78).
 	{ name = "lasterm-desktop", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-process-lock", allow = ["AGPL-3.0-only"] },
 ]

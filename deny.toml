@@ -16,4 +16,5 @@ exceptions = [
 	# Our own application crates — AGPL by decision (#78), never a dependency of the libs.
 	{ name = "lasterm-agent", allow = ["AGPL-3.0-only"] },
 	{ name = "lasterm-hub-lock", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-process-lock", allow = ["AGPL-3.0-only"] },
 ]

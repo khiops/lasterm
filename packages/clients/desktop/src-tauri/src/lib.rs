@@ -592,20 +592,17 @@ where
                     }
                     RaiseRequestResult::Unanswered => {}
                 }
-                match ProcessLock::try_acquire(lock_path).map_err(|error| {
+                if let Some(lock) = ProcessLock::try_acquire(lock_path).map_err(|error| {
                     format!(
                         "cannot acquire desktop lock {}: {error}",
                         lock_path.display()
                     )
                 })? {
-                    Some(lock) => {
-                        return Ok(DesktopInstanceStartup::Primary(DesktopInstance {
-                            _lock: lock,
-                            endpoint: endpoint.clone(),
-                            raise_listener: None,
-                        }))
-                    }
-                    None => {}
+                    return Ok(DesktopInstanceStartup::Primary(DesktopInstance {
+                        _lock: lock,
+                        endpoint: endpoint.clone(),
+                        raise_listener: None,
+                    }));
                 }
                 if Instant::now() >= deadline {
                     return Err(
@@ -938,6 +935,19 @@ impl Read for WindowsPipeReader<'_> {
 }
 
 #[cfg(windows)]
+impl Write for WindowsPipeReader<'_> {
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, std::io::Error> {
+        let mut stream = self.stream;
+        stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        let mut stream = self.stream;
+        stream.flush()
+    }
+}
+
+#[cfg(windows)]
 fn read_windows_pipe_message(stream: &std::fs::File) -> Result<Option<Vec<u8>>, std::io::Error> {
     let mut reader = WindowsPipeReader {
         stream,
@@ -1015,21 +1025,11 @@ fn start_desktop_raise_listener(
             }
             let raise_app = app.clone();
             std::thread::spawn(move || {
-                let Ok(Some(request)) = read_windows_pipe_message(&stream) else {
-                    return;
+                let mut stream = WindowsPipeReader {
+                    stream: &stream,
+                    deadline: Instant::now() + INSTANCE_RAISE_TIMEOUT,
                 };
-                if request != INSTANCE_RAISE_REQUEST {
-                    return;
-                }
-                let reply = match raise_main_window(raise_app) {
-                    Ok(()) => INSTANCE_RAISE_SUCCESS,
-                    Err(error) => {
-                        eprintln!("[lasterm] desktop raise failed: {error}");
-                        INSTANCE_RAISE_FAILURE
-                    }
-                };
-                let mut stream = stream;
-                let _ = stream.write_all(reply);
+                handle_desktop_raise_connection(&mut stream, move || raise_main_window(raise_app));
             });
         }
     });
@@ -3267,7 +3267,7 @@ mod tests {
         let fixture = close_behavior_test_path("tray");
         let path = fixture.path();
         std::fs::create_dir_all(path.parent().expect("test path parent")).expect("create test dir");
-        std::fs::write(&path, r#"{"closeBehavior":"tray"}"#).expect("write test config");
+        std::fs::write(path, r#"{"closeBehavior":"tray"}"#).expect("write test config");
 
         assert_eq!(
             read_close_behavior_from_path(&path),
@@ -3280,7 +3280,7 @@ mod tests {
         let fixture = close_behavior_test_path("invalid");
         let path = fixture.path();
         std::fs::create_dir_all(path.parent().expect("test path parent")).expect("create test dir");
-        std::fs::write(&path, r#"{"closeBehavior":"destroy"}"#).expect("write test config");
+        std::fs::write(path, r#"{"closeBehavior":"destroy"}"#).expect("write test config");
 
         assert_eq!(
             read_close_behavior_from_path(&path),
@@ -3291,7 +3291,7 @@ mod tests {
             Err("failed to read close preference".to_string())
         );
 
-        std::fs::remove_file(&path).expect("remove test config");
+        std::fs::remove_file(path).expect("remove test config");
         assert_eq!(
             read_close_behavior_from_path(&path),
             CloseBehaviorConfigState::Missing

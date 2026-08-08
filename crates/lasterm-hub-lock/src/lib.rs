@@ -1,120 +1,18 @@
+use lasterm_process_lock::ProcessLock;
 use napi_derive::napi;
-use std::fs::File;
 use std::io;
 use std::path::Path;
 
 /// Owns the kernel lock. It deliberately owns the file descriptor/handle rather
 /// than a pathname: closing this object (or process termination) releases it.
 struct KernelLock {
-    _file: File,
+    _inner: ProcessLock,
 }
 
 impl KernelLock {
     fn acquire(path: &Path) -> io::Result<Option<Self>> {
-        let file = open_lock_file(path)?;
-        match lock_file(&file) {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(error) if is_lock_contended(&error) => Ok(None),
-            Err(error) => Err(error),
-        }
+        ProcessLock::try_acquire(path).map(|lock| lock.map(|inner| Self { _inner: inner }))
     }
-}
-
-#[cfg(unix)]
-fn open_lock_file(path: &Path) -> io::Result<File> {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::ffi::OsStrExt;
-
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    // O_CLOEXEC makes descriptor inheritance across the agent's exec impossible.
-    // O_NOFOLLOW avoids silently locking a different target through a symlink.
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-#[cfg(windows)]
-fn open_lock_file(path: &Path) -> io::Result<File> {
-    use std::fs::OpenOptions;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
-
-    // Never truncate: an existing authority file may be held by a live hub right
-    // now, and its length is not ours to change. Creating it when absent is the
-    // only write this needs.
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
-    // Node's child creation can only inherit handles marked inheritable. Clear
-    // that bit here, next to acquisition, instead of relying on every caller to
-    // remember a spawn option.
-    let ok = unsafe { SetHandleInformation(file.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(file)
-}
-
-#[cfg(unix)]
-fn lock_file(file: &File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn lock_file(file: &File) -> io::Result<()> {
-    use std::mem::zeroed;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-    let ok = unsafe {
-        LockFileEx(
-            file.as_raw_handle(),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            u32::MAX,
-            u32::MAX,
-            &mut overlapped,
-        )
-    };
-    if ok != 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(unix)]
-fn is_lock_contended(error: &io::Error) -> bool {
-    let code = error.raw_os_error();
-    code == Some(libc::EWOULDBLOCK) || code == Some(libc::EAGAIN)
-}
-
-#[cfg(windows)]
-fn is_lock_contended(error: &io::Error) -> bool {
-    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
-    let code = error.raw_os_error();
-    code == Some(ERROR_LOCK_VIOLATION as i32) || code == Some(ERROR_SHARING_VIOLATION as i32)
 }
 
 /// JavaScript-visible handle. Keeping this object reachable keeps the kernel
@@ -212,22 +110,10 @@ mod tests {
             .unwrap()
     }
 
-    /// A second acquisition is refused while the first handle is alive.
-    ///
-    /// This used to also assert that re-acquiring succeeds once the handle is
-    /// dropped, and that assertion failed six times on CI against 74 green local
-    /// runs (#139) without ever naming a cause. It is gone rather than instrumented,
-    /// because it covered a path production does not take: `acquireHubLock` puts the
-    /// handle in a process-global map for the process's lifetime, so the release the
-    /// hub actually depends on is kernel teardown at exit — which is what
-    /// `process_death_releases_lock` asserts, and that test does not flake.
-    ///
-    /// What no longer has a test is a *duplicated* descriptor kept alive past the
-    /// drop. Nothing but re-acquisition can observe it, and re-acquisition is the
-    /// step that flaked, so the coverage is stated as missing instead of being
-    /// claimed by a check that cannot fail: `KernelLock` owns exactly one `File` and
-    /// releases through its `Drop`, which is a guarantee of the language rather than
-    /// of this crate.
+    /// This wrapper still proves that a live JavaScript-visible handle excludes a
+    /// second acquisition. The platform mechanics, SIGKILL release, concurrent
+    /// races, and descriptor inheritance are tested directly in
+    /// `lasterm-process-lock`, the one implementation both consumers now share.
     #[test]
     fn second_acquisition_is_refused_while_the_first_handle_lives() {
         let path = test_dir("second-acquisition").join("hub.lock");

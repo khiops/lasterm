@@ -1,8 +1,10 @@
+use lasterm_process_lock::ProcessLock;
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -99,6 +101,8 @@ const WINDOW_CLOSE_PRESENTATION_ACK_TIMEOUT: Duration = Duration::from_secs(1);
 const WINDOW_CLOSE_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
+const INSTANCE_MARKER_POLL: Duration = Duration::from_millis(100);
+const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "windows", test))]
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 #[cfg(any(target_os = "windows", test))]
@@ -236,6 +240,393 @@ enum RuntimeLoadResult {
 struct QuitResponseBody {
     message: Option<String>,
     others: Option<usize>,
+}
+
+/// A desktop-owned authority and the one-bit request channel next to it.
+///
+/// This lives in a host-local runtime directory rather than the configurable state
+/// directory. `flock` semantics on network-backed state filesystems are too variable
+/// to claim single-instance correctness, and state storage is user-configurable.
+struct DesktopInstance {
+    _lock: ProcessLock,
+    marker_path: PathBuf,
+}
+
+enum DesktopInstanceStartup {
+    Primary(DesktopInstance),
+    Secondary,
+}
+
+fn desktop_instance_paths() -> Result<(PathBuf, PathBuf), String> {
+    #[cfg(unix)]
+    {
+        // Mirror packages/shared/src/socket-path.ts exactly: prefer the user's XDG
+        // runtime location, otherwise use the uid-scoped directory under /tmp.
+        let runtime_dir = match std::env::var_os("XDG_RUNTIME_DIR") {
+            Some(path) if !path.is_empty() => PathBuf::from(path).join("lasterm"),
+            _ => {
+                let uid = unsafe { libc::getuid() };
+                PathBuf::from("/tmp").join(format!("lasterm-{uid}"))
+            }
+        };
+        prepare_runtime_dir(&runtime_dir)?;
+        Ok((
+            runtime_dir.join("desktop-instance.lock"),
+            runtime_dir.join("desktop-instance.raise"),
+        ))
+    }
+    #[cfg(windows)]
+    {
+        windows_desktop_instance_paths(std::env::var_os("LOCALAPPDATA"))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_desktop_instance_paths(
+    local_app_data: Option<std::ffi::OsString>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let local_app_data = local_app_data
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            "cannot establish the desktop single-instance lock: LOCALAPPDATA is absent or empty"
+                .to_string()
+        })?;
+
+    // LOCALAPPDATA is the non-roaming application-data location, so this runtime
+    // authority remains host-local. It is under the user's profile, whose default
+    // ACL already excludes other users; a full ACL audit is intentionally out of
+    // scope here. get_state_dir() already uses LOCALAPPDATA for Windows state, so
+    // this does not introduce a new environment convention.
+    let runtime_dir = PathBuf::from(local_app_data)
+        .join("lasterm")
+        .join("runtime");
+    prepare_windows_runtime_dir(&runtime_dir)?;
+    Ok((
+        runtime_dir.join("desktop-instance.lock"),
+        runtime_dir.join("desktop-instance.raise"),
+    ))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn prepare_windows_runtime_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not absolute",
+            path.display()
+        ));
+    }
+
+    std::fs::create_dir_all(path).map_err(|error| {
+        format!(
+            "cannot create desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "refusing desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    validate_windows_runtime_dir(
+        path,
+        &metadata,
+        windows_metadata_is_reparse_point(&metadata),
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+/// Windows validation is deliberately narrower than the Unix branch's, and the
+/// difference is a decision rather than an omission.
+///
+/// On Unix the runtime directory can sit under `/tmp`, which every user can write,
+/// so ownership and mode have to be checked: the location proves nothing. On Windows
+/// it sits under `%LOCALAPPDATA%`, inside the user's profile, whose ACL already
+/// excludes other users — **the location is the property**, and re-deriving it from
+/// an ACL audit would restate what the profile already guarantees while adding a
+/// dependency and a second thing to keep correct.
+///
+/// So no ACL is read here, and no ancestor chain is walked. What is checked is that
+/// the final component is a real directory rather than a reparse point, because a
+/// junction is the one way a path under the profile can lead somewhere else.
+///
+/// The limit that leaves: an ancestor replaced between this check and the lock's
+/// open would go unnoticed. Closing it needs a descent that opens each component and
+/// re-verifies by handle, which the risk here does not justify.
+fn validate_windows_runtime_dir(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    is_reparse_point: bool,
+) -> Result<(), String> {
+    if is_reparse_point || metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not a real directory",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(all(not(target_os = "windows"), test))]
+fn windows_metadata_is_reparse_point(_: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn prepare_runtime_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not absolute",
+            path.display()
+        ));
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => validate_runtime_dir(path, &metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path).map_err(|error| {
+                format!(
+                    "cannot create desktop runtime directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    format!(
+                        "cannot secure desktop runtime directory {}: {error}",
+                        path.display()
+                    )
+                },
+            )?;
+            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+                format!(
+                    "refusing desktop runtime directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            validate_runtime_dir(path, &metadata)
+        }
+        Err(error) => Err(format!(
+            "refusing desktop runtime directory {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn validate_runtime_dir(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not a real directory",
+            path.display()
+        ));
+    }
+    let uid = unsafe { libc::getuid() };
+    if metadata.uid() != uid {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not owned by the current user",
+            path.display()
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(format!(
+            "refusing desktop runtime directory {}: group or other may write it",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn create_raise_marker(path: &Path) -> Result<(), String> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(_) => Ok(()),
+        // A marker is a one-bit request. Existing regular files coalesce, but a
+        // directory, symlink, or other object is not an acknowledgeable request.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+                format!("cannot inspect raise marker {}: {error}", path.display())
+            })?;
+            if metadata.file_type().is_file() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cannot create raise marker {}: existing object is not a marker file",
+                    path.display()
+                ))
+            }
+        }
+        Err(error) => Err(format!(
+            "cannot create raise marker {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn acquire_desktop_instance() -> Result<DesktopInstanceStartup, String> {
+    let (lock_path, marker_path) = desktop_instance_paths()?;
+    acquire_desktop_instance_at(&lock_path, &marker_path)
+}
+
+fn acquire_desktop_instance_at(
+    lock_path: &Path,
+    marker_path: &Path,
+) -> Result<DesktopInstanceStartup, String> {
+    match ProcessLock::try_acquire(lock_path).map_err(|error| {
+        format!(
+            "cannot acquire desktop lock {}: {error}",
+            lock_path.display()
+        )
+    })? {
+        Some(lock) => Ok(DesktopInstanceStartup::Primary(DesktopInstance {
+            _lock: lock,
+            marker_path: marker_path.to_path_buf(),
+        })),
+        None => {
+            create_raise_marker(marker_path)?;
+            // A secondary only exits quietly after the primary consumed its request.
+            // The lock is attempted in the same polling step as that decision, so a
+            // release cannot land in a final retry/return gap.
+            let deadline = Instant::now() + INSTANCE_HANDOFF_TIMEOUT;
+            loop {
+                if let Some(lock) = ProcessLock::try_acquire(lock_path).map_err(|error| {
+                    format!(
+                        "cannot acquire desktop lock {}: {error}",
+                        lock_path.display()
+                    )
+                })? {
+                    return Ok(DesktopInstanceStartup::Primary(DesktopInstance {
+                        _lock: lock,
+                        marker_path: marker_path.to_path_buf(),
+                    }));
+                }
+                match std::fs::symlink_metadata(marker_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(DesktopInstanceStartup::Secondary);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "cannot inspect raise marker {}: {error}",
+                            marker_path.display()
+                        ));
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "timed out after {} seconds waiting for the existing Lasterm window to acknowledge this launch",
+                        INSTANCE_HANDOFF_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(INSTANCE_MARKER_POLL);
+            }
+        }
+    }
+}
+
+fn consume_raise_marker(marker_path: &Path) -> Result<bool, std::io::Error> {
+    match std::fs::remove_file(marker_path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+fn attempt_window_raise(
+    label: &str,
+    unminimize: impl FnOnce() -> Result<(), String>,
+    show: impl FnOnce() -> Result<(), String>,
+    focus: impl FnOnce() -> Result<(), String>,
+) {
+    for (operation, result) in [
+        ("unminimize", unminimize()),
+        ("show", show()),
+        ("set_focus", focus()),
+    ] {
+        if let Err(error) = result {
+            eprintln!("[lasterm] could not {operation} window {label}: {error}");
+        }
+    }
+}
+
+fn raise_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("window main no longer exists".to_string());
+    };
+    let label = window.label().to_string();
+    window
+        .unminimize()
+        .map_err(|error| format!("could not unminimize window {label}: {error}"))?;
+    window
+        .show()
+        .map_err(|error| format!("could not show window {label}: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("could not focus window {label}: {error}"))
+}
+
+fn start_raise_marker_poll(app: tauri::AppHandle, marker_path: PathBuf) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(INSTANCE_MARKER_POLL);
+            match std::fs::symlink_metadata(&marker_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "[lasterm] could not inspect raise marker {}: {error}",
+                        marker_path.display()
+                    );
+                    return;
+                }
+            }
+            if let Err(error) = raise_main_window(&app) {
+                eprintln!("[lasterm] could not raise window main: {error}");
+                continue;
+            }
+            match consume_raise_marker(&marker_path) {
+                Ok(true) | Ok(false) => {}
+                Err(error) => {
+                    // This path is no longer acknowledgeable. Log exactly once and
+                    // stop polling it rather than raising on every interval.
+                    eprintln!(
+                        "[lasterm] could not consume raise marker {}: {error}",
+                        marker_path.display()
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(dev)]
+fn show_desktop_instance_failure_then_exit(app: tauri::AppHandle, message: String) {
+    eprintln!("[lasterm] startup stopped: {message}");
+    app.dialog()
+        .message(message)
+        .title("Lasterm cannot start")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(1));
+}
+
+#[cfg(not(dev))]
+fn show_instance_failure_then_exit(app: tauri::AppHandle, message: String) {
+    show_startup_failure_then_exit(app, message);
+}
+
+#[cfg(dev)]
+fn show_instance_failure_then_exit(app: tauri::AppHandle, message: String) {
+    show_desktop_instance_failure_then_exit(app, message);
 }
 
 #[derive(Clone)]
@@ -1458,6 +1849,24 @@ fn set_windows_transparent_background(window: &tauri::WebviewWindow) -> tauri::R
 /// In release builds, spawn the hub sidecar and wait for it to become ready.
 /// In dev builds, the hub is already running externally — just show the window.
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // This is deliberately first: no second desktop may spawn a sidecar, initialise
+    // a tray, or show a window. The managed guard keeps its non-inheritable handle
+    // alive until this desktop process exits.
+    let instance = match acquire_desktop_instance() {
+        Ok(DesktopInstanceStartup::Primary(instance)) => instance,
+        Ok(DesktopInstanceStartup::Secondary) => {
+            app.handle().exit(0);
+            return Ok(());
+        }
+        Err(error) => {
+            show_instance_failure_then_exit(app.handle().clone(), error);
+            return Ok(());
+        }
+    };
+    let marker_path = instance.marker_path.clone();
+    app.manage(instance);
+    start_raise_marker_poll(app.handle().clone(), marker_path);
+
     // System tray
     let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -1818,6 +2227,165 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    fn instance_test_dir(name: &str) -> PathBuf {
+        let base = std::env::temp_dir();
+        let pid = std::process::id();
+        let start = INSTANCE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..1024 {
+            let path = base.join(format!(
+                "lasterm-desktop-instance-{name}-{pid}-{start}-{attempt}"
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("could not create {}: {error}", path.display()),
+            }
+        }
+        panic!(
+            "could not allocate a unique test directory under {}",
+            base.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_writable_runtime_directory_is_refused_with_its_path() {
+        let dir = instance_test_dir("group-writable");
+        let mut permissions = std::fs::metadata(&dir).unwrap().permissions();
+        permissions.set_mode(0o770);
+        std::fs::set_permissions(&dir, permissions).unwrap();
+
+        let error = prepare_runtime_dir(&dir).unwrap_err();
+        assert!(error.contains(&dir.display().to_string()));
+        assert!(error.contains("group or other may write"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_runtime_directory_is_refused_and_absent_directory_is_created_securely() {
+        assert!(prepare_runtime_dir(Path::new("relative-runtime")).is_err());
+        let absent = instance_test_dir("absent").join("missing").join("lasterm");
+        prepare_runtime_dir(&absent).unwrap();
+        let metadata = std::fs::metadata(&absent).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn windows_local_app_data_absent_or_empty_is_refused() {
+        for local_app_data in [None, Some(std::ffi::OsString::new())] {
+            let error = windows_desktop_instance_paths(local_app_data).unwrap_err();
+            assert!(error.contains("LOCALAPPDATA"));
+        }
+    }
+
+    #[test]
+    fn windows_relative_local_app_data_is_refused() {
+        let error =
+            windows_desktop_instance_paths(Some(std::ffi::OsString::from("relative"))).unwrap_err();
+        assert!(error.contains("not absolute"));
+        assert!(error.contains("relative"));
+    }
+
+    #[test]
+    fn windows_local_app_data_creates_the_runtime_paths() {
+        let local_app_data = instance_test_dir("windows-local-app-data");
+        let (lock_path, marker_path) =
+            windows_desktop_instance_paths(Some(local_app_data.clone().into())).unwrap();
+        let runtime_dir = local_app_data.join("lasterm").join("runtime");
+
+        assert_eq!(lock_path, runtime_dir.join("desktop-instance.lock"));
+        assert_eq!(marker_path, runtime_dir.join("desktop-instance.raise"));
+        assert!(runtime_dir.is_dir());
+    }
+
+    #[test]
+    fn windows_local_app_data_that_is_not_a_directory_is_refused() {
+        let path = instance_test_dir("windows-local-app-data-file").join("not-a-directory");
+        std::fs::write(&path, "not a directory").unwrap();
+
+        let error = windows_desktop_instance_paths(Some(path.clone().into())).unwrap_err();
+        assert!(error.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn windows_runtime_validation_rejects_reparse_points() {
+        let path = instance_test_dir("windows-reparse-point");
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+
+        let error = validate_windows_runtime_dir(&path, &metadata, true).unwrap_err();
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("not a real directory"));
+    }
+
+    #[test]
+    fn marker_is_create_new_and_never_requires_observing_contents() {
+        let marker = instance_test_dir("marker").join("raise");
+        create_raise_marker(&marker).unwrap();
+        assert!(std::fs::read(&marker).unwrap().is_empty());
+        create_raise_marker(&marker).unwrap();
+        assert!(consume_raise_marker(&marker).unwrap());
+        assert!(!consume_raise_marker(&marker).unwrap());
+    }
+
+    #[test]
+    fn marker_directory_is_a_hard_creation_error() {
+        let marker = instance_test_dir("marker-directory").join("raise");
+        std::fs::create_dir(&marker).unwrap();
+        let error = create_raise_marker(&marker).unwrap_err();
+        assert!(error.contains("not a marker file"));
+    }
+
+    #[test]
+    fn marker_poll_attempts_unminimize_before_show_and_focus() {
+        let marker = instance_test_dir("poll").join("raise");
+        create_raise_marker(&marker).unwrap();
+        assert!(consume_raise_marker(&marker).unwrap());
+
+        let calls = std::sync::Mutex::new(Vec::new());
+        attempt_window_raise(
+            "main",
+            || {
+                calls.lock().unwrap().push("unminimize");
+                Ok(())
+            },
+            || {
+                calls.lock().unwrap().push("show");
+                Ok(())
+            },
+            || {
+                calls.lock().unwrap().push("set_focus");
+                Ok(())
+            },
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["unminimize", "show", "set_focus"]
+        );
+    }
+
+    #[test]
+    fn secondary_becomes_primary_when_the_holder_releases_during_retry() {
+        let dir = instance_test_dir("handoff");
+        let lock_path = dir.join("desktop.lock");
+        let marker_path = dir.join("desktop.raise");
+        let holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+        let waiter = std::thread::spawn({
+            let lock_path = lock_path.clone();
+            let marker_path = marker_path.clone();
+            move || acquire_desktop_instance_at(&lock_path, &marker_path)
+        });
+
+        std::thread::sleep(Duration::from_millis(150));
+        drop(holder);
+        assert!(matches!(
+            waiter.join().unwrap().unwrap(),
+            DesktopInstanceStartup::Primary(_)
+        ));
+    }
 
     /// The line the hub actually prints, taken from a run rather than written from
     /// memory: `lasterm hub listening on http://127.0.0.1:45999 (build: 5c31e75)`.

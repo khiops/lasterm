@@ -1,10 +1,13 @@
+use lasterm_process_lock::ProcessLock;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -99,6 +102,13 @@ const WINDOW_CLOSE_PRESENTATION_ACK_TIMEOUT: Duration = Duration::from_secs(1);
 const WINDOW_CLOSE_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
+const INSTANCE_ACQUIRE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+const INSTANCE_RAISE_TIMEOUT: Duration = Duration::from_secs(2);
+const INSTANCE_RAISE_REQUEST: &[u8] = b"raise-v1\n";
+const INSTANCE_RAISE_SUCCESS: &[u8] = b"ok\n";
+const INSTANCE_RAISE_FAILURE: &[u8] = b"error\n";
+const INSTANCE_RAISE_MAX_BYTES: usize = 64;
 #[cfg(any(target_os = "windows", test))]
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 #[cfg(any(target_os = "windows", test))]
@@ -236,6 +246,815 @@ enum RuntimeLoadResult {
 struct QuitResponseBody {
     message: Option<String>,
     others: Option<usize>,
+}
+
+/// A desktop-owned authority.
+///
+/// This lives in a host-local runtime directory rather than the configurable state
+/// directory. `flock` semantics on network-backed state filesystems are too variable
+/// to claim single-instance correctness, and state storage is user-configurable.
+struct DesktopInstance {
+    _lock: ProcessLock,
+    endpoint: DesktopRaiseEndpoint,
+    raise_listener: Option<DesktopRaiseListener>,
+}
+
+impl Drop for DesktopInstance {
+    fn drop(&mut self) {
+        // Stop and unlink the endpoint before releasing the authority lock. A
+        // successor may bind as soon as that lock is free, so reversing this
+        // order would briefly leave two listeners reachable on different
+        // socket inodes.
+        self.raise_listener.take();
+    }
+}
+
+enum DesktopInstanceStartup {
+    Primary(DesktopInstance),
+    Secondary,
+}
+
+/// The only local endpoint through which a second desktop process may ask the
+/// lock holder to raise its main window. The endpoint is deliberately separate
+/// from the lock: its presence never decides whether an instance is running.
+#[derive(Clone, Debug)]
+struct DesktopRaiseEndpoint {
+    #[cfg(unix)]
+    path: PathBuf,
+    #[cfg(windows)]
+    pipe_name: String,
+}
+
+/// Owns the cleanup signal for the rare single-message listener.
+struct DesktopRaiseListener {
+    stop: Arc<AtomicBool>,
+    #[cfg(unix)]
+    path: PathBuf,
+}
+
+impl Drop for DesktopRaiseListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        #[cfg(unix)]
+        {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "[lasterm] failed to remove desktop raise socket {}: {error}",
+                        self.path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn desktop_instance_lock_path() -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    {
+        // XDG_RUNTIME_DIR is intentionally not consulted. A graphical launcher
+        // exports it while a bare shell often does not, which used to create two
+        // different authorities for the same uid. The sticky /tmp parent lets this
+        // uid-owned, mode-0700 child remain private and stable across both launches.
+        let uid = unsafe { libc::getuid() };
+        let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+        let runtime_dir = unix_desktop_runtime_dir_for_environment(uid, xdg_runtime_dir.as_deref());
+        prepare_runtime_dir(&runtime_dir)?;
+        Ok(runtime_dir.join("desktop-instance.lock"))
+    }
+    #[cfg(windows)]
+    {
+        windows_desktop_instance_lock_path(std::env::var_os("LOCALAPPDATA"))
+    }
+}
+
+#[cfg(unix)]
+fn unix_desktop_runtime_dir(uid: u32) -> PathBuf {
+    unix_desktop_runtime_dir_for_environment_at(Path::new("/tmp"), uid, None)
+}
+
+#[cfg(unix)]
+fn unix_desktop_runtime_dir_for_environment(
+    uid: u32,
+    _xdg_runtime_dir: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    unix_desktop_runtime_dir(uid)
+}
+
+#[cfg(unix)]
+fn unix_desktop_runtime_dir_for_environment_at(
+    base: &Path,
+    uid: u32,
+    _xdg_runtime_dir: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    base.join(format!("lasterm-{uid}"))
+}
+
+#[cfg(unix)]
+fn desktop_raise_endpoint(lock_path: &Path) -> Result<DesktopRaiseEndpoint, String> {
+    let runtime_dir = lock_path.parent().ok_or_else(|| {
+        format!(
+            "cannot establish desktop raise endpoint for lock without parent: {}",
+            lock_path.display()
+        )
+    })?;
+    Ok(DesktopRaiseEndpoint {
+        path: runtime_dir.join("desktop-raise.sock"),
+    })
+}
+
+#[cfg(windows)]
+fn desktop_raise_endpoint(_: &Path) -> Result<DesktopRaiseEndpoint, String> {
+    // Named pipes are machine-global. Match the agent daemon's user-scoped
+    // naming, while the owner-only DACL below is the actual access boundary.
+    let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
+    Ok(DesktopRaiseEndpoint {
+        pipe_name: format!(r"\\.\pipe\lasterm-desktop-raise-{username}"),
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_desktop_instance_lock_path(
+    local_app_data: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let local_app_data = local_app_data
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            "cannot establish the desktop single-instance lock: LOCALAPPDATA is absent or empty"
+                .to_string()
+        })?;
+
+    let local_app_data_path = PathBuf::from(&local_app_data);
+    if is_windows_unc_path(&local_app_data_path) {
+        return Err(format!(
+            "refusing desktop runtime directory {}: LOCALAPPDATA must be host-local, not UNC",
+            local_app_data_path.display()
+        ));
+    }
+
+    // LOCALAPPDATA is the non-roaming application-data location, so this runtime
+    // authority remains host-local. It is under the user's profile, whose default
+    // ACL already excludes other users; a full ACL audit is intentionally out of
+    // scope here. get_state_dir() already uses LOCALAPPDATA for Windows state, so
+    // this does not introduce a new environment convention.
+    let runtime_dir = local_app_data_path.join("lasterm").join("runtime");
+    prepare_windows_runtime_dir(&runtime_dir)?;
+    Ok(runtime_dir.join("desktop-instance.lock"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_unc_path(path: &Path) -> bool {
+    let path = path.as_os_str().to_string_lossy();
+    path.starts_with(r"\\") || path.starts_with("//")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn prepare_windows_runtime_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not absolute",
+            path.display()
+        ));
+    }
+
+    std::fs::create_dir_all(path).map_err(|error| {
+        format!(
+            "cannot create desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "refusing desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    validate_windows_runtime_dir(
+        path,
+        &metadata,
+        windows_metadata_is_reparse_point(&metadata),
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+/// Windows validation is deliberately narrower than the Unix branch's, and the
+/// difference is a decision rather than an omission.
+///
+/// On Unix the runtime directory can sit under `/tmp`, which every user can write,
+/// so ownership and mode have to be checked: the location proves nothing. On Windows
+/// it sits under `%LOCALAPPDATA%`, inside the user's profile, whose ACL already
+/// excludes other users — **the location is the property**, and re-deriving it from
+/// an ACL audit would restate what the profile already guarantees while adding a
+/// dependency and a second thing to keep correct.
+///
+/// So no ACL is read here, and no ancestor chain is walked. What is checked is that
+/// the final component is a real directory rather than a reparse point, because a
+/// junction is the one way a path under the profile can lead somewhere else.
+///
+/// The limit that leaves: an ancestor replaced between this check and the lock's
+/// open would go unnoticed. Closing it needs a descent that opens each component and
+/// re-verifies by handle, which the risk here does not justify.
+fn validate_windows_runtime_dir(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    is_reparse_point: bool,
+) -> Result<(), String> {
+    if is_reparse_point || metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not a real directory",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(all(not(target_os = "windows"), test))]
+fn windows_metadata_is_reparse_point(_: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn prepare_runtime_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not absolute",
+            path.display()
+        ));
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => validate_runtime_dir(path, &metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                // This is deliberately part of creation. A later chmod could follow
+                // a symlink substituted after the create and change another path.
+                .mode(0o700)
+                .create(path)
+                .map_err(|error| {
+                    format!(
+                        "cannot create desktop runtime directory {}: {error}",
+                        path.display()
+                    )
+                })?;
+            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+                format!(
+                    "refusing desktop runtime directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            validate_runtime_dir(path, &metadata)
+        }
+        Err(error) => Err(format!(
+            "refusing desktop runtime directory {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn validate_runtime_dir(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not a real directory",
+            path.display()
+        ));
+    }
+    let uid = unsafe { libc::getuid() };
+    if metadata.uid() != uid {
+        return Err(format!(
+            "refusing desktop runtime directory {}: it is not owned by the current user",
+            path.display()
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(format!(
+            "refusing desktop runtime directory {}: group or other may write it",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn acquire_desktop_instance() -> Result<DesktopInstanceStartup, String> {
+    let lock_path = desktop_instance_lock_path()?;
+    let endpoint = desktop_raise_endpoint(&lock_path)?;
+    acquire_desktop_instance_at(&lock_path, &endpoint)
+}
+
+fn acquire_desktop_instance_at(
+    lock_path: &Path,
+    endpoint: &DesktopRaiseEndpoint,
+) -> Result<DesktopInstanceStartup, String> {
+    acquire_desktop_instance_at_with_raise(lock_path, endpoint, request_desktop_raise)
+}
+
+fn acquire_desktop_instance_at_with_raise<R>(
+    lock_path: &Path,
+    endpoint: &DesktopRaiseEndpoint,
+    request_raise: R,
+) -> Result<DesktopInstanceStartup, String>
+where
+    R: Fn(&DesktopRaiseEndpoint) -> RaiseRequestResult,
+{
+    match ProcessLock::try_acquire(lock_path).map_err(|error| {
+        format!(
+            "cannot acquire desktop lock {}: {error}",
+            lock_path.display()
+        )
+    })? {
+        Some(lock) => Ok(DesktopInstanceStartup::Primary(DesktopInstance {
+            _lock: lock,
+            endpoint: endpoint.clone(),
+            raise_listener: None,
+        })),
+        None => {
+            let deadline = Instant::now() + INSTANCE_HANDOFF_TIMEOUT;
+            loop {
+                // The primary may still be in setup and deliberately has no
+                // listener yet. Keep retrying the endpoint for the entire
+                // handoff budget rather than treating the first refusal as its
+                // final state.
+                match request_raise(endpoint) {
+                    RaiseRequestResult::Raised => return Ok(DesktopInstanceStartup::Secondary),
+                    RaiseRequestResult::Failed => {
+                        return Err(
+                            "The running Lasterm instance could not show its window.".to_string()
+                        )
+                    }
+                    RaiseRequestResult::Unanswered => {}
+                }
+                match ProcessLock::try_acquire(lock_path).map_err(|error| {
+                    format!(
+                        "cannot acquire desktop lock {}: {error}",
+                        lock_path.display()
+                    )
+                })? {
+                    Some(lock) => {
+                        return Ok(DesktopInstanceStartup::Primary(DesktopInstance {
+                            _lock: lock,
+                            endpoint: endpoint.clone(),
+                            raise_listener: None,
+                        }))
+                    }
+                    None => {}
+                }
+                if Instant::now() >= deadline {
+                    return Err(
+                        "A running Lasterm instance did not answer the request to show its window."
+                            .to_string(),
+                    );
+                }
+                std::thread::sleep(INSTANCE_ACQUIRE_RETRY_INTERVAL);
+            }
+        }
+    }
+}
+
+enum RaiseRequestResult {
+    Raised,
+    Failed,
+    Unanswered,
+}
+
+/// Dispatch UI work to the Tauri main thread and wait for that work, rather
+/// than merely waiting for it to be queued. This is the acknowledgement P2
+/// needs: success reaches the peer only after both native calls completed.
+fn run_after_main_thread_action<S, A>(schedule: S, action: A) -> Result<(), String>
+where
+    S: FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), String>,
+    A: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+    schedule(Box::new(move || {
+        let _ = completed_tx.send(action());
+    }))?;
+    completed_rx
+        .recv_timeout(INSTANCE_RAISE_TIMEOUT)
+        .map_err(|error| format!("the main-thread window raise did not complete: {error}"))?
+}
+
+trait WindowRaiseTarget {
+    fn label(&self) -> &str;
+    fn unminimize(&self) -> Result<(), String>;
+    fn show(&self) -> Result<(), String>;
+    fn focus(&self) -> Result<(), String>;
+}
+
+impl<R: tauri::Runtime> WindowRaiseTarget for tauri::WebviewWindow<R> {
+    fn label(&self) -> &str {
+        self.label()
+    }
+
+    fn unminimize(&self) -> Result<(), String> {
+        self.unminimize().map_err(|error| error.to_string())
+    }
+
+    fn show(&self) -> Result<(), String> {
+        self.show().map_err(|error| error.to_string())
+    }
+
+    fn focus(&self) -> Result<(), String> {
+        self.set_focus().map_err(|error| error.to_string())
+    }
+}
+
+fn run_window_raise_actions(window: &impl WindowRaiseTarget) -> Result<(), String> {
+    let label = window.label();
+    let mut show_error = None;
+    for (operation, result) in [
+        ("unminimize", window.unminimize()),
+        ("show", window.show()),
+        ("focus", window.focus()),
+    ] {
+        if let Err(error) = result {
+            eprintln!("[lasterm] WARN: cannot {operation} window {label}: {error}");
+            if operation == "show" {
+                show_error = Some(error);
+            }
+        }
+    }
+
+    show_error.map_or(Ok(()), |error| {
+        Err(format!("cannot show window {label}: {error}"))
+    })
+}
+
+fn raise_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let main_thread_app = app.clone();
+    run_after_main_thread_action(
+        move |action| {
+            app.run_on_main_thread(action)
+                .map_err(|error| format!("cannot schedule the main-window raise: {error}"))
+        },
+        move || {
+            let window = main_thread_app
+                .get_webview_window("main")
+                .ok_or_else(|| "the main window is unavailable".to_string())?;
+            run_window_raise_actions(&window)
+        },
+    )
+}
+
+fn read_delimited_raise_message<S: Read>(stream: &mut S) -> std::io::Result<Option<Vec<u8>>> {
+    let mut message = Vec::with_capacity(INSTANCE_RAISE_MAX_BYTES);
+    let mut byte = [0_u8; 1];
+    while message.len() < INSTANCE_RAISE_MAX_BYTES {
+        match stream.read(&mut byte) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {
+                message.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(Some(message));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+fn handle_desktop_raise_connection<S, Raise>(stream: &mut S, raise: Raise)
+where
+    S: Read + Write,
+    Raise: FnOnce() -> Result<(), String>,
+{
+    let Ok(Some(request)) = read_delimited_raise_message(stream) else {
+        return;
+    };
+    if request != INSTANCE_RAISE_REQUEST {
+        return;
+    }
+    let reply = match raise() {
+        Ok(()) => INSTANCE_RAISE_SUCCESS,
+        Err(error) => {
+            eprintln!("[lasterm] desktop raise failed: {error}");
+            INSTANCE_RAISE_FAILURE
+        }
+    };
+    let _ = stream.write_all(reply);
+}
+
+#[cfg(unix)]
+fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult {
+    let mut stream = match UnixStream::connect(&endpoint.path) {
+        Ok(stream) => stream,
+        Err(_) => return RaiseRequestResult::Unanswered,
+    };
+    if stream
+        .set_read_timeout(Some(INSTANCE_RAISE_TIMEOUT))
+        .is_err()
+        || stream
+            .set_write_timeout(Some(INSTANCE_RAISE_TIMEOUT))
+            .is_err()
+        || stream.write_all(INSTANCE_RAISE_REQUEST).is_err()
+        || stream.shutdown(std::net::Shutdown::Write).is_err()
+    {
+        return RaiseRequestResult::Unanswered;
+    }
+    match read_delimited_raise_message(&mut stream) {
+        Ok(Some(reply)) if reply == INSTANCE_RAISE_SUCCESS => RaiseRequestResult::Raised,
+        Ok(Some(reply)) if reply == INSTANCE_RAISE_FAILURE => RaiseRequestResult::Failed,
+        _ => RaiseRequestResult::Unanswered,
+    }
+}
+
+#[cfg(unix)]
+fn bind_desktop_raise_socket(path: &Path) -> Result<UnixListener, String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot remove stale desktop raise socket {}: {error}",
+                path.display()
+            ))
+        }
+    }
+    UnixListener::bind(path).map_err(|error| {
+        format!(
+            "cannot bind desktop raise socket {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn start_desktop_raise_listener(
+    app: tauri::AppHandle,
+    endpoint: &DesktopRaiseEndpoint,
+) -> Result<DesktopRaiseListener, String> {
+    let listener = bind_desktop_raise_socket(&endpoint.path)?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("cannot configure desktop raise listener: {error}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    std::thread::spawn({
+        let endpoint = endpoint.clone();
+        move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(INSTANCE_RAISE_TIMEOUT));
+                        let _ = stream.set_write_timeout(Some(INSTANCE_RAISE_TIMEOUT));
+                        let raise_app = app.clone();
+                        handle_desktop_raise_connection(&mut stream, move || {
+                            raise_main_window(raise_app)
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[lasterm] desktop raise listener {} stopped: {error}",
+                            endpoint.path.display()
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Ok(DesktopRaiseListener {
+        stop,
+        path: endpoint.path.clone(),
+    })
+}
+
+#[cfg(windows)]
+fn create_desktop_raise_pipe(name: &str) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{LocalFree, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+
+    // Only the creating user may connect. The pipe namespace is global, so a
+    // user-scoped name alone would not be a sufficient boundary.
+    let sddl: Vec<u16> = "D:(A;;GA;;;OW)\0".encode_utf16().collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { LocalFree(self.0.cast()) };
+            }
+        }
+    }
+    let _descriptor = Descriptor(descriptor);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            INSTANCE_RAISE_MAX_BYTES as u32,
+            INSTANCE_RAISE_MAX_BYTES as u32,
+            0,
+            &attributes,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+struct WindowsPipeReader<'a> {
+    stream: &'a std::fs::File,
+    deadline: Instant,
+}
+
+#[cfg(windows)]
+impl Read for WindowsPipeReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let mut available = 0;
+            let ok = unsafe {
+                PeekNamedPipe(
+                    self.stream.as_raw_handle(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if available > 0 {
+                let mut stream = self.stream;
+                return stream.read(&mut buffer[..1]);
+            }
+            if Instant::now() >= self.deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out waiting for a desktop raise message",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_pipe_message(stream: &std::fs::File) -> Result<Option<Vec<u8>>, std::io::Error> {
+    let mut reader = WindowsPipeReader {
+        stream,
+        deadline: Instant::now() + INSTANCE_RAISE_TIMEOUT,
+    };
+    read_delimited_raise_message(&mut reader)
+}
+
+#[cfg(windows)]
+fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FlushFileBuffers, OPEN_EXISTING};
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+    let name: Vec<u16> = endpoint.pipe_name.encode_utf16().chain(Some(0)).collect();
+    if unsafe { WaitNamedPipeW(name.as_ptr(), INSTANCE_RAISE_TIMEOUT.as_millis() as u32) } == 0 {
+        return RaiseRequestResult::Unanswered;
+    }
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return RaiseRequestResult::Unanswered;
+    }
+    let mut stream = unsafe { std::fs::File::from_raw_handle(handle) };
+    if stream.write_all(INSTANCE_RAISE_REQUEST).is_err()
+        || unsafe { FlushFileBuffers(std::os::windows::io::AsRawHandle::as_raw_handle(&stream)) }
+            == 0
+    {
+        return RaiseRequestResult::Unanswered;
+    }
+    match read_windows_pipe_message(&stream) {
+        Ok(Some(reply)) if reply == INSTANCE_RAISE_SUCCESS => RaiseRequestResult::Raised,
+        Ok(Some(reply)) if reply == INSTANCE_RAISE_FAILURE => RaiseRequestResult::Failed,
+        _ => RaiseRequestResult::Unanswered,
+    }
+}
+
+#[cfg(windows)]
+fn start_desktop_raise_listener(
+    app: tauri::AppHandle,
+    endpoint: &DesktopRaiseEndpoint,
+) -> Result<DesktopRaiseListener, String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let pipe_name = endpoint.pipe_name.clone();
+    std::thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let stream = match create_desktop_raise_pipe(&pipe_name) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    eprintln!("[lasterm] cannot create desktop raise pipe {pipe_name}: {error}");
+                    break;
+                }
+            };
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
+            use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+            let connected =
+                unsafe { ConnectNamedPipe(stream.as_raw_handle(), std::ptr::null_mut()) };
+            if connected == 0
+                && std::io::Error::last_os_error().raw_os_error()
+                    != Some(ERROR_PIPE_CONNECTED as i32)
+            {
+                continue;
+            }
+            let raise_app = app.clone();
+            std::thread::spawn(move || {
+                let Ok(Some(request)) = read_windows_pipe_message(&stream) else {
+                    return;
+                };
+                if request != INSTANCE_RAISE_REQUEST {
+                    return;
+                }
+                let reply = match raise_main_window(raise_app) {
+                    Ok(()) => INSTANCE_RAISE_SUCCESS,
+                    Err(error) => {
+                        eprintln!("[lasterm] desktop raise failed: {error}");
+                        INSTANCE_RAISE_FAILURE
+                    }
+                };
+                let mut stream = stream;
+                let _ = stream.write_all(reply);
+            });
+        }
+    });
+    Ok(DesktopRaiseListener { stop })
+}
+
+#[cfg(dev)]
+fn show_desktop_instance_failure_then_exit(app: tauri::AppHandle, message: String) {
+    eprintln!("[lasterm] startup stopped: {message}");
+    app.dialog()
+        .message(message)
+        .title("Lasterm cannot start")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(1));
+}
+
+#[cfg(not(dev))]
+fn show_instance_failure_then_exit(app: tauri::AppHandle, message: String) {
+    show_startup_failure_then_exit(app, message);
+}
+
+#[cfg(dev)]
+fn show_instance_failure_then_exit(app: tauri::AppHandle, message: String) {
+    show_desktop_instance_failure_then_exit(app, message);
 }
 
 #[derive(Clone)]
@@ -1458,6 +2277,22 @@ fn set_windows_transparent_background(window: &tauri::WebviewWindow) -> tauri::R
 /// In release builds, spawn the hub sidecar and wait for it to become ready.
 /// In dev builds, the hub is already running externally — just show the window.
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // This is deliberately first: no second desktop may spawn a sidecar, initialise
+    // a tray, or show a window. The managed guard keeps its non-inheritable handle
+    // alive until this desktop process exits.
+    let mut instance = match acquire_desktop_instance() {
+        Ok(DesktopInstanceStartup::Primary(instance)) => instance,
+        Ok(DesktopInstanceStartup::Secondary) => {
+            // The primary acknowledged after `show()` and `set_focus()` completed.
+            // There is nothing for this process to initialise or display.
+            app.handle().exit(0);
+            return Ok(());
+        }
+        Err(error) => {
+            show_instance_failure_then_exit(app.handle().clone(), error);
+            return Ok(());
+        }
+    };
     // System tray
     let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -1762,6 +2597,19 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let _ = window.set_focus();
     }
 
+    // Publish the handoff endpoint only after primary setup is complete. Until
+    // then a secondary retries the lock and endpoint, so a queued main-thread
+    // raise can never time out and run only after its failure was reported.
+    instance.raise_listener =
+        match start_desktop_raise_listener(app.handle().clone(), &instance.endpoint) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                show_instance_failure_then_exit(app.handle().clone(), error);
+                return Ok(());
+            }
+        };
+    app.manage(instance);
+
     Ok(())
 }
 
@@ -1818,6 +2666,489 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    struct TestWindowRaiseTarget {
+        label: &'static str,
+        unminimize_result: Result<(), String>,
+        show_result: Result<(), String>,
+        focus_result: Result<(), String>,
+        attempts: Mutex<Vec<&'static str>>,
+    }
+
+    impl TestWindowRaiseTarget {
+        fn new(
+            unminimize_result: Result<(), String>,
+            show_result: Result<(), String>,
+            focus_result: Result<(), String>,
+        ) -> Self {
+            Self {
+                label: "main",
+                unminimize_result,
+                show_result,
+                focus_result,
+                attempts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn attempts(&self) -> Vec<&'static str> {
+            self.attempts.lock().unwrap().clone()
+        }
+    }
+
+    impl WindowRaiseTarget for TestWindowRaiseTarget {
+        fn label(&self) -> &str {
+            self.label
+        }
+
+        fn unminimize(&self) -> Result<(), String> {
+            self.attempts.lock().unwrap().push("unminimize");
+            self.unminimize_result.clone()
+        }
+
+        fn show(&self) -> Result<(), String> {
+            self.attempts.lock().unwrap().push("show");
+            self.show_result.clone()
+        }
+
+        fn focus(&self) -> Result<(), String> {
+            self.attempts.lock().unwrap().push("focus");
+            self.focus_result.clone()
+        }
+    }
+
+    struct FragmentedReader {
+        fragments: VecDeque<Vec<u8>>,
+    }
+
+    impl FragmentedReader {
+        fn new(fragments: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self {
+                fragments: fragments.into_iter().collect(),
+            }
+        }
+    }
+
+    impl Read for FragmentedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let Some(fragment) = self.fragments.pop_front() else {
+                return Ok(0);
+            };
+            let used = buffer.len().min(fragment.len());
+            buffer[..used].copy_from_slice(&fragment[..used]);
+            if used < fragment.len() {
+                self.fragments.push_front(fragment[used..].to_vec());
+            }
+            Ok(used)
+        }
+    }
+
+    struct InstanceTestDir(PathBuf);
+
+    impl std::ops::Deref for InstanceTestDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for InstanceTestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl InstanceTestDir {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for InstanceTestDir {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "[lasterm] could not remove test directory {}: {error}",
+                        self.0.display()
+                    );
+                }
+            }
+        }
+    }
+
+    fn instance_test_dir(name: &str) -> InstanceTestDir {
+        let base = std::env::temp_dir();
+        let pid = std::process::id();
+        let start = INSTANCE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..1024 {
+            let path = base.join(format!(
+                "lasterm-desktop-instance-{name}-{pid}-{start}-{attempt}"
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return InstanceTestDir(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("could not create {}: {error}", path.display()),
+            }
+        }
+        panic!(
+            "could not allocate a unique test directory under {}",
+            base.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_writable_runtime_directory_is_refused_with_its_path() {
+        let dir = instance_test_dir("group-writable");
+        let mut permissions = std::fs::metadata(&dir).unwrap().permissions();
+        permissions.set_mode(0o770);
+        std::fs::set_permissions(&dir, permissions).unwrap();
+
+        let error = prepare_runtime_dir(&dir).unwrap_err();
+        assert!(error.contains(&dir.display().to_string()));
+        assert!(error.contains("group or other may write"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_runtime_directory_is_refused_and_absent_directory_is_created_securely() {
+        assert!(prepare_runtime_dir(Path::new("relative-runtime")).is_err());
+        let dir = instance_test_dir("absent");
+        let absent = dir.join("missing").join("lasterm");
+        prepare_runtime_dir(&absent).unwrap();
+        let metadata = std::fs::metadata(&absent).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn windows_local_app_data_absent_or_empty_is_refused() {
+        for local_app_data in [None, Some(std::ffi::OsString::new())] {
+            let error = windows_desktop_instance_lock_path(local_app_data).unwrap_err();
+            assert!(error.contains("LOCALAPPDATA"));
+        }
+    }
+
+    #[test]
+    fn windows_relative_local_app_data_is_refused() {
+        let error = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from("relative")))
+            .unwrap_err();
+        assert!(error.contains("not absolute"));
+        assert!(error.contains("relative"));
+    }
+
+    #[test]
+    fn windows_local_app_data_creates_the_runtime_paths() {
+        let local_app_data = instance_test_dir("windows-local-app-data");
+        let lock_path =
+            windows_desktop_instance_lock_path(Some(local_app_data.path().to_path_buf().into()))
+                .unwrap();
+        let runtime_dir = local_app_data.join("lasterm").join("runtime");
+
+        assert_eq!(lock_path, runtime_dir.join("desktop-instance.lock"));
+        assert!(runtime_dir.is_dir());
+    }
+
+    #[test]
+    fn windows_local_app_data_that_is_not_a_directory_is_refused() {
+        let dir = instance_test_dir("windows-local-app-data-file");
+        let path = dir.join("not-a-directory");
+        std::fs::write(&path, "not a directory").unwrap();
+
+        let error = windows_desktop_instance_lock_path(Some(path.clone().into())).unwrap_err();
+        assert!(error.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn windows_unc_local_app_data_is_refused_with_its_value() {
+        let unc = r"\\server\share";
+        let error =
+            windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(unc))).unwrap_err();
+        assert!(error.contains(unc));
+        assert!(error.contains("host-local"));
+    }
+
+    #[test]
+    fn windows_runtime_validation_rejects_reparse_points() {
+        let path = instance_test_dir("windows-reparse-point");
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+
+        let error = validate_windows_runtime_dir(&path, &metadata, true).unwrap_err();
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("not a real directory"));
+    }
+
+    #[test]
+    fn secondary_becomes_primary_when_the_holder_releases_during_retry() {
+        let dir = instance_test_dir("handoff");
+        let lock_path = dir.join("desktop.lock");
+        let endpoint = desktop_raise_endpoint(&lock_path).unwrap();
+        let holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+        let waiter = std::thread::spawn({
+            let lock_path = lock_path.clone();
+            move || acquire_desktop_instance_at(&lock_path, &endpoint)
+        });
+
+        std::thread::sleep(Duration::from_millis(150));
+        drop(holder);
+        assert!(matches!(
+            waiter.join().unwrap().unwrap(),
+            DesktopInstanceStartup::Primary(_)
+        ));
+    }
+
+    /// A primary only binds its endpoint once setup has completed, so an early
+    /// refusal must not prevent a later successful raise within the handoff
+    /// budget.
+    #[test]
+    fn handoff_retries_the_endpoint_until_a_later_raise_succeeds() {
+        let dir = instance_test_dir("handoff-retries-endpoint");
+        let lock_path = dir.join("desktop.lock");
+        let endpoint = desktop_raise_endpoint(&lock_path).unwrap();
+        let _holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+        let attempts = Arc::new(AtomicU16::new(0));
+
+        let result = acquire_desktop_instance_at_with_raise(&lock_path, &endpoint, {
+            let attempts = attempts.clone();
+            move |_| {
+                if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                    RaiseRequestResult::Unanswered
+                } else {
+                    RaiseRequestResult::Raised
+                }
+            }
+        });
+
+        assert!(matches!(result.unwrap(), DesktopInstanceStartup::Secondary));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    /// Kills the mutation that removes unminimize from a raise, leaving a
+    /// normally tray-less-minimized main window unable to be restored.
+    #[test]
+    fn raise_unminimizes_before_showing_and_focusing() {
+        let window = TestWindowRaiseTarget::new(Ok(()), Ok(()), Ok(()));
+
+        run_window_raise_actions(&window).unwrap();
+
+        assert_eq!(window.attempts(), ["unminimize", "show", "focus"]);
+    }
+
+    /// Kills the mutation that returns after the first failing operation and
+    /// skips later raise operations. It also proves only `show()` establishes
+    /// a successful raise: a no-op unminimize is not enough to make a hidden
+    /// window visible.
+    #[test]
+    fn raise_continues_after_failures_and_requires_show() {
+        let partial_success = TestWindowRaiseTarget::new(
+            Err("unminimize failed".to_string()),
+            Ok(()),
+            Err("focus failed".to_string()),
+        );
+
+        assert!(run_window_raise_actions(&partial_success).is_ok());
+        assert_eq!(partial_success.attempts(), ["unminimize", "show", "focus"]);
+
+        let show_failed = TestWindowRaiseTarget::new(
+            Ok(()),
+            Err("show failed".to_string()),
+            Ok(()),
+        );
+        let error = run_window_raise_actions(&show_failed).unwrap_err();
+
+        assert!(error.contains("cannot show window main"));
+        assert_eq!(show_failed.attempts(), ["unminimize", "show", "focus"]);
+    }
+
+    /// Kills the P1 mutation that selects a different authority when a shell
+    /// lacks XDG_RUNTIME_DIR than when a desktop launcher exports it.
+    #[cfg(unix)]
+    #[test]
+    fn desktop_lock_authority_is_identical_with_and_without_xdg_runtime_dir() {
+        let base = instance_test_dir("stable-authority");
+        let uid = 42_424;
+        let graphical = unix_desktop_runtime_dir_for_environment_at(
+            base.path(),
+            uid,
+            Some(std::ffi::OsStr::new("/run/user/1000")),
+        );
+        let shell = unix_desktop_runtime_dir_for_environment_at(base.path(), uid, None);
+        assert_eq!(graphical, shell);
+
+        std::fs::create_dir(&graphical).unwrap();
+        let first = ProcessLock::try_acquire(&graphical.join("desktop-instance.lock"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            ProcessLock::try_acquire(&shell.join("desktop-instance.lock"))
+                .unwrap()
+                .is_none()
+        );
+        drop(first);
+    }
+
+    /// Kills the P2 mutation that sends success immediately after queueing UI
+    /// work rather than after the main thread has performed it.
+    #[cfg(unix)]
+    #[test]
+    fn raise_reply_is_sent_only_after_the_main_thread_action_runs() {
+        let dir = instance_test_dir("raise-completion");
+        let path = dir.join("desktop-raise.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (queued_tx, queued_rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_desktop_raise_connection(&mut stream, move || {
+                run_after_main_thread_action(
+                    move |action| queued_tx.send(action).map_err(|error| error.to_string()),
+                    || Ok(()),
+                )
+            });
+        });
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let mut stream = UnixStream::connect(path).unwrap();
+            stream.write_all(INSTANCE_RAISE_REQUEST).unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).unwrap();
+            reply_tx.send(reply).unwrap();
+        });
+
+        let action = queued_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(reply_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        action();
+        assert_eq!(
+            reply_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            INSTANCE_RAISE_SUCCESS
+        );
+        client.join().unwrap();
+        server.join().unwrap();
+    }
+
+    /// Kills the P3 mutation that treats a primary's explicit failure response
+    /// as if it were a successful raise and exits this process with status 0.
+    #[cfg(unix)]
+    #[test]
+    fn failure_reply_from_the_primary_is_reported() {
+        let dir = instance_test_dir("raise-failure");
+        let lock_path = dir.join("desktop.lock");
+        let endpoint = desktop_raise_endpoint(&lock_path).unwrap();
+        let listener = UnixListener::bind(&endpoint.path).unwrap();
+        let holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_desktop_raise_connection(&mut stream, || Err("window unavailable".to_string()));
+        });
+
+        let error = match acquire_desktop_instance_at(&lock_path, &endpoint) {
+            Err(error) => error,
+            Ok(_) => panic!("a failure reply must not be treated as a successful secondary"),
+        };
+        assert!(error.contains("could not show its window"));
+        drop(holder);
+        server.join().unwrap();
+    }
+
+    /// Kills the P3 mutation that exits after an unanswered connection instead
+    /// of retrying the lock, which is the handoff race after a dead primary.
+    #[cfg(unix)]
+    #[test]
+    fn no_reply_retries_the_lock_and_becomes_primary() {
+        let dir = instance_test_dir("raise-no-reply");
+        let lock_path = dir.join("desktop.lock");
+        let endpoint = desktop_raise_endpoint(&lock_path).unwrap();
+        let listener = UnixListener::bind(&endpoint.path).unwrap();
+        let holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            std::thread::sleep(INSTANCE_RAISE_TIMEOUT + Duration::from_millis(50));
+        });
+        let waiter = std::thread::spawn({
+            let lock_path = lock_path.clone();
+            let endpoint = endpoint.clone();
+            move || acquire_desktop_instance_at(&lock_path, &endpoint)
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        drop(holder);
+        assert!(matches!(
+            waiter.join().unwrap().unwrap(),
+            DesktopInstanceStartup::Primary(_)
+        ));
+        server.join().unwrap();
+    }
+
+    /// Kills the P5 mutation that leaves a stale Unix socket preventing the
+    /// next lock holder from binding its listener.
+    #[cfg(unix)]
+    #[test]
+    fn stale_desktop_raise_socket_is_replaced_by_the_next_primary() {
+        let dir = instance_test_dir("stale-raise-socket");
+        let path = dir.join("desktop-raise.sock");
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        let listener = bind_desktop_raise_socket(&path).unwrap();
+        assert!(path.exists());
+        drop(listener);
+    }
+
+    /// Kills the P5 mutation that releases the lock while leaving the socket
+    /// name behind after a normal primary shutdown.
+    #[cfg(unix)]
+    #[test]
+    fn desktop_raise_listener_cleanup_removes_its_socket_before_lock_release() {
+        let dir = instance_test_dir("raise-listener-cleanup");
+        let path = dir.join("desktop-raise.sock");
+        drop(UnixListener::bind(&path).unwrap());
+        let listener = DesktopRaiseListener {
+            stop: Arc::new(AtomicBool::new(false)),
+            path: path.clone(),
+        };
+        drop(listener);
+        assert!(!path.exists());
+    }
+
+    /// Kills the P4 mutation that accepts an arbitrary local socket payload as
+    /// a raise request. Invalid bytes receive no response and never invoke UI.
+    #[test]
+    fn unknown_or_oversized_raise_request_is_rejected_without_action() {
+        let oversized = vec![b'x'; INSTANCE_RAISE_MAX_BYTES];
+        for request in [b"unknown\n".as_slice(), oversized.as_slice()] {
+            let mut stream = std::io::Cursor::new(request.to_vec());
+            let invoked = Arc::new(AtomicBool::new(false));
+            let action_invoked = invoked.clone();
+            handle_desktop_raise_connection(&mut stream, move || {
+                action_invoked.store(true, Ordering::Relaxed);
+                Ok(())
+            });
+            assert!(!invoked.load(Ordering::Relaxed));
+            assert_eq!(stream.into_inner(), request);
+        }
+    }
+
+    #[test]
+    fn fragmented_raise_message_is_read_to_its_delimiter() {
+        let mut reader = FragmentedReader::new([b"raise-".to_vec(), b"v1\n".to_vec()]);
+
+        assert_eq!(
+            read_delimited_raise_message(&mut reader).unwrap(),
+            Some(INSTANCE_RAISE_REQUEST.to_vec())
+        );
+    }
+
+    #[test]
+    fn unterminated_raise_message_at_the_byte_cap_is_refused() {
+        let mut reader = FragmentedReader::new([vec![b'x'; INSTANCE_RAISE_MAX_BYTES]]);
+
+        assert_eq!(read_delimited_raise_message(&mut reader).unwrap(), None);
+    }
 
     /// The line the hub actually prints, taken from a run rather than written from
     /// memory: `lasterm hub listening on http://127.0.0.1:45999 (build: 5c31e75)`.
@@ -1894,20 +3225,47 @@ mod tests {
 
     static CLOSE_BEHAVIOR_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
 
-    fn close_behavior_test_path(name: &str) -> PathBuf {
+    struct CloseBehaviorTestFixture(PathBuf);
+
+    impl CloseBehaviorTestFixture {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for CloseBehaviorTestFixture {
+        fn drop(&mut self) {
+            let Some(parent) = self.0.parent() else {
+                return;
+            };
+            if let Err(error) = std::fs::remove_dir_all(parent) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "[lasterm] could not remove test directory {}: {error}",
+                        parent.display()
+                    );
+                }
+            }
+        }
+    }
+
+    fn close_behavior_test_path(name: &str) -> CloseBehaviorTestFixture {
         let unique = format!(
             "lasterm-close-behavior-{name}-{}-{}",
             std::process::id(),
             CLOSE_BEHAVIOR_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        std::env::temp_dir()
-            .join(unique)
-            .join("close-behavior.json")
+        CloseBehaviorTestFixture(
+            std::env::temp_dir()
+                .join(unique)
+                .join("close-behavior.json"),
+        )
     }
 
     #[test]
     fn stored_tray_behavior_reads_as_hide() {
-        let path = close_behavior_test_path("tray");
+        let fixture = close_behavior_test_path("tray");
+        let path = fixture.path();
         std::fs::create_dir_all(path.parent().expect("test path parent")).expect("create test dir");
         std::fs::write(&path, r#"{"closeBehavior":"tray"}"#).expect("write test config");
 
@@ -1915,13 +3273,12 @@ mod tests {
             read_close_behavior_from_path(&path),
             CloseBehaviorConfigState::Stored(CloseBehavior::Hide)
         );
-
-        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
     }
 
     #[test]
     fn unknown_or_unreadable_close_behavior_is_not_a_decision() {
-        let path = close_behavior_test_path("invalid");
+        let fixture = close_behavior_test_path("invalid");
+        let path = fixture.path();
         std::fs::create_dir_all(path.parent().expect("test path parent")).expect("create test dir");
         std::fs::write(&path, r#"{"closeBehavior":"destroy"}"#).expect("write test config");
 
@@ -1943,13 +3300,12 @@ mod tests {
             close_behavior_command_result(read_close_behavior_from_path(&path)),
             Ok(CloseBehavior::Ask)
         );
-
-        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
     }
 
     #[test]
     fn written_close_behavior_is_readable_without_a_window() {
-        let path = close_behavior_test_path("round-trip");
+        let fixture = close_behavior_test_path("round-trip");
+        let path = fixture.path();
 
         write_close_behavior_to_path(&path, CloseBehavior::Quit).expect("write close preference");
 
@@ -1957,13 +3313,12 @@ mod tests {
             read_close_behavior_from_path(&path),
             CloseBehaviorConfigState::Stored(CloseBehavior::Quit)
         );
-
-        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
     }
 
     #[test]
     fn interrupted_close_behavior_replace_keeps_the_previous_preference() {
-        let path = close_behavior_test_path("interrupted-replace");
+        let fixture = close_behavior_test_path("interrupted-replace");
+        let path = fixture.path();
         write_close_behavior_to_path(&path, CloseBehavior::Ask).expect("write initial preference");
 
         let error =
@@ -1980,8 +3335,6 @@ mod tests {
             read_close_behavior_from_path(&path),
             CloseBehaviorConfigState::Stored(CloseBehavior::Ask)
         );
-
-        std::fs::remove_dir_all(path.parent().expect("test path parent")).expect("remove test dir");
     }
 
     #[test]

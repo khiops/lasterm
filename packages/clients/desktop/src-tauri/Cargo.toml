@@ -25,6 +25,13 @@ reqwest = { version = "0.12", features = ["blocking"], default-features = false 
 dirs = "6"
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
+lasterm-process-lock = { path = "../../../../crates/lasterm-process-lock" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes"] }
 
 [profile.release]
 # Keep lto = false (Cargo default) for fast CI builds.

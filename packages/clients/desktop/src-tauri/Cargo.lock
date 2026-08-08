@@ -1797,6 +1797,8 @@ name = "lasterm-desktop"
 version = "0.8.0"
 dependencies = [
  "dirs",
+ "lasterm-process-lock",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1806,6 +1808,15 @@ dependencies = [
  "tauri-plugin-os",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "lasterm-process-lock"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -338,10 +338,17 @@ dependencies = [
 name = "lasterm-hub-lock"
 version = "0.6.0"
 dependencies = [
- "libc",
+ "lasterm-process-lock",
  "napi",
  "napi-build",
  "napi-derive",
+]
+
+[[package]]
+name = "lasterm-process-lock"
+version = "0.1.0"
+dependencies = [
+ "libc",
  "windows-sys 0.59.0",
 ]
 

@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "lasterm-desktop"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "dirs",
  "lasterm-process-lock",

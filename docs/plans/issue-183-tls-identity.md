@@ -103,6 +103,37 @@ batch was verified complete by reading the page's own byte counter — the first
 bench reported three refusals from a server that had crashed on a missing module, and only
 the plain-HTTP control revealed it.
 
+## §2.4 What this branch delivers, and what it does not
+
+Written after the cumulative gate refused the branch for claiming more than the code does. Six properties
+had reached no dispatched brief: a slice table assigned every one, then the cuts moved — a split, a merge,
+and a slice assumed done by a spike — and the obligations did not travel.
+`~/.claude/scripts/spec-coverage.sh` now maps each property against the prompts actually dispatched, and the
+gate carries the same list into its prompt.
+
+| Property | State |
+|---|---|
+| P1 no plaintext credential endpoint | delivered |
+| P2 certificate and key inseparable | delivered |
+| P3 generated leaf, never a CA | delivered |
+| P3b the published identity is never ahead of the running one | delivered |
+| P3c the first pin comes from an anchor | delivered — the hub's announcement carries its SPKI on the child's pipe, and the attach path checks the record's ownership, mode and symlinks before it authorises a pin |
+| P3c-visibility | **deferred, #201.** A mismatch shows a startup failure naming `--reset-hub-pin`; there is no first-pin window, no once/always/no prompt, and no hub-side fingerprint command |
+| P4 the pin survives a re-issue over the same key | delivered |
+| P5 a mismatch is terminal | delivered |
+| P6 accepted solely on the pin | delivered |
+| P7 no hub traffic originates in the webview | delivered for REST and the WebSocket. Assets now cross the relay as blob URLs; their caching and revocation lifecycle stays in **#194** |
+| P8 no browser pairing outlives the hub run | delivered |
+| P8-authority | delivered |
+| P9 the relay cannot buffer without bound | delivered |
+| P10 the operator can replace the key | **deferred, #199.** Nothing can replace the key today, and nothing warns of expiry |
+| P11 permission checks where files are opened | **partly delivered.** `runtime.json` is checked because its contents decide who the client trusts. `auth.json`, the certificate, the key's re-read, and the whole Windows story are **deferred, #200** |
+| P12 the default port is not guessable | delivered |
+
+**The one thing a reader should carry from this table:** the transport authenticates the hub and the desktop
+detects a substitution, which is what the work existed for. The defences *around* that — rotating a leaked
+key, refusing a group-readable token file, showing the user a fingerprint — are named, tracked, and not here.
+
 ## §3 Properties
 
 Each property is stated as what must hold. The mechanism that achieves it is a suggestion in
@@ -998,6 +1029,10 @@ implemented by whoever reads it next.
 | issue #193 | cites `docs/plans/issue-183-hub-identity.md` as the specification | That file was abandoned and is not in this repository |
 | `docs/SECURITY.md` | describes the transport as plaintext loopback, and instructs a second device to open `http://<hub-ip>:4100` | Contradicts P1 outright. Already tracked as self-contradictory in #192, and this design changes the answer rather than resolving the old contradiction |
 | `docs/SPEC.md` | documents the hub as binding `127.0.0.1` over HTTP | The port and binding stay, the scheme does not |
+
+Three properties this branch does not deliver are now tracked: **#199** key rotation and the expiry
+reminder, **#200** the remaining permission and redirection checks, **#201** the pin-mismatch interface and
+the hub-side fingerprint command. #194 keeps the asset blob lifecycle.
 
 `docs/decisions.md` gains this story's decisions: the transport-carries-identity principle, the
 SPKI-only pinning predicate with the key generated once, the unconditional browser-token rule, and

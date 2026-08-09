@@ -136,6 +136,7 @@ describe.sequential("hub startup lock", () => {
 					initAuth: () => "token",
 					createOwnerToken: () => "owner",
 					openDatabases: () => databases as never,
+					sweepNonPrimaryTokens: () => undefined,
 					createServer: async () => server as never,
 					startServer: async () => "127.0.0.1:4100",
 					addStartupCorsOrigins: () => 4100,

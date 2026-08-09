@@ -4,3 +4,6 @@
 /lasterm-agent-*
 /gen/
 /target/
+# cargo-mutants writes its per-run output and the previous run's copy here.
+/mutants.out/
+/mutants.out.old/

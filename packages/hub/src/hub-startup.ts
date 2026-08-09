@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { initAuth } from "./auth.js";
+import { initAuth, sweepNonPrimaryTokens } from "./auth.js";
 import {
 	deleteRuntime,
 	getConfigDir,
@@ -46,6 +46,7 @@ export interface HubStartupDependencies {
 	readonly initAuth: typeof initAuth;
 	readonly createOwnerToken: typeof createOwnerToken;
 	readonly openDatabases: typeof openDatabases;
+	readonly sweepNonPrimaryTokens: typeof sweepNonPrimaryTokens;
 	readonly createServer: typeof createServer;
 	readonly startServer: typeof startServer;
 	readonly addStartupCorsOrigins: typeof addStartupCorsOrigins;
@@ -61,6 +62,7 @@ const defaultDependencies: HubStartupDependencies = {
 	initAuth,
 	createOwnerToken,
 	openDatabases,
+	sweepNonPrimaryTokens,
 	createServer,
 	startServer,
 	addStartupCorsOrigins,
@@ -119,6 +121,9 @@ export async function startHub(
 		const ownerToken = dependencies.createOwnerToken();
 		const databases = dependencies.openDatabases(stateDir);
 		dbManager = databases;
+		// This must commit before createServer() can construct a listener, so a
+		// browser token from the previous hub run is never valid while serving.
+		dependencies.sweepNonPrimaryTokens(databases.meta);
 		const quit = createQuitLifecycle(() => {
 			if (!server || !runtime) throw new Error("hub shutdown requested before startup completed");
 			return { server, dbManager: databases, runtime, deleteRuntime: dependencies.deleteRuntime };

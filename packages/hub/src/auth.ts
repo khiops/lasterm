@@ -30,8 +30,23 @@ export interface AuthTokenRecord {
 	expiresAt: string | null;
 	/** ISO 8601 — non-null means revoked */
 	revokedAt: string | null;
+	/** ISO 8601 — non-null means invalidated by a hub restart */
+	sweptAt: string | null;
 	/** ISO 8601 — set on each successful auth request (sliding window) */
 	lastUsedAt: string | null;
+}
+
+/**
+ * The hub cannot safely start unless it has invalidated every browser-issued
+ * credential from the preceding run.
+ */
+export class TokenSweepError extends Error {
+	readonly code = "AUTH_TOKEN_SWEEP_FAILED";
+
+	constructor(cause: unknown) {
+		super("Unable to invalidate non-primary tokens before startup", { cause });
+		this.name = "TokenSweepError";
+	}
 }
 
 // ─── Auth config (re-exported from config.ts to avoid circular deps) ──────────
@@ -121,6 +136,7 @@ function rowToRecord(row: Record<string, unknown>): AuthTokenRecord {
 		createdAt: row.created_at as string,
 		expiresAt: (row.expires_at as string | null) ?? null,
 		revokedAt: (row.revoked_at as string | null) ?? null,
+		sweptAt: (row.swept_at as string | null) ?? null,
 		lastUsedAt: (row.last_used_at as string | null) ?? null,
 	};
 }
@@ -160,6 +176,24 @@ export function createToken(
 	).run(id, hash, opts.label, now, opts.expiresAt);
 
 	return { id, token };
+}
+
+/**
+ * Invalidate every credential except the durable auth.json token.
+ *
+ * This runs once during startup, before the listener is bound. The sentinel is
+ * deliberately the entire allowlist: rows from an unknown future issuer are
+ * invalidated too, rather than being accidentally allowed to survive a restart.
+ */
+export function sweepNonPrimaryTokens(db: Database.Database): void {
+	try {
+		db.prepare("UPDATE auth_tokens SET swept_at = ? WHERE id <> ?").run(
+			new Date().toISOString(),
+			PRIMARY_TOKEN_ID,
+		);
+	} catch (cause) {
+		throw new TokenSweepError(cause);
+	}
 }
 
 /**
@@ -226,7 +260,7 @@ export function touchToken(db: Database.Database, id: string, ttlDays: number): 
  *
  * Checks:
  * 1. Token hash exists in auth_tokens
- * 2. Not revoked (revoked_at IS NULL)
+ * 2. Not operator-revoked or restart-swept
  * 3. Not expired (expires_at IS NULL OR expires_at > now)
  *
  * Returns the token record on success, or null on failure.
@@ -235,14 +269,19 @@ export function validateTokenRecord(
 	db: Database.Database,
 	plaintextToken: string,
 ): AuthTokenRecord | null {
-	const record = getTokenByValue(db, plaintextToken);
-	if (!record) return null;
-	if (record.revokedAt !== null) return null;
+	try {
+		const record = getTokenByValue(db, plaintextToken);
+		if (!record) return null;
+		if (record.revokedAt !== null || record.sweptAt !== null) return null;
 
-	const now = new Date().toISOString();
-	if (record.expiresAt !== null && record.expiresAt <= now) return null;
+		const now = new Date().toISOString();
+		if (record.expiresAt !== null && record.expiresAt <= now) return null;
 
-	return record;
+		return record;
+	} catch {
+		// If the DB cannot establish validity, it cannot authorise a request.
+		return null;
+	}
 }
 
 /**

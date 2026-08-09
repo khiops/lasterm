@@ -84,6 +84,7 @@ import { ref, computed, onMounted } from "vue";
 import type { LastermTheme } from "@lasterm/shared";
 import { BUNDLED_THEME_NAMES, validateTheme } from "@lasterm/shared";
 import { hubBaseUrl } from "../../utils/hub-url.js";
+import { hubFetch } from "../../utils/hub-fetch.js";
 import { useThemeStore } from "../../stores/theme.js";
 import { useAuthStore } from "../../stores/auth.js";
 import ThemeCard from "./ThemeCard.vue";
@@ -125,7 +126,7 @@ async function handleImport(event: Event) {
 			return;
 		}
 
-		const response = await fetch(`${hubBaseUrl()}/api/themes`, {
+		const response = await hubFetch(`${hubBaseUrl()}/api/themes`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",

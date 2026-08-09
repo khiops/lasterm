@@ -12,6 +12,7 @@ import {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 
@@ -119,7 +120,7 @@ export const useConfigStore = defineStore("config", () => {
 	async function loadFonts(): Promise<void> {
 		try {
 			const authStore = useAuthStore();
-			const response = await fetch(`${hubBaseUrl()}/api/fonts`, {
+			const response = await hubFetch(`${hubBaseUrl()}/api/fonts`, {
 				...(authStore.token ? { headers: { Authorization: `Bearer ${authStore.token}` } } : {}),
 			});
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -155,7 +156,7 @@ export const useConfigStore = defineStore("config", () => {
 	async function loadProfile(): Promise<void> {
 		try {
 			const authStore = useAuthStore();
-			const resp = await fetch(`${hubBaseUrl()}/api/config/cascade`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/cascade`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (resp.ok) {
@@ -175,7 +176,7 @@ export const useConfigStore = defineStore("config", () => {
 	async function loadUiConfig(): Promise<void> {
 		try {
 			const authStore = useAuthStore();
-			const resp = await fetch(`${hubBaseUrl()}/api/config/ui`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/ui`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (resp.ok) {

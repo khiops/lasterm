@@ -20,11 +20,39 @@
 			}
 		},
 		{
+			"includes": ["packages/clients/web/src/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedGlobals": {
+							"level": "error",
+							"options": {
+								"deniedGlobals": {
+									"fetch": "Use hubFetch: direct webview requests can bypass the pinned desktop relay."
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		{
 			"includes": ["**/*.spec.ts"],
 			"linter": {
 				"rules": {
 					"style": {
-						"noNonNullAssertion": "off"
+						"noNonNullAssertion": "off",
+						"noRestrictedGlobals": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["packages/clients/web/src/utils/hub-fetch.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedGlobals": "off"
 					}
 				}
 			}

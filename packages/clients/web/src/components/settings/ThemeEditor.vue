@@ -192,6 +192,7 @@ import { THEME_NAME_REGEX } from "@lasterm/shared";
 import { useThemeStore } from "../../stores/theme.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { hubBaseUrl } from "../../utils/hub-url.js";
+import { hubFetch } from "../../utils/hub-fetch.js";
 
 const props = defineProps<{
 	theme?: LastermTheme;
@@ -407,7 +408,7 @@ async function handleSave() {
 			? `${hubBaseUrl()}/api/themes`
 			: `${hubBaseUrl()}/api/themes/${encodeURIComponent(theme.name)}`;
 
-		const response = await fetch(url, {
+		const response = await hubFetch(url, {
 			method,
 			headers: {
 				"Content-Type": "application/json",

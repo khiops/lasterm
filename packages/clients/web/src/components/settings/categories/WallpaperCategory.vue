@@ -155,6 +155,7 @@ import {
 	usePlatformInfo,
 } from "../../../composables/useWindowEffects.js";
 import { assetTokenReady, hubBaseUrl, namedPublicAssetUrl } from "../../../utils/hub-url.js";
+import { hubFetch } from "../../../utils/hub-fetch.js";
 import { useAuthStore } from "../../../stores/auth.js";
 import { useSettingsStore } from "../../../stores/settings.js";
 import type { Scope } from "../../../stores/settings.js";
@@ -243,7 +244,7 @@ const hasWallpaperOverride = computed(() => {
 
 async function loadWallpapers(): Promise<void> {
 	try {
-		const resp = await fetch(`${hubBaseUrl()}/api/wallpapers`, {
+		const resp = await hubFetch(`${hubBaseUrl()}/api/wallpapers`, {
 			headers: { Authorization: `Bearer ${authStore.token ?? ""}` },
 		});
 		if (resp.ok) {
@@ -301,7 +302,7 @@ const { isDragging, onDragEnter, onDragOver, onDragLeave, onDrop } = useFileDrop
 
 async function deleteWallpaper(filename: string): Promise<void> {
 	try {
-		await fetch(`${hubBaseUrl()}/api/wallpapers/${encodeURIComponent(filename)}`, {
+		await hubFetch(`${hubBaseUrl()}/api/wallpapers/${encodeURIComponent(filename)}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token ?? ""}` },
 		});

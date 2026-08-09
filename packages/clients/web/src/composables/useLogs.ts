@@ -1,5 +1,6 @@
 import { type Ref, ref } from "vue";
 import { useAuthStore } from "../stores/auth.js";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 
 export interface LogEntry {
@@ -70,7 +71,7 @@ export function useLogs(options: UseLogsOptions): UseLogsReturn {
 		return query ? `${path}?${query}` : path;
 	}
 
-	async function fetch(params: FetchParams = {}): Promise<void> {
+	async function refresh(params: FetchParams = {}): Promise<void> {
 		const authStore = useAuthStore();
 		if (authStore.token === null) {
 			error.value = "Not authenticated";
@@ -89,11 +90,11 @@ export function useLogs(options: UseLogsOptions): UseLogsReturn {
 
 		try {
 			const url = buildUrl({ ...params, offset: 0 });
-			const res = await globalThis.fetch(url, {
+			const res = await hubFetch(url, {
 				headers: { Authorization: `Bearer ${tok}` },
 			});
 
-			// B1: stale response guard — a newer fetch() superseded this one, or auth changed
+			// B1: stale response guard — a newer refresh superseded this one, or auth changed
 			if (gen !== _generation || authStore.token !== tok) return;
 
 			if (!res.ok) {
@@ -122,7 +123,7 @@ export function useLogs(options: UseLogsOptions): UseLogsReturn {
 	async function loadMore(): Promise<void> {
 		const authStore = useAuthStore();
 		if (authStore.token === null) {
-			// B4: match fetch()'s unauthenticated behavior — set error before returning
+			// B4: match refresh's unauthenticated behavior — set error before returning
 			error.value = "Not authenticated";
 			return;
 		}
@@ -132,7 +133,7 @@ export function useLogs(options: UseLogsOptions): UseLogsReturn {
 		if (loading.value) return;
 		if (entries.value.length >= total.value) return;
 
-		// B2: snapshot the generation at the start of loadMore; if fetch() fires
+		// B2: snapshot the generation at the start of loadMore; if refresh fires
 		// concurrently and bumps _generation, we discard the stale append.
 		const gen = _generation;
 
@@ -141,7 +142,7 @@ export function useLogs(options: UseLogsOptions): UseLogsReturn {
 
 		try {
 			const url = buildUrl({ ..._lastParams, offset: entries.value.length });
-			const res = await globalThis.fetch(url, {
+			const res = await hubFetch(url, {
 				headers: { Authorization: `Bearer ${tok}` },
 			});
 
@@ -170,5 +171,5 @@ export function useLogs(options: UseLogsOptions): UseLogsReturn {
 		}
 	}
 
-	return { entries, total, loading, error, fetch, loadMore };
+	return { entries, total, loading, error, fetch: refresh, loadMore };
 }

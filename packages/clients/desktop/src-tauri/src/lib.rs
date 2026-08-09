@@ -1,13 +1,14 @@
 use lasterm_process_lock::ProcessLock;
 pub mod tls_identity;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -22,6 +23,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 /// and the client would talk to whatever holds it — the shape of the defect this
 /// file exists to remove. Zero cannot be dialled, so a miss is loud.
 static HUB_PORT: AtomicU16 = AtomicU16::new(0);
+static NEXT_RELAY_ID: AtomicU64 = AtomicU64::new(1);
+static HUB_UPLOADS: OnceLock<Mutex<HashMap<u64, HubUpload>>> = OnceLock::new();
+static RELAY_RESPONSE_ACKS: OnceLock<Mutex<HashMap<u64, mpsc::SyncSender<bool>>>> = OnceLock::new();
 /// What the launched sidecar has told us, as one value.
 ///
 /// This was three atomics — announced port, exited flag, exit code — and no reader
@@ -93,7 +97,6 @@ static CLOSE_BEHAVIOR_TEMP_COUNTER: AtomicU16 = AtomicU16::new(0);
 const HUB_AGENT_STOP_TIMEOUT_MS: u64 = 12_000;
 const HUB_QUIT_RESPONSE_SLACK_MS: u64 = 3_000;
 const HUB_QUIT_REQUEST_TIMEOUT_MS: u64 = HUB_AGENT_STOP_TIMEOUT_MS + HUB_QUIT_RESPONSE_SLACK_MS;
-const HUB_QUIT_REQUEST_TIMEOUT: Duration = Duration::from_millis(HUB_QUIT_REQUEST_TIMEOUT_MS);
 const HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 const HUB_QUIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(
     HUB_QUIT_REQUEST_TIMEOUT_MS + HUB_AGENT_STOP_TIMEOUT_MS + HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
@@ -103,6 +106,11 @@ const WINDOW_CLOSE_PRESENTATION_ACK_TIMEOUT: Duration = Duration::from_secs(1);
 const WINDOW_CLOSE_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
+/// One fixed IPC frame keeps a multipart file out of a JavaScript string and
+/// bounds the native hand-off independently of the route's file-size cap.
+const RELAY_CHUNK_BYTES: usize = 256 * 1024;
+const RELAY_UPLOAD_QUEUE_CHUNKS: usize = 2;
+const MAX_ACTIVE_RELAY_UPLOADS: usize = 4;
 const INSTANCE_ACQUIRE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTANCE_RAISE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -235,6 +243,53 @@ struct RuntimeInfo {
     instance_id: Option<String>,
     #[serde(rename = "ownerToken")]
     owner_token: Option<String>,
+    /// Base64 DER SubjectPublicKeyInfo for the TLS listener named by `port`.
+    spki: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayHubRequest {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayHubHead {
+    id: u64,
+    status: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+}
+
+/// The two bounded queues which make an in-progress multipart upload a pipe,
+/// not a `Vec` containing the file.
+struct HubUpload {
+    sender: mpsc::SyncSender<Vec<u8>>,
+    response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
+}
+
+struct HubUploadReader {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    current: std::io::Cursor<Vec<u8>>,
+}
+
+impl Read for HubUploadReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let read = self.current.read(output)?;
+            if read != 0 {
+                return Ok(read);
+            }
+            match self.receiver.recv() {
+                Ok(next) => self.current = std::io::Cursor::new(next),
+                Err(_) => return Ok(0),
+            }
+        }
+    }
 }
 
 enum RuntimeLoadResult {
@@ -1651,6 +1706,258 @@ fn get_hub_port() -> Result<u16, String> {
     }
 }
 
+fn hub_uploads() -> &'static Mutex<HashMap<u64, HubUpload>> {
+    HUB_UPLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn relay_response_acks() -> &'static Mutex<HashMap<u64, mpsc::SyncSender<bool>>> {
+    RELAY_RESPONSE_ACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Build the one client used for every desktop-to-hub REST request. Its only
+/// server-identity predicate is the SPKI published beside the listener.
+fn pinned_hub_client(runtime: &RuntimeInfo) -> Result<reqwest::blocking::Client, String> {
+    use base64::Engine;
+    use rustls::ClientConfig;
+    use std::sync::Arc;
+
+    let encoded_spki = runtime
+        .spki
+        .as_deref()
+        .ok_or_else(|| "runtime.json is missing the hub TLS SPKI".to_string())?;
+    let spki = base64::engine::general_purpose::STANDARD
+        .decode(encoded_spki)
+        .map_err(|error| format!("runtime.json contains an invalid hub TLS SPKI: {error}"))?;
+    if spki.is_empty() {
+        return Err("runtime.json contains an empty hub TLS SPKI".to_string());
+    }
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(tls_identity::SpkiPinVerifier::new(spki)))
+        .with_no_client_auth();
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .use_preconfigured_tls(config)
+        .build()
+        .map_err(|error| format!("failed to build the pinned hub client: {error}"))
+}
+
+fn relay_runtime() -> Result<RuntimeInfo, String> {
+    match load_runtime_info() {
+        RuntimeLoadResult::Present(runtime) => Ok(runtime),
+        RuntimeLoadResult::Absent => {
+            Err("runtime.json is missing; refusing to relay to an unknown hub".to_string())
+        }
+        RuntimeLoadResult::Unreadable(error) => Err(format!(
+            "runtime.json cannot be read; refusing to relay to an unknown hub: {error}"
+        )),
+    }
+}
+
+fn relay_hub_url(port: u16, path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.contains("://") || path.contains('\n') || path.contains('\r')
+    {
+        return Err("relay request has an invalid hub path".to_string());
+    }
+    Ok(format!("https://127.0.0.1:{port}{path}"))
+}
+
+fn send_relay_hub_request(
+    request: &RelayHubRequest,
+    body: Option<reqwest::blocking::Body>,
+) -> Result<reqwest::blocking::Response, String> {
+    let runtime = relay_runtime()?;
+    let client = pinned_hub_client(&runtime)?;
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|error| format!("relay request has an invalid HTTP method: {error}"))?;
+    let mut builder = client.request(method, relay_hub_url(runtime.port, &request.path)?);
+    for (name, value) in &request.headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("relay request has an invalid header name: {error}"))?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|error| format!("relay request has an invalid header value: {error}"))?;
+        builder = builder.header(name, value);
+    }
+    if let Some(body) = body {
+        builder = builder.body(body);
+    } else if let Some(body) = &request.body {
+        builder = builder.body(body.clone());
+    }
+    builder
+        .send()
+        .map_err(|error| format!("pinned hub request failed: {error}"))
+}
+
+fn response_head(response: &reqwest::blocking::Response, id: u64) -> RelayHubHead {
+    RelayHubHead {
+        id,
+        status: response.status().as_u16(),
+        status_text: response
+            .status()
+            .canonical_reason()
+            .unwrap_or_default()
+            .to_string(),
+        headers: response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), value.to_string()))
+            })
+            .collect(),
+    }
+}
+
+/// Push at most one response frame past the hub socket until the webview has
+/// accepted the preceding frame. If it stops reading, this thread stops reading
+/// too and TCP carries lossless backpressure to the hub.
+fn relay_response(
+    mut response: reqwest::blocking::Response,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> RelayHubHead {
+    let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+    let head = response_head(&response, id);
+    let (ack_sender, ack_receiver) = mpsc::sync_channel(0);
+    relay_response_acks()
+        .lock()
+        .expect("relay acknowledgement map lock poisoned")
+        .insert(id, ack_sender);
+    std::thread::spawn(move || {
+        let mut buffer = vec![0_u8; RELAY_CHUNK_BYTES];
+        loop {
+            let read = match response.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => {
+                    let message = serde_json::json!({ "error": format!("pinned hub response failed: {error}") });
+                    let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(message.to_string()));
+                    break;
+                }
+            };
+            if read == 0 {
+                let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(Vec::new()));
+                break;
+            }
+            if channel
+                .send(tauri::ipc::InvokeResponseBody::Raw(buffer[..read].to_vec()))
+                .is_err()
+            {
+                break;
+            }
+            match ack_receiver.recv() {
+                Ok(false) => {}
+                Ok(true) | Err(_) => break,
+            }
+        }
+        let _ = relay_response_acks()
+            .lock()
+            .expect("relay acknowledgement map lock poisoned")
+            .remove(&id);
+    });
+    head
+}
+
+#[tauri::command]
+fn relay_hub_request(
+    request: RelayHubRequest,
+    response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<RelayHubHead, String> {
+    let hub_response = send_relay_hub_request(&request, None)?;
+    Ok(relay_response(hub_response, response))
+}
+
+#[tauri::command]
+fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
+    if request.body.is_some() {
+        return Err("multipart relay request must stream its body".to_string());
+    }
+    let mut uploads = hub_uploads()
+        .lock()
+        .map_err(|_| "relay upload map lock poisoned".to_string())?;
+    if uploads.len() >= MAX_ACTIVE_RELAY_UPLOADS {
+        return Err("too many active hub uploads".to_string());
+    }
+    let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+    let (sender, receiver) = mpsc::sync_channel(RELAY_UPLOAD_QUEUE_CHUNKS);
+    let (response_sender, response_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let body = reqwest::blocking::Body::new(HubUploadReader {
+            receiver,
+            current: std::io::Cursor::new(Vec::new()),
+        });
+        let _ = response_sender.send(send_relay_hub_request(&request, Some(body)));
+    });
+    uploads.insert(
+        id,
+        HubUpload {
+            sender,
+            response: response_receiver,
+        },
+    );
+    Ok(id)
+}
+
+#[tauri::command]
+fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let upload_id = request
+        .headers()
+        .get("X-Lasterm-Upload-Id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "multipart relay chunk is missing its upload id".to_string())?;
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes)
+            if !bytes.is_empty() && bytes.len() <= RELAY_CHUNK_BYTES =>
+        {
+            bytes
+        }
+        tauri::ipc::InvokeBody::Raw(_) => {
+            return Err("multipart relay chunk exceeds the bounded IPC frame size".to_string())
+        }
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("multipart relay chunk must use Tauri raw IPC bytes".to_string())
+        }
+    };
+    let sender = hub_uploads()
+        .lock()
+        .map_err(|_| "relay upload map lock poisoned".to_string())?
+        .get(&upload_id)
+        .map(|upload| upload.sender.clone())
+        .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
+    sender
+        .send(bytes.clone())
+        .map_err(|_| "multipart relay upload stopped before its body completed".to_string())
+}
+
+#[tauri::command]
+fn relay_hub_upload_finish(
+    upload_id: u64,
+    response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<RelayHubHead, String> {
+    let upload = hub_uploads()
+        .lock()
+        .map_err(|_| "relay upload map lock poisoned".to_string())?
+        .remove(&upload_id)
+        .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
+    drop(upload.sender);
+    let hub_response = upload.response.recv().map_err(|_| {
+        "multipart relay upload stopped before receiving a hub response".to_string()
+    })??;
+    Ok(relay_response(hub_response, response))
+}
+
+#[tauri::command]
+fn relay_hub_response_ack(response_id: u64, cancel: bool) {
+    let sender = relay_response_acks()
+        .lock()
+        .ok()
+        .and_then(|acks| acks.get(&response_id).cloned());
+    if let Some(sender) = sender {
+        let _ = sender.send(cancel);
+    }
+}
+
 #[tauri::command]
 fn is_tray_available() -> bool {
     TRAY_AVAILABLE.load(Ordering::Relaxed)
@@ -1703,10 +2010,7 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
     };
     let target = HubQuitTarget { pid, instance_id };
 
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(HUB_QUIT_REQUEST_TIMEOUT)
-        .build()
-    {
+    let client = match pinned_hub_client(&runtime) {
         Ok(client) => client,
         Err(error) => return QuitRequestResult::Failed(error.to_string()),
     };
@@ -1782,7 +2086,7 @@ fn classify_quit_response(status: u16, body: &str, target: HubQuitTarget) -> Qui
 
 fn hub_quit_url(port: u16, force: bool) -> String {
     let force_query = if force { "?force=1" } else { "" };
-    format!("http://127.0.0.1:{port}/api/quit{force_query}")
+    format!("https://127.0.0.1:{port}/api/quit{force_query}")
 }
 
 fn observe_hub_quit(target: &HubQuitTarget) -> Result<(), String> {
@@ -2642,6 +2946,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_hub_auth_token,
             get_hub_port,
+            relay_hub_request,
+            relay_hub_upload_start,
+            relay_hub_upload_chunk,
+            relay_hub_upload_finish,
+            relay_hub_response_ack,
             is_tray_available,
             get_close_behavior,
             set_close_behavior,
@@ -3462,10 +3771,10 @@ mod tests {
 
     #[test]
     fn desktop_quit_uses_the_hub_quit_endpoint_that_ends_the_agent() {
-        assert_eq!(hub_quit_url(4100, false), "http://127.0.0.1:4100/api/quit");
+        assert_eq!(hub_quit_url(4100, false), "https://127.0.0.1:4100/api/quit");
         assert_eq!(
             hub_quit_url(4100, true),
-            "http://127.0.0.1:4100/api/quit?force=1"
+            "https://127.0.0.1:4100/api/quit?force=1"
         );
     }
 
@@ -3515,7 +3824,7 @@ mod tests {
     fn observation_window_covers_request_stopper_and_graceful_shutdown_bounds() {
         assert_eq!(
             HUB_QUIT_OBSERVE_TIMEOUT,
-            HUB_QUIT_REQUEST_TIMEOUT
+            Duration::from_millis(HUB_QUIT_REQUEST_TIMEOUT_MS)
                 + Duration::from_millis(HUB_AGENT_STOP_TIMEOUT_MS)
                 + Duration::from_millis(HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS)
         );
@@ -3531,6 +3840,7 @@ mod tests {
                     port: 4101,
                     instance_id: Some("replacement".to_string()),
                     owner_token: None,
+                    spki: None,
                 })
             },
             |_| false,

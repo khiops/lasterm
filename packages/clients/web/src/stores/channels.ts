@@ -1,6 +1,7 @@
 import type { Channel, ChannelCreatedMessage, ChannelGroup } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, nextTick, ref } from "vue";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 import { useConfigStore } from "./config.js";
@@ -166,7 +167,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		generalCollapsed: boolean;
 	}> {
 		if (authStore.token === null) return { groups: [], generalCollapsed: false };
-		const res = await fetch(`${hubBaseUrl()}/api/groups?host_id=${encodeURIComponent(hostId)}`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/groups?host_id=${encodeURIComponent(hostId)}`, {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
 		if (!res.ok) {
@@ -226,7 +227,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		try {
 			// ── 2. ALL I/O — no state commits in this section ────────────────
 			const [channelsRes, fetchedGroups] = await Promise.all([
-				fetch(`${hubBaseUrl()}/api/channels?host_id=${encodeURIComponent(hostId)}`, {
+				hubFetch(`${hubBaseUrl()}/api/channels?host_id=${encodeURIComponent(hostId)}`, {
 					headers: { Authorization: `Bearer ${authStore.token}` },
 				}),
 				_fetchGroupsRaw(hostId),
@@ -513,7 +514,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function removeChannel(channelId: string): Promise<void> {
 		try {
-			await fetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
+			await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
 				method: "DELETE",
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
@@ -732,7 +733,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		const hostId = activeHostId.value;
 		if (hostId === null) throw new Error("No active host");
 
-		const res = await fetch(`${hubBaseUrl()}/api/groups`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/groups`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -752,7 +753,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	async function removeGroup(groupId: string): Promise<void> {
 		if (authStore.token === null) return;
 
-		await fetch(`${hubBaseUrl()}/api/groups/${groupId}`, {
+		await hubFetch(`${hubBaseUrl()}/api/groups/${groupId}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
@@ -780,7 +781,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		groups.value = groups.value.map((g) => (g.id === groupId ? { ...g, name } : g));
 
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/groups/${groupId}`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/groups/${groupId}`, {
 				method: "PATCH",
 				headers: {
 					"Content-Type": "application/json",
@@ -808,7 +809,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		groups.value = reordered;
 
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/groups/order`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/groups/order`, {
 				method: "PUT",
 				headers: {
 					"Content-Type": "application/json",
@@ -863,7 +864,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		channels.value = next;
 
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
 				method: "PATCH",
 				headers: {
 					"Content-Type": "application/json",
@@ -911,7 +912,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		});
 
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
 				method: "PATCH",
 				headers: {
 					"Content-Type": "application/json",
@@ -946,7 +947,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		});
 
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/hosts/${hostId}/welcome`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/welcome`, {
 				method: "PUT",
 				headers: {
 					"Content-Type": "application/json",
@@ -973,7 +974,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		});
 
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/hosts/${hostId}/welcome`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/welcome`, {
 				method: "DELETE",
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
@@ -1000,7 +1001,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	): Promise<boolean> {
 		if (authStore.token === null) return false;
 
-		const res = await fetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
 			method: "PATCH",
 			headers: {
 				"Content-Type": "application/json",
@@ -1020,7 +1021,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	async function restartChannel(channelId: string): Promise<boolean> {
 		if (authStore.token === null) return false;
 
-		const res = await fetch(`${hubBaseUrl()}/api/channels/${channelId}/restart`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}/restart`, {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -1041,7 +1042,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function deleteChannel(channelId: string): Promise<boolean> {
 		if (authStore.token === null) return false;
-		const res = await fetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
@@ -1063,7 +1064,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function purgeDeadChannels(): Promise<number> {
 		if (authStore.token === null || activeHostId.value === null) return 0;
-		const res = await fetch(`${hubBaseUrl()}/api/channels/dead`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/channels/dead`, {
 			method: "DELETE",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,

@@ -88,6 +88,7 @@
 import { computed, ref, watch } from 'vue';
 import { useAuthStore } from '../stores/auth.js';
 import { hubBaseUrl } from '../utils/hub-url.js';
+import { hubFetch } from '../utils/hub-fetch.js';
 
 const BUILD_HASH: string = (import.meta.env['VITE_BUILD_HASH'] as string | undefined) ?? 'dev';
 
@@ -109,7 +110,7 @@ const fetchError = ref(false);
 async function fetchVersion(): Promise<void> {
 	if (version.value !== null || fetchError.value) return;
 	try {
-		const res = await fetch(`${hubBaseUrl()}/api/health`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/health`, {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);

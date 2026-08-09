@@ -651,9 +651,10 @@ keeps draining while the webview, backgrounded or busy, stops consuming events. 
 MiB/s through the boundary, which is exactly how fast an unbounded queue would grow.
 
 The same rule applies to the REST relay in the other direction. A relay that buffers a whole
-multipart upload to hand it across the boundary turns **four** existing streaming routes
-(`/api/agents/import`, `/api/ssh-keys`, `/api/fonts`, `/api/wallpapers`) into memory proportional to
-the file.
+multipart upload to hand it across the boundary turns **four** existing streaming routes into memory
+proportional to the file: `/api/agents/import` (**64 MiB**, and two files at once), `/api/fonts` and
+`/api/wallpapers` (10 MB each), `/api/ssh-keys` (100 KB). The agent binary is the one that decides the
+design — a 64 MiB buffer held across the boundary is not an edge case, it is the documented cap.
 
 ### P8-rejected — two answers that were considered and do not hold
 
@@ -694,7 +695,7 @@ complete a TLS handshake against a self-signed certificate (§2.2), not because 
 |---|---|---|
 | WebSocket URL builder | `web/src/utils/hub-url.ts:74-80` | `ws://127.0.0.1:<port>` under Tauri; in a browser it follows the page — `wss:` when `window.location.protocol === "https:"`, else `ws:` (`:78-79`) |
 | REST base URL | `web/src/utils/hub-url.ts:67-72` | `http://127.0.0.1:<port>` under Tauri, `""` in a browser |
-| REST call sites | across `web/src` | **77** uses of `hubBaseUrl()` outside tests |
+| REST call sites | across `web/src` | **76** uses of `hubBaseUrl()` outside tests — 72 of them plain, 4 streaming uploads (§4.4) |
 | WS client | `web/src/services/ws-client.ts` | `IWsClient` at lines 13-21: `connect(url)`, `send`, `on`, `onReconnect`, `onDisconnect`, `close`, `readonly isConnected` |
 | its sole **constructor** | `web/src/stores/session.ts:22` | the only `new WsClient()`; appends `/ws`, resolves the port via `get_hub_port` (`hub-url.ts:39`) |
 | its other **consumers** | six modules, injected via `setWsClient(client: IWsClient)` | `host-verify.ts:35`, `auth-prompt.ts:48`, `useActivityTracker.ts`, `useTerminal.ts:21`, `writelock.ts:27`, `agent-verify.ts:24` |
@@ -709,7 +710,8 @@ must satisfy, and it strengthens the argument at the same time — an interface 
 already depend on is a real seam rather than an artefact of one call site.
 
 The two URL builders are the other seam, and they are already the single place each transport
-decision is made, which is why 77 REST call sites are not 77 edits.
+decision is made, which is why 76 REST call sites are not 76 edits — and why 72 of them need no design
+decision at all (§4.4).
 
 *One thing the browser path does for free:* `hubWsUrl()` already derives its scheme from the page, so
 a browser reaching an HTTPS hub upgrades to `wss` with no change. Only the Tauri branch hard-codes a
@@ -797,17 +799,40 @@ enabling it for reqwest adds no new instance of that problem. Lint the Windows t
 | `desktop src-tauri` | new: an HTTP relay command and a streaming channel. The ten existing `#[tauri::command]`s use no `ipc::Channel`, but `acknowledge_desktop_close` (`lib.rs:2122-2140`) already emits `desktop-close-expired` from a spawned thread — a one-shot event rather than a stream, and the precedent for pushing to the webview |
 | `hub/src/sea-static-server.ts` | no change — the desktop does not load its UI from here (4.1) |
 
-**Not established, and it gates one half of the work rather than all of it:** whether any of the 77
-REST call sites depends on `fetch` semantics an IPC relay does not reproduce — streaming request
-bodies, `AbortSignal`, redirects, or response headers read directly. **Four** routes take uploads: `/api/agents/import` (`agents.ts:195`, `request.parts()`),
-`/api/ssh-keys` (`ssh-keys.ts:173`), `/api/fonts` (`fonts.ts:220`) and `/api/wallpapers`
-(`wallpapers.ts:38`), the last three via `request.file()`. An earlier draft said three and omitted
-`/api/ssh-keys`.
+**Established by inventory, and the answer is narrow.** **72** call sites are a mechanical relay —
+method, headers, a JSON or text body in, a JSON or text body out — and **4** depend on something a
+request/response message pair does not reproduce. All four are the same behaviour: a streaming request
+body, `FormData` carrying a `File`.
 
-**Sequencing:** the hub-side work (P1, P2, P3, P3b, P10, P11) does not depend on this and can start.
-The relay (P7, P9) cannot be specified until the inventory exists, because the inventory *is* the
-relay's API contract. A relay that silently buffers a stream is the defect that surfaces on a large
-upload months later.
+| Call site | Route | Payload | Server cap |
+|---|---|---|---|
+| `web/src/stores/agent-manager.ts:417` | `/api/agents/import` | two `File`s: binary plus manifest | **64 MiB**, enforced by its own multipart instance (`api/agents.ts:436-439`) |
+| `web/src/components/settings/FontPicker.vue:107` | `/api/fonts` | one `File` | 10 MB |
+| `web/src/components/settings/categories/wallpaperUpload.ts:42` | `/api/wallpapers` | one `File` | 10 MB |
+| `web/src/components/SshKeyPicker.vue:196` | `/api/ssh-keys` | one `File` | 100 KB |
+
+The agent binary is the large one, not the font or the wallpaper. The hub registers a **separate**
+`@fastify/multipart` instance for `api/agents.ts` precisely because the global registration
+(`server.ts:335`) caps at 10 MB — so a relay that buffers holds up to 64 MiB, and both files at once for
+that route.
+
+**What the inventory found none of, which is what makes the relay tractable:** no `AbortSignal`, no code
+reading `res.body` as a stream, no `res.headers` read directly, no `res.redirected` or
+`redirect: "manual"`, and no function returning a `Response` for a caller to consume later. P9's
+streaming requirement therefore has exactly four call sites to satisfy, and 72 need no design decision.
+
+**No site depends on being same-origin.** Zero `credentials:`, zero `document.cookie`, zero
+`withCredentials`; every call carries `Authorization: Bearer`. Moving the request's origin into Rust
+costs nothing here. The only relative-URL behaviour lives inside `hubBaseUrl()` itself, which returns
+`""` in browser mode so the path resolves against the page — the helper's documented behaviour, not a
+call site bypassing it.
+
+*A count corrected:* an earlier draft said 77 sites, taken from the first investigation. A careful
+enumeration finds **76** — of 80 `fetch(` matches, one is a local function declaration named `fetch`
+(`web/src/composables/useLogs.ts:73`) and three are comments mentioning it.
+
+**Sequencing:** the hub-side work (P1, P2, P3, P3b, P10, P11, P12) never depended on this. The relay
+(P7, P9) now has its contract.
 
 ## §5 Test requirements
 
@@ -886,7 +911,7 @@ things it was checked on.
 |---|---|---|
 | `ws-client.ts` is 172 lines | MISMATCH (171) | line count removed from the spec — a number that rots on the first edit and carries no requirement |
 | `session.ts` is the ws-client's only caller | MISMATCH | sole **constructor**; six more modules consume `IWsClient` via `setWsClient`. Widens the swap's surface and strengthens the seam argument |
-| ~59 `hubBaseUrl()` call sites | MISMATCH | **77** |
+| ~59 `hubBaseUrl()` call sites | MISMATCH twice | The audit corrected 59 to **77**; a later careful enumeration found **76**. Of 80 `fetch(` matches, one is a local function declaration named `fetch` (`useLogs.ts:73`) and three are comments. Three different numbers for one count, and only the third was arrived at by stating the method |
 | three upload routes | MISMATCH | **four** — `/api/ssh-keys` was missing, and it is a `request.file()` route like the others |
 | no tauri command emits incrementally | MISMATCH | `acknowledge_desktop_close` emits `desktop-close-expired` from a spawned thread. No `ipc::Channel`, but a push precedent exists |
 | a TLS certificate or key is configured anywhere in the hub | GAP, as expected | nothing to build on and nothing to duplicate. The only `https` in the hub is `open-browser.ts:18` and the release fetch in `agent-fetch.ts` |

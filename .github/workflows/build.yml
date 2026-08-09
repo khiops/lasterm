@@ -93,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
-      - run: cargo build --release -p lasterm-hub-lock
+      - run: cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
       - run: pnpm test:run
 
   build-agent:

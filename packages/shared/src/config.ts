@@ -399,6 +399,17 @@ export const ELEVATION_CONFIG_KEYS = [
 
 // ─── Server configuration ────────────────────────────────────────────────────
 
+/** TLS material supplied by an operator through [server] in config.toml. */
+export type TlsConfig =
+	| {
+			certificatePath: string;
+			keyPath: string;
+	  }
+	| {
+			certificatePath?: never;
+			keyPath?: never;
+	  };
+
 /** Server-level configuration (from [server] in config.toml). */
 export interface ServerConfig {
 	/**
@@ -406,4 +417,6 @@ export interface ServerConfig {
 	 * Defaults to localhost + 127.0.0.1 + Tauri origins.
 	 */
 	corsOrigins?: string[];
+	/** A certificate/key pair. Omitting both selects the generated local identity. */
+	tls?: TlsConfig;
 }

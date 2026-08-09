@@ -198,6 +198,27 @@ export function locateHubLockAddon(): string {
 	return addonPath;
 }
 
+/** The build script passes the target-qualified TLS identity addon directly to packaging. */
+export function locateTlsIdentityAddon(): string {
+	const addonPath = process.env.LASTERM_TLS_IDENTITY_ADDON;
+	if (!addonPath || !existsSync(addonPath)) {
+		throw new Error(
+			"[package-sea-hub] TLS identity addon path was not supplied or does not exist. " +
+				"Run scripts/build-hub.sh or scripts/build-hub.ps1 instead of package:sea-hub directly.",
+		);
+	}
+	if (!isCrossBuild()) {
+		const mod = { exports: {} as Record<string, unknown> };
+		process.dlopen(mod, addonPath);
+		if (typeof mod.exports.generateTlsIdentity !== "function") {
+			throw new Error(
+				`[package-sea-hub] TLS identity addon at ${addonPath} has no generator export.`,
+			);
+		}
+	}
+	return addonPath;
+}
+
 /**
  * True when this build targets something the host cannot execute.
  *
@@ -377,11 +398,13 @@ async function main(): Promise<void> {
 
 	const betterSqlite3Path = locateBetterSqlite3();
 	const hubLockAddonPath = locateHubLockAddon();
+	const tlsIdentityAddonPath = locateTlsIdentityAddon();
 	const tomlWasmPath = locateTomlWasm();
 	const version = readHubVersion();
 
 	console.log(`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path}`);
 	console.log(`[package-sea-hub] hub lock addon:      ${hubLockAddonPath}`);
+	console.log(`[package-sea-hub] TLS identity addon:  ${tlsIdentityAddonPath}`);
 	console.log(`[package-sea-hub] toml-edit WASM:        ${tomlWasmPath}`);
 	console.log(`[package-sea-hub] hub version: ${version}`);
 
@@ -398,6 +421,7 @@ async function main(): Promise<void> {
 		nativeAddons: {
 			"better_sqlite3.node": betterSqlite3Path,
 			"lasterm_hub_lock.node": hubLockAddonPath,
+			"lasterm_tls_identity.node": tlsIdentityAddonPath,
 		},
 		extraAssets: {
 			VERSION: versionFilePath,

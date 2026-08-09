@@ -6,7 +6,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, X509Certificate } from "node:crypto";
 import {
 	closeSync,
 	copyFileSync,
@@ -20,6 +20,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -81,10 +82,13 @@ export interface RuntimeInfo {
 	/** Unique per hub process; prevents a quit waiter mistaking a replacement for its target. */
 	instanceId?: string;
 	ownerToken?: string;
+	/** Base64 DER SubjectPublicKeyInfo for the TLS identity serving this port. */
+	spki?: string;
 }
 
 const HUB_QUIT_OBSERVE_TIMEOUT_MS = 15_000;
 const HUB_QUIT_OBSERVE_POLL_MS = 50;
+const HUB_TLS_CERTIFICATE_NAME = "hub-tls-cert.pem";
 
 export type RuntimeLoadResult =
 	| { kind: "absent" }
@@ -270,8 +274,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 	if (body !== undefined) headers["Content-Type"] = "application/json";
 	if (token) headers.Authorization = `Bearer ${token}`;
 
-	const url = `http://127.0.0.1:${runtime.port}${path}`;
-	const res = await fetch(url, {
+	const res = await requestHub(runtime, path, {
 		method,
 		headers,
 		...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -287,6 +290,71 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 		return res.json();
 	}
 	return res.text();
+}
+
+type HubRequestInit = {
+	method?: string;
+	headers?: Record<string, string>;
+	body?: string;
+	signal?: AbortSignal;
+};
+
+function hubUrl(runtime: RuntimeInfo, path: string): URL {
+	return new URL(path, `https://127.0.0.1:${runtime.port}`);
+}
+
+function hubCertificate(runtime: RuntimeInfo): string {
+	if (typeof runtime.spki !== "string" || runtime.spki.length === 0) {
+		throw new Error("Hub runtime has no TLS SPKI; refusing to send a credential");
+	}
+	const certificatePath = join(getStateDir(), HUB_TLS_CERTIFICATE_NAME);
+	const certificate = readFileSync(certificatePath, "utf8");
+	const spki = new X509Certificate(certificate).publicKey
+		.export({ type: "spki", format: "der" })
+		.toString("base64");
+	if (spki !== runtime.spki) {
+		throw new Error("Hub TLS certificate does not match runtime SPKI; refusing to connect");
+	}
+	return certificate;
+}
+
+/**
+ * The sole local-hub transport. `ca` pins the leaf through Node's normal TLS
+ * verification; credentials are added only after that handshake succeeds.
+ */
+export async function requestHub(
+	runtime: RuntimeInfo,
+	path: string,
+	init: HubRequestInit = {},
+): Promise<Response> {
+	const certificate = hubCertificate(runtime);
+	const url = hubUrl(runtime, path);
+	return new Promise<Response>((resolve, reject) => {
+		const request = httpsRequest(
+			url,
+			{
+				method: init.method ?? "GET",
+				headers: init.headers,
+				ca: certificate,
+				signal: init.signal,
+			},
+			(response) => {
+				const chunks: Buffer[] = [];
+				response.on("data", (chunk: Buffer) => chunks.push(chunk));
+				response.on("error", reject);
+				response.on("end", () => {
+					resolve(
+						new Response(Buffer.concat(chunks), {
+							status: response.statusCode ?? 500,
+							headers: response.headers as Record<string, string>,
+						}),
+					);
+				});
+			},
+		);
+		request.on("error", reject);
+		request.end(init.body);
+	});
 }
 
 // ─── Argument parser ───────────────────────────────────────────────────────────
@@ -724,7 +792,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	// A previous installation is refused by `startHub`, not here: the check belongs
 	// to the operation that constructs a hub, so the daemon child and `pnpm dev`
 	// cannot reach it by another door. This handler only renders the refusal.
-	const port = args.port ?? 4100;
+	const port = args.port;
 
 	if (args.daemon) {
 		const stateDir = getStateDir();
@@ -733,7 +801,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 		const logFd = openDaemonLog(logPath);
 		const plan = buildDaemonSpawnPlan({
 			sea: detectSea(),
-			port,
+			...(port !== undefined ? { port } : {}),
 			...(args.open ? { open: true } : {}),
 			moduleUrl: import.meta.url,
 		});
@@ -769,7 +837,11 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 				loadRuntime,
 				fetchHealth: async (runtimePort) => {
 					// Abort a stalled probe so the socket is not left hanging open.
-					const res = await fetch(`http://127.0.0.1:${runtimePort}/api/health`, {
+					const current = loadRuntime();
+					if (current.kind !== "present" || current.runtime.port !== runtimePort) {
+						throw new Error("Hub runtime changed before its health check");
+					}
+					const res = await requestHub(current.runtime, "/api/health", {
 						signal: AbortSignal.timeout(healthTimeoutMs),
 					});
 					if (!res.ok) {
@@ -810,7 +882,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	const { PreviousInstallationError } = await import("./previous-installation.js");
 	try {
 		await startHub({
-			port,
+			...(port !== undefined ? { port } : {}),
 			openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
 			announce: ({ address, configDir, stateDir }) => {
 				console.log(`lasterm hub listening on ${address} (build: ${BUILD_HASH})`);
@@ -861,7 +933,7 @@ export async function cmdStop(
 	if (runtime.ownerToken) {
 		try {
 			const force = args.force === true ? "?force=1" : "";
-			const res = await fetch(`http://127.0.0.1:${runtime.port}/api/shutdown${force}`, {
+			const res = await requestHub(runtime, `/api/shutdown${force}`, {
 				method: "POST",
 				headers: {
 					"X-Lasterm-Owner": runtime.ownerToken,
@@ -913,7 +985,6 @@ export async function cmdQuit(
 ): Promise<void> {
 	const readRuntime = options.loadRuntime ?? loadRuntime;
 	const alive = options.isPidAlive ?? isPidAlive;
-	const request = options.fetch ?? fetch;
 	const wait = options.waitForHubQuit ?? waitForHubQuit;
 	const interactive = options.isInteractive ?? (() => process.stdin.isTTY && process.stdout.isTTY);
 	const confirm = options.confirmQuit ?? confirmQuit;
@@ -944,11 +1015,14 @@ export async function cmdQuit(
 	// is to go and look.
 	const postQuit = async (query: string): Promise<QuitResponse> => {
 		try {
-			const res = await request(`http://127.0.0.1:${runtime.port}/api/quit${query}`, {
+			const init = {
 				method: "POST",
 				headers: { "X-Lasterm-Owner": runtime.ownerToken as string },
 				signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
-			});
+			};
+			const res = options.fetch
+				? await options.fetch(hubUrl(runtime, `/api/quit${query}`), init)
+				: await requestHub(runtime, `/api/quit${query}`, init);
 			return { status: res.status, ok: res.ok, body: await readQuitBody(res) };
 		} catch (error) {
 			return { status: null, ok: false, body: {}, transportError: error };
@@ -1144,7 +1218,7 @@ export async function cmdStatus(args: ParsedArgs): Promise<void> {
 
 	let health: unknown = null;
 	try {
-		health = await fetch(`http://127.0.0.1:${runtime.port}/api/health`).then((r) => r.json());
+		health = await requestHub(runtime, "/api/health").then((r) => r.json());
 	} catch {
 		// Not reachable yet — not fatal
 	}

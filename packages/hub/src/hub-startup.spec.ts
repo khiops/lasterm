@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -9,9 +10,16 @@ import {
 	upsertPrimaryToken,
 	validateTokenRecord,
 } from "./auth.js";
+import { getStateDir, loadRuntime } from "./cli.js";
 import { startHub } from "./hub-startup.js";
 import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
+
+const TEST_TLS_IDENTITY = {
+	tls: { cert: "certificate", key: "key" },
+	certificate: "certificate",
+	spki: "test-spki",
+};
 
 // The refusal has to belong to the operation that constructs a hub, not to the
 // `start` command handler: the daemon child re-enters through the CLI, `pnpm dev`
@@ -62,6 +70,42 @@ describe("startHub refuses beside a previous installation", () => {
 });
 
 describe("startHub token restart sweep", () => {
+	it("leaves no readable runtime record when publication fails after TLS bind", async () => {
+		const originalStateRoot = process.env.XDG_STATE_HOME;
+		const stateRoot = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
+		process.env.XDG_STATE_HOME = stateRoot;
+		const dbs = openTestDatabases();
+		try {
+			await expect(
+				startHub(
+					{},
+					{
+						describePreviousInstallation: () => undefined,
+						getStateDir,
+						getConfigDir: () => getStateDir(),
+						acquireHubLock: () => null as never,
+						initAuth: () => randomBytes(32).toString("hex"),
+						createOwnerToken: () => "owner-token",
+						openDatabases: () => dbs,
+						createServer: async () => ({ close: async () => undefined }) as never,
+						startServer: async () => "https://127.0.0.1:4321",
+						addStartupCorsOrigins: () => 4321,
+						persistRuntime: () => {
+							throw new Error("injected failure between bind and publish");
+						},
+					},
+				),
+			).rejects.toThrow("injected failure between bind and publish");
+
+			expect(loadRuntime()).toEqual({ kind: "absent" });
+			expect(existsSync(join(getStateDir(), "runtime.json"))).toBe(false);
+		} finally {
+			dbs.close();
+			rmSync(stateRoot, { recursive: true, force: true });
+			process.env.XDG_STATE_HOME = originalStateRoot;
+		}
+	});
+
 	it("commits the sweep before constructing or binding the server", async () => {
 		const dbs = openTestDatabases();
 		const primaryToken = randomBytes(32).toString("hex");
@@ -79,6 +123,7 @@ describe("startHub token restart sweep", () => {
 				acquireHubLock: () => null as never,
 				initAuth: () => primaryToken,
 				createOwnerToken: () => "owner-token",
+				resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
 				openDatabases: () => dbs,
 				sweepNonPrimaryTokens: (db) => {
 					steps.push("sweep");
@@ -128,6 +173,7 @@ describe("startHub token restart sweep", () => {
 					acquireHubLock: () => null as never,
 					initAuth: () => randomBytes(32).toString("hex"),
 					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
 					openDatabases: () => ({
 						meta,
 						spool,
@@ -160,6 +206,7 @@ describe("startHub token restart sweep", () => {
 					acquireHubLock: () => null as never,
 					initAuth: () => randomBytes(32).toString("hex"),
 					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
 					openDatabases: () => dbs,
 					createServer,
 				},

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import { getTestTls } from "../test-tls.js";
 
 // ─── Mock ssh-config-parser ───────────────────────────────────────────────────
 
@@ -49,7 +50,12 @@ let server: FastifyInstance;
 
 beforeEach(async () => {
 	dbs = openTestDatabases();
-	server = await createServer({ logger: false, dbManager: dbs, skipShellDiscovery: true });
+	server = await createServer({
+		tls: getTestTls(),
+		logger: false,
+		dbManager: dbs,
+		skipShellDiscovery: true,
+	});
 });
 
 afterEach(async () => {

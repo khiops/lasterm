@@ -2,7 +2,7 @@ import { DEFAULT_CHANNEL_NAME, DEFAULT_NOTIFICATION_CONFIG, generateId } from "@
 import { defineStore } from "pinia";
 import { markRaw, ref } from "vue";
 import { showSimpleNotification } from "../composables/useDesktopNotifications.js";
-import { WsClient } from "../services/ws-client.js";
+import { createWsClient } from "../services/ws-client.js";
 import { hubWsUrl } from "../utils/hub-url.js";
 import { useAgentManagerStore } from "./agent-manager.js";
 import { useAgentVerifyStore } from "./agent-verify.js";
@@ -17,9 +17,9 @@ import { useToastStore } from "./toast.js";
 import { useWriteLockStore } from "./writelock.js";
 
 export const useSessionStore = defineStore("session", () => {
-	// markRaw: prevent Pinia/Vue from making WsClient reactive,
+	// markRaw: prevent Pinia/Vue from making the client reactive,
 	// which would strip private class members and break the class methods.
-	const wsClient = markRaw(new WsClient());
+	const wsClient = markRaw(createWsClient());
 	const connected = ref(false);
 	const currentChannelId = ref<string | null>(null);
 	/** Set to true after AUTH_OK is received (not just WS open). */

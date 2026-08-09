@@ -1,5 +1,6 @@
 use lasterm_process_lock::ProcessLock;
 pub mod tls_identity;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -26,6 +27,7 @@ static HUB_PORT: AtomicU16 = AtomicU16::new(0);
 static NEXT_RELAY_ID: AtomicU64 = AtomicU64::new(1);
 static HUB_UPLOADS: OnceLock<Mutex<HashMap<u64, HubUpload>>> = OnceLock::new();
 static RELAY_RESPONSE_ACKS: OnceLock<Mutex<HashMap<u64, mpsc::SyncSender<bool>>>> = OnceLock::new();
+static HUB_WS_RELAYS: OnceLock<Mutex<HashMap<u64, HubWsRelay>>> = OnceLock::new();
 /// What the launched sidecar has told us, as one value.
 ///
 /// This was three atomics — announced port, exited flag, exit code — and no reader
@@ -111,6 +113,15 @@ const MAX_AGENT_MANIFEST_BYTES: u64 = 1024 * 1024;
 const RELAY_CHUNK_BYTES: usize = 256 * 1024;
 const RELAY_UPLOAD_QUEUE_CHUNKS: usize = 2;
 const MAX_ACTIVE_RELAY_UPLOADS: usize = 4;
+/// A hub OUTPUT batch is at most 256 KiB before MessagePack metadata. This cap
+/// leaves room for that envelope while keeping one native WebSocket message
+/// bounded independently of whether the webview drains its IPC channel.
+const HUB_WS_MAX_MESSAGE_BYTES: usize = RELAY_CHUNK_BYTES * 2;
+/// One capped WebSocket message plus the one IPC frame awaiting its ACK.
+#[cfg(test)]
+const HUB_WS_OUTPUT_BUFFERED_BYTES: usize = HUB_WS_MAX_MESSAGE_BYTES + RELAY_CHUNK_BYTES + 1;
+/// At most this many unsent webview-to-hub messages exist in native memory.
+const HUB_WS_INPUT_QUEUE_MESSAGES: usize = 2;
 const INSTANCE_ACQUIRE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTANCE_RAISE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -270,6 +281,15 @@ struct RelayHubHead {
 struct HubUpload {
     sender: mpsc::SyncSender<Vec<u8>>,
     response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
+}
+
+/// State owned by one IPC-backed hub WebSocket. The input and acknowledgement
+/// queues are deliberately bounded: neither direction may turn a stopped
+/// webview into an unbounded native queue.
+struct HubWsRelay {
+    input: tokio::sync::mpsc::Sender<Vec<u8>>,
+    acknowledgement: tokio::sync::mpsc::Sender<()>,
+    close: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 struct HubUploadReader {
@@ -1714,11 +1734,14 @@ fn relay_response_acks() -> &'static Mutex<HashMap<u64, mpsc::SyncSender<bool>>>
     RELAY_RESPONSE_ACKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Build the one client used for every desktop-to-hub REST request. Its only
-/// server-identity predicate is the SPKI published beside the listener.
-fn pinned_hub_client(runtime: &RuntimeInfo) -> Result<reqwest::blocking::Client, String> {
+fn hub_ws_relays() -> &'static Mutex<HashMap<u64, HubWsRelay>> {
+    HUB_WS_RELAYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Builds the pinned TLS configuration shared by the REST and WebSocket
+/// relays. Both paths therefore make the same, sole server-identity decision.
+fn pinned_hub_tls_config(runtime: &RuntimeInfo) -> Result<rustls::ClientConfig, String> {
     use base64::Engine;
-    use rustls::ClientConfig;
     use std::sync::Arc;
 
     let encoded_spki = runtime
@@ -1731,10 +1754,16 @@ fn pinned_hub_client(runtime: &RuntimeInfo) -> Result<reqwest::blocking::Client,
     if spki.is_empty() {
         return Err("runtime.json contains an empty hub TLS SPKI".to_string());
     }
-    let config = ClientConfig::builder()
+    Ok(rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(tls_identity::SpkiPinVerifier::new(spki)))
-        .with_no_client_auth();
+        .with_no_client_auth())
+}
+
+/// Build the one client used for every desktop-to-hub REST request. Its only
+/// server-identity predicate is the SPKI published beside the listener.
+fn pinned_hub_client(runtime: &RuntimeInfo) -> Result<reqwest::blocking::Client, String> {
+    let config = pinned_hub_tls_config(runtime)?;
     reqwest::blocking::Client::builder()
         .no_proxy()
         .use_preconfigured_tls(config)
@@ -1955,6 +1984,230 @@ fn relay_hub_response_ack(response_id: u64, cancel: bool) {
         .and_then(|acks| acks.get(&response_id).cloned());
     if let Some(sender) = sender {
         let _ = sender.send(cancel);
+    }
+}
+
+fn relay_hub_ws_url(port: u16) -> String {
+    format!("wss://127.0.0.1:{port}/ws")
+}
+
+fn send_hub_ws_event(
+    channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    event: &str,
+    message: Option<String>,
+) {
+    let body = serde_json::json!({ "event": event, "message": message });
+    let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(body.to_string()));
+}
+
+enum HubWsRelayEnd {
+    Closed,
+    Stopped,
+    TransportFailure(String),
+}
+
+/// Forwards one native WebSocket message in fixed-size raw IPC frames. Crucially,
+/// the next chunk (and therefore the next socket read) waits for the webview's
+/// acknowledgement. `Channel::send` itself is push-only and provides no such
+/// flow control.
+async fn relay_hub_ws_binary(
+    bytes: Vec<u8>,
+    channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    acknowledgement: &mut tokio::sync::mpsc::Receiver<()>,
+    close: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> HubWsRelayEnd {
+    if bytes.len() > HUB_WS_MAX_MESSAGE_BYTES {
+        return HubWsRelayEnd::TransportFailure(format!(
+            "hub WebSocket message exceeds the {} byte relay limit",
+            HUB_WS_MAX_MESSAGE_BYTES
+        ));
+    }
+
+    // `bytes` has one bounded owner here. We do not call `read.next()` again
+    // until every one of its frames has been acknowledged by the webview.
+    let chunk_count = bytes.len().div_ceil(RELAY_CHUNK_BYTES);
+    for (index, chunk) in bytes.chunks(RELAY_CHUNK_BYTES).enumerate() {
+        // The first byte identifies the end of this one WebSocket message. IPC
+        // frames stay raw bytes; the desktop client reassembles them before its
+        // normal MessagePack decode.
+        let mut frame = Vec::with_capacity(chunk.len() + 1);
+        frame.push(u8::from(index + 1 == chunk_count));
+        frame.extend_from_slice(chunk);
+        if channel
+            .send(tauri::ipc::InvokeResponseBody::Raw(frame))
+            .is_err()
+        {
+            return HubWsRelayEnd::Stopped;
+        }
+        tokio::select! {
+            acknowledged = acknowledgement.recv() => {
+                if acknowledged.is_none() {
+                    return HubWsRelayEnd::Stopped;
+                }
+            }
+            _ = close.recv() => return HubWsRelayEnd::Stopped,
+        }
+    }
+    HubWsRelayEnd::Closed
+}
+
+async fn relay_hub_ws_stream(
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut acknowledgement: tokio::sync::mpsc::Receiver<()>,
+    mut close: tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    let (mut writer, mut reader) = socket.split();
+    loop {
+        tokio::select! {
+            _ = close.recv() => break,
+            input = input.recv() => {
+                let Some(input) = input else { break };
+                if let Err(error) = writer.send(tokio_tungstenite::tungstenite::Message::Binary(input.into())).await {
+                    send_hub_ws_event(&channel, "transport_error", Some(format!("pinned hub WebSocket write failed: {error}")));
+                    break;
+                }
+            }
+            received = reader.next() => match received {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
+                    match relay_hub_ws_binary(bytes.to_vec(), &channel, &mut acknowledgement, &mut close).await {
+                        HubWsRelayEnd::Closed => {},
+                        HubWsRelayEnd::Stopped => break,
+                        HubWsRelayEnd::TransportFailure(error) => {
+                            send_hub_ws_event(&channel, "transport_error", Some(error));
+                            break;
+                        }
+                    }
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(payload))) => {
+                    if let Err(error) = writer.send(tokio_tungstenite::tungstenite::Message::Pong(payload)).await {
+                        send_hub_ws_event(&channel, "transport_error", Some(format!("pinned hub WebSocket pong failed: {error}")));
+                        break;
+                    }
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                    send_hub_ws_event(&channel, "closed", None);
+                    break;
+                }
+                Some(Ok(_)) => {},
+                Some(Err(error)) => {
+                    send_hub_ws_event(&channel, "transport_error", Some(format!("pinned hub WebSocket read failed: {error}")));
+                    break;
+                }
+                None => {
+                    send_hub_ws_event(&channel, "transport_error", Some("pinned hub WebSocket ended without a close frame".to_string()));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn relay_hub_ws_connect(
+    stream: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<u64, String> {
+    let runtime = relay_runtime()?;
+    let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    config.max_message_size = Some(HUB_WS_MAX_MESSAGE_BYTES);
+    config.max_frame_size = Some(HUB_WS_MAX_MESSAGE_BYTES);
+    let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+        relay_hub_ws_url(runtime.port),
+        Some(config),
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(
+            pinned_hub_tls_config(&runtime)?,
+        ))),
+    )
+    .await
+    .map_err(|error| format!("pinned hub WebSocket connection failed: {error}"))?;
+
+    let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+    let (input_sender, input) = tokio::sync::mpsc::channel(HUB_WS_INPUT_QUEUE_MESSAGES);
+    let (acknowledgement_sender, acknowledgement) = tokio::sync::mpsc::channel(1);
+    let (close_sender, close) = tokio::sync::mpsc::unbounded_channel();
+    hub_ws_relays()
+        .lock()
+        .map_err(|_| "hub WebSocket relay map lock poisoned".to_string())?
+        .insert(
+            id,
+            HubWsRelay {
+                input: input_sender,
+                acknowledgement: acknowledgement_sender,
+                close: close_sender,
+            },
+        );
+    tauri::async_runtime::spawn(async move {
+        relay_hub_ws_stream(socket, stream, input, acknowledgement, close).await;
+        let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
+    });
+    Ok(id)
+}
+
+/// Receives exactly one raw MessagePack frame from the webview. Overflow is an
+/// explicit disconnect, never a blocked IPC command or an unbounded queue.
+#[tauri::command]
+fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let relay_id = request
+        .headers()
+        .get("X-Lasterm-Ws-Id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "WebSocket input is missing its relay id".to_string())?;
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes)
+            if !bytes.is_empty() && bytes.len() <= HUB_WS_MAX_MESSAGE_BYTES =>
+        {
+            bytes.clone()
+        }
+        tauri::ipc::InvokeBody::Raw(_) => {
+            close_hub_ws_relay(relay_id);
+            return Err("WebSocket input exceeds the bounded relay message size".to_string());
+        }
+        tauri::ipc::InvokeBody::Json(_) => {
+            close_hub_ws_relay(relay_id);
+            return Err("WebSocket input must use Tauri raw IPC bytes".to_string());
+        }
+    };
+    let relay = hub_ws_relays()
+        .lock()
+        .map_err(|_| "hub WebSocket relay map lock poisoned".to_string())?
+        .get(&relay_id)
+        .map(|relay| (relay.input.clone(), relay.close.clone()))
+        .ok_or_else(|| "WebSocket relay is no longer active".to_string())?;
+    relay.0.try_send(bytes).map_err(|error| {
+        let _ = relay.1.send(());
+        format!("WebSocket input queue overflow; relay disconnected: {error}")
+    })
+}
+
+#[tauri::command]
+fn relay_hub_ws_ack(relay_id: u64) {
+    let sender = hub_ws_relays().lock().ok().and_then(|relays| {
+        relays
+            .get(&relay_id)
+            .map(|relay| relay.acknowledgement.clone())
+    });
+    if let Some(sender) = sender {
+        let _ = sender.try_send(());
+    }
+}
+
+#[tauri::command]
+fn relay_hub_ws_close(relay_id: u64) {
+    close_hub_ws_relay(relay_id);
+}
+
+fn close_hub_ws_relay(relay_id: u64) {
+    let sender = hub_ws_relays()
+        .lock()
+        .ok()
+        .and_then(|relays| relays.get(&relay_id).map(|relay| relay.close.clone()));
+    if let Some(sender) = sender {
+        let _ = sender.send(());
     }
 }
 
@@ -2951,6 +3204,10 @@ pub fn run() {
             relay_hub_upload_chunk,
             relay_hub_upload_finish,
             relay_hub_response_ack,
+            relay_hub_ws_connect,
+            relay_hub_ws_send,
+            relay_hub_ws_ack,
+            relay_hub_ws_close,
             is_tray_available,
             get_close_behavior,
             set_close_behavior,
@@ -2977,6 +3234,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
 
@@ -3907,5 +4165,132 @@ mod tests {
             coordinator.resolve_native_consent(true),
             QuitAction::SendForced { attempt_id } if attempt_id == id
         ));
+    }
+
+    #[test]
+    fn unacknowledged_webview_stops_before_the_next_hub_message() {
+        let read_count = Arc::new(AtomicUsize::new(0));
+        let (second_read_sender, second_read_received) = mpsc::channel();
+        let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let delivered_for_channel = delivered.clone();
+        let (first_frame_sender, first_frame_received) = mpsc::channel();
+        let channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody> =
+            tauri::ipc::Channel::new(move |body| {
+                let tauri::ipc::InvokeResponseBody::Raw(bytes) = body else {
+                    panic!("the relay must send raw binary IPC frames");
+                };
+                delivered_for_channel.lock().unwrap().push(bytes);
+                let _ = first_frame_sender.send(());
+                Ok(())
+            });
+        let (hub_sender, mut hub_receiver) = tokio::sync::mpsc::channel(2);
+        hub_sender
+            .try_send(vec![1; HUB_WS_MAX_MESSAGE_BYTES])
+            .expect("queue first hub message");
+        hub_sender
+            .try_send(vec![2; HUB_WS_MAX_MESSAGE_BYTES])
+            .expect("queue second hub message");
+        let (_ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
+        let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
+        let reads = read_count.clone();
+
+        let task = tauri::async_runtime::spawn(async move {
+            while let Some(message) = hub_receiver.recv().await {
+                if reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                    let _ = second_read_sender.send(());
+                }
+                let end =
+                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &mut close).await;
+                if !matches!(end, HubWsRelayEnd::Closed) {
+                    break;
+                }
+            }
+        });
+        first_frame_received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the first relay frame reaches the webview");
+
+        // The second hub message is already queued. Wait for the loop to prove
+        // it read that message before tearing it down: with the acknowledgement
+        // wait removed, this event arrives immediately; with it present, the
+        // bounded wait expires while the first IPC frame remains unacknowledged.
+        assert!(matches!(
+            second_read_received.recv_timeout(Duration::from_millis(250)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        task.abort();
+
+        assert_eq!(
+            read_count.load(Ordering::SeqCst),
+            1,
+            "without an ACK the relay must not read a second hub message"
+        );
+        let delivered = delivered.lock().unwrap();
+        assert_eq!(delivered.len(), 1, "only one IPC frame may await an ACK");
+        assert!(
+            delivered[0].len() <= RELAY_CHUNK_BYTES + 1,
+            "the one pending IPC frame is bounded to its marker plus 256 KiB"
+        );
+        assert!(
+            HUB_WS_MAX_MESSAGE_BYTES + delivered[0].len() <= HUB_WS_OUTPUT_BUFFERED_BYTES,
+            "the native output relay holds at most one 512 KiB WebSocket message and one 256 KiB IPC frame"
+        );
+    }
+
+    #[test]
+    fn acknowledged_webview_reads_the_next_hub_message() {
+        let read_count = Arc::new(AtomicUsize::new(0));
+        let (second_read_sender, second_read_received) = mpsc::channel();
+        let (frame_sender, frame_received) = mpsc::channel();
+        let channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody> =
+            tauri::ipc::Channel::new(move |body| {
+                let tauri::ipc::InvokeResponseBody::Raw(_) = body else {
+                    panic!("the relay must send raw binary IPC frames");
+                };
+                let _ = frame_sender.send(());
+                Ok(())
+            });
+        let (hub_sender, mut hub_receiver) = tokio::sync::mpsc::channel(2);
+        hub_sender
+            .try_send(vec![1; HUB_WS_MAX_MESSAGE_BYTES])
+            .expect("queue first hub message");
+        hub_sender
+            .try_send(vec![2; HUB_WS_MAX_MESSAGE_BYTES])
+            .expect("queue second hub message");
+        let (ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
+        let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
+        let reads = read_count.clone();
+
+        let task = tauri::async_runtime::spawn(async move {
+            while let Some(message) = hub_receiver.recv().await {
+                if reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                    let _ = second_read_sender.send(());
+                }
+                let end =
+                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &mut close).await;
+                if !matches!(end, HubWsRelayEnd::Closed) {
+                    break;
+                }
+            }
+        });
+
+        for _ in 0..2 {
+            frame_received
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the first hub message reaches the webview in bounded frames");
+            ack_sender
+                .try_send(())
+                .expect("acknowledge the delivered IPC frame");
+        }
+        second_read_received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("acknowledging every first-message frame lets the relay read the second");
+        task.abort();
+
+        assert_eq!(
+            read_count.load(Ordering::SeqCst),
+            2,
+            "after its first message is acknowledged the relay reads the queued second message"
+        );
     }
 }

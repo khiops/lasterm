@@ -74,7 +74,7 @@ vi.mock("../services/ws-client.js", () => {
 		}
 	}
 
-	return { WsClient: MockWsClient };
+	return { WsClient: MockWsClient, createWsClient: () => new MockWsClient() };
 });
 
 const localStorageMap = new Map<string, string>();

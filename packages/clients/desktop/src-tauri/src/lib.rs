@@ -1,4 +1,5 @@
 use lasterm_process_lock::ProcessLock;
+pub mod tls_identity;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 #[cfg(unix)]

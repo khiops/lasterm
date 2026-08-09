@@ -679,15 +679,56 @@ dependencies, including `rustls`, `hyper-rustls`, `tokio-rustls`,
 crate declares. A read that does not separate the two versions concludes the opposite; two
 successive probes did.
 
-**The decision procedure, so this does not stay open.** A short spike settles it: add a
-manual-roots rustls feature to reqwest 0.12 and compile a custom `ServerCertVerifier`. If it
-compiles and the verifier is reachable through `ClientBuilder`, keep 0.12. If it does not,
-consolidate on the 0.13 line already in the graph. Prefer 0.12 because it is what the crate declares
-and changing a major line touches whatever else uses it.
+**SETTLED by a spike with a runtime assertion.** Keep reqwest 0.12; consolidation on 0.13 is not
+required. The configuration that works:
 
-Whichever wins, the feature must permit a **custom certificate verifier**: platform-root
-verification cannot express "this SPKI and no other", and `danger_accept_invalid_certs` verifies
-nothing. P4, P5 and P6 all rest on this, so the spike comes before any code that assumes it.
+```toml
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls-manual-roots"], default-features = false }
+rustls  = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+```
+
+Manual roots is the right feature because pinning wants **no** trust anchors.
+
+**The rustls requirement must resolve to the same version reqwest uses, and a caret does that.**
+`use_preconfigured_tls` takes `impl Any` and **downcasts at runtime**
+(`reqwest-0.12.28/src/blocking/client.rs:1068` → `async_impl/client.rs:2156`), so a `ClientConfig`
+built against a semver-incompatible rustls is a different type: it compiles cleanly and fails when the
+request runs. That is why a `cargo check` could not have answered this and the spike had to issue a
+real TLS request.
+
+*An exact `=0.23.37` pin was tried first and is wrong.* Cargo already unifies semver-compatible
+versions, so `"0.23"` resolves to one rustls 0.23.37 shared with `hyper-rustls` across reqwest 0.12
+and 0.13 — verified by `cargo tree -i rustls`, with the three tests still passing. The exact pin bought
+nothing and **blocked patch updates to a TLS library**, which is the wrong trade on the one dependency
+where security fixes matter most. Only a rustls 0.24 while reqwest still requires 0.23 would make the
+requirement bind, and the caret handles that correctly by staying on 0.23.
+
+Verified rather than reported: three tests in `src/tls_identity.rs` pass — a matching SPKI completes a
+blocking TLS request, a different SPKI fails at the handshake with no HTTP bytes sent, and an expired
+certificate naming `wrong-hostname.invalid` still connects when its SPKI matches. Suite 46 → 49.
+Mutating the SPKI comparison to `true` turns the second test RED and leaves the other two green, so
+the discriminating lock is that one and the three are not redundant.
+
+**The SPKI is read with `rustls-webpki`, not a second parser.** The spike first reached for
+`x509-parser 0.16`, which would have added seven crates (`asn1-rs`, `der-parser`, `oid-registry`,
+`nom`, `rusticata-macros`, `data-encoding`, `lazy_static`) to the **production** build, in the trust
+path, reading a certificate supplied by the peer.
+
+`rustls-webpki 0.103.13` is already in the graph, is written by the rustls authors, and already parses
+certificates there. The path is fully public, checked in the vendored source:
+`EndEntityCert::try_from(&CertificateDer)` (`end_entity.rs:63`) → `Deref` to `Cert`
+(`end_entity.rs:172`, `cert.rs:30`) → `Cert::subject_public_key_info()` (`cert.rs:234`), documented as
+the RFC 5280-compliant SPKI. So `x509-parser` is removed.
+
+*Two things a reader should carry from that.* A malformed certificate must map
+`EndEntityCert::try_from`'s error to `CertificateError::BadEncoding` rather than panicking, since the
+input comes from the peer. And whatever computes the pinned value must produce it the same way the
+verifier reads it — the pin is bytes, and two parsers agreeing is an assumption, not a given.
+
+*Not a cost, checked because the lock diff looks alarming:* the change adds 26 lock entries including
+`quinn`, `quinn-proto` and `quinn-udp`. `cargo tree -i quinn` prints nothing for the host and nothing
+for `--target all`, so QUIC is in no build graph — those are lock entries for a feature combination
+nothing enables.
 
 *Cost already paid:* rustls pulls `ring`, and `ring` is what prevents cross-compiling this
 crate for `x86_64-pc-windows-msvc` on a Linux host. Since rustls is already in the graph,

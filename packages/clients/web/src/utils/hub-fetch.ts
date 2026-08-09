@@ -7,7 +7,7 @@ type RelayRequest = {
 	method: string;
 	path: string;
 	headers: [string, string][];
-	body: string | null;
+	body: number[] | null;
 };
 
 type RelayHead = {
@@ -53,7 +53,7 @@ async function relayHubFetch(input: RequestInfo | URL, init?: RequestInit): Prom
 	if (request.body === null) return relayRequestToResponse(relayRequest);
 	if (init?.body instanceof FormData) return relayUploadToResponse(relayRequest, init.body);
 
-	relayRequest.body = await request.text();
+	relayRequest.body = Array.from(new Uint8Array(await request.arrayBuffer()));
 	return relayRequestToResponse(relayRequest);
 }
 
@@ -71,7 +71,7 @@ function isDesktopRelayRuntime(): boolean {
 
 function relayPath(url: string): string {
 	const parsed = new URL(url);
-	if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") {
+	if (parsed.protocol !== "https:" || parsed.hostname !== "127.0.0.1") {
 		throw new HubRelayTransportError("desktop hub requests must target the local hub");
 	}
 	return `${parsed.pathname}${parsed.search}`;

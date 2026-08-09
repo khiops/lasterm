@@ -264,7 +264,7 @@ struct RelayHubRequest {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
 }
 
 #[derive(Serialize)]
@@ -1654,7 +1654,7 @@ enum HubStartOutcome {
 }
 
 /// The port from the hub's own announcement, `lasterm hub listening on
-/// http://127.0.0.1:PORT (build: …)`.
+/// https://127.0.0.1:PORT (build: …)`.
 ///
 /// Parsed from a pipe only our child writes to, which is what makes it trustworthy;
 /// the value is used to talk to that child and nothing else.
@@ -1670,7 +1670,7 @@ fn parse_listening_port(line: &str) -> Option<u16> {
     // http://127.0.0.1:4444 because …` announces nothing, and `…:4444garbage` is not
     // an address. The hub emits exactly `lasterm hub listening on <address> (build:
     // <hash>)`, so the port is followed by a space or ends the line.
-    const PREFIX: &str = "lasterm hub listening on http://127.0.0.1:";
+    const PREFIX: &str = "lasterm hub listening on https://127.0.0.1:";
     // No `trim()`: leading whitespace is what a wrapped or prefixed diagnostic has,
     // and allowing it defeated the anchor — `" lasterm hub listening on
     // http://127.0.0.1:4444 failed"` parsed. The tail must be the build suffix the
@@ -3716,17 +3716,17 @@ mod tests {
     }
 
     /// The line the hub actually prints, taken from a run rather than written from
-    /// memory: `lasterm hub listening on http://127.0.0.1:45999 (build: 5c31e75)`.
+    /// memory: `lasterm hub listening on https://127.0.0.1:45999 (build: 5c31e75)`.
     #[test]
     fn listening_port_comes_from_the_hub_announcement() {
         assert_eq!(
             parse_listening_port(
-                "lasterm hub listening on http://127.0.0.1:45999 (build: 5c31e75)"
+                "lasterm hub listening on https://127.0.0.1:45999 (build: 5c31e75)"
             ),
             Some(45999)
         );
         assert_eq!(
-            parse_listening_port("lasterm hub listening on http://127.0.0.1:4100"),
+            parse_listening_port("lasterm hub listening on https://127.0.0.1:4100"),
             Some(4100)
         );
     }

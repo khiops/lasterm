@@ -21,7 +21,7 @@ describe("hubFetch desktop transport", () => {
 			value: { invoke, transformCallback: () => 1 },
 		});
 
-		const response = await hubFetch("http://127.0.0.1:4242/api/health");
+		const response = await hubFetch("https://127.0.0.1:4242/api/health");
 
 		expect(response.status).toBe(204);
 		expect(invoke).toHaveBeenCalledWith(
@@ -32,6 +32,38 @@ describe("hubFetch desktop transport", () => {
 			undefined,
 		);
 		expect(webviewFetch).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["Blob", new Blob([new Uint8Array([0, 255, 1, 128])]), [0, 255, 1, 128]],
+		["ArrayBuffer", new Uint8Array([2, 254, 3]).buffer, [2, 254, 3]],
+		["typed array", new Uint8Array([4, 253, 5]), [4, 253, 5]],
+		[
+			"URLSearchParams",
+			new URLSearchParams("one=1&two=%C3%A9"),
+			[111, 110, 101, 61, 49, 38, 116, 119, 111, 61, 37, 67, 51, 37, 65, 57],
+		],
+	])("relays %s request bodies byte-for-byte", async (_kind, body, expectedBytes) => {
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_request") {
+				return { id: 1, status: 204, statusText: "No Content", headers: [] };
+			}
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+
+		await hubFetch("https://127.0.0.1:4242/api/body", { method: "POST", body });
+
+		expect(invoke).toHaveBeenCalledWith(
+			"relay_hub_request",
+			expect.objectContaining({
+				request: expect.objectContaining({ body: expectedBytes }),
+			}),
+			undefined,
+		);
 	});
 
 	it("keeps browser requests on fetch", async () => {

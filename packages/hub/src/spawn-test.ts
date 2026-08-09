@@ -1,16 +1,37 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { request } from "node:http";
-import { homedir } from "node:os";
+import { request } from "node:https";
+import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
 
-const auth = JSON.parse(readFileSync(join(homedir(), ".config/lasterm/auth.json"), "utf8"));
+const stateDir =
+	platform() === "win32"
+		? join(process.env.LOCALAPPDATA ?? "", "lasterm")
+		: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
+const configDir =
+	platform() === "win32"
+		? join(process.env.APPDATA ?? "", "lasterm")
+		: join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
+const runtime = JSON.parse(readFileSync(join(stateDir, "runtime.json"), "utf8")) as {
+	port?: unknown;
+};
+const runtimePort = runtime.port;
+if (
+	typeof runtimePort !== "number" ||
+	!Number.isInteger(runtimePort) ||
+	runtimePort < 1 ||
+	runtimePort > 65535
+) {
+	throw new Error("runtime.json has no usable hub port");
+}
+const auth = JSON.parse(readFileSync(join(configDir, "auth.json"), "utf8"));
 const hostId = process.argv[2] || "local";
 
 const key = randomBytes(16).toString("base64");
-const req = request("http://localhost:4100/ws", {
+const req = request(`https://127.0.0.1:${runtimePort}/ws`, {
+	ca: readFileSync(join(stateDir, "hub-tls-cert.pem"), "utf8"),
 	headers: {
 		Connection: "Upgrade",
 		Upgrade: "websocket",

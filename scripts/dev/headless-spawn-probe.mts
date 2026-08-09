@@ -1,5 +1,8 @@
 #!/usr/bin/env -S pnpm exec tsx
 import { existsSync, readFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
+import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { decodeMessage, encodeMessage } from "../../packages/shared/src/index.js";
 import type {
 	AuthMessage,
@@ -13,11 +16,34 @@ interface HostSummary {
 	label: string;
 }
 
-const port = process.argv[2] ?? "4100";
-const base = `http://127.0.0.1:${port}`;
+const stateDir =
+	platform() === "win32"
+		? join(process.env.LOCALAPPDATA ?? "", "lasterm")
+		: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
+const configDir =
+	platform() === "win32"
+		? join(process.env.APPDATA ?? "", "lasterm")
+		: join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
+const runtime = JSON.parse(readFileSync(join(stateDir, "runtime.json"), "utf8")) as {
+	port?: unknown;
+};
+const runtimePort = runtime.port;
+if (
+	typeof runtimePort !== "number" ||
+	!Number.isInteger(runtimePort) ||
+	runtimePort < 1 ||
+	runtimePort > 65535
+) {
+	throw new Error("runtime.json has no usable hub port");
+}
+const port = runtimePort;
+// Node 24 lets this script add the hub's per-run certificate to its normal
+// verification roots. This is trust of the recorded certificate, not a TLS bypass.
+setDefaultCACertificates([...getCACertificates(), readFileSync(join(stateDir, "hub-tls-cert.pem"))]);
+const base = `https://127.0.0.1:${port}`;
 const authPath =
 	process.env.TT_AUTH ??
-	`${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/lasterm/auth.json`;
+	join(configDir, "auth.json");
 const token = readToken(authPath);
 const hosts = await readHosts(base, token);
 const local = hosts.find((h) => h.type === "local") ?? hosts[0];
@@ -27,7 +53,7 @@ if (!local) {
 
 console.log(`[ws] local host: ${local.id} (${local.label})`);
 
-const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+const ws = new WebSocket(`wss://127.0.0.1:${port}/ws`);
 ws.binaryType = "arraybuffer";
 
 const t0 = Date.now();

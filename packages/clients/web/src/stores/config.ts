@@ -13,7 +13,7 @@ import {
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
-import { hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
+import { domPublicAssetUrl, hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 
 // ─── Profile change event bus ─────────────────────────────────────────────────
@@ -30,7 +30,7 @@ type ProfileChangeListener = (event: ProfileChangeEvent) => void;
  * Inject @font-face rules into the document head so the browser
  * can resolve custom font families referenced in the terminal profile.
  */
-function injectFontFaces(families: FontFamily[]): void {
+async function injectFontFaces(families: FontFamily[]): Promise<void> {
 	// Remove any previously injected style element
 	const existing = document.getElementById("lasterm-fonts");
 	if (existing) existing.remove();
@@ -48,11 +48,7 @@ function injectFontFaces(families: FontFamily[]): void {
 					: pathname.endsWith(".ttf")
 						? "truetype"
 						: "opentype";
-			const src = file.url.startsWith("/public/")
-				? publicAssetUrl(file.url)
-				: file.url.startsWith("/")
-					? `${hubBaseUrl()}${file.url}`
-					: file.url;
+			const src = file.url.startsWith("/") ? await domPublicAssetUrl(file.url) : file.url;
 			rules.push(
 				`@font-face {
 	font-family: "${family.family}";
@@ -126,7 +122,7 @@ export const useConfigStore = defineStore("config", () => {
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			const fontList: FontFamily[] = await response.json();
 			fonts.value = fontList;
-			injectFontFaces(fontList);
+			await injectFontFaces(fontList);
 
 			// Force-load fonts so canvas-based xterm.js can use them.
 			// document.fonts.load() triggers actual download; without this,

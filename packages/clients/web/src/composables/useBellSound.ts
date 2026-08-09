@@ -1,5 +1,5 @@
 import type { BellSound } from "@lasterm/shared";
-import { namedPublicAssetUrl } from "../utils/hub-url.js";
+import { domNamedPublicAssetUrl } from "../utils/hub-url.js";
 
 let audioContext: AudioContext | null = null;
 let userInteracted = false;
@@ -94,11 +94,15 @@ function _playCustomSound(filename: string): void {
 	}
 
 	try {
-		const audio = new Audio(namedPublicAssetUrl("sounds", filename));
-		audio.volume = 0.5;
-		void audio.play().catch(() => {
-			// Autoplay may be blocked
-		});
+		void domNamedPublicAssetUrl("sounds", filename)
+			.then((url) => {
+				const audio = new Audio(url);
+				audio.volume = 0.5;
+				return audio.play();
+			})
+			.catch(() => {
+				// Loading through the relay or autoplay may fail.
+			});
 	} catch {
 		// Audio creation may fail
 	}

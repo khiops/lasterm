@@ -67,14 +67,14 @@ function requireResolvedPort(): number {
 // where the origin is the page's own and no port of ours is involved.
 export function hubBaseUrl(): string {
 	if (isTauriRuntime()) {
-		return `http://127.0.0.1:${requireResolvedPort()}`;
+		return `https://127.0.0.1:${requireResolvedPort()}`;
 	}
 	return "";
 }
 
 export function hubWsUrl(): string {
 	if (isTauriRuntime()) {
-		return `ws://127.0.0.1:${requireResolvedPort()}`;
+		return `wss://127.0.0.1:${requireResolvedPort()}`;
 	}
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	return `${protocol}//${window.location.host}`;
@@ -163,4 +163,25 @@ export function namedPublicAssetUrl(
 	extraParams?: Record<string, number | string | null | undefined>,
 ): string {
 	return publicAssetUrl(`/public/${kind}/${encodeURIComponent(filename)}`, extraParams);
+}
+
+/** Resolve an asset to a URL the DOM may load. */
+export async function domPublicAssetUrl(
+	pathOrUrl: string,
+	extraParams?: Record<string, number | string | null | undefined>,
+): Promise<string> {
+	const url = publicAssetUrl(pathOrUrl, extraParams);
+	if (!isTauriRuntime()) return url;
+
+	const response = await hubFetch(url);
+	if (!response.ok) throw new Error(`Failed to load asset: ${response.status}`);
+	return URL.createObjectURL(await response.blob());
+}
+
+export function domNamedPublicAssetUrl(
+	kind: "fonts" | "sounds" | "wallpapers",
+	filename: string,
+	extraParams?: Record<string, number | string | null | undefined>,
+): Promise<string> {
+	return domPublicAssetUrl(`/public/${kind}/${encodeURIComponent(filename)}`, extraParams);
 }

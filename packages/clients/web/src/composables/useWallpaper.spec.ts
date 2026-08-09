@@ -1,5 +1,5 @@
 import type { TerminalProfile } from "@lasterm/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { nextTick, ref } from "vue";
 import { setAssetTokenForTests, setHubPortForTests } from "../utils/hub-url.js";
 import { useWallpaper } from "./useWallpaper.js";
@@ -25,6 +25,7 @@ describe("useWallpaper", () => {
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 		setAssetTokenForTests(null);
 		setHubPortForTests(null);
+		vi.restoreAllMocks();
 	});
 
 	describe("wallpaperStyle", () => {
@@ -129,12 +130,19 @@ describe("useWallpaper", () => {
 			expect(wallpaperStyle.value?.backgroundImage).toContain("asset_token=late-token");
 		});
 
-		it("should prefix wallpaper URL with the hub base URL in Tauri runtime", () => {
+		it("loads desktop wallpaper through a blob URL rather than a plaintext hub URL", async () => {
 			// Arrange
 			Object.defineProperty(window, "__TAURI_INTERNALS__", {
-				value: {},
+				value: {
+					invoke: async (command: string) =>
+						command === "relay_hub_request"
+							? { id: 1, status: 204, statusText: "No Content", headers: [] }
+							: undefined,
+					transformCallback: () => 1,
+				},
 				configurable: true,
 			});
+			vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:lasterm-wallpaper");
 			// The desktop shell resolves the port before any URL is built; there is no
 			// default to fall back on, so a test that builds one must resolve it too.
 			setHubPortForTests(4100);
@@ -142,11 +150,13 @@ describe("useWallpaper", () => {
 
 			// Act
 			const { wallpaperStyle } = useWallpaper(profile);
+			await vi.waitFor(() => {
+				expect(wallpaperStyle.value?.backgroundImage).toBe("url(blob:lasterm-wallpaper)");
+			});
 
 			// Assert
-			expect(wallpaperStyle.value?.backgroundImage).toContain(
-				`url(http://127.0.0.1:4100/public/wallpapers/${encodeURIComponent("desktop image.jpg")}`,
-			);
+			expect(wallpaperStyle.value?.backgroundImage).toBe("url(blob:lasterm-wallpaper)");
+			expect(wallpaperStyle.value?.backgroundImage).not.toContain("http://");
 		});
 	});
 

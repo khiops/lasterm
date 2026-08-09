@@ -114,6 +114,20 @@ describe("GET /api/auth/tokens", () => {
 		expect(found?.expires_at).toBe(expiresAt);
 		expect(found?.revoked_at).toBeNull();
 	});
+
+	it("shows swept_at for a token invalidated on restart", async () => {
+		const { id } = createToken(dbs.meta, { label: "previous browser", expiresAt: null });
+		const sweptAt = new Date().toISOString();
+		dbs.meta.prepare("UPDATE auth_tokens SET swept_at = ? WHERE id = ?").run(sweptAt, id);
+
+		const res = await server.inject({
+			method: "GET",
+			url: "/api/auth/tokens",
+			headers: authHeader(),
+		});
+		const body = res.json<{ tokens: Array<{ id: string; swept_at: string | null }> }>();
+		expect(body.tokens.find((token) => token.id === id)?.swept_at).toBe(sweptAt);
+	});
 });
 
 // ─── DELETE /api/auth/tokens/:id ─────────────────────────────────────────────

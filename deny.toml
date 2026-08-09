@@ -17,4 +17,5 @@ exceptions = [
 	{ name = "lasterm-agent", allow = ["AGPL-3.0-only"] },
 	{ name = "lasterm-hub-lock", allow = ["AGPL-3.0-only"] },
 	{ name = "lasterm-process-lock", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-tls-identity", allow = ["AGPL-3.0-only"] },
 ]

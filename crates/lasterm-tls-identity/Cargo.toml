@@ -1,0 +1,30 @@
+[package]
+name = "lasterm-tls-identity"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/khiops/lasterm"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi4"] }
+napi-derive = "3"
+rcgen = "0.13"
+time = "0.3"
+
+[build-dependencies]
+napi-build = "2"
+
+[dev-dependencies]
+pem = "3"
+rustls-pki-types = "1"
+rustls-webpki = "0.103"
+x509-parser = "0.16"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }

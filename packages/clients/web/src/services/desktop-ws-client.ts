@@ -27,6 +27,7 @@ export class DesktopWsClient implements IWsClient {
 	private pendingFrame: ArrayBuffer | RelayEvent | undefined;
 	private messageParts: Uint8Array[] = [];
 	private messageBytes = 0;
+	private sendQueue: Promise<void> = Promise.resolve();
 
 	async connect(_url: string): Promise<void> {
 		const { Channel, invoke } = await import("@tauri-apps/api/core");
@@ -51,14 +52,20 @@ export class DesktopWsClient implements IWsClient {
 	send(msg: ProtocolMessage): void {
 		const relayId = this.relayId;
 		if (relayId === null) throw new Error("WebSocket not connected");
+		const generation = this.connectionGeneration;
 		const encoded = encodeMessage(msg);
-		void import("@tauri-apps/api/core")
-			.then(({ invoke }) =>
-				invoke("relay_hub_ws_send", encoded.buffer, {
+		// IWsClient intentionally remains fire-and-forget, as WebSocket.send is.
+		// This one FIFO serializes all callers; the native command awaits queue
+		// capacity, so it applies backpressure instead of overflowing a relay.
+		this.sendQueue = this.sendQueue
+			.then(async () => {
+				if (!this._isCurrentRelay(relayId, generation)) return;
+				const { invoke } = await import("@tauri-apps/api/core");
+				await invoke("relay_hub_ws_send", encoded.buffer, {
 					headers: { "X-Lasterm-Ws-Id": String(relayId) },
-				}),
-			)
-			.catch((error: unknown) => this._transportFailure(String(error)));
+				});
+			})
+			.catch((error: unknown) => this._transportFailure(String(error), relayId, generation));
 	}
 
 	on(type: string, callback: MessageListener): () => void {
@@ -88,6 +95,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
+		this.sendQueue = Promise.resolve();
 		if (relayId !== null) {
 			void import("@tauri-apps/api/core")
 				.then(({ invoke }) => invoke("relay_hub_ws_close", { relayId }))
@@ -145,9 +153,10 @@ export class DesktopWsClient implements IWsClient {
 	private _acknowledge(): void {
 		const relayId = this.relayId;
 		if (relayId === null) return;
+		const generation = this.connectionGeneration;
 		void import("@tauri-apps/api/core")
 			.then(({ invoke }) => invoke("relay_hub_ws_ack", { relayId }))
-			.catch((error: unknown) => this._transportFailure(String(error)));
+			.catch((error: unknown) => this._transportFailure(String(error), relayId, generation));
 	}
 
 	private _closed(): void {
@@ -155,20 +164,29 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
+		this.sendQueue = Promise.resolve();
 		for (const listener of this.disconnectListeners) listener();
 		this._scheduleReconnect();
 	}
 
-	private _transportFailure(error: string): void {
-		if (this.relayId === null) return;
+	private _transportFailure(error: string, relayId?: number, generation?: number): void {
+		if (
+			this.relayId === null ||
+			(relayId !== undefined && !this._isCurrentRelay(relayId, generation))
+		) {
+			return;
+		}
 		console.error("[DesktopWsClient] Transport failure:", error);
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		// A failed TLS handshake or vanished hub is not a protocol close. Do not
-		// expose it as onDisconnect, which consumers treat as a reconnectable
-		// closed session.
+		this.sendQueue = Promise.resolve();
+		for (const listener of this.disconnectListeners) listener();
 		this._scheduleReconnect();
+	}
+
+	private _isCurrentRelay(relayId: number, generation = this.connectionGeneration): boolean {
+		return this.relayId === relayId && this.connectionGeneration === generation;
 	}
 
 	private _scheduleReconnect(): void {

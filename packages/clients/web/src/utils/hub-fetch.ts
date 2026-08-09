@@ -19,6 +19,9 @@ type RelayHead = {
 
 type RelayStreamError = { error: string };
 
+/** The subset of fetch options the desktop relay implements in both runtimes. */
+export type HubFetchInit = Pick<RequestInit, "method" | "headers" | "body">;
+
 /** A failed pinned-shell request, never an HTTP response with a synthetic status. */
 export class HubRelayTransportError extends Error {
 	constructor(message: string) {
@@ -33,7 +36,7 @@ export class HubRelayTransportError extends Error {
  * Browsers retain ordinary fetch semantics. In a desktop webview the command
  * sends the request from Rust, which is the process holding the hub SPKI pin.
  */
-export function hubFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export function hubFetch(input: string | URL, init?: HubFetchInit): Promise<Response> {
 	if (!isDesktopRelayRuntime()) return fetch(input, init);
 	if (!isDesktopHubUrl(input)) {
 		return Promise.reject(new HubRelayTransportError("desktop hub requests must target 127.0.0.1"));
@@ -41,7 +44,7 @@ export function hubFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
 	return relayHubFetch(input, init);
 }
 
-async function relayHubFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+async function relayHubFetch(input: string | URL, init?: HubFetchInit): Promise<Response> {
 	const request = new Request(input, init);
 	const relayRequest: RelayRequest = {
 		method: request.method,
@@ -57,9 +60,8 @@ async function relayHubFetch(input: RequestInfo | URL, init?: RequestInit): Prom
 	return relayRequestToResponse(relayRequest);
 }
 
-function isDesktopHubUrl(input: RequestInfo | URL): boolean {
-	const value = input instanceof Request ? input.url : input.toString();
-	return new URL(value, window.location.href).hostname === "127.0.0.1";
+function isDesktopHubUrl(input: string | URL): boolean {
+	return new URL(input.toString(), window.location.href).hostname === "127.0.0.1";
 }
 
 function isDesktopRelayRuntime(): boolean {
@@ -106,31 +108,34 @@ async function relayUploadToResponse(request: RelayRequest, formData: FormData):
 	request.headers = request.headers.filter(([name]) => name.toLowerCase() !== "content-type");
 	request.headers.push(["content-type", `multipart/form-data; boundary=${boundary}`]);
 
-	let uploadId: number;
+	let uploadId: number | null = null;
 	try {
 		uploadId = await invoke<number>("relay_hub_upload_start", { request });
 		await sendMultipartChunks(uploadId, formData, boundary, invoke);
-	} catch (error) {
-		throw relayTransportError(error);
-	}
 
-	let responseId: number | null = null;
-	const stream = responseStream(
-		new Channel<ArrayBuffer | RelayStreamError>((frame) => {
-			stream.receive(frame);
-		}),
-		() => responseId,
-	);
-	try {
+		let responseId: number | null = null;
+		const stream = responseStream(
+			new Channel<ArrayBuffer | RelayStreamError>((frame) => {
+				stream.receive(frame);
+			}),
+			() => responseId,
+		);
 		const head = await invoke<RelayHead>("relay_hub_upload_finish", {
 			uploadId,
 			response: stream.channel,
 		});
+		uploadId = null;
 		responseId = head.id;
 		stream.drain();
 		return relayResponse(head, stream.body);
 	} catch (error) {
 		throw relayTransportError(error);
+	} finally {
+		if (uploadId !== null) {
+			// `finish` transfers and removes the slot. Every other outcome must
+			// explicitly release the map entry and close the body's sender.
+			await invoke("relay_hub_upload_cancel", { uploadId }).catch(() => undefined);
+		}
 	}
 }
 

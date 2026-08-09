@@ -1,11 +1,16 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
 import { createServer, startServer } from "./server.js";
-import { resolveHubTlsIdentity } from "./tls-identity.js";
+import {
+	certificateSpki,
+	HUB_TLS_CERTIFICATE_NAME,
+	resolveHubTlsIdentity,
+} from "./tls-identity.js";
 
 describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
@@ -46,5 +51,85 @@ describe("generated hub TLS identity", () => {
 				"/api/health",
 			),
 		).rejects.toThrow("does not match runtime SPKI");
+	});
+
+	it("refuses a different leaf even when it chains to the operator bundle CA", async () => {
+		originalStateRoot = process.env.XDG_STATE_HOME;
+		stateRoot = join(tmpdir(), `lasterm-tls-ca-${randomBytes(8).toString("hex")}`);
+		process.env.XDG_STATE_HOME = stateRoot;
+		const stateDir = getStateDir();
+		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+
+		const runOpenSsl = (...args: string[]) =>
+			execFileSync("openssl", args, { cwd: stateDir, stdio: "pipe" });
+		runOpenSsl(
+			"req",
+			"-x509",
+			"-newkey",
+			"rsa:2048",
+			"-nodes",
+			"-days",
+			"1",
+			"-subj",
+			"/CN=test-ca",
+			"-keyout",
+			"ca-key.pem",
+			"-out",
+			"ca.pem",
+		);
+		for (const leaf of ["recorded", "other"]) {
+			runOpenSsl(
+				"req",
+				"-newkey",
+				"rsa:2048",
+				"-nodes",
+				"-subj",
+				`/CN=${leaf}`,
+				"-keyout",
+				`${leaf}-key.pem`,
+				"-out",
+				`${leaf}.csr`,
+			);
+			runOpenSsl(
+				"x509",
+				"-req",
+				"-days",
+				"1",
+				"-CA",
+				"ca.pem",
+				"-CAkey",
+				"ca-key.pem",
+				"-CAcreateserial",
+				"-in",
+				`${leaf}.csr`,
+				"-out",
+				`${leaf}.pem`,
+			);
+		}
+		const recordedCertificate = readFileSync(join(stateDir, "recorded.pem"), "utf8");
+		const caCertificate = readFileSync(join(stateDir, "ca.pem"), "utf8");
+		writeFileSync(join(stateDir, HUB_TLS_CERTIFICATE_NAME), recordedCertificate + caCertificate, {
+			mode: 0o600,
+		});
+		server = await createServer({
+			logger: false,
+			tls: {
+				cert: readFileSync(join(stateDir, "other.pem"), "utf8"),
+				key: readFileSync(join(stateDir, "other-key.pem"), "utf8"),
+			},
+		});
+		const port = Number(new URL(await startServer(server)).port);
+
+		await expect(
+			requestHub(
+				{
+					pid: process.pid,
+					port,
+					started_at: new Date().toISOString(),
+					spki: certificateSpki(recordedCertificate),
+				},
+				"/api/health",
+			),
+		).rejects.toThrow("peer SPKI does not match runtime.json");
 	});
 });

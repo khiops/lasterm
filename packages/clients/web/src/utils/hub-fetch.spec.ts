@@ -66,6 +66,25 @@ describe("hubFetch desktop transport", () => {
 		);
 	});
 
+	it("cancels a started upload when a chunk relay fails", async () => {
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_upload_start") return 33;
+			if (command === "relay_hub_upload_chunk") throw new Error("IPC rejected the chunk");
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const form = new FormData();
+		form.append("field", "value");
+
+		await expect(
+			hubFetch("https://127.0.0.1:4242/api/upload", { method: "POST", body: form }),
+		).rejects.toThrow("IPC rejected the chunk");
+		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+	});
+
 	it("keeps browser requests on fetch", async () => {
 		const browserFetch = vi.fn(async () => new Response("browser"));
 		vi.stubGlobal("fetch", browserFetch);

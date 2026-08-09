@@ -6,7 +6,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes, X509Certificate } from "node:crypto";
+import { randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import {
 	closeSync,
 	copyFileSync,
@@ -318,10 +318,7 @@ function hubCertificate(runtime: RuntimeInfo): string {
 	return certificate;
 }
 
-/**
- * The sole local-hub transport. `ca` pins the leaf through Node's normal TLS
- * verification; credentials are added only after that handshake succeeds.
- */
+/** The sole local-hub transport. Credentials are added only after TLS pinning. */
 export async function requestHub(
 	runtime: RuntimeInfo,
 	path: string,
@@ -336,6 +333,21 @@ export async function requestHub(
 				method: init.method ?? "GET",
 				headers: init.headers,
 				ca: certificate,
+				// Keep normal certificate validation on: Node calls this hook only after
+				// that validation succeeded. `ca` may be an operator bundle, so it is
+				// not itself a leaf pin. This is the one identity predicate: exact DER
+				// SubjectPublicKeyInfo equality with runtime.json.
+				checkServerIdentity: (_hostname, peerCertificate) => {
+					const peerSpki = new X509Certificate(peerCertificate.raw).publicKey.export({
+						type: "spki",
+						format: "der",
+					});
+					const expectedSpki = Buffer.from(runtime.spki ?? "", "base64");
+					if (peerSpki.length !== expectedSpki.length || !timingSafeEqual(peerSpki, expectedSpki)) {
+						return new Error("Hub TLS peer SPKI does not match runtime.json; refusing to connect");
+					}
+					return undefined;
+				},
 				signal: init.signal,
 			},
 			(response) => {

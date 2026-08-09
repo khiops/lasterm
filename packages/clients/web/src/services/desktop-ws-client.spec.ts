@@ -62,7 +62,7 @@ describe("DesktopWsClient", () => {
 		client.close();
 	});
 
-	it("keeps a transport failure distinct from a clean session close", async () => {
+	it("reports a transport failure as disconnected before reconnecting", async () => {
 		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 		const client = createWsClient();
 		const disconnected = vi.fn();
@@ -70,12 +70,61 @@ describe("DesktopWsClient", () => {
 		await client.connect("ws://127.0.0.1:4100/ws");
 
 		ipc.callback?.({ event: "transport_error" });
-		expect(disconnected).not.toHaveBeenCalled();
+		expect(disconnected).toHaveBeenCalledTimes(1);
+		expect(client.isConnected).toBe(false);
 		client.close();
 
 		await client.connect("ws://127.0.0.1:4100/ws");
 		ipc.callback?.({ event: "closed" });
-		expect(disconnected).toHaveBeenCalledTimes(1);
+		expect(disconnected).toHaveBeenCalledTimes(2);
+		client.close();
+	});
+
+	it("serializes fire-and-forget sends until native capacity accepts each one", async () => {
+		let sendCount = 0;
+		let releaseFirst: (() => void) | undefined;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(41);
+			if (command !== "relay_hub_ws_send") return Promise.resolve();
+			sendCount++;
+			if (sendCount === 1) return new Promise<void>((resolve) => (releaseFirst = resolve));
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "one" });
+		client.send({ type: "AUTH", token: "two" });
+		await vi.waitFor(() => expect(sendCount).toBe(1));
+		releaseFirst?.();
+		await vi.waitFor(() => expect(sendCount).toBe(2));
+		client.close();
+	});
+
+	it("discards a late send rejection from a replaced relay", async () => {
+		let nextRelayId = 41;
+		let rejectFirst: ((error: Error) => void) | undefined;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(nextRelayId++);
+			if (command === "relay_hub_ws_send") {
+				return new Promise<void>((_resolve, reject) => (rejectFirst = reject));
+			}
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "old" });
+		await vi.waitFor(() => expect(rejectFirst).toBeTypeOf("function"));
+		ipc.callback?.({ event: "transport_error" });
+		await client.connect("ws://127.0.0.1:4100/ws");
+		rejectFirst?.(new Error("late failure"));
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(client.isConnected).toBe(true);
 		client.close();
 	});
 });

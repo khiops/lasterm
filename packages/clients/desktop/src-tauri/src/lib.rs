@@ -97,8 +97,12 @@ static CLOSE_BEHAVIOR_TEMP_COUNTER: AtomicU16 = AtomicU16::new(0);
 // timeout, then the hub's agent stopper can use its bound, then graceful
 // shutdown has its own bound before it deletes runtime.json.
 const HUB_AGENT_STOP_TIMEOUT_MS: u64 = 12_000;
-const HUB_QUIT_RESPONSE_SLACK_MS: u64 = 3_000;
-const HUB_QUIT_REQUEST_TIMEOUT_MS: u64 = HUB_AGENT_STOP_TIMEOUT_MS + HUB_QUIT_RESPONSE_SLACK_MS;
+/// The user-visible quit request gets 25 s: enough for the hub's 12 s agent
+/// stopper and scheduling slack, but finite when the peer sends no headers.
+const HUB_QUIT_REQUEST_TIMEOUT_MS: u64 = 25_000;
+/// Covers TLS, request headers, and body transfer. A connected but silent hub
+/// must not retain a desktop request or quit path indefinitely.
+const HUB_REQUEST_TIMEOUT: Duration = Duration::from_millis(HUB_QUIT_REQUEST_TIMEOUT_MS);
 const HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 const HUB_QUIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(
     HUB_QUIT_REQUEST_TIMEOUT_MS + HUB_AGENT_STOP_TIMEOUT_MS + HUB_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
@@ -289,6 +293,7 @@ struct HubUpload {
 struct HubWsRelay {
     input: tokio::sync::mpsc::Sender<Vec<u8>>,
     acknowledgement: tokio::sync::mpsc::Sender<()>,
+    acknowledgement_pending: Arc<AtomicBool>,
     close: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
@@ -1766,6 +1771,7 @@ fn pinned_hub_client(runtime: &RuntimeInfo) -> Result<reqwest::blocking::Client,
     let config = pinned_hub_tls_config(runtime)?;
     reqwest::blocking::Client::builder()
         .no_proxy()
+        .timeout(HUB_REQUEST_TIMEOUT)
         .use_preconfigured_tls(config)
         .build()
         .map_err(|error| format!("failed to build the pinned hub client: {error}"))
@@ -1948,15 +1954,23 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
             return Err("multipart relay chunk must use Tauri raw IPC bytes".to_string())
         }
     };
+    send_hub_upload_chunk(upload_id, bytes.clone())
+}
+
+/// A broken upload reader means its background request has finished. Release
+/// the map entry as part of that failed chunk, not at a later upload attempt.
+fn send_hub_upload_chunk(upload_id: u64, bytes: Vec<u8>) -> Result<(), String> {
     let sender = hub_uploads()
         .lock()
         .map_err(|_| "relay upload map lock poisoned".to_string())?
         .get(&upload_id)
         .map(|upload| upload.sender.clone())
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    sender
-        .send(bytes.clone())
-        .map_err(|_| "multipart relay upload stopped before its body completed".to_string())
+    if sender.send(bytes).is_err() {
+        release_hub_upload(upload_id);
+        return Err("multipart relay upload stopped before its body completed".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1964,16 +1978,34 @@ fn relay_hub_upload_finish(
     upload_id: u64,
     response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RelayHubHead, String> {
-    let upload = hub_uploads()
-        .lock()
-        .map_err(|_| "relay upload map lock poisoned".to_string())?
-        .remove(&upload_id)
+    let upload = take_hub_upload(upload_id)?
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
     drop(upload.sender);
     let hub_response = upload.response.recv().map_err(|_| {
         "multipart relay upload stopped before receiving a hub response".to_string()
     })??;
     Ok(relay_response(hub_response, response))
+}
+
+/// Idempotent: `finish` may have won the failure race and already removed it.
+#[tauri::command]
+fn relay_hub_upload_cancel(upload_id: u64) {
+    release_hub_upload(upload_id);
+}
+
+fn take_hub_upload(upload_id: u64) -> Result<Option<HubUpload>, String> {
+    let mut uploads = hub_uploads()
+        .lock()
+        .map_err(|_| "relay upload map lock poisoned".to_string())?;
+    Ok(uploads.remove(&upload_id))
+}
+
+fn release_hub_upload(upload_id: u64) {
+    let upload = hub_uploads()
+        .lock()
+        .ok()
+        .and_then(|mut uploads| uploads.remove(&upload_id));
+    drop(upload);
 }
 
 #[tauri::command]
@@ -2014,6 +2046,7 @@ async fn relay_hub_ws_binary(
     bytes: Vec<u8>,
     channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     acknowledgement: &mut tokio::sync::mpsc::Receiver<()>,
+    acknowledgement_pending: &Arc<AtomicBool>,
     close: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> HubWsRelayEnd {
     if bytes.len() > HUB_WS_MAX_MESSAGE_BYTES {
@@ -2033,10 +2066,14 @@ async fn relay_hub_ws_binary(
         let mut frame = Vec::with_capacity(chunk.len() + 1);
         frame.push(u8::from(index + 1 == chunk_count));
         frame.extend_from_slice(chunk);
+        // An ACK is meaningful only after this frame has become outstanding.
+        // Clearing before queueing it makes early and duplicate ACKs inert.
+        acknowledgement_pending.store(true, Ordering::Release);
         if channel
             .send(tauri::ipc::InvokeResponseBody::Raw(frame))
             .is_err()
         {
+            acknowledgement_pending.store(false, Ordering::Release);
             return HubWsRelayEnd::Stopped;
         }
         tokio::select! {
@@ -2058,6 +2095,7 @@ async fn relay_hub_ws_stream(
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut acknowledgement: tokio::sync::mpsc::Receiver<()>,
+    acknowledgement_pending: Arc<AtomicBool>,
     mut close: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     let (mut writer, mut reader) = socket.split();
@@ -2073,7 +2111,7 @@ async fn relay_hub_ws_stream(
             }
             received = reader.next() => match received {
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
-                    match relay_hub_ws_binary(bytes.to_vec(), &channel, &mut acknowledgement, &mut close).await {
+                    match relay_hub_ws_binary(bytes.to_vec(), &channel, &mut acknowledgement, &acknowledgement_pending, &mut close).await {
                         HubWsRelayEnd::Closed => {},
                         HubWsRelayEnd::Stopped => break,
                         HubWsRelayEnd::TransportFailure(error) => {
@@ -2128,6 +2166,7 @@ async fn relay_hub_ws_connect(
     let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
     let (input_sender, input) = tokio::sync::mpsc::channel(HUB_WS_INPUT_QUEUE_MESSAGES);
     let (acknowledgement_sender, acknowledgement) = tokio::sync::mpsc::channel(1);
+    let acknowledgement_pending = Arc::new(AtomicBool::new(false));
     let (close_sender, close) = tokio::sync::mpsc::unbounded_channel();
     hub_ws_relays()
         .lock()
@@ -2137,20 +2176,21 @@ async fn relay_hub_ws_connect(
             HubWsRelay {
                 input: input_sender,
                 acknowledgement: acknowledgement_sender,
+                acknowledgement_pending: acknowledgement_pending.clone(),
                 close: close_sender,
             },
         );
     tauri::async_runtime::spawn(async move {
-        relay_hub_ws_stream(socket, stream, input, acknowledgement, close).await;
+        relay_hub_ws_stream(socket, stream, input, acknowledgement, acknowledgement_pending, close).await;
         let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
     });
     Ok(id)
 }
 
-/// Receives exactly one raw MessagePack frame from the webview. Overflow is an
-/// explicit disconnect, never a blocked IPC command or an unbounded queue.
+/// Receives one raw MessagePack frame from the webview. Awaiting the bounded
+/// queue provides native backpressure; the TypeScript client serializes calls.
 #[tauri::command]
-fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let relay_id = request
         .headers()
         .get("X-Lasterm-Ws-Id")
@@ -2172,26 +2212,32 @@ fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), String> {
             return Err("WebSocket input must use Tauri raw IPC bytes".to_string());
         }
     };
-    let relay = hub_ws_relays()
+    let input = hub_ws_relays()
         .lock()
         .map_err(|_| "hub WebSocket relay map lock poisoned".to_string())?
         .get(&relay_id)
-        .map(|relay| (relay.input.clone(), relay.close.clone()))
+        .map(|relay| relay.input.clone())
         .ok_or_else(|| "WebSocket relay is no longer active".to_string())?;
-    relay.0.try_send(bytes).map_err(|error| {
-        let _ = relay.1.send(());
-        format!("WebSocket input queue overflow; relay disconnected: {error}")
-    })
+    input
+        .send(bytes)
+        .await
+        .map_err(|_| "WebSocket relay is no longer active".to_string())
 }
 
 #[tauri::command]
 fn relay_hub_ws_ack(relay_id: u64) {
-    let sender = hub_ws_relays().lock().ok().and_then(|relays| {
+    let relay = hub_ws_relays().lock().ok().and_then(|relays| {
         relays
             .get(&relay_id)
-            .map(|relay| relay.acknowledgement.clone())
+            .map(|relay| (relay.acknowledgement.clone(), relay.acknowledgement_pending.clone()))
     });
-    if let Some(sender) = sender {
+    if let Some((sender, pending)) = relay {
+        accept_hub_ws_ack(&sender, &pending);
+    }
+}
+
+fn accept_hub_ws_ack(sender: &tokio::sync::mpsc::Sender<()>, pending: &AtomicBool) {
+    if pending.swap(false, Ordering::AcqRel) {
         let _ = sender.try_send(());
     }
 }
@@ -3203,6 +3249,7 @@ pub fn run() {
             relay_hub_upload_start,
             relay_hub_upload_chunk,
             relay_hub_upload_finish,
+            relay_hub_upload_cancel,
             relay_hub_response_ack,
             relay_hub_ws_connect,
             relay_hub_ws_send,
@@ -4191,6 +4238,7 @@ mod tests {
             .try_send(vec![2; HUB_WS_MAX_MESSAGE_BYTES])
             .expect("queue second hub message");
         let (_ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
+        let acknowledgement_pending = Arc::new(AtomicBool::new(false));
         let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
         let reads = read_count.clone();
 
@@ -4200,7 +4248,7 @@ mod tests {
                     let _ = second_read_sender.send(());
                 }
                 let end =
-                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &mut close).await;
+                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &acknowledgement_pending, &mut close).await;
                 if !matches!(end, HubWsRelayEnd::Closed) {
                     break;
                 }
@@ -4238,6 +4286,35 @@ mod tests {
     }
 
     #[test]
+    fn failed_upload_chunk_releases_its_slot() {
+        let before = hub_uploads().lock().unwrap().len();
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let (_response_sender, response) = mpsc::channel();
+        hub_uploads().lock().unwrap().insert(id, HubUpload { sender, response });
+
+        assert!(send_hub_upload_chunk(id, vec![1]).is_err());
+        let after = hub_uploads().lock().unwrap().len();
+        assert_eq!(before, after, "a rejected chunk must release its upload slot");
+    }
+
+    #[test]
+    fn acknowledgement_requires_an_outstanding_frame() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let pending = AtomicBool::new(false);
+
+        accept_hub_ws_ack(&sender, &pending);
+        assert!(receiver.try_recv().is_err(), "an early ACK must be discarded");
+
+        pending.store(true, Ordering::Release);
+        accept_hub_ws_ack(&sender, &pending);
+        accept_hub_ws_ack(&sender, &pending);
+        assert!(receiver.try_recv().is_ok(), "the outstanding frame gets one ACK");
+        assert!(receiver.try_recv().is_err(), "a duplicate ACK must be discarded");
+    }
+
+    #[test]
     fn acknowledged_webview_reads_the_next_hub_message() {
         let read_count = Arc::new(AtomicUsize::new(0));
         let (second_read_sender, second_read_received) = mpsc::channel();
@@ -4258,6 +4335,7 @@ mod tests {
             .try_send(vec![2; HUB_WS_MAX_MESSAGE_BYTES])
             .expect("queue second hub message");
         let (ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
+        let acknowledgement_pending = Arc::new(AtomicBool::new(false));
         let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
         let reads = read_count.clone();
 
@@ -4267,7 +4345,7 @@ mod tests {
                     let _ = second_read_sender.send(());
                 }
                 let end =
-                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &mut close).await;
+                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &acknowledgement_pending, &mut close).await;
                 if !matches!(end, HubWsRelayEnd::Closed) {
                     break;
                 }

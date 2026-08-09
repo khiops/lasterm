@@ -57,6 +57,35 @@ export const useSessionStore = defineStore("session", () => {
 		await wsClient.connect(wsUrl);
 		connected.value = true;
 
+		// Install lifecycle truth before any authentication or setup can fail.
+		// Desktop transport errors and clean closes both mean no live session.
+		_unsubs.disconnect = wsClient.onDisconnect(() => {
+			connected.value = false;
+		});
+
+		// Re-authenticate and refresh state after each WS auto-reconnect.
+		_unsubs.reconnect = wsClient.onReconnect(async () => {
+			try {
+				connected.value = true;
+				await _authenticate();
+				// Re-fetch state after reconnect
+				const hostsStore2 = useHostsStore();
+				await hostsStore2.fetchHosts();
+				const channelsStore2 = useChannelsStore();
+				if (channelsStore2.activeHostId) {
+					await channelsStore2.fetchChannels(channelsStore2.activeHostId);
+				}
+				await useConfigStore().loadProfile();
+				const notifStore = useNotificationStore();
+				for (const ch of channelsStore2.channels) {
+					if (ch.id !== channelsStore2.selectedChannelId) notifStore.setActivity(ch.id);
+				}
+				reconnectCount.value++;
+			} catch (err) {
+				console.error("[session] Reconnect auth failed:", err);
+			}
+		});
+
 		// Register write-lock message routing before authenticating
 		const writeLockStore = useWriteLockStore();
 		writeLockStore.setWsClient(wsClient);
@@ -94,38 +123,6 @@ export const useSessionStore = defineStore("session", () => {
 
 		// Authenticate immediately after connecting
 		await _authenticate();
-
-		// Track WS disconnection so UI can show reconnecting overlay
-		_unsubs.disconnect = wsClient.onDisconnect(() => {
-			connected.value = false;
-		});
-
-		// Re-authenticate and refresh state after each WS auto-reconnect
-		_unsubs.reconnect = wsClient.onReconnect(async () => {
-			try {
-				connected.value = true;
-				await _authenticate();
-				// Re-fetch state after reconnect
-				const hostsStore2 = useHostsStore();
-				await hostsStore2.fetchHosts();
-				const channelsStore2 = useChannelsStore();
-				if (channelsStore2.activeHostId) {
-					await channelsStore2.fetchChannels(channelsStore2.activeHostId);
-				}
-				// Reload resolved profile (font, cursor, scrollback settings)
-				await useConfigStore().loadProfile();
-				// Mark background channels with activity (SC-30/ERR-04)
-				const notifStore = useNotificationStore();
-				for (const ch of channelsStore2.channels) {
-					if (ch.id !== channelsStore2.selectedChannelId) {
-						notifStore.setActivity(ch.id);
-					}
-				}
-				reconnectCount.value++;
-			} catch (err) {
-				console.error("[session] Reconnect auth failed:", err);
-			}
-		});
 	}
 
 	/**

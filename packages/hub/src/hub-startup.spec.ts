@@ -148,6 +148,43 @@ describe("startHub token restart sweep", () => {
 		dbs.close();
 	});
 
+	it("announces the same SPKI that it published for the TLS listener", async () => {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
+		let announced: { address: string; port: number; spki: string } | undefined;
+
+		await startHub(
+			{
+				port: 4100,
+				announce: (details) => {
+					announced = details;
+				},
+			},
+			{
+				describePreviousInstallation: () => undefined,
+				getStateDir: () => stateDir,
+				getConfigDir: () => stateDir,
+				acquireHubLock: () => null as never,
+				initAuth: () => randomBytes(32).toString("hex"),
+				createOwnerToken: () => "owner-token",
+				resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+				openDatabases: () => dbs,
+				createServer: async () => ({}) as never,
+				startServer: async () => "https://127.0.0.1:4100",
+				addStartupCorsOrigins: () => 4100,
+				persistRuntime: () => undefined,
+				deleteRuntime: () => undefined,
+			},
+		);
+
+		expect(announced).toMatchObject({
+			address: "https://127.0.0.1:4100",
+			port: 4100,
+			spki: TEST_TLS_IDENTITY.spki,
+		});
+		dbs.close();
+	});
+
 	it("refuses startup before server construction when the sweep column is missing", async () => {
 		const meta = new Database(":memory:");
 		meta.exec(`CREATE TABLE auth_tokens (

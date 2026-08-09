@@ -97,6 +97,7 @@ mod tests {
     use std::time::Duration;
 
     const REQUEST_BODY: &[u8] = b"request body must not reach a rejected peer";
+    const BEARER_TOKEN: &str = "Bearer credential-bytes-must-not-reach-a-rejected-peer";
     const RESPONSE_BODY: &[u8] = b"pinned hub response";
 
     struct TestServer {
@@ -205,6 +206,7 @@ mod tests {
     fn post_to(server: &TestServer, client: &reqwest::blocking::Client) -> reqwest::Result<String> {
         client
             .post(format!("https://{}/identity", server.address))
+            .header("Authorization", BEARER_TOKEN)
             .body(REQUEST_BODY)
             .send()?
             .text()
@@ -222,14 +224,25 @@ mod tests {
     }
 
     #[test]
-    fn different_spki_fails_during_tls_before_http_request_bytes_are_sent() {
+    fn stored_pin_rejects_different_hub_before_credential_bytes_are_sent() {
         let server_key = KeyPair::generate().expect("generate server key pair");
-        let pinned_key = KeyPair::generate().expect("generate different pinned key pair");
+        let pinned_key = KeyPair::generate().expect("generate originally trusted hub key pair");
+        let store_path = std::env::temp_dir().join(format!(
+            "lasterm-stored-pin-test-{}",
+            std::process::id()
+        ));
+        let store_path = store_path.join("desktop-state").join("known_hubs.json");
+        let stored_pin = crate::record_or_match_hub_pin_at(
+            &store_path,
+            crate::LOOPBACK_HUB_PIN_KEY,
+            &pinned_key.public_key_der(),
+        )
+        .expect("record first trusted hub key");
         let server = TestServer::start(
             certificate_for(&server_key, false),
             server_key.serialize_der(),
         );
-        let error = post_to(&server, &pinned_client(pinned_key.public_key_der()))
+        let error = post_to(&server, &pinned_client(stored_pin))
             .expect_err("a different SPKI must not produce an HTTP response");
 
         assert!(
@@ -237,6 +250,12 @@ mod tests {
             "expected a TLS connection error: {error}"
         );
         server.assert_no_request_received();
+        let _ = std::fs::remove_dir_all(
+            store_path
+                .parent()
+                .and_then(|path| path.parent())
+                .expect("test store has parent"),
+        );
     }
 
     #[test]

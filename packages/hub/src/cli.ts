@@ -896,8 +896,11 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 		await startHub({
 			...(port !== undefined ? { port } : {}),
 			openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
-			announce: ({ address, configDir, stateDir }) => {
-				console.log(`lasterm hub listening on ${address} (build: ${BUILD_HASH})`);
+			announce: ({ address, spki, configDir, stateDir }) => {
+				// This line is consumed by the desktop parent from the child's stdout.
+				// Unlike runtime.json, another process cannot replace that pipe, so it is
+				// the first-use anchor for the desktop's hub SPKI pin.
+				console.log(`lasterm hub listening on ${address} (spki: ${spki}) (build: ${BUILD_HASH})`);
 				console.log(`Config dir : ${configDir}`);
 				console.log(`State dir  : ${stateDir}`);
 			},

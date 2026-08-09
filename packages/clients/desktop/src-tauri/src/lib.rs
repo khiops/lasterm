@@ -24,6 +24,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 /// and the client would talk to whatever holds it — the shape of the defect this
 /// file exists to remove. Zero cannot be dialled, so a miss is loud.
 static HUB_PORT: AtomicU16 = AtomicU16::new(0);
+static HUB_CONNECTION: Mutex<Option<HubConnection>> = Mutex::new(None);
 static NEXT_RELAY_ID: AtomicU64 = AtomicU64::new(1);
 static HUB_UPLOADS: OnceLock<Mutex<HashMap<u64, HubUpload>>> = OnceLock::new();
 static RELAY_RESPONSE_ACKS: OnceLock<Mutex<HashMap<u64, mpsc::SyncSender<bool>>>> = OnceLock::new();
@@ -43,12 +44,12 @@ static HUB_WS_RELAYS: OnceLock<Mutex<HashMap<u64, HubWsRelay>>> = OnceLock::new(
 /// runs with `dev` set, and the supersession rule below is the whole reason this type
 /// exists — a rule no test job could reach would be a rule nobody checks.
 #[cfg_attr(dev, allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum HubState {
     /// Launched, nothing said yet.
     Starting,
     /// It announced this port on its own stdout, with nothing queued to contradict it.
-    Serving(u16),
+    Serving(HubAnnouncement),
     /// It is gone. `None` means signalled, or the event stream ended without saying.
     Exited(Option<i32>),
 }
@@ -64,7 +65,7 @@ fn publish_hub_state(next: HubState) {
         eprintln!("[lasterm] hub state lock poisoned; treating the child as gone");
         return;
     };
-    if matches!(*state, HubState::Exited(_)) && !matches!(next, HubState::Exited(_)) {
+    if matches!(&*state, HubState::Exited(_)) && !matches!(&next, HubState::Exited(_)) {
         return;
     }
     *state = next;
@@ -73,7 +74,7 @@ fn publish_hub_state(next: HubState) {
 #[cfg_attr(dev, allow(dead_code))]
 fn hub_state() -> HubState {
     match HUB_STATE.lock() {
-        Ok(state) => *state,
+        Ok(state) => state.clone(),
         // A poisoned lock means the writer panicked; the child's fate is unknown and
         // "still starting" is the one reading that would hang startup on it.
         Err(_) => HubState::Exited(None),
@@ -261,6 +262,32 @@ struct RuntimeInfo {
     /// Base64 DER SubjectPublicKeyInfo for the TLS listener named by `port`.
     spki: Option<String>,
 }
+
+/// The one endpoint and public key this desktop has authorised for the current
+/// process. It is established once at startup and never reconstructed from a
+/// mutable discovery record while credentials are being relayed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HubConnection {
+    port: u16,
+    expected_spki: Vec<u8>,
+}
+
+/// The complete ready line written to a launched child's stdout. The port is
+/// deliberately separate from the pin: it changes on every OS-assigned launch,
+/// while the loopback hub identity does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HubAnnouncement {
+    port: u16,
+    spki: Vec<u8>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct HubPinStore {
+    pins: HashMap<String, String>,
+}
+
+const LOOPBACK_HUB_PIN_KEY: &str = "https://127.0.0.1";
+const HUB_PIN_STORE_FILE: &str = "known_hubs.json";
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1612,17 +1639,305 @@ fn load_runtime_info() -> RuntimeLoadResult {
             "failed to resolve the hub state directory".to_string(),
         );
     };
-    let runtime_path = state_dir.join("runtime.json");
-    let contents = match std::fs::read_to_string(&runtime_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return RuntimeLoadResult::Absent
-        }
-        Err(error) => return RuntimeLoadResult::Unreadable(error.to_string()),
+    load_runtime_info_at(&state_dir.join("runtime.json"))
+}
+
+/// `runtime.json` is discovery, but it can authorise a first pin in the dev /
+/// externally launched path. Read it only through this owner-and-mode checked
+/// open, never through a path-following convenience read.
+fn load_runtime_info_at(runtime_path: &Path) -> RuntimeLoadResult {
+    let contents = match read_protected_file(runtime_path) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return RuntimeLoadResult::Absent,
+        Err(error) => return RuntimeLoadResult::Unreadable(error),
     };
     match serde_json::from_str(&contents) {
         Ok(runtime) => RuntimeLoadResult::Present(runtime),
         Err(error) => RuntimeLoadResult::Unreadable(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("refusing protected file {} without a parent", path.display()))?;
+    refuse_symlinked_ancestors(parent)?;
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        format!(
+            "refusing protected file {} because its parent {} cannot be inspected: {error}",
+            path.display(),
+            parent.display()
+        )
+    })?;
+    validate_runtime_dir(parent, &parent_metadata)?;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| format!("refusing protected file path with an interior NUL: {error}"))?;
+    // O_NOFOLLOW rejects a final symlink before it can change what this read
+    // authorises. The file descriptor, not a second pathname lookup, is then
+    // inspected and read.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(format!("refusing protected file: {error}"));
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("refusing protected file metadata: {error}"))?;
+    if !metadata.is_file() {
+        return Err("refusing protected path that is not a regular file".to_string());
+    }
+    let current_user = unsafe { libc::geteuid() };
+    if metadata.uid() != current_user {
+        return Err("protected file is not owned by the current user".to_string());
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err("protected file grants group or other permissions".to_string());
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| format!("cannot read protected file: {error}"))?;
+    Ok(Some(contents))
+}
+
+#[cfg(unix)]
+fn refuse_symlinked_ancestors(path: &Path) -> Result<(), String> {
+    for component in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(component).map_err(|error| {
+            format!(
+                "refusing protected file path because {} cannot be inspected: {error}",
+                component.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "refusing protected file path because {} is a symlink",
+                component.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hub_pin_store_path() -> Result<PathBuf, String> {
+    dirs::data_local_dir()
+        // Keep the authority under its own 0700 leaf, not beside hub.log: the
+        // log directory is intentionally ordinary application storage.
+        .map(|path| path.join("lasterm").join("identity").join(HUB_PIN_STORE_FILE))
+        .ok_or_else(|| "failed to resolve the desktop pin-store directory".to_string())
+}
+
+fn record_or_match_hub_pin(identity: &str, presented_spki: &[u8]) -> Result<Vec<u8>, String> {
+    let path = hub_pin_store_path()?;
+    record_or_match_hub_pin_at(&path, identity, presented_spki)
+}
+
+/// SSH-known-hosts shape: the stable identity names one entry, its first public
+/// key is recorded, and a different later key is a refusal -- never an update.
+fn record_or_match_hub_pin_at(
+    path: &Path,
+    identity: &str,
+    presented_spki: &[u8],
+) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+
+    if presented_spki.is_empty() {
+        return Err("refusing an empty hub TLS SPKI".to_string());
+    }
+    let mut store = load_hub_pin_store(path)?;
+    if let Some(encoded) = store.pins.get(identity) {
+        let stored = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("desktop hub pin store contains invalid SPKI: {error}"))?;
+        if stored.is_empty() {
+            return Err("desktop hub pin store contains an empty SPKI".to_string());
+        }
+        if stored != presented_spki {
+            return Err(format!(
+                "Hub identity changed for {identity}; refusing to send credentials. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again."
+            ));
+        }
+        return Ok(stored);
+    }
+
+    store.pins.insert(
+        identity.to_string(),
+        base64::engine::general_purpose::STANDARD.encode(presented_spki),
+    );
+    write_hub_pin_store(path, &store)?;
+    Ok(presented_spki.to_vec())
+}
+
+fn load_hub_pin_store(path: &Path) -> Result<HubPinStore, String> {
+    prepare_hub_pin_store_dir(
+        path.parent()
+            .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?,
+    )?;
+    match read_protected_file(path)? {
+        Some(contents) => serde_json::from_str(&contents)
+            .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
+        None => Ok(HubPinStore::default()),
+    }
+}
+
+fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
+    use std::sync::atomic::AtomicU64;
+    static PIN_STORE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
+    prepare_hub_pin_store_dir(parent)?;
+    let bytes = serde_json::to_vec_pretty(store)
+        .map_err(|error| format!("cannot encode desktop hub pin store: {error}"))?;
+    for _ in 0..128 {
+        let temporary = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("known_hubs"),
+            std::process::id(),
+            PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match create_owner_only_file(&temporary, &bytes) {
+            Ok(()) => match std::fs::rename(&temporary, path) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(format!("cannot atomically replace desktop hub pin store: {error}"));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("cannot create desktop hub pin store: {error}")),
+        }
+    }
+    Err("could not allocate a temporary desktop hub pin-store file".to_string())
+}
+
+#[cfg(unix)]
+fn prepare_hub_pin_store_dir(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => validate_owner_only_pin_store_dir(path, &metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .map_err(|error| format!("cannot create desktop pin-store directory {}: {error}", path.display()))?;
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|error| format!("cannot inspect desktop pin-store directory {}: {error}", path.display()))?;
+            validate_owner_only_pin_store_dir(path, &metadata)
+        }
+        Err(error) => Err(format!("cannot inspect desktop pin-store directory {}: {error}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn validate_owner_only_pin_store_dir(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
+    validate_runtime_dir(path, metadata)?;
+    if metadata.mode() & 0o077 != 0 {
+        return Err(format!(
+            "refusing desktop pin-store directory {}: it grants group or other permissions",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prepare_hub_pin_store_dir(path: &Path) -> Result<(), String> {
+    prepare_windows_runtime_dir(path)
+}
+
+#[cfg(unix)]
+fn create_owner_only_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+#[cfg(windows)]
+fn create_owner_only_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn reset_loopback_hub_pin() -> Result<(), String> {
+    let path = hub_pin_store_path()?;
+    let mut store = load_hub_pin_store(&path)?;
+    if store.pins.remove(LOOPBACK_HUB_PIN_KEY).is_none() {
+        return Err("there is no stored loopback hub pin to reset".to_string());
+    }
+    write_hub_pin_store(&path, &store)
+}
+
+fn establish_hub_connection(port: u16, presented_spki: &[u8]) -> Result<(), String> {
+    let expected_spki = record_or_match_hub_pin(LOOPBACK_HUB_PIN_KEY, presented_spki)?;
+    let mut connection = HUB_CONNECTION
+        .lock()
+        .map_err(|_| "hub connection lock poisoned".to_string())?;
+    *connection = Some(HubConnection { port, expected_spki });
+    HUB_PORT.store(port, Ordering::Relaxed);
+    Ok(())
+}
+
+fn established_hub_connection() -> Result<HubConnection, String> {
+    HUB_CONNECTION
+        .lock()
+        .map_err(|_| "hub connection lock poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "the hub identity was never established; refusing to relay credentials".to_string())
+}
+
+// The Windows profile-root ACL audit is intentionally outside this issue's P11
+// slice. Still reject reparse points so this reader never silently follows a
+// substituted final component on platforms where that metadata is available.
+#[cfg(windows)]
+fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("refusing protected file {} without a parent", path.display()))?;
+    let parent_metadata = std::fs::symlink_metadata(parent)
+        .map_err(|error| format!("refusing protected file parent: {error}"))?;
+    validate_windows_runtime_dir(
+        parent,
+        &parent_metadata,
+        windows_metadata_is_reparse_point(&parent_metadata),
+    )?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("refusing protected file metadata: {error}"))?;
+    if metadata.file_type().is_symlink() || windows_metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+        return Err("refusing protected path that is not a regular file".to_string());
+    }
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("refusing protected file: {error}")),
     }
 }
 
@@ -1650,16 +1965,16 @@ fn current_shutdown_caller_client_id() -> Option<String> {
 /// How a launched sidecar resolved.
 #[cfg(not(dev))]
 enum HubStartOutcome {
-    /// It announced a listening port on its own stdout.
-    Serving(u16),
+    /// It announced a listening endpoint and SPKI on its own stdout.
+    Serving(HubAnnouncement),
     /// It exited. `None` means signalled, or the stream ended without saying.
     Exited(Option<i32>),
     /// Neither, within the window.
     Silent,
 }
 
-/// The port from the hub's own announcement, `lasterm hub listening on
-/// https://127.0.0.1:PORT (build: …)`.
+/// The endpoint and SPKI from the hub's own announcement, `lasterm hub
+/// listening on https://127.0.0.1:PORT (spki: BASE64) (build: …)`.
 ///
 /// Parsed from a pipe only our child writes to, which is what makes it trustworthy;
 /// the value is used to talk to that child and nothing else.
@@ -1669,35 +1984,32 @@ enum HubStartOutcome {
 /// beyond the reach of every test job. Only the `dev` library has no caller, hence
 /// the narrow allowance rather than a cfg that would take the tests with it.
 #[cfg_attr(dev, allow(dead_code))]
-fn parse_listening_port(line: &str) -> Option<u16> {
-    // Anchored on the start of the line and on what follows the digits, because a
-    // substring match reads a port out of prose: `warning: not listening on
-    // http://127.0.0.1:4444 because …` announces nothing, and `…:4444garbage` is not
-    // an address. The hub emits exactly `lasterm hub listening on <address> (build:
-    // <hash>)`, so the port is followed by a space or ends the line.
+fn parse_listening_announcement(line: &str) -> Option<HubAnnouncement> {
+    use base64::Engine;
+
     const PREFIX: &str = "lasterm hub listening on https://127.0.0.1:";
-    // No `trim()`: leading whitespace is what a wrapped or prefixed diagnostic has,
-    // and allowing it defeated the anchor — `" lasterm hub listening on
-    // http://127.0.0.1:4444 failed"` parsed. The tail must be the build suffix the
-    // hub actually prints or nothing at all, so a trailing word cannot pass either.
     let rest = line
         .strip_suffix('\n')
         .unwrap_or(line)
         .strip_prefix(PREFIX)?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     let after = &rest[digits.len()..];
-    // The suffix must be the whole build parenthesis, closing bracket included.
-    // Accepting anything that merely *starts* with it let `…:4444 (build:` and
-    // `…:4444 (build: failed) not serving` through.
-    let tail_is_announcement = after.is_empty()
-        || (after.starts_with(" (build: ") && after.ends_with(')') && !after[9..].contains(' '));
-    if !tail_is_announcement {
+    let spki_and_build = after.strip_prefix(" (spki: ")?.strip_suffix(')')?;
+    let (encoded_spki, build) = spki_and_build.rsplit_once(") (build: ")?;
+    if encoded_spki.is_empty() || build.is_empty() || encoded_spki.contains(' ') || build.contains(' ') {
         return None;
     }
-    match digits.parse::<u16>() {
-        Ok(port) if port != 0 => Some(port),
-        _ => None,
+    let port = digits.parse::<u16>().ok().filter(|port| *port != 0)?;
+    let spki = base64::engine::general_purpose::STANDARD.decode(encoded_spki).ok()?;
+    if spki.is_empty() {
+        return None;
     }
+    Some(HubAnnouncement { port, spki })
+}
+
+#[cfg_attr(dev, allow(dead_code))]
+fn parse_listening_port(line: &str) -> Option<u16> {
+    parse_listening_announcement(line).map(|announcement| announcement.port)
 }
 
 // `await_live_runtime_port` used to live here and answered "which port may I trust"
@@ -1743,50 +2055,31 @@ fn hub_ws_relays() -> &'static Mutex<HashMap<u64, HubWsRelay>> {
     HUB_WS_RELAYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Builds the pinned TLS configuration shared by the REST and WebSocket
-/// relays. Both paths therefore make the same, sole server-identity decision.
-fn pinned_hub_tls_config(runtime: &RuntimeInfo) -> Result<rustls::ClientConfig, String> {
-    use base64::Engine;
+/// Builds the pinned TLS configuration shared by the REST, WebSocket, and quit
+/// paths. The verifier's sole decision uses the durable desktop pin, never a
+/// fresh key from runtime.json.
+fn pinned_hub_tls_config(expected_spki: Vec<u8>) -> Result<rustls::ClientConfig, String> {
     use std::sync::Arc;
 
-    let encoded_spki = runtime
-        .spki
-        .as_deref()
-        .ok_or_else(|| "runtime.json is missing the hub TLS SPKI".to_string())?;
-    let spki = base64::engine::general_purpose::STANDARD
-        .decode(encoded_spki)
-        .map_err(|error| format!("runtime.json contains an invalid hub TLS SPKI: {error}"))?;
-    if spki.is_empty() {
-        return Err("runtime.json contains an empty hub TLS SPKI".to_string());
+    if expected_spki.is_empty() {
+        return Err("desktop hub pin is empty".to_string());
     }
     Ok(rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(tls_identity::SpkiPinVerifier::new(spki)))
+        .with_custom_certificate_verifier(Arc::new(tls_identity::SpkiPinVerifier::new(expected_spki)))
         .with_no_client_auth())
 }
 
 /// Build the one client used for every desktop-to-hub REST request. Its only
 /// server-identity predicate is the SPKI published beside the listener.
-fn pinned_hub_client(runtime: &RuntimeInfo) -> Result<reqwest::blocking::Client, String> {
-    let config = pinned_hub_tls_config(runtime)?;
+fn pinned_hub_client(connection: &HubConnection) -> Result<reqwest::blocking::Client, String> {
+    let config = pinned_hub_tls_config(connection.expected_spki.clone())?;
     reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(HUB_REQUEST_TIMEOUT)
         .use_preconfigured_tls(config)
         .build()
         .map_err(|error| format!("failed to build the pinned hub client: {error}"))
-}
-
-fn relay_runtime() -> Result<RuntimeInfo, String> {
-    match load_runtime_info() {
-        RuntimeLoadResult::Present(runtime) => Ok(runtime),
-        RuntimeLoadResult::Absent => {
-            Err("runtime.json is missing; refusing to relay to an unknown hub".to_string())
-        }
-        RuntimeLoadResult::Unreadable(error) => Err(format!(
-            "runtime.json cannot be read; refusing to relay to an unknown hub: {error}"
-        )),
-    }
 }
 
 fn relay_hub_url(port: u16, path: &str) -> Result<String, String> {
@@ -1801,11 +2094,11 @@ fn send_relay_hub_request(
     request: &RelayHubRequest,
     body: Option<reqwest::blocking::Body>,
 ) -> Result<reqwest::blocking::Response, String> {
-    let runtime = relay_runtime()?;
-    let client = pinned_hub_client(&runtime)?;
+    let connection = established_hub_connection()?;
+    let client = pinned_hub_client(&connection)?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|error| format!("relay request has an invalid HTTP method: {error}"))?;
-    let mut builder = client.request(method, relay_hub_url(runtime.port, &request.path)?);
+    let mut builder = client.request(method, relay_hub_url(connection.port, &request.path)?);
     for (name, value) in &request.headers {
         let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
             .map_err(|error| format!("relay request has an invalid header name: {error}"))?;
@@ -2148,16 +2441,16 @@ async fn relay_hub_ws_stream(
 async fn relay_hub_ws_connect(
     stream: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<u64, String> {
-    let runtime = relay_runtime()?;
+    let connection = established_hub_connection()?;
     let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     config.max_message_size = Some(HUB_WS_MAX_MESSAGE_BYTES);
     config.max_frame_size = Some(HUB_WS_MAX_MESSAGE_BYTES);
     let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(
-        relay_hub_ws_url(runtime.port),
+        relay_hub_ws_url(connection.port),
         Some(config),
         false,
         Some(tokio_tungstenite::Connector::Rustls(Arc::new(
-            pinned_hub_tls_config(&runtime)?,
+            pinned_hub_tls_config(connection.expected_spki)?,
         ))),
     )
     .await
@@ -2309,7 +2602,11 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
     };
     let target = HubQuitTarget { pid, instance_id };
 
-    let client = match pinned_hub_client(&runtime) {
+    let connection = match established_hub_connection() {
+        Ok(connection) => connection,
+        Err(error) => return QuitRequestResult::Failed(error),
+    };
+    let client = match pinned_hub_client(&connection) {
         Ok(client) => client,
         Err(error) => return QuitRequestResult::Failed(error.to_string()),
     };
@@ -2321,7 +2618,7 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
             ))
         }
     };
-    let url = hub_quit_url(runtime.port, force);
+    let url = hub_quit_url(connection.port, force);
     let mut request = client.post(url).header("X-Lasterm-Owner", owner_header);
     if let Some(client_id) = current_shutdown_caller_client_id() {
         request = request.header("X-Lasterm-Client-Id", client_id);
@@ -3007,7 +3304,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             // Held back until nothing else is waiting to contradict it. Publishing a
             // port the instant it is parsed is what let startup succeed against a
             // child whose termination event was already queued behind that line.
-            let mut announced: Option<u16> = None;
+            let mut announced: Option<HubAnnouncement> = None;
             let mut exited = false;
             loop {
                 // Anything already queued is taken first, so a pending exit is seen
@@ -3021,8 +3318,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     // Naming the two apart would need tokio as a direct dependency for
                     // no behavioural difference.
                     Err(_) => {
-                        if let Some(port) = announced.take() {
-                            publish_hub_state(HubState::Serving(port));
+                        if let Some(announcement) = announced.take() {
+                            publish_hub_state(HubState::Serving(announcement));
                         }
                         match rx.recv().await {
                             Some(event) => event,
@@ -3034,8 +3331,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     CommandEvent::Stdout(line) => {
                         let text = String::from_utf8_lossy(&line).to_string();
-                        if let Some(port) = parse_listening_port(&text) {
-                            announced = Some(port);
+                        if let Some(announcement) = parse_listening_announcement(&text) {
+                            announced = Some(announcement);
                         }
                         record(format!("[hub:stdout] {text}"));
                     }
@@ -3067,7 +3364,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         // One read of one state, so there is no pair of cells to see out of step.
         let outcome = loop {
             match hub_state() {
-                HubState::Serving(port) => break HubStartOutcome::Serving(port),
+                HubState::Serving(announcement) => break HubStartOutcome::Serving(announcement),
                 HubState::Exited(code) => break HubStartOutcome::Exited(code),
                 HubState::Starting if std::time::Instant::now() >= deadline => {
                     break HubStartOutcome::Silent;
@@ -3077,13 +3374,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let hub_port = match outcome {
-            HubStartOutcome::Serving(port) => {
+            HubStartOutcome::Serving(announcement) => {
                 // No second look, and none possible: `Serving` is published only when
                 // the event queue was momentarily empty, and an exit supersedes it, so
                 // there is no pair of readings to disagree. A child dying a moment after
                 // this is #184, which nothing here can see.
+                if let Err(error) = establish_hub_connection(announcement.port, &announcement.spki) {
+                    if let Err(kill_error) = child.kill() {
+                        eprintln!("[lasterm] could not stop hub after pin refusal: {kill_error}");
+                    }
+                    show_startup_failure_then_exit(app.handle().clone(), error);
+                    return Ok(());
+                }
                 app.manage(child);
-                port
+                announcement.port
             }
             HubStartOutcome::Exited(Some(code)) if code == HUB_LOCK_HELD_EXIT_CODE => {
                 // A hub of this user is already running, and this build will not attach
@@ -3151,7 +3455,6 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        HUB_PORT.store(hub_port, Ordering::Relaxed);
         eprintln!("[lasterm] hub port resolved to {}", hub_port);
     }
 
@@ -3165,28 +3468,32 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // model to defend. The release path deliberately does not trust it (#183).
     #[cfg(dev)]
     {
-        const DEV_FALLBACK_PORT: u16 = 4100;
-        let dev_port = match load_runtime_info() {
+        let runtime = match load_runtime_info() {
             RuntimeLoadResult::Present(runtime) => {
                 eprintln!(
                     "[lasterm] dev build: using port {} from the hub's runtime record",
                     runtime.port
                 );
-                runtime.port
+                runtime
             }
-            other => {
-                eprintln!(
-                    "[lasterm] dev build: no usable runtime record ({}), assuming {DEV_FALLBACK_PORT}",
-                    match other {
-                        RuntimeLoadResult::Absent => "absent".to_string(),
-                        RuntimeLoadResult::Unreadable(error) => error,
-                        RuntimeLoadResult::Present(_) => unreachable!(),
-                    }
+            RuntimeLoadResult::Absent => {
+                return Err(
+                    "The dev hub runtime record is missing; refusing to trust an unpinned hub."
+                        .into(),
                 );
-                DEV_FALLBACK_PORT
+            }
+            RuntimeLoadResult::Unreadable(error) => {
+                return Err(format!("The dev hub runtime record is not defensible: {error}").into());
             }
         };
-        HUB_PORT.store(dev_port, Ordering::Relaxed);
+        let spki = runtime.spki.as_deref().ok_or_else(|| {
+            "The dev hub runtime record is missing its TLS SPKI; refusing to trust it".to_string()
+        })?;
+        use base64::Engine;
+        let spki = base64::engine::general_purpose::STANDARD
+            .decode(spki)
+            .map_err(|error| format!("The dev hub runtime record has an invalid TLS SPKI: {error}"))?;
+        establish_hub_connection(runtime.port, &spki)?;
     }
 
     // Show the main window (hidden by default in config)
@@ -3219,6 +3526,15 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Deliberate recovery only. A mismatch never reaches this path by itself;
+    // the user must run the command after independently verifying the new hub.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--reset-hub-pin")) {
+        match reset_loopback_hub_pin() {
+            Ok(()) => println!("Removed the stored loopback hub pin. Start Lasterm to trust the next hub deliberately."),
+            Err(error) => eprintln!("Could not reset the stored loopback hub pin: {error}"),
+        }
+        return;
+    }
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init());
@@ -3438,6 +3754,114 @@ mod tests {
         let metadata = std::fs::metadata(&absent).unwrap();
         assert!(metadata.is_dir());
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pin_survives_desktop_and_hub_restart_when_port_changes() {
+        let directory = instance_test_dir("pin-restart");
+        let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
+        let first_port = 41_001;
+        let second_port = 52_002;
+        let spki = vec![7, 8, 9];
+
+        // First desktop + first hub run records only the stable loopback name,
+        // never the OS-assigned port.
+        assert_eq!(
+            record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
+            spki
+        );
+        assert_eq!(
+            std::fs::metadata(store_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&store_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_ne!(first_port, second_port);
+
+        // A fresh read represents a new desktop process. The later hub's port
+        // may differ, but the same stable identity finds the original pin.
+        assert_eq!(
+            record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
+            spki
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_runtime_parent_authorizes_no_pin_or_connection() {
+        let directory = instance_test_dir("runtime-writable-parent");
+        let state_dir = directory.join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("runtime.json"),
+            r#"{"port":4100,"spki":"AQID"}"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&state_dir).unwrap().permissions();
+        permissions.set_mode(0o777);
+        std::fs::set_permissions(&state_dir, permissions).unwrap();
+
+        assert!(matches!(
+            load_runtime_info_at(&state_dir.join("runtime.json")),
+            RuntimeLoadResult::Unreadable(_)
+        ));
+        // The rejected record never gets as far as `record_or_match_hub_pin_at`;
+        // no desktop pin-store directory exists and no connection can be set.
+        assert!(!directory.join("desktop-state").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_runtime_record_authorizes_no_pin_or_connection() {
+        use std::os::unix::fs::symlink;
+
+        let directory = instance_test_dir("runtime-symlink");
+        let state_dir = directory.join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        let target = directory.join("runtime-target.json");
+        std::fs::write(&target, r#"{"port":4100,"spki":"AQID"}"#).unwrap();
+        let mut target_permissions = std::fs::metadata(&target).unwrap().permissions();
+        target_permissions.set_mode(0o600);
+        std::fs::set_permissions(&target, target_permissions).unwrap();
+        symlink(&target, state_dir.join("runtime.json")).unwrap();
+
+        assert!(matches!(
+            load_runtime_info_at(&state_dir.join("runtime.json")),
+            RuntimeLoadResult::Unreadable(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_path_through_a_symlinked_parent_authorizes_no_pin_or_connection() {
+        use std::os::unix::fs::symlink;
+
+        let directory = instance_test_dir("runtime-parent-symlink");
+        let state_dir = directory.join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        let runtime = state_dir.join("runtime.json");
+        std::fs::write(&runtime, r#"{"port":4100,"spki":"AQID"}"#).unwrap();
+        let mut permissions = std::fs::metadata(&runtime).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&runtime, permissions).unwrap();
+        let linked_state_dir = directory.join("state-link");
+        symlink(&state_dir, &linked_state_dir).unwrap();
+
+        assert!(matches!(
+            load_runtime_info_at(&linked_state_dir.join("runtime.json")),
+            RuntimeLoadResult::Unreadable(_)
+        ));
     }
 
     #[test]
@@ -3762,19 +4186,21 @@ mod tests {
         assert_eq!(read_delimited_raise_message(&mut reader).unwrap(), None);
     }
 
-    /// The line the hub actually prints, taken from a run rather than written from
-    /// memory: `lasterm hub listening on https://127.0.0.1:45999 (build: 5c31e75)`.
+    /// The complete first-use anchor written by the hub: the child-owned stdout
+    /// carries both its OS-assigned port and the public key to pin.
     #[test]
     fn listening_port_comes_from_the_hub_announcement() {
         assert_eq!(
             parse_listening_port(
-                "lasterm hub listening on https://127.0.0.1:45999 (build: 5c31e75)"
+                "lasterm hub listening on https://127.0.0.1:45999 (spki: AQID) (build: 5c31e75)"
             ),
             Some(45999)
         );
         assert_eq!(
-            parse_listening_port("lasterm hub listening on https://127.0.0.1:4100"),
-            Some(4100)
+            parse_listening_announcement(
+                "lasterm hub listening on https://127.0.0.1:45999 (spki: AQID) (build: 5c31e75)"
+            ),
+            Some(HubAnnouncement { port: 45999, spki: vec![1, 2, 3] })
         );
     }
 
@@ -3805,6 +4231,12 @@ mod tests {
             "lasterm hub listening on http://127.0.0.1:4444 (build:",
             "lasterm hub listening on http://127.0.0.1:4444 (build: failed) not serving",
             "lasterm hub listening on http://127.0.0.1:4444 (build: a b)",
+            // These were valid before the SPKI travelled on the trusted pipe.
+            "lasterm hub listening on https://127.0.0.1:4100",
+            "lasterm hub listening on https://127.0.0.1:4100 (build: old)",
+            "lasterm hub listening on https://127.0.0.1:4100 (spki: ) (build: new)",
+            "lasterm hub listening on https://127.0.0.1:4100 (spki: not-base64) (build: new)",
+            "lasterm hub listening on https://127.0.0.1:4100 (spki: AQID) (build: new) trailing",
         ] {
             assert_eq!(parse_listening_port(line), None, "line: {line:?}");
         }
@@ -3817,13 +4249,20 @@ mod tests {
     fn an_exit_is_never_overwritten_by_a_late_announcement() {
         // Serialised by the shared static this test drives; the launch path does not
         // run under `cargo test`, so nothing else writes it.
-        publish_hub_state(HubState::Serving(4137));
-        assert_eq!(hub_state(), HubState::Serving(4137));
+        let first = HubAnnouncement {
+            port: 4137,
+            spki: vec![1],
+        };
+        publish_hub_state(HubState::Serving(first.clone()));
+        assert_eq!(hub_state(), HubState::Serving(first));
 
         publish_hub_state(HubState::Exited(Some(73)));
         assert_eq!(hub_state(), HubState::Exited(Some(73)));
 
-        publish_hub_state(HubState::Serving(4200));
+        publish_hub_state(HubState::Serving(HubAnnouncement {
+            port: 4200,
+            spki: vec![2],
+        }));
         assert_eq!(
             hub_state(),
             HubState::Exited(Some(73)),

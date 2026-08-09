@@ -30,6 +30,8 @@ export interface HubStartupOptions {
 	readonly announce?: (details: {
 		address: string;
 		port: number;
+		/** Base64 DER SubjectPublicKeyInfo for the listener just announced. */
+		spki: string;
 		configDir: string;
 		stateDir: string;
 	}) => void;
@@ -176,7 +178,7 @@ export async function startHub(
 			});
 		}
 
-		options.announce?.({ address, port: actualPort, configDir, stateDir });
+		options.announce?.({ address, port: actualPort, spki: tlsIdentity.spki, configDir, stateDir });
 		if (options.openBrowser) openBrowser(`https://127.0.0.1:${actualPort}`);
 
 		const shutdown = () => quit.shutdown();

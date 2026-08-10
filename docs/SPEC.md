@@ -20,7 +20,7 @@ lasterm is a **local-first session terminal platform** that lets developers and 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         UI (PWA / Tauri)                        │
-│   Vue 3 + xterm.js — served at http://localhost:4100            │
+│   Vue 3 + xterm.js — served over HTTPS on the published port    │
 │   Discord-style: host rail │ channel sidebar │ terminal panes   │
 └──────────┬──────────────────────────────┬───────────────────────┘
            │ REST (/api/*)                │ WS (/ws)
@@ -29,7 +29,7 @@ lasterm is a **local-first session terminal platform** that lets developers and 
            │                              │ SNAPSHOT, WRITE_*, HEARTBEAT
 ┌──────────▼──────────────────────────────▼───────────────────────┐
 │                        Hub (Node.js daemon)                     │
-│   Binds 127.0.0.1:4100 — single HTTP server (REST + WS)        │
+│   Binds 127.0.0.1:<assigned port> — HTTPS + WSS server          │
 │                                                                  │
 │   ┌──────────┐ ┌──────────────┐ ┌────────────┐ ┌────────────┐  │
 │   │ Client   │ │ Session      │ │ Cache      │ │ Config     │  │
@@ -150,13 +150,13 @@ Local daemon, single process, binds to 127.0.0.1.
 
 **Responsibilities:**
 
-**HTTP Server (single port, default 4100, configurable):**
+**HTTPS Server (single port, OS-assigned by default, configurable):**
 - REST API: CRUD for hosts, sessions, channels, workspaces, config
 - WebSocket upgrade on `/ws` path
 - Static file serving for UI (production build)
 - Health endpoint (`GET /api/health`)
-- Port resolution: CLI flag > `LASTERM_PORT` env > config.toml `[server] port` > default 4100
-- `zero_conf` mode (opt-in): if default port taken, auto-increment 4100→4199, write actual port to `runtime.json`
+- Port resolution: CLI flag or `LASTERM_PORT` supplies an explicit override; otherwise the OS assigns a free port and the hub writes it to `runtime.json`.
+- The certificate is the operator's configured pair or a key/certificate generated once for this hub identity; clients validate TLS and pin the recorded SPKI.
 
 **Session Manager:**
 - Local sessions (daemon): connect to standalone agent via UDS (`connectOrLaunch`), auto-spawn if needed
@@ -757,19 +757,20 @@ Data dir:
 └── spool.db-wal
 
 State dir:
-└── runtime.json             # { port, pid, started_at } — written on start, deleted on shutdown
+├── runtime.json             # { port, pid, started_at, spki } — written on start, deleted on shutdown
+└── hub-tls-cert.pem          # configured or generated certificate used by same-user clients
 ```
 
-### runtime.json (zero_conf discovery)
+### runtime.json (TLS endpoint discovery)
 
-Written at startup when `zero_conf` is enabled and port auto-incremented.
-Always written when hub starts (even on default port) for CLI/UI discovery.
+Written at startup for CLI/UI discovery of the OS-assigned or explicitly overridden port,
+and for the public-key identity serving it.
 
 ```json
-{ "port": 4100, "pid": 12345, "started_at": "2026-03-03T10:00:00Z" }
+{ "port": 41237, "pid": 12345, "started_at": "2026-03-03T10:00:00Z", "spki": "base64-DER-SPKI" }
 ```
 
-CLI and UI read this file to find the hub. Deleted on clean shutdown; stale file detected via PID check.
+CLI and UI read this file to find the HTTPS/WSS hub and pin its key. Deleted on clean shutdown; stale file detected via PID check.
 
 ## 8. Monorepo Structure
 

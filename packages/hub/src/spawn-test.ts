@@ -5,6 +5,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
+import { hubTlsOptions } from "./hub-transport.js";
 
 const stateDir =
 	platform() === "win32"
@@ -16,6 +17,7 @@ const configDir =
 		: join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
 const runtime = JSON.parse(readFileSync(join(stateDir, "runtime.json"), "utf8")) as {
 	port?: unknown;
+	spki?: string;
 };
 const runtimePort = runtime.port;
 if (
@@ -28,10 +30,14 @@ if (
 }
 const auth = JSON.parse(readFileSync(join(configDir, "auth.json"), "utf8"));
 const hostId = process.argv[2] || "local";
+const hubRuntime = {
+	port: runtimePort,
+	...(typeof runtime.spki === "string" ? { spki: runtime.spki } : {}),
+};
 
 const key = randomBytes(16).toString("base64");
 const req = request(`https://127.0.0.1:${runtimePort}/ws`, {
-	ca: readFileSync(join(stateDir, "hub-tls-cert.pem"), "utf8"),
+	...hubTlsOptions(hubRuntime, stateDir),
 	headers: {
 		Connection: "Upgrade",
 		Upgrade: "websocket",

@@ -12,8 +12,8 @@
 ┌──────────────────────────────────────────────────────────┐
 │ User's machine (trusted)                                  │
 │                                                           │
-│  Browser (PWA) ──── WS/REST ──── Hub daemon               │
-│  127.0.0.1:4100     │            127.0.0.1:4100           │
+│  Browser (PWA) ──── WSS/HTTPS ──── Hub daemon             │
+│  127.0.0.1:<port>   │            127.0.0.1:<assigned port>│
 │                      │            ┌───────────────┐       │
 │  Token auth          │            │ meta.db       │       │
 │  (Bearer header)     │            │ spool.db      │ 0600  │
@@ -52,7 +52,7 @@
 
 | Actor | Access | Capability |
 |-------|--------|------------|
-| Malicious local process | Same machine, different user | Can attempt WS connection to 127.0.0.1:4100 |
+| Malicious local process | Same machine, different user | Can attempt TLS connections to the loopback hub |
 | Malicious local process | Same user | Can read auth.json, DB files |
 | Network attacker | On same LAN | Cannot reach 127.0.0.1 (loopback only) |
 | Compromised remote | Agent's SSH user | Can send crafted protocol messages |
@@ -61,7 +61,7 @@
 
 | Threat | Vector | Impact | Likelihood | Mitigation |
 |--------|--------|--------|------------|------------|
-| Unauthorized hub access | Local process connects to WS | HIGH — terminal access | MEDIUM | Token auth required for all WS/REST |
+| Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
 | Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600, warn if world-readable |
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
@@ -82,8 +82,8 @@
 ```
 
 **Token validation:**
-- REST: `Authorization: Bearer <token>` header on every request (except `/health`)
-- WS: First message must be `AUTH { token }`. Connection closed if invalid.
+- REST: `Authorization: Bearer <token>` header on every browser API request.
+- WSS: First message must be `AUTH { token }`. Connection closed if invalid.
 - Token comparison: constant-time (crypto.timingSafeEqual)
 
 **Token rotation:**
@@ -120,37 +120,10 @@ Device A (has token):
   Pairing code: 847293
   Expires in 60 seconds.
   Enter this code on the other device.
-
-Device B (needs token):
-  Opens http://<hub-ip>:4100 → pairing screen
-  Enters: 847293
-  → Hub verifies code, returns token
-  → Device B stores token locally
 ```
 
-**Pairing flow:**
-
-```
-1. POST /api/pair (authenticated — Device A must have token)
-   → Hub generates 6-digit code, stores in pairing_codes table
-   → Returns { code: "847293", expires_at: "..." }
-
-2. POST /api/pair/verify (unauthenticated — Device B uses code)
-   Body: { code: "847293" }
-   → Hub checks: code exists, not expired, not used
-   → If valid: mark used, return { token: "<the auth token>" }
-   → If invalid: return 401
-
-3. Code expires after 60 seconds (cleaned up by GC)
-4. Code is single-use (used flag prevents replay)
-```
-
-**Security properties:**
-- Short-lived (60s)
-- Single-use
-- 6 digits = 1M combinations (brute force not practical in 60s)
-- Requires authenticated user to generate (Device A must have token)
-- Rate limit: max 3 active codes, max 10 attempts per minute
+Remote-device pairing is not delivered in this branch (#183). The hub remains
+loopback-only; do not open a LAN port or direct another device to a hub URL.
 
 ## 3. SSH Security
 
@@ -238,11 +211,12 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 
 | Path | Encryption | Notes |
 |------|-----------|-------|
-| UI ↔ Hub | None (localhost) | 127.0.0.1 only — no network transit |
+| UI ↔ Hub | TLS | Loopback HTTPS/WSS; the peer key must match `runtime.json`'s recorded SPKI |
 | Hub ↔ Agent (daemon) | None (UDS) | Kernel-only IPC, same user, no network transit |
 | Hub ↔ Agent (SSH) | SSH (AES-256-GCM or ChaCha20) | Standard SSH encryption |
 
-**Note:** If hub bind is changed to 0.0.0.0 (not recommended), TLS should be added. MVP does not support this — warn user in config comment.
+**Note:** The hub is loopback-only. A configured certificate is used as supplied;
+otherwise a key and certificate are generated once for the local hub identity.
 
 ### 4.3 In Memory
 

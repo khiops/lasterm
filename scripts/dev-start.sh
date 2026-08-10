@@ -34,9 +34,9 @@ start_hub() {
 	HUB_PORT=""
 	for i in $(seq 1 30); do
 		if [ -r "$HUB_STATE_DIR/runtime.json" ] && [ -r "$HUB_STATE_DIR/hub-tls-cert.pem" ]; then
-			HUB_PORT="$(sed -n 's/^[[:space:]]*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$HUB_STATE_DIR/runtime.json" | head -n 1)"
+			HUB_PORT="$(pnpm exec tsx "$ROOT/scripts/dev/hub-health-probe.mts" 2>/dev/null || true)"
 		fi
-		if [ -n "$HUB_PORT" ] && curl --cacert "$HUB_STATE_DIR/hub-tls-cert.pem" -sf "https://127.0.0.1:$HUB_PORT/api/health" > /dev/null 2>&1; then
+		if [ -n "$HUB_PORT" ]; then
 			echo " ✓"
 			HUB_OK=1
 			break

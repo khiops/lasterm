@@ -6,7 +6,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
 	closeSync,
 	copyFileSync,
@@ -32,6 +32,7 @@ import {
 	readDaemonLogTail,
 	waitForDaemonReady,
 } from "./daemon-launch.js";
+import { hubTlsOptions } from "./hub-transport.js";
 import { detectSea } from "./sea-addon-loader.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -88,7 +89,6 @@ export interface RuntimeInfo {
 
 const HUB_QUIT_OBSERVE_TIMEOUT_MS = 15_000;
 const HUB_QUIT_OBSERVE_POLL_MS = 50;
-const HUB_TLS_CERTIFICATE_NAME = "hub-tls-cert.pem";
 
 export type RuntimeLoadResult =
 	| { kind: "absent" }
@@ -303,28 +303,13 @@ function hubUrl(runtime: RuntimeInfo, path: string): URL {
 	return new URL(path, `https://127.0.0.1:${runtime.port}`);
 }
 
-function hubCertificate(runtime: RuntimeInfo): string {
-	if (typeof runtime.spki !== "string" || runtime.spki.length === 0) {
-		throw new Error("Hub runtime has no TLS SPKI; refusing to send a credential");
-	}
-	const certificatePath = join(getStateDir(), HUB_TLS_CERTIFICATE_NAME);
-	const certificate = readFileSync(certificatePath, "utf8");
-	const spki = new X509Certificate(certificate).publicKey
-		.export({ type: "spki", format: "der" })
-		.toString("base64");
-	if (spki !== runtime.spki) {
-		throw new Error("Hub TLS certificate does not match runtime SPKI; refusing to connect");
-	}
-	return certificate;
-}
-
 /** The sole local-hub transport. Credentials are added only after TLS pinning. */
 export async function requestHub(
 	runtime: RuntimeInfo,
 	path: string,
 	init: HubRequestInit = {},
 ): Promise<Response> {
-	const certificate = hubCertificate(runtime);
+	const tls = hubTlsOptions(runtime, getStateDir());
 	const url = hubUrl(runtime, path);
 	return new Promise<Response>((resolve, reject) => {
 		const request = httpsRequest(
@@ -332,22 +317,7 @@ export async function requestHub(
 			{
 				method: init.method ?? "GET",
 				headers: init.headers,
-				ca: certificate,
-				// Keep normal certificate validation on: Node calls this hook only after
-				// that validation succeeded. `ca` may be an operator bundle, so it is
-				// not itself a leaf pin. This is the one identity predicate: exact DER
-				// SubjectPublicKeyInfo equality with runtime.json.
-				checkServerIdentity: (_hostname, peerCertificate) => {
-					const peerSpki = new X509Certificate(peerCertificate.raw).publicKey.export({
-						type: "spki",
-						format: "der",
-					});
-					const expectedSpki = Buffer.from(runtime.spki ?? "", "base64");
-					if (peerSpki.length !== expectedSpki.length || !timingSafeEqual(peerSpki, expectedSpki)) {
-						return new Error("Hub TLS peer SPKI does not match runtime.json; refusing to connect");
-					}
-					return undefined;
-				},
+				...tls,
 				signal: init.signal,
 			},
 			(response) => {

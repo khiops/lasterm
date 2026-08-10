@@ -40,7 +40,9 @@ Both binaries, in that order: `build-hub.sh` does not build the agent, and the h
 resolves it next to its own executable. Without it the UI serves but the first local
 terminal fails. On Windows use `scripts\build-agent.ps1` and `scripts\build-hub.ps1`.
 
-Open `http://localhost:4100` in your browser.
+Open the `https://127.0.0.1:<port>` address printed at startup. The default is an
+OS-assigned free port; pass `--port <port>` when a stable port is required. The
+hub uses the operator's configured certificate or generates one on first start.
 
 There is no `npx lasterm`, and there will not be one under that name: the unscoped
 `lasterm` on npm belongs to an unrelated project. The hub ships as a single
@@ -52,7 +54,7 @@ exists to remove. Packaged builds land in the [releases](../../releases).
 ## Architecture
 
 ```
-UI (Vue 3 + xterm.js) ──── WS + REST ──── Hub (Fastify, 127.0.0.1:4100)
+UI (Vue 3 + xterm.js) ──── WSS + HTTPS ──── Hub (Fastify, 127.0.0.1:<assigned port>)
                                             ├── Local Agent (child_process, stdio)
                                             ├── Remote Agent (ssh2, stdio)
                                             ├── meta.db  (hosts, sessions, workspaces)
@@ -65,7 +67,10 @@ Agent (local or remote, same binary):
 Hub never touches PTY directly — the agent is the universal PTY manager.
 ```
 
-The hub daemon binds to `127.0.0.1:4100` and serves both the REST API (`/api/*`) and the WebSocket endpoint (`/ws`). All PTY management is delegated to the agent process, whether local or remote.
+The hub daemon binds to `127.0.0.1` on an OS-assigned port by default and serves
+both the HTTPS REST API (`/api/*`) and WSS endpoint (`/ws`). An explicit port is
+an override. The certificate is configured by the operator or generated once and
+recorded with the endpoint identity in `runtime.json`.
 
 ### Agent distribution
 
@@ -112,7 +117,9 @@ pnpm install
 pnpm dev
 ```
 
-The hub starts on `http://localhost:4100` and the Vite dev server on `http://localhost:5173`.
+The hub starts on HTTPS at an OS-assigned port and the Vite dev server on
+`http://localhost:5173`. Vite resolves the published `runtime.json` for each
+proxied request, so it can follow the port chosen after Vite itself starts.
 
 ### Commands
 
@@ -161,7 +168,7 @@ Both binaries land co-located in `dist/sea/`; the hub resolves the agent next to
 
 ```sh
 cd dist/sea
-./lasterm-hub start --port 4100   # serves the PWA at http://127.0.0.1:4100  (add --daemon / --open)
+./lasterm-hub start --port 4100   # serves the PWA at https://127.0.0.1:4100  (add --daemon / --open)
 ./lasterm-hub pair                # prints an 8-digit code to authorise a new browser client
 ./lasterm-hub status              # or: ./lasterm-hub stop
 ```
@@ -201,7 +208,7 @@ State (databases, runtime socket) is stored in:
 - **Linux / macOS:** `~/.local/state/lasterm/`
 - **Windows:** `%LOCALAPPDATA%\lasterm\`
 
-The port defaults to `4100` and can be overridden via:
+The hub chooses an OS-assigned free port by default. Set an explicit port via:
 
 1. CLI flag `--port`
 2. Environment variable `LASTERM_PORT`
@@ -224,7 +231,7 @@ background_mode = "transparent"
 window_effect = "auto"
 ```
 
-In `zero_conf` mode the hub auto-increments from 4100 to 4199 if the default port is taken, and writes the actual port to `runtime.json` in the state directory.
+The chosen endpoint and its SPKI are written to `runtime.json` in the state directory.
 
 ---
 

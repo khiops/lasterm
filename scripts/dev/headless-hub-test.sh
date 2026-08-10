@@ -56,7 +56,7 @@ case "${1:-}" in
 		echo "[headless] hub starting pid $(<"$PIDF") on :$PORT"
 		echo "[headless] isolated root: $TT"
 		for _ in $(seq 1 30); do
-			if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
+			if pnpm exec tsx "$ROOT/scripts/dev/hub-health-probe.mts" >/dev/null 2>&1; then
 				echo "[headless] hub up"
 				exit 0
 			fi

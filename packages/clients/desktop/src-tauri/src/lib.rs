@@ -1929,8 +1929,14 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
         &parent_metadata,
         windows_metadata_is_reparse_point(&parent_metadata),
     )?;
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("refusing protected file metadata: {error}"))?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        // A protected store is created only after its first successful use. Its
+        // absence is therefore normal; every other metadata failure is a
+        // refusal, before any open can follow a substituted path.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("refusing protected file metadata: {error}")),
+    };
     if metadata.file_type().is_symlink() || windows_metadata_is_reparse_point(&metadata) || !metadata.is_file() {
         return Err("refusing protected path that is not a regular file".to_string());
     }
@@ -3795,6 +3801,22 @@ mod tests {
             record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
             spki
         );
+    }
+
+    #[test]
+    fn first_pin_is_recorded_from_an_absent_store() {
+        let directory = instance_test_dir("first-pin-absent-store");
+        let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
+        let spki = vec![7, 8, 9];
+
+        // Deliberately do not create the store or its parent. This exercises
+        // both platform readers' absent-file path before the first pin exists.
+        assert!(!store_path.exists());
+        assert_eq!(
+            record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
+            spki
+        );
+        assert!(store_path.is_file());
     }
 
     #[cfg(unix)]

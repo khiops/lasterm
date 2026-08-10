@@ -42,23 +42,19 @@ function Start-Hub {
         -RedirectStandardError "$LogDir\dev-stderr.log"
     $proc.Id | Out-File -FilePath $PidFile -Force
 
-    # The hub selects its port and publishes the certificate only after TLS is
-    # listening. Trust that exact certificate; never suppress TLS verification.
+    # The shared probe verifies both certificate validation and the TLS peer's
+    # recorded SPKI; a certificate bundle alone is not an identity assertion.
     Write-Host -NoNewline "Waiting for hub TLS listener"
     $hubOk = $false
     $hubPort = $null
     for ($i = 0; $i -lt 30; $i++) {
         if ((Test-Path $HubRuntimePath) -and (Test-Path $HubCertificatePath)) {
             try {
-                $runtime = Get-Content -Raw $HubRuntimePath | ConvertFrom-Json
-                $candidatePort = [int]$runtime.port
-                if ($candidatePort -ge 1 -and $candidatePort -le 65535) {
-                    & curl.exe --cacert $HubCertificatePath --fail --silent --show-error "https://127.0.0.1:$candidatePort/api/health" | Out-Null
-                    if ($LASTEXITCODE -eq 0) {
-                        $hubPort = $candidatePort
-                        $hubOk = $true
-                        break
-                    }
+                $candidatePort = & pnpm exec tsx "$Root\scripts\dev\hub-health-probe.mts" 2>$null
+                if ($LASTEXITCODE -eq 0 -and [int]$candidatePort -ge 1 -and [int]$candidatePort -le 65535) {
+                    $hubPort = [int]$candidatePort
+                    $hubOk = $true
+                    break
                 }
             } catch {
                 # The runtime record may be mid-publication; retry.

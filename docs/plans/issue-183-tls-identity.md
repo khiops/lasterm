@@ -50,17 +50,29 @@ Three constraints shaped this design, and two of them killed an earlier one.
 
 ### 2.0 Who this defends against, and who it does not
 
-"A local attacker" is two threat classes, and this design addresses one of them.
+**Three actors, and the third is the one this document kept omitting.** `127.0.0.1` is the default when
+the desktop launches the hub locally; it is not the architecture. The hub must be able to listen on any
+interface so a client — desktop or browser — can reach it, which is why pairing exists at all (#96 owns the
+configurable bind address, #193 the network half of identity). So the binding must never be cited as a
+security property, and a threat model that lists only local actors is incomplete.
 
 | Attacker | Already has | This design |
 |---|---|---|
 | a **different OS user** on the machine | cannot read `auth.json` (0600) or `runtime.json` | **closes** the theft: they can bind a free port but cannot produce the pinned key |
 | a process of the **same user** | can read `auth.json` directly, so it already holds the primary token | **changes nothing.** Marginal privilege is zero |
+| a **network attacker**, once the hub binds a non-loopback interface | sees every byte on the wire and can answer in the hub's place | **this is why TLS is a precondition rather than an improvement.** A page served over plain HTTP from a non-loopback address is not a secure context, so `crypto.subtle` is unavailable and no application-layer scheme can even execute |
 
-State this before anything else, because a reader who takes "local attacker" as one class will
-judge the design against a threat it cannot address and cannot be made to address: a token file
-readable by its owner is readable by that owner's processes. The port-squatting attack is
-interesting precisely because it needs neither of those files.
+State this before anything else, because a reader who takes "local attacker" as one class will judge the
+design against a threat it cannot address and cannot be made to address: a token file readable by its owner
+is readable by that owner's processes. The port-squatting attack is interesting precisely because it needs
+neither of those files.
+
+**And a consequence for every severity argument in this document.** Reasoning that treats the current
+loopback binding as a limit on an attacker's reach is invalid, because that binding is a default rather than
+a property. It was used exactly that way while triaging #203 — "exfiltrating the token buys a remote
+attacker nothing, since the hub is local" — and the conclusion drawn from it does not survive the correction:
+with a network-facing hub, a stolen bearer token is remotely usable, so an unenforced webview boundary is
+worse than that triage concluded, not better.
 
 ### 2.1 The application cannot authenticate the server
 

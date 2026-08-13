@@ -32,7 +32,7 @@ import {
 	readDaemonLogTail,
 	waitForDaemonReady,
 } from "./daemon-launch.js";
-import { hubTlsOptions } from "./hub-transport.js";
+import { createHubTlsAgent } from "./hub-transport.js";
 import { detectSea } from "./sea-addon-loader.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -309,7 +309,7 @@ export async function requestHub(
 	path: string,
 	init: HubRequestInit = {},
 ): Promise<Response> {
-	const tls = hubTlsOptions(runtime, getStateDir());
+	const agent = createHubTlsAgent(runtime);
 	const url = hubUrl(runtime, path);
 	return new Promise<Response>((resolve, reject) => {
 		const request = httpsRequest(
@@ -317,7 +317,7 @@ export async function requestHub(
 			{
 				method: init.method ?? "GET",
 				headers: init.headers,
-				...tls,
+				agent,
 				signal: init.signal,
 			},
 			(response) => {

@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
@@ -8,9 +7,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
-import { HUB_TLS_HANDSHAKE_TIMEOUT_MS } from "./hub-transport.js";
+import { HUB_TLS_HANDSHAKE_TIMEOUT_MS, HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { createServer, startServer } from "./server.js";
 import { certificateSpki, getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
+
+function tlsFixture(name: string): string {
+	return readFileSync(new URL(`./fixtures/tls/${name}`, import.meta.url), "utf8");
+}
+
+const tlsFixtures = {
+	ca: tlsFixture("test-ca.pem"),
+	expired: { certificate: tlsFixture("expired.pem"), key: tlsFixture("expired-key.pem") },
+	pinned: { certificate: tlsFixture("pinned.pem"), key: tlsFixture("pinned-key.pem") },
+	other: { certificate: tlsFixture("other.pem"), key: tlsFixture("other-key.pem") },
+};
 
 describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
@@ -42,35 +52,6 @@ describe("generated hub TLS identity", () => {
 		const stateDir = getStateDir();
 		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 		return stateDir;
-	}
-
-	function generateCertificate(
-		stateDir: string,
-		name: string,
-		validity: "valid" | "expired",
-	): { certificate: string; key: string } {
-		const runOpenSsl = (...args: string[]) =>
-			execFileSync("openssl", args, { cwd: stateDir, stdio: "pipe" });
-		const keyPath = join(stateDir, `${name}-key.pem`);
-		const certificatePath = join(stateDir, `${name}.pem`);
-		runOpenSsl("genrsa", "-out", keyPath, "2048");
-		runOpenSsl(
-			"x509",
-			"-new",
-			"-key",
-			keyPath,
-			"-subj",
-			`/CN=${name}`,
-			...(validity === "expired"
-				? ["-not_before", "20240101000000Z", "-not_after", "20240102000000Z"]
-				: ["-days", "1"]),
-			"-out",
-			certificatePath,
-		);
-		return {
-			certificate: readFileSync(certificatePath, "utf8"),
-			key: readFileSync(keyPath, "utf8"),
-		};
 	}
 
 	async function listenTlsServer(
@@ -144,9 +125,7 @@ describe("generated hub TLS identity", () => {
 	});
 
 	it("accepts a pinned key with an expired certificate", async () => {
-		const stateDir = prepareStateDir();
-		const expired = generateCertificate(stateDir, "expired", "expired");
-		const listener = await listenTlsServer(expired, (_request, response) => {
+		const listener = await listenTlsServer(tlsFixtures.expired, (_request, response) => {
 			response.end("accepted");
 		});
 
@@ -155,7 +134,7 @@ describe("generated hub TLS identity", () => {
 				pid: process.pid,
 				port: listener.port,
 				started_at: new Date().toISOString(),
-				spki: certificateSpki(expired.certificate),
+				spki: certificateSpki(tlsFixtures.expired.certificate),
 			},
 			"/expired",
 		);
@@ -165,13 +144,13 @@ describe("generated hub TLS identity", () => {
 		);
 	});
 
-	it("refuses another key before any Authorization header or body reaches it", async () => {
-		const stateDir = prepareStateDir();
-		const pinned = generateCertificate(stateDir, "pinned", "valid");
-		const different = generateCertificate(stateDir, "different", "valid");
-		const listener = await listenTlsServer(different, (_request, response) => {
-			response.end("unexpected request");
-		});
+	it("refuses a different leaf under the same CA before any Authorization header or body reaches it", async () => {
+		const listener = await listenTlsServer(
+			{ certificate: tlsFixtures.other.certificate + tlsFixtures.ca, key: tlsFixtures.other.key },
+			(_request, response) => {
+				response.end("unexpected request");
+			},
+		);
 
 		await expect(
 			requestHub(
@@ -179,7 +158,7 @@ describe("generated hub TLS identity", () => {
 					pid: process.pid,
 					port: listener.port,
 					started_at: new Date().toISOString(),
-					spki: certificateSpki(pinned.certificate),
+					spki: certificateSpki(tlsFixtures.pinned.certificate),
 				},
 				"/sensitive",
 				{
@@ -191,7 +170,7 @@ describe("generated hub TLS identity", () => {
 					body: "private request body",
 				},
 			),
-		).rejects.toThrow("peer SPKI does not match runtime.json");
+		).rejects.toMatchObject({ code: HUB_TLS_PIN_MISMATCH_CODE });
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(Buffer.concat(listener.applicationBytes)).toHaveLength(0);
 	});
@@ -204,29 +183,42 @@ describe("generated hub TLS identity", () => {
 			),
 		).rejects.toThrow("runtime has no usable TLS SPKI");
 
-		const stateDir = prepareStateDir();
-		const identity = generateCertificate(stateDir, "unreachable", "valid");
-		const listener = await listenTlsServer(identity, (_request, response) => response.end());
+		const listener = await listenTlsServer(tlsFixtures.pinned, (_request, response) =>
+			response.end(),
+		);
 		const port = listener.port;
 		await new Promise<void>((resolve, reject) =>
 			tlsServers.pop()?.close((error) => (error ? reject(error) : resolve())),
 		);
-		await expect(
-			requestHub(
-				{
-					pid: process.pid,
-					port,
-					started_at: new Date().toISOString(),
-					spki: certificateSpki(identity.certificate),
-				},
-				"/",
-			),
-		).rejects.toThrow("TLS endpoint could not be reached");
+		const error = await requestHub(
+			{
+				pid: process.pid,
+				port,
+				started_at: new Date().toISOString(),
+				spki: certificateSpki(tlsFixtures.pinned.certificate),
+			},
+			"/",
+		).catch((error: unknown) => error);
+		expect(error).toMatchObject({
+			message: expect.stringContaining("TLS endpoint could not be reached"),
+			cause: { code: "ECONNREFUSED" },
+		});
+	});
+
+	it("refuses non-canonical Base64 runtime pins before connecting", async () => {
+		const canonical = certificateSpki(tlsFixtures.pinned.certificate);
+		for (const spki of [
+			`${canonical.slice(0, 12)}!${canonical.slice(12)}`,
+			`${canonical.slice(0, 12)}\n${canonical.slice(12)}`,
+			canonical.slice(0, -1),
+		]) {
+			await expect(
+				requestHub({ pid: process.pid, port: 1, started_at: new Date().toISOString(), spki }, "/"),
+			).rejects.toThrow("runtime has no usable TLS SPKI");
+		}
 	});
 
 	it("abandons a TCP peer that accepts but never completes TLS", async () => {
-		const stateDir = prepareStateDir();
-		const identity = generateCertificate(stateDir, "stalled", "valid");
 		let peerSocket: Socket | undefined;
 		const stalledPeer = createNetServer((socket) => {
 			peerSocket = socket;
@@ -248,7 +240,7 @@ describe("generated hub TLS identity", () => {
 						pid: process.pid,
 						port: address.port,
 						started_at: new Date().toISOString(),
-						spki: certificateSpki(identity.certificate),
+						spki: certificateSpki(tlsFixtures.pinned.certificate),
 					},
 					"/",
 				),

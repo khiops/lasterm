@@ -11,6 +11,19 @@ export interface HubTlsRuntime {
 
 type ConnectionCallback = (error: Error | null, socket: Duplex) => void;
 
+/** A peer completed TLS but proved a key other than the runtime pin. */
+export const HUB_TLS_PIN_MISMATCH_CODE = "ERR_HUB_TLS_PIN_MISMATCH";
+
+/** Lets callers distinguish an identity refusal from an unavailable transport. */
+export class HubTlsPinMismatchError extends Error {
+	readonly code = HUB_TLS_PIN_MISMATCH_CODE;
+
+	constructor() {
+		super("Hub TLS peer SPKI does not match runtime.json; refusing to connect");
+		this.name = "HubTlsPinMismatchError";
+	}
+}
+
 /**
  * Maximum time from starting a TLS connection until its peer has proved the
  * recorded key. Three seconds leaves substantial headroom for a local hub under
@@ -99,7 +112,10 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 			);
 		}, handshakeTimeoutMs);
 		socket.once("error", (error) => {
-			complete(new Error(`Hub TLS endpoint could not be reached: ${error.message}`), socket);
+			complete(
+				new Error(`Hub TLS endpoint could not be reached: ${error.message}`, { cause: error }),
+				socket,
+			);
 		});
 		socket.once("secureConnect", () => {
 			const peerCertificate = socket.getPeerCertificate(true);
@@ -120,18 +136,18 @@ export function verifyHubPeerSpki(
 ): Error | undefined {
 	try {
 		if (peerCertificateDer === undefined || peerCertificateDer.length === 0) {
-			return new Error("Hub TLS peer SPKI does not match runtime.json; refusing to connect");
+			return new HubTlsPinMismatchError();
 		}
 		const peerSpki = new X509Certificate(peerCertificateDer).publicKey.export({
 			type: "spki",
 			format: "der",
 		});
 		if (peerSpki.length !== expectedSpki.length || !timingSafeEqual(peerSpki, expectedSpki)) {
-			return new Error("Hub TLS peer SPKI does not match runtime.json; refusing to connect");
+			return new HubTlsPinMismatchError();
 		}
 		return undefined;
 	} catch {
-		return new Error("Hub TLS peer SPKI does not match runtime.json; refusing to connect");
+		return new HubTlsPinMismatchError();
 	}
 }
 
@@ -141,7 +157,9 @@ function expectedHubSpki(runtime: HubTlsRuntime): Buffer {
 	}
 	try {
 		const expectedSpki = Buffer.from(runtime.spki, "base64");
-		if (expectedSpki.length === 0) throw new Error("empty SPKI");
+		if (expectedSpki.length === 0 || expectedSpki.toString("base64") !== runtime.spki) {
+			throw new Error("non-canonical SPKI");
+		}
 		createPublicKey({ key: expectedSpki, format: "der", type: "spki" });
 		return expectedSpki;
 	} catch {

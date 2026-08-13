@@ -11,6 +11,54 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
 
+  desktop-webview-boundary:
+    name: Desktop webview boundary (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+          cache: "pnpm"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/clients/desktop/src-tauri
+      # These are the upstream Tauri v2 Linux build dependencies. Keep the
+      # WebKit driver and Xvfb alongside them: the next step requires both to
+      # launch a real renderer rather than silently falling back to a unit test.
+      # The package is webkit2gtk-driver on this runner; other distributions
+      # call it webkitgtk-webdriver. Both provide the WebKitWebDriver executable.
+      - name: Install Tauri and WebDriver dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -F @lasterm/shared build
+      - run: ./scripts/build-web.sh
+        env:
+          LASTERM_BUILD_HASH: ${{ github.sha }}
+      - run: ./scripts/build-agent.sh
+      - run: ./scripts/build-hub.sh
+        env:
+          LASTERM_SKIP_WEB: "true"
+          LASTERM_BUILD_HASH: ${{ github.sha }}
+      - name: Place desktop sidecars
+        run: |
+          cp dist/sea/lasterm-agent packages/clients/desktop/src-tauri/lasterm-agent-x86_64-unknown-linux-gnu
+          cp dist/sea/lasterm-hub packages/clients/desktop/src-tauri/lasterm-hub-x86_64-unknown-linux-gnu
+      - name: Build packaged desktop application
+        run: pnpm -F @lasterm/desktop tauri build --debug --no-bundle
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+      - name: Observe the renderer boundary
+        run: xvfb-run --auto-servernum pnpm -F @lasterm/desktop test:e2e
+
   lint-desktop-windows:
     name: Clippy (desktop, Windows)
     runs-on: windows-latest

@@ -134,10 +134,10 @@ gate carries the same list into its prompt.
 | P4 the pin survives a re-issue over the same key | delivered |
 | P5 a mismatch is terminal | delivered |
 | P6 accepted solely on the pin | delivered |
-| P7 no hub traffic originates in the webview | delivered for REST and the WebSocket. Assets now cross the relay as blob URLs; their caching and revocation lifecycle stays in **#194** |
+| P7 no hub traffic originates in the webview | delivered and enforced in the packaged build. The webview's only connection sources are Tauri's IPC, it cannot navigate off the application origin or open a window, and an end-to-end suite drives the packaged application and observes eight renderer routes reach a sentinel server not at all — the same suite turns red and records six arrivals when the policy is removed. A development build served from an external Vite server is outside that guarantee. Assets cross the relay as blob URLs; their caching and revocation lifecycle stays in **#194** |
 | P8 no browser pairing outlives the hub run | delivered |
 | P8-authority | delivered |
-| P9 the relay cannot buffer without bound | delivered |
+| P9 the relay cannot buffer without bound | **delivered for the response direction only.** Responses stream under frame acknowledgement and are tested for it. The request direction holds a whole body — `hub-fetch.ts` reads it as an array buffer and then as an array of numbers — the WebSocket send queue is unbounded, and nothing bounds the number of relays in flight. **#204** |
 | P10 the operator can replace the key | **deferred, #199.** Nothing can replace the key today, and nothing warns of expiry |
 | P11 permission checks where files are opened | **partly delivered.** `runtime.json` is checked because its contents decide who the client trusts. `auth.json`, the certificate, the key's re-read, and the whole Windows story are **deferred, #200** |
 | P12 the default port is not guessable | delivered |

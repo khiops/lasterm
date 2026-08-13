@@ -17,6 +17,11 @@ use time::{Duration, OffsetDateTime};
 const VALIDITY_DAYS: i64 = 825;
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_TEMPORARY_KEY_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Certificate material that may cross the napi boundary. It intentionally has
 /// no private-key field: the key is never converted into a JavaScript value.
 #[napi(object)]
@@ -128,15 +133,24 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
                 // owner-only temporary file is synced. Hard links never replace
                 // an existing destination, so a concurrent creator cannot be
                 // silently overwritten.
-                fs::remove_file(&temporary_path)?;
+                if let Err(error) = remove_temporary_key_file(&temporary_path) {
+                    // The authoritative name is already durable. Do not report
+                    // that successful install as a startup failure, but make
+                    // the owner-only duplicate private key visible to operators.
+                    eprintln!(
+                        "[lasterm] private key installed at {}; could not remove temporary private-key copy {}: {error}",
+                        key_path.display(),
+                        temporary_path.display()
+                    );
+                }
                 return Ok(key_pair);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                fs::remove_file(&temporary_path)?;
+                remove_temporary_key_file(&temporary_path)?;
                 return load_or_create_key(key_path);
             }
             Err(error) => {
-                let _ = fs::remove_file(&temporary_path);
+                let _ = remove_temporary_key_file(&temporary_path);
                 return Err(error);
             }
         }
@@ -146,6 +160,16 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique temporary private-key file",
     ))
+}
+
+fn remove_temporary_key_file(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_TEMPORARY_KEY_CLEANUP.with(|fail| fail.replace(false)) {
+        return Err(io::Error::other(
+            "injected temporary private-key cleanup failure",
+        ));
+    }
+    fs::remove_file(path)
 }
 
 fn temporary_key_path(key_path: &Path) -> io::Result<PathBuf> {
@@ -354,9 +378,9 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::load_or_create_key;
-    use super::{generate_identity, VALIDITY_DAYS};
+    use super::{
+        generate_identity, load_or_create_key, FAIL_NEXT_TEMPORARY_KEY_CLEANUP, VALIDITY_DAYS,
+    };
     use rustls_pki_types::CertificateDer;
     use std::env;
     use std::fs::{self, create_dir};
@@ -493,6 +517,31 @@ mod tests {
         let second = generate_identity(&key_path).expect("reissue TLS identity from existing key");
 
         assert_eq!(first.spki, second.spki, "reissuing preserves the SPKI");
+    }
+
+    #[test]
+    fn installed_key_is_successful_even_when_temporary_copy_cleanup_fails() {
+        let directory = test_dir("installed-key-cleanup-warning");
+        let key_path = directory.key_path();
+        FAIL_NEXT_TEMPORARY_KEY_CLEANUP.with(|fail| fail.set(true));
+
+        let installed = load_or_create_key(&key_path)
+            .expect("a committed authoritative private key is not reported as a failure");
+
+        assert!(key_path.is_file(), "the authoritative key was installed");
+        assert!(
+            fs::read_dir(&directory.0)
+                .expect("read temporary-key directory")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "the injected cleanup failure leaves an observable temporary key copy"
+        );
+        assert_eq!(
+            installed.public_key_der(),
+            load_or_create_key(&key_path)
+                .expect("the installed key remains usable after its cleanup warning")
+                .public_key_der()
+        );
     }
 
     #[cfg(unix)]

@@ -35,6 +35,29 @@ describe("hubFetch desktop transport", () => {
 	});
 
 	it.each([
+		["HEAD", 200],
+		["GET", 204],
+		["GET", 205],
+		["GET", 304],
+	] as const)("returns a null body for %s %i", async (method, status) => {
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_request") {
+				return { id: 1, status, statusText: "No Content", headers: [] };
+			}
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+
+		const response = await hubFetch("https://127.0.0.1:4242/api/no-body", { method });
+
+		expect(response.status).toBe(status);
+		expect(response.body).toBeNull();
+	});
+
+	it.each([
 		["Blob", new Blob([new Uint8Array([0, 255, 1, 128])]), [0, 255, 1, 128]],
 		["ArrayBuffer", new Uint8Array([2, 254, 3]).buffer, [2, 254, 3]],
 		["typed array", new Uint8Array([4, 253, 5]), [4, 253, 5]],

@@ -96,7 +96,7 @@ async function relayRequestToResponse(request: RelayRequest): Promise<Response> 
 		});
 		responseId = head.id;
 		stream.drain();
-		return relayResponse(head, stream.body);
+		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
 		throw relayTransportError(error);
 	}
@@ -127,7 +127,7 @@ async function relayUploadToResponse(request: RelayRequest, formData: FormData):
 		uploadId = null;
 		responseId = head.id;
 		stream.drain();
-		return relayResponse(head, stream.body);
+		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
 		throw relayTransportError(error);
 	} finally {
@@ -266,8 +266,17 @@ function responseStream(
 	};
 }
 
-function relayResponse(head: RelayHead, body: ReadableStream<Uint8Array>): Response {
-	return new Response(head.status === 204 || head.status === 304 ? null : body, {
+function relayResponse(
+	method: string,
+	head: RelayHead,
+	body: ReadableStream<Uint8Array>,
+): Response {
+	// Keep this exact Fetch null-body set aligned with packages/hub/src/cli.ts.
+	const responseBody =
+		method === "HEAD" || head.status === 204 || head.status === 205 || head.status === 304
+			? null
+			: body;
+	return new Response(responseBody, {
 		status: head.status,
 		statusText: head.statusText,
 		headers: head.headers,

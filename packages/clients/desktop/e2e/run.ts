@@ -2,21 +2,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { accessSync, constants } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { WebSocketServer } from "ws";
+import { type SentinelRequest, startSentinel } from "./sentinel.js";
 
-type SentinelRequest = {
-	kind: "http" | "websocket";
-	method: string;
-	path: string;
-};
-
-const png = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==",
-	"base64",
-);
 const requests: SentinelRequest[] = [];
 const desktopRoot = resolve(process.cwd());
 const application = process.env.LASTERM_DESKTOP_BINARY
@@ -115,68 +104,6 @@ async function printApplicationOutput(logPath: string): Promise<void> {
 	);
 }
 
-async function startSentinel(): Promise<{ baseUrl: string; close(): Promise<void> }> {
-	const server = createServer((request, response) => {
-		const path = request.url ?? "/";
-		requests.push({ kind: "http", method: request.method ?? "GET", path });
-		// A missing CSP must make fetch, XHR, and EventSource succeed, not merely
-		// replace one client-side failure with CORS. The route token below then
-		// makes the unwanted request observable in this process.
-		response.setHeader("access-control-allow-origin", "*");
-
-		if (path === "/__health") {
-			response.writeHead(200, { "content-type": "text/plain" }).end("sentinel reachable");
-			return;
-		}
-		if (path === "/__records") {
-			response.setHeader("content-type", "application/json");
-			response.end(JSON.stringify(requests));
-			return;
-		}
-		if (path.startsWith("/image")) {
-			response.writeHead(200, { "content-type": "image/png" }).end(png);
-			return;
-		}
-		if (path.startsWith("/event-source")) {
-			response.writeHead(200, {
-				"cache-control": "no-cache",
-				"content-type": "text/event-stream",
-			});
-			response.write("data: reachable\\n\\n");
-			return;
-		}
-		response.writeHead(200, { "content-type": "text/plain" }).end("reachable");
-	});
-	const webSocketServer = new WebSocketServer({ noServer: true });
-	server.on("upgrade", (request, socket, head) => {
-		requests.push({ kind: "websocket", method: request.method ?? "GET", path: request.url ?? "/" });
-		webSocketServer.handleUpgrade(request, socket, head, (websocket) => {
-			webSocketServer.emit("connection", websocket, request);
-		});
-	});
-	webSocketServer.on("connection", (socket) => socket.close());
-
-	server.listen(0, "127.0.0.1");
-	await once(server, "listening");
-	const address = server.address();
-	if (!address || typeof address === "string") {
-		throw new Error("Desktop boundary sentinel did not bind a TCP port");
-	}
-	const baseUrl = `http://127.0.0.1:${address.port}`;
-	const health = await fetch(`${baseUrl}/__health`);
-	if (!health.ok || (await health.text()) !== "sentinel reachable")
-		throw new Error(`Desktop boundary sentinel health check returned ${health.status}`);
-
-	return {
-		baseUrl,
-		close: async () => {
-			webSocketServer.close();
-			server.close();
-			await once(server, "close");
-		},
-	};
-}
-
 async function main(): Promise<void> {
 	if (process.platform === "linux" && !process.env.DISPLAY) {
 		failMissing("DISPLAY", "run the suite under xvfb-run or a real display server");
@@ -192,7 +119,10 @@ async function main(): Promise<void> {
 	let sentinelReported = false;
 	let applicationOutputPrinted = false;
 	try {
-		sentinel = await startSentinel();
+		sentinel = await startSentinel(
+			(request) => requests.push(request),
+			() => requests,
+		);
 		capturedApplication = await captureApplicationOutput();
 		const child = spawn("pnpm", ["exec", "wdio", "run", "e2e/wdio.conf.ts"], {
 			cwd: desktopRoot,

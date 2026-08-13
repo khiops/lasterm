@@ -4238,6 +4238,47 @@ mod tests {
     }
 
     #[test]
+    fn pin_survives_desktop_and_hub_restart_when_port_changes() {
+        let _guard = HUB_CONNECTION_TEST_LOCK.lock().unwrap();
+        let directory = instance_test_dir("pin-restart");
+        let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let announced_spki = key_pair.public_key_der();
+        let first_hub = TestTlsPeer::start(&key_pair);
+        let first_port = first_hub.port;
+
+        establish_hub_connection_at(&store_path, first_port, &announced_spki).unwrap();
+        first_hub.assert_http_request();
+        *HUB_CONNECTION.lock().unwrap() = None;
+        HUB_PORT.store(0, Ordering::Relaxed);
+
+        let restarted_hub = TestTlsPeer::start(&key_pair);
+        assert_ne!(first_port, restarted_hub.port);
+        establish_hub_connection_at(&store_path, restarted_hub.port, &announced_spki).unwrap();
+        let response = send_relay_hub_request(
+            &RelayHubRequest {
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                headers: Vec::new(),
+                body: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 204);
+        restarted_hub.assert_http_request();
+
+        let store = load_existing_hub_pin_store(&store_path).unwrap().unwrap();
+        assert_eq!(store.pins.len(), 1, "the port never contributes to the pin key");
+        assert_eq!(
+            existing_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY).unwrap(),
+            Some(announced_spki)
+        );
+        *HUB_CONNECTION.lock().unwrap() = None;
+        HUB_PORT.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
     fn first_pin_is_persisted_only_after_a_live_peer_proves_the_announced_key() {
         let _guard = HUB_CONNECTION_TEST_LOCK.lock().unwrap();
         let directory = instance_test_dir("first-pin-live-peer");

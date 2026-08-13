@@ -3,6 +3,7 @@ pub mod tls_identity;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::error::Error;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -1834,14 +1835,13 @@ fn hub_pin_store_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "failed to resolve the desktop pin-store directory".to_string())
 }
 
-fn record_or_match_hub_pin(identity: &str, presented_spki: &[u8]) -> Result<Vec<u8>, String> {
-    let path = hub_pin_store_path()?;
-    record_or_match_hub_pin_at(&path, identity, presented_spki)
-}
-
 /// SSH-known-hosts shape: the stable identity names one entry, its first public
 /// key is recorded, and a different later key is a refusal -- never an update.
-fn record_or_match_hub_pin_at(
+///
+/// This is called only after the first-use TLS proof. Existing pins can be
+/// matched without a connection; an absent pin must not reach this function
+/// until `prove_announced_hub_key` has completed.
+fn record_or_match_hub_pin_after_proof_at(
     path: &Path,
     identity: &str,
     presented_spki: &[u8],
@@ -1873,6 +1873,58 @@ fn record_or_match_hub_pin_at(
     );
     write_hub_pin_store(path, &store)?;
     Ok(presented_spki.to_vec())
+}
+
+/// Reads an existing pin without creating the store directory. The absence of
+/// the directory is normal on first use, and must stay non-durable until the
+/// announced peer has completed its TLS proof.
+fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
+    match std::fs::symlink_metadata(parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect desktop pin-store directory {}: {error}",
+                parent.display()
+            ));
+        }
+        Ok(_) => {}
+    }
+    match read_protected_file(path)? {
+        Some(contents) => serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
+        None => Ok(None),
+    }
+}
+
+fn existing_hub_pin_at(path: &Path, identity: &str) -> Result<Option<Vec<u8>>, String> {
+    use base64::Engine;
+
+    let Some(store) = load_existing_hub_pin_store(path)? else {
+        return Ok(None);
+    };
+    let Some(encoded) = store.pins.get(identity) else {
+        return Ok(None);
+    };
+    let stored = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("desktop hub pin store contains invalid SPKI: {error}"))?;
+    if stored.is_empty() {
+        return Err("desktop hub pin store contains an empty SPKI".to_string());
+    }
+    Ok(Some(stored))
+}
+
+fn match_existing_hub_pin(stored_spki: Vec<u8>, presented_spki: &[u8]) -> Result<Vec<u8>, String> {
+    if stored_spki != presented_spki {
+        return Err(format!(
+            "Hub identity changed for {LOOPBACK_HUB_PIN_KEY}; refusing to send credentials. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again."
+        ));
+    }
+    Ok(stored_spki)
 }
 
 fn load_hub_pin_store(path: &Path) -> Result<HubPinStore, String> {
@@ -2012,8 +2064,36 @@ fn report_reset_hub_pin_result(result: Result<(), String>) -> i32 {
 }
 
 fn establish_hub_connection(port: u16, presented_spki: &[u8]) -> Result<(), String> {
-    let expected_spki = record_or_match_hub_pin(LOOPBACK_HUB_PIN_KEY, presented_spki)?;
-    let client = build_pinned_hub_client(expected_spki.clone())?;
+    let pin_store_path = hub_pin_store_path()?;
+    establish_hub_connection_at(&pin_store_path, port, presented_spki)
+}
+
+/// Establishes the connection the shell uses after a hub announcement. A known
+/// pin is still matched before any request. On first use, the pinned client
+/// performs an unauthenticated TLS probe before the key can enter the store.
+fn establish_hub_connection_at(
+    pin_store_path: &Path,
+    port: u16,
+    presented_spki: &[u8],
+) -> Result<(), String> {
+    let (expected_spki, client) = match existing_hub_pin_at(pin_store_path, LOOPBACK_HUB_PIN_KEY)? {
+        Some(stored_spki) => {
+            let expected_spki = match_existing_hub_pin(stored_spki, presented_spki)?;
+            let client = build_pinned_hub_client(expected_spki.clone())?;
+            (expected_spki, client)
+        }
+        None => {
+            validate_announced_hub_spki(presented_spki)?;
+            let client = build_pinned_hub_client(presented_spki.to_vec())?;
+            prove_announced_hub_key(&client, port)?;
+            let expected_spki = record_or_match_hub_pin_after_proof_at(
+                pin_store_path,
+                LOOPBACK_HUB_PIN_KEY,
+                presented_spki,
+            )?;
+            (expected_spki, client)
+        }
+    };
     let mut connection = HUB_CONNECTION
         .lock()
         .map_err(|_| "hub connection lock poisoned".to_string())?;
@@ -2196,6 +2276,20 @@ fn pinned_hub_tls_config(expected_spki: Vec<u8>) -> Result<rustls::ClientConfig,
         .with_no_client_auth())
 }
 
+/// Reject malformed announcements before allocating a TLS client. This checks
+/// that the bytes are one complete DER SubjectPublicKeyInfo, not merely a
+/// non-empty base64 payload.
+fn validate_announced_hub_spki(spki: &[u8]) -> Result<(), String> {
+    if spki.is_empty() {
+        return Err("The hub runtime record has an empty TLS SPKI; refusing to trust it".to_string());
+    }
+    let spki_der = rustls::pki_types::SubjectPublicKeyInfoDer::from(spki);
+    webpki::RawPublicKeyEntity::try_from(&spki_der).map_err(|error| {
+        format!("The hub runtime record has a malformed TLS SPKI; refusing to trust it: {error}")
+    })?;
+    Ok(())
+}
+
 /// Build the pinned REST client once when a hub connection is established.
 /// `reqwest::Client` clones retain this client's connection pool. Its only
 /// server-identity predicate is the SPKI published beside the listener.
@@ -2207,6 +2301,52 @@ fn build_pinned_hub_client(expected_spki: Vec<u8>) -> Result<reqwest::blocking::
         .use_preconfigured_tls(config)
         .build()
         .map_err(|error| format!("failed to build the pinned hub client: {error}"))
+}
+
+/// The first-use probe deliberately carries no hub credential. Any HTTP status
+/// proves enough here: the TLS handshake already verified that the endpoint
+/// possesses the private key for the announced SPKI.
+fn prove_announced_hub_key(client: &reqwest::blocking::Client, port: u16) -> Result<(), String> {
+    client
+        .get(relay_hub_url(port, "/")?)
+        .send()
+        .map(|_| ())
+        .map_err(|error| {
+            if tls_peer_presented_another_key(&error) {
+                "The announced hub peer presented another TLS key; refusing to trust it. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again.".to_string()
+            } else {
+                format!(
+                    "The announced hub peer could not be reached to prove its TLS key: {error}"
+                )
+            }
+        })
+}
+
+fn tls_peer_presented_another_key(error: &reqwest::Error) -> bool {
+    error_chain_has_spki_mismatch(error)
+}
+
+fn error_chain_has_spki_mismatch(error: &(dyn Error + 'static)) -> bool {
+    if matches!(
+        error.downcast_ref::<rustls::Error>(),
+        Some(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::ApplicationVerificationFailure
+        ))
+    ) {
+        return true;
+    }
+    // Hyper wraps Rustls failures in `io::Error`; its source chain stops at
+    // that wrapper, so inspect its retained inner error explicitly.
+    if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+        if let Some(inner) = io_error.get_ref() {
+            if error_chain_has_spki_mismatch(inner) {
+                return true;
+            }
+        }
+    }
+    error
+        .source()
+        .is_some_and(error_chain_has_spki_mismatch)
 }
 
 fn relay_hub_url(port: u16, path: &str) -> Result<String, String> {
@@ -3987,6 +4127,91 @@ mod tests {
         );
     }
 
+    static HUB_CONNECTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestTlsPeer {
+        port: u16,
+        received_http_request: std::sync::mpsc::Receiver<bool>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl TestTlsPeer {
+        fn start(key_pair: &rcgen::KeyPair) -> Self {
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+            use rustls::{ServerConfig, ServerConnection, StreamOwned};
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+
+            let certificate = rcgen::CertificateParams::new(Vec::<String>::new())
+                .unwrap()
+                .self_signed(key_pair)
+                .unwrap()
+                .der()
+                .clone();
+            let private_key = key_pair.serialize_der();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (received_http_request_sender, received_http_request) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let config = ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![CertificateDer::from(certificate)],
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key)),
+                    )
+                    .unwrap();
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let connection = ServerConnection::new(Arc::new(config)).unwrap();
+                let mut tls = StreamOwned::new(connection, socket);
+                let mut request = [0_u8; 1024];
+                let received = matches!(tls.read(&mut request), Ok(read) if read > 0);
+                received_http_request_sender.send(received).unwrap();
+                if received {
+                    tls.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                    tls.flush().unwrap();
+                }
+            });
+            Self {
+                port,
+                received_http_request,
+                thread,
+            }
+        }
+
+        fn assert_http_request(self) {
+            assert!(
+                self.received_http_request
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap(),
+                "the peer never received the unauthenticated first-use probe"
+            );
+            self.thread.join().unwrap();
+        }
+
+        fn assert_no_http_request(self) {
+            assert!(
+                !self
+                    .received_http_request
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap(),
+                "a peer with another key received HTTP bytes after TLS rejection"
+            );
+            self.thread.join().unwrap();
+        }
+    }
+
+    fn unused_loopback_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
     #[cfg(unix)]
     #[test]
     fn group_writable_runtime_directory_is_refused_with_its_path() {
@@ -4012,61 +4237,82 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn pin_survives_desktop_and_hub_restart_when_port_changes() {
-        let directory = instance_test_dir("pin-restart");
+    fn first_pin_is_persisted_only_after_a_live_peer_proves_the_announced_key() {
+        let _guard = HUB_CONNECTION_TEST_LOCK.lock().unwrap();
+        let directory = instance_test_dir("first-pin-live-peer");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
-        let first_port = 41_001;
-        let second_port = 52_002;
-        let spki = vec![7, 8, 9];
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let peer = TestTlsPeer::start(&key_pair);
+        let announced_spki = key_pair.public_key_der();
 
-        // First desktop + first hub run records only the stable loopback name,
-        // never the OS-assigned port.
-        assert_eq!(
-            record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
-            spki
-        );
-        assert_eq!(
-            std::fs::metadata(store_path.parent().unwrap())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&store_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        assert_ne!(first_port, second_port);
+        establish_hub_connection_at(&store_path, peer.port, &announced_spki).unwrap();
+        peer.assert_http_request();
 
-        // A fresh read represents a new desktop process. The later hub's port
-        // may differ, but the same stable identity finds the original pin.
+        let store = load_existing_hub_pin_store(&store_path).unwrap().unwrap();
+        assert_eq!(store.pins.len(), 1, "the successful first use writes one pin");
         assert_eq!(
-            record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
-            spki
+            existing_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY).unwrap(),
+            Some(announced_spki)
+        );
+        *HUB_CONNECTION.lock().unwrap() = None;
+        HUB_PORT.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn unreachable_first_use_leaves_the_store_empty() {
+        let directory = instance_test_dir("first-pin-unreachable");
+        let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
+        let announced_spki = rcgen::KeyPair::generate().unwrap().public_key_der();
+
+        let error = establish_hub_connection_at(&store_path, unused_loopback_port(), &announced_spki)
+            .unwrap_err();
+
+        assert!(error.contains("could not be reached"), "error: {error}");
+        assert!(
+            !store_path.exists() && !store_path.parent().unwrap().exists(),
+            "an unreachable peer must not cause a durable pin-store write"
         );
     }
 
     #[test]
-    fn first_pin_is_recorded_from_an_absent_store() {
-        let directory = instance_test_dir("first-pin-absent-store");
+    fn different_first_use_peer_leaves_the_store_empty() {
+        let directory = instance_test_dir("first-pin-different-peer");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
-        let spki = vec![7, 8, 9];
+        let announced_key_pair = rcgen::KeyPair::generate().unwrap();
+        let peer_key_pair = rcgen::KeyPair::generate().unwrap();
+        let peer = TestTlsPeer::start(&peer_key_pair);
 
-        // Deliberately do not create the store or its parent. This exercises
-        // both platform readers' absent-file path before the first pin exists.
-        assert!(!store_path.exists());
-        assert_eq!(
-            record_or_match_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY, &spki).unwrap(),
-            spki
+        let error = establish_hub_connection_at(
+            &store_path,
+            peer.port,
+            &announced_key_pair.public_key_der(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.contains("presented another TLS key"),
+            "error: {error}; debug: {error:?}"
         );
-        assert!(store_path.is_file());
+        assert!(
+            !store_path.exists() && !store_path.parent().unwrap().exists(),
+            "a different peer key must not enter the pin store"
+        );
+        peer.assert_no_http_request();
+    }
+
+    #[test]
+    fn malformed_first_use_record_leaves_the_store_empty() {
+        let directory = instance_test_dir("first-pin-malformed-record");
+        let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
+
+        let error = establish_hub_connection_at(&store_path, 4444, &[1, 2, 3]).unwrap_err();
+
+        assert!(error.contains("runtime record has a malformed TLS SPKI"), "error: {error}");
+        assert!(
+            !store_path.exists() && !store_path.parent().unwrap().exists(),
+            "a malformed record must not create a pin store"
+        );
     }
 
     #[cfg(unix)]
@@ -4088,7 +4334,7 @@ mod tests {
             load_runtime_info_at(&state_dir.join("runtime.json")),
             RuntimeLoadResult::Unreadable(_)
         ));
-        // The rejected record never gets as far as `record_or_match_hub_pin_at`;
+        // The rejected record never gets as far as the first-use TLS proof;
         // no desktop pin-store directory exists and no connection can be set.
         assert!(!directory.join("desktop-state").exists());
     }

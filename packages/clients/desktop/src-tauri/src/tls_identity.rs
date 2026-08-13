@@ -225,6 +225,8 @@ mod tests {
 
     #[test]
     fn stored_pin_rejects_different_hub_before_credential_bytes_are_sent() {
+        use base64::Engine;
+
         let server_key = KeyPair::generate().expect("generate server key pair");
         let pinned_key = KeyPair::generate().expect("generate originally trusted hub key pair");
         let store_path = std::env::temp_dir().join(format!(
@@ -232,12 +234,13 @@ mod tests {
             std::process::id()
         ));
         let store_path = store_path.join("desktop-state").join("known_hubs.json");
-        let stored_pin = crate::record_or_match_hub_pin_at(
-            &store_path,
-            crate::LOOPBACK_HUB_PIN_KEY,
-            &pinned_key.public_key_der(),
-        )
-        .expect("record first trusted hub key");
+        let stored_pin = pinned_key.public_key_der();
+        let mut store = crate::HubPinStore::default();
+        store.pins.insert(
+            crate::LOOPBACK_HUB_PIN_KEY.to_string(),
+            base64::engine::general_purpose::STANDARD.encode(&stored_pin),
+        );
+        crate::write_hub_pin_store(&store_path, &store).expect("write existing trusted hub key");
         let server = TestServer::start(
             certificate_for(&server_key, false),
             server_key.serialize_der(),

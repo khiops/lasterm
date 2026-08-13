@@ -4137,7 +4137,7 @@ mod tests {
 
     impl TestTlsPeer {
         fn start(key_pair: &rcgen::KeyPair) -> Self {
-            use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+            use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
             use rustls::{ServerConfig, ServerConnection, StreamOwned};
             use std::io::{Read, Write};
             use std::net::TcpListener;
@@ -4156,7 +4156,7 @@ mod tests {
                 let config = ServerConfig::builder()
                     .with_no_client_auth()
                     .with_single_cert(
-                        vec![CertificateDer::from(certificate)],
+                        vec![certificate],
                         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key)),
                     )
                     .unwrap();

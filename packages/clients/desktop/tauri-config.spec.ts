@@ -72,7 +72,51 @@ describe("tauri.conf.json", () => {
 		const app = conf.app as Record<string, unknown>;
 		const windows = app.windows as Array<Record<string, unknown>>;
 		expect(windows[0]?.transparent).toBe(true);
+		expect(windows[0]?.create).toBe(false);
 		expect(app.macOSPrivateApi).toBe(true);
+	});
+
+	it("limits packaged webview resources to the app, local blobs, and Tauri IPC", () => {
+		const app = conf.app as Record<string, unknown>;
+		const security = app.security as Record<string, unknown>;
+		const csp = security.csp as Record<string, string[]>;
+
+		// Every fetch directive falls back to denial unless named below.
+		expect(csp["default-src"]).toEqual(["'none'"]);
+		// The bundled JavaScript is served from the packaged application origin.
+		expect(csp["script-src"]).toEqual(["'self'"]);
+		// index.html and injectFontFaces() both require inline styles.
+		expect(csp["style-src"]).toEqual(["'self'", "'unsafe-inline'"]);
+		// Tauri IPC is the webview's sole connection transport.
+		expect(csp["connect-src"]).toEqual(["ipc:", "http://ipc.localhost"]);
+		// Browser-compatible data icons and relay-created blob wallpapers both load.
+		expect(csp["img-src"]).toEqual(["'self'", "data:", "blob:"]);
+		// Browser-compatible direct fonts and relay-created blob @font-face sources both load.
+		expect(csp["font-src"]).toEqual(["'self'", "data:", "blob:"]);
+		// Custom bell sounds are loaded from relay-created blob URLs.
+		expect(csp["media-src"]).toEqual(["blob:"]);
+		// The frontend creates no worker, so it must not inherit a permissive fallback.
+		expect(csp["worker-src"]).toEqual(["'none'"]);
+		// These directives do not inherit from default-src and must fail closed themselves.
+		expect(csp["base-uri"]).toEqual(["'none'"]);
+		expect(csp["form-action"]).toEqual(["'none'"]);
+		expect(csp["frame-ancestors"]).toEqual(["'none'"]);
+
+		expect(Object.keys(csp).sort()).toEqual(
+			[
+				"default-src",
+				"script-src",
+				"style-src",
+				"connect-src",
+				"img-src",
+				"font-src",
+				"media-src",
+				"worker-src",
+				"base-uri",
+				"form-action",
+				"frame-ancestors",
+			].sort(),
+		);
 	});
 
 	it("updater plugin is configured with endpoint", () => {

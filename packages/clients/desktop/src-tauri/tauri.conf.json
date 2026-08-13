@@ -13,6 +13,7 @@
 		"windows": [
 			{
 				"label": "main",
+				"create": false,
 				"title": "Lasterm",
 				"width": 1280,
 				"height": 800,
@@ -27,7 +28,19 @@
 		],
 		"macOSPrivateApi": true,
 		"security": {
-			"csp": null
+			"csp": {
+				"default-src": ["'none'"],
+				"script-src": ["'self'"],
+				"style-src": ["'self'", "'unsafe-inline'"],
+				"connect-src": ["ipc:", "http://ipc.localhost"],
+				"img-src": ["'self'", "data:", "blob:"],
+				"font-src": ["'self'", "data:", "blob:"],
+				"media-src": ["blob:"],
+				"worker-src": ["'none'"],
+				"base-uri": ["'none'"],
+				"form-action": ["'none'"],
+				"frame-ancestors": ["'none'"]
+			}
 		}
 	},
 	"bundle": {

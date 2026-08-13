@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager, Url, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 /// The hub port, once the launch path resolved it. Zero until then.
@@ -134,6 +134,60 @@ const INSTANCE_RAISE_REQUEST: &[u8] = b"raise-v1\n";
 const INSTANCE_RAISE_SUCCESS: &[u8] = b"ok\n";
 const INSTANCE_RAISE_FAILURE: &[u8] = b"error\n";
 const INSTANCE_RAISE_MAX_BYTES: usize = 64;
+
+/// One parsed origin rather than a URL prefix. In particular, matching the host
+/// exactly rejects lookalikes such as `tauri.localhost.example.com`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WebviewOrigin {
+    scheme: &'static str,
+    host: &'static str,
+    port: Option<u16>,
+}
+
+// Wry serves Tauri's custom protocol through an HTTP localhost workaround on
+// Windows. Other desktop platforms keep Tauri's native custom protocol.
+#[cfg(windows)]
+const PACKAGED_WEBVIEW_ORIGIN: WebviewOrigin = WebviewOrigin {
+    scheme: "http",
+    host: "tauri.localhost",
+    port: Some(80),
+};
+#[cfg(not(windows))]
+const PACKAGED_WEBVIEW_ORIGIN: WebviewOrigin = WebviewOrigin {
+    scheme: "tauri",
+    host: "localhost",
+    port: None,
+};
+
+const VITE_WEBVIEW_ORIGIN: WebviewOrigin = WebviewOrigin {
+    scheme: "http",
+    host: "localhost",
+    port: Some(5173),
+};
+
+fn has_webview_origin(url: &Url, origin: WebviewOrigin) -> bool {
+    url.scheme() == origin.scheme
+        && url.host_str() == Some(origin.host)
+        && url.port_or_known_default() == origin.port
+}
+
+/// The only documents a Lasterm webview may load. This is deliberately a
+/// plain predicate so its security boundary is testable without a running
+/// renderer.
+fn allows_webview_navigation(url: &Url, development_build: bool) -> bool {
+    has_webview_origin(url, PACKAGED_WEBVIEW_ORIGIN)
+        || (development_build && has_webview_origin(url, VITE_WEBVIEW_ORIGIN))
+}
+
+fn allows_current_webview_navigation(url: &Url) -> bool {
+    allows_webview_navigation(url, cfg!(dev))
+}
+
+/// A renderer never gets another native browsing context. This remains a plain
+/// predicate so popup refusal is testable without a running renderer.
+fn allows_webview_new_window(_url: &Url) -> bool {
+    false
+}
 #[cfg(any(target_os = "windows", test))]
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 #[cfg(any(target_os = "windows", test))]
@@ -3200,6 +3254,26 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
+
+    // `create: false` keeps the main window config in tauri.conf.json while
+    // letting us install the builder-only new-window boundary. Construct it
+    // before any startup path can look it up by label.
+    let main_window_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or("tauri.conf.json is missing the main window configuration")?;
+    tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_config)?
+        .on_new_window(|url, _features| {
+            if !allows_webview_new_window(&url) {
+                eprintln!("[lasterm] refused webview new-window request to {url}");
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .build()?;
+
     // System tray
     let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -3542,6 +3616,24 @@ pub fn run() {
         return;
     }
     let builder = tauri::Builder::default()
+        // Install the navigation boundary before setup_app constructs the main
+        // window from its configuration. It then also applies to every later
+        // webview the application creates.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("webview-navigation-boundary")
+                .on_navigation(|webview, url| {
+                    let allowed = allows_current_webview_navigation(url);
+                    if !allowed {
+                        eprintln!(
+                            "[lasterm] refused webview navigation from {} to {}",
+                            webview.label(),
+                            url
+                        );
+                    }
+                    allowed
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init());
     let builder = match current_package_identity_probe() {
@@ -3606,6 +3698,78 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    #[test]
+    fn packaged_navigation_stays_on_the_parsed_app_origin() {
+        #[cfg(windows)]
+        let packaged_url = "http://tauri.localhost/";
+        #[cfg(not(windows))]
+        let packaged_url = "tauri://localhost/";
+
+        assert!(allows_webview_navigation(
+            &Url::parse(packaged_url).unwrap(),
+            false
+        ));
+
+        for url in [
+            "https://127.0.0.1:4100/",
+            "https://tauri.localhost.example.com/",
+            "https://evil.example/",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "http://localhost:5173/",
+        ] {
+            assert!(
+                !allows_webview_navigation(&Url::parse(url).unwrap(), false),
+                "packaged build accepted {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn development_navigation_adds_only_the_configured_vite_origin() {
+        assert!(allows_webview_navigation(
+            &Url::parse("http://localhost:5173/").unwrap(),
+            true
+        ));
+        assert!(!allows_webview_navigation(
+            &Url::parse("http://localhost:5174/").unwrap(),
+            true
+        ));
+        assert!(!allows_webview_navigation(
+            &Url::parse("http://localhost.evil.example:5173/").unwrap(),
+            true
+        ));
+    }
+
+    #[test]
+    fn shell_navigation_predicate_uses_the_current_build_policy() {
+        assert_eq!(
+            allows_current_webview_navigation(&Url::parse("http://localhost:5173/").unwrap()),
+            cfg!(dev)
+        );
+    }
+
+    #[test]
+    fn shell_new_window_policy_denies_every_target() {
+        #[cfg(windows)]
+        let packaged_url = "http://tauri.localhost/";
+        #[cfg(not(windows))]
+        let packaged_url = "tauri://localhost/";
+
+        for url in [
+            packaged_url,
+            "https://evil.example/",
+            "https://127.0.0.1:4100/",
+            "about:blank",
+        ] {
+            assert!(
+                !allows_webview_new_window(&Url::parse(url).unwrap()),
+                "new-window policy accepted {url}"
+            );
+        }
+    }
 
     struct TestWindowRaiseTarget {
         label: &'static str,

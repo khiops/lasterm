@@ -156,7 +156,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - Static file serving for UI (production build)
 - Health endpoint (`GET /api/health`)
 - Port resolution: CLI flag or `LASTERM_PORT` supplies an explicit override; otherwise the OS assigns a free port and the hub writes it to `runtime.json`.
-- The certificate is the operator's configured pair or a key/certificate generated once for this hub identity; clients validate TLS and pin the recorded SPKI.
+- The certificate is the operator's configured pair, or one this hub generates for itself. In the generated case the **key** is created once and kept; the leaf certificate around it is reissued on every start, so its bytes change while the identity does not (**#205** proposes issuing it once). Clients pin the recorded SPKI, which is the key's, and a client that pins is unaffected by the reissue; a browser that stored a certificate exception sees a new one each restart.
 
 **Session Manager:**
 - Local sessions (daemon): connect to standalone agent via UDS (`connectOrLaunch`), auto-spawn if needed
@@ -758,7 +758,9 @@ Data dir:
 
 State dir:
 ├── runtime.json             # { port, pid, started_at, spki } — written on start, deleted on shutdown
-└── hub-tls-cert.pem          # configured or generated certificate used by same-user clients
+├── hub-tls-cert.pem         # 0600 — the certificate same-user clients read; reissued at each start
+└── hub-tls-key.pem          # 0600 — the durable identity. Losing it re-pairs every client; back it
+                             #        up with the same care as a private key, never share it
 ```
 
 ### runtime.json (TLS endpoint discovery)

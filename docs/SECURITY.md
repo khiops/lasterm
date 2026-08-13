@@ -86,9 +86,10 @@
 - WSS: First message must be `AUTH { token }`. Connection closed if invalid.
 - Token comparison: constant-time (crypto.timingSafeEqual)
 
-**Token rotation:**
-- `lasterm token rotate` — generates new token, invalidates old
-- All connected clients receive AUTH_FAIL and must re-authenticate
+**Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
+clients to re-authenticate. Replacing it today means stopping the hub, removing `auth.json`, and
+starting again, which invalidates every browser pairing. A supported rotation is tracked in **#199**
+alongside the TLS key's.
 
 ### 2.2 Startup Security Check
 
@@ -105,7 +106,9 @@ On every hub start:
    - Expected: 0700 (drwx------)
 
 3. Verify auth.json contains valid token (64 hex chars)
-   - If missing or invalid: generate new token
+   - If missing: generate one
+   - If present but not 64 hex characters: refuse to start, naming the file. A hub that quietly
+     replaced an unreadable token would invalidate every paired client without saying so.
 ```
 
 ### 2.3 Multi-Device Pairing

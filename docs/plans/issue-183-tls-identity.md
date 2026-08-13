@@ -129,7 +129,7 @@ gate carries the same list into its prompt.
 | P2 certificate and key inseparable | delivered |
 | P3 generated leaf, never a CA | delivered |
 | P3b the published identity is never ahead of the running one | delivered |
-| P3c the first pin comes from an anchor | delivered — the hub's announcement carries its SPKI on the child's pipe, and the attach path checks the record's ownership, mode and symlinks before it authorises a pin |
+| P3c the first pin comes from an anchor | **delivered, with a narrower filesystem guarantee than this section originally claimed.** The hub's announcement carries its SPKI on the child's pipe, and a pin is now written only after a credential-free TLS handshake proves the hub holds the announced key — so a corrupt record can no longer pin anything. The record's own protection is checked at its immediate parent, and its ancestors are checked for symlinks only: ownership and write permission on higher ancestors are **not** verified, and each check is by pathname rather than by the descriptor later opened. **#202** |
 | P3c-visibility | **deferred, #201.** A mismatch shows a startup failure naming `--reset-hub-pin`; there is no first-pin window, no once/always/no prompt, and no hub-side fingerprint command |
 | P4 the pin survives a re-issue over the same key | delivered |
 | P5 a mismatch is terminal | delivered |

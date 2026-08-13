@@ -30,7 +30,7 @@ export interface AuthTokenRecord {
 	expiresAt: string | null;
 	/** ISO 8601 — non-null means revoked */
 	revokedAt: string | null;
-	/** ISO 8601 — non-null means invalidated by a hub restart */
+	/** ISO 8601 — the first hub restart that invalidated this token; never rewritten */
 	sweptAt: string | null;
 	/** ISO 8601 — set on each successful auth request (sliding window) */
 	lastUsedAt: string | null;
@@ -179,7 +179,8 @@ export function createToken(
 }
 
 /**
- * Invalidate every credential except the durable auth.json token.
+ * Invalidate every credential except the durable auth.json token. `swept_at`
+ * records the first restart that invalidated a token and is never rewritten.
  *
  * This runs once during startup, before the listener is bound. The sentinel is
  * deliberately the entire allowlist: rows from an unknown future issuer are
@@ -187,7 +188,7 @@ export function createToken(
  */
 export function sweepNonPrimaryTokens(db: Database.Database): void {
 	try {
-		db.prepare("UPDATE auth_tokens SET swept_at = ? WHERE id <> ?").run(
+		db.prepare("UPDATE auth_tokens SET swept_at = ? WHERE id <> ? AND swept_at IS NULL").run(
 			new Date().toISOString(),
 			PRIMARY_TOKEN_ID,
 		);

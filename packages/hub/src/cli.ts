@@ -325,9 +325,16 @@ export async function requestHub(
 				response.on("data", (chunk: Buffer) => chunks.push(chunk));
 				response.on("error", reject);
 				response.on("end", () => {
+					const status = response.statusCode ?? 500;
+					// Fetch requires a null body for these statuses and for HEAD,
+					// even when Node gave us an empty Buffer.
+					const responseBody =
+						init.method === "HEAD" || status === 204 || status === 205 || status === 304
+							? null
+							: Buffer.concat(chunks);
 					resolve(
-						new Response(Buffer.concat(chunks), {
-							status: response.statusCode ?? 500,
+						new Response(responseBody, {
+							status,
 							headers: response.headers as Record<string, string>,
 						}),
 					);

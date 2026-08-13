@@ -320,10 +320,11 @@ struct RuntimeInfo {
 /// The one endpoint and public key this desktop has authorised for the current
 /// process. It is established once at startup and never reconstructed from a
 /// mutable discovery record while credentials are being relayed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct HubConnection {
     port: u16,
     expected_spki: Vec<u8>,
+    client: reqwest::blocking::Client,
 }
 
 /// The complete ready line written to a launched child's stdout. The port is
@@ -1994,12 +1995,33 @@ fn reset_loopback_hub_pin() -> Result<(), String> {
     write_hub_pin_store(&path, &store)
 }
 
+/// Print the recovery result and return the process status used by the command.
+/// Keeping this result explicit lets scripts distinguish a completed recovery
+/// from a missing, unreadable, or unwritable pin store.
+fn report_reset_hub_pin_result(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => {
+            println!("Removed the stored loopback hub pin. Start Lasterm to trust the next hub deliberately.");
+            0
+        }
+        Err(error) => {
+            eprintln!("Could not reset the stored loopback hub pin: {error}");
+            1
+        }
+    }
+}
+
 fn establish_hub_connection(port: u16, presented_spki: &[u8]) -> Result<(), String> {
     let expected_spki = record_or_match_hub_pin(LOOPBACK_HUB_PIN_KEY, presented_spki)?;
+    let client = build_pinned_hub_client(expected_spki.clone())?;
     let mut connection = HUB_CONNECTION
         .lock()
         .map_err(|_| "hub connection lock poisoned".to_string())?;
-    *connection = Some(HubConnection { port, expected_spki });
+    *connection = Some(HubConnection {
+        port,
+        expected_spki,
+        client,
+    });
     HUB_PORT.store(port, Ordering::Relaxed);
     Ok(())
 }
@@ -2174,10 +2196,11 @@ fn pinned_hub_tls_config(expected_spki: Vec<u8>) -> Result<rustls::ClientConfig,
         .with_no_client_auth())
 }
 
-/// Build the one client used for every desktop-to-hub REST request. Its only
+/// Build the pinned REST client once when a hub connection is established.
+/// `reqwest::Client` clones retain this client's connection pool. Its only
 /// server-identity predicate is the SPKI published beside the listener.
-fn pinned_hub_client(connection: &HubConnection) -> Result<reqwest::blocking::Client, String> {
-    let config = pinned_hub_tls_config(connection.expected_spki.clone())?;
+fn build_pinned_hub_client(expected_spki: Vec<u8>) -> Result<reqwest::blocking::Client, String> {
+    let config = pinned_hub_tls_config(expected_spki)?;
     reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(HUB_REQUEST_TIMEOUT)
@@ -2199,10 +2222,11 @@ fn send_relay_hub_request(
     body: Option<reqwest::blocking::Body>,
 ) -> Result<reqwest::blocking::Response, String> {
     let connection = established_hub_connection()?;
-    let client = pinned_hub_client(&connection)?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|error| format!("relay request has an invalid HTTP method: {error}"))?;
-    let mut builder = client.request(method, relay_hub_url(connection.port, &request.path)?);
+    let mut builder = connection
+        .client
+        .request(method, relay_hub_url(connection.port, &request.path)?);
     for (name, value) in &request.headers {
         let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
             .map_err(|error| format!("relay request has an invalid header name: {error}"))?;
@@ -2710,10 +2734,6 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
         Ok(connection) => connection,
         Err(error) => return QuitRequestResult::Failed(error),
     };
-    let client = match pinned_hub_client(&connection) {
-        Ok(client) => client,
-        Err(error) => return QuitRequestResult::Failed(error.to_string()),
-    };
     let owner_header = match owner_token.parse::<reqwest::header::HeaderValue>() {
         Ok(header) => header,
         Err(error) => {
@@ -2723,7 +2743,7 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
         }
     };
     let url = hub_quit_url(connection.port, force);
-    let mut request = client.post(url).header("X-Lasterm-Owner", owner_header);
+    let mut request = connection.client.post(url).header("X-Lasterm-Owner", owner_header);
     if let Some(client_id) = current_shutdown_caller_client_id() {
         request = request.header("X-Lasterm-Client-Id", client_id);
     }
@@ -3671,11 +3691,7 @@ pub fn run() {
     // Deliberate recovery only. A mismatch never reaches this path by itself;
     // the user must run the command after independently verifying the new hub.
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--reset-hub-pin")) {
-        match reset_loopback_hub_pin() {
-            Ok(()) => println!("Removed the stored loopback hub pin. Start Lasterm to trust the next hub deliberately."),
-            Err(error) => eprintln!("Could not reset the stored loopback hub pin: {error}"),
-        }
-        return;
+        std::process::exit(report_reset_hub_pin_result(reset_loopback_hub_pin()));
     }
     let builder = tauri::Builder::default()
         // Install the navigation boundary before setup_app constructs the main
@@ -3760,6 +3776,14 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    #[test]
+    fn reset_hub_pin_failure_returns_a_non_zero_command_status() {
+        assert_eq!(
+            report_reset_hub_pin_result(Err("store is unreadable".to_string())),
+            1
+        );
+    }
 
     #[test]
     fn packaged_navigation_stays_on_the_parsed_app_origin() {

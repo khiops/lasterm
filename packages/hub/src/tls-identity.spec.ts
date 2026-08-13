@@ -33,6 +33,9 @@ describe("generated hub TLS identity", () => {
 		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 		const identity = resolveHubTlsIdentity(stateDir, {});
 		server = await createServer({ logger: false, tls: identity.tls });
+		server.get("/test/no-content", async (_request, reply) => reply.code(204).send());
+		server.get("/test/reset-content", async (_request, reply) => reply.code(205).send());
+		server.get("/test/not-modified", async (_request, reply) => reply.code(304).send());
 		const address = await startServer(server);
 		const port = Number(new URL(address).port);
 
@@ -44,6 +47,29 @@ describe("generated hub TLS identity", () => {
 		);
 		expect(response.ok).toBe(true);
 		expect(await response.json()).toMatchObject({ status: "ok" });
+
+		for (const [path, expectedStatus] of [
+			["/test/no-content", 204],
+			["/test/reset-content", 205],
+			["/test/not-modified", 304],
+		] as const) {
+			const noContent = await requestHub(
+				{ pid: process.pid, port, started_at: new Date().toISOString(), spki: identity.spki },
+				path,
+			);
+			expect(noContent.status).toBe(expectedStatus);
+			if (expectedStatus !== 304) expect(noContent.ok).toBe(true);
+			expect(await noContent.text()).toBe("");
+		}
+
+		const head = await requestHub(
+			{ pid: process.pid, port, started_at: new Date().toISOString(), spki: identity.spki },
+			"/api/health",
+			{ method: "HEAD" },
+		);
+		expect(head.status).toBe(200);
+		expect(head.ok).toBe(true);
+		expect(await head.text()).toBe("");
 
 		await expect(
 			requestHub(

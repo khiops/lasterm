@@ -281,6 +281,10 @@ fn open_key_file(path: &Path, mode: OpenKeyMode) -> io::Result<Option<File>> {
         OpenKeyMode::Existing => OPEN_EXISTING,
         OpenKeyMode::CreateNew => CREATE_NEW,
     };
+    let desired_access = match mode {
+        OpenKeyMode::Existing => GENERIC_READ,
+        OpenKeyMode::CreateNew => GENERIC_READ | GENERIC_WRITE,
+    };
     // SAFETY: wide_path is NUL-terminated and lives for the call; null security
     // attributes and template handles are permitted. FILE_FLAG_OPEN_REPARSE_POINT
     // opens the final component itself so the tag check below can reject a
@@ -288,7 +292,7 @@ fn open_key_file(path: &Path, mode: OpenKeyMode) -> io::Result<Option<File>> {
     let handle = unsafe {
         CreateFileW(
             wide_path.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
+            desired_access,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             disposition,

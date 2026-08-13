@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkPermissions,
 	createToken,
@@ -264,6 +264,33 @@ describe("sweepNonPrimaryTokens", () => {
 			.get("future-issuer-token") as { swept_at: string | null };
 		expect(row.swept_at).not.toBeNull();
 		expect(validateTokenRecord(db, futureToken)).toBeNull();
+	});
+
+	it("records the first restart sweep once instead of rewriting its audit timestamp", () => {
+		const db = makeDb();
+		const { id } = createToken(db, { label: "browser", expiresAt: null });
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-08-01T09:00:00.000Z"));
+			sweepNonPrimaryTokens(db);
+			const firstSweep = (
+				db.prepare("SELECT swept_at FROM auth_tokens WHERE id = ?").get(id) as {
+					swept_at: string;
+				}
+			).swept_at;
+
+			vi.setSystemTime(new Date("2026-08-02T09:00:00.000Z"));
+			sweepNonPrimaryTokens(db);
+			expect(
+				(
+					db.prepare("SELECT swept_at FROM auth_tokens WHERE id = ?").get(id) as {
+						swept_at: string;
+					}
+				).swept_at,
+			).toBe(firstSweep);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("records restart invalidation separately from operator revocation", () => {

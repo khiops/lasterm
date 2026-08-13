@@ -26,6 +26,7 @@ describe("DesktopWsClient", () => {
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 		ipc.callback = undefined;
 		ipc.invoke.mockClear();
+		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
 	});
 
@@ -64,6 +65,7 @@ describe("DesktopWsClient", () => {
 
 	it("reports a transport failure as disconnected before reconnecting", async () => {
 		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const client = createWsClient();
 		const disconnected = vi.fn();
 		client.onDisconnect(disconnected);
@@ -72,11 +74,17 @@ describe("DesktopWsClient", () => {
 		ipc.callback?.({ event: "transport_error" });
 		expect(disconnected).toHaveBeenCalledTimes(1);
 		expect(client.isConnected).toBe(false);
+		expect(consoleError).toHaveBeenCalledWith(
+			"[DesktopWsClient] Transport failure:",
+			"pinned hub WebSocket transport failed",
+		);
 		client.close();
 
+		consoleError.mockClear();
 		await client.connect("ws://127.0.0.1:4100/ws");
 		ipc.callback?.({ event: "closed" });
 		expect(disconnected).toHaveBeenCalledTimes(2);
+		expect(consoleError).not.toHaveBeenCalled();
 		client.close();
 	});
 

@@ -218,8 +218,11 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 | Hub ↔ Agent (daemon) | None (UDS) | Kernel-only IPC, same user, no network transit |
 | Hub ↔ Agent (SSH) | SSH (AES-256-GCM or ChaCha20) | Standard SSH encryption |
 
-**Note:** The hub is loopback-only. A configured certificate is used as supplied;
-otherwise a key and certificate are generated once for the local hub identity.
+**Note:** the hub binds `127.0.0.1` today, which is the default of the local launch rather than the
+design — pairing exists so a client can reach a hub across a network, and #96 covers hardening that
+binding. A configured certificate is used as supplied; otherwise the hub generates its own key **once**
+and keeps it, and reissues a leaf certificate over that key on every start. A client pins the key, so
+the reissue does not affect it; a browser that stored a certificate exception is asked again (#205).
 
 ### 4.3 In Memory
 

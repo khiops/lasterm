@@ -215,7 +215,9 @@ The hub chooses an OS-assigned free port by default. Set an explicit port via:
 
 1. CLI flag `--port`
 2. Environment variable `LASTERM_PORT`
-3. `port` key in `config.toml`
+
+A `port` key in `config.toml` is **not** read today — `lasterm start` computes its port from the flag
+alone, and the environment variable is read only on the daemon entry point (#175).
 
 Terminal background settings live in `[terminal]` and cascade to host/channel profiles:
 

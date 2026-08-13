@@ -183,6 +183,12 @@ The generated certificate is a self-signed **leaf** valid for the names the hub 
 private key stays confidential and non-replaceable to the extent P11 can establish, and a hub that
 cannot establish it refuses to start rather than generating into a location it cannot defend.
 
+*What is actually built:* the **key** is generated once and kept; the leaf over it is **reissued on
+every start**, so the certificate's bytes change while the identity does not. A client pins the key,
+so a reissue costs it nothing; a browser that stored a certificate exception is asked again, and the
+825-day window never approaches expiry because it restarts each time. Issuing the leaf once is
+**#205**. Read every "generated once" elsewhere in this document as applying to the key.
+
 *What the substitution actually buys an attacker, since an earlier draft got this wrong.* That draft
 said a substituted key means "the pin the client holds then matches the attacker". It does not: a
 different key has a different SPKI, so an existing pin **mismatches** and P5 refuses. The danger is
@@ -369,8 +375,12 @@ and a user who does not is no worse off than today. Without that command the rem
 theatre, and this is the one part of the operator's decision that needed adding rather than
 recording.
 
-*Scope:* the remote half cannot be exercised until a non-loopback bind exists (#96), so it is
-specified here and lands with #193. The local half lands with this work.
+*Scope:* **none of this section is delivered.** It describes what #201 will build, and the table above
+records it as deferred; read the two together and the table wins. What exists today is narrower: a
+first pin is recorded without asking, after a live hub has proved it holds the announced key, and a
+mismatch is a terminal startup failure naming `--reset-hub-pin`. No fingerprint is displayed, no
+once/always/no prompt exists, no re-pair interface exists, and a matching pin logs nothing. The remote
+half additionally waits on a non-loopback bind (#96) and lands with #193.
 
 *Display format:* a raw base64 SPKI digest is not comparable by eye. Whatever form is chosen must be
 identical on both ends and readable aloud, since comparing over the phone is the realistic
@@ -585,6 +595,14 @@ protected by different things and both are covered.
 | firewall rules | a fixed rule needs an explicit port. That is the professional-user case and the override serves it |
 
 ### P10 — The operator can replace the key, and no schedule can
+
+**None of this section is delivered.** It describes what #199 will build, and the table above records
+it as deferred; read the two together and the table wins. Today no command replaces the hub's key,
+nothing logs a rotation, and nothing warns that a certificate is near expiry — replacing the key means
+stopping the hub and deleting its file, which is unsupported and re-pairs every client silently.
+`--reset-hub-pin` is unrelated: it clears a desktop's trust record, and does not touch the hub.
+
+What follows is the design that section will follow.
 
 An operator action replaces the hub's key and certificate. After it, every client holding the old
 pin refuses to connect and must establish a new pin through P3c's anchor. The operator-supplied case

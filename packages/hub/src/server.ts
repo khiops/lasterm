@@ -130,6 +130,12 @@ type ServerTlsOptions = { tls: { cert: string; key: string } };
 
 export type ServerOptions = ServerQuitOptions & ServerTlsOptions;
 
+/** The only options consumed after a server has already been created. */
+export interface StartServerOptions {
+	host?: string;
+	port?: number;
+}
+
 export async function createServer(options: ServerOptions): Promise<FastifyInstance> {
 	const server = Fastify<HttpsServer>({
 		logger: options.logger ?? true,
@@ -578,7 +584,7 @@ function isLoopbackAddress(ip: string): boolean {
 
 export async function startServer(
 	server: FastifyInstance,
-	options?: ServerOptions,
+	options?: StartServerOptions,
 ): Promise<string> {
 	const host = options?.host ?? "127.0.0.1";
 	if (options?.port === undefined) {

@@ -30,41 +30,63 @@ type ProfileChangeListener = (event: ProfileChangeEvent) => void;
  * Inject @font-face rules into the document head so the browser
  * can resolve custom font families referenced in the terminal profile.
  */
-async function injectFontFaces(families: FontFamily[]): Promise<void> {
-	// Remove any previously injected style element
-	const existing = document.getElementById("lasterm-fonts");
-	if (existing) existing.remove();
+let injectedFontObjectUrls = new Set<string>();
 
-	if (families.length === 0) return;
-
+export async function injectFontFaces(families: FontFamily[]): Promise<void> {
 	const rules: string[] = [];
+	const nextObjectUrls = new Set<string>();
 	for (const family of families) {
 		for (const file of family.files) {
-			const pathname = new URL(file.url, "http://localhost").pathname;
-			const format = pathname.endsWith(".woff2")
-				? "woff2"
-				: pathname.endsWith(".woff")
-					? "woff"
-					: pathname.endsWith(".ttf")
-						? "truetype"
-						: "opentype";
-			const src = file.url.startsWith("/") ? await domPublicAssetUrl(file.url) : file.url;
-			rules.push(
-				`@font-face {
+			let objectUrl: string | null = null;
+			try {
+				const pathname = new URL(file.url, "http://localhost").pathname;
+				const format = pathname.endsWith(".woff2")
+					? "woff2"
+					: pathname.endsWith(".woff")
+						? "woff"
+						: pathname.endsWith(".ttf")
+							? "truetype"
+							: "opentype";
+				const src = file.url.startsWith("/") ? await domPublicAssetUrl(file.url) : file.url;
+				if (file.url.startsWith("/") && src.startsWith("blob:")) objectUrl = src;
+				rules.push(
+					`@font-face {
 	font-family: "${family.family}";
 	src: url("${src}") format("${format}");
 	font-weight: ${file.weight};
 	font-style: ${file.style};
 	font-display: swap;
 }`,
-			);
+				);
+				if (objectUrl) nextObjectUrls.add(objectUrl);
+			} catch (err) {
+				if (objectUrl) URL.revokeObjectURL(objectUrl);
+				console.error(
+					`[config] failed to resolve custom font ${family.family} (${file.url}):`,
+					err,
+				);
+			}
 		}
 	}
+
+	// A failed refresh must not make a working font set disappear. An empty
+	// configured list is intentional and therefore replaces the rules with none.
+	if (families.length > 0 && rules.length === 0) return;
 
 	const style = document.createElement("style");
 	style.id = "lasterm-fonts";
 	style.textContent = rules.join("\n");
-	document.head.appendChild(style);
+	const existing = document.getElementById("lasterm-fonts");
+	if (existing) {
+		existing.replaceWith(style);
+	} else {
+		document.head.appendChild(style);
+	}
+
+	for (const objectUrl of injectedFontObjectUrls) {
+		if (!nextObjectUrls.has(objectUrl)) URL.revokeObjectURL(objectUrl);
+	}
+	injectedFontObjectUrls = nextObjectUrls;
 }
 
 /**

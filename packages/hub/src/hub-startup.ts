@@ -155,7 +155,6 @@ export async function startHub(
 		});
 		const address = await dependencies.startServer(server, {
 			...(options.port !== undefined ? { port: options.port } : {}),
-			tls: tlsIdentity.tls,
 		});
 		const actualPort = dependencies.addStartupCorsOrigins(address, options.port);
 		runtime = {

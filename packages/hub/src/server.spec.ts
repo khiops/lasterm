@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addCorsOrigins, addStartupCorsOrigins, createServer } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
-import { getTestTls } from "./test-tls.js";
+import { getTestTls } from "./test-tls.fixture.js";
 
 /** Known token used across auth tests */
 const TEST_TOKEN = "a".repeat(64);

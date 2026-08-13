@@ -8,6 +8,12 @@ repository = "https://github.com/khiops/lasterm"
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "lasterm-tls-test-material"
+path = "src/bin/lasterm-tls-test-material.rs"
+test = false
+bench = false
+
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"

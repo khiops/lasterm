@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, rmSync, unlinkSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
 import { createServer as createNetServer, type Socket } from "node:net";
@@ -9,18 +9,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_HANDSHAKE_TIMEOUT_MS, HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { createServer, startServer } from "./server.js";
-import { certificateSpki, getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
-
-function tlsFixture(name: string): string {
-	return readFileSync(new URL(`./fixtures/tls/${name}`, import.meta.url), "utf8");
-}
-
-const tlsFixtures = {
-	ca: tlsFixture("test-ca.pem"),
-	expired: { certificate: tlsFixture("expired.pem"), key: tlsFixture("expired-key.pem") },
-	pinned: { certificate: tlsFixture("pinned.pem"), key: tlsFixture("pinned-key.pem") },
-	other: { certificate: tlsFixture("other.pem"), key: tlsFixture("other-key.pem") },
-};
+import { getTestTlsMaterial } from "./test-tls.fixture.js";
+import { getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
 
 describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
@@ -125,7 +115,8 @@ describe("generated hub TLS identity", () => {
 	});
 
 	it("accepts a pinned key with an expired certificate", async () => {
-		const listener = await listenTlsServer(tlsFixtures.expired, (_request, response) => {
+		const tls = getTestTlsMaterial();
+		const listener = await listenTlsServer(tls.expired, (_request, response) => {
 			response.end("accepted");
 		});
 
@@ -134,7 +125,7 @@ describe("generated hub TLS identity", () => {
 				pid: process.pid,
 				port: listener.port,
 				started_at: new Date().toISOString(),
-				spki: certificateSpki(tlsFixtures.expired.certificate),
+				spki: tls.expired.spki,
 			},
 			"/expired",
 		);
@@ -145,8 +136,9 @@ describe("generated hub TLS identity", () => {
 	});
 
 	it("refuses a different leaf under the same CA before any Authorization header or body reaches it", async () => {
+		const tls = getTestTlsMaterial();
 		const listener = await listenTlsServer(
-			{ certificate: tlsFixtures.other.certificate + tlsFixtures.ca, key: tlsFixtures.other.key },
+			{ certificate: tls.other.certificate + tls.authority.certificate, key: tls.other.key },
 			(_request, response) => {
 				response.end("unexpected request");
 			},
@@ -158,7 +150,7 @@ describe("generated hub TLS identity", () => {
 					pid: process.pid,
 					port: listener.port,
 					started_at: new Date().toISOString(),
-					spki: certificateSpki(tlsFixtures.pinned.certificate),
+					spki: tls.pinned.spki,
 				},
 				"/sensitive",
 				{
@@ -183,9 +175,8 @@ describe("generated hub TLS identity", () => {
 			),
 		).rejects.toThrow("runtime has no usable TLS SPKI");
 
-		const listener = await listenTlsServer(tlsFixtures.pinned, (_request, response) =>
-			response.end(),
-		);
+		const tls = getTestTlsMaterial();
+		const listener = await listenTlsServer(tls.pinned, (_request, response) => response.end());
 		const port = listener.port;
 		await new Promise<void>((resolve, reject) =>
 			tlsServers.pop()?.close((error) => (error ? reject(error) : resolve())),
@@ -195,7 +186,7 @@ describe("generated hub TLS identity", () => {
 				pid: process.pid,
 				port,
 				started_at: new Date().toISOString(),
-				spki: certificateSpki(tlsFixtures.pinned.certificate),
+				spki: tls.pinned.spki,
 			},
 			"/",
 		).catch((error: unknown) => error);
@@ -206,7 +197,7 @@ describe("generated hub TLS identity", () => {
 	});
 
 	it("refuses non-canonical Base64 runtime pins before connecting", async () => {
-		const canonical = certificateSpki(tlsFixtures.pinned.certificate);
+		const canonical = getTestTlsMaterial().pinned.spki;
 		for (const spki of [
 			`${canonical.slice(0, 12)}!${canonical.slice(12)}`,
 			`${canonical.slice(0, 12)}\n${canonical.slice(12)}`,
@@ -219,6 +210,7 @@ describe("generated hub TLS identity", () => {
 	});
 
 	it("abandons a TCP peer that accepts but never completes TLS", async () => {
+		const tls = getTestTlsMaterial();
 		let peerSocket: Socket | undefined;
 		const stalledPeer = createNetServer((socket) => {
 			peerSocket = socket;
@@ -240,7 +232,7 @@ describe("generated hub TLS identity", () => {
 						pid: process.pid,
 						port: address.port,
 						started_at: new Date().toISOString(),
-						spki: certificateSpki(tlsFixtures.pinned.certificate),
+						spki: tls.pinned.spki,
 					},
 					"/",
 				),

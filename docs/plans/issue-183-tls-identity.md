@@ -391,9 +391,11 @@ out-of-band channel.
 Whatever pins the hub's identity pins the **SPKI**, not a leaf-certificate fingerprint, so
 re-issuing with the same key leaves existing pins valid.
 
-*Where this actually applies, since P3 generates the key once:* the operator-supplied case. An
-operator whose certificate is renewed by their CA over the same key keeps every client's pin, and
-that is the only routine re-issuance this design has. The generated case never re-issues; the only
+*Where this applies:* both cases, and it is what makes the generated one work at all. The operator
+whose certificate is renewed by their CA over the same key keeps every client's pin. The generated
+case **reissues its leaf on every start** over the key it retains (#205 proposes issuing it once), so
+P4 is not a nicety there but the reason a pinned client survives a restart. What follows describes the
+operator case, where the only
 thing that changes a generated key is P10's rotation, which changes the SPKI **on purpose** and
 therefore invalidates pins by design. The two are not in tension: P4 says a new certificate over an
 old key preserves pins, P10 says a new key breaks them.

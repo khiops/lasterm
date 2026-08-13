@@ -68,6 +68,7 @@
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
+| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No recovery exists**: clearing a client's pin does not revoke the key, and re-pinning may simply pin the compromised identity again. Recovery needs the hub's key rotated and every client re-pinned, and no supported rotation workflow exists yet (#199) |
 
 ## 2. Authentication
 
@@ -214,7 +215,8 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 
 | Path | Encryption | Notes |
 |------|-----------|-------|
-| UI ↔ Hub | TLS | HTTPS/WSS; the peer key must match `runtime.json`'s recorded SPKI. This is **key** identity, not certificate identity: every client accepts when the handshake proves possession of that key, and refuses otherwise, with chain, expiry, hostname and trust roots taking no part. So an expired certificate over the pinned key connects, and a key that leaks stays usable until the pin is replaced |
+| Desktop, CLI, dev proxy ↔ Hub | TLS, key-pinned | The peer key must match `runtime.json`'s recorded SPKI. This is **key** identity, not certificate identity: these clients accept when the handshake proves possession of that key and refuse otherwise, with chain, expiry, hostname and trust roots taking no part. An expired certificate over the pinned key connects |
+| Browser ↔ Hub | TLS, **not pinned** | A browser applies its own trust decision — its root store, or an exception the user accepted for the hub's self-signed certificate. It does not read `runtime.json` and does not check the recorded key, so a certificate the browser trusts for another reason is accepted. What bounds the exposure there is that a browser pairing does not outlive the hub run it was made against |
 | Hub ↔ Agent (daemon) | None (UDS) | Kernel-only IPC, same user, no network transit |
 | Hub ↔ Agent (SSH) | SSH (AES-256-GCM or ChaCha20) | Standard SSH encryption |
 

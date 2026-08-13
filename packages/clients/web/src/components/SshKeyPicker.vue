@@ -85,6 +85,7 @@ import { useFileDrop } from "../composables/useFileDrop.js";
 import { useToastStore } from "../stores/toast.js";
 import { useAuthStore } from "../stores/auth.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
+import { hubFetch } from "../utils/hub-fetch.js";
 
 const props = defineProps<{
 	modelValue: string | undefined;
@@ -117,7 +118,7 @@ async function loadEntries(): Promise<void> {
 	loading.value = true;
 	try {
 		const params = currentDir.value ? `?dir=${encodeURIComponent(currentDir.value)}` : "";
-		const resp = await fetch(`${hubBaseUrl()}/api/ssh-keys${params}`, { headers: authHeader() });
+		const resp = await hubFetch(`${hubBaseUrl()}/api/ssh-keys${params}`, { headers: authHeader() });
 		if (!resp.ok) {
 			const msg = await resp.text().catch(() => resp.statusText);
 			toastStore.show("error", `Failed to load SSH keys: ${msg}`);
@@ -170,7 +171,7 @@ async function onDelete(entry: SshKeyEntry): Promise<void> {
 	try {
 		const deleteParams = new URLSearchParams({ name: entry.name });
 		if (currentDir.value) deleteParams.set("dir", currentDir.value);
-		const resp = await fetch(`${hubBaseUrl()}/api/ssh-keys?${deleteParams.toString()}`, {
+		const resp = await hubFetch(`${hubBaseUrl()}/api/ssh-keys?${deleteParams.toString()}`, {
 			method: "DELETE",
 			headers: authHeader(),
 		});
@@ -193,7 +194,7 @@ async function uploadFiles(files: File[]): Promise<void> {
 			const fd = new FormData();
 			fd.append("file", file);
 			if (currentDir.value) fd.append("dir", currentDir.value);
-			const resp = await fetch(`${hubBaseUrl()}/api/ssh-keys`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/ssh-keys`, {
 				method: "POST",
 				headers: authHeader(),
 				body: fd,

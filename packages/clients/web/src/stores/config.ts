@@ -12,7 +12,8 @@ import {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
+import { hubFetch } from "../utils/hub-fetch.js";
+import { domPublicAssetUrl, hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 
 // ─── Profile change event bus ─────────────────────────────────────────────────
@@ -29,45 +30,63 @@ type ProfileChangeListener = (event: ProfileChangeEvent) => void;
  * Inject @font-face rules into the document head so the browser
  * can resolve custom font families referenced in the terminal profile.
  */
-function injectFontFaces(families: FontFamily[]): void {
-	// Remove any previously injected style element
-	const existing = document.getElementById("lasterm-fonts");
-	if (existing) existing.remove();
+let injectedFontObjectUrls = new Set<string>();
 
-	if (families.length === 0) return;
-
+export async function injectFontFaces(families: FontFamily[]): Promise<void> {
 	const rules: string[] = [];
+	const nextObjectUrls = new Set<string>();
 	for (const family of families) {
 		for (const file of family.files) {
-			const pathname = new URL(file.url, "http://localhost").pathname;
-			const format = pathname.endsWith(".woff2")
-				? "woff2"
-				: pathname.endsWith(".woff")
-					? "woff"
-					: pathname.endsWith(".ttf")
-						? "truetype"
-						: "opentype";
-			const src = file.url.startsWith("/public/")
-				? publicAssetUrl(file.url)
-				: file.url.startsWith("/")
-					? `${hubBaseUrl()}${file.url}`
-					: file.url;
-			rules.push(
-				`@font-face {
+			let objectUrl: string | null = null;
+			try {
+				const pathname = new URL(file.url, "http://localhost").pathname;
+				const format = pathname.endsWith(".woff2")
+					? "woff2"
+					: pathname.endsWith(".woff")
+						? "woff"
+						: pathname.endsWith(".ttf")
+							? "truetype"
+							: "opentype";
+				const src = file.url.startsWith("/") ? await domPublicAssetUrl(file.url) : file.url;
+				if (file.url.startsWith("/") && src.startsWith("blob:")) objectUrl = src;
+				rules.push(
+					`@font-face {
 	font-family: "${family.family}";
 	src: url("${src}") format("${format}");
 	font-weight: ${file.weight};
 	font-style: ${file.style};
 	font-display: swap;
 }`,
-			);
+				);
+				if (objectUrl) nextObjectUrls.add(objectUrl);
+			} catch (err) {
+				if (objectUrl) URL.revokeObjectURL(objectUrl);
+				console.error(
+					`[config] failed to resolve custom font ${family.family} (${file.url}):`,
+					err,
+				);
+			}
 		}
 	}
+
+	// A failed refresh must not make a working font set disappear. An empty
+	// configured list is intentional and therefore replaces the rules with none.
+	if (families.length > 0 && rules.length === 0) return;
 
 	const style = document.createElement("style");
 	style.id = "lasterm-fonts";
 	style.textContent = rules.join("\n");
-	document.head.appendChild(style);
+	const existing = document.getElementById("lasterm-fonts");
+	if (existing) {
+		existing.replaceWith(style);
+	} else {
+		document.head.appendChild(style);
+	}
+
+	for (const objectUrl of injectedFontObjectUrls) {
+		if (!nextObjectUrls.has(objectUrl)) URL.revokeObjectURL(objectUrl);
+	}
+	injectedFontObjectUrls = nextObjectUrls;
 }
 
 /**
@@ -119,13 +138,13 @@ export const useConfigStore = defineStore("config", () => {
 	async function loadFonts(): Promise<void> {
 		try {
 			const authStore = useAuthStore();
-			const response = await fetch(`${hubBaseUrl()}/api/fonts`, {
+			const response = await hubFetch(`${hubBaseUrl()}/api/fonts`, {
 				...(authStore.token ? { headers: { Authorization: `Bearer ${authStore.token}` } } : {}),
 			});
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			const fontList: FontFamily[] = await response.json();
 			fonts.value = fontList;
-			injectFontFaces(fontList);
+			await injectFontFaces(fontList);
 
 			// Force-load fonts so canvas-based xterm.js can use them.
 			// document.fonts.load() triggers actual download; without this,
@@ -155,7 +174,7 @@ export const useConfigStore = defineStore("config", () => {
 	async function loadProfile(): Promise<void> {
 		try {
 			const authStore = useAuthStore();
-			const resp = await fetch(`${hubBaseUrl()}/api/config/cascade`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/cascade`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (resp.ok) {
@@ -175,7 +194,7 @@ export const useConfigStore = defineStore("config", () => {
 	async function loadUiConfig(): Promise<void> {
 		try {
 			const authStore = useAuthStore();
-			const resp = await fetch(`${hubBaseUrl()}/api/config/ui`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/ui`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (resp.ok) {

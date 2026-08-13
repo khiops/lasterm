@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { getInitials } from "./useHostIcon.js";
 
@@ -111,7 +112,7 @@ export function useHostForm(editHost?: Host) {
 	async function loadSshConfig(): Promise<void> {
 		loadingSshConfig.value = true;
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/ssh-config`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/ssh-config`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (!res.ok) {

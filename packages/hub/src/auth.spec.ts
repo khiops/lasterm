@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkPermissions,
 	createToken,
@@ -11,6 +12,8 @@ import {
 	listTokens,
 	PRIMARY_TOKEN_ID,
 	revokeToken,
+	sweepNonPrimaryTokens,
+	TokenSweepError,
 	touchToken,
 	upsertPrimaryToken,
 	validateTokenRecord,
@@ -219,6 +222,123 @@ describe("validateTokenRecord", () => {
 		const db = makeDb();
 		const { token } = createToken(db, { label: "test", expiresAt: null });
 		expect(validateTokenRecord(db, token)).not.toBeNull();
+	});
+
+	it("refuses when the database query throws", () => {
+		const db = makeDb();
+		db.close();
+
+		expect(validateTokenRecord(db, "unreadable-database")).toBeNull();
+	});
+});
+
+describe("sweepNonPrimaryTokens", () => {
+	it("keeps only the primary token valid across a restart", () => {
+		const db = makeDb();
+		const primaryToken = randomBytes(32).toString("hex");
+		upsertPrimaryToken(db, primaryToken);
+		const pairing = createToken(db, { label: "browser", expiresAt: null });
+
+		sweepNonPrimaryTokens(db);
+
+		expect(validateTokenRecord(db, primaryToken)?.id).toBe(PRIMARY_TOKEN_ID);
+		expect(validateTokenRecord(db, pairing.token)).toBeNull();
+	});
+
+	it("sweeps every non-primary id, including an unrecognised future row", () => {
+		const db = makeDb();
+		const primaryToken = randomBytes(32).toString("hex");
+		upsertPrimaryToken(db, primaryToken);
+		const futureToken = randomBytes(32).toString("hex");
+		const now = new Date().toISOString();
+		db.prepare(
+			`INSERT INTO auth_tokens
+			 (id, token_hash, label, created_at, expires_at, revoked_at, last_used_at)
+			 VALUES (?, ?, ?, ?, NULL, NULL, NULL)`,
+		).run("future-issuer-token", hashToken(futureToken), "future", now);
+
+		sweepNonPrimaryTokens(db);
+
+		const row = db
+			.prepare("SELECT swept_at FROM auth_tokens WHERE id = ?")
+			.get("future-issuer-token") as { swept_at: string | null };
+		expect(row.swept_at).not.toBeNull();
+		expect(validateTokenRecord(db, futureToken)).toBeNull();
+	});
+
+	it("records the first restart sweep once instead of rewriting its audit timestamp", () => {
+		const db = makeDb();
+		const { id } = createToken(db, { label: "browser", expiresAt: null });
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-08-01T09:00:00.000Z"));
+			sweepNonPrimaryTokens(db);
+			const firstSweep = (
+				db.prepare("SELECT swept_at FROM auth_tokens WHERE id = ?").get(id) as {
+					swept_at: string;
+				}
+			).swept_at;
+
+			vi.setSystemTime(new Date("2026-08-02T09:00:00.000Z"));
+			sweepNonPrimaryTokens(db);
+			expect(
+				(
+					db.prepare("SELECT swept_at FROM auth_tokens WHERE id = ?").get(id) as {
+						swept_at: string;
+					}
+				).swept_at,
+			).toBe(firstSweep);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("records restart invalidation separately from operator revocation", () => {
+		const db = makeDb();
+		const { id } = createToken(db, { label: "operator-revoked", expiresAt: null });
+		revokeToken(db, id);
+
+		sweepNonPrimaryTokens(db);
+
+		const token = listTokens(db).find((record) => record.id === id);
+		expect(token?.revokedAt).not.toBeNull();
+		expect(token?.sweptAt).not.toBeNull();
+	});
+
+	it("fails closed when auth_tokens is absent", () => {
+		const db = new Database(":memory:");
+
+		expect(() => sweepNonPrimaryTokens(db)).toThrow(TokenSweepError);
+		try {
+			sweepNonPrimaryTokens(db);
+		} catch (error) {
+			expect(error).toMatchObject({
+				code: "AUTH_TOKEN_SWEEP_FAILED",
+				message: "Unable to invalidate non-primary tokens before startup",
+			});
+		}
+	});
+
+	it("fails closed when the restart-sweep migration column is absent", () => {
+		const db = new Database(":memory:");
+		db.exec(`CREATE TABLE auth_tokens (
+			id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			label TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT,
+			revoked_at TEXT,
+			last_used_at TEXT
+		)`);
+
+		expect(() => sweepNonPrimaryTokens(db)).toThrow(TokenSweepError);
+	});
+
+	it("fails closed when the database is unreadable", () => {
+		const db = makeDb();
+		db.close();
+
+		expect(() => sweepNonPrimaryTokens(db)).toThrow(TokenSweepError);
 	});
 });
 

@@ -386,6 +386,7 @@ import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
+import { hubFetch } from './utils/hub-fetch.js';
 
 const authStore = useAuthStore();
 const sessionStore = useSessionStore();
@@ -396,7 +397,7 @@ const toastStore = useToastStore();
 
 function saveLayoutWidth(key: string, value: number): void {
 	if (authStore.token === null) return;
-	void fetch(`${hubBaseUrl()}/api/config/ui`, {
+	void hubFetch(`${hubBaseUrl()}/api/config/ui`, {
 		method: 'PUT',
 		headers: {
 			'Content-Type': 'application/json',
@@ -586,7 +587,7 @@ async function applyCascadeTheme(channelId: string): Promise<void> {
 		const params = new URLSearchParams();
 		if (hostId) params.set('host_id', hostId);
 		params.set('channel_id', channelId);
-		const res = await fetch(`${hubBaseUrl()}/api/config/cascade?${params.toString()}`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/config/cascade?${params.toString()}`, {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
 		if (!res.ok) return;

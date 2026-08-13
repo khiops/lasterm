@@ -1,9 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
+import type { Server as HttpsServer } from "node:https";
 import * as path from "node:path";
 import cors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
 import websocket from "@fastify/websocket";
-import { DEFAULT_PORT, MAX_WALLPAPER_SIZE } from "@lasterm/shared";
+import { MAX_WALLPAPER_SIZE } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import Fastify from "fastify";
 import { registerAgentRoutes } from "./api/agents.js";
@@ -78,13 +79,13 @@ export function addCorsOrigins(...origins: string[]): void {
  * Returns the actual port from the listen address, which may differ from the
  * requested port due to zero_conf auto-increment on EADDRINUSE.
  */
-export function addStartupCorsOrigins(address: string, requestedPort: number): number {
+export function addStartupCorsOrigins(address: string, requestedPort?: number): number {
 	const port = new URL(address).port;
-	const actualPort = port ? Number(port) : requestedPort;
+	const actualPort = port ? Number(port) : (requestedPort ?? 0);
 
 	// SEC-020: Inject exact localhost origins now that the actual port is known.
 	// These replace the former wildcard http://localhost:* and http://127.0.0.1:* patterns.
-	addCorsOrigins(`http://localhost:${actualPort}`, `http://127.0.0.1:${actualPort}`);
+	addCorsOrigins(`https://localhost:${actualPort}`, `https://127.0.0.1:${actualPort}`);
 	// In non-production environments also allow the Vite dev server origin.
 	if (process.env.NODE_ENV !== "production") {
 		addCorsOrigins("http://localhost:5173");
@@ -95,7 +96,7 @@ export function addStartupCorsOrigins(address: string, requestedPort: number): n
 
 interface ServerBaseOptions {
 	host?: string; // default: "127.0.0.1"
-	port?: number; // default: DEFAULT_PORT (4100)
+	port?: number; // absent: let the operating system assign an unused port
 	logger?: boolean; // default: true
 	dbManager?: DatabaseManager; // when provided, WS routes are registered
 	authToken?: string; // when provided, Bearer auth is enforced on all routes except /api/health
@@ -112,7 +113,7 @@ interface ServerBaseOptions {
 }
 
 /** The response and teardown halves of quit are one capability, never independent hooks. */
-export type ServerOptions =
+type ServerQuitOptions =
 	| (ServerBaseOptions & {
 			ownerToken: string;
 			onQuit: (sessionManager: SessionManager | null) => Promise<QuitResult>;
@@ -124,10 +125,22 @@ export type ServerOptions =
 			onQuitDelivered?: never;
 	  });
 
-export async function createServer(options?: ServerOptions): Promise<FastifyInstance> {
-	const server = Fastify({
-		logger: options?.logger ?? true,
-	});
+/** Certificate and key are intentionally impossible to omit or supply independently. */
+type ServerTlsOptions = { tls: { cert: string; key: string } };
+
+export type ServerOptions = ServerQuitOptions & ServerTlsOptions;
+
+/** The only options consumed after a server has already been created. */
+export interface StartServerOptions {
+	host?: string;
+	port?: number;
+}
+
+export async function createServer(options: ServerOptions): Promise<FastifyInstance> {
+	const server = Fastify<HttpsServer>({
+		logger: options.logger ?? true,
+		https: options.tls,
+	}) as unknown as FastifyInstance;
 
 	// Helmet — sets security-related HTTP response headers
 	await server.register(fastifyHelmet, {
@@ -571,11 +584,15 @@ function isLoopbackAddress(ip: string): boolean {
 
 export async function startServer(
 	server: FastifyInstance,
-	options?: ServerOptions,
+	options?: StartServerOptions,
 ): Promise<string> {
 	const host = options?.host ?? "127.0.0.1";
-	const basePort = options?.port ?? DEFAULT_PORT;
-	const maxPort = basePort + 99; // zero_conf: try up to 100 ports
+	if (options?.port === undefined) {
+		return server.listen({ host, port: 0 });
+	}
+
+	const basePort = options.port;
+	const maxPort = basePort + 99; // explicit-port zero_conf: try up to 100 ports
 
 	for (let port = basePort; port <= maxPort; port++) {
 		try {

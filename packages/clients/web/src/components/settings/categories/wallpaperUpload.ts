@@ -1,4 +1,5 @@
 import { MAX_WALLPAPER_SIZE, WALLPAPER_EXTENSIONS } from "@lasterm/shared";
+import { hubFetch } from "../../../utils/hub-fetch.js";
 import { hubBaseUrl } from "../../../utils/hub-url.js";
 
 export const WALLPAPER_ACCEPTED_EXTENSIONS = new Set(WALLPAPER_EXTENSIONS.map((ext) => `.${ext}`));
@@ -39,7 +40,7 @@ export async function uploadWallpaperFiles(
 		formData.append("image", file);
 
 		try {
-			const resp = await fetch(`${hubBaseUrl()}/api/wallpapers`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/wallpapers`, {
 				method: "POST",
 				headers: { Authorization: `Bearer ${options.token ?? ""}` },
 				body: formData,

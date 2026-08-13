@@ -8,20 +8,20 @@ export interface DaemonSpawnPlan {
 
 export interface BuildDaemonSpawnPlanOptions {
 	sea: boolean;
-	port: number;
+	port?: number;
 	open?: boolean;
 	moduleUrl: string;
 }
 
 export function buildDaemonSpawnPlan(options: BuildDaemonSpawnPlanOptions): DaemonSpawnPlan {
 	const env: Record<string, string> = {
-		LASTERM_PORT: String(options.port),
+		...(options.port !== undefined ? { LASTERM_PORT: String(options.port) } : {}),
 		...(options.open ? { LASTERM_OPEN: "1" } : {}),
 	};
 
 	if (options.sea) {
 		return {
-			args: ["start", "--port", String(options.port)],
+			args: ["start", ...(options.port !== undefined ? ["--port", String(options.port)] : [])],
 			env,
 		};
 	}

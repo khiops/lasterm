@@ -49,6 +49,7 @@
 import { ref, onMounted } from "vue";
 import type { HostLaunchProfileOverride } from "@lasterm/shared";
 import { hubBaseUrl } from "../../utils/hub-url.js";
+import { hubFetch } from "../../utils/hub-fetch.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useAuthStore } from "../../stores/auth.js";
 
@@ -88,7 +89,7 @@ async function fetchOverrides(): Promise<void> {
 	await Promise.all(
 		hostsStore.hosts.map(async (host) => {
 			try {
-				const res = await fetch(`${hubBaseUrl()}/api/hosts/${encodeURIComponent(host.id)}/profiles`, {
+				const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${encodeURIComponent(host.id)}/profiles`, {
 					headers: { Authorization: `Bearer ${authStore.token!}` },
 				});
 				if (!res.ok) return;
@@ -114,7 +115,7 @@ async function handleOverrideChange(hostId: string, value: string): Promise<void
 	try {
 		if (value === "") {
 			// Remove override
-			const res = await fetch(
+			const res = await hubFetch(
 				`${hubBaseUrl()}/api/hosts/${encodeURIComponent(hostId)}/profiles/${encodeURIComponent(props.profileId)}`,
 				{
 					method: "DELETE",
@@ -129,7 +130,7 @@ async function handleOverrideChange(hostId: string, value: string): Promise<void
 		} else {
 			// Upsert override
 			const overrideType = value as "pin" | "hide" | "default";
-			const res = await fetch(
+			const res = await hubFetch(
 				`${hubBaseUrl()}/api/hosts/${encodeURIComponent(hostId)}/profiles/${encodeURIComponent(props.profileId)}`,
 				{
 					method: "PUT",

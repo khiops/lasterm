@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="/tmp/lasterm-dev"
 PID_FILE="$LOG_DIR/dev.pid"
 AGENT_SOCK="${XDG_RUNTIME_DIR:-/tmp/lasterm-$(id -u)}/lasterm/agent.sock"
+HUB_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lasterm"
 
 mkdir -p "$LOG_DIR"
 
@@ -26,11 +27,16 @@ start_hub() {
 	DEV_PID=$!
 	echo "$DEV_PID" > "$PID_FILE"
 
-	# Wait for hub to be ready (port 4100)
-	echo -n "Waiting for hub on :4100"
+	# The hub chooses an OS-assigned port unless explicitly configured. Its runtime
+	# record and self-signed certificate appear only after TLS is listening.
+	echo -n "Waiting for hub TLS listener"
 	HUB_OK=0
+	HUB_PORT=""
 	for i in $(seq 1 30); do
-		if curl -sf http://127.0.0.1:4100/api/health > /dev/null 2>&1; then
+		if [ -r "$HUB_STATE_DIR/runtime.json" ] && [ -r "$HUB_STATE_DIR/hub-tls-cert.pem" ]; then
+			HUB_PORT="$(pnpm exec tsx "$ROOT/scripts/dev/hub-health-probe.mts" 2>/dev/null || true)"
+		fi
+		if [ -n "$HUB_PORT" ]; then
 			echo " ✓"
 			HUB_OK=1
 			break
@@ -71,7 +77,7 @@ start_hub() {
 
 	echo ""
 	echo "Hub + web running (PID $DEV_PID)"
-	echo "  Hub:    http://127.0.0.1:4100"
+	echo "  Hub:    https://127.0.0.1:$HUB_PORT"
 	echo "  Web:    http://localhost:5173"
 	echo "  Logs:   $LOG_DIR/dev.log"
 }

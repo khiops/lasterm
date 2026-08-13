@@ -71,6 +71,7 @@ import { useFileDrop } from "../../composables/useFileDrop.js";
 import { useConfigStore } from "../../stores/config.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { hubBaseUrl } from "../../utils/hub-url.js";
+import { hubFetch } from "../../utils/hub-fetch.js";
 
 const props = defineProps<{
 	modelValue: string | undefined;
@@ -104,7 +105,7 @@ async function uploadFiles(files: File[]): Promise<void> {
 		try {
 			const fd = new FormData();
 			fd.append("file", file);
-			const resp = await fetch(`${hubBaseUrl()}/api/fonts`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/fonts`, {
 				method: "POST",
 				headers: authHeader(),
 				body: fd,
@@ -132,7 +133,7 @@ const { isDragging, onDragEnter, onDragOver, onDragLeave, onDrop } = useFileDrop
 async function onDelete(family: string): Promise<void> {
 	error.value = null;
 	try {
-		const resp = await fetch(`${hubBaseUrl()}/api/fonts/${encodeURIComponent(family)}`, {
+		const resp = await hubFetch(`${hubBaseUrl()}/api/fonts/${encodeURIComponent(family)}`, {
 			method: "DELETE",
 			headers: authHeader(),
 		});

@@ -2,6 +2,7 @@ import { DEFAULT_PROFILE, type TerminalProfile } from "@lasterm/shared";
 import { onMounted, onUnmounted, type Ref, ref, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useConfigStore } from "../stores/config.js";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl, hubPortReady } from "../utils/hub-url.js";
 
 export interface ResolvedProfileContext {
@@ -76,7 +77,7 @@ export function useResolvedProfile(
 			if (requestContext.hostId) params.set("host_id", requestContext.hostId);
 			if (requestContext.channelId) params.set("channel_id", requestContext.channelId);
 			const qs = params.toString();
-			const resp = await fetch(`${hubBaseUrl()}/api/config/cascade${qs ? `?${qs}` : ""}`, {
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/cascade${qs ? `?${qs}` : ""}`, {
 				headers: { Authorization: `Bearer ${token}` },
 			});
 			if (resp.ok) {

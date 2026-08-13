@@ -94,6 +94,16 @@ pnpm -F @lasterm/hub test # Test single package
 pnpm -F @lasterm/web dev  # Dev single package
 ```
 
+### TypeScript test prerequisite
+
+The hub TypeScript specs load the `lasterm-hub-lock` and `lasterm-tls-identity`
+Rust addons. From a clean checkout, build them before a hub or root test run:
+
+```bash
+cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
+pnpm -F @lasterm/hub test # or: pnpm test
+```
+
 ### Production build & run (local, Linux/macOS native)
 
 ```bash

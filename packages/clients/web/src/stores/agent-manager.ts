@@ -8,6 +8,7 @@ import type {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 
@@ -289,7 +290,7 @@ export const useAgentManagerStore = defineStore("agentManager", () => {
 
 		loading.value = true;
 		try {
-			const response = await fetch(`${hubBaseUrl()}/api/agents/targets`, { headers });
+			const response = await hubFetch(`${hubBaseUrl()}/api/agents/targets`, { headers });
 			if (!response.ok) {
 				throw new Error(`Failed to load agent targets: ${await responseErrorMessage(response)}`);
 			}
@@ -331,7 +332,7 @@ export const useAgentManagerStore = defineStore("agentManager", () => {
 		const body: { os: HostOs; arch: HostArch; version?: string } = { os, arch };
 		if (version !== undefined) body.version = version;
 
-		const response = await fetch(`${hubBaseUrl()}/api/agents/fetch`, {
+		const response = await hubFetch(`${hubBaseUrl()}/api/agents/fetch`, {
 			method: "POST",
 			headers: {
 				...requireAuthHeaders(),
@@ -388,7 +389,7 @@ export const useAgentManagerStore = defineStore("agentManager", () => {
 	}
 
 	async function pruneStale(): Promise<number> {
-		const response = await fetch(`${hubBaseUrl()}/api/agents/prune`, {
+		const response = await hubFetch(`${hubBaseUrl()}/api/agents/prune`, {
 			method: "POST",
 			headers: {
 				...requireAuthHeaders(),
@@ -414,7 +415,7 @@ export const useAgentManagerStore = defineStore("agentManager", () => {
 		form.append("binary", input.binary);
 		form.append("manifest", input.manifest);
 
-		const response = await fetch(`${hubBaseUrl()}/api/agents/import`, {
+		const response = await hubFetch(`${hubBaseUrl()}/api/agents/import`, {
 			method: "POST",
 			headers: requireAuthHeaders(),
 			body: form,

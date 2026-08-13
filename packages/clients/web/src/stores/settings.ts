@@ -1,6 +1,7 @@
 import type { CascadeResponse, ElevationConfig } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 import { useConfigStore } from "./config.js";
@@ -73,7 +74,7 @@ export const useSettingsStore = defineStore("settings", () => {
 			if (channelId) params.set("channel_id", channelId);
 			const qs = params.toString();
 			const url = `${hubBaseUrl()}/api/config/cascade${qs ? `?${qs}` : ""}`;
-			const res = await fetch(url, {
+			const res = await hubFetch(url, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (!res.ok) throw new Error(`Failed to load cascade: ${res.status}`);
@@ -244,7 +245,7 @@ export const useSettingsStore = defineStore("settings", () => {
 				try {
 					if (scope === "global") {
 						if (section === "terminal") {
-							await fetch(`${hubBaseUrl()}/api/config/global`, {
+							await hubFetch(`${hubBaseUrl()}/api/config/global`, {
 								method: "PUT",
 								headers,
 								body: JSON.stringify({ terminal: { [key]: value } }),
@@ -253,14 +254,14 @@ export const useSettingsStore = defineStore("settings", () => {
 							// Build nested appearance payload from dot-path key
 							const payload: Record<string, unknown> = {};
 							setNestedValue(payload, key, value);
-							await fetch(`${hubBaseUrl()}/api/config/appearance`, {
+							await hubFetch(`${hubBaseUrl()}/api/config/appearance`, {
 								method: "PUT",
 								headers,
 								body: JSON.stringify(payload),
 							});
 						} else if (section === "elevation") {
 							// Elevation settings route to their own endpoint (flat key/value)
-							await fetch(`${hubBaseUrl()}/api/config/elevation`, {
+							await hubFetch(`${hubBaseUrl()}/api/config/elevation`, {
 								method: "PUT",
 								headers,
 								body: JSON.stringify({ [key]: value }),
@@ -277,7 +278,7 @@ export const useSettingsStore = defineStore("settings", () => {
 							// { ui: { key: value } } which the PUT /api/config/ui endpoint
 							// rejects with 400 (no such top-level UI key).
 							if (uiKey) {
-								await fetch(`${hubBaseUrl()}/api/config/ui`, {
+								await hubFetch(`${hubBaseUrl()}/api/config/ui`, {
 									method: "PUT",
 									headers,
 									body: JSON.stringify({ [uiSection]: { [uiKey]: value } }),
@@ -292,7 +293,7 @@ export const useSettingsStore = defineStore("settings", () => {
 						// PATCH merge semantics: { profile: { key: value } }
 						const profile: Record<string, unknown> = {};
 						profile[key] = value;
-						await fetch(`${hubBaseUrl()}/api/hosts/${currentHostId.value}/profile`, {
+						await hubFetch(`${hubBaseUrl()}/api/hosts/${currentHostId.value}/profile`, {
 							method: "PATCH",
 							headers,
 							body: JSON.stringify({ profile }),
@@ -304,7 +305,7 @@ export const useSettingsStore = defineStore("settings", () => {
 						}
 						const profile: Record<string, unknown> = {};
 						profile[key] = value;
-						await fetch(`${hubBaseUrl()}/api/channels/${currentChannelId.value}/profile`, {
+						await hubFetch(`${hubBaseUrl()}/api/channels/${currentChannelId.value}/profile`, {
 							method: "PATCH",
 							headers,
 							body: JSON.stringify({ profile }),

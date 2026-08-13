@@ -27,7 +27,7 @@ Decisions archived from workflow — newest first.
 ## HUB-DAEMON-SEA — SEA-aware daemon re-exec + readiness gate (#60, 2026-06-10)
 
 - SEA daemon spawn re-execs the binary with CLI argv (`start --port N`) — the SEA bundle's entry IS cli.ts (footer auto-invokes `main(argv)`), so the existing foreground path provides everything (auth init, DBs, `persistRuntime`, shutdown handlers). No second entry point, no extracted script. `--daemon` is never re-passed (fork-bomb guard, locked by test). Dev mode keeps the compiled `main.js` sibling.
-- Readiness is proven, never assumed: the parent polls `runtime.json` until `pid === child.pid` (immune to stale files/pid reuse), then probes `/api/health` on the port from runtime.json (zero_conf may shift it from the requested one). Success message only after a 200.
+- Readiness is proven, never assumed: the parent polls `runtime.json` until `pid === child.pid` (immune to stale files/pid reuse), then probes `/api/health` on the published TLS endpoint. Success message only after a 200.
 - Failure is loud and terminal: child stdout/stderr go to `hub-daemon.log` in the state dir (truncated per start so it can't grow unbounded; 0600 — daemon output may leak sensitive details); on child death or 5s timeout the CLI prints the cause plus a bounded log tail (64 KiB read cap) and exits 1. A timeout also SIGTERMs the child via the ChildProcess handle (never a raw pid kill — pid-reuse hazard): exit 1 must mean "no daemon is running".
 - Health probes are individually bounded (single `healthTimeoutMs` constant feeding both the fetch AbortSignal and a race timeout) so a socket that accepts but never responds cannot hang the CLI past its deadline.
 - Polling/probing logic lives in `daemon-launch.ts` as pure functions + injected-deps loop (no module mocks needed); the cmdStart wiring stays thin glue, untested by design (integration spawn test deferred — heavy and platform-fragile).
@@ -99,8 +99,8 @@ Decisions archived from workflow — newest first.
 - PSEUDOCONSOLE_INHERIT_CURSOR: skip initial cursor position query (prevents DSR deadlock)
 - DSR response: pre-emptive \x1b[1;1R sent immediately + detection in output stream
 - Agent CLI: --stdio (default), --daemon, --socket, --buffer-per-channel, --buffer-global flags
-- Zero-conf port: hub retries port+1 on EADDRINUSE (up to +99), writes actual port to runtime.json
-- Desktop reads runtime.json only (no hardcoded port 4100 fallback)
+- OS-assigned port by default; an explicit port may retry on EADDRINUSE and the actual port is written to runtime.json
+- Desktop reads runtime.json only (no hardcoded-port fallback)
 
 ---
 
@@ -148,7 +148,7 @@ Decisions archived from workflow — newest first.
 - sshExec utility: generic SSH command execution with configurable timeout
 - checkRemoteAgent: which/where first, then common paths fallback
 - CI: 3-job pipeline (build-web → build-sea 5-platform matrix → release), GitHub Releases
-- Tauri v2: hub as sidecar (no glue layer), webview loads localhost:4100
+- Tauri v2: hub as sidecar (no glue layer), webview loads the published TLS endpoint
 - System tray (show/quit), auto-updater (pubkey placeholder), shell plugin for sidecar
 
 ---
@@ -624,7 +624,16 @@ Decisions archived from workflow — newest first.
 - Session state machine: STARTING → ACTIVE → DISCONNECTED → CLOSED, persisted in meta.db
 - Architecture: local-first hub daemon, agents spawned as children (local) or via SSH (remote)
 - REST API: all routes under /api/ prefix, WebSocket at /ws (no /api)
-- Default port: 4100 with zero-conf auto-increment fallback
+- OS-assigned port by default, with an explicit-port override
 - Snapshot: event-driven scheduler → chunks in spool.db with cache_index, GC preserves last per channel
 - Formatting: biome with tabs
 - Tests: vitest, colocated *.spec.ts
+
+---
+
+## issue-183 — TLS endpoint identity and startup authority (2026-08-10)
+
+- The hub transport carries endpoint identity: browser, CLI, development proxy, and probes use HTTPS/WSS and validate the peer against the SPKI recorded in `runtime.json`.
+- Pin only the SPKI, not a certificate fingerprint. The key is generated once when no operator certificate/key pair is configured, so certificate replacement does not silently become a new identity.
+- The browser-token rule is unconditional: browser-originated requests and WebSocket connections carry a token; TLS identity does not replace application authorization.
+- Startup uses a sweep of stale browser tokens before serving rather than an instance identifier. The sweep makes prior browser authority invalid before the new listener is observable.

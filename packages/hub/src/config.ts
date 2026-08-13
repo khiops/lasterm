@@ -28,6 +28,7 @@ import type {
 	TabsConfig,
 	TerminalProfile,
 	TitleConfig,
+	TlsConfig,
 	UiConfig,
 } from "@lasterm/shared";
 import {
@@ -141,6 +142,32 @@ export function loadCorsOrigins(configDir: string): string[] {
 	} catch {
 		return [...DEFAULT_CORS_ORIGINS];
 	}
+}
+
+/**
+ * Load the optional operator TLS identity from [server]. The two paths are one
+ * configuration unit: accepting just one would create a plaintext fallback
+ * temptation at precisely the point credentials start to matter.
+ */
+export function loadTlsConfig(configDir: string): TlsConfig {
+	const configPath = join(configDir, "config.toml");
+	if (!existsSync(configPath)) return {};
+
+	const parsed = TOML.parse(readFileSync(configPath, "utf8"));
+	const section = parsed.server;
+	if (section == null || typeof section !== "object") return {};
+	const raw = section as Record<string, unknown>;
+	const certificatePath = raw.tls_certificate;
+	const keyPath = raw.tls_key;
+
+	if (certificatePath === undefined && keyPath === undefined) return {};
+	if (typeof certificatePath !== "string" || certificatePath.length === 0) {
+		throw new Error("Missing server.tls_certificate for configured server.tls_key");
+	}
+	if (typeof keyPath !== "string" || keyPath.length === 0) {
+		throw new Error("Missing server.tls_key for configured server.tls_certificate");
+	}
+	return { certificatePath, keyPath };
 }
 
 // ─── UI configuration ───────────────────────────────────────────────────────

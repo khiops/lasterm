@@ -13,6 +13,9 @@ $LogDir = "$env:TEMP\lasterm-dev"
 $PidFile = "$LogDir\dev.pid"
 $PipeName = "lasterm-agent-$env:USERNAME"
 $PipePath = "\\.\pipe\$PipeName"
+$HubStateDir = Join-Path $env:LOCALAPPDATA "lasterm"
+$HubRuntimePath = Join-Path $HubStateDir "runtime.json"
+$HubCertificatePath = Join-Path $HubStateDir "hub-tls-cert.pem"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -39,18 +42,26 @@ function Start-Hub {
         -RedirectStandardError "$LogDir\dev-stderr.log"
     $proc.Id | Out-File -FilePath $PidFile -Force
 
-    # Wait for hub health (port 4100)
-    Write-Host -NoNewline "Waiting for hub on :4100"
+    # The shared probe verifies both certificate validation and the TLS peer's
+    # recorded SPKI; a certificate bundle alone is not an identity assertion.
+    Write-Host -NoNewline "Waiting for hub TLS listener"
     $hubOk = $false
+    $hubPort = $null
     for ($i = 0; $i -lt 30; $i++) {
-        try {
-            $null = Invoke-RestMethod -Uri "http://127.0.0.1:4100/api/health" -TimeoutSec 2
-            $hubOk = $true
-            break
-        } catch {
-            Write-Host -NoNewline "."
-            Start-Sleep -Seconds 1
+        if ((Test-Path $HubRuntimePath) -and (Test-Path $HubCertificatePath)) {
+            try {
+                $candidatePort = & pnpm exec tsx "$Root\scripts\dev\hub-health-probe.mts" 2>$null
+                if ($LASTEXITCODE -eq 0 -and [int]$candidatePort -ge 1 -and [int]$candidatePort -le 65535) {
+                    $hubPort = [int]$candidatePort
+                    $hubOk = $true
+                    break
+                }
+            } catch {
+                # The runtime record may be mid-publication; retry.
+            }
         }
+        Write-Host -NoNewline "."
+        Start-Sleep -Seconds 1
     }
     if (-not $hubOk) {
         Write-Host ""
@@ -78,7 +89,7 @@ function Start-Hub {
 
     Write-Host ""
     Write-Host "Hub + web running (PID $($proc.Id))"
-    Write-Host "  Hub:    http://127.0.0.1:4100"
+    Write-Host "  Hub:    https://127.0.0.1:$hubPort"
     Write-Host "  Web:    http://localhost:5173"
     Write-Host "  Logs:   $LogDir"
 }

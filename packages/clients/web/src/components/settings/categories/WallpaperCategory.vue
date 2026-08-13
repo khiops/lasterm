@@ -154,7 +154,14 @@ import {
 	isTauriRuntime,
 	usePlatformInfo,
 } from "../../../composables/useWindowEffects.js";
-import { assetTokenReady, hubBaseUrl, namedPublicAssetUrl } from "../../../utils/hub-url.js";
+import {
+	assetTokenReady,
+	domNamedPublicAssetUrl,
+	hubBaseUrl,
+	isTauriRuntime as isTauriHubRuntime,
+	namedPublicAssetUrl,
+} from "../../../utils/hub-url.js";
+import { hubFetch } from "../../../utils/hub-fetch.js";
 import { useAuthStore } from "../../../stores/auth.js";
 import { useSettingsStore } from "../../../stores/settings.js";
 import type { Scope } from "../../../stores/settings.js";
@@ -186,6 +193,7 @@ const uploadError = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 const platformInfo = usePlatformInfo();
 const runsInTauri = computed(() => isTauriRuntime());
+const wallpaperThumbnails = ref<Record<string, string>>({});
 
 /**
  * Builds a signed thumbnail src for a wallpaper filename.
@@ -195,6 +203,16 @@ const runsInTauri = computed(() => isTauriRuntime());
 function wallpaperThumbnailSrc(filename: string): string {
 	// Establish reactive dependency on the token — forces re-render when it flips.
 	void assetTokenReady.value;
+	if (isTauriHubRuntime()) {
+		if (!(filename in wallpaperThumbnails.value)) {
+			void domNamedPublicAssetUrl("wallpapers", filename)
+				.then((url) => {
+					wallpaperThumbnails.value = { ...wallpaperThumbnails.value, [filename]: url };
+				})
+				.catch(() => undefined);
+		}
+		return wallpaperThumbnails.value[filename] ?? "";
+	}
 	return namedPublicAssetUrl("wallpapers", filename);
 }
 
@@ -243,7 +261,7 @@ const hasWallpaperOverride = computed(() => {
 
 async function loadWallpapers(): Promise<void> {
 	try {
-		const resp = await fetch(`${hubBaseUrl()}/api/wallpapers`, {
+		const resp = await hubFetch(`${hubBaseUrl()}/api/wallpapers`, {
 			headers: { Authorization: `Bearer ${authStore.token ?? ""}` },
 		});
 		if (resp.ok) {
@@ -301,7 +319,7 @@ const { isDragging, onDragEnter, onDragOver, onDragLeave, onDrop } = useFileDrop
 
 async function deleteWallpaper(filename: string): Promise<void> {
 	try {
-		await fetch(`${hubBaseUrl()}/api/wallpapers/${encodeURIComponent(filename)}`, {
+		await hubFetch(`${hubBaseUrl()}/api/wallpapers/${encodeURIComponent(filename)}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token ?? ""}` },
 		});

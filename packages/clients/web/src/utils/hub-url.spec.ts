@@ -26,8 +26,8 @@ describe("the address the desktop client talks to", () => {
 		});
 		setHubPortForTests(4137);
 
-		expect(hubBaseUrl()).toBe("http://127.0.0.1:4137");
-		expect(hubWsUrl()).toBe("ws://127.0.0.1:4137");
+		expect(hubBaseUrl()).toBe("https://127.0.0.1:4137");
+		expect(hubWsUrl()).toBe("wss://127.0.0.1:4137");
 		expect(hubBaseUrl()).not.toContain("localhost");
 		expect(hubWsUrl()).not.toContain("localhost");
 	});
@@ -85,7 +85,19 @@ describe("public asset URL helpers", () => {
 		// a name that resolves to `::1` first would let another local process holding
 		// `::1:4100` receive this URL's asset token.
 		expect(namedPublicAssetUrl("sounds", "bell.mp3")).toBe(
-			"http://127.0.0.1:4100/public/sounds/bell.mp3?asset_token=asset-token",
+			"https://127.0.0.1:4100/public/sounds/bell.mp3?asset_token=asset-token",
+		);
+	});
+
+	it("never produces a plaintext desktop asset URL", () => {
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: {},
+			configurable: true,
+		});
+		setHubPortForTests(4100);
+
+		expect(namedPublicAssetUrl("wallpapers", "desktop.png")).toMatch(
+			/^https:\/\/127\.0\.0\.1:4100\//,
 		);
 	});
 

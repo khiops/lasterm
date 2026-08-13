@@ -20,6 +20,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -31,6 +32,7 @@ import {
 	readDaemonLogTail,
 	waitForDaemonReady,
 } from "./daemon-launch.js";
+import { hubTlsOptions } from "./hub-transport.js";
 import { detectSea } from "./sea-addon-loader.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -81,6 +83,8 @@ export interface RuntimeInfo {
 	/** Unique per hub process; prevents a quit waiter mistaking a replacement for its target. */
 	instanceId?: string;
 	ownerToken?: string;
+	/** Base64 DER SubjectPublicKeyInfo for the TLS identity serving this port. */
+	spki?: string;
 }
 
 const HUB_QUIT_OBSERVE_TIMEOUT_MS = 15_000;
@@ -270,8 +274,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 	if (body !== undefined) headers["Content-Type"] = "application/json";
 	if (token) headers.Authorization = `Bearer ${token}`;
 
-	const url = `http://127.0.0.1:${runtime.port}${path}`;
-	const res = await fetch(url, {
+	const res = await requestHub(runtime, path, {
 		method,
 		headers,
 		...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -287,6 +290,60 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 		return res.json();
 	}
 	return res.text();
+}
+
+type HubRequestInit = {
+	method?: string;
+	headers?: Record<string, string>;
+	body?: string;
+	signal?: AbortSignal;
+};
+
+function hubUrl(runtime: RuntimeInfo, path: string): URL {
+	return new URL(path, `https://127.0.0.1:${runtime.port}`);
+}
+
+/** The sole local-hub transport. Credentials are added only after TLS pinning. */
+export async function requestHub(
+	runtime: RuntimeInfo,
+	path: string,
+	init: HubRequestInit = {},
+): Promise<Response> {
+	const tls = hubTlsOptions(runtime, getStateDir());
+	const url = hubUrl(runtime, path);
+	return new Promise<Response>((resolve, reject) => {
+		const request = httpsRequest(
+			url,
+			{
+				method: init.method ?? "GET",
+				headers: init.headers,
+				...tls,
+				signal: init.signal,
+			},
+			(response) => {
+				const chunks: Buffer[] = [];
+				response.on("data", (chunk: Buffer) => chunks.push(chunk));
+				response.on("error", reject);
+				response.on("end", () => {
+					const status = response.statusCode ?? 500;
+					// Fetch requires a null body for these statuses and for HEAD,
+					// even when Node gave us an empty Buffer.
+					const responseBody =
+						init.method === "HEAD" || status === 204 || status === 205 || status === 304
+							? null
+							: Buffer.concat(chunks);
+					resolve(
+						new Response(responseBody, {
+							status,
+							headers: response.headers as Record<string, string>,
+						}),
+					);
+				});
+			},
+		);
+		request.on("error", reject);
+		request.end(init.body);
+	});
 }
 
 // ─── Argument parser ───────────────────────────────────────────────────────────
@@ -724,7 +781,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	// A previous installation is refused by `startHub`, not here: the check belongs
 	// to the operation that constructs a hub, so the daemon child and `pnpm dev`
 	// cannot reach it by another door. This handler only renders the refusal.
-	const port = args.port ?? 4100;
+	const port = args.port;
 
 	if (args.daemon) {
 		const stateDir = getStateDir();
@@ -733,7 +790,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 		const logFd = openDaemonLog(logPath);
 		const plan = buildDaemonSpawnPlan({
 			sea: detectSea(),
-			port,
+			...(port !== undefined ? { port } : {}),
 			...(args.open ? { open: true } : {}),
 			moduleUrl: import.meta.url,
 		});
@@ -769,7 +826,11 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 				loadRuntime,
 				fetchHealth: async (runtimePort) => {
 					// Abort a stalled probe so the socket is not left hanging open.
-					const res = await fetch(`http://127.0.0.1:${runtimePort}/api/health`, {
+					const current = loadRuntime();
+					if (current.kind !== "present" || current.runtime.port !== runtimePort) {
+						throw new Error("Hub runtime changed before its health check");
+					}
+					const res = await requestHub(current.runtime, "/api/health", {
 						signal: AbortSignal.timeout(healthTimeoutMs),
 					});
 					if (!res.ok) {
@@ -810,10 +871,13 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	const { PreviousInstallationError } = await import("./previous-installation.js");
 	try {
 		await startHub({
-			port,
+			...(port !== undefined ? { port } : {}),
 			openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
-			announce: ({ address, configDir, stateDir }) => {
-				console.log(`lasterm hub listening on ${address} (build: ${BUILD_HASH})`);
+			announce: ({ address, spki, configDir, stateDir }) => {
+				// This line is consumed by the desktop parent from the child's stdout.
+				// Unlike runtime.json, another process cannot replace that pipe, so it is
+				// the first-use anchor for the desktop's hub SPKI pin.
+				console.log(`lasterm hub listening on ${address} (spki: ${spki}) (build: ${BUILD_HASH})`);
 				console.log(`Config dir : ${configDir}`);
 				console.log(`State dir  : ${stateDir}`);
 			},
@@ -861,7 +925,7 @@ export async function cmdStop(
 	if (runtime.ownerToken) {
 		try {
 			const force = args.force === true ? "?force=1" : "";
-			const res = await fetch(`http://127.0.0.1:${runtime.port}/api/shutdown${force}`, {
+			const res = await requestHub(runtime, `/api/shutdown${force}`, {
 				method: "POST",
 				headers: {
 					"X-Lasterm-Owner": runtime.ownerToken,
@@ -913,7 +977,6 @@ export async function cmdQuit(
 ): Promise<void> {
 	const readRuntime = options.loadRuntime ?? loadRuntime;
 	const alive = options.isPidAlive ?? isPidAlive;
-	const request = options.fetch ?? fetch;
 	const wait = options.waitForHubQuit ?? waitForHubQuit;
 	const interactive = options.isInteractive ?? (() => process.stdin.isTTY && process.stdout.isTTY);
 	const confirm = options.confirmQuit ?? confirmQuit;
@@ -944,11 +1007,14 @@ export async function cmdQuit(
 	// is to go and look.
 	const postQuit = async (query: string): Promise<QuitResponse> => {
 		try {
-			const res = await request(`http://127.0.0.1:${runtime.port}/api/quit${query}`, {
+			const init = {
 				method: "POST",
 				headers: { "X-Lasterm-Owner": runtime.ownerToken as string },
 				signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
-			});
+			};
+			const res = options.fetch
+				? await options.fetch(hubUrl(runtime, `/api/quit${query}`), init)
+				: await requestHub(runtime, `/api/quit${query}`, init);
 			return { status: res.status, ok: res.ok, body: await readQuitBody(res) };
 		} catch (error) {
 			return { status: null, ok: false, body: {}, transportError: error };
@@ -1144,7 +1210,7 @@ export async function cmdStatus(args: ParsedArgs): Promise<void> {
 
 	let health: unknown = null;
 	try {
-		health = await fetch(`http://127.0.0.1:${runtime.port}/api/health`).then((r) => r.json());
+		health = await requestHub(runtime, "/api/health").then((r) => r.json());
 	} catch {
 		// Not reachable yet — not fatal
 	}

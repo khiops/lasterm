@@ -30,12 +30,14 @@ import {
 	extractLogConfig,
 	extractUiConfig,
 	loadGcConfig,
+	loadTlsConfig,
 	loadUiConfig,
 } from "./config.js";
 import { createServer } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
+import { getTestTls } from "./test-tls.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
 
@@ -388,6 +390,38 @@ describe("loadGcConfig", () => {
 	});
 });
 
+describe("loadTlsConfig", () => {
+	it("rejects a configured certificate without its TLS key", () => {
+		const dir = join(tmpdir(), `lasterm-tls-config-${Date.now()}`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "config.toml"), '[server]\ntls_certificate = "/tmp/hub.pem"\n');
+
+		expect(() => loadTlsConfig(dir)).toThrow("Missing server.tls_key");
+	});
+
+	it("rejects a configured TLS key without its certificate", () => {
+		const dir = join(tmpdir(), `lasterm-tls-config-${Date.now()}`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "config.toml"), '[server]\ntls_key = "/tmp/hub.key"\n');
+
+		expect(() => loadTlsConfig(dir)).toThrow("Missing server.tls_certificate");
+	});
+
+	it("loads the operator certificate and key as one pair", () => {
+		const dir = join(tmpdir(), `lasterm-tls-config-${Date.now()}`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "config.toml"),
+			'[server]\ntls_certificate = "/tmp/hub.pem"\ntls_key = "/tmp/hub.key"\n',
+		);
+
+		expect(loadTlsConfig(dir)).toEqual({
+			certificatePath: "/tmp/hub.pem",
+			keyPath: "/tmp/hub.key",
+		});
+	});
+});
+
 describe("ConfigResolver.gcConfig", () => {
 	let dbs: DatabaseManager;
 	let metaDal: MetaDAL;
@@ -429,7 +463,12 @@ describe("GET /api/config/defaults", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		server = await createServer({ logger: false, dbManager: dbs, skipShellDiscovery: true });
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
 	});
 
 	afterEach(async () => {
@@ -455,6 +494,7 @@ describe("GET /api/config/cascade (resolved layer)", () => {
 		dbs = openTestDatabases();
 		// Use tmpdir as configDir to avoid loading the real ~/.config/lasterm/config.toml
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -506,7 +546,12 @@ describe("PATCH /api/hosts/:id/profile", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		server = await createServer({ logger: false, dbManager: dbs, skipShellDiscovery: true });
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
 	});
 
 	afterEach(async () => {
@@ -573,7 +618,12 @@ describe("PATCH /api/channels/:id/profile", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		server = await createServer({ logger: false, dbManager: dbs, skipShellDiscovery: true });
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
 	});
 
 	afterEach(async () => {
@@ -691,6 +741,7 @@ describe("GET /api/config/ui", () => {
 	beforeEach(async () => {
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -1492,6 +1543,7 @@ describe("GET /api/config/cascade", () => {
 		const dir = join(tmpdir(), `lasterm-cascade-api-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -1558,6 +1610,7 @@ describe("PUT /api/config/global", () => {
 		mkdirSync(tempDir, { recursive: true });
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -1639,6 +1692,7 @@ describe("PUT /api/config/ui", () => {
 		mkdirSync(tempDir, { recursive: true });
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -1712,6 +1766,7 @@ describe("PUT /api/config/appearance", () => {
 		mkdirSync(tempDir, { recursive: true });
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -1785,7 +1840,12 @@ describe("GET /api/hosts/:id/profile", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		server = await createServer({ logger: false, dbManager: dbs, skipShellDiscovery: true });
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
 	});
 
 	afterEach(async () => {
@@ -1839,7 +1899,12 @@ describe("GET /api/channels/:id/profile", () => {
 
 	beforeEach(async () => {
 		dbs = openTestDatabases();
-		server = await createServer({ logger: false, dbManager: dbs, skipShellDiscovery: true });
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
 	});
 
 	afterEach(async () => {
@@ -1867,6 +1932,7 @@ describe("Auth enforcement on cascade/config endpoints", () => {
 		const dir = join(tmpdir(), `lasterm-auth-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,

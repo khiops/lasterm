@@ -2,7 +2,7 @@ import { DEFAULT_CHANNEL_NAME, DEFAULT_NOTIFICATION_CONFIG, generateId } from "@
 import { defineStore } from "pinia";
 import { markRaw, ref } from "vue";
 import { showSimpleNotification } from "../composables/useDesktopNotifications.js";
-import { WsClient } from "../services/ws-client.js";
+import { createWsClient } from "../services/ws-client.js";
 import { hubWsUrl } from "../utils/hub-url.js";
 import { useAgentManagerStore } from "./agent-manager.js";
 import { useAgentVerifyStore } from "./agent-verify.js";
@@ -17,9 +17,9 @@ import { useToastStore } from "./toast.js";
 import { useWriteLockStore } from "./writelock.js";
 
 export const useSessionStore = defineStore("session", () => {
-	// markRaw: prevent Pinia/Vue from making WsClient reactive,
+	// markRaw: prevent Pinia/Vue from making the client reactive,
 	// which would strip private class members and break the class methods.
-	const wsClient = markRaw(new WsClient());
+	const wsClient = markRaw(createWsClient());
 	const connected = ref(false);
 	const currentChannelId = ref<string | null>(null);
 	/** Set to true after AUTH_OK is received (not just WS open). */
@@ -56,6 +56,35 @@ export const useSessionStore = defineStore("session", () => {
 		const wsUrl = `${hubWsUrl()}/ws`;
 		await wsClient.connect(wsUrl);
 		connected.value = true;
+
+		// Install lifecycle truth before any authentication or setup can fail.
+		// Desktop transport errors and clean closes both mean no live session.
+		_unsubs.disconnect = wsClient.onDisconnect(() => {
+			connected.value = false;
+		});
+
+		// Re-authenticate and refresh state after each WS auto-reconnect.
+		_unsubs.reconnect = wsClient.onReconnect(async () => {
+			try {
+				connected.value = true;
+				await _authenticate();
+				// Re-fetch state after reconnect
+				const hostsStore2 = useHostsStore();
+				await hostsStore2.fetchHosts();
+				const channelsStore2 = useChannelsStore();
+				if (channelsStore2.activeHostId) {
+					await channelsStore2.fetchChannels(channelsStore2.activeHostId);
+				}
+				await useConfigStore().loadProfile();
+				const notifStore = useNotificationStore();
+				for (const ch of channelsStore2.channels) {
+					if (ch.id !== channelsStore2.selectedChannelId) notifStore.setActivity(ch.id);
+				}
+				reconnectCount.value++;
+			} catch (err) {
+				console.error("[session] Reconnect auth failed:", err);
+			}
+		});
 
 		// Register write-lock message routing before authenticating
 		const writeLockStore = useWriteLockStore();
@@ -94,38 +123,6 @@ export const useSessionStore = defineStore("session", () => {
 
 		// Authenticate immediately after connecting
 		await _authenticate();
-
-		// Track WS disconnection so UI can show reconnecting overlay
-		_unsubs.disconnect = wsClient.onDisconnect(() => {
-			connected.value = false;
-		});
-
-		// Re-authenticate and refresh state after each WS auto-reconnect
-		_unsubs.reconnect = wsClient.onReconnect(async () => {
-			try {
-				connected.value = true;
-				await _authenticate();
-				// Re-fetch state after reconnect
-				const hostsStore2 = useHostsStore();
-				await hostsStore2.fetchHosts();
-				const channelsStore2 = useChannelsStore();
-				if (channelsStore2.activeHostId) {
-					await channelsStore2.fetchChannels(channelsStore2.activeHostId);
-				}
-				// Reload resolved profile (font, cursor, scrollback settings)
-				await useConfigStore().loadProfile();
-				// Mark background channels with activity (SC-30/ERR-04)
-				const notifStore = useNotificationStore();
-				for (const ch of channelsStore2.channels) {
-					if (ch.id !== channelsStore2.selectedChannelId) {
-						notifStore.setActivity(ch.id);
-					}
-				}
-				reconnectCount.value++;
-			} catch (err) {
-				console.error("[session] Reconnect auth failed:", err);
-			}
-		});
 	}
 
 	/**

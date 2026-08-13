@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addCorsOrigins, addStartupCorsOrigins, createServer } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
+import { getTestTls } from "./test-tls.js";
 
 /** Known token used across auth tests */
 const TEST_TOKEN = "a".repeat(64);
@@ -24,12 +25,12 @@ describe("Hub Server", () => {
 	});
 
 	it("should create a server instance", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		expect(server).toBeDefined();
 	});
 
 	it("GET /api/health returns ok status with build hash and version", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({ method: "GET", url: "/api/health" });
 		expect(response.statusCode).toBe(200);
 		const body = response.json();
@@ -42,7 +43,7 @@ describe("Hub Server", () => {
 	});
 
 	it("GET /unknown returns 404", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({ method: "GET", url: "/unknown" });
 		expect(response.statusCode).toBe(404);
 	});
@@ -64,6 +65,7 @@ describe("Hub Server — Bearer auth", () => {
 
 	it("GET /api/health is accessible without token", async () => {
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -75,6 +77,7 @@ describe("Hub Server — Bearer auth", () => {
 
 	it("GET /api/pair/verify is accessible without token", async () => {
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -87,6 +90,7 @@ describe("Hub Server — Bearer auth", () => {
 
 	it("API route without Authorization header → 401 AUTH_REQUIRED", async () => {
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -100,6 +104,7 @@ describe("Hub Server — Bearer auth", () => {
 
 	it("API route with wrong token → 401 AUTH_INVALID", async () => {
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -117,6 +122,7 @@ describe("Hub Server — Bearer auth", () => {
 
 	it("API route with malformed Authorization header → 401", async () => {
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -134,6 +140,7 @@ describe("Hub Server — Bearer auth", () => {
 
 	it("API route with correct token → passes auth (404 from missing route, not 401)", async () => {
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -148,7 +155,7 @@ describe("Hub Server — Bearer auth", () => {
 	});
 
 	it("no authToken configured → all routes accessible without auth", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({ method: "GET", url: "/unknown" });
 		// Without auth, falls through to 404 — not 401
 		expect(response.statusCode).toBe(404);
@@ -165,7 +172,11 @@ describe("Hub Server — CORS allowlist", () => {
 	it("allowed origin (localhost:5173) gets Access-Control-Allow-Origin header when explicitly allowed", async () => {
 		// SEC-020: localhost:5173 is NOT in the default allowlist — it must be explicitly added
 		// (done by startup code after startServer() in non-production, or via corsOrigins override).
-		server = await createServer({ logger: false, corsOrigins: ["http://localhost:5173"] });
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			corsOrigins: ["http://localhost:5173"],
+		});
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -175,7 +186,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("disallowed origin (http://evil.com) gets no CORS allow header", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -185,7 +196,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("subdomain bypass blocked (http://localhost.evil.com:5173)", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -195,7 +206,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("default config allows Tauri origin (tauri://localhost)", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -205,7 +216,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("default config allows http://tauri.localhost", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -215,7 +226,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("empty allowlist rejects all origins", async () => {
-		server = await createServer({ logger: false, corsOrigins: [] });
+		server = await createServer({ tls: getTestTls(), logger: false, corsOrigins: [] });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -225,7 +236,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("missing origin header results in no CORS allow header", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -236,7 +247,7 @@ describe("Hub Server — CORS allowlist", () => {
 	it("127.0.0.1 origin is allowed after addCorsOrigins() injects the actual port", async () => {
 		// SEC-020: Exact localhost origins are not in defaults — addCorsOrigins() injects them
 		// after startServer() returns the actual port.
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 		addCorsOrigins("http://127.0.0.1:4100");
 		const response = await server.inject({
 			method: "GET",
@@ -248,7 +259,7 @@ describe("Hub Server — CORS allowlist", () => {
 
 	it("localhost:5173 is NOT allowed by default (no wildcard)", async () => {
 		// SEC-020: Verify wildcard removal — localhost:5173 must not be allowed without explicit config.
-		server = await createServer({ logger: false, corsOrigins: [] });
+		server = await createServer({ tls: getTestTls(), logger: false, corsOrigins: [] });
 		const response = await server.inject({
 			method: "GET",
 			url: "/api/health",
@@ -258,7 +269,7 @@ describe("Hub Server — CORS allowlist", () => {
 	});
 
 	it("addCorsOrigins() adds an exact origin to the allowlist", async () => {
-		server = await createServer({ logger: false, corsOrigins: [] });
+		server = await createServer({ tls: getTestTls(), logger: false, corsOrigins: [] });
 		addCorsOrigins("http://localhost:9999");
 		const response = await server.inject({
 			method: "GET",
@@ -287,6 +298,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 		tempDirs.push(configDir);
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -294,7 +306,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 			configDir,
 		});
 
-		const actualPort = addStartupCorsOrigins("http://127.0.0.1:4217", 4100);
+		const actualPort = addStartupCorsOrigins("https://127.0.0.1:4217", 4100);
 		const response = await server.inject({
 			method: "POST",
 			url: "/api/agents/fetch",
@@ -302,7 +314,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 				authorization: `Bearer ${TEST_TOKEN}`,
 				"content-type": "application/json",
 				host: "127.0.0.1:4217",
-				origin: "http://127.0.0.1:4217",
+				origin: "https://127.0.0.1:4217",
 			},
 			payload: { os: "plan9", arch: "x64" },
 		});
@@ -318,6 +330,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 	it("allows agent mutations from a wildcard CORS origin when the hub Host differs", async () => {
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -344,6 +357,7 @@ describe("Hub Server — startup CORS origin injection", () => {
 	it("allows agent mutations from an exact CORS origin regardless of Host", async () => {
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			dbManager: dbs,
@@ -395,6 +409,7 @@ describe("Hub Server — security headers", () => {
 		writeFileSync(join(configDir, kind, filename), body);
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			dbManager: dbs,
 			skipShellDiscovery: true,
@@ -460,7 +475,7 @@ describe("Hub Server — security headers", () => {
 	});
 
 	it("GET /api/health keeps Helmet's same-origin CORP", async () => {
-		server = await createServer({ logger: false });
+		server = await createServer({ tls: getTestTls(), logger: false });
 
 		const response = await server.inject({ method: "GET", url: "/api/health" });
 

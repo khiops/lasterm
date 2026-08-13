@@ -2,6 +2,7 @@ import type { AppearanceConfig, LastermTheme, LastermThemeColors } from "@laster
 import { BUNDLED_THEMES, DEFAULT_APPEARANCE, DEFAULT_THEME_NAME } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 
@@ -61,7 +62,7 @@ export const useThemeStore = defineStore("theme", () => {
 	async function loadThemes(): Promise<void> {
 		const authStore = useAuthStore();
 		try {
-			const response = await fetch(`${hubBaseUrl()}/api/themes`, {
+			const response = await hubFetch(`${hubBaseUrl()}/api/themes`, {
 				headers: {
 					Authorization: `Bearer ${authStore.token ?? ""}`,
 				},
@@ -191,7 +192,7 @@ export const useThemeStore = defineStore("theme", () => {
 
 		const authStore = useAuthStore();
 		try {
-			await fetch(`${hubBaseUrl()}/api/config/appearance`, {
+			await hubFetch(`${hubBaseUrl()}/api/config/appearance`, {
 				method: "PUT",
 				headers: {
 					"Content-Type": "application/json",
@@ -238,7 +239,7 @@ export const useThemeStore = defineStore("theme", () => {
 	async function loadAppearance(): Promise<void> {
 		const authStore = useAuthStore();
 		try {
-			const response = await fetch(`${hubBaseUrl()}/api/config/cascade`, {
+			const response = await hubFetch(`${hubBaseUrl()}/api/config/cascade`, {
 				headers: {
 					Authorization: `Bearer ${authStore.token ?? ""}`,
 				},
@@ -297,7 +298,7 @@ export const useThemeStore = defineStore("theme", () => {
 
 		const authStore = useAuthStore();
 		try {
-			await fetch(`${hubBaseUrl()}/api/config/appearance`, {
+			await hubFetch(`${hubBaseUrl()}/api/config/appearance`, {
 				method: "PUT",
 				headers: {
 					"Content-Type": "application/json",

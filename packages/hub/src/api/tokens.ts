@@ -28,6 +28,7 @@ export function registerTokenRoutes(server: FastifyInstance, opts: TokenRouteOpt
 			created_at: r.createdAt,
 			expires_at: r.expiresAt,
 			revoked_at: r.revokedAt,
+			swept_at: r.sweptAt,
 			last_used_at: r.lastUsedAt,
 		}));
 

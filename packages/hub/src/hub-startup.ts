@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { initAuth } from "./auth.js";
+import { initAuth, sweepNonPrimaryTokens } from "./auth.js";
 import {
 	deleteRuntime,
 	getConfigDir,
@@ -9,7 +9,7 @@ import {
 	persistRuntime,
 	type RuntimeInfo,
 } from "./cli.js";
-import { ConfigResolver } from "./config.js";
+import { ConfigResolver, loadTlsConfig } from "./config.js";
 import { acquireHubLock } from "./hub-lock.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
@@ -21,14 +21,17 @@ import {
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
 import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 import { openDatabases } from "./storage/db.js";
+import { resolveHubTlsIdentity } from "./tls-identity.js";
 
 export interface HubStartupOptions {
-	readonly port: number;
+	readonly port?: number;
 	readonly openBrowser?: boolean;
 	readonly logging?: boolean;
 	readonly announce?: (details: {
 		address: string;
 		port: number;
+		/** Base64 DER SubjectPublicKeyInfo for the listener just announced. */
+		spki: string;
 		configDir: string;
 		stateDir: string;
 	}) => void;
@@ -46,6 +49,9 @@ export interface HubStartupDependencies {
 	readonly initAuth: typeof initAuth;
 	readonly createOwnerToken: typeof createOwnerToken;
 	readonly openDatabases: typeof openDatabases;
+	readonly sweepNonPrimaryTokens: typeof sweepNonPrimaryTokens;
+	readonly loadTlsConfig: typeof loadTlsConfig;
+	readonly resolveHubTlsIdentity: typeof resolveHubTlsIdentity;
 	readonly createServer: typeof createServer;
 	readonly startServer: typeof startServer;
 	readonly addStartupCorsOrigins: typeof addStartupCorsOrigins;
@@ -61,6 +67,9 @@ const defaultDependencies: HubStartupDependencies = {
 	initAuth,
 	createOwnerToken,
 	openDatabases,
+	sweepNonPrimaryTokens,
+	loadTlsConfig,
+	resolveHubTlsIdentity,
 	createServer,
 	startServer,
 	addStartupCorsOrigins,
@@ -115,16 +124,26 @@ export async function startHub(
 	let runtime: RuntimeInfo | undefined;
 	let runtimePublished = false;
 	try {
+		// The identity exists before token revocation, binding or publication. No
+		// observable endpoint can therefore precede the key that answers for it.
+		const tlsIdentity = dependencies.resolveHubTlsIdentity(
+			stateDir,
+			dependencies.loadTlsConfig(configDir),
+		);
 		const authToken = dependencies.initAuth(configDir);
 		const ownerToken = dependencies.createOwnerToken();
 		const databases = dependencies.openDatabases(stateDir);
 		dbManager = databases;
+		// This must commit before createServer() can construct a listener, so a
+		// browser token from the previous hub run is never valid while serving.
+		dependencies.sweepNonPrimaryTokens(databases.meta);
 		const quit = createQuitLifecycle(() => {
 			if (!server || !runtime) throw new Error("hub shutdown requested before startup completed");
 			return { server, dbManager: databases, runtime, deleteRuntime: dependencies.deleteRuntime };
 		});
 		server = await dependencies.createServer({
-			port: options.port,
+			...(options.port !== undefined ? { port: options.port } : {}),
+			tls: tlsIdentity.tls,
 			authToken,
 			ownerToken,
 			dbManager: databases,
@@ -134,7 +153,9 @@ export async function startHub(
 			onQuit: quit.onQuit,
 			onQuitDelivered: quit.onQuitDelivered,
 		});
-		const address = await dependencies.startServer(server, { port: options.port });
+		const address = await dependencies.startServer(server, {
+			...(options.port !== undefined ? { port: options.port } : {}),
+		});
 		const actualPort = dependencies.addStartupCorsOrigins(address, options.port);
 		runtime = {
 			pid: process.pid,
@@ -142,6 +163,7 @@ export async function startHub(
 			started_at: new Date().toISOString(),
 			instanceId: randomUUID(),
 			ownerToken,
+			spki: tlsIdentity.spki,
 		};
 		dependencies.persistRuntime(runtime);
 		runtimePublished = true;
@@ -155,8 +177,8 @@ export async function startHub(
 			});
 		}
 
-		options.announce?.({ address, port: actualPort, configDir, stateDir });
-		if (options.openBrowser) openBrowser(`http://127.0.0.1:${actualPort}`);
+		options.announce?.({ address, port: actualPort, spki: tlsIdentity.spki, configDir, stateDir });
+		if (options.openBrowser) openBrowser(`https://127.0.0.1:${actualPort}`);
 
 		const shutdown = () => quit.shutdown();
 		process.on("SIGTERM", () => {

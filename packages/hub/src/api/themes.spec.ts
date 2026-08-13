@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import { getTestTls } from "../test-tls.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
 
@@ -78,6 +79,7 @@ beforeEach(async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "lasterm-theme-api-test-"));
 	dbs = openTestDatabases();
 	server = await createServer({
+		tls: getTestTls(),
 		logger: false,
 		dbManager: dbs,
 		skipShellDiscovery: true,

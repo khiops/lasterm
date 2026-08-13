@@ -1,5 +1,5 @@
 import { type ComputedRef, onUnmounted, watch } from "vue";
-import type { WsClient } from "../services/ws-client.js";
+import type { IWsClient } from "../services/ws-client.js";
 import { useNotificationStore } from "../stores/notifications.js";
 
 /**
@@ -14,7 +14,7 @@ import { useNotificationStore } from "../stores/notifications.js";
 export function useActivityTracker(opts: {
 	channelId: ComputedRef<string | null>;
 	isActiveTab: ComputedRef<boolean>;
-	wsClient: WsClient;
+	wsClient: IWsClient;
 	debounceMs?: number;
 	minLines?: number;
 }): { dispose: () => void } {

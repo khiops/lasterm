@@ -30,7 +30,10 @@ export {
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
 /** Names of .node assets embedded in the hub SEA binary. */
-const SEA_ADDON_ASSETS: readonly string[] = ["better_sqlite3.node"] as const;
+const SEA_ADDON_ASSETS: readonly string[] = [
+	"better_sqlite3.node",
+	"lasterm_tls_identity.node",
+] as const;
 
 /**
  * Called once at hub startup (before any better-sqlite3 imports).

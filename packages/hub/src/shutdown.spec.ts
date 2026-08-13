@@ -1,6 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { request as requestHttps } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import tls from "node:tls";
 import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
@@ -15,6 +18,7 @@ import {
 } from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
+import { getTestTls } from "./test-tls.js";
 
 const TEST_TOKEN = "a".repeat(64);
 const OWNER_TOKEN = "b".repeat(64);
@@ -322,6 +326,7 @@ describe("POST /api/shutdown", () => {
 	it("requires owner token and loopback; paired Bearer auth is not enough", async () => {
 		let shutdownCalls = 0;
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			ownerToken: OWNER_TOKEN,
 			onShutdown: () => {
@@ -360,6 +365,7 @@ describe("POST /api/shutdown", () => {
 	it("POST /api/quit waits for the stopper result, then schedules teardown", async () => {
 		const calls: string[] = [];
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			ownerToken: OWNER_TOKEN,
 			onQuit: async () => {
@@ -387,6 +393,7 @@ describe("POST /api/shutdown", () => {
 		dbs = openTestDatabases();
 		const calls: string[] = [];
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
@@ -402,7 +409,7 @@ describe("POST /api/shutdown", () => {
 		const first = await connectAuthedWebSocket(address, TEST_TOKEN);
 		const second = await connectAuthedWebSocket(address, TEST_TOKEN);
 
-		const refused = await fetch(`${address}/api/quit`, {
+		const refused = await requestTestHub(address, "/api/quit", {
 			method: "POST",
 			headers: {
 				"X-Lasterm-Owner": OWNER_TOKEN,
@@ -416,9 +423,9 @@ describe("POST /api/shutdown", () => {
 			message: expect.stringContaining("snapshot"),
 		});
 		expect(calls).toEqual([]);
-		expect((await fetch(`${address}/api/health`)).status).toBe(200);
+		expect((await requestTestHub(address, "/api/health")).status).toBe(200);
 
-		const forced = await fetch(`${address}/api/quit?force=1`, {
+		const forced = await requestTestHub(address, "/api/quit?force=1", {
 			method: "POST",
 			headers: {
 				"X-Lasterm-Owner": OWNER_TOKEN,
@@ -450,6 +457,7 @@ describe("POST /api/shutdown", () => {
 			announceLatched = resolve;
 		});
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
@@ -469,7 +477,7 @@ describe("POST /api/shutdown", () => {
 		const first = await connectAuthedWebSocket(address, TEST_TOKEN);
 		const second = await connectAuthedWebSocket(address, TEST_TOKEN);
 
-		const forced = fetch(`${address}/api/quit?force=1`, {
+		const forced = requestTestHub(address, "/api/quit?force=1", {
 			method: "POST",
 			headers: { "X-Lasterm-Owner": OWNER_TOKEN, "X-Lasterm-Client-Id": first.clientId },
 		});
@@ -477,7 +485,7 @@ describe("POST /api/shutdown", () => {
 
 		// Both are in flight before either can settle, which is the shape being
 		// tested; releasing afterwards keeps the joiner from waiting on itself.
-		const joiner = fetch(`${address}/api/quit`, {
+		const joiner = requestTestHub(address, "/api/quit", {
 			method: "POST",
 			headers: { "X-Lasterm-Owner": OWNER_TOKEN, "X-Lasterm-Client-Id": first.clientId },
 		});
@@ -499,6 +507,7 @@ describe("POST /api/shutdown", () => {
 		dbs = openTestDatabases();
 		let quitCalls = 0;
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
@@ -513,7 +522,7 @@ describe("POST /api/shutdown", () => {
 		const address = await startServer(server, { port: 0 });
 		const client = await connectAuthedWebSocket(address, TEST_TOKEN);
 
-		const response = await fetch(`${address}/api/quit`, {
+		const response = await requestTestHub(address, "/api/quit", {
 			method: "POST",
 			headers: {
 				"X-Lasterm-Owner": OWNER_TOKEN,
@@ -529,6 +538,7 @@ describe("POST /api/shutdown", () => {
 	it("does not run shutdown when no owner token is configured", async () => {
 		let shutdownCalls = 0;
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			onShutdown: () => {
 				shutdownCalls++;
@@ -550,6 +560,7 @@ describe("POST /api/shutdown", () => {
 		dbs = openTestDatabases();
 		let shutdownCalls = 0;
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
@@ -574,6 +585,7 @@ describe("POST /api/shutdown", () => {
 	it("does not exempt non-POST /api/shutdown from bearer auth", async () => {
 		dbs = openTestDatabases();
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
@@ -596,6 +608,7 @@ describe("POST /api/shutdown", () => {
 		dbs = openTestDatabases();
 		let shutdownCalls = 0;
 		server = await createServer({
+			tls: getTestTls(),
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
@@ -609,7 +622,7 @@ describe("POST /api/shutdown", () => {
 		const first = await connectAuthedWebSocket(address, TEST_TOKEN);
 		const second = await connectAuthedWebSocket(address, TEST_TOKEN);
 
-		const guarded = await fetch(`${address}/api/shutdown`, {
+		const guarded = await requestTestHub(address, "/api/shutdown", {
 			method: "POST",
 			headers: {
 				"X-Lasterm-Owner": OWNER_TOKEN,
@@ -621,7 +634,7 @@ describe("POST /api/shutdown", () => {
 		expect(await guarded.json()).toEqual({ others: 1 });
 		expect(shutdownCalls).toBe(0);
 
-		const forced = await fetch(`${address}/api/shutdown?force=1`, {
+		const forced = await requestTestHub(address, "/api/shutdown?force=1", {
 			method: "POST",
 			headers: {
 				"X-Lasterm-Owner": OWNER_TOKEN,
@@ -641,35 +654,17 @@ async function connectAuthedWebSocket(
 	address: string,
 	token: string,
 ): Promise<{ clientId: string; close: () => Promise<void> }> {
-	const ws = new WebSocket(`${address.replace(/^http/, "ws")}/ws`);
-	ws.binaryType = "arraybuffer";
-	await once(ws, "open");
-
-	const authOk = new Promise<string>((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error("AUTH_OK timeout")), 2_000);
-		ws.addEventListener("message", (event) => {
-			try {
-				const msg = decodeWsMessage(event.data);
-				if (msg.type === "AUTH_OK") {
-					clearTimeout(timer);
-					resolve(msg.clientId);
-				} else if (msg.type === "AUTH_FAIL") {
-					clearTimeout(timer);
-					reject(new Error(msg.message));
-				}
-			} catch (err) {
-				clearTimeout(timer);
-				reject(err);
-			}
-		});
-	});
-
-	ws.send(encodeMessage({ type: "AUTH", token }));
-	const clientId = await authOk;
+	const url = new URL(address);
+	const socket = await connectTrustedSocket(url);
+	await upgradeToWebSocket(socket, url);
+	socket.write(encodeClientWebSocketFrame(encodeMessage({ type: "AUTH", token })));
+	const msg = decodeWsMessage(await readWebSocketPayload(socket));
+	if (msg.type === "AUTH_FAIL") throw new Error(msg.message);
+	if (msg.type !== "AUTH_OK") throw new Error(`Unexpected WebSocket message: ${msg.type}`);
 
 	return {
-		clientId,
-		close: () => closeWebSocket(ws),
+		clientId: msg.clientId,
+		close: () => closeWebSocket(socket),
 	};
 }
 
@@ -683,33 +678,138 @@ function decodeWsMessage(data: unknown): ProtocolMessage {
 	throw new Error(`Unexpected WebSocket message payload: ${typeof data}`);
 }
 
-function once(ws: WebSocket, eventName: "open" | "close"): Promise<void> {
+async function closeWebSocket(socket: tls.TLSSocket): Promise<void> {
+	if (socket.destroyed) return;
+	const closed = new Promise<void>((resolve) => socket.once("close", resolve));
+	socket.write(encodeClientWebSocketFrame(Buffer.alloc(0), 0x88));
+	await closed;
+}
+
+function requestTestHub(
+	address: string,
+	path: string,
+	options: { method?: string; headers?: Record<string, string> } = {},
+): Promise<{ status: number; json: () => Promise<unknown> }> {
 	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error(`${eventName} timeout`)), 2_000);
-		ws.addEventListener(
-			eventName,
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-		ws.addEventListener(
-			"error",
-			() => {
-				clearTimeout(timer);
-				reject(new Error(`WebSocket ${eventName} failed`));
-			},
-			{ once: true },
-		);
+		const request = requestHttps(new URL(path, address), {
+			method: options.method,
+			headers: options.headers,
+			ca: getTestTls().cert,
+		});
+		request.once("error", reject);
+		request.once("response", (response) => {
+			const chunks: Buffer[] = [];
+			response.on("data", (chunk: Buffer) => chunks.push(chunk));
+			response.once("error", reject);
+			response.once("end", () => {
+				const body = Buffer.concat(chunks).toString("utf8");
+				resolve({
+					status: response.statusCode ?? 0,
+					json: async () => JSON.parse(body) as unknown,
+				});
+			});
+		});
+		request.end();
 	});
 }
 
-async function closeWebSocket(ws: WebSocket): Promise<void> {
-	if (ws.readyState === WebSocket.CLOSED) return;
-	const closed = once(ws, "close");
-	ws.close();
-	await closed;
+function connectTrustedSocket(url: URL): Promise<tls.TLSSocket> {
+	return new Promise((resolve, reject) => {
+		const socket = tls.connect({
+			host: url.hostname,
+			port: Number(url.port),
+			ca: getTestTls().cert,
+		});
+		socket.once("secureConnect", () => resolve(socket));
+		socket.once("error", reject);
+	});
+}
+
+async function upgradeToWebSocket(socket: tls.TLSSocket, url: URL): Promise<void> {
+	const response = readUntil(socket, "\r\n\r\n");
+	socket.write(
+		[
+			"GET /ws HTTP/1.1",
+			`Host: ${url.host}`,
+			"Upgrade: websocket",
+			"Connection: Upgrade",
+			`Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}`,
+			"Sec-WebSocket-Version: 13",
+			"\r\n",
+		].join("\r\n"),
+	);
+	const headers = await response;
+	if (!headers.startsWith("HTTP/1.1 101")) throw new Error(`WebSocket upgrade failed: ${headers}`);
+}
+
+function readUntil(socket: tls.TLSSocket, terminator: string): Promise<string> {
+	return new Promise((resolve, reject) => {
+		let data = "";
+		const onData = (chunk: Buffer) => {
+			data += chunk.toString("latin1");
+			if (!data.includes(terminator)) return;
+			cleanup();
+			resolve(data);
+		};
+		const cleanup = () => {
+			socket.off("data", onData);
+			socket.off("error", onError);
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			reject(error);
+		};
+		socket.on("data", onData);
+		socket.once("error", onError);
+	});
+}
+
+function encodeClientWebSocketFrame(payload: Uint8Array, opcode = 0x82): Buffer {
+	if (payload.length > 125)
+		throw new Error("Test WebSocket payload unexpectedly exceeds 125 bytes");
+	const mask = randomBytes(4);
+	const frame = Buffer.alloc(2 + mask.length + payload.length);
+	frame[0] = opcode;
+	frame[1] = 0x80 | payload.length;
+	mask.copy(frame, 2);
+	for (let index = 0; index < payload.length; index++) {
+		frame[6 + index] = payload[index] ^ mask[index % mask.length];
+	}
+	return frame;
+}
+
+function readWebSocketPayload(socket: tls.TLSSocket): Promise<Uint8Array> {
+	return new Promise((resolve, reject) => {
+		let frame = Buffer.alloc(0);
+		const onData = (chunk: Buffer) => {
+			frame = Buffer.concat([frame, chunk]);
+			if (frame.length < 2) return;
+			const length = frame[1] & 0x7f;
+			if (length > 125) {
+				cleanup();
+				reject(new Error("Test WebSocket response unexpectedly exceeds 125 bytes"));
+				return;
+			}
+			if (frame.length < 2 + length) return;
+			if (frame[0] !== 0x82) {
+				cleanup();
+				reject(new Error(`Unexpected WebSocket opcode: ${frame[0]}`));
+				return;
+			}
+			cleanup();
+			resolve(frame.subarray(2, 2 + length));
+		};
+		const cleanup = () => {
+			socket.off("data", onData);
+			socket.off("error", onError);
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			reject(error);
+		};
+		socket.on("data", onData);
+		socket.once("error", onError);
+	});
 }
 
 function tick(): Promise<void> {

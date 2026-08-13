@@ -1,5 +1,7 @@
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
+import { isTauriRuntime } from "../utils/tauri-runtime.js";
+import { DesktopWsClient } from "./desktop-ws-client.js";
 
 type MessageListener = (msg: ProtocolMessage) => void;
 
@@ -18,6 +20,11 @@ export interface IWsClient {
 	onDisconnect(callback: LifecycleListener): () => void;
 	close(): void;
 	readonly isConnected: boolean;
+}
+
+/** Selects the only client allowed for the active runtime. */
+export function createWsClient(): IWsClient {
+	return isTauriRuntime() ? new DesktopWsClient() : new WsClient();
 }
 
 /**

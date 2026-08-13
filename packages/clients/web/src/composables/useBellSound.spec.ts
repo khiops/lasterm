@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
-import { setAssetTokenForTests } from "../utils/hub-url.js";
+import { setAssetTokenForTests, setHubPortForTests } from "../utils/hub-url.js";
 import { playBellSound } from "./useBellSound.js";
 
 describe("playBellSound", () => {
@@ -27,12 +27,15 @@ describe("playBellSound", () => {
 
 		afterEach(() => {
 			setAssetTokenForTests(null);
+			setHubPortForTests(null);
+			Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 			AudioSpy.mockRestore();
 			warnSpy.mockRestore();
 		});
 
-		it.each([".wav", ".mp3", ".ogg", ".m4a"])("accepts valid extension %s", (ext) => {
+		it.each([".wav", ".mp3", ".ogg", ".m4a"])("accepts valid extension %s", async (ext) => {
 			playBellSound({ sound: "custom", customSoundFile: `bell${ext}` });
+			await Promise.resolve();
 			expect(AudioSpy).toHaveBeenCalledWith(`/public/sounds/bell${ext}?asset_token=sound-token`);
 			expect(warnSpy).not.toHaveBeenCalled();
 		});
@@ -55,8 +58,9 @@ describe("playBellSound", () => {
 			expect(AudioSpy).not.toHaveBeenCalled();
 		});
 
-		it("is case-insensitive for extension check", () => {
+		it("is case-insensitive for extension check", async () => {
 			playBellSound({ sound: "custom", customSoundFile: "BELL.MP3" });
+			await Promise.resolve();
 			expect(AudioSpy).toHaveBeenCalledWith("/public/sounds/BELL.MP3?asset_token=sound-token");
 			expect(warnSpy).not.toHaveBeenCalled();
 		});

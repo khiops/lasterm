@@ -1143,8 +1143,8 @@ describe("runtime state", () => {
 		}
 
 		expect(urls).toEqual([
-			"http://127.0.0.1:456/api/quit",
-			"http://127.0.0.1:456/api/quit?force=1",
+			"https://127.0.0.1:456/api/quit",
+			"https://127.0.0.1:456/api/quit?force=1",
 		]);
 		expect(output).toEqual(["Local agent stopped; hub is shutting down"]);
 	});

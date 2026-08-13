@@ -135,7 +135,13 @@ describe.sequential("hub startup lock", () => {
 					acquireHubLock: () => ({ path: path.join(stateDir, "hub.lock") }) as never,
 					initAuth: () => "token",
 					createOwnerToken: () => "owner",
+					resolveHubTlsIdentity: () => ({
+						tls: { cert: "certificate", key: "key" },
+						certificate: "certificate",
+						spki: "test-spki",
+					}),
 					openDatabases: () => databases as never,
+					sweepNonPrimaryTokens: () => undefined,
 					createServer: async () => server as never,
 					startServer: async () => "127.0.0.1:4100",
 					addStartupCorsOrigins: () => 4100,

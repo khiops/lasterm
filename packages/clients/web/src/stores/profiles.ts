@@ -8,6 +8,7 @@ export type HostVisibleProfile = LaunchProfile & {
 
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 import { useChannelsStore } from "./channels.js";
@@ -34,7 +35,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 		if (authStore.token === null) return;
 		loading.value = true;
 		try {
-			const res = await fetch(`${hubBaseUrl()}/api/launch-profiles`, {
+			const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (!res.ok) throw new Error(`GET /api/launch-profiles failed: ${res.status}`);
@@ -50,7 +51,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 
 	async function fetchHostProfiles(hostId: string): Promise<HostVisibleProfile[]> {
 		if (authStore.token === null) return [];
-		const res = await fetch(`${hubBaseUrl()}/api/hosts/${encodeURIComponent(hostId)}/profiles`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${encodeURIComponent(hostId)}/profiles`, {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
 		if (!res.ok) throw new Error(`GET /api/hosts/${hostId}/profiles failed: ${res.status}`);
@@ -63,7 +64,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 
 	async function createProfile(data: Partial<LaunchProfile>): Promise<LaunchProfile> {
 		if (authStore.token === null) throw new Error("Not authenticated");
-		const res = await fetch(`${hubBaseUrl()}/api/launch-profiles`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -79,7 +80,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 
 	async function updateProfile(id: string, data: Partial<LaunchProfile>): Promise<LaunchProfile> {
 		if (authStore.token === null) throw new Error("Not authenticated");
-		const res = await fetch(`${hubBaseUrl()}/api/launch-profiles/${encodeURIComponent(id)}`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles/${encodeURIComponent(id)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
@@ -95,7 +96,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 
 	async function deleteProfile(id: string): Promise<void> {
 		if (authStore.token === null) throw new Error("Not authenticated");
-		const res = await fetch(`${hubBaseUrl()}/api/launch-profiles/${encodeURIComponent(id)}`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles/${encodeURIComponent(id)}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
@@ -105,7 +106,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 
 	async function reorderProfiles(ids: string[]): Promise<void> {
 		if (authStore.token === null) return;
-		const res = await fetch(`${hubBaseUrl()}/api/launch-profiles/order`, {
+		const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles/order`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",

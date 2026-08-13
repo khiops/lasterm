@@ -7,6 +7,11 @@
  */
 
 import { readonly, ref } from "vue";
+import { hubFetch } from "./hub-fetch.js";
+
+export { isTauriRuntime } from "./tauri-runtime.js";
+
+import { isTauriRuntime } from "./tauri-runtime.js";
 
 let _cachedPort: number | null = null;
 let _assetToken: string | null = null;
@@ -16,10 +21,6 @@ const ASSET_TOKEN_QUERY_PARAM = "asset_token";
 
 export const hubPortReady = readonly(_hubPortReady);
 export const assetTokenReady = readonly(_assetTokenReady);
-
-export function isTauriRuntime(): boolean {
-	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 /**
  * The hub's port, resolved once by the desktop shell and cached here.
@@ -66,14 +67,14 @@ function requireResolvedPort(): number {
 // where the origin is the page's own and no port of ours is involved.
 export function hubBaseUrl(): string {
 	if (isTauriRuntime()) {
-		return `http://127.0.0.1:${requireResolvedPort()}`;
+		return `https://127.0.0.1:${requireResolvedPort()}`;
 	}
 	return "";
 }
 
 export function hubWsUrl(): string {
 	if (isTauriRuntime()) {
-		return `ws://127.0.0.1:${requireResolvedPort()}`;
+		return `wss://127.0.0.1:${requireResolvedPort()}`;
 	}
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	return `${protocol}//${window.location.host}`;
@@ -93,7 +94,7 @@ export async function initHubPort(): Promise<void> {
 }
 
 export async function initAssetToken(authToken: string | null): Promise<void> {
-	const response = await fetch(`${hubBaseUrl()}/api/assets/token`, {
+	const response = await hubFetch(`${hubBaseUrl()}/api/assets/token`, {
 		...(authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}),
 	});
 	if (!response.ok) {
@@ -162,4 +163,25 @@ export function namedPublicAssetUrl(
 	extraParams?: Record<string, number | string | null | undefined>,
 ): string {
 	return publicAssetUrl(`/public/${kind}/${encodeURIComponent(filename)}`, extraParams);
+}
+
+/** Resolve an asset to a URL the DOM may load. */
+export async function domPublicAssetUrl(
+	pathOrUrl: string,
+	extraParams?: Record<string, number | string | null | undefined>,
+): Promise<string> {
+	const url = publicAssetUrl(pathOrUrl, extraParams);
+	if (!isTauriRuntime()) return url;
+
+	const response = await hubFetch(url);
+	if (!response.ok) throw new Error(`Failed to load asset: ${response.status}`);
+	return URL.createObjectURL(await response.blob());
+}
+
+export function domNamedPublicAssetUrl(
+	kind: "fonts" | "sounds" | "wallpapers",
+	filename: string,
+	extraParams?: Record<string, number | string | null | undefined>,
+): Promise<string> {
+	return domPublicAssetUrl(`/public/${kind}/${encodeURIComponent(filename)}`, extraParams);
 }

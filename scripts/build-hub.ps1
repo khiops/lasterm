@@ -19,11 +19,14 @@ Set-Location $Root
 pnpm -F @lasterm/shared build
 if ($LASTEXITCODE -ne 0) { throw "shared build failed" }
 
-cargo build -p lasterm-hub-lock --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $env:LASTERM_CARGO_TARGET_DIR
-if ($LASTEXITCODE -ne 0) { throw "lasterm-hub-lock build failed" }
+cargo build -p lasterm-hub-lock -p lasterm-tls-identity --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $env:LASTERM_CARGO_TARGET_DIR
+if ($LASTEXITCODE -ne 0) { throw "native hub addons build failed" }
 $lockLibrary = Join-Path $env:LASTERM_CARGO_TARGET_DIR "$env:LASTERM_TARGET_TRIPLE\release\lasterm_hub_lock.dll"
 if (-not (Test-Path $lockLibrary)) { throw "Hub lock addon not found at $lockLibrary" }
 $env:LASTERM_HUB_LOCK_ADDON = $lockLibrary
+$tlsLibrary = Join-Path $env:LASTERM_CARGO_TARGET_DIR "$env:LASTERM_TARGET_TRIPLE\release\lasterm_tls_identity.dll"
+if (-not (Test-Path $tlsLibrary)) { throw "TLS identity addon not found at $tlsLibrary" }
+$env:LASTERM_TLS_IDENTITY_ADDON = $tlsLibrary
 
 if ($env:LASTERM_SKIP_WEB -ne "true") {
     Write-Host "  → Building web UI first..." -ForegroundColor DarkGray

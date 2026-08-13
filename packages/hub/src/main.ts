@@ -10,7 +10,7 @@ async function main() {
 		}
 	}
 	await startHub({
-		port: envPort !== undefined ? Number(envPort) : 4100,
+		...(envPort !== undefined ? { port: Number(envPort) } : {}),
 		openBrowser: process.env.LASTERM_OPEN === "1",
 		logging: true,
 	});

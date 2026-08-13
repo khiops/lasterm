@@ -4,6 +4,7 @@ import { createToken } from "../auth.js";
 import { createServer } from "../server.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import { getTestTls } from "../test-tls.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
 
@@ -31,6 +32,7 @@ let server: FastifyInstance;
 beforeEach(async () => {
 	dbs = openTestDatabases();
 	server = await createServer({
+		tls: getTestTls(),
 		logger: false,
 		dbManager: dbs,
 		skipShellDiscovery: true,
@@ -111,6 +113,20 @@ describe("GET /api/auth/tokens", () => {
 		const found = body.tokens.find((t) => t.id === id);
 		expect(found?.expires_at).toBe(expiresAt);
 		expect(found?.revoked_at).toBeNull();
+	});
+
+	it("shows swept_at for a token invalidated on restart", async () => {
+		const { id } = createToken(dbs.meta, { label: "previous browser", expiresAt: null });
+		const sweptAt = new Date().toISOString();
+		dbs.meta.prepare("UPDATE auth_tokens SET swept_at = ? WHERE id = ?").run(sweptAt, id);
+
+		const res = await server.inject({
+			method: "GET",
+			url: "/api/auth/tokens",
+			headers: authHeader(),
+		});
+		const body = res.json<{ tokens: Array<{ id: string; swept_at: string | null }> }>();
+		expect(body.tokens.find((token) => token.id === id)?.swept_at).toBe(sweptAt);
 	});
 });
 

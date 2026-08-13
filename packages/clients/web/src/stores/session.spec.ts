@@ -9,6 +9,7 @@ type Listener = (msg: ProtocolMessage) => void;
 interface MockWsInstance {
 	sent: ProtocolMessage[];
 	emit: (msg: ProtocolMessage) => void;
+	emitDisconnect: () => void;
 }
 
 const wsHarness = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ vi.mock("../services/ws-client.js", () => {
 	class MockWsClient {
 		private connected = false;
 		private readonly listeners = new Map<string, Set<Listener>>();
+		private readonly disconnectListeners = new Set<() => void>();
 		readonly sent: ProtocolMessage[] = [];
 
 		constructor() {
@@ -52,8 +54,9 @@ vi.mock("../services/ws-client.js", () => {
 			return () => {};
 		}
 
-		onDisconnect(): () => void {
-			return () => {};
+		onDisconnect(callback: () => void): () => void {
+			this.disconnectListeners.add(callback);
+			return () => this.disconnectListeners.delete(callback);
 		}
 
 		close(): void {
@@ -72,9 +75,14 @@ vi.mock("../services/ws-client.js", () => {
 				listener(msg);
 			}
 		}
+
+		emitDisconnect(): void {
+			this.connected = false;
+			for (const listener of this.disconnectListeners) listener();
+		}
 	}
 
-	return { WsClient: MockWsClient };
+	return { WsClient: MockWsClient, createWsClient: () => new MockWsClient() };
 });
 
 const localStorageMap = new Map<string, string>();
@@ -131,5 +139,14 @@ describe("useSessionStore — agent sync messages", () => {
 		});
 
 		expect(toastStore.messages).toHaveLength(0);
+	});
+
+	it("clears connected when the transport fails", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		expect(sessionStore.connected).toBe(true);
+
+		wsHarness.instances[0]?.emitDisconnect();
+		expect(sessionStore.connected).toBe(false);
 	});
 });

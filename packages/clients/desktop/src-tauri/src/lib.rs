@@ -808,6 +808,50 @@ trait WindowRaiseTarget {
     fn focus(&self) -> Result<(), String>;
 }
 
+/// The outcomes of presenting the main window at startup.
+///
+/// A failure to find or show the window leaves the application without any
+/// usable UI and is fatal. Focus is helpful but not required to use a shown
+/// window, so its error is retained for reporting while startup continues.
+#[derive(Debug, PartialEq, Eq)]
+enum MainWindowStartupOutcome {
+    Fatal(String),
+    Shown { focus_error: Option<String> },
+}
+
+trait WindowStartupTarget {
+    fn show(&self) -> Result<(), String>;
+    fn focus(&self) -> Result<(), String>;
+}
+
+impl<R: tauri::Runtime> WindowStartupTarget for tauri::WebviewWindow<R> {
+    fn show(&self) -> Result<(), String> {
+        self.show().map_err(|error| error.to_string())
+    }
+
+    fn focus(&self) -> Result<(), String> {
+        self.set_focus().map_err(|error| error.to_string())
+    }
+}
+
+fn present_main_window_at_startup(
+    window: Option<&impl WindowStartupTarget>,
+) -> MainWindowStartupOutcome {
+    let Some(window) = window else {
+        return MainWindowStartupOutcome::Fatal("The main window is unavailable.".to_string());
+    };
+
+    if let Err(error) = window.show() {
+        return MainWindowStartupOutcome::Fatal(format!(
+            "The main window could not be shown: {error}"
+        ));
+    }
+
+    MainWindowStartupOutcome::Shown {
+        focus_error: window.focus().err(),
+    }
+}
+
 impl<R: tauri::Runtime> WindowRaiseTarget for tauri::WebviewWindow<R> {
     fn label(&self) -> &str {
         self.label()
@@ -2898,6 +2942,11 @@ fn show_startup_failure_then_exit(app: tauri::AppHandle, message: String) {
         .show(move |_| app.exit(1));
 }
 
+#[cfg(dev)]
+fn show_startup_failure_then_exit(app: tauri::AppHandle, message: String) {
+    show_desktop_instance_failure_then_exit(app, message);
+}
+
 fn show_quit_diagnostic_then_exit(app: tauri::AppHandle, diagnostic: String) {
     app.dialog()
         .message(format!(
@@ -3576,16 +3625,29 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         establish_hub_connection(runtime.port, &spki)?;
     }
 
-    // Show the main window (hidden by default in config)
-    if let Some(window) = app.get_webview_window("main") {
+    // Show the main window (hidden by default in config).
+    let main_window = app.get_webview_window("main");
+    if let Some(window) = main_window.as_ref() {
         #[cfg(target_os = "windows")]
-        set_windows_transparent_background(&window)?;
+        set_windows_transparent_background(window)?;
 
         // Enable DevTools in debug builds only
         #[cfg(debug_assertions)]
         window.open_devtools();
-        let _ = window.show();
-        let _ = window.set_focus();
+    }
+    match present_main_window_at_startup(main_window.as_ref()) {
+        MainWindowStartupOutcome::Fatal(message) => {
+            show_startup_failure_then_exit(app.handle().clone(), message);
+            return Ok(());
+        }
+        MainWindowStartupOutcome::Shown {
+            focus_error: Some(error),
+        } => {
+            eprintln!("[lasterm] could not focus the shown main window: {error}");
+        }
+        MainWindowStartupOutcome::Shown {
+            focus_error: None,
+        } => {}
     }
 
     // Publish the handoff endpoint only after primary setup is complete. Until
@@ -4184,6 +4246,84 @@ mod tests {
 
         assert!(error.contains("cannot show window main"));
         assert_eq!(show_failed.attempts(), ["unminimize", "show", "focus"]);
+    }
+
+    struct TestWindowStartupTarget {
+        show_result: Result<(), String>,
+        focus_result: Result<(), String>,
+        attempts: Mutex<Vec<&'static str>>,
+    }
+
+    impl TestWindowStartupTarget {
+        fn new(show_result: Result<(), String>, focus_result: Result<(), String>) -> Self {
+            Self {
+                show_result,
+                focus_result,
+                attempts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn attempts(&self) -> Vec<&'static str> {
+            self.attempts.lock().unwrap().clone()
+        }
+    }
+
+    impl WindowStartupTarget for TestWindowStartupTarget {
+        fn show(&self) -> Result<(), String> {
+            self.attempts.lock().unwrap().push("show");
+            self.show_result.clone()
+        }
+
+        fn focus(&self) -> Result<(), String> {
+            self.attempts.lock().unwrap().push("focus");
+            self.focus_result.clone()
+        }
+    }
+
+    /// A startup without a main window cannot end silently with no visible UI.
+    #[test]
+    fn startup_reports_a_missing_main_window_as_fatal() {
+        assert_eq!(
+            present_main_window_at_startup(None::<&TestWindowStartupTarget>),
+            MainWindowStartupOutcome::Fatal("The main window is unavailable.".to_string())
+        );
+    }
+
+    /// A native show error is fatal and retains the native diagnostic rather
+    /// than leaving the application hidden without an explanation.
+    #[test]
+    fn startup_reports_a_native_show_error_as_fatal() {
+        let window = TestWindowStartupTarget::new(
+            Err("native compositor refused the window".to_string()),
+            Ok(()),
+        );
+
+        assert_eq!(
+            present_main_window_at_startup(Some(&window)),
+            MainWindowStartupOutcome::Fatal(
+                "The main window could not be shown: native compositor refused the window"
+                    .to_string()
+            )
+        );
+        assert_eq!(window.attempts(), ["show"]);
+    }
+
+    /// Focus does not make an already shown window unusable, but its failure is
+    /// returned to the caller so startup logs it instead of discarding it.
+    #[test]
+    fn startup_reports_focus_failure_but_keeps_the_shown_window_usable() {
+        let window = TestWindowStartupTarget::new(
+            Ok(()),
+            Err("native focus denied".to_string()),
+        );
+
+        assert_eq!(
+            present_main_window_at_startup(Some(&window)),
+            MainWindowStartupOutcome::Shown {
+                focus_error: Some("native focus denied".to_string())
+            }
+        );
+        assert_eq!(window.attempts(), ["show", "focus"]);
     }
 
     /// Kills the P1 mutation that selects a different authority when a shell

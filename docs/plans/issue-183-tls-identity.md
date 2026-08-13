@@ -133,7 +133,7 @@ gate carries the same list into its prompt.
 | P3c-visibility | **deferred, #201.** A mismatch shows a startup failure naming `--reset-hub-pin`; there is no first-pin window, no once/always/no prompt, and no hub-side fingerprint command |
 | P4 the pin survives a re-issue over the same key | delivered |
 | P5 a mismatch is terminal | delivered |
-| P6 accepted solely on the pin | delivered |
+| P6 accepted solely on the pin | **delivered, and now the same on both clients.** Every client — the desktop's Rust shell, the CLI, the development proxy, the spawn probe — accepts when the peer proves possession of the pinned key, and refuses otherwise. Chain, expiry, hostname and trust roots take no part. Until #206 the Node clients applied the pin *after* Node's own certificate validation, so an expired certificate over the pinned key refused there and connected on the desktop |
 | P7 no hub traffic originates in the webview | delivered and enforced in the packaged build. The webview's only connection sources are Tauri's IPC, it cannot navigate off the application origin or open a window, and an end-to-end suite drives the packaged application and observes eight renderer routes reach a sentinel server not at all — the same suite turns red and records six arrivals when the policy is removed. A development build served from an external Vite server is outside that guarantee. Assets cross the relay as blob URLs; their caching and revocation lifecycle stays in **#194** |
 | P8 no browser pairing outlives the hub run | delivered |
 | P8-authority | delivered |

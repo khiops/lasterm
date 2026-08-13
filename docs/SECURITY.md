@@ -214,7 +214,7 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 
 | Path | Encryption | Notes |
 |------|-----------|-------|
-| UI ↔ Hub | TLS | Loopback HTTPS/WSS; the peer key must match `runtime.json`'s recorded SPKI |
+| UI ↔ Hub | TLS | HTTPS/WSS; the peer key must match `runtime.json`'s recorded SPKI. This is **key** identity, not certificate identity: every client accepts when the handshake proves possession of that key, and refuses otherwise, with chain, expiry, hostname and trust roots taking no part. So an expired certificate over the pinned key connects, and a key that leaks stays usable until the pin is replaced |
 | Hub ↔ Agent (daemon) | None (UDS) | Kernel-only IPC, same user, no network transit |
 | Hub ↔ Agent (SSH) | SSH (AES-256-GCM or ChaCha20) | Standard SSH encryption |
 

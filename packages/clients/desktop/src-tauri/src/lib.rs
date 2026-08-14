@@ -1977,7 +1977,9 @@ fn read_protected_file(
     let parent_metadata = parent
         .metadata()
         .map_err(|error| format!("refusing protected file parent metadata: {error}"))?;
-    validate_runtime_dir(path.parent().unwrap_or(path), &parent_metadata)?;
+    if matches!(policy, ProtectedFilePolicy::Strict) {
+        validate_runtime_dir(path.parent().unwrap_or(path), &parent_metadata)?;
+    }
     let mut file = match parent.open_existing(&leaf) {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(None),
@@ -1989,9 +1991,11 @@ fn read_protected_file(
     if !metadata.is_file() {
         return Err("refusing protected path that is not a regular file".to_string());
     }
-    let current_user = unsafe { libc::geteuid() };
-    if metadata.uid() != current_user {
-        return Err("protected file is not owned by the current user".to_string());
+    if matches!(policy, ProtectedFilePolicy::Strict) {
+        let current_user = unsafe { libc::geteuid() };
+        if metadata.uid() != current_user {
+            return Err("protected file is not owned by the current user".to_string());
+        }
     }
     match policy {
         ProtectedFilePolicy::Strict if metadata.mode() & 0o077 != 0 => {
@@ -5405,20 +5409,73 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = instance_test_dir("hub-auth-permissions");
-        let auth_path = directory.join("auth.json");
         let token = "a".repeat(64);
-        std::fs::write(&auth_path, format!(r#"{{"token":"{token}"}}"#)).unwrap();
+        let auth_contents = format!(r#"{{"token":"{token}"}}"#);
+
+        let private_config_dir = directory.join("private-config");
+        std::fs::create_dir(&private_config_dir).unwrap();
+        std::fs::set_permissions(
+            &private_config_dir,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let private_auth_path = private_config_dir.join("auth.json");
+        std::fs::write(&private_auth_path, &auth_contents).unwrap();
+        std::fs::set_permissions(
+            &private_auth_path,
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        assert_eq!(read_hub_auth_token_at(&private_config_dir), Some(token.clone()));
+        std::fs::set_permissions(
+            &private_auth_path,
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
+
+        let config_dir = directory.join("group-writable-config");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let auth_path = config_dir.join("auth.json");
+        std::fs::write(&auth_path, &auth_contents).unwrap();
 
         std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        assert_eq!(read_hub_auth_token_at(directory.path()), Some(token.clone()));
+        assert_eq!(read_hub_auth_token_at(&config_dir), Some(token));
 
         std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(read_hub_auth_token_at(directory.path()), None);
+        assert_eq!(read_hub_auth_token_at(&config_dir), None);
     }
 
     #[cfg(unix)]
     #[test]
-    fn runtime_path_through_a_symlinked_parent_authorizes_no_pin_or_connection() {
+    fn strict_protected_files_reject_a_group_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = instance_test_dir("strict-protected-parent-permissions");
+        let protected_dir = directory.join("group-writable");
+        std::fs::create_dir(&protected_dir).unwrap();
+
+        let runtime_path = protected_dir.join("runtime.json");
+        std::fs::write(&runtime_path, r#"{"port":4100,"spki":"AQID"}"#).unwrap();
+        std::fs::set_permissions(&runtime_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let pin_store_path = protected_dir.join(HUB_PIN_STORE_FILE);
+        std::fs::write(&pin_store_path, r#"{"pins":{}}"#).unwrap();
+        std::fs::set_permissions(&pin_store_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        std::fs::set_permissions(&protected_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+
+        assert!(matches!(
+            load_runtime_info_at(&runtime_path),
+            RuntimeLoadResult::Unreadable(_)
+        ));
+        assert!(load_existing_hub_pin_store(&pin_store_path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_paths_through_a_symlinked_parent_are_refused() {
         use std::os::unix::fs::symlink;
 
         let directory = instance_test_dir("runtime-parent-symlink");
@@ -5429,6 +5486,12 @@ mod tests {
         let mut permissions = std::fs::metadata(&runtime).unwrap().permissions();
         permissions.set_mode(0o600);
         std::fs::set_permissions(&runtime, permissions).unwrap();
+        let auth = state_dir.join("auth.json");
+        let token = "a".repeat(64);
+        std::fs::write(&auth, format!(r#"{{"token":"{token}"}}"#)).unwrap();
+        let mut permissions = std::fs::metadata(&auth).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&auth, permissions).unwrap();
         let linked_state_dir = directory.join("state-link");
         symlink(&state_dir, &linked_state_dir).unwrap();
 
@@ -5436,6 +5499,7 @@ mod tests {
             load_runtime_info_at(&linked_state_dir.join("runtime.json")),
             RuntimeLoadResult::Unreadable(_)
         ));
+        assert_eq!(read_hub_auth_token_at(&linked_state_dir), None);
     }
 
     #[cfg(windows)]

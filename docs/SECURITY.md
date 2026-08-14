@@ -62,7 +62,7 @@
 | Threat | Vector | Impact | Likelihood | Mitigation |
 |--------|--------|--------|------------|------------|
 | Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
-| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600. The hub adopts an existing token at first start, so write access to the configuration directory by another account is credential takeover rather than denial of service. The desktop refuses such a directory through its protected-file policy; the hub does not yet, and that is tracked in #232. |
+| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600. The hub adopts an existing token at first start, so write access to the configuration directory by another account is credential takeover rather than denial of service. On Unix, the desktop refuses a directory group or other can write through its protected-file policy; the hub does not yet, and that is tracked in #232. On Windows, protection is the single leaf handle, while the user's profile ACL keeps other accounts out; the reader does not inspect ownership or a DACL. |
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |

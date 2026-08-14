@@ -13,7 +13,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 use x509_parser::extensions::GeneralName;
@@ -53,18 +53,20 @@ struct TlsIdentity {
 }
 
 /// Creates or reuses the generated identity whose private key and certificate
-/// cache have fixed, distinct names inside `identity_directory`. A leaf is
-/// reissued only when it cannot safely serve that key anymore.
+/// cache have fixed, distinct names inside the absolute `identity_directory`.
+/// A leaf is reissued only when it cannot safely serve that key anymore.
 ///
 /// The returned object contains only public certificate material. In
 /// particular, no private key is returned or converted to a JavaScript string.
 #[napi]
 pub fn generate_tls_identity(identity_directory: String) -> napi::Result<GeneratedTlsIdentity> {
-    let identity_directory = resolve_identity_directory(&identity_directory).map_err(|error| {
-        napi::Error::from_reason(format!(
-            "cannot resolve hub TLS identity directory: {error}"
-        ))
-    })?;
+    let identity_directory = PathBuf::from(identity_directory);
+    if !identity_directory.is_absolute() {
+        return Err(napi::Error::from_reason(format!(
+            "cannot generate hub TLS identity in {}: identity directory must be absolute",
+            identity_directory.display()
+        )));
+    }
     let (identity, key_path) = generate_tls_identity_at(&identity_directory).map_err(|error| {
         napi::Error::from_reason(format!(
             "cannot generate hub TLS identity in {}: {error}",
@@ -95,34 +97,6 @@ fn generate_tls_identity_at(identity_directory: &Path) -> io::Result<(TlsIdentit
         })?;
     let identity = generate_identity(identity_directory)?;
     Ok((identity, key_path))
-}
-
-/// Resolves the N-API locator once, before protected descriptor traversal.
-/// This is lexical only: it does not canonicalize, touch the filesystem, or
-/// follow links, so a missing identity directory remains creatable.
-fn resolve_identity_directory(identity_directory: &str) -> io::Result<PathBuf> {
-    let input = Path::new(identity_directory);
-    let absolute = if input.is_absolute() {
-        input.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(input)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::Normal(name) => normalized.push(name),
-            Component::ParentDir => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "identity directory is not normalized",
-                ));
-            }
-        }
-    }
-    Ok(normalized)
 }
 
 fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
@@ -906,35 +880,13 @@ mod tests {
     use std::fs::{self, create_dir};
     use std::io;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::path::PathBuf;
     use time::{Duration, OffsetDateTime};
     use webpki::EndEntityCert;
     use x509_parser::extensions::GeneralName;
     use x509_parser::prelude::{FromDer, X509Certificate};
 
     struct TestDir(PathBuf);
-
-    struct WorkingDirectory(PathBuf);
-
-    impl WorkingDirectory {
-        fn change_to(path: &Path) -> Self {
-            let original = env::current_dir().expect("read current working directory");
-            env::set_current_dir(path).expect("enter temporary working directory");
-            Self(original)
-        }
-    }
-
-    impl Drop for WorkingDirectory {
-        fn drop(&mut self) {
-            env::set_current_dir(&self.0).expect("restore current working directory");
-        }
-    }
-
-    fn working_directory_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     impl TestDir {
         fn key_path(&self) -> PathBuf {
@@ -979,28 +931,13 @@ mod tests {
     }
 
     #[test]
-    fn relative_identity_directory_is_resolved_once_at_the_napi_boundary() {
-        let _lock = working_directory_test_lock()
-            .lock()
-            .expect("lock process working directory");
-        let directory = test_dir("relative-napi-directory");
-        let identity_directory = {
-            let _working_directory = WorkingDirectory::change_to(&directory.0);
-            super::resolve_identity_directory("./identity")
-                .expect("resolve a relative N-API identity directory")
+    fn relative_identity_directory_is_refused_before_identity_generation() {
+        let error = match generate_identity(std::path::Path::new("identity")) {
+            Ok(_) => panic!("a relative identity directory must be refused"),
+            Err(error) => error,
         };
 
-        assert_eq!(identity_directory, directory.0.join("identity"));
-        assert!(
-            !identity_directory.exists(),
-            "lexical resolution does not require the identity directory to exist"
-        );
-        fs::create_dir(&identity_directory).expect("create resolved identity directory");
-        generate_identity(&identity_directory).expect("generate identity from resolved directory");
-        assert!(
-            identity_directory.join(GENERATED_KEY_NAME).is_file(),
-            "the plain-Rust generation path creates the resolved key path"
-        );
+        assert!(error.to_string().contains("not absolute"), "error: {error}");
     }
 
     #[cfg(unix)]
@@ -1009,26 +946,14 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        let _lock = working_directory_test_lock()
-            .lock()
-            .expect("lock process working directory");
         let directory = test_dir("non-utf8-key-path");
-        let non_utf8_working_directory = directory
+        let identity_directory = directory
             .0
             .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
-        fs::create_dir(&non_utf8_working_directory).expect("create non-UTF-8 working directory");
-        let identity_directory = non_utf8_working_directory.join("identity");
-        fs::create_dir(&identity_directory).expect("create identity directory");
-
-        let error = {
-            let _working_directory = WorkingDirectory::change_to(&non_utf8_working_directory);
-            let resolved = super::resolve_identity_directory("identity")
-                .expect("resolve relative N-API identity directory");
-            assert_eq!(resolved, identity_directory);
-            match generate_tls_identity_at(&resolved) {
-                Ok(_) => panic!("the N-API key path must be valid before generation"),
-                Err(error) => error,
-            }
+        fs::create_dir(&identity_directory).expect("create non-UTF-8 identity directory");
+        let error = match generate_tls_identity_at(&identity_directory) {
+            Ok(_) => panic!("the N-API key path must be valid before generation"),
+            Err(error) => error,
         };
         assert!(error.to_string().contains("not UTF-8"), "error: {error}");
         assert!(

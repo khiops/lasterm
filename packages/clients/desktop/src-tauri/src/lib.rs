@@ -757,20 +757,16 @@ fn windows_desktop_instance_lock_path(
                 .to_string()
         })?;
 
-    let local_app_data_locator = PathBuf::from(&local_app_data);
-    let local_app_data_path = resolve_platform_directory(local_app_data_locator.clone())
-        .ok_or_else(|| {
-            format!(
-                "cannot resolve desktop runtime directory from LOCALAPPDATA: {}",
-                local_app_data_locator.display()
-            )
-        })?;
-    // On Windows the resolved locator retains its UNC prefix. Keep the raw
-    // check too, so this platform-neutral testable helper does not lose that
-    // namespace marker when it is compiled on a non-Windows host.
-    if is_windows_unc_path(&local_app_data_locator) || is_windows_unc_path(&local_app_data_path) {
+    let local_app_data_path = PathBuf::from(&local_app_data);
+    if is_windows_unc_path(&local_app_data_path) {
         return Err(format!(
             "refusing desktop runtime directory {}: LOCALAPPDATA must be host-local, not UNC",
+            local_app_data_path.display()
+        ));
+    }
+    if !local_app_data_path.is_absolute() {
+        return Err(format!(
+            "refusing desktop runtime directory from LOCALAPPDATA={}: the value must be absolute",
             local_app_data_path.display()
         ));
     }
@@ -778,8 +774,7 @@ fn windows_desktop_instance_lock_path(
     // LOCALAPPDATA is the non-roaming application-data location, so this runtime
     // authority remains host-local. It is under the user's profile, whose default
     // ACL already excludes other users; a full ACL audit is intentionally out of
-    // scope here. This uses the same once-resolved LOCALAPPDATA locator as
-    // get_state_dir(), so every consumer derives the same runtime authority.
+    // scope here.
     let runtime_dir = local_app_data_path.join("lasterm").join("runtime");
     prepare_windows_runtime_dir(&runtime_dir)?;
     Ok(runtime_dir.join("desktop-instance.lock"))
@@ -1728,55 +1723,43 @@ enum WindowCloseChoice {
     Tray,
 }
 
-/// Resolves the per-user Lasterm configuration directory.
-fn lasterm_config_dir() -> Option<PathBuf> {
+/// Locates the per-user Lasterm configuration directory.
+fn lasterm_config_dir() -> Result<PathBuf, String> {
     let config_dir = {
         #[cfg(target_os = "windows")]
         {
-            std::env::var("APPDATA")
-                .ok()
-                .map(std::path::PathBuf::from)
-                .or_else(dirs::config_dir)?
+            let config_dir = std::env::var_os("APPDATA")
+                .filter(|directory| !directory.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| "APPDATA is absent or empty".to_string())?;
+            if !config_dir.is_absolute() {
+                return Err(format!(
+                    "refusing desktop configuration directory from APPDATA={}: the value must be absolute",
+                    config_dir.display()
+                ));
+            }
+            config_dir
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::env::var("XDG_CONFIG_HOME")
-                .ok()
-                .map(std::path::PathBuf::from)
-                .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?
+            // "All paths set in these environment variables must be absolute.
+            // If an implementation encounters a relative path in any of these
+            // variables it should consider the path invalid and ignore it."
+            std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|directory| Path::new(directory).is_absolute())
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+                .ok_or_else(|| "cannot determine the home directory".to_string())?
         }
     };
 
-    Some(resolve_platform_directory(config_dir)?.join("lasterm"))
-}
-
-/// Resolves an environment-derived directory locator once before it reaches a
-/// protected descriptor walk. This is lexical only: it does not canonicalize,
-/// touch the filesystem, or follow links, so a missing directory remains
-/// creatable.
-fn resolve_platform_directory(directory: PathBuf) -> Option<PathBuf> {
-    let absolute = if directory.is_absolute() {
-        directory
-    } else {
-        std::env::current_dir().ok()?.join(directory)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            std::path::Component::RootDir => normalized.push(component.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(name) => normalized.push(name),
-            std::path::Component::ParentDir => return None,
-        }
-    }
-    Some(normalized)
+    Ok(config_dir.join("lasterm"))
 }
 
 /// Resolves the hub config directory and reads the auth token from auth.json.
 /// Returns `Some(token)` only if the token is a valid 64-char lowercase hex string.
 fn read_hub_auth_token() -> Option<String> {
-    let config_dir = lasterm_config_dir()?;
+    let config_dir = lasterm_config_dir().ok()?;
     read_hub_auth_token_at(&config_dir)
 }
 
@@ -1835,8 +1818,8 @@ fn close_behavior_command_result(state: CloseBehaviorConfigState) -> Result<Clos
     }
 }
 
-fn close_behavior_config_path() -> Option<PathBuf> {
-    lasterm_config_dir().map(|config_dir| config_dir.join("close-behavior.json"))
+fn close_behavior_config_path() -> Result<PathBuf, String> {
+    Ok(lasterm_config_dir()?.join("close-behavior.json"))
 }
 
 fn read_close_behavior_from_path(path: &std::path::Path) -> CloseBehaviorConfigState {
@@ -1855,8 +1838,9 @@ fn read_close_behavior_from_path(path: &std::path::Path) -> CloseBehaviorConfigS
 }
 
 fn read_close_behavior() -> CloseBehaviorConfigState {
-    let Some(path) = close_behavior_config_path() else {
-        return CloseBehaviorConfigState::Unreadable;
+    let path = match close_behavior_config_path() {
+        Ok(path) => path,
+        Err(_) => return CloseBehaviorConfigState::Unreadable,
     };
     read_close_behavior_from_path(&path)
 }
@@ -1945,41 +1929,48 @@ fn get_close_behavior() -> Result<CloseBehavior, String> {
 
 #[tauri::command]
 fn set_close_behavior(behavior: CloseBehavior) -> Result<(), String> {
-    let path = close_behavior_config_path()
-        .ok_or_else(|| "failed to resolve close preference directory".to_string())?;
+    let path = close_behavior_config_path()?;
     write_close_behavior_to_path(&path, behavior)
 }
 
-/// Resolves the lasterm state directory:
+/// Locates the lasterm state directory:
 /// - Linux/macOS: $XDG_STATE_HOME/lasterm or ~/.local/state/lasterm
 /// - Windows: %LOCALAPPDATA%\lasterm
-fn get_state_dir() -> Option<std::path::PathBuf> {
+fn get_state_dir() -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .and_then(resolve_platform_directory)
-            .map(|p| p.join("lasterm"))
+        let state_dir = std::env::var_os("LOCALAPPDATA")
+            .filter(|directory| !directory.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| "LOCALAPPDATA is absent or empty".to_string())?;
+        if !state_dir.is_absolute() {
+            return Err(format!(
+                "refusing hub state directory from LOCALAPPDATA={}: the value must be absolute",
+                state_dir.display()
+            ));
+        }
+        Ok(state_dir.join("lasterm"))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        std::env::var("XDG_STATE_HOME")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))
-            .and_then(resolve_platform_directory)
-            .map(|p| p.join("lasterm"))
+        // "All paths set in these environment variables must be absolute. If
+        // an implementation encounters a relative path in any of these
+        // variables it should consider the path invalid and ignore it."
+        std::env::var_os("XDG_STATE_HOME")
+            .filter(|directory| Path::new(directory).is_absolute())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))
+            .map(|state_dir| state_dir.join("lasterm"))
+            .ok_or_else(|| "cannot determine the home directory".to_string())
     }
 }
 
 /// Mirrors the hub CLI's three-way runtime observation: absence, a usable
 /// record, and every failure to read or parse it are deliberately distinct.
 fn load_runtime_info() -> RuntimeLoadResult {
-    let Some(state_dir) = get_state_dir() else {
-        return RuntimeLoadResult::Unreadable(
-            "failed to resolve the hub state directory".to_string(),
-        );
+    let state_dir = match get_state_dir() {
+        Ok(state_dir) => state_dir,
+        Err(error) => return RuntimeLoadResult::Unreadable(error),
     };
     load_runtime_info_at(&state_dir.join("runtime.json"))
 }
@@ -4874,35 +4865,13 @@ mod tests {
     use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
-    #[cfg(not(target_os = "windows"))]
     static PLATFORM_DIRECTORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    #[cfg(not(target_os = "windows"))]
-    struct TestWorkingDirectory(PathBuf);
-
-    #[cfg(not(target_os = "windows"))]
-    impl TestWorkingDirectory {
-        fn change_to(path: &Path) -> Self {
-            let original = std::env::current_dir().expect("read current working directory");
-            std::env::set_current_dir(path).expect("enter temporary working directory");
-            Self(original)
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    impl Drop for TestWorkingDirectory {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.0).expect("restore current working directory");
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
     struct TestEnvironmentVariable {
         name: &'static str,
         original: Option<std::ffi::OsString>,
     }
 
-    #[cfg(not(target_os = "windows"))]
     impl TestEnvironmentVariable {
         fn set(name: &'static str, value: &str) -> Self {
             let original = std::env::var_os(name);
@@ -4913,7 +4882,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
     impl Drop for TestEnvironmentVariable {
         fn drop(&mut self) {
             // SAFETY: this restores the process-global value changed by this
@@ -5416,25 +5384,27 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn relative_xdg_config_home_is_resolved_lexically_before_protected_read() {
+    fn relative_xdg_config_home_is_ignored_and_uses_the_default() {
         use std::os::unix::fs::PermissionsExt;
 
         let _lock = PLATFORM_DIRECTORY_TEST_LOCK
             .lock()
-            .expect("lock process environment and working directory");
+            .expect("lock process environment");
         let directory = instance_test_dir("relative-xdg-config-home");
-        let _working_directory = TestWorkingDirectory::change_to(directory.path());
+        let home = directory.join("home");
+        std::fs::create_dir(&home).expect("create temporary home directory");
+        let _home = TestEnvironmentVariable::set("HOME", home.to_str().expect("UTF-8 home path"));
         let _xdg_config_home = TestEnvironmentVariable::set("XDG_CONFIG_HOME", "relative-config/.");
 
-        let config_dir = lasterm_config_dir().expect("resolve relative XDG_CONFIG_HOME");
-        assert_eq!(config_dir, directory.join("relative-config/lasterm"));
-        assert!(config_dir.is_absolute(), "protected paths receive an absolute locator");
+        let config_dir = lasterm_config_dir().expect("ignore relative XDG_CONFIG_HOME");
+        assert_eq!(config_dir, home.join(".config/lasterm"));
+        assert_ne!(config_dir, directory.join("relative-config/lasterm"));
         assert!(
             !config_dir.exists(),
-            "lexical resolution does not require the config directory to exist"
+            "the XDG default need not exist before the protected read"
         );
 
-        std::fs::create_dir_all(&config_dir).expect("create lexically resolved config directory");
+        std::fs::create_dir_all(&config_dir).expect("create default config directory");
         std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
             .expect("make config directory owner-only");
         let token = "a".repeat(64);
@@ -5447,7 +5417,25 @@ mod tests {
         assert_eq!(
             read_hub_auth_token(),
             Some(token),
-            "the protected reader accepts the once-resolved absolute config path"
+            "the protected reader accepts the specified default config path"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn absolute_xdg_config_home_is_used() {
+        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
+            .lock()
+            .expect("lock process environment");
+        let directory = instance_test_dir("absolute-xdg-config-home");
+        let _xdg_config_home = TestEnvironmentVariable::set(
+            "XDG_CONFIG_HOME",
+            directory.path().to_str().expect("UTF-8 XDG directory"),
+        );
+
+        assert_eq!(
+            lasterm_config_dir().expect("use absolute XDG_CONFIG_HOME"),
+            directory.join("lasterm")
         );
     }
 
@@ -5558,6 +5546,11 @@ mod tests {
         std::fs::write(&runtime_path, r#"{"port":4100,"spki":"AQID"}"#).unwrap();
         std::fs::set_permissions(&runtime_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
+        let auth_path = protected_dir.join("auth.json");
+        let token = "a".repeat(64);
+        std::fs::write(&auth_path, format!(r#"{{"token":"{token}"}}"#)).unwrap();
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
         let pin_store_path = protected_dir.join(HUB_PIN_STORE_FILE);
         std::fs::write(&pin_store_path, r#"{"pins":{}}"#).unwrap();
         std::fs::set_permissions(&pin_store_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -5568,7 +5561,27 @@ mod tests {
             load_runtime_info_at(&runtime_path),
             RuntimeLoadResult::Unreadable(_)
         ));
+        assert_eq!(read_hub_auth_token_at(&protected_dir), None);
         assert!(load_existing_hub_pin_store(&pin_store_path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_runtime_parent_accepts_0755_and_refuses_0770() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = instance_test_dir("protected-runtime-parent-permissions");
+        let protected_dir = directory.join("protected");
+        std::fs::create_dir(&protected_dir).unwrap();
+        std::fs::set_permissions(&protected_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata = std::fs::metadata(&protected_dir).unwrap();
+        validate_runtime_dir(&protected_dir, &metadata).expect("0755 is not group- or other-writable");
+
+        std::fs::set_permissions(&protected_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let metadata = std::fs::metadata(&protected_dir).unwrap();
+        let error = validate_runtime_dir(&protected_dir, &metadata)
+            .expect_err("0770 grants group write and must be refused");
+        assert!(error.contains("group or other may write"), "error: {error}");
     }
 
     #[cfg(unix)]
@@ -5625,26 +5638,44 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(windows)]
     #[test]
-    fn windows_relative_local_app_data_is_resolved_once_before_use() {
+    fn relative_app_data_is_refused_with_its_variable_name() {
         let _lock = PLATFORM_DIRECTORY_TEST_LOCK
             .lock()
-            .expect("lock process working directory");
-        let directory = instance_test_dir("windows-relative-local-app-data");
-        let _working_directory = TestWorkingDirectory::change_to(directory.path());
+            .expect("lock process environment");
+        let _app_data = TestEnvironmentVariable::set("APPDATA", "relative-app-data");
+        let error = lasterm_config_dir().expect_err("relative APPDATA must be refused");
+        assert!(error.contains("APPDATA"), "error: {error}");
+        assert!(error.contains("relative-app-data"), "error: {error}");
+    }
 
-        let lock_path = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(
-            "relative-local-app-data/.",
-        )))
-        .expect("resolve relative LOCALAPPDATA before preparing the runtime directory");
-
-        assert_eq!(
-            lock_path,
-            directory
-                .join("relative-local-app-data/lasterm/runtime/desktop-instance.lock")
+    #[cfg(windows)]
+    #[test]
+    fn absolute_app_data_is_used() {
+        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
+            .lock()
+            .expect("lock process environment");
+        let directory = instance_test_dir("absolute-app-data");
+        let _app_data = TestEnvironmentVariable::set(
+            "APPDATA",
+            directory.path().to_str().expect("UTF-8 APPDATA directory"),
         );
-        assert!(lock_path.is_absolute(), "the runtime lock has an absolute locator");
+        assert_eq!(
+            lasterm_config_dir().expect("absolute APPDATA works"),
+            directory.join("lasterm")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_local_app_data_is_refused_with_its_variable_name() {
+        let error = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(
+            "relative-local-app-data",
+        )))
+        .expect_err("relative LOCALAPPDATA must be refused");
+        assert!(error.contains("LOCALAPPDATA"), "error: {error}");
+        assert!(error.contains("relative-local-app-data"), "error: {error}");
     }
 
     #[test]

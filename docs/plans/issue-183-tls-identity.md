@@ -185,7 +185,8 @@ cannot establish it refuses to start rather than generating into a location it c
 
 *What is actually built:* the key **and** the leaf over it are generated once and kept, in
 `hub-tls-key.pem` and `hub-tls-generated-cert.pem`. A restart serves the same bytes. A new leaf is
-signed only when the stored one cannot serve — absent, unreadable, for another key, expired or within
+signed only when the stored one cannot serve, **decided when the hub starts and not again while it
+runs** (#199) — absent, unreadable, for another key, expired or within
 seven days of it, dated in the future after a clock moved backwards, or failing the profile a
 generated leaf must have: one self-signed certificate for this key, not a CA, carrying the loopback
 address and a TLS server's usages. That profile is judged rather than the bytes, so a later version

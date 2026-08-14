@@ -225,7 +225,10 @@ design — pairing exists so a client can reach a hub across a network, and #96 
 binding. A configured certificate is used as supplied; otherwise the hub generates its own key **once** and
 keeps it, and issues a leaf over that key **once**, reusing it across restarts. A new leaf is signed
 only when the stored one cannot serve: absent, unreadable, belonging to another key, expired or within
-seven days of it, dated in the future, or no longer matching the shape a generated leaf must have. A
+seven days of it, dated in the future, or no longer matching the shape a generated leaf must have.
+**That decision is taken when the hub starts, and not again while it runs** — a hub up for longer than
+its leaf's remaining validity serves an expired certificate until it is restarted, which browsers
+refuse and pinning clients do not care about (#199). A
 client pins the key, so a reissue costs it nothing; a browser that accepted the certificate is asked
 again, which is now roughly every two and a quarter years rather than every restart.
 

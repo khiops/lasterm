@@ -18,9 +18,10 @@ const RELAY_FRAME_HEADER_BYTES = 17;
 const RELAY_DATA_FRAME = 0;
 const RELAY_END_FRAME = 1;
 const RELAY_ERROR_FRAME = 2;
-// This mirrors the complete pinned native request deadline. A wait in the
-// renderer must end too: native cleanup alone cannot settle a pending Promise.
-const HUB_RELAY_WAIT_TIMEOUT_MS = 25_000;
+// Native owns the 25 s relay deadline and can report why it ended. Keep the
+// renderer watchdog deliberately later so a simultaneous timer cannot replace
+// that diagnosis with a generic browser-side timeout.
+const HUB_RELAY_WAIT_TIMEOUT_MS = 26_000;
 
 type RelayFrame = {
 	id: number;

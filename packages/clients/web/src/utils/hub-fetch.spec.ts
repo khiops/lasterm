@@ -234,7 +234,7 @@ describe("hubFetch desktop transport", () => {
 			"timed out while waiting for its producer",
 		);
 
-		await vi.advanceTimersByTimeAsync(25_000);
+		await vi.advanceTimersByTimeAsync(26_000);
 
 		await settled;
 		expect(invoke).toHaveBeenCalledWith("relay_hub_response_cancel", { responseId: 55 }, undefined);
@@ -317,6 +317,32 @@ describe("hubFetch desktop transport", () => {
 		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
 	});
 
+	it("cancels a body rejected on its first pull without finishing the request", async () => {
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_upload_start") return 33;
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const body = new ReadableStream<Uint8Array>({
+			pull() {
+				throw new Error("first body pull rejected");
+			},
+		});
+
+		await expect(
+			hubFetch("https://127.0.0.1:4242/api/channels/purge-dead", { method: "POST", body }),
+		).rejects.toThrow("first body pull rejected");
+		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+		expect(invoke).not.toHaveBeenCalledWith(
+			"relay_hub_upload_finish",
+			expect.anything(),
+			undefined,
+		);
+	});
+
 	it("settles a stalled upload even when its producer and cancellation never resolve", async () => {
 		vi.useFakeTimers();
 		const invoke = vi.fn((command: string) => {
@@ -342,10 +368,35 @@ describe("hubFetch desktop transport", () => {
 			body,
 		});
 		const settled = expect(pending).rejects.toThrow("timed out while waiting for its producer");
-		await vi.advanceTimersByTimeAsync(25_000);
+		await vi.advanceTimersByTimeAsync(26_000);
 
 		await settled;
 		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+	});
+
+	it("leaves room for the native deadline to report its diagnosis first", async () => {
+		vi.useFakeTimers();
+		const invoke = vi.fn((command: string) => {
+			if (command === "relay_hub_upload_start") return Promise.resolve(33);
+			if (command === "relay_hub_upload_cancel") return Promise.resolve();
+			return Promise.resolve(undefined);
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const body = new ReadableStream<Uint8Array>({
+			pull() {
+				return new Promise<void>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("native relay body deadline expired")), 25_000),
+				);
+			},
+		});
+
+		const pending = hubFetch("https://127.0.0.1:4242/api/deadline", { method: "POST", body });
+		const settled = expect(pending).rejects.toThrow("native relay body deadline expired");
+		await vi.advanceTimersByTimeAsync(25_000);
+		await settled;
 	});
 
 	it("keeps browser requests on fetch", async () => {

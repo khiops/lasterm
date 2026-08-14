@@ -378,13 +378,23 @@ struct RelayHubHead {
 /// The two bounded queues which make an in-progress multipart upload a pipe,
 /// not a `Vec` containing the file.
 struct HubUpload {
-    sender: mpsc::SyncSender<Vec<u8>>,
+    sender: mpsc::SyncSender<HubUploadFrame>,
     response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
     relay_id: u64,
     /// Exactly one IPC chunk command may wait on this pipe. Without this claim,
     /// duplicate commands could each retain one bounded frame and a thread for
     /// the full request deadline while still counting as one admitted relay.
     chunk_in_flight: Arc<AtomicBool>,
+}
+
+/// Upload-body termination is data on the pipe, not a side effect of dropping
+/// its sender. Reqwest interprets `Ok(0)` as a completed HTTP body, so only an
+/// explicit `Finished` frame may produce it. Every rejected relay instead
+/// makes the body reader fail and forces reqwest to abandon the request.
+enum HubUploadFrame {
+    Data(Vec<u8>),
+    Finished,
+    Aborted,
 }
 
 /// One response has one outstanding frame at most. The sequence makes an ACK
@@ -406,20 +416,45 @@ struct HubWsRelay {
 }
 
 struct HubUploadReader {
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::Receiver<HubUploadFrame>,
     current: std::io::Cursor<Vec<u8>>,
+    finished: bool,
+    aborted: bool,
 }
 
 impl Read for HubUploadReader {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if self.finished {
+            return Ok(0);
+        }
+        if self.aborted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "multipart relay upload was aborted",
+            ));
+        }
         loop {
             let read = self.current.read(output)?;
             if read != 0 {
                 return Ok(read);
             }
             match self.receiver.recv() {
-                Ok(next) => self.current = std::io::Cursor::new(next),
-                Err(_) => return Ok(0),
+                Ok(HubUploadFrame::Data(next)) => self.current = std::io::Cursor::new(next),
+                Ok(HubUploadFrame::Finished) => {
+                    self.finished = true;
+                    return Ok(0);
+                }
+                Ok(HubUploadFrame::Aborted) => {
+                    self.aborted = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "multipart relay upload was aborted",
+                    ));
+                }
+                Err(_) => return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "multipart relay upload ended without a completion frame",
+                )),
             }
         }
     }
@@ -2629,6 +2664,8 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
         let body = reqwest::blocking::Body::new(HubUploadReader {
             receiver,
             current: std::io::Cursor::new(Vec::new()),
+            finished: false,
+            aborted: false,
         });
         let _ = response_sender.send(send_relay_hub_request(&request, Some(body)));
     });
@@ -2709,26 +2746,39 @@ impl Drop for UploadChunkClaim {
 
 fn send_hub_upload_chunk_until(
     upload_id: u64,
-    sender: mpsc::SyncSender<Vec<u8>>,
+    sender: mpsc::SyncSender<HubUploadFrame>,
     bytes: Vec<u8>,
     deadline: Instant,
 ) -> Result<(), String> {
-    let mut bytes = bytes;
+    send_hub_upload_frame_until(sender, HubUploadFrame::Data(bytes), deadline).map_err(|_| {
+        release_hub_upload(upload_id);
+        "multipart relay upload stopped or timed out before its body completed".to_string()
+    })
+}
+
+/// A bounded pipe can be full while the request thread is still draining its
+/// preceding frame. Limit that wait just like chunk delivery; dropping the
+/// sender after a failed terminal delivery is still an error to the reader,
+/// never a clean EOF.
+fn send_hub_upload_frame_until(
+    sender: mpsc::SyncSender<HubUploadFrame>,
+    frame: HubUploadFrame,
+    deadline: Instant,
+) -> Result<(), HubUploadFrame> {
+    let mut frame = frame;
     loop {
-        match sender.try_send(bytes) {
+        match sender.try_send(frame) {
             Ok(()) => return Ok(()),
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+            Err(mpsc::TrySendError::Disconnected(returned)) => return Err(returned),
             Err(mpsc::TrySendError::Full(returned)) => {
                 if Instant::now() >= deadline {
-                    break;
+                    return Err(returned);
                 }
-                bytes = returned;
+                frame = returned;
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
     }
-    release_hub_upload(upload_id);
-    Err("multipart relay upload stopped or timed out before its body completed".to_string())
 }
 
 #[tauri::command]
@@ -2739,6 +2789,16 @@ fn relay_hub_upload_finish(
     let upload = take_hub_upload(upload_id)?
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
     let relay_id = upload.relay_id;
+    if send_hub_upload_frame_until(
+        upload.sender.clone(),
+        HubUploadFrame::Finished,
+        Instant::now() + HUB_REQUEST_TIMEOUT,
+    )
+    .is_err()
+    {
+        release_hub_relay(relay_id);
+        return Err("multipart relay upload stopped or timed out before its body completed".to_string());
+    }
     drop(upload.sender);
     let hub_response = match upload.response.recv_timeout(HUB_REQUEST_TIMEOUT) {
         Ok(Ok(response)) => response,
@@ -2778,6 +2838,10 @@ fn release_hub_upload(upload_id: u64) {
         .and_then(|mut uploads| uploads.remove(&upload_id));
     if let Some(upload) = &upload {
         release_hub_relay(upload.relay_id);
+        // Best-effort because a full bounded data pipe must not make
+        // cancellation wait forever. If it cannot be queued, dropping the
+        // sender yields BrokenPipe in HubUploadReader, which is also an abort.
+        let _ = upload.sender.try_send(HubUploadFrame::Aborted);
     }
     drop(upload);
 }
@@ -5728,6 +5792,97 @@ mod tests {
     }
 
     #[test]
+    fn only_an_explicit_finished_frame_completes_an_upload_body() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send(HubUploadFrame::Finished).unwrap();
+        let mut reader = HubUploadReader {
+            receiver,
+            current: std::io::Cursor::new(Vec::new()),
+            finished: false,
+            aborted: false,
+        };
+        assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send(HubUploadFrame::Aborted).unwrap();
+        let mut reader = HubUploadReader {
+            receiver,
+            current: std::io::Cursor::new(Vec::new()),
+            finished: false,
+            aborted: false,
+        };
+        assert_eq!(
+            reader.read(&mut [0; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted,
+            "a cancelled relay is a request-body error, never EOF"
+        );
+    }
+
+    #[test]
+    fn aborted_upload_never_reaches_the_hub_as_an_empty_request() {
+        use std::net::TcpListener;
+
+        // This is deliberately a raw, harmless one-shot listener rather than
+        // the purge endpoint. With the old clean-EOF behavior it accepts the
+        // request; an aborted first pull must fail before the hub receives an
+        // empty request, so the listener observes no connection at all.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let received = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let accept_deadline = Instant::now() + Duration::from_secs(2);
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= accept_deadline {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("test hub accept failed: {error}"),
+                }
+            };
+            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                match socket.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) => break,
+                    Err(error) => panic!("test hub read failed: {error}"),
+                }
+            }
+            Some(bytes)
+        });
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send(HubUploadFrame::Aborted).unwrap();
+        let error = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/api/channels/purge-dead"))
+            .body(reqwest::blocking::Body::new(HubUploadReader {
+                receiver,
+                current: std::io::Cursor::new(Vec::new()),
+                finished: false,
+                aborted: false,
+            }))
+            .send()
+            .expect_err("an aborted upload must fail the HTTP request");
+        assert!(error.is_request() || error.is_body() || error.is_connect());
+        assert!(
+            received.join().unwrap().is_none(),
+            "the server-side listener must not observe an empty completed request"
+        );
+    }
+
+    #[test]
     fn relay_request_command_schema_refuses_an_expanded_body() {
         let error = serde_json::from_str::<RelayHubRequest>(
             r#"{"method":"POST","path":"/api/body","headers":[],"body":[1,2,3]}"#,
@@ -5740,7 +5895,7 @@ mod tests {
     fn concurrent_upload_chunk_command_is_refused_before_waiting_on_the_pipe() {
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
         let (sender, _receiver) = mpsc::sync_channel(1);
-        sender.try_send(vec![0]).unwrap();
+        sender.try_send(HubUploadFrame::Data(vec![0])).unwrap();
         let chunk_in_flight = Arc::new(AtomicBool::new(false));
         let (_response_sender, response) = mpsc::channel();
         hub_uploads().lock().unwrap().insert(
@@ -5790,7 +5945,7 @@ mod tests {
 
         expire_hub_upload(id);
         assert_eq!(hub_uploads().lock().unwrap().len(), before);
-        assert!(receiver.try_recv().is_err(), "expiry closes the upload reader's pipe");
+        assert!(matches!(receiver.try_recv(), Ok(HubUploadFrame::Aborted)));
     }
 
     #[test]

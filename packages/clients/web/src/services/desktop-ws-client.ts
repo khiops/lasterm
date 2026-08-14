@@ -37,8 +37,23 @@ export class DesktopWsClient implements IWsClient {
 	private sendInFlight = false;
 
 	async connect(_url: string): Promise<void> {
+		await this._connect(_url);
+	}
+
+	private async _connect(url: string): Promise<{ connected: boolean; generation: number }> {
 		const { Channel, invoke } = await import("@tauri-apps/api/core");
 		const generation = ++this.connectionGeneration;
+		const previousRelayId = this.relayId;
+		// A new connect supersedes the old receive callback immediately. Leaving
+		// the old id live until the new native dial succeeds makes a failed
+		// replacement look connected even though it can no longer receive frames.
+		this.relayId = null;
+		this.pendingFrame = undefined;
+		this._resetMessage();
+		if (previousRelayId !== null) {
+			this.pendingSends = this.pendingSends.filter((send) => send.relayId !== previousRelayId);
+			void invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
+		}
 		const stream = new Channel<ArrayBuffer | RelayEvent>((frame) => {
 			if (generation !== this.connectionGeneration) return;
 			this.pendingFrame = frame;
@@ -48,22 +63,13 @@ export class DesktopWsClient implements IWsClient {
 		const relayId = await invoke<number>("relay_hub_ws_connect", { stream });
 		if (generation !== this.connectionGeneration) {
 			void invoke("relay_hub_ws_close", { relayId }).catch(() => undefined);
-			return;
-		}
-		const previousRelayId = this.relayId;
-		if (previousRelayId !== null) {
-			// A replacement relay owns a new ordered send stream. Drop queued work
-			// for the old one before closing it; an already-running IPC call will
-			// retire itself without being allowed to start another old send.
-			this.pendingSends = this.pendingSends.filter((send) => send.relayId !== previousRelayId);
+			return { connected: false, generation };
 		}
 		this.relayId = relayId;
-		this.reconnectUrl = _url;
+		this.reconnectUrl = url;
 		this.reconnectAttempt = 0;
-		if (previousRelayId !== null && previousRelayId !== relayId) {
-			void invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
-		}
 		this._drain();
+		return { connected: true, generation };
 	}
 
 	send(msg: ProtocolMessage): void {
@@ -135,7 +141,7 @@ export class DesktopWsClient implements IWsClient {
 
 	private _receiveChunk(frame: ArrayBuffer): void {
 		const bytes = new Uint8Array(frame);
-		if (bytes.byteLength < 2 || (bytes[0] !== 0 && bytes[0] !== 1)) {
+		if (bytes.byteLength < 1 || (bytes[0] !== 0 && bytes[0] !== 1)) {
 			this._transportFailure("invalid WebSocket relay frame");
 			return;
 		}
@@ -248,8 +254,14 @@ export class DesktopWsClient implements IWsClient {
 			this.reconnectTimer = null;
 			this.reconnectAttempt++;
 			try {
-				await this.connect(url);
-				for (const listener of this.reconnectListeners) listener();
+				const connection = await this._connect(url);
+				if (
+					connection.connected &&
+					this.reconnectUrl === url &&
+					this._isCurrentRelay(this.relayId ?? -1, connection.generation)
+				) {
+					for (const listener of this.reconnectListeners) listener();
+				}
 			} catch {
 				this._scheduleReconnect();
 			}

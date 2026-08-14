@@ -26,6 +26,7 @@ describe("DesktopWsClient", () => {
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 		ipc.callback = undefined;
 		ipc.invoke.mockClear();
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
 	});
@@ -65,6 +66,28 @@ describe("DesktopWsClient", () => {
 
 		await vi.waitFor(() =>
 			expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_ack", { relayId: 41 }),
+		);
+		client.close();
+	});
+
+	it("acknowledges a valid empty binary relay message without disconnecting", async () => {
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		ipc.callback?.(new Uint8Array([1]).buffer);
+
+		await vi.waitFor(() =>
+			expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_ack", { relayId: 41 }),
+		);
+		expect(client.isConnected).toBe(true);
+		expect(consoleError).not.toHaveBeenCalledWith(
+			"[DesktopWsClient] Transport failure:",
+			expect.anything(),
 		);
 		client.close();
 	});
@@ -241,5 +264,61 @@ describe("DesktopWsClient", () => {
 		expect(oldSendCount).toBe(1);
 		expect(client.isConnected).toBe(true);
 		client.close();
+	});
+
+	it("does not report a failed replacement connection as live", async () => {
+		let calls = 0;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") {
+				calls++;
+				return calls === 1 ? Promise.resolve(41) : Promise.reject<number>(new Error("dial failed"));
+			}
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		await expect(client.connect("ws://127.0.0.1:4100/ws")).rejects.toThrow("dial failed");
+
+		expect(client.isConnected).toBe(false);
+		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: 41 });
+	});
+
+	it("does not emit reconnect after close supersedes an in-flight reconnect", async () => {
+		vi.useFakeTimers();
+		let calls = 0;
+		let resolveReconnect: ((relayId: number) => void) | undefined;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") {
+				calls++;
+				if (calls === 1) return Promise.resolve(41);
+				return new Promise<number>((resolve) => (resolveReconnect = resolve));
+			}
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+		const reconnected = vi.fn();
+		client.onReconnect(reconnected);
+		await client.connect("ws://127.0.0.1:4100/ws");
+		ipc.callback?.({ event: "closed" });
+
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(resolveReconnect).toBeTypeOf("function");
+		client.close();
+		resolveReconnect?.(42);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(reconnected).not.toHaveBeenCalled();
+		expect(client.isConnected).toBe(false);
+		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: 42 });
 	});
 });

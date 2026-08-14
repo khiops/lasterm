@@ -111,6 +111,67 @@ fn windows_file_not_found_status(status: Option<i32>) -> bool {
     status == Some(2)
 }
 
+/// Converts an absolute Win32 path to the verbatim form required by the raw
+/// Win32 pathname APIs used below. This stays independent of the host OS so
+/// its prefix rules can be tested wherever this crate's tests run.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn verbatim_wide_path(mut path: Vec<u16>, description: &str) -> io::Result<Vec<u16>> {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const SLASH: u16 = b'/' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    const DOT: u16 = b'.' as u16;
+    const COLON: u16 = b':' as u16;
+    const U: u16 = b'U' as u16;
+    const N: u16 = b'N' as u16;
+    const C: u16 = b'C' as u16;
+    const VERBATIM_PREFIX: &[u16] = &[BACKSLASH, BACKSLASH, QUESTION, BACKSLASH];
+    const DEVICE_PREFIX: &[u16] = &[BACKSLASH, BACKSLASH, DOT, BACKSLASH];
+    const NT_PREFIX: &[u16] = &[BACKSLASH, QUESTION, QUESTION, BACKSLASH];
+
+    if path.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{description} contains an interior NUL"),
+        ));
+    }
+
+    if path.starts_with(VERBATIM_PREFIX) {
+        path.push(0);
+        return Ok(path);
+    }
+
+    for unit in &mut path {
+        if *unit == SLASH {
+            *unit = BACKSLASH;
+        }
+    }
+
+    if path.starts_with(DEVICE_PREFIX) || path.starts_with(NT_PREFIX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{description} uses a Windows device namespace"),
+        ));
+    }
+
+    let mut verbatim = if matches!(path.as_slice(), [drive, COLON, BACKSLASH, ..] if *drive != BACKSLASH) {
+        VERBATIM_PREFIX.to_vec()
+    } else if path.starts_with(&[BACKSLASH, BACKSLASH]) {
+        vec![BACKSLASH, BACKSLASH, QUESTION, BACKSLASH, U, N, C, BACKSLASH]
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{description} is not an absolute Windows drive or UNC path"),
+        ));
+    };
+    if path.starts_with(&[BACKSLASH, BACKSLASH]) {
+        verbatim.extend_from_slice(&path[2..]);
+    } else {
+        verbatim.extend_from_slice(&path);
+    }
+    verbatim.push(0);
+    Ok(verbatim)
+}
+
 #[cfg(unix)]
 mod unix {
     use std::ffi::CString;
@@ -560,15 +621,7 @@ mod windows {
     }
 
     fn wide_path(path: &Path, description: &str) -> io::Result<Vec<u16>> {
-        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if wide.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{description} contains an interior NUL"),
-            ));
-        }
-        wide.push(0);
-        Ok(wide)
+        super::verbatim_wide_path(path.as_os_str().encode_wide().collect(), description)
     }
 
     fn validate_path(path: &Path, require_leaf: bool) -> io::Result<()> {
@@ -847,6 +900,24 @@ mod tests {
             },
             AllowedCall {
                 source: "protected-fs",
+                call: "libc::renameat(",
+                expected_occurrences: 1,
+                why: "the crate's Unix descriptor-relative replacement primitive",
+            },
+            AllowedCall {
+                source: "protected-fs",
+                call: "libc::unlinkat(",
+                expected_occurrences: 1,
+                why: "the crate's Unix descriptor-relative leaf-removal primitive",
+            },
+            AllowedCall {
+                source: "protected-fs",
+                call: "libc::stat",
+                expected_occurrences: 2,
+                why: "the crate's Unix descriptor-relative metadata storage",
+            },
+            AllowedCall {
+                source: "protected-fs",
                 call: "CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,",
                 expected_occurrences: 1,
                 why: "imports the crate's Windows checked-handle and pathname publication primitives",
@@ -918,7 +989,13 @@ mod tests {
             "File::create",
             "OpenOptions",
             "libc::open",
+            "libc::unlink",
+            "libc::rename",
+            "libc::stat",
+            "libc::lstat",
             "CreateFileW",
+            "GetFileAttributesW",
+            "ReplaceFileW",
             "symlink(",
             "MoveFileExW",
             "DeleteFileW",
@@ -961,6 +1038,42 @@ mod tests {
                 allowed.call, allowed.source, allowed.expected_occurrences,
             );
         }
+    }
+
+    #[test]
+    fn verbatim_wide_path_preserves_win32_absolute_path_access() {
+        fn convert(path: &str) -> String {
+            let wide = super::verbatim_wide_path(path.encode_utf16().collect(), "test path")
+                .expect("convert absolute Windows path");
+            String::from_utf16(&wide[..wide.len() - 1]).expect("converted UTF-16 path")
+        }
+
+        assert_eq!(
+            convert(r"C:\Users\lasterm\identity"),
+            r"\\?\C:\Users\lasterm\identity"
+        );
+
+        let long_path = format!(r"C:\{}", "identity\\".repeat(40));
+        assert!(long_path.encode_utf16().count() > 260, "test path exceeds MAX_PATH");
+        assert_eq!(convert(&long_path), format!(r"\\?\{long_path}"));
+
+        assert_eq!(
+            convert(r"\\server\share\identity"),
+            r"\\?\UNC\server\share\identity"
+        );
+
+        assert_eq!(
+            convert(r"\\?\C:\already-verbatim\identity"),
+            r"\\?\C:\already-verbatim\identity"
+        );
+
+        let error = super::verbatim_wide_path(
+            r"\\.\PhysicalDrive0".encode_utf16().collect(),
+            "test path",
+        )
+        .expect_err("device namespaces are not protected paths");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("device namespace"));
     }
 
     #[test]

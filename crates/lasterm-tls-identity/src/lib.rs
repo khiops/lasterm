@@ -511,7 +511,6 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
                 // owner-only temporary file is synced. Publication never
                 // replaces an existing destination, so a concurrent creator
                 // cannot be silently overwritten.
-                #[cfg(unix)]
                 if let Err(error) = remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey) {
                     // The authoritative name is already installed. Preserve the
                     // invariant that errors mean no key was committed, while
@@ -1420,6 +1419,17 @@ mod tests {
                 .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
             "failed setup leaves no temporary identity file"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_private_key_leaves_no_temporary_hard_link() {
+        let directory = test_dir("windows-private-key-temporary-link");
+
+        generate_identity(&directory.0).expect("generate TLS identity");
+
+        assert!(directory.key_path().is_file(), "the authoritative key was installed");
+        assert_no_temporary_files(&directory);
     }
 
     #[test]

@@ -69,7 +69,6 @@
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#199)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until #199, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
-
 | Protected file substitution | Write access, as another user, to a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW (needs a differently-owned writable directory on the path) | Every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. Whole on Unix, partial on Windows — see § 4.4 |
 
 ## 2. Authentication
@@ -244,24 +243,25 @@ again, which is now roughly every two and a quarter years rather than every rest
 
 ### 4.4 How a protected file is reached
 
-`auth.json`, `runtime.json`, the pinned-key store, the TLS private key and the generated
-certificate are never opened by name. Every directory on the path is opened relative to the one
-above it, starting at the filesystem root and following no link, and the checks that decide
+The files are `auth.json`, `runtime.json`, the pinned-key store, the TLS private key and the
+generated certificate. What protects them differs by platform, and there is no summary that is
+true of both.
+
+**On Unix** they are never opened by name. Every directory on the path is opened relative to the
+one above it, starting at the filesystem root and following no link, and the checks that decide
 whether to trust the file read the descriptor it will be read through. Nothing re-resolves a
 component afterwards, so the name cannot come to mean something else between the check and the
-read.
+read. Each ancestor must be readable as well as searchable: the walk opens directories, and no
+portable search-only descriptor exists.
 
-Each ancestor must be readable as well as searchable: the walk opens directories, and no portable
-search-only descriptor exists.
-
-On Windows the guarantee is narrower, and the difference is chosen rather than overlooked. A
-protected file is opened once, with any reparse point left unfollowed, and every check and read
-uses that one handle — the leaf-read race is closed. Publication, meaning rename, delete and hard
-link, is pathname-based and is not protected against concurrent namespace changes; ancestor
-directories are not protected either. Closing those needs handle-relative opens through
-`NtCreateFile`, which this does not use. The residual actor is a process able to write one of
-these directories, which a process running as the same user commonly can: a bounded and accepted
-risk rather than an absent one.
+**On Windows** a protected file is opened once, with any reparse point left unfollowed, and every
+check and read uses that one handle — the leaf-read race is closed, and that is the whole of what
+is protected. Directories are held as pathnames, so ancestors are not protected and the leaf is
+re-resolved by name whenever it is opened again. Publication, meaning rename, delete and hard
+link, is pathname-based and is not protected against concurrent namespace changes. Closing either
+needs handle-relative opens through `NtCreateFile`, which this does not use. The residual actor is
+a process able to write one of these directories, which a process running as the same user
+commonly can: a bounded and accepted risk rather than an absent one.
 
 A handle-based publication was built and removed. Windows offers no write-through equivalent for
 it, so it dropped a durability guarantee the pathname form carries, and withholding the

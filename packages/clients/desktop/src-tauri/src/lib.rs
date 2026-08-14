@@ -6269,6 +6269,68 @@ mod tests {
     }
 
     #[test]
+    fn accepted_upload_chunk_is_never_discarded_before_finish() {
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(HubUploadFrame::Data(vec![0]))
+            .expect("occupy the bounded body pipe");
+        let (_response_sender, response) = mpsc::channel();
+        let upload = test_upload(sender, response, id);
+        let claim = upload.chunk_in_flight.clone();
+        hub_uploads().lock().unwrap().insert(id, upload.clone());
+
+        let accepted_chunk = std::thread::spawn(move || {
+            send_hub_upload_chunk_with_deadline(
+                id,
+                vec![1],
+                Instant::now() + Duration::from_secs(1),
+            )
+        });
+        let claim_deadline = Instant::now() + Duration::from_secs(1);
+        while !claim.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < claim_deadline,
+                "the chunk did not claim the upload before its pipe wait"
+            );
+            std::thread::yield_now();
+        }
+
+        assert!(
+            enqueue_hub_upload_frame(&upload, HubUploadFrame::Finished, Instant::now()).is_err(),
+            "a terminal frame must not overtake a chunk that is still in flight"
+        );
+
+        let mut body = HubUploadReader {
+            receiver,
+            current: std::io::Cursor::new(Vec::new()),
+            finished: false,
+            aborted: false,
+        };
+        let mut bytes = [0; 1];
+        assert_eq!(body.read(&mut bytes).unwrap(), 1);
+        assert_eq!(bytes, [0]);
+        assert!(
+            accepted_chunk.join().unwrap().is_ok(),
+            "the admitted chunk must enter the body pipe"
+        );
+        assert_eq!(body.read(&mut bytes).unwrap(), 1);
+        assert_eq!(bytes, [1], "the accepted chunk reaches the request body");
+
+        assert!(
+            enqueue_hub_upload_frame(
+                &upload,
+                HubUploadFrame::Finished,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .is_ok(),
+            "finish may follow only after the accepted chunk is in the body"
+        );
+        assert_eq!(body.read(&mut bytes).unwrap(), 0, "only Finished completes the body");
+        assert!(remove_hub_upload(id, &upload));
+    }
+
+    #[test]
     fn stalled_upload_expiry_releases_its_pipe() {
         let before = hub_uploads().lock().unwrap().len();
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);

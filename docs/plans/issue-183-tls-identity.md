@@ -183,11 +183,14 @@ The generated certificate is a self-signed **leaf** valid for the names the hub 
 private key stays confidential and non-replaceable to the extent P11 can establish, and a hub that
 cannot establish it refuses to start rather than generating into a location it cannot defend.
 
-*What is actually built:* the **key** is generated once and kept; the leaf over it is **reissued on
-every start**, so the certificate's bytes change while the identity does not. A client pins the key,
-so a reissue costs it nothing; a browser that stored a certificate exception is asked again, and the
-825-day window never approaches expiry because it restarts each time. Issuing the leaf once is
-**#205**. Read every "generated once" elsewhere in this document as applying to the key.
+*What is actually built:* the key **and** the leaf over it are generated once and kept, in
+`hub-tls-key.pem` and `hub-tls-generated-cert.pem`. A restart serves the same bytes. A new leaf is
+signed only when the stored one cannot serve — absent, unreadable, for another key, expired or within
+seven days of it, dated in the future after a clock moved backwards, or failing the profile a
+generated leaf must have: one self-signed certificate for this key, not a CA, carrying the loopback
+address and a TLS server's usages. That profile is judged rather than the bytes, so a later version
+does not reissue everywhere because a serial differs. The cache is separate from `hub-tls-cert.pem`,
+which is a copy of whatever certificate is in effect and may be an operator's.
 
 *What the substitution actually buys an attacker, since an earlier draft got this wrong.* That draft
 said a substituted key means "the pin the client holds then matches the attacker". It does not: a
@@ -391,11 +394,11 @@ out-of-band channel.
 Whatever pins the hub's identity pins the **SPKI**, not a leaf-certificate fingerprint, so
 re-issuing with the same key leaves existing pins valid.
 
-*Where this applies:* both cases, and it is what makes the generated one work at all. The operator
-whose certificate is renewed by their CA over the same key keeps every client's pin. The generated
-case **reissues its leaf on every start** over the key it retains (#205 proposes issuing it once), so
-P4 is not a nicety there but the reason a pinned client survives a restart. What follows describes the
-operator case, where the only
+*Where this applies:* both cases. The operator whose certificate is renewed by their CA over the same
+key keeps every client's pin. The generated case reuses one leaf across restarts and signs a new one
+only when the stored one cannot serve, so P4 is what makes that renewal invisible to a pinning client
+when it happens — roughly every 818 days, or after a clock anomaly or corruption. What follows
+describes the operator case, where the only
 thing that changes a generated key is P10's rotation, which changes the SPKI **on purpose** and
 therefore invalidates pins by design. The two are not in tension: P4 says a new certificate over an
 old key preserves pins, P10 says a new key breaks them.

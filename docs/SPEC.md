@@ -156,7 +156,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - Static file serving for UI (production build)
 - Health endpoint (`GET /api/health`)
 - Port resolution: CLI flag or `LASTERM_PORT` supplies an explicit override; otherwise the OS assigns a free port and the hub writes it to `runtime.json`.
-- The certificate is the operator's configured pair, or one this hub generates for itself. In the generated case the **key** is created once and kept; the leaf certificate around it is reissued on every start, so its bytes change while the identity does not (**#205** proposes issuing it once). Clients pin the recorded SPKI, which is the key's, and a client that pins is unaffected by the reissue; a browser that stored a certificate exception sees a new one each restart.
+- The certificate is the operator's configured pair, or one this hub generates for itself. In the generated case both the **key** and the leaf over it are created once and kept, in `hub-tls-key.pem` and `hub-tls-generated-cert.pem`; a restart serves the same bytes. A new leaf is signed only when the stored one cannot serve — absent, unreadable, for another key, expired or within seven days of it, dated in the future after a clock moved back, or failing the profile a generated leaf must have. Clients pin the recorded SPKI, which is the key's, so a reissue costs them nothing; a browser that accepted the certificate is asked again only when one happens.
 
 **Session Manager:**
 - Local sessions (daemon): connect to standalone agent via UDS (`connectOrLaunch`), auto-spawn if needed
@@ -758,7 +758,10 @@ Data dir:
 
 State dir:
 ├── runtime.json             # { port, pid, started_at, spki } — written on start, deleted on shutdown
-├── hub-tls-cert.pem         # 0600 — the certificate same-user clients read; reissued at each start
+├── hub-tls-cert.pem         # 0600 — a copy of whatever certificate is in effect, an operator's
+                             #        included. Nothing decides anything from it
+├── hub-tls-generated-cert.pem # 0600 — the leaf this hub generated over its own key, reused across
+                             #        restarts and replaced only when it can no longer serve
 └── hub-tls-key.pem          # 0600 — the durable identity. Losing it re-pairs every client; back it
                              #        up with the same care as a private key, never share it
 ```

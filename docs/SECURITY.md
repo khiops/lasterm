@@ -222,9 +222,12 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 
 **Note:** the hub binds `127.0.0.1` today, which is the default of the local launch rather than the
 design — pairing exists so a client can reach a hub across a network, and #96 covers hardening that
-binding. A configured certificate is used as supplied; otherwise the hub generates its own key **once**
-and keeps it, and reissues a leaf certificate over that key on every start. A client pins the key, so
-the reissue does not affect it; a browser that stored a certificate exception is asked again (#205).
+binding. A configured certificate is used as supplied; otherwise the hub generates its own key **once** and
+keeps it, and issues a leaf over that key **once**, reusing it across restarts. A new leaf is signed
+only when the stored one cannot serve: absent, unreadable, belonging to another key, expired or within
+seven days of it, dated in the future, or no longer matching the shape a generated leaf must have. A
+client pins the key, so a reissue costs it nothing; a browser that accepted the certificate is asked
+again, which is now roughly every two and a quarter years rather than every restart.
 
 ### 4.3 In Memory
 

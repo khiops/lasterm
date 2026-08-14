@@ -21,6 +21,18 @@ vi.mock("@tauri-apps/api/core", () => ({
 	invoke: ipc.invoke,
 }));
 
+function relayFrame(payload: Uint8Array, sequence = 1n, marker = 1): ArrayBuffer {
+	const frame = new Uint8Array(34 + payload.byteLength);
+	const view = new DataView(frame.buffer);
+	view.setBigUint64(0, 41n, true);
+	view.setBigUint64(8, sequence, true);
+	frame.fill(7, 16, 32);
+	frame[32] = 0;
+	frame[33] = marker;
+	frame.set(payload, 34);
+	return frame.buffer;
+}
+
 describe("DesktopWsClient", () => {
 	afterEach(() => {
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
@@ -58,14 +70,15 @@ describe("DesktopWsClient", () => {
 		await client.connect("ws://127.0.0.1:4100/ws");
 
 		const message = encodeMessage({ type: "AUTH_OK", clientId: "client-1" });
-		const frame = new Uint8Array(message.byteLength + 1);
-		frame[0] = 1;
-		frame.set(message, 1);
-		ipc.callback?.(frame.buffer);
+		ipc.callback?.(relayFrame(message));
 		await vi.waitFor(() => expect(received).toEqual(["AUTH_OK"]));
 
 		await vi.waitFor(() =>
-			expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_ack", { relayId: 41 }),
+			expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_ack", {
+				relayId: "41",
+				sequence: "1",
+				acknowledgementToken: "BwcHBwcHBwcHBwcHBwcHBw",
+			}),
 		);
 		client.close();
 	});
@@ -79,10 +92,14 @@ describe("DesktopWsClient", () => {
 		const client = createWsClient();
 		await client.connect("ws://127.0.0.1:4100/ws");
 
-		ipc.callback?.(new Uint8Array([1]).buffer);
+		ipc.callback?.(relayFrame(new Uint8Array()));
 
 		await vi.waitFor(() =>
-			expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_ack", { relayId: 41 }),
+			expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_ack", {
+				relayId: "41",
+				sequence: "1",
+				acknowledgementToken: "BwcHBwcHBwcHBwcHBwcHBw",
+			}),
 		);
 		expect(client.isConnected).toBe(true);
 		expect(consoleError).not.toHaveBeenCalledWith(
@@ -257,7 +274,7 @@ describe("DesktopWsClient", () => {
 		resolveSecond?.(42);
 		await replacement;
 
-		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: 41 });
+		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: "41" });
 		acceptOldSend?.();
 		await Promise.resolve();
 		await Promise.resolve();
@@ -285,7 +302,7 @@ describe("DesktopWsClient", () => {
 		await expect(client.connect("ws://127.0.0.1:4100/ws")).rejects.toThrow("dial failed");
 
 		expect(client.isConnected).toBe(false);
-		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: 41 });
+		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: "41" });
 	});
 
 	it("does not emit reconnect after close supersedes an in-flight reconnect", async () => {
@@ -319,6 +336,28 @@ describe("DesktopWsClient", () => {
 
 		expect(reconnected).not.toHaveBeenCalled();
 		expect(client.isConnected).toBe(false);
-		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: 42 });
+		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: "42" });
+	});
+
+	it("does not let a pending reconnect timer replace a newer manual connection", async () => {
+		vi.useFakeTimers();
+		let connects = 0;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(++connects + 40);
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+		ipc.callback?.({ event: "closed" });
+		await client.connect("ws://127.0.0.1:4100/ws");
+		await vi.advanceTimersByTimeAsync(30_000);
+
+		expect(connects).toBe(2);
+		expect(client.isConnected).toBe(true);
+		client.close();
 	});
 });

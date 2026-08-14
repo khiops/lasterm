@@ -1,8 +1,9 @@
 use lasterm_process_lock::ProcessLock;
 pub mod tls_identity;
+use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -11,7 +12,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -27,7 +28,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 static HUB_PORT: AtomicU16 = AtomicU16::new(0);
 static HUB_CONNECTION: Mutex<Option<HubConnection>> = Mutex::new(None);
 static NEXT_RELAY_ID: AtomicU64 = AtomicU64::new(1);
-static HUB_UPLOADS: OnceLock<Mutex<HashMap<u64, HubUpload>>> = OnceLock::new();
+static HUB_UPLOADS: OnceLock<Mutex<HashMap<u64, Arc<HubUpload>>>> = OnceLock::new();
+static HUB_UPLOAD_DEADLINES: OnceLock<Arc<HubUploadDeadlines>> = OnceLock::new();
 static ACTIVE_HUB_RELAYS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static RELAY_RESPONSE_ACKS: OnceLock<Mutex<HashMap<u64, Arc<RelayResponseAck>>>> = OnceLock::new();
 static HUB_WS_RELAYS: OnceLock<Mutex<HashMap<u64, HubWsRelay>>> = OnceLock::new();
@@ -127,7 +129,10 @@ const MAX_ACTIVE_HUB_RELAYS: usize = 8;
 /// This is deliberately no longer than reqwest's complete request timeout. An
 /// abandoned webview can therefore retain at most one response frame for 25 s.
 const HUB_RELAY_ACK_TIMEOUT: Duration = HUB_REQUEST_TIMEOUT;
-const RELAY_RESPONSE_FRAME_HEADER_BYTES: usize = 17;
+/// Every native-to-webview relay frame has one identity envelope: relay id,
+/// monotonically increasing position, and an OS-random acknowledgement token.
+const RELAY_FRAME_ENVELOPE_BYTES: usize = 32;
+const RELAY_RESPONSE_FRAME_HEADER_BYTES: usize = RELAY_FRAME_ENVELOPE_BYTES + 1;
 const RELAY_RESPONSE_DATA_FRAME: u8 = 0;
 const RELAY_RESPONSE_END_FRAME: u8 = 1;
 const RELAY_RESPONSE_ERROR_FRAME: u8 = 2;
@@ -137,7 +142,8 @@ const RELAY_RESPONSE_ERROR_FRAME: u8 = 2;
 const HUB_WS_MAX_MESSAGE_BYTES: usize = RELAY_CHUNK_BYTES * 2;
 /// One capped WebSocket message plus the one IPC frame awaiting its ACK.
 #[cfg(test)]
-const HUB_WS_OUTPUT_BUFFERED_BYTES: usize = HUB_WS_MAX_MESSAGE_BYTES + RELAY_CHUNK_BYTES + 1;
+const HUB_WS_OUTPUT_BUFFERED_BYTES: usize =
+    HUB_WS_MAX_MESSAGE_BYTES + RELAY_RESPONSE_FRAME_HEADER_BYTES + RELAY_CHUNK_BYTES + 1;
 /// At most this many unsent webview-to-hub messages exist in native memory.
 const HUB_WS_INPUT_QUEUE_MESSAGES: usize = 2;
 const INSTANCE_ACQUIRE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -363,13 +369,14 @@ const HUB_PIN_STORE_FILE: &str = "known_hubs.json";
 struct RelayHubRequest {
     method: String,
     path: String,
+    port: u16,
     headers: Vec<(String, String)>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RelayHubHead {
-    id: u64,
+    id: String,
     status: u16,
     status_text: String,
     headers: Vec<(String, String)>,
@@ -378,13 +385,24 @@ struct RelayHubHead {
 /// The two bounded queues which make an in-progress multipart upload a pipe,
 /// not a `Vec` containing the file.
 struct HubUpload {
-    sender: mpsc::SyncSender<HubUploadFrame>,
-    response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
+    /// This mutex is the owner of the upload lifecycle. Holding it covers both
+    /// testing whether the upload is open and inserting the frame into its
+    /// bounded body pipe, so a terminal frame cannot overtake accepted data.
+    pipe: Mutex<HubUploadPipe>,
+    response: Mutex<Option<mpsc::Receiver<Result<reqwest::blocking::Response, String>>>>,
     relay_id: u64,
-    /// Exactly one IPC chunk command may wait on this pipe. Without this claim,
-    /// duplicate commands could each retain one bounded frame and a thread for
-    /// the full request deadline while still counting as one admitted relay.
-    chunk_in_flight: Arc<AtomicBool>,
+}
+
+struct HubUploadPipe {
+    sender: Option<mpsc::SyncSender<HubUploadFrame>>,
+    phase: HubUploadPhase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HubUploadPhase {
+    Open,
+    Finished,
+    Aborted,
 }
 
 /// Upload-body termination is data on the pipe, not a side effect of dropping
@@ -401,8 +419,15 @@ enum HubUploadFrame {
 /// attributable even when a frame reaches JavaScript before its command result.
 struct RelayResponseAck {
     sender: mpsc::SyncSender<bool>,
-    outstanding_sequence: AtomicU64,
+    outstanding: Mutex<Option<RelayFrameIdentity>>,
     cancelled: AtomicBool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RelayFrameIdentity {
+    relay_id: u64,
+    sequence: u64,
+    acknowledgement_token: [u8; 16],
 }
 
 /// State owned by one IPC-backed hub WebSocket. The input and acknowledgement
@@ -410,8 +435,8 @@ struct RelayResponseAck {
 /// webview into an unbounded native queue.
 struct HubWsRelay {
     input: tokio::sync::mpsc::Sender<Vec<u8>>,
-    acknowledgement: tokio::sync::mpsc::Sender<()>,
-    acknowledgement_pending: Arc<AtomicBool>,
+    acknowledgement: tokio::sync::mpsc::Sender<RelayFrameIdentity>,
+    outstanding: Arc<Mutex<Option<RelayFrameIdentity>>>,
     close: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
@@ -420,6 +445,76 @@ struct HubUploadReader {
     current: std::io::Cursor<Vec<u8>>,
     finished: bool,
     aborted: bool,
+}
+
+/// A single scheduler owns all upload deadlines. Removing an upload removes
+/// its identity from both indexes, so short-lived uploads retain neither a
+/// thread nor a dormant timer entry.
+struct HubUploadDeadlines {
+    state: Mutex<HubUploadDeadlineState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct HubUploadDeadlineState {
+    entries: HashMap<u64, Instant>,
+    schedule: BTreeMap<Instant, HashSet<u64>>,
+}
+
+impl HubUploadDeadlines {
+    fn insert(&self, upload_id: u64) {
+        let deadline = Instant::now() + HUB_REQUEST_TIMEOUT;
+        let mut state = self.state.lock().expect("hub upload deadline lock poisoned");
+        state.entries.insert(upload_id, deadline);
+        state.schedule.entry(deadline).or_default().insert(upload_id);
+        self.changed.notify_one();
+    }
+
+    fn remove(&self, upload_id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(deadline) = state.entries.remove(&upload_id) {
+                let remove_slot = if let Some(ids) = state.schedule.get_mut(&deadline) {
+                    ids.remove(&upload_id);
+                    ids.is_empty()
+                } else {
+                    false
+                };
+                if remove_slot {
+                    state.schedule.remove(&deadline);
+                }
+            }
+            self.changed.notify_one();
+        }
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.state.lock().map(|state| state.entries.len()).unwrap_or(0)
+    }
+
+    fn next_expired(&self) -> Vec<u64> {
+        let mut state = self.state.lock().expect("hub upload deadline lock poisoned");
+        loop {
+            let Some((&deadline, _)) = state.schedule.first_key_value() else {
+                state = self.changed.wait(state).expect("hub upload deadline lock poisoned");
+                continue;
+            };
+            let now = Instant::now();
+            if deadline > now {
+                let (next, _) = self
+                    .changed
+                    .wait_timeout(state, deadline.saturating_duration_since(now))
+                    .expect("hub upload deadline lock poisoned");
+                state = next;
+                continue;
+            }
+            let ids = state.schedule.remove(&deadline).unwrap_or_default();
+            for id in &ids {
+                state.entries.remove(id);
+            }
+            return ids.into_iter().collect();
+        }
+    }
 }
 
 impl Read for HubUploadReader {
@@ -2309,8 +2404,24 @@ fn get_hub_port() -> Result<u16, String> {
     }
 }
 
-fn hub_uploads() -> &'static Mutex<HashMap<u64, HubUpload>> {
+fn hub_uploads() -> &'static Mutex<HashMap<u64, Arc<HubUpload>>> {
     HUB_UPLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn hub_upload_deadlines() -> &'static Arc<HubUploadDeadlines> {
+    HUB_UPLOAD_DEADLINES.get_or_init(|| {
+        let deadlines = Arc::new(HubUploadDeadlines {
+            state: Mutex::new(HubUploadDeadlineState::default()),
+            changed: Condvar::new(),
+        });
+        let worker = deadlines.clone();
+        std::thread::spawn(move || loop {
+            for upload_id in worker.next_expired() {
+                expire_hub_upload(upload_id);
+            }
+        });
+        deadlines
+    })
 }
 
 fn active_hub_relays() -> &'static Mutex<HashSet<u64>> {
@@ -2337,6 +2448,12 @@ fn admit_hub_relay(relays: &mut HashSet<u64>, id: u64) -> bool {
 
 fn release_hub_relay(id: u64) {
     let _ = active_hub_relays().lock().map(|mut relays| relays.remove(&id));
+}
+
+fn parse_relay_identifier(value: &str, label: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("{label} is not an exact unsigned identifier"))
 }
 
 fn relay_response_acks() -> &'static Mutex<HashMap<u64, Arc<RelayResponseAck>>> {
@@ -2448,7 +2565,7 @@ fn send_relay_hub_request(
     body: Option<reqwest::blocking::Body>,
 ) -> Result<reqwest::blocking::Response, String> {
     validate_relay_request_headers(&request.headers)?;
-    let connection = established_hub_connection()?;
+    let connection = relay_request_connection(request)?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|error| format!("relay request has an invalid HTTP method: {error}"))?;
     let mut builder = connection
@@ -2467,6 +2584,17 @@ fn send_relay_hub_request(
     builder
         .send()
         .map_err(|error| format!("pinned hub request failed: {error}"))
+}
+
+/// The renderer supplies the URL authority alongside the path. Native still
+/// chooses the pinned connection, but only after proving it is the endpoint the
+/// URL named; this makes a different port a refusal, never a redirect.
+fn relay_request_connection(request: &RelayHubRequest) -> Result<HubConnection, String> {
+    let connection = established_hub_connection()?;
+    if request.port != connection.port {
+        return Err("relay request names a different hub endpoint".to_string());
+    }
+    Ok(connection)
 }
 
 /// Framing and hop-by-hop fields describe the connection chosen by the native
@@ -2498,7 +2626,7 @@ fn validate_relay_request_headers(headers: &[(String, String)]) -> Result<(), St
 
 fn response_head(response: &reqwest::blocking::Response, id: u64) -> RelayHubHead {
     RelayHubHead {
-        id,
+        id: id.to_string(),
         status: response.status().as_u16(),
         status_text: response
             .status()
@@ -2521,13 +2649,49 @@ fn response_head(response: &reqwest::blocking::Response, id: u64) -> RelayHubHea
 /// Push at most one response frame past the hub socket until the webview has
 /// accepted the preceding frame. If it stops reading, this thread stops reading
 /// too and TCP carries lossless backpressure to the hub.
-fn relay_response_frame(id: u64, sequence: u64, kind: u8, payload: &[u8]) -> Vec<u8> {
+fn new_relay_frame_identity(relay_id: u64, sequence: u64) -> RelayFrameIdentity {
+    let mut acknowledgement_token = [0_u8; 16];
+    getrandom::getrandom(&mut acknowledgement_token).expect("the operating system random source is available");
+    RelayFrameIdentity {
+        relay_id,
+        sequence,
+        acknowledgement_token,
+    }
+}
+
+fn relay_response_frame(identity: &RelayFrameIdentity, kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(RELAY_RESPONSE_FRAME_HEADER_BYTES + payload.len());
-    frame.extend_from_slice(&id.to_le_bytes());
-    frame.extend_from_slice(&sequence.to_le_bytes());
+    frame.extend_from_slice(&identity.relay_id.to_le_bytes());
+    frame.extend_from_slice(&identity.sequence.to_le_bytes());
+    frame.extend_from_slice(&identity.acknowledgement_token);
     frame.push(kind);
     frame.extend_from_slice(payload);
     frame
+}
+
+fn publish_relay_response_frame(
+    channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    acknowledgement: &RelayResponseAck,
+    identity: RelayFrameIdentity,
+    kind: u8,
+    payload: &[u8],
+) -> bool {
+    if channel
+        .send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
+            &identity, kind, payload,
+        )))
+        .is_err()
+    {
+        return false;
+    }
+    // This store occurs only after `Channel::send` has published the frame.
+    // A direct command arriving before publication cannot manufacture credit.
+    if kind == RELAY_RESPONSE_DATA_FRAME {
+        if let Ok(mut outstanding) = acknowledgement.outstanding.lock() {
+            *outstanding = Some(identity);
+        }
+    }
+    true
 }
 
 fn wait_for_relay_response_ack(
@@ -2557,7 +2721,7 @@ fn relay_response(
     let (ack_sender, ack_receiver) = mpsc::sync_channel(1);
     let acknowledgement = Arc::new(RelayResponseAck {
         sender: ack_sender,
-        outstanding_sequence: AtomicU64::new(0),
+        outstanding: Mutex::new(None),
         cancelled: AtomicBool::new(false),
     });
     relay_response_acks()
@@ -2575,36 +2739,34 @@ fn relay_response(
                 Ok(read) => read,
                 Err(error) => {
                     let message = format!("pinned hub response failed: {error}");
-                    let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
-                        id,
-                        sequence,
+                    let _ = publish_relay_response_frame(
+                        &channel,
+                        &acknowledgement,
+                        new_relay_frame_identity(id, sequence),
                         RELAY_RESPONSE_ERROR_FRAME,
                         message.as_bytes(),
-                    )));
+                    );
                     break;
                 }
             };
             if read == 0 {
-                let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
-                    id,
-                    sequence,
+                let _ = publish_relay_response_frame(
+                    &channel,
+                    &acknowledgement,
+                    new_relay_frame_identity(id, sequence),
                     RELAY_RESPONSE_END_FRAME,
                     &[],
-                )));
+                );
                 break;
             }
-            acknowledgement
-                .outstanding_sequence
-                .store(sequence, Ordering::Release);
-            if channel
-                .send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
-                    id,
-                    sequence,
-                    RELAY_RESPONSE_DATA_FRAME,
-                    &buffer[..read],
-                )))
-                .is_err()
-            {
+            let identity = new_relay_frame_identity(id, sequence);
+            if !publish_relay_response_frame(
+                &channel,
+                &acknowledgement,
+                identity,
+                RELAY_RESPONSE_DATA_FRAME,
+                &buffer[..read],
+            ) {
                 break;
             }
             sequence = sequence.saturating_add(1);
@@ -2613,12 +2775,13 @@ fn relay_response(
                 Ok(true) => break,
                 Err(error) => {
                     let message = relay_response_ack_failure_message(error);
-                    let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
-                        id,
-                        sequence,
+                    let _ = publish_relay_response_frame(
+                        &channel,
+                        &acknowledgement,
+                        new_relay_frame_identity(id, sequence),
                         RELAY_RESPONSE_ERROR_FRAME,
                         message.as_bytes(),
-                    )));
+                    );
                     break;
                 }
             }
@@ -2649,8 +2812,9 @@ fn relay_hub_request(
 }
 
 #[tauri::command]
-fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
+fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
     validate_relay_request_headers(&request.headers)?;
+    relay_request_connection(&request)?;
     let mut uploads = hub_uploads()
         .lock()
         .map_err(|_| "relay upload map lock poisoned".to_string())?;
@@ -2671,16 +2835,18 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
     });
     uploads.insert(
         id,
-        HubUpload {
-            sender,
-            response: response_receiver,
+        Arc::new(HubUpload {
+            pipe: Mutex::new(HubUploadPipe {
+                sender: Some(sender),
+                phase: HubUploadPhase::Open,
+            }),
+            response: Mutex::new(Some(response_receiver)),
             relay_id: id,
-            chunk_in_flight: Arc::new(AtomicBool::new(false)),
-        },
+        }),
     );
     drop(uploads);
-    schedule_hub_upload_expiry(id);
-    Ok(id)
+    hub_upload_deadlines().insert(id);
+    Ok(id.to_string())
 }
 
 #[tauri::command]
@@ -2689,7 +2855,7 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
         .headers()
         .get("X-Lasterm-Upload-Id")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| parse_relay_identifier(value, "multipart relay upload id").ok())
         .ok_or_else(|| "multipart relay chunk is missing its upload id".to_string())?;
     let bytes = match request.body() {
         tauri::ipc::InvokeBody::Raw(bytes)
@@ -2707,8 +2873,6 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
     send_hub_upload_chunk(upload_id, bytes.clone())
 }
 
-/// A broken upload reader means its background request has finished. Release
-/// the map entry as part of that failed chunk, not at a later upload attempt.
 fn send_hub_upload_chunk(upload_id: u64, bytes: Vec<u8>) -> Result<(), String> {
     send_hub_upload_chunk_with_deadline(upload_id, bytes, Instant::now() + HUB_REQUEST_TIMEOUT)
 }
@@ -2718,60 +2882,72 @@ fn send_hub_upload_chunk_with_deadline(
     bytes: Vec<u8>,
     deadline: Instant,
 ) -> Result<(), String> {
-    let (sender, chunk_in_flight) = hub_uploads()
+    let upload = hub_uploads()
         .lock()
         .map_err(|_| "relay upload map lock poisoned".to_string())?
         .get(&upload_id)
-        .map(|upload| (upload.sender.clone(), upload.chunk_in_flight.clone()))
+        .cloned()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    if chunk_in_flight
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Err("multipart relay upload already has a chunk in flight".to_string());
+    if enqueue_hub_upload_frame(&upload, HubUploadFrame::Data(bytes), deadline).is_ok() {
+        return Ok(());
     }
-    let _chunk_claim = UploadChunkClaim(chunk_in_flight);
-    send_hub_upload_chunk_until(upload_id, sender, bytes, deadline)
-}
-
-/// Releases the per-upload command claim even when a blocked pipe fails or is
-/// removed concurrently with its sender clone.
-struct UploadChunkClaim(Arc<AtomicBool>);
-
-impl Drop for UploadChunkClaim {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-fn send_hub_upload_chunk_until(
-    upload_id: u64,
-    sender: mpsc::SyncSender<HubUploadFrame>,
-    bytes: Vec<u8>,
-    deadline: Instant,
-) -> Result<(), String> {
-    send_hub_upload_frame_until(sender, HubUploadFrame::Data(bytes), deadline).map_err(|_| {
+    // A chunk racing a successfully published `Finished` frame was refused;
+    // it must not tear down that finisher's response relay. Only a broken pipe
+    // changes the upload to Aborted and releases its admission slot.
+    let aborted = upload
+        .pipe
+        .lock()
+        .map(|pipe| pipe.phase == HubUploadPhase::Aborted)
+        .unwrap_or(true);
+    if aborted {
         release_hub_upload(upload_id);
-        "multipart relay upload stopped or timed out before its body completed".to_string()
-    })
+    }
+    Err("multipart relay upload stopped or timed out before its body completed".to_string())
 }
 
-/// A bounded pipe can be full while the request thread is still draining its
-/// preceding frame. Limit that wait just like chunk delivery; dropping the
-/// sender after a failed terminal delivery is still an error to the reader,
-/// never a clean EOF.
-fn send_hub_upload_frame_until(
-    sender: mpsc::SyncSender<HubUploadFrame>,
+/// `pipe` remains locked while `frame` enters the bounded queue. This is the
+/// linearization point for every lifecycle transition: no finish, cancellation,
+/// or expiry may insert a terminal frame between an accepted chunk's open check
+/// and its data frame.
+fn enqueue_hub_upload_frame(
+    upload: &HubUpload,
     frame: HubUploadFrame,
     deadline: Instant,
 ) -> Result<(), HubUploadFrame> {
+    let mut pipe = match upload.pipe.lock() {
+        Ok(pipe) => pipe,
+        Err(_) => return Err(frame),
+    };
+    if pipe.phase != HubUploadPhase::Open {
+        return Err(frame);
+    }
+    let terminal_phase = match &frame {
+        HubUploadFrame::Finished => Some(HubUploadPhase::Finished),
+        HubUploadFrame::Aborted => Some(HubUploadPhase::Aborted),
+        HubUploadFrame::Data(_) => None,
+    };
     let mut frame = frame;
     loop {
+        let Some(sender) = pipe.sender.as_ref() else {
+            pipe.phase = HubUploadPhase::Aborted;
+            return Err(frame);
+        };
         match sender.try_send(frame) {
-            Ok(()) => return Ok(()),
-            Err(mpsc::TrySendError::Disconnected(returned)) => return Err(returned),
+            Ok(()) => {
+                if let Some(phase) = terminal_phase {
+                    pipe.phase = phase;
+                }
+                return Ok(());
+            }
+            Err(mpsc::TrySendError::Disconnected(returned)) => {
+                pipe.phase = HubUploadPhase::Aborted;
+                pipe.sender.take();
+                return Err(returned);
+            }
             Err(mpsc::TrySendError::Full(returned)) => {
                 if Instant::now() >= deadline {
+                    pipe.phase = HubUploadPhase::Aborted;
+                    pipe.sender.take();
                     return Err(returned);
                 }
                 frame = returned;
@@ -2783,14 +2959,19 @@ fn send_hub_upload_frame_until(
 
 #[tauri::command]
 fn relay_hub_upload_finish(
-    upload_id: u64,
+    upload_id: String,
     response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RelayHubHead, String> {
-    let upload = take_hub_upload(upload_id)?
+    let upload_id = parse_relay_identifier(&upload_id, "multipart relay upload id")?;
+    let upload = hub_uploads()
+        .lock()
+        .map_err(|_| "relay upload map lock poisoned".to_string())?
+        .get(&upload_id)
+        .cloned()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
     let relay_id = upload.relay_id;
-    if send_hub_upload_frame_until(
-        upload.sender.clone(),
+    if enqueue_hub_upload_frame(
+        &upload,
         HubUploadFrame::Finished,
         Instant::now() + HUB_REQUEST_TIMEOUT,
     )
@@ -2799,8 +2980,14 @@ fn relay_hub_upload_finish(
         release_hub_relay(relay_id);
         return Err("multipart relay upload stopped or timed out before its body completed".to_string());
     }
-    drop(upload.sender);
-    let hub_response = match upload.response.recv_timeout(HUB_REQUEST_TIMEOUT) {
+    remove_hub_upload(upload_id, &upload);
+    let response_receiver = upload
+        .response
+        .lock()
+        .map_err(|_| "multipart relay upload response lock poisoned".to_string())?
+        .take()
+        .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
+    let hub_response = match response_receiver.recv_timeout(HUB_REQUEST_TIMEOUT) {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
             release_hub_relay(relay_id);
@@ -2820,73 +3007,101 @@ fn relay_hub_upload_finish(
 
 /// Idempotent: `finish` may have won the failure race and already removed it.
 #[tauri::command]
-fn relay_hub_upload_cancel(upload_id: u64) {
-    release_hub_upload(upload_id);
+fn relay_hub_upload_cancel(upload_id: String) {
+    if let Ok(upload_id) = parse_relay_identifier(&upload_id, "multipart relay upload id") {
+        release_hub_upload(upload_id);
+    }
 }
 
-fn take_hub_upload(upload_id: u64) -> Result<Option<HubUpload>, String> {
+fn remove_hub_upload(upload_id: u64, expected: &Arc<HubUpload>) -> bool {
     let mut uploads = hub_uploads()
         .lock()
-        .map_err(|_| "relay upload map lock poisoned".to_string())?;
-    Ok(uploads.remove(&upload_id))
+        .expect("relay upload map lock poisoned");
+    let matches = uploads
+        .get(&upload_id)
+        .is_some_and(|upload| Arc::ptr_eq(upload, expected));
+    if matches {
+        uploads.remove(&upload_id);
+        hub_upload_deadlines().remove(upload_id);
+    }
+    matches
 }
 
 fn release_hub_upload(upload_id: u64) {
     let upload = hub_uploads()
         .lock()
         .ok()
-        .and_then(|mut uploads| uploads.remove(&upload_id));
-    if let Some(upload) = &upload {
-        release_hub_relay(upload.relay_id);
-        // Best-effort because a full bounded data pipe must not make
-        // cancellation wait forever. If it cannot be queued, dropping the
-        // sender yields BrokenPipe in HubUploadReader, which is also an abort.
-        let _ = upload.sender.try_send(HubUploadFrame::Aborted);
+        .and_then(|uploads| uploads.get(&upload_id).cloned());
+    if let Some(upload) = upload {
+        let _ = enqueue_hub_upload_frame(&upload, HubUploadFrame::Aborted, Instant::now() + HUB_REQUEST_TIMEOUT);
+        if remove_hub_upload(upload_id, &upload) {
+            release_hub_relay(upload.relay_id);
+        }
     }
-    drop(upload);
-}
-
-fn schedule_hub_upload_expiry(upload_id: u64) {
-    std::thread::spawn(move || {
-        std::thread::sleep(HUB_REQUEST_TIMEOUT);
-        expire_hub_upload(upload_id);
-    });
 }
 
 fn expire_hub_upload(upload_id: u64) {
     release_hub_upload(upload_id);
 }
 
-fn accept_relay_response_ack(acknowledgement: &RelayResponseAck, sequence: u64) {
+fn accept_relay_response_ack(acknowledgement: &RelayResponseAck, identity: &RelayFrameIdentity) {
     if acknowledgement
-        .outstanding_sequence
-        .compare_exchange(sequence, 0, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+        .outstanding
+        .lock()
+        .ok()
+        .and_then(|mut outstanding| {
+            (outstanding.as_ref() == Some(identity)).then(|| outstanding.take())
+        })
+        .is_some()
     {
         let _ = acknowledgement.sender.try_send(false);
     }
 }
 
 #[tauri::command]
-fn relay_hub_response_ack(response_id: u64, sequence: u64) {
+fn relay_hub_response_ack(response_id: String, sequence: String, acknowledgement_token: String) {
+    let Ok(relay_id) = parse_relay_identifier(&response_id, "desktop response relay id") else {
+        return;
+    };
+    let Ok(sequence) = parse_relay_identifier(&sequence, "desktop response frame sequence") else {
+        return;
+    };
+    let Ok(token) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(acknowledgement_token) else {
+        return;
+    };
+    let Ok(acknowledgement_token) = <[u8; 16]>::try_from(token.as_slice()) else {
+        return;
+    };
     let acknowledgement = relay_response_acks()
         .lock()
         .ok()
-        .and_then(|acks| acks.get(&response_id).cloned());
+        .and_then(|acks| acks.get(&relay_id).cloned());
     if let Some(acknowledgement) = acknowledgement {
-        accept_relay_response_ack(&acknowledgement, sequence);
+        accept_relay_response_ack(
+            &acknowledgement,
+            &RelayFrameIdentity {
+                relay_id,
+                sequence,
+                acknowledgement_token,
+            },
+        );
     }
 }
 
 #[tauri::command]
-fn relay_hub_response_cancel(response_id: u64) {
+fn relay_hub_response_cancel(response_id: String) {
+    let Ok(response_id) = parse_relay_identifier(&response_id, "desktop response relay id") else {
+        return;
+    };
     let acknowledgement = relay_response_acks()
         .lock()
         .ok()
         .and_then(|acks| acks.get(&response_id).cloned());
     if let Some(acknowledgement) = acknowledgement {
         acknowledgement.cancelled.store(true, Ordering::Release);
-        acknowledgement.outstanding_sequence.store(0, Ordering::Release);
+        if let Ok(mut outstanding) = acknowledgement.outstanding.lock() {
+            *outstanding = None;
+        }
         let _ = acknowledgement.sender.try_send(true);
     }
 }
@@ -2917,8 +3132,10 @@ enum HubWsRelayEnd {
 async fn relay_hub_ws_binary(
     bytes: Vec<u8>,
     channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-    acknowledgement: &mut tokio::sync::mpsc::Receiver<()>,
-    acknowledgement_pending: &Arc<AtomicBool>,
+    relay_id: u64,
+    next_sequence: &mut u64,
+    acknowledgement: &mut tokio::sync::mpsc::Receiver<RelayFrameIdentity>,
+    outstanding: &Arc<Mutex<Option<RelayFrameIdentity>>>,
     close: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> HubWsRelayEnd {
     if bytes.len() > HUB_WS_MAX_MESSAGE_BYTES {
@@ -2939,21 +3156,26 @@ async fn relay_hub_ws_binary(
     };
     let chunk_count = chunks.len();
     for (index, chunk) in chunks.into_iter().enumerate() {
-        // The first byte identifies the end of this one WebSocket message. IPC
-        // frames stay raw bytes; the desktop client reassembles them before its
-        // normal MessagePack decode.
-        let mut frame = Vec::with_capacity(chunk.len() + 1);
+        // The first payload byte identifies the end of this WebSocket message;
+        // the native-to-webview envelope ahead of it is identical to REST.
+        let identity = new_relay_frame_identity(relay_id, *next_sequence);
+        *next_sequence = next_sequence.saturating_add(1);
+        let mut frame = relay_response_frame(&identity, RELAY_RESPONSE_DATA_FRAME, &[]);
         frame.push(u8::from(index + 1 == chunk_count));
         frame.extend_from_slice(chunk);
-        // An ACK is meaningful only after this frame has become outstanding.
-        // Clearing before queueing it makes early and duplicate ACKs inert.
-        acknowledgement_pending.store(true, Ordering::Release);
+        if let Ok(mut pending) = outstanding.lock() {
+            *pending = None;
+        }
         if channel
             .send(tauri::ipc::InvokeResponseBody::Raw(frame))
             .is_err()
         {
-            acknowledgement_pending.store(false, Ordering::Release);
             return HubWsRelayEnd::Stopped;
+        }
+        // Published before the credit exists: a direct early acknowledgement
+        // sees no outstanding identity and is inert.
+        if let Ok(mut pending) = outstanding.lock() {
+            *pending = Some(identity);
         }
         tokio::select! {
             acknowledged = acknowledgement.recv() => {
@@ -2963,7 +3185,9 @@ async fn relay_hub_ws_binary(
             }
             _ = close.recv() => return HubWsRelayEnd::Stopped,
             _ = tokio::time::sleep(HUB_RELAY_ACK_TIMEOUT) => {
-                acknowledgement_pending.store(false, Ordering::Release);
+                if let Ok(mut pending) = outstanding.lock() {
+                    *pending = None;
+                }
                 return HubWsRelayEnd::TransportFailure("desktop WebSocket relay acknowledgement timed out".to_string());
             }
         }
@@ -3020,12 +3244,14 @@ async fn relay_hub_ws_stream(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    id: u64,
     mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    mut acknowledgement: tokio::sync::mpsc::Receiver<()>,
-    acknowledgement_pending: Arc<AtomicBool>,
+    mut acknowledgement: tokio::sync::mpsc::Receiver<RelayFrameIdentity>,
+    outstanding: Arc<Mutex<Option<RelayFrameIdentity>>>,
     mut close: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     let (mut writer, mut reader) = socket.split();
+    let mut next_sequence = 1_u64;
     loop {
         tokio::select! {
             _ = close.recv() => break,
@@ -3042,7 +3268,7 @@ async fn relay_hub_ws_stream(
             }
             received = reader.next() => match received {
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
-                    match relay_hub_ws_binary(bytes.to_vec(), &channel, &mut acknowledgement, &acknowledgement_pending, &mut close).await {
+                    match relay_hub_ws_binary(bytes.to_vec(), &channel, id, &mut next_sequence, &mut acknowledgement, &outstanding, &mut close).await {
                         HubWsRelayEnd::Closed => {},
                         HubWsRelayEnd::Stopped => break,
                         HubWsRelayEnd::TransportFailure(error) => {
@@ -3082,7 +3308,7 @@ async fn relay_hub_ws_stream(
 #[tauri::command]
 async fn relay_hub_ws_connect(
     stream: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-) -> Result<u64, String> {
+) -> Result<String, String> {
     let id = reserve_hub_relay()?;
     let connection = match established_hub_connection() {
         Ok(connection) => connection,
@@ -3121,14 +3347,14 @@ async fn relay_hub_ws_connect(
 
     let (input_sender, input) = tokio::sync::mpsc::channel(HUB_WS_INPUT_QUEUE_MESSAGES);
     let (acknowledgement_sender, acknowledgement) = tokio::sync::mpsc::channel(1);
-    let acknowledgement_pending = Arc::new(AtomicBool::new(false));
+    let outstanding = Arc::new(Mutex::new(None));
     let (close_sender, close) = tokio::sync::mpsc::unbounded_channel();
     if hub_ws_relays().lock().map(|mut relays| relays.insert(
             id,
             HubWsRelay {
                 input: input_sender,
                 acknowledgement: acknowledgement_sender,
-                acknowledgement_pending: acknowledgement_pending.clone(),
+                outstanding: outstanding.clone(),
                 close: close_sender,
             },
         )).is_err() {
@@ -3136,10 +3362,10 @@ async fn relay_hub_ws_connect(
         return Err("hub WebSocket relay map lock poisoned".to_string());
     }
     tauri::async_runtime::spawn(async move {
-        relay_hub_ws_stream(socket, stream, input, acknowledgement, acknowledgement_pending, close).await;
+        relay_hub_ws_stream(socket, stream, id, input, acknowledgement, outstanding, close).await;
         finish_hub_ws_relay(id);
     });
-    Ok(id)
+    Ok(id.to_string())
 }
 
 fn finish_hub_ws_relay(id: u64) {
@@ -3156,7 +3382,7 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
         .headers()
         .get("X-Lasterm-Ws-Id")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| parse_relay_identifier(value, "WebSocket relay id").ok())
         .ok_or_else(|| "WebSocket input is missing its relay id".to_string())?;
     let bytes = match request.body() {
         tauri::ipc::InvokeBody::Raw(bytes)
@@ -3193,26 +3419,57 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn relay_hub_ws_ack(relay_id: u64) {
+fn relay_hub_ws_ack(relay_id: String, sequence: String, acknowledgement_token: String) {
+    let Ok(relay_id) = parse_relay_identifier(&relay_id, "WebSocket relay id") else {
+        return;
+    };
+    let Ok(sequence) = parse_relay_identifier(&sequence, "WebSocket relay frame sequence") else {
+        return;
+    };
+    let Ok(token) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(acknowledgement_token) else {
+        return;
+    };
+    let Ok(acknowledgement_token) = <[u8; 16]>::try_from(token.as_slice()) else {
+        return;
+    };
     let relay = hub_ws_relays().lock().ok().and_then(|relays| {
         relays
             .get(&relay_id)
-            .map(|relay| (relay.acknowledgement.clone(), relay.acknowledgement_pending.clone()))
+            .map(|relay| (relay.acknowledgement.clone(), relay.outstanding.clone()))
     });
-    if let Some((sender, pending)) = relay {
-        accept_hub_ws_ack(&sender, &pending);
+    if let Some((sender, outstanding)) = relay {
+        accept_hub_ws_ack(
+            &sender,
+            &outstanding,
+            RelayFrameIdentity {
+                relay_id,
+                sequence,
+                acknowledgement_token,
+            },
+        );
     }
 }
 
-fn accept_hub_ws_ack(sender: &tokio::sync::mpsc::Sender<()>, pending: &AtomicBool) {
-    if pending.swap(false, Ordering::AcqRel) {
-        let _ = sender.try_send(());
+fn accept_hub_ws_ack(
+    sender: &tokio::sync::mpsc::Sender<RelayFrameIdentity>,
+    outstanding: &Mutex<Option<RelayFrameIdentity>>,
+    identity: RelayFrameIdentity,
+) {
+    if outstanding
+        .lock()
+        .ok()
+        .and_then(|mut current| (current.as_ref() == Some(&identity)).then(|| current.take()))
+        .is_some()
+    {
+        let _ = sender.try_send(identity);
     }
 }
 
 #[tauri::command]
-fn relay_hub_ws_close(relay_id: u64) {
-    close_hub_ws_relay(relay_id);
+fn relay_hub_ws_close(relay_id: String) {
+    if let Ok(relay_id) = parse_relay_identifier(&relay_id, "WebSocket relay id") {
+        close_hub_ws_relay(relay_id);
+    }
 }
 
 fn close_hub_ws_relay(relay_id: u64) {
@@ -4326,6 +4583,29 @@ mod tests {
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
 
+    fn test_upload(
+        sender: mpsc::SyncSender<HubUploadFrame>,
+        response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
+        relay_id: u64,
+    ) -> Arc<HubUpload> {
+        Arc::new(HubUpload {
+            pipe: Mutex::new(HubUploadPipe {
+                sender: Some(sender),
+                phase: HubUploadPhase::Open,
+            }),
+            response: Mutex::new(Some(response)),
+            relay_id,
+        })
+    }
+
+    fn test_identity(relay_id: u64, sequence: u64) -> RelayFrameIdentity {
+        RelayFrameIdentity {
+            relay_id,
+            sequence,
+            acknowledgement_token: [9; 16],
+        }
+    }
+
     #[test]
     fn reset_hub_pin_failure_returns_a_non_zero_command_status() {
         assert_eq!(
@@ -4668,12 +4948,24 @@ mod tests {
             &RelayHubRequest {
                 method: "GET".to_string(),
                 path: "/".to_string(),
+                port: restarted_hub.port,
                 headers: Vec::new(),
             },
             None,
         )
         .unwrap();
         assert_eq!(response.status().as_u16(), 204);
+        let wrong_port = send_relay_hub_request(
+            &RelayHubRequest {
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                port: restarted_hub.port.saturating_add(1),
+                headers: Vec::new(),
+            },
+            None,
+        )
+        .expect_err("the relay must not redirect a URL to its established port");
+        assert!(wrong_port.contains("different hub endpoint"));
         restarted_hub.assert_http_request();
 
         let store = load_existing_hub_pin_store(&store_path).unwrap().unwrap();
@@ -5722,17 +6014,18 @@ mod tests {
             .try_send(vec![2; HUB_WS_MAX_MESSAGE_BYTES])
             .expect("queue second hub message");
         let (_ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
-        let acknowledgement_pending = Arc::new(AtomicBool::new(false));
+        let outstanding = Arc::new(Mutex::new(None));
         let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
         let reads = read_count.clone();
+        let task_outstanding = outstanding.clone();
 
         let task = tauri::async_runtime::spawn(async move {
+            let mut next_sequence = 1;
             while let Some(message) = hub_receiver.recv().await {
                 if reads.fetch_add(1, Ordering::SeqCst) == 1 {
                     let _ = second_read_sender.send(());
                 }
-                let end =
-                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &acknowledgement_pending, &mut close).await;
+                let end = relay_hub_ws_binary(message, &channel, 41, &mut next_sequence, &mut acknowledgements, &task_outstanding, &mut close).await;
                 if !matches!(end, HubWsRelayEnd::Closed) {
                     break;
                 }
@@ -5760,8 +6053,8 @@ mod tests {
         let delivered = delivered.lock().unwrap();
         assert_eq!(delivered.len(), 1, "only one IPC frame may await an ACK");
         assert!(
-            delivered[0].len() <= RELAY_CHUNK_BYTES + 1,
-            "the one pending IPC frame is bounded to its marker plus 256 KiB"
+            delivered[0].len() <= RELAY_RESPONSE_FRAME_HEADER_BYTES + RELAY_CHUNK_BYTES + 1,
+            "the one pending IPC frame is bounded to its envelope, marker, and 256 KiB payload"
         );
         assert!(
             HUB_WS_MAX_MESSAGE_BYTES + delivered[0].len() <= HUB_WS_OUTPUT_BUFFERED_BYTES,
@@ -5778,12 +6071,7 @@ mod tests {
         let (_response_sender, response) = mpsc::channel();
         hub_uploads().lock().unwrap().insert(
             id,
-            HubUpload {
-                sender,
-                response,
-                relay_id: id,
-                chunk_in_flight: Arc::new(AtomicBool::new(false)),
-            },
+            test_upload(sender, response, id),
         );
 
         assert!(send_hub_upload_chunk(id, vec![1]).is_err());
@@ -5876,9 +6164,10 @@ mod tests {
             .send()
             .expect_err("an aborted upload must fail the HTTP request");
         assert!(error.is_request() || error.is_body() || error.is_connect());
+        let received = received.join().unwrap().unwrap_or_default();
         assert!(
-            received.join().unwrap().is_none(),
-            "the server-side listener must not observe an empty completed request"
+            !received.windows(b"\r\n0\r\n\r\n".len()).any(|window| window == b"\r\n0\r\n\r\n"),
+            "the server-side listener must not observe a completed empty chunked request"
         );
     }
 
@@ -5892,39 +6181,39 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_upload_chunk_command_is_refused_before_waiting_on_the_pipe() {
+    fn terminal_transition_waits_for_a_chunk_and_never_overtakes_accepted_data() {
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
-        let (sender, _receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = mpsc::sync_channel(1);
         sender.try_send(HubUploadFrame::Data(vec![0])).unwrap();
-        let chunk_in_flight = Arc::new(AtomicBool::new(false));
         let (_response_sender, response) = mpsc::channel();
         hub_uploads().lock().unwrap().insert(
             id,
-            HubUpload {
-                sender,
-                response,
-                relay_id: id,
-                chunk_in_flight: chunk_in_flight.clone(),
-            },
+            test_upload(sender, response, id),
         );
 
         let first = std::thread::spawn(move || {
             send_hub_upload_chunk_with_deadline(
                 id,
                 vec![1],
-                Instant::now() + Duration::from_millis(100),
+                Instant::now() + Duration::from_secs(1),
             )
         });
-        let claim_deadline = Instant::now() + Duration::from_secs(1);
-        while !chunk_in_flight.load(Ordering::Acquire) {
-            assert!(Instant::now() < claim_deadline, "first command did not claim the upload");
+        let upload = hub_uploads().lock().unwrap().get(&id).cloned().unwrap();
+        let lock_deadline = Instant::now() + Duration::from_secs(1);
+        while upload.pipe.try_lock().is_ok() {
+            assert!(Instant::now() < lock_deadline, "chunk did not reach its state-to-pipe transition");
             std::thread::yield_now();
         }
-
-        let error = send_hub_upload_chunk(id, vec![2])
-            .expect_err("a second command for one upload must not wait beside the first");
-        assert!(error.contains("already has a chunk in flight"));
-        assert!(first.join().unwrap().is_err(), "the intentionally full pipe times out");
+        let finish = std::thread::spawn(move || {
+            let upload = hub_uploads().lock().unwrap().get(&id).cloned().unwrap();
+            enqueue_hub_upload_frame(&upload, HubUploadFrame::Finished, Instant::now() + Duration::from_secs(1))
+        });
+        assert!(matches!(receiver.recv().unwrap(), HubUploadFrame::Data(bytes) if bytes == vec![0]));
+        assert!(first.join().unwrap().is_ok(), "the claimed chunk either enters the pipe or reports failure");
+        assert!(matches!(receiver.recv().unwrap(), HubUploadFrame::Data(bytes) if bytes == vec![1]));
+        assert!(finish.join().unwrap().is_ok(), "finish queues only after the accepted chunk");
+        assert!(matches!(receiver.recv().unwrap(), HubUploadFrame::Finished));
+        release_hub_upload(id);
     }
 
     #[test]
@@ -5935,12 +6224,7 @@ mod tests {
         let (_response_sender, response) = mpsc::channel();
         hub_uploads().lock().unwrap().insert(
             id,
-            HubUpload {
-                sender,
-                response,
-                relay_id: id,
-                chunk_in_flight: Arc::new(AtomicBool::new(false)),
-            },
+            test_upload(sender, response, id),
         );
 
         expire_hub_upload(id);
@@ -5949,16 +6233,32 @@ mod tests {
     }
 
     #[test]
+    fn completed_uploads_leave_no_per_upload_deadlines() {
+        let deadlines = HubUploadDeadlines {
+            state: Mutex::new(HubUploadDeadlineState::default()),
+            changed: Condvar::new(),
+        };
+        for upload_id in 1..=1_000 {
+            deadlines.insert(upload_id);
+            deadlines.remove(upload_id);
+        }
+        assert_eq!(deadlines.entry_count(), 0, "finished uploads retain no timer identity");
+    }
+
+    #[test]
     fn acknowledgement_requires_an_outstanding_frame() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        let pending = AtomicBool::new(false);
+        let outstanding = Mutex::new(None);
+        let identity = test_identity(4, 7);
 
-        accept_hub_ws_ack(&sender, &pending);
+        accept_hub_ws_ack(&sender, &outstanding, identity.clone());
         assert!(receiver.try_recv().is_err(), "an early ACK must be discarded");
 
-        pending.store(true, Ordering::Release);
-        accept_hub_ws_ack(&sender, &pending);
-        accept_hub_ws_ack(&sender, &pending);
+        *outstanding.lock().unwrap() = Some(identity.clone());
+        accept_hub_ws_ack(&sender, &outstanding, test_identity(4, 8));
+        assert!(receiver.try_recv().is_err(), "another frame's ACK must be discarded");
+        accept_hub_ws_ack(&sender, &outstanding, identity);
+        accept_hub_ws_ack(&sender, &outstanding, test_identity(4, 7));
         assert!(receiver.try_recv().is_ok(), "the outstanding frame gets one ACK");
         assert!(receiver.try_recv().is_err(), "a duplicate ACK must be discarded");
     }
@@ -5968,14 +6268,16 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         let acknowledgement = RelayResponseAck {
             sender,
-            outstanding_sequence: AtomicU64::new(7),
+            outstanding: Mutex::new(Some(test_identity(3, 7))),
             cancelled: AtomicBool::new(false),
         };
 
-        accept_relay_response_ack(&acknowledgement, 6);
+        accept_relay_response_ack(&acknowledgement, &test_identity(3, 6));
         assert!(receiver.try_recv().is_err(), "a premature sequence is inert");
-        accept_relay_response_ack(&acknowledgement, 7);
-        accept_relay_response_ack(&acknowledgement, 7);
+        accept_relay_response_ack(&acknowledgement, &RelayFrameIdentity { acknowledgement_token: [8; 16], ..test_identity(3, 7) });
+        assert!(receiver.try_recv().is_err(), "an unpublished token cannot earn credit");
+        accept_relay_response_ack(&acknowledgement, &test_identity(3, 7));
+        accept_relay_response_ack(&acknowledgement, &test_identity(3, 7));
         assert_eq!(receiver.try_recv(), Ok(false), "one frame receives one ACK");
         assert!(receiver.try_recv().is_err(), "a duplicate ACK cannot block or queue");
     }
@@ -6073,7 +6375,7 @@ mod tests {
             HubWsRelay {
                 input,
                 acknowledgement,
-                acknowledgement_pending: Arc::new(AtomicBool::new(false)),
+                outstanding: Arc::new(Mutex::new(None)),
                 close,
             },
         );
@@ -6097,11 +6399,13 @@ mod tests {
 
     #[test]
     fn response_frames_carry_their_own_relay_identity() {
-        let frame = relay_response_frame(41, 3, RELAY_RESPONSE_DATA_FRAME, &[9, 8]);
+        let identity = test_identity(41, 3);
+        let frame = relay_response_frame(&identity, RELAY_RESPONSE_DATA_FRAME, &[9, 8]);
         assert_eq!(frame.len(), RELAY_RESPONSE_FRAME_HEADER_BYTES + 2);
         assert_eq!(u64::from_le_bytes(frame[0..8].try_into().unwrap()), 41);
         assert_eq!(u64::from_le_bytes(frame[8..16].try_into().unwrap()), 3);
-        assert_eq!(frame[16], RELAY_RESPONSE_DATA_FRAME);
+        assert_eq!(&frame[16..32], &[9; 16]);
+        assert_eq!(frame[32], RELAY_RESPONSE_DATA_FRAME);
     }
 
     #[test]
@@ -6116,13 +6420,16 @@ mod tests {
                 Ok(())
             });
         let (ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
-        let acknowledgement_pending = Arc::new(AtomicBool::new(false));
+        let outstanding = Arc::new(Mutex::new(None));
         let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
-        let pending = acknowledgement_pending.clone();
+        let pending = outstanding.clone();
         let task = tauri::async_runtime::spawn(async move {
+            let mut next_sequence = 1;
             relay_hub_ws_binary(
                 Vec::new(),
                 &channel,
+                41,
+                &mut next_sequence,
                 &mut acknowledgements,
                 &pending,
                 &mut close,
@@ -6130,12 +6437,21 @@ mod tests {
             .await
         });
 
-        assert_eq!(
-            frame_received.recv_timeout(Duration::from_secs(1)).unwrap(),
-            vec![1],
-            "an empty binary message is one completed empty IPC frame"
-        );
-        ack_sender.try_send(()).unwrap();
+        let frame = frame_received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(frame.len(), RELAY_RESPONSE_FRAME_HEADER_BYTES + 1);
+        assert_eq!(u64::from_le_bytes(frame[..8].try_into().unwrap()), 41);
+        assert_eq!(u64::from_le_bytes(frame[8..16].try_into().unwrap()), 1);
+        assert_eq!(frame[32], RELAY_RESPONSE_DATA_FRAME);
+        assert_eq!(frame[RELAY_RESPONSE_FRAME_HEADER_BYTES], 1);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let identity = loop {
+            if let Some(identity) = outstanding.lock().unwrap().clone() {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "published frame did not earn its credit");
+            std::thread::yield_now();
+        };
+        ack_sender.try_send(identity).unwrap();
         assert!(matches!(
             tauri::async_runtime::block_on(task).unwrap(),
             HubWsRelayEnd::Closed
@@ -6163,17 +6479,18 @@ mod tests {
             .try_send(vec![2; HUB_WS_MAX_MESSAGE_BYTES])
             .expect("queue second hub message");
         let (ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
-        let acknowledgement_pending = Arc::new(AtomicBool::new(false));
+        let outstanding = Arc::new(Mutex::new(None));
         let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
         let reads = read_count.clone();
+        let task_outstanding = outstanding.clone();
 
         let task = tauri::async_runtime::spawn(async move {
+            let mut next_sequence = 1;
             while let Some(message) = hub_receiver.recv().await {
                 if reads.fetch_add(1, Ordering::SeqCst) == 1 {
                     let _ = second_read_sender.send(());
                 }
-                let end =
-                    relay_hub_ws_binary(message, &channel, &mut acknowledgements, &acknowledgement_pending, &mut close).await;
+                let end = relay_hub_ws_binary(message, &channel, 41, &mut next_sequence, &mut acknowledgements, &task_outstanding, &mut close).await;
                 if !matches!(end, HubWsRelayEnd::Closed) {
                     break;
                 }
@@ -6184,8 +6501,16 @@ mod tests {
             frame_received
                 .recv_timeout(Duration::from_secs(1))
                 .expect("the first hub message reaches the webview in bounded frames");
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let identity = loop {
+                if let Some(identity) = outstanding.lock().unwrap().clone() {
+                    break identity;
+                }
+                assert!(Instant::now() < deadline, "published frame did not earn its credit");
+                std::thread::yield_now();
+            };
             ack_sender
-                .try_send(())
+                .try_send(identity)
                 .expect("acknowledge the delivered IPC frame");
         }
         second_read_received

@@ -6,13 +6,14 @@ type MessageListener = (msg: ProtocolMessage) => void;
 type LifecycleListener = () => void;
 type RelayEvent = { event: "closed" | "transport_error"; message?: string | null };
 type PendingRelaySend = {
-	relayId: number;
+	relayId: string;
 	generation: number;
 	payload: ArrayBuffer;
 };
 
 const MAX_RELAYED_MESSAGE_BYTES = 512 * 1024;
 const MAX_PENDING_RELAY_SENDS = 2;
+const RELAY_FRAME_ENVELOPE_BYTES = 33;
 
 /**
  * Desktop implementation of IWsClient.
@@ -22,7 +23,7 @@ const MAX_PENDING_RELAY_SENDS = 2;
  * not read the next hub frame until that acknowledgement returns.
  */
 export class DesktopWsClient implements IWsClient {
-	private relayId: number | null = null;
+	private relayId: string | null = null;
 	private listeners = new Map<string, Set<MessageListener>>();
 	private reconnectListeners = new Set<LifecycleListener>();
 	private disconnectListeners = new Set<LifecycleListener>();
@@ -33,6 +34,7 @@ export class DesktopWsClient implements IWsClient {
 	private pendingFrame: ArrayBuffer | RelayEvent | undefined;
 	private messageParts: Uint8Array[] = [];
 	private messageBytes = 0;
+	private nextInboundSequence = 1n;
 	private pendingSends: PendingRelaySend[] = [];
 	private sendInFlight = false;
 
@@ -42,6 +44,7 @@ export class DesktopWsClient implements IWsClient {
 
 	private async _connect(url: string): Promise<{ connected: boolean; generation: number }> {
 		const { Channel, invoke } = await import("@tauri-apps/api/core");
+		this._cancelReconnect();
 		const generation = ++this.connectionGeneration;
 		const previousRelayId = this.relayId;
 		// A new connect supersedes the old receive callback immediately. Leaving
@@ -50,6 +53,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
+		this.nextInboundSequence = 1n;
 		if (previousRelayId !== null) {
 			this.pendingSends = this.pendingSends.filter((send) => send.relayId !== previousRelayId);
 			void invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
@@ -60,7 +64,7 @@ export class DesktopWsClient implements IWsClient {
 			this._drain();
 		});
 
-		const relayId = await invoke<number>("relay_hub_ws_connect", { stream });
+		const relayId = String(await invoke<string>("relay_hub_ws_connect", { stream }));
 		if (generation !== this.connectionGeneration) {
 			void invoke("relay_hub_ws_close", { relayId }).catch(() => undefined);
 			return { connected: false, generation };
@@ -141,18 +145,33 @@ export class DesktopWsClient implements IWsClient {
 
 	private _receiveChunk(frame: ArrayBuffer): void {
 		const bytes = new Uint8Array(frame);
-		if (bytes.byteLength < 1 || (bytes[0] !== 0 && bytes[0] !== 1)) {
+		if (bytes.byteLength < RELAY_FRAME_ENVELOPE_BYTES) {
 			this._transportFailure("invalid WebSocket relay frame");
 			return;
 		}
-		const chunk = bytes.slice(1);
+		const view = new DataView(frame);
+		const relayId = view.getBigUint64(0, true).toString();
+		const sequence = view.getBigUint64(8, true);
+		if (relayId !== this.relayId || sequence !== this.nextInboundSequence) {
+			this._transportFailure("WebSocket relay frame belongs to another relay or position");
+			return;
+		}
+		const end = bytes[RELAY_FRAME_ENVELOPE_BYTES - 1];
+		const marker = bytes[RELAY_FRAME_ENVELOPE_BYTES];
+		if (end !== 0 || (marker !== 0 && marker !== 1)) {
+			this._transportFailure("invalid WebSocket relay frame");
+			return;
+		}
+		this.nextInboundSequence++;
+		const acknowledgementToken = base64Url(bytes.slice(16, 32));
+		const chunk = bytes.slice(RELAY_FRAME_ENVELOPE_BYTES + 1);
 		this.messageBytes += chunk.byteLength;
 		if (this.messageBytes > MAX_RELAYED_MESSAGE_BYTES) {
 			this._transportFailure("WebSocket relay message exceeds its bounded size");
 			return;
 		}
 		this.messageParts.push(chunk);
-		if (bytes[0] === 1) {
+		if (marker === 1) {
 			const message = new Uint8Array(this.messageBytes);
 			let offset = 0;
 			for (const part of this.messageParts) {
@@ -166,15 +185,14 @@ export class DesktopWsClient implements IWsClient {
 				console.error("[DesktopWsClient] Failed to decode message:", error);
 			}
 		}
-		this._acknowledge();
+		this._acknowledge(relayId, sequence.toString(), acknowledgementToken);
 	}
 
-	private _acknowledge(): void {
-		const relayId = this.relayId;
-		if (relayId === null) return;
+	private _acknowledge(relayId: string, sequence: string, acknowledgementToken: string): void {
+		if (!this._isCurrentRelay(relayId)) return;
 		const generation = this.connectionGeneration;
 		void import("@tauri-apps/api/core")
-			.then(({ invoke }) => invoke("relay_hub_ws_ack", { relayId }))
+			.then(({ invoke }) => invoke("relay_hub_ws_ack", { relayId, sequence, acknowledgementToken }))
 			.catch((error: unknown) => this._transportFailure(String(error), relayId, generation));
 	}
 
@@ -188,7 +206,7 @@ export class DesktopWsClient implements IWsClient {
 		this._scheduleReconnect();
 	}
 
-	private _transportFailure(error: string, relayId?: number, generation?: number): void {
+	private _transportFailure(error: string, relayId?: string, generation?: number): void {
 		if (
 			this.relayId === null ||
 			(relayId !== undefined && !this._isCurrentRelay(relayId, generation))
@@ -212,7 +230,7 @@ export class DesktopWsClient implements IWsClient {
 		this._scheduleReconnect();
 	}
 
-	private _isCurrentRelay(relayId: number, generation = this.connectionGeneration): boolean {
+	private _isCurrentRelay(relayId: string, generation = this.connectionGeneration): boolean {
 		return this.relayId === relayId && this.connectionGeneration === generation;
 	}
 
@@ -250,15 +268,18 @@ export class DesktopWsClient implements IWsClient {
 		if (!url) return;
 		const delays = [1000, 2000, 4000, 8000, 15000, 30000];
 		const delay = delays[Math.min(this.reconnectAttempt, delays.length - 1)];
+		const scheduledGeneration = this.connectionGeneration;
 		this.reconnectTimer = setTimeout(async () => {
 			this.reconnectTimer = null;
+			if (scheduledGeneration !== this.connectionGeneration || this.reconnectUrl !== url) return;
 			this.reconnectAttempt++;
 			try {
 				const connection = await this._connect(url);
 				if (
 					connection.connected &&
 					this.reconnectUrl === url &&
-					this._isCurrentRelay(this.relayId ?? -1, connection.generation)
+					this.relayId !== null &&
+					this._isCurrentRelay(this.relayId, connection.generation)
 				) {
 					for (const listener of this.reconnectListeners) listener();
 				}
@@ -266,6 +287,12 @@ export class DesktopWsClient implements IWsClient {
 				this._scheduleReconnect();
 			}
 		}, delay);
+	}
+
+	private _cancelReconnect(): void {
+		if (this.reconnectTimer === null) return;
+		clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = null;
 	}
 
 	private _resetMessage(): void {
@@ -277,4 +304,10 @@ export class DesktopWsClient implements IWsClient {
 		for (const listener of this.listeners.get(msg.type) ?? []) listener(msg);
 		for (const listener of this.listeners.get("*") ?? []) listener(msg);
 	}
+}
+
+function base64Url(bytes: Uint8Array): string {
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }

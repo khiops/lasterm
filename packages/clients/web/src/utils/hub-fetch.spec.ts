@@ -7,12 +7,13 @@ function responseFrame(
 	kind: number,
 	payload = new Uint8Array(),
 ): ArrayBuffer {
-	const frame = new Uint8Array(17 + payload.byteLength);
+	const frame = new Uint8Array(33 + payload.byteLength);
 	const view = new DataView(frame.buffer);
 	view.setBigUint64(0, id, true);
 	view.setBigUint64(8, sequence, true);
-	frame[16] = kind;
-	frame.set(payload, 17);
+	frame.fill(7, 16, 32);
+	frame[32] = kind;
+	frame.set(payload, 33);
 	return frame.buffer;
 }
 
@@ -48,6 +49,38 @@ describe("hubFetch desktop transport", () => {
 			undefined,
 		);
 		expect(webviewFetch).not.toHaveBeenCalled();
+	});
+
+	it("refuses a desktop request whose URL names another hub port", async () => {
+		const invoke = vi.fn(async (command: string, args?: { request?: { port?: number } }) => {
+			if (command === "relay_hub_request" && args?.request?.port !== 4242) {
+				throw new Error("relay request names a different hub endpoint");
+			}
+			return { id: "1", status: 204, statusText: "No Content", headers: [] };
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+
+		await expect(hubFetch("https://127.0.0.1:9999/api/channels/purge-dead")).rejects.toThrow(
+			"different hub endpoint",
+		);
+		expect(invoke).toHaveBeenCalledWith(
+			"relay_hub_request",
+			expect.objectContaining({ request: expect.objectContaining({ port: 9999 }) }),
+			undefined,
+		);
+	});
+
+	it("refuses desktop hub URL userinfo instead of dropping it", async () => {
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke: vi.fn(), transformCallback: () => 1 },
+		});
+		await expect(hubFetch("https://user:secret@127.0.0.1:4242/api/health")).rejects.toThrow(
+			"127.0.0.1",
+		);
 	});
 
 	it.each([
@@ -153,7 +186,11 @@ describe("hubFetch desktop transport", () => {
 		await vi.waitFor(() =>
 			expect(invoke).toHaveBeenCalledWith(
 				"relay_hub_response_ack",
-				{ responseId: 55, sequence: 1 },
+				{
+					responseId: "55",
+					sequence: "1",
+					acknowledgementToken: "BwcHBwcHBwcHBwcHBwcHBw",
+				},
 				undefined,
 			),
 		);
@@ -237,7 +274,11 @@ describe("hubFetch desktop transport", () => {
 		await vi.advanceTimersByTimeAsync(26_000);
 
 		await settled;
-		expect(invoke).toHaveBeenCalledWith("relay_hub_response_cancel", { responseId: 55 }, undefined);
+		expect(invoke).toHaveBeenCalledWith(
+			"relay_hub_response_cancel",
+			{ responseId: "55" },
+			undefined,
+		);
 	});
 
 	it("rejects a protocol failure delivered before the response head without cancelling another relay", async () => {
@@ -250,7 +291,7 @@ describe("hubFetch desktop transport", () => {
 		const stream = responseStream(channel);
 
 		channel.onmessage?.(responseFrame(99n, 1n, 2, new TextEncoder().encode("pre-head failure")));
-		stream.setResponseId(55);
+		stream.setResponseId("55");
 
 		expect(stream.failure()).toMatchObject({
 			message: "hub relay response frame belongs to another relay",
@@ -258,13 +299,13 @@ describe("hubFetch desktop transport", () => {
 		await vi.waitFor(() =>
 			expect(invoke).toHaveBeenCalledWith(
 				"relay_hub_response_cancel",
-				{ responseId: 55 },
+				{ responseId: "55" },
 				undefined,
 			),
 		);
 		expect(invoke).not.toHaveBeenCalledWith(
 			"relay_hub_response_cancel",
-			{ responseId: 99 },
+			{ responseId: "99" },
 			undefined,
 		);
 	});
@@ -298,6 +339,27 @@ describe("hubFetch desktop transport", () => {
 		await expect(response.text()).rejects.toThrow("out of sequence");
 	});
 
+	it("keeps a 64-bit response relay identity exact across the JavaScript boundary", async () => {
+		const invoke = vi.fn(async () => undefined);
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const channel = { onmessage: null as ((frame: ArrayBuffer) => void) | null };
+		const stream = responseStream(channel);
+		const id = 9_007_199_254_740_993n;
+		stream.setResponseId(id.toString());
+		channel.onmessage?.(responseFrame(id, 1n, 0, new Uint8Array([1])));
+
+		await vi.waitFor(() =>
+			expect(invoke).toHaveBeenCalledWith(
+				"relay_hub_response_ack",
+				expect.objectContaining({ responseId: id.toString(), sequence: "1" }),
+				undefined,
+			),
+		);
+	});
+
 	it("cancels a started upload when a chunk relay fails", async () => {
 		const invoke = vi.fn(async (command: string) => {
 			if (command === "relay_hub_upload_start") return 33;
@@ -314,7 +376,7 @@ describe("hubFetch desktop transport", () => {
 		await expect(
 			hubFetch("https://127.0.0.1:4242/api/upload", { method: "POST", body: form }),
 		).rejects.toThrow("IPC rejected the chunk");
-		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: "33" }, undefined);
 	});
 
 	it("cancels a body rejected on its first pull without finishing the request", async () => {
@@ -335,7 +397,7 @@ describe("hubFetch desktop transport", () => {
 		await expect(
 			hubFetch("https://127.0.0.1:4242/api/channels/purge-dead", { method: "POST", body }),
 		).rejects.toThrow("first body pull rejected");
-		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: "33" }, undefined);
 		expect(invoke).not.toHaveBeenCalledWith(
 			"relay_hub_upload_finish",
 			expect.anything(),
@@ -371,7 +433,7 @@ describe("hubFetch desktop transport", () => {
 		await vi.advanceTimersByTimeAsync(26_000);
 
 		await settled;
-		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: "33" }, undefined);
 	});
 
 	it("leaves room for the native deadline to report its diagnosis first", async () => {

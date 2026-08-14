@@ -3,18 +3,19 @@ import type { InvokeArgs, InvokeOptions } from "@tauri-apps/api/core";
 type RelayRequest = {
 	method: string;
 	path: string;
+	port: number;
 	headers: [string, string][];
 };
 
 type RelayHead = {
-	id: number;
+	id: string;
 	status: number;
 	statusText: string;
 	headers: [string, string][];
 };
 
 const UPLOAD_CHUNK_BYTES = 256 * 1024;
-const RELAY_FRAME_HEADER_BYTES = 17;
+const RELAY_FRAME_HEADER_BYTES = 33;
 const RELAY_DATA_FRAME = 0;
 const RELAY_END_FRAME = 1;
 const RELAY_ERROR_FRAME = 2;
@@ -24,8 +25,9 @@ const RELAY_ERROR_FRAME = 2;
 const HUB_RELAY_WAIT_TIMEOUT_MS = 26_000;
 
 type RelayFrame = {
-	id: number;
-	sequence: number;
+	id: string;
+	sequence: bigint;
+	acknowledgementToken: string;
 	kind: number;
 	payload: ArrayBuffer;
 };
@@ -57,9 +59,11 @@ export function hubFetch(input: string | URL, init?: HubFetchInit): Promise<Resp
 
 async function relayHubFetch(input: string | URL, init?: HubFetchInit): Promise<Response> {
 	const request = new Request(input, init);
+	const endpoint = relayEndpoint(request.url);
 	const relayRequest: RelayRequest = {
 		method: request.method,
-		path: relayPath(request.url),
+		path: `${endpoint.pathname}${endpoint.search}`,
+		port: Number(endpoint.port || 443),
 		headers: [...request.headers.entries()],
 	};
 
@@ -69,7 +73,12 @@ async function relayHubFetch(input: string | URL, init?: HubFetchInit): Promise<
 }
 
 function isDesktopHubUrl(input: string | URL): boolean {
-	return new URL(input.toString(), window.location.href).hostname === "127.0.0.1";
+	try {
+		const url = new URL(input.toString(), window.location.href);
+		return url.hostname === "127.0.0.1" && url.username === "" && url.password === "";
+	} catch {
+		return false;
+	}
 }
 
 function isDesktopRelayRuntime(): boolean {
@@ -79,12 +88,17 @@ function isDesktopRelayRuntime(): boolean {
 	return typeof internals?.invoke === "function";
 }
 
-function relayPath(url: string): string {
+function relayEndpoint(url: string): URL {
 	const parsed = new URL(url);
-	if (parsed.protocol !== "https:" || parsed.hostname !== "127.0.0.1") {
+	if (
+		parsed.protocol !== "https:" ||
+		parsed.hostname !== "127.0.0.1" ||
+		parsed.username !== "" ||
+		parsed.password !== ""
+	) {
 		throw new HubRelayTransportError("desktop hub requests must target the local hub");
 	}
-	return `${parsed.pathname}${parsed.search}`;
+	return parsed;
 }
 
 async function relayRequestToResponse(request: RelayRequest): Promise<Response> {
@@ -100,7 +114,7 @@ async function relayRequestToResponse(request: RelayRequest): Promise<Response> 
 			request,
 			response: stream.channel,
 		});
-		stream.setResponseId(head.id);
+		stream.setResponseId(String(head.id));
 		const failure = stream.failure();
 		if (failure !== undefined) throw failure;
 		stream.drain();
@@ -116,9 +130,9 @@ async function relayUploadToResponse(
 ): Promise<Response> {
 	const { Channel, invoke } = await import("@tauri-apps/api/core");
 
-	let uploadId: number | null = null;
+	let uploadId: string | null = null;
 	try {
-		uploadId = await invoke<number>("relay_hub_upload_start", { request });
+		uploadId = String(await invoke<string>("relay_hub_upload_start", { request }));
 		await sendRequestChunks(uploadId, body, invoke);
 
 		const stream = responseStream(
@@ -131,7 +145,7 @@ async function relayUploadToResponse(
 			response: stream.channel,
 		});
 		uploadId = null;
-		stream.setResponseId(head.id);
+		stream.setResponseId(String(head.id));
 		const failure = stream.failure();
 		if (failure !== undefined) throw failure;
 		stream.drain();
@@ -150,7 +164,7 @@ async function relayUploadToResponse(
 }
 
 async function sendRequestChunks(
-	uploadId: number,
+	uploadId: string,
 	body: ReadableStream<Uint8Array>,
 	invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T>,
 ): Promise<void> {
@@ -200,7 +214,7 @@ function relayWait<T>(promise: Promise<T>, timeoutMessage: string): Promise<T> {
 }
 
 function cancelUpload(
-	uploadId: number,
+	uploadId: string,
 	invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T>,
 ): void {
 	void relayWait(
@@ -213,16 +227,16 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 	channel: typeof channel;
 	body: ReadableStream<Uint8Array>;
 	receive: (frame: ArrayBuffer) => void;
-	setResponseId: (id: number) => void;
+	setResponseId: (id: string) => void;
 	drain: () => void;
 	failure: () => HubRelayTransportError | undefined;
 } {
 	let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
 	const pending: RelayFrame[] = [];
 	let finished = false;
-	let responseId: number | null = null;
+	let responseId: string | null = null;
 	let cancelAttempted = false;
-	let expectedSequence = 1;
+	let expectedSequence = 1n;
 	let failure: HubRelayTransportError | undefined;
 	let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -260,7 +274,11 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 	const acknowledge = (frame: RelayFrame) => {
 		void import("@tauri-apps/api/core")
 			.then(({ invoke }) =>
-				invoke("relay_hub_response_ack", { responseId: frame.id, sequence: frame.sequence }),
+				invoke("relay_hub_response_ack", {
+					responseId: frame.id,
+					sequence: frame.sequence.toString(),
+					acknowledgementToken: frame.acknowledgementToken,
+				}),
 			)
 			.catch((error) => fail(`hub relay acknowledgement failed: ${String(error)}`));
 	};
@@ -345,7 +363,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 			},
 		}),
 		receive,
-		setResponseId(id) {
+		setResponseId(id: string) {
 			if (responseId !== null && responseId !== id) {
 				fail("hub relay response head belongs to another relay");
 				return;
@@ -376,17 +394,24 @@ function decodeRelayFrame(frame: ArrayBuffer): RelayFrame {
 		throw new HubRelayTransportError("hub relay sent a truncated response frame");
 	}
 	const view = new DataView(frame);
-	const id = Number(view.getBigUint64(0, true));
-	const sequence = Number(view.getBigUint64(8, true));
-	if (!Number.isSafeInteger(id) || !Number.isSafeInteger(sequence) || id < 1 || sequence < 1) {
+	const id = view.getBigUint64(0, true);
+	const sequence = view.getBigUint64(8, true);
+	if (id < 1n || sequence < 1n) {
 		throw new HubRelayTransportError("hub relay sent an invalid response frame identity");
 	}
 	return {
-		id,
+		id: id.toString(),
 		sequence,
-		kind: view.getUint8(16),
+		acknowledgementToken: base64Url(new Uint8Array(frame, 16, 16)),
+		kind: view.getUint8(32),
 		payload: frame.slice(RELAY_FRAME_HEADER_BYTES),
 	};
+}
+
+function base64Url(bytes: Uint8Array): string {
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
 
 function relayResponse(

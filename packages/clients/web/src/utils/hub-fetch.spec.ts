@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hubFetch } from "./hub-fetch.js";
+import { hubFetch, responseStream } from "./hub-fetch.js";
 
 function responseFrame(
 	id: bigint,
@@ -19,6 +19,7 @@ function responseFrame(
 describe("hubFetch desktop transport", () => {
 	afterEach(() => {
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+		vi.useRealTimers();
 		vi.unstubAllGlobals();
 	});
 
@@ -156,6 +157,106 @@ describe("hubFetch desktop transport", () => {
 		);
 	});
 
+	it("settles a response body when its acknowledgement never arrives", async () => {
+		let channelCallback:
+			| ((
+					message: { index: number; message: ArrayBuffer } | { index: number; end: boolean },
+			  ) => void)
+			| undefined;
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_request") {
+				return { id: 55, status: 200, statusText: "OK", headers: [] };
+			}
+			if (command === "relay_hub_response_ack") return new Promise<void>(() => undefined);
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: {
+				invoke,
+				transformCallback: (callback: typeof channelCallback) => {
+					channelCallback = callback;
+					return 1;
+				},
+			},
+		});
+
+		const response = await hubFetch("https://127.0.0.1:4242/api/ack-timeout");
+		channelCallback?.({
+			index: 0,
+			message: responseFrame(55n, 1n, 0, new TextEncoder().encode("partial")),
+		});
+		channelCallback?.({
+			index: 1,
+			message: responseFrame(
+				55n,
+				2n,
+				2,
+				new TextEncoder().encode("desktop response relay acknowledgement timed out"),
+			),
+		});
+
+		await expect(response.text()).rejects.toThrow("acknowledgement timed out");
+	});
+
+	it("rejects a protocol failure delivered before the response head without cancelling another relay", async () => {
+		const invoke = vi.fn(async () => undefined);
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const channel = { onmessage: null as ((frame: ArrayBuffer) => void) | null };
+		const stream = responseStream(channel);
+
+		channel.onmessage?.(responseFrame(99n, 1n, 2, new TextEncoder().encode("pre-head failure")));
+		stream.setResponseId(55);
+
+		expect(stream.failure()).toMatchObject({
+			message: "hub relay response frame belongs to another relay",
+		});
+		await vi.waitFor(() =>
+			expect(invoke).toHaveBeenCalledWith(
+				"relay_hub_response_cancel",
+				{ responseId: 55 },
+				undefined,
+			),
+		);
+		expect(invoke).not.toHaveBeenCalledWith(
+			"relay_hub_response_cancel",
+			{ responseId: 99 },
+			undefined,
+		);
+	});
+
+	it("rejects response frames whose sequence skips the outstanding frame", async () => {
+		let channelCallback:
+			| ((
+					message: { index: number; message: ArrayBuffer } | { index: number; end: boolean },
+			  ) => void)
+			| undefined;
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_request") {
+				return { id: 55, status: 200, statusText: "OK", headers: [] };
+			}
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: {
+				invoke,
+				transformCallback: (callback: typeof channelCallback) => {
+					channelCallback = callback;
+					return 1;
+				},
+			},
+		});
+
+		const response = await hubFetch("https://127.0.0.1:4242/api/out-of-sequence");
+		channelCallback?.({ index: 0, message: responseFrame(55n, 2n, 0, new Uint8Array([1])) });
+
+		await expect(response.text()).rejects.toThrow("out of sequence");
+	});
+
 	it("cancels a started upload when a chunk relay fails", async () => {
 		const invoke = vi.fn(async (command: string) => {
 			if (command === "relay_hub_upload_start") return 33;
@@ -172,6 +273,37 @@ describe("hubFetch desktop transport", () => {
 		await expect(
 			hubFetch("https://127.0.0.1:4242/api/upload", { method: "POST", body: form }),
 		).rejects.toThrow("IPC rejected the chunk");
+		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
+	});
+
+	it("settles a stalled upload even when its producer and cancellation never resolve", async () => {
+		vi.useFakeTimers();
+		const invoke = vi.fn((command: string) => {
+			if (command === "relay_hub_upload_start") return Promise.resolve(33);
+			if (command === "relay_hub_upload_cancel") return new Promise<void>(() => undefined);
+			return Promise.resolve(undefined);
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const body = new ReadableStream<Uint8Array>({
+			pull() {
+				return new Promise<void>(() => undefined);
+			},
+			cancel() {
+				return new Promise<void>(() => undefined);
+			},
+		});
+
+		const pending = hubFetch("https://127.0.0.1:4242/api/stalled-upload", {
+			method: "POST",
+			body,
+		});
+		const settled = expect(pending).rejects.toThrow("timed out while waiting for its producer");
+		await vi.advanceTimersByTimeAsync(25_000);
+
+		await settled;
 		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: 33 }, undefined);
 	});
 

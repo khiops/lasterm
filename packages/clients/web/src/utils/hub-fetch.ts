@@ -19,6 +19,9 @@ const RELAY_FRAME_HEADER_BYTES = 17;
 const RELAY_DATA_FRAME = 0;
 const RELAY_END_FRAME = 1;
 const RELAY_ERROR_FRAME = 2;
+// This mirrors the complete pinned native request deadline. A wait in the
+// renderer must end too: native cleanup alone cannot settle a pending Promise.
+const HUB_RELAY_WAIT_TIMEOUT_MS = 25_000;
 
 type RelayFrame = {
 	id: number;
@@ -99,6 +102,8 @@ async function relayRequestToResponse(request: RelayRequest): Promise<Response> 
 			response: stream.channel,
 		});
 		stream.setResponseId(head.id);
+		const failure = stream.failure();
+		if (failure !== undefined) throw failure;
 		stream.drain();
 		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
@@ -128,6 +133,8 @@ async function relayUploadToResponse(
 		});
 		uploadId = null;
 		stream.setResponseId(head.id);
+		const failure = stream.failure();
+		if (failure !== undefined) throw failure;
 		stream.drain();
 		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
@@ -135,13 +142,10 @@ async function relayUploadToResponse(
 	} finally {
 		if (uploadId !== null) {
 			// `finish` transfers and removes the slot. Every other outcome must
-			// explicitly release the map entry and close the body's sender.
-			try {
-				await invoke("relay_hub_upload_cancel", { uploadId });
-			} catch (cancelError) {
-				const message = `hub relay cancellation failed: ${String(cancelError)}`;
-				console.error(message);
-			}
+			// explicitly release the map entry and close the body's sender. This is
+			// deliberately not awaited: a stuck IPC cancellation cannot keep the
+			// caller's fetch Promise pending after its own deadline.
+			cancelUpload(uploadId, invoke);
 		}
 	}
 }
@@ -154,40 +158,73 @@ async function sendRequestChunks(
 	const reader = body.getReader();
 	try {
 		for (;;) {
-			const { done, value } = await reader.read();
+			const { done, value } = await relayWait(
+				reader.read(),
+				"hub relay request body timed out while waiting for its producer",
+			);
 			if (done) return;
 			if (value.byteLength === 0) continue;
 			for (let offset = 0; offset < value.byteLength; offset += UPLOAD_CHUNK_BYTES) {
 				// Allocate only this IPC frame: some browser streams yield views onto a
 				// larger backing buffer, which must not cross the boundary wholesale.
 				const payload = new Uint8Array(value.subarray(offset, offset + UPLOAD_CHUNK_BYTES));
-				await invoke("relay_hub_upload_chunk", payload.buffer, {
-					headers: { "X-Lasterm-Upload-Id": String(uploadId) },
-				});
+				await relayWait(
+					invoke("relay_hub_upload_chunk", payload.buffer, {
+						headers: { "X-Lasterm-Upload-Id": String(uploadId) },
+					}),
+					"hub relay request body timed out while sending a chunk",
+				);
 			}
 		}
 	} catch (error) {
-		await reader
-			.cancel(error)
-			.catch((cancelError) =>
+		// Some underlying stream sources never settle `cancel`. Start cleanup but
+		// do not make the caller wait for a producer that has already timed out.
+		void relayWait(reader.cancel(error), "hub relay request stream cancellation timed out").catch(
+			(cancelError) =>
 				console.error(`hub relay request stream cancellation failed: ${String(cancelError)}`),
-			);
+		);
 		throw error;
 	}
 }
 
-function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) | null }): {
+function relayWait<T>(promise: Promise<T>, timeoutMessage: string): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	return new Promise<T>((resolve, reject) => {
+		timeout = setTimeout(
+			() => reject(new HubRelayTransportError(timeoutMessage)),
+			HUB_RELAY_WAIT_TIMEOUT_MS,
+		);
+		promise.then(resolve, reject);
+	}).finally(() => {
+		if (timeout !== undefined) clearTimeout(timeout);
+	});
+}
+
+function cancelUpload(
+	uploadId: number,
+	invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T>,
+): void {
+	void relayWait(
+		invoke("relay_hub_upload_cancel", { uploadId }),
+		"hub relay cancellation timed out",
+	).catch((cancelError) => console.error(`hub relay cancellation failed: ${String(cancelError)}`));
+}
+
+export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) | null }): {
 	channel: typeof channel;
 	body: ReadableStream<Uint8Array>;
 	receive: (frame: ArrayBuffer) => void;
 	setResponseId: (id: number) => void;
 	drain: () => void;
+	failure: () => HubRelayTransportError | undefined;
 } {
 	let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-	let pending: RelayFrame | undefined;
+	const pending: RelayFrame[] = [];
 	let finished = false;
 	let responseId: number | null = null;
 	let cancelAttempted = false;
+	let expectedSequence = 1;
+	let failure: HubRelayTransportError | undefined;
 
 	const cancelRelay = () => {
 		if (cancelAttempted || responseId === null) return;
@@ -202,7 +239,8 @@ function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) |
 		if (finished) return;
 		finished = true;
 		cancelRelay();
-		controller?.error(new HubRelayTransportError(message));
+		failure = new HubRelayTransportError(message);
+		controller?.error(failure);
 	};
 
 	const acknowledge = (frame: RelayFrame) => {
@@ -213,16 +251,13 @@ function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) |
 			.catch((error) => fail(`hub relay acknowledgement failed: ${String(error)}`));
 	};
 	const drain = () => {
-		if (
-			controller === undefined ||
-			pending === undefined ||
-			finished ||
-			controller.desiredSize === 0
-		) {
+		if (controller === undefined || pending.length === 0 || finished) {
 			return;
 		}
-		const frame = pending;
-		pending = undefined;
+		const frame = pending[0];
+		if (frame === undefined) return;
+		if (frame.kind === RELAY_DATA_FRAME && controller.desiredSize === 0) return;
+		pending.shift();
 		if (frame.kind === RELAY_DATA_FRAME) {
 			controller.enqueue(new Uint8Array(frame.payload));
 			acknowledge(frame);
@@ -235,7 +270,8 @@ function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) |
 		}
 		if (frame.kind === RELAY_ERROR_FRAME) {
 			finished = true;
-			controller.error(new HubRelayTransportError(new TextDecoder().decode(frame.payload)));
+			failure = new HubRelayTransportError(new TextDecoder().decode(frame.payload));
+			controller.error(failure);
 			return;
 		}
 		fail("hub relay sent an unknown response frame");
@@ -248,13 +284,24 @@ function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) |
 			fail(error instanceof Error ? error.message : String(error));
 			return;
 		}
+		if (pending.length !== 0 && responseId !== null) {
+			fail("hub relay sent a response frame before its preceding frame was consumed");
+			return;
+		}
 		if (responseId !== null && responseId !== decoded.id) {
 			fail("hub relay response frame belongs to another relay");
 			return;
 		}
-		responseId ??= decoded.id;
-		pending = decoded;
-		drain();
+		if (decoded.sequence !== expectedSequence) {
+			fail("hub relay response frame is out of sequence");
+			return;
+		}
+		expectedSequence++;
+		pending.push(decoded);
+		// A pre-head frame is not trusted to identify a relay. Native guarantees
+		// only one outstanding frame, so retain it until the command returns the
+		// authoritative head id; that avoids cancelling an unrelated relay.
+		if (responseId !== null) drain();
 	};
 	channel.onmessage = receive;
 
@@ -280,8 +327,18 @@ function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) |
 				return;
 			}
 			responseId = id;
+			if (failure !== undefined) {
+				cancelRelay();
+				return;
+			}
+			if (pending.some((frame) => frame.id !== id)) {
+				fail("hub relay response frame belongs to another relay");
+				return;
+			}
+			drain();
 		},
 		drain,
+		failure: () => failure,
 	};
 }
 

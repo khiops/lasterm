@@ -5,6 +5,11 @@ import type { IWsClient } from "./ws-client.js";
 type MessageListener = (msg: ProtocolMessage) => void;
 type LifecycleListener = () => void;
 type RelayEvent = { event: "closed" | "transport_error"; message?: string | null };
+type PendingRelaySend = {
+	relayId: number;
+	generation: number;
+	payload: ArrayBuffer;
+};
 
 const MAX_RELAYED_MESSAGE_BYTES = 512 * 1024;
 const MAX_PENDING_RELAY_SENDS = 2;
@@ -28,7 +33,8 @@ export class DesktopWsClient implements IWsClient {
 	private pendingFrame: ArrayBuffer | RelayEvent | undefined;
 	private messageParts: Uint8Array[] = [];
 	private messageBytes = 0;
-	private pendingSends = 0;
+	private pendingSends: PendingRelaySend[] = [];
+	private sendInFlight = false;
 
 	async connect(_url: string): Promise<void> {
 		const { Channel, invoke } = await import("@tauri-apps/api/core");
@@ -44,9 +50,19 @@ export class DesktopWsClient implements IWsClient {
 			void invoke("relay_hub_ws_close", { relayId }).catch(() => undefined);
 			return;
 		}
+		const previousRelayId = this.relayId;
+		if (previousRelayId !== null) {
+			// A replacement relay owns a new ordered send stream. Drop queued work
+			// for the old one before closing it; an already-running IPC call will
+			// retire itself without being allowed to start another old send.
+			this.pendingSends = this.pendingSends.filter((send) => send.relayId !== previousRelayId);
+		}
 		this.relayId = relayId;
 		this.reconnectUrl = _url;
 		this.reconnectAttempt = 0;
+		if (previousRelayId !== null && previousRelayId !== relayId) {
+			void invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
+		}
 		this._drain();
 	}
 
@@ -54,32 +70,15 @@ export class DesktopWsClient implements IWsClient {
 		const relayId = this.relayId;
 		if (relayId === null) throw new Error("WebSocket not connected");
 		const generation = this.connectionGeneration;
-		if (this.pendingSends >= MAX_PENDING_RELAY_SENDS) {
+		// Encode before reserving a queue slot. Invalid work must not consume the
+		// bounded capacity needed by valid protocol messages behind it.
+		const payload = encodeMessage(msg).slice().buffer;
+		if (this.pendingSends.length >= MAX_PENDING_RELAY_SENDS) {
 			this._transportFailure("WebSocket relay send queue is full", relayId, generation);
 			return;
 		}
-		this.pendingSends++;
-		const encoded = encodeMessage(msg).slice();
-		// IWsClient is fire-and-forget. A bounded number of outstanding IPC
-		// invocations prevents callers from building a promise chain in JavaScript;
-		// native then refuses rather than waits when its own queue is full.
-		void import("@tauri-apps/api/core")
-			.then(({ invoke }) =>
-				invoke("relay_hub_ws_send", encoded.buffer, {
-					headers: { "X-Lasterm-Ws-Id": String(relayId) },
-				}),
-			)
-			.then(
-				() => {
-					if (this._isCurrentRelay(relayId, generation)) this.pendingSends--;
-				},
-				(error: unknown) => {
-					if (this._isCurrentRelay(relayId, generation)) {
-						this.pendingSends--;
-						this._transportFailure(String(error), relayId, generation);
-					}
-				},
-			);
+		this.pendingSends.push({ relayId, generation, payload });
+		void this._drainSends();
 	}
 
 	on(type: string, callback: MessageListener): () => void {
@@ -109,7 +108,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		this.pendingSends = 0;
+		this.pendingSends = [];
 		if (relayId !== null) {
 			void import("@tauri-apps/api/core")
 				.then(({ invoke }) => invoke("relay_hub_ws_close", { relayId }))
@@ -178,7 +177,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		this.pendingSends = 0;
+		this.pendingSends = [];
 		for (const listener of this.disconnectListeners) listener();
 		this._scheduleReconnect();
 	}
@@ -195,7 +194,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		this.pendingSends = 0;
+		this.pendingSends = [];
 		if (activeRelayId !== null) {
 			void import("@tauri-apps/api/core")
 				.then(({ invoke }) => invoke("relay_hub_ws_close", { relayId: activeRelayId }))
@@ -209,6 +208,35 @@ export class DesktopWsClient implements IWsClient {
 
 	private _isCurrentRelay(relayId: number, generation = this.connectionGeneration): boolean {
 		return this.relayId === relayId && this.connectionGeneration === generation;
+	}
+
+	/**
+	 * Tauri commands are asynchronous even when Rust immediately accepts a
+	 * message. Keep exactly one call in flight so the native input queue observes
+	 * the caller's order; the bounded JS queue is the only place B may wait for A.
+	 */
+	private async _drainSends(): Promise<void> {
+		if (this.sendInFlight) return;
+		const send = this.pendingSends[0];
+		if (!send) return;
+		this.sendInFlight = true;
+		try {
+			const { invoke } = await import("@tauri-apps/api/core");
+			await invoke("relay_hub_ws_send", send.payload, {
+				headers: { "X-Lasterm-Ws-Id": String(send.relayId) },
+			});
+		} catch (error) {
+			if (this._isCurrentRelay(send.relayId, send.generation)) {
+				this._transportFailure(String(error), send.relayId, send.generation);
+			}
+		} finally {
+			// `close` and a replacement connect may already have discarded this
+			// entry. Remove only this completed work, never a newer relay's head.
+			const index = this.pendingSends.indexOf(send);
+			if (index !== -1) this.pendingSends.splice(index, 1);
+			this.sendInFlight = false;
+			void this._drainSends();
+		}
 	}
 
 	private _scheduleReconnect(): void {

@@ -2408,6 +2408,7 @@ fn send_relay_hub_request(
     request: &RelayHubRequest,
     body: Option<reqwest::blocking::Body>,
 ) -> Result<reqwest::blocking::Response, String> {
+    validate_relay_request_headers(&request.headers)?;
     let connection = established_hub_connection()?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|error| format!("relay request has an invalid HTTP method: {error}"))?;
@@ -2429,6 +2430,33 @@ fn send_relay_hub_request(
     builder
         .send()
         .map_err(|error| format!("pinned hub request failed: {error}"))
+}
+
+/// Framing and hop-by-hop fields describe the connection chosen by the native
+/// client, not an individual request. A renderer may invoke this command
+/// directly, so this boundary refuses them before reqwest can forward a
+/// conflicting body length onto a pooled HTTP/1 connection.
+fn validate_relay_request_headers(headers: &[(String, String)]) -> Result<(), String> {
+    const FORBIDDEN: &[&str] = &[
+        "connection",
+        "content-length",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ];
+    if let Some((name, _)) = headers.iter().find(|(name, _)| {
+        FORBIDDEN
+            .iter()
+            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+    }) {
+        return Err(format!(
+            "relay request header {name} is controlled by the native HTTP transport"
+        ));
+    }
+    Ok(())
 }
 
 fn response_head(response: &reqwest::blocking::Response, id: u64) -> RelayHubHead {
@@ -2470,6 +2498,17 @@ fn wait_for_relay_response_ack(
     deadline: Duration,
 ) -> Result<bool, mpsc::RecvTimeoutError> {
     receiver.recv_timeout(deadline)
+}
+
+fn relay_response_ack_failure_message(error: mpsc::RecvTimeoutError) -> String {
+    match error {
+        mpsc::RecvTimeoutError::Timeout => {
+            "desktop response relay acknowledgement timed out".to_string()
+        }
+        mpsc::RecvTimeoutError::Disconnected => {
+            "desktop response relay acknowledgement stopped".to_string()
+        }
+    }
 }
 
 fn relay_response(
@@ -2531,11 +2570,21 @@ fn relay_response(
             {
                 break;
             }
+            sequence = sequence.saturating_add(1);
             match wait_for_relay_response_ack(&ack_receiver, HUB_RELAY_ACK_TIMEOUT) {
                 Ok(false) => {}
-                Ok(true) | Err(_) => break,
+                Ok(true) => break,
+                Err(error) => {
+                    let message = relay_response_ack_failure_message(error);
+                    let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
+                        id,
+                        sequence,
+                        RELAY_RESPONSE_ERROR_FRAME,
+                        message.as_bytes(),
+                    )));
+                    break;
+                }
             }
-            sequence = sequence.saturating_add(1);
         }
         let _ = relay_response_acks()
             .lock()
@@ -2570,6 +2619,7 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
     if request.body.is_some() {
         return Err("multipart relay request must stream its body".to_string());
     }
+    validate_relay_request_headers(&request.headers)?;
     let mut uploads = hub_uploads()
         .lock()
         .map_err(|_| "relay upload map lock poisoned".to_string())?;
@@ -2786,8 +2836,15 @@ async fn relay_hub_ws_binary(
 
     // `bytes` has one bounded owner here. We do not call `read.next()` again
     // until every one of its frames has been acknowledged by the webview.
-    let chunk_count = bytes.len().div_ceil(RELAY_CHUNK_BYTES);
-    for (index, chunk) in bytes.chunks(RELAY_CHUNK_BYTES).enumerate() {
+    // `chunks` would otherwise yield no frame for an empty binary message,
+    // making it disappear between the socket and the webview.
+    let chunks: Vec<&[u8]> = if bytes.is_empty() {
+        vec![&[]]
+    } else {
+        bytes.chunks(RELAY_CHUNK_BYTES).collect()
+    };
+    let chunk_count = chunks.len();
+    for (index, chunk) in chunks.into_iter().enumerate() {
         // The first byte identifies the end of this one WebSocket message. IPC
         // frames stay raw bytes; the desktop client reassembles them before its
         // normal MessagePack decode.
@@ -2818,6 +2875,18 @@ async fn relay_hub_ws_binary(
         }
     }
     HubWsRelayEnd::Closed
+}
+
+async fn wait_for_hub_ws_connect<T, E, F>(future: F, deadline: Duration) -> Result<T, String>
+where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(deadline, future).await {
+        Ok(Ok(socket)) => Ok(socket),
+        Ok(Err(error)) => Err(format!("pinned hub WebSocket connection failed: {error}")),
+        Err(_) => Err("pinned hub WebSocket connection timed out".to_string()),
+    }
 }
 
 async fn relay_hub_ws_stream(
@@ -2898,18 +2967,21 @@ async fn relay_hub_ws_connect(
             return Err(error);
         }
     };
-    let (socket, _) = match tokio_tungstenite::connect_async_tls_with_config(
-        relay_hub_ws_url(connection.port),
-        Some(config),
-        false,
-        Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls_config))),
+    let (socket, _) = match wait_for_hub_ws_connect(
+        tokio_tungstenite::connect_async_tls_with_config(
+            relay_hub_ws_url(connection.port),
+            Some(config),
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls_config))),
+        ),
+        HUB_REQUEST_TIMEOUT,
     )
     .await
     {
         Ok(socket) => socket,
         Err(error) => {
             release_hub_relay(id);
-            return Err(format!("pinned hub WebSocket connection failed: {error}"));
+            return Err(error);
         }
     };
 
@@ -2917,10 +2989,7 @@ async fn relay_hub_ws_connect(
     let (acknowledgement_sender, acknowledgement) = tokio::sync::mpsc::channel(1);
     let acknowledgement_pending = Arc::new(AtomicBool::new(false));
     let (close_sender, close) = tokio::sync::mpsc::unbounded_channel();
-    hub_ws_relays()
-        .lock()
-        .map_err(|_| "hub WebSocket relay map lock poisoned".to_string())?
-        .insert(
+    if hub_ws_relays().lock().map(|mut relays| relays.insert(
             id,
             HubWsRelay {
                 input: input_sender,
@@ -2928,7 +2997,10 @@ async fn relay_hub_ws_connect(
                 acknowledgement_pending: acknowledgement_pending.clone(),
                 close: close_sender,
             },
-        );
+        )).is_err() {
+        release_hub_relay(id);
+        return Err("hub WebSocket relay map lock poisoned".to_string());
+    }
     tauri::async_runtime::spawn(async move {
         relay_hub_ws_stream(socket, stream, input, acknowledgement, acknowledgement_pending, close).await;
         let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
@@ -5643,6 +5715,33 @@ mod tests {
     }
 
     #[test]
+    fn response_ack_timeout_is_reported_to_the_waiting_webview() {
+        assert!(relay_response_ack_failure_message(mpsc::RecvTimeoutError::Timeout)
+            .contains("acknowledgement timed out"));
+        assert!(relay_response_ack_failure_message(mpsc::RecvTimeoutError::Disconnected)
+            .contains("acknowledgement stopped"));
+    }
+
+    #[test]
+    fn relay_refuses_caller_supplied_framing_and_connection_headers() {
+        for header in ["Content-Length", "Transfer-Encoding", "Connection", "Upgrade"] {
+            let error = validate_relay_request_headers(&[(header.to_string(), "value".to_string())])
+                .expect_err("the native request boundary must own HTTP framing");
+            assert!(error.contains(header), "error: {error}");
+        }
+        assert!(validate_relay_request_headers(&[("Content-Type".to_string(), "application/json".to_string())]).is_ok());
+    }
+
+    #[test]
+    fn websocket_connect_wait_has_a_finite_deadline() {
+        let result = tauri::async_runtime::block_on(wait_for_hub_ws_connect(
+            std::future::pending::<Result<(), &str>>(),
+            Duration::from_millis(1),
+        ));
+        assert!(matches!(result, Err(error) if error.contains("timed out")));
+    }
+
+    #[test]
     fn relay_admission_refuses_the_first_request_past_its_limit() {
         let mut relays = HashSet::new();
         for id in 1..=MAX_ACTIVE_HUB_RELAYS as u64 {
@@ -5662,6 +5761,44 @@ mod tests {
         assert_eq!(u64::from_le_bytes(frame[0..8].try_into().unwrap()), 41);
         assert_eq!(u64::from_le_bytes(frame[8..16].try_into().unwrap()), 3);
         assert_eq!(frame[16], RELAY_RESPONSE_DATA_FRAME);
+    }
+
+    #[test]
+    fn empty_binary_websocket_message_is_forwarded_as_a_terminal_frame() {
+        let (frame_sender, frame_received) = mpsc::channel();
+        let channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody> =
+            tauri::ipc::Channel::new(move |body| {
+                let tauri::ipc::InvokeResponseBody::Raw(frame) = body else {
+                    panic!("the relay must send raw binary IPC frames");
+                };
+                frame_sender.send(frame).unwrap();
+                Ok(())
+            });
+        let (ack_sender, mut acknowledgements) = tokio::sync::mpsc::channel(1);
+        let acknowledgement_pending = Arc::new(AtomicBool::new(false));
+        let (_close_sender, mut close) = tokio::sync::mpsc::unbounded_channel();
+        let pending = acknowledgement_pending.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            relay_hub_ws_binary(
+                Vec::new(),
+                &channel,
+                &mut acknowledgements,
+                &pending,
+                &mut close,
+            )
+            .await
+        });
+
+        assert_eq!(
+            frame_received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            vec![1],
+            "an empty binary message is one completed empty IPC frame"
+        );
+        ack_sender.try_send(()).unwrap();
+        assert!(matches!(
+            tauri::async_runtime::block_on(task).unwrap(),
+            HubWsRelayEnd::Closed
+        ));
     }
 
     #[test]

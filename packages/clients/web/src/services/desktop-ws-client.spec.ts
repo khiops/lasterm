@@ -90,6 +90,33 @@ describe("DesktopWsClient", () => {
 		client.close();
 	});
 
+	it("serializes fire-and-forget sends until native capacity accepts each one", async () => {
+		let acceptFirst: (() => void) | undefined;
+		let sendCount = 0;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(41);
+			if (command !== "relay_hub_ws_send") return Promise.resolve();
+			sendCount++;
+			if (sendCount === 1) return new Promise<void>((resolve) => (acceptFirst = resolve));
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "first" });
+		client.send({ type: "ATTACH", channelId: "channel-1" });
+		await vi.waitFor(() => expect(sendCount).toBe(1));
+		expect(sendCount).toBe(1);
+
+		acceptFirst?.();
+		await vi.waitFor(() => expect(sendCount).toBe(2));
+		client.close();
+	});
+
 	it("fails the relay rather than retaining more than two fire-and-forget sends", async () => {
 		let sendCount = 0;
 		ipc.invoke.mockImplementation((command: string) => {
@@ -108,13 +135,40 @@ describe("DesktopWsClient", () => {
 
 		client.send({ type: "AUTH", token: "one" });
 		client.send({ type: "AUTH", token: "two" });
-		await vi.waitFor(() => expect(sendCount).toBe(2));
+		await vi.waitFor(() => expect(sendCount).toBe(1));
 		client.send({ type: "AUTH", token: "three" });
 		expect(client.isConnected).toBe(false);
 		expect(consoleError).toHaveBeenCalledWith(
 			"[DesktopWsClient] Transport failure:",
 			"WebSocket relay send queue is full",
 		);
+		client.close();
+	});
+
+	it("does not reserve a send slot when message encoding fails", async () => {
+		let sendCount = 0;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(41);
+			if (command === "relay_hub_ws_send") {
+				sendCount++;
+				return new Promise<void>(() => undefined);
+			}
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+		const invalid = { type: "AUTH", token: "invalid" } as Record<string, unknown>;
+		invalid.self = invalid;
+
+		expect(() => client.send(invalid as never)).toThrow();
+		client.send({ type: "AUTH", token: "one" });
+		client.send({ type: "AUTH", token: "two" });
+		await vi.waitFor(() => expect(sendCount).toBe(1));
+		expect(client.isConnected).toBe(true);
 		client.close();
 	});
 
@@ -143,6 +197,48 @@ describe("DesktopWsClient", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 
+		expect(client.isConnected).toBe(true);
+		client.close();
+	});
+
+	it("closes the prior relay when an overlapping connect supersedes it", async () => {
+		let nextRelayId = 41;
+		let resolveSecond: ((relayId: number) => void) | undefined;
+		let acceptOldSend: (() => void) | undefined;
+		let oldSendCount = 0;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") {
+				if (nextRelayId++ === 41) return Promise.resolve(41);
+				return new Promise<number>((resolve) => (resolveSecond = resolve));
+			}
+			if (command === "relay_hub_ws_send") {
+				oldSendCount++;
+				if (oldSendCount === 1) {
+					return new Promise<void>((resolve) => (acceptOldSend = resolve));
+				}
+			}
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+		client.send({ type: "AUTH", token: "old-first" });
+		client.send({ type: "AUTH", token: "old-queued" });
+		await vi.waitFor(() => expect(oldSendCount).toBe(1));
+
+		const replacement = client.connect("ws://127.0.0.1:4100/ws");
+		await vi.waitFor(() => expect(resolveSecond).toBeTypeOf("function"));
+		resolveSecond?.(42);
+		await replacement;
+
+		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: 41 });
+		acceptOldSend?.();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(oldSendCount).toBe(1);
 		expect(client.isConnected).toBe(true);
 		client.close();
 	});

@@ -385,28 +385,55 @@ struct RelayHubHead {
 /// The two bounded queues which make an in-progress multipart upload a pipe,
 /// not a `Vec` containing the file.
 struct HubUpload {
-    /// This mutex is the owner of the upload lifecycle. Holding it covers both
-    /// testing whether the upload is open and inserting the frame into its
-    /// bounded body pipe, so a terminal frame cannot overtake accepted data.
+    /// This mutex is the one owner of the upload lifecycle. `end_hub_upload`
+    /// makes its terminal transition here; chunks hold the same lock while
+    /// claiming their pipe position, so an accepted chunk is always written
+    /// before any terminal frame.
     pipe: Mutex<HubUploadPipe>,
-    response: Mutex<Option<mpsc::Receiver<Result<reqwest::blocking::Response, String>>>>,
-    relay_id: u64,
-    /// One chunk command may wait for the bounded pipe.  This is an admission
-    /// bit, not the lifecycle mutex: contenders are refused before retaining
-    /// their IPC body or waiting behind the current command.
-    chunk_in_flight: Arc<AtomicBool>,
+    chunk_finished: Condvar,
+    response: Mutex<Option<mpsc::Receiver<HubUploadResponse>>>,
 }
 
 struct HubUploadPipe {
     sender: Option<mpsc::SyncSender<HubUploadFrame>>,
     phase: HubUploadPhase,
+    chunk_in_flight: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HubUploadPhase {
     Open,
+    Ending,
     Finished,
     Aborted,
+}
+
+#[derive(Clone, Copy)]
+enum HubUploadEndReason {
+    Finish,
+    Cancel,
+    Expiry,
+    ChunkFailure,
+}
+
+type HubUploadResponse = (Result<reqwest::blocking::Response, String>, HubRelayAdmission);
+
+/// Admission follows the object that still owns the request, response, socket,
+/// or worker thread. It is released structurally when that object is dropped.
+struct HubRelayAdmission {
+    id: u64,
+}
+
+impl HubRelayAdmission {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for HubRelayAdmission {
+    fn drop(&mut self) {
+        let _ = active_hub_relays().lock().map(|mut relays| relays.remove(&self.id));
+    }
 }
 
 /// Upload-body termination is data on the pipe, not a side effect of dropping
@@ -2432,7 +2459,7 @@ fn active_hub_relays() -> &'static Mutex<HashSet<u64>> {
     ACTIVE_HUB_RELAYS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn reserve_hub_relay() -> Result<u64, String> {
+fn reserve_hub_relay() -> Result<HubRelayAdmission, String> {
     let mut relays = active_hub_relays()
         .lock()
         .map_err(|_| "hub relay admission lock poisoned".to_string())?;
@@ -2443,7 +2470,7 @@ fn reserve_hub_relay() -> Result<u64, String> {
         current.checked_add(1)
     }).map_err(|_| "hub relay identifier sequence exhausted".to_string())?;
     if !admit_hub_relay(&mut relays, id) { return Err("too many active hub relays".to_string()); }
-    Ok(id)
+    Ok(HubRelayAdmission { id })
 }
 
 fn admit_hub_relay(relays: &mut HashSet<u64>, id: u64) -> bool {
@@ -2451,10 +2478,6 @@ fn admit_hub_relay(relays: &mut HashSet<u64>, id: u64) -> bool {
         return false;
     }
     relays.insert(id)
-}
-
-fn release_hub_relay(id: u64) {
-    let _ = active_hub_relays().lock().map(|mut relays| relays.remove(&id));
 }
 
 fn parse_relay_identifier(value: &str, label: &str) -> Result<u64, String> {
@@ -2732,8 +2755,9 @@ fn relay_response_ack_failure_message(error: mpsc::RecvTimeoutError) -> String {
 fn relay_response(
     mut response: reqwest::blocking::Response,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-    id: u64,
+    admission: HubRelayAdmission,
 ) -> RelayHubHead {
+    let id = admission.id();
     let head = response_head(&response, id);
     let (ack_sender, ack_receiver) = mpsc::sync_channel(1);
     let acknowledgement = Arc::new(RelayResponseAck {
@@ -2748,6 +2772,8 @@ fn relay_response(
         .lock()
         .map(|mut acknowledgements| acknowledgements.insert(id, acknowledgement.clone()));
     std::thread::spawn(move || {
+        // `admission` stays with this response and its socket until both end.
+        let _admission = admission;
         let mut buffer = vec![0_u8; RELAY_CHUNK_BYTES];
         let mut sequence = 1_u64;
         loop {
@@ -2810,7 +2836,6 @@ fn relay_response(
         let _ = relay_response_acks()
             .lock()
             .map(|mut acknowledgements| acknowledgements.remove(&id));
-        release_hub_relay(id);
     });
     head
 }
@@ -2820,15 +2845,9 @@ fn relay_hub_request(
     request: RelayHubRequest,
     response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RelayHubHead, String> {
-    let id = reserve_hub_relay()?;
-    let hub_response = match send_relay_hub_request(&request, None) {
-        Ok(response) => response,
-        Err(error) => {
-            release_hub_relay(id);
-            return Err(error);
-        }
-    };
-    Ok(relay_response(hub_response, response, id))
+    let admission = reserve_hub_relay()?;
+    let hub_response = send_relay_hub_request(&request, None)?;
+    Ok(relay_response(hub_response, response, admission))
 }
 
 #[tauri::command]
@@ -2841,7 +2860,8 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
     if uploads.len() >= MAX_ACTIVE_RELAY_UPLOADS {
         return Err("too many active hub uploads".to_string());
     }
-    let id = reserve_hub_relay()?;
+    let admission = reserve_hub_relay()?;
+    let id = admission.id();
     let (sender, receiver) = mpsc::sync_channel(RELAY_UPLOAD_QUEUE_CHUNKS);
     let (response_sender, response_receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -2851,7 +2871,9 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
             finished: false,
             aborted: false,
         });
-        let _ = response_sender.send(send_relay_hub_request(&request, Some(body)));
+        // The worker owns admission while reqwest owns the request socket. On a
+        // successful finish it transfers that admission with the response.
+        let _ = response_sender.send((send_relay_hub_request(&request, Some(body)), admission));
     });
     uploads.insert(
         id,
@@ -2859,10 +2881,10 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
             pipe: Mutex::new(HubUploadPipe {
                 sender: Some(sender),
                 phase: HubUploadPhase::Open,
+                chunk_in_flight: false,
             }),
+            chunk_finished: Condvar::new(),
             response: Mutex::new(Some(response_receiver)),
-            relay_id: id,
-            chunk_in_flight: Arc::new(AtomicBool::new(false)),
         }),
     );
     drop(uploads);
@@ -2892,7 +2914,9 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
         }
     };
     let claim = claim_hub_upload_chunk(upload_id)?;
-    // Do not materialise the IPC body until this command has won admission.
+    // Tauri has already materialised this raw IPC body before entering the
+    // command. An oversized body is rejected here without another copy or any
+    // relay retention; an admitted bounded frame is copied into the body pipe.
     send_hub_upload_chunk_claimed(upload_id, claim, bytes.clone(), Instant::now() + HUB_REQUEST_TIMEOUT)
 }
 
@@ -2911,9 +2935,9 @@ fn send_hub_upload_chunk_with_deadline(
     send_hub_upload_chunk_claimed(upload_id, claim, bytes, deadline)
 }
 
-/// Claims the single permitted waiting chunk before copying the IPC bytes.  The
-/// lifecycle mutex is held only long enough to snapshot the sender and phase;
-/// the bounded-pipe wait happens after it has been released.
+/// Claims the single permitted waiting chunk before copying IPC bytes. The
+/// lifecycle mutex makes this claim and the terminal transition mutually
+/// exclusive; the bounded-pipe wait itself happens after it is released.
 fn claim_hub_upload_chunk(upload_id: u64) -> Result<(Arc<HubUpload>, mpsc::SyncSender<HubUploadFrame>, UploadChunkClaim), String> {
     let upload = hub_uploads()
         .lock()
@@ -2921,23 +2945,26 @@ fn claim_hub_upload_chunk(upload_id: u64) -> Result<(Arc<HubUpload>, mpsc::SyncS
         .get(&upload_id)
         .cloned()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    if upload.chunk_in_flight.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+    let mut pipe = upload.pipe.lock().map_err(|_| "relay upload pipe lock poisoned".to_string())?;
+    if pipe.chunk_in_flight {
         return Err("multipart relay upload already has a chunk in flight".to_string());
     }
-    let claim = UploadChunkClaim(upload.chunk_in_flight.clone());
-    // This guard is deliberately short: the potentially blocking pipe send is
-    // below, after the lifecycle mutex has been released.
-    let pipe = upload.pipe.lock().map_err(|_| "relay upload pipe lock poisoned".to_string())?;
     let sender = (pipe.phase == HubUploadPhase::Open).then(|| pipe.sender.clone()).flatten()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
+    pipe.chunk_in_flight = true;
     drop(pipe);
-    Ok((upload, sender, claim))
+    Ok((upload.clone(), sender, UploadChunkClaim(upload)))
 }
 
-struct UploadChunkClaim(Arc<AtomicBool>);
+struct UploadChunkClaim(Arc<HubUpload>);
 
 impl Drop for UploadChunkClaim {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        if let Ok(mut pipe) = self.0.pipe.lock() {
+            pipe.chunk_in_flight = false;
+            self.0.chunk_finished.notify_all();
+        }
+    }
 }
 
 fn send_hub_upload_chunk_claimed(
@@ -2946,23 +2973,10 @@ fn send_hub_upload_chunk_claimed(
     bytes: Vec<u8>,
     deadline: Instant,
 ) -> Result<(), String> {
-    let (upload, sender, _claim) = _claim;
+    let (_upload, sender, claim) = _claim;
     if send_hub_upload_frame_until(sender, HubUploadFrame::Data(bytes), deadline).is_ok() { return Ok(()); }
-    if let Ok(mut pipe) = upload.pipe.lock() {
-        pipe.phase = HubUploadPhase::Aborted;
-        pipe.sender.take();
-    }
-    // A chunk racing a successfully published `Finished` frame was refused;
-    // it must not tear down that finisher's response relay. Only a broken pipe
-    // changes the upload to Aborted and releases its admission slot.
-    let aborted = upload
-        .pipe
-        .lock()
-        .map(|pipe| pipe.phase == HubUploadPhase::Aborted)
-        .unwrap_or(true);
-    if aborted {
-        release_hub_upload(upload_id);
-    }
+    drop(claim);
+    let _ = end_hub_upload(upload_id, HubUploadEndReason::ChunkFailure);
     Err("multipart relay upload stopped or timed out before its body completed".to_string())
 }
 
@@ -2982,33 +2996,71 @@ fn send_hub_upload_frame_until(
     }
 }
 
-/// The lifecycle lock owns only the state transition.  It never covers the
-/// bounded-pipe wait: a caller that would contend with a claimed chunk is
-/// refused, rather than queued behind it.
-fn enqueue_hub_upload_frame(
-    upload: &HubUpload,
-    frame: HubUploadFrame,
-    deadline: Instant,
-) -> Result<(), HubUploadFrame> {
+/// The only terminal transition for uploads. The winning caller removes the
+/// upload from admission-visible state while it changes `Open` to `Ending`; all
+/// later finish, cancel, expiry, and chunk-failure calls are inert. It waits for
+/// a previously accepted chunk before inserting its terminal frame, so no
+/// terminal reason can discard accepted data.
+fn end_hub_upload(upload_id: u64, reason: HubUploadEndReason) -> Option<Arc<HubUpload>> {
+    let upload = {
+        let mut uploads = hub_uploads().lock().ok()?;
+        let upload = uploads.get(&upload_id)?.clone();
+        let mut pipe = upload.pipe.lock().ok()?;
+        if pipe.phase != HubUploadPhase::Open {
+            return None;
+        }
+        pipe.phase = HubUploadPhase::Ending;
+        uploads.remove(&upload_id);
+        drop(pipe);
+        upload
+    };
+    hub_upload_deadlines().remove(upload_id);
+
+    let deadline = Instant::now() + HUB_REQUEST_TIMEOUT;
+    let frame = if matches!(reason, HubUploadEndReason::Finish) {
+        HubUploadFrame::Finished
+    } else {
+        HubUploadFrame::Aborted
+    };
     let mut pipe = match upload.pipe.lock() {
         Ok(pipe) => pipe,
-        Err(_) => return Err(frame),
+        Err(_) => return Some(upload.clone()),
     };
-    if pipe.phase != HubUploadPhase::Open {
-        return Err(frame);
+    while pipe.chunk_in_flight {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            pipe.sender.take();
+            pipe.phase = HubUploadPhase::Aborted;
+            drop(pipe);
+            return Some(upload);
+        }
+        let (next, result) = match upload.chunk_finished.wait_timeout(pipe, remaining) {
+            Ok(waited) => waited,
+            Err(_) => return Some(upload.clone()),
+        };
+        pipe = next;
+        if result.timed_out() && pipe.chunk_in_flight {
+            // The chunk has its own finite deadline and will wake us. Do not
+            // emit a terminal frame ahead of the chunk it already accepted.
+            pipe.sender.take();
+            pipe.phase = HubUploadPhase::Aborted;
+            drop(pipe);
+            return Some(upload);
+        }
     }
-    if matches!(frame, HubUploadFrame::Finished) && upload.chunk_in_flight.load(Ordering::Acquire) {
-        return Err(frame);
-    }
-    let terminal_phase = match &frame {
-        HubUploadFrame::Finished => Some(HubUploadPhase::Finished),
-        HubUploadFrame::Aborted => Some(HubUploadPhase::Aborted),
-        HubUploadFrame::Data(_) => None,
+    let sent = pipe
+        .sender
+        .clone()
+        .map(|sender| send_hub_upload_frame_until(sender, frame, deadline).is_ok())
+        .unwrap_or(false);
+    pipe.sender.take();
+    pipe.phase = if sent && matches!(reason, HubUploadEndReason::Finish) {
+        HubUploadPhase::Finished
+    } else {
+        HubUploadPhase::Aborted
     };
-    let Some(sender) = pipe.sender.clone() else { pipe.phase = HubUploadPhase::Aborted; return Err(frame); };
-    if let Some(phase) = terminal_phase { pipe.phase = phase; }
     drop(pipe);
-    send_hub_upload_frame_until(sender, frame, deadline)
+    Some(upload)
 }
 
 #[tauri::command]
@@ -3017,91 +3069,37 @@ fn relay_hub_upload_finish(
     response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RelayHubHead, String> {
     let upload_id = parse_relay_identifier(&upload_id, "multipart relay upload id")?;
-    let upload = hub_uploads()
-        .lock()
-        .map_err(|_| "relay upload map lock poisoned".to_string())?
-        .get(&upload_id)
-        .cloned()
+    let upload = end_hub_upload(upload_id, HubUploadEndReason::Finish)
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    let relay_id = upload.relay_id;
-    if enqueue_hub_upload_frame(
-        &upload,
-        HubUploadFrame::Finished,
-        Instant::now() + HUB_REQUEST_TIMEOUT,
-    )
-    .is_err()
-    {
-        remove_hub_upload(upload_id, &upload);
-        release_hub_relay(relay_id);
-        return Err("multipart relay upload stopped or timed out before its body completed".to_string());
-    }
-    remove_hub_upload(upload_id, &upload);
     let response_receiver = upload
         .response
         .lock()
         .map_err(|_| "multipart relay upload response lock poisoned".to_string())?
         .take()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    let hub_response = match response_receiver.recv_timeout(HUB_REQUEST_TIMEOUT) {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            release_hub_relay(relay_id);
-            return Err(error);
-        }
+    let (hub_result, admission) = match response_receiver.recv_timeout(HUB_REQUEST_TIMEOUT) {
+        Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            release_hub_relay(relay_id);
             return Err("multipart relay upload timed out before receiving a hub response".to_string());
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            release_hub_relay(relay_id);
             return Err("multipart relay upload stopped before receiving a hub response".to_string());
         }
     };
-    Ok(relay_response(hub_response, response, relay_id))
+    let hub_response = hub_result?;
+    Ok(relay_response(hub_response, response, admission))
 }
 
 /// Idempotent: `finish` may have won the failure race and already removed it.
 #[tauri::command]
 fn relay_hub_upload_cancel(upload_id: String) {
     if let Ok(upload_id) = parse_relay_identifier(&upload_id, "multipart relay upload id") {
-        release_hub_upload(upload_id);
-    }
-}
-
-fn remove_hub_upload(upload_id: u64, expected: &Arc<HubUpload>) -> bool {
-    let mut uploads = hub_uploads()
-        .lock()
-        .expect("relay upload map lock poisoned");
-    let matches = uploads
-        .get(&upload_id)
-        .is_some_and(|upload| Arc::ptr_eq(upload, expected));
-    if matches {
-        uploads.remove(&upload_id);
-        hub_upload_deadlines().remove(upload_id);
-    }
-    matches
-}
-
-fn release_hub_upload(upload_id: u64) {
-    let upload = hub_uploads()
-        .lock()
-        .ok()
-        .and_then(|uploads| uploads.get(&upload_id).cloned());
-    if let Some(upload) = upload {
-        // Finish transfers this admission to the response relay. A concurrent
-        // cancel must not remove that relay's slot while it is streaming.
-        if upload.pipe.lock().map(|pipe| pipe.phase == HubUploadPhase::Finished).unwrap_or(false) {
-            return;
-        }
-        let _ = enqueue_hub_upload_frame(&upload, HubUploadFrame::Aborted, Instant::now() + HUB_REQUEST_TIMEOUT);
-        if remove_hub_upload(upload_id, &upload) {
-            release_hub_relay(upload.relay_id);
-        }
+        let _ = end_hub_upload(upload_id, HubUploadEndReason::Cancel);
     }
 }
 
 fn expire_hub_upload(upload_id: u64) {
-    release_hub_upload(upload_id);
+    let _ = end_hub_upload(upload_id, HubUploadEndReason::Expiry);
 }
 
 fn accept_relay_response_ack(acknowledgement: &RelayResponseAck, identity: &RelayFrameIdentity) {
@@ -3368,23 +3366,18 @@ async fn relay_hub_ws_stream(
 async fn relay_hub_ws_connect(
     stream: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<String, String> {
-    let id = reserve_hub_relay()?;
+    let admission = reserve_hub_relay()?;
+    let id = admission.id();
     let connection = match established_hub_connection() {
         Ok(connection) => connection,
-        Err(error) => {
-            release_hub_relay(id);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     config.max_message_size = Some(HUB_WS_MAX_MESSAGE_BYTES);
     config.max_frame_size = Some(HUB_WS_MAX_MESSAGE_BYTES);
     let tls_config = match pinned_hub_tls_config(connection.expected_spki) {
         Ok(config) => config,
-        Err(error) => {
-            release_hub_relay(id);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let (socket, _) = match wait_for_hub_ws_connect(
         tokio_tungstenite::connect_async_tls_with_config(
@@ -3398,10 +3391,7 @@ async fn relay_hub_ws_connect(
     .await
     {
         Ok(socket) => socket,
-        Err(error) => {
-            release_hub_relay(id);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
 
     let (input_sender, input) = tokio::sync::mpsc::channel(HUB_WS_INPUT_QUEUE_MESSAGES);
@@ -3417,23 +3407,21 @@ async fn relay_hub_ws_connect(
                 close: close_sender,
             },
         )).is_err() {
-        release_hub_relay(id);
         return Err("hub WebSocket relay map lock poisoned".to_string());
     }
     tauri::async_runtime::spawn(async move {
+        // This task owns admission for exactly as long as it owns the socket.
+        let _admission = admission;
         relay_hub_ws_stream(socket, stream, id, input, acknowledgement, outstanding, close).await;
-        finish_hub_ws_relay(id);
+        let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
     });
     Ok(id.to_string())
 }
 
-fn finish_hub_ws_relay(id: u64) {
-    let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
-    release_hub_relay(id);
-}
-
-/// Receives one raw MessagePack frame from the webview. This command refuses a
-/// full native queue so the fire-and-forget JavaScript API cannot retain an
+/// Receives one raw MessagePack frame from the webview. Tauri has already
+/// materialised that body before this command runs; an oversized body is
+/// rejected without another copy or relay retention. This command also refuses
+/// a full native queue so the fire-and-forget JavaScript API cannot retain an
 /// unbounded chain of pending sends.
 #[tauri::command]
 async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), String> {
@@ -3443,6 +3431,12 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
         .and_then(|value| value.to_str().ok())
         .and_then(|value| parse_relay_identifier(value, "WebSocket relay id").ok())
         .ok_or_else(|| "WebSocket input is missing its relay id".to_string())?;
+    let input = hub_ws_relays()
+        .lock()
+        .map_err(|_| "hub WebSocket relay map lock poisoned".to_string())?
+        .get(&relay_id)
+        .map(|relay| relay.input.clone())
+        .ok_or_else(|| "WebSocket relay is no longer active".to_string())?;
     let bytes = match request.body() {
         tauri::ipc::InvokeBody::Raw(bytes)
             if !bytes.is_empty() && bytes.len() <= HUB_WS_MAX_MESSAGE_BYTES =>
@@ -3458,13 +3452,7 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
             return Err("WebSocket input must use Tauri raw IPC bytes".to_string());
         }
     };
-    let input = hub_ws_relays()
-        .lock()
-        .map_err(|_| "hub WebSocket relay map lock poisoned".to_string())?
-        .get(&relay_id)
-        .map(|relay| relay.input.clone())
-        .ok_or_else(|| "WebSocket relay is no longer active".to_string())?;
-    input.try_send(bytes).map_err(|error| {
+    input.try_send(bytes.clone()).map_err(|error| {
         close_hub_ws_relay(relay_id);
         match error {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
@@ -4644,17 +4632,17 @@ mod tests {
 
     fn test_upload(
         sender: mpsc::SyncSender<HubUploadFrame>,
-        response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
-        relay_id: u64,
+        response: mpsc::Receiver<HubUploadResponse>,
+        _relay_id: u64,
     ) -> Arc<HubUpload> {
         Arc::new(HubUpload {
             pipe: Mutex::new(HubUploadPipe {
                 sender: Some(sender),
                 phase: HubUploadPhase::Open,
+                chunk_in_flight: false,
             }),
+            chunk_finished: Condvar::new(),
             response: Mutex::new(Some(response)),
-            relay_id,
-            chunk_in_flight: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -6247,8 +6235,7 @@ mod tests {
         sender.try_send(HubUploadFrame::Data(vec![0])).unwrap();
         let (_response_sender, response) = mpsc::channel();
         let upload = test_upload(sender, response, id);
-        let claim = upload.chunk_in_flight.clone();
-        hub_uploads().lock().unwrap().insert(id, upload);
+        hub_uploads().lock().unwrap().insert(id, upload.clone());
 
         let first = std::thread::spawn(move || {
             send_hub_upload_chunk_with_deadline(
@@ -6258,7 +6245,7 @@ mod tests {
             )
         });
         let claim_deadline = Instant::now() + Duration::from_secs(1);
-        while !claim.load(Ordering::Acquire) {
+        while !upload.pipe.lock().unwrap().chunk_in_flight {
             assert!(Instant::now() < claim_deadline, "first command did not claim the upload");
             std::thread::yield_now();
         }
@@ -6269,65 +6256,57 @@ mod tests {
     }
 
     #[test]
-    fn accepted_upload_chunk_is_never_discarded_before_finish() {
-        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        sender
-            .try_send(HubUploadFrame::Data(vec![0]))
-            .expect("occupy the bounded body pipe");
-        let (_response_sender, response) = mpsc::channel();
-        let upload = test_upload(sender, response, id);
-        let claim = upload.chunk_in_flight.clone();
-        hub_uploads().lock().unwrap().insert(id, upload.clone());
+    fn accepted_upload_chunk_is_never_discarded_by_any_terminal_reason() {
+        for (reason, completes) in [
+            (HubUploadEndReason::Finish, true),
+            (HubUploadEndReason::Cancel, false),
+            (HubUploadEndReason::Expiry, false),
+            (HubUploadEndReason::ChunkFailure, false),
+        ] {
+            let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+            let (sender, receiver) = mpsc::sync_channel(1);
+            sender.try_send(HubUploadFrame::Data(vec![0])).unwrap();
+            let (_response_sender, response) = mpsc::channel();
+            let upload = test_upload(sender, response, id);
+            hub_uploads().lock().unwrap().insert(id, upload.clone());
 
-        let accepted_chunk = std::thread::spawn(move || {
-            send_hub_upload_chunk_with_deadline(
-                id,
-                vec![1],
-                Instant::now() + Duration::from_secs(1),
-            )
-        });
-        let claim_deadline = Instant::now() + Duration::from_secs(1);
-        while !claim.load(Ordering::Acquire) {
-            assert!(
-                Instant::now() < claim_deadline,
-                "the chunk did not claim the upload before its pipe wait"
-            );
-            std::thread::yield_now();
+            let accepted_chunk = std::thread::spawn(move || {
+                send_hub_upload_chunk_with_deadline(
+                    id,
+                    vec![1],
+                    Instant::now() + Duration::from_secs(1),
+                )
+            });
+            let claim_deadline = Instant::now() + Duration::from_secs(1);
+            while !upload.pipe.lock().unwrap().chunk_in_flight {
+                assert!(Instant::now() < claim_deadline, "the chunk did not claim the upload");
+                std::thread::yield_now();
+            }
+            let terminal = std::thread::spawn(move || end_hub_upload(id, reason));
+            while hub_uploads().lock().unwrap().contains_key(&id) {
+                assert!(Instant::now() < claim_deadline, "the terminal transition did not win");
+                std::thread::yield_now();
+            }
+
+            let mut body = HubUploadReader {
+                receiver,
+                current: std::io::Cursor::new(Vec::new()),
+                finished: false,
+                aborted: false,
+            };
+            let mut bytes = [0; 1];
+            assert_eq!(body.read(&mut bytes).unwrap(), 1);
+            assert_eq!(bytes, [0]);
+            assert!(accepted_chunk.join().unwrap().is_ok(), "the admitted chunk enters the body pipe");
+            assert_eq!(body.read(&mut bytes).unwrap(), 1);
+            assert_eq!(bytes, [1], "no terminal reason discards accepted data");
+            assert!(terminal.join().unwrap().is_some(), "one terminal call ends the upload");
+            if completes {
+                assert_eq!(body.read(&mut bytes).unwrap(), 0);
+            } else {
+                assert_eq!(body.read(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+            }
         }
-
-        assert!(
-            enqueue_hub_upload_frame(&upload, HubUploadFrame::Finished, Instant::now()).is_err(),
-            "a terminal frame must not overtake a chunk that is still in flight"
-        );
-
-        let mut body = HubUploadReader {
-            receiver,
-            current: std::io::Cursor::new(Vec::new()),
-            finished: false,
-            aborted: false,
-        };
-        let mut bytes = [0; 1];
-        assert_eq!(body.read(&mut bytes).unwrap(), 1);
-        assert_eq!(bytes, [0]);
-        assert!(
-            accepted_chunk.join().unwrap().is_ok(),
-            "the admitted chunk must enter the body pipe"
-        );
-        assert_eq!(body.read(&mut bytes).unwrap(), 1);
-        assert_eq!(bytes, [1], "the accepted chunk reaches the request body");
-
-        assert!(
-            enqueue_hub_upload_frame(
-                &upload,
-                HubUploadFrame::Finished,
-                Instant::now() + Duration::from_secs(1),
-            )
-            .is_ok(),
-            "finish may follow only after the accepted chunk is in the body"
-        );
-        assert_eq!(body.read(&mut bytes).unwrap(), 0, "only Finished completes the body");
-        assert!(remove_hub_upload(id, &upload));
     }
 
     #[test]
@@ -6423,19 +6402,53 @@ mod tests {
     }
 
     #[test]
-    fn cancel_after_finish_does_not_release_the_response_relay() {
-        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
-        let (sender, _receiver) = mpsc::sync_channel(2);
-        let (_response_sender, response) = mpsc::channel();
-        let upload = test_upload(sender, response, id);
-        hub_uploads().lock().unwrap().insert(id, upload.clone());
-        active_hub_relays().lock().unwrap().insert(id);
-        assert!(enqueue_hub_upload_frame(&upload, HubUploadFrame::Finished, Instant::now()).is_ok());
+    fn concurrent_finish_and_cancel_calls_end_an_upload_once() {
+        for reasons in [
+            [HubUploadEndReason::Finish, HubUploadEndReason::Finish],
+            [HubUploadEndReason::Finish, HubUploadEndReason::Cancel],
+        ] {
+            let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+            let (sender, _receiver) = mpsc::sync_channel(2);
+            let (_response_sender, response) = mpsc::channel();
+            hub_uploads().lock().unwrap().insert(id, test_upload(sender, response, id));
+            let first = std::thread::spawn(move || end_hub_upload(id, reasons[0]).is_some());
+            let second = std::thread::spawn(move || end_hub_upload(id, reasons[1]).is_some());
+            assert_eq!(usize::from(first.join().unwrap()) + usize::from(second.join().unwrap()), 1);
+            assert!(!hub_uploads().lock().unwrap().contains_key(&id));
+        }
+    }
 
-        release_hub_upload(id);
-        assert!(active_hub_relays().lock().unwrap().contains(&id), "the response relay still owns admission");
-        remove_hub_upload(id, &upload);
-        release_hub_relay(id);
+    #[test]
+    fn cancelling_uploads_keeps_admission_until_their_workers_end() {
+        let mut releases = Vec::new();
+        let mut workers = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..MAX_ACTIVE_HUB_RELAYS {
+            let admission = reserve_hub_relay().expect("each worker is admitted up to the bound");
+            let id = admission.id();
+            let (release, wait) = mpsc::channel();
+            workers.push(std::thread::spawn(move || {
+                let _admission = admission;
+                wait.recv().expect("test worker is released");
+            }));
+            releases.push(release);
+            ids.push(id);
+
+            let (sender, _receiver) = mpsc::sync_channel(1);
+            let (_response_sender, response) = mpsc::channel();
+            hub_uploads().lock().unwrap().insert(id, test_upload(sender, response, id));
+            assert!(end_hub_upload(id, HubUploadEndReason::Cancel).is_some());
+            assert!(active_hub_relays().lock().unwrap().contains(&id));
+        }
+        assert!(reserve_hub_relay().is_err(), "cancelled workers still occupy the bounded admission");
+        assert!(ids.iter().all(|id| active_hub_relays().lock().unwrap().contains(id)));
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(ids.iter().all(|id| !active_hub_relays().lock().unwrap().contains(id)));
     }
 
     #[test]
@@ -6522,7 +6535,6 @@ mod tests {
         assert!(error.contains("write timed out"));
 
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
-        active_hub_relays().lock().unwrap().insert(id);
         let (input, _input_receiver) = tokio::sync::mpsc::channel(1);
         let (acknowledgement, _acknowledgement_receiver) = tokio::sync::mpsc::channel(1);
         let (close, _close_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -6535,9 +6547,8 @@ mod tests {
                 close,
             },
         );
-        finish_hub_ws_relay(id);
+        let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
         assert!(!hub_ws_relays().lock().unwrap().contains_key(&id));
-        assert!(!active_hub_relays().lock().unwrap().contains(&id));
     }
 
     #[test]

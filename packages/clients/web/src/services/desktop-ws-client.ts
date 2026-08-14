@@ -7,6 +7,7 @@ type LifecycleListener = () => void;
 type RelayEvent = { event: "closed" | "transport_error"; message?: string | null };
 
 const MAX_RELAYED_MESSAGE_BYTES = 512 * 1024;
+const MAX_PENDING_RELAY_SENDS = 2;
 
 /**
  * Desktop implementation of IWsClient.
@@ -27,7 +28,7 @@ export class DesktopWsClient implements IWsClient {
 	private pendingFrame: ArrayBuffer | RelayEvent | undefined;
 	private messageParts: Uint8Array[] = [];
 	private messageBytes = 0;
-	private sendQueue: Promise<void> = Promise.resolve();
+	private pendingSends = 0;
 
 	async connect(_url: string): Promise<void> {
 		const { Channel, invoke } = await import("@tauri-apps/api/core");
@@ -53,19 +54,32 @@ export class DesktopWsClient implements IWsClient {
 		const relayId = this.relayId;
 		if (relayId === null) throw new Error("WebSocket not connected");
 		const generation = this.connectionGeneration;
-		const encoded = encodeMessage(msg);
-		// IWsClient intentionally remains fire-and-forget, as WebSocket.send is.
-		// This one FIFO serializes all callers; the native command awaits queue
-		// capacity, so it applies backpressure instead of overflowing a relay.
-		this.sendQueue = this.sendQueue
-			.then(async () => {
-				if (!this._isCurrentRelay(relayId, generation)) return;
-				const { invoke } = await import("@tauri-apps/api/core");
-				await invoke("relay_hub_ws_send", encoded.buffer, {
+		if (this.pendingSends >= MAX_PENDING_RELAY_SENDS) {
+			this._transportFailure("WebSocket relay send queue is full", relayId, generation);
+			return;
+		}
+		this.pendingSends++;
+		const encoded = encodeMessage(msg).slice();
+		// IWsClient is fire-and-forget. A bounded number of outstanding IPC
+		// invocations prevents callers from building a promise chain in JavaScript;
+		// native then refuses rather than waits when its own queue is full.
+		void import("@tauri-apps/api/core")
+			.then(({ invoke }) =>
+				invoke("relay_hub_ws_send", encoded.buffer, {
 					headers: { "X-Lasterm-Ws-Id": String(relayId) },
-				});
-			})
-			.catch((error: unknown) => this._transportFailure(String(error), relayId, generation));
+				}),
+			)
+			.then(
+				() => {
+					if (this._isCurrentRelay(relayId, generation)) this.pendingSends--;
+				},
+				(error: unknown) => {
+					if (this._isCurrentRelay(relayId, generation)) {
+						this.pendingSends--;
+						this._transportFailure(String(error), relayId, generation);
+					}
+				},
+			);
 	}
 
 	on(type: string, callback: MessageListener): () => void {
@@ -95,7 +109,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		this.sendQueue = Promise.resolve();
+		this.pendingSends = 0;
 		if (relayId !== null) {
 			void import("@tauri-apps/api/core")
 				.then(({ invoke }) => invoke("relay_hub_ws_close", { relayId }))
@@ -164,7 +178,7 @@ export class DesktopWsClient implements IWsClient {
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		this.sendQueue = Promise.resolve();
+		this.pendingSends = 0;
 		for (const listener of this.disconnectListeners) listener();
 		this._scheduleReconnect();
 	}
@@ -177,10 +191,18 @@ export class DesktopWsClient implements IWsClient {
 			return;
 		}
 		console.error("[DesktopWsClient] Transport failure:", error);
+		const activeRelayId = this.relayId;
 		this.relayId = null;
 		this.pendingFrame = undefined;
 		this._resetMessage();
-		this.sendQueue = Promise.resolve();
+		this.pendingSends = 0;
+		if (activeRelayId !== null) {
+			void import("@tauri-apps/api/core")
+				.then(({ invoke }) => invoke("relay_hub_ws_close", { relayId: activeRelayId }))
+				.catch((closeError: unknown) =>
+					console.error("[DesktopWsClient] Failed to close relay:", closeError),
+				);
+		}
 		for (const listener of this.disconnectListeners) listener();
 		this._scheduleReconnect();
 	}

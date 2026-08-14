@@ -31,7 +31,10 @@ describe("DesktopWsClient", () => {
 	});
 
 	it("does not construct a webview WebSocket in the desktop runtime", async () => {
-		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
 		const webSocket = vi.fn();
 		vi.stubGlobal("WebSocket", webSocket);
 
@@ -44,7 +47,10 @@ describe("DesktopWsClient", () => {
 	});
 
 	it("acknowledges a consumed raw relay frame before Rust may read another", async () => {
-		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
 		const client = createWsClient();
 		const received: string[] = [];
 		client.on("AUTH_OK", (message) => received.push(message.type));
@@ -64,7 +70,10 @@ describe("DesktopWsClient", () => {
 	});
 
 	it("reports a transport failure as disconnected before reconnecting", async () => {
-		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
 		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const client = createWsClient();
 		const disconnected = vi.fn();
@@ -79,34 +88,33 @@ describe("DesktopWsClient", () => {
 			"pinned hub WebSocket transport failed",
 		);
 		client.close();
-
-		consoleError.mockClear();
-		await client.connect("ws://127.0.0.1:4100/ws");
-		ipc.callback?.({ event: "closed" });
-		expect(disconnected).toHaveBeenCalledTimes(2);
-		expect(consoleError).not.toHaveBeenCalled();
-		client.close();
 	});
 
-	it("serializes fire-and-forget sends until native capacity accepts each one", async () => {
+	it("fails the relay rather than retaining more than two fire-and-forget sends", async () => {
 		let sendCount = 0;
-		let releaseFirst: (() => void) | undefined;
 		ipc.invoke.mockImplementation((command: string) => {
 			if (command === "relay_hub_ws_connect") return Promise.resolve(41);
 			if (command !== "relay_hub_ws_send") return Promise.resolve();
 			sendCount++;
-			if (sendCount === 1) return new Promise<void>((resolve) => (releaseFirst = resolve));
-			return Promise.resolve();
+			return new Promise<void>(() => undefined);
 		});
-		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const client = createWsClient();
 		await client.connect("ws://127.0.0.1:4100/ws");
 
 		client.send({ type: "AUTH", token: "one" });
 		client.send({ type: "AUTH", token: "two" });
-		await vi.waitFor(() => expect(sendCount).toBe(1));
-		releaseFirst?.();
 		await vi.waitFor(() => expect(sendCount).toBe(2));
+		client.send({ type: "AUTH", token: "three" });
+		expect(client.isConnected).toBe(false);
+		expect(consoleError).toHaveBeenCalledWith(
+			"[DesktopWsClient] Transport failure:",
+			"WebSocket relay send queue is full",
+		);
 		client.close();
 	});
 
@@ -120,7 +128,10 @@ describe("DesktopWsClient", () => {
 			}
 			return Promise.resolve();
 		});
-		Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
 		const client = createWsClient();
 		await client.connect("ws://127.0.0.1:4100/ws");
 

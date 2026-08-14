@@ -97,7 +97,9 @@ describe("hubFetch desktop transport", () => {
 
 		expect(invoke).toHaveBeenCalledWith(
 			"relay_hub_upload_start",
-			expect.objectContaining({ request: expect.objectContaining({ body: null }) }),
+			expect.objectContaining({
+				request: expect.not.objectContaining({ body: expect.anything() }),
+			}),
 			undefined,
 		);
 		expect(chunks).toHaveLength(4);
@@ -197,6 +199,45 @@ describe("hubFetch desktop transport", () => {
 		});
 
 		await expect(response.text()).rejects.toThrow("acknowledgement timed out");
+	});
+
+	it("settles a response body when its producer sends data then goes silent", async () => {
+		vi.useFakeTimers();
+		let channelCallback:
+			| ((
+					message: { index: number; message: ArrayBuffer } | { index: number; end: boolean },
+			  ) => void)
+			| undefined;
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_request") {
+				return { id: 55, status: 200, statusText: "OK", headers: [] };
+			}
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: {
+				invoke,
+				transformCallback: (callback: typeof channelCallback) => {
+					channelCallback = callback;
+					return 1;
+				},
+			},
+		});
+
+		const response = await hubFetch("https://127.0.0.1:4242/api/silent-after-data");
+		channelCallback?.({
+			index: 0,
+			message: responseFrame(55n, 1n, 0, new TextEncoder().encode("partial")),
+		});
+		const settled = expect(response.text()).rejects.toThrow(
+			"timed out while waiting for its producer",
+		);
+
+		await vi.advanceTimersByTimeAsync(25_000);
+
+		await settled;
+		expect(invoke).toHaveBeenCalledWith("relay_hub_response_cancel", { responseId: 55 }, undefined);
 	});
 
 	it("rejects a protocol failure delivered before the response head without cancelling another relay", async () => {

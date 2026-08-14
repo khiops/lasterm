@@ -4,7 +4,6 @@ type RelayRequest = {
 	method: string;
 	path: string;
 	headers: [string, string][];
-	body: null;
 };
 
 type RelayHead = {
@@ -61,7 +60,6 @@ async function relayHubFetch(input: string | URL, init?: HubFetchInit): Promise<
 		method: request.method,
 		path: relayPath(request.url),
 		headers: [...request.headers.entries()],
-		body: null,
 	};
 
 	return request.body === null
@@ -225,6 +223,20 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 	let cancelAttempted = false;
 	let expectedSequence = 1;
 	let failure: HubRelayTransportError | undefined;
+	let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+
+	const clearInactivityTimer = () => {
+		if (inactivityTimer !== undefined) {
+			clearTimeout(inactivityTimer);
+			inactivityTimer = undefined;
+		}
+	};
+	const resetInactivityTimer = () => {
+		clearInactivityTimer();
+		inactivityTimer = setTimeout(() => {
+			fail("hub relay response timed out while waiting for its producer");
+		}, HUB_RELAY_WAIT_TIMEOUT_MS);
+	};
 
 	const cancelRelay = () => {
 		if (cancelAttempted || responseId === null) return;
@@ -238,6 +250,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 	const fail = (message: string) => {
 		if (finished) return;
 		finished = true;
+		clearInactivityTimer();
 		cancelRelay();
 		failure = new HubRelayTransportError(message);
 		controller?.error(failure);
@@ -265,11 +278,13 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 		}
 		if (frame.kind === RELAY_END_FRAME) {
 			finished = true;
+			clearInactivityTimer();
 			controller.close();
 			return;
 		}
 		if (frame.kind === RELAY_ERROR_FRAME) {
 			finished = true;
+			clearInactivityTimer();
 			failure = new HubRelayTransportError(new TextDecoder().decode(frame.payload));
 			controller.error(failure);
 			return;
@@ -298,6 +313,13 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 		}
 		expectedSequence++;
 		pending.push(decoded);
+		if (responseId !== null) {
+			if (decoded.kind === RELAY_END_FRAME || decoded.kind === RELAY_ERROR_FRAME) {
+				clearInactivityTimer();
+			} else {
+				resetInactivityTimer();
+			}
+		}
 		// A pre-head frame is not trusted to identify a relay. Native guarantees
 		// only one outstanding frame, so retain it until the command returns the
 		// authoritative head id; that avoids cancelling an unrelated relay.
@@ -317,6 +339,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 			},
 			cancel() {
 				finished = true;
+				clearInactivityTimer();
 				cancelRelay();
 			},
 		}),
@@ -335,6 +358,11 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 				fail("hub relay response frame belongs to another relay");
 				return;
 			}
+			const terminal = pending.some(
+				(frame) => frame.kind === RELAY_END_FRAME || frame.kind === RELAY_ERROR_FRAME,
+			);
+			if (terminal) clearInactivityTimer();
+			else resetInactivityTimer();
 			drain();
 		},
 		drain,

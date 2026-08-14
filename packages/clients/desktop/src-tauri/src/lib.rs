@@ -1,6 +1,6 @@
 use lasterm_process_lock::ProcessLock;
 pub mod tls_identity;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -357,13 +357,13 @@ struct HubPinStore {
 const LOOPBACK_HUB_PIN_KEY: &str = "https://127.0.0.1";
 const HUB_PIN_STORE_FILE: &str = "known_hubs.json";
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct RelayHubRequest {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
-    body: Option<Vec<u8>>,
 }
 
 #[derive(Serialize)]
@@ -381,6 +381,10 @@ struct HubUpload {
     sender: mpsc::SyncSender<Vec<u8>>,
     response: mpsc::Receiver<Result<reqwest::blocking::Response, String>>,
     relay_id: u64,
+    /// Exactly one IPC chunk command may wait on this pipe. Without this claim,
+    /// duplicate commands could each retain one bounded frame and a thread for
+    /// the full request deadline while still counting as one admitted relay.
+    chunk_in_flight: Arc<AtomicBool>,
 }
 
 /// One response has one outstanding frame at most. The sequence makes an ACK
@@ -2424,8 +2428,6 @@ fn send_relay_hub_request(
     }
     if let Some(body) = body {
         builder = builder.body(body);
-    } else if request.body.is_some() {
-        return Err("relay request bodies must use the bounded upload pipe".to_string());
     }
     builder
         .send()
@@ -2600,9 +2602,6 @@ fn relay_hub_request(
     request: RelayHubRequest,
     response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RelayHubHead, String> {
-    if request.body.is_some() {
-        return Err("relay request bodies must use the bounded upload pipe".to_string());
-    }
     let id = reserve_hub_relay()?;
     let hub_response = match send_relay_hub_request(&request, None) {
         Ok(response) => response,
@@ -2616,9 +2615,6 @@ fn relay_hub_request(
 
 #[tauri::command]
 fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
-    if request.body.is_some() {
-        return Err("multipart relay request must stream its body".to_string());
-    }
     validate_relay_request_headers(&request.headers)?;
     let mut uploads = hub_uploads()
         .lock()
@@ -2642,6 +2638,7 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<u64, String> {
             sender,
             response: response_receiver,
             relay_id: id,
+            chunk_in_flight: Arc::new(AtomicBool::new(false)),
         },
     );
     drop(uploads);
@@ -2676,13 +2673,46 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
 /// A broken upload reader means its background request has finished. Release
 /// the map entry as part of that failed chunk, not at a later upload attempt.
 fn send_hub_upload_chunk(upload_id: u64, bytes: Vec<u8>) -> Result<(), String> {
-    let sender = hub_uploads()
+    send_hub_upload_chunk_with_deadline(upload_id, bytes, Instant::now() + HUB_REQUEST_TIMEOUT)
+}
+
+fn send_hub_upload_chunk_with_deadline(
+    upload_id: u64,
+    bytes: Vec<u8>,
+    deadline: Instant,
+) -> Result<(), String> {
+    let (sender, chunk_in_flight) = hub_uploads()
         .lock()
         .map_err(|_| "relay upload map lock poisoned".to_string())?
         .get(&upload_id)
-        .map(|upload| upload.sender.clone())
+        .map(|upload| (upload.sender.clone(), upload.chunk_in_flight.clone()))
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    let deadline = Instant::now() + HUB_REQUEST_TIMEOUT;
+    if chunk_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("multipart relay upload already has a chunk in flight".to_string());
+    }
+    let _chunk_claim = UploadChunkClaim(chunk_in_flight);
+    send_hub_upload_chunk_until(upload_id, sender, bytes, deadline)
+}
+
+/// Releases the per-upload command claim even when a blocked pipe fails or is
+/// removed concurrently with its sender clone.
+struct UploadChunkClaim(Arc<AtomicBool>);
+
+impl Drop for UploadChunkClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn send_hub_upload_chunk_until(
+    upload_id: u64,
+    sender: mpsc::SyncSender<Vec<u8>>,
+    bytes: Vec<u8>,
+    deadline: Instant,
+) -> Result<(), String> {
     let mut bytes = bytes;
     loop {
         match sender.try_send(bytes) {
@@ -2889,6 +2919,38 @@ where
     }
 }
 
+/// A hub peer can keep TCP open while never draining its receive buffer. Bound
+/// every socket write so close processing and relay admission are never held by
+/// that peer indefinitely.
+async fn write_hub_ws_message<S>(
+    writer: &mut S,
+    message: tokio_tungstenite::tungstenite::Message,
+    operation: &str,
+) -> Result<(), String>
+where
+    S: Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    write_hub_ws_message_with_deadline(writer, message, operation, HUB_REQUEST_TIMEOUT).await
+}
+
+async fn write_hub_ws_message_with_deadline<S>(
+    writer: &mut S,
+    message: tokio_tungstenite::tungstenite::Message,
+    operation: &str,
+    deadline: Duration,
+) -> Result<(), String>
+where
+    S: Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match tokio::time::timeout(deadline, writer.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("pinned hub WebSocket {operation} failed: {error}")),
+        Err(_) => Err(format!("pinned hub WebSocket {operation} timed out")),
+    }
+}
+
 async fn relay_hub_ws_stream(
     socket: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -2905,8 +2967,12 @@ async fn relay_hub_ws_stream(
             _ = close.recv() => break,
             input = input.recv() => {
                 let Some(input) = input else { break };
-                if let Err(error) = writer.send(tokio_tungstenite::tungstenite::Message::Binary(input.into())).await {
-                    send_hub_ws_event(&channel, "transport_error", Some(format!("pinned hub WebSocket write failed: {error}")));
+                if let Err(error) = write_hub_ws_message(
+                    &mut writer,
+                    tokio_tungstenite::tungstenite::Message::Binary(input.into()),
+                    "write",
+                ).await {
+                    send_hub_ws_event(&channel, "transport_error", Some(error));
                     break;
                 }
             }
@@ -2922,8 +2988,12 @@ async fn relay_hub_ws_stream(
                     }
                 }
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(payload))) => {
-                    if let Err(error) = writer.send(tokio_tungstenite::tungstenite::Message::Pong(payload)).await {
-                        send_hub_ws_event(&channel, "transport_error", Some(format!("pinned hub WebSocket pong failed: {error}")));
+                    if let Err(error) = write_hub_ws_message(
+                        &mut writer,
+                        tokio_tungstenite::tungstenite::Message::Pong(payload),
+                        "pong",
+                    ).await {
+                        send_hub_ws_event(&channel, "transport_error", Some(error));
                         break;
                     }
                 }
@@ -3003,10 +3073,14 @@ async fn relay_hub_ws_connect(
     }
     tauri::async_runtime::spawn(async move {
         relay_hub_ws_stream(socket, stream, input, acknowledgement, acknowledgement_pending, close).await;
-        let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
-        release_hub_relay(id);
+        finish_hub_ws_relay(id);
     });
     Ok(id)
+}
+
+fn finish_hub_ws_relay(id: u64) {
+    let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
+    release_hub_relay(id);
 }
 
 /// Receives one raw MessagePack frame from the webview. This command refuses a
@@ -4184,6 +4258,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
 
@@ -4530,7 +4605,6 @@ mod tests {
                 method: "GET".to_string(),
                 path: "/".to_string(),
                 headers: Vec::new(),
-                body: None,
             },
             None,
         )
@@ -5644,12 +5718,58 @@ mod tests {
                 sender,
                 response,
                 relay_id: id,
+                chunk_in_flight: Arc::new(AtomicBool::new(false)),
             },
         );
 
         assert!(send_hub_upload_chunk(id, vec![1]).is_err());
         let after = hub_uploads().lock().unwrap().len();
         assert_eq!(before, after, "a rejected chunk must release its upload slot");
+    }
+
+    #[test]
+    fn relay_request_command_schema_refuses_an_expanded_body() {
+        let error = serde_json::from_str::<RelayHubRequest>(
+            r#"{"method":"POST","path":"/api/body","headers":[],"body":[1,2,3]}"#,
+        )
+        .expect_err("the native command schema must not deserialize numeric body arrays");
+        assert!(error.to_string().contains("body"));
+    }
+
+    #[test]
+    fn concurrent_upload_chunk_command_is_refused_before_waiting_on_the_pipe() {
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        sender.try_send(vec![0]).unwrap();
+        let chunk_in_flight = Arc::new(AtomicBool::new(false));
+        let (_response_sender, response) = mpsc::channel();
+        hub_uploads().lock().unwrap().insert(
+            id,
+            HubUpload {
+                sender,
+                response,
+                relay_id: id,
+                chunk_in_flight: chunk_in_flight.clone(),
+            },
+        );
+
+        let first = std::thread::spawn(move || {
+            send_hub_upload_chunk_with_deadline(
+                id,
+                vec![1],
+                Instant::now() + Duration::from_millis(100),
+            )
+        });
+        let claim_deadline = Instant::now() + Duration::from_secs(1);
+        while !chunk_in_flight.load(Ordering::Acquire) {
+            assert!(Instant::now() < claim_deadline, "first command did not claim the upload");
+            std::thread::yield_now();
+        }
+
+        let error = send_hub_upload_chunk(id, vec![2])
+            .expect_err("a second command for one upload must not wait beside the first");
+        assert!(error.contains("already has a chunk in flight"));
+        assert!(first.join().unwrap().is_err(), "the intentionally full pipe times out");
     }
 
     #[test]
@@ -5664,6 +5784,7 @@ mod tests {
                 sender,
                 response,
                 relay_id: id,
+                chunk_in_flight: Arc::new(AtomicBool::new(false)),
             },
         );
 
@@ -5739,6 +5860,71 @@ mod tests {
             Duration::from_millis(1),
         ));
         assert!(matches!(result, Err(error) if error.contains("timed out")));
+    }
+
+    struct PeerThatStoppedReading;
+
+    impl Sink<tokio_tungstenite::tungstenite::Message> for PeerThatStoppedReading {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn start_send(
+            self: std::pin::Pin<&mut Self>,
+            _item: tokio_tungstenite::tungstenite::Message,
+        ) -> Result<(), Self::Error> {
+            unreachable!("a peer that stopped reading is never ready to send")
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn peer_that_stops_reading_times_out_the_write_and_releases_its_relay_slot() {
+        let mut writer = PeerThatStoppedReading;
+        let error = tauri::async_runtime::block_on(write_hub_ws_message_with_deadline(
+            &mut writer,
+            tokio_tungstenite::tungstenite::Message::Binary(vec![1].into()),
+            "write",
+            Duration::from_millis(1),
+        ))
+        .expect_err("a non-reading peer must not hold the write forever");
+        assert!(error.contains("write timed out"));
+
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        active_hub_relays().lock().unwrap().insert(id);
+        let (input, _input_receiver) = tokio::sync::mpsc::channel(1);
+        let (acknowledgement, _acknowledgement_receiver) = tokio::sync::mpsc::channel(1);
+        let (close, _close_receiver) = tokio::sync::mpsc::unbounded_channel();
+        hub_ws_relays().lock().unwrap().insert(
+            id,
+            HubWsRelay {
+                input,
+                acknowledgement,
+                acknowledgement_pending: Arc::new(AtomicBool::new(false)),
+                close,
+            },
+        );
+        finish_hub_ws_relay(id);
+        assert!(!hub_ws_relays().lock().unwrap().contains_key(&id));
+        assert!(!active_hub_relays().lock().unwrap().contains(&id));
     }
 
     #[test]

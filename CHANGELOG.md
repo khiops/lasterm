@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/khiops/lasterm/compare/v0.9.0...v0.9.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **desktop:** sync Cargo.lock with the 0.9.0 manifest version ([2bc75a4](https://github.com/khiops/lasterm/commit/2bc75a4bc831bfd5a0e128f36bef808223107345))
+
 ## [0.9.0](https://github.com/khiops/lasterm/compare/v0.8.0...v0.9.0) (2026-08-08)
 
 

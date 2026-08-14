@@ -1,6 +1,6 @@
 {
 	"name": "@lasterm/web",
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"description": "lasterm web client — Vue 3 PWA (not published; embedded in hub static dir)",
 	"private": true,
 	"license": "AGPL-3.0-only",

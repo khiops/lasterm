@@ -112,10 +112,7 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 			);
 		}, handshakeTimeoutMs);
 		socket.once("error", (error) => {
-			complete(
-				new Error(`Hub TLS endpoint could not be reached: ${error.message}`, { cause: error }),
-				socket,
-			);
+			complete(withHubTransportContext(error), socket);
 		});
 		socket.once("secureConnect", () => {
 			const peerCertificate = socket.getPeerCertificate(true);
@@ -128,6 +125,17 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 		});
 		return undefined;
 	};
+}
+
+/** Preserve conventional Node socket error codes alongside hub-specific context. */
+function withHubTransportContext(error: Error): Error {
+	const contextualError = new Error(`Hub TLS endpoint could not be reached: ${error.message}`, {
+		cause: error,
+	});
+	if ("code" in error && typeof error.code === "string") {
+		Object.assign(contextualError, { code: error.code });
+	}
+	return contextualError;
 }
 
 export function verifyHubPeerSpki(

@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 use time::{Duration, OffsetDateTime};
 
 const MANIFEST_NAME: &str = "manifest.json";
+// A year plus a leap day keeps freshly minted fixtures valid for any plausible
+// test/watch run without giving the deliberately expired identity the same treatment.
+const TEST_CERTIFICATE_VALIDITY: Duration = Duration::days(366);
 
 struct Identity {
     certificate_pem: String,
@@ -41,7 +44,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let pinned = signed_leaf(now, &authority, &authority_key)?;
     let other = signed_leaf(now, &authority, &authority_key)?;
     let expired = self_signed_leaf(now - Duration::days(2), now - Duration::days(1))?;
-    let server = self_signed_leaf(now, now + Duration::days(1))?;
+    let server = self_signed_leaf(now, now + TEST_CERTIFICATE_VALIDITY)?;
 
     write_public(&output_dir.join("test-ca.pem"), &authority.pem())?;
     write_identity(&output_dir, "pinned", &pinned)?;
@@ -88,7 +91,7 @@ fn authority_certificate(now: OffsetDateTime, key: &KeyPair) -> Result<Certifica
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = now - Duration::days(1);
-    params.not_after = now + Duration::days(1);
+    params.not_after = now + TEST_CERTIFICATE_VALIDITY;
     params.self_signed(key)
 }
 
@@ -98,7 +101,7 @@ fn signed_leaf(
     authority_key: &KeyPair,
 ) -> Result<Identity, rcgen::Error> {
     let key = KeyPair::generate()?;
-    let params = server_leaf_params(now, now + Duration::days(1))?;
+    let params = server_leaf_params(now, now + TEST_CERTIFICATE_VALIDITY)?;
     let certificate = params.signed_by(&key, authority, authority_key)?;
     Ok(identity(certificate, key))
 }

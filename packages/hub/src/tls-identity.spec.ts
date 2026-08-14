@@ -1,10 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, X509Certificate } from "node:crypto";
 import { mkdirSync, rmSync, unlinkSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
-import { createServer as createNetServer, type Socket } from "node:net";
+import { syncBuiltinESMExports } from "node:module";
+import { createServer as createNetServer, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_HANDSHAKE_TIMEOUT_MS, HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
@@ -167,7 +169,7 @@ describe("generated hub TLS identity", () => {
 		expect(Buffer.concat(listener.applicationBytes)).toHaveLength(0);
 	});
 
-	it("names an unusable runtime key and an unreachable endpoint separately", async () => {
+	it("names an unusable runtime key and a deliberately refused endpoint separately", async () => {
 		await expect(
 			requestHub(
 				{ pid: process.pid, port: 1, started_at: new Date().toISOString(), spki: "not a key" },
@@ -175,25 +177,49 @@ describe("generated hub TLS identity", () => {
 			),
 		).rejects.toThrow("runtime has no usable TLS SPKI");
 
+		const material = getTestTlsMaterial();
+		const originalConnect = tls.connect;
+		tls.connect = (() => {
+			const socket = new tls.TLSSocket(new Socket());
+			queueMicrotask(() => {
+				socket.emit(
+					"error",
+					Object.assign(new Error("connect ECONNREFUSED 127.0.0.1"), {
+						code: "ECONNREFUSED",
+					}),
+				);
+			});
+			return socket;
+		}) as typeof tls.connect;
+		syncBuiltinESMExports();
+		try {
+			const error = await requestHub(
+				{
+					pid: process.pid,
+					port: 1,
+					started_at: new Date().toISOString(),
+					spki: material.pinned.spki,
+				},
+				"/",
+			).catch((error: unknown) => error);
+			expect(error).toMatchObject({
+				code: "ECONNREFUSED",
+				message: expect.stringContaining("TLS endpoint could not be reached"),
+				cause: { code: "ECONNREFUSED" },
+			});
+		} finally {
+			tls.connect = originalConnect;
+			syncBuiltinESMExports();
+		}
+	});
+
+	it("mints material valid beyond a day-long watch session while keeping the expired fixture expired", () => {
 		const tls = getTestTlsMaterial();
-		const listener = await listenTlsServer(tls.pinned, (_request, response) => response.end());
-		const port = listener.port;
-		await new Promise<void>((resolve, reject) =>
-			tlsServers.pop()?.close((error) => (error ? reject(error) : resolve())),
+		const now = Date.now();
+		expect(Date.parse(new X509Certificate(tls.pinned.certificate).validTo)).toBeGreaterThan(
+			now + 365 * 24 * 60 * 60 * 1000,
 		);
-		const error = await requestHub(
-			{
-				pid: process.pid,
-				port,
-				started_at: new Date().toISOString(),
-				spki: tls.pinned.spki,
-			},
-			"/",
-		).catch((error: unknown) => error);
-		expect(error).toMatchObject({
-			message: expect.stringContaining("TLS endpoint could not be reached"),
-			cause: { code: "ECONNREFUSED" },
-		});
+		expect(Date.parse(new X509Certificate(tls.expired.certificate).validTo)).toBeLessThan(now);
 	});
 
 	it("refuses non-canonical Base64 runtime pins before connecting", async () => {

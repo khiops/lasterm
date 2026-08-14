@@ -8,7 +8,7 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use std::collections::HashSet;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -61,7 +61,9 @@ struct TlsIdentity {
 #[napi]
 pub fn generate_tls_identity(identity_directory: String) -> napi::Result<GeneratedTlsIdentity> {
     let identity_directory = resolve_identity_directory(&identity_directory).map_err(|error| {
-        napi::Error::from_reason(format!("cannot resolve hub TLS identity directory: {error}"))
+        napi::Error::from_reason(format!(
+            "cannot resolve hub TLS identity directory: {error}"
+        ))
     })?;
     let (identity, key_path) = generate_tls_identity_at(&identity_directory).map_err(|error| {
         napi::Error::from_reason(format!(
@@ -405,6 +407,23 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
     ))
 }
 
+/// Atomic replacement and hard-link installation both require sibling paths.
+/// Compare lexical parents before opening either one, so a caller cannot cause
+/// a destination leaf to be resolved under the temporary file's directory.
+fn require_same_parent(temporary_path: &Path, destination_path: &Path) -> io::Result<()> {
+    match (temporary_path.parent(), destination_path.parent()) {
+        (Some(temporary_parent), Some(destination_parent))
+            if temporary_parent == destination_parent =>
+        {
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "temporary and destination identity files must share a parent directory",
+        )),
+    }
+}
+
 #[cfg(unix)]
 fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
     // POSIX gives the same-directory rename its atomic replacement semantics.
@@ -413,8 +432,13 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
     // both synced. If that sync fails after rename, the new complete leaf may
     // already be visible, but it is never reported as a committed publication.
     let publication = (|| -> io::Result<lasterm_protected_fs::Directory> {
+        require_same_parent(temporary_path, certificate_path)?;
         let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
-        let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
+        let certificate = lasterm_protected_fs::LeafName::new(
+            certificate_path
+                .file_name()
+                .expect("destination with a parent has a final component"),
+        )?;
         parent.rename(&temporary, &certificate, true)?;
         Ok(parent)
     })();
@@ -431,11 +455,17 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
 #[cfg(windows)]
 fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
     let publication = (|| -> io::Result<()> {
+        require_same_parent(temporary_path, certificate_path)?;
         let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
-        let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
+        let certificate = lasterm_protected_fs::LeafName::new(
+            certificate_path
+                .file_name()
+                .expect("destination with a parent has a final component"),
+        )?;
         parent.rename(&temporary, &certificate, true)
     })();
-    publication.map_err(|error| cleanup_temporary_file(temporary_path, TemporaryFile::Certificate, error))
+    publication
+        .map_err(|error| cleanup_temporary_file(temporary_path, TemporaryFile::Certificate, error))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -507,14 +537,24 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
 
         #[cfg(unix)]
         let install_result = (|| -> io::Result<()> {
+            require_same_parent(&temporary_path, key_path)?;
             let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
-            let (_, key) = lasterm_protected_fs::open_parent(key_path)?;
+            let key = lasterm_protected_fs::LeafName::new(
+                key_path
+                    .file_name()
+                    .expect("destination with a parent has a final component"),
+            )?;
             parent.hard_link(&temporary, &key)
         })();
         #[cfg(windows)]
         let install_result = (|| -> io::Result<()> {
+            require_same_parent(&temporary_path, key_path)?;
             let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
-            let (_, key) = lasterm_protected_fs::open_parent(key_path)?;
+            let key = lasterm_protected_fs::LeafName::new(
+                key_path
+                    .file_name()
+                    .expect("destination with a parent has a final component"),
+            )?;
             parent.hard_link(&temporary, &key)
         })();
         #[cfg(not(any(unix, windows)))]
@@ -525,7 +565,9 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
                 // owner-only temporary file is synced. Publication never
                 // replaces an existing destination, so a concurrent creator
                 // cannot be silently overwritten.
-                if let Err(error) = remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey) {
+                if let Err(error) =
+                    remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)
+                {
                     // The authoritative name is already installed. Preserve the
                     // invariant that errors mean no key was committed, while
                     // making the owner-only duplicate visible to operators.
@@ -849,10 +891,9 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         generate_identity, generate_tls_identity_at, load_or_create_key, publish_certificate,
-        temporary_key_path,
-        FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP, FAIL_NEXT_TEMPORARY_FILE_SETUP,
-        FAIL_NEXT_TEMPORARY_KEY_CLEANUP, GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME,
-        VALIDITY_DAYS,
+        temporary_key_path, FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP,
+        FAIL_NEXT_TEMPORARY_FILE_SETUP, FAIL_NEXT_TEMPORARY_KEY_CLEANUP,
+        GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME, VALIDITY_DAYS,
     };
     #[cfg(unix)]
     use super::{FAIL_NEXT_PARENT_SYNC, PARENT_SYNCED};
@@ -863,6 +904,7 @@ mod tests {
     use rustls_pki_types::CertificateDer;
     use std::env;
     use std::fs::{self, create_dir};
+    use std::io;
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
@@ -1483,7 +1525,10 @@ mod tests {
 
         generate_identity(&directory.0).expect("generate TLS identity");
 
-        assert!(directory.key_path().is_file(), "the authoritative key was installed");
+        assert!(
+            directory.key_path().is_file(),
+            "the authoritative key was installed"
+        );
         assert_no_temporary_files(&directory);
     }
 
@@ -1558,6 +1603,28 @@ mod tests {
                 .to_string()
                 .contains("could not remove temporary identity file"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn certificate_publication_under_different_parents_is_refused() {
+        let temporary_directory = test_dir("certificate-publication-temporary");
+        let destination_directory = test_dir("certificate-publication-destination");
+        let temporary = temporary_directory.0.join("certificate.tmp");
+        let destination = destination_directory.certificate_path();
+        fs::write(&temporary, "replacement").expect("write temporary certificate");
+
+        let error = publish_certificate(&temporary, &destination)
+            .expect_err("certificate publication under different parents is refused");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !destination.exists(),
+            "a refused publication leaves its requested destination untouched"
+        );
+        assert!(
+            !temporary_directory.certificate_path().exists(),
+            "a refused publication does not redirect to the temporary parent"
         );
     }
 

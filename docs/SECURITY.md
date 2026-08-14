@@ -69,7 +69,7 @@
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#199)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until #199, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
-| Protected file substitution | Write access, as another user, to a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW (needs a differently-owned writable directory on the path) | Every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. Whole on Unix, partial on Windows — see § 4.4 |
+| Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
 
 ## 2. Authentication
 
@@ -249,10 +249,11 @@ true of both.
 
 **On Unix** they are never opened by name. Every directory on the path is opened relative to the
 one above it, starting at the filesystem root and following no link, and the checks that decide
-whether to trust the file read the descriptor it will be read through. Nothing re-resolves a
-component afterwards, so the name cannot come to mean something else between the check and the
-read. Each ancestor must be readable as well as searchable: the walk opens directories, and no
-portable search-only descriptor exists.
+whether to trust the file read the descriptor it will be read through. Within one resolved
+operation, no component is re-resolved, so the name cannot come to mean something else between
+the check and the read. A later operation on the same path descends again. Each ancestor must be
+readable as well as searchable: the walk opens directories, and no portable search-only descriptor
+exists.
 
 **On Windows** a protected file is opened once, with any reparse point left unfollowed, and every
 check and read uses that one handle — the leaf-read race is closed, and that is the whole of what

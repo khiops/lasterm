@@ -128,7 +128,11 @@ fn is_ordinary_child_name(name: &OsStr) -> bool {
         .last()
         .is_some_and(|character| matches!(character, '.' | ' '))
         || name.chars().any(|character| {
-            character <= '\u{1f}' || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            character <= '\u{1f}'
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
         })
     {
         return false;
@@ -138,11 +142,34 @@ fn is_ordinary_child_name(name: &OsStr) -> bool {
     let base = base.to_ascii_uppercase();
     !matches!(
         base.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "COM¹" | "COM²" | "COM³"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
-            | "LPT¹" | "LPT²" | "LPT³"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
     )
 }
 
@@ -195,10 +222,13 @@ fn verbatim_wide_path(mut path: Vec<u16>, description: &str) -> io::Result<Vec<u
         ));
     }
 
-    let mut verbatim = if matches!(path.as_slice(), [drive, COLON, BACKSLASH, ..] if *drive != BACKSLASH) {
+    let mut verbatim = if matches!(path.as_slice(), [drive, COLON, BACKSLASH, ..] if *drive != BACKSLASH)
+    {
         VERBATIM_PREFIX.to_vec()
     } else if path.starts_with(&[BACKSLASH, BACKSLASH]) {
-        vec![BACKSLASH, BACKSLASH, QUESTION, BACKSLASH, U, N, C, BACKSLASH]
+        vec![
+            BACKSLASH, BACKSLASH, QUESTION, BACKSLASH, U, N, C, BACKSLASH,
+        ]
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -222,7 +252,7 @@ mod unix {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
 
-    use super::{AncestorName, io, Component, LeafName, Path};
+    use super::{io, AncestorName, Component, LeafName, Path};
 
     /// Metadata read with `fstatat(2)` relative to a checked directory handle.
     pub struct LeafMetadata(libc::stat);
@@ -316,12 +346,7 @@ mod unix {
             Ok(unsafe { File::from_raw_fd(fd) })
         }
 
-        pub fn rename(
-            &self,
-            from: &LeafName,
-            to: &LeafName,
-            replace: bool,
-        ) -> io::Result<()> {
+        pub fn rename(&self, from: &LeafName, to: &LeafName, replace: bool) -> io::Result<()> {
             if !replace {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -433,27 +458,33 @@ mod unix {
         })
     }
 
-    /// Opens the parent of an absolute protected path by descending from `/`.
-    pub fn open_parent(path: &Path) -> io::Result<(Directory, LeafName)> {
+    /// Parses every directory component of an absolute, normalized path before
+    /// a root descriptor is opened. Callers must descend over these exact
+    /// validated names so validation and use cannot diverge.
+    fn ancestor_names(path: &Path, description: &str) -> io::Result<Vec<AncestorName>> {
         if !path.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "protected path is not absolute",
+                format!("{description} is not absolute"),
             ));
         }
-        let mut names = Vec::new();
-        for component in path.components() {
-            match component {
-                Component::RootDir => {}
-                Component::Normal(name) => names.push(AncestorName::new(name)?),
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "protected path is not normalized",
-                    ))
-                }
-            }
-        }
+
+        path.components()
+            .map(|component| match component {
+                Component::RootDir => Ok(None),
+                Component::Normal(name) => AncestorName::new(name).map(Some),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{description} is not normalized"),
+                )),
+            })
+            .collect::<io::Result<Vec<_>>>()
+            .map(|names| names.into_iter().flatten().collect())
+    }
+
+    /// Opens the parent of an absolute protected path by descending from `/`.
+    pub fn open_parent(path: &Path) -> io::Result<(Directory, LeafName)> {
+        let mut names = ancestor_names(path, "protected path")?;
         let leaf = names.pop().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "protected path has no leaf")
         })?;
@@ -482,12 +513,7 @@ mod unix {
     /// Opens an absolute directory by the same root-to-leaf descent.  Missing
     /// components are created relative to their verified parent when requested.
     pub fn open_directory(path: &Path, create: bool, mode: u32) -> io::Result<Directory> {
-        if !path.is_absolute() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "protected directory is not absolute",
-            ));
-        }
+        let names = ancestor_names(path, "protected directory")?;
         let root = CString::new("/").expect("root has no NUL");
         // SAFETY: root is NUL-terminated; O_DIRECTORY requires the root directory.
         let root_fd = unsafe {
@@ -501,39 +527,30 @@ mod unix {
         }
         // SAFETY: open returned an owned descriptor.
         let mut directory = Directory(unsafe { File::from_raw_fd(root_fd) });
-        for component in path.components() {
-            let Component::Normal(name) = component else {
-                if matches!(component, Component::RootDir) {
-                    continue;
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "protected directory is not normalized",
-                ));
-            };
-            let ancestor = AncestorName::new(name)?;
+        for ancestor in names {
             let fd = open_ancestor(directory.0.as_raw_fd(), &ancestor);
             let fd = match fd {
                 Ok(fd) => fd,
                 Err(error) => {
-                if !create || error.kind() != io::ErrorKind::NotFound {
-                    return Err(error);
-                }
-                let c_name = c_os_str(ancestor.as_os_str(), "protected ancestor")?;
-                // SAFETY: name is NUL-terminated and parent is an owned directory.
-                if unsafe {
-                    libc::mkdirat(
-                        directory.0.as_raw_fd(),
-                        c_name.as_ptr(),
-                        mode as libc::mode_t,
-                    )
-                } != 0 {
-                    let error = io::Error::last_os_error();
-                    if error.kind() != io::ErrorKind::AlreadyExists {
+                    if !create || error.kind() != io::ErrorKind::NotFound {
                         return Err(error);
                     }
-                }
-                open_ancestor(directory.0.as_raw_fd(), &ancestor)?
+                    let c_name = c_os_str(ancestor.as_os_str(), "protected ancestor")?;
+                    // SAFETY: name is NUL-terminated and parent is an owned directory.
+                    if unsafe {
+                        libc::mkdirat(
+                            directory.0.as_raw_fd(),
+                            c_name.as_ptr(),
+                            mode as libc::mode_t,
+                        )
+                    } != 0
+                    {
+                        let error = io::Error::last_os_error();
+                        if error.kind() != io::ErrorKind::AlreadyExists {
+                            return Err(error);
+                        }
+                    }
+                    open_ancestor(directory.0.as_raw_fd(), &ancestor)?
                 }
             };
             // SAFETY: openat returned an owned descriptor, replacing the parent only after success.
@@ -557,12 +574,11 @@ mod windows {
         INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,
-        MoveFileExW, CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING,
-        MOVEFILE_WRITE_THROUGH, OPEN_EXISTING,
+        CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo,
+        GetFileInformationByHandleEx, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, OPEN_EXISTING,
     };
 
     use super::{io, Component, LeafName, Path};
@@ -625,12 +641,7 @@ mod windows {
             )
         }
 
-        pub fn rename(
-            &self,
-            from: &LeafName,
-            to: &LeafName,
-            replace: bool,
-        ) -> io::Result<()> {
+        pub fn rename(&self, from: &LeafName, to: &LeafName, replace: bool) -> io::Result<()> {
             if !replace {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -638,7 +649,10 @@ mod windows {
                 ));
             }
             let from = wide_path(&self.path.join(from.as_os_str()), "protected source path")?;
-            let to = wide_path(&self.path.join(to.as_os_str()), "protected destination path")?;
+            let to = wide_path(
+                &self.path.join(to.as_os_str()),
+                "protected destination path",
+            )?;
             // SAFETY: both paths are NUL-terminated and remain live for the call.
             if unsafe {
                 MoveFileExW(
@@ -646,7 +660,8 @@ mod windows {
                     to.as_ptr(),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
                 )
-            } == 0 {
+            } == 0
+            {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
@@ -663,7 +678,10 @@ mod windows {
 
         pub fn hard_link(&self, from: &LeafName, to: &LeafName) -> io::Result<()> {
             let from = wide_path(&self.path.join(from.as_os_str()), "protected source path")?;
-            let to = wide_path(&self.path.join(to.as_os_str()), "protected destination path")?;
+            let to = wide_path(
+                &self.path.join(to.as_os_str()),
+                "protected destination path",
+            )?;
             // SAFETY: both paths are NUL-terminated and remain live for the call.
             if unsafe { CreateHardLinkW(to.as_ptr(), from.as_ptr(), std::ptr::null()) } == 0 {
                 return Err(io::Error::last_os_error());
@@ -800,10 +818,14 @@ pub use windows::{open_directory, open_parent, Directory, LeafMetadata};
 
 #[cfg(test)]
 mod tests {
-    use super::{AncestorName, LeafName};
     #[cfg(unix)]
-    use super::open_parent;
+    use super::AncestorName;
+    use super::LeafName;
+    #[cfg(unix)]
+    use super::{open_directory, open_parent};
     use std::fs;
+    #[cfg(unix)]
+    use std::io;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
@@ -974,15 +996,15 @@ mod tests {
             },
             AllowedCall {
                 source: "protected-fs",
-                call: "CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,",
+                call: "CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo,",
                 expected_occurrences: 1,
                 why: "imports the crate's Windows checked-handle and pathname publication primitives",
             },
             AllowedCall {
                 source: "protected-fs",
-                call: "MoveFileExW, CREATE_NEW,",
+                call: "GetFileInformationByHandleEx, MoveFileExW, CREATE_NEW,",
                 expected_occurrences: 1,
-                why: "imports the crate's pathname replacement primitive",
+                why: "imports the checked-handle query and pathname replacement primitives",
             },
             AllowedCall {
                 source: "protected-fs",
@@ -1021,9 +1043,18 @@ mod tests {
             .and_then(|path| path.parent())
             .expect("protected-fs lives directly under the workspace crates directory");
         let sources = [
-            ("desktop", root.join("packages/clients/desktop/src-tauri/src/lib.rs")),
-            ("identity", root.join("crates/lasterm-tls-identity/src/lib.rs")),
-            ("protected-fs", root.join("crates/lasterm-protected-fs/src/lib.rs")),
+            (
+                "desktop",
+                root.join("packages/clients/desktop/src-tauri/src/lib.rs"),
+            ),
+            (
+                "identity",
+                root.join("crates/lasterm-tls-identity/src/lib.rs"),
+            ),
+            (
+                "protected-fs",
+                root.join("crates/lasterm-protected-fs/src/lib.rs"),
+            ),
         ];
         let patterns = [
             "fs::read",
@@ -1110,7 +1141,10 @@ mod tests {
         );
 
         let long_path = format!(r"C:\{}", "identity\\".repeat(40));
-        assert!(long_path.encode_utf16().count() > 260, "test path exceeds MAX_PATH");
+        assert!(
+            long_path.encode_utf16().count() > 260,
+            "test path exceeds MAX_PATH"
+        );
         assert_eq!(convert(&long_path), format!(r"\\?\{long_path}"));
 
         assert_eq!(
@@ -1123,11 +1157,9 @@ mod tests {
             r"\\?\C:\already-verbatim\identity"
         );
 
-        let error = super::verbatim_wide_path(
-            r"\\.\PhysicalDrive0".encode_utf16().collect(),
-            "test path",
-        )
-        .expect_err("device namespaces are not protected paths");
+        let error =
+            super::verbatim_wide_path(r"\\.\PhysicalDrive0".encode_utf16().collect(), "test path")
+                .expect_err("device namespaces are not protected paths");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("device namespace"));
     }
@@ -1201,8 +1233,8 @@ mod tests {
                 .expect("create legal ancestor");
             fs::write(&protected, ancestor).expect("write protected file");
 
-            let (parent, leaf) = open_parent(&protected)
-                .expect("a platform-legal ancestor remains traversable");
+            let (parent, leaf) =
+                open_parent(&protected).expect("a platform-legal ancestor remains traversable");
             let mut file = parent
                 .open_existing(&leaf)
                 .expect("open protected file")
@@ -1229,15 +1261,9 @@ mod tests {
         fs::create_dir_all(root.join("safe/nested")).unwrap();
         let clean = root.join("safe/nested/leaf");
         let (parent, leaf) = open_parent(&clean).unwrap();
-        assert!(parent
-            .open_existing(&leaf)
-            .unwrap()
-            .is_none());
+        assert!(parent.open_existing(&leaf).unwrap().is_none());
         fs::write(&clean, "ok").unwrap();
-        assert!(parent
-            .open_existing(&leaf)
-            .unwrap()
-            .is_some());
+        assert!(parent.open_existing(&leaf).unwrap().is_some());
         fs::create_dir_all(root.join("decoy/nested")).unwrap();
         fs::write(root.join("decoy/nested/leaf"), "decoy").unwrap();
         fs::rename(root.join("safe"), root.join("safe-real")).unwrap();
@@ -1248,6 +1274,33 @@ mod tests {
         assert!(open_parent(&root.join("file/leaf")).is_err());
         assert!(open_parent(std::path::Path::new("relative/leaf")).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_directory_component_creates_no_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "lasterm-protected-fs-invalid-directory-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create empty fixture root");
+        let invalid = root.join("created-before-invalid").join("..").join("later");
+
+        let error = match open_directory(&invalid, true, 0o700) {
+            Ok(_) => panic!("an invalid directory component is refused before creation"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            fs::read_dir(&root)
+                .expect("read unchanged fixture root")
+                .next()
+                .is_none(),
+            "an invalid directory component creates no directory"
+        );
+        fs::remove_dir_all(root).expect("remove fixture root");
     }
 
     #[cfg(unix)]
@@ -1300,7 +1353,9 @@ mod tests {
         };
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(
-            error.to_string().contains("must be readable as well as searchable"),
+            error
+                .to_string()
+                .contains("must be readable as well as searchable"),
             "{error}"
         );
 
@@ -1343,8 +1398,7 @@ mod tests {
         assert!(error.to_string().contains("reparse point"));
 
         let linked_directory = root.join("linked-directory");
-        symlink_dir(root.join("safe"), &linked_directory)
-            .expect("create directory reparse point");
+        symlink_dir(root.join("safe"), &linked_directory).expect("create directory reparse point");
         let error = match open_directory(&linked_directory, false, 0) {
             Ok(_) => panic!("a directory reparse point is refused through its opened handle"),
             Err(error) => error,

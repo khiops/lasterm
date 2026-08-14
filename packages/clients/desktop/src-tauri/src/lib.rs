@@ -757,8 +757,18 @@ fn windows_desktop_instance_lock_path(
                 .to_string()
         })?;
 
-    let local_app_data_path = PathBuf::from(&local_app_data);
-    if is_windows_unc_path(&local_app_data_path) {
+    let local_app_data_locator = PathBuf::from(&local_app_data);
+    let local_app_data_path = resolve_platform_directory(local_app_data_locator.clone())
+        .ok_or_else(|| {
+            format!(
+                "cannot resolve desktop runtime directory from LOCALAPPDATA: {}",
+                local_app_data_locator.display()
+            )
+        })?;
+    // On Windows the resolved locator retains its UNC prefix. Keep the raw
+    // check too, so this platform-neutral testable helper does not lose that
+    // namespace marker when it is compiled on a non-Windows host.
+    if is_windows_unc_path(&local_app_data_locator) || is_windows_unc_path(&local_app_data_path) {
         return Err(format!(
             "refusing desktop runtime directory {}: LOCALAPPDATA must be host-local, not UNC",
             local_app_data_path.display()
@@ -768,8 +778,8 @@ fn windows_desktop_instance_lock_path(
     // LOCALAPPDATA is the non-roaming application-data location, so this runtime
     // authority remains host-local. It is under the user's profile, whose default
     // ACL already excludes other users; a full ACL audit is intentionally out of
-    // scope here. get_state_dir() already uses LOCALAPPDATA for Windows state, so
-    // this does not introduce a new environment convention.
+    // scope here. This uses the same once-resolved LOCALAPPDATA locator as
+    // get_state_dir(), so every consumer derives the same runtime authority.
     let runtime_dir = local_app_data_path.join("lasterm").join("runtime");
     prepare_windows_runtime_dir(&runtime_dir)?;
     Ok(runtime_dir.join("desktop-instance.lock"))
@@ -5615,12 +5625,26 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn windows_relative_local_app_data_is_refused() {
-        let error = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from("relative")))
-            .unwrap_err();
-        assert!(error.contains("not absolute"));
-        assert!(error.contains("relative"));
+    fn windows_relative_local_app_data_is_resolved_once_before_use() {
+        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
+            .lock()
+            .expect("lock process working directory");
+        let directory = instance_test_dir("windows-relative-local-app-data");
+        let _working_directory = TestWorkingDirectory::change_to(directory.path());
+
+        let lock_path = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(
+            "relative-local-app-data/.",
+        )))
+        .expect("resolve relative LOCALAPPDATA before preparing the runtime directory");
+
+        assert_eq!(
+            lock_path,
+            directory
+                .join("relative-local-app-data/lasterm/runtime/desktop-instance.lock")
+        );
+        assert!(lock_path.is_absolute(), "the runtime lock has an absolute locator");
     }
 
     #[test]

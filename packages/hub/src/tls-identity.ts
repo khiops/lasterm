@@ -11,8 +11,6 @@ import {
 	getAddonCacheDir,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
-const GENERATED_KEY_NAME = "hub-tls-key.pem";
-export const GENERATED_CERTIFICATE_CACHE_NAME = "hub-tls-generated-cert.pem";
 export const HUB_TLS_CERTIFICATE_NAME = "hub-tls-cert.pem";
 const SEA_ASSET_NAME = "lasterm_tls_identity.node";
 
@@ -20,19 +18,13 @@ interface GeneratedTlsIdentity {
 	readonly certificatePem?: string;
 	readonly certificate_pem?: string;
 	readonly spki: Buffer;
+	readonly keyPath?: string;
+	readonly key_path?: string;
 }
 
 interface TlsIdentityAddon {
-	generateTlsIdentity?(
-		keyPath: string,
-		certificatePath: string,
-		legacyCertificatePath?: string,
-	): GeneratedTlsIdentity;
-	generate_tls_identity?(
-		keyPath: string,
-		certificatePath: string,
-		legacyCertificatePath?: string,
-	): GeneratedTlsIdentity;
+	generateTlsIdentity?(identityDirectory: string): GeneratedTlsIdentity;
+	generate_tls_identity?(identityDirectory: string): GeneratedTlsIdentity;
 }
 
 export interface HubTlsIdentity {
@@ -44,10 +36,6 @@ export interface HubTlsIdentity {
 
 export function getHubCertificatePath(stateDir: string): string {
 	return join(stateDir, HUB_TLS_CERTIFICATE_NAME);
-}
-
-export function getGeneratedCertificateCachePath(stateDir: string): string {
-	return join(stateDir, GENERATED_CERTIFICATE_CACHE_NAME);
 }
 
 /**
@@ -63,15 +51,11 @@ export function resolveHubTlsIdentity(stateDir: string, configured: TlsConfig): 
 		return { tls: { cert: certificate, key }, certificate, spki: certificateSpki(certificate) };
 	}
 
-	const keyPath = join(stateDir, GENERATED_KEY_NAME);
-	const generated = generateTlsIdentity(
-		loadTlsIdentityAddon(),
-		keyPath,
-		getGeneratedCertificateCachePath(stateDir),
-		getHubCertificatePath(stateDir),
-	);
+	const generated = generateTlsIdentity(loadTlsIdentityAddon(), stateDir);
 	const certificate = generated.certificatePem ?? generated.certificate_pem;
 	if (certificate === undefined) throw new Error("TLS identity addon returned no certificate");
+	const keyPath = generated.keyPath ?? generated.key_path;
+	if (keyPath === undefined) throw new Error("TLS identity addon returned no private-key path");
 	persistCertificate(stateDir, certificate);
 	return {
 		tls: { cert: certificate, key: readFileSync(keyPath, "utf8") },
@@ -144,11 +128,9 @@ function dlopenAddon(addonPath: string): TlsIdentityAddon {
 /** napi-rs camel-cases the Rust export for JavaScript while retaining its Rust name. */
 function generateTlsIdentity(
 	addon: TlsIdentityAddon,
-	keyPath: string,
-	certificatePath: string,
-	legacyCertificatePath: string,
+	identityDirectory: string,
 ): GeneratedTlsIdentity {
 	const generate = addon.generateTlsIdentity ?? addon.generate_tls_identity;
 	if (generate === undefined) throw new Error("TLS identity addon has no generator");
-	return generate(keyPath, certificatePath, legacyCertificatePath);
+	return generate(identityDirectory);
 }

@@ -12,11 +12,7 @@ import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { createServer, startServer } from "./server.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
-import {
-	getGeneratedCertificateCachePath,
-	getHubCertificatePath,
-	resolveHubTlsIdentity,
-} from "./tls-identity.js";
+import { getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
 
 describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
@@ -173,23 +169,7 @@ describe("generated hub TLS identity", () => {
 		expect(second.certificate).toBe(first.certificate);
 		expect(second.tls.cert).toBe(first.tls.cert);
 		expect(second.spki).toBe(first.spki);
-		expect(readFileSync(getGeneratedCertificateCachePath(stateDir), "utf8")).toBe(
-			first.certificate,
-		);
 		expect(readFileSync(getHubCertificatePath(stateDir), "utf8")).toBe(first.certificate);
-	});
-
-	it("does not adopt a valid generated leaf from the legacy public copy", () => {
-		const stateDir = prepareStateDir();
-		const legacy = resolveHubTlsIdentity(stateDir, {});
-		unlinkSync(getGeneratedCertificateCachePath(stateDir));
-
-		const generated = resolveHubTlsIdentity(stateDir, {});
-		expect(generated.certificate).not.toBe(legacy.certificate);
-		expect(readFileSync(getGeneratedCertificateCachePath(stateDir), "utf8")).toBe(
-			generated.certificate,
-		);
-		expect(readFileSync(getHubCertificatePath(stateDir), "utf8")).toBe(generated.certificate);
 	});
 
 	it("accepts a pinned key with an expired certificate", async () => {

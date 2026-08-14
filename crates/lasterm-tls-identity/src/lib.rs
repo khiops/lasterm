@@ -19,12 +19,20 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 const VALIDITY_DAYS: i64 = 825;
 const RENEWAL_WINDOW_DAYS: i64 = 7;
+const GENERATED_KEY_NAME: &str = "hub-tls-key.pem";
+const GENERATED_CERTIFICATE_CACHE_NAME: &str = "hub-tls-generated-cert.pem";
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
     static FAIL_NEXT_TEMPORARY_KEY_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_NEXT_TEMPORARY_FILE_SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static PARENT_SYNCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Certificate material that may cross the napi boundary. It intentionally has
@@ -33,6 +41,7 @@ thread_local! {
 pub struct GeneratedTlsIdentity {
     pub certificate_pem: String,
     pub spki: Buffer,
+    pub key_path: String,
 }
 
 struct TlsIdentity {
@@ -40,44 +49,39 @@ struct TlsIdentity {
     spki: Vec<u8>,
 }
 
-/// Creates a private key at `key_path` when absent, or safely reuses its
-/// existing key and a usable generated leaf at `certificate_path`. A leaf is
+/// Creates or reuses the generated identity whose private key and certificate
+/// cache have fixed, distinct names inside `identity_directory`. A leaf is
 /// reissued only when it cannot safely serve that key anymore.
 ///
 /// The returned object contains only public certificate material. In
 /// particular, no private key is returned or converted to a JavaScript string.
 #[napi]
-pub fn generate_tls_identity(
-    key_path: String,
-    certificate_path: String,
-    legacy_certificate_path: Option<String>,
-) -> napi::Result<GeneratedTlsIdentity> {
-    let identity = generate_identity(
-        Path::new(&key_path),
-        Path::new(&certificate_path),
-        legacy_certificate_path.as_deref().map(Path::new),
-    )
-    .map_err(|error| {
+pub fn generate_tls_identity(identity_directory: String) -> napi::Result<GeneratedTlsIdentity> {
+    let identity_directory = Path::new(&identity_directory);
+    let identity = generate_identity(identity_directory).map_err(|error| {
         napi::Error::from_reason(format!(
-            "cannot generate hub TLS identity at {key_path} and {certificate_path}: {error}"
+            "cannot generate hub TLS identity in {}: {error}",
+            identity_directory.display()
         ))
     })?;
 
     Ok(GeneratedTlsIdentity {
         certificate_pem: identity.certificate_pem,
         spki: Buffer::from(identity.spki),
+        key_path: identity_directory
+            .join(GENERATED_KEY_NAME)
+            .into_os_string()
+            .into_string()
+            .map_err(|_| napi::Error::from_reason("generated private-key path is not UTF-8"))?,
     })
 }
 
-fn generate_identity(
-    key_path: &Path,
-    certificate_path: &Path,
-    _legacy_certificate_path: Option<&Path>,
-) -> io::Result<TlsIdentity> {
-    ensure_distinct_identity_paths(key_path, certificate_path)?;
-    let key_pair = load_or_create_key(key_path)?;
+fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
+    let key_path = identity_directory.join(GENERATED_KEY_NAME);
+    let certificate_path = identity_directory.join(GENERATED_CERTIFICATE_CACHE_NAME);
+    let key_pair = load_or_create_key(&key_path)?;
     let now = OffsetDateTime::now_utc();
-    let cached_certificate = load_usable_certificate(certificate_path, &key_pair, now)?;
+    let cached_certificate = load_usable_certificate(&certificate_path, &key_pair, now)?;
     if let CertificateCache::Usable(certificate_pem) = cached_certificate {
         return Ok(TlsIdentity {
             certificate_pem,
@@ -86,7 +90,7 @@ fn generate_identity(
     }
 
     let certificate_pem = issue_certificate(&key_pair, now)?;
-    write_certificate_file(certificate_path, &certificate_pem)?;
+    write_certificate_file(&certificate_path, &certificate_pem)?;
 
     Ok(TlsIdentity {
         certificate_pem,
@@ -124,8 +128,10 @@ fn load_usable_certificate(
     now: OffsetDateTime,
 ) -> io::Result<CertificateCache> {
     // A certificate from an unsafe parent is never a cache entry we may use or
-    // replace. Conversely, a regular, owned cache that cannot be read is only
-    // unusable: publishing a replacement does not follow its path.
+    // replace. A regular Unix cache that cannot be read is only unusable and
+    // can be replaced without following its path. On Windows, a non-reparse
+    // regular cache is likewise unusable, but replacing it remains subject to
+    // the destination's delete/ACL permissions (the MoveFileExW contract).
     check_parent_directory(certificate_path)?;
     let mut file = match open_key_file(
         certificate_path,
@@ -315,26 +321,91 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
         })();
         drop(temporary_file);
         if let Err(error) = write_result {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(error);
+            return Err(cleanup_temporary_file(
+                &temporary_path,
+                TemporaryFile::Certificate,
+                error,
+            ));
         }
-        // A same-directory rename replaces the old complete cache atomically.
-        // Syncing the parent commits that namespace update on Unix filesystems
-        // that honor directory fsync, so a power loss leaves either complete
-        // leaf rather than a partially written certificate.
-        match fs::rename(&temporary_path, certificate_path) {
-            Ok(()) => {
-                return sync_parent(certificate_path.parent().unwrap_or_else(|| Path::new(".")))
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&temporary_path);
-                return Err(error);
-            }
-        }
+        return publish_certificate(&temporary_path, certificate_path);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique temporary certificate file",
+    ))
+}
+
+#[cfg(unix)]
+fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
+    // POSIX gives the same-directory rename its atomic replacement semantics.
+    // The directory sync is the documented durability step on filesystems that
+    // support it: a successful return means the file and namespace update were
+    // both synced. If that sync fails after rename, the new complete leaf may
+    // already be visible, but it is never reported as a committed publication.
+    match fs::rename(temporary_path, certificate_path) {
+        Ok(()) => sync_parent(certificate_path.parent().unwrap_or_else(|| Path::new("."))),
+        Err(error) => Err(cleanup_temporary_file(
+            temporary_path,
+            TemporaryFile::Certificate,
+            error,
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temporary_wide = wide_path(temporary_path, "temporary certificate path")?;
+    let certificate_wide = wide_path(certificate_path, "certificate path")?;
+    // MoveFileExW documents WRITE_THROUGH as waiting until the move is flushed
+    // to disk. REPLACE_EXISTING keeps the old complete cache in place if the
+    // move itself fails, so there is no directory FlushFileBuffers step after a
+    // successful replacement that could turn success into an error.
+    if unsafe {
+        MoveFileExW(
+            temporary_wide.as_ptr(),
+            certificate_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        let error = io::Error::last_os_error();
+        return Err(cleanup_temporary_file(
+            temporary_path,
+            TemporaryFile::Certificate,
+            error,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path, description: &str) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{description} contains an interior NUL"),
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn publish_certificate(_temporary_path: &Path, _certificate_path: &Path) -> io::Result<()> {
+    Err(cleanup_temporary_file(
+        _temporary_path,
+        TemporaryFile::Certificate,
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable certificate publication is unsupported on this platform",
+        ),
     ))
 }
 
@@ -387,8 +458,11 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
         drop(temporary_file);
 
         if let Err(error) = write_result {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(error);
+            return Err(cleanup_temporary_file(
+                &temporary_path,
+                TemporaryFile::PrivateKey,
+                error,
+            ));
         }
 
         match fs::hard_link(&temporary_path, key_path) {
@@ -397,25 +471,19 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
                 // owner-only temporary file is synced. Hard links never replace
                 // an existing destination, so a concurrent creator cannot be
                 // silently overwritten.
-                if let Err(error) = remove_temporary_key_file(&temporary_path) {
-                    // The authoritative name is already durable. Do not report
-                    // that successful install as a startup failure, but make
-                    // the owner-only duplicate private key visible to operators.
-                    eprintln!(
-                        "[lasterm] private key installed at {}; could not remove temporary private-key copy {}: {error}",
-                        key_path.display(),
-                        temporary_path.display()
-                    );
-                }
+                remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)?;
                 return Ok(key_pair);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                remove_temporary_key_file(&temporary_path)?;
+                remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)?;
                 return load_or_create_key(key_path);
             }
             Err(error) => {
-                let _ = remove_temporary_key_file(&temporary_path);
-                return Err(error);
+                return Err(cleanup_temporary_file(
+                    &temporary_path,
+                    TemporaryFile::PrivateKey,
+                    error,
+                ));
             }
         }
     }
@@ -426,30 +494,58 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
     ))
 }
 
-fn remove_temporary_key_file(path: &Path) -> io::Result<()> {
+#[derive(Clone, Copy)]
+enum TemporaryFile {
+    PrivateKey,
+    Certificate,
+}
+
+fn remove_temporary_file(path: &Path, file: TemporaryFile) -> io::Result<()> {
+    #[cfg(not(test))]
+    let _ = file;
     #[cfg(test)]
-    if FAIL_NEXT_TEMPORARY_KEY_CLEANUP.with(|fail| fail.replace(false)) {
+    if match file {
+        TemporaryFile::PrivateKey => {
+            FAIL_NEXT_TEMPORARY_KEY_CLEANUP.with(|fail| fail.replace(false))
+        }
+        TemporaryFile::Certificate => {
+            FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP.with(|fail| fail.replace(false))
+        }
+    } {
         return Err(io::Error::other(
-            "injected temporary private-key cleanup failure",
+            "injected temporary identity-file cleanup failure",
         ));
     }
     fs::remove_file(path)
 }
 
+fn cleanup_temporary_file(
+    path: &Path,
+    file: TemporaryFile,
+    operation_error: io::Error,
+) -> io::Error {
+    match remove_temporary_file(path, file) {
+        Ok(()) => operation_error,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => operation_error,
+        Err(cleanup_error) => io::Error::new(
+            operation_error.kind(),
+            format!(
+                "{operation_error}; could not remove temporary identity file {}: {cleanup_error}",
+                path.display()
+            ),
+        ),
+    }
+}
+
 fn temporary_key_path(key_path: &Path) -> io::Result<PathBuf> {
     let parent = key_path.parent().unwrap_or_else(|| Path::new("."));
-    let filename = key_path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private-key path must name a file",
-        )
-    })?;
     let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    // Do not derive the temporary component from the final name: a legal
+    // near-limit final component must not become illegal just because a suffix
+    // is needed for atomic publication.
     Ok(parent.join(format!(
-        ".{}.{}.{}.tmp",
-        filename.to_string_lossy(),
-        std::process::id(),
-        sequence
+        ".lasterm-tls-{}-{sequence}.tmp",
+        std::process::id()
     )))
 }
 
@@ -462,33 +558,6 @@ enum OpenKeyMode {
 enum FilePolicy {
     PrivateKey,
     Certificate,
-}
-
-fn ensure_distinct_identity_paths(key_path: &Path, certificate_path: &Path) -> io::Result<()> {
-    if resolved_path_for_comparison(key_path)? == resolved_path_for_comparison(certificate_path)? {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private-key and certificate paths resolve to the same file",
-        ));
-    }
-    Ok(())
-}
-
-fn resolved_path_for_comparison(path: &Path) -> io::Result<PathBuf> {
-    if path.exists() {
-        return fs::canonicalize(path);
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let filename = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "identity path must name a file",
-        )
-    })?;
-    Ok(fs::canonicalize(parent)?.join(filename))
 }
 
 #[cfg(unix)]
@@ -726,62 +795,9 @@ fn open_file_setup_error(path: &Path, mode: OpenKeyMode, creation_error: io::Err
 
 #[cfg(unix)]
 fn sync_parent(parent: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    PARENT_SYNCED.with(|synced| synced.set(true));
     File::open(parent)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FlushFileBuffers, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
-
-    let mut wide_parent: Vec<u16> = parent.as_os_str().encode_wide().collect();
-    if wide_parent.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "certificate parent contains an interior NUL",
-        ));
-    }
-    wide_parent.push(0);
-    // SAFETY: wide_parent is NUL-terminated and lives for the call. Backup
-    // semantics permits opening a directory so FlushFileBuffers can commit
-    // the rename's namespace update.
-    let handle = unsafe {
-        CreateFileW(
-            wide_parent.as_ptr(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: CreateFileW returned a valid owned directory handle. File closes
-    // it on all return paths.
-    let directory = unsafe { File::from_raw_handle(handle) };
-    // SAFETY: directory owns a valid Windows handle accepted by
-    // FlushFileBuffers. Failure is returned so startup never reports the
-    // cache durable when the filesystem declines the directory flush.
-    if unsafe { FlushFileBuffers(directory.as_raw_handle()) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn sync_parent(_parent: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "certificate parent-directory synchronization is unsupported on this platform",
-    ))
 }
 
 #[cfg(windows)]
@@ -798,9 +814,13 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::PARENT_SYNCED;
     use super::{
-        generate_identity, load_or_create_key, sync_parent, FAIL_NEXT_TEMPORARY_FILE_SETUP,
-        FAIL_NEXT_TEMPORARY_KEY_CLEANUP, VALIDITY_DAYS,
+        generate_identity, load_or_create_key, publish_certificate, temporary_key_path,
+        FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP, FAIL_NEXT_TEMPORARY_FILE_SETUP,
+        FAIL_NEXT_TEMPORARY_KEY_CLEANUP, GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME,
+        VALIDITY_DAYS,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CustomExtension, ExtendedKeyUsagePurpose, IsCa,
@@ -820,11 +840,11 @@ mod tests {
 
     impl TestDir {
         fn key_path(&self) -> PathBuf {
-            self.0.join("hub.key.pem")
+            self.0.join(GENERATED_KEY_NAME)
         }
 
         fn certificate_path(&self) -> PathBuf {
-            self.0.join("hub.generated-cert.pem")
+            self.0.join(GENERATED_CERTIFICATE_CACHE_NAME)
         }
     }
 
@@ -945,16 +965,13 @@ mod tests {
     }
 
     fn assert_replaced_once(directory: &TestDir, stored: &str) {
-        let key_path = directory.key_path();
-        let certificate_path = directory.certificate_path();
-        let replacement = generate_identity(&key_path, &certificate_path, None)
-            .expect("replace unusable cached certificate");
+        let replacement =
+            generate_identity(&directory.0).expect("replace unusable cached certificate");
         assert_ne!(
             replacement.certificate_pem, stored,
             "the unusable leaf is not served"
         );
-        let restart = generate_identity(&key_path, &certificate_path, None)
-            .expect("reuse replacement certificate");
+        let restart = generate_identity(&directory.0).expect("reuse replacement certificate");
         assert_eq!(
             restart.certificate_pem, replacement.certificate_pem,
             "replacement is issued once rather than on every restart"
@@ -964,9 +981,7 @@ mod tests {
     #[test]
     fn generated_certificate_is_a_loopback_tls_server_leaf() {
         let directory = test_dir("certificate-extensions");
-        let identity =
-            generate_identity(&directory.key_path(), &directory.certificate_path(), None)
-                .expect("generate TLS identity");
+        let identity = generate_identity(&directory.0).expect("generate TLS identity");
         let certificate_der = certificate_der(&identity.certificate_pem);
         let (remaining, certificate) =
             X509Certificate::from_der(&certificate_der).expect("parse generated certificate DER");
@@ -1024,9 +1039,7 @@ mod tests {
     #[test]
     fn reported_spki_is_what_rustls_webpki_reads_from_the_certificate() {
         let directory = test_dir("spki-reader");
-        let identity =
-            generate_identity(&directory.key_path(), &directory.certificate_path(), None)
-                .expect("generate TLS identity");
+        let identity = generate_identity(&directory.0).expect("generate TLS identity");
         let pem = pem::parse(identity.certificate_pem).expect("parse generated certificate PEM");
         let certificate_der = CertificateDer::from(pem.into_contents());
         let end_entity = EndEntityCert::try_from(&certificate_der)
@@ -1042,12 +1055,8 @@ mod tests {
     #[test]
     fn existing_key_reuses_the_same_certificate_and_spki() {
         let directory = test_dir("reuse");
-        let key_path = directory.key_path();
-        let certificate_path = directory.certificate_path();
-        let first = generate_identity(&key_path, &certificate_path, None)
-            .expect("generate initial TLS identity");
-        let second = generate_identity(&key_path, &certificate_path, None)
-            .expect("reuse TLS identity from existing key");
+        let first = generate_identity(&directory.0).expect("generate initial TLS identity");
+        let second = generate_identity(&directory.0).expect("reuse TLS identity from existing key");
 
         assert_eq!(
             first.certificate_pem, second.certificate_pem,
@@ -1059,16 +1068,13 @@ mod tests {
     #[test]
     fn absent_cached_certificate_is_created_once() {
         let directory = test_dir("absent-cache");
-        let key_path = directory.key_path();
         let certificate_path = directory.certificate_path();
-        let first = generate_identity(&key_path, &certificate_path, None)
-            .expect("create absent cached certificate");
+        let first = generate_identity(&directory.0).expect("create absent cached certificate");
         assert!(
             certificate_path.is_file(),
             "the generated cache is committed"
         );
-        let restart = generate_identity(&key_path, &certificate_path, None)
-            .expect("reuse created cached certificate");
+        let restart = generate_identity(&directory.0).expect("reuse created cached certificate");
         assert_eq!(first.certificate_pem, restart.certificate_pem);
     }
 
@@ -1101,7 +1107,46 @@ mod tests {
     fn cached_certificate_in_the_renewal_window_is_replaced_once() {
         let directory = test_dir("renewal-cache");
         let stored = write_cached_leaf(&directory, CachedLeaf::WithinRenewalWindow);
-        assert_replaced_once(&directory, &stored);
+        let replacement =
+            generate_identity(&directory.0).expect("replace a certificate in the renewal window");
+        let key = load_or_create_key(&directory.key_path()).expect("read identity key");
+        assert_ne!(replacement.certificate_pem, stored);
+        assert_eq!(
+            replacement.spki,
+            key.public_key_der(),
+            "the renewed leaf publishes the existing key fingerprint"
+        );
+        let restart = generate_identity(&directory.0).expect("reuse renewed leaf");
+        assert_eq!(
+            restart.certificate_pem, replacement.certificate_pem,
+            "renewal persists the replacement leaf"
+        );
+        assert_eq!(
+            restart.spki, replacement.spki,
+            "renewal preserves the published fingerprint across restart"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_certificate_publication_keeps_the_previous_complete_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = test_dir("failed-certificate-publication");
+        let previous = write_cached_leaf(&directory, CachedLeaf::WithinRenewalWindow);
+        fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o500))
+            .expect("prevent temporary certificate creation");
+
+        let result = generate_identity(&directory.0);
+
+        fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o700))
+            .expect("restore test directory cleanup permission");
+        assert!(result.is_err(), "the failed publication is reported");
+        assert_eq!(
+            fs::read_to_string(directory.certificate_path()).expect("read previous leaf"),
+            previous,
+            "a failed publication did not replace the prior complete certificate"
+        );
     }
 
     #[test]
@@ -1143,12 +1188,7 @@ mod tests {
     fn cached_leaf_for_a_different_key_is_never_served() {
         let directory = test_dir("different-key-cache");
         let other_directory = test_dir("different-key-source");
-        let other = generate_identity(
-            &other_directory.key_path(),
-            &other_directory.certificate_path(),
-            None,
-        )
-        .expect("generate other identity");
+        let other = generate_identity(&other_directory.0).expect("generate other identity");
         load_or_create_key(&directory.key_path()).expect("create target key");
         fs::write(directory.certificate_path(), &other.certificate_pem).expect("plant other leaf");
         #[cfg(unix)]
@@ -1166,25 +1206,21 @@ mod tests {
     #[test]
     fn legacy_generated_public_copy_is_not_adopted() {
         let directory = test_dir("legacy-generated-copy");
-        let key_path = directory.key_path();
-        let legacy_path = directory.0.join("hub-tls-cert.pem");
-        let certificate_path = directory.certificate_path();
-        let legacy = generate_identity(&key_path, &legacy_path, None)
-            .expect("create old generated public copy");
-        let replacement = generate_identity(&key_path, &certificate_path, Some(&legacy_path))
-            .expect("issue a new leaf instead of adopting the legacy public copy");
-        assert_ne!(replacement.certificate_pem, legacy.certificate_pem);
-        let restart = generate_identity(&key_path, &certificate_path, None)
-            .expect("reuse dedicated generated cache");
-        assert_eq!(restart.certificate_pem, replacement.certificate_pem);
+        let legacy_public_copy = directory.0.join("hub-tls-cert.pem");
+        let replacement =
+            generate_identity(&directory.0).expect("create generated certificate cache");
+        fs::write(&legacy_public_copy, &replacement.certificate_pem)
+            .expect("write legacy public copy");
+        fs::remove_file(directory.certificate_path()).expect("remove generated cache");
+        let restart =
+            generate_identity(&directory.0).expect("issue instead of adopting legacy public copy");
+        assert_ne!(restart.certificate_pem, replacement.certificate_pem);
     }
 
     #[test]
     fn valid_cache_followed_by_a_truncated_pem_block_is_replaced_once() {
         let directory = test_dir("trailing-truncated-pem");
-        let original =
-            generate_identity(&directory.key_path(), &directory.certificate_path(), None)
-                .expect("create valid certificate cache");
+        let original = generate_identity(&directory.0).expect("create valid certificate cache");
         let malformed = format!(
             "{}-----BEGIN CERTIFICATE-----\nMIIB",
             original.certificate_pem
@@ -1194,17 +1230,12 @@ mod tests {
     }
 
     #[test]
-    fn resolved_key_and_certificate_aliases_are_refused_before_writing() {
-        let directory = test_dir("aliased-identity-paths");
-        let key_path = directory.key_path();
-        let certificate_path = directory.0.join(".").join("hub.key.pem");
-
-        let error = match generate_identity(&key_path, &certificate_path, None) {
-            Ok(_) => panic!("an alias must not overwrite the private key"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(!key_path.exists(), "the private key was not created");
+    fn identity_layout_owns_distinct_fixed_names() {
+        let directory = test_dir("owned-identity-layout");
+        generate_identity(&directory.0).expect("generate TLS identity");
+        assert!(directory.key_path().is_file());
+        assert!(directory.certificate_path().is_file());
+        assert_ne!(directory.key_path(), directory.certificate_path());
     }
 
     #[cfg(unix)]
@@ -1213,7 +1244,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = test_dir("unreadable-cache");
-        let stored = generate_identity(&directory.key_path(), &directory.certificate_path(), None)
+        let stored = generate_identity(&directory.0)
             .expect("create valid certificate cache")
             .certificate_pem;
         fs::set_permissions(
@@ -1236,7 +1267,7 @@ mod tests {
         symlink(&target, directory.certificate_path()).expect("plant certificate symlink");
 
         assert!(
-            generate_identity(&directory.key_path(), &directory.certificate_path(), None).is_err(),
+            generate_identity(&directory.0).is_err(),
             "the unsafe cache path is refused rather than replaced"
         );
         assert!(
@@ -1252,9 +1283,12 @@ mod tests {
     #[test]
     fn generated_cache_directory_is_synced_after_atomic_publish() {
         let directory = test_dir("certificate-parent-sync");
-        generate_identity(&directory.key_path(), &directory.certificate_path(), None)
-            .expect("write and publish certificate cache");
-        sync_parent(&directory.0).expect("sync the directory containing the rename");
+        PARENT_SYNCED.with(|synced| synced.set(false));
+        generate_identity(&directory.0).expect("write and publish certificate cache");
+        assert!(
+            PARENT_SYNCED.with(|synced| synced.get()),
+            "the publication itself syncs its parent directory"
+        );
         assert!(directory.certificate_path().is_file());
     }
 
@@ -1262,9 +1296,7 @@ mod tests {
     fn temporary_file_setup_failure_leaves_no_key_or_certificate_temporary_file() {
         let directory = test_dir("temporary-setup-cleanup");
         FAIL_NEXT_TEMPORARY_FILE_SETUP.with(|fail| fail.set(true));
-        assert!(
-            generate_identity(&directory.key_path(), &directory.certificate_path(), None).is_err()
-        );
+        assert!(generate_identity(&directory.0).is_err());
         assert!(
             !directory.key_path().exists(),
             "failed key setup leaves no key"
@@ -1277,9 +1309,7 @@ mod tests {
 
         load_or_create_key(&directory.key_path()).expect("create the key for certificate setup");
         FAIL_NEXT_TEMPORARY_FILE_SETUP.with(|fail| fail.set(true));
-        assert!(
-            generate_identity(&directory.key_path(), &directory.certificate_path(), None).is_err()
-        );
+        assert!(generate_identity(&directory.0).is_err());
         assert!(
             directory.key_path().is_file(),
             "existing key remains intact"
@@ -1302,15 +1332,16 @@ mod tests {
     }
 
     #[test]
-    fn installed_key_is_successful_even_when_temporary_copy_cleanup_fails() {
-        let directory = test_dir("installed-key-cleanup-warning");
+    fn installed_key_reports_temporary_copy_cleanup_failure() {
+        let directory = test_dir("installed-key-cleanup-error");
         let key_path = directory.key_path();
         FAIL_NEXT_TEMPORARY_KEY_CLEANUP.with(|fail| fail.set(true));
 
-        let installed = load_or_create_key(&key_path)
-            .expect("a committed authoritative private key is not reported as a failure");
+        let error = load_or_create_key(&key_path)
+            .expect_err("a temporary private-key cleanup failure is reported");
 
         assert!(key_path.is_file(), "the authoritative key was installed");
+        assert!(error.to_string().contains("cleanup failure"));
         assert!(
             fs::read_dir(&directory.0)
                 .expect("read temporary-key directory")
@@ -1318,11 +1349,42 @@ mod tests {
                 .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
             "the injected cleanup failure leaves an observable temporary key copy"
         );
-        assert_eq!(
-            installed.public_key_der(),
-            load_or_create_key(&key_path)
-                .expect("the installed key remains usable after its cleanup warning")
-                .public_key_der()
+        assert!(
+            load_or_create_key(&key_path).is_ok(),
+            "the installed key remains usable"
+        );
+    }
+
+    #[test]
+    fn certificate_publish_reports_temporary_cleanup_failure() {
+        let directory = test_dir("certificate-cleanup-error");
+        let temporary = directory.0.join("certificate.tmp");
+        fs::write(&temporary, "replacement").expect("write temporary certificate");
+        create_dir(directory.certificate_path()).expect("block certificate replacement");
+        FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP.with(|fail| fail.set(true));
+
+        let error = match publish_certificate(&temporary, &directory.certificate_path()) {
+            Ok(_) => panic!("a temporary certificate cleanup failure is reported"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not remove temporary identity file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn temporary_name_does_not_extend_a_valid_long_final_component() {
+        let directory = test_dir("long-final-component");
+        let final_path = directory.0.join("x".repeat(255));
+        let temporary = temporary_key_path(&final_path).expect("construct temporary sibling");
+
+        assert!(
+            temporary.file_name().expect("temporary name").len() < 255,
+            "temporary component has a bounded independent name"
         );
     }
 
@@ -1333,8 +1395,7 @@ mod tests {
 
         let directory = test_dir("owner-only-key");
         let key_path = directory.key_path();
-        generate_identity(&key_path, &directory.certificate_path(), None)
-            .expect("generate TLS identity");
+        generate_identity(&directory.0).expect("generate TLS identity");
         assert_eq!(
             fs::metadata(key_path).expect("inspect private key").mode() & 0o777,
             0o600,

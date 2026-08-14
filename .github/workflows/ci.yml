@@ -83,6 +83,27 @@ jobs:
         working-directory: packages/clients/desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+  lint-tls-identity-windows:
+    name: Clippy (tls identity, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/lasterm-tls-identity
+      # napi's Windows build script locates libnode.dll through PATH. setup-node
+      # puts the selected Node installation, including that DLL, on PATH.
+      - name: Clippy
+        working-directory: crates/lasterm-tls-identity
+        run: cargo clippy --all-targets -- -D warnings
+
   licenses:
     name: License compliance
     runs-on: ubuntu-latest

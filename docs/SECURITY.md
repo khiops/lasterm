@@ -68,7 +68,7 @@
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
-| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No recovery exists**: clearing a client's pin does not revoke the key, and re-pinning may simply pin the compromised identity again. Recovery needs the hub's key rotated and every client re-pinned, and no supported rotation workflow exists yet (#199) |
+| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#199)**, and clearing a client's pin revokes nothing — re-pinning can pin the compromised identity again. The emergency procedure until then, in this order: stop the hub; delete `hub-tls-key.pem` and `hub-tls-cert.pem`; start it, which generates a new key; then clear each client's pin (`--reset-hub-pin` on the desktop) and let it pin the new key on a first contact you are watching. Every browser exception must be accepted again. In any other order a client re-pins the compromised identity |
 
 ## 2. Authentication
 

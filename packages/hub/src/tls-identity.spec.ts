@@ -1,5 +1,5 @@
 import { randomBytes, X509Certificate } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
 import { syncBuiltinESMExports } from "node:module";
@@ -179,23 +179,13 @@ describe("generated hub TLS identity", () => {
 		expect(readFileSync(getHubCertificatePath(stateDir), "utf8")).toBe(first.certificate);
 	});
 
-	it("never promotes an operator certificate from the public copy into the generated cache", () => {
+	it("does not adopt a valid generated leaf from the legacy public copy", () => {
 		const stateDir = prepareStateDir();
-		const operator = getTestTlsMaterial().pinned;
-		const operatorCertificatePath = join(stateDir, "operator-cert.pem");
-		const operatorKeyPath = join(stateDir, "operator-key.pem");
-		writeFileSync(operatorCertificatePath, operator.certificate, { mode: 0o600 });
-		writeFileSync(operatorKeyPath, operator.key, { mode: 0o600 });
-
-		const configured = resolveHubTlsIdentity(stateDir, {
-			certificatePath: operatorCertificatePath,
-			keyPath: operatorKeyPath,
-		});
-		expect(configured.certificate).toBe(operator.certificate);
-		expect(existsSync(getGeneratedCertificateCachePath(stateDir))).toBe(false);
+		const legacy = resolveHubTlsIdentity(stateDir, {});
+		unlinkSync(getGeneratedCertificateCachePath(stateDir));
 
 		const generated = resolveHubTlsIdentity(stateDir, {});
-		expect(generated.certificate).not.toBe(operator.certificate);
+		expect(generated.certificate).not.toBe(legacy.certificate);
 		expect(readFileSync(getGeneratedCertificateCachePath(stateDir), "utf8")).toBe(
 			generated.certificate,
 		);

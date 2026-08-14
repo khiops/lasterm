@@ -12,6 +12,7 @@ import {
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
 const GENERATED_KEY_NAME = "hub-tls-key.pem";
+export const GENERATED_CERTIFICATE_CACHE_NAME = "hub-tls-generated-cert.pem";
 export const HUB_TLS_CERTIFICATE_NAME = "hub-tls-cert.pem";
 const SEA_ASSET_NAME = "lasterm_tls_identity.node";
 
@@ -22,8 +23,16 @@ interface GeneratedTlsIdentity {
 }
 
 interface TlsIdentityAddon {
-	generateTlsIdentity?(keyPath: string): GeneratedTlsIdentity;
-	generate_tls_identity?(keyPath: string): GeneratedTlsIdentity;
+	generateTlsIdentity?(
+		keyPath: string,
+		certificatePath: string,
+		legacyCertificatePath?: string,
+	): GeneratedTlsIdentity;
+	generate_tls_identity?(
+		keyPath: string,
+		certificatePath: string,
+		legacyCertificatePath?: string,
+	): GeneratedTlsIdentity;
 }
 
 export interface HubTlsIdentity {
@@ -35,6 +44,10 @@ export interface HubTlsIdentity {
 
 export function getHubCertificatePath(stateDir: string): string {
 	return join(stateDir, HUB_TLS_CERTIFICATE_NAME);
+}
+
+export function getGeneratedCertificateCachePath(stateDir: string): string {
+	return join(stateDir, GENERATED_CERTIFICATE_CACHE_NAME);
 }
 
 /**
@@ -51,7 +64,12 @@ export function resolveHubTlsIdentity(stateDir: string, configured: TlsConfig): 
 	}
 
 	const keyPath = join(stateDir, GENERATED_KEY_NAME);
-	const generated = generateTlsIdentity(loadTlsIdentityAddon(), keyPath);
+	const generated = generateTlsIdentity(
+		loadTlsIdentityAddon(),
+		keyPath,
+		getGeneratedCertificateCachePath(stateDir),
+		getHubCertificatePath(stateDir),
+	);
 	const certificate = generated.certificatePem ?? generated.certificate_pem;
 	if (certificate === undefined) throw new Error("TLS identity addon returned no certificate");
 	persistCertificate(stateDir, certificate);
@@ -124,8 +142,13 @@ function dlopenAddon(addonPath: string): TlsIdentityAddon {
 }
 
 /** napi-rs camel-cases the Rust export for JavaScript while retaining its Rust name. */
-function generateTlsIdentity(addon: TlsIdentityAddon, keyPath: string): GeneratedTlsIdentity {
+function generateTlsIdentity(
+	addon: TlsIdentityAddon,
+	keyPath: string,
+	certificatePath: string,
+	legacyCertificatePath: string,
+): GeneratedTlsIdentity {
 	const generate = addon.generateTlsIdentity ?? addon.generate_tls_identity;
 	if (generate === undefined) throw new Error("TLS identity addon has no generator");
-	return generate(keyPath);
+	return generate(keyPath, certificatePath, legacyCertificatePath);
 }

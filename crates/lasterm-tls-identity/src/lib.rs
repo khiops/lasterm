@@ -13,8 +13,11 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
+use x509_parser::extensions::{GeneralName, ParsedExtension};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 const VALIDITY_DAYS: i64 = 825;
+const RENEWAL_WINDOW_DAYS: i64 = 7;
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
@@ -36,15 +39,25 @@ struct TlsIdentity {
 }
 
 /// Creates a private key at `key_path` when absent, or safely reuses its
-/// existing key, then issues a self-signed loopback TLS server leaf.
+/// existing key and a usable generated leaf at `certificate_path`. A leaf is
+/// reissued only when it cannot safely serve that key anymore.
 ///
 /// The returned object contains only public certificate material. In
 /// particular, no private key is returned or converted to a JavaScript string.
 #[napi]
-pub fn generate_tls_identity(key_path: String) -> napi::Result<GeneratedTlsIdentity> {
-    let identity = generate_identity(Path::new(&key_path)).map_err(|error| {
+pub fn generate_tls_identity(
+    key_path: String,
+    certificate_path: String,
+    legacy_certificate_path: Option<String>,
+) -> napi::Result<GeneratedTlsIdentity> {
+    let identity = generate_identity(
+        Path::new(&key_path),
+        Path::new(&certificate_path),
+        legacy_certificate_path.as_deref().map(Path::new),
+    )
+    .map_err(|error| {
         napi::Error::from_reason(format!(
-            "cannot generate hub TLS identity at {key_path}: {error}"
+            "cannot generate hub TLS identity at {key_path} and {certificate_path}: {error}"
         ))
     })?;
 
@@ -54,9 +67,44 @@ pub fn generate_tls_identity(key_path: String) -> napi::Result<GeneratedTlsIdent
     })
 }
 
-fn generate_identity(key_path: &Path) -> io::Result<TlsIdentity> {
+fn generate_identity(
+    key_path: &Path,
+    certificate_path: &Path,
+    legacy_certificate_path: Option<&Path>,
+) -> io::Result<TlsIdentity> {
     let key_pair = load_or_create_key(key_path)?;
     let now = OffsetDateTime::now_utc();
+    let cached_certificate = load_usable_certificate(certificate_path, &key_pair, now)?;
+    if let CertificateCache::Usable(certificate_pem) = cached_certificate {
+        return Ok(TlsIdentity {
+            certificate_pem,
+            spki: key_pair.public_key_der(),
+        });
+    }
+    if matches!(cached_certificate, CertificateCache::Absent) {
+        if let Some(legacy_certificate_path) = legacy_certificate_path {
+            if let CertificateCache::Usable(certificate_pem) =
+                load_usable_certificate(legacy_certificate_path, &key_pair, now)?
+            {
+                write_certificate_file(certificate_path, &certificate_pem)?;
+                return Ok(TlsIdentity {
+                    certificate_pem,
+                    spki: key_pair.public_key_der(),
+                });
+            }
+        }
+    }
+
+    let certificate_pem = issue_certificate(&key_pair, now)?;
+    write_certificate_file(certificate_path, &certificate_pem)?;
+
+    Ok(TlsIdentity {
+        certificate_pem,
+        spki: key_pair.public_key_der(),
+    })
+}
+
+fn issue_certificate(key_pair: &KeyPair, now: OffsetDateTime) -> io::Result<String> {
     let mut params = CertificateParams::new(Vec::<String>::new())
         .map_err(|error| io::Error::other(format!("cannot configure certificate: {error}")))?;
     params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
@@ -71,11 +119,140 @@ fn generate_identity(key_path: &Path) -> io::Result<TlsIdentity> {
     let certificate = params
         .self_signed(&key_pair)
         .map_err(|error| io::Error::other(format!("cannot issue certificate: {error}")))?;
+    Ok(certificate.pem())
+}
 
-    Ok(TlsIdentity {
-        certificate_pem: certificate.pem(),
-        spki: key_pair.public_key_der(),
+enum CertificateCache {
+    Absent,
+    Unusable,
+    Usable(String),
+}
+
+fn load_usable_certificate(
+    certificate_path: &Path,
+    key_pair: &KeyPair,
+    now: OffsetDateTime,
+) -> io::Result<CertificateCache> {
+    let Some(mut file) = open_key_file(certificate_path, OpenKeyMode::Existing)? else {
+        return Ok(CertificateCache::Absent);
+    };
+    let mut certificate_pem = String::new();
+    if file.read_to_string(&mut certificate_pem).is_err() {
+        return Ok(CertificateCache::Unusable);
+    }
+    Ok(
+        if certificate_matches_profile(&certificate_pem, key_pair, now) {
+            CertificateCache::Usable(certificate_pem)
+        } else {
+            CertificateCache::Unusable
+        },
+    )
+}
+
+fn certificate_matches_profile(
+    certificate_pem: &str,
+    key_pair: &KeyPair,
+    now: OffsetDateTime,
+) -> bool {
+    let Ok(mut pems) = pem::parse_many(certificate_pem) else {
+        return false;
+    };
+    if pems.len() != 1 || pems[0].tag() != "CERTIFICATE" {
+        return false;
+    }
+    let der = pems.remove(0).into_contents();
+    let Ok((remaining, certificate)) = X509Certificate::from_der(&der) else {
+        return false;
+    };
+    if !remaining.is_empty()
+        || certificate.public_key().raw != key_pair.public_key_der().as_slice()
+        || certificate.issuer() != certificate.subject()
+        || certificate.verify_signature(None).is_err()
+    {
+        return false;
+    }
+
+    let validity = certificate.validity();
+    let not_before = validity.not_before.to_datetime();
+    let not_after = validity.not_after.to_datetime();
+    if not_before > now || not_after <= now + Duration::days(RENEWAL_WINDOW_DAYS) {
+        return false;
+    }
+
+    let Ok(Some(basic_constraints)) = certificate.basic_constraints() else {
+        return false;
+    };
+    if !basic_constraints.critical || basic_constraints.value.ca {
+        return false;
+    }
+    let Ok(Some(subject_alternative_name)) = certificate.subject_alternative_name() else {
+        return false;
+    };
+    if !subject_alternative_name
+        .value
+        .general_names
+        .iter()
+        .any(|name| matches!(name, GeneralName::IPAddress(bytes) if *bytes == [127, 0, 0, 1]))
+    {
+        return false;
+    }
+    let Ok(Some(key_usage)) = certificate.key_usage() else {
+        return false;
+    };
+    if !key_usage.value.digital_signature() {
+        return false;
+    }
+    let Ok(Some(extended_key_usage)) = certificate.extended_key_usage() else {
+        return false;
+    };
+    if !extended_key_usage.value.server_auth {
+        return false;
+    }
+
+    !certificate.extensions().iter().any(|extension| {
+        extension.critical
+            && matches!(
+                extension.parsed_extension(),
+                ParsedExtension::UnsupportedExtension { .. } | ParsedExtension::ParseError { .. }
+            )
     })
+}
+
+fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io::Result<()> {
+    check_parent_directory(certificate_path)?;
+    for _ in 0..128 {
+        let temporary_path = temporary_key_path(certificate_path)?;
+        let mut temporary_file = match open_key_file(&temporary_path, OpenKeyMode::CreateNew) {
+            Ok(Some(file)) => file,
+            Ok(None) => unreachable!("creating a temporary certificate file cannot report absence"),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let write_result = (|| -> io::Result<()> {
+            temporary_file.write_all(certificate_pem.as_bytes())?;
+            temporary_file.sync_all()?;
+            Ok(())
+        })();
+        drop(temporary_file);
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(error);
+        }
+        // A same-directory rename replaces the old complete cache atomically;
+        // a crash can therefore expose either the previous leaf or this one,
+        // never a partially written certificate.
+        match fs::rename(&temporary_path, certificate_path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let _ = fs::remove_file(&temporary_path);
+                return Err(error);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary certificate file",
+    ))
 }
 
 fn load_or_create_key(key_path: &Path) -> io::Result<KeyPair> {
@@ -381,11 +558,16 @@ mod tests {
     use super::{
         generate_identity, load_or_create_key, FAIL_NEXT_TEMPORARY_KEY_CLEANUP, VALIDITY_DAYS,
     };
+    use rcgen::{
+        BasicConstraints, CertificateParams, CustomExtension, ExtendedKeyUsagePurpose, IsCa,
+        KeyUsagePurpose, SanType,
+    };
     use rustls_pki_types::CertificateDer;
     use std::env;
     use std::fs::{self, create_dir};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
-    use time::Duration;
+    use time::{Duration, OffsetDateTime};
     use webpki::EndEntityCert;
     use x509_parser::extensions::GeneralName;
     use x509_parser::prelude::{FromDer, X509Certificate};
@@ -395,6 +577,10 @@ mod tests {
     impl TestDir {
         fn key_path(&self) -> PathBuf {
             self.0.join("hub.key.pem")
+        }
+
+        fn certificate_path(&self) -> PathBuf {
+            self.0.join("hub.generated-cert.pem")
         }
     }
 
@@ -435,10 +621,87 @@ mod tests {
         pem.into_contents()
     }
 
+    #[derive(Clone, Copy)]
+    enum CachedLeaf {
+        Expired,
+        WithinRenewalWindow,
+        DatedInTheFuture,
+        CertificateAuthority,
+        UnsupportedCriticalExtension,
+    }
+
+    fn write_cached_leaf(directory: &TestDir, leaf: CachedLeaf) -> String {
+        let key_pair = load_or_create_key(&directory.key_path()).expect("create test key");
+        let now = OffsetDateTime::now_utc();
+        let mut params =
+            CertificateParams::new(Vec::<String>::new()).expect("configure test certificate");
+        params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.not_before = now - Duration::days(1);
+        params.not_after = now + Duration::days(VALIDITY_DAYS);
+        match leaf {
+            CachedLeaf::Expired => {
+                params.not_before = now - Duration::days(VALIDITY_DAYS);
+                params.not_after = now - Duration::days(1);
+            }
+            CachedLeaf::WithinRenewalWindow => params.not_after = now + Duration::days(7),
+            CachedLeaf::DatedInTheFuture => {
+                params.not_before = now + Duration::days(1);
+                params.not_after = now + Duration::days(VALIDITY_DAYS);
+            }
+            CachedLeaf::CertificateAuthority => {
+                params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            }
+            CachedLeaf::UnsupportedCriticalExtension => {
+                let mut extension =
+                    CustomExtension::from_oid_content(&[1, 2, 3, 4], vec![0x05, 0x00]);
+                extension.set_criticality(true);
+                params.custom_extensions.push(extension);
+            }
+        }
+        let certificate = params
+            .self_signed(&key_pair)
+            .expect("issue cached test certificate")
+            .pem();
+        fs::write(directory.certificate_path(), &certificate)
+            .expect("write cached test certificate");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                directory.certificate_path(),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("make cached test certificate owner-only");
+        }
+        certificate
+    }
+
+    fn assert_replaced_once(directory: &TestDir, stored: &str) {
+        let key_path = directory.key_path();
+        let certificate_path = directory.certificate_path();
+        let replacement = generate_identity(&key_path, &certificate_path, None)
+            .expect("replace unusable cached certificate");
+        assert_ne!(
+            replacement.certificate_pem, stored,
+            "the unusable leaf is not served"
+        );
+        let restart = generate_identity(&key_path, &certificate_path, None)
+            .expect("reuse replacement certificate");
+        assert_eq!(
+            restart.certificate_pem, replacement.certificate_pem,
+            "replacement is issued once rather than on every restart"
+        );
+    }
+
     #[test]
     fn generated_certificate_is_a_loopback_tls_server_leaf() {
         let directory = test_dir("certificate-extensions");
-        let identity = generate_identity(&directory.key_path()).expect("generate TLS identity");
+        let identity =
+            generate_identity(&directory.key_path(), &directory.certificate_path(), None)
+                .expect("generate TLS identity");
         let certificate_der = certificate_der(&identity.certificate_pem);
         let (remaining, certificate) =
             X509Certificate::from_der(&certificate_der).expect("parse generated certificate DER");
@@ -496,7 +759,9 @@ mod tests {
     #[test]
     fn reported_spki_is_what_rustls_webpki_reads_from_the_certificate() {
         let directory = test_dir("spki-reader");
-        let identity = generate_identity(&directory.key_path()).expect("generate TLS identity");
+        let identity =
+            generate_identity(&directory.key_path(), &directory.certificate_path(), None)
+                .expect("generate TLS identity");
         let pem = pem::parse(identity.certificate_pem).expect("parse generated certificate PEM");
         let certificate_der = CertificateDer::from(pem.into_contents());
         let end_entity = EndEntityCert::try_from(&certificate_der)
@@ -510,13 +775,130 @@ mod tests {
     }
 
     #[test]
-    fn existing_key_is_reissued_with_the_same_spki() {
-        let directory = test_dir("reissue");
+    fn existing_key_reuses_the_same_certificate_and_spki() {
+        let directory = test_dir("reuse");
         let key_path = directory.key_path();
-        let first = generate_identity(&key_path).expect("generate initial TLS identity");
-        let second = generate_identity(&key_path).expect("reissue TLS identity from existing key");
+        let certificate_path = directory.certificate_path();
+        let first = generate_identity(&key_path, &certificate_path, None)
+            .expect("generate initial TLS identity");
+        let second = generate_identity(&key_path, &certificate_path, None)
+            .expect("reuse TLS identity from existing key");
 
-        assert_eq!(first.spki, second.spki, "reissuing preserves the SPKI");
+        assert_eq!(
+            first.certificate_pem, second.certificate_pem,
+            "restart reuses the leaf"
+        );
+        assert_eq!(first.spki, second.spki, "reuse preserves the SPKI");
+    }
+
+    #[test]
+    fn absent_cached_certificate_is_created_once() {
+        let directory = test_dir("absent-cache");
+        let key_path = directory.key_path();
+        let certificate_path = directory.certificate_path();
+        let first = generate_identity(&key_path, &certificate_path, None)
+            .expect("create absent cached certificate");
+        assert!(
+            certificate_path.is_file(),
+            "the generated cache is committed"
+        );
+        let restart = generate_identity(&key_path, &certificate_path, None)
+            .expect("reuse created cached certificate");
+        assert_eq!(first.certificate_pem, restart.certificate_pem);
+    }
+
+    #[test]
+    fn unparseable_cached_certificate_is_replaced_once() {
+        let directory = test_dir("unparseable-cache");
+        load_or_create_key(&directory.key_path()).expect("create test key");
+        let stored = "not a certificate";
+        fs::write(directory.certificate_path(), stored).expect("write corrupt cache");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                directory.certificate_path(),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("make corrupt cache owner-only");
+        }
+        assert_replaced_once(&directory, stored);
+    }
+
+    #[test]
+    fn expired_cached_certificate_is_replaced_once() {
+        let directory = test_dir("expired-cache");
+        let stored = write_cached_leaf(&directory, CachedLeaf::Expired);
+        assert_replaced_once(&directory, &stored);
+    }
+
+    #[test]
+    fn cached_certificate_in_the_renewal_window_is_replaced_once() {
+        let directory = test_dir("renewal-cache");
+        let stored = write_cached_leaf(&directory, CachedLeaf::WithinRenewalWindow);
+        assert_replaced_once(&directory, &stored);
+    }
+
+    #[test]
+    fn future_dated_cached_certificate_is_replaced_once() {
+        let directory = test_dir("future-cache");
+        let stored = write_cached_leaf(&directory, CachedLeaf::DatedInTheFuture);
+        assert_replaced_once(&directory, &stored);
+    }
+
+    #[test]
+    fn cached_certificate_with_an_invalid_profile_is_replaced_once() {
+        let directory = test_dir("ca-cache");
+        let stored = write_cached_leaf(&directory, CachedLeaf::CertificateAuthority);
+        assert_replaced_once(&directory, &stored);
+    }
+
+    #[test]
+    fn cached_certificate_with_unsupported_critical_extension_is_replaced_once() {
+        let directory = test_dir("critical-extension-cache");
+        let stored = write_cached_leaf(&directory, CachedLeaf::UnsupportedCriticalExtension);
+        assert_replaced_once(&directory, &stored);
+    }
+
+    #[test]
+    fn cached_leaf_for_a_different_key_is_never_served() {
+        let directory = test_dir("different-key-cache");
+        let other_directory = test_dir("different-key-source");
+        let other = generate_identity(
+            &other_directory.key_path(),
+            &other_directory.certificate_path(),
+            None,
+        )
+        .expect("generate other identity");
+        load_or_create_key(&directory.key_path()).expect("create target key");
+        fs::write(directory.certificate_path(), &other.certificate_pem).expect("plant other leaf");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                directory.certificate_path(),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("make planted leaf owner-only");
+        }
+        assert_replaced_once(&directory, &other.certificate_pem);
+    }
+
+    #[test]
+    fn legacy_generated_public_copy_is_adopted_once_but_not_required_afterward() {
+        let directory = test_dir("legacy-generated-copy");
+        let key_path = directory.key_path();
+        let legacy_path = directory.0.join("hub-tls-cert.pem");
+        let certificate_path = directory.certificate_path();
+        let legacy = generate_identity(&key_path, &legacy_path, None)
+            .expect("create old generated public copy");
+        let adopted = generate_identity(&key_path, &certificate_path, Some(&legacy_path))
+            .expect("adopt valid old generated public copy");
+        assert_eq!(adopted.certificate_pem, legacy.certificate_pem);
+        fs::remove_file(legacy_path).expect("remove old public copy after migration");
+        let restart = generate_identity(&key_path, &certificate_path, None)
+            .expect("reuse dedicated generated cache");
+        assert_eq!(restart.certificate_pem, adopted.certificate_pem);
     }
 
     #[test]
@@ -551,7 +933,8 @@ mod tests {
 
         let directory = test_dir("owner-only-key");
         let key_path = directory.key_path();
-        generate_identity(&key_path).expect("generate TLS identity");
+        generate_identity(&key_path, &directory.certificate_path(), None)
+            .expect("generate TLS identity");
         assert_eq!(
             fs::metadata(key_path).expect("inspect private key").mode() & 0o777,
             0o600,

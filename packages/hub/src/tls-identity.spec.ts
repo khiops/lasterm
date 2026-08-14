@@ -1,5 +1,5 @@
 import { randomBytes, X509Certificate } from "node:crypto";
-import { mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
 import { syncBuiltinESMExports } from "node:module";
@@ -12,7 +12,11 @@ import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { createServer, startServer } from "./server.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
-import { getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
+import {
+	getGeneratedCertificateCachePath,
+	getHubCertificatePath,
+	resolveHubTlsIdentity,
+} from "./tls-identity.js";
 
 describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
@@ -159,6 +163,43 @@ describe("generated hub TLS identity", () => {
 		expect(head.status).toBe(200);
 		expect(head.ok).toBe(true);
 		expect(await head.text()).toBe("");
+	});
+
+	it("reuses the generated leaf and published fingerprint across a restart", () => {
+		const stateDir = prepareStateDir();
+		const first = resolveHubTlsIdentity(stateDir, {});
+		const second = resolveHubTlsIdentity(stateDir, {});
+
+		expect(second.certificate).toBe(first.certificate);
+		expect(second.tls.cert).toBe(first.tls.cert);
+		expect(second.spki).toBe(first.spki);
+		expect(readFileSync(getGeneratedCertificateCachePath(stateDir), "utf8")).toBe(
+			first.certificate,
+		);
+		expect(readFileSync(getHubCertificatePath(stateDir), "utf8")).toBe(first.certificate);
+	});
+
+	it("never promotes an operator certificate from the public copy into the generated cache", () => {
+		const stateDir = prepareStateDir();
+		const operator = getTestTlsMaterial().pinned;
+		const operatorCertificatePath = join(stateDir, "operator-cert.pem");
+		const operatorKeyPath = join(stateDir, "operator-key.pem");
+		writeFileSync(operatorCertificatePath, operator.certificate, { mode: 0o600 });
+		writeFileSync(operatorKeyPath, operator.key, { mode: 0o600 });
+
+		const configured = resolveHubTlsIdentity(stateDir, {
+			certificatePath: operatorCertificatePath,
+			keyPath: operatorKeyPath,
+		});
+		expect(configured.certificate).toBe(operator.certificate);
+		expect(existsSync(getGeneratedCertificateCachePath(stateDir))).toBe(false);
+
+		const generated = resolveHubTlsIdentity(stateDir, {});
+		expect(generated.certificate).not.toBe(operator.certificate);
+		expect(readFileSync(getGeneratedCertificateCachePath(stateDir), "utf8")).toBe(
+			generated.certificate,
+		);
+		expect(readFileSync(getHubCertificatePath(stateDir), "utf8")).toBe(generated.certificate);
 	});
 
 	it("accepts a pinned key with an expired certificate", async () => {

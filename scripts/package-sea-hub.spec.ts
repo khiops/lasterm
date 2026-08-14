@@ -116,10 +116,10 @@ describe("buildStaticManifest", () => {
 		expect(manifest).toHaveProperty("assets/style.css");
 
 		// Verify base64 decode round-trips
-		const htmlDecoded = Buffer.from(manifest["index.html"]?.data, "base64").toString("utf8");
+		const htmlDecoded = Buffer.from(manifest["index.html"]!.data, "base64").toString("utf8");
 		expect(htmlDecoded).toBe("<html><body>hello</body></html>");
 
-		const jsDecoded = Buffer.from(manifest["assets/app.js"]?.data, "base64").toString("utf8");
+		const jsDecoded = Buffer.from(manifest["assets/app.js"]!.data, "base64").toString("utf8");
 		expect(jsDecoded).toBe("console.log('app')");
 	});
 

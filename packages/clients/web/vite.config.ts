@@ -4,7 +4,7 @@ import * as https from "node:https";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import vue from "@vitejs/plugin-vue";
-import { defineConfig } from "vite";
+import { defineConfig, type ProxyOptions } from "vite";
 import { createHubTlsConnector, type HubTlsRuntime } from "../../hub/src/hub-transport.js";
 
 function resolveBuildHash(): string {
@@ -54,11 +54,27 @@ hubProxyAgent.createConnection = (options, callback) => {
 	if (Number(options.port) !== runtime.port) {
 		throw new Error("Hub runtime changed before the Vite proxy connected");
 	}
-	return createHubTlsConnector(runtime)(options, callback);
+	const connector = createHubTlsConnector(runtime);
+	// @types/node requires a socket on every callback path, though Node invokes
+	// TLS connector errors before a socket exists. hub-transport keeps that
+	// absence explicit; this is only the Node Agent boundary.
+	return connector(options, callback as Parameters<typeof connector>[1]);
 };
 
 function hubProxyTarget(): string {
 	return `https://127.0.0.1:${readHubRuntime().port}`;
+}
+
+function hubProxyOptions(websocket = false): ProxyOptions {
+	// Vite delegates these options to http-proxy, whose runtime accepts router
+	// and Agent even though Vite's exported ProxyOptions omits them.
+	return {
+		target: "https://127.0.0.1:1",
+		router: hubProxyTarget,
+		agent: hubProxyAgent,
+		secure: true,
+		...(websocket ? { ws: true } : {}),
+	} as unknown as ProxyOptions;
 }
 
 export default defineConfig({
@@ -73,25 +89,9 @@ export default defineConfig({
 	},
 	server: {
 		proxy: {
-			"/ws": {
-				target: "https://127.0.0.1:1",
-				router: hubProxyTarget,
-				agent: hubProxyAgent,
-				secure: true,
-				ws: true,
-			},
-			"/api": {
-				target: "https://127.0.0.1:1",
-				router: hubProxyTarget,
-				agent: hubProxyAgent,
-				secure: true,
-			},
-			"/public": {
-				target: "https://127.0.0.1:1",
-				router: hubProxyTarget,
-				agent: hubProxyAgent,
-				secure: true,
-			},
+			"/ws": hubProxyOptions(true),
+			"/api": hubProxyOptions(),
+			"/public": hubProxyOptions(),
 		},
 	},
 });

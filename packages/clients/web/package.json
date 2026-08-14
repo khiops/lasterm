@@ -9,7 +9,7 @@
 		"build": "vue-tsc -p tsconfig.json --noEmit && vite build",
 		"dev": "vite",
 		"test": "pnpm -w exec vitest run --project web",
-		"typecheck": "vue-tsc -p tsconfig.json --noEmit"
+		"typecheck": "vue-tsc -p tsconfig.json --noEmit && tsc -p tsconfig.typecheck.json"
 	},
 	"dependencies": {
 		"@msgpack/msgpack": "catalog:",

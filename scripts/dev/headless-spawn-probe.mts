@@ -5,7 +5,7 @@ import { request } from "node:https";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage } from "../../packages/shared/src/index.js";
-import { hubTlsOptions } from "../../packages/hub/src/hub-transport.js";
+import { createHubTlsAgent } from "../../packages/hub/src/hub-transport.js";
 import { requestHub } from "../../packages/hub/src/cli.js";
 import type {
 	AuthMessage,
@@ -67,8 +67,9 @@ const deadline = setTimeout(() => {
 let finished = false;
 
 const key = randomBytes(16).toString("base64");
+const hubTlsAgent = createHubTlsAgent(hubRuntime);
 const req = request(`https://127.0.0.1:${port}/ws`, {
-	...hubTlsOptions(hubRuntime, stateDir),
+	agent: hubTlsAgent,
 	headers: {
 		Connection: "Upgrade",
 		Upgrade: "websocket",
@@ -166,6 +167,7 @@ function finish(socket: NodeJS.WritableStream | undefined, code: number): void {
 	clearTimeout(deadline);
 	try {
 		socket?.end();
+		hubTlsAgent.destroy();
 	} catch {
 		// Ignore close errors while exiting the probe.
 	}

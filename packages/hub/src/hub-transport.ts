@@ -9,7 +9,15 @@ export interface HubTlsRuntime {
 	readonly spki?: string;
 }
 
-type ConnectionCallback = (error: Error | null, socket: Duplex) => void;
+/**
+ * Node's callback declaration requires a Duplex, but an asynchronous connector
+ * reports transport failures before one exists. Keep that absence explicit,
+ * while requiring a socket for a successful TLS handshake.
+ */
+type ConnectionCallback = {
+	(error: Error, socket?: Duplex): void;
+	(error: null, socket: Duplex): void;
+};
 
 /** A peer completed TLS but proved a key other than the runtime pin. */
 export const HUB_TLS_PIN_MISMATCH_CODE = "ERR_HUB_TLS_PIN_MISMATCH";
@@ -43,7 +51,13 @@ export function createHubTlsAgent(
 ): Agent {
 	const expectedSpki = expectedHubSpki(runtime);
 	const agent = new Agent({ keepAlive: false, maxCachedSessions: 0 });
-	agent.createConnection = makeHubTlsConnector(expectedSpki, handshakeTimeoutMs);
+	// @types/node requires a socket even on an error callback, while Node calls
+	// this with undefined before a TLS socket exists. The connector itself keeps
+	// the accurate type; this assertion is only the incompatible Node boundary.
+	agent.createConnection = makeHubTlsConnector(
+		expectedSpki,
+		handshakeTimeoutMs,
+	) as typeof agent.createConnection;
 	return agent;
 }
 
@@ -75,19 +89,20 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 			if (handshakeTimer !== undefined) clearTimeout(handshakeTimer);
 			if (error !== null) {
 				if (socket !== undefined) socket.destroy();
-				callback(error, socket as Duplex);
+				callback(error, socket);
 				return;
 			}
-			callback(null, socket as Duplex);
+			if (socket === undefined) {
+				callback(new Error("Hub TLS connector completed without a socket"));
+				return;
+			}
+			callback(null, socket);
 		};
 
 		const { host, port: configuredPort, ...connectionOptions } = options;
 		const port = typeof configuredPort === "string" ? Number(configuredPort) : configuredPort;
 		if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
-			callback(
-				new Error("Hub TLS endpoint could not be reached: no usable TCP port"),
-				undefined as unknown as Duplex,
-			);
+			callback(new Error("Hub TLS endpoint could not be reached: no usable TCP port"), undefined);
 			return undefined;
 		}
 		const socket = tls.connect({

@@ -21,20 +21,65 @@ describe("generated hub TLS identity", () => {
 	let originalStateRoot: string | undefined;
 
 	afterEach(async () => {
-		if (server) await server.close();
+		const serverToClose = server;
 		server = undefined;
-		await Promise.all(
-			tlsServers.map(
-				(tlsServer) =>
-					new Promise<void>((resolve, reject) =>
-						tlsServer.close((error) => (error ? reject(error) : resolve())),
-					),
-			),
-		);
+		const tlsServersToClose = tlsServers;
 		tlsServers = [];
-		if (stateRoot) rmSync(stateRoot, { recursive: true, force: true });
+		const stateRootToRemove = stateRoot;
 		stateRoot = undefined;
-		process.env.XDG_STATE_HOME = originalStateRoot;
+		const stateRootToRestore = originalStateRoot;
+		originalStateRoot = undefined;
+
+		const cleanupErrors = await runCleanup([
+			async () => {
+				if (serverToClose !== undefined) await serverToClose.close();
+			},
+			async () => {
+				await Promise.all(
+					tlsServersToClose.map(
+						(tlsServer) =>
+							new Promise<void>((resolve, reject) =>
+								tlsServer.close((error) => (error ? reject(error) : resolve())),
+							),
+					),
+				);
+			},
+			() => {
+				if (stateRootToRemove !== undefined)
+					rmSync(stateRootToRemove, { recursive: true, force: true });
+			},
+			() => restoreEnvironmentVariable("XDG_STATE_HOME", stateRootToRestore),
+		]);
+		if (cleanupErrors.length > 0) {
+			console.error("TLS identity test cleanup failed:", cleanupErrors);
+		}
+	});
+
+	it("teardown restores absent environment variables and continues after cleanup failures", async () => {
+		const environmentKey = "LASTERM_TLS_CLEANUP_TEST";
+		const originalValue = process.env[environmentKey];
+		const attempts: string[] = [];
+		try {
+			process.env[environmentKey] = "temporary";
+			const cleanupErrors = await runCleanup([
+				() => {
+					attempts.push("server");
+					throw new Error("injected server-close failure");
+				},
+				() => {
+					attempts.push("state directory");
+				},
+				() => {
+					attempts.push("environment");
+					restoreEnvironmentVariable(environmentKey, undefined);
+				},
+			]);
+			expect(attempts).toEqual(["server", "state directory", "environment"]);
+			expect(cleanupErrors).toHaveLength(1);
+			expect(environmentKey in process.env).toBe(false);
+		} finally {
+			restoreEnvironmentVariable(environmentKey, originalValue);
+		}
 	});
 
 	function prepareStateDir(): string {
@@ -283,3 +328,25 @@ describe("generated hub TLS identity", () => {
 		expect(stalledPeer.listening).toBe(false);
 	});
 });
+
+type CleanupAction = () => void | Promise<void>;
+
+async function runCleanup(actions: readonly CleanupAction[]): Promise<unknown[]> {
+	const errors: unknown[] = [];
+	for (const action of actions) {
+		try {
+			await action();
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	return errors;
+}
+
+function restoreEnvironmentVariable(name: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[name];
+		return;
+	}
+	process.env[name] = value;
+}

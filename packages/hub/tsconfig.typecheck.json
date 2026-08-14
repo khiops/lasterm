@@ -1,0 +1,17 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"baseUrl": "../..",
+		"paths": {
+			"fastify": ["packages/hub/node_modules/fastify/fastify.d.ts"]
+		}
+	},
+	"include": [
+		"src/tls-identity.spec.ts",
+		"src/**/*.fixture.ts",
+		"src/**/*.setup.ts",
+		"../../scripts/**/*"
+	],
+	"exclude": ["node_modules", "dist"]
+}

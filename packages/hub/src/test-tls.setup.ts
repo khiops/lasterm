@@ -10,22 +10,30 @@ export default function setupTestTlsMaterial(): () => void {
 	const directory = mkdtempSync(join(tmpdir(), "lasterm-hub-test-tls-"));
 	const generator = testMaterialGeneratorPath();
 	if (!existsSync(generator)) {
-		rmSync(directory, { recursive: true, force: true });
+		removeTestTlsDirectory(directory);
 		throw new Error(
-			`hub TLS test material generator is missing at ${generator}; build it with \`cargo build --release -p lasterm-tls-identity\` before running hub tests`,
+			`hub TLS test material generator is missing at ${generator}; build it with \`cargo build --release -p lasterm-tls-identity --features test-tls-material\` before running hub tests`,
 		);
 	}
 	try {
 		execFileSync(generator, ["--output", directory], { stdio: "pipe" });
 	} catch (error) {
-		rmSync(directory, { recursive: true, force: true });
+		removeTestTlsDirectory(directory);
 		throw new Error(`hub TLS test material generator failed: ${String(error)}`);
 	}
 	process.env[TEST_TLS_DIRECTORY_ENV] = directory;
 	return () => {
 		delete process.env[TEST_TLS_DIRECTORY_ENV];
-		rmSync(directory, { recursive: true, force: true });
+		removeTestTlsDirectory(directory);
 	};
+}
+
+function removeTestTlsDirectory(directory: string): void {
+	try {
+		rmSync(directory, { recursive: true, force: true });
+	} catch (error) {
+		console.error(`Could not remove hub TLS test material directory ${directory}:`, error);
+	}
 }
 
 function testMaterialGeneratorPath(): string {

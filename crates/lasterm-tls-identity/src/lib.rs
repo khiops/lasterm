@@ -63,7 +63,7 @@ pub fn generate_tls_identity(identity_directory: String) -> napi::Result<Generat
     let identity_directory = resolve_identity_directory(&identity_directory).map_err(|error| {
         napi::Error::from_reason(format!("cannot resolve hub TLS identity directory: {error}"))
     })?;
-    let identity = generate_identity(&identity_directory).map_err(|error| {
+    let (identity, key_path) = generate_tls_identity_at(&identity_directory).map_err(|error| {
         napi::Error::from_reason(format!(
             "cannot generate hub TLS identity in {}: {error}",
             identity_directory.display()
@@ -73,12 +73,26 @@ pub fn generate_tls_identity(identity_directory: String) -> napi::Result<Generat
     Ok(GeneratedTlsIdentity {
         certificate_pem: identity.certificate_pem,
         spki: Buffer::from(identity.spki),
-        key_path: identity_directory
-            .join(GENERATED_KEY_NAME)
-            .into_os_string()
-            .into_string()
-            .map_err(|_| napi::Error::from_reason("generated private-key path is not UTF-8"))?,
+        key_path,
     })
+}
+
+/// Prevalidates the string returned by N-API before any durable identity work.
+/// Keeping this beside the generation call makes a reported conversion failure
+/// transactional: no key or certificate has been created yet.
+fn generate_tls_identity_at(identity_directory: &Path) -> io::Result<(TlsIdentity, String)> {
+    let key_path = identity_directory
+        .join(GENERATED_KEY_NAME)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "generated private-key path is not UTF-8",
+            )
+        })?;
+    let identity = generate_identity(identity_directory)?;
+    Ok((identity, key_path))
 }
 
 /// Resolves the N-API locator once, before protected descriptor traversal.
@@ -834,7 +848,8 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_identity, load_or_create_key, publish_certificate, temporary_key_path,
+        generate_identity, generate_tls_identity_at, load_or_create_key, publish_certificate,
+        temporary_key_path,
         FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP, FAIL_NEXT_TEMPORARY_FILE_SETUP,
         FAIL_NEXT_TEMPORARY_KEY_CLEANUP, GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME,
         VALIDITY_DAYS,
@@ -943,6 +958,46 @@ mod tests {
         assert!(
             identity_directory.join(GENERATED_KEY_NAME).is_file(),
             "the plain-Rust generation path creates the resolved key path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_returned_key_path_fails_before_identity_generation() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let _lock = working_directory_test_lock()
+            .lock()
+            .expect("lock process working directory");
+        let directory = test_dir("non-utf8-key-path");
+        let non_utf8_working_directory = directory
+            .0
+            .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        fs::create_dir(&non_utf8_working_directory).expect("create non-UTF-8 working directory");
+        let identity_directory = non_utf8_working_directory.join("identity");
+        fs::create_dir(&identity_directory).expect("create identity directory");
+
+        let error = {
+            let _working_directory = WorkingDirectory::change_to(&non_utf8_working_directory);
+            let resolved = super::resolve_identity_directory("identity")
+                .expect("resolve relative N-API identity directory");
+            assert_eq!(resolved, identity_directory);
+            match generate_tls_identity_at(&resolved) {
+                Ok(_) => panic!("the N-API key path must be valid before generation"),
+                Err(error) => error,
+            }
+        };
+        assert!(error.to_string().contains("not UTF-8"), "error: {error}");
+        assert!(
+            !identity_directory.join(GENERATED_KEY_NAME).exists(),
+            "a failed N-API path conversion leaves no key"
+        );
+        assert!(
+            !identity_directory
+                .join(GENERATED_CERTIFICATE_CACHE_NAME)
+                .exists(),
+            "a failed N-API path conversion leaves no certificate"
         );
     }
 

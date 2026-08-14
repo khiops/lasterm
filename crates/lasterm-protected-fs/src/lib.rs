@@ -55,6 +55,48 @@ impl LeafName {
     }
 }
 
+/// A single existing directory component used only while descending a protected
+/// path. Unlike `LeafName`, this accepts every platform-legal directory name:
+/// ancestors belong to the user's existing namespace, while protected leaves
+/// are names this application creates and must be ordinary on every platform.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AncestorName(OsString);
+
+#[cfg(unix)]
+impl AncestorName {
+    /// Accept exactly one normal path component and no interior NUL. This is
+    /// deliberately less restrictive than `LeafName`; do not use it for a
+    /// public `Directory` operation.
+    fn new(name: &OsStr) -> io::Result<Self> {
+        if contains_nul(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "protected ancestor contains an interior NUL",
+            ));
+        }
+        let path = Path::new(name);
+        let mut components = path.components();
+        let Some(Component::Normal(component)) = components.next() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "protected ancestor is not one normal path component",
+            ));
+        };
+        if components.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "protected ancestor is not one normal path component",
+            ));
+        }
+        Ok(Self(component.to_os_string()))
+    }
+
+    fn as_os_str(&self) -> &OsStr {
+        &self.0
+    }
+}
+
 fn contains_nul(name: &OsStr) -> bool {
     #[cfg(unix)]
     {
@@ -180,7 +222,7 @@ mod unix {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
 
-    use super::{io, Component, LeafName, Path};
+    use super::{AncestorName, io, Component, LeafName, Path};
 
     /// Metadata read with `fstatat(2)` relative to a checked directory handle.
     pub struct LeafMetadata(libc::stat);
@@ -223,9 +265,10 @@ mod unix {
         pub fn open_existing(&self, name: &LeafName) -> io::Result<Option<File>> {
             match open_at(
                 self.0.as_raw_fd(),
-                name,
+                name.as_os_str(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0,
+                "protected path",
             ) {
                 Ok(fd) => {
                     // SAFETY: openat returned a valid owned descriptor.
@@ -264,9 +307,10 @@ mod unix {
         pub fn create_new(&self, name: &LeafName) -> io::Result<File> {
             let fd = open_at(
                 self.0.as_raw_fd(),
-                name,
+                name.as_os_str(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0o600,
+                "protected path",
             )?;
             // SAFETY: openat returned a valid owned descriptor.
             Ok(unsafe { File::from_raw_fd(fd) })
@@ -331,22 +375,32 @@ mod unix {
     }
 
     fn c_name(name: &LeafName) -> io::Result<CString> {
-        if name.as_os_str().as_bytes().contains(&0) {
+        c_os_str(name.as_os_str(), "protected path")
+    }
+
+    fn c_os_str(name: &std::ffi::OsStr, description: &str) -> io::Result<CString> {
+        if name.as_bytes().contains(&0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid protected path component",
+                format!("invalid {description} component"),
             ));
         }
-        CString::new(name.as_os_str().as_bytes()).map_err(|_| {
+        CString::new(name.as_bytes()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "protected path contains an interior NUL",
+                format!("{description} contains an interior NUL"),
             )
         })
     }
 
-    fn open_at(parent: i32, name: &LeafName, flags: i32, mode: u32) -> io::Result<i32> {
-        let name = c_name(name)?;
+    fn open_at(
+        parent: i32,
+        name: &std::ffi::OsStr,
+        flags: i32,
+        mode: u32,
+        description: &str,
+    ) -> io::Result<i32> {
+        let name = c_os_str(name, description)?;
         // SAFETY: the directory descriptor and C string remain valid for the call.
         let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, mode) };
         if fd < 0 {
@@ -356,12 +410,13 @@ mod unix {
         }
     }
 
-    fn open_ancestor(parent: i32, name: &LeafName) -> io::Result<i32> {
+    fn open_ancestor(parent: i32, name: &AncestorName) -> io::Result<i32> {
         open_at(
             parent,
-            name,
+            name.as_os_str(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0,
+            "protected ancestor",
         )
         .map_err(|error| {
             if error.kind() == io::ErrorKind::PermissionDenied {
@@ -390,7 +445,7 @@ mod unix {
         for component in path.components() {
             match component {
                 Component::RootDir => {}
-                Component::Normal(name) => names.push(LeafName::new(name)?),
+                Component::Normal(name) => names.push(AncestorName::new(name)?),
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -402,6 +457,7 @@ mod unix {
         let leaf = names.pop().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "protected path has no leaf")
         })?;
+        let leaf = LeafName::new(leaf.as_os_str())?;
         let root = CString::new("/").expect("root has no NUL");
         // SAFETY: root is NUL-terminated; O_DIRECTORY requires the root directory.
         let root_fd = unsafe {
@@ -455,15 +511,15 @@ mod unix {
                     "protected directory is not normalized",
                 ));
             };
-            let fd = open_ancestor(directory.0.as_raw_fd(), &LeafName::new(name)?);
+            let ancestor = AncestorName::new(name)?;
+            let fd = open_ancestor(directory.0.as_raw_fd(), &ancestor);
             let fd = match fd {
                 Ok(fd) => fd,
                 Err(error) => {
                 if !create || error.kind() != io::ErrorKind::NotFound {
                     return Err(error);
                 }
-                let name = LeafName::new(name)?;
-                let c_name = c_name(&name)?;
+                let c_name = c_os_str(ancestor.as_os_str(), "protected ancestor")?;
                 // SAFETY: name is NUL-terminated and parent is an owned directory.
                 if unsafe {
                     libc::mkdirat(
@@ -477,7 +533,7 @@ mod unix {
                         return Err(error);
                     }
                 }
-                open_ancestor(directory.0.as_raw_fd(), &name)?
+                open_ancestor(directory.0.as_raw_fd(), &ancestor)?
                 }
             };
             // SAFETY: openat returned an owned descriptor, replacing the parent only after success.
@@ -744,7 +800,7 @@ pub use windows::{open_directory, open_parent, Directory, LeafMetadata};
 
 #[cfg(test)]
 mod tests {
-    use super::LeafName;
+    use super::{AncestorName, LeafName};
     #[cfg(unix)]
     use super::open_parent;
     use std::fs;
@@ -1107,6 +1163,61 @@ mod tests {
                 "{invalid:?} is not an ordinary child name on every supported platform"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_name_only_rejects_non_components_and_interior_nuls() {
+        use std::ffi::{OsStr, OsString};
+
+        for accepted in ["CON", "team:data", "trailing.", "trailing "] {
+            assert!(
+                AncestorName::new(OsStr::new(accepted)).is_ok(),
+                "{accepted:?} is a platform-legal existing ancestor"
+            );
+        }
+        let separator = AncestorName::new(OsStr::new("ancestor/child"))
+            .expect_err("an ancestor is exactly one component");
+        assert!(separator.to_string().contains("ancestor"));
+        let interior_nul = AncestorName::new(&OsString::from("ancestor\0child"))
+            .expect_err("an ancestor contains no interior NUL");
+        assert!(interior_nul.to_string().contains("ancestor"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_walk_reads_platform_legal_ancestor_names() {
+        use std::io::Read;
+
+        let root = std::env::temp_dir().join(format!(
+            "lasterm-protected-fs-legal-ancestors-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        for ancestor in ["CON", "team:data"] {
+            let protected = root.join(ancestor).join("auth.json");
+            fs::create_dir_all(protected.parent().expect("protected parent"))
+                .expect("create legal ancestor");
+            fs::write(&protected, ancestor).expect("write protected file");
+
+            let (parent, leaf) = open_parent(&protected)
+                .expect("a platform-legal ancestor remains traversable");
+            let mut file = parent
+                .open_existing(&leaf)
+                .expect("open protected file")
+                .expect("protected file exists");
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)
+                .expect("read protected file through its directory capability");
+            assert_eq!(contents, ancestor);
+        }
+
+        assert!(
+            LeafName::new(std::ffi::OsStr::new("CON")).is_err(),
+            "a DOS device basename remains invalid for a protected leaf"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[cfg(unix)]

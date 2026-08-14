@@ -1737,7 +1737,30 @@ fn lasterm_config_dir() -> Option<PathBuf> {
         }
     };
 
-    Some(config_dir.join("lasterm"))
+    Some(resolve_platform_directory(config_dir)?.join("lasterm"))
+}
+
+/// Resolves an environment-derived directory locator once before it reaches a
+/// protected descriptor walk. This is lexical only: it does not canonicalize,
+/// touch the filesystem, or follow links, so a missing directory remains
+/// creatable.
+fn resolve_platform_directory(directory: PathBuf) -> Option<PathBuf> {
+    let absolute = if directory.is_absolute() {
+        directory
+    } else {
+        std::env::current_dir().ok()?.join(directory)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => normalized.push(name),
+            std::path::Component::ParentDir => return None,
+        }
+    }
+    Some(normalized)
 }
 
 /// Resolves the hub config directory and reads the auth token from auth.json.
@@ -1925,7 +1948,9 @@ fn get_state_dir() -> Option<std::path::PathBuf> {
     {
         std::env::var("LOCALAPPDATA")
             .ok()
-            .map(|p| std::path::PathBuf::from(p).join("lasterm"))
+            .map(std::path::PathBuf::from)
+            .and_then(resolve_platform_directory)
+            .map(|p| p.join("lasterm"))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1933,6 +1958,7 @@ fn get_state_dir() -> Option<std::path::PathBuf> {
             .ok()
             .map(std::path::PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))
+            .and_then(resolve_platform_directory)
             .map(|p| p.join("lasterm"))
     }
 }
@@ -4838,6 +4864,59 @@ mod tests {
     use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+    #[cfg(not(target_os = "windows"))]
+    static PLATFORM_DIRECTORY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(not(target_os = "windows"))]
+    struct TestWorkingDirectory(PathBuf);
+
+    #[cfg(not(target_os = "windows"))]
+    impl TestWorkingDirectory {
+        fn change_to(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("read current working directory");
+            std::env::set_current_dir(path).expect("enter temporary working directory");
+            Self(original)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    impl Drop for TestWorkingDirectory {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).expect("restore current working directory");
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    struct TestEnvironmentVariable {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    impl TestEnvironmentVariable {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(name);
+            // SAFETY: the test lock serializes this test's process-global
+            // environment mutation and Drop restores the prior value.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, original }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    impl Drop for TestEnvironmentVariable {
+        fn drop(&mut self) {
+            // SAFETY: this restores the process-global value changed by this
+            // fixture while its test lock is still held.
+            unsafe {
+                if let Some(value) = &self.original {
+                    std::env::set_var(self.name, value);
+                } else {
+                    std::env::remove_var(self.name);
+                }
+            }
+        }
+    }
 
     fn test_upload(
         sender: mpsc::SyncSender<HubUploadFrame>,
@@ -5322,6 +5401,43 @@ mod tests {
         assert!(
             !store_path.exists() && !store_path.parent().unwrap().exists(),
             "a malformed record must not create a pin store"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn relative_xdg_config_home_is_resolved_lexically_before_protected_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
+            .lock()
+            .expect("lock process environment and working directory");
+        let directory = instance_test_dir("relative-xdg-config-home");
+        let _working_directory = TestWorkingDirectory::change_to(directory.path());
+        let _xdg_config_home = TestEnvironmentVariable::set("XDG_CONFIG_HOME", "relative-config/.");
+
+        let config_dir = lasterm_config_dir().expect("resolve relative XDG_CONFIG_HOME");
+        assert_eq!(config_dir, directory.join("relative-config/lasterm"));
+        assert!(config_dir.is_absolute(), "protected paths receive an absolute locator");
+        assert!(
+            !config_dir.exists(),
+            "lexical resolution does not require the config directory to exist"
+        );
+
+        std::fs::create_dir_all(&config_dir).expect("create lexically resolved config directory");
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("make config directory owner-only");
+        let token = "a".repeat(64);
+        let auth_path = config_dir.join("auth.json");
+        std::fs::write(&auth_path, format!(r#"{{"token":"{token}"}}"#))
+            .expect("write protected auth file");
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make auth file owner-only");
+
+        assert_eq!(
+            read_hub_auth_token(),
+            Some(token),
+            "the protected reader accepts the once-resolved absolute config path"
         );
     }
 

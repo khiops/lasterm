@@ -1752,7 +1752,7 @@ fn read_hub_auth_token_at(config_dir: &Path) -> Option<String> {
     eprintln!("[lasterm] checking auth.json at: {}", auth_path.display());
     // auth.json carries the hub bearer token.  It follows the same protected
     // descriptor walk as runtime.json and the pin store.
-    let contents = match read_protected_file(&auth_path, ProtectedFilePolicy::HubAuth) {
+    let contents = match read_protected_file(&auth_path) {
         Ok(Some(contents)) => contents,
         Ok(None) => return None,
         Err(error) => {
@@ -1952,7 +1952,7 @@ fn load_runtime_info() -> RuntimeLoadResult {
 /// externally launched path. Read it only through this owner-and-mode checked
 /// open, never through a path-following convenience read.
 fn load_runtime_info_at(runtime_path: &Path) -> RuntimeLoadResult {
-    let contents = match read_protected_file(runtime_path, ProtectedFilePolicy::Strict) {
+    let contents = match read_protected_file(runtime_path) {
         Ok(Some(contents)) => contents,
         Ok(None) => return RuntimeLoadResult::Absent,
         Err(error) => return RuntimeLoadResult::Unreadable(error),
@@ -1964,10 +1964,7 @@ fn load_runtime_info_at(runtime_path: &Path) -> RuntimeLoadResult {
 }
 
 #[cfg(unix)]
-fn read_protected_file(
-    path: &Path,
-    policy: ProtectedFilePolicy,
-) -> Result<Option<String>, String> {
+fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
     let (parent, leaf) = lasterm_protected_fs::open_parent(path).map_err(|error| {
         format!(
             "refusing protected file {} because its parent cannot be inspected: {error}",
@@ -1977,9 +1974,7 @@ fn read_protected_file(
     let parent_metadata = parent
         .metadata()
         .map_err(|error| format!("refusing protected file parent metadata: {error}"))?;
-    if matches!(policy, ProtectedFilePolicy::Strict) {
-        validate_runtime_dir(path.parent().unwrap_or(path), &parent_metadata)?;
-    }
+    validate_runtime_dir(path.parent().unwrap_or(path), &parent_metadata)?;
     let mut file = match parent.open_existing(&leaf) {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(None),
@@ -1991,42 +1986,17 @@ fn read_protected_file(
     if !metadata.is_file() {
         return Err("refusing protected path that is not a regular file".to_string());
     }
-    if matches!(policy, ProtectedFilePolicy::Strict) {
-        let current_user = unsafe { libc::geteuid() };
-        if metadata.uid() != current_user {
-            return Err("protected file is not owned by the current user".to_string());
-        }
+    let current_user = unsafe { libc::geteuid() };
+    if metadata.uid() != current_user {
+        return Err("protected file is not owned by the current user".to_string());
     }
-    match policy {
-        ProtectedFilePolicy::Strict if metadata.mode() & 0o077 != 0 => {
-            return Err("protected file grants group or other permissions".to_string());
-        }
-        ProtectedFilePolicy::HubAuth if metadata.mode() & 0o004 != 0 => {
-            return Err(format!(
-                "SECURITY: auth.json at {} is world-readable (mode {:o}). Fix with: chmod 600 auth.json",
-                path.display(),
-                metadata.mode() & 0o777,
-            ));
-        }
-        ProtectedFilePolicy::HubAuth if metadata.mode() & 0o040 != 0 => {
-            eprintln!(
-                "[lasterm] WARNING: auth.json at {} is group-readable (mode {:o}). Recommend: chmod 600 auth.json",
-                path.display(),
-                metadata.mode() & 0o777,
-            );
-        }
-        _ => {}
+    if metadata.mode() & 0o077 != 0 {
+        return Err("protected file grants group or other permissions".to_string());
     }
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|error| format!("cannot read protected file: {error}"))?;
     Ok(Some(contents))
-}
-
-#[derive(Clone, Copy)]
-enum ProtectedFilePolicy {
-    Strict,
-    HubAuth,
 }
 
 fn hub_pin_store_path() -> Result<PathBuf, String> {
@@ -2108,7 +2078,7 @@ fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, Strin
                 validate_owner_only_pin_store_dir(parent, &metadata)?;
             }
         }
-        match read_protected_file(path, ProtectedFilePolicy::Strict)? {
+        match read_protected_file(path)? {
             Some(contents) => serde_json::from_str(&contents)
                 .map(Some)
                 .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
@@ -2147,7 +2117,7 @@ fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, Strin
                 )?;
             }
         }
-        match read_protected_file(path, ProtectedFilePolicy::Strict)? {
+        match read_protected_file(path)? {
             Some(contents) => serde_json::from_str(&contents)
                 .map(Some)
                 .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
@@ -2188,7 +2158,7 @@ fn load_hub_pin_store(path: &Path) -> Result<HubPinStore, String> {
         path.parent()
             .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?,
     )?;
-    match read_protected_file(path, ProtectedFilePolicy::Strict)? {
+    match read_protected_file(path)? {
         Some(contents) => serde_json::from_str(&contents)
             .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
         None => Ok(HubPinStore::default()),
@@ -2453,10 +2423,7 @@ fn established_hub_connection() -> Result<HubConnection, String> {
 // slice. Still reject reparse points so this reader never silently follows a
 // substituted final component on platforms where that metadata is available.
 #[cfg(windows)]
-fn read_protected_file(
-    path: &Path,
-    _policy: ProtectedFilePolicy,
-) -> Result<Option<String>, String> {
+fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
     let parent = path.parent().ok_or_else(|| {
         format!(
             "refusing protected file {} without a parent",
@@ -5405,7 +5372,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hub_auth_permission_policy_matches_the_hub_contract() {
+    fn hub_auth_requires_the_strict_protected_file_policy() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = instance_test_dir("hub-auth-permissions");
@@ -5423,28 +5390,33 @@ mod tests {
         std::fs::write(&private_auth_path, &auth_contents).unwrap();
         std::fs::set_permissions(
             &private_auth_path,
-            std::fs::Permissions::from_mode(0o640),
+            std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
         assert_eq!(read_hub_auth_token_at(&private_config_dir), Some(token.clone()));
+        std::fs::set_permissions(
+            &private_auth_path,
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
         std::fs::set_permissions(
             &private_auth_path,
             std::fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
-
-        let config_dir = directory.join("group-writable-config");
-        std::fs::create_dir(&config_dir).unwrap();
-        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
-        let auth_path = config_dir.join("auth.json");
-        std::fs::write(&auth_path, &auth_contents).unwrap();
-
-        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        assert_eq!(read_hub_auth_token_at(&config_dir), Some(token));
-
-        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(read_hub_auth_token_at(&config_dir), None);
+        std::fs::set_permissions(
+            &private_auth_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &private_config_dir,
+            std::fs::Permissions::from_mode(0o770),
+        )
+        .unwrap();
+        assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
     }
 
     #[cfg(unix)]
@@ -5514,7 +5486,7 @@ mod tests {
             .expect("write reparse target");
         symlink_file(&target, &protected).expect("create protected-file reparse point");
 
-        let error = read_protected_file(&protected, ProtectedFilePolicy::Strict)
+        let error = read_protected_file(&protected)
             .expect_err("the protected reader rejects a leaf reparse point");
         assert!(error.contains("reparse point"));
     }

@@ -137,7 +137,7 @@ gate carries the same list into its prompt.
 | P7 no hub traffic originates in the webview | delivered and enforced in the packaged build. The webview's only connection sources are Tauri's IPC, it cannot navigate off the application origin or open a window, and an end-to-end suite drives the packaged application and observes eight renderer routes reach a sentinel server not at all — the same suite turns red and records six arrivals when the policy is removed. A development build served from an external Vite server is outside that guarantee. Assets cross the relay as blob URLs; their caching and revocation lifecycle stays in **#194** |
 | P8 no browser pairing outlives the hub run | delivered |
 | P8-authority | delivered |
-| P9 the relay cannot buffer without bound | **delivered for the response direction only.** Responses stream under frame acknowledgement and are tested for it. The request direction holds a whole body — `hub-fetch.ts` reads it as an array buffer and then as an array of numbers — the WebSocket send queue is unbounded, and nothing bounds the number of relays in flight. **#204** |
+| P9 the relay cannot buffer without bound | **delivered in both directions, with one honest limit.** Responses stream under a single outstanding credit per relay; requests, multipart included, cross in 256 KiB pieces, and no body crosses as an expanded numeric array — refused at the native contract rather than only in the page. Eight relays may be in flight, four of them uploads, and a request past that is refused rather than queued. Every wait ends, the caller's included: a response settles on its own inactivity timer, so it does not depend on the producer being able to send a terminal frame, and an upload that is abandoned fails its request instead of finishing it empty. **The limit:** what this bounds is the relay's own buffering. A producer handing the stream one enormous chunk keeps that chunk alive while it is transmitted, because Web Streams give a consumer no way to bound a producer's chunk size |
 | P10 the operator can replace the key | **deferred, #199.** Nothing can replace the key today, and nothing warns of expiry |
 | P11 permission checks where files are opened | **partly delivered.** `runtime.json` is checked because its contents decide who the client trusts. `auth.json`, the certificate, the key's re-read, and the whole Windows story are **deferred, #200** |
 | P12 the default port is not guessable | delivered |
@@ -350,6 +350,13 @@ safe is the anchor, never the comparison. What makes a *remote* one better than 
 comparison, which is why the two cases get different treatment in P3c-visibility.
 
 #### P3c-visibility — the first pin is visible locally and confirmed remotely
+
+> **Not delivered, and not a binding property of what has shipped.** This section and its regression
+> rows describe **#201**. What exists is narrower: a first pin is recorded without asking, after a
+> live hub has proved it holds the announced key, and a mismatch is a terminal startup failure naming
+> `--reset-hub-pin`. No fingerprint is shown, no once/always/no prompt exists, no re-pair interface
+> exists, and a matching pin logs nothing. The remote half additionally waits on a non-loopback
+> bind (#96).
 
 **What decides whether the user is asked: is this identity already pinned.** Not the address, not the
 launch. The model is `ssh`'s host-key prompt, and the property that makes that prompt work is that it
@@ -905,6 +912,10 @@ enumeration finds **76** — of 80 `fetch(` matches, one is a local function dec
 
 Named by the property each test defends, because a test named after a mechanism dies with
 that mechanism.
+
+Rows for **P3c-visibility** and **P10** describe tests for behaviour that does not exist. They belong
+to #201 and #199, and are kept here so those issues inherit the locks rather than reinventing them.
+Every other row is asserted today.
 
 | Property | The test asserts | Kills the mutation |
 |---|---|---|

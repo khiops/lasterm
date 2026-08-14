@@ -1,23 +1,36 @@
 import type { InvokeArgs, InvokeOptions } from "@tauri-apps/api/core";
 
-const UPLOAD_CHUNK_BYTES = 256 * 1024;
-const textEncoder = new TextEncoder();
-
 type RelayRequest = {
 	method: string;
 	path: string;
+	port: number;
 	headers: [string, string][];
-	body: number[] | null;
 };
 
 type RelayHead = {
-	id: number;
+	id: string;
 	status: number;
 	statusText: string;
 	headers: [string, string][];
 };
 
-type RelayStreamError = { error: string };
+const UPLOAD_CHUNK_BYTES = 256 * 1024;
+const RELAY_FRAME_HEADER_BYTES = 33;
+const RELAY_DATA_FRAME = 0;
+const RELAY_END_FRAME = 1;
+const RELAY_ERROR_FRAME = 2;
+// Native owns the 25 s relay deadline and can report why it ended. Keep the
+// renderer watchdog deliberately later so a simultaneous timer cannot replace
+// that diagnosis with a generic browser-side timeout.
+const HUB_RELAY_WAIT_TIMEOUT_MS = 26_000;
+
+type RelayFrame = {
+	id: string;
+	sequence: bigint;
+	acknowledgementToken: string;
+	kind: number;
+	payload: ArrayBuffer;
+};
 
 /** The subset of fetch options the desktop relay implements in both runtimes. */
 export type HubFetchInit = Pick<RequestInit, "method" | "headers" | "body">;
@@ -45,23 +58,34 @@ export function hubFetch(input: string | URL, init?: HubFetchInit): Promise<Resp
 }
 
 async function relayHubFetch(input: string | URL, init?: HubFetchInit): Promise<Response> {
-	const request = new Request(input, init);
+	// Fetch requires duplex when a request body is a ReadableStream.  Chromium
+	// accepts neither an omitted value nor a late declaration after construction.
+	const request = new Request(
+		input,
+		init?.body instanceof ReadableStream
+			? ({ ...init, duplex: "half" } as RequestInit & { duplex: "half" })
+			: init,
+	);
+	const endpoint = relayEndpoint(request.url);
 	const relayRequest: RelayRequest = {
 		method: request.method,
-		path: relayPath(request.url),
+		path: `${endpoint.pathname}${endpoint.search}`,
+		port: Number(endpoint.port || 443),
 		headers: [...request.headers.entries()],
-		body: null,
 	};
 
-	if (request.body === null) return relayRequestToResponse(relayRequest);
-	if (init?.body instanceof FormData) return relayUploadToResponse(relayRequest, init.body);
-
-	relayRequest.body = Array.from(new Uint8Array(await request.arrayBuffer()));
-	return relayRequestToResponse(relayRequest);
+	return request.body === null
+		? relayRequestToResponse(relayRequest)
+		: relayUploadToResponse(relayRequest, request.body);
 }
 
 function isDesktopHubUrl(input: string | URL): boolean {
-	return new URL(input.toString(), window.location.href).hostname === "127.0.0.1";
+	try {
+		const url = new URL(input.toString(), window.location.href);
+		return url.hostname === "127.0.0.1" && url.username === "" && url.password === "";
+	} catch {
+		return false;
+	}
 }
 
 function isDesktopRelayRuntime(): boolean {
@@ -71,22 +95,25 @@ function isDesktopRelayRuntime(): boolean {
 	return typeof internals?.invoke === "function";
 }
 
-function relayPath(url: string): string {
+function relayEndpoint(url: string): URL {
 	const parsed = new URL(url);
-	if (parsed.protocol !== "https:" || parsed.hostname !== "127.0.0.1") {
+	if (
+		parsed.protocol !== "https:" ||
+		parsed.hostname !== "127.0.0.1" ||
+		parsed.username !== "" ||
+		parsed.password !== ""
+	) {
 		throw new HubRelayTransportError("desktop hub requests must target the local hub");
 	}
-	return `${parsed.pathname}${parsed.search}`;
+	return parsed;
 }
 
 async function relayRequestToResponse(request: RelayRequest): Promise<Response> {
 	const { Channel, invoke } = await import("@tauri-apps/api/core");
-	let responseId: number | null = null;
 	const stream = responseStream(
-		new Channel<ArrayBuffer | RelayStreamError>((frame) => {
+		new Channel<ArrayBuffer>((frame) => {
 			stream.receive(frame);
 		}),
-		() => responseId,
 	);
 
 	try {
@@ -94,7 +121,9 @@ async function relayRequestToResponse(request: RelayRequest): Promise<Response> 
 			request,
 			response: stream.channel,
 		});
-		responseId = head.id;
+		stream.setResponseId(String(head.id));
+		const failure = stream.failure();
+		if (failure !== undefined) throw failure;
 		stream.drain();
 		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
@@ -102,30 +131,30 @@ async function relayRequestToResponse(request: RelayRequest): Promise<Response> 
 	}
 }
 
-async function relayUploadToResponse(request: RelayRequest, formData: FormData): Promise<Response> {
+async function relayUploadToResponse(
+	request: RelayRequest,
+	body: ReadableStream<Uint8Array>,
+): Promise<Response> {
 	const { Channel, invoke } = await import("@tauri-apps/api/core");
-	const boundary = multipartBoundary();
-	request.headers = request.headers.filter(([name]) => name.toLowerCase() !== "content-type");
-	request.headers.push(["content-type", `multipart/form-data; boundary=${boundary}`]);
 
-	let uploadId: number | null = null;
+	let uploadId: string | null = null;
 	try {
-		uploadId = await invoke<number>("relay_hub_upload_start", { request });
-		await sendMultipartChunks(uploadId, formData, boundary, invoke);
+		uploadId = String(await invoke<string>("relay_hub_upload_start", { request }));
+		await sendRequestChunks(uploadId, body, invoke);
 
-		let responseId: number | null = null;
 		const stream = responseStream(
-			new Channel<ArrayBuffer | RelayStreamError>((frame) => {
+			new Channel<ArrayBuffer>((frame) => {
 				stream.receive(frame);
 			}),
-			() => responseId,
 		);
 		const head = await invoke<RelayHead>("relay_hub_upload_finish", {
 			uploadId,
 			response: stream.channel,
 		});
 		uploadId = null;
-		responseId = head.id;
+		stream.setResponseId(String(head.id));
+		const failure = stream.failure();
+		if (failure !== undefined) throw failure;
 		stream.drain();
 		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
@@ -133,116 +162,194 @@ async function relayUploadToResponse(request: RelayRequest, formData: FormData):
 	} finally {
 		if (uploadId !== null) {
 			// `finish` transfers and removes the slot. Every other outcome must
-			// explicitly release the map entry and close the body's sender.
-			await invoke("relay_hub_upload_cancel", { uploadId }).catch(() => undefined);
+			// explicitly release the map entry and close the body's sender. This is
+			// deliberately not awaited: a stuck IPC cancellation cannot keep the
+			// caller's fetch Promise pending after its own deadline.
+			cancelUpload(uploadId, invoke);
 		}
 	}
 }
 
-async function sendMultipartChunks(
-	uploadId: number,
-	formData: FormData,
-	boundary: string,
+async function sendRequestChunks(
+	uploadId: string,
+	body: ReadableStream<Uint8Array>,
 	invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T>,
 ): Promise<void> {
-	for (const [name, value] of formData.entries()) {
-		if (value instanceof File) {
-			await sendMultipartBytes(
-				uploadId,
-				textEncoder.encode(
-					`--${boundary}\r\nContent-Disposition: form-data; name="${quoteMultipart(name)}"; filename="${quoteMultipart(value.name)}"\r\nContent-Type: ${value.type || "application/octet-stream"}\r\n\r\n`,
-				),
-				invoke,
+	const reader = body.getReader();
+	try {
+		for (;;) {
+			const { done, value } = await relayWait(
+				reader.read(),
+				"hub relay request body timed out while waiting for its producer",
 			);
-			for (let offset = 0; offset < value.size; offset += UPLOAD_CHUNK_BYTES) {
-				const chunk = await value.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer();
-				await sendMultipartBytes(uploadId, new Uint8Array(chunk), invoke);
+			if (done) return;
+			if (value.byteLength === 0) continue;
+			for (let offset = 0; offset < value.byteLength; offset += UPLOAD_CHUNK_BYTES) {
+				// Allocate only this IPC frame: some browser streams yield views onto a
+				// larger backing buffer, which must not cross the boundary wholesale.
+				const payload = new Uint8Array(value.subarray(offset, offset + UPLOAD_CHUNK_BYTES));
+				await relayWait(
+					invoke("relay_hub_upload_chunk", payload.buffer, {
+						headers: { "X-Lasterm-Upload-Id": String(uploadId) },
+					}),
+					"hub relay request body timed out while sending a chunk",
+				);
 			}
-			await sendMultipartBytes(uploadId, textEncoder.encode("\r\n"), invoke);
-		} else {
-			await sendMultipartBytes(
-				uploadId,
-				textEncoder.encode(
-					`--${boundary}\r\nContent-Disposition: form-data; name="${quoteMultipart(name)}"\r\n\r\n${value}\r\n`,
-				),
-				invoke,
-			);
 		}
+	} catch (error) {
+		// Some underlying stream sources never settle `cancel`. Start cleanup but
+		// do not make the caller wait for a producer that has already timed out.
+		void relayWait(reader.cancel(error), "hub relay request stream cancellation timed out").catch(
+			(cancelError) =>
+				console.error(`hub relay request stream cancellation failed: ${String(cancelError)}`),
+		);
+		throw error;
 	}
-	await sendMultipartBytes(uploadId, textEncoder.encode(`--${boundary}--\r\n`), invoke);
 }
 
-function multipartBoundary(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(18));
-	return `----lasterm-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+function relayWait<T>(promise: Promise<T>, timeoutMessage: string): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	return new Promise<T>((resolve, reject) => {
+		timeout = setTimeout(
+			() => reject(new HubRelayTransportError(timeoutMessage)),
+			HUB_RELAY_WAIT_TIMEOUT_MS,
+		);
+		promise.then(resolve, reject);
+	}).finally(() => {
+		if (timeout !== undefined) clearTimeout(timeout);
+	});
 }
 
-function quoteMultipart(value: string): string {
-	return value.replace(/[\r\n"]/g, (character) =>
-		character === '"' ? "%22" : character === "\r" ? "%0D" : "%0A",
-	);
-}
-
-async function sendMultipartBytes(
-	uploadId: number,
-	bytes: Uint8Array,
+function cancelUpload(
+	uploadId: string,
 	invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T>,
-): Promise<void> {
-	for (let offset = 0; offset < bytes.byteLength; offset += UPLOAD_CHUNK_BYTES) {
-		const chunk = bytes.slice(offset, offset + UPLOAD_CHUNK_BYTES);
-		await invoke("relay_hub_upload_chunk", chunk.buffer, {
-			headers: { "X-Lasterm-Upload-Id": String(uploadId) },
-		});
-	}
+): void {
+	void relayWait(
+		invoke("relay_hub_upload_cancel", { uploadId }),
+		"hub relay cancellation timed out",
+	).catch((cancelError) => console.error(`hub relay cancellation failed: ${String(cancelError)}`));
 }
 
-function responseStream(
-	channel: { onmessage: ((message: ArrayBuffer | RelayStreamError) => void) | null },
-	responseId: () => number | null,
-): {
+export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) | null }): {
 	channel: typeof channel;
 	body: ReadableStream<Uint8Array>;
-	receive: (frame: ArrayBuffer | RelayStreamError) => void;
+	receive: (frame: ArrayBuffer) => void;
+	setResponseId: (id: string) => void;
 	drain: () => void;
+	failure: () => HubRelayTransportError | undefined;
 } {
 	let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-	let pending: ArrayBuffer | RelayStreamError | undefined;
+	const pending: RelayFrame[] = [];
 	let finished = false;
+	let responseId: string | null = null;
+	let cancelAttempted = false;
+	let expectedSequence = 1n;
+	let failure: HubRelayTransportError | undefined;
+	let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
-	const acknowledge = (cancel = false) => {
-		const id = responseId();
-		if (id === null) return;
+	const clearInactivityTimer = () => {
+		if (inactivityTimer !== undefined) {
+			clearTimeout(inactivityTimer);
+			inactivityTimer = undefined;
+		}
+	};
+	const resetInactivityTimer = () => {
+		clearInactivityTimer();
+		inactivityTimer = setTimeout(() => {
+			fail("hub relay response timed out while waiting for its producer");
+		}, HUB_RELAY_WAIT_TIMEOUT_MS);
+	};
+
+	const cancelRelay = () => {
+		if (cancelAttempted || responseId === null) return;
+		cancelAttempted = true;
 		void import("@tauri-apps/api/core").then(({ invoke }) =>
-			invoke("relay_hub_response_ack", { responseId: id, cancel }).catch(() => undefined),
+			invoke("relay_hub_response_cancel", { responseId }).catch((error) =>
+				console.error(`hub relay response cancellation failed: ${String(error)}`),
+			),
 		);
 	};
-	const drain = () => {
-		if (
-			controller === undefined ||
-			pending === undefined ||
-			finished ||
-			controller.desiredSize === 0
-		) {
-			return;
-		}
-		const frame = pending;
-		pending = undefined;
-		if (frame instanceof ArrayBuffer) {
-			if (frame.byteLength === 0) {
-				finished = true;
-				controller.close();
-				return;
-			}
-			controller.enqueue(new Uint8Array(frame));
-			acknowledge();
-			return;
-		}
+	const fail = (message: string) => {
+		if (finished) return;
 		finished = true;
-		controller.error(new HubRelayTransportError(frame.error));
+		clearInactivityTimer();
+		cancelRelay();
+		failure = new HubRelayTransportError(message);
+		controller?.error(failure);
 	};
-	const receive = (frame: ArrayBuffer | RelayStreamError) => {
-		pending = frame;
-		drain();
+
+	const acknowledge = (frame: RelayFrame) => {
+		void import("@tauri-apps/api/core")
+			.then(({ invoke }) =>
+				invoke("relay_hub_response_ack", {
+					responseId: frame.id,
+					sequence: frame.sequence.toString(),
+					acknowledgementToken: frame.acknowledgementToken,
+				}),
+			)
+			.catch((error) => fail(`hub relay acknowledgement failed: ${String(error)}`));
+	};
+	const drain = () => {
+		if (controller === undefined || pending.length === 0 || finished) {
+			return;
+		}
+		const frame = pending[0];
+		if (frame === undefined) return;
+		if (frame.kind === RELAY_DATA_FRAME && controller.desiredSize === 0) return;
+		pending.shift();
+		if (frame.kind === RELAY_DATA_FRAME) {
+			controller.enqueue(new Uint8Array(frame.payload));
+			acknowledge(frame);
+			return;
+		}
+		if (frame.kind === RELAY_END_FRAME) {
+			finished = true;
+			clearInactivityTimer();
+			controller.close();
+			return;
+		}
+		if (frame.kind === RELAY_ERROR_FRAME) {
+			finished = true;
+			clearInactivityTimer();
+			failure = new HubRelayTransportError(new TextDecoder().decode(frame.payload));
+			controller.error(failure);
+			return;
+		}
+		fail("hub relay sent an unknown response frame");
+	};
+	const receive = (frame: ArrayBuffer) => {
+		let decoded: RelayFrame;
+		try {
+			decoded = decodeRelayFrame(frame);
+		} catch (error) {
+			fail(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (pending.length !== 0 && responseId !== null) {
+			fail("hub relay sent a response frame before its preceding frame was consumed");
+			return;
+		}
+		if (responseId !== null && responseId !== decoded.id) {
+			fail("hub relay response frame belongs to another relay");
+			return;
+		}
+		if (decoded.sequence !== expectedSequence) {
+			fail("hub relay response frame is out of sequence");
+			return;
+		}
+		expectedSequence++;
+		pending.push(decoded);
+		if (responseId !== null) {
+			if (decoded.kind === RELAY_END_FRAME || decoded.kind === RELAY_ERROR_FRAME) {
+				clearInactivityTimer();
+			} else {
+				resetInactivityTimer();
+			}
+		}
+		// A pre-head frame is not trusted to identify a relay. Native guarantees
+		// only one outstanding frame, so retain it until the command returns the
+		// authoritative head id; that avoids cancelling an unrelated relay.
+		if (responseId !== null) drain();
 	};
 	channel.onmessage = receive;
 
@@ -258,12 +365,60 @@ function responseStream(
 			},
 			cancel() {
 				finished = true;
-				acknowledge(true);
+				clearInactivityTimer();
+				cancelRelay();
 			},
 		}),
 		receive,
+		setResponseId(id: string) {
+			if (responseId !== null && responseId !== id) {
+				fail("hub relay response head belongs to another relay");
+				return;
+			}
+			responseId = id;
+			if (failure !== undefined) {
+				cancelRelay();
+				return;
+			}
+			if (pending.some((frame) => frame.id !== id)) {
+				fail("hub relay response frame belongs to another relay");
+				return;
+			}
+			const terminal = pending.some(
+				(frame) => frame.kind === RELAY_END_FRAME || frame.kind === RELAY_ERROR_FRAME,
+			);
+			if (terminal) clearInactivityTimer();
+			else resetInactivityTimer();
+			drain();
+		},
 		drain,
+		failure: () => failure,
 	};
+}
+
+function decodeRelayFrame(frame: ArrayBuffer): RelayFrame {
+	if (frame.byteLength < RELAY_FRAME_HEADER_BYTES) {
+		throw new HubRelayTransportError("hub relay sent a truncated response frame");
+	}
+	const view = new DataView(frame);
+	const id = view.getBigUint64(0, true);
+	const sequence = view.getBigUint64(8, true);
+	if (id < 1n || sequence < 1n) {
+		throw new HubRelayTransportError("hub relay sent an invalid response frame identity");
+	}
+	return {
+		id: id.toString(),
+		sequence,
+		acknowledgementToken: base64Url(new Uint8Array(frame, 16, 16)),
+		kind: view.getUint8(32),
+		payload: frame.slice(RELAY_FRAME_HEADER_BYTES),
+	};
+}
+
+function base64Url(bytes: Uint8Array): string {
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
 
 function relayResponse(

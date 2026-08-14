@@ -133,7 +133,7 @@ gate carries the same list into its prompt.
 | P3c-visibility | **deferred, #201.** A mismatch shows a startup failure naming `--reset-hub-pin`; there is no first-pin window, no once/always/no prompt, and no hub-side fingerprint command |
 | P4 the pin survives a re-issue over the same key | delivered |
 | P5 a mismatch is terminal | delivered |
-| P6 accepted solely on the pin | delivered |
+| P6 accepted solely on the pin | **delivered, and now the same on both clients.** Every client — the desktop's Rust shell, the CLI, the development proxy, the spawn probe — accepts when the peer proves possession of the pinned key, and refuses otherwise. Chain, expiry, hostname and trust roots take no part. Until #206 the Node clients applied the pin *after* Node's own certificate validation, so an expired certificate over the pinned key refused there and connected on the desktop |
 | P7 no hub traffic originates in the webview | delivered and enforced in the packaged build. The webview's only connection sources are Tauri's IPC, it cannot navigate off the application origin or open a window, and an end-to-end suite drives the packaged application and observes eight renderer routes reach a sentinel server not at all — the same suite turns red and records six arrivals when the policy is removed. A development build served from an external Vite server is outside that guarantee. Assets cross the relay as blob URLs; their caching and revocation lifecycle stays in **#194** |
 | P8 no browser pairing outlives the hub run | delivered |
 | P8-authority | delivered |
@@ -391,9 +391,11 @@ out-of-band channel.
 Whatever pins the hub's identity pins the **SPKI**, not a leaf-certificate fingerprint, so
 re-issuing with the same key leaves existing pins valid.
 
-*Where this actually applies, since P3 generates the key once:* the operator-supplied case. An
-operator whose certificate is renewed by their CA over the same key keeps every client's pin, and
-that is the only routine re-issuance this design has. The generated case never re-issues; the only
+*Where this applies:* both cases, and it is what makes the generated one work at all. The operator
+whose certificate is renewed by their CA over the same key keeps every client's pin. The generated
+case **reissues its leaf on every start** over the key it retains (#205 proposes issuing it once), so
+P4 is not a nicety there but the reason a pinned client survives a restart. What follows describes the
+operator case, where the only
 thing that changes a generated key is P10's rotation, which changes the SPKI **on purpose** and
 therefore invalidates pins by design. The two are not in tension: P4 says a new certificate over an
 old key preserves pins, P10 says a new key breaks them.

@@ -5,7 +5,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
-import { hubTlsOptions } from "./hub-transport.js";
+import { createHubTlsAgent } from "./hub-transport.js";
 
 const stateDir =
 	platform() === "win32"
@@ -37,7 +37,7 @@ const hubRuntime = {
 
 const key = randomBytes(16).toString("base64");
 const req = request(`https://127.0.0.1:${runtimePort}/ws`, {
-	...hubTlsOptions(hubRuntime, stateDir),
+	agent: createHubTlsAgent(hubRuntime),
 	headers: {
 		Connection: "Upgrade",
 		Upgrade: "websocket",

@@ -4,9 +4,20 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/khiops/lasterm"
+autobins = false
+
+[features]
+test-tls-material = []
 
 [lib]
 crate-type = ["cdylib"]
+
+[[bin]]
+name = "lasterm-tls-test-material"
+path = "src/bin/lasterm-tls-test-material.rs"
+test = false
+bench = false
+required-features = ["test-tls-material"]
 
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi4"] }

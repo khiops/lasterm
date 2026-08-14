@@ -23,6 +23,7 @@
 		"dev": "concurrently -n hub,web -c blue,green \"pnpm -F @lasterm/hub dev\" \"pnpm -F @lasterm/web dev\"",
 		"build": "pnpm -r build",
 		"build:embed": "pnpm -F @lasterm/web build && node scripts/embed-web.js",
+		"build:test-tls-material": "tsx scripts/build-test-tls-material.ts",
 		"test": "vitest",
 		"test:run": "vitest run",
 		"lint": "biome check .",

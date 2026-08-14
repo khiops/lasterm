@@ -16,6 +16,7 @@ export default defineConfig({
 					name: "hub",
 					include: ["packages/hub/**/*.spec.ts"],
 					environment: "node",
+					globalSetup: ["packages/hub/src/test-tls.setup.ts"],
 				},
 			},
 			{

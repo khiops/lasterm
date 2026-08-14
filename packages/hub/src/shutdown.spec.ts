@@ -18,7 +18,7 @@ import {
 } from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
-import { getTestTls } from "./test-tls.js";
+import { getTestTls } from "./test-tls.fixture.js";
 
 const TEST_TOKEN = "a".repeat(64);
 const OWNER_TOKEN = "b".repeat(64);

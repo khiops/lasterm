@@ -68,6 +68,7 @@
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
+| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#199)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until #199, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 
 ## 2. Authentication
 
@@ -214,7 +215,8 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 
 | Path | Encryption | Notes |
 |------|-----------|-------|
-| UI ↔ Hub | TLS | Loopback HTTPS/WSS; the peer key must match `runtime.json`'s recorded SPKI |
+| Desktop, CLI, dev proxy ↔ Hub | TLS, key-pinned | The peer key must match `runtime.json`'s recorded SPKI. This is **key** identity, not certificate identity: these clients accept when the handshake proves possession of that key and refuse otherwise, with chain, expiry, hostname and trust roots taking no part. An expired certificate over the pinned key connects |
+| Browser ↔ Hub | TLS, **not pinned** | A browser applies its own trust decision — its root store, or an exception the user accepted for the hub's self-signed certificate. It does not read `runtime.json` and does not check the recorded key, so a certificate the browser trusts for another reason is accepted. What bounds the exposure there is that a browser pairing does not outlive the hub run it was made against |
 | Hub ↔ Agent (daemon) | None (UDS) | Kernel-only IPC, same user, no network transit |
 | Hub ↔ Agent (SSH) | SSH (AES-256-GCM or ChaCha20) | Standard SSH encryption |
 

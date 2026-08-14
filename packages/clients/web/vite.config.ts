@@ -3,10 +3,9 @@ import { readFileSync } from "node:fs";
 import * as https from "node:https";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import * as tls from "node:tls";
 import vue from "@vitejs/plugin-vue";
-import { defineConfig } from "vite";
-import { type HubTlsRuntime, hubTlsOptions } from "../../hub/src/hub-transport.js";
+import { defineConfig, type ProxyOptions } from "vite";
+import { createHubTlsConnector, type HubTlsRuntime } from "../../hub/src/hub-transport.js";
 
 function resolveBuildHash(): string {
 	const env = process.env.LASTERM_BUILD_HASH;
@@ -48,18 +47,30 @@ function readHubRuntime(): HubTlsRuntime {
 }
 
 // Vite evaluates config before its concurrently started hub chooses an
-// OS-assigned port. Resolve runtime.json when each proxy connection is made.
-const hubProxyAgent = new https.Agent({ keepAlive: false });
-hubProxyAgent.createConnection = (options) => {
+// OS-assigned port. http-proxy reads target.port for each proxied request, and
+// the connector reads it again immediately before opening the TLS socket.
+const hubProxyAgent = new https.Agent({ keepAlive: false, maxCachedSessions: 0 });
+hubProxyAgent.createConnection = (options, callback) => {
 	const runtime = readHubRuntime();
-	if (Number(options.port) !== runtime.port) {
-		throw new Error("Hub runtime changed before the Vite proxy connected");
-	}
-	return tls.connect({ ...options, ...hubTlsOptions(runtime, hubStateDir()) });
+	const connector = createHubTlsConnector(runtime);
+	return connector({ ...options, port: runtime.port }, callback);
 };
 
-function hubProxyTarget(): string {
-	return `https://127.0.0.1:${readHubRuntime().port}`;
+const hubProxyTarget = {
+	protocol: "https:",
+	host: "127.0.0.1",
+	get port(): number {
+		return readHubRuntime().port;
+	},
+};
+
+function hubProxyOptions(websocket = false): ProxyOptions {
+	return {
+		target: hubProxyTarget,
+		agent: hubProxyAgent,
+		secure: true,
+		...(websocket ? { ws: true } : {}),
+	};
 }
 
 export default defineConfig({
@@ -74,25 +85,9 @@ export default defineConfig({
 	},
 	server: {
 		proxy: {
-			"/ws": {
-				target: "https://127.0.0.1:1",
-				router: hubProxyTarget,
-				agent: hubProxyAgent,
-				secure: true,
-				ws: true,
-			},
-			"/api": {
-				target: "https://127.0.0.1:1",
-				router: hubProxyTarget,
-				agent: hubProxyAgent,
-				secure: true,
-			},
-			"/public": {
-				target: "https://127.0.0.1:1",
-				router: hubProxyTarget,
-				agent: hubProxyAgent,
-				secure: true,
-			},
+			"/ws": hubProxyOptions(true),
+			"/api": hubProxyOptions(),
+			"/public": hubProxyOptions(),
 		},
 	},
 });

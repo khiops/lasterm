@@ -37,7 +37,7 @@ import { createServer } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
-import { getTestTls } from "./test-tls.js";
+import { getTestTls } from "./test-tls.fixture.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
 

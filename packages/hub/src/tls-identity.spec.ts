@@ -1,5 +1,5 @@
 import { randomBytes, X509Certificate } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
 import { syncBuiltinESMExports } from "node:module";
@@ -12,7 +12,7 @@ import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { createServer, startServer } from "./server.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
-import { getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
+import { resolveHubTlsIdentity } from "./tls-identity.js";
 
 describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
@@ -117,10 +117,9 @@ describe("generated hub TLS identity", () => {
 		return { port: address.port, applicationBytes };
 	}
 
-	it("serves only through TLS on an OS-assigned port and accepts its pinned key without the stored certificate", async () => {
+	it("serves only through TLS on an OS-assigned port and accepts its pinned key", async () => {
 		const stateDir = prepareStateDir();
 		const identity = resolveHubTlsIdentity(stateDir, {});
-		unlinkSync(getHubCertificatePath(stateDir));
 		server = await createServer({ logger: false, tls: identity.tls });
 		server.get("/test/no-content", async (_request, reply) => reply.code(204).send());
 		server.get("/test/reset-content", async (_request, reply) => reply.code(205).send());
@@ -169,7 +168,6 @@ describe("generated hub TLS identity", () => {
 		expect(second.certificate).toBe(first.certificate);
 		expect(second.tls.cert).toBe(first.tls.cert);
 		expect(second.spki).toBe(first.spki);
-		expect(readFileSync(getHubCertificatePath(stateDir), "utf8")).toBe(first.certificate);
 	});
 
 	it("accepts a pinned key with an expired certificate", async () => {

@@ -33,6 +33,7 @@ thread_local! {
 #[cfg(all(test, unix))]
 thread_local! {
     static PARENT_SYNCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_NEXT_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Certificate material that may cross the napi boundary. It intentionally has
@@ -83,6 +84,11 @@ fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
     let now = OffsetDateTime::now_utc();
     let cached_certificate = load_usable_certificate(&certificate_path, &key_pair, now)?;
     if let CertificateCache::Usable(certificate_pem) = cached_certificate {
+        // A previous atomic rename can have made this complete cache visible
+        // even though its directory sync failed. Do not serve that cache until
+        // this start has established the missing durability guarantee.
+        #[cfg(unix)]
+        sync_parent(certificate_path.parent().unwrap_or_else(|| Path::new(".")))?;
         return Ok(TlsIdentity {
             certificate_pem,
             spki: key_pair.public_key_der(),
@@ -471,7 +477,18 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
                 // owner-only temporary file is synced. Hard links never replace
                 // an existing destination, so a concurrent creator cannot be
                 // silently overwritten.
-                remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)?;
+                if let Err(error) =
+                    remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)
+                {
+                    // The authoritative name is already installed. Preserve the
+                    // invariant that errors mean no key was committed, while
+                    // making the owner-only duplicate visible to operators.
+                    eprintln!(
+                        "[lasterm] private key installed at {}; could not remove temporary private-key copy {}: {error}",
+                        key_path.display(),
+                        temporary_path.display(),
+                    );
+                }
                 return Ok(key_pair);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -796,6 +813,10 @@ fn open_file_setup_error(path: &Path, mode: OpenKeyMode, creation_error: io::Err
 #[cfg(unix)]
 fn sync_parent(parent: &Path) -> io::Result<()> {
     #[cfg(test)]
+    if FAIL_NEXT_PARENT_SYNC.with(|fail| fail.replace(false)) {
+        return Err(io::Error::other("injected parent-directory sync failure"));
+    }
+    #[cfg(test)]
     PARENT_SYNCED.with(|synced| synced.set(true));
     File::open(parent)?.sync_all()
 }
@@ -814,14 +835,14 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::PARENT_SYNCED;
     use super::{
         generate_identity, load_or_create_key, publish_certificate, temporary_key_path,
         FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP, FAIL_NEXT_TEMPORARY_FILE_SETUP,
         FAIL_NEXT_TEMPORARY_KEY_CLEANUP, GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME,
         VALIDITY_DAYS,
     };
+    #[cfg(unix)]
+    use super::{FAIL_NEXT_PARENT_SYNC, PARENT_SYNCED};
     use rcgen::{
         BasicConstraints, CertificateParams, CustomExtension, ExtendedKeyUsagePurpose, IsCa,
         KeyUsagePurpose, SanType,
@@ -1332,16 +1353,15 @@ mod tests {
     }
 
     #[test]
-    fn installed_key_reports_temporary_copy_cleanup_failure() {
+    fn installed_key_is_successful_even_when_temporary_copy_cleanup_fails() {
         let directory = test_dir("installed-key-cleanup-error");
         let key_path = directory.key_path();
         FAIL_NEXT_TEMPORARY_KEY_CLEANUP.with(|fail| fail.set(true));
 
-        let error = load_or_create_key(&key_path)
-            .expect_err("a temporary private-key cleanup failure is reported");
+        let installed = load_or_create_key(&key_path)
+            .expect("a committed authoritative private key is not reported as a failure");
 
         assert!(key_path.is_file(), "the authoritative key was installed");
-        assert!(error.to_string().contains("cleanup failure"));
         assert!(
             fs::read_dir(&directory.0)
                 .expect("read temporary-key directory")
@@ -1349,9 +1369,40 @@ mod tests {
                 .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
             "the injected cleanup failure leaves an observable temporary key copy"
         );
-        assert!(
-            load_or_create_key(&key_path).is_ok(),
+        assert_eq!(
+            installed.public_key_der(),
+            load_or_create_key(&key_path)
+                .expect("the installed key remains usable after its cleanup warning")
+                .public_key_der(),
             "the installed key remains usable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn visible_cache_is_synced_before_it_is_reused() {
+        let directory = test_dir("reused-cache-parent-sync");
+        FAIL_NEXT_PARENT_SYNC.with(|fail| fail.set(true));
+
+        assert!(
+            generate_identity(&directory.0).is_err(),
+            "a publication whose directory sync fails is not reported as committed"
+        );
+        assert!(
+            directory.certificate_path().is_file(),
+            "rename has made the complete cache visible"
+        );
+
+        PARENT_SYNCED.with(|synced| synced.set(false));
+        let reused = generate_identity(&directory.0).expect("reuse syncs the visible cache first");
+        assert!(
+            PARENT_SYNCED.with(|synced| synced.get()),
+            "the later start establishes durability before serving the cache"
+        );
+        assert_eq!(
+            reused.certificate_pem,
+            fs::read_to_string(directory.certificate_path()).expect("read reused cache"),
+            "the durable cached leaf is the leaf returned to the hub"
         );
     }
 

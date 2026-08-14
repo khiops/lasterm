@@ -4,15 +4,76 @@
 //! descriptor already held.  `O_NOFOLLOW` applies to every component, not just
 //! the leaf.  Callers retain ownership of object-specific policy decisions.
 
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::path::{Component, Path};
+
+/// A single, validated final pathname component.
+///
+/// `Directory` only accepts this type for leaf operations, so a capability
+/// cannot be made to address its parent or another rooted path by accident.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeafName(OsString);
+
+impl LeafName {
+    /// Accept exactly one normal path component.
+    pub fn new(name: &OsStr) -> io::Result<Self> {
+        let path = Path::new(name);
+        let mut components = path.components();
+        let Some(Component::Normal(component)) = components.next() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "protected leaf is not one normal path component",
+            ));
+        };
+        if components.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "protected leaf is not one normal path component",
+            ));
+        }
+        Ok(Self(component.to_os_string()))
+    }
+
+    pub fn as_os_str(&self) -> &OsStr {
+        &self.0
+    }
+}
+
+// Win32 maps both ERROR_FILE_NOT_FOUND (2) and ERROR_PATH_NOT_FOUND (3) to
+// ErrorKind::NotFound. Only the former denotes an absent final component.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_file_not_found_status(status: Option<i32>) -> bool {
+    status == Some(2)
+}
+
 #[cfg(unix)]
 mod unix {
     use std::ffi::CString;
-    use std::ffi::OsStr;
     use std::fs::{File, Metadata};
-    use std::io;
+    use std::mem::MaybeUninit;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
-    use std::path::{Component, Path};
+
+    use super::{io, Component, LeafName, Path};
+
+    /// Metadata read with `fstatat(2)` relative to a checked directory handle.
+    pub struct LeafMetadata(libc::stat);
+
+    impl LeafMetadata {
+        pub fn is_file(&self) -> bool {
+            self.0.st_mode & libc::S_IFMT == libc::S_IFREG
+        }
+
+        pub fn uid(&self) -> u32 {
+            self.0.st_uid
+        }
+
+        pub fn mode(&self) -> u32 {
+            #[allow(clippy::useless_conversion)] // Darwin's mode_t is u16.
+            u32::from(self.0.st_mode)
+        }
+    }
 
     /// An owned directory descriptor obtained by a no-symlink descent from `/`.
     pub struct Directory(File);
@@ -26,11 +87,19 @@ mod unix {
             self.0.sync_all()
         }
 
-        pub fn open_existing(&self, name: &OsStr, flags: i32) -> io::Result<Option<File>> {
+        /// ```compile_fail
+        /// use lasterm_protected_fs::Directory;
+        /// use std::ffi::OsStr;
+        ///
+        /// fn cannot_escape(dir: &Directory, name: &OsStr) {
+        ///     let _ = dir.open_existing(name);
+        /// }
+        /// ```
+        pub fn open_existing(&self, name: &LeafName) -> io::Result<Option<File>> {
             match open_at(
                 self.0.as_raw_fd(),
                 name,
-                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0,
             ) {
                 Ok(fd) => {
@@ -42,18 +111,56 @@ mod unix {
             }
         }
 
-        pub fn create_new(&self, name: &OsStr, flags: i32, mode: u32) -> io::Result<File> {
+        pub fn inspect_existing(&self, name: &LeafName) -> io::Result<Option<LeafMetadata>> {
+            let name = c_name(name)?;
+            let mut stat = MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: the directory descriptor and C string are valid, and stat
+            // points to suitably aligned uninitialized storage for fstatat.
+            if unsafe {
+                libc::fstatat(
+                    self.0.as_raw_fd(),
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                let error = io::Error::last_os_error();
+                return if error.kind() == io::ErrorKind::NotFound {
+                    Ok(None)
+                } else {
+                    Err(error)
+                };
+            }
+            // SAFETY: fstatat filled the storage on its successful return.
+            Ok(Some(LeafMetadata(unsafe { stat.assume_init() })))
+        }
+
+        pub fn create_new(&self, name: &LeafName) -> io::Result<File> {
             let fd = open_at(
                 self.0.as_raw_fd(),
                 name,
-                flags | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                mode,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
             )?;
             // SAFETY: openat returned a valid owned descriptor.
             Ok(unsafe { File::from_raw_fd(fd) })
         }
 
-        pub fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        pub fn rename(
+            &self,
+            source: &File,
+            from: &LeafName,
+            to: &LeafName,
+            replace: bool,
+        ) -> io::Result<()> {
+            let _ = source;
+            if !replace {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Unix has no portable no-replace descriptor-relative rename",
+                ));
+            }
             let from = c_name(from)?;
             let to = c_name(to)?;
             // SAFETY: names are NUL-terminated and the descriptors are owned.
@@ -71,7 +178,7 @@ mod unix {
             Ok(())
         }
 
-        pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
+        pub fn remove_file(&self, name: &LeafName) -> io::Result<()> {
             let name = c_name(name)?;
             // SAFETY: name is NUL-terminated and the descriptor is owned.
             if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0 {
@@ -80,7 +187,8 @@ mod unix {
             Ok(())
         }
 
-        pub fn hard_link(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        pub fn hard_link(&self, source: &File, from: &LeafName, to: &LeafName) -> io::Result<()> {
+            let _ = source;
             let from = c_name(from)?;
             let to = c_name(to)?;
             // SAFETY: names are NUL-terminated and the descriptor is owned.
@@ -100,14 +208,14 @@ mod unix {
         }
     }
 
-    fn c_name(name: &OsStr) -> io::Result<CString> {
-        if name.is_empty() || name.as_bytes().contains(&0) || name.as_bytes().contains(&b'/') {
+    fn c_name(name: &LeafName) -> io::Result<CString> {
+        if name.as_os_str().as_bytes().contains(&0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid protected path component",
             ));
         }
-        CString::new(name.as_bytes()).map_err(|_| {
+        CString::new(name.as_os_str().as_bytes()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "protected path contains an interior NUL",
@@ -115,7 +223,7 @@ mod unix {
         })
     }
 
-    fn open_at(parent: i32, name: &OsStr, flags: i32, mode: u32) -> io::Result<i32> {
+    fn open_at(parent: i32, name: &LeafName, flags: i32, mode: u32) -> io::Result<i32> {
         let name = c_name(name)?;
         // SAFETY: the directory descriptor and C string remain valid for the call.
         let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, mode) };
@@ -127,7 +235,7 @@ mod unix {
     }
 
     /// Opens the parent of an absolute protected path by descending from `/`.
-    pub fn open_parent(path: &Path) -> io::Result<(Directory, std::ffi::OsString)> {
+    pub fn open_parent(path: &Path) -> io::Result<(Directory, LeafName)> {
         if !path.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -138,7 +246,7 @@ mod unix {
         for component in path.components() {
             match component {
                 Component::RootDir => {}
-                Component::Normal(name) => names.push(name.to_os_string()),
+                Component::Normal(name) => names.push(LeafName::new(name)?),
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -190,7 +298,7 @@ mod unix {
         let root_fd = unsafe {
             libc::open(
                 root.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
         if root_fd < 0 {
@@ -210,7 +318,7 @@ mod unix {
             };
             let fd = open_at(
                 directory.0.as_raw_fd(),
-                name,
+                &LeafName::new(name)?,
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0,
             );
@@ -220,9 +328,16 @@ mod unix {
                 if !create || error.kind() != io::ErrorKind::NotFound {
                     return Err(error);
                 }
-                let c_name = c_name(name)?;
+                let name = LeafName::new(name)?;
+                let c_name = c_name(&name)?;
                 // SAFETY: name is NUL-terminated and parent is an owned directory.
-                if unsafe { libc::mkdirat(directory.0.as_raw_fd(), c_name.as_ptr(), mode) } != 0 {
+                if unsafe {
+                    libc::mkdirat(
+                        directory.0.as_raw_fd(),
+                        c_name.as_ptr(),
+                        mode as libc::mode_t,
+                    )
+                } != 0 {
                     let error = io::Error::last_os_error();
                     if error.kind() != io::ErrorKind::AlreadyExists {
                         return Err(error);
@@ -230,7 +345,7 @@ mod unix {
                 }
                 open_at(
                     directory.0.as_raw_fd(),
-                    name,
+                    &name,
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                     0,
                 )?
@@ -244,34 +359,46 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub use unix::{open_directory, open_parent, Directory};
+pub use unix::{open_directory, open_parent, Directory, LeafMetadata};
 
 #[cfg(windows)]
 mod windows {
-    use std::ffi::{OsStr, OsString};
     use std::fs::{File, Metadata};
-    use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use std::path::{Component, Path, PathBuf};
+    use std::path::PathBuf;
     use windows_sys::Win32::Foundation::{
         SetHandleInformation, GENERIC_READ, GENERIC_WRITE, HANDLE_FLAG_INHERIT,
         INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,
-        MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING,
-        MOVEFILE_WRITE_THROUGH, OPEN_EXISTING,
+        CreateFileW, FileAttributeTagInfo, FileDispositionInfo, FileRenameInfo, DELETE,
+        GetFileInformationByHandleEx, SetFileInformationByHandle, CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    /// A Windows directory handle plus its lexical path for Win32's pathname-only
-    /// leaf operations.
+    use super::{io, Component, LeafName, Path};
+
+    /// Metadata read through an opened, checked Windows leaf handle.
+    pub struct LeafMetadata(Metadata);
+
+    impl LeafMetadata {
+        pub fn is_file(&self) -> bool {
+            self.0.is_file()
+        }
+    }
+
+    /// A Windows directory handle plus its lexical path for initial leaf opens
+    /// and requested directory creation.
     ///
     /// Windows has no public handle-relative open. Ancestor substitution is not
-    /// prevented: each final component is still opened once with delete sharing
-    /// withheld and inspected through that same handle.
+    /// prevented. Initial leaf opens and `open_directory(create: true)` both
+    /// reconstruct a path. Each leaf is then opened once with delete sharing
+    /// withheld and inspected through that same handle; publication and
+    /// deletion use that handle rather than reconstructing its path.
     pub struct Directory {
         file: File,
         path: PathBuf,
@@ -282,61 +409,138 @@ mod windows {
             self.file.metadata()
         }
 
-        pub fn open_existing(&self, name: &OsStr) -> io::Result<Option<File>> {
-            match open_leaf(&self.path.join(name), OPEN_EXISTING, GENERIC_READ) {
+        pub fn open_existing(&self, name: &LeafName) -> io::Result<Option<File>> {
+            match open_leaf(
+                &self.path.join(name.as_os_str()),
+                OPEN_EXISTING,
+                GENERIC_READ,
+            ) {
                 Ok(file) => Ok(Some(file)),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) if is_missing_leaf(&error) => Ok(None),
                 Err(error) => Err(error),
             }
         }
 
-        pub fn inspect_existing(&self, name: &OsStr) -> io::Result<Option<File>> {
-            match open_leaf(&self.path.join(name), OPEN_EXISTING, FILE_READ_ATTRIBUTES) {
-                Ok(file) => Ok(Some(file)),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        pub fn inspect_existing(&self, name: &LeafName) -> io::Result<Option<LeafMetadata>> {
+            match open_leaf(
+                &self.path.join(name.as_os_str()),
+                OPEN_EXISTING,
+                FILE_READ_ATTRIBUTES,
+            ) {
+                Ok(file) => Ok(Some(LeafMetadata(file.metadata()?))),
+                Err(error) if is_missing_leaf(&error) => Ok(None),
                 Err(error) => Err(error),
             }
         }
 
-        pub fn create_new(&self, name: &OsStr) -> io::Result<File> {
-            open_leaf(&self.path.join(name), CREATE_NEW, GENERIC_READ | GENERIC_WRITE)
+        pub fn create_new(&self, name: &LeafName) -> io::Result<File> {
+            open_leaf(
+                &self.path.join(name.as_os_str()),
+                CREATE_NEW,
+                GENERIC_READ | GENERIC_WRITE | DELETE,
+            )
         }
 
-        pub fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
-            let from = wide_path(&self.path.join(from), "protected source path")?;
-            let to = wide_path(&self.path.join(to), "protected destination path")?;
-            // SAFETY: both paths are NUL-terminated and remain valid for the call.
+        pub fn rename(
+            &self,
+            source: &File,
+            _from: &LeafName,
+            to: &LeafName,
+            replace: bool,
+        ) -> io::Result<()> {
+            let mut information = rename_information(self.file.as_raw_handle(), to, replace)?;
+            // SAFETY: source is the checked temporary handle, and information is
+            // a correctly sized FILE_RENAME_INFO buffer with a relative leaf.
             if unsafe {
-                MoveFileExW(
-                    from.as_ptr(),
-                    to.as_ptr(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                SetFileInformationByHandle(
+                    source.as_raw_handle(),
+                    FileRenameInfo,
+                    information.as_mut_ptr().cast(),
+                    information.len() as u32,
                 )
-            } == 0
-            {
+            } == 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         }
 
-        pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
-            let name = wide_path(&self.path.join(name), "protected path")?;
-            // SAFETY: the path is NUL-terminated and remains valid for the call.
-            if unsafe { DeleteFileW(name.as_ptr()) } == 0 {
+        pub fn remove_file(&self, name: &LeafName) -> io::Result<()> {
+            let file = open_leaf(
+                &self.path.join(name.as_os_str()),
+                OPEN_EXISTING,
+                GENERIC_READ | DELETE,
+            )?;
+            let information = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+            // SAFETY: file is the checked leaf handle and DELETE access was
+            // requested when it was opened.
+            if unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileDispositionInfo,
+                    std::ptr::from_ref(&information).cast(),
+                    std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+                )
+            } == 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         }
 
-        pub fn hard_link(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
-            let from = wide_path(&self.path.join(from), "protected source path")?;
-            let to = wide_path(&self.path.join(to), "protected destination path")?;
-            // SAFETY: both paths are NUL-terminated and remain valid for the call.
-            if unsafe { CreateHardLinkW(to.as_ptr(), from.as_ptr(), std::ptr::null()) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
+        pub fn hard_link(
+            &self,
+            _source: &File,
+            _from: &LeafName,
+            _to: &LeafName,
+        ) -> io::Result<()> {
+            // SetFileInformationByHandle has no FileLinkInfo class. Refuse this
+            // operation rather than reopening a checked source by its pathname.
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows has no handle-based hard-link publication primitive",
+            ))
         }
+    }
+
+    fn is_missing_leaf(error: &io::Error) -> bool {
+        super::windows_file_not_found_status(error.raw_os_error())
+    }
+
+    fn rename_information(
+        directory: std::os::windows::io::RawHandle,
+        name: &LeafName,
+        replace: bool,
+    ) -> io::Result<Vec<u8>> {
+        let filename: Vec<u16> = name.as_os_str().encode_wide().collect();
+        if filename.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "protected leaf contains an interior NUL",
+            ));
+        }
+        let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let mut buffer = vec![0_u8; header + filename.len() * std::mem::size_of::<u16>()];
+        let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        // SAFETY: buffer is exactly FILE_RENAME_INFO's fixed header plus its
+        // variable UTF-16 leaf; Vec's allocation alignment satisfies the struct.
+        unsafe {
+            std::ptr::write(
+                information,
+                FILE_RENAME_INFO {
+                    Anonymous: FILE_RENAME_INFO_0 {
+                        ReplaceIfExists: replace as u8,
+                    },
+                    RootDirectory: directory,
+                    FileNameLength: (filename.len() * std::mem::size_of::<u16>()) as u32,
+                    FileName: [0],
+                },
+            );
+            std::ptr::copy_nonoverlapping(
+                filename.as_ptr(),
+                buffer.as_mut_ptr().add(header).cast::<u16>(),
+                filename.len(),
+            );
+        }
+        Ok(buffer)
     }
 
     fn wide_path(path: &Path, description: &str) -> io::Result<Vec<u16>> {
@@ -426,8 +630,10 @@ mod windows {
         }
         // SAFETY: CreateFileW returned an owned handle.
         let file = unsafe { File::from_raw_handle(handle) };
-        reject_reparse_point(&file)?;
-        make_non_inheritable(&file)?;
+        if disposition != CREATE_NEW {
+            reject_reparse_point(&file)?;
+            make_non_inheritable(&file)?;
+        }
         Ok(file)
     }
 
@@ -436,10 +642,10 @@ mod windows {
         open_path(path, disposition, access, 0)
     }
 
-    pub fn open_parent(path: &Path) -> io::Result<(Directory, OsString)> {
+    pub fn open_parent(path: &Path) -> io::Result<(Directory, LeafName)> {
         validate_path(path, true)?;
         let parent = path.parent().expect("a path with a leaf has a parent");
-        let leaf = path.file_name().expect("validated path has a leaf").to_os_string();
+        let leaf = LeafName::new(path.file_name().expect("validated path has a leaf"))?;
         Ok((open_directory(parent, false, 0)?, leaf))
     }
 
@@ -465,10 +671,11 @@ mod windows {
 }
 
 #[cfg(windows)]
-pub use windows::{open_directory, open_parent, Directory};
+pub use windows::{open_directory, open_parent, Directory, LeafMetadata};
 
 #[cfg(test)]
 mod tests {
+    use super::LeafName;
     #[cfg(unix)]
     use super::open_parent;
     use std::fs;
@@ -521,6 +728,11 @@ mod tests {
             },
             AllowedCall {
                 source: "desktop",
+                call: "std::fs::create_dir_all(parent)",
+                why: "creates the non-protected close-behavior preference directory",
+            },
+            AllowedCall {
+                source: "desktop",
                 call: "match std::fs::OpenOptions::new()",
                 why: "creates a non-protected close-behavior temporary file",
             },
@@ -541,6 +753,26 @@ mod tests {
             },
             AllowedCall {
                 source: "desktop",
+                call: "if is_reparse_point || metadata.file_type().is_symlink() || !metadata.is_dir()",
+                why: "examines already-read runtime-directory metadata to reject symlinks",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "if metadata.file_type().is_symlink() || !metadata.is_dir()",
+                why: "examines already-read runtime-directory metadata to reject symlinks",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "if selected_metadata.file_type().is_symlink()",
+                why: "examines already-read explicitly user-selected agent metadata",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "if canonical_metadata.file_type().is_symlink()",
+                why: "examines already-read resolved explicitly user-selected agent metadata",
+            },
+            AllowedCall {
+                source: "desktop",
                 call: "std::fs::File::open(&canonical_path)",
                 why: "reads an explicitly user-selected agent file",
             },
@@ -550,9 +782,19 @@ mod tests {
                 why: "opens the non-protected hub diagnostic log",
             },
             AllowedCall {
+                source: "desktop",
+                call: "std::fs::create_dir_all(&log_dir)",
+                why: "creates the non-protected hub diagnostic-log directory",
+            },
+            AllowedCall {
                 source: "identity",
                 call: "fs::remove_file(path)",
                 why: "unsupported-platform temporary cleanup; Unix and Windows use the crate",
+            },
+            AllowedCall {
+                source: "identity",
+                call: "fs::hard_link(&temporary_path, key_path)",
+                why: "unsupported-platform private-key publication fallback; Unix and Windows use the crate",
             },
             AllowedCall {
                 source: "protected-fs",
@@ -566,13 +808,18 @@ mod tests {
             },
             AllowedCall {
                 source: "protected-fs",
-                call: "CreateFileW, CreateHardLinkW, DeleteFileW",
-                why: "imports the crate's Windows protected-file primitives",
+                call: "CreateFileW, FileAttributeTagInfo, FileDispositionInfo",
+                why: "imports the crate's Windows checked-handle file primitives",
             },
             AllowedCall {
                 source: "protected-fs",
                 call: "CreateFileW(",
                 why: "the crate's Windows one-handle protected-leaf primitive",
+            },
+            AllowedCall {
+                source: "protected-fs",
+                call: "std::fs::create_dir_all(path)",
+                why: "Windows requested-directory creation has no public handle-relative primitive; the boundary comment states this limit",
             },
         ];
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -591,13 +838,26 @@ mod tests {
             "fs::write",
             "fs::rename",
             "fs::remove_file",
+            "fs::remove_dir_all",
             "fs::metadata",
             "fs::symlink_metadata",
+            "fs::hard_link",
+            "fs::create_dir",
+            "fs::create_dir_all",
+            "fs::set_permissions",
+            "fs::read_dir",
+            "fs::copy",
+            "fs::canonicalize",
             "File::open",
             "File::create",
             "OpenOptions",
             "libc::open",
             "CreateFileW",
+            "symlink(",
+            "MoveFileExW",
+            "DeleteFileW",
+            "CreateHardLinkW",
+            "RemoveDirectoryW",
         ];
 
         for (source_name, path) in sources {
@@ -627,6 +887,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn leaf_name_accepts_exactly_one_normal_component() {
+        use std::ffi::OsStr;
+
+        assert!(LeafName::new(OsStr::new("ordinary-name")).is_ok());
+        for invalid in ["", ".", "..", "a/b", "/abs"] {
+            assert!(
+                LeafName::new(OsStr::new(invalid)).is_err(),
+                "{invalid:?} must not be a protected leaf"
+            );
+        }
+        #[cfg(windows)]
+        assert!(LeafName::new(OsStr::new(r"C:\\escape")).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn descriptor_walk_refuses_unsafe_components_and_keeps_absence_distinct() {
@@ -637,12 +912,12 @@ mod tests {
         let clean = root.join("safe/nested/leaf");
         let (parent, leaf) = open_parent(&clean).unwrap();
         assert!(parent
-            .open_existing(&leaf, libc::O_RDONLY)
+            .open_existing(&leaf)
             .unwrap()
             .is_none());
         fs::write(&clean, "ok").unwrap();
         assert!(parent
-            .open_existing(&leaf, libc::O_RDONLY)
+            .open_existing(&leaf)
             .unwrap()
             .is_some());
         fs::create_dir_all(root.join("decoy/nested")).unwrap();
@@ -655,6 +930,32 @@ mod tests {
         assert!(open_parent(&root.join("file/leaf")).is_err());
         assert!(open_parent(std::path::Path::new("relative/leaf")).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_relative_metadata_inspects_an_unreadable_regular_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "lasterm-protected-fs-metadata-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("unreadable-certificate");
+        fs::write(&path, "certificate").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (parent, leaf) = open_parent(&path).unwrap();
+        assert!(parent
+            .inspect_existing(&leaf)
+            .unwrap()
+            .expect("the regular leaf exists")
+            .is_file());
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
@@ -699,5 +1000,25 @@ mod tests {
         };
         assert!(error.to_string().contains("reparse point"));
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn windows_only_file_not_found_means_an_absent_leaf() {
+        assert!(super::windows_file_not_found_status(Some(2)));
+        assert!(
+            !super::windows_file_not_found_status(Some(3)),
+            "ERROR_PATH_NOT_FOUND is an ancestor failure, not an absent leaf"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_not_found_is_not_an_absent_leaf() {
+        use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
+
+        assert!(
+            !super::windows_file_not_found_status(Some(ERROR_PATH_NOT_FOUND as i32)),
+            "ERROR_PATH_NOT_FOUND is an ancestor failure, not an absent leaf"
+        );
     }
 }

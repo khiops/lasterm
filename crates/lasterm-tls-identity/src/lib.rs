@@ -139,7 +139,7 @@ fn load_usable_certificate(
     // replace. A regular Unix cache that cannot be read is only unusable and
     // can be replaced without following its path. On Windows, a non-reparse
     // regular cache is likewise unusable, but replacing it remains subject to
-    // the destination's delete/ACL permissions (the MoveFileExW contract).
+    // the destination's delete/ACL permissions (the FileRenameInfo contract).
     check_parent_directory(certificate_path)?;
     let mut file = match open_key_file(
         certificate_path,
@@ -281,17 +281,15 @@ fn certificate_extensions_match_profile(
 #[cfg(unix)]
 fn unreadable_certificate_is_replaceable(certificate_path: &Path) -> io::Result<bool> {
     let (parent, leaf) = lasterm_protected_fs::open_parent(certificate_path)?;
-    let metadata = match parent.open_existing(&leaf, libc::O_PATH)? {
-        Some(file) => file.metadata()?,
+    let metadata = match parent.inspect_existing(&leaf)? {
+        Some(metadata) => metadata,
         None => return Ok(false),
     };
-    if !metadata.file_type().is_file() {
+    if !metadata.is_file() {
         return Ok(false);
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-
         // SAFETY: geteuid has no preconditions and reads only the caller's uid.
         let current_user = unsafe { libc::geteuid() };
         Ok(metadata.uid() == current_user && metadata.mode() & 0o022 == 0)
@@ -316,7 +314,7 @@ fn unreadable_certificate_is_replaceable(certificate_path: &Path) -> io::Result<
     // one-handle, FILE_FLAG_OPEN_REPARSE_POINT boundary.
     let (parent, leaf) = lasterm_protected_fs::open_parent(certificate_path)?;
     let metadata = match parent.inspect_existing(&leaf)? {
-        Some(file) => file.metadata()?,
+        Some(metadata) => metadata,
         None => return Ok(false),
     };
     Ok(metadata.is_file())
@@ -346,15 +344,15 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
             temporary_file.sync_all()?;
             Ok(())
         })();
-        drop(temporary_file);
         if let Err(error) = write_result {
+            drop(temporary_file);
             return Err(cleanup_temporary_file(
                 &temporary_path,
                 TemporaryFile::Certificate,
                 error,
             ));
         }
-        return publish_certificate(&temporary_path, certificate_path);
+        return publish_certificate(&temporary_file, &temporary_path, certificate_path);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -363,7 +361,11 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
 }
 
 #[cfg(unix)]
-fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
+fn publish_certificate(
+    temporary_file: &File,
+    temporary_path: &Path,
+    certificate_path: &Path,
+) -> io::Result<()> {
     // POSIX gives the same-directory rename its atomic replacement semantics.
     // The directory sync is the documented durability step on filesystems that
     // support it: a successful return means the file and namespace update were
@@ -371,7 +373,7 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
     // already be visible, but it is never reported as a committed publication.
     let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
     let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
-    match parent.rename(&temporary, &certificate) {
+    match parent.rename(temporary_file, &temporary, &certificate, true) {
         Ok(()) => sync_directory(&parent),
         Err(error) => Err(cleanup_temporary_file(
             temporary_path,
@@ -382,14 +384,17 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
 }
 
 #[cfg(windows)]
-fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
-    // MoveFileExW documents WRITE_THROUGH as waiting until the move is flushed
-    // to disk. REPLACE_EXISTING keeps the old complete cache in place if the
-    // move itself fails, so there is no directory FlushFileBuffers step after a
-    // successful replacement that could turn success into an error.
+fn publish_certificate(
+    temporary_file: &File,
+    temporary_path: &Path,
+    certificate_path: &Path,
+) -> io::Result<()> {
+    // FileRenameInfo publishes the checked, already-synced temporary handle.
+    // ReplaceIfExists keeps replacement explicit; the Windows API has no
+    // directory-handle flush equivalent to the Unix durability step above.
     let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
     let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
-    parent.rename(&temporary, &certificate).map_err(|error| {
+    parent.rename(temporary_file, &temporary, &certificate, true).map_err(|error| {
         cleanup_temporary_file(
             temporary_path,
             TemporaryFile::Certificate,
@@ -399,7 +404,11 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
 }
 
 #[cfg(not(any(unix, windows)))]
-fn publish_certificate(_temporary_path: &Path, _certificate_path: &Path) -> io::Result<()> {
+fn publish_certificate(
+    _temporary_file: &File,
+    _temporary_path: &Path,
+    _certificate_path: &Path,
+) -> io::Result<()> {
     Err(cleanup_temporary_file(
         _temporary_path,
         TemporaryFile::Certificate,
@@ -456,9 +465,8 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
             temporary_file.sync_all()?;
             Ok(())
         })();
-        drop(temporary_file);
-
         if let Err(error) = write_result {
+            drop(temporary_file);
             return Err(cleanup_temporary_file(
                 &temporary_path,
                 TemporaryFile::PrivateKey,
@@ -470,25 +478,26 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
         let install_result = (|| -> io::Result<()> {
             let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
             let (_, key) = lasterm_protected_fs::open_parent(key_path)?;
-            parent.hard_link(&temporary, &key)
+            parent.hard_link(&temporary_file, &temporary, &key)
         })();
         #[cfg(windows)]
         let install_result = (|| -> io::Result<()> {
             let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
             let (_, key) = lasterm_protected_fs::open_parent(key_path)?;
-            parent.hard_link(&temporary, &key)
+            // FileRenameInfo with ReplaceIfExists=false keeps the private-key
+            // installation exclusive while publishing the checked source handle.
+            parent.rename(&temporary_file, &temporary, &key, false)
         })();
         #[cfg(not(any(unix, windows)))]
         let install_result = fs::hard_link(&temporary_path, key_path);
         match install_result {
             Ok(()) => {
                 // The final name becomes visible only after the fully written,
-                // owner-only temporary file is synced. Hard links never replace
-                // an existing destination, so a concurrent creator cannot be
-                // silently overwritten.
-                if let Err(error) =
-                    remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)
-                {
+                // owner-only temporary file is synced. Publication never
+                // replaces an existing destination, so a concurrent creator
+                // cannot be silently overwritten.
+                #[cfg(unix)]
+                if let Err(error) = remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey) {
                     // The authoritative name is already installed. Preserve the
                     // invariant that errors mean no key was committed, while
                     // making the owner-only duplicate visible to operators.
@@ -605,18 +614,13 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, policy: FilePolicy) -> io::Resu
     use std::os::unix::fs::MetadataExt;
 
     let (parent, leaf) = lasterm_protected_fs::open_parent(path)?;
-    let flags = match mode {
-        OpenKeyMode::Existing => libc::O_RDONLY,
-        OpenKeyMode::CreateNew => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-    } | libc::O_CLOEXEC
-        | libc::O_NOFOLLOW;
     let file = match mode {
-        OpenKeyMode::Existing => match parent.open_existing(&leaf, flags) {
+        OpenKeyMode::Existing => match parent.open_existing(&leaf) {
             Ok(Some(file)) => file,
             Ok(None) => return Ok(None),
             Err(error) => return Err(error),
         },
-        OpenKeyMode::CreateNew => parent.create_new(&leaf, flags, 0o600)?,
+        OpenKeyMode::CreateNew => parent.create_new(&leaf)?,
     };
     #[cfg(test)]
     if matches!(mode, OpenKeyMode::CreateNew)
@@ -733,7 +737,7 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, _policy: FilePolicy) -> io::Res
 #[cfg(unix)]
 fn open_file_setup_error(
     parent: &lasterm_protected_fs::Directory,
-    leaf: &std::ffi::OsStr,
+    leaf: &lasterm_protected_fs::LeafName,
     mode: OpenKeyMode,
     creation_error: io::Error,
 ) -> io::Error {
@@ -755,7 +759,7 @@ fn open_file_setup_error(
 #[cfg(windows)]
 fn open_file_setup_error(
     parent: &lasterm_protected_fs::Directory,
-    leaf: &std::ffi::OsStr,
+    leaf: &lasterm_protected_fs::LeafName,
     mode: OpenKeyMode,
     creation_error: io::Error,
 ) -> io::Error {
@@ -1405,8 +1409,18 @@ mod tests {
         fs::write(&temporary, "replacement").expect("write temporary certificate");
         create_dir(directory.certificate_path()).expect("block certificate replacement");
         FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP.with(|fail| fail.set(true));
+        let (parent, leaf) = lasterm_protected_fs::open_parent(&temporary)
+            .expect("open temporary certificate parent");
+        let temporary_file = parent
+            .open_existing(&leaf)
+            .expect("open temporary certificate")
+            .expect("temporary certificate exists");
 
-        let error = match publish_certificate(&temporary, &directory.certificate_path()) {
+        let error = match publish_certificate(
+            &temporary_file,
+            &temporary,
+            &directory.certificate_path(),
+        ) {
             Ok(_) => panic!("a temporary certificate cleanup failure is reported"),
             Err(error) => error,
         };

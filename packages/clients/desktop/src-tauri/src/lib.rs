@@ -1744,12 +1744,22 @@ fn lasterm_config_dir() -> Option<PathBuf> {
 /// Returns `Some(token)` only if the token is a valid 64-char lowercase hex string.
 fn read_hub_auth_token() -> Option<String> {
     let config_dir = lasterm_config_dir()?;
+    read_hub_auth_token_at(&config_dir)
+}
 
+fn read_hub_auth_token_at(config_dir: &Path) -> Option<String> {
     let auth_path = config_dir.join("auth.json");
     eprintln!("[lasterm] checking auth.json at: {}", auth_path.display());
     // auth.json carries the hub bearer token.  It follows the same protected
     // descriptor walk as runtime.json and the pin store.
-    let contents = read_protected_file(&auth_path).ok()??;
+    let contents = match read_protected_file(&auth_path, ProtectedFilePolicy::HubAuth) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("[lasterm] auto-auth: {error}");
+            return None;
+        }
+    };
     let parsed: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let token = parsed.get("token")?.as_str()?.to_string();
 
@@ -1942,7 +1952,7 @@ fn load_runtime_info() -> RuntimeLoadResult {
 /// externally launched path. Read it only through this owner-and-mode checked
 /// open, never through a path-following convenience read.
 fn load_runtime_info_at(runtime_path: &Path) -> RuntimeLoadResult {
-    let contents = match read_protected_file(runtime_path) {
+    let contents = match read_protected_file(runtime_path, ProtectedFilePolicy::Strict) {
         Ok(Some(contents)) => contents,
         Ok(None) => return RuntimeLoadResult::Absent,
         Err(error) => return RuntimeLoadResult::Unreadable(error),
@@ -1954,7 +1964,10 @@ fn load_runtime_info_at(runtime_path: &Path) -> RuntimeLoadResult {
 }
 
 #[cfg(unix)]
-fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
+fn read_protected_file(
+    path: &Path,
+    policy: ProtectedFilePolicy,
+) -> Result<Option<String>, String> {
     let (parent, leaf) = lasterm_protected_fs::open_parent(path).map_err(|error| {
         format!(
             "refusing protected file {} because its parent cannot be inspected: {error}",
@@ -1965,7 +1978,7 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
         .metadata()
         .map_err(|error| format!("refusing protected file parent metadata: {error}"))?;
     validate_runtime_dir(path.parent().unwrap_or(path), &parent_metadata)?;
-    let mut file = match parent.open_existing(&leaf, libc::O_RDONLY) {
+    let mut file = match parent.open_existing(&leaf) {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(None),
         Err(error) => return Err(format!("refusing protected file: {error}")),
@@ -1980,13 +1993,36 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
     if metadata.uid() != current_user {
         return Err("protected file is not owned by the current user".to_string());
     }
-    if metadata.mode() & 0o077 != 0 {
-        return Err("protected file grants group or other permissions".to_string());
+    match policy {
+        ProtectedFilePolicy::Strict if metadata.mode() & 0o077 != 0 => {
+            return Err("protected file grants group or other permissions".to_string());
+        }
+        ProtectedFilePolicy::HubAuth if metadata.mode() & 0o004 != 0 => {
+            return Err(format!(
+                "SECURITY: auth.json at {} is world-readable (mode {:o}). Fix with: chmod 600 auth.json",
+                path.display(),
+                metadata.mode() & 0o777,
+            ));
+        }
+        ProtectedFilePolicy::HubAuth if metadata.mode() & 0o040 != 0 => {
+            eprintln!(
+                "[lasterm] WARNING: auth.json at {} is group-readable (mode {:o}). Recommend: chmod 600 auth.json",
+                path.display(),
+                metadata.mode() & 0o777,
+            );
+        }
+        _ => {}
     }
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|error| format!("cannot read protected file: {error}"))?;
     Ok(Some(contents))
+}
+
+#[derive(Clone, Copy)]
+enum ProtectedFilePolicy {
+    Strict,
+    HubAuth,
 }
 
 fn hub_pin_store_path() -> Result<PathBuf, String> {
@@ -2068,7 +2104,7 @@ fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, Strin
                 validate_owner_only_pin_store_dir(parent, &metadata)?;
             }
         }
-        match read_protected_file(path)? {
+        match read_protected_file(path, ProtectedFilePolicy::Strict)? {
             Some(contents) => serde_json::from_str(&contents)
                 .map(Some)
                 .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
@@ -2081,7 +2117,12 @@ fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, Strin
             .parent()
             .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
         match lasterm_protected_fs::open_directory(parent, false, 0o700) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if error.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND as i32) =>
+            {
+                return Ok(None);
+            }
             Err(error) => {
                 return Err(format!(
                     "cannot inspect desktop pin-store directory {}: {error}",
@@ -2102,7 +2143,7 @@ fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, Strin
                 )?;
             }
         }
-        match read_protected_file(path)? {
+        match read_protected_file(path, ProtectedFilePolicy::Strict)? {
             Some(contents) => serde_json::from_str(&contents)
                 .map(Some)
                 .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
@@ -2143,7 +2184,7 @@ fn load_hub_pin_store(path: &Path) -> Result<HubPinStore, String> {
         path.parent()
             .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?,
     )?;
-    match read_protected_file(path)? {
+    match read_protected_file(path, ProtectedFilePolicy::Strict)? {
         Some(contents) => serde_json::from_str(&contents)
             .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
         None => Ok(HubPinStore::default()),
@@ -2175,14 +2216,15 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(store)
         .map_err(|error| format!("cannot encode desktop hub pin store: {error}"))?;
     for _ in 0..128 {
-        let temporary = std::ffi::OsString::from(format!(
+        let temporary = lasterm_protected_fs::LeafName::new(std::ffi::OsStr::new(&format!(
             ".{}.{}.{}.tmp",
-            leaf.to_str().unwrap_or("known_hubs"),
+            leaf.as_os_str().to_str().unwrap_or("known_hubs"),
             std::process::id(),
             PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        )))
+        .map_err(|error| format!("cannot allocate desktop hub pin-store temporary leaf: {error}"))?;
         match create_owner_only_file(&directory, &temporary, &bytes) {
-            Ok(()) => match directory.rename(&temporary, &leaf) {
+            Ok(temporary_file) => match directory.rename(&temporary_file, &temporary, &leaf, true) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let _ = directory.remove_file(&temporary);
@@ -2215,15 +2257,16 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(store)
         .map_err(|error| format!("cannot encode desktop hub pin store: {error}"))?;
     for _ in 0..128 {
-        let temporary = std::ffi::OsString::from(format!(
+        let temporary = lasterm_protected_fs::LeafName::new(std::ffi::OsStr::new(&format!(
             ".{}.{}.{}.tmp",
-            leaf.to_str()
+            leaf.as_os_str().to_str()
                 .unwrap_or("known_hubs"),
             std::process::id(),
             PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        )))
+        .map_err(|error| format!("cannot allocate desktop hub pin-store temporary leaf: {error}"))?;
         match create_owner_only_file(&directory, &temporary, &bytes) {
-            Ok(()) => match directory.rename(&temporary, &leaf) {
+            Ok(temporary_file) => match directory.rename(&temporary_file, &temporary, &leaf, true) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let _ = directory.remove_file(&temporary);
@@ -2292,28 +2335,30 @@ fn prepare_hub_pin_store_dir(path: &Path) -> Result<lasterm_protected_fs::Direct
 #[cfg(unix)]
 fn create_owner_only_file(
     directory: &lasterm_protected_fs::Directory,
-    name: &std::ffi::OsStr,
+    name: &lasterm_protected_fs::LeafName,
     bytes: &[u8],
-) -> std::io::Result<()> {
+) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsRawFd;
 
-    let mut file = directory.create_new(name, libc::O_WRONLY, 0o600)?;
+    let mut file = directory.create_new(name)?;
     if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     file.write_all(bytes)?;
-    file.sync_all()
+    file.sync_all()?;
+    Ok(file)
 }
 
 #[cfg(windows)]
 fn create_owner_only_file(
     directory: &lasterm_protected_fs::Directory,
-    name: &std::ffi::OsStr,
+    name: &lasterm_protected_fs::LeafName,
     bytes: &[u8],
-) -> std::io::Result<()> {
+) -> std::io::Result<std::fs::File> {
     let mut file = directory.create_new(name)?;
     file.write_all(bytes)?;
-    file.sync_all()
+    file.sync_all()?;
+    Ok(file)
 }
 
 fn reset_loopback_hub_pin() -> Result<(), String> {
@@ -2398,7 +2443,10 @@ fn established_hub_connection() -> Result<HubConnection, String> {
 // slice. Still reject reparse points so this reader never silently follows a
 // substituted final component on platforms where that metadata is available.
 #[cfg(windows)]
-fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
+fn read_protected_file(
+    path: &Path,
+    _policy: ProtectedFilePolicy,
+) -> Result<Option<String>, String> {
     let parent = path.parent().ok_or_else(|| {
         format!(
             "refusing protected file {} without a parent",
@@ -2420,7 +2468,6 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
         // A protected store is created only after its first successful use. Its
         // absence is therefore normal; every other metadata failure is a
         // refusal, before any open can follow a substituted path.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("refusing protected file metadata: {error}")),
     };
     let metadata = file
@@ -5348,6 +5395,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn hub_auth_permission_policy_matches_the_hub_contract() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = instance_test_dir("hub-auth-permissions");
+        let auth_path = directory.join("auth.json");
+        let token = "a".repeat(64);
+        std::fs::write(&auth_path, format!(r#"{{"token":"{token}"}}"#)).unwrap();
+
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(read_hub_auth_token_at(directory.path()), Some(token.clone()));
+
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_hub_auth_token_at(directory.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runtime_path_through_a_symlinked_parent_authorizes_no_pin_or_connection() {
         use std::os::unix::fs::symlink;
 
@@ -5380,7 +5444,7 @@ mod tests {
             .expect("write reparse target");
         symlink_file(&target, &protected).expect("create protected-file reparse point");
 
-        let error = read_protected_file(&protected)
+        let error = read_protected_file(&protected, ProtectedFilePolicy::Strict)
             .expect_err("the protected reader rejects a leaf reparse point");
         assert!(error.contains("reparse point"));
     }

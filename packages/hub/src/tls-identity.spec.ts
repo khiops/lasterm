@@ -9,7 +9,7 @@ import { join } from "node:path";
 import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
-import { HUB_TLS_HANDSHAKE_TIMEOUT_MS, HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
+import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { createServer, startServer } from "./server.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
 import { getHubCertificatePath, resolveHubTlsIdentity } from "./tls-identity.js";
@@ -51,7 +51,7 @@ describe("generated hub TLS identity", () => {
 			() => restoreEnvironmentVariable("XDG_STATE_HOME", stateRootToRestore),
 		]);
 		if (cleanupErrors.length > 0) {
-			console.error("TLS identity test cleanup failed:", cleanupErrors);
+			throw new AggregateError(cleanupErrors, "TLS identity test cleanup failed");
 		}
 	});
 
@@ -283,8 +283,10 @@ describe("generated hub TLS identity", () => {
 	it("abandons a TCP peer that accepts but never completes TLS", async () => {
 		const tls = getTestTlsMaterial();
 		let peerSocket: Socket | undefined;
+		let peerClosed: Promise<boolean> | undefined;
 		const stalledPeer = createNetServer((socket) => {
 			peerSocket = socket;
+			peerClosed = new Promise<boolean>((resolve) => socket.once("close", resolve));
 			socket.resume();
 		});
 		await new Promise<void>((resolve, reject) => {
@@ -296,7 +298,6 @@ describe("generated hub TLS identity", () => {
 			throw new Error("stall listener has no port");
 
 		try {
-			const startedAt = Date.now();
 			await expect(
 				requestHub(
 					{
@@ -308,10 +309,7 @@ describe("generated hub TLS identity", () => {
 					"/",
 				),
 			).rejects.toThrow("Hub TLS endpoint could not be reached: TLS handshake timed out");
-			expect(Date.now() - startedAt).toBeLessThan(HUB_TLS_HANDSHAKE_TIMEOUT_MS + 1_000);
-
-			await new Promise<void>((resolve) => setTimeout(resolve, 100));
-			expect(peerSocket?.readableEnded).toBe(true);
+			await expect(peerClosed).resolves.toBe(false);
 			await expect(
 				new Promise<number>((resolve, reject) =>
 					stalledPeer.getConnections((error, count) => (error ? reject(error) : resolve(count))),

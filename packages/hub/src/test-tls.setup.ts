@@ -41,5 +41,26 @@ function testMaterialGeneratorPath(): string {
 	const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 	const targetDirectory =
 		process.env.CARGO_TARGET_DIR ?? resolve(sourceDirectory, "../../../target");
-	return resolve(targetDirectory, "release", `lasterm-tls-test-material${extension}`);
+	const generator = resolve(targetDirectory, "release", `lasterm-tls-test-material${extension}`);
+	if (!existsSync(generator)) {
+		try {
+			execFileSync(
+				"cargo",
+				[
+					"build",
+					"--release",
+					"-p",
+					"lasterm-hub-lock",
+					"-p",
+					"lasterm-tls-identity",
+					"--features",
+					"lasterm-tls-identity/test-tls-material",
+				],
+				{ stdio: "pipe" },
+			);
+		} catch (error) {
+			throw new Error(`could not build hub TLS test material generator: ${String(error)}`);
+		}
+	}
+	return generator;
 }

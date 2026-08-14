@@ -47,34 +47,30 @@ function readHubRuntime(): HubTlsRuntime {
 }
 
 // Vite evaluates config before its concurrently started hub chooses an
-// OS-assigned port. Resolve runtime.json when each proxy connection is made.
+// OS-assigned port. http-proxy reads target.port for each proxied request, and
+// the connector reads it again immediately before opening the TLS socket.
 const hubProxyAgent = new https.Agent({ keepAlive: false, maxCachedSessions: 0 });
 hubProxyAgent.createConnection = (options, callback) => {
 	const runtime = readHubRuntime();
-	if (Number(options.port) !== runtime.port) {
-		throw new Error("Hub runtime changed before the Vite proxy connected");
-	}
 	const connector = createHubTlsConnector(runtime);
-	// @types/node requires a socket on every callback path, though Node invokes
-	// TLS connector errors before a socket exists. hub-transport keeps that
-	// absence explicit; this is only the Node Agent boundary.
-	return connector(options, callback as Parameters<typeof connector>[1]);
+	return connector({ ...options, port: runtime.port }, callback);
 };
 
-function hubProxyTarget(): string {
-	return `https://127.0.0.1:${readHubRuntime().port}`;
-}
+const hubProxyTarget = {
+	protocol: "https:",
+	host: "127.0.0.1",
+	get port(): number {
+		return readHubRuntime().port;
+	},
+};
 
 function hubProxyOptions(websocket = false): ProxyOptions {
-	// Vite delegates these options to http-proxy, whose runtime accepts router
-	// and Agent even though Vite's exported ProxyOptions omits them.
 	return {
-		target: "https://127.0.0.1:1",
-		router: hubProxyTarget,
+		target: hubProxyTarget,
 		agent: hubProxyAgent,
 		secure: true,
 		...(websocket ? { ws: true } : {}),
-	} as unknown as ProxyOptions;
+	};
 }
 
 export default defineConfig({

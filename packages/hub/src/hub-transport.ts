@@ -1,5 +1,6 @@
 import { createPublicKey, timingSafeEqual, X509Certificate } from "node:crypto";
 import { Agent, type RequestOptions } from "node:https";
+import { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import * as tls from "node:tls";
 
@@ -9,15 +10,8 @@ export interface HubTlsRuntime {
 	readonly spki?: string;
 }
 
-/**
- * Node's callback declaration requires a Duplex, but an asynchronous connector
- * reports transport failures before one exists. Keep that absence explicit,
- * while requiring a socket for a successful TLS handshake.
- */
-type ConnectionCallback = {
-	(error: Error, socket?: Duplex): void;
-	(error: null, socket: Duplex): void;
-};
+/** Node's Agent callback always receives a Duplex, including an error path. */
+type ConnectionCallback = (error: Error | null, socket: Duplex) => void;
 
 /** A peer completed TLS but proved a key other than the runtime pin. */
 export const HUB_TLS_PIN_MISMATCH_CODE = "ERR_HUB_TLS_PIN_MISMATCH";
@@ -51,13 +45,7 @@ export function createHubTlsAgent(
 ): Agent {
 	const expectedSpki = expectedHubSpki(runtime);
 	const agent = new Agent({ keepAlive: false, maxCachedSessions: 0 });
-	// @types/node requires a socket even on an error callback, while Node calls
-	// this with undefined before a TLS socket exists. The connector itself keeps
-	// the accurate type; this assertion is only the incompatible Node boundary.
-	agent.createConnection = makeHubTlsConnector(
-		expectedSpki,
-		handshakeTimeoutMs,
-	) as typeof agent.createConnection;
+	agent.createConnection = makeHubTlsConnector(expectedSpki, handshakeTimeoutMs);
 	return agent;
 }
 
@@ -83,30 +71,29 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 
 		let completed = false;
 		let handshakeTimer: NodeJS.Timeout | undefined;
-		const complete = (error: Error | null, socket?: tls.TLSSocket) => {
+		const complete = (error: Error | null, socket: tls.TLSSocket) => {
 			if (completed) return;
 			completed = true;
 			if (handshakeTimer !== undefined) clearTimeout(handshakeTimer);
 			if (error !== null) {
-				if (socket !== undefined) socket.destroy();
+				socket.destroy();
 				callback(error, socket);
-				return;
-			}
-			if (socket === undefined) {
-				callback(new Error("Hub TLS connector completed without a socket"));
 				return;
 			}
 			callback(null, socket);
 		};
 
-		const { host, port: configuredPort, ...connectionOptions } = options;
+		const { host, path, port: configuredPort, ...connectionOptions } = options;
 		const port = typeof configuredPort === "string" ? Number(configuredPort) : configuredPort;
 		if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
-			callback(new Error("Hub TLS endpoint could not be reached: no usable TCP port"), undefined);
+			const socket = new tls.TLSSocket(new Socket());
+			socket.destroy();
+			callback(new Error("Hub TLS endpoint could not be reached: no usable TCP port"), socket);
 			return undefined;
 		}
-		const socket = tls.connect({
-			...(connectionOptions as tls.ConnectionOptions),
+		const tlsOptions: tls.ConnectionOptions = {
+			...connectionOptions,
+			...(typeof path === "string" ? { path } : {}),
 			...(typeof host === "string" ? { host } : {}),
 			port,
 			// Certificate authorization and name matching are deliberately not part
@@ -117,7 +104,8 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 			// A resumed session has no CertificateVerify or leaf certificate to pin.
 			// The agent also disables its session cache, making resumption impossible.
 			session: undefined,
-		});
+		};
+		const socket = tls.connect(tlsOptions);
 		handshakeTimer = setTimeout(() => {
 			complete(
 				new Error(

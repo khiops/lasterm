@@ -2224,15 +2224,18 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
         )))
         .map_err(|error| format!("cannot allocate desktop hub pin-store temporary leaf: {error}"))?;
         match create_owner_only_file(&directory, &temporary, &bytes) {
-            Ok(temporary_file) => match directory.rename(&temporary_file, &temporary, &leaf, true) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    let _ = directory.remove_file(&temporary);
-                    return Err(format!(
-                        "cannot atomically replace desktop hub pin store: {error}"
-                    ));
+            Ok(temporary_file) => {
+                drop(temporary_file);
+                match directory.rename(&temporary, &leaf, true) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        let _ = directory.remove_file(&temporary);
+                        return Err(format!(
+                            "cannot atomically replace desktop hub pin store: {error}"
+                        ));
+                    }
                 }
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("cannot create desktop hub pin store: {error}")),
         }
@@ -2266,15 +2269,18 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
         )))
         .map_err(|error| format!("cannot allocate desktop hub pin-store temporary leaf: {error}"))?;
         match create_owner_only_file(&directory, &temporary, &bytes) {
-            Ok(temporary_file) => match directory.rename(&temporary_file, &temporary, &leaf, true) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    let _ = directory.remove_file(&temporary);
-                    return Err(format!(
-                        "cannot atomically replace desktop hub pin store: {error}"
-                    ));
+            Ok(temporary_file) => {
+                drop(temporary_file);
+                match directory.rename(&temporary, &leaf, true) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        let _ = directory.remove_file(&temporary);
+                        return Err(format!(
+                            "cannot atomically replace desktop hub pin store: {error}"
+                        ));
+                    }
                 }
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("cannot create desktop hub pin store: {error}")),
         }

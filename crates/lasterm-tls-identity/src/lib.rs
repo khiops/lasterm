@@ -13,7 +13,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 use x509_parser::extensions::GeneralName;
@@ -60,8 +60,10 @@ struct TlsIdentity {
 /// particular, no private key is returned or converted to a JavaScript string.
 #[napi]
 pub fn generate_tls_identity(identity_directory: String) -> napi::Result<GeneratedTlsIdentity> {
-    let identity_directory = Path::new(&identity_directory);
-    let identity = generate_identity(identity_directory).map_err(|error| {
+    let identity_directory = resolve_identity_directory(&identity_directory).map_err(|error| {
+        napi::Error::from_reason(format!("cannot resolve hub TLS identity directory: {error}"))
+    })?;
+    let identity = generate_identity(&identity_directory).map_err(|error| {
         napi::Error::from_reason(format!(
             "cannot generate hub TLS identity in {}: {error}",
             identity_directory.display()
@@ -77,6 +79,34 @@ pub fn generate_tls_identity(identity_directory: String) -> napi::Result<Generat
             .into_string()
             .map_err(|_| napi::Error::from_reason("generated private-key path is not UTF-8"))?,
     })
+}
+
+/// Resolves the N-API locator once, before protected descriptor traversal.
+/// This is lexical only: it does not canonicalize, touch the filesystem, or
+/// follow links, so a missing identity directory remains creatable.
+fn resolve_identity_directory(identity_directory: &str) -> io::Result<PathBuf> {
+    let input = Path::new(identity_directory);
+    let absolute = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(input)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "identity directory is not normalized",
+                ));
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
@@ -138,8 +168,8 @@ fn load_usable_certificate(
     // A certificate from an unsafe parent is never a cache entry we may use or
     // replace. A regular Unix cache that cannot be read is only unusable and
     // can be replaced without following its path. On Windows, a non-reparse
-    // regular cache is likewise unusable, but replacing it remains subject to
-    // the destination's delete/ACL permissions (the FileRenameInfo contract).
+    // regular cache is likewise unusable, but pathname replacement remains
+    // subject to the destination's delete/ACL permissions.
     check_parent_directory(certificate_path)?;
     let mut file = match open_key_file(
         certificate_path,
@@ -352,7 +382,8 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
                 error,
             ));
         }
-        return publish_certificate(&temporary_file, &temporary_path, certificate_path);
+        drop(temporary_file);
+        return publish_certificate(&temporary_path, certificate_path);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -361,20 +392,20 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
 }
 
 #[cfg(unix)]
-fn publish_certificate(
-    temporary_file: &File,
-    temporary_path: &Path,
-    certificate_path: &Path,
-) -> io::Result<()> {
+fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
     // POSIX gives the same-directory rename its atomic replacement semantics.
     // The directory sync is the documented durability step on filesystems that
     // support it: a successful return means the file and namespace update were
     // both synced. If that sync fails after rename, the new complete leaf may
     // already be visible, but it is never reported as a committed publication.
-    let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
-    let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
-    match parent.rename(temporary_file, &temporary, &certificate, true) {
-        Ok(()) => sync_directory(&parent),
+    let publication = (|| -> io::Result<lasterm_protected_fs::Directory> {
+        let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
+        let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
+        parent.rename(&temporary, &certificate, true)?;
+        Ok(parent)
+    })();
+    match publication {
+        Ok(parent) => sync_directory(&parent),
         Err(error) => Err(cleanup_temporary_file(
             temporary_path,
             TemporaryFile::Certificate,
@@ -384,31 +415,17 @@ fn publish_certificate(
 }
 
 #[cfg(windows)]
-fn publish_certificate(
-    temporary_file: &File,
-    temporary_path: &Path,
-    certificate_path: &Path,
-) -> io::Result<()> {
-    // FileRenameInfo publishes the checked, already-synced temporary handle.
-    // ReplaceIfExists keeps replacement explicit; the Windows API has no
-    // directory-handle flush equivalent to the Unix durability step above.
-    let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
-    let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
-    parent.rename(temporary_file, &temporary, &certificate, true).map_err(|error| {
-        cleanup_temporary_file(
-            temporary_path,
-            TemporaryFile::Certificate,
-            error,
-        )
-    })
+fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
+    let publication = (|| -> io::Result<()> {
+        let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
+        let (_, certificate) = lasterm_protected_fs::open_parent(certificate_path)?;
+        parent.rename(&temporary, &certificate, true)
+    })();
+    publication.map_err(|error| cleanup_temporary_file(temporary_path, TemporaryFile::Certificate, error))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn publish_certificate(
-    _temporary_file: &File,
-    _temporary_path: &Path,
-    _certificate_path: &Path,
-) -> io::Result<()> {
+fn publish_certificate(_temporary_path: &Path, _certificate_path: &Path) -> io::Result<()> {
     Err(cleanup_temporary_file(
         _temporary_path,
         TemporaryFile::Certificate,
@@ -478,15 +495,13 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
         let install_result = (|| -> io::Result<()> {
             let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
             let (_, key) = lasterm_protected_fs::open_parent(key_path)?;
-            parent.hard_link(&temporary_file, &temporary, &key)
+            parent.hard_link(&temporary, &key)
         })();
         #[cfg(windows)]
         let install_result = (|| -> io::Result<()> {
             let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
             let (_, key) = lasterm_protected_fs::open_parent(key_path)?;
-            // FileRenameInfo with ReplaceIfExists=false keeps the private-key
-            // installation exclusive while publishing the checked source handle.
-            parent.rename(&temporary_file, &temporary, &key, false)
+            parent.hard_link(&temporary, &key)
         })();
         #[cfg(not(any(unix, windows)))]
         let install_result = fs::hard_link(&temporary_path, key_path);
@@ -731,6 +746,18 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, _policy: FilePolicy) -> io::Res
             io::Error::other("injected temporary-file setup failure"),
         ));
     }
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(file);
+            return Err(open_file_setup_error(&parent, &leaf, mode, error));
+        }
+    };
+    if !metadata.is_file() {
+        let error = io::Error::other("refusing identity path that is not a regular file");
+        drop(file);
+        return Err(open_file_setup_error(&parent, &leaf, mode, error));
+    }
     Ok(Some(file))
 }
 
@@ -823,13 +850,35 @@ mod tests {
     use std::env;
     use std::fs::{self, create_dir};
     use std::net::{IpAddr, Ipv4Addr};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use time::{Duration, OffsetDateTime};
     use webpki::EndEntityCert;
     use x509_parser::extensions::GeneralName;
     use x509_parser::prelude::{FromDer, X509Certificate};
 
     struct TestDir(PathBuf);
+
+    struct WorkingDirectory(PathBuf);
+
+    impl WorkingDirectory {
+        fn change_to(path: &Path) -> Self {
+            let original = env::current_dir().expect("read current working directory");
+            env::set_current_dir(path).expect("enter temporary working directory");
+            Self(original)
+        }
+    }
+
+    impl Drop for WorkingDirectory {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.0).expect("restore current working directory");
+        }
+    }
+
+    fn working_directory_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     impl TestDir {
         fn key_path(&self) -> PathBuf {
@@ -870,6 +919,31 @@ mod tests {
         panic!(
             "could not allocate a unique test directory under {}",
             base.display()
+        );
+    }
+
+    #[test]
+    fn relative_identity_directory_is_resolved_once_at_the_napi_boundary() {
+        let _lock = working_directory_test_lock()
+            .lock()
+            .expect("lock process working directory");
+        let directory = test_dir("relative-napi-directory");
+        let identity_directory = {
+            let _working_directory = WorkingDirectory::change_to(&directory.0);
+            super::resolve_identity_directory("./identity")
+                .expect("resolve a relative N-API identity directory")
+        };
+
+        assert_eq!(identity_directory, directory.0.join("identity"));
+        assert!(
+            !identity_directory.exists(),
+            "lexical resolution does not require the identity directory to exist"
+        );
+        fs::create_dir(&identity_directory).expect("create resolved identity directory");
+        generate_identity(&identity_directory).expect("generate identity from resolved directory");
+        assert!(
+            identity_directory.join(GENERATED_KEY_NAME).is_file(),
+            "the plain-Rust generation path creates the resolved key path"
         );
     }
 
@@ -1409,18 +1483,7 @@ mod tests {
         fs::write(&temporary, "replacement").expect("write temporary certificate");
         create_dir(directory.certificate_path()).expect("block certificate replacement");
         FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP.with(|fail| fail.set(true));
-        let (parent, leaf) = lasterm_protected_fs::open_parent(&temporary)
-            .expect("open temporary certificate parent");
-        let temporary_file = parent
-            .open_existing(&leaf)
-            .expect("open temporary certificate")
-            .expect("temporary certificate exists");
-
-        let error = match publish_certificate(
-            &temporary_file,
-            &temporary,
-            &directory.certificate_path(),
-        ) {
+        let error = match publish_certificate(&temporary, &directory.certificate_path()) {
             Ok(_) => panic!("a temporary certificate cleanup failure is reported"),
             Err(error) => error,
         };

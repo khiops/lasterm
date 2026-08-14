@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -416,7 +416,10 @@ enum HubUploadEndReason {
     ChunkFailure,
 }
 
-type HubUploadResponse = (Result<reqwest::blocking::Response, String>, HubRelayAdmission);
+type HubUploadResponse = (
+    Result<reqwest::blocking::Response, String>,
+    HubRelayAdmission,
+);
 
 /// Admission follows the object that still owns the request, response, socket,
 /// or worker thread. It is released structurally when that object is dropped.
@@ -432,7 +435,9 @@ impl HubRelayAdmission {
 
 impl Drop for HubRelayAdmission {
     fn drop(&mut self) {
-        let _ = active_hub_relays().lock().map(|mut relays| relays.remove(&self.id));
+        let _ = active_hub_relays()
+            .lock()
+            .map(|mut relays| relays.remove(&self.id));
     }
 }
 
@@ -495,9 +500,16 @@ struct HubUploadDeadlineState {
 impl HubUploadDeadlines {
     fn insert(&self, upload_id: u64) {
         let deadline = Instant::now() + HUB_REQUEST_TIMEOUT;
-        let mut state = self.state.lock().expect("hub upload deadline lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("hub upload deadline lock poisoned");
         state.entries.insert(upload_id, deadline);
-        state.schedule.entry(deadline).or_default().insert(upload_id);
+        state
+            .schedule
+            .entry(deadline)
+            .or_default()
+            .insert(upload_id);
         self.changed.notify_one();
     }
 
@@ -520,14 +532,23 @@ impl HubUploadDeadlines {
 
     #[cfg(test)]
     fn entry_count(&self) -> usize {
-        self.state.lock().map(|state| state.entries.len()).unwrap_or(0)
+        self.state
+            .lock()
+            .map(|state| state.entries.len())
+            .unwrap_or(0)
     }
 
     fn next_expired(&self) -> Vec<u64> {
-        let mut state = self.state.lock().expect("hub upload deadline lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("hub upload deadline lock poisoned");
         loop {
             let Some((&deadline, _)) = state.schedule.first_key_value() else {
-                state = self.changed.wait(state).expect("hub upload deadline lock poisoned");
+                state = self
+                    .changed
+                    .wait(state)
+                    .expect("hub upload deadline lock poisoned");
                 continue;
             };
             let now = Instant::now();
@@ -577,10 +598,12 @@ impl Read for HubUploadReader {
                         "multipart relay upload was aborted",
                     ));
                 }
-                Err(_) => return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "multipart relay upload ended without a completion frame",
-                )),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "multipart relay upload ended without a completion frame",
+                    ))
+                }
             }
         }
     }
@@ -767,13 +790,13 @@ fn prepare_windows_runtime_dir(path: &Path) -> Result<(), String> {
         ));
     }
 
-    std::fs::create_dir_all(path).map_err(|error| {
+    let directory = lasterm_protected_fs::open_directory(path, true, 0o700).map_err(|error| {
         format!(
             "cannot create desktop runtime directory {}: {error}",
             path.display()
         )
     })?;
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+    let metadata = directory.metadata().map_err(|error| {
         format!(
             "refusing desktop runtime directory {}: {error}",
             path.display()
@@ -840,34 +863,19 @@ fn prepare_runtime_dir(path: &Path) -> Result<(), String> {
         ));
     }
 
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => validate_runtime_dir(path, &metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                // This is deliberately part of creation. A later chmod could follow
-                // a symlink substituted after the create and change another path.
-                .mode(0o700)
-                .create(path)
-                .map_err(|error| {
-                    format!(
-                        "cannot create desktop runtime directory {}: {error}",
-                        path.display()
-                    )
-                })?;
-            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-                format!(
-                    "refusing desktop runtime directory {}: {error}",
-                    path.display()
-                )
-            })?;
-            validate_runtime_dir(path, &metadata)
-        }
-        Err(error) => Err(format!(
+    let directory = lasterm_protected_fs::open_directory(path, true, 0o700).map_err(|error| {
+        format!(
+            "cannot create desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = directory.metadata().map_err(|error| {
+        format!(
             "refusing desktop runtime directory {}: {error}",
             path.display()
-        )),
-    }
+        )
+    })?;
+    validate_runtime_dir(path, &metadata)
 }
 
 #[cfg(unix)]
@@ -1739,7 +1747,9 @@ fn read_hub_auth_token() -> Option<String> {
 
     let auth_path = config_dir.join("auth.json");
     eprintln!("[lasterm] checking auth.json at: {}", auth_path.display());
-    let contents = std::fs::read_to_string(&auth_path).ok()?;
+    // auth.json carries the hub bearer token.  It follows the same protected
+    // descriptor walk as runtime.json and the pin store.
+    let contents = read_protected_file(&auth_path).ok()??;
     let parsed: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let token = parsed.get("token")?.as_str()?.to_string();
 
@@ -1945,36 +1955,21 @@ fn load_runtime_info_at(runtime_path: &Path) -> RuntimeLoadResult {
 
 #[cfg(unix)]
 fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::ffi::OsStrExt;
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("refusing protected file {} without a parent", path.display()))?;
-    refuse_symlinked_ancestors(parent)?;
-    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+    let (parent, leaf) = lasterm_protected_fs::open_parent(path).map_err(|error| {
         format!(
-            "refusing protected file {} because its parent {} cannot be inspected: {error}",
+            "refusing protected file {} because its parent cannot be inspected: {error}",
             path.display(),
-            parent.display()
         )
     })?;
-    validate_runtime_dir(parent, &parent_metadata)?;
-
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|error| format!("refusing protected file path with an interior NUL: {error}"))?;
-    // O_NOFOLLOW rejects a final symlink before it can change what this read
-    // authorises. The file descriptor, not a second pathname lookup, is then
-    // inspected and read.
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        return Err(format!("refusing protected file: {error}"));
-    }
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let parent_metadata = parent
+        .metadata()
+        .map_err(|error| format!("refusing protected file parent metadata: {error}"))?;
+    validate_runtime_dir(path.parent().unwrap_or(path), &parent_metadata)?;
+    let mut file = match parent.open_existing(&leaf, libc::O_RDONLY) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(None),
+        Err(error) => return Err(format!("refusing protected file: {error}")),
+    };
     let metadata = file
         .metadata()
         .map_err(|error| format!("refusing protected file metadata: {error}"))?;
@@ -1994,30 +1989,15 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(contents))
 }
 
-#[cfg(unix)]
-fn refuse_symlinked_ancestors(path: &Path) -> Result<(), String> {
-    for component in path.ancestors() {
-        let metadata = std::fs::symlink_metadata(component).map_err(|error| {
-            format!(
-                "refusing protected file path because {} cannot be inspected: {error}",
-                component.display()
-            )
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "refusing protected file path because {} is a symlink",
-                component.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn hub_pin_store_path() -> Result<PathBuf, String> {
     dirs::data_local_dir()
         // Keep the authority under its own 0700 leaf, not beside hub.log: the
         // log directory is intentionally ordinary application storage.
-        .map(|path| path.join("lasterm").join("identity").join(HUB_PIN_STORE_FILE))
+        .map(|path| {
+            path.join("lasterm")
+                .join("identity")
+                .join(HUB_PIN_STORE_FILE)
+        })
         .ok_or_else(|| "failed to resolve the desktop pin-store directory".to_string())
 }
 
@@ -2065,24 +2045,69 @@ fn record_or_match_hub_pin_after_proof_at(
 /// the directory is normal on first use, and must stay non-durable until the
 /// announced peer has completed its TLS proof.
 fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
-    match std::fs::symlink_metadata(parent) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect desktop pin-store directory {}: {error}",
-                parent.display()
-            ));
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
+        match lasterm_protected_fs::open_directory(parent, false, 0o700) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect desktop pin-store directory {}: {error}",
+                    parent.display()
+                ));
+            }
+            Ok(directory) => {
+                let metadata = directory.metadata().map_err(|error| {
+                    format!(
+                        "cannot inspect desktop pin-store directory {}: {error}",
+                        parent.display()
+                    )
+                })?;
+                validate_owner_only_pin_store_dir(parent, &metadata)?;
+            }
         }
-        Ok(_) => {}
+        match read_protected_file(path)? {
+            Some(contents) => serde_json::from_str(&contents)
+                .map(Some)
+                .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
+            None => Ok(None),
+        }
     }
-    match read_protected_file(path)? {
-        Some(contents) => serde_json::from_str(&contents)
-            .map(Some)
-            .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
-        None => Ok(None),
+    #[cfg(windows)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
+        match lasterm_protected_fs::open_directory(parent, false, 0o700) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect desktop pin-store directory {}: {error}",
+                    parent.display()
+                ))
+            }
+            Ok(directory) => {
+                let metadata = directory.metadata().map_err(|error| {
+                    format!(
+                        "cannot inspect desktop pin-store directory {}: {error}",
+                        parent.display()
+                    )
+                })?;
+                validate_windows_runtime_dir(
+                    parent,
+                    &metadata,
+                    windows_metadata_is_reparse_point(&metadata),
+                )?;
+            }
+        }
+        match read_protected_file(path)? {
+            Some(contents) => serde_json::from_str(&contents)
+                .map(Some)
+                .map_err(|error| format!("desktop hub pin store is invalid: {error}")),
+            None => Ok(None),
+        }
     }
 }
 
@@ -2125,6 +2150,7 @@ fn load_hub_pin_store(path: &Path) -> Result<HubPinStore, String> {
     }
 }
 
+#[cfg(unix)]
 fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
     use std::sync::atomic::AtomicU64;
     static PIN_STORE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -2133,21 +2159,77 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
         .parent()
         .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
     prepare_hub_pin_store_dir(parent)?;
+    let (directory, leaf) = lasterm_protected_fs::open_parent(path).map_err(|error| {
+        format!(
+            "cannot inspect desktop pin-store directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let directory_metadata = directory.metadata().map_err(|error| {
+        format!(
+            "cannot inspect desktop pin-store directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    validate_owner_only_pin_store_dir(parent, &directory_metadata)?;
     let bytes = serde_json::to_vec_pretty(store)
         .map_err(|error| format!("cannot encode desktop hub pin store: {error}"))?;
     for _ in 0..128 {
-        let temporary = parent.join(format!(
+        let temporary = std::ffi::OsString::from(format!(
             ".{}.{}.{}.tmp",
-            path.file_name().and_then(|name| name.to_str()).unwrap_or("known_hubs"),
+            leaf.to_str().unwrap_or("known_hubs"),
             std::process::id(),
             PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        match create_owner_only_file(&temporary, &bytes) {
-            Ok(()) => match std::fs::rename(&temporary, path) {
+        match create_owner_only_file(&directory, &temporary, &bytes) {
+            Ok(()) => match directory.rename(&temporary, &leaf) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(format!("cannot atomically replace desktop hub pin store: {error}"));
+                    let _ = directory.remove_file(&temporary);
+                    return Err(format!(
+                        "cannot atomically replace desktop hub pin store: {error}"
+                    ));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("cannot create desktop hub pin store: {error}")),
+        }
+    }
+    Err("could not allocate a temporary desktop hub pin-store file".to_string())
+}
+
+#[cfg(windows)]
+fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
+    use std::sync::atomic::AtomicU64;
+    static PIN_STORE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
+    let directory = prepare_hub_pin_store_dir(parent)?;
+    let (_, leaf) = lasterm_protected_fs::open_parent(path).map_err(|error| {
+        format!(
+            "cannot inspect desktop pin-store directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let bytes = serde_json::to_vec_pretty(store)
+        .map_err(|error| format!("cannot encode desktop hub pin store: {error}"))?;
+    for _ in 0..128 {
+        let temporary = std::ffi::OsString::from(format!(
+            ".{}.{}.{}.tmp",
+            leaf.to_str()
+                .unwrap_or("known_hubs"),
+            std::process::id(),
+            PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match create_owner_only_file(&directory, &temporary, &bytes) {
+            Ok(()) => match directory.rename(&temporary, &leaf) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let _ = directory.remove_file(&temporary);
+                    return Err(format!(
+                        "cannot atomically replace desktop hub pin store: {error}"
+                    ));
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2159,24 +2241,26 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
 
 #[cfg(unix)]
 fn prepare_hub_pin_store_dir(path: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => validate_owner_only_pin_store_dir(path, &metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(path)
-                .map_err(|error| format!("cannot create desktop pin-store directory {}: {error}", path.display()))?;
-            let metadata = std::fs::symlink_metadata(path)
-                .map_err(|error| format!("cannot inspect desktop pin-store directory {}: {error}", path.display()))?;
-            validate_owner_only_pin_store_dir(path, &metadata)
-        }
-        Err(error) => Err(format!("cannot inspect desktop pin-store directory {}: {error}", path.display())),
-    }
+    let directory = lasterm_protected_fs::open_directory(path, true, 0o700).map_err(|error| {
+        format!(
+            "cannot create desktop pin-store directory {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = directory.metadata().map_err(|error| {
+        format!(
+            "cannot inspect desktop pin-store directory {}: {error}",
+            path.display()
+        )
+    })?;
+    validate_owner_only_pin_store_dir(path, &metadata)
 }
 
 #[cfg(unix)]
-fn validate_owner_only_pin_store_dir(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
+fn validate_owner_only_pin_store_dir(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), String> {
     validate_runtime_dir(path, metadata)?;
     if metadata.mode() & 0o077 != 0 {
         return Err(format!(
@@ -2188,27 +2272,32 @@ fn validate_owner_only_pin_store_dir(path: &Path, metadata: &std::fs::Metadata) 
 }
 
 #[cfg(windows)]
-fn prepare_hub_pin_store_dir(path: &Path) -> Result<(), String> {
-    prepare_windows_runtime_dir(path)
+fn prepare_hub_pin_store_dir(path: &Path) -> Result<lasterm_protected_fs::Directory, String> {
+    let directory = lasterm_protected_fs::open_directory(path, true, 0o700).map_err(|error| {
+        format!(
+            "cannot create desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = directory.metadata().map_err(|error| {
+        format!(
+            "refusing desktop runtime directory {}: {error}",
+            path.display()
+        )
+    })?;
+    validate_windows_runtime_dir(path, &metadata, windows_metadata_is_reparse_point(&metadata))?;
+    Ok(directory)
 }
 
 #[cfg(unix)]
-fn create_owner_only_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
+fn create_owner_only_file(
+    directory: &lasterm_protected_fs::Directory,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
 
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = directory.create_new(name, libc::O_WRONLY, 0o600)?;
     if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -2217,9 +2306,12 @@ fn create_owner_only_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn create_owner_only_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+fn create_owner_only_file(
+    directory: &lasterm_protected_fs::Directory,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut file = directory.create_new(name)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -2297,7 +2389,9 @@ fn established_hub_connection() -> Result<HubConnection, String> {
         .lock()
         .map_err(|_| "hub connection lock poisoned".to_string())?
         .clone()
-        .ok_or_else(|| "the hub identity was never established; refusing to relay credentials".to_string())
+        .ok_or_else(|| {
+            "the hub identity was never established; refusing to relay credentials".to_string()
+        })
 }
 
 // The Windows profile-root ACL audit is intentionally outside this issue's P11
@@ -2305,32 +2399,40 @@ fn established_hub_connection() -> Result<HubConnection, String> {
 // substituted final component on platforms where that metadata is available.
 #[cfg(windows)]
 fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("refusing protected file {} without a parent", path.display()))?;
-    let parent_metadata = std::fs::symlink_metadata(parent)
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "refusing protected file {} without a parent",
+            path.display()
+        )
+    })?;
+    let (directory, leaf) = lasterm_protected_fs::open_parent(path)
+        .map_err(|error| format!("refusing protected file parent: {error}"))?;
+    let parent_metadata = directory.metadata()
         .map_err(|error| format!("refusing protected file parent: {error}"))?;
     validate_windows_runtime_dir(
         parent,
         &parent_metadata,
         windows_metadata_is_reparse_point(&parent_metadata),
     )?;
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    let mut file = match directory.open_existing(&leaf) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(None),
         // A protected store is created only after its first successful use. Its
         // absence is therefore normal; every other metadata failure is a
         // refusal, before any open can follow a substituted path.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("refusing protected file metadata: {error}")),
     };
-    if metadata.file_type().is_symlink() || windows_metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("refusing protected file metadata: {error}"))?;
+    if !metadata.is_file() {
         return Err("refusing protected path that is not a regular file".to_string());
     }
-    match std::fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(contents)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("refusing protected file: {error}")),
-    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| format!("refusing protected file: {error}"))?;
+    Ok(Some(contents))
 }
 
 fn shutdown_caller_client_id() -> &'static Mutex<Option<String>> {
@@ -2388,11 +2490,17 @@ fn parse_listening_announcement(line: &str) -> Option<HubAnnouncement> {
     let after = &rest[digits.len()..];
     let spki_and_build = after.strip_prefix(" (spki: ")?.strip_suffix(')')?;
     let (encoded_spki, build) = spki_and_build.rsplit_once(") (build: ")?;
-    if encoded_spki.is_empty() || build.is_empty() || encoded_spki.contains(' ') || build.contains(' ') {
+    if encoded_spki.is_empty()
+        || build.is_empty()
+        || encoded_spki.contains(' ')
+        || build.contains(' ')
+    {
         return None;
     }
     let port = digits.parse::<u16>().ok().filter(|port| *port != 0)?;
-    let spki = base64::engine::general_purpose::STANDARD.decode(encoded_spki).ok()?;
+    let spki = base64::engine::general_purpose::STANDARD
+        .decode(encoded_spki)
+        .ok()?;
     if spki.is_empty() {
         return None;
     }
@@ -2466,10 +2574,14 @@ fn reserve_hub_relay() -> Result<HubRelayAdmission, String> {
     if relays.len() >= MAX_ACTIVE_HUB_RELAYS {
         return Err("too many active hub relays".to_string());
     }
-    let id = NEXT_RELAY_ID.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        current.checked_add(1)
-    }).map_err(|_| "hub relay identifier sequence exhausted".to_string())?;
-    if !admit_hub_relay(&mut relays, id) { return Err("too many active hub relays".to_string()); }
+    let id = NEXT_RELAY_ID
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| "hub relay identifier sequence exhausted".to_string())?;
+    if !admit_hub_relay(&mut relays, id) {
+        return Err("too many active hub relays".to_string());
+    }
     Ok(HubRelayAdmission { id })
 }
 
@@ -2505,7 +2617,9 @@ fn pinned_hub_tls_config(expected_spki: Vec<u8>) -> Result<rustls::ClientConfig,
     }
     Ok(rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(tls_identity::SpkiPinVerifier::new(expected_spki)))
+        .with_custom_certificate_verifier(Arc::new(tls_identity::SpkiPinVerifier::new(
+            expected_spki,
+        )))
         .with_no_client_auth())
 }
 
@@ -2514,7 +2628,9 @@ fn pinned_hub_tls_config(expected_spki: Vec<u8>) -> Result<rustls::ClientConfig,
 /// non-empty base64 payload.
 fn validate_announced_hub_spki(spki: &[u8]) -> Result<(), String> {
     if spki.is_empty() {
-        return Err("The hub runtime record has an empty TLS SPKI; refusing to trust it".to_string());
+        return Err(
+            "The hub runtime record has an empty TLS SPKI; refusing to trust it".to_string(),
+        );
     }
     let spki_der = rustls::pki_types::SubjectPublicKeyInfoDer::from(spki);
     webpki::RawPublicKeyEntity::try_from(&spki_der).map_err(|error| {
@@ -2577,9 +2693,7 @@ fn error_chain_has_spki_mismatch(error: &(dyn Error + 'static)) -> bool {
             }
         }
     }
-    error
-        .source()
-        .is_some_and(error_chain_has_spki_mismatch)
+    error.source().is_some_and(error_chain_has_spki_mismatch)
 }
 
 fn relay_hub_url(port: u16, path: &str) -> Result<String, String> {
@@ -2786,7 +2900,10 @@ fn relay_response(
                     let message = format!("pinned hub response failed: {error}");
                     if let Ok(identity) = new_relay_frame_identity(id, sequence) {
                         let _ = publish_relay_response_frame(
-                            &channel, &acknowledgement, identity, RELAY_RESPONSE_ERROR_FRAME,
+                            &channel,
+                            &acknowledgement,
+                            identity,
+                            RELAY_RESPONSE_ERROR_FRAME,
                             message.as_bytes(),
                         );
                     }
@@ -2796,7 +2913,11 @@ fn relay_response(
             if read == 0 {
                 if let Ok(identity) = new_relay_frame_identity(id, sequence) {
                     let _ = publish_relay_response_frame(
-                        &channel, &acknowledgement, identity, RELAY_RESPONSE_END_FRAME, &[],
+                        &channel,
+                        &acknowledgement,
+                        identity,
+                        RELAY_RESPONSE_END_FRAME,
+                        &[],
                     );
                 }
                 break;
@@ -2825,7 +2946,10 @@ fn relay_response(
                     let message = relay_response_ack_failure_message(error);
                     if let Ok(identity) = new_relay_frame_identity(id, sequence) {
                         let _ = publish_relay_response_frame(
-                            &channel, &acknowledgement, identity, RELAY_RESPONSE_ERROR_FRAME,
+                            &channel,
+                            &acknowledgement,
+                            identity,
+                            RELAY_RESPONSE_ERROR_FRAME,
                             message.as_bytes(),
                         );
                     }
@@ -2917,7 +3041,12 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
     // Tauri has already materialised this raw IPC body before entering the
     // command. An oversized body is rejected here without another copy or any
     // relay retention; an admitted bounded frame is copied into the body pipe.
-    send_hub_upload_chunk_claimed(upload_id, claim, bytes.clone(), Instant::now() + HUB_REQUEST_TIMEOUT)
+    send_hub_upload_chunk_claimed(
+        upload_id,
+        claim,
+        bytes.clone(),
+        Instant::now() + HUB_REQUEST_TIMEOUT,
+    )
 }
 
 #[cfg(test)]
@@ -2938,18 +3067,32 @@ fn send_hub_upload_chunk_with_deadline(
 /// Claims the single permitted waiting chunk before copying IPC bytes. The
 /// lifecycle mutex makes this claim and the terminal transition mutually
 /// exclusive; the bounded-pipe wait itself happens after it is released.
-fn claim_hub_upload_chunk(upload_id: u64) -> Result<(Arc<HubUpload>, mpsc::SyncSender<HubUploadFrame>, UploadChunkClaim), String> {
+fn claim_hub_upload_chunk(
+    upload_id: u64,
+) -> Result<
+    (
+        Arc<HubUpload>,
+        mpsc::SyncSender<HubUploadFrame>,
+        UploadChunkClaim,
+    ),
+    String,
+> {
     let upload = hub_uploads()
         .lock()
         .map_err(|_| "relay upload map lock poisoned".to_string())?
         .get(&upload_id)
         .cloned()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
-    let mut pipe = upload.pipe.lock().map_err(|_| "relay upload pipe lock poisoned".to_string())?;
+    let mut pipe = upload
+        .pipe
+        .lock()
+        .map_err(|_| "relay upload pipe lock poisoned".to_string())?;
     if pipe.chunk_in_flight {
         return Err("multipart relay upload already has a chunk in flight".to_string());
     }
-    let sender = (pipe.phase == HubUploadPhase::Open).then(|| pipe.sender.clone()).flatten()
+    let sender = (pipe.phase == HubUploadPhase::Open)
+        .then(|| pipe.sender.clone())
+        .flatten()
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
     pipe.chunk_in_flight = true;
     drop(pipe);
@@ -2969,12 +3112,18 @@ impl Drop for UploadChunkClaim {
 
 fn send_hub_upload_chunk_claimed(
     upload_id: u64,
-    _claim: (Arc<HubUpload>, mpsc::SyncSender<HubUploadFrame>, UploadChunkClaim),
+    _claim: (
+        Arc<HubUpload>,
+        mpsc::SyncSender<HubUploadFrame>,
+        UploadChunkClaim,
+    ),
     bytes: Vec<u8>,
     deadline: Instant,
 ) -> Result<(), String> {
     let (_upload, sender, claim) = _claim;
-    if send_hub_upload_frame_until(sender, HubUploadFrame::Data(bytes), deadline).is_ok() { return Ok(()); }
+    if send_hub_upload_frame_until(sender, HubUploadFrame::Data(bytes), deadline).is_ok() {
+        return Ok(());
+    }
     drop(claim);
     let _ = end_hub_upload(upload_id, HubUploadEndReason::ChunkFailure);
     Err("multipart relay upload stopped or timed out before its body completed".to_string())
@@ -2990,8 +3139,13 @@ fn send_hub_upload_frame_until(
         match sender.try_send(frame) {
             Ok(()) => return Ok(()),
             Err(mpsc::TrySendError::Disconnected(frame)) => return Err(frame),
-            Err(mpsc::TrySendError::Full(frame)) if Instant::now() >= deadline => return Err(frame),
-            Err(mpsc::TrySendError::Full(next)) => { frame = next; std::thread::sleep(Duration::from_millis(10)); }
+            Err(mpsc::TrySendError::Full(frame)) if Instant::now() >= deadline => {
+                return Err(frame)
+            }
+            Err(mpsc::TrySendError::Full(next)) => {
+                frame = next;
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 }
@@ -3080,10 +3234,14 @@ fn relay_hub_upload_finish(
     let (hub_result, admission) = match response_receiver.recv_timeout(HUB_REQUEST_TIMEOUT) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            return Err("multipart relay upload timed out before receiving a hub response".to_string());
+            return Err(
+                "multipart relay upload timed out before receiving a hub response".to_string(),
+            );
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            return Err("multipart relay upload stopped before receiving a hub response".to_string());
+            return Err(
+                "multipart relay upload stopped before receiving a hub response".to_string(),
+            );
         }
     };
     let hub_response = hub_result?;
@@ -3124,7 +3282,8 @@ fn relay_hub_response_ack(response_id: String, sequence: String, acknowledgement
     let Ok(sequence) = parse_relay_identifier(&sequence, "desktop response frame sequence") else {
         return;
     };
-    let Ok(token) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(acknowledgement_token) else {
+    let Ok(token) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(acknowledgement_token)
+    else {
         return;
     };
     let Ok(acknowledgement_token) = <[u8; 16]>::try_from(token.as_slice()) else {
@@ -3221,13 +3380,17 @@ async fn relay_hub_ws_binary(
             Err(error) => return HubWsRelayEnd::TransportFailure(error),
         };
         let Some(next) = next_sequence.checked_add(1) else {
-            return HubWsRelayEnd::TransportFailure("desktop WebSocket relay sequence exhausted".to_string());
+            return HubWsRelayEnd::TransportFailure(
+                "desktop WebSocket relay sequence exhausted".to_string(),
+            );
         };
         *next_sequence = next;
         let mut frame = relay_response_frame(&identity, RELAY_RESPONSE_DATA_FRAME, &[]);
         frame.push(u8::from(index + 1 == chunk_count));
         frame.extend_from_slice(chunk);
-        if let Ok(mut pending) = outstanding.lock() { *pending = Some(identity.clone()); }
+        if let Ok(mut pending) = outstanding.lock() {
+            *pending = Some(identity.clone());
+        }
         if channel
             .send(tauri::ipc::InvokeResponseBody::Raw(frame))
             .is_err()
@@ -3398,21 +3561,36 @@ async fn relay_hub_ws_connect(
     let (acknowledgement_sender, acknowledgement) = tokio::sync::mpsc::channel(1);
     let outstanding = Arc::new(Mutex::new(None));
     let (close_sender, close) = tokio::sync::mpsc::unbounded_channel();
-    if hub_ws_relays().lock().map(|mut relays| relays.insert(
-            id,
-            HubWsRelay {
-                input: input_sender,
-                acknowledgement: acknowledgement_sender,
-                outstanding: outstanding.clone(),
-                close: close_sender,
-            },
-        )).is_err() {
+    if hub_ws_relays()
+        .lock()
+        .map(|mut relays| {
+            relays.insert(
+                id,
+                HubWsRelay {
+                    input: input_sender,
+                    acknowledgement: acknowledgement_sender,
+                    outstanding: outstanding.clone(),
+                    close: close_sender,
+                },
+            )
+        })
+        .is_err()
+    {
         return Err("hub WebSocket relay map lock poisoned".to_string());
     }
     tauri::async_runtime::spawn(async move {
         // This task owns admission for exactly as long as it owns the socket.
         let _admission = admission;
-        relay_hub_ws_stream(socket, stream, id, input, acknowledgement, outstanding, close).await;
+        relay_hub_ws_stream(
+            socket,
+            stream,
+            id,
+            input,
+            acknowledgement,
+            outstanding,
+            close,
+        )
+        .await;
         let _ = hub_ws_relays().lock().map(|mut relays| relays.remove(&id));
     });
     Ok(id.to_string())
@@ -3473,7 +3651,8 @@ fn relay_hub_ws_ack(relay_id: String, sequence: String, acknowledgement_token: S
     let Ok(sequence) = parse_relay_identifier(&sequence, "WebSocket relay frame sequence") else {
         return;
     };
-    let Ok(token) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(acknowledgement_token) else {
+    let Ok(token) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(acknowledgement_token)
+    else {
         return;
     };
     let Ok(acknowledgement_token) = <[u8; 16]>::try_from(token.as_slice()) else {
@@ -3594,7 +3773,10 @@ fn request_hub_quit(force: bool) -> QuitRequestResult {
         }
     };
     let url = hub_quit_url(connection.port, force);
-    let mut request = connection.client.post(url).header("X-Lasterm-Owner", owner_header);
+    let mut request = connection
+        .client
+        .post(url)
+        .header("X-Lasterm-Owner", owner_header);
     if let Some(client_id) = current_shutdown_caller_client_id() {
         request = request.header("X-Lasterm-Client-Id", client_id);
     }
@@ -4379,7 +4561,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 // the event queue was momentarily empty, and an exit supersedes it, so
                 // there is no pair of readings to disagree. A child dying a moment after
                 // this is #184, which nothing here can see.
-                if let Err(error) = establish_hub_connection(announcement.port, &announcement.spki) {
+                if let Err(error) = establish_hub_connection(announcement.port, &announcement.spki)
+                {
                     if let Err(kill_error) = child.kill() {
                         eprintln!("[lasterm] could not stop hub after pin refusal: {kill_error}");
                     }
@@ -4483,7 +4666,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             RuntimeLoadResult::Unreadable(error) => {
-                return Err(format!("The dev hub runtime record is not defensible: {error}").into());
+                return Err(
+                    format!("The dev hub runtime record is not defensible: {error}").into(),
+                );
             }
         };
         let spki = runtime.spki.as_deref().ok_or_else(|| {
@@ -4492,7 +4677,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         use base64::Engine;
         let spki = base64::engine::general_purpose::STANDARD
             .decode(spki)
-            .map_err(|error| format!("The dev hub runtime record has an invalid TLS SPKI: {error}"))?;
+            .map_err(|error| {
+                format!("The dev hub runtime record has an invalid TLS SPKI: {error}")
+            })?;
         establish_hub_connection(runtime.port, &spki)?;
     }
 
@@ -4516,9 +4703,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             eprintln!("[lasterm] could not focus the shown main window: {error}");
         }
-        MainWindowStartupOutcome::Shown {
-            focus_error: None,
-        } => {}
+        MainWindowStartupOutcome::Shown { focus_error: None } => {}
     }
 
     // Publish the handoff endpoint only after primary setup is complete. Until
@@ -5017,7 +5202,11 @@ mod tests {
         restarted_hub.assert_http_request();
 
         let store = load_existing_hub_pin_store(&store_path).unwrap().unwrap();
-        assert_eq!(store.pins.len(), 1, "the port never contributes to the pin key");
+        assert_eq!(
+            store.pins.len(),
+            1,
+            "the port never contributes to the pin key"
+        );
         assert_eq!(
             existing_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY).unwrap(),
             Some(announced_spki)
@@ -5039,7 +5228,11 @@ mod tests {
         peer.assert_http_request();
 
         let store = load_existing_hub_pin_store(&store_path).unwrap().unwrap();
-        assert_eq!(store.pins.len(), 1, "the successful first use writes one pin");
+        assert_eq!(
+            store.pins.len(),
+            1,
+            "the successful first use writes one pin"
+        );
         assert_eq!(
             existing_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY).unwrap(),
             Some(announced_spki)
@@ -5054,8 +5247,9 @@ mod tests {
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
         let announced_spki = rcgen::KeyPair::generate().unwrap().public_key_der();
 
-        let error = establish_hub_connection_at(&store_path, unused_loopback_port(), &announced_spki)
-            .unwrap_err();
+        let error =
+            establish_hub_connection_at(&store_path, unused_loopback_port(), &announced_spki)
+                .unwrap_err();
 
         assert!(error.contains("could not be reached"), "error: {error}");
         assert!(
@@ -5097,7 +5291,10 @@ mod tests {
 
         let error = establish_hub_connection_at(&store_path, 4444, &[1, 2, 3]).unwrap_err();
 
-        assert!(error.contains("runtime record has a malformed TLS SPKI"), "error: {error}");
+        assert!(
+            error.contains("runtime record has a malformed TLS SPKI"),
+            "error: {error}"
+        );
         assert!(
             !store_path.exists() && !store_path.parent().unwrap().exists(),
             "a malformed record must not create a pin store"
@@ -5169,6 +5366,23 @@ mod tests {
             load_runtime_info_at(&linked_state_dir.join("runtime.json")),
             RuntimeLoadResult::Unreadable(_)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_protected_file_rejects_a_leaf_reparse_point() {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = instance_test_dir("windows-protected-file-reparse-point");
+        let target = directory.join("target.json");
+        let protected = directory.join("protected.json");
+        std::fs::write(&target, r#"{"port":4100,"spki":"AQID"}"#)
+            .expect("write reparse target");
+        symlink_file(&target, &protected).expect("create protected-file reparse point");
+
+        let error = read_protected_file(&protected)
+            .expect_err("the protected reader rejects a leaf reparse point");
+        assert!(error.contains("reparse point"));
     }
 
     #[test]
@@ -5371,10 +5585,7 @@ mod tests {
     /// returned to the caller so startup logs it instead of discarding it.
     #[test]
     fn startup_reports_focus_failure_but_keeps_the_shown_window_usable() {
-        let window = TestWindowStartupTarget::new(
-            Ok(()),
-            Err("native focus denied".to_string()),
-        );
+        let window = TestWindowStartupTarget::new(Ok(()), Err("native focus denied".to_string()));
 
         assert_eq!(
             present_main_window_at_startup(Some(&window)),
@@ -5585,7 +5796,10 @@ mod tests {
             parse_listening_announcement(
                 "lasterm hub listening on https://127.0.0.1:45999 (spki: AQID) (build: 5c31e75)"
             ),
-            Some(HubAnnouncement { port: 45999, spki: vec![1, 2, 3] })
+            Some(HubAnnouncement {
+                port: 45999,
+                spki: vec![1, 2, 3]
+            })
         );
     }
 
@@ -6073,7 +6287,16 @@ mod tests {
                 if reads.fetch_add(1, Ordering::SeqCst) == 1 {
                     let _ = second_read_sender.send(());
                 }
-                let end = relay_hub_ws_binary(message, &channel, 41, &mut next_sequence, &mut acknowledgements, &task_outstanding, &mut close).await;
+                let end = relay_hub_ws_binary(
+                    message,
+                    &channel,
+                    41,
+                    &mut next_sequence,
+                    &mut acknowledgements,
+                    &task_outstanding,
+                    &mut close,
+                )
+                .await;
                 if !matches!(end, HubWsRelayEnd::Closed) {
                     break;
                 }
@@ -6117,14 +6340,17 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
         let (_response_sender, response) = mpsc::channel();
-        hub_uploads().lock().unwrap().insert(
-            id,
-            test_upload(sender, response, id),
-        );
+        hub_uploads()
+            .lock()
+            .unwrap()
+            .insert(id, test_upload(sender, response, id));
 
         assert!(send_hub_upload_chunk(id, vec![1]).is_err());
         let after = hub_uploads().lock().unwrap().len();
-        assert_eq!(before, after, "a rejected chunk must release its upload slot");
+        assert_eq!(
+            before, after,
+            "a rejected chunk must release its upload slot"
+        );
     }
 
     #[test]
@@ -6179,7 +6405,9 @@ mod tests {
                     Err(error) => panic!("test hub accept failed: {error}"),
                 }
             };
-            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
             let mut bytes = Vec::new();
             let mut buffer = [0; 1024];
             loop {
@@ -6190,7 +6418,10 @@ mod tests {
                         if matches!(
                             error.kind(),
                             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                        ) => break,
+                        ) =>
+                    {
+                        break
+                    }
                     Err(error) => panic!("test hub read failed: {error}"),
                 }
             }
@@ -6214,7 +6445,9 @@ mod tests {
         assert!(error.is_request() || error.is_body() || error.is_connect());
         let received = received.join().unwrap().unwrap_or_default();
         assert!(
-            !received.windows(b"\r\n0\r\n\r\n".len()).any(|window| window == b"\r\n0\r\n\r\n"),
+            !received
+                .windows(b"\r\n0\r\n\r\n".len())
+                .any(|window| window == b"\r\n0\r\n\r\n"),
             "the server-side listener must not observe a completed empty chunked request"
         );
     }
@@ -6246,13 +6479,19 @@ mod tests {
         });
         let claim_deadline = Instant::now() + Duration::from_secs(1);
         while !upload.pipe.lock().unwrap().chunk_in_flight {
-            assert!(Instant::now() < claim_deadline, "first command did not claim the upload");
+            assert!(
+                Instant::now() < claim_deadline,
+                "first command did not claim the upload"
+            );
             std::thread::yield_now();
         }
         let error = send_hub_upload_chunk(id, vec![2])
             .expect_err("a second command must refuse instead of queueing behind the first");
         assert!(error.contains("already has a chunk in flight"));
-        assert!(first.join().unwrap().is_err(), "the intentionally full pipe times out");
+        assert!(
+            first.join().unwrap().is_err(),
+            "the intentionally full pipe times out"
+        );
     }
 
     #[test]
@@ -6279,12 +6518,18 @@ mod tests {
             });
             let claim_deadline = Instant::now() + Duration::from_secs(1);
             while !upload.pipe.lock().unwrap().chunk_in_flight {
-                assert!(Instant::now() < claim_deadline, "the chunk did not claim the upload");
+                assert!(
+                    Instant::now() < claim_deadline,
+                    "the chunk did not claim the upload"
+                );
                 std::thread::yield_now();
             }
             let terminal = std::thread::spawn(move || end_hub_upload(id, reason));
             while hub_uploads().lock().unwrap().contains_key(&id) {
-                assert!(Instant::now() < claim_deadline, "the terminal transition did not win");
+                assert!(
+                    Instant::now() < claim_deadline,
+                    "the terminal transition did not win"
+                );
                 std::thread::yield_now();
             }
 
@@ -6297,14 +6542,23 @@ mod tests {
             let mut bytes = [0; 1];
             assert_eq!(body.read(&mut bytes).unwrap(), 1);
             assert_eq!(bytes, [0]);
-            assert!(accepted_chunk.join().unwrap().is_ok(), "the admitted chunk enters the body pipe");
+            assert!(
+                accepted_chunk.join().unwrap().is_ok(),
+                "the admitted chunk enters the body pipe"
+            );
             assert_eq!(body.read(&mut bytes).unwrap(), 1);
             assert_eq!(bytes, [1], "no terminal reason discards accepted data");
-            assert!(terminal.join().unwrap().is_some(), "one terminal call ends the upload");
+            assert!(
+                terminal.join().unwrap().is_some(),
+                "one terminal call ends the upload"
+            );
             if completes {
                 assert_eq!(body.read(&mut bytes).unwrap(), 0);
             } else {
-                assert_eq!(body.read(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+                assert_eq!(
+                    body.read(&mut bytes).unwrap_err().kind(),
+                    std::io::ErrorKind::Interrupted
+                );
             }
         }
     }
@@ -6315,10 +6569,10 @@ mod tests {
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel(1);
         let (_response_sender, response) = mpsc::channel();
-        hub_uploads().lock().unwrap().insert(
-            id,
-            test_upload(sender, response, id),
-        );
+        hub_uploads()
+            .lock()
+            .unwrap()
+            .insert(id, test_upload(sender, response, id));
 
         expire_hub_upload(id);
         assert_eq!(hub_uploads().lock().unwrap().len(), before);
@@ -6335,7 +6589,11 @@ mod tests {
             deadlines.insert(upload_id);
             deadlines.remove(upload_id);
         }
-        assert_eq!(deadlines.entry_count(), 0, "finished uploads retain no timer identity");
+        assert_eq!(
+            deadlines.entry_count(),
+            0,
+            "finished uploads retain no timer identity"
+        );
     }
 
     #[test]
@@ -6345,15 +6603,27 @@ mod tests {
         let identity = test_identity(4, 7);
 
         accept_hub_ws_ack(&sender, &outstanding, identity.clone());
-        assert!(receiver.try_recv().is_err(), "an early ACK must be discarded");
+        assert!(
+            receiver.try_recv().is_err(),
+            "an early ACK must be discarded"
+        );
 
         *outstanding.lock().unwrap() = Some(identity.clone());
         accept_hub_ws_ack(&sender, &outstanding, test_identity(4, 8));
-        assert!(receiver.try_recv().is_err(), "another frame's ACK must be discarded");
+        assert!(
+            receiver.try_recv().is_err(),
+            "another frame's ACK must be discarded"
+        );
         accept_hub_ws_ack(&sender, &outstanding, identity);
         accept_hub_ws_ack(&sender, &outstanding, test_identity(4, 7));
-        assert!(receiver.try_recv().is_ok(), "the outstanding frame gets one ACK");
-        assert!(receiver.try_recv().is_err(), "a duplicate ACK must be discarded");
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the outstanding frame gets one ACK"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "a duplicate ACK must be discarded"
+        );
     }
 
     #[test]
@@ -6366,13 +6636,28 @@ mod tests {
         };
 
         accept_relay_response_ack(&acknowledgement, &test_identity(3, 6));
-        assert!(receiver.try_recv().is_err(), "a premature sequence is inert");
-        accept_relay_response_ack(&acknowledgement, &RelayFrameIdentity { acknowledgement_token: [8; 16], ..test_identity(3, 7) });
-        assert!(receiver.try_recv().is_err(), "an unpublished token cannot earn credit");
+        assert!(
+            receiver.try_recv().is_err(),
+            "a premature sequence is inert"
+        );
+        accept_relay_response_ack(
+            &acknowledgement,
+            &RelayFrameIdentity {
+                acknowledgement_token: [8; 16],
+                ..test_identity(3, 7)
+            },
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "an unpublished token cannot earn credit"
+        );
         accept_relay_response_ack(&acknowledgement, &test_identity(3, 7));
         accept_relay_response_ack(&acknowledgement, &test_identity(3, 7));
         assert_eq!(receiver.try_recv(), Ok(false), "one frame receives one ACK");
-        assert!(receiver.try_recv().is_err(), "a duplicate ACK cannot block or queue");
+        assert!(
+            receiver.try_recv().is_err(),
+            "a duplicate ACK cannot block or queue"
+        );
     }
 
     #[test]
@@ -6398,7 +6683,11 @@ mod tests {
             RELAY_RESPONSE_DATA_FRAME,
             b"frame",
         ));
-        assert_eq!(receiver.try_recv(), Ok(false), "a synchronous acknowledgement earns the installed credit");
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(false),
+            "a synchronous acknowledgement earns the installed credit"
+        );
     }
 
     #[test]
@@ -6410,10 +6699,16 @@ mod tests {
             let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
             let (sender, _receiver) = mpsc::sync_channel(2);
             let (_response_sender, response) = mpsc::channel();
-            hub_uploads().lock().unwrap().insert(id, test_upload(sender, response, id));
+            hub_uploads()
+                .lock()
+                .unwrap()
+                .insert(id, test_upload(sender, response, id));
             let first = std::thread::spawn(move || end_hub_upload(id, reasons[0]).is_some());
             let second = std::thread::spawn(move || end_hub_upload(id, reasons[1]).is_some());
-            assert_eq!(usize::from(first.join().unwrap()) + usize::from(second.join().unwrap()), 1);
+            assert_eq!(
+                usize::from(first.join().unwrap()) + usize::from(second.join().unwrap()),
+                1
+            );
             assert!(!hub_uploads().lock().unwrap().contains_key(&id));
         }
     }
@@ -6436,19 +6731,29 @@ mod tests {
 
             let (sender, _receiver) = mpsc::sync_channel(1);
             let (_response_sender, response) = mpsc::channel();
-            hub_uploads().lock().unwrap().insert(id, test_upload(sender, response, id));
+            hub_uploads()
+                .lock()
+                .unwrap()
+                .insert(id, test_upload(sender, response, id));
             assert!(end_hub_upload(id, HubUploadEndReason::Cancel).is_some());
             assert!(active_hub_relays().lock().unwrap().contains(&id));
         }
-        assert!(reserve_hub_relay().is_err(), "cancelled workers still occupy the bounded admission");
-        assert!(ids.iter().all(|id| active_hub_relays().lock().unwrap().contains(id)));
+        assert!(
+            reserve_hub_relay().is_err(),
+            "cancelled workers still occupy the bounded admission"
+        );
+        assert!(ids
+            .iter()
+            .all(|id| active_hub_relays().lock().unwrap().contains(id)));
         for release in releases {
             release.send(()).unwrap();
         }
         for worker in workers {
             worker.join().unwrap();
         }
-        assert!(ids.iter().all(|id| !active_hub_relays().lock().unwrap().contains(id)));
+        assert!(ids
+            .iter()
+            .all(|id| !active_hub_relays().lock().unwrap().contains(id)));
     }
 
     #[test]
@@ -6463,20 +6768,34 @@ mod tests {
 
     #[test]
     fn response_ack_timeout_is_reported_to_the_waiting_webview() {
-        assert!(relay_response_ack_failure_message(mpsc::RecvTimeoutError::Timeout)
-            .contains("acknowledgement timed out"));
-        assert!(relay_response_ack_failure_message(mpsc::RecvTimeoutError::Disconnected)
-            .contains("acknowledgement stopped"));
+        assert!(
+            relay_response_ack_failure_message(mpsc::RecvTimeoutError::Timeout)
+                .contains("acknowledgement timed out")
+        );
+        assert!(
+            relay_response_ack_failure_message(mpsc::RecvTimeoutError::Disconnected)
+                .contains("acknowledgement stopped")
+        );
     }
 
     #[test]
     fn relay_refuses_caller_supplied_framing_and_connection_headers() {
-        for header in ["Content-Length", "Transfer-Encoding", "Connection", "Upgrade"] {
-            let error = validate_relay_request_headers(&[(header.to_string(), "value".to_string())])
-                .expect_err("the native request boundary must own HTTP framing");
+        for header in [
+            "Content-Length",
+            "Transfer-Encoding",
+            "Connection",
+            "Upgrade",
+        ] {
+            let error =
+                validate_relay_request_headers(&[(header.to_string(), "value".to_string())])
+                    .expect_err("the native request boundary must own HTTP framing");
             assert!(error.contains(header), "error: {error}");
         }
-        assert!(validate_relay_request_headers(&[("Content-Type".to_string(), "application/json".to_string())]).is_ok());
+        assert!(validate_relay_request_headers(&[(
+            "Content-Type".to_string(),
+            "application/json".to_string()
+        )])
+        .is_ok());
     }
 
     #[test]
@@ -6615,7 +6934,10 @@ mod tests {
             if let Some(identity) = outstanding.lock().unwrap().clone() {
                 break identity;
             }
-            assert!(Instant::now() < deadline, "published frame did not earn its credit");
+            assert!(
+                Instant::now() < deadline,
+                "published frame did not earn its credit"
+            );
             std::thread::yield_now();
         };
         ack_sender.try_send(identity).unwrap();
@@ -6657,7 +6979,16 @@ mod tests {
                 if reads.fetch_add(1, Ordering::SeqCst) == 1 {
                     let _ = second_read_sender.send(());
                 }
-                let end = relay_hub_ws_binary(message, &channel, 41, &mut next_sequence, &mut acknowledgements, &task_outstanding, &mut close).await;
+                let end = relay_hub_ws_binary(
+                    message,
+                    &channel,
+                    41,
+                    &mut next_sequence,
+                    &mut acknowledgements,
+                    &task_outstanding,
+                    &mut close,
+                )
+                .await;
                 if !matches!(end, HubWsRelayEnd::Closed) {
                     break;
                 }
@@ -6673,7 +7004,10 @@ mod tests {
                 if let Some(identity) = outstanding.lock().unwrap().clone() {
                     break identity;
                 }
-                assert!(Instant::now() < deadline, "published frame did not earn its credit");
+                assert!(
+                    Instant::now() < deadline,
+                    "published frame did not earn its credit"
+                );
                 std::thread::yield_now();
             };
             ack_sender

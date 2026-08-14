@@ -19,7 +19,8 @@ allow = [
 	"CDLA-Permissive-2.0",
 ]
 exceptions = [
-	# Our own application crate — AGPL by decision (#78).
+	# Our own application crates — AGPL by decision (#78).
 	{ name = "lasterm-desktop", allow = ["AGPL-3.0-only"] },
 	{ name = "lasterm-process-lock", allow = ["AGPL-3.0-only"] },
+	{ name = "lasterm-protected-fs", allow = ["AGPL-3.0-only"] },
 ]

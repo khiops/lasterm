@@ -58,7 +58,14 @@ export function hubFetch(input: string | URL, init?: HubFetchInit): Promise<Resp
 }
 
 async function relayHubFetch(input: string | URL, init?: HubFetchInit): Promise<Response> {
-	const request = new Request(input, init);
+	// Fetch requires duplex when a request body is a ReadableStream.  Chromium
+	// accepts neither an omitted value nor a late declaration after construction.
+	const request = new Request(
+		input,
+		init?.body instanceof ReadableStream
+			? ({ ...init, duplex: "half" } as RequestInit & { duplex: "half" })
+			: init,
+	);
 	const endpoint = relayEndpoint(request.url);
 	const relayRequest: RelayRequest = {
 		method: request.method,

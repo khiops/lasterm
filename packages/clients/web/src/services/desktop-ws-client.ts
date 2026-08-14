@@ -39,7 +39,8 @@ export class DesktopWsClient implements IWsClient {
 	private sendInFlight = false;
 
 	async connect(_url: string): Promise<void> {
-		await this._connect(_url);
+		const connection = await this._connect(_url);
+		if (!connection.connected) throw new Error("WebSocket connection was superseded");
 	}
 
 	private async _connect(url: string): Promise<{ connected: boolean; generation: number }> {
@@ -202,7 +203,7 @@ export class DesktopWsClient implements IWsClient {
 		this.pendingFrame = undefined;
 		this._resetMessage();
 		this.pendingSends = [];
-		for (const listener of this.disconnectListeners) listener();
+		this._notify(this.disconnectListeners);
 		this._scheduleReconnect();
 	}
 
@@ -226,7 +227,7 @@ export class DesktopWsClient implements IWsClient {
 					console.error("[DesktopWsClient] Failed to close relay:", closeError),
 				);
 		}
-		for (const listener of this.disconnectListeners) listener();
+		this._notify(this.disconnectListeners);
 		this._scheduleReconnect();
 	}
 
@@ -281,7 +282,7 @@ export class DesktopWsClient implements IWsClient {
 					this.relayId !== null &&
 					this._isCurrentRelay(this.relayId, connection.generation)
 				) {
-					for (const listener of this.reconnectListeners) listener();
+					this._notify(this.reconnectListeners);
 				}
 			} catch {
 				this._scheduleReconnect();
@@ -300,9 +301,32 @@ export class DesktopWsClient implements IWsClient {
 		this.messageBytes = 0;
 	}
 
+	/** A consumer exception must not interrupt the reconnect state machine. */
+	private _notify(listeners: Set<LifecycleListener>): void {
+		for (const listener of listeners) {
+			try {
+				listener();
+			} catch (error) {
+				console.error("[DesktopWsClient] Lifecycle listener failed:", error);
+			}
+		}
+	}
+
 	private _dispatch(msg: ProtocolMessage): void {
-		for (const listener of this.listeners.get(msg.type) ?? []) listener(msg);
-		for (const listener of this.listeners.get("*") ?? []) listener(msg);
+		for (const listener of this.listeners.get(msg.type) ?? []) {
+			try {
+				listener(msg);
+			} catch (error) {
+				console.error("[DesktopWsClient] Message listener failed:", error);
+			}
+		}
+		for (const listener of this.listeners.get("*") ?? []) {
+			try {
+				listener(msg);
+			} catch (error) {
+				console.error("[DesktopWsClient] Message listener failed:", error);
+			}
+		}
 	}
 }
 

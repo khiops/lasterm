@@ -10,6 +10,7 @@ type PendingRelaySend = {
 	generation: number;
 	payload: ArrayBuffer;
 };
+type ConnectionState = "connected" | "closed" | "superseded";
 
 const MAX_RELAYED_MESSAGE_BYTES = 512 * 1024;
 const MAX_PENDING_RELAY_SENDS = 2;
@@ -31,6 +32,8 @@ export class DesktopWsClient implements IWsClient {
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private reconnectAttempt = 0;
 	private connectionGeneration = 0;
+	private pendingConnectionGenerations = new Set<number>();
+	private connectionInvalidations = new Map<number, Exclude<ConnectionState, "connected">>();
 	private pendingFrame: ArrayBuffer | RelayEvent | undefined;
 	private messageParts: Uint8Array[] = [];
 	private messageBytes = 0;
@@ -40,13 +43,19 @@ export class DesktopWsClient implements IWsClient {
 
 	async connect(_url: string): Promise<void> {
 		const connection = await this._connect(_url);
-		if (!connection.connected) throw new Error("WebSocket connection was superseded");
+		if (connection.state === "connected") return;
+		if (connection.state === "superseded") {
+			throw new Error("WebSocket connection was superseded by a newer connect");
+		}
+		throw new Error("WebSocket connection closed before it was established");
 	}
 
-	private async _connect(url: string): Promise<{ connected: boolean; generation: number }> {
+	private async _connect(url: string): Promise<{ state: ConnectionState; generation: number }> {
 		const { Channel, invoke } = await import("@tauri-apps/api/core");
 		this._cancelReconnect();
+		this._invalidatePendingConnections("superseded");
 		const generation = ++this.connectionGeneration;
+		this.pendingConnectionGenerations.add(generation);
 		const previousRelayId = this.relayId;
 		// A new connect supersedes the old receive callback immediately. Leaving
 		// the old id live until the new native dial succeeds makes a failed
@@ -65,16 +74,27 @@ export class DesktopWsClient implements IWsClient {
 			this._drain();
 		});
 
-		const relayId = String(await invoke<string>("relay_hub_ws_connect", { stream }));
-		if (generation !== this.connectionGeneration) {
-			void invoke("relay_hub_ws_close", { relayId }).catch(() => undefined);
-			return { connected: false, generation };
+		try {
+			const relayId = String(await invoke<string>("relay_hub_ws_connect", { stream }));
+			if (generation !== this.connectionGeneration) {
+				void invoke("relay_hub_ws_close", { relayId }).catch(() => undefined);
+				return {
+					state: this.connectionInvalidations.get(generation) ?? "superseded",
+					generation,
+				};
+			}
+			this.relayId = relayId;
+			this.reconnectUrl = url;
+			this.reconnectAttempt = 0;
+			this._drain();
+			return {
+				state: this._isCurrentRelay(relayId, generation) ? "connected" : "closed",
+				generation,
+			};
+		} finally {
+			this.pendingConnectionGenerations.delete(generation);
+			this.connectionInvalidations.delete(generation);
 		}
-		this.relayId = relayId;
-		this.reconnectUrl = url;
-		this.reconnectAttempt = 0;
-		this._drain();
-		return { connected: true, generation };
 	}
 
 	send(msg: ProtocolMessage): void {
@@ -110,6 +130,7 @@ export class DesktopWsClient implements IWsClient {
 
 	close(): void {
 		this.reconnectUrl = null;
+		this._invalidatePendingConnections("closed");
 		this.connectionGeneration++;
 		if (this.reconnectTimer !== null) {
 			clearTimeout(this.reconnectTimer);
@@ -277,7 +298,7 @@ export class DesktopWsClient implements IWsClient {
 			try {
 				const connection = await this._connect(url);
 				if (
-					connection.connected &&
+					connection.state === "connected" &&
 					this.reconnectUrl === url &&
 					this.relayId !== null &&
 					this._isCurrentRelay(this.relayId, connection.generation)
@@ -294,6 +315,14 @@ export class DesktopWsClient implements IWsClient {
 		if (this.reconnectTimer === null) return;
 		clearTimeout(this.reconnectTimer);
 		this.reconnectTimer = null;
+	}
+
+	private _invalidatePendingConnections(reason: Exclude<ConnectionState, "connected">): void {
+		for (const generation of this.pendingConnectionGenerations) {
+			if (!this.connectionInvalidations.has(generation)) {
+				this.connectionInvalidations.set(generation, reason);
+			}
+		}
 	}
 
 	private _resetMessage(): void {

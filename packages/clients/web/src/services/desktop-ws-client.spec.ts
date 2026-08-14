@@ -305,6 +305,55 @@ describe("DesktopWsClient", () => {
 		expect(ipc.invoke).toHaveBeenCalledWith("relay_hub_ws_close", { relayId: "41" });
 	});
 
+	it("rejects when the hub closes immediately after its handshake", async () => {
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command === "relay_hub_ws_connect") {
+				ipc.callback?.({ event: "closed" });
+				return Promise.resolve(41);
+			}
+			return Promise.resolve();
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+
+		await expect(client.connect("ws://127.0.0.1:4100/ws")).rejects.toThrow(
+			"WebSocket connection closed before it was established",
+		);
+
+		expect(client.isConnected).toBe(false);
+		client.close();
+	});
+
+	it("reports a superseded connection attempt differently from an immediate close", async () => {
+		let resolveFirst: ((relayId: number) => void) | undefined;
+		let connects = 0;
+		ipc.invoke.mockImplementation((command: string) => {
+			if (command !== "relay_hub_ws_connect") return Promise.resolve();
+			connects++;
+			if (connects === 1) return new Promise<number>((resolve) => (resolveFirst = resolve));
+			return Promise.resolve(42);
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const client = createWsClient();
+
+		const superseded = client.connect("ws://127.0.0.1:4100/ws");
+		await vi.waitFor(() => expect(resolveFirst).toBeTypeOf("function"));
+		await client.connect("ws://127.0.0.1:4100/ws");
+		resolveFirst?.(41);
+
+		await expect(superseded).rejects.toThrow(
+			"WebSocket connection was superseded by a newer connect",
+		);
+		expect(client.isConnected).toBe(true);
+		client.close();
+	});
+
 	it("does not emit reconnect after close supersedes an in-flight reconnect", async () => {
 		vi.useFakeTimers();
 		let calls = 0;

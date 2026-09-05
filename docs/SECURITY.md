@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-03-02
+> Last updated: 2026-09-05
 
 ## 1. Threat Model
 
@@ -116,9 +116,11 @@ equivalent ACL validation is #200.
    - If not a regular file, including a symlink: HARD FAIL
    - Expected: 0600 (-rw-------)
 
-3. Check data directory permissions
-   - If world-readable: WARN in logs
-   - Expected: 0700 (drwx------)
+3. Check data directory permissions — NOT IMPLEMENTED
+   - Nothing inspects the state directory holding meta.db and spool.db. The hub's
+     only permission checks are the two above, both in `auth.ts`
+   - Expected once it exists: 0700 (drwx------)
+   - #200
 
 4. Verify auth.json contains valid token (64 hex chars)
    - If missing: generate one

@@ -8,7 +8,9 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use std::collections::HashSet;
-use std::fs::{self, File};
+#[cfg(not(any(unix, windows)))]
+use std::fs;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -51,15 +53,21 @@ struct TlsIdentity {
 }
 
 /// Creates or reuses the generated identity whose private key and certificate
-/// cache have fixed, distinct names inside `identity_directory`. A leaf is
-/// reissued only when it cannot safely serve that key anymore.
+/// cache have fixed, distinct names inside the absolute `identity_directory`.
+/// A leaf is reissued only when it cannot safely serve that key anymore.
 ///
 /// The returned object contains only public certificate material. In
 /// particular, no private key is returned or converted to a JavaScript string.
 #[napi]
 pub fn generate_tls_identity(identity_directory: String) -> napi::Result<GeneratedTlsIdentity> {
-    let identity_directory = Path::new(&identity_directory);
-    let identity = generate_identity(identity_directory).map_err(|error| {
+    let identity_directory = PathBuf::from(identity_directory);
+    if !identity_directory.is_absolute() {
+        return Err(napi::Error::from_reason(format!(
+            "cannot generate hub TLS identity in {}: identity directory must be absolute",
+            identity_directory.display()
+        )));
+    }
+    let (identity, key_path) = generate_tls_identity_at(&identity_directory).map_err(|error| {
         napi::Error::from_reason(format!(
             "cannot generate hub TLS identity in {}: {error}",
             identity_directory.display()
@@ -69,12 +77,26 @@ pub fn generate_tls_identity(identity_directory: String) -> napi::Result<Generat
     Ok(GeneratedTlsIdentity {
         certificate_pem: identity.certificate_pem,
         spki: Buffer::from(identity.spki),
-        key_path: identity_directory
-            .join(GENERATED_KEY_NAME)
-            .into_os_string()
-            .into_string()
-            .map_err(|_| napi::Error::from_reason("generated private-key path is not UTF-8"))?,
+        key_path,
     })
+}
+
+/// Prevalidates the string returned by N-API before any durable identity work.
+/// Keeping this beside the generation call makes a reported conversion failure
+/// transactional: no key or certificate has been created yet.
+fn generate_tls_identity_at(identity_directory: &Path) -> io::Result<(TlsIdentity, String)> {
+    let key_path = identity_directory
+        .join(GENERATED_KEY_NAME)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "generated private-key path is not UTF-8",
+            )
+        })?;
+    let identity = generate_identity(identity_directory)?;
+    Ok((identity, key_path))
 }
 
 fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
@@ -88,7 +110,7 @@ fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
         // even though its directory sync failed. Do not serve that cache until
         // this start has established the missing durability guarantee.
         #[cfg(unix)]
-        sync_parent(certificate_path.parent().unwrap_or_else(|| Path::new(".")))?;
+        sync_parent_for(&certificate_path)?;
         return Ok(TlsIdentity {
             certificate_pem,
             spki: key_pair.public_key_der(),
@@ -136,8 +158,8 @@ fn load_usable_certificate(
     // A certificate from an unsafe parent is never a cache entry we may use or
     // replace. A regular Unix cache that cannot be read is only unusable and
     // can be replaced without following its path. On Windows, a non-reparse
-    // regular cache is likewise unusable, but replacing it remains subject to
-    // the destination's delete/ACL permissions (the MoveFileExW contract).
+    // regular cache is likewise unusable, but pathname replacement remains
+    // subject to the destination's delete/ACL permissions.
     check_parent_directory(certificate_path)?;
     let mut file = match open_key_file(
         certificate_path,
@@ -276,19 +298,18 @@ fn certificate_extensions_match_profile(
     }) && seen.len() == 5
 }
 
+#[cfg(unix)]
 fn unreadable_certificate_is_replaceable(certificate_path: &Path) -> io::Result<bool> {
-    let metadata = match fs::symlink_metadata(certificate_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+    let (parent, leaf) = lasterm_protected_fs::open_parent(certificate_path)?;
+    let metadata = match parent.inspect_existing(&leaf)? {
+        Some(metadata) => metadata,
+        None => return Ok(false),
     };
-    if !metadata.file_type().is_file() {
+    if !metadata.is_file() {
         return Ok(false);
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-
         // SAFETY: geteuid has no preconditions and reads only the caller's uid.
         let current_user = unsafe { libc::geteuid() };
         Ok(metadata.uid() == current_user && metadata.mode() & 0o022 == 0)
@@ -304,6 +325,24 @@ fn unreadable_certificate_is_replaceable(certificate_path: &Path) -> io::Result<
     {
         Ok(true)
     }
+}
+
+#[cfg(windows)]
+fn unreadable_certificate_is_replaceable(certificate_path: &Path) -> io::Result<bool> {
+    // Windows has no handle-relative descent. Ancestor substitution is not
+    // prevented here; the protected leaf is inspected through the crate's
+    // one-handle, FILE_FLAG_OPEN_REPARSE_POINT boundary.
+    let (parent, leaf) = lasterm_protected_fs::open_parent(certificate_path)?;
+    let metadata = match parent.inspect_existing(&leaf)? {
+        Some(metadata) => metadata,
+        None => return Ok(false),
+    };
+    Ok(metadata.is_file())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unreadable_certificate_is_replaceable(_certificate_path: &Path) -> io::Result<bool> {
+    Ok(true)
 }
 
 fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io::Result<()> {
@@ -325,20 +364,38 @@ fn write_certificate_file(certificate_path: &Path, certificate_pem: &str) -> io:
             temporary_file.sync_all()?;
             Ok(())
         })();
-        drop(temporary_file);
         if let Err(error) = write_result {
+            drop(temporary_file);
             return Err(cleanup_temporary_file(
                 &temporary_path,
                 TemporaryFile::Certificate,
                 error,
             ));
         }
+        drop(temporary_file);
         return publish_certificate(&temporary_path, certificate_path);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique temporary certificate file",
     ))
+}
+
+/// Atomic replacement and hard-link installation both require sibling paths.
+/// Compare lexical parents before opening either one, so a caller cannot cause
+/// a destination leaf to be resolved under the temporary file's directory.
+fn require_same_parent(temporary_path: &Path, destination_path: &Path) -> io::Result<()> {
+    match (temporary_path.parent(), destination_path.parent()) {
+        (Some(temporary_parent), Some(destination_parent))
+            if temporary_parent == destination_parent =>
+        {
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "temporary and destination identity files must share a parent directory",
+        )),
+    }
 }
 
 #[cfg(unix)]
@@ -348,8 +405,19 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
     // support it: a successful return means the file and namespace update were
     // both synced. If that sync fails after rename, the new complete leaf may
     // already be visible, but it is never reported as a committed publication.
-    match fs::rename(temporary_path, certificate_path) {
-        Ok(()) => sync_parent(certificate_path.parent().unwrap_or_else(|| Path::new("."))),
+    let publication = (|| -> io::Result<lasterm_protected_fs::Directory> {
+        require_same_parent(temporary_path, certificate_path)?;
+        let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
+        let certificate = lasterm_protected_fs::LeafName::new(
+            certificate_path
+                .file_name()
+                .expect("destination with a parent has a final component"),
+        )?;
+        parent.rename(&temporary, &certificate, true)?;
+        Ok(parent)
+    })();
+    match publication {
+        Ok(parent) => sync_directory(&parent),
         Err(error) => Err(cleanup_temporary_file(
             temporary_path,
             TemporaryFile::Certificate,
@@ -360,47 +428,18 @@ fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Re
 
 #[cfg(windows)]
 fn publish_certificate(temporary_path: &Path, certificate_path: &Path) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let temporary_wide = wide_path(temporary_path, "temporary certificate path")?;
-    let certificate_wide = wide_path(certificate_path, "certificate path")?;
-    // MoveFileExW documents WRITE_THROUGH as waiting until the move is flushed
-    // to disk. REPLACE_EXISTING keeps the old complete cache in place if the
-    // move itself fails, so there is no directory FlushFileBuffers step after a
-    // successful replacement that could turn success into an error.
-    if unsafe {
-        MoveFileExW(
-            temporary_wide.as_ptr(),
-            certificate_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        let error = io::Error::last_os_error();
-        return Err(cleanup_temporary_file(
-            temporary_path,
-            TemporaryFile::Certificate,
-            error,
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn wide_path(path: &Path, description: &str) -> io::Result<Vec<u16>> {
-    use std::os::windows::ffi::OsStrExt;
-
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    if wide.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{description} contains an interior NUL"),
-        ));
-    }
-    wide.push(0);
-    Ok(wide)
+    let publication = (|| -> io::Result<()> {
+        require_same_parent(temporary_path, certificate_path)?;
+        let (parent, temporary) = lasterm_protected_fs::open_parent(temporary_path)?;
+        let certificate = lasterm_protected_fs::LeafName::new(
+            certificate_path
+                .file_name()
+                .expect("destination with a parent has a final component"),
+        )?;
+        parent.rename(&temporary, &certificate, true)
+    })();
+    publication
+        .map_err(|error| cleanup_temporary_file(temporary_path, TemporaryFile::Certificate, error))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -461,9 +500,8 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
             temporary_file.sync_all()?;
             Ok(())
         })();
-        drop(temporary_file);
-
         if let Err(error) = write_result {
+            drop(temporary_file);
             return Err(cleanup_temporary_file(
                 &temporary_path,
                 TemporaryFile::PrivateKey,
@@ -471,12 +509,36 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
             ));
         }
 
-        match fs::hard_link(&temporary_path, key_path) {
+        #[cfg(unix)]
+        let install_result = (|| -> io::Result<()> {
+            require_same_parent(&temporary_path, key_path)?;
+            let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
+            let key = lasterm_protected_fs::LeafName::new(
+                key_path
+                    .file_name()
+                    .expect("destination with a parent has a final component"),
+            )?;
+            parent.hard_link(&temporary, &key)
+        })();
+        #[cfg(windows)]
+        let install_result = (|| -> io::Result<()> {
+            require_same_parent(&temporary_path, key_path)?;
+            let (parent, temporary) = lasterm_protected_fs::open_parent(&temporary_path)?;
+            let key = lasterm_protected_fs::LeafName::new(
+                key_path
+                    .file_name()
+                    .expect("destination with a parent has a final component"),
+            )?;
+            parent.hard_link(&temporary, &key)
+        })();
+        #[cfg(not(any(unix, windows)))]
+        let install_result = fs::hard_link(&temporary_path, key_path);
+        match install_result {
             Ok(()) => {
                 // The final name becomes visible only after the fully written,
-                // owner-only temporary file is synced. Hard links never replace
-                // an existing destination, so a concurrent creator cannot be
-                // silently overwritten.
+                // owner-only temporary file is synced. Publication never
+                // replaces an existing destination, so a concurrent creator
+                // cannot be silently overwritten.
                 if let Err(error) =
                     remove_temporary_file(&temporary_path, TemporaryFile::PrivateKey)
                 {
@@ -533,7 +595,20 @@ fn remove_temporary_file(path: &Path, file: TemporaryFile) -> io::Result<()> {
             "injected temporary identity-file cleanup failure",
         ));
     }
-    fs::remove_file(path)
+    #[cfg(unix)]
+    {
+        let (parent, leaf) = lasterm_protected_fs::open_parent(path)?;
+        parent.remove_file(&leaf)
+    }
+    #[cfg(windows)]
+    {
+        let (parent, leaf) = lasterm_protected_fs::open_parent(path)?;
+        parent.remove_file(&leaf)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        fs::remove_file(path)
+    }
 }
 
 fn cleanup_temporary_file(
@@ -579,38 +654,26 @@ enum FilePolicy {
 
 #[cfg(unix)]
 fn open_key_file(path: &Path, mode: OpenKeyMode, policy: FilePolicy) -> io::Result<Option<File>> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
 
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    let flags = match mode {
-        OpenKeyMode::Existing => libc::O_RDONLY,
-        OpenKeyMode::CreateNew => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-    } | libc::O_CLOEXEC
-        | libc::O_NOFOLLOW;
-    // SAFETY: path is a NUL-terminated CString, flags are valid open flags, and
-    // the creation mode is used only when O_CREAT is set. O_NOFOLLOW prevents a
-    // planted symlink from redirecting private-key reads or writes; O_EXCL makes
-    // each temporary key file exclusive to this call.
-    let fd = unsafe { libc::open(c_path.as_ptr(), flags, 0o600) };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        if matches!(mode, OpenKeyMode::Existing) && error.kind() == io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        return Err(error);
-    }
-    // SAFETY: libc::open returned a valid owned descriptor. File closes it on
-    // every return path, including failed metadata validation below.
-    let file = unsafe { File::from_raw_fd(fd) };
+    let (parent, leaf) = lasterm_protected_fs::open_parent(path)?;
+    let file = match mode {
+        OpenKeyMode::Existing => match parent.open_existing(&leaf) {
+            Ok(Some(file)) => file,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(error),
+        },
+        OpenKeyMode::CreateNew => parent.create_new(&leaf)?,
+    };
     #[cfg(test)]
     if matches!(mode, OpenKeyMode::CreateNew)
         && FAIL_NEXT_TEMPORARY_FILE_SETUP.with(|fail| fail.replace(false))
     {
         drop(file);
         return Err(open_file_setup_error(
-            path,
+            &parent,
+            &leaf,
             mode,
             io::Error::other("injected temporary-file setup failure"),
         ));
@@ -622,20 +685,20 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, policy: FilePolicy) -> io::Resu
         if chmod_result != 0 {
             let error = io::Error::last_os_error();
             drop(file);
-            return Err(open_file_setup_error(path, mode, error));
+            return Err(open_file_setup_error(&parent, &leaf, mode, error));
         }
     }
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
         Err(error) => {
             drop(file);
-            return Err(open_file_setup_error(path, mode, error));
+            return Err(open_file_setup_error(&parent, &leaf, mode, error));
         }
     };
     if !metadata.is_file() {
         let error = io::Error::other("refusing identity path that is not a regular file");
         drop(file);
-        return Err(open_file_setup_error(path, mode, error));
+        return Err(open_file_setup_error(&parent, &leaf, mode, error));
     }
     // SAFETY: geteuid has no preconditions and reads only the caller's uid.
     let current_user = unsafe { libc::geteuid() };
@@ -645,7 +708,7 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, policy: FilePolicy) -> io::Resu
             "identity file is not owned by the current user",
         );
         drop(file);
-        return Err(open_file_setup_error(path, mode, error));
+        return Err(open_file_setup_error(&parent, &leaf, mode, error));
     }
     let unsafe_permissions = match policy {
         FilePolicy::PrivateKey => metadata.mode() & 0o077 != 0,
@@ -659,7 +722,7 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, policy: FilePolicy) -> io::Resu
             "identity file is writable by group or other",
         );
         drop(file);
-        return Err(open_file_setup_error(path, mode, error));
+        return Err(open_file_setup_error(&parent, &leaf, mode, error));
     }
     Ok(Some(file))
 }
@@ -668,8 +731,8 @@ fn open_key_file(path: &Path, mode: OpenKeyMode, policy: FilePolicy) -> io::Resu
 fn check_parent_directory(key_path: &Path) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let parent = key_path.parent().unwrap_or_else(|| Path::new("."));
-    let metadata = fs::metadata(parent)?;
+    let (parent, _) = lasterm_protected_fs::open_parent(key_path)?;
+    let metadata = parent.metadata()?;
     if !metadata.is_dir() {
         return Err(io::Error::other("private-key parent is not a directory"));
     }
@@ -692,139 +755,104 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn open_key_file(path: &Path, mode: OpenKeyMode, _policy: FilePolicy) -> io::Result<Option<File>> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows_sys::Win32::Foundation::{
-        SetHandleInformation, GENERIC_READ, GENERIC_WRITE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE,
+    let (parent, leaf) = lasterm_protected_fs::open_parent(path)?;
+    let file = match mode {
+        OpenKeyMode::Existing => match parent.open_existing(&leaf)? {
+            Some(file) => file,
+            None => return Ok(None),
+        },
+        OpenKeyMode::CreateNew => parent.create_new(&leaf)?,
     };
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
-    };
-
-    let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
-    if wide_path.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private-key path contains an interior NUL",
-        ));
-    }
-    wide_path.push(0);
-    let disposition = match mode {
-        OpenKeyMode::Existing => OPEN_EXISTING,
-        OpenKeyMode::CreateNew => CREATE_NEW,
-    };
-    let desired_access = match mode {
-        OpenKeyMode::Existing => GENERIC_READ,
-        OpenKeyMode::CreateNew => GENERIC_READ | GENERIC_WRITE,
-    };
-    // SAFETY: wide_path is NUL-terminated and lives for the call; null security
-    // attributes and template handles are permitted. FILE_FLAG_OPEN_REPARSE_POINT
-    // opens the final component itself so the tag check below can reject a
-    // symlink or junction before it redirects the key.
-    let handle = unsafe {
-        CreateFileW(
-            wide_path.as_ptr(),
-            desired_access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            disposition,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        let error = io::Error::last_os_error();
-        if matches!(mode, OpenKeyMode::Existing) && error.kind() == io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        return Err(error);
-    }
-    // SAFETY: CreateFileW returned a valid owned handle. File closes it on all
-    // returns below, including reparse-point and inheritability failures.
-    let file = unsafe { File::from_raw_handle(handle) };
     #[cfg(test)]
     if matches!(mode, OpenKeyMode::CreateNew)
         && FAIL_NEXT_TEMPORARY_FILE_SETUP.with(|fail| fail.replace(false))
     {
         drop(file);
         return Err(open_file_setup_error(
-            path,
+            &parent,
+            &leaf,
             mode,
             io::Error::other("injected temporary-file setup failure"),
         ));
     }
-    let mut attributes = FILE_ATTRIBUTE_TAG_INFO {
-        FileAttributes: 0,
-        ReparseTag: 0,
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(file);
+            return Err(open_file_setup_error(&parent, &leaf, mode, error));
+        }
     };
-    // SAFETY: attributes is initialized writable storage of exactly the size
-    // GetFileInformationByHandleEx requires for FileAttributeTagInfo.
-    let information_ok = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileAttributeTagInfo,
-            std::ptr::from_mut(&mut attributes).cast(),
-            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-        )
-    };
-    if information_ok == 0 {
-        let error = io::Error::last_os_error();
+    if !metadata.is_file() {
+        let error = io::Error::other("refusing identity path that is not a regular file");
         drop(file);
-        return Err(open_file_setup_error(path, mode, error));
-    }
-    if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        let error = io::Error::other("refusing identity reparse point");
-        drop(file);
-        return Err(open_file_setup_error(path, mode, error));
-    }
-    // SAFETY: file owns a valid Windows handle; clearing HANDLE_FLAG_INHERIT
-    // prevents child processes from retaining access to the private key.
-    let inheritability_ok =
-        unsafe { SetHandleInformation(file.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) };
-    if inheritability_ok == 0 {
-        let error = io::Error::last_os_error();
-        drop(file);
-        return Err(open_file_setup_error(path, mode, error));
+        return Err(open_file_setup_error(&parent, &leaf, mode, error));
     }
     Ok(Some(file))
 }
 
-fn open_file_setup_error(path: &Path, mode: OpenKeyMode, creation_error: io::Error) -> io::Error {
+#[cfg(unix)]
+fn open_file_setup_error(
+    parent: &lasterm_protected_fs::Directory,
+    leaf: &lasterm_protected_fs::LeafName,
+    mode: OpenKeyMode,
+    creation_error: io::Error,
+) -> io::Error {
     if matches!(mode, OpenKeyMode::Existing) {
         return creation_error;
     }
-    match fs::remove_file(path) {
+    match parent.remove_file(leaf) {
         Ok(()) => creation_error,
         Err(error) if error.kind() == io::ErrorKind::NotFound => creation_error,
         Err(cleanup_error) => io::Error::new(
             creation_error.kind(),
             format!(
-                "temporary file creation failed: {creation_error}; could not remove {}: {cleanup_error}",
-                path.display()
+                "temporary file creation failed: {creation_error}; could not remove temporary identity file: {cleanup_error}",
             ),
         ),
     }
 }
 
+#[cfg(windows)]
+fn open_file_setup_error(
+    parent: &lasterm_protected_fs::Directory,
+    leaf: &lasterm_protected_fs::LeafName,
+    mode: OpenKeyMode,
+    creation_error: io::Error,
+) -> io::Error {
+    if matches!(mode, OpenKeyMode::Existing) {
+        return creation_error;
+    }
+    match parent.remove_file(leaf) {
+        Ok(()) => creation_error,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => creation_error,
+        Err(cleanup_error) => io::Error::new(
+            creation_error.kind(),
+            format!("temporary file creation failed: {creation_error}; could not remove temporary identity file: {cleanup_error}"),
+        ),
+    }
+}
+
 #[cfg(unix)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
+fn sync_directory(parent: &lasterm_protected_fs::Directory) -> io::Result<()> {
     #[cfg(test)]
     if FAIL_NEXT_PARENT_SYNC.with(|fail| fail.replace(false)) {
         return Err(io::Error::other("injected parent-directory sync failure"));
     }
     #[cfg(test)]
     PARENT_SYNCED.with(|synced| synced.set(true));
-    File::open(parent)?.sync_all()
+    parent.sync_all()
+}
+
+#[cfg(unix)]
+fn sync_parent_for(path: &Path) -> io::Result<()> {
+    let (parent, _) = lasterm_protected_fs::open_parent(path)?;
+    sync_directory(&parent)
 }
 
 #[cfg(windows)]
 fn check_parent_directory(key_path: &Path) -> io::Result<()> {
-    let parent = key_path.parent().unwrap_or_else(|| Path::new("."));
-    if !fs::metadata(parent)?.is_dir() {
+    let (parent, _) = lasterm_protected_fs::open_parent(key_path)?;
+    if !parent.metadata()?.is_dir() {
         return Err(io::Error::other("private-key parent is not a directory"));
     }
     // Files inherit the caller's default DACL. The process-lock sibling uses
@@ -841,6 +869,10 @@ mod tests {
         FAIL_NEXT_TEMPORARY_KEY_CLEANUP, GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME,
         VALIDITY_DAYS,
     };
+    // Its only caller is the non-UTF-8 path test, which exists on Unix alone, so
+    // importing it here makes the whole module unused on Windows.
+    #[cfg(unix)]
+    use super::generate_tls_identity_at;
     #[cfg(unix)]
     use super::{FAIL_NEXT_PARENT_SYNC, PARENT_SYNCED};
     use rcgen::{
@@ -850,6 +882,7 @@ mod tests {
     use rustls_pki_types::CertificateDer;
     use std::env;
     use std::fs::{self, create_dir};
+    use std::io;
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
     use time::{Duration, OffsetDateTime};
@@ -898,6 +931,68 @@ mod tests {
         panic!(
             "could not allocate a unique test directory under {}",
             base.display()
+        );
+    }
+
+    #[test]
+    fn relative_identity_directory_is_refused_before_identity_generation() {
+        let error = match generate_identity(std::path::Path::new("identity")) {
+            Ok(_) => panic!("a relative identity directory must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("not absolute"), "error: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_returned_key_path_fails_before_identity_generation() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = test_dir("non-utf8-key-path");
+        let identity_directory = directory
+            .0
+            .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        fs::create_dir(&identity_directory).expect("create non-UTF-8 identity directory");
+        let error = match generate_tls_identity_at(&identity_directory) {
+            Ok(_) => panic!("the N-API key path must be valid before generation"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("not UTF-8"), "error: {error}");
+        assert!(
+            !identity_directory.join(GENERATED_KEY_NAME).exists(),
+            "a failed N-API path conversion leaves no key"
+        );
+        assert!(
+            !identity_directory
+                .join(GENERATED_CERTIFICATE_CACHE_NAME)
+                .exists(),
+            "a failed N-API path conversion leaves no certificate"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_symlink_is_refused_before_identity_files_are_reached() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_dir("intermediate-symlink");
+        let identity = root.0.join("identity");
+        let decoy = root.0.join("decoy");
+        fs::create_dir(&identity).expect("create identity directory");
+        fs::create_dir(&decoy).expect("create decoy directory");
+        generate_identity(&identity).expect("create real identity");
+        fs::rename(&identity, root.0.join("identity-real")).expect("move real identity");
+        symlink(&decoy, &identity).expect("plant intermediate symlink");
+
+        assert!(
+            generate_identity(&identity).is_err(),
+            "the decoy identity is never read"
+        );
+        assert!(
+            !decoy.join(GENERATED_KEY_NAME).exists(),
+            "no decoy key is created"
         );
     }
 
@@ -1352,6 +1447,20 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn generated_private_key_leaves_no_temporary_hard_link() {
+        let directory = test_dir("windows-private-key-temporary-link");
+
+        generate_identity(&directory.0).expect("generate TLS identity");
+
+        assert!(
+            directory.key_path().is_file(),
+            "the authoritative key was installed"
+        );
+        assert_no_temporary_files(&directory);
+    }
+
     #[test]
     fn installed_key_is_successful_even_when_temporary_copy_cleanup_fails() {
         let directory = test_dir("installed-key-cleanup-error");
@@ -1413,7 +1522,6 @@ mod tests {
         fs::write(&temporary, "replacement").expect("write temporary certificate");
         create_dir(directory.certificate_path()).expect("block certificate replacement");
         FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP.with(|fail| fail.set(true));
-
         let error = match publish_certificate(&temporary, &directory.certificate_path()) {
             Ok(_) => panic!("a temporary certificate cleanup failure is reported"),
             Err(error) => error,
@@ -1424,6 +1532,28 @@ mod tests {
                 .to_string()
                 .contains("could not remove temporary identity file"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn certificate_publication_under_different_parents_is_refused() {
+        let temporary_directory = test_dir("certificate-publication-temporary");
+        let destination_directory = test_dir("certificate-publication-destination");
+        let temporary = temporary_directory.0.join("certificate.tmp");
+        let destination = destination_directory.certificate_path();
+        fs::write(&temporary, "replacement").expect("write temporary certificate");
+
+        let error = publish_certificate(&temporary, &destination)
+            .expect_err("certificate publication under different parents is refused");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !destination.exists(),
+            "a refused publication leaves its requested destination untouched"
+        );
+        assert!(
+            !temporary_directory.certificate_path().exists(),
+            "a refused publication does not redirect to the temporary parent"
         );
     }
 

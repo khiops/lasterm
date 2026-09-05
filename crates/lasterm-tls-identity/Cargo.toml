@@ -26,6 +26,7 @@ rcgen = "0.13"
 time = "0.3"
 x509-parser = { version = "0.16", features = ["verify"] }
 pem = "3"
+lasterm-protected-fs = { path = "../lasterm-protected-fs" }
 
 [build-dependencies]
 napi-build = "2"

@@ -62,13 +62,15 @@
 | Threat | Vector | Impact | Likelihood | Mitigation |
 |--------|--------|--------|------------|------------|
 | Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
-| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600, warn if world-readable |
+| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600, and the hub refuses to start on a world-readable file |
+| Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a default install, where the directory is not writable by another account; higher wherever it has been made group-writable, which a umask of 002 with a shared group produces | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix the desktop refuses a directory group or other can write, through its protected-file policy; **the hub does not yet, and that is #232**. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL |
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#199)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until #199, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
+| Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
 
 ## 2. Authentication
 
@@ -223,9 +225,10 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 **Note:** the hub binds `127.0.0.1` today, which is the default of the local launch rather than the
 design — pairing exists so a client can reach a hub across a network, and #96 covers hardening that
 binding. A configured certificate is used as supplied; otherwise the hub generates its own key **once** and
-keeps it, and issues a leaf over that key **once**, reusing it across restarts. A new leaf is signed
-only when the stored one cannot serve: absent, unreadable, belonging to another key, expired or within
-seven days of it, dated in the future, or no longer matching the shape a generated leaf must have.
+keeps it, and **reuses a stored leaf over that key while it can still serve, reissuing over the same
+key when it cannot**. The key is what stays fixed; the leaf is not. A new leaf is signed when the
+stored one is absent, unreadable, belonging to another key, expired or within seven days of it,
+dated in the future, or no longer matching the shape a generated leaf must have.
 **That decision is taken when the hub starts, and not again while it runs** — a hub up for longer than
 its leaf's remaining validity serves an expired certificate until it is restarted, which browsers
 refuse and pinning clients do not care about (#199). A
@@ -239,6 +242,42 @@ again, which is now roughly every two and a quarter years rather than every rest
 - Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
 - Terminal output (daemon agent): `OutputBuffer` ring buffer — per-channel cap (default 1 MB) + global cap (default 20 MB), oldest data evicted from largest channel
 - Snapshots: kept in cache, limited by GC policy
+
+### 4.4 How a protected file is reached
+
+The files are `auth.json`, `runtime.json`, the pinned-key store, the TLS private key and the
+generated certificate. What protects them differs by platform, and there is no summary that is
+true of both.
+
+**On Unix** no component of the path is resolved by the kernel from a name this process hands it
+whole. Every directory is opened relative to the one above it, starting at the filesystem root and
+following no link, and the leaf is opened by a fixed name relative to the parent that was just
+checked. The checks that decide whether to trust the file read the descriptor it will be read
+through. Within one resolved operation no component is re-resolved, so the name cannot come to
+mean something else between the check and the read.
+
+A later operation on the same path descends again, and that is where the guarantee currently
+stops: a protected file's parent policy and its use can be established by two separate descents,
+so an actor with rename rights over an ancestor can replace it — with a different real directory,
+not a link — between them. #235 carries the repair, which is to hold one directory capability
+across a whole operation.
+
+Each ancestor must be readable as well as searchable: the walk opens directories, and no portable
+search-only descriptor exists.
+
+**On Windows** a protected file is opened once, with any reparse point left unfollowed, and every
+check and read uses that one handle — the leaf-read race is closed, and that is the whole of what
+is protected. Directories are held as pathnames, so ancestors are not protected and the leaf is
+re-resolved by name whenever it is opened again. Publication, meaning rename, delete and hard
+link, is pathname-based and is not protected against concurrent namespace changes. Closing either
+needs handle-relative opens through `NtCreateFile`, which this does not use. The residual actor is
+a process able to write one of these directories, which a process running as the same user
+commonly can: a bounded and accepted risk rather than an absent one.
+
+A handle-based publication was built and removed. Windows offers no write-through equivalent for
+it, so it dropped a durability guarantee the pathname form carries, and withholding the
+delete-sharing it needs broke both failure cleanup and concurrent replacement. None of that would
+have been observable here: no test executes these paths on Windows.
 
 ## 5. Input Validation
 

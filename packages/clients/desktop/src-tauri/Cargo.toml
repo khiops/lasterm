@@ -33,6 +33,7 @@ dirs = "6"
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
 lasterm-process-lock = { path = "../../../../crates/lasterm-process-lock" }
+lasterm-protected-fs = { path = "../../../../crates/lasterm-protected-fs" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

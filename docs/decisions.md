@@ -4,6 +4,15 @@ Decisions archived from workflow — newest first.
 
 ---
 
+## RELEASE-PM-PIN — the release workflow rebuilds only tags that pin the package manager (#236, 2026-09-05)
+
+- pnpm 11 reads its settings from `pnpm-workspace.yaml` and ignores the `pnpm` field of `package.json`, so a tag published before that move keeps its advisory overrides and build policy where pnpm 11 does not look. Rebuilding such a tag resolves dependencies differently from the artefacts that shipped under it, which is not a rebuild.
+- Every `pnpm/action-setup` step therefore takes its version from `package.json`'s `packageManager` and passes no `version` input. The action compares the two literally and throws `Multiple versions of pnpm specified` when both are present and differ, and the comparison is string equality, so a matching input would be the same pin written eleven times.
+- This narrows RELEASE-AUTO-CHAIN: `workflow_dispatch` remains a recovery path for a tag published since the migration, and an older tag cannot be rebuilt by this workflow at all. There is no procedure for one: `workflow_dispatch` takes only a tag, and carrying the migration onto a branch cut from that tag produces a different commit, which the tag-versus-HEAD guard refuses by design. Ship the fix under a new version instead. `create-release` refuses such a ref before it touches the release, next to that guard, and admits only what `pnpm/action-setup` admits so that nothing it passes can fail in a later job.
+- `.npmrc`'s `dangerouslyAllowAllBuilds=true` is gone. pnpm 11 ignores it — `better-sqlite3` was blocked with that line present — and it said the opposite of the `allowBuilds` map that now decides. Two descriptions of one policy, one of them dead.
+
+---
+
 ## RELEASE-AUTO-CHAIN — merging the release PR is the whole release (2026-06-11)
 
 - The multi-OS build chains directly off the release-please job via `workflow_call` (`release-build` job gated on `release_created`), in the same workflow run. Tag-triggered chaining is impossible by design: release-please pushes its tag with the default `GITHUB_TOKEN`, and GITHUB_TOKEN-created events never trigger workflows. The `push: tags` and `workflow_dispatch` triggers remain as recovery paths for re-building an existing tag.

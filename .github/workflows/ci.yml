@@ -18,8 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v5
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
@@ -122,8 +120,6 @@ jobs:
           # belongs with the other global flags rather than in command-arguments.
           arguments: --all-features --config packages/clients/desktop/src-tauri/deny.toml
       - uses: pnpm/action-setup@v5
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc

@@ -2,13 +2,16 @@ packages:
   - 'packages/*'
   - 'packages/clients/*'
 
-onlyBuiltDependencies:
-  - "@biomejs/biome"
-  - better-sqlite3
-  - cpu-features
-  - esbuild
-  - ssh2
-  - "@esbuild/linux-x64"
+
+
+overrides:
+  "shell-quote@<1.8.4": ">=1.8.4"
+  "fast-uri@<=3.1.4": ">=3.1.5 <4.0.0"
+  "picomatch@>=4.0.0 <4.0.4": ">=4.0.4"
+  "postcss@<8.5.10": ">=8.5.10"
+  "ws@>=8.0.0 <8.20.1": ">=8.20.1"
+  "brace-expansion@^2.0.0": ">=2.0.3 <3.0.0"
+  "brace-expansion@^5.0.0": ">=5.0.6"
 
 catalog:
   typescript: "~5.7.0"
@@ -44,3 +47,23 @@ catalog:
   file-type: "^21.3.2"
   happy-dom: "^20.8.9"
   postject: "^1.0.0-alpha.6"
+
+# Written by `pnpm approve-builds`; pnpm 11 reads this instead of the
+# onlyBuiltDependencies / ignoredBuiltDependencies lists it replaced.
+# edgedriver and geckodriver come from @wdio/* and are denied on purpose: the
+# desktop e2e suite drives the packaged application through tauri-driver, so
+# neither is ever launched and neither needs to download a browser at install.
+#
+# This map decides what a build may run; it does not re-run a build already
+# recorded as skipped. A node_modules populated by a pnpm 11 that never read
+# this policy stays that way through `pnpm install`, which reports it up to
+# date, and better-sqlite3 keeps failing on its missing binding. Repair such a
+# tree once with `pnpm rebuild better-sqlite3 cpu-features esbuild ssh2`, or
+# delete node_modules and install again.
+allowBuilds:
+  better-sqlite3: true
+  cpu-features: true
+  edgedriver: false
+  esbuild: true
+  geckodriver: false
+  ssh2: true

@@ -1725,42 +1725,67 @@ enum WindowCloseChoice {
 
 /// Locates the per-user Lasterm configuration directory.
 fn lasterm_config_dir() -> Result<PathBuf, String> {
-    let config_dir = {
-        #[cfg(target_os = "windows")]
-        {
-            let config_dir = std::env::var_os("APPDATA")
-                .filter(|directory| !directory.is_empty())
-                .map(PathBuf::from)
-                .ok_or_else(|| "APPDATA is absent or empty".to_string())?;
-            if !config_dir.is_absolute() {
-                return Err(format!(
-                    "refusing desktop configuration directory from APPDATA={}: the value must be absolute",
-                    config_dir.display()
-                ));
-            }
-            config_dir
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // "All paths set in these environment variables must be absolute.
-            // If an implementation encounters a relative path in any of these
-            // variables it should consider the path invalid and ignore it."
-            std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|directory| Path::new(directory).is_absolute())
-                .map(PathBuf::from)
-                .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
-                .ok_or_else(|| "cannot determine the home directory".to_string())?
-        }
-    };
+    #[cfg(target_os = "windows")]
+    {
+        windows_lasterm_config_dir_for_environment(std::env::var_os("APPDATA").as_deref())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        unix_lasterm_config_dir_for_environment(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_lasterm_config_dir_for_environment(
+    app_data: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    let config_dir = app_data
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "APPDATA is absent or empty".to_string())?;
+    if !config_dir.is_absolute() {
+        return Err(format!(
+            "refusing desktop configuration directory from APPDATA={}: the value must be absolute",
+            config_dir.display()
+        ));
+    }
 
     Ok(config_dir.join("lasterm"))
 }
 
+#[cfg(not(target_os = "windows"))]
+fn unix_lasterm_config_dir_for_environment(
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    // "All paths set in these environment variables must be absolute. If an
+    // implementation encounters a relative path in any of these variables it
+    // should consider the path invalid and ignore it."
+    xdg_config_home
+        .filter(|directory| Path::new(directory).is_absolute())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|directory| Path::new(directory).is_absolute())
+                .map(PathBuf::from)
+                .map(|home| home.join(".config"))
+        })
+        .map(|config_dir| config_dir.join("lasterm"))
+        .ok_or_else(|| "cannot determine the home directory".to_string())
+}
+
 /// Resolves the hub config directory and reads the auth token from auth.json.
 /// Returns `Some(token)` only if the token is a valid 64-char lowercase hex string.
-fn read_hub_auth_token() -> Option<String> {
-    let config_dir = lasterm_config_dir().ok()?;
-    read_hub_auth_token_at(&config_dir)
+fn read_hub_auth_token() -> Result<Option<String>, String> {
+    read_hub_auth_token_from_config_dir(lasterm_config_dir())
+}
+
+fn read_hub_auth_token_from_config_dir(
+    config_dir: Result<PathBuf, String>,
+) -> Result<Option<String>, String> {
+    Ok(read_hub_auth_token_at(&config_dir?))
 }
 
 fn read_hub_auth_token_at(config_dir: &Path) -> Option<String> {
@@ -1939,30 +1964,53 @@ fn set_close_behavior(behavior: CloseBehavior) -> Result<(), String> {
 fn get_state_dir() -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
-        let state_dir = std::env::var_os("LOCALAPPDATA")
-            .filter(|directory| !directory.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| "LOCALAPPDATA is absent or empty".to_string())?;
-        if !state_dir.is_absolute() {
-            return Err(format!(
-                "refusing hub state directory from LOCALAPPDATA={}: the value must be absolute",
-                state_dir.display()
-            ));
-        }
-        Ok(state_dir.join("lasterm"))
+        windows_lasterm_state_dir_for_environment(std::env::var_os("LOCALAPPDATA").as_deref())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // "All paths set in these environment variables must be absolute. If
-        // an implementation encounters a relative path in any of these
-        // variables it should consider the path invalid and ignore it."
-        std::env::var_os("XDG_STATE_HOME")
-            .filter(|directory| Path::new(directory).is_absolute())
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))
-            .map(|state_dir| state_dir.join("lasterm"))
-            .ok_or_else(|| "cannot determine the home directory".to_string())
+        unix_lasterm_state_dir_for_environment(
+            std::env::var_os("XDG_STATE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_lasterm_state_dir_for_environment(
+    local_app_data: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    let state_dir = local_app_data
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is absent or empty".to_string())?;
+    if !state_dir.is_absolute() {
+        return Err(format!(
+            "refusing hub state directory from LOCALAPPDATA={}: the value must be absolute",
+            state_dir.display()
+        ));
+    }
+
+    Ok(state_dir.join("lasterm"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unix_lasterm_state_dir_for_environment(
+    xdg_state_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    // "All paths set in these environment variables must be absolute. If an
+    // implementation encounters a relative path in any of these variables it
+    // should consider the path invalid and ignore it."
+    xdg_state_home
+        .filter(|directory| Path::new(directory).is_absolute())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|directory| Path::new(directory).is_absolute())
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("state"))
+        })
+        .map(|state_dir| state_dir.join("lasterm"))
+        .ok_or_else(|| "cannot determine the home directory".to_string())
 }
 
 /// Mirrors the hub CLI's three-way runtime observation: absence, a usable
@@ -2572,11 +2620,12 @@ fn parse_listening_port(line: &str) -> Option<u16> {
 // to prove it holds the record's `ownerToken`, and no endpoint offers that yet: #183.
 
 #[tauri::command]
-fn get_hub_auth_token() -> Option<String> {
+fn get_hub_auth_token() -> Result<Option<String>, String> {
     let result = read_hub_auth_token();
     match &result {
-        Some(_) => eprintln!("[lasterm] auto-auth: token found in auth.json"),
-        None => eprintln!("[lasterm] auto-auth: no valid token in auth.json"),
+        Ok(Some(_)) => eprintln!("[lasterm] auto-auth: token found in auth.json"),
+        Ok(None) => eprintln!("[lasterm] auto-auth: no valid token in auth.json"),
+        Err(error) => eprintln!("[lasterm] auto-auth: {error}"),
     }
     result
 }
@@ -4865,36 +4914,6 @@ mod tests {
     use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
-    static PLATFORM_DIRECTORY_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    struct TestEnvironmentVariable {
-        name: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl TestEnvironmentVariable {
-        fn set(name: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(name);
-            // SAFETY: the test lock serializes this test's process-global
-            // environment mutation and Drop restores the prior value.
-            unsafe { std::env::set_var(name, value) };
-            Self { name, original }
-        }
-    }
-
-    impl Drop for TestEnvironmentVariable {
-        fn drop(&mut self) {
-            // SAFETY: this restores the process-global value changed by this
-            // fixture while its test lock is still held.
-            unsafe {
-                if let Some(value) = &self.original {
-                    std::env::set_var(self.name, value);
-                } else {
-                    std::env::remove_var(self.name);
-                }
-            }
-        }
-    }
 
     fn test_upload(
         sender: mpsc::SyncSender<HubUploadFrame>,
@@ -5387,16 +5406,14 @@ mod tests {
     fn relative_xdg_config_home_is_ignored_and_uses_the_default() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
-            .lock()
-            .expect("lock process environment");
         let directory = instance_test_dir("relative-xdg-config-home");
         let home = directory.join("home");
         std::fs::create_dir(&home).expect("create temporary home directory");
-        let _home = TestEnvironmentVariable::set("HOME", home.to_str().expect("UTF-8 home path"));
-        let _xdg_config_home = TestEnvironmentVariable::set("XDG_CONFIG_HOME", "relative-config/.");
-
-        let config_dir = lasterm_config_dir().expect("ignore relative XDG_CONFIG_HOME");
+        let config_dir = unix_lasterm_config_dir_for_environment(
+            Some(std::ffi::OsStr::new("relative-config/.")),
+            Some(home.as_os_str()),
+        )
+        .expect("ignore relative XDG_CONFIG_HOME");
         assert_eq!(config_dir, home.join(".config/lasterm"));
         assert_ne!(config_dir, directory.join("relative-config/lasterm"));
         assert!(
@@ -5415,8 +5432,8 @@ mod tests {
             .expect("make auth file owner-only");
 
         assert_eq!(
-            read_hub_auth_token(),
-            Some(token),
+            read_hub_auth_token_from_config_dir(Ok(config_dir)),
+            Ok(Some(token)),
             "the protected reader accepts the specified default config path"
         );
     }
@@ -5424,18 +5441,27 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn absolute_xdg_config_home_is_used() {
-        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
-            .lock()
-            .expect("lock process environment");
         let directory = instance_test_dir("absolute-xdg-config-home");
-        let _xdg_config_home = TestEnvironmentVariable::set(
-            "XDG_CONFIG_HOME",
-            directory.path().to_str().expect("UTF-8 XDG directory"),
-        );
 
         assert_eq!(
-            lasterm_config_dir().expect("use absolute XDG_CONFIG_HOME"),
+            unix_lasterm_config_dir_for_environment(Some(directory.path().as_os_str()), None)
+                .expect("use absolute XDG_CONFIG_HOME"),
             directory.join("lasterm")
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn relative_home_without_xdg_is_refused() {
+        let home = std::ffi::OsStr::new("relative-home");
+
+        assert!(
+            unix_lasterm_config_dir_for_environment(None, Some(home)).is_err(),
+            "a relative HOME must not resolve a configuration directory"
+        );
+        assert!(
+            unix_lasterm_state_dir_for_environment(None, Some(home)).is_err(),
+            "a relative HOME must not resolve a state directory"
         );
     }
 
@@ -5638,36 +5664,26 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn relative_app_data_is_refused_with_its_variable_name() {
-        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
-            .lock()
-            .expect("lock process environment");
-        let _app_data = TestEnvironmentVariable::set("APPDATA", "relative-app-data");
-        let error = lasterm_config_dir().expect_err("relative APPDATA must be refused");
+        let error = windows_lasterm_config_dir_for_environment(Some(std::ffi::OsStr::new(
+            "relative-app-data",
+        )))
+        .expect_err("relative APPDATA must be refused");
         assert!(error.contains("APPDATA"), "error: {error}");
         assert!(error.contains("relative-app-data"), "error: {error}");
     }
 
-    #[cfg(windows)]
     #[test]
     fn absolute_app_data_is_used() {
-        let _lock = PLATFORM_DIRECTORY_TEST_LOCK
-            .lock()
-            .expect("lock process environment");
         let directory = instance_test_dir("absolute-app-data");
-        let _app_data = TestEnvironmentVariable::set(
-            "APPDATA",
-            directory.path().to_str().expect("UTF-8 APPDATA directory"),
-        );
         assert_eq!(
-            lasterm_config_dir().expect("absolute APPDATA works"),
+            windows_lasterm_config_dir_for_environment(Some(directory.path().as_os_str()))
+                .expect("absolute APPDATA works"),
             directory.join("lasterm")
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn relative_local_app_data_is_refused_with_its_variable_name() {
         let error = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(
@@ -5676,6 +5692,26 @@ mod tests {
         .expect_err("relative LOCALAPPDATA must be refused");
         assert!(error.contains("LOCALAPPDATA"), "error: {error}");
         assert!(error.contains("relative-local-app-data"), "error: {error}");
+
+        let error = windows_lasterm_state_dir_for_environment(Some(std::ffi::OsStr::new(
+            "relative-local-app-data",
+        )))
+        .expect_err("relative LOCALAPPDATA must not resolve the state directory");
+        assert!(error.contains("LOCALAPPDATA"), "error: {error}");
+        assert!(error.contains("relative-local-app-data"), "error: {error}");
+    }
+
+    #[test]
+    fn invalid_app_data_reaches_the_hub_auth_token_caller() {
+        let result = read_hub_auth_token_from_config_dir(
+            windows_lasterm_config_dir_for_environment(Some(std::ffi::OsStr::new(
+                "relative-app-data",
+            ))),
+        );
+
+        let error = result.expect_err("relative APPDATA must not become an absent token");
+        assert!(error.contains("APPDATA"), "error: {error}");
+        assert!(error.contains("relative-app-data"), "error: {error}");
     }
 
     #[test]

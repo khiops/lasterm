@@ -438,8 +438,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          # The triple belongs in this predicate because the packaging step above
+          # carries it too. Testing only the repository variables meant a
+          # non-Windows row — aarch64-apple-darwin, declared in the matrix and
+          # disabled under #224 — read MSIX as enabled, produced nothing because
+          # packaging is Windows-only, and would now fail on the absent output
+          # directory. Every row that enforces MSIX is a row that attempted it.
           MSIX_RELEASE_ENABLED: >-
             ${{
+              matrix.triple == 'x86_64-pc-windows-msvc' &&
               vars.MSIX_IDENTITY_NAME != '' &&
               vars.MSIX_PUBLISHER != '' &&
               vars.MSIX_PUBLISHER_DISPLAY_NAME != ''

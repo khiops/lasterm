@@ -864,11 +864,15 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_identity, generate_tls_identity_at, load_or_create_key, publish_certificate,
-        temporary_key_path, FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP,
-        FAIL_NEXT_TEMPORARY_FILE_SETUP, FAIL_NEXT_TEMPORARY_KEY_CLEANUP,
-        GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME, VALIDITY_DAYS,
+        generate_identity, load_or_create_key, publish_certificate, temporary_key_path,
+        FAIL_NEXT_TEMPORARY_CERTIFICATE_CLEANUP, FAIL_NEXT_TEMPORARY_FILE_SETUP,
+        FAIL_NEXT_TEMPORARY_KEY_CLEANUP, GENERATED_CERTIFICATE_CACHE_NAME, GENERATED_KEY_NAME,
+        VALIDITY_DAYS,
     };
+    // Its only caller is the non-UTF-8 path test, which exists on Unix alone, so
+    // importing it here makes the whole module unused on Windows.
+    #[cfg(unix)]
+    use super::generate_tls_identity_at;
     #[cfg(unix)]
     use super::{FAIL_NEXT_PARENT_SYNC, PARENT_SYNCED};
     use rcgen::{

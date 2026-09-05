@@ -247,13 +247,21 @@ The files are `auth.json`, `runtime.json`, the pinned-key store, the TLS private
 generated certificate. What protects them differs by platform, and there is no summary that is
 true of both.
 
-**On Unix** they are never opened by name. Every directory on the path is opened relative to the
-one above it, starting at the filesystem root and following no link, and the checks that decide
-whether to trust the file read the descriptor it will be read through. Within one resolved
-operation, no component is re-resolved, so the name cannot come to mean something else between
-the check and the read. A later operation on the same path descends again. Each ancestor must be
-readable as well as searchable: the walk opens directories, and no portable search-only descriptor
-exists.
+**On Unix** no component of the path is resolved by the kernel from a name this process hands it
+whole. Every directory is opened relative to the one above it, starting at the filesystem root and
+following no link, and the leaf is opened by a fixed name relative to the parent that was just
+checked. The checks that decide whether to trust the file read the descriptor it will be read
+through. Within one resolved operation no component is re-resolved, so the name cannot come to
+mean something else between the check and the read.
+
+A later operation on the same path descends again, and that is where the guarantee currently
+stops: a protected file's parent policy and its use can be established by two separate descents,
+so an actor with rename rights over an ancestor can replace it — with a different real directory,
+not a link — between them. #235 carries the repair, which is to hold one directory capability
+across a whole operation.
+
+Each ancestor must be readable as well as searchable: the walk opens directories, and no portable
+search-only descriptor exists.
 
 **On Windows** a protected file is opened once, with any reparse point left unfollowed, and every
 check and read uses that one handle — the leaf-read race is closed, and that is the whole of what

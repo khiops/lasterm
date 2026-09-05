@@ -2127,8 +2127,9 @@ fn record_or_match_hub_pin_after_proof_at(
 }
 
 /// Reads an existing pin without creating the store directory. The absence of
-/// the directory is normal on first use, and must stay non-durable until the
-/// announced peer has completed its TLS proof.
+/// the directory tree is normal on first use. A directory is not a trust
+/// record: no pin is written until the announced peer has completed its TLS
+/// proof.
 fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, String> {
     #[cfg(unix)]
     {
@@ -2167,9 +2168,20 @@ fn load_existing_hub_pin_store(path: &Path) -> Result<Option<HubPinStore>, Strin
             .ok_or_else(|| format!("pin store path {} has no parent", path.display()))?;
         match lasterm_protected_fs::open_directory(parent, false, 0o700) {
             Err(error)
-                if error.raw_os_error()
-                    == Some(windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND as i32) =>
+                if matches!(
+                    error.raw_os_error(),
+                    Some(status)
+                        if status
+                            == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND as i32
+                            || status
+                                == windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND as i32
+                ) =>
             {
+                // This is a lookup of the pin-store directory, not of a
+                // protected leaf. An empty profile has no application tree
+                // yet, and no pin record exists before TLS proof. The leaf
+                // open below deliberately remains stricter: there, status 3
+                // can mean an established store's ancestor vanished.
                 return Ok(None);
             }
             Err(error) => {
@@ -2517,9 +2529,11 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
     let mut file = match directory.open_existing(&leaf) {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(None),
-        // A protected store is created only after its first successful use. Its
-        // absence is therefore normal; every other metadata failure is a
-        // refusal, before any open can follow a substituted path.
+        // `open_existing` treats only ERROR_FILE_NOT_FOUND as an absent leaf.
+        // Unlike the pin-store directory lookup, ERROR_PATH_NOT_FOUND here can
+        // mean an established store's ancestor vanished, so it stays a
+        // refusal. The directory lookup can accept an empty application tree
+        // because no pin record is written before TLS proof.
         Err(error) => return Err(format!("refusing protected file metadata: {error}")),
     };
     let metadata = file
@@ -5654,6 +5668,20 @@ mod tests {
         let error = read_protected_file(&protected)
             .expect_err("the protected reader rejects a leaf reparse point");
         assert!(error.contains("reparse point"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_missing_pin_store_grandparent_is_an_absent_pin() {
+        let directory = instance_test_dir("windows-missing-pin-store-grandparent");
+        let pin_store_path = directory
+            .join("lasterm")
+            .join("identity")
+            .join(HUB_PIN_STORE_FILE);
+
+        assert!(load_existing_hub_pin_store(&pin_store_path)
+            .expect("an empty profile has no existing hub pin")
+            .is_none());
     }
 
     #[test]

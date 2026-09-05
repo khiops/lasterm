@@ -1426,4 +1426,33 @@ mod tests {
             "ERROR_PATH_NOT_FOUND is an ancestor failure, not an absent leaf"
         );
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_leaf_open_refuses_when_an_existing_store_ancestor_vanishes() {
+        use super::open_parent;
+        use std::io::ErrorKind;
+        use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
+
+        let root = std::env::temp_dir().join(format!(
+            "lasterm-protected-fs-windows-vanished-ancestor-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = root.join("identity");
+        let pin = store.join("hub-pins.json");
+        fs::create_dir_all(&store).expect("create existing pin store");
+        fs::write(&pin, "{}").expect("write existing pin");
+
+        let (directory, leaf) = open_parent(&pin).expect("open existing pin-store directory");
+        fs::rename(&store, root.join("identity-moved"))
+            .expect("make the existing store ancestor vanish");
+        let error = directory
+            .open_existing(&leaf)
+            .expect_err("a vanished ancestor is not an absent leaf");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(error.raw_os_error(), Some(ERROR_PATH_NOT_FOUND as i32));
+
+        fs::remove_dir_all(&root).expect("remove fixture");
+    }
 }

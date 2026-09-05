@@ -140,8 +140,6 @@ jobs:
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v5
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
@@ -229,8 +227,6 @@ jobs:
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v5
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
@@ -332,8 +328,6 @@ jobs:
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v5
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc

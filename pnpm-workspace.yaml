@@ -53,6 +53,13 @@ catalog:
 # edgedriver and geckodriver come from @wdio/* and are denied on purpose: the
 # desktop e2e suite drives the packaged application through tauri-driver, so
 # neither is ever launched and neither needs to download a browser at install.
+#
+# This map decides what a build may run; it does not re-run a build already
+# recorded as skipped. A node_modules populated by a pnpm 11 that never read
+# this policy stays that way through `pnpm install`, which reports it up to
+# date, and better-sqlite3 keeps failing on its missing binding. Repair such a
+# tree once with `pnpm rebuild better-sqlite3 cpu-features esbuild ssh2`, or
+# delete node_modules and install again.
 allowBuilds:
   better-sqlite3: true
   cpu-features: true

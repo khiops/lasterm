@@ -4,6 +4,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	rmSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
@@ -11,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkPermissions,
 	createToken,
@@ -35,6 +36,16 @@ describe("initAuth", () => {
 
 	beforeEach(() => {
 		testDir = join(tmpdir(), `lasterm-auth-test-${randomBytes(8).toString("hex")}`);
+	});
+
+	// Neither describe removed its tree, so every run left one behind under
+	// tmpdir(). chmod first: a test that made the directory unreadable would
+	// otherwise defeat the removal.
+	afterEach(() => {
+		if (existsSync(testDir)) {
+			chmodSync(testDir, 0o700);
+			rmSync(testDir, { recursive: true, force: true });
+		}
 	});
 
 	it("generates a 64-hex-char token on first call", () => {
@@ -128,6 +139,16 @@ describe("checkPermissions", () => {
 
 	beforeEach(() => {
 		testDir = join(tmpdir(), `lasterm-perm-test-${randomBytes(8).toString("hex")}`);
+	});
+
+	// Neither describe removed its tree, so every run left one behind under
+	// tmpdir(). chmod first: a test that made the directory unreadable would
+	// otherwise defeat the removal.
+	afterEach(() => {
+		if (existsSync(testDir)) {
+			chmodSync(testDir, 0o700);
+			rmSync(testDir, { recursive: true, force: true });
+		}
 	});
 
 	it("throws if auth.json is world-readable (non-Windows)", () => {

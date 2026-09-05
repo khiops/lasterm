@@ -34,15 +34,12 @@ describe("validateAgentVersion", () => {
 		expect(() => validateAgentVersion(version)).not.toThrow();
 	});
 
-	it.each([
-		"0.0.0",
-		"0.4",
-		"v0.4.1",
-		"0.4.1-beta.1",
-		"../0.4.1",
-	])("rejects bad version %s", (version) => {
-		expectFetchError(() => validateAgentVersion(version), "BAD_VERSION");
-	});
+	it.each(["0.0.0", "0.4", "v0.4.1", "0.4.1-beta.1", "../0.4.1"])(
+		"rejects bad version %s",
+		(version) => {
+			expectFetchError(() => validateAgentVersion(version), "BAD_VERSION");
+		},
+	);
 });
 
 describe("verifyAndPlace", () => {

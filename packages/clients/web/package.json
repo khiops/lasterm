@@ -12,9 +12,9 @@
 		"typecheck": "vue-tsc -p tsconfig.json --noEmit && tsc -p tsconfig.typecheck.json"
 	},
 	"dependencies": {
-		"@msgpack/msgpack": "catalog:",
 		"@lasterm/shared": "workspace:*",
-		"@tauri-apps/api": "^2.10.1",
+		"@msgpack/msgpack": "catalog:",
+		"@tauri-apps/api": "^2.11.1",
 		"@tauri-apps/plugin-os": "^2.3.2",
 		"@xterm/addon-fit": "catalog:",
 		"@xterm/addon-search": "catalog:",

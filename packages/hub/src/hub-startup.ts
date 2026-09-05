@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { checkConfigDirectoryPermissions, initAuth, sweepNonPrimaryTokens } from "./auth.js";
+import {
+	checkConfigDirectoryPermissions,
+	createOwnerOnlyDirectory,
+	initAuth,
+	sweepNonPrimaryTokens,
+} from "./auth.js";
 import {
 	deleteRuntime,
 	getConfigDir,
@@ -105,11 +110,10 @@ export async function startHub(
 	dependencies.acquireHubLock(stateDir);
 
 	const configDir = dependencies.getConfigDir();
-	// 0o700 explicitly: without a mode the umask decides, and a umask of 002
-	// yields 0775. initAuth refuses a group-writable configuration directory —
-	// that is the point of the check — so leaving this to the umask made a first
-	// launch fail on any host whose umask grants the group.
-	mkdirSync(configDir, { recursive: true, mode: 0o700 });
+	// Owner-only, and exactly: a umask of 002 would otherwise give 0775 and the
+	// validator below refuses that, while a umask carrying owner bits would give
+	// mode 000 and the validator would accept a directory the hub cannot use.
+	createOwnerOnlyDirectory(configDir);
 	// Validate here, not only inside initAuth: the logging and TLS configuration
 	// below are read from this directory, and initAuth runs after both. A group
 	// member could otherwise have the hub consume a FIFO, a malformed file or

@@ -48,6 +48,23 @@ describe("initAuth", () => {
 		}
 	});
 
+	it.runIf(process.platform !== "win32")(
+		"creates the directory 0700 under a umask that masks owner bits",
+		() => {
+			// mkdirSync's mode is masked, so `{ mode: 0o700 }` under `umask 0700`
+			// arrives as 000: a directory the validator accepts, since it inspects
+			// only the group and other bits, and that the hub then cannot read.
+			const previous = process.umask(0o700);
+			try {
+				const token = initAuth(testDir);
+				expect(token).toMatch(/^[0-9a-f]{64}$/);
+				expect(statSync(testDir).mode & 0o777).toBe(0o700);
+			} finally {
+				process.umask(previous);
+			}
+		},
+	);
+
 	it("generates a 64-hex-char token on first call", () => {
 		const token = initAuth(testDir);
 		expect(token).toMatch(/^[0-9a-f]{64}$/);

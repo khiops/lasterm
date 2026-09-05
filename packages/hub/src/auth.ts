@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+	chmodSync,
 	closeSync,
 	existsSync,
 	fchmodSync,
@@ -106,6 +107,21 @@ export function checkPermissions(authFilePath: string): void {
 	}
 }
 
+/**
+ * Create a directory owner-only, and mean it. `mkdirSync(dir, { mode: 0o700 })`
+ * gives `0o700 & ~umask`, which a umask carrying owner bits reduces: under
+ * `umask 0700` the directory arrives at mode 000, the validator below accepts it
+ * because it inspects only the group and other bits, and the process then fails
+ * with EACCES on its own directory. `mkdirSync` with `recursive` returns the
+ * first path it created, or undefined when the directory already existed, so the
+ * chmod lands only on a directory this call made — an existing one keeps its mode
+ * and is judged by the validator instead of being silently repaired.
+ */
+export function createOwnerOnlyDirectory(directory: string): void {
+	const created = mkdirSync(directory, { recursive: true, mode: 0o700 });
+	if (created !== undefined) chmodSync(directory, 0o700);
+}
+
 /** Check the directory that contains auth.json before using it. */
 export function checkConfigDirectoryPermissions(configDir: string): void {
 	if (process.platform === "win32") return;
@@ -155,9 +171,7 @@ export function initAuth(configDir: string): string {
 	}
 
 	// First run — generate and store token
-	// 0o700 & ~umask remains 0o700, so this protects a directory this call
-	// creates; the check below covers a directory that already existed.
-	mkdirSync(configDir, { recursive: true, mode: 0o700 });
+	createOwnerOnlyDirectory(configDir);
 	checkConfigDirectoryPermissions(configDir);
 	const token = randomBytes(32).toString("hex");
 	// Atomic: open with restricted mode so the file is never world-readable,

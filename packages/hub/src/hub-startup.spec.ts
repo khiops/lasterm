@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -301,6 +301,53 @@ describe("startHub creates the configuration directory owner-only", () => {
 				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
 				else process.env.XDG_STATE_HOME = originalStateRoot;
 				dbs.close();
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.runIf(process.platform !== "win32")(
+		"refuses a group-writable directory before loading TLS configuration from it",
+		async () => {
+			const dbs = openTestDatabases();
+			const root = join(tmpdir(), `lasterm-untrusted-${randomBytes(8).toString("hex")}`);
+			const configDir = join(root, "config");
+			const stateDir = join(root, "state");
+			mkdirSync(configDir, { recursive: true, mode: 0o770 });
+			chmodSync(configDir, 0o770);
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = root;
+			const loadTlsConfig = vi.fn();
+			const initAuth = vi.fn();
+
+			try {
+				await expect(
+					startHub(
+						{ port: 4100 },
+						{
+							describePreviousInstallation: () => undefined,
+							getStateDir: () => stateDir,
+							getConfigDir: () => configDir,
+							acquireHubLock: () => null as never,
+							initAuth,
+							loadTlsConfig,
+							createOwnerToken: () => "owner-token",
+							resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+							openDatabases: () => dbs,
+							createServer: async () => ({}) as never,
+							startServer: async () => "http://127.0.0.1:4100",
+						},
+					),
+				).rejects.toThrow(/group- or world-writable/);
+
+				// The point of moving the check up: nothing read the directory first.
+				expect(loadTlsConfig).not.toHaveBeenCalled();
+				expect(initAuth).not.toHaveBeenCalled();
+			} finally {
+				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+				else process.env.XDG_STATE_HOME = originalStateRoot;
+				dbs.close();
+				chmodSync(configDir, 0o700);
 				rmSync(root, { recursive: true, force: true });
 			}
 		},

@@ -103,7 +103,18 @@ describe("initAuth", () => {
 		writeFileSync(authFile, JSON.stringify({ token: "a".repeat(64) }));
 		chmodSync(authFile, 0o640);
 
-		expect(() => initAuth(testDir)).toThrow(new RegExp(`${authFile}.*640`));
+		// Not `new RegExp(authFile)`: TMPDIR may legally hold `[`, `(`, `.` or `\`,
+		// which would change the pattern or make it invalid, so the test would fail
+		// for the host's temporary directory rather than for the permissions.
+		let thrown: unknown;
+		try {
+			initAuth(testDir);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toContain(authFile);
+		expect((thrown as Error).message).toContain("640");
 	});
 
 	it("refuses auth.json symlinks (non-Windows)", () => {

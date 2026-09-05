@@ -75,6 +75,10 @@ export function hashToken(token: string): string {
  * as `quoteForShell` in the desktop e2e runner: a literal single quote is closed,
  * escaped and reopened. Without it a configuration directory containing a space
  * produced a repair command that does something else.
+ *
+ * Quoting is not enough on its own: `chmod` still reads an operand beginning with
+ * `-` as an option, which a relative `XDG_CONFIG_HOME` of `-R` produces. Every
+ * command built from this ends its options with `--` first.
  */
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -91,7 +95,7 @@ export function checkPermissions(authFilePath: string): void {
 
 	if (mode & 0o066) {
 		throw new Error(
-			`SECURITY: auth.json at ${authFilePath} is group- or world-readable or writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 600 ${shellQuote(authFilePath)}`,
+			`SECURITY: auth.json at ${authFilePath} is group- or world-readable or writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 600 -- ${shellQuote(authFilePath)}`,
 		);
 	}
 
@@ -103,7 +107,7 @@ export function checkPermissions(authFilePath: string): void {
 }
 
 /** Check the directory that contains auth.json before using it. */
-function checkConfigDirectoryPermissions(configDir: string): void {
+export function checkConfigDirectoryPermissions(configDir: string): void {
 	if (process.platform === "win32") return;
 
 	// One lstat of configDir is defence in depth, not path integrity. An ancestor
@@ -118,7 +122,7 @@ function checkConfigDirectoryPermissions(configDir: string): void {
 
 	if (mode & 0o022) {
 		throw new Error(
-			`SECURITY: auth config directory at ${configDir} is group- or world-writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 700 ${shellQuote(configDir)}`,
+			`SECURITY: auth config directory at ${configDir} is group- or world-writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 700 -- ${shellQuote(configDir)}`,
 		);
 	}
 

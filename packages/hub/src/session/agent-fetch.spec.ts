@@ -105,28 +105,25 @@ describe("parseChecksumManifest", () => {
 });
 
 describe("fetchAgentBinary", () => {
-	it.each([
-		"0.0.0",
-		"0.4",
-		"v0.4.1",
-		"0.4.1-beta.1",
-		"../0.4.1",
-	])("rejects bad version %s before building a URL", async (version) => {
-		const cacheDir = makeTempDir();
-		const fetchImpl = vi.fn<AgentFetchImpl>();
+	it.each(["0.0.0", "0.4", "v0.4.1", "0.4.1-beta.1", "../0.4.1"])(
+		"rejects bad version %s before building a URL",
+		async (version) => {
+			const cacheDir = makeTempDir();
+			const fetchImpl = vi.fn<AgentFetchImpl>();
 
-		await expect(
-			fetchAgentBinary({
-				os: "linux",
-				arch: "x64",
-				version,
-				cacheDir,
-				baseUrl: BASE_URL,
-				fetchImpl,
-			}),
-		).rejects.toMatchObject({ code: "BAD_VERSION" });
-		expect(fetchImpl).not.toHaveBeenCalled();
-	});
+			await expect(
+				fetchAgentBinary({
+					os: "linux",
+					arch: "x64",
+					version,
+					cacheDir,
+					baseUrl: BASE_URL,
+					fetchImpl,
+				}),
+			).rejects.toMatchObject({ code: "BAD_VERSION" });
+			expect(fetchImpl).not.toHaveBeenCalled();
+		},
+	);
 
 	it("rejects unsupported targets without network calls", async () => {
 		const cacheDir = makeTempDir();

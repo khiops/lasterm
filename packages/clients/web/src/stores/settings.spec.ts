@@ -493,13 +493,19 @@ describe("useSettingsStore", () => {
 					(args[1] as RequestInit | undefined)?.method === "PATCH",
 			);
 
-			expect(JSON.parse((putGlobal?.[1] as RequestInit).body as string)).toEqual({
+			expect(putGlobal).toBeDefined();
+			if (!putGlobal) return;
+			expect(JSON.parse((putGlobal[1] as RequestInit).body as string)).toEqual({
 				terminal: { backgroundMode: "transparent" },
 			});
-			expect(JSON.parse((patchHost?.[1] as RequestInit).body as string)).toEqual({
+			expect(patchHost).toBeDefined();
+			if (!patchHost) return;
+			expect(JSON.parse((patchHost[1] as RequestInit).body as string)).toEqual({
 				profile: { windowEffect: "auto" },
 			});
-			expect(JSON.parse((patchChannel?.[1] as RequestInit).body as string)).toEqual({
+			expect(patchChannel).toBeDefined();
+			if (!patchChannel) return;
+			expect(JSON.parse((patchChannel[1] as RequestInit).body as string)).toEqual({
 				profile: { backgroundMode: "solid" },
 			});
 

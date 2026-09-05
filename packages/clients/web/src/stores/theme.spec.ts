@@ -288,10 +288,10 @@ describe("useThemeStore", () => {
 
 			// PATCH payload should include autoSwitch.enabled = false
 			expect(fetchMock).toHaveBeenCalledOnce();
-			const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body) as Record<
-				string,
-				unknown
-			>;
+			const request = fetchMock.mock.calls[0];
+			expect(request).toBeDefined();
+			if (!request) return;
+			const body = JSON.parse((request[1] as { body: string }).body) as Record<string, unknown>;
 			expect(body.theme).toBe("nord");
 			expect(body.autoSwitch).toEqual(expect.objectContaining({ enabled: false }));
 

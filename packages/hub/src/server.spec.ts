@@ -421,58 +421,53 @@ describe("Hub Server — security headers", () => {
 		return assetToken;
 	}
 
-	it.each(
-		PUBLIC_ASSET_CASES,
-	)("GET /public/$kind/:file serves signed public assets with cross-origin CORP", async ({
-		kind,
-		filename,
-		body,
-	}) => {
-		const assetToken = await createProtectedAssetServer(kind, filename, body);
+	it.each(PUBLIC_ASSET_CASES)(
+		"GET /public/$kind/:file serves signed public assets with cross-origin CORP",
+		async ({ kind, filename, body }) => {
+			const assetToken = await createProtectedAssetServer(kind, filename, body);
 
-		const response = await server?.inject({
-			method: "GET",
-			url: `/public/${kind}/${filename}?asset_token=${assetToken}`,
-			headers: { origin: "tauri://localhost" },
-		});
+			const response = await server?.inject({
+				method: "GET",
+				url: `/public/${kind}/${filename}?asset_token=${assetToken}`,
+				headers: { origin: "tauri://localhost" },
+			});
 
-		expect(response?.statusCode).toBe(200);
-		expect(response?.headers["cross-origin-resource-policy"]).toBe("cross-origin");
-	});
+			expect(response?.statusCode).toBe(200);
+			expect(response?.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+		},
+	);
 
-	it.each(PUBLIC_ASSET_CASES)("GET /public/$kind/:file rejects missing asset token", async ({
-		kind,
-		filename,
-		body,
-	}) => {
-		await createProtectedAssetServer(kind, filename, body);
+	it.each(PUBLIC_ASSET_CASES)(
+		"GET /public/$kind/:file rejects missing asset token",
+		async ({ kind, filename, body }) => {
+			await createProtectedAssetServer(kind, filename, body);
 
-		const response = await server?.inject({
-			method: "GET",
-			url: `/public/${kind}/${filename}`,
-			headers: { origin: "tauri://localhost" },
-		});
+			const response = await server?.inject({
+				method: "GET",
+				url: `/public/${kind}/${filename}`,
+				headers: { origin: "tauri://localhost" },
+			});
 
-		expect(response?.statusCode).toBe(403);
-		expect(response?.json<{ error: { code: string } }>().error.code).toBe("ASSET_TOKEN_REQUIRED");
-	});
+			expect(response?.statusCode).toBe(403);
+			expect(response?.json<{ error: { code: string } }>().error.code).toBe("ASSET_TOKEN_REQUIRED");
+		},
+	);
 
-	it.each(PUBLIC_ASSET_CASES)("GET /public/$kind/:file rejects invalid asset token", async ({
-		kind,
-		filename,
-		body,
-	}) => {
-		await createProtectedAssetServer(kind, filename, body);
+	it.each(PUBLIC_ASSET_CASES)(
+		"GET /public/$kind/:file rejects invalid asset token",
+		async ({ kind, filename, body }) => {
+			await createProtectedAssetServer(kind, filename, body);
 
-		const response = await server?.inject({
-			method: "GET",
-			url: `/public/${kind}/${filename}?asset_token=bad-token`,
-			headers: { origin: "tauri://localhost" },
-		});
+			const response = await server?.inject({
+				method: "GET",
+				url: `/public/${kind}/${filename}?asset_token=bad-token`,
+				headers: { origin: "tauri://localhost" },
+			});
 
-		expect(response?.statusCode).toBe(403);
-		expect(response?.json<{ error: { code: string } }>().error.code).toBe("ASSET_TOKEN_REQUIRED");
-	});
+			expect(response?.statusCode).toBe(403);
+			expect(response?.json<{ error: { code: string } }>().error.code).toBe("ASSET_TOKEN_REQUIRED");
+		},
+	);
 
 	it("GET /api/health keeps Helmet's same-origin CORP", async () => {
 		server = await createServer({ tls: getTestTls(), logger: false });

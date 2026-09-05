@@ -3,10 +3,10 @@ import {
 	closeSync,
 	existsSync,
 	fchmodSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
-	statSync,
 	writeSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -66,27 +66,56 @@ export function hashToken(token: string): string {
 // ─── File permission check ────────────────────────────────────────────────────
 
 /**
- * Check file permissions on the auth.json.
- * Throws if world-readable (mode & 0o004).
- * Warns if group-readable (mode & 0o040).
- * Skipped on Windows.
+ * Check file permissions on auth.json.
+ * Skipped on Windows because this needs an ACL check; #200's Windows half is
+ * not in this change.
  */
 export function checkPermissions(authFilePath: string): void {
 	if (process.platform === "win32") return;
 
-	const stat = statSync(authFilePath);
+	const stat = lstatSync(authFilePath);
+	if (!stat.isFile()) {
+		throw new Error(`SECURITY: auth.json at ${authFilePath} is not a regular file`);
+	}
 	const mode = stat.mode;
 
-	if (mode & 0o004) {
+	if (mode & 0o066) {
 		throw new Error(
-			`SECURITY: auth.json at ${authFilePath} is world-readable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 600 auth.json`,
+			`SECURITY: auth.json at ${authFilePath} is group- or world-readable or writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 600 ${authFilePath}`,
 		);
 	}
 
-	if (mode & 0o040) {
-		process.stderr.write(
-			`[lasterm] WARNING: auth.json at ${authFilePath} is group-readable (mode ${(mode & 0o777).toString(8)}). Recommend: chmod 600 auth.json\n`,
+	// This POSIX safety check is not proof of ownership: the directory ancestry
+	// and namespace can still change after lstatSync returns.
+	if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+		throw new Error(`SECURITY: auth.json at ${authFilePath} is not owned by this user`);
+	}
+}
+
+/** Check the directory that contains auth.json before using it. */
+function checkConfigDirectoryPermissions(configDir: string): void {
+	if (process.platform === "win32") return;
+
+	// One lstat of configDir is defence in depth, not path integrity. An ancestor
+	// that can rename or replace configDir defeats it. The lasterm-protected-fs
+	// crate does the descriptor walk that would establish the stronger claim, and
+	// it is Rust, unreachable from this file.
+	const stat = lstatSync(configDir);
+	if (!stat.isDirectory()) {
+		throw new Error(`SECURITY: auth config directory at ${configDir} is not a directory`);
+	}
+	const mode = stat.mode;
+
+	if (mode & 0o022) {
+		throw new Error(
+			`SECURITY: auth config directory at ${configDir} is group- or world-writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 700 ${configDir}`,
 		);
+	}
+
+	// This POSIX safety check is not proof of ownership: the directory ancestry
+	// and namespace can still change after lstatSync returns.
+	if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+		throw new Error(`SECURITY: auth config directory at ${configDir} is not owned by this user`);
 	}
 }
 
@@ -101,6 +130,7 @@ export function initAuth(configDir: string): string {
 	const authFilePath = join(configDir, AUTH_FILE);
 
 	if (existsSync(authFilePath)) {
+		checkConfigDirectoryPermissions(configDir);
 		checkPermissions(authFilePath);
 		const raw = readFileSync(authFilePath, "utf-8");
 		const parsed = JSON.parse(raw) as { token: string };
@@ -111,11 +141,14 @@ export function initAuth(configDir: string): string {
 	}
 
 	// First run — generate and store token
-	mkdirSync(configDir, { recursive: true });
+	// 0o700 & ~umask remains 0o700, so this protects a directory this call
+	// creates; the check below covers a directory that already existed.
+	mkdirSync(configDir, { recursive: true, mode: 0o700 });
+	checkConfigDirectoryPermissions(configDir);
 	const token = randomBytes(32).toString("hex");
 	// Atomic: open with restricted mode so the file is never world-readable,
 	// even briefly. writeFileSync + chmodSync has a TOCTOU window at 0644.
-	const fd = openSync(authFilePath, "w", 0o600);
+	const fd = openSync(authFilePath, "wx", 0o600);
 	try {
 		writeSync(fd, JSON.stringify({ token }, null, "\t"));
 		fchmodSync(fd, 0o600); // Belt-and-suspenders: enforce even if umask is weird

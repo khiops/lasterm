@@ -100,8 +100,7 @@ On every hub start:
 
 ```
 1. Check auth.json permissions
-   - If world-readable (o+r): HARD FAIL — refuse to start
-   - If group-readable (g+r): WARN in logs
+   - If group- or world-readable or writable (g+rw or o+rw): HARD FAIL — refuse to start
    - Expected: 0600 (-rw-------)
 
 2. Check data directory permissions

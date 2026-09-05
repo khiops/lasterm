@@ -1,5 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -55,6 +63,62 @@ describe("initAuth", () => {
 		const mode = statSync(authFile).mode & 0o777;
 		expect(mode).toBe(0o600);
 	});
+
+	it("refuses a group-writable existing config directory before creating auth.json (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		chmodSync(testDir, 0o770);
+
+		expect(() => initAuth(testDir)).toThrow(/group- or world-writable/);
+		expect(existsSync(join(testDir, "auth.json"))).toBe(false);
+	});
+
+	it("refuses a group-writable existing config directory before reading auth.json (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		writeFileSync(testDir + "/auth.json", JSON.stringify({ token: "a".repeat(64) }));
+		chmodSync(testDir, 0o770);
+
+		expect(() => initAuth(testDir)).toThrow(/group- or world-writable/);
+	});
+
+	it("refuses a group-readable auth.json with its path and mode in the error (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		const authFile = join(testDir, "auth.json");
+		writeFileSync(authFile, JSON.stringify({ token: "a".repeat(64) }));
+		chmodSync(authFile, 0o640);
+
+		expect(() => initAuth(testDir)).toThrow(new RegExp(`${authFile}.*640`));
+	});
+
+	it("refuses auth.json symlinks (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		const target = join(testDir, "token-target.json");
+		writeFileSync(target, JSON.stringify({ token: "a".repeat(64) }));
+		chmodSync(target, 0o600);
+		symlinkSync(target, join(testDir, "auth.json"));
+
+		expect(() => initAuth(testDir)).toThrow(/not a regular file/);
+	});
+
+	it("reads a token from owner-only config directory and auth.json (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		const authFile = join(testDir, "auth.json");
+		const token = "a".repeat(64);
+		writeFileSync(authFile, JSON.stringify({ token }));
+		chmodSync(testDir, 0o700);
+		chmodSync(authFile, 0o600);
+
+		expect(initAuth(testDir)).toBe(token);
+	});
 });
 
 // ─── checkPermissions ────────────────────────────────────────────────────────
@@ -70,7 +134,6 @@ describe("checkPermissions", () => {
 		if (process.platform === "win32") return;
 
 		// Create a real file with world-readable permissions
-		const { mkdirSync } = require("node:fs") as typeof import("node:fs");
 		mkdirSync(testDir, { recursive: true });
 		const authFile = join(testDir, "auth.json");
 		writeFileSync(authFile, JSON.stringify({ token: "test" }));
@@ -82,7 +145,6 @@ describe("checkPermissions", () => {
 	it("does not throw for mode 0o600 (non-Windows)", () => {
 		if (process.platform === "win32") return;
 
-		const { mkdirSync } = require("node:fs") as typeof import("node:fs");
 		mkdirSync(testDir, { recursive: true });
 		const authFile = join(testDir, "auth.json");
 		writeFileSync(authFile, JSON.stringify({ token: "test" }));

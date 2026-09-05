@@ -105,7 +105,11 @@ export async function startHub(
 	dependencies.acquireHubLock(stateDir);
 
 	const configDir = dependencies.getConfigDir();
-	mkdirSync(configDir, { recursive: true });
+	// 0o700 explicitly: without a mode the umask decides, and a umask of 002
+	// yields 0775. initAuth refuses a group-writable configuration directory —
+	// that is the point of the check — so leaving this to the umask made a first
+	// launch fail on any host whose umask grants the group.
+	mkdirSync(configDir, { recursive: true, mode: 0o700 });
 	mkdirSync(stateDir, { recursive: true });
 
 	let hubLogger: HubLogger | undefined;

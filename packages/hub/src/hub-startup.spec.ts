@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -102,7 +102,13 @@ describe("startHub token restart sweep", () => {
 		} finally {
 			dbs.close();
 			rmSync(stateRoot, { recursive: true, force: true });
-			process.env.XDG_STATE_HOME = originalStateRoot;
+			// `process.env.X = undefined` stores the string "undefined", so an
+			// unset variable restored this way leaves XDG_STATE_HOME="undefined"
+			// for every later test in the process, and getStateDir then resolves
+			// "undefined/lasterm" relative to the working directory. Same form as
+			// cli.spec.ts:721.
+			if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+			else process.env.XDG_STATE_HOME = originalStateRoot;
 		}
 	});
 
@@ -252,4 +258,51 @@ describe("startHub token restart sweep", () => {
 
 		expect(createServer).not.toHaveBeenCalled();
 	});
+});
+
+// initAuth refuses a group-writable configuration directory, and this is the call
+// that creates it. Without an explicit mode the umask decides: 002 yields 0775 and
+// a first launch fails before writing auth.json. The mode is the contract between
+// the two, so it is asserted here rather than left to whatever umask the host has.
+describe("startHub creates the configuration directory owner-only", () => {
+	it.runIf(process.platform !== "win32")(
+		"creates it 0700 under a group-writable umask",
+		async () => {
+			const dbs = openTestDatabases();
+			const root = join(tmpdir(), `lasterm-umask-${randomBytes(8).toString("hex")}`);
+			const configDir = join(root, "config");
+			const stateDir = join(root, "state");
+			const previous = process.umask(0o002);
+			// startHub writes runtime.json through the module-level getStateDir,
+			// not the injected one, so this has to be set rather than inherited.
+			const originalStateRoot = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = root;
+
+			try {
+				await startHub(
+					{ port: 4100 },
+					{
+						describePreviousInstallation: () => undefined,
+						getStateDir: () => stateDir,
+						getConfigDir: () => configDir,
+						acquireHubLock: () => null as never,
+						initAuth: () => randomBytes(32).toString("hex"),
+						createOwnerToken: () => "owner-token",
+						resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+						openDatabases: () => dbs,
+						createServer: async () => ({}) as never,
+						startServer: async () => "http://127.0.0.1:4100",
+					},
+				);
+
+				expect(statSync(configDir).mode & 0o777).toBe(0o700);
+			} finally {
+				process.umask(previous);
+				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+				else process.env.XDG_STATE_HOME = originalStateRoot;
+				dbs.close();
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 });

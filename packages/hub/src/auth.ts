@@ -70,6 +70,16 @@ export function hashToken(token: string): string {
  * Skipped on Windows because this needs an ACL check; #200's Windows half is
  * not in this change.
  */
+/**
+ * Single-quote a path for a shell command a reader is meant to paste. Same form
+ * as `quoteForShell` in the desktop e2e runner: a literal single quote is closed,
+ * escaped and reopened. Without it a configuration directory containing a space
+ * produced a repair command that does something else.
+ */
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 export function checkPermissions(authFilePath: string): void {
 	if (process.platform === "win32") return;
 
@@ -81,7 +91,7 @@ export function checkPermissions(authFilePath: string): void {
 
 	if (mode & 0o066) {
 		throw new Error(
-			`SECURITY: auth.json at ${authFilePath} is group- or world-readable or writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 600 ${authFilePath}`,
+			`SECURITY: auth.json at ${authFilePath} is group- or world-readable or writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 600 ${shellQuote(authFilePath)}`,
 		);
 	}
 
@@ -108,7 +118,7 @@ function checkConfigDirectoryPermissions(configDir: string): void {
 
 	if (mode & 0o022) {
 		throw new Error(
-			`SECURITY: auth config directory at ${configDir} is group- or world-writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 700 ${configDir}`,
+			`SECURITY: auth config directory at ${configDir} is group- or world-writable (mode ${(mode & 0o777).toString(8)}). Fix with: chmod 700 ${shellQuote(configDir)}`,
 		);
 	}
 

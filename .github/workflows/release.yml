@@ -519,11 +519,22 @@ jobs:
           # Build the EXACT expected asset names from the matrix (windows → .exe), so
           # a stale near-match (e.g. ...-${VERSION}.bad) can never satisfy completeness
           # while the real asset is missing.
-          mapfile -t EXPECTED < <(
-            jq -r --arg v "$VERSION" '.targets[] | select(.enabled and .agent)
-              | "lasterm-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
-              ../.github/build-matrix.json
-          )
+          # jq runs in the foreground redirected to a file, for the same reason the
+          # installer collectors do: `mapfile < <(jq …)` reports mapfile's status,
+          # so a jq that could not read or parse the matrix left EXPECTED empty
+          # and the step green. MISSING then stays 0 and `sha256sum` with an empty
+          # array hashes standard input, publishing a manifest whose one entry is
+          # `-`. An empty expected set is refused outright: this repository always
+          # enables at least one agent target.
+          jq -r --arg v "$VERSION" '.targets[] | select(.enabled and .agent)
+            | "lasterm-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
+            ../.github/build-matrix.json > expected.txt
+          EXPECTED=()
+          while IFS= read -r name; do EXPECTED+=("$name"); done < expected.txt
+          if [ "${#EXPECTED[@]}" -eq 0 ]; then
+            echo "::error::No enabled agent target found in .github/build-matrix.json"
+            exit 1
+          fi
           # Download each exact asset; fail (never publish a partial-looking manifest)
           # if any enabled agent triple's exact asset is missing.
           MISSING=0
@@ -547,9 +558,23 @@ jobs:
           # These two are build inputs, not release assets. `|| true` turned a
           # throttled or unauthorised delete into "published it anyway", so the
           # only tolerated outcome is the asset already being gone.
-          ATTACHED="$(gh release view "$TAG_NAME" --json assets -q '.assets[].name')"
+          # Membership is decided by jq over the retained JSON, not by a
+          # `printf | grep -q` pipeline: under `pipefail`, grep exits on its match,
+          # printf takes SIGPIPE, and the pipeline reports failure — so a present
+          # asset read as absent and was published. jq's exits are also
+          # distinguishable, where grep's are not: 0 present, 1 absent, anything
+          # else a parse or runtime failure that must not be read as absence.
+          ATTACHED_JSON="$(gh release view "$TAG_NAME" --json assets)"
           for asset in web-dist.tar.gz web-embedded.tar.gz; do
-            if printf '%s\n' "$ATTACHED" | grep -qxF "$asset"; then
+            set +e
+            printf '%s' "$ATTACHED_JSON" | jq -e --arg a "$asset" 'any(.assets[]; .name == $a)' > /dev/null
+            probe=$?
+            set -e
+            if [ "$probe" -gt 1 ]; then
+              echo "::error::Could not determine whether $asset is attached to $TAG_NAME (jq exit $probe)"
+              exit 1
+            fi
+            if [ "$probe" -eq 0 ]; then
               gh release delete-asset "$TAG_NAME" "$asset" --yes
             else
               echo "intermediate asset $asset is already absent"

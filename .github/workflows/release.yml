@@ -448,25 +448,46 @@ jobs:
           # `find -exec cmd \;` does not adopt cmd's exit status — `find /dev/null
           # -exec false {} \;` exits 0 — so an upload that failed on a network or
           # token error left this job green and the release short an installer.
-          # Collect the paths, refuse an empty set, and let one upload command's
-          # status decide the step. -print0 keeps paths with spaces intact.
-          mapfile -d '' INSTALLERS < <(
-            find packages/clients/desktop/src-tauri/target/release/bundle -type f \
-              \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
-              -print0
-          )
+          #
+          # `find` runs in the foreground writing to a file, never through a
+          # process substitution: `mapfile < <(find …)` reports mapfile's status,
+          # so a traversal that read one installer and then hit an unreadable
+          # subtree would look like a complete scan. Redirected like this, `-e`
+          # ends the step on find's own status. The read loop is used rather than
+          # `mapfile -d ''` because macOS runners carry bash 3.2, and
+          # aarch64-apple-darwin is a declared desktop target (disabled today,
+          # #224). -print0 keeps a path containing a space whole.
+          #
+          # The set is checked for being non-empty, which is not the same as
+          # complete: `bundle.targets` is "all", so what tauri produces per
+          # platform is not declared anywhere this step could compare against.
+          BUNDLE_LIST="$RUNNER_TEMP/desktop-installers"
+          find packages/clients/desktop/src-tauri/target/release/bundle -type f \
+            \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
+            -print0 > "$BUNDLE_LIST"
+          INSTALLERS=()
+          while IFS= read -r -d '' path; do INSTALLERS+=("$path"); done < "$BUNDLE_LIST"
           if [ "${#INSTALLERS[@]}" -eq 0 ]; then
             echo "::error::No installer found under packages/clients/desktop/src-tauri/target/release/bundle"
             exit 1
           fi
           printf 'uploading %s\n' "${INSTALLERS[@]}"
           gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
-          if [ "$MSIX_RELEASE_ENABLED" = "true" ] && [ -d packages/clients/desktop/msix/out ]; then
-            mapfile -d '' PACKAGES < <(
-              find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" -print0
-            )
+          if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
+            # An absent output directory is a failure here, not a reason to skip:
+            # the variables that enable MSIX publication are set, so the package
+            # was meant to exist.
+            if [ ! -d packages/clients/desktop/msix/out ]; then
+              echo "::error::MSIX publication is enabled but packages/clients/desktop/msix/out does not exist"
+              exit 1
+            fi
+            MSIX_LIST="$RUNNER_TEMP/desktop-msix"
+            find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" \
+              -print0 > "$MSIX_LIST"
+            PACKAGES=()
+            while IFS= read -r -d '' path; do PACKAGES+=("$path"); done < "$MSIX_LIST"
             if [ "${#PACKAGES[@]}" -eq 0 ]; then
-              echo "::error::MSIX publication is enabled and its output directory exists, but holds no .msix"
+              echo "::error::MSIX publication is enabled but its output directory holds no .msix"
               exit 1
             fi
             printf 'uploading %s\n' "${PACKAGES[@]}"

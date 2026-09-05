@@ -445,12 +445,32 @@ jobs:
               vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
             }}
         run: |
-          find packages/clients/desktop/src-tauri/target/release/bundle -type f \
-            \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
-            -exec gh release upload "$TAG_NAME" --clobber {} \;
+          # `find -exec cmd \;` does not adopt cmd's exit status — `find /dev/null
+          # -exec false {} \;` exits 0 — so an upload that failed on a network or
+          # token error left this job green and the release short an installer.
+          # Collect the paths, refuse an empty set, and let one upload command's
+          # status decide the step. -print0 keeps paths with spaces intact.
+          mapfile -d '' INSTALLERS < <(
+            find packages/clients/desktop/src-tauri/target/release/bundle -type f \
+              \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
+              -print0
+          )
+          if [ "${#INSTALLERS[@]}" -eq 0 ]; then
+            echo "::error::No installer found under packages/clients/desktop/src-tauri/target/release/bundle"
+            exit 1
+          fi
+          printf 'uploading %s\n' "${INSTALLERS[@]}"
+          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
           if [ "$MSIX_RELEASE_ENABLED" = "true" ] && [ -d packages/clients/desktop/msix/out ]; then
-            find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" \
-              -exec gh release upload "$TAG_NAME" --clobber {} \;
+            mapfile -d '' PACKAGES < <(
+              find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" -print0
+            )
+            if [ "${#PACKAGES[@]}" -eq 0 ]; then
+              echo "::error::MSIX publication is enabled and its output directory exists, but holds no .msix"
+              exit 1
+            fi
+            printf 'uploading %s\n' "${PACKAGES[@]}"
+            gh release upload "$TAG_NAME" --clobber "${PACKAGES[@]}"
           fi
 
   publish-release:
@@ -496,8 +516,17 @@ jobs:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
           echo "Publishing release: $TAG_NAME"
-          gh release delete-asset "$TAG_NAME" web-dist.tar.gz --yes || true
-          gh release delete-asset "$TAG_NAME" web-embedded.tar.gz --yes || true
+          # These two are build inputs, not release assets. `|| true` turned a
+          # throttled or unauthorised delete into "published it anyway", so the
+          # only tolerated outcome is the asset already being gone.
+          ATTACHED="$(gh release view "$TAG_NAME" --json assets -q '.assets[].name')"
+          for asset in web-dist.tar.gz web-embedded.tar.gz; do
+            if printf '%s\n' "$ATTACHED" | grep -qxF "$asset"; then
+              gh release delete-asset "$TAG_NAME" "$asset" --yes
+            else
+              echo "intermediate asset $asset is already absent"
+            fi
+          done
           gh release edit "$TAG_NAME" --draft=false
           IS_DRAFT=$(gh release view "$TAG_NAME" --json isDraft -q '.isDraft')
           echo "Release $TAG_NAME draft=$IS_DRAFT"

@@ -438,19 +438,67 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          # The triple belongs in this predicate because the packaging step above
+          # carries it too. Testing only the repository variables meant a
+          # non-Windows row — aarch64-apple-darwin, declared in the matrix and
+          # disabled under #224 — read MSIX as enabled, produced nothing because
+          # packaging is Windows-only, and would now fail on the absent output
+          # directory. Every row that enforces MSIX is a row that attempted it.
           MSIX_RELEASE_ENABLED: >-
             ${{
+              matrix.triple == 'x86_64-pc-windows-msvc' &&
               vars.MSIX_IDENTITY_NAME != '' &&
               vars.MSIX_PUBLISHER != '' &&
               vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
             }}
         run: |
+          # `find -exec cmd \;` does not adopt cmd's exit status — `find /dev/null
+          # -exec false {} \;` exits 0 — so an upload that failed on a network or
+          # token error left this job green and the release short an installer.
+          #
+          # `find` runs in the foreground writing to a file, never through a
+          # process substitution: `mapfile < <(find …)` reports mapfile's status,
+          # so a traversal that read one installer and then hit an unreadable
+          # subtree would look like a complete scan. Redirected like this, `-e`
+          # ends the step on find's own status. The read loop is used rather than
+          # `mapfile -d ''` because macOS runners carry bash 3.2, and
+          # aarch64-apple-darwin is a declared desktop target (disabled today,
+          # #224). -print0 keeps a path containing a space whole.
+          #
+          # The set is checked for being non-empty, which is not the same as
+          # complete: `bundle.targets` is "all", so what tauri produces per
+          # platform is not declared anywhere this step could compare against.
+          BUNDLE_LIST="$RUNNER_TEMP/desktop-installers"
           find packages/clients/desktop/src-tauri/target/release/bundle -type f \
             \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
-            -exec gh release upload "$TAG_NAME" --clobber {} \;
-          if [ "$MSIX_RELEASE_ENABLED" = "true" ] && [ -d packages/clients/desktop/msix/out ]; then
+            -print0 > "$BUNDLE_LIST"
+          INSTALLERS=()
+          while IFS= read -r -d '' path; do INSTALLERS+=("$path"); done < "$BUNDLE_LIST"
+          if [ "${#INSTALLERS[@]}" -eq 0 ]; then
+            echo "::error::No installer found under packages/clients/desktop/src-tauri/target/release/bundle"
+            exit 1
+          fi
+          printf 'uploading %s\n' "${INSTALLERS[@]}"
+          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
+          if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
+            # An absent output directory is a failure here, not a reason to skip:
+            # the variables that enable MSIX publication are set, so the package
+            # was meant to exist.
+            if [ ! -d packages/clients/desktop/msix/out ]; then
+              echo "::error::MSIX publication is enabled but packages/clients/desktop/msix/out does not exist"
+              exit 1
+            fi
+            MSIX_LIST="$RUNNER_TEMP/desktop-msix"
             find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" \
-              -exec gh release upload "$TAG_NAME" --clobber {} \;
+              -print0 > "$MSIX_LIST"
+            PACKAGES=()
+            while IFS= read -r -d '' path; do PACKAGES+=("$path"); done < "$MSIX_LIST"
+            if [ "${#PACKAGES[@]}" -eq 0 ]; then
+              echo "::error::MSIX publication is enabled but its output directory holds no .msix"
+              exit 1
+            fi
+            printf 'uploading %s\n' "${PACKAGES[@]}"
+            gh release upload "$TAG_NAME" --clobber "${PACKAGES[@]}"
           fi
 
   publish-release:
@@ -471,11 +519,22 @@ jobs:
           # Build the EXACT expected asset names from the matrix (windows → .exe), so
           # a stale near-match (e.g. ...-${VERSION}.bad) can never satisfy completeness
           # while the real asset is missing.
-          mapfile -t EXPECTED < <(
-            jq -r --arg v "$VERSION" '.targets[] | select(.enabled and .agent)
-              | "lasterm-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
-              ../.github/build-matrix.json
-          )
+          # jq runs in the foreground redirected to a file, for the same reason the
+          # installer collectors do: `mapfile < <(jq …)` reports mapfile's status,
+          # so a jq that could not read or parse the matrix left EXPECTED empty
+          # and the step green. MISSING then stays 0 and `sha256sum` with an empty
+          # array hashes standard input, publishing a manifest whose one entry is
+          # `-`. An empty expected set is refused outright: this repository always
+          # enables at least one agent target.
+          jq -r --arg v "$VERSION" '.targets[] | select(.enabled and .agent)
+            | "lasterm-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
+            ../.github/build-matrix.json > expected.txt
+          EXPECTED=()
+          while IFS= read -r name; do EXPECTED+=("$name"); done < expected.txt
+          if [ "${#EXPECTED[@]}" -eq 0 ]; then
+            echo "::error::No enabled agent target found in .github/build-matrix.json"
+            exit 1
+          fi
           # Download each exact asset; fail (never publish a partial-looking manifest)
           # if any enabled agent triple's exact asset is missing.
           MISSING=0
@@ -496,8 +555,31 @@ jobs:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
           echo "Publishing release: $TAG_NAME"
-          gh release delete-asset "$TAG_NAME" web-dist.tar.gz --yes || true
-          gh release delete-asset "$TAG_NAME" web-embedded.tar.gz --yes || true
+          # These two are build inputs, not release assets. `|| true` turned a
+          # throttled or unauthorised delete into "published it anyway", so the
+          # only tolerated outcome is the asset already being gone.
+          # Membership is decided by jq over the retained JSON, not by a
+          # `printf | grep -q` pipeline: under `pipefail`, grep exits on its match,
+          # printf takes SIGPIPE, and the pipeline reports failure — so a present
+          # asset read as absent and was published. jq's exits are also
+          # distinguishable, where grep's are not: 0 present, 1 absent, anything
+          # else a parse or runtime failure that must not be read as absence.
+          ATTACHED_JSON="$(gh release view "$TAG_NAME" --json assets)"
+          for asset in web-dist.tar.gz web-embedded.tar.gz; do
+            set +e
+            printf '%s' "$ATTACHED_JSON" | jq -e --arg a "$asset" 'any(.assets[]; .name == $a)' > /dev/null
+            probe=$?
+            set -e
+            if [ "$probe" -gt 1 ]; then
+              echo "::error::Could not determine whether $asset is attached to $TAG_NAME (jq exit $probe)"
+              exit 1
+            fi
+            if [ "$probe" -eq 0 ]; then
+              gh release delete-asset "$TAG_NAME" "$asset" --yes
+            else
+              echo "intermediate asset $asset is already absent"
+            fi
+          done
           gh release edit "$TAG_NAME" --draft=false
           IS_DRAFT=$(gh release view "$TAG_NAME" --json isDraft -q '.isDraft')
           echo "Release $TAG_NAME draft=$IS_DRAFT"

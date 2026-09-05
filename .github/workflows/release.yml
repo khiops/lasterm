@@ -68,6 +68,17 @@ jobs:
             echo "::error::Version mismatch — tag=$VERSION root=$PKG_VERSION hub=$HUB_PKG_VERSION lasterm-agent=$CARGO_VERSION (the hub HUB_VERSION reads packages/hub/package.json and the agent CARGO_PKG_VERSION must both equal the tag for the HELLO lockstep)"
             exit 1
           fi
+      - name: Assert the checked-out tree pins the package manager
+        run: |
+          # The build jobs install pnpm from package.json's packageManager
+          # field. A tag published before that field existed keeps its pnpm
+          # settings where pnpm 11 no longer reads them, so a rebuild would
+          # resolve dependencies differently from what shipped. Refuse here,
+          # while this job has not yet touched the release.
+          if ! jq -e 'has("packageManager")' package.json > /dev/null; then
+            echo "::error::This ref declares no packageManager, so it predates the move of the pnpm settings to pnpm-workspace.yaml. Rebuilding it would run pnpm 11 against settings it ignores and resolve dependencies differently from the published artefacts. Rebuild such a tag from a branch that carries the migration."
+            exit 1
+          fi
       - name: Create or reuse release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

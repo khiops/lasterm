@@ -100,8 +100,9 @@ alongside the TLS key's.
 On every hub start:
 
 ```
-Every check in this list is Unix-only: each returns immediately on Windows, where the
-equivalent ACL validation is #200.
+The permission checks below — items 1 to 3 — are Unix-only: each returns immediately on
+Windows, where the equivalent ACL validation is #200. The token-format check in item 4
+runs everywhere.
 
 1. Check the configuration directory holding auth.json, before reading a token from it
    and before writing one into it

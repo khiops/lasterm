@@ -75,8 +75,15 @@ jobs:
           # settings where pnpm 11 no longer reads them, so a rebuild would
           # resolve dependencies differently from what shipped. Refuse here,
           # while this job has not yet touched the release.
-          if ! jq -e 'has("packageManager")' package.json > /dev/null; then
-            echo "::error::This ref declares no packageManager, so it predates the move of the pnpm settings to pnpm-workspace.yaml. Rebuilding it would run pnpm 11 against settings it ignores and resolve dependencies differently from the published artefacts. Rebuild such a tag from a branch that carries the migration."
+          # Admit only what pnpm/action-setup admits: a string beginning with
+          # `pnpm@`. `has("packageManager")` would pass null, "", 42 and
+          # `npm@11`, each of which reaches the setup step and fails there,
+          # after this job has written. The trailing group leaves room for the
+          # `+sha512.<digest>` form.
+          if ! jq -e '(.packageManager | type) == "string"
+                      and (.packageManager | test("^pnpm@[0-9]+\\.[0-9]+\\.[0-9]+(\\+.+)?$"))' \
+                   package.json > /dev/null; then
+            echo "::error::This ref does not pin pnpm in packageManager, so it predates the move of the pnpm settings to pnpm-workspace.yaml. Rebuilding it would run pnpm 11 against settings it ignores and resolve dependencies differently from the published artefacts. Such a tag cannot be rebuilt by this workflow; ship the fix under a new version instead."
             exit 1
           fi
       - name: Create or reuse release

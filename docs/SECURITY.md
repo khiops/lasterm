@@ -62,7 +62,8 @@
 | Threat | Vector | Impact | Likelihood | Mitigation |
 |--------|--------|--------|------------|------------|
 | Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
-| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600. The hub adopts an existing token at first start, so write access to the configuration directory by another account is credential takeover rather than denial of service. On Unix, the desktop refuses a directory group or other can write through its protected-file policy; the hub does not yet, and that is tracked in #232. On Windows, protection is the single leaf handle, while the user's profile ACL keeps other accounts out; the reader does not inspect ownership or a DACL. |
+| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600, and the hub refuses to start on a world-readable file |
+| Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a default install, where the directory is not writable by another account; higher wherever it has been made group-writable, which a umask of 002 with a shared group produces | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix the desktop refuses a directory group or other can write, through its protected-file policy; **the hub does not yet, and that is #232**. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL |
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
@@ -224,9 +225,10 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 **Note:** the hub binds `127.0.0.1` today, which is the default of the local launch rather than the
 design — pairing exists so a client can reach a hub across a network, and #96 covers hardening that
 binding. A configured certificate is used as supplied; otherwise the hub generates its own key **once** and
-keeps it, and issues a leaf over that key **once**, reusing it across restarts. A new leaf is signed
-only when the stored one cannot serve: absent, unreadable, belonging to another key, expired or within
-seven days of it, dated in the future, or no longer matching the shape a generated leaf must have.
+keeps it, and **reuses a stored leaf over that key while it can still serve, reissuing over the same
+key when it cannot**. The key is what stays fixed; the leaf is not. A new leaf is signed when the
+stored one is absent, unreadable, belonging to another key, expired or within seven days of it,
+dated in the future, or no longer matching the shape a generated leaf must have.
 **That decision is taken when the hub starts, and not again while it runs** — a hub up for longer than
 its leaf's remaining validity serves an expired certificate until it is restarted, which browsers
 refuse and pinning clients do not care about (#199). A

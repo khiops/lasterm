@@ -43,7 +43,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
-          fetch-depth: 0
       - id: resolve
         env:
           REQUESTED_REF: ${{ inputs.ref }}
@@ -102,7 +101,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve.outputs.sha }}
-          fetch-depth: 0
       - name: Assert tag, package.json, and agent Cargo.toml versions agree
         env:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
@@ -170,6 +168,16 @@ jobs:
           PUBLISHED_ID="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '[.[] | select(.tag_name == $tag and (.draft | not)) | .id][0] // empty')"
           if [ -n "$PUBLISHED_ID" ]; then
             echo "Release $TAG_NAME already exists (published); reusing id=$PUBLISHED_ID"
+            # Same binding the draft branch gets. Without a tag there is nothing
+            # else tying this release to a commit, and a published release is the
+            # one case where the assets are visible while the run proceeds.
+            if [ -z "$TAG_SHA" ]; then
+              PUBLISHED_TARGET="$(printf '%s' "$RELEASES_JSON" | jq -r --arg id "$PUBLISHED_ID" '.[] | select((.id|tostring) == $id) | .target_commitish')"
+              if [ "$PUBLISHED_TARGET" != "$FROZEN_SHA" ]; then
+                echo "::error::Release $TAG_NAME has no tag and targets $PUBLISHED_TARGET, not the $FROZEN_SHA this run built"
+                exit 1
+              fi
+            fi
           else
             DRAFT_IDS="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag and .draft) | .id')"
             KEEP_DRAFT_ID=""
@@ -636,9 +644,24 @@ jobs:
           REMOTE="$(git ls-remote "https://github.com/${{ github.repository }}.git" "refs/tags/$TAG_NAME" "refs/tags/$TAG_NAME^{}")"
           TAG_SHA="$(printf '%s\n' "$REMOTE" | awk '/\^\{\}$/ {print $1}')"
           [ -n "$TAG_SHA" ] || TAG_SHA="$(printf '%s\n' "$REMOTE" | awk 'NR==1 {print $1}')"
-          if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$FROZEN_SHA" ]; then
-            echo "::error::Tag $TAG_NAME now points at $TAG_SHA but this run built $FROZEN_SHA; refusing to publish"
-            exit 1
+          if [ -n "$TAG_SHA" ]; then
+            if [ "$TAG_SHA" != "$FROZEN_SHA" ]; then
+              echo "::error::Tag $TAG_NAME now points at $TAG_SHA but this run built $FROZEN_SHA; refusing to publish"
+              exit 1
+            fi
+          else
+            # An empty result is not a pass. The tag can have existed when
+            # create-release ran — which is why that job compared the tag and
+            # skipped the draft target — and been deleted since, leaving nothing
+            # that binds this release to a commit. Publishing would recreate the
+            # tag at the release's own target while the assets came from
+            # FROZEN_SHA. Require that target to be the frozen commit exactly: a
+            # branch name there resolves today and moves tomorrow.
+            RELEASE_TARGET="$(gh release view "$TAG_NAME" --json targetCommitish -q '.targetCommitish')"
+            if [ "$RELEASE_TARGET" != "$FROZEN_SHA" ]; then
+              echo "::error::Tag $TAG_NAME does not exist and release $TAG_NAME targets $RELEASE_TARGET, not the $FROZEN_SHA this run built; refusing to publish"
+              exit 1
+            fi
           fi
           # These two are build inputs, not release assets. `|| true` turned a
           # throttled or unauthorised delete into "published it anyway", so the

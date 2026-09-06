@@ -20,9 +20,6 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
-
 # One run at a time per group. The group is a literal namespace plus the tag rather
 # than github.workflow, because a workflow invoked through workflow_call sees the
 # caller's workflow name. cancel-in-progress: false keeps a queued recovery run
@@ -41,15 +38,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  resolve:
-    name: Resolve the commit to build
+  matrix:
+    name: Load Build Matrix
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      agent: ${{ steps.filter.outputs.agent }}
+      hub: ${{ steps.filter.outputs.hub }}
+      desktop: ${{ steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          persist-credentials: false
       - id: resolve
         env:
           REQUESTED_REF: ${{ inputs.ref }}
@@ -85,19 +88,6 @@ jobs:
           fi
           echo "building $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-
-  matrix:
-    name: Load Build Matrix
-    runs-on: ubuntu-latest
-    needs: [resolve]
-    outputs:
-      agent: ${{ steps.filter.outputs.agent }}
-      hub: ${{ steps.filter.outputs.hub }}
-      desktop: ${{ steps.filter.outputs.desktop }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
       - id: filter
         run: |
           jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
@@ -113,11 +103,14 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [resolve]
+    needs: [matrix]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.matrix.outputs.sha }}
+          persist-credentials: false
       - name: Assert tag, package.json, and agent Cargo.toml versions agree
         env:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
@@ -153,7 +146,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          FROZEN_SHA: ${{ needs.resolve.outputs.sha }}
+          FROZEN_SHA: ${{ needs.matrix.outputs.sha }}
         run: |
           # The build must match the tag: when the tag already exists
           # (force-tag-creation), refuse to attach assets built from a
@@ -255,12 +248,15 @@ jobs:
 
   build-web:
     name: Build Web UI
-    needs: [resolve, create-release]
+    needs: [matrix, create-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.matrix.outputs.sha }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
@@ -285,7 +281,9 @@ jobs:
 
   build-agent:
     name: Build Agent (${{ matrix.triple }})
-    needs: [resolve, matrix, create-release]
+    needs: [matrix, create-release]
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.agent) }}
@@ -293,7 +291,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.matrix.outputs.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -339,7 +338,9 @@ jobs:
 
   build-hub:
     name: Build Hub (${{ matrix.triple }})
-    needs: [resolve, matrix, build-web]
+    needs: [matrix, build-web]
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
@@ -347,7 +348,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.matrix.outputs.sha }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
@@ -440,7 +442,9 @@ jobs:
 
   build-desktop:
     name: Build Desktop (${{ matrix.triple }})
-    needs: [resolve, matrix, build-agent, build-hub, build-web]
+    needs: [matrix, build-agent, build-hub, build-web]
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
@@ -448,7 +452,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.matrix.outputs.sha }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
@@ -607,12 +612,15 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: [resolve, build-agent, build-hub, build-desktop]
+    needs: [matrix, build-agent, build-hub, build-desktop]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.matrix.outputs.sha }}
+          persist-credentials: false
       - name: Generate and verify SHA256SUMS for agent assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -657,7 +665,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          FROZEN_SHA: ${{ needs.resolve.outputs.sha }}
+          FROZEN_SHA: ${{ needs.matrix.outputs.sha }}
         run: |
           echo "Publishing release: $TAG_NAME"
           # create-release checked the tag against the frozen commit before any

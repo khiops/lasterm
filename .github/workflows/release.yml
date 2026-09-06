@@ -23,10 +23,73 @@ on:
 permissions:
   contents: write
 
+# One run at a time per group. The group is a literal namespace plus the tag rather
+# than github.workflow, because a workflow invoked through workflow_call sees the
+# caller's workflow name. cancel-in-progress: false keeps a queued recovery run
+# instead of killing a run that may be mid-upload; it does not preserve an
+# arbitrary queue, since GitHub keeps one pending run per group and a newer one
+# replaces an older pending one.
+#
+# A group is not exactly a tag: GitHub folds group names to one case, so
+# v1.0.0-alpha and v1.0.0-ALPHA share this group and the second pending run
+# replaces the first. Release tags here come from release-please and are
+# lowercase, so a case-variant pair can only arrive through two manual
+# dispatches. `queue:` is not a key the concurrency schema accepts, so there is
+# no in-workflow way to hold both.
+concurrency:
+  group: lasterm-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  resolve:
+    name: Resolve the commit to build
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+      - id: resolve
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          # Seven jobs used to resolve `inputs.ref || inputs.tag || github.ref`
+          # for themselves. A tag is a pointer: if it moves after create-release
+          # has checked that it names the commit it built, the later jobs read a
+          # different manifest, a different matrix and different source, and the
+          # guards that passed described a commit nothing else used. Resolve once
+          # here; every other job checks out this SHA.
+          if [ -n "$REQUESTED_REF" ]; then
+            # The workflow_call input is documented as an exact commit. Enforce
+            # that rather than trusting the description: a branch name here would
+            # reintroduce the moving target this job exists to remove.
+            case "$REQUESTED_REF" in
+              *[!0-9a-f]* | "" ) echo "::error::ref input must be a full commit SHA, got $REQUESTED_REF"; exit 1 ;;
+            esac
+            if [ "${#REQUESTED_REF}" -ne 40 ]; then
+              echo "::error::ref input must be a full 40-character commit SHA, got $REQUESTED_REF"
+              exit 1
+            fi
+          fi
+          SHA="$(git rev-parse HEAD)"
+          if [ -n "$REQUESTED_REF" ] && [ "$SHA" != "$REQUESTED_REF" ]; then
+            # Forty lowercase hex characters is not a commit. An annotated tag's
+            # object matches that shape — v0.1.0 in this repository is object
+            # 6f73821a and commit 73d6eabf — and checkout peels it, so the
+            # resolver would emit a SHA the caller never asked for while claiming
+            # to build the exact one it did. Requiring equality rejects a tag
+            # object, which is the promised contract.
+            echo "::error::ref input $REQUESTED_REF is not the commit that was checked out ($SHA); pass a commit SHA, not a tag object"
+            exit 1
+          fi
+          echo "building $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
   matrix:
     name: Load Build Matrix
     runs-on: ubuntu-latest
+    needs: [resolve]
     outputs:
       agent: ${{ steps.filter.outputs.agent }}
       hub: ${{ steps.filter.outputs.hub }}
@@ -34,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - id: filter
         run: |
           jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
@@ -50,11 +113,11 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    needs: [resolve]
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
-          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.sha }}
       - name: Assert tag, package.json, and agent Cargo.toml versions agree
         env:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
@@ -90,17 +153,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          FROZEN_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           # The build must match the tag: when the tag already exists
           # (force-tag-creation), refuse to attach assets built from a
           # different commit — GitHub ignores target_commitish once the
           # tag exists, so failing loudly is the only safe option.
-          if TAG_SHA="$(git rev-parse -q --verify "refs/tags/$TAG_NAME^{commit}" 2>/dev/null)"; then
-            HEAD_SHA="$(git rev-parse HEAD)"
-            if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
-              echo "::error::Tag $TAG_NAME points at $TAG_SHA but this build checked out $HEAD_SHA"
+          #
+          # Read the tag from the remote, not from this checkout: the local ref
+          # is whatever the fetch happened to bring, and this guard exists
+          # precisely because the tag can move. `ls-remote 'refs/tags/<t>*'`
+          # returns the tag object for an annotated tag and the commit for a
+          # lightweight one, so the peeled `^{}` line is preferred when present.
+          REMOTE="$(git ls-remote "https://github.com/${{ github.repository }}.git" "refs/tags/$TAG_NAME" "refs/tags/$TAG_NAME^{}")"
+          TAG_SHA="$(printf '%s\n' "$REMOTE" | awk '/\^\{\}$/ {print $1}')"
+          [ -n "$TAG_SHA" ] || TAG_SHA="$(printf '%s\n' "$REMOTE" | awk 'NR==1 {print $1}')"
+          if [ -n "$TAG_SHA" ]; then
+            if [ "$TAG_SHA" != "$FROZEN_SHA" ]; then
+              echo "::error::Tag $TAG_NAME points at $TAG_SHA but this run froze $FROZEN_SHA"
               exit 1
             fi
+          else
+            # No tag yet: release-please calls this workflow before creating one,
+            # so the linkage to check is the draft's target rather than a tag that
+            # does not exist. Asserted below, once the draft is identified.
+            echo "Tag $TAG_NAME does not exist on the remote yet; checking the draft target instead"
           fi
           # --paginate: with >100 releases, a single page can miss the
           # tag's release and create a duplicate draft.
@@ -108,6 +185,16 @@ jobs:
           PUBLISHED_ID="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '[.[] | select(.tag_name == $tag and (.draft | not)) | .id][0] // empty')"
           if [ -n "$PUBLISHED_ID" ]; then
             echo "Release $TAG_NAME already exists (published); reusing id=$PUBLISHED_ID"
+            # Same binding the draft branch gets. Without a tag there is nothing
+            # else tying this release to a commit, and a published release is the
+            # one case where the assets are visible while the run proceeds.
+            if [ -z "$TAG_SHA" ]; then
+              PUBLISHED_TARGET="$(printf '%s' "$RELEASES_JSON" | jq -r --arg id "$PUBLISHED_ID" '.[] | select((.id|tostring) == $id) | .target_commitish')"
+              if [ "$PUBLISHED_TARGET" != "$FROZEN_SHA" ]; then
+                echo "::error::Release $TAG_NAME has no tag and targets $PUBLISHED_TARGET, not the $FROZEN_SHA this run built"
+                exit 1
+              fi
+            fi
           else
             DRAFT_IDS="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag and .draft) | .id')"
             KEEP_DRAFT_ID=""
@@ -125,6 +212,16 @@ jobs:
               # changelog body, and the tag-vs-HEAD guard above already
               # rules out building a commit the tag does not point at.
               echo "Reusing draft release $TAG_NAME id=$KEEP_DRAFT_ID"
+              # With no tag yet, this is the only link between the draft and the
+              # commit: release-please creates the draft with target_commitish set,
+              # and a draft aimed elsewhere would publish a tag on another commit.
+              DRAFT_TARGET="$(printf '%s' "$RELEASES_JSON" | jq -r --arg id "$KEEP_DRAFT_ID" '.[] | select((.id|tostring) == $id) | .target_commitish')"
+              if [ -n "$TAG_SHA" ] || [ "$DRAFT_TARGET" = "$FROZEN_SHA" ]; then
+                :
+              else
+                echo "::error::Draft $TAG_NAME targets $DRAFT_TARGET but this run froze $FROZEN_SHA"
+                exit 1
+              fi
               # Every agent asset in a reused draft came from an earlier run — this run's
               # build jobs have not started, and a re-run of them uploads again — so
               # delete them all rather than describing which are legitimate (§3.5.5).
@@ -136,7 +233,14 @@ jobs:
               # A failed deletion fails the job. Suppressing it would turn "could not
               # remove the stale binary" into publishing the stale binary, which is the
               # one outcome this loop exists to prevent.
-              for asset in $(gh release view "$TAG_NAME" --json assets -q '.assets[].name'); do
+              # The listing runs as its own assignment, not inside the for word
+              # list: a failing command substitution there leaves the loop with
+              # zero iterations and a zero status, so an API or auth failure read
+              # as "no assets to remove" and publication continued over stale
+              # binaries. Same shape as the collectors this workflow already had
+              # to lose.
+              DRAFT_ASSETS="$(gh release view "$TAG_NAME" --json assets -q '.assets[].name')"
+              for asset in $DRAFT_ASSETS; do
                 case "$asset" in
                   *-agent-*)
                     echo "Deleting agent asset left by an earlier run: $asset"
@@ -151,12 +255,12 @@ jobs:
 
   build-web:
     name: Build Web UI
-    needs: [create-release]
+    needs: [resolve, create-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
@@ -181,7 +285,7 @@ jobs:
 
   build-agent:
     name: Build Agent (${{ matrix.triple }})
-    needs: [matrix, create-release]
+    needs: [resolve, matrix, create-release]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.agent) }}
@@ -189,7 +293,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -235,7 +339,7 @@ jobs:
 
   build-hub:
     name: Build Hub (${{ matrix.triple }})
-    needs: [matrix, build-web]
+    needs: [resolve, matrix, build-web]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
@@ -243,7 +347,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
@@ -336,7 +440,7 @@ jobs:
 
   build-desktop:
     name: Build Desktop (${{ matrix.triple }})
-    needs: [matrix, build-agent, build-hub, build-web]
+    needs: [resolve, matrix, build-agent, build-hub, build-web]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
@@ -344,7 +448,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
@@ -503,12 +607,12 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: [build-agent, build-hub, build-desktop]
+    needs: [resolve, build-agent, build-hub, build-desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - name: Generate and verify SHA256SUMS for agent assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -553,8 +657,36 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          FROZEN_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           echo "Publishing release: $TAG_NAME"
+          # create-release checked the tag against the frozen commit before any
+          # build ran. Check it again here, against the remote, because that is
+          # the last moment before the release becomes public and the whole run
+          # has had time to elapse in between. A tag that moved meanwhile would
+          # otherwise publish assets built from a commit it no longer names.
+          REMOTE="$(git ls-remote "https://github.com/${{ github.repository }}.git" "refs/tags/$TAG_NAME" "refs/tags/$TAG_NAME^{}")"
+          TAG_SHA="$(printf '%s\n' "$REMOTE" | awk '/\^\{\}$/ {print $1}')"
+          [ -n "$TAG_SHA" ] || TAG_SHA="$(printf '%s\n' "$REMOTE" | awk 'NR==1 {print $1}')"
+          if [ -n "$TAG_SHA" ]; then
+            if [ "$TAG_SHA" != "$FROZEN_SHA" ]; then
+              echo "::error::Tag $TAG_NAME now points at $TAG_SHA but this run built $FROZEN_SHA; refusing to publish"
+              exit 1
+            fi
+          else
+            # An empty result is not a pass. The tag can have existed when
+            # create-release ran — which is why that job compared the tag and
+            # skipped the draft target — and been deleted since, leaving nothing
+            # that binds this release to a commit. Publishing would recreate the
+            # tag at the release's own target while the assets came from
+            # FROZEN_SHA. Require that target to be the frozen commit exactly: a
+            # branch name there resolves today and moves tomorrow.
+            RELEASE_TARGET="$(gh release view "$TAG_NAME" --json targetCommitish -q '.targetCommitish')"
+            if [ "$RELEASE_TARGET" != "$FROZEN_SHA" ]; then
+              echo "::error::Tag $TAG_NAME does not exist and release $TAG_NAME targets $RELEASE_TARGET, not the $FROZEN_SHA this run built; refusing to publish"
+              exit 1
+            fi
+          fi
           # These two are build inputs, not release assets. `|| true` turned a
           # throttled or unauthorised delete into "published it anyway", so the
           # only tolerated outcome is the asset already being gone.

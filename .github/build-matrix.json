@@ -9,6 +9,7 @@
 			"agent": true,
 			"hub": false,
 			"desktop": false,
+			"artifacts": {},
 			"enabled": true
 		},
 		{
@@ -20,6 +21,7 @@
 			"agent": true,
 			"hub": false,
 			"desktop": false,
+			"artifacts": {},
 			"enabled": true
 		},
 		{
@@ -31,6 +33,15 @@
 			"agent": true,
 			"hub": true,
 			"desktop": true,
+			"artifacts": {
+				"bundles": ["nsis", "msi"],
+				"hub": ["lasterm-hub-x86_64-pc-windows-msvc.exe"],
+				"desktop": [
+					"Lasterm_{version}_x64-setup.exe",
+					"Lasterm_{version}_x64_*.msi"
+				],
+				"msix": ["Lasterm_{version}.*_x64.msix"]
+			},
 			"enabled": true
 		},
 		{

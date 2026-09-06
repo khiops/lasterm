@@ -183,17 +183,55 @@ jobs:
           RELEASES_JSON="$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" | jq -s 'add')"
           PUBLISHED_ID="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '[.[] | select(.tag_name == $tag and (.draft | not)) | .id][0] // empty')"
           if [ -n "$PUBLISHED_ID" ]; then
-            echo "Release $TAG_NAME already exists (published); reusing id=$PUBLISHED_ID"
-            # Same binding the draft branch gets. Without a tag there is nothing
-            # else tying this release to a commit, and a published release is the
-            # one case where the assets are visible while the run proceeds.
-            if [ -z "$TAG_SHA" ]; then
-              PUBLISHED_TARGET="$(printf '%s' "$RELEASES_JSON" | jq -r --arg id "$PUBLISHED_ID" '.[] | select((.id|tostring) == $id) | .target_commitish')"
-              if [ "$PUBLISHED_TARGET" != "$FROZEN_SHA" ]; then
-                echo "::error::Release $TAG_NAME has no tag and targets $PUBLISHED_TARGET, not the $FROZEN_SHA this run built"
-                exit 1
-              fi
-            fi
+            # Refuse, before any cleanup and before a single build starts.
+            #
+            # Reusing a published release meant every later job wrote to something
+            # users could already see: `gh release upload --clobber` replaces one
+            # asset at a time, so a build that failed halfway left the public
+            # release holding a mixture of the old assets and the new ones, with
+            # nothing marking it as mid-flight. Draft-until-built was true of a
+            # first publication and of nothing else.
+            #
+            # What this refusal is, exactly: the release is not public at the
+            # moment create-release looks. It is a snapshot. Anyone with write
+            # access can publish the admitted draft while the builds run, and the
+            # later `--clobber` uploads would then mutate a public release again.
+            # Serialising this workflow's own runs is what the concurrency group
+            # does; an out-of-band publish is outside what this can enforce.
+            #
+            # Recovery, and its cost. `gh release edit <tag> --draft` takes the
+            # release out of public view immediately, and is unavailable at all if
+            # immutable releases are enabled for this repository — then cutting a
+            # new version is the only path.
+            #
+            # After a conversion, the next run deletes the release's *-agent-*
+            # assets and nothing else. Every upload here is `--clobber`, which
+            # deletes the existing asset before uploading its replacement, so a
+            # transport failure mid-upload leaves neither version of that one.
+            # A rebuild that fails therefore leaves a non-public draft holding
+            # some mixture of old assets, new assets, and assets that are simply
+            # gone. Inspect it; do not assume a shape.
+            #
+            # Cutting a new version leaves the published release exactly as it is.
+            # If the tag also carries drafts, delete them first: the cleanup below
+            # keeps whichever release the API lists first, which may not be the one
+            # that was public (#270).
+            #
+            # A publication that GitHub applied while the CLI lost the response
+            # lands here too, and this refuses it. The release is already complete;
+            # verify its assets rather than re-running.
+            echo "::error::Release $TAG_NAME is already published (id=$PUBLISHED_ID)."
+            echo "::error::This run refuses a release it observes as published. Draft state is not locked"
+            echo "::error::while the run proceeds, so this is a check at admission, not a guarantee."
+            echo "::error::Releasing a new version leaves this one exactly as it is."
+            echo "::error::To rebuild it instead: delete any other draft for the tag, run"
+            echo "::error::'gh release edit $TAG_NAME --draft' — unavailable if immutable releases are"
+            echo "::error::enabled — and dispatch again. That removes it from public view at once, and a"
+            echo "::error::rebuild that fails leaves a draft mixing old assets, new assets and assets"
+            echo "::error::deleted by an upload that did not finish. Inspect it."
+            echo "::error::If a previous run published this release and then reported failure, the"
+            echo "::error::release is already complete: check its assets instead of re-running."
+            exit 1
           else
             DRAFT_IDS="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag and .draft) | .id')"
             KEEP_DRAFT_ID=""

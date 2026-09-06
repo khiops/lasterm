@@ -837,7 +837,8 @@ describe("runtime state", () => {
 				);
 			} finally {
 				log.mockRestore();
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+				else process.env.XDG_STATE_HOME = originalStateRoot;
 			}
 		},
 	);
@@ -870,7 +871,8 @@ describe("runtime state", () => {
 				expect(readRuntimeFile()).toMatchObject({ instanceId: "replacement" });
 			} finally {
 				deleteCurrentRuntime();
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+				else process.env.XDG_STATE_HOME = originalStateRoot;
 			}
 		},
 	);
@@ -893,7 +895,8 @@ describe("runtime state", () => {
 				expect(readRuntimeFile()).toMatchObject({ instanceId: "replacement" });
 			} finally {
 				deleteCurrentRuntime();
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+				else process.env.XDG_STATE_HOME = originalStateRoot;
 			}
 		},
 	);
@@ -910,7 +913,8 @@ describe("runtime state", () => {
 				expect(deleteRuntime(legacy)).toBe(true);
 				expect(loadRuntime()).toEqual({ kind: "absent" });
 			} finally {
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
+				else process.env.XDG_STATE_HOME = originalStateRoot;
 			}
 		},
 	);

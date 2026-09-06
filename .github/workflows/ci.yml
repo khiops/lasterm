@@ -7,6 +7,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege for GITHUB_TOKEN: every scope not listed here is none. Nothing in
+# this workflow or the one it calls uses the token — no gh command, no API call —
+# and actions/checkout documents contents: read as what it needs. Without this the
+# jobs take the repository default, which is write, while running pnpm install and
+# cargo build.
+permissions:
+  contents: read
+
 jobs:
   build:
     uses: ./.github/workflows/build.yml

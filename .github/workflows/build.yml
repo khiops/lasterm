@@ -3,6 +3,13 @@ name: Build
 on:
   workflow_call:
 
+# A called workflow may only preserve or reduce the caller's GITHUB_TOKEN
+# permissions, so this block constrains every job here whatever the caller holds.
+# Every scope not listed is none; actions/upload-artifact and download-artifact
+# authenticate to the artifact service separately and are unaffected.
+permissions:
+  contents: read
+
 jobs:
   matrix:
     name: Load Build Matrix

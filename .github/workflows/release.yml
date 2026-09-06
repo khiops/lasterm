@@ -226,7 +226,14 @@ jobs:
               # A failed deletion fails the job. Suppressing it would turn "could not
               # remove the stale binary" into publishing the stale binary, which is the
               # one outcome this loop exists to prevent.
-              for asset in $(gh release view "$TAG_NAME" --json assets -q '.assets[].name'); do
+              # The listing runs as its own assignment, not inside the for word
+              # list: a failing command substitution there leaves the loop with
+              # zero iterations and a zero status, so an API or auth failure read
+              # as "no assets to remove" and publication continued over stale
+              # binaries. Same shape as the collectors this workflow already had
+              # to lose.
+              DRAFT_ASSETS="$(gh release view "$TAG_NAME" --json assets -q '.assets[].name')"
+              for asset in $DRAFT_ASSETS; do
                 case "$asset" in
                   *-agent-*)
                     echo "Deleting agent asset left by an earlier run: $asset"

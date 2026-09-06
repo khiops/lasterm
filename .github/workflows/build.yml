@@ -20,7 +20,7 @@ jobs:
       desktop: ${{ steps.filter.outputs.desktop }}
       is_release: ${{ startsWith(github.ref, 'refs/tags/') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - id: filter
         run: |
           jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
@@ -39,9 +39,9 @@ jobs:
     name: Build Web UI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
@@ -53,13 +53,13 @@ jobs:
           LASTERM_BUILD_HASH: ${{ github.sha }}
       # Artifacts on tags (release) or manual dispatch (downstream hub/desktop jobs
       # need them) — plain PR pushes just verify build + tests
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           name: web-dist-raw
           path: packages/clients/web/dist/
           retention-days: 1
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           name: web-dist-embedded
@@ -70,9 +70,9 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
@@ -84,14 +84,14 @@ jobs:
     name: Test (TypeScript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
           cache: "pnpm"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
       - run: cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
@@ -105,12 +105,12 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.agent) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy, rustfmt
           targets: ${{ matrix.triple }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install aarch64 cross-compile tools
         if: matrix.triple == 'aarch64-unknown-linux-gnu'
         run: |
@@ -140,7 +140,7 @@ jobs:
         run: .\scripts\build-agent.ps1
         env:
           LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           name: agent-${{ matrix.triple }}
@@ -157,16 +157,16 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: web-dist-embedded
           path: packages/hub/static/
@@ -227,7 +227,7 @@ jobs:
           # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
           # so [{"hub_version":"x"}] would pass here and fail the check above.
           node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: hub-${{ matrix.triple }}
           path: dist/sea/lasterm-hub*
@@ -243,30 +243,30 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
           cache: "pnpm"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: agent-${{ matrix.triple }}
           path: dist/sea/
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: hub-${{ matrix.triple }}
           path: dist/sea/
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: web-dist-raw
           path: packages/clients/web/dist/
@@ -317,7 +317,7 @@ jobs:
             $packArgs.PublisherDisplayName = $env:MSIX_PUBLISHER_DISPLAY_NAME
           }
           .\packages\clients\desktop\msix\pack-msix.ps1 @packArgs
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-${{ matrix.triple }}
           path: |
@@ -326,7 +326,7 @@ jobs:
             packages/clients/desktop/src-tauri/target/release/bundle/**/*.dmg
             packages/clients/desktop/src-tauri/target/release/bundle/**/*.deb
           retention-days: 1
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: matrix.triple == 'x86_64-pc-windows-msvc'
         with:
           name: desktop-msix-${{ matrix.triple }}

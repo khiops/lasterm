@@ -192,13 +192,33 @@ jobs:
             # nothing marking it as mid-flight. Draft-until-built was true of a
             # first publication and of nothing else.
             #
-            # The cost is that this workflow no longer repairs a published
-            # release in place. To rebuild one, convert it back to a draft
-            # (`gh release edit <tag> --draft`) and dispatch again, or cut a new
-            # version. Both leave the public release untouched until the run has
-            # produced every asset.
+            # What this refusal is, exactly: the release is not public at the
+            # moment create-release looks. It is a snapshot. Anyone with write
+            # access can publish the admitted draft while the builds run, and the
+            # later `--clobber` uploads would then mutate a public release again.
+            # Serialising this workflow's own runs is what the concurrency group
+            # does; an out-of-band publish is outside what this can enforce.
+            #
+            # Recovery, and its cost. `gh release edit <tag> --draft` takes the
+            # release out of public view immediately, and the next run deletes its
+            # agent assets before building replacements — so a build that fails
+            # after that leaves the old release neither available nor intact.
+            # Cutting a new version is the option that keeps the published one.
+            # If the tag also carries drafts, delete them first: the cleanup below
+            # keeps whichever release the API lists first, which may not be the one
+            # that was public (#270).
+            #
+            # A publication that GitHub applied while the CLI lost the response
+            # lands here too, and this refuses it. The release is already complete;
+            # verify its assets rather than re-running.
             echo "::error::Release $TAG_NAME is already published (id=$PUBLISHED_ID)."
-            echo "::error::This workflow only writes to drafts. Convert it back to a draft with 'gh release edit $TAG_NAME --draft' and dispatch again, or release a new version."
+            echo "::error::This workflow writes to drafts only. Either release a new version, or"
+            echo "::error::delete any other draft for this tag, run 'gh release edit $TAG_NAME --draft'"
+            echo "::error::and dispatch again — that takes the release out of public view immediately"
+            echo "::error::and its agent assets are deleted before the rebuild, so a failing build"
+            echo "::error::leaves neither the old assets nor new ones."
+            echo "::error::If a previous run published this release and then reported failure, the"
+            echo "::error::release is already complete: check its assets instead of re-running."
             exit 1
           else
             DRAFT_IDS="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag and .draft) | .id')"

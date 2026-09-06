@@ -1192,13 +1192,12 @@ describe("runtime state", () => {
 	);
 
 	it("cmdStop fails closed on owner-token shutdown errors without signaling the pid", async () => {
-		const orig = process.env.XDG_STATE_HOME;
-		const stateRoot = makeTempDir();
+		const { restore } = useTempStateRoot();
 		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			stdio: "ignore",
 		});
+		const childDone = waitForCloseOrError(child);
 
-		process.env.XDG_STATE_HOME = stateRoot;
 		try {
 			if (child.pid === undefined) throw new Error("child pid missing");
 			const port = await getUnusedPort();
@@ -1216,22 +1215,21 @@ describe("runtime state", () => {
 			expect(existsSync(path.join(getStateDir(), "runtime.json"))).toBe(true);
 			expect(isChildAlive(child)).toBe(true);
 		} finally {
-			if (child.exitCode === null && child.signalCode === null) {
+			restore();
+			if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
 				child.kill("SIGKILL");
-				await waitForExit(child);
 			}
-			restoreEnv("XDG_STATE_HOME", orig);
+			await childDone;
 		}
 	});
 
 	it("cmdStop validates legacy process identity before signaling the pid", async () => {
-		const orig = process.env.XDG_STATE_HOME;
-		const stateRoot = makeTempDir();
+		const { restore } = useTempStateRoot();
 		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			stdio: "ignore",
 		});
+		const childDone = waitForCloseOrError(child);
 
-		process.env.XDG_STATE_HOME = stateRoot;
 		try {
 			if (child.pid === undefined) throw new Error("child pid missing");
 			persistRuntime({
@@ -1245,11 +1243,11 @@ describe("runtime state", () => {
 			expect(existsSync(path.join(getStateDir(), "runtime.json"))).toBe(true);
 			expect(isChildAlive(child)).toBe(true);
 		} finally {
-			if (child.exitCode === null && child.signalCode === null) {
+			restore();
+			if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
 				child.kill("SIGKILL");
-				await waitForExit(child);
 			}
-			restoreEnv("XDG_STATE_HOME", orig);
+			await childDone;
 		}
 	});
 });
@@ -1264,6 +1262,14 @@ function makeTempDir(): string {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-cli-agent-fetch-"));
 	tempDirs.push(dir);
 	return dir;
+}
+
+function useTempStateRoot(): { root: string; restore: () => void } {
+	const name = process.platform === "win32" ? "LOCALAPPDATA" : "XDG_STATE_HOME";
+	const saved = process.env[name];
+	const root = makeTempDir();
+	process.env[name] = root;
+	return { root, restore: () => restoreEnv(name, saved) };
 }
 
 function restoreEnv(name: string, saved: string | undefined): void {
@@ -1312,10 +1318,18 @@ function isChildAlive(child: ReturnType<typeof spawn>): boolean {
 	}
 }
 
-function waitForExit(child: ReturnType<typeof spawn>): Promise<void> {
+function waitForCloseOrError(child: ReturnType<typeof spawn>): Promise<void> {
 	if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
 	return new Promise((resolve) => {
-		child.once("exit", () => resolve());
+		const settle = () => {
+			child.off("close", settle);
+			child.off("error", settle);
+			child.off("exit", settle);
+			resolve();
+		};
+		child.once("close", settle);
+		child.once("error", settle);
+		child.once("exit", settle);
 	});
 }
 

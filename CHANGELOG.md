@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.1](https://github.com/khiops/lasterm/compare/v0.9.0...v0.9.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **desktop:** sync Cargo.lock with the 0.9.0 manifest version ([2bc75a4](https://github.com/khiops/lasterm/commit/2bc75a4bc831bfd5a0e128f36bef808223107345))
+* **hub:** restoring an unset environment variable stored the string "undefined" ([#279](https://github.com/khiops/lasterm/issues/279)) ([dd0dddc](https://github.com/khiops/lasterm/commit/dd0dddc100b5a947e56a2984de3949c7001a8923))
+* **root:** freeze the release commit once, so every job builds the same source ([#276](https://github.com/khiops/lasterm/issues/276)) ([4d61c09](https://github.com/khiops/lasterm/commit/4d61c09b3276cd06259eb10c1cbee266919e10f5))
+* **root:** pin every action to a commit, and add the config that keeps them current ([#290](https://github.com/khiops/lasterm/issues/290)) ([fec8ce0](https://github.com/khiops/lasterm/commit/fec8ce0273f413dd91fb59f8d6b16b1fa51b4278))
+* **root:** refuse to build onto a release that is already published ([#294](https://github.com/khiops/lasterm/issues/294)) ([dc05aff](https://github.com/khiops/lasterm/commit/dc05aff1770b9b0d01af85dfcaeb7a9bf8e9df4f))
+* **root:** resolve the release commit in the matrix job, and grant release-write per job ([#285](https://github.com/khiops/lasterm/issues/285)) ([47b8327](https://github.com/khiops/lasterm/commit/47b8327f2fcd459fe53a75dfa0552b76a78ac814))
+* **root:** stop running third-party build code with a write-capable token ([#287](https://github.com/khiops/lasterm/issues/287)) ([a77129e](https://github.com/khiops/lasterm/commit/a77129e2aa5f86e7e5d61f3a1e63b76467cd0d9b)), closes [#286](https://github.com/khiops/lasterm/issues/286)
+
 ## [0.9.0](https://github.com/khiops/lasterm/compare/v0.8.0...v0.9.0) (2026-08-08)
 
 

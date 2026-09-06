@@ -30,17 +30,11 @@ updates:
       cargo-desktop:
         patterns: ["*"]
 
-  # Every external version lives in the `catalog:` of pnpm-workspace.yaml, which
-  # Dependabot has updated since February 2025. Two upstream limits apply: it
-  # labels every catalog entry `dependency-type: production` because the catalog
-  # does not record dev/prod (dependabot-core#14824), and it has been reported to
-  # commit a lockfile missing a catalog package (dependabot-core#14339). CI runs
-  # `pnpm install --frozen-lockfile`, so the second fails the pull request rather
-  # than reaching main.
-  - package-ecosystem: npm
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      npm:
-        patterns: ["*"]
+  # No npm entry. Dependabot's npm updater supports pnpm up to v10
+  # (dependabot-core#14794, open), and package.json pins pnpm@11.22.0 — that
+  # major is what reads the settings and `allowBuilds` policy in
+  # pnpm-workspace.yaml, so downgrading to suit the updater is not on the table.
+  # A weekly npm entry here would promise updates it cannot produce, and the two
+  # catalog defects it would hit are dependabot-core#14824 (every catalog entry
+  # labelled dependency-type: production) and #14339 (a committed lockfile
+  # missing a catalog package). JavaScript updates stay manual until v11 lands.

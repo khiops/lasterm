@@ -1,0 +1,40 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit SHAs, which is the only immutable reference a
+  # `uses:` can take. Without this ecosystem those pins never move again, so the
+  # workflows would silently miss the actions' own security fixes.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The desktop crate is excluded from the workspace in Cargo.toml, so it has its
+  # own lockfile and needs its own entry.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /packages/clients/desktop/src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      cargo-desktop:
+        patterns: ["*"]
+
+  # No npm entry. Dependabot's npm updater supports pnpm up to v10
+  # (dependabot-core#14794, open), and package.json pins pnpm@11.22.0 — that
+  # major is what reads the settings and `allowBuilds` policy in
+  # pnpm-workspace.yaml, so downgrading to suit the updater is not on the table.
+  # A weekly npm entry here would promise updates it cannot produce, and the two
+  # catalog defects it would hit are dependabot-core#14824 (every catalog entry
+  # labelled dependency-type: production) and #14339 (a committed lockfile
+  # missing a catalog package). JavaScript updates stay manual until v11 lands.

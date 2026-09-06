@@ -53,7 +53,7 @@ jobs:
       hub: ${{ steps.filter.outputs.hub }}
       desktop: ${{ steps.filter.outputs.desktop }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
           persist-credentials: false
@@ -111,7 +111,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false
@@ -259,12 +259,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
@@ -295,15 +295,16 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.agent) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           components: clippy, rustfmt
           targets: ${{ matrix.triple }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install aarch64 cross-compile tools
         if: matrix.triple == 'aarch64-unknown-linux-gnu'
         run: |
@@ -352,12 +353,12 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
@@ -456,20 +457,21 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           check-latest: true
           cache: "pnpm"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
@@ -623,7 +625,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false

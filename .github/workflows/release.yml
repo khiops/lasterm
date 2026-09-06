@@ -23,12 +23,19 @@ on:
 permissions:
   contents: write
 
-# One run at a time per tag. The group is a literal namespace plus the tag rather
+# One run at a time per group. The group is a literal namespace plus the tag rather
 # than github.workflow, because a workflow invoked through workflow_call sees the
 # caller's workflow name. cancel-in-progress: false keeps a queued recovery run
 # instead of killing a run that may be mid-upload; it does not preserve an
 # arbitrary queue, since GitHub keeps one pending run per group and a newer one
 # replaces an older pending one.
+#
+# A group is not exactly a tag: GitHub folds group names to one case, so
+# v1.0.0-alpha and v1.0.0-ALPHA share this group and the second pending run
+# replaces the first. Release tags here come from release-please and are
+# lowercase, so a case-variant pair can only arrive through two manual
+# dispatches. `queue:` is not a key the concurrency schema accepts, so there is
+# no in-workflow way to hold both.
 concurrency:
   group: lasterm-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false

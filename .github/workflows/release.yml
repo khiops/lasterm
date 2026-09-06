@@ -121,6 +121,23 @@ jobs:
             done <<< "$INVALID"
             exit 1
           fi
+          DUPLICATE_PATTERNS="$(jq -r '
+            .targets[] | .triple as $triple | .artifacts? as $artifacts
+            | ["hub", "desktop", "bundles", "msix"][] as $kind
+            | ($artifacts[$kind]? // empty) as $patterns
+            | if ($patterns | type) == "array" then
+                [$patterns[] | select(type == "string")] | group_by(.)[] | select(length > 1)
+                | "\($triple) artifacts.\($kind) duplicate declaration: \(.[0])"
+              else
+                empty
+              end
+          ' .github/build-matrix.json)"
+          if [ -n "$DUPLICATE_PATTERNS" ]; then
+            while IFS= read -r duplicate; do
+              echo "::error::Target has duplicate artifact declaration: $duplicate"
+            done <<< "$DUPLICATE_PATTERNS"
+            exit 1
+          fi
           jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
             .github/build-matrix.json > /tmp/agent.json
           jq -c '{include:[.targets[]|select(.enabled and .hub)]}' \
@@ -507,8 +524,10 @@ jobs:
           VERSION="${TAG_NAME#v}"
           HUB_LIST="$RUNNER_TEMP/hub-artifacts"
           HUB_PATTERN_LIST="$RUNNER_TEMP/hub-artifact-patterns"
+          # These are the two distributable executable names. A prefix glob also
+          # matches lasterm-hub.cjs, the required SEA input and not a deliverable.
           find dist/sea -maxdepth 1 -type f \
-            \( -name 'lasterm-hub' -o -name 'lasterm-hub?*' \) -print0 > "$HUB_LIST"
+            \( -name 'lasterm-hub' -o -name 'lasterm-hub.exe' \) -print0 > "$HUB_LIST"
           jq -r --arg triple "$TRIPLE" \
             '.targets[] | select(.triple == $triple) | .artifacts.hub[]' \
             .github/build-matrix.json > "$HUB_PATTERN_LIST"
@@ -530,11 +549,12 @@ jobs:
 
           UPLOAD_SOURCES=()
           UPLOAD_NAMES=()
+          HUB_CLAIMED_BY=()
           for declared in "${HUB_PATTERNS[@]}"; do
             pattern="${declared//\{version\}/$VERSION}"
             matches=()
             for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
-              if pattern_matches "${HUB_NAMES[$i]}" "$pattern"; then
+              if pattern_matches "${HUB_NAMES[i]}" "$pattern"; then
                 matches+=("$i")
               fi
             done
@@ -544,25 +564,30 @@ jobs:
             fi
             if [ "${#matches[@]}" -gt 1 ]; then
               matched_paths=()
-              for i in "${matches[@]}"; do matched_paths+=("${HUB_SOURCES[$i]}"); done
+              for i in "${matches[@]}"; do matched_paths+=("${HUB_SOURCES[i]}"); done
               echo "::error::Hub artifact pattern $pattern matched more than one file: ${matched_paths[*]}"
               exit 1
             fi
             i="${matches[0]}"
-            UPLOAD_SOURCES+=("${HUB_SOURCES[$i]}")
-            UPLOAD_NAMES+=("${HUB_NAMES[$i]}")
+            if [ -n "${HUB_CLAIMED_BY[i]+set}" ]; then
+              echo "::error::Hub artifact patterns ${HUB_CLAIMED_BY[i]} and $pattern both matched ${HUB_SOURCES[i]}"
+              exit 1
+            fi
+            HUB_CLAIMED_BY[i]="$pattern"
+            UPLOAD_SOURCES+=("${HUB_SOURCES[i]}")
+            UPLOAD_NAMES+=("${HUB_NAMES[i]}")
           done
 
           for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
             declared_match=false
             for declared in "${HUB_PATTERNS[@]}"; do
               pattern="${declared//\{version\}/$VERSION}"
-              if pattern_matches "${HUB_NAMES[$i]}" "$pattern"; then
+              if pattern_matches "${HUB_NAMES[i]}" "$pattern"; then
                 declared_match=true
               fi
             done
             if [ "$declared_match" = false ]; then
-              echo "::error::Hub build output ${HUB_SOURCES[$i]} resolves to undeclared release asset ${HUB_NAMES[$i]}"
+              echo "::error::Hub build output ${HUB_SOURCES[i]} resolves to undeclared release asset ${HUB_NAMES[i]}"
               exit 1
             fi
           done
@@ -734,13 +759,15 @@ jobs:
             [[ "$1" == $2 ]]
           }
           INSTALLERS=()
+          INSTALLER_CLAIMED_BY=()
           for declared in "${DESKTOP_PATTERNS[@]}"; do
             pattern="${declared//\{version\}/$VERSION}"
             matches=()
-            for path in "${BUNDLE_FILES[@]}"; do
+            for ((i = 0; i < ${#BUNDLE_FILES[@]}; i++)); do
+              path="${BUNDLE_FILES[i]}"
               base="${path##*/}"
               if pattern_matches "$base" "$pattern"; then
-                matches+=("$path")
+                matches+=("$i")
               fi
             done
             if [ "${#matches[@]}" -eq 0 ]; then
@@ -748,10 +775,18 @@ jobs:
               exit 1
             fi
             if [ "${#matches[@]}" -gt 1 ]; then
-              echo "::error::Desktop artifact pattern $pattern matched more than one installer: ${matches[*]}"
+              matched_paths=()
+              for i in "${matches[@]}"; do matched_paths+=("${BUNDLE_FILES[i]}"); done
+              echo "::error::Desktop artifact pattern $pattern matched more than one installer: ${matched_paths[*]}"
               exit 1
             fi
-            INSTALLERS+=("${matches[0]}")
+            i="${matches[0]}"
+            if [ -n "${INSTALLER_CLAIMED_BY[i]+set}" ]; then
+              echo "::error::Desktop artifact patterns ${INSTALLER_CLAIMED_BY[i]} and $pattern both matched ${BUNDLE_FILES[i]}"
+              exit 1
+            fi
+            INSTALLER_CLAIMED_BY[i]="$pattern"
+            INSTALLERS+=("${BUNDLE_FILES[i]}")
           done
           for path in "${BUNDLE_FILES[@]}"; do
             base="${path##*/}"
@@ -767,8 +802,6 @@ jobs:
               exit 1
             fi
           done
-          printf 'uploading %s\n' "${INSTALLERS[@]}"
-          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
           if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
             # An absent output directory is a failure here, not a reason to skip:
             # the variables that enable MSIX publication are set, so the package
@@ -793,13 +826,15 @@ jobs:
               exit 1
             fi
             PACKAGES=()
+            MSIX_CLAIMED_BY=()
             for declared in "${MSIX_PATTERNS[@]}"; do
               pattern="${declared//\{version\}/$VERSION}"
               matches=()
-              for path in "${MSIX_FILES[@]}"; do
+              for ((i = 0; i < ${#MSIX_FILES[@]}; i++)); do
+                path="${MSIX_FILES[i]}"
                 base="${path##*/}"
                 if pattern_matches "$base" "$pattern"; then
-                  matches+=("$path")
+                  matches+=("$i")
                 fi
               done
               if [ "${#matches[@]}" -eq 0 ]; then
@@ -807,10 +842,18 @@ jobs:
                 exit 1
               fi
               if [ "${#matches[@]}" -gt 1 ]; then
-                echo "::error::MSIX artifact pattern $pattern matched more than one package: ${matches[*]}"
+                matched_paths=()
+                for i in "${matches[@]}"; do matched_paths+=("${MSIX_FILES[i]}"); done
+                echo "::error::MSIX artifact pattern $pattern matched more than one package: ${matched_paths[*]}"
                 exit 1
               fi
-              PACKAGES+=("${matches[0]}")
+              i="${matches[0]}"
+              if [ -n "${MSIX_CLAIMED_BY[i]+set}" ]; then
+                echo "::error::MSIX artifact patterns ${MSIX_CLAIMED_BY[i]} and $pattern both matched ${MSIX_FILES[i]}"
+                exit 1
+              fi
+              MSIX_CLAIMED_BY[i]="$pattern"
+              PACKAGES+=("${MSIX_FILES[i]}")
             done
             for path in "${MSIX_FILES[@]}"; do
               base="${path##*/}"
@@ -826,6 +869,10 @@ jobs:
                 exit 1
               fi
             done
+          fi
+          printf 'uploading %s\n' "${INSTALLERS[@]}"
+          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
+          if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
             printf 'uploading %s\n' "${PACKAGES[@]}"
             gh release upload "$TAG_NAME" --clobber "${PACKAGES[@]}"
           fi

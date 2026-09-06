@@ -1192,15 +1192,17 @@ describe("runtime state", () => {
 	);
 
 	it("cmdStop fails closed on owner-token shutdown errors without signaling the pid", async () => {
-		const { restore } = useTempStateRoot();
-		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-			stdio: "ignore",
-		});
-		const childDone = waitForCloseOrError(child);
-
+		const { root, restore } = useTempStateRoot();
+		let child: ReturnType<typeof spawn> | undefined;
+		let childDone: Promise<void> | undefined;
 		try {
+			child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+				stdio: "ignore",
+			});
+			childDone = waitForClose(child);
 			if (child.pid === undefined) throw new Error("child pid missing");
 			const port = await getUnusedPort();
+			expect(getStateDir()).toBe(path.join(root, "lasterm"));
 			persistRuntime({
 				pid: child.pid,
 				port,
@@ -1216,22 +1218,21 @@ describe("runtime state", () => {
 			expect(isChildAlive(child)).toBe(true);
 		} finally {
 			restore();
-			if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-				child.kill("SIGKILL");
-			}
-			await childDone;
+			await cleanUpChild(child, childDone);
 		}
-	});
+	}, 10_000);
 
 	it("cmdStop validates legacy process identity before signaling the pid", async () => {
-		const { restore } = useTempStateRoot();
-		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-			stdio: "ignore",
-		});
-		const childDone = waitForCloseOrError(child);
-
+		const { root, restore } = useTempStateRoot();
+		let child: ReturnType<typeof spawn> | undefined;
+		let childDone: Promise<void> | undefined;
 		try {
+			child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+				stdio: "ignore",
+			});
+			childDone = waitForClose(child);
 			if (child.pid === undefined) throw new Error("child pid missing");
+			expect(getStateDir()).toBe(path.join(root, "lasterm"));
 			persistRuntime({
 				pid: child.pid,
 				port: await getUnusedPort(),
@@ -1244,12 +1245,9 @@ describe("runtime state", () => {
 			expect(isChildAlive(child)).toBe(true);
 		} finally {
 			restore();
-			if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-				child.kill("SIGKILL");
-			}
-			await childDone;
+			await cleanUpChild(child, childDone);
 		}
-	});
+	}, 10_000);
 });
 
 function parsed(argv: string[]): ParsedArgs {
@@ -1318,19 +1316,45 @@ function isChildAlive(child: ReturnType<typeof spawn>): boolean {
 	}
 }
 
-function waitForCloseOrError(child: ReturnType<typeof spawn>): Promise<void> {
+const childErrors = new WeakMap<ReturnType<typeof spawn>, string>();
+
+function waitForClose(child: ReturnType<typeof spawn>): Promise<void> {
+	// Records a spawn or signal error without settling: Node guarantees close after error only
+	// for a failed spawn, so a live child denied SIGKILL emits error and nothing else.
+	child.on("error", (err: NodeJS.ErrnoException) => {
+		childErrors.set(child, err.code ?? err.message);
+	});
 	if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
 	return new Promise((resolve) => {
-		const settle = () => {
-			child.off("close", settle);
-			child.off("error", settle);
-			child.off("exit", settle);
-			resolve();
-		};
-		child.once("close", settle);
-		child.once("error", settle);
-		child.once("exit", settle);
+		child.once("close", () => resolve());
 	});
+}
+
+async function cleanUpChild(
+	child: ReturnType<typeof spawn> | undefined,
+	childDone: Promise<void> | undefined,
+): Promise<void> {
+	if (child === undefined || childDone === undefined) return;
+	let killReturned: boolean | undefined;
+	if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+		killReturned = child.kill("SIGKILL");
+	}
+	let timer: NodeJS.Timeout | undefined;
+	const timedOut = Symbol("timeout");
+	const bound = new Promise<typeof timedOut>((resolve) => {
+		timer = setTimeout(() => resolve(timedOut), 2_000);
+	});
+	try {
+		if ((await Promise.race([childDone, bound])) === timedOut) {
+			child.unref();
+			throw new Error(
+				`ChildCleanupTimeout: pid=${child.pid} killReturned=${killReturned} ` +
+					`error=${childErrors.get(child) ?? "none"}`,
+			);
+		}
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
 }
 
 function agentCachePath(cacheDir: string, osName: string, arch: string, version: string): string {

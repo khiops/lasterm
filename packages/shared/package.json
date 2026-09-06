@@ -1,7 +1,7 @@
 {
 	"name": "@lasterm/shared",
 	"private": true,
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"description": "Shared TypeScript types and codec for lasterm (wire protocol, entities)",
 	"license": "MIT OR Apache-2.0",
 	"repository": {

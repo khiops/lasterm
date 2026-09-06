@@ -66,6 +66,16 @@ jobs:
             fi
           fi
           SHA="$(git rev-parse HEAD)"
+          if [ -n "$REQUESTED_REF" ] && [ "$SHA" != "$REQUESTED_REF" ]; then
+            # Forty lowercase hex characters is not a commit. An annotated tag's
+            # object matches that shape — v0.1.0 in this repository is object
+            # 6f73821a and commit 73d6eabf — and checkout peels it, so the
+            # resolver would emit a SHA the caller never asked for while claiming
+            # to build the exact one it did. Requiring equality rejects a tag
+            # object, which is the promised contract.
+            echo "::error::ref input $REQUESTED_REF is not the commit that was checked out ($SHA); pass a commit SHA, not a tag object"
+            exit 1
+          fi
           echo "building $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 

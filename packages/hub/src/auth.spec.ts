@@ -1,9 +1,18 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkPermissions,
 	createToken,
@@ -28,6 +37,33 @@ describe("initAuth", () => {
 	beforeEach(() => {
 		testDir = join(tmpdir(), `lasterm-auth-test-${randomBytes(8).toString("hex")}`);
 	});
+
+	// Neither describe removed its tree, so every run left one behind under
+	// tmpdir(). chmod first: a test that made the directory unreadable would
+	// otherwise defeat the removal.
+	afterEach(() => {
+		if (existsSync(testDir)) {
+			chmodSync(testDir, 0o700);
+			rmSync(testDir, { recursive: true, force: true });
+		}
+	});
+
+	it.runIf(process.platform !== "win32")(
+		"creates the directory 0700 under a umask that masks owner bits",
+		() => {
+			// mkdirSync's mode is masked, so `{ mode: 0o700 }` under `umask 0700`
+			// arrives as 000: a directory the validator accepts, since it inspects
+			// only the group and other bits, and that the hub then cannot read.
+			const previous = process.umask(0o700);
+			try {
+				const token = initAuth(testDir);
+				expect(token).toMatch(/^[0-9a-f]{64}$/);
+				expect(statSync(testDir).mode & 0o777).toBe(0o700);
+			} finally {
+				process.umask(previous);
+			}
+		},
+	);
 
 	it("generates a 64-hex-char token on first call", () => {
 		const token = initAuth(testDir);
@@ -55,6 +91,73 @@ describe("initAuth", () => {
 		const mode = statSync(authFile).mode & 0o777;
 		expect(mode).toBe(0o600);
 	});
+
+	it("refuses a group-writable existing config directory before creating auth.json (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		chmodSync(testDir, 0o770);
+
+		expect(() => initAuth(testDir)).toThrow(/group- or world-writable/);
+		expect(existsSync(join(testDir, "auth.json"))).toBe(false);
+	});
+
+	it("refuses a group-writable existing config directory before reading auth.json (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		writeFileSync(testDir + "/auth.json", JSON.stringify({ token: "a".repeat(64) }));
+		chmodSync(testDir, 0o770);
+
+		expect(() => initAuth(testDir)).toThrow(/group- or world-writable/);
+	});
+
+	it("refuses a group-readable auth.json with its path and mode in the error (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		const authFile = join(testDir, "auth.json");
+		writeFileSync(authFile, JSON.stringify({ token: "a".repeat(64) }));
+		chmodSync(authFile, 0o640);
+
+		// Not `new RegExp(authFile)`: TMPDIR may legally hold `[`, `(`, `.` or `\`,
+		// which would change the pattern or make it invalid, so the test would fail
+		// for the host's temporary directory rather than for the permissions.
+		let thrown: unknown;
+		try {
+			initAuth(testDir);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toContain(authFile);
+		expect((thrown as Error).message).toContain("640");
+	});
+
+	it("refuses auth.json symlinks (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		const target = join(testDir, "token-target.json");
+		writeFileSync(target, JSON.stringify({ token: "a".repeat(64) }));
+		chmodSync(target, 0o600);
+		symlinkSync(target, join(testDir, "auth.json"));
+
+		expect(() => initAuth(testDir)).toThrow(/not a regular file/);
+	});
+
+	it("reads a token from owner-only config directory and auth.json (non-Windows)", () => {
+		if (process.platform === "win32") return;
+
+		mkdirSync(testDir, { recursive: true, mode: 0o700 });
+		const authFile = join(testDir, "auth.json");
+		const token = "a".repeat(64);
+		writeFileSync(authFile, JSON.stringify({ token }));
+		chmodSync(testDir, 0o700);
+		chmodSync(authFile, 0o600);
+
+		expect(initAuth(testDir)).toBe(token);
+	});
 });
 
 // ─── checkPermissions ────────────────────────────────────────────────────────
@@ -66,11 +169,20 @@ describe("checkPermissions", () => {
 		testDir = join(tmpdir(), `lasterm-perm-test-${randomBytes(8).toString("hex")}`);
 	});
 
+	// Neither describe removed its tree, so every run left one behind under
+	// tmpdir(). chmod first: a test that made the directory unreadable would
+	// otherwise defeat the removal.
+	afterEach(() => {
+		if (existsSync(testDir)) {
+			chmodSync(testDir, 0o700);
+			rmSync(testDir, { recursive: true, force: true });
+		}
+	});
+
 	it("throws if auth.json is world-readable (non-Windows)", () => {
 		if (process.platform === "win32") return;
 
 		// Create a real file with world-readable permissions
-		const { mkdirSync } = require("node:fs") as typeof import("node:fs");
 		mkdirSync(testDir, { recursive: true });
 		const authFile = join(testDir, "auth.json");
 		writeFileSync(authFile, JSON.stringify({ token: "test" }));
@@ -82,7 +194,6 @@ describe("checkPermissions", () => {
 	it("does not throw for mode 0o600 (non-Windows)", () => {
 		if (process.platform === "win32") return;
 
-		const { mkdirSync } = require("node:fs") as typeof import("node:fs");
 		mkdirSync(testDir, { recursive: true });
 		const authFile = join(testDir, "auth.json");
 		writeFileSync(authFile, JSON.stringify({ token: "test" }));

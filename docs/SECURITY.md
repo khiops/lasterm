@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-03-02
+> Last updated: 2026-09-05
 
 ## 1. Threat Model
 
@@ -62,8 +62,8 @@
 | Threat | Vector | Impact | Likelihood | Mitigation |
 |--------|--------|--------|------------|------------|
 | Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
-| Token theft | Read auth.json | HIGH — full access | LOW (requires same user) | chmod 600, and the hub refuses to start on a world-readable file |
-| Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a default install, where the directory is not writable by another account; higher wherever it has been made group-writable, which a umask of 002 with a shared group produces | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix the desktop refuses a directory group or other can write, through its protected-file policy; **the hub does not yet, and that is #232**. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL |
+| Token theft | Read auth.json | HIGH — full access | LOW on a current install, where the hub creates auth.json 0600 and its directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one whose permissions were widened by hand | chmod 600, and on Unix the hub refuses to start when the file is group- or world-readable or writable. Windows is not checked: both checks return before doing anything there, and the ACL validation that would replace them is #200 |
+| Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a current install, where the hub creates the directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one widened by hand | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix both the desktop and the hub now refuse a directory group or other can write, before reading a token from it and before writing one into it, and the hub also refuses a directory it does not own. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL, and the hub's check returns immediately there — #200 |
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
@@ -81,7 +81,8 @@
 1. Generate 32 bytes of crypto-random data
 2. Encode as hex string (64 chars)
 3. Write to $LASTERM_CONFIG_DIR/auth.json: { "token": "<hex>" }
-4. Set file permissions: chmod 600 (Linux/macOS) or restrictive ACL (Windows)
+4. Set file permissions: chmod 600 (Linux/macOS). On Windows the file inherits the
+   profile's ACL and nothing here sets or checks one — #200
 ```
 
 **Token validation:**
@@ -99,16 +100,30 @@ alongside the TLS key's.
 On every hub start:
 
 ```
-1. Check auth.json permissions
-   - If world-readable (o+r): HARD FAIL — refuse to start
-   - If group-readable (g+r): WARN in logs
+The permission checks below — items 1 to 3 — are Unix-only: each returns immediately on
+Windows, where the equivalent ACL validation is #200. The token-format check in item 4
+runs everywhere.
+
+1. Check the configuration directory holding auth.json, before reading a token from it
+   and before writing one into it
+   - If group- or world-writable, not a directory, or owned by another user: HARD FAIL
+   - Expected: 0700, owned by the user running the hub
+   - This is one lstat of that directory. An ancestor able to rename or replace it
+     defeats the check; establishing more would need the descriptor walk that
+     `lasterm-protected-fs` performs, and that crate is Rust
+
+2. Check auth.json permissions
+   - If group- or world-readable or writable (g+rw or o+rw): HARD FAIL — refuse to start
+   - If not a regular file, including a symlink: HARD FAIL
    - Expected: 0600 (-rw-------)
 
-2. Check data directory permissions
-   - If world-readable: WARN in logs
-   - Expected: 0700 (drwx------)
+3. Check data directory permissions — NOT IMPLEMENTED
+   - Nothing inspects the state directory holding meta.db and spool.db. The hub's
+     only permission checks are the two above, both in `auth.ts`
+   - Expected once it exists: 0700 (drwx------)
+   - #200
 
-3. Verify auth.json contains valid token (64 hex chars)
+4. Verify auth.json contains valid token (64 hex chars)
    - If missing: generate one
    - If present but not 64 hex characters: refuse to start, naming the file. A hub that quietly
      replaced an unreadable token would invalidate every paired client without saying so.

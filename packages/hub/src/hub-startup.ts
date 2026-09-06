@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { initAuth, sweepNonPrimaryTokens } from "./auth.js";
+import {
+	checkConfigDirectoryPermissions,
+	createOwnerOnlyDirectory,
+	initAuth,
+	sweepNonPrimaryTokens,
+} from "./auth.js";
 import {
 	deleteRuntime,
 	getConfigDir,
@@ -105,7 +110,16 @@ export async function startHub(
 	dependencies.acquireHubLock(stateDir);
 
 	const configDir = dependencies.getConfigDir();
-	mkdirSync(configDir, { recursive: true });
+	// Owner-only, and exactly: a umask of 002 would otherwise give 0775 and the
+	// validator below refuses that, while a umask carrying owner bits would give
+	// mode 000 and the validator would accept a directory the hub cannot use.
+	createOwnerOnlyDirectory(configDir);
+	// Validate here, not only inside initAuth: the logging and TLS configuration
+	// below are read from this directory, and initAuth runs after both. A group
+	// member could otherwise have the hub consume a FIFO, a malformed file or
+	// attacker-chosen TLS paths from a directory the later check would refuse.
+	// initAuth keeps its own call for direct callers and to shorten the window.
+	checkConfigDirectoryPermissions(configDir);
 	mkdirSync(stateDir, { recursive: true });
 
 	let hubLogger: HubLogger | undefined;

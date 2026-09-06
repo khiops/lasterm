@@ -696,9 +696,16 @@ describe("path helpers", () => {
 
 	it.skipIf(process.platform === "win32")("getStateDir uses XDG_STATE_HOME when set", () => {
 		const orig = process.env.XDG_STATE_HOME;
-		process.env.XDG_STATE_HOME = "/tmp/xdg-state";
-		expect(getStateDir()).toBe("/tmp/xdg-state/lasterm");
-		process.env.XDG_STATE_HOME = orig;
+		try {
+			delete process.env.XDG_STATE_HOME;
+			const absent = process.env.XDG_STATE_HOME;
+			process.env.XDG_STATE_HOME = "/tmp/xdg-state";
+			expect(getStateDir()).toBe("/tmp/xdg-state/lasterm");
+			restoreEnv("XDG_STATE_HOME", absent);
+			expect("XDG_STATE_HOME" in process.env).toBe(false);
+		} finally {
+			restoreEnv("XDG_STATE_HOME", orig);
+		}
 	});
 
 	// The rename moved every namespace at once, so a Termora install and this one
@@ -718,10 +725,8 @@ describe("path helpers", () => {
 		});
 
 		afterEach(() => {
-			if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
-			else process.env.XDG_CONFIG_HOME = origConfig;
-			if (origState === undefined) delete process.env.XDG_STATE_HOME;
-			else process.env.XDG_STATE_HOME = origState;
+			restoreEnv("XDG_CONFIG_HOME", origConfig);
+			restoreEnv("XDG_STATE_HOME", origState);
 			rmSync(root, { recursive: true, force: true });
 		});
 
@@ -813,9 +818,12 @@ describe("path helpers", () => {
 
 	it.skipIf(process.platform === "win32")("getConfigDir uses XDG_CONFIG_HOME when set", () => {
 		const orig = process.env.XDG_CONFIG_HOME;
-		process.env.XDG_CONFIG_HOME = "/tmp/xdg-cfg";
-		expect(getConfigDir()).toBe("/tmp/xdg-cfg/lasterm");
-		process.env.XDG_CONFIG_HOME = orig;
+		try {
+			process.env.XDG_CONFIG_HOME = "/tmp/xdg-cfg";
+			expect(getConfigDir()).toBe("/tmp/xdg-cfg/lasterm");
+		} finally {
+			restoreEnv("XDG_CONFIG_HOME", orig);
+		}
 	});
 });
 
@@ -837,7 +845,7 @@ describe("runtime state", () => {
 				);
 			} finally {
 				log.mockRestore();
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				restoreEnv("XDG_STATE_HOME", originalStateRoot);
 			}
 		},
 	);
@@ -869,8 +877,7 @@ describe("runtime state", () => {
 				);
 				expect(readRuntimeFile()).toMatchObject({ instanceId: "replacement" });
 			} finally {
-				deleteCurrentRuntime();
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				restoreEnv("XDG_STATE_HOME", originalStateRoot);
 			}
 		},
 	);
@@ -892,8 +899,7 @@ describe("runtime state", () => {
 				).rejects.toThrow("Hub process is gone");
 				expect(readRuntimeFile()).toMatchObject({ instanceId: "replacement" });
 			} finally {
-				deleteCurrentRuntime();
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				restoreEnv("XDG_STATE_HOME", originalStateRoot);
 			}
 		},
 	);
@@ -910,7 +916,7 @@ describe("runtime state", () => {
 				expect(deleteRuntime(legacy)).toBe(true);
 				expect(loadRuntime()).toEqual({ kind: "absent" });
 			} finally {
-				process.env.XDG_STATE_HOME = originalStateRoot;
+				restoreEnv("XDG_STATE_HOME", originalStateRoot);
 			}
 		},
 	);
@@ -1180,23 +1186,23 @@ describe("runtime state", () => {
 				expect(statSync(runtimePath).mode & 0o777).toBe(0o600);
 				expect(readdirSync(getStateDir()).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 			} finally {
-				deleteCurrentRuntime();
-				process.env.XDG_STATE_HOME = orig;
+				restoreEnv("XDG_STATE_HOME", orig);
 			}
 		},
 	);
 
 	it("cmdStop fails closed on owner-token shutdown errors without signaling the pid", async () => {
-		const orig = process.env.XDG_STATE_HOME;
-		const stateRoot = makeTempDir();
-		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-			stdio: "ignore",
-		});
-
-		process.env.XDG_STATE_HOME = stateRoot;
+		const { root, restore } = useTempStateRoot();
+		let child: ReturnType<typeof spawn> | undefined;
+		let childDone: Promise<void> | undefined;
 		try {
+			child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+				stdio: "ignore",
+			});
+			childDone = waitForExit(child);
 			if (child.pid === undefined) throw new Error("child pid missing");
 			const port = await getUnusedPort();
+			expect(getStateDir()).toBe(path.join(root, "lasterm"));
 			persistRuntime({
 				pid: child.pid,
 				port,
@@ -1211,25 +1217,25 @@ describe("runtime state", () => {
 			expect(existsSync(path.join(getStateDir(), "runtime.json"))).toBe(true);
 			expect(isChildAlive(child)).toBe(true);
 		} finally {
-			if (child.exitCode === null && child.signalCode === null) {
+			restore();
+			if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
 				child.kill("SIGKILL");
-				await waitForExit(child);
 			}
-			deleteCurrentRuntime();
-			process.env.XDG_STATE_HOME = orig;
+			if (childDone !== undefined) await childDone;
 		}
 	});
 
 	it("cmdStop validates legacy process identity before signaling the pid", async () => {
-		const orig = process.env.XDG_STATE_HOME;
-		const stateRoot = makeTempDir();
-		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-			stdio: "ignore",
-		});
-
-		process.env.XDG_STATE_HOME = stateRoot;
+		const { root, restore } = useTempStateRoot();
+		let child: ReturnType<typeof spawn> | undefined;
+		let childDone: Promise<void> | undefined;
 		try {
+			child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+				stdio: "ignore",
+			});
+			childDone = waitForExit(child);
 			if (child.pid === undefined) throw new Error("child pid missing");
+			expect(getStateDir()).toBe(path.join(root, "lasterm"));
 			persistRuntime({
 				pid: child.pid,
 				port: await getUnusedPort(),
@@ -1241,12 +1247,11 @@ describe("runtime state", () => {
 			expect(existsSync(path.join(getStateDir(), "runtime.json"))).toBe(true);
 			expect(isChildAlive(child)).toBe(true);
 		} finally {
-			if (child.exitCode === null && child.signalCode === null) {
+			restore();
+			if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
 				child.kill("SIGKILL");
-				await waitForExit(child);
 			}
-			deleteCurrentRuntime();
-			process.env.XDG_STATE_HOME = orig;
+			if (childDone !== undefined) await childDone;
 		}
 	});
 });
@@ -1263,9 +1268,17 @@ function makeTempDir(): string {
 	return dir;
 }
 
-function deleteCurrentRuntime(): void {
-	const result = loadRuntime();
-	if (result.kind === "present") deleteRuntime(result.runtime);
+function useTempStateRoot(): { root: string; restore: () => void } {
+	const name = process.platform === "win32" ? "LOCALAPPDATA" : "XDG_STATE_HOME";
+	const saved = process.env[name];
+	const root = makeTempDir();
+	process.env[name] = root;
+	return { root, restore: () => restoreEnv(name, saved) };
+}
+
+function restoreEnv(name: string, saved: string | undefined): void {
+	if (saved === undefined) delete process.env[name];
+	else process.env[name] = saved;
 }
 
 function runtimeRecord(overrides: Partial<import("./cli.js").RuntimeInfo> = {}) {

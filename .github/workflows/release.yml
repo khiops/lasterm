@@ -183,17 +183,23 @@ jobs:
           RELEASES_JSON="$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" | jq -s 'add')"
           PUBLISHED_ID="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '[.[] | select(.tag_name == $tag and (.draft | not)) | .id][0] // empty')"
           if [ -n "$PUBLISHED_ID" ]; then
-            echo "Release $TAG_NAME already exists (published); reusing id=$PUBLISHED_ID"
-            # Same binding the draft branch gets. Without a tag there is nothing
-            # else tying this release to a commit, and a published release is the
-            # one case where the assets are visible while the run proceeds.
-            if [ -z "$TAG_SHA" ]; then
-              PUBLISHED_TARGET="$(printf '%s' "$RELEASES_JSON" | jq -r --arg id "$PUBLISHED_ID" '.[] | select((.id|tostring) == $id) | .target_commitish')"
-              if [ "$PUBLISHED_TARGET" != "$FROZEN_SHA" ]; then
-                echo "::error::Release $TAG_NAME has no tag and targets $PUBLISHED_TARGET, not the $FROZEN_SHA this run built"
-                exit 1
-              fi
-            fi
+            # Refuse, before any cleanup and before a single build starts.
+            #
+            # Reusing a published release meant every later job wrote to something
+            # users could already see: `gh release upload --clobber` replaces one
+            # asset at a time, so a build that failed halfway left the public
+            # release holding a mixture of the old assets and the new ones, with
+            # nothing marking it as mid-flight. Draft-until-built was true of a
+            # first publication and of nothing else.
+            #
+            # The cost is that this workflow no longer repairs a published
+            # release in place. To rebuild one, convert it back to a draft
+            # (`gh release edit <tag> --draft`) and dispatch again, or cut a new
+            # version. Both leave the public release untouched until the run has
+            # produced every asset.
+            echo "::error::Release $TAG_NAME is already published (id=$PUBLISHED_ID)."
+            echo "::error::This workflow only writes to drafts. Convert it back to a draft with 'gh release edit $TAG_NAME --draft' and dispatch again, or release a new version."
+            exit 1
           else
             DRAFT_IDS="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag and .draft) | .id')"
             KEEP_DRAFT_ID=""

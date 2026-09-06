@@ -20,6 +20,10 @@ on:
         required: false
         type: string
 
+# Empty baseline, so a job added later starts from nothing rather than from the
+# repository default. Every job below declares the scopes it needs.
+permissions: {}
+
 # One run at a time per group. The group is a literal namespace plus the tag rather
 # than github.workflow, because a workflow invoked through workflow_call sees the
 # caller's workflow name. cancel-in-progress: false keeps a queued recovery run
@@ -158,6 +162,8 @@ jobs:
           # precisely because the tag can move. `ls-remote 'refs/tags/<t>*'`
           # returns the tag object for an annotated tag and the commit for a
           # lightweight one, so the peeled `^{}` line is preferred when present.
+          # persist-credentials: false leaves git unauthenticated; gh has the token, git does not.
+          gh auth setup-git
           REMOTE="$(git ls-remote "https://github.com/${{ github.repository }}.git" "refs/tags/$TAG_NAME" "refs/tags/$TAG_NAME^{}")"
           TAG_SHA="$(printf '%s\n' "$REMOTE" | awk '/\^\{\}$/ {print $1}')"
           [ -n "$TAG_SHA" ] || TAG_SHA="$(printf '%s\n' "$REMOTE" | awk 'NR==1 {print $1}')"
@@ -673,6 +679,8 @@ jobs:
           # the last moment before the release becomes public and the whole run
           # has had time to elapse in between. A tag that moved meanwhile would
           # otherwise publish assets built from a commit it no longer names.
+          # persist-credentials: false leaves git unauthenticated; gh has the token, git does not.
+          gh auth setup-git
           REMOTE="$(git ls-remote "https://github.com/${{ github.repository }}.git" "refs/tags/$TAG_NAME" "refs/tags/$TAG_NAME^{}")"
           TAG_SHA="$(printf '%s\n' "$REMOTE" | awk '/\^\{\}$/ {print $1}')"
           [ -n "$TAG_SHA" ] || TAG_SHA="$(printf '%s\n' "$REMOTE" | awk 'NR==1 {print $1}')"

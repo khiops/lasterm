@@ -200,12 +200,19 @@ jobs:
             # does; an out-of-band publish is outside what this can enforce.
             #
             # Recovery, and its cost. `gh release edit <tag> --draft` takes the
-            # release out of public view immediately. The next run deletes its
-            # *-agent-* assets and nothing else, so a build that fails after that
-            # leaves a non-public draft holding the retained hub, desktop and
-            # checksum assets from before, plus whichever new uploads finished.
-            # It wants inspecting, or another pass. Cutting a new version is the
-            # option that keeps the published release as it is.
+            # release out of public view immediately, and is unavailable at all if
+            # immutable releases are enabled for this repository — then cutting a
+            # new version is the only path.
+            #
+            # After a conversion, the next run deletes the release's *-agent-*
+            # assets and nothing else. Every upload here is `--clobber`, which
+            # deletes the existing asset before uploading its replacement, so a
+            # transport failure mid-upload leaves neither version of that one.
+            # A rebuild that fails therefore leaves a non-public draft holding
+            # some mixture of old assets, new assets, and assets that are simply
+            # gone. Inspect it; do not assume a shape.
+            #
+            # Cutting a new version leaves the published release exactly as it is.
             # If the tag also carries drafts, delete them first: the cleanup below
             # keeps whichever release the API lists first, which may not be the one
             # that was public (#270).
@@ -214,11 +221,14 @@ jobs:
             # lands here too, and this refuses it. The release is already complete;
             # verify its assets rather than re-running.
             echo "::error::Release $TAG_NAME is already published (id=$PUBLISHED_ID)."
-            echo "::error::This workflow writes to drafts only. Either release a new version, or"
-            echo "::error::delete any other draft for this tag, run 'gh release edit $TAG_NAME --draft'"
-            echo "::error::and dispatch again — that takes the release out of public view at once, and"
-            echo "::error::deletes its agent assets only, so a failing rebuild leaves a draft holding the"
-            echo "::error::old hub, desktop and checksum assets plus whichever new uploads finished."
+            echo "::error::This run refuses a release it observes as published. Draft state is not locked"
+            echo "::error::while the run proceeds, so this is a check at admission, not a guarantee."
+            echo "::error::Releasing a new version leaves this one exactly as it is."
+            echo "::error::To rebuild it instead: delete any other draft for the tag, run"
+            echo "::error::'gh release edit $TAG_NAME --draft' — unavailable if immutable releases are"
+            echo "::error::enabled — and dispatch again. That removes it from public view at once, and a"
+            echo "::error::rebuild that fails leaves a draft mixing old assets, new assets and assets"
+            echo "::error::deleted by an upload that did not finish. Inspect it."
             echo "::error::If a previous run published this release and then reported failure, the"
             echo "::error::release is already complete: check its assets instead of re-running."
             exit 1

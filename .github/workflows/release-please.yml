@@ -3,10 +3,23 @@ name: Release Please
 on:
   push:
     branches: [main]
+  # Merging the release pull request on 2026-09-17 advanced main to 2a91a75 and
+  # created no run at all, leaving 0.9.1 without a tag or a release. Running this
+  # on main recovers from that: release-please reads the commit history, so it
+  # creates the tag and the release exactly as the push would have.
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+
+# Two runs of the action can discover the same merged release pull request and
+# both try to create its tag, draft and labels. release.yml serialises by tag,
+# which only starts once that mutation is over. One repository-wide group is the
+# right width: the tag is not known until the action has run.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
 
 jobs:
   release-please:
@@ -14,6 +27,7 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
@@ -27,4 +41,12 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
-      ref: ${{ github.sha }}
+      # The commit the action tagged, not the commit that started this run. They
+      # are the same on a push to main and differ on a dispatch made later:
+      # release-please tags the release pull request's merge commit, while
+      # github.sha is whatever HEAD the dispatch selected. release.yml freezes
+      # this ref and refuses to publish when the tag points elsewhere, so passing
+      # github.sha would fail the build after the tag and draft already exist.
+      # release-please-action documents `sha` as "SHA that a GitHub release was
+      # tagged at"; when it is empty release.yml falls back to `tag`.
+      ref: ${{ needs.release-please.outputs.sha }}

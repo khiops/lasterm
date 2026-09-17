@@ -963,6 +963,20 @@ mod tests {
     fn temp_dir() -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("lasterm-identity-test-{}", ulid::Ulid::new()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)
+                .expect("create private identity fixture directory");
+        }
+        // Stays recursive: on Windows the temp path comes from TMP or TEMP and
+        // is not checked for existence, so a configured but absent hierarchy
+        // must still be created, as it was before the Unix branch was added.
+        #[cfg(not(unix))]
         fs::create_dir_all(&path).unwrap();
         path
     }

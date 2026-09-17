@@ -1,6 +1,6 @@
 [package]
 name = "lasterm-agent"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/khiops/lasterm"

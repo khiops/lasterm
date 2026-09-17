@@ -100,6 +100,82 @@ fn daemon_fixture_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
+// Copies an executable and waits until no other process can still hold it open
+// for writing, so the caller can execute it without hitting ETXTBSY.
+//
+// A `flock` belongs to the open file description, so a child that inherited the
+// writable descriptor before reaching execve inherited the exclusive lock with
+// it, and the shared probe below cannot succeed until that child is gone. This
+// holds where flock is the kernel's own lock. On a filesystem where Linux
+// emulates flock through fcntl byte-range locks — NFS — the lock is not
+// inherited across fork, the fence proves nothing, and the caller is back to the
+// intermittent ETXTBSY this exists to remove. That is the prior behaviour, not a
+// new failure, and TMPDIR is a local filesystem everywhere this suite runs.
+//
+// Matches its only caller, which is `cfg(target_os = "linux")` because the
+// behaviour it fences is Linux's ETXTBSY. A wider `cfg(unix)` here compiles the
+// helper with no caller on macOS, where `clippy --all-targets -- -D warnings`
+// then fails on dead_code.
+#[cfg(target_os = "linux")]
+async fn install_executable_fixture(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut destination_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o700)
+        .open(destination)?;
+    let mut source_file = std::fs::File::open(source)?;
+    std::io::copy(&mut source_file, &mut destination_file)?;
+    drop(source_file);
+    destination_file.flush()?;
+
+    let result = unsafe { libc::flock(destination_file.as_raw_fd(), libc::LOCK_EX) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Dropping our descriptor leaves this lock held only by children that
+    // inherited this writable open file description before reaching execve.
+    drop(destination_file);
+
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(5);
+    loop {
+        let destination_file = std::fs::File::open(destination)?;
+        let result =
+            unsafe { libc::flock(destination_file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+        if result == 0 {
+            drop(destination_file);
+            return Ok(());
+        }
+
+        let error = std::io::Error::last_os_error();
+        let is_contended = matches!(
+            error.raw_os_error(),
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+        );
+        if !is_contended {
+            return Err(error);
+        }
+        drop(destination_file);
+
+        let now = tokio::time::Instant::now();
+        let elapsed = now.duration_since(started);
+        assert!(
+            now < deadline,
+            "timed out draining inherited writers for {} after {elapsed:?}",
+            destination.display()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[cfg(unix)]
 async fn wait_for_record(socket: &std::path::Path, prefix: &str) -> std::path::PathBuf {
     let directory = socket.parent().expect("socket has parent directory");
@@ -478,13 +554,19 @@ async fn replaced_daemon_binary_remains_stoppable() {
     let dir = daemon_fixture_dir("replaced-binary");
     let socket = dir.join("agent.socket");
     let running_binary = dir.join("lasterm-agent-running");
-    std::fs::copy(env!("CARGO_BIN_EXE_lasterm-agent"), &running_binary)
-        .expect("copy running agent binary");
+    install_executable_fixture(
+        std::path::Path::new(env!("CARGO_BIN_EXE_lasterm-agent")),
+        &running_binary,
+    )
+    .await
+    .expect("install running agent binary");
     let mut daemon = DaemonGuard(
         spawn_daemon_from(running_binary.to_str().expect("UTF-8 binary path"), &socket).await,
     );
     let _record = wait_for_record(&socket, "agent.identity-").await;
     let replacement = dir.join("lasterm-agent-replacement");
+    // This file is renamed over the running binary and never executed, so it
+    // does not need the inherited-writer fence used for `running_binary`.
     std::fs::copy(env!("CARGO_BIN_EXE_lasterm-agent"), &replacement)
         .expect("copy replacement agent binary");
     std::fs::rename(&replacement, &running_binary).expect("replace daemon binary atomically");

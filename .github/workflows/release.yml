@@ -610,7 +610,8 @@ jobs:
           UPLOAD_SOURCES=()
           UPLOAD_NAMES=()
           HUB_CLAIMED_BY=()
-          for declared in "${HUB_PATTERNS[@]}"; do
+          for ((p = 0; p < ${#HUB_PATTERNS[@]}; p++)); do
+            declared="${HUB_PATTERNS[p]}"
             pattern="${declared//\{version\}/$VERSION}"
             matches=()
             for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
@@ -619,7 +620,53 @@ jobs:
               fi
             done
             if [ "${#matches[@]}" -eq 0 ]; then
+              # Name what was compared, not just what failed. A message holding
+              # only the pattern cannot be diagnosed from the run it belongs to:
+              # an empty candidate list and a value carrying an invisible byte
+              # produce the same sentence.
+              #
+              # Encode the operands `pattern_matches` actually received — every
+              # HUB_NAMES element and the expanded pattern — rather than the
+              # files they came from. A name is built from $TRIPLE, which never
+              # appears in HUB_LIST, so a byte that arrives through the triple
+              # shows up in neither file.
+              #
+              # Dumped whole, with no length cap. A cap would hide a byte that
+              # sits past it, which is the one case this branch exists for, and
+              # every consumer here drains its input so `pipefail` cannot turn a
+              # truncation into an early exit. These values are declarations
+              # from build-matrix.json and names built from them, so the volume
+              # is bounded by the matrix rather than by anything a build emits.
+              #
+              # LC_ALL=C for the lengths: ${#s} counts characters, so a
+              # multi-byte invisible character would be reported as one while
+              # od -c shows three, and the two halves of the diagnostic would
+              # contradict each other.
               echo "::error::Hub artifact pattern $pattern matched no file in dist/sea"
+              printf 'failing declaration: artifacts.hub[%s], %s bytes as declared:\n' \
+                "$p" "$(LC_ALL=C; raw="$declared"; echo "${#raw}")"
+              printf '%s' "$declared" | od -c
+              printf 'the same, expanded ({version} -> %s), %s bytes:\n' \
+                "$VERSION" "$(LC_ALL=C; echo "${#pattern}")"
+              printf '%s' "$pattern" | od -c
+              printf 'candidate names (%s):\n' "${#HUB_NAMES[@]}"
+              for ((d = 0; d < ${#HUB_NAMES[@]}; d++)); do
+                printf '  [%s] %s bytes, from %s:\n' \
+                  "$d" "$(LC_ALL=C; name="${HUB_NAMES[d]}"; echo "${#name}")" "${HUB_SOURCES[d]}"
+                printf '%s' "${HUB_NAMES[d]}" | od -c
+              done
+              printf 'all declarations (%s), after the CR strip above:\n' "${#HUB_PATTERNS[@]}"
+              for ((d = 0; d < ${#HUB_PATTERNS[@]}; d++)); do
+                printf '  artifacts.hub[%s]:\n' "$d"
+                printf '%s' "${HUB_PATTERNS[d]}" | od -c
+              done
+              # Labelled for the layer it comes from: jq on Windows writes CRLF,
+              # and the loop above strips that CR, so a `\r` here says nothing
+              # about what build-matrix.json declares.
+              printf 'jq output, before the CR strip:\n'
+              od -c "$HUB_PATTERN_LIST"
+              printf 'dist/sea:\n'
+              ls -la dist/sea || true
               exit 1
             fi
             if [ "${#matches[@]}" -gt 1 ]; then

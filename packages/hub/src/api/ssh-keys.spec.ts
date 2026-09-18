@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import path, { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -350,7 +350,10 @@ describe("SSH key endpoints", () => {
 			const { payload, headers } = buildMultipart("id_ed25519_perms", keyBuf);
 
 			server = await makeServer();
-			await server.inject({ method: "POST", url: "/api/ssh-keys", headers, payload });
+			const res = await server.inject({ method: "POST", url: "/api/ssh-keys", headers, payload });
+			// A rejected upload otherwise surfaces as ENOENT on the stat below,
+			// which hides the route's own error code (#101).
+			expect(res.statusCode, res.body).toBe(200);
 
 			const info = await stat(join(sshDir, "id_ed25519_perms"));
 			// Check that only owner read/write bits are set (0o600)
@@ -447,4 +450,38 @@ describe("SSH key endpoints", () => {
 			expect(existsSync(join(subDir, "id_ed25519"))).toBe(false);
 		});
 	});
+});
+
+// The route specs above only exercise the host's path rules, and CI runs them
+// on Linux alone. These run both platforms' rules on any host (#309).
+describe("containedPathWith", () => {
+	const cases = [
+		{ name: "posix", p: path.posix, base: "/home/me/.ssh" },
+		{ name: "win32", p: path.win32, base: "C:\\Users\\me\\.ssh" },
+	] as const;
+
+	for (const { name, p, base } of cases) {
+		describe(name, () => {
+			it("accepts a file and a nested file under the base", async () => {
+				const { containedPathWith } = await import("./ssh-keys.js");
+				expect(containedPathWith(p, base, "id_ed25519")).toBe(p.join(base, "id_ed25519"));
+				expect(containedPathWith(p, base, "work", "id_ed25519")).toBe(
+					p.join(base, "work", "id_ed25519"),
+				);
+			});
+
+			it("accepts the base itself and a name that only starts with two dots", async () => {
+				const { containedPathWith } = await import("./ssh-keys.js");
+				expect(containedPathWith(p, base, "")).toBe(p.resolve(base));
+				expect(containedPathWith(p, base, "..key")).toBe(p.join(base, "..key"));
+			});
+
+			it("rejects the parent, a sibling sharing the prefix, and a deeper escape", async () => {
+				const { containedPathWith } = await import("./ssh-keys.js");
+				expect(containedPathWith(p, base, "..")).toBeNull();
+				expect(containedPathWith(p, base, "..", ".ssh-other")).toBeNull();
+				expect(containedPathWith(p, base, "work", "..", "..", "id_ed25519")).toBeNull();
+			});
+		});
+	}
 });

@@ -28,12 +28,15 @@ start_hub() {
 	echo "$DEV_PID" > "$PID_FILE"
 
 	# The hub chooses an OS-assigned port unless explicitly configured. Its runtime
-	# record and self-signed certificate appear only after TLS is listening.
+	# record appears only after TLS is listening, and the probe checks the peer
+	# against the SPKI that record carries. No certificate file is waited on: its
+	# name is the TLS crate's cache detail (#218 renamed it) and a configured
+	# certificate has none.
 	echo -n "Waiting for hub TLS listener"
 	HUB_OK=0
 	HUB_PORT=""
 	for i in $(seq 1 30); do
-		if [ -r "$HUB_STATE_DIR/runtime.json" ] && [ -r "$HUB_STATE_DIR/hub-tls-cert.pem" ]; then
+		if [ -r "$HUB_STATE_DIR/runtime.json" ]; then
 			HUB_PORT="$(pnpm exec tsx "$ROOT/scripts/dev/hub-health-probe.mts" 2>/dev/null || true)"
 		fi
 		if [ -n "$HUB_PORT" ]; then

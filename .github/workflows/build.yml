@@ -531,8 +531,10 @@ jobs:
         shell: pwsh
         env:
           BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
+        # A file, not inline JSON: how PowerShell passes the embedded quotes
+        # depends on whether pnpm is a .cmd or an .exe launcher.
         run: |
-          pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+          pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config tauri.prebuilt-frontend.json
       # Uses the real Partner Center identity when the repository variables are
       # set, so the packaged identity is exercised before a tagged release;
       # falls back to the manifest placeholders otherwise — except on a release,

@@ -15,7 +15,6 @@ $PipeName = "lasterm-agent-$env:USERNAME"
 $PipePath = "\\.\pipe\$PipeName"
 $HubStateDir = Join-Path $env:LOCALAPPDATA "lasterm"
 $HubRuntimePath = Join-Path $HubStateDir "runtime.json"
-$HubCertificatePath = Join-Path $HubStateDir "hub-tls-cert.pem"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -42,13 +41,15 @@ function Start-Hub {
         -RedirectStandardError "$LogDir\dev-stderr.log"
     $proc.Id | Out-File -FilePath $PidFile -Force
 
-    # The shared probe verifies both certificate validation and the TLS peer's
-    # recorded SPKI; a certificate bundle alone is not an identity assertion.
+    # The runtime record appears only once TLS is listening, and the shared
+    # probe checks the peer against the SPKI that record carries. No certificate
+    # file is waited on: its name is the TLS crate's cache detail (#218 renamed
+    # it) and a configured certificate has none.
     Write-Host -NoNewline "Waiting for hub TLS listener"
     $hubOk = $false
     $hubPort = $null
     for ($i = 0; $i -lt 30; $i++) {
-        if ((Test-Path $HubRuntimePath) -and (Test-Path $HubCertificatePath)) {
+        if (Test-Path $HubRuntimePath) {
             try {
                 $candidatePort = & pnpm exec tsx "$Root\scripts\dev\hub-health-probe.mts" 2>$null
                 if ($LASTEXITCODE -eq 0 -and [int]$candidatePort -ge 1 -and [int]$candidatePort -le 65535) {

@@ -25,8 +25,8 @@ on:
 permissions: {}
 
 env:
-  # MSIX publication depends on all three repository variables. Individual
-  # targets add their platform predicate where they consume this value.
+  # MSIX publication depends on all three repository variables. Only the matrix
+  # job reads this, once; every later job gets its frozen value.
   MSIX_PUBLICATION_ENABLED: >-
     ${{
       vars.MSIX_IDENTITY_NAME != '' &&
@@ -53,15 +53,14 @@ concurrency:
 
 jobs:
   matrix:
-    name: Load Build Matrix
+    name: Freeze Release Inputs
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
-      agent: ${{ steps.filter.outputs.agent }}
-      hub: ${{ steps.filter.outputs.hub }}
-      desktop: ${{ steps.filter.outputs.desktop }}
+      version: ${{ steps.freeze.outputs.version }}
+      msix: ${{ steps.freeze.outputs.msix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,103 +101,22 @@ jobs:
           fi
           echo "building $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-      - id: filter
+      - id: freeze
         env:
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
           MSIX_RELEASE_ENABLED: ${{ env.MSIX_PUBLICATION_ENABLED }}
         run: |
-          # Enabled producers must declare exactly what they ship before the
-          # matrix reaches a build job. Agent names are computed separately;
-          # MSIX is optional because repository variables gate its publication.
-          INVALID="$(jq -r --argjson msix_release_enabled "$MSIX_RELEASE_ENABLED" '
-            # Declarations are carried to their consumers through delimiters a
-            # value can itself contain: jq -r emits one per line and the
-            # collectors read them back with `read`, so a pattern holding a
-            # newline arrives as two. Bundle kinds reach Tauri joined by commas,
-            # so "nsis,msi" would arrive as two kinds. Reject both classes here
-            # rather than teach every consumer a lossless encoding.
-            #
-            # A NUL escape is one of the control characters this rejects: jq
-            # keeps it through parsing, so the predicate sees it and refuses
-            # the row. That matters because `read` would silently drop it
-            # further down, turning one declaration into a different one.
-            def strings(forbidden):
-              if type == "array" then
-                length > 0
-                and all(.[];
-                  type == "string" and length > 0 and (test(forbidden) | not))
-              else
-                false
-              end;
-            def patterns: strings("[[:cntrl:]]");
-            def bundle_kinds: strings("[[:cntrl:],]");
-            # The triple is the identity every collector looks a row up by, and
-            # asset names are built from it. Two rows sharing one would have
-            # their declarations concatenated at collection time, so a valid
-            # enabled row could be failed by a stale duplicate. Checked over
-            # every row, disabled included, so that enabling one later cannot
-            # turn a latent collision into a failed release; the collectors
-            # also select on .enabled, which is the second layer.
-            ( [.targets[].triple]
-              | (map(select(type != "string" or length == 0)) | length > 0) as $bad
-              | (length != (unique | length)) as $dup
-              | if $bad then "targets: a triple is missing or not a string"
-                elif $dup then "targets: two rows share one triple"
-                else empty end
-            ),
-            (.targets[] | select(.enabled)
-            | if (.artifacts | type) != "object" then
-                # Checked before the lookups below. Written as .artifacts.hub?
-                # instead, the optional operator swallows the type error that a
-                # scalar or an array raises, and a malformed row becomes an
-                # empty stream this step reads as valid.
-                "\(.triple) artifacts"
-              elif .hub and ((.artifacts.hub | patterns) | not) then
-                "\(.triple) artifacts.hub"
-              elif .desktop and ((.artifacts.desktop | patterns) | not) then
-                "\(.triple) artifacts.desktop"
-              elif .desktop and ((.artifacts.bundles | bundle_kinds) | not) then
-                "\(.triple) artifacts.bundles"
-              elif (($msix_release_enabled and .triple == "x86_64-pc-windows-msvc")
-                    or (.artifacts | has("msix")))
-                   and ((.artifacts.msix | patterns) | not) then
-                "\(.triple) artifacts.msix"
-              else
-                empty
-              end)
-          ' .github/build-matrix.json)"
-          if [ -n "$INVALID" ]; then
-            while IFS= read -r missing; do
-              echo "::error::Enabled target requires a non-empty declaration: $missing"
-            done <<< "$INVALID"
-            exit 1
-          fi
-          DUPLICATE_PATTERNS="$(jq -r '
-            .targets[] | .triple as $triple | .artifacts as $artifacts
-            | select(($artifacts | type) == "object")
-            | ["hub", "desktop", "bundles", "msix"][] as $kind
-            | ($artifacts[$kind] // empty) as $patterns
-            | if ($patterns | type) == "array" then
-                [$patterns[] | select(type == "string")] | group_by(.)[] | select(length > 1)
-                | "\($triple) artifacts.\($kind) duplicate declaration: \(.[0])"
-              else
-                empty
-              end
-          ' .github/build-matrix.json)"
-          if [ -n "$DUPLICATE_PATTERNS" ]; then
-            while IFS= read -r duplicate; do
-              echo "::error::Target has duplicate artifact declaration: $duplicate"
-            done <<< "$DUPLICATE_PATTERNS"
-            exit 1
-          fi
-          jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
-            .github/build-matrix.json > /tmp/agent.json
-          jq -c '{include:[.targets[]|select(.enabled and .hub)]}' \
-            .github/build-matrix.json > /tmp/hub.json
-          jq -c '{include:[.targets[]|select(.enabled and .desktop)]}' \
-            .github/build-matrix.json > /tmp/desktop.json
-          echo "agent=$(cat /tmp/agent.json)" >> "$GITHUB_OUTPUT"
-          echo "hub=$(cat /tmp/hub.json)" >> "$GITHUB_OUTPUT"
-          echo "desktop=$(cat /tmp/desktop.json)" >> "$GITHUB_OUTPUT"
+          # Read once, here, and handed to every later job. The repository
+          # variables behind MSIX_PUBLICATION_ENABLED are read when each job
+          # starts, so a variable changed mid-run would otherwise have the job
+          # that packages and the job that publishes disagree. The matrix
+          # itself is validated by build.yml, on this same frozen commit.
+          VERSION="${TAG_NAME#v}"
+          echo "version=$VERSION msix=$MSIX_RELEASE_ENABLED"
+          {
+            echo "version=$VERSION"
+            echo "msix=$MSIX_RELEASE_ENABLED"
+          } >> "$GITHUB_OUTPUT"
 
   create-release:
     name: Create GitHub Release
@@ -290,23 +208,23 @@ jobs:
             #
             # What this refusal is, exactly: the release is not public at the
             # moment create-release looks. It is a snapshot. Anyone with write
-            # access can publish the admitted draft while the builds run, and the
-            # later `--clobber` uploads would then mutate a public release again.
+            # access can publish the admitted draft while the builds run.
+            # publish-release looks again immediately before it writes and
+            # refuses a release it no longer finds as a draft; a publish between
+            # that look and its last upload is outside what either can enforce.
             # Serialising this workflow's own runs is what the concurrency group
-            # does; an out-of-band publish is outside what this can enforce.
+            # does.
             #
             # Recovery, and its cost. `gh release edit <tag> --draft` takes the
             # release out of public view immediately, and is unavailable at all if
             # immutable releases are enabled for this repository — then cutting a
             # new version is the only path.
             #
-            # After a conversion, the next run deletes the release's *-agent-*
-            # assets and nothing else. Every upload here is `--clobber`, which
-            # deletes the existing asset before uploading its replacement, so a
-            # transport failure mid-upload leaves neither version of that one.
-            # A rebuild that fails therefore leaves a non-public draft holding
-            # some mixture of old assets, new assets, and assets that are simply
-            # gone. Inspect it; do not assume a shape.
+            # After a conversion, the next run's publish-release deletes every
+            # asset the draft carries, then uploads this run's one at a time. A
+            # rebuild that fails during that step leaves a non-public draft
+            # holding part of the new set and none of the old. Inspect it; do
+            # not assume a shape.
             #
             # Cutting a new version leaves the published release exactly as it is.
             # If the tag also carries drafts, delete them first: the cleanup below
@@ -323,8 +241,8 @@ jobs:
             echo "::error::To rebuild it instead: delete any other draft for the tag, run"
             echo "::error::'gh release edit $TAG_NAME --draft' — unavailable if immutable releases are"
             echo "::error::enabled — and dispatch again. That removes it from public view at once, and a"
-            echo "::error::rebuild that fails leaves a draft mixing old assets, new assets and assets"
-            echo "::error::deleted by an upload that did not finish. Inspect it."
+            echo "::error::rebuild that fails while publishing leaves a draft holding part of the new"
+            echo "::error::assets and none of the old. Inspect it."
             echo "::error::If a previous run published this release and then reported failure, the"
             echo "::error::release is already complete: check its assets instead of re-running."
             exit 1
@@ -355,677 +273,37 @@ jobs:
                 echo "::error::Draft $TAG_NAME targets $DRAFT_TARGET but this run froze $FROZEN_SHA"
                 exit 1
               fi
-              # Every agent asset in a reused draft came from an earlier run — this run's
-              # build jobs have not started, and a re-run of them uploads again — so
-              # delete them all rather than describing which are legitimate (§3.5.5).
-              # Two shapes of that description have now been wrong: matching only the
-              # current basename left a pre-rename draft's binaries to be published
-              # beside this run's, and keeping "this version's" accepted anything whose
-              # tail merely looked like a version. There is nothing here to describe.
-              #
-              # A failed deletion fails the job. Suppressing it would turn "could not
-              # remove the stale binary" into publishing the stale binary, which is the
-              # one outcome this loop exists to prevent.
-              # The listing runs as its own assignment, not inside the for word
-              # list: a failing command substitution there leaves the loop with
-              # zero iterations and a zero status, so an API or auth failure read
-              # as "no assets to remove" and publication continued over stale
-              # binaries. Same shape as the collectors this workflow already had
-              # to lose.
-              DRAFT_ASSETS="$(gh release view "$TAG_NAME" --json assets -q '.assets[].name')"
-              for asset in $DRAFT_ASSETS; do
-                case "$asset" in
-                  *-agent-*)
-                    echo "Deleting agent asset left by an earlier run: $asset"
-                    gh release delete-asset "$TAG_NAME" "$asset" --yes
-                    ;;
-                esac
-              done
+              # Whatever a reused draft already carries came from an earlier run.
+              # publish-release, the only job that attaches assets, deletes all of
+              # it before uploading this run's, so nothing is removed here.
             else
               gh release create "$TAG_NAME" --draft --generate-notes --title "$TAG_NAME" --target "$(git rev-parse HEAD)"
             fi
           fi
 
-  build-web:
-    name: Build Web UI
-    needs: [matrix, create-release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.matrix.outputs.sha }}
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          check-latest: true
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @lasterm/shared build
-      - name: Build web
-        run: |
-          LASTERM_BUILD_HASH="$(git rev-parse HEAD)"
-          export LASTERM_BUILD_HASH
-          ./scripts/build-web.sh
-      - name: Upload web assets to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-        run: |
-          tar czf web-dist.tar.gz -C packages/clients/web/dist .
-          tar czf web-embedded.tar.gz -C packages/hub/static .
-          gh release upload "$TAG_NAME" --clobber web-dist.tar.gz web-embedded.tar.gz
-
-  build-agent:
-    name: Build Agent (${{ matrix.triple }})
+  # The same build a pull request dispatch runs, on the frozen commit. Its jobs
+  # hand their outputs over as workflow artifacts and hold contents: read, so no
+  # job that runs third-party build code sees a token that can write the release
+  # (#272), and everything up to the release itself is exercised on any branch
+  # by dispatching ci.yml.
+  build:
+    name: Build
     needs: [matrix, create-release]
     permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.agent) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.matrix.outputs.sha }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          components: clippy, rustfmt
-          targets: ${{ matrix.triple }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Install aarch64 cross-compile tools
-        if: matrix.triple == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        if: matrix.shell_sh && matrix.triple != 'aarch64-unknown-linux-gnu'
-        run: cargo test
-      - name: Build (bash)
-        if: matrix.shell_sh
-        env:
-          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: ./scripts/build-agent.sh
-      - name: Build (pwsh)
-        if: ${{ !matrix.shell_sh }}
-        shell: pwsh
-        env:
-          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-        run: .\scripts\build-agent.ps1
-      - name: Upload agent to release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          TRIPLE: ${{ matrix.triple }}
-        run: |
-          VERSION="${TAG_NAME#v}"
-          for f in dist/sea/lasterm-agent*; do
-            ext="${f##*.}"
-            if [ "$ext" = "$f" ]; then ext=""; else ext=".$ext"; fi
-            base="lasterm-agent-${TRIPLE}-${VERSION}${ext}"
-            cp "$f" "$base"
-            gh release upload "$TAG_NAME" --clobber "$base"
-          done
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.matrix.outputs.sha }}
+      version: ${{ needs.matrix.outputs.version }}
+      release: true
+      msix: ${{ needs.matrix.outputs.msix == 'true' }}
 
-  build-hub:
-    name: Build Hub (${{ matrix.triple }})
-    needs: [matrix, build-web]
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.matrix.outputs.sha }}
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          check-latest: true
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @lasterm/shared build
-      - name: Download web-embedded from release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-        run: |
-          mkdir -p _tmp
-          gh release download "$TAG_NAME" --pattern web-embedded.tar.gz --dir _tmp
-          mkdir -p packages/hub/static
-          tar xzf _tmp/web-embedded.tar.gz -C packages/hub/static
-      - name: Build (bash)
-        if: matrix.shell_sh
-        env:
-          LASTERM_SKIP_WEB: "true"
-          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-        run: |
-          LASTERM_BUILD_HASH="$(git rev-parse HEAD)"
-          export LASTERM_BUILD_HASH
-          ./scripts/build-hub.sh
-      - name: Build (pwsh)
-        if: ${{ !matrix.shell_sh }}
-        shell: pwsh
-        env:
-          LASTERM_SKIP_WEB: "true"
-          LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-        run: |
-          $env:LASTERM_BUILD_HASH = (git rev-parse HEAD)
-          .\scripts\build-hub.ps1
-      # Nothing here ran the binary before publishing it, so a hub whose SQLite
-      # bootstrap was broken reached a tagged release once: every job up to
-      # packaging only ever produced the executable. `agent status` goes through
-      # that bootstrap and prints.
-      #
-      # What it does NOT prove: it never calls startHub(), so the hub lock addon,
-      # the server, the databases and the port binding stay untested here. That is
-      # #147's job. This step's scope is the bootstrap that broke.
-      #
-      # Exit status alone is not enough either. A bundle that never reaches its
-      # entry point exits 0 having printed nothing, so the output must parse and
-      # carry a version-shaped value.
-      #
-      # Version-SHAPED, not semver-valid. The question here is whether the bundle
-      # reached its entry point and reported, and digits-and-dots answers it. That
-      # the version is the right one is asserted against the tag by this workflow's
-      # own version check above, and what the artefacts contain is #155.
-      #
-      # Gated on the shell alone, so every hub row runs one of the two. Every hub
-      # target in .github/build-matrix.json is native to its runner, and a condition
-      # for a non-native row that does not exist would only add a way to skip: a
-      # skipped step is green, so an inconsistent matrix row would publish untested.
-      # A future non-native hub row needs an explicit refusal here, not a predicate.
-      - name: Smoke — the built hub runs and reports its version
-        if: matrix.shell_sh
-        timeout-minutes: 2
-        run: |
-          ./dist/sea/lasterm-hub agent status --json > status.json
-          node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
-      - name: Smoke — the built hub runs and reports its version (pwsh)
-        if: ${{ !matrix.shell_sh }}
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          .\dist\sea\lasterm-hub.exe agent status --json > status.json
-          if ($LASTEXITCODE -ne 0) { throw "the built hub failed to run ($LASTEXITCODE)" }
-          # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
-          # so [{"hub_version":"x"}] would pass here and fail the check above.
-          node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
-      - name: Upload hub to release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          TRIPLE: ${{ matrix.triple }}
-        run: |
-          VERSION="${TAG_NAME#v}"
-          HUB_LIST="$RUNNER_TEMP/hub-artifacts"
-          HUB_PATTERN_LIST="$RUNNER_TEMP/hub-artifact-patterns"
-          # These are the two distributable executable names. A prefix glob also
-          # matches lasterm-hub.cjs, the required SEA input and not a deliverable.
-          # `find -maxdepth` is a GNU extension the BSD find on macOS rejects.
-          #
-          # Read the directory and compare real filenames rather than testing
-          # each name: on the Windows runner `[ -f dist/sea/lasterm-hub ]`
-          # succeeds because MSYS resolves a bare name to its .exe, so a single
-          # built file produced two candidates and the extensionless one matched
-          # no declaration. A glob only ever yields names that exist.
-          : > "$HUB_LIST"
-          shopt -s nullglob
-          for candidate in dist/sea/*; do
-            case "${candidate##*/}" in
-              lasterm-hub|lasterm-hub.exe) printf '%s\0' "$candidate" ;;
-            esac
-          done >> "$HUB_LIST"
-          shopt -u nullglob
-          # tr, not a bash suffix removal: jq on the Windows runner writes CRLF,
-          # and `${pattern%$'\r'}` in the reader was observed leaving the CR in
-          # place there. An external filter does not depend on how the runner's
-          # shell handles that escape.
-          #
-          # jq's own output is kept, because the failure path dumps it to show
-          # what arrived before this filter ran. Reading the filtered file there
-          # would prove nothing about the transport.
-          HUB_PATTERN_RAW="$RUNNER_TEMP/hub-artifact-patterns-raw"
-          jq -r --arg triple "$TRIPLE" \
-            '.targets[] | select(.enabled and .triple == $triple) | .artifacts.hub[]' \
-            .github/build-matrix.json > "$HUB_PATTERN_RAW"
-          tr -d '\r' < "$HUB_PATTERN_RAW" > "$HUB_PATTERN_LIST"
-
-          HUB_SOURCES=()
-          HUB_NAMES=()
-          while IFS= read -r -d '' path; do
-            ext="${path##*.}"
-            if [ "$ext" = "$path" ]; then ext=""; else ext=".$ext"; fi
-            HUB_SOURCES+=("$path")
-            HUB_NAMES+=("lasterm-hub-${TRIPLE}${ext}")
-          done < "$HUB_LIST"
-          HUB_PATTERNS=()
-          # Already CR-free: tr normalised jq's output above.
-          while IFS= read -r pattern; do HUB_PATTERNS+=("$pattern"); done < "$HUB_PATTERN_LIST"
-          pattern_matches() {
-            # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
-            [[ "$1" == $2 ]]
-          }
-
-          UPLOAD_SOURCES=()
-          UPLOAD_NAMES=()
-          HUB_CLAIMED_BY=()
-          for ((p = 0; p < ${#HUB_PATTERNS[@]}; p++)); do
-            declared="${HUB_PATTERNS[p]}"
-            pattern="${declared//\{version\}/$VERSION}"
-            matches=()
-            for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
-              if pattern_matches "${HUB_NAMES[i]}" "$pattern"; then
-                matches+=("$i")
-              fi
-            done
-            if [ "${#matches[@]}" -eq 0 ]; then
-              # Name what was compared, not just what failed. A message holding
-              # only the pattern cannot be diagnosed from the run it belongs to:
-              # an empty candidate list and a value carrying an invisible byte
-              # produce the same sentence.
-              #
-              # Encode the operands `pattern_matches` actually received — every
-              # HUB_NAMES element and the expanded pattern — rather than the
-              # files they came from. A name is built from $TRIPLE, which never
-              # appears in HUB_LIST, so a byte that arrives through the triple
-              # shows up in neither file.
-              #
-              # Dumped whole, with no length cap. A cap would hide a byte that
-              # sits past it, which is the one case this branch exists for, and
-              # every consumer here drains its input so `pipefail` cannot turn a
-              # truncation into an early exit. These values are declarations
-              # from build-matrix.json and names built from them, so the volume
-              # is bounded by the matrix rather than by anything a build emits.
-              #
-              # LC_ALL=C for the lengths: ${#s} counts characters, so a
-              # multi-byte invisible character would be reported as one while
-              # od -c shows three, and the two halves of the diagnostic would
-              # contradict each other.
-              echo "::error::Hub artifact pattern $pattern matched no file in dist/sea"
-              printf 'failing declaration: artifacts.hub[%s], %s bytes as declared:\n' \
-                "$p" "$(LC_ALL=C; raw="$declared"; echo "${#raw}")"
-              printf '%s' "$declared" | od -c
-              printf 'the same, expanded ({version} -> %s), %s bytes:\n' \
-                "$VERSION" "$(LC_ALL=C; echo "${#pattern}")"
-              printf '%s' "$pattern" | od -c
-              printf 'candidate names (%s):\n' "${#HUB_NAMES[@]}"
-              for ((d = 0; d < ${#HUB_NAMES[@]}; d++)); do
-                printf '  [%s] %s bytes, from %s:\n' \
-                  "$d" "$(LC_ALL=C; name="${HUB_NAMES[d]}"; echo "${#name}")" "${HUB_SOURCES[d]}"
-                printf '%s' "${HUB_NAMES[d]}" | od -c
-              done
-              printf 'all declarations (%s), after tr removed the CR:\n' "${#HUB_PATTERNS[@]}"
-              for ((d = 0; d < ${#HUB_PATTERNS[@]}; d++)); do
-                printf '  artifacts.hub[%s]:\n' "$d"
-                printf '%s' "${HUB_PATTERNS[d]}" | od -c
-              done
-              # Labelled for the layer it comes from: jq on Windows writes CRLF
-              # and tr removes it upstream, so a `\r` here is transport, not
-              # something build-matrix.json declares.
-              printf 'jq output, before tr:\n'
-              od -c "$HUB_PATTERN_RAW"
-              printf 'dist/sea:\n'
-              ls -la dist/sea || true
-              exit 1
-            fi
-            if [ "${#matches[@]}" -gt 1 ]; then
-              matched_paths=()
-              for i in "${matches[@]}"; do matched_paths+=("${HUB_SOURCES[i]}"); done
-              echo "::error::Hub artifact pattern $pattern matched more than one file: ${matched_paths[*]}"
-              exit 1
-            fi
-            i="${matches[0]}"
-            if [ -n "${HUB_CLAIMED_BY[i]+set}" ]; then
-              echo "::error::Hub artifact patterns ${HUB_CLAIMED_BY[i]} and $pattern both matched ${HUB_SOURCES[i]}"
-              exit 1
-            fi
-            HUB_CLAIMED_BY[i]="$pattern"
-            UPLOAD_SOURCES+=("${HUB_SOURCES[i]}")
-            UPLOAD_NAMES+=("${HUB_NAMES[i]}")
-          done
-
-          for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
-            declared_match=false
-            for declared in "${HUB_PATTERNS[@]}"; do
-              pattern="${declared//\{version\}/$VERSION}"
-              if pattern_matches "${HUB_NAMES[i]}" "$pattern"; then
-                declared_match=true
-              fi
-            done
-            if [ "$declared_match" = false ]; then
-              echo "::error::Hub build output ${HUB_SOURCES[i]} resolves to undeclared release asset ${HUB_NAMES[i]}"
-              exit 1
-            fi
-          done
-
-          for ((i = 0; i < ${#UPLOAD_NAMES[@]}; i++)); do
-            cp "${UPLOAD_SOURCES[$i]}" "${UPLOAD_NAMES[$i]}"
-          done
-          printf 'uploading %s\n' "${UPLOAD_NAMES[@]}"
-          gh release upload "$TAG_NAME" --clobber "${UPLOAD_NAMES[@]}"
-
-  build-desktop:
-    name: Build Desktop (${{ matrix.triple }})
-    needs: [matrix, build-agent, build-hub, build-web]
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.matrix.outputs.sha }}
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          check-latest: true
-          cache: "pnpm"
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: packages/clients/desktop/src-tauri
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @lasterm/shared build
-      - name: Align desktop versions with release tag
-        shell: bash
-        env:
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-        run: |
-          VERSION="${TAG_NAME#v}"
-          CONF="packages/clients/desktop/src-tauri/tauri.conf.json"
-          CARGO="packages/clients/desktop/src-tauri/Cargo.toml"
-          jq --arg v "$VERSION" '.version = $v' "$CONF" > "${CONF}.tmp" && mv "${CONF}.tmp" "$CONF"
-          sed -i "0,/^version = .*/s//version = \"$VERSION\"/" "$CARGO"
-          echo "Set desktop versions to $VERSION"
-      - name: Download assets from release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          TRIPLE: ${{ matrix.triple }}
-        run: |
-          VERSION="${TAG_NAME#v}"
-          if [ "${{ matrix.shell_sh }}" = "true" ]; then EXT=""; else EXT=".exe"; fi
-          mkdir -p _tmp dist/sea
-          # Exact asset names, not globs (a glob silently bundles the wrong asset
-          # once two versioned files match). The agent asset is versioned; rename it
-          # to the fixed unversioned sidecar name Tauri expects.
-          gh release download "$TAG_NAME" --pattern "lasterm-agent-${TRIPLE}-${VERSION}${EXT}" --dir dist/sea/
-          mv "dist/sea/lasterm-agent-${TRIPLE}-${VERSION}${EXT}" "dist/sea/lasterm-agent-${TRIPLE}${EXT}"
-          gh release download "$TAG_NAME" --pattern "lasterm-hub-${TRIPLE}${EXT}" --dir dist/sea/
-          gh release download "$TAG_NAME" --pattern web-dist.tar.gz --dir _tmp
-          mkdir -p packages/clients/web/dist
-          tar xzf _tmp/web-dist.tar.gz -C packages/clients/web/dist
-      - name: Place sidecars + build (bash)
-        if: matrix.shell_sh
-        env:
-          BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
-        run: |
-          TRIPLE="${{ matrix.triple }}"
-          cp dist/sea/lasterm-agent-${TRIPLE} "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
-          cp dist/sea/lasterm-hub-${TRIPLE} "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
-          pnpm -F @lasterm/desktop tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}'
-      - name: Place sidecars (pwsh)
-        if: ${{ !matrix.shell_sh }}
-        shell: pwsh
-        env:
-          TRIPLE: ${{ matrix.triple }}
-        run: |
-          Copy-Item "dist\sea\lasterm-agent-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\lasterm-agent-${env:TRIPLE}.exe"
-          Copy-Item "dist\sea\lasterm-hub-${env:TRIPLE}.exe" "packages\clients\desktop\src-tauri\lasterm-hub-${env:TRIPLE}.exe"
-      - name: Clippy (desktop crate)
-        if: matrix.triple == 'x86_64-pc-windows-msvc'
-        shell: pwsh
-        working-directory: packages/clients/desktop/src-tauri
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Build desktop (pwsh)
-        if: ${{ !matrix.shell_sh }}
-        shell: pwsh
-        env:
-          BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
-        run: |
-          pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
-      - name: Package unsigned MSIX
-        if: >-
-          ${{
-            matrix.triple == 'x86_64-pc-windows-msvc' &&
-            env.MSIX_PUBLICATION_ENABLED == 'true'
-          }}
-        shell: pwsh
-        env:
-          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
-          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
-          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
-        run: |
-          .\packages\clients\desktop\msix\pack-msix.ps1 `
-            -SkipBuild `
-            -IdentityName $env:MSIX_IDENTITY_NAME `
-            -Publisher $env:MSIX_PUBLISHER `
-            -PublisherDisplayName $env:MSIX_PUBLISHER_DISPLAY_NAME
-      - name: Upload desktop installers to release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          TRIPLE: ${{ matrix.triple }}
-          # The triple belongs in this predicate because the packaging step above
-          # carries it too. Testing only the repository variables meant a
-          # non-Windows row — aarch64-apple-darwin, declared in the matrix and
-          # disabled under #224 — read MSIX as enabled, produced nothing because
-          # packaging is Windows-only, and would now fail on the absent output
-          # directory. Every row that enforces MSIX is a row that attempted it.
-          MSIX_RELEASE_ENABLED: >-
-            ${{
-              matrix.triple == 'x86_64-pc-windows-msvc' &&
-              env.MSIX_PUBLICATION_ENABLED == 'true'
-            }}
-        run: |
-          # `find -exec cmd \;` does not adopt cmd's exit status — `find /dev/null
-          # -exec false {} \;` exits 0 — so an upload that failed on a network or
-          # token error left this job green and the release short an installer.
-          #
-          # `find` runs in the foreground writing to a file, never through a
-          # process substitution: `mapfile < <(find …)` reports mapfile's status,
-          # so a traversal that read one installer and then hit an unreadable
-          # subtree would look like a complete scan. Redirected like this, `-e`
-          # ends the step on find's own status. The read loop is used rather than
-          # `mapfile -d ''` because macOS runners carry bash 3.2, and
-          # aarch64-apple-darwin is a declared desktop target (disabled today,
-          # #224). -print0 keeps a path containing a space whole.
-          #
-          # Resolve the declared installer patterns exactly. The Tauri config
-          # keeps its broad defaults; the frozen matrix says what this target
-          # actually ships and the build command narrows Tauri to those bundles.
-          # The suffix list is not a second copy of the declaration: it is the
-          # only thing that separates a deliverable from a file inside one.
-          # Tauri's macOS and AppImage bundles are directory trees — `.app`
-          # holds Info.plist, the executable and its resources — and every file
-          # under them is a regular file. Collecting all of them would hand the
-          # reverse resolver each one as an undeclared installer and fail the
-          # step.
-          #
-          # The list holds one suffix per bundle kind a target actually
-          # declares, and no more. A suffix nothing declares only widens what
-          # can be mistaken for a deliverable: a resource named
-          # `offline-cache.rpm` inside a `.app` becomes a candidate the moment
-          # `.rpm` is listed here, and then either fails the resolver as
-          # undeclared or makes a broad declaration ambiguous. Add a suffix in
-          # the same change that makes a target declare its kind, never before.
-          #
-          # `-type f` and `gh release upload` both take a file, so a bundle
-          # kind whose output is a directory — Tauri's `app`, and the `.AppDir`
-          # behind an AppImage — cannot be declared in artifacts.desktop and
-          # shipped as it stands. Publishing one means archiving it first and
-          # declaring the archive, which is a different change.
-          VERSION="${TAG_NAME#v}"
-          BUNDLE_LIST="$RUNNER_TEMP/desktop-installers"
-          find packages/clients/desktop/src-tauri/target/release/bundle -type f \
-            \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
-            -print0 > "$BUNDLE_LIST"
-          DESKTOP_PATTERN_LIST="$RUNNER_TEMP/desktop-artifact-patterns"
-          jq -r --arg triple "$TRIPLE" \
-            '.targets[] | select(.enabled and .triple == $triple) | .artifacts.desktop[]' \
-            .github/build-matrix.json | tr -d '\r' > "$DESKTOP_PATTERN_LIST"
-          BUNDLE_FILES=()
-          while IFS= read -r -d '' path; do BUNDLE_FILES+=("$path"); done < "$BUNDLE_LIST"
-          DESKTOP_PATTERNS=()
-          # Already CR-free: tr normalised jq's output above.
-          while IFS= read -r pattern; do DESKTOP_PATTERNS+=("$pattern"); done < "$DESKTOP_PATTERN_LIST"
-          pattern_matches() {
-            # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
-            [[ "$1" == $2 ]]
-          }
-          INSTALLERS=()
-          INSTALLER_CLAIMED_BY=()
-          for declared in "${DESKTOP_PATTERNS[@]}"; do
-            pattern="${declared//\{version\}/$VERSION}"
-            matches=()
-            for ((i = 0; i < ${#BUNDLE_FILES[@]}; i++)); do
-              path="${BUNDLE_FILES[i]}"
-              base="${path##*/}"
-              if pattern_matches "$base" "$pattern"; then
-                matches+=("$i")
-              fi
-            done
-            if [ "${#matches[@]}" -eq 0 ]; then
-              echo "::error::Desktop artifact pattern $pattern matched no installer"
-              exit 1
-            fi
-            if [ "${#matches[@]}" -gt 1 ]; then
-              matched_paths=()
-              for i in "${matches[@]}"; do matched_paths+=("${BUNDLE_FILES[i]}"); done
-              echo "::error::Desktop artifact pattern $pattern matched more than one installer: ${matched_paths[*]}"
-              exit 1
-            fi
-            i="${matches[0]}"
-            if [ -n "${INSTALLER_CLAIMED_BY[i]+set}" ]; then
-              echo "::error::Desktop artifact patterns ${INSTALLER_CLAIMED_BY[i]} and $pattern both matched ${BUNDLE_FILES[i]}"
-              exit 1
-            fi
-            INSTALLER_CLAIMED_BY[i]="$pattern"
-            INSTALLERS+=("${BUNDLE_FILES[i]}")
-          done
-          for path in "${BUNDLE_FILES[@]}"; do
-            base="${path##*/}"
-            declared_match=false
-            for declared in "${DESKTOP_PATTERNS[@]}"; do
-              pattern="${declared//\{version\}/$VERSION}"
-              if pattern_matches "$base" "$pattern"; then
-                declared_match=true
-              fi
-            done
-            if [ "$declared_match" = false ]; then
-              echo "::error::Undeclared desktop installer $path"
-              exit 1
-            fi
-          done
-          if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
-            # An absent output directory is a failure here, not a reason to skip:
-            # the variables that enable MSIX publication are set, so the package
-            # was meant to exist.
-            if [ ! -d packages/clients/desktop/msix/out ]; then
-              echo "::error::MSIX publication is enabled but packages/clients/desktop/msix/out does not exist"
-              exit 1
-            fi
-            MSIX_LIST="$RUNNER_TEMP/desktop-msix"
-            MSIX_PATTERN_LIST="$RUNNER_TEMP/msix-artifact-patterns"
-            # -maxdepth 1 because pack-msix.ps1 writes its package directly
-            # here, and this branch runs only on the Windows triple, where the
-            # runner's find is GNU. A nested .msix left by anything else would
-            # otherwise become a second candidate for the declared basename.
-            find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" \
-              -print0 > "$MSIX_LIST"
-            jq -r --arg triple "$TRIPLE" \
-              '.targets[] | select(.enabled and .triple == $triple) | .artifacts.msix[]?' \
-              .github/build-matrix.json | tr -d '\r' > "$MSIX_PATTERN_LIST"
-            MSIX_FILES=()
-            while IFS= read -r -d '' path; do MSIX_FILES+=("$path"); done < "$MSIX_LIST"
-            MSIX_PATTERNS=()
-            # Already CR-free: tr normalised jq's output above.
-            while IFS= read -r pattern; do MSIX_PATTERNS+=("$pattern"); done < "$MSIX_PATTERN_LIST"
-            if [ "${#MSIX_PATTERNS[@]}" -eq 0 ]; then
-              echo "::error::MSIX publication is enabled but target $TRIPLE has no artifacts.msix declaration"
-              exit 1
-            fi
-            PACKAGES=()
-            MSIX_CLAIMED_BY=()
-            for declared in "${MSIX_PATTERNS[@]}"; do
-              pattern="${declared//\{version\}/$VERSION}"
-              matches=()
-              for ((i = 0; i < ${#MSIX_FILES[@]}; i++)); do
-                path="${MSIX_FILES[i]}"
-                base="${path##*/}"
-                if pattern_matches "$base" "$pattern"; then
-                  matches+=("$i")
-                fi
-              done
-              if [ "${#matches[@]}" -eq 0 ]; then
-                echo "::error::MSIX artifact pattern $pattern matched no package"
-                exit 1
-              fi
-              if [ "${#matches[@]}" -gt 1 ]; then
-                matched_paths=()
-                for i in "${matches[@]}"; do matched_paths+=("${MSIX_FILES[i]}"); done
-                echo "::error::MSIX artifact pattern $pattern matched more than one package: ${matched_paths[*]}"
-                exit 1
-              fi
-              i="${matches[0]}"
-              if [ -n "${MSIX_CLAIMED_BY[i]+set}" ]; then
-                echo "::error::MSIX artifact patterns ${MSIX_CLAIMED_BY[i]} and $pattern both matched ${MSIX_FILES[i]}"
-                exit 1
-              fi
-              MSIX_CLAIMED_BY[i]="$pattern"
-              PACKAGES+=("${MSIX_FILES[i]}")
-            done
-            for path in "${MSIX_FILES[@]}"; do
-              base="${path##*/}"
-              declared_match=false
-              for declared in "${MSIX_PATTERNS[@]}"; do
-                pattern="${declared//\{version\}/$VERSION}"
-                if pattern_matches "$base" "$pattern"; then
-                  declared_match=true
-                fi
-              done
-              if [ "$declared_match" = false ]; then
-                echo "::error::Undeclared MSIX package $path"
-                exit 1
-              fi
-            done
-          fi
-          printf 'uploading %s\n' "${INSTALLERS[@]}"
-          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
-          if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
-            printf 'uploading %s\n' "${PACKAGES[@]}"
-            gh release upload "$TAG_NAME" --clobber "${PACKAGES[@]}"
-          fi
-
+  # The only job that writes release assets. It installs nothing: the resolver
+  # runs under Node's own type stripping, and the rest is gh, jq and coreutils,
+  # because this is the job holding a token that can replace what users download.
   publish-release:
     name: Publish Release
-    needs: [matrix, build-agent, build-hub, build-desktop]
+    needs: [matrix, create-release, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1034,47 +312,133 @@ jobs:
         with:
           ref: ${{ needs.matrix.outputs.sha }}
           persist-credentials: false
-      - name: Generate and verify SHA256SUMS for agent assets
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+      # Each artifact lands in its own directory named after it. The web
+      # artifacts are build inputs and never match this pattern.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "{agent,hub,desktop,msix}-*"
+          path: _release/downloads/
+      # The resolution build.yml already ran, repeated on the files this job is
+      # about to publish rather than trusted from another job's output.
+      - name: Resolve release assets
+        env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+          MSIX: ${{ needs.matrix.outputs.msix }}
+        run: >-
+          node scripts/release-assets.ts
+          --matrix .github/build-matrix.json
+          --version "$VERSION"
+          --msix "$MSIX"
+          --downloads _release/downloads
+          --extract-to _release/extracted
+          --out _release/manifest.json
+      - name: Attach assets to the draft
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ needs.matrix.outputs.version }}
         run: |
-          VERSION="${TAG_NAME#v}"
-          rm -rf _sums && mkdir -p _sums && cd _sums
-          # Build the EXACT expected asset names from the matrix (windows → .exe), so
-          # a stale near-match (e.g. ...-${VERSION}.bad) can never satisfy completeness
-          # while the real asset is missing.
-          # jq runs in the foreground redirected to a file, for the same reason the
-          # installer collectors do: `mapfile < <(jq …)` reports mapfile's status,
-          # so a jq that could not read or parse the matrix left EXPECTED empty
-          # and the step green. MISSING then stays 0 and `sha256sum` with an empty
-          # array hashes standard input, publishing a manifest whose one entry is
-          # `-`. An empty expected set is refused outright: this repository always
-          # enables at least one agent target.
-          jq -r --arg v "$VERSION" '.targets[] | select(.enabled and .agent)
-            | "lasterm-agent-\(.triple)-\($v)\(if .os == "windows" then ".exe" else "" end)"' \
-            ../.github/build-matrix.json > expected.txt
-          EXPECTED=()
-          while IFS= read -r name; do EXPECTED+=("$name"); done < expected.txt
-          if [ "${#EXPECTED[@]}" -eq 0 ]; then
-            echo "::error::No enabled agent target found in .github/build-matrix.json"
-            exit 1
-          fi
-          # Download each exact asset; fail (never publish a partial-looking manifest)
-          # if any enabled agent triple's exact asset is missing.
-          MISSING=0
-          for name in "${EXPECTED[@]}"; do
-            if ! gh release download "$TAG_NAME" --pattern "$name" --dir . 2>/dev/null || [ ! -f "$name" ]; then
-              echo "::error::Missing agent asset $name"
-              MISSING=1
-            fi
-          done
-          [ "$MISSING" -eq 0 ] || exit 1
-          # Checksum ONLY the exact expected files.
-          sha256sum "${EXPECTED[@]}" > "SHA256SUMS-${VERSION}.txt"
-          cat "SHA256SUMS-${VERSION}.txt"
-          gh release upload "$TAG_NAME" --clobber "SHA256SUMS-${VERSION}.txt"
-      - name: Remove intermediate assets and publish
+          export LC_ALL=C
+          fail() { echo "::error::$*"; exit 1; }
+
+          # The draft is identified again rather than trusted from
+          # create-release: the whole build ran in between, and anyone with
+          # write access could have published it meanwhile. A release this job
+          # does not find as a draft is not written to.
+          gh api --paginate "repos/$REPO/releases?per_page=100" | jq -s 'add // []' > _release/releases.json
+          jq --arg tag "$TAG_NAME" '[.[] | select(.tag_name == $tag) | {id, draft}]' \
+            _release/releases.json > _release/matches.json
+          COUNT="$(jq 'length' _release/matches.json)"
+          [ "$COUNT" -eq 1 ] || fail "expected exactly one release for $TAG_NAME, found $COUNT"
+          [ "$(jq -r '.[0].draft' _release/matches.json)" = "true" ] \
+            || fail "release $TAG_NAME was published while this run built it; refusing to write to it"
+          RELEASE_ID="$(jq -r '.[0].id' _release/matches.json)"
+          echo "writing to draft release id=$RELEASE_ID"
+
+          # Listed through the API, paginated: `gh release view --json assets`
+          # hides records a failed upload left in the `starter` state, and
+          # those still hold their name.
+          list_assets() {
+            gh api --paginate "repos/$REPO/releases/$RELEASE_ID/assets?per_page=100" \
+              | jq -s 'add // []' > _release/assets.json
+          }
+          # The draft holds exactly the names in $1, every one uploaded.
+          check_set() {
+            sort "$1" > _release/expected.sorted
+            list_assets
+            jq -r '.[].name' _release/assets.json | sort > _release/actual.sorted
+            diff -u _release/expected.sorted _release/actual.sorted \
+              || fail "the draft's assets differ from what this run attached (diff above)"
+            NOT_UPLOADED="$(jq -r '[.[] | select(.state != "uploaded") | "\(.name) (\(.state))"] | join(", ")' _release/assets.json)"
+            [ -z "$NOT_UPLOADED" ] || fail "assets not in the uploaded state: $NOT_UPLOADED"
+          }
+
+          # Start from nothing. Whatever the draft carries came from an earlier
+          # run: this is the only job that attaches assets, and it has not yet.
+          list_assets
+          jq -r '.[] | "\(.id)\t\(.name)\t\(.state)"' _release/assets.json > _release/stale.tsv
+          while IFS=$'\t' read -r id name state; do
+            echo "deleting $name ($state), left by an earlier run"
+            gh api -X DELETE "repos/$REPO/releases/assets/$id" > /dev/null < /dev/null
+          done < _release/stale.tsv
+          : > _release/none.txt
+          check_set _release/none.txt
+
+          # One file at a time: upload, then wait until GitHub reports it
+          # complete with the digest of the bytes hashed here. An upload can
+          # return while the asset is still `starter`, and a digest that is
+          # absent or late is a failure, not a pass.
+          mkdir -p _release/publish
+          attach() {
+            local source="$1" name="$2" sha state="" digest=""
+            sha="$(sha256sum "$source" | cut -d' ' -f1)"
+            # gh names an asset after its file, so stage it under the public name.
+            # No --clobber: after the reset, an existing name is an error.
+            cp "$source" "_release/publish/$name"
+            gh release upload "$TAG_NAME" "_release/publish/$name"
+            for _ in $(seq 1 30); do
+              list_assets
+              state="$(jq -r --arg n "$name" '[.[] | select(.name == $n)][0].state // ""' _release/assets.json)"
+              digest="$(jq -r --arg n "$name" '[.[] | select(.name == $n)][0].digest // ""' _release/assets.json)"
+              if [ "$state" = "uploaded" ] && [ -n "$digest" ]; then
+                [ "$digest" = "sha256:$sha" ] \
+                  || fail "$name was stored with $digest, but this job hashed sha256:$sha"
+                echo "attached $name sha256:$sha"
+                return 0
+              fi
+              sleep 2
+            done
+            fail "$name was not reported uploaded with a digest within 60 s (state '$state', digest '$digest')"
+          }
+
+          # stdin redirected: gh inside attach must not consume the list.
+          jq -r '.[] | "\(.path)\t\(.asset)"' _release/manifest.json > _release/deliverables.tsv
+          while IFS=$'\t' read -r path name; do
+            attach "$path" "$name" < /dev/null
+          done < _release/deliverables.tsv
+          jq -r '.[].asset' _release/manifest.json > _release/expected.txt
+          check_set _release/expected.txt
+
+          # SHA256SUMS keeps its shape: the agent assets only, named as
+          # published, in matrix order. The hub verifies the agent it fetches
+          # against this file.
+          jq -r '.[] | select(.kind == "agent") | .asset' _release/manifest.json > _release/agents.txt
+          AGENTS=()
+          while IFS= read -r name; do AGENTS+=("$name"); done < _release/agents.txt
+          [ "${#AGENTS[@]}" -gt 0 ] || fail "no agent asset to checksum"
+          SUMS="SHA256SUMS-$VERSION.txt"
+          (cd _release/publish && sha256sum "${AGENTS[@]}") > "_release/$SUMS"
+          cat "_release/$SUMS"
+          attach "_release/$SUMS" "$SUMS" < /dev/null
+          echo "$SUMS" >> _release/expected.txt
+          check_set _release/expected.txt
+      - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
@@ -1110,31 +474,6 @@ jobs:
               exit 1
             fi
           fi
-          # These two are build inputs, not release assets. `|| true` turned a
-          # throttled or unauthorised delete into "published it anyway", so the
-          # only tolerated outcome is the asset already being gone.
-          # Membership is decided by jq over the retained JSON, not by a
-          # `printf | grep -q` pipeline: under `pipefail`, grep exits on its match,
-          # printf takes SIGPIPE, and the pipeline reports failure — so a present
-          # asset read as absent and was published. jq's exits are also
-          # distinguishable, where grep's are not: 0 present, 1 absent, anything
-          # else a parse or runtime failure that must not be read as absence.
-          ATTACHED_JSON="$(gh release view "$TAG_NAME" --json assets)"
-          for asset in web-dist.tar.gz web-embedded.tar.gz; do
-            set +e
-            printf '%s' "$ATTACHED_JSON" | jq -e --arg a "$asset" 'any(.assets[]; .name == $a)' > /dev/null
-            probe=$?
-            set -e
-            if [ "$probe" -gt 1 ]; then
-              echo "::error::Could not determine whether $asset is attached to $TAG_NAME (jq exit $probe)"
-              exit 1
-            fi
-            if [ "$probe" -eq 0 ]; then
-              gh release delete-asset "$TAG_NAME" "$asset" --yes
-            else
-              echo "intermediate asset $asset is already absent"
-            fi
-          done
           gh release edit "$TAG_NAME" --draft=false
           IS_DRAFT=$(gh release view "$TAG_NAME" --json isDraft -q '.isDraft')
           echo "Release $TAG_NAME draft=$IS_DRAFT"

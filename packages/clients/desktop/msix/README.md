@@ -6,9 +6,9 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 
 ## Current Flow
 
-- `.github/workflows/build.yml` builds the Windows desktop target, runs `pack-msix.ps1 -SkipBuild`, and uploads `desktop-msix-x86_64-pc-windows-msvc`.
-- A manual `ci.yml` dispatch produces the unsigned `.msix` artifact through the reusable build workflow.
-- `.github/workflows/release.yml` builds the same unsigned `.msix` during the Windows desktop release job and uploads it to the GitHub Release with the existing desktop installers.
+- `.github/workflows/build.yml` builds the Windows desktop target and runs `pack-msix.ps1 -SkipBuild`. When MSIX publication is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`.
+- A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow, and resolves it against `.github/build-matrix.json` as a release would.
+- `.github/workflows/release.yml` calls the same build workflow; its `publish-release` job uploads the `.msix` to the GitHub Release with the desktop installers.
 - There is no signing step and no Store submission step in CI.
 
 ## Package Inputs
@@ -69,7 +69,7 @@ Validate these points on the next Windows CI dispatch or release run:
 3. The staged desktop executable, hub sidecar, and agent sidecar all pass the x64 PE check.
 4. The sidecar version gate passes for `lasterm-hub.exe` and `lasterm-agent.exe`.
 5. `MakeAppx.exe pack /d ... /p ... /o` writes `Lasterm_<version>.0_x64.msix`.
-6. Manual `ci.yml` dispatch exposes the `desktop-msix-x86_64-pc-windows-msvc` artifact.
+6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX publication is enabled.
 7. Release runs upload the `.msix` asset alongside the existing desktop installers.
 
 ## Later: Manual Partner Center Submission

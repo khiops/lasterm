@@ -2,6 +2,23 @@ name: Build
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build. Empty builds the triggering commit, as a pull request or a dispatch does."
+        type: string
+        default: ""
+      version:
+        description: "Release version without the leading v. Empty keeps the version the manifests carry."
+        type: string
+        default: ""
+      release:
+        description: "Build every producer and keep its artifacts for release.yml's publish-release, whatever event reached the caller."
+        type: boolean
+        default: false
+      msix:
+        description: "MSIX publication as frozen by release.yml's matrix job. Read only when release is true."
+        type: boolean
+        default: false
 
 # A called workflow may only preserve or reduce the caller's GITHUB_TOKEN
 # permissions, so this block constrains every job here whatever the caller holds.
@@ -18,11 +35,143 @@ jobs:
       agent: ${{ steps.filter.outputs.agent }}
       hub: ${{ steps.filter.outputs.hub }}
       desktop: ${{ steps.filter.outputs.desktop }}
-      is_release: ${{ startsWith(github.ref, 'refs/tags/') }}
+      artifacts: ${{ steps.mode.outputs.artifacts }}
+      msix: ${{ steps.mode.outputs.msix }}
+      version: ${{ steps.mode.outputs.version }}
+      retention: ${{ steps.mode.outputs.retention }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: filter
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - id: mode
+        env:
+          RELEASE: ${{ inputs.release }}
+          # Producers keep their artifacts on a release, a tag, or a manual
+          # dispatch (pre-merge cross-platform validation). A called workflow sees
+          # its caller's event, and release-please calls release.yml from a push
+          # to main, so a release says so through its input rather than its event.
+          PRODUCE: ${{ inputs.release || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+          FROZEN_MSIX: ${{ inputs.msix }}
+          VARS_MSIX: >-
+            ${{
+              vars.MSIX_IDENTITY_NAME != '' &&
+              vars.MSIX_PUBLISHER != '' &&
+              vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+            }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
+          # A release freezes MSIX publication once, in release.yml's matrix job:
+          # the repository variables could change while this run is in flight,
+          # and the job that packages and the job that publishes must agree. A
+          # dispatch reads them here, once, for the same reason.
+          if [ "$RELEASE" = "true" ]; then
+            MSIX="$FROZEN_MSIX"
+            # GitHub keeps a run re-runnable for 30 days, and a re-run of
+            # publish-release alone consumes the artifacts of the original run.
+            RETENTION=30
+          else
+            MSIX="$VARS_MSIX"
+            RETENTION=1
+          fi
+          VERSION="${VERSION_INPUT:-$(jq -r '.version' package.json)}"
+          case "$VERSION" in
+            "" | null | v*) echo "::error::version must be the bare release version, got '$VERSION'"; exit 1 ;;
+          esac
+          {
+            echo "artifacts=$PRODUCE"
+            echo "msix=$MSIX"
+            echo "version=$VERSION"
+            echo "retention=$RETENTION"
+          } >> "$GITHUB_OUTPUT"
+          echo "artifacts=$PRODUCE msix=$MSIX version=$VERSION retention=$RETENTION"
+      - id: filter
+        env:
+          MSIX_RELEASE_ENABLED: ${{ steps.mode.outputs.msix }}
+        run: |
+          # Enabled producers must declare exactly what they ship before the
+          # matrix reaches a build job. Agent names are computed separately;
+          # MSIX is optional because repository variables gate its publication.
+          # This runs on every pull request too, so a change to the matrix is
+          # checked where it is proposed rather than when it is released.
+          INVALID="$(jq -r --argjson msix_release_enabled "$MSIX_RELEASE_ENABLED" '
+            # Declarations are carried to their consumers through delimiters a
+            # value can itself contain: bundle kinds reach Tauri joined by commas,
+            # so "nsis,msi" would arrive as two kinds, and a pattern holding a
+            # newline or a CR could never name a real file. Reject both classes
+            # here rather than teach every consumer a lossless encoding.
+            #
+            # A NUL escape is one of the control characters this rejects: jq
+            # keeps it through parsing, so the predicate sees it and refuses
+            # the row.
+            def strings(forbidden):
+              if type == "array" then
+                length > 0
+                and all(.[];
+                  type == "string" and length > 0 and (test(forbidden) | not))
+              else
+                false
+              end;
+            def patterns: strings("[[:cntrl:]]");
+            def bundle_kinds: strings("[[:cntrl:],]");
+            # The triple is the identity every collector looks a row up by, and
+            # asset names are built from it. Two rows sharing one would have
+            # their declarations concatenated at collection time, so a valid
+            # enabled row could be failed by a stale duplicate. Checked over
+            # every row, disabled included, so that enabling one later cannot
+            # turn a latent collision into a failed release.
+            ( [.targets[].triple]
+              | (map(select(type != "string" or length == 0)) | length > 0) as $bad
+              | (length != (unique | length)) as $dup
+              | if $bad then "targets: a triple is missing or not a string"
+                elif $dup then "targets: two rows share one triple"
+                else empty end
+            ),
+            (.targets[] | select(.enabled)
+            | if (.artifacts | type) != "object" then
+                # Checked before the lookups below. Written as .artifacts.hub?
+                # instead, the optional operator swallows the type error that a
+                # scalar or an array raises, and a malformed row becomes an
+                # empty stream this step reads as valid.
+                "\(.triple) artifacts"
+              elif .hub and ((.artifacts.hub | patterns) | not) then
+                "\(.triple) artifacts.hub"
+              elif .desktop and ((.artifacts.desktop | patterns) | not) then
+                "\(.triple) artifacts.desktop"
+              elif .desktop and ((.artifacts.bundles | bundle_kinds) | not) then
+                "\(.triple) artifacts.bundles"
+              elif (($msix_release_enabled and .triple == "x86_64-pc-windows-msvc")
+                    or (.artifacts | has("msix")))
+                   and ((.artifacts.msix | patterns) | not) then
+                "\(.triple) artifacts.msix"
+              else
+                empty
+              end)
+          ' .github/build-matrix.json)"
+          if [ -n "$INVALID" ]; then
+            while IFS= read -r missing; do
+              echo "::error::Enabled target requires a non-empty declaration: $missing"
+            done <<< "$INVALID"
+            exit 1
+          fi
+          DUPLICATE_PATTERNS="$(jq -r '
+            .targets[] | .triple as $triple | .artifacts as $artifacts
+            | select(($artifacts | type) == "object")
+            | ["hub", "desktop", "bundles", "msix"][] as $kind
+            | ($artifacts[$kind] // empty) as $patterns
+            | if ($patterns | type) == "array" then
+                [$patterns[] | select(type == "string")] | group_by(.)[] | select(length > 1)
+                | "\($triple) artifacts.\($kind) duplicate declaration: \(.[0])"
+              else
+                empty
+              end
+          ' .github/build-matrix.json)"
+          if [ -n "$DUPLICATE_PATTERNS" ]; then
+            while IFS= read -r duplicate; do
+              echo "::error::Target has duplicate artifact declaration: $duplicate"
+            done <<< "$DUPLICATE_PATTERNS"
+            exit 1
+          fi
           jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
             .github/build-matrix.json > /tmp/agent.json
           jq -c '{include:[.targets[]|select(.enabled and .hub)]}' \
@@ -37,9 +186,13 @@ jobs:
 
   build-web:
     name: Build Web UI
+    needs: [matrix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -48,29 +201,43 @@ jobs:
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
-      - run: ./scripts/build-web.sh
-        env:
-          LASTERM_BUILD_HASH: ${{ github.sha }}
-      # Artifacts on tags (release) or manual dispatch (downstream hub/desktop jobs
-      # need them) — plain PR pushes just verify build + tests
+      # Build hashes come from the checkout, never from the event SHA, which is
+      # wrong for a release built from a frozen commit (docs/decisions.md).
+      - name: Build web
+        run: |
+          LASTERM_BUILD_HASH="$(git rev-parse HEAD)"
+          export LASTERM_BUILD_HASH
+          ./scripts/build-web.sh
+      # Artifacts only when the hub and desktop jobs will consume them — plain
+      # pull-request pushes just verify build + tests. Build inputs, never
+      # published: publish-release downloads by producer name only.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: needs.matrix.outputs.artifacts == 'true'
         with:
           name: web-dist-raw
           path: packages/clients/web/dist/
-          retention-days: 1
+          if-no-files-found: error
+          retention-days: ${{ needs.matrix.outputs.retention }}
+          overwrite: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: needs.matrix.outputs.artifacts == 'true'
         with:
           name: web-dist-embedded
           path: packages/hub/static/
-          retention-days: 1
+          if-no-files-found: error
+          retention-days: ${{ needs.matrix.outputs.retention }}
+          overwrite: true
 
+  # A release was tested on main before release-please tagged it, and this suite
+  # still has load-dependent flakes (#101), so a release does not re-run it.
   lint:
     name: Lint
+    if: ${{ !inputs.release }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -82,9 +249,12 @@ jobs:
 
   test:
     name: Test (TypeScript)
+    if: ${{ !inputs.release }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -108,6 +278,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
@@ -143,17 +316,32 @@ jobs:
         run: .\scripts\build-agent.ps1
         env:
           LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
+      # Each artifact is one tar. upload-artifact's zip transport resets file
+      # modes, and a tar keeps the executable bit a Linux sidecar needs. The
+      # executable is named, never globbed, and every path stays relative: the
+      # Windows runner's GNU tar reads a leading `D:` as a remote host.
+      - name: Pack agent
+        if: needs.matrix.outputs.artifacts == 'true'
+        shell: bash
+        env:
+          ARTIFACT: agent-${{ matrix.triple }}
+          EXE: ${{ matrix.os == 'windows' && 'lasterm-agent.exe' || 'lasterm-agent' }}
+        run: |
+          mkdir -p _release
+          tar -cf "_release/$ARTIFACT.tar" -C dist/sea "$EXE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: needs.matrix.outputs.artifacts == 'true'
         with:
           name: agent-${{ matrix.triple }}
-          path: dist/sea/lasterm-agent*
-          retention-days: 1
+          path: _release/agent-${{ matrix.triple }}.tar
+          if-no-files-found: error
+          retention-days: ${{ needs.matrix.outputs.retention }}
+          compression-level: 0
+          overwrite: true
 
   build-hub:
     name: Build Hub (${{ matrix.triple }})
-    # Tags (release) or manual dispatch (pre-merge cross-platform validation)
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: needs.matrix.outputs.artifacts == 'true'
     needs: [matrix, build-web]
     strategy:
       fail-fast: false
@@ -161,6 +349,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -175,19 +366,22 @@ jobs:
           path: packages/hub/static/
       - name: Build (bash)
         if: matrix.shell_sh
-        run: ./scripts/build-hub.sh
         env:
           LASTERM_SKIP_WEB: "true"
           LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-          LASTERM_BUILD_HASH: ${{ github.sha }}
+        run: |
+          LASTERM_BUILD_HASH="$(git rev-parse HEAD)"
+          export LASTERM_BUILD_HASH
+          ./scripts/build-hub.sh
       - name: Build (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
-        run: .\scripts\build-hub.ps1
         env:
           LASTERM_SKIP_WEB: "true"
           LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
-          LASTERM_BUILD_HASH: ${{ github.sha }}
+        run: |
+          $env:LASTERM_BUILD_HASH = (git rev-parse HEAD)
+          .\scripts\build-hub.ps1
       # A binary that has never been run is not known to work. The bundle that
       # loads the SQLite addon at startup broke once and reached a tagged release,
       # because every job until packaging only ever produced the executable.
@@ -204,10 +398,9 @@ jobs:
       #
       # Version-SHAPED, not semver-valid, and not checked against anything here.
       # The question is whether the bundle reached its entry point and reported;
-      # digits-and-dots answers it. This workflow also runs from a manual dispatch
-      # with no tag in sight, so it cannot claim the value is the *right* version —
-      # only `release.yml` compares the manifest to a tag, and what the artefacts
-      # actually contain is #155.
+      # digits-and-dots answers it. That the version is the right one is
+      # release.yml's check against the tag, and what the artefacts actually
+      # contain is #155.
       #
       # Gated on the shell alone, so every hub row runs one of the two. Every hub
       # target in .github/build-matrix.json is native to its runner, and a condition
@@ -230,16 +423,28 @@ jobs:
           # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
           # so [{"hub_version":"x"}] would pass here and fail the check above.
           node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
+      # The executable only. dist/sea also holds lasterm-hub.cjs, the SEA input,
+      # which is not a deliverable. Same tar rules as the agent above.
+      - name: Pack hub
+        shell: bash
+        env:
+          ARTIFACT: hub-${{ matrix.triple }}
+          EXE: ${{ matrix.os == 'windows' && 'lasterm-hub.exe' || 'lasterm-hub' }}
+        run: |
+          mkdir -p _release
+          tar -cf "_release/$ARTIFACT.tar" -C dist/sea "$EXE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: hub-${{ matrix.triple }}
-          path: dist/sea/lasterm-hub*
-          retention-days: 1
+          path: _release/hub-${{ matrix.triple }}.tar
+          if-no-files-found: error
+          retention-days: ${{ needs.matrix.outputs.retention }}
+          compression-level: 0
+          overwrite: true
 
   build-desktop:
     name: Build Desktop (${{ matrix.triple }})
-    # Tags (release) or manual dispatch (pre-merge cross-platform validation)
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: needs.matrix.outputs.artifacts == 'true'
     needs: [matrix, build-agent, build-hub, build-web]
     strategy:
       fail-fast: false
@@ -247,6 +452,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -262,26 +470,46 @@ jobs:
           workspaces: packages/clients/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
+      - name: Align desktop versions with the release
+        if: inputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          CONF="packages/clients/desktop/src-tauri/tauri.conf.json"
+          CARGO="packages/clients/desktop/src-tauri/Cargo.toml"
+          jq --arg v "$VERSION" '.version = $v' "$CONF" > "${CONF}.tmp" && mv "${CONF}.tmp" "$CONF"
+          sed -i "0,/^version = .*/s//version = \"$VERSION\"/" "$CARGO"
+          echo "Set desktop versions to $VERSION"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: agent-${{ matrix.triple }}
-          path: dist/sea/
+          path: _release/in/
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: hub-${{ matrix.triple }}
-          path: dist/sea/
+          path: _release/in/
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: web-dist-raw
           path: packages/clients/web/dist/
+      - name: Unpack sidecars
+        shell: bash
+        env:
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          mkdir -p dist/sea
+          tar -xf "_release/in/agent-$TRIPLE.tar" -C dist/sea
+          tar -xf "_release/in/hub-$TRIPLE.tar" -C dist/sea
       - name: Place sidecars + build (bash)
         if: matrix.shell_sh
+        env:
+          BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
         run: |
           TRIPLE="${{ matrix.triple }}"
           cp dist/sea/lasterm-agent "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
           cp dist/sea/lasterm-hub "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
-          pnpm -F @lasterm/shared build
-          pnpm -F @lasterm/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
+          pnpm -F @lasterm/desktop tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}'
       - name: Place sidecars (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
@@ -296,19 +524,28 @@ jobs:
         shell: pwsh
         working-directory: packages/clients/desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings
+      # The frozen matrix says what this target ships; Tauri's config keeps its
+      # broad defaults and the build is narrowed to the declared bundle kinds.
       - name: Build desktop (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
+        env:
+          BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
         run: |
-          pnpm -F @lasterm/shared build
-          pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+          pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
       # Uses the real Partner Center identity when the repository variables are
       # set, so the packaged identity is exercised before a tagged release;
-      # falls back to the manifest placeholders otherwise.
+      # falls back to the manifest placeholders otherwise — except on a release,
+      # where MSIX publication was frozen on and a placeholder package would ship.
       - name: Package unsigned MSIX
-        if: matrix.triple == 'x86_64-pc-windows-msvc'
+        if: >-
+          ${{
+            matrix.triple == 'x86_64-pc-windows-msvc' &&
+            (!inputs.release || needs.matrix.outputs.msix == 'true')
+          }}
         shell: pwsh
         env:
+          RELEASE: ${{ inputs.release }}
           MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
           MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
@@ -319,20 +556,111 @@ jobs:
             $packArgs.IdentityName = $env:MSIX_IDENTITY_NAME
             $packArgs.Publisher = $env:MSIX_PUBLISHER
             $packArgs.PublisherDisplayName = $env:MSIX_PUBLISHER_DISPLAY_NAME
+          } elseif ($env:RELEASE -eq 'true') {
+            throw "MSIX publication was frozen on for this release, but its repository variables are now unset"
           }
           .\packages\clients\desktop\msix\pack-msix.ps1 @packArgs
+      # #304: the deliverables are the files the bundler writes directly into the
+      # directory of each bundle kind this target declares. Walking the whole
+      # bundle tree by suffix also reached files inside `.app` and `.AppDir`
+      # trees, and a kind no target declares never enters the set now.
+      - name: Pack desktop installers
+        shell: bash
+        env:
+          ARTIFACT: desktop-${{ matrix.triple }}
+          BUNDLE_KINDS: ${{ join(matrix.artifacts.bundles, ' ') }}
+        run: |
+          BUNDLE_ROOT=packages/clients/desktop/src-tauri/target/release/bundle
+          STAGING="_release/$ARTIFACT"
+          mkdir -p "$STAGING"
+          shopt -s nullglob
+          for kind in $BUNDLE_KINDS; do
+            # Tauri writes the `app` kind under bundle/macos and every other
+            # kind under a directory of its own name.
+            case "$kind" in app) dir=macos ;; *) dir="$kind" ;; esac
+            # A glob only yields names that exist, so MSYS cannot fabricate one
+            # here. Directories, such as a .app bundle, and links are not
+            # deliverables; release-assets.ts reports a declaration left unmatched.
+            for path in "$BUNDLE_ROOT/$dir"/*; do
+              if [ -f "$path" ] && [ ! -L "$path" ]; then
+                if [ -e "$STAGING/${path##*/}" ]; then
+                  echo "::error::Two bundle kinds wrote ${path##*/}"
+                  exit 1
+                fi
+                cp "$path" "$STAGING/"
+              fi
+            done
+          done
+          ls -la "$STAGING"
+          tar -cf "_release/$ARTIFACT.tar" -C "$STAGING" .
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-${{ matrix.triple }}
-          path: |
-            packages/clients/desktop/src-tauri/target/release/bundle/**/*.msi
-            packages/clients/desktop/src-tauri/target/release/bundle/nsis/*.exe
-            packages/clients/desktop/src-tauri/target/release/bundle/**/*.dmg
-            packages/clients/desktop/src-tauri/target/release/bundle/**/*.deb
-          retention-days: 1
+          path: _release/desktop-${{ matrix.triple }}.tar
+          if-no-files-found: error
+          retention-days: ${{ needs.matrix.outputs.retention }}
+          compression-level: 0
+          overwrite: true
+      # Only when publication is on: release-assets.ts expects this artifact
+      # exactly when the frozen flag says so. MSIX_TRIPLE in that script carries
+      # the same triple.
+      - name: Pack MSIX
+        if: needs.matrix.outputs.msix == 'true' && matrix.triple == 'x86_64-pc-windows-msvc'
+        shell: bash
+        env:
+          ARTIFACT: msix-${{ matrix.triple }}
+        run: |
+          STAGING="_release/$ARTIFACT"
+          mkdir -p "$STAGING"
+          shopt -s nullglob
+          # pack-msix.ps1 writes its package directly into msix/out.
+          for path in packages/clients/desktop/msix/out/*.msix; do
+            if [ -f "$path" ] && [ ! -L "$path" ]; then cp "$path" "$STAGING/"; fi
+          done
+          ls -la "$STAGING"
+          tar -cf "_release/$ARTIFACT.tar" -C "$STAGING" .
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: matrix.triple == 'x86_64-pc-windows-msvc'
+        if: needs.matrix.outputs.msix == 'true' && matrix.triple == 'x86_64-pc-windows-msvc'
         with:
-          name: desktop-msix-${{ matrix.triple }}
-          path: packages/clients/desktop/msix/out/*.msix
-          retention-days: 1
+          name: msix-${{ matrix.triple }}
+          path: _release/msix-${{ matrix.triple }}.tar
+          if-no-files-found: error
+          retention-days: ${{ needs.matrix.outputs.retention }}
+          compression-level: 0
+          overwrite: true
+
+  # The resolution release.yml's publish-release performs, run here so that a
+  # manual dispatch exercises it on any branch before anything is released
+  # (#272). Linux only: no Windows shell decides what ships.
+  release-assets:
+    name: Resolve Release Assets
+    if: needs.matrix.outputs.artifacts == 'true'
+    needs: [matrix, build-agent, build-hub, build-desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+      # Each artifact lands in its own directory named after it. The web
+      # artifacts are build inputs and never match this pattern.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "{agent,hub,desktop,msix}-*"
+          path: _release/downloads/
+      - name: Resolve release assets
+        env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+          MSIX: ${{ needs.matrix.outputs.msix }}
+        run: >-
+          node scripts/release-assets.ts
+          --matrix .github/build-matrix.json
+          --version "$VERSION"
+          --msix "$MSIX"
+          --downloads _release/downloads
+          --extract-to _release/extracted
+          --out _release/manifest.json

@@ -16,6 +16,7 @@
 		"@msgpack/msgpack": "catalog:",
 		"@tauri-apps/api": "catalog:",
 		"@tauri-apps/plugin-os": "catalog:",
+		"@vue/devtools-api": "catalog:",
 		"@xterm/addon-fit": "catalog:",
 		"@xterm/addon-search": "catalog:",
 		"@xterm/addon-unicode11": "catalog:",

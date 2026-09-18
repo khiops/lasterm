@@ -172,16 +172,16 @@ jobs:
             done <<< "$DUPLICATE_PATTERNS"
             exit 1
           fi
-          jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
-            .github/build-matrix.json > /tmp/agent.json
-          jq -c '{include:[.targets[]|select(.enabled and .hub)]}' \
-            .github/build-matrix.json > /tmp/hub.json
-          jq -c '{include:[.targets[]|select(.enabled and .desktop)]}' \
-            .github/build-matrix.json > /tmp/desktop.json
+          # Standalone assignments, so `set -e` sees jq's status (#283). A
+          # command substitution inside `echo` would fail silently and emit an
+          # empty output that only a later fromJson trips over.
+          AGENT="$(jq -c '{include:[.targets[]|select(.enabled and .agent)]}' .github/build-matrix.json)"
+          HUB="$(jq -c '{include:[.targets[]|select(.enabled and .hub)]}' .github/build-matrix.json)"
+          DESKTOP="$(jq -c '{include:[.targets[]|select(.enabled and .desktop)]}' .github/build-matrix.json)"
           {
-            echo "agent=$(cat /tmp/agent.json)"
-            echo "hub=$(cat /tmp/hub.json)"
-            echo "desktop=$(cat /tmp/desktop.json)"
+            printf 'agent=%s\n' "$AGENT"
+            printf 'hub=%s\n' "$HUB"
+            printf 'desktop=%s\n' "$DESKTOP"
           } >> "$GITHUB_OUTPUT"
 
   build-web:

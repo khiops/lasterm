@@ -440,7 +440,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "vt100",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -459,7 +459,7 @@ name = "lasterm-process-lock"
 version = "0.1.0"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -467,7 +467,7 @@ name = "lasterm-protected-fs"
 version = "0.1.0"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -484,7 +484,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "time",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "x509-parser",
 ]
 

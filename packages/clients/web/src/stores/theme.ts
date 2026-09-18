@@ -49,6 +49,9 @@ export const useThemeStore = defineStore("theme", () => {
 				result[key] = value;
 			}
 		}
+		// xterm.js 6 lays the overview ruler over its scrollbar and outlines it in
+		// the foreground colour, which reads as a permanent line down the edge.
+		result.overviewRulerBorder ??= "#00000000";
 		// Apply terminal opacity to background so xterm.js renders with alpha
 		const alpha = appearance.value.opacity.terminal / 100;
 		if (alpha < 1 && result.background) {

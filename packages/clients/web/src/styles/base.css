@@ -146,18 +146,26 @@ body {
 	border-radius: 3px;
 }
 
-/* xterm.js injects its own styles on .xterm-viewport — override with higher specificity */
-.xterm .xterm-viewport::-webkit-scrollbar {
-	width: var(--nt-scrollbar-width);
-}
-
-.xterm .xterm-viewport::-webkit-scrollbar-track {
+/* xterm.js 6 draws its own scrollbar: useTerminal sizes it through the
+   overviewRuler option, and xterm colours the slider from a style element it
+   injects after this sheet. The extra .vertical class outranks that element. */
+.xterm .xterm-scrollable-element > .scrollbar.vertical {
 	background: var(--nt-scrollbar-track);
 }
 
-.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
 	background: var(--nt-scrollbar-thumb);
 	border-radius: 3px;
+}
+
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider:hover,
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active {
+	background: var(--nt-scrollbar-thumb);
+	filter: brightness(1.3);
+}
+
+.nt-scrollbar-hidden .xterm .xterm-scrollable-element > .scrollbar {
+	display: none;
 }
 
 /* Hidden mode: fully remove scrollbar from layout (keeps overflow-y: scroll for scroll events) */

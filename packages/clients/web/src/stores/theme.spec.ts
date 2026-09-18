@@ -167,6 +167,11 @@ describe("useThemeStore", () => {
 			expect(result.cursorAccent).toBe("#ff0000");
 			expect(result.selectionForeground).toBe("#00ff00");
 		});
+
+		it("hides the overview ruler outline unless the theme colours it", () => {
+			const store = useThemeStore();
+			expect(store.toXtermTheme(catppuccinMocha.colors).overviewRulerBorder).toBe("#00000000");
+		});
 	});
 
 	describe("onTerminalThemeChange", () => {

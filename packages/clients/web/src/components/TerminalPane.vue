@@ -115,6 +115,7 @@ import { useHostsStore } from '../stores/hosts.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
+import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import SearchOverlay from './SearchOverlay.vue';
 import UnreadLinesBar from './UnreadLinesBar.vue';
@@ -768,6 +769,14 @@ watch(terminal, (term) => {
 			if (k === 'c' || k === 'r' || k === 'w') {
 				return false;
 			}
+		}
+		// Alt+arrow → word motion, as xterm 5 did before leaving it to embedders
+		const altArrow = altArrowSequence(ev, IS_MAC);
+		if (altArrow !== null) {
+			if (ev.type === 'keydown') {
+				term.input(altArrow);
+			}
+			return false;
 		}
 		// Ctrl+V / Ctrl+Shift+V → let browser handle paste from clipboard
 		if (ev.ctrlKey && ev.key === 'v') {

@@ -800,18 +800,23 @@ jobs:
           # reverse resolver each one as an undeclared installer and fail the
           # step.
           #
-          # These six suffixes are therefore the whole set this channel can
-          # publish: `-type f` and `gh release upload` both take a file, so a
-          # bundle kind whose output is a directory — Tauri's `app`, and the
-          # `.AppDir` behind an AppImage — cannot be declared in
-          # artifacts.desktop and shipped as it stands. Publishing one means
-          # archiving it first and declaring the archive, which is a different
-          # change. Within the six, the declaration decides what actually ships.
+          # The list holds one suffix per bundle kind a target actually
+          # declares, and no more. A suffix nothing declares only widens what
+          # can be mistaken for a deliverable: a resource named
+          # `offline-cache.rpm` inside a `.app` becomes a candidate the moment
+          # `.rpm` is listed here, and then either fails the resolver as
+          # undeclared or makes a broad declaration ambiguous. Add a suffix in
+          # the same change that makes a target declare its kind, never before.
+          #
+          # `-type f` and `gh release upload` both take a file, so a bundle
+          # kind whose output is a directory — Tauri's `app`, and the `.AppDir`
+          # behind an AppImage — cannot be declared in artifacts.desktop and
+          # shipped as it stands. Publishing one means archiving it first and
+          # declaring the archive, which is a different change.
           VERSION="${TAG_NAME#v}"
           BUNDLE_LIST="$RUNNER_TEMP/desktop-installers"
           find packages/clients/desktop/src-tauri/target/release/bundle -type f \
-            \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \
-               -o -name "*.rpm" -o -name "*.AppImage" \) \
+            \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
             -print0 > "$BUNDLE_LIST"
           DESKTOP_PATTERN_LIST="$RUNNER_TEMP/desktop-artifact-patterns"
           jq -r --arg triple "$TRIPLE" \

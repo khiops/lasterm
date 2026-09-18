@@ -60,7 +60,7 @@ catalog:
   "ws": "^8.21.3"
   "@types/ws": "^8.18.1"
 
-# Written by `pnpm approve-builds`; pnpm 11 reads this instead of the
+# Written by `pnpm approve-builds`; pnpm 11 and later read this instead of the
 # onlyBuiltDependencies / ignoredBuiltDependencies lists it replaced.
 # edgedriver and geckodriver come from @wdio/* and are denied on purpose: the
 # desktop e2e suite drives the packaged application through tauri-driver, so

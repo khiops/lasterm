@@ -31,10 +31,10 @@ updates:
         patterns: ["*"]
 
   # No npm entry. Dependabot's npm updater supports pnpm up to v10
-  # (dependabot-core#14794, open), and package.json pins pnpm@11.22.0 — that
-  # major is what reads the settings and `allowBuilds` policy in
+  # (dependabot-core#14794, open), and package.json pins pnpm@12.4.1 — pnpm 11
+  # and later are what read the settings and `allowBuilds` policy in
   # pnpm-workspace.yaml, so downgrading to suit the updater is not on the table.
   # A weekly npm entry here would promise updates it cannot produce, and the two
   # catalog defects it would hit are dependabot-core#14824 (every catalog entry
   # labelled dependency-type: production) and #14339 (a committed lockfile
-  # missing a catalog package). JavaScript updates stay manual until v11 lands.
+  # missing a catalog package). JavaScript updates stay manual until the updater supports the pinned major.

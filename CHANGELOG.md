@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.10.0](https://github.com/khiops/lasterm/compare/v0.9.1...v0.10.0) (2026-09-18)
+
+
+### Features
+
+* **root:** declare what each release target ships, and resolve to exactly that ([#303](https://github.com/khiops/lasterm/issues/303)) ([37e8dc4](https://github.com/khiops/lasterm/commit/37e8dc49c537850d3f250afcc6110dfbecbedd55))
+
+
+### Tests
+
+* **agent:** stop two tests failing on their environment instead of the code ([#301](https://github.com/khiops/lasterm/issues/301)) ([9f604b0](https://github.com/khiops/lasterm/commit/9f604b043cc0f335f129ba3ee8a6716c8c29161e))
+
+
+### CI/CD
+
+* allow Release Please to be run manually ([#299](https://github.com/khiops/lasterm/issues/299)) ([5e8a0e0](https://github.com/khiops/lasterm/commit/5e8a0e00079ac48893e9dbce9a5596c0d23870d5))
+
 ## [0.9.1](https://github.com/khiops/lasterm/compare/v0.9.0...v0.9.1) (2026-09-06)
 
 

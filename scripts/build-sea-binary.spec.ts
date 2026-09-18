@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -83,5 +84,41 @@ describe("buildSeaConfigJson generates valid sea-config.json structure", () => {
 
 		const result = buildSeaConfigJson(cfg, "/a/blob");
 		expect(result.assets).toEqual({});
+	});
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Child processes run without a shell
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("run", () => {
+	it("passes an argument containing a space as one argument", async () => {
+		const { run } = await import("./build-sea-binary.js");
+		// A checkout under a profile such as C:\Users\Jane Doe. With the shell
+		// Windows used to get, cmd.exe split this path in two.
+		const argument = join(tmpdir(), "Jane Doe", "lasterm checkout", "sea-prep.blob");
+		const check = `process.exit(process.argv.length === 2 && process.argv[1] === ${JSON.stringify(argument)} ? 0 : 3)`;
+
+		expect(() => run(process.execPath, ["-e", check, argument], "argument check")).not.toThrow();
+	});
+
+	it("reports a child's failure with its exit code", async () => {
+		const { run } = await import("./build-sea-binary.js");
+		expect(() => run(process.execPath, ["-e", "process.exit(3)"], "failing child")).toThrow(
+			/failing child exited with code 3/,
+		);
+	});
+});
+
+describe("postjectCommand", () => {
+	it("runs the pinned postject CLI with this Node, not through npx", async () => {
+		const { postjectCommand, run } = await import("./build-sea-binary.js");
+		const { cmd, args } = postjectCommand(["--help"]);
+
+		expect(cmd).toBe(resolve(process.execPath));
+		expect(args[0]?.replaceAll("\\", "/")).toMatch(/\/postject\/dist\/cli\.js$/);
+		expect(args.slice(1)).toEqual(["--help"]);
+		// It starts without a shell on every platform, Windows included.
+		expect(() => run(cmd, args, "postject help")).not.toThrow();
 	});
 });

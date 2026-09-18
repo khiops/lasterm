@@ -10,7 +10,7 @@
  *   2. node --experimental-sea-config <config>  →  sea-prep.blob
  *   3. cp $(which node) <output>
  *   4. macOS only: codesign --remove-signature <output>
- *   5. npx postject <output> NODE_SEA_BLOB <blob> --sentinel-fuse ...
+ *   5. node <postject cli> <output> NODE_SEA_BLOB <blob> --sentinel-fuse ...
  *   6. chmod +x on Linux/macOS
  *   7. Print final binary size.
  */
@@ -26,6 +26,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -61,18 +62,31 @@ export interface SeaBuildConfig {
 const SENTINEL_FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 
 /**
- * Run a child process synchronously.
+ * Run a child process synchronously, without a shell, so every argument
+ * reaches the child as one argument whatever it contains. `cmd` must be a real
+ * executable: a `.cmd` shim such as `npx` cannot start on Windows this way.
  * Throws a descriptive Error if the process exits with a non-zero code.
  */
-function run(cmd: string, args: string[], label: string): void {
+export function run(cmd: string, args: string[], label: string): void {
 	console.log(`[build-sea] ${label}: ${cmd} ${args.join(" ")}`);
-	const result = spawnSync(cmd, args, { stdio: "inherit", shell: process.platform === "win32" });
+	const result = spawnSync(cmd, args, { stdio: "inherit" });
 	if (result.error) {
 		throw new Error(`[build-sea] ${label} failed to start: ${result.error.message}`);
 	}
 	if (result.status !== 0) {
 		throw new Error(`[build-sea] ${label} exited with code ${result.status ?? "null"}`);
 	}
+}
+
+/**
+ * The postject invocation: the repository's own postject CLI (a pinned root
+ * devDependency) run by this Node. `npx postject` resolved the same file, but
+ * npx is a `.cmd` shim on Windows, which needed `shell: true` there; cmd.exe
+ * then joined the arguments unquoted, so a path with a space split in two.
+ */
+export function postjectCommand(args: string[]): { cmd: string; args: string[] } {
+	const cli = createRequire(import.meta.url).resolve("postject/dist/cli.js");
+	return { cmd: resolveNodeBinary(), args: [cli, ...args] };
 }
 
 /**
@@ -215,7 +229,6 @@ export async function buildSeaBinary(cfg: SeaBuildConfig): Promise<void> {
 		// ------------------------------------------------------------------
 		// 5. Inject the SEA blob via postject
 		// ------------------------------------------------------------------
-		// postject is invoked via npx so it works even without a global install.
 		const postjectArgs = [
 			cfg.outputBinary,
 			"NODE_SEA_BLOB",
@@ -226,7 +239,8 @@ export async function buildSeaBinary(cfg: SeaBuildConfig): Promise<void> {
 		if (targetPlat === "darwin") {
 			postjectArgs.push("--macho-segment-name", "NODE_SEA");
 		}
-		run("npx", ["postject", ...postjectArgs], "postject inject");
+		const postject = postjectCommand(postjectArgs);
+		run(postject.cmd, postject.args, "postject inject");
 
 		// ------------------------------------------------------------------
 		// 6. chmod +x on Linux/macOS

@@ -25,6 +25,7 @@ import {
 	cmdStatus,
 	cmdStop,
 	deleteRuntime,
+	ensureStateDir,
 	getConfigDir,
 	getStateDir,
 	isPidAlive,
@@ -36,6 +37,7 @@ import {
 	waitForHubQuit,
 } from "./cli.js";
 import { expectPosixMode } from "./file-mode.fixture.js";
+import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { describePreviousInstallation } from "./previous-installation.js";
 import {
 	AGENT_TARGET_TRIPLES,
@@ -1164,6 +1166,22 @@ describe("runtime state", () => {
 		expect(isPidAlive(123)).toBe(true);
 		vi.restoreAllMocks();
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"creates the state directory owner-only under a group-writable umask",
+		() => {
+			// The TLS key's writer refuses a group-writable parent, so a state
+			// directory left at 0775 by `umask 002` kept the daemon from starting.
+			const restore = usePlatformDirs({ state: path.join(makeTempDir(), "fresh") });
+			const previous = process.umask(0o002);
+			try {
+				expectPosixMode(ensureStateDir(), 0o700);
+			} finally {
+				process.umask(previous);
+				restore();
+			}
+		},
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"persistRuntime writes ownerToken via a 0600 atomic replacement",

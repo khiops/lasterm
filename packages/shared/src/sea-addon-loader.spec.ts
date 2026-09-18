@@ -2,7 +2,6 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { extractAddonToDir } from "./sea-addon-loader.js";
 
@@ -55,7 +54,7 @@ function makeTempDir(): string {
 }
 
 function extractInChild(cacheDir: string, assetName: string, size: number): ChildProcess {
-	const moduleUrl = pathToFileURL(new URL("./sea-addon-loader.ts", import.meta.url).pathname).href;
+	const moduleUrl = new URL("./sea-addon-loader.ts", import.meta.url).href;
 	const program = [
 		`import { extractAddonToDir } from ${JSON.stringify(moduleUrl)};`,
 		`extractAddonToDir(${JSON.stringify(assetName)}, ${JSON.stringify(cacheDir)}, Buffer.alloc(${size}, 0xa5));`,

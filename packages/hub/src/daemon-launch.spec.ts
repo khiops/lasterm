@@ -1,6 +1,6 @@
 import { closeSync, mkdtempSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -35,7 +35,9 @@ describe("buildDaemonSpawnPlan", () => {
 			moduleUrl: pathToFileURL("/tmp/lasterm/dist/cli.js").href,
 		});
 
-		expect(plan.args).toEqual(["/tmp/lasterm/dist/main.js"]);
+		// pathToFileURL resolves the POSIX-looking path against the current drive
+		// on Windows, so the expectation goes through the same resolution.
+		expect(plan.args).toEqual([resolve("/tmp/lasterm/dist/main.js")]);
 		expect(plan.env).toEqual({ LASTERM_PORT: "4100", LASTERM_OPEN: "1" });
 	});
 });

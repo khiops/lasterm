@@ -1,16 +1,9 @@
 import { createHash } from "node:crypto";
-import {
-	existsSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { expectPosixMode } from "../file-mode.fixture.js";
 import {
 	AGENT_TARGET_TRIPLES,
 	FetchError,
@@ -61,7 +54,7 @@ describe("verifyAndPlace", () => {
 		expect(result).toBe(finalPath);
 		expect(existsSync(tempPath)).toBe(false);
 		expect(readFileSync(finalPath, "utf8")).toBe(body);
-		expect(statSync(finalPath).mode & 0o777).toBe(0o755);
+		expectPosixMode(finalPath, 0o755);
 	});
 
 	it("rejects a mismatched binary without placing it", () => {

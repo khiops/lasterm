@@ -35,6 +35,7 @@ import {
 	runtimeMatches,
 	waitForHubQuit,
 } from "./cli.js";
+import { expectPosixMode } from "./file-mode.fixture.js";
 import { describePreviousInstallation } from "./previous-installation.js";
 import {
 	AGENT_TARGET_TRIPLES,
@@ -677,7 +678,7 @@ describe("cmdAgentImport", () => {
 		expect(code).toBe(0);
 		expect(lines).toEqual([finalPath]);
 		expect(readFileSync(finalPath, "utf8")).toBe("agent");
-		expect(statSync(finalPath).mode & 0o777).toBe(0o755);
+		expectPosixMode(finalPath, 0o755);
 		expect(readFileSync(binaryPath, "utf8")).toBe("agent");
 		expect(listTempFiles(cacheDir)).toEqual([]);
 	});

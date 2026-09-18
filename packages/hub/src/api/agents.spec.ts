@@ -6,7 +6,6 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
-	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -21,6 +20,7 @@ import type {
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { expectPosixMode } from "../file-mode.fixture.js";
 import { AGENT_FETCH_MAX_BYTES, AGENT_TARGET_TRIPLES } from "../session/agent-cache.js";
 import type { AgentFetchImpl } from "../session/agent-fetch.js";
 import type { AgentTargetArch, AgentTargetOs, HubPlatform } from "../session/agent-status.js";
@@ -421,7 +421,7 @@ describe("POST /api/agents/import", () => {
 		expect(res.statusCode).toBe(200);
 		expect(res.json()).toEqual({ path: finalPath, version, verified: true });
 		expect(readFileSync(finalPath, "utf8")).toBe(binary);
-		expect(statSync(finalPath).mode & 0o777).toBe(0o755);
+		expectPosixMode(finalPath, 0o755);
 		expect(listTempFiles(cacheDir)).toEqual([]);
 	});
 

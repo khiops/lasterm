@@ -15,6 +15,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { expectPosixMode } from "../file-mode.fixture.js";
 import {
 	AGENT_FETCH_IDLE_TIMEOUT_MS,
 	AGENT_FETCH_MAX_BYTES,
@@ -238,7 +239,7 @@ describe("fetchAgentBinary", () => {
 		]);
 		expect(readFileSync(finalPath, "utf8")).toBe(body);
 		expect(path.basename(finalPath)).toBe("lasterm-agent-linux-x64-0.3.4");
-		expect(statSync(finalPath).mode & 0o777).toBe(0o755);
+		expectPosixMode(finalPath, 0o755);
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("predates"));
 	});
 
@@ -576,7 +577,7 @@ describe("fetchAgentBinary", () => {
 		expect(path.basename(first)).toBe(`lasterm-agent-linux-x64-${VERSION}`);
 		expect(readFileSync(first, "utf8")).toBe(body);
 		// The cached binary must be executable (modern path chmod 755, not only legacy).
-		expect(statSync(first).mode & 0o777).toBe(0o755);
+		expectPosixMode(first, 0o755);
 		expect(listCache(cacheDir).filter((name) => name === path.basename(first))).toHaveLength(1);
 		expect(listCache(cacheDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 	});
@@ -629,7 +630,7 @@ describe("fetchAgentBinary", () => {
 			total: body.length,
 			phase: "verify",
 		});
-		expect(statSync(withProgressPath).mode & 0o777).toBe(0o755);
+		expectPosixMode(withProgressPath, 0o755);
 	});
 
 	it.skipIf(process.platform === "win32")(

@@ -24,6 +24,16 @@ on:
 # repository default. Every job below declares the scopes it needs.
 permissions: {}
 
+env:
+  # MSIX publication depends on all three repository variables. Individual
+  # targets add their platform predicate where they consume this value.
+  MSIX_PUBLICATION_ENABLED: >-
+    ${{
+      vars.MSIX_IDENTITY_NAME != '' &&
+      vars.MSIX_PUBLISHER != '' &&
+      vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+    }}
+
 # One run at a time per group. The group is a literal namespace plus the tag rather
 # than github.workflow, because a workflow invoked through workflow_call sees the
 # caller's workflow name. cancel-in-progress: false keeps a queued recovery run
@@ -93,7 +103,93 @@ jobs:
           echo "building $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - id: filter
+        env:
+          MSIX_RELEASE_ENABLED: ${{ env.MSIX_PUBLICATION_ENABLED }}
         run: |
+          # Enabled producers must declare exactly what they ship before the
+          # matrix reaches a build job. Agent names are computed separately;
+          # MSIX is optional because repository variables gate its publication.
+          INVALID="$(jq -r --argjson msix_release_enabled "$MSIX_RELEASE_ENABLED" '
+            # Declarations are carried to their consumers through delimiters a
+            # value can itself contain: jq -r emits one per line and the
+            # collectors read them back with `read`, so a pattern holding a
+            # newline arrives as two. Bundle kinds reach Tauri joined by commas,
+            # so "nsis,msi" would arrive as two kinds. Reject both classes here
+            # rather than teach every consumer a lossless encoding.
+            #
+            # A NUL escape is one of the control characters this rejects: jq
+            # keeps it through parsing, so the predicate sees it and refuses
+            # the row. That matters because `read` would silently drop it
+            # further down, turning one declaration into a different one.
+            def strings(forbidden):
+              if type == "array" then
+                length > 0
+                and all(.[];
+                  type == "string" and length > 0 and (test(forbidden) | not))
+              else
+                false
+              end;
+            def patterns: strings("[[:cntrl:]]");
+            def bundle_kinds: strings("[[:cntrl:],]");
+            # The triple is the identity every collector looks a row up by, and
+            # asset names are built from it. Two rows sharing one would have
+            # their declarations concatenated at collection time, so a valid
+            # enabled row could be failed by a stale duplicate. Checked over
+            # every row, disabled included, so that enabling one later cannot
+            # turn a latent collision into a failed release; the collectors
+            # also select on .enabled, which is the second layer.
+            ( [.targets[].triple]
+              | (map(select(type != "string" or length == 0)) | length > 0) as $bad
+              | (length != (unique | length)) as $dup
+              | if $bad then "targets: a triple is missing or not a string"
+                elif $dup then "targets: two rows share one triple"
+                else empty end
+            ),
+            (.targets[] | select(.enabled)
+            | if (.artifacts | type) != "object" then
+                # Checked before the lookups below. Written as .artifacts.hub?
+                # instead, the optional operator swallows the type error that a
+                # scalar or an array raises, and a malformed row becomes an
+                # empty stream this step reads as valid.
+                "\(.triple) artifacts"
+              elif .hub and ((.artifacts.hub | patterns) | not) then
+                "\(.triple) artifacts.hub"
+              elif .desktop and ((.artifacts.desktop | patterns) | not) then
+                "\(.triple) artifacts.desktop"
+              elif .desktop and ((.artifacts.bundles | bundle_kinds) | not) then
+                "\(.triple) artifacts.bundles"
+              elif (($msix_release_enabled and .triple == "x86_64-pc-windows-msvc")
+                    or (.artifacts | has("msix")))
+                   and ((.artifacts.msix | patterns) | not) then
+                "\(.triple) artifacts.msix"
+              else
+                empty
+              end)
+          ' .github/build-matrix.json)"
+          if [ -n "$INVALID" ]; then
+            while IFS= read -r missing; do
+              echo "::error::Enabled target requires a non-empty declaration: $missing"
+            done <<< "$INVALID"
+            exit 1
+          fi
+          DUPLICATE_PATTERNS="$(jq -r '
+            .targets[] | .triple as $triple | .artifacts as $artifacts
+            | select(($artifacts | type) == "object")
+            | ["hub", "desktop", "bundles", "msix"][] as $kind
+            | ($artifacts[$kind] // empty) as $patterns
+            | if ($patterns | type) == "array" then
+                [$patterns[] | select(type == "string")] | group_by(.)[] | select(length > 1)
+                | "\($triple) artifacts.\($kind) duplicate declaration: \(.[0])"
+              else
+                empty
+              end
+          ' .github/build-matrix.json)"
+          if [ -n "$DUPLICATE_PATTERNS" ]; then
+            while IFS= read -r duplicate; do
+              echo "::error::Target has duplicate artifact declaration: $duplicate"
+            done <<< "$DUPLICATE_PATTERNS"
+            exit 1
+          fi
           jq -c '{include:[.targets[]|select(.enabled and .agent)]}' \
             .github/build-matrix.json > /tmp/agent.json
           jq -c '{include:[.targets[]|select(.enabled and .hub)]}' \
@@ -477,13 +573,85 @@ jobs:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
           TRIPLE: ${{ matrix.triple }}
         run: |
-          for f in dist/sea/lasterm-hub*; do
-            ext="${f##*.}"
-            if [ "$ext" = "$f" ]; then ext=""; else ext=".$ext"; fi
-            base="lasterm-hub-${TRIPLE}${ext}"
-            cp "$f" "$base"
-            gh release upload "$TAG_NAME" --clobber "$base"
+          VERSION="${TAG_NAME#v}"
+          HUB_LIST="$RUNNER_TEMP/hub-artifacts"
+          HUB_PATTERN_LIST="$RUNNER_TEMP/hub-artifact-patterns"
+          # These are the two distributable executable names. A prefix glob also
+          # matches lasterm-hub.cjs, the required SEA input and not a deliverable.
+          # Enumerate the names rather than searching: GNU's depth-limit option is unavailable on macOS.
+          : > "$HUB_LIST"
+          for candidate in dist/sea/lasterm-hub dist/sea/lasterm-hub.exe; do
+            [ -f "$candidate" ] && printf '%s\0' "$candidate"
+          done >> "$HUB_LIST"
+          jq -r --arg triple "$TRIPLE" \
+            '.targets[] | select(.enabled and .triple == $triple) | .artifacts.hub[]' \
+            .github/build-matrix.json > "$HUB_PATTERN_LIST"
+
+          HUB_SOURCES=()
+          HUB_NAMES=()
+          while IFS= read -r -d '' path; do
+            ext="${path##*.}"
+            if [ "$ext" = "$path" ]; then ext=""; else ext=".$ext"; fi
+            HUB_SOURCES+=("$path")
+            HUB_NAMES+=("lasterm-hub-${TRIPLE}${ext}")
+          done < "$HUB_LIST"
+          HUB_PATTERNS=()
+          while IFS= read -r pattern; do HUB_PATTERNS+=("$pattern"); done < "$HUB_PATTERN_LIST"
+          pattern_matches() {
+            # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
+            [[ "$1" == $2 ]]
+          }
+
+          UPLOAD_SOURCES=()
+          UPLOAD_NAMES=()
+          HUB_CLAIMED_BY=()
+          for declared in "${HUB_PATTERNS[@]}"; do
+            pattern="${declared//\{version\}/$VERSION}"
+            matches=()
+            for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
+              if pattern_matches "${HUB_NAMES[i]}" "$pattern"; then
+                matches+=("$i")
+              fi
+            done
+            if [ "${#matches[@]}" -eq 0 ]; then
+              echo "::error::Hub artifact pattern $pattern matched no file in dist/sea"
+              exit 1
+            fi
+            if [ "${#matches[@]}" -gt 1 ]; then
+              matched_paths=()
+              for i in "${matches[@]}"; do matched_paths+=("${HUB_SOURCES[i]}"); done
+              echo "::error::Hub artifact pattern $pattern matched more than one file: ${matched_paths[*]}"
+              exit 1
+            fi
+            i="${matches[0]}"
+            if [ -n "${HUB_CLAIMED_BY[i]+set}" ]; then
+              echo "::error::Hub artifact patterns ${HUB_CLAIMED_BY[i]} and $pattern both matched ${HUB_SOURCES[i]}"
+              exit 1
+            fi
+            HUB_CLAIMED_BY[i]="$pattern"
+            UPLOAD_SOURCES+=("${HUB_SOURCES[i]}")
+            UPLOAD_NAMES+=("${HUB_NAMES[i]}")
           done
+
+          for ((i = 0; i < ${#HUB_NAMES[@]}; i++)); do
+            declared_match=false
+            for declared in "${HUB_PATTERNS[@]}"; do
+              pattern="${declared//\{version\}/$VERSION}"
+              if pattern_matches "${HUB_NAMES[i]}" "$pattern"; then
+                declared_match=true
+              fi
+            done
+            if [ "$declared_match" = false ]; then
+              echo "::error::Hub build output ${HUB_SOURCES[i]} resolves to undeclared release asset ${HUB_NAMES[i]}"
+              exit 1
+            fi
+          done
+
+          for ((i = 0; i < ${#UPLOAD_NAMES[@]}; i++)); do
+            cp "${UPLOAD_SOURCES[$i]}" "${UPLOAD_NAMES[$i]}"
+          done
+          printf 'uploading %s\n' "${UPLOAD_NAMES[@]}"
+          gh release upload "$TAG_NAME" --clobber "${UPLOAD_NAMES[@]}"
 
   build-desktop:
     name: Build Desktop (${{ matrix.triple }})
@@ -546,11 +714,13 @@ jobs:
           tar xzf _tmp/web-dist.tar.gz -C packages/clients/web/dist
       - name: Place sidecars + build (bash)
         if: matrix.shell_sh
+        env:
+          BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
         run: |
           TRIPLE="${{ matrix.triple }}"
           cp dist/sea/lasterm-agent-${TRIPLE} "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
           cp dist/sea/lasterm-hub-${TRIPLE} "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
-          pnpm -F @lasterm/desktop tauri build --config '{"build":{"beforeBuildCommand":""}}'
+          pnpm -F @lasterm/desktop tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}'
       - name: Place sidecars (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
@@ -567,15 +737,15 @@ jobs:
       - name: Build desktop (pwsh)
         if: ${{ !matrix.shell_sh }}
         shell: pwsh
+        env:
+          BUNDLES: ${{ join(matrix.artifacts.bundles, ',') }}
         run: |
-          pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+          pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
       - name: Package unsigned MSIX
         if: >-
           ${{
             matrix.triple == 'x86_64-pc-windows-msvc' &&
-            vars.MSIX_IDENTITY_NAME != '' &&
-            vars.MSIX_PUBLISHER != '' &&
-            vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+            env.MSIX_PUBLICATION_ENABLED == 'true'
           }}
         shell: pwsh
         env:
@@ -593,6 +763,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          TRIPLE: ${{ matrix.triple }}
           # The triple belongs in this predicate because the packaging step above
           # carries it too. Testing only the repository variables meant a
           # non-Windows row — aarch64-apple-darwin, declared in the matrix and
@@ -602,9 +773,7 @@ jobs:
           MSIX_RELEASE_ENABLED: >-
             ${{
               matrix.triple == 'x86_64-pc-windows-msvc' &&
-              vars.MSIX_IDENTITY_NAME != '' &&
-              vars.MSIX_PUBLISHER != '' &&
-              vars.MSIX_PUBLISHER_DISPLAY_NAME != ''
+              env.MSIX_PUBLICATION_ENABLED == 'true'
             }}
         run: |
           # `find -exec cmd \;` does not adopt cmd's exit status — `find /dev/null
@@ -620,21 +789,91 @@ jobs:
           # aarch64-apple-darwin is a declared desktop target (disabled today,
           # #224). -print0 keeps a path containing a space whole.
           #
-          # The set is checked for being non-empty, which is not the same as
-          # complete: `bundle.targets` is "all", so what tauri produces per
-          # platform is not declared anywhere this step could compare against.
+          # Resolve the declared installer patterns exactly. The Tauri config
+          # keeps its broad defaults; the frozen matrix says what this target
+          # actually ships and the build command narrows Tauri to those bundles.
+          # The suffix list is not a second copy of the declaration: it is the
+          # only thing that separates a deliverable from a file inside one.
+          # Tauri's macOS and AppImage bundles are directory trees — `.app`
+          # holds Info.plist, the executable and its resources — and every file
+          # under them is a regular file. Collecting all of them would hand the
+          # reverse resolver each one as an undeclared installer and fail the
+          # step.
+          #
+          # The list holds one suffix per bundle kind a target actually
+          # declares, and no more. A suffix nothing declares only widens what
+          # can be mistaken for a deliverable: a resource named
+          # `offline-cache.rpm` inside a `.app` becomes a candidate the moment
+          # `.rpm` is listed here, and then either fails the resolver as
+          # undeclared or makes a broad declaration ambiguous. Add a suffix in
+          # the same change that makes a target declare its kind, never before.
+          #
+          # `-type f` and `gh release upload` both take a file, so a bundle
+          # kind whose output is a directory — Tauri's `app`, and the `.AppDir`
+          # behind an AppImage — cannot be declared in artifacts.desktop and
+          # shipped as it stands. Publishing one means archiving it first and
+          # declaring the archive, which is a different change.
+          VERSION="${TAG_NAME#v}"
           BUNDLE_LIST="$RUNNER_TEMP/desktop-installers"
           find packages/clients/desktop/src-tauri/target/release/bundle -type f \
             \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) \
             -print0 > "$BUNDLE_LIST"
+          DESKTOP_PATTERN_LIST="$RUNNER_TEMP/desktop-artifact-patterns"
+          jq -r --arg triple "$TRIPLE" \
+            '.targets[] | select(.enabled and .triple == $triple) | .artifacts.desktop[]' \
+            .github/build-matrix.json > "$DESKTOP_PATTERN_LIST"
+          BUNDLE_FILES=()
+          while IFS= read -r -d '' path; do BUNDLE_FILES+=("$path"); done < "$BUNDLE_LIST"
+          DESKTOP_PATTERNS=()
+          while IFS= read -r pattern; do DESKTOP_PATTERNS+=("$pattern"); done < "$DESKTOP_PATTERN_LIST"
+          pattern_matches() {
+            # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
+            [[ "$1" == $2 ]]
+          }
           INSTALLERS=()
-          while IFS= read -r -d '' path; do INSTALLERS+=("$path"); done < "$BUNDLE_LIST"
-          if [ "${#INSTALLERS[@]}" -eq 0 ]; then
-            echo "::error::No installer found under packages/clients/desktop/src-tauri/target/release/bundle"
-            exit 1
-          fi
-          printf 'uploading %s\n' "${INSTALLERS[@]}"
-          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
+          INSTALLER_CLAIMED_BY=()
+          for declared in "${DESKTOP_PATTERNS[@]}"; do
+            pattern="${declared//\{version\}/$VERSION}"
+            matches=()
+            for ((i = 0; i < ${#BUNDLE_FILES[@]}; i++)); do
+              path="${BUNDLE_FILES[i]}"
+              base="${path##*/}"
+              if pattern_matches "$base" "$pattern"; then
+                matches+=("$i")
+              fi
+            done
+            if [ "${#matches[@]}" -eq 0 ]; then
+              echo "::error::Desktop artifact pattern $pattern matched no installer"
+              exit 1
+            fi
+            if [ "${#matches[@]}" -gt 1 ]; then
+              matched_paths=()
+              for i in "${matches[@]}"; do matched_paths+=("${BUNDLE_FILES[i]}"); done
+              echo "::error::Desktop artifact pattern $pattern matched more than one installer: ${matched_paths[*]}"
+              exit 1
+            fi
+            i="${matches[0]}"
+            if [ -n "${INSTALLER_CLAIMED_BY[i]+set}" ]; then
+              echo "::error::Desktop artifact patterns ${INSTALLER_CLAIMED_BY[i]} and $pattern both matched ${BUNDLE_FILES[i]}"
+              exit 1
+            fi
+            INSTALLER_CLAIMED_BY[i]="$pattern"
+            INSTALLERS+=("${BUNDLE_FILES[i]}")
+          done
+          for path in "${BUNDLE_FILES[@]}"; do
+            base="${path##*/}"
+            declared_match=false
+            for declared in "${DESKTOP_PATTERNS[@]}"; do
+              pattern="${declared//\{version\}/$VERSION}"
+              if pattern_matches "$base" "$pattern"; then
+                declared_match=true
+              fi
+            done
+            if [ "$declared_match" = false ]; then
+              echo "::error::Undeclared desktop installer $path"
+              exit 1
+            fi
+          done
           if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
             # An absent output directory is a failure here, not a reason to skip:
             # the variables that enable MSIX publication are set, so the package
@@ -644,14 +883,72 @@ jobs:
               exit 1
             fi
             MSIX_LIST="$RUNNER_TEMP/desktop-msix"
+            MSIX_PATTERN_LIST="$RUNNER_TEMP/msix-artifact-patterns"
+            # -maxdepth 1 because pack-msix.ps1 writes its package directly
+            # here, and this branch runs only on the Windows triple, where the
+            # runner's find is GNU. A nested .msix left by anything else would
+            # otherwise become a second candidate for the declared basename.
             find packages/clients/desktop/msix/out -maxdepth 1 -type f -name "*.msix" \
               -print0 > "$MSIX_LIST"
-            PACKAGES=()
-            while IFS= read -r -d '' path; do PACKAGES+=("$path"); done < "$MSIX_LIST"
-            if [ "${#PACKAGES[@]}" -eq 0 ]; then
-              echo "::error::MSIX publication is enabled but its output directory holds no .msix"
+            jq -r --arg triple "$TRIPLE" \
+              '.targets[] | select(.enabled and .triple == $triple) | .artifacts.msix[]?' \
+              .github/build-matrix.json > "$MSIX_PATTERN_LIST"
+            MSIX_FILES=()
+            while IFS= read -r -d '' path; do MSIX_FILES+=("$path"); done < "$MSIX_LIST"
+            MSIX_PATTERNS=()
+            while IFS= read -r pattern; do MSIX_PATTERNS+=("$pattern"); done < "$MSIX_PATTERN_LIST"
+            if [ "${#MSIX_PATTERNS[@]}" -eq 0 ]; then
+              echo "::error::MSIX publication is enabled but target $TRIPLE has no artifacts.msix declaration"
               exit 1
             fi
+            PACKAGES=()
+            MSIX_CLAIMED_BY=()
+            for declared in "${MSIX_PATTERNS[@]}"; do
+              pattern="${declared//\{version\}/$VERSION}"
+              matches=()
+              for ((i = 0; i < ${#MSIX_FILES[@]}; i++)); do
+                path="${MSIX_FILES[i]}"
+                base="${path##*/}"
+                if pattern_matches "$base" "$pattern"; then
+                  matches+=("$i")
+                fi
+              done
+              if [ "${#matches[@]}" -eq 0 ]; then
+                echo "::error::MSIX artifact pattern $pattern matched no package"
+                exit 1
+              fi
+              if [ "${#matches[@]}" -gt 1 ]; then
+                matched_paths=()
+                for i in "${matches[@]}"; do matched_paths+=("${MSIX_FILES[i]}"); done
+                echo "::error::MSIX artifact pattern $pattern matched more than one package: ${matched_paths[*]}"
+                exit 1
+              fi
+              i="${matches[0]}"
+              if [ -n "${MSIX_CLAIMED_BY[i]+set}" ]; then
+                echo "::error::MSIX artifact patterns ${MSIX_CLAIMED_BY[i]} and $pattern both matched ${MSIX_FILES[i]}"
+                exit 1
+              fi
+              MSIX_CLAIMED_BY[i]="$pattern"
+              PACKAGES+=("${MSIX_FILES[i]}")
+            done
+            for path in "${MSIX_FILES[@]}"; do
+              base="${path##*/}"
+              declared_match=false
+              for declared in "${MSIX_PATTERNS[@]}"; do
+                pattern="${declared//\{version\}/$VERSION}"
+                if pattern_matches "$base" "$pattern"; then
+                  declared_match=true
+                fi
+              done
+              if [ "$declared_match" = false ]; then
+                echo "::error::Undeclared MSIX package $path"
+                exit 1
+              fi
+            done
+          fi
+          printf 'uploading %s\n' "${INSTALLERS[@]}"
+          gh release upload "$TAG_NAME" --clobber "${INSTALLERS[@]}"
+          if [ "$MSIX_RELEASE_ENABLED" = "true" ]; then
             printf 'uploading %s\n' "${PACKAGES[@]}"
             gh release upload "$TAG_NAME" --clobber "${PACKAGES[@]}"
           fi

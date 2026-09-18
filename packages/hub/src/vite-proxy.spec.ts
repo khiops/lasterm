@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { platformDirEnv } from "./platform-dirs.fixture.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(sourceDirectory, "../../..");
@@ -71,8 +72,7 @@ function startHub(stateDirectory: string, port: number): ChildProcess {
 			cwd: hubDirectory,
 			env: {
 				...process.env,
-				XDG_CONFIG_HOME: join(stateDirectory, "config"),
-				XDG_STATE_HOME: stateDirectory,
+				...platformDirEnv({ state: stateDirectory, config: join(stateDirectory, "config") }),
 				LASTERM_OPEN: "0",
 				LASTERM_PORT: String(port),
 			},
@@ -96,8 +96,7 @@ function startVite(stateDirectory: string, port: number): ChildProcess {
 			cwd: webDirectory,
 			env: {
 				...process.env,
-				XDG_CONFIG_HOME: join(stateDirectory, "config"),
-				XDG_STATE_HOME: stateDirectory,
+				...platformDirEnv({ state: stateDirectory, config: join(stateDirectory, "config") }),
 			},
 			stdio: "ignore",
 		},

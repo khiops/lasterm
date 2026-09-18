@@ -10,6 +10,7 @@ import {
 	PROTOCOL_VERSION,
 } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { usePlatformDirs } from "../platform-dirs.fixture.js";
 import type { LastermAgent } from "./lasterm-agent.js";
 import { HubQuittingError } from "./quit-fence.js";
 import { getTestSocketPath } from "./test-socket-path.js";
@@ -79,14 +80,13 @@ describe("connectOrLaunch", () => {
 	let socketPath: string;
 	let daemon: { server: net.Server; connections: net.Socket[] } | null = null;
 	let agent: LastermAgent | null = null;
-	let oldXdgStateHome: string | undefined;
+	let restoreStateRoot: () => void = () => {};
 
 	const config: AgentConfig = { ...DEFAULT_AGENT_CONFIG };
 
 	beforeEach(async () => {
-		oldXdgStateHome = process.env.XDG_STATE_HOME;
 		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-launcher-test-"));
-		process.env.XDG_STATE_HOME = tmpDir;
+		restoreStateRoot = usePlatformDirs({ state: tmpDir });
 		socketPath = getTestSocketPath();
 
 		// Reset spawn mock to default (no-op)
@@ -104,11 +104,7 @@ describe("connectOrLaunch", () => {
 			daemon = null;
 		}
 		await rm(tmpDir, { recursive: true, force: true });
-		if (oldXdgStateHome === undefined) {
-			delete process.env.XDG_STATE_HOME;
-		} else {
-			process.env.XDG_STATE_HOME = oldXdgStateHome;
-		}
+		restoreStateRoot();
 	});
 
 	describe("Given agent daemon already running", () => {

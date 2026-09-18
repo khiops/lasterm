@@ -17,6 +17,7 @@ export default defineConfig({
 					include: ["packages/hub/**/*.spec.ts"],
 					environment: "node",
 					globalSetup: ["packages/hub/src/test-tls.setup.ts"],
+					setupFiles: ["packages/hub/src/platform-dirs.setup.ts"],
 				},
 			},
 			{
@@ -31,6 +32,9 @@ export default defineConfig({
 					name: "scripts",
 					include: ["scripts/**/*.spec.ts"],
 					environment: "node",
+					// These specs run hub code and the built SEA, which extracts its
+					// addons into the platform cache directory.
+					setupFiles: ["packages/hub/src/platform-dirs.setup.ts"],
 					testTimeout: 60_000,
 				},
 			},

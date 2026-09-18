@@ -54,7 +54,10 @@ describe("Vite development proxy", () => {
 
 		await stopProcess(hub);
 		hub = undefined;
-		await waitForRuntimeRemoval(stateRoot);
+		// On Windows, kill("SIGTERM") terminates the process outright: no
+		// shutdown handler runs, so the record stays until the next hub
+		// overwrites it, which waitForRuntime below waits for.
+		if (process.platform !== "win32") await waitForRuntimeRemoval(stateRoot);
 
 		hub = startHub(stateRoot, secondHubPort);
 		await waitForRuntime(stateRoot, secondHubPort);

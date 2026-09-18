@@ -167,18 +167,24 @@ describe("connectOrLaunch", () => {
 		);
 	});
 
-	it("leaves the endpoint intact when its operation is invalidated before connect", async () => {
-		await writeFile(socketPath, "not a socket");
-		const dummyBinary = path.join(tmpDir, "fake-agent.js");
-		await writeFile(dummyBinary, "// placeholder");
+	// The stale endpoint is a regular file left at a socket path. On Windows the
+	// endpoint is a named pipe, which no file can occupy and which disappears
+	// with its process, so the scenario only exists on POSIX.
+	it.skipIf(process.platform === "win32")(
+		"leaves the endpoint intact when its operation is invalidated before connect",
+		async () => {
+			await writeFile(socketPath, "not a socket");
+			const dummyBinary = path.join(tmpDir, "fake-agent.js");
+			await writeFile(dummyBinary, "// placeholder");
 
-		await expect(
-			connectOrLaunch(socketPath, config, dummyBinary, undefined, () => {
-				throw new HubQuittingError();
-			}),
-		).rejects.toThrow("Hub is quitting");
-		expect(existsSync(socketPath)).toBe(true);
-	});
+			await expect(
+				connectOrLaunch(socketPath, config, dummyBinary, undefined, () => {
+					throw new HubQuittingError();
+				}),
+			).rejects.toThrow("Hub is quitting");
+			expect(existsSync(socketPath)).toBe(true);
+		},
+	);
 
 	describe("Given no agent running (ENOENT)", () => {
 		it(

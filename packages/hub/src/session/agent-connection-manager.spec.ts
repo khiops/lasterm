@@ -23,6 +23,7 @@ import type { SessionManager } from "./session-manager.js";
 import type { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
+import { getTestSocketPath } from "./test-socket-path.js";
 
 const HOST_ID = "host-1";
 const SESSION_ID = "session-1";
@@ -290,7 +291,9 @@ describe("AgentConnectionManager HELLO version check", () => {
 
 	beforeEach(async () => {
 		tmpDir = await mkdtemp(join(tmpdir(), "lasterm-agent-manager-test-"));
-		socketPath = join(tmpDir, "agent.sock");
+		// A filesystem path cannot carry a local socket on Windows; Node listens
+		// on a named pipe there, which getTestSocketPath provides.
+		socketPath = getTestSocketPath();
 	});
 
 	afterEach(async () => {

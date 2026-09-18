@@ -247,7 +247,7 @@ async fn create_askpass_script(
 
     let filename = format!(
         "lasterm-askpass-{}",
-        ulid::Ulid::new().to_string().to_lowercase()
+        ulid::Ulid::generate().to_string().to_lowercase()
     );
     let mut last_err = None;
     let (path, mut file) = loop {

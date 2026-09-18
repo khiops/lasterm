@@ -91,7 +91,8 @@ fn iv(n: i64) -> rmpv::Value {
 fn daemon_fixture_dir(label: &str) -> std::path::PathBuf {
     use std::os::unix::fs::DirBuilderExt;
 
-    let dir = std::env::temp_dir().join(format!("lasterm-agent-{label}-{}", ulid::Ulid::new()));
+    let dir =
+        std::env::temp_dir().join(format!("lasterm-agent-{label}-{}", ulid::Ulid::generate()));
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

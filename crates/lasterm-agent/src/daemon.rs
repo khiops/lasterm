@@ -1007,7 +1007,7 @@ mod tests {
         std::env::temp_dir().join(format!(
             "{}-{}",
             prefix,
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ))
     }
 
@@ -1062,7 +1062,7 @@ mod tests {
         // Pass directly to run_daemon_impl to avoid env var mutation races.
         let empty_config = std::env::temp_dir().join(format!(
             "lasterm-test-cfg-noop-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
@@ -1070,7 +1070,7 @@ mod tests {
 
         let sock_name = format!(
             "lasterm-test-{}.sock",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
         let path_str = path.to_string_lossy().to_string();
@@ -1114,7 +1114,7 @@ mod tests {
     async fn test_connection_displacement() {
         let empty_config = std::env::temp_dir().join(format!(
             "lasterm-test-cfg-disp-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
@@ -1122,7 +1122,7 @@ mod tests {
 
         let sock_name = format!(
             "lasterm-test-displace-{}.sock",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
         let path_str = path.to_string_lossy().to_string();
@@ -1174,7 +1174,7 @@ mod tests {
     async fn test_socket_permissions() {
         let empty_config = std::env::temp_dir().join(format!(
             "lasterm-test-cfg-perms-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
@@ -1182,7 +1182,7 @@ mod tests {
 
         let sock_name = format!(
             "lasterm-test-perms-{}.sock",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
         let path_str = path.to_string_lossy().to_string();
@@ -1214,7 +1214,7 @@ mod tests {
     async fn test_channel_state_end_sent_on_connect() {
         let empty_config = std::env::temp_dir().join(format!(
             "lasterm-test-cfg-stateend-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&empty_config).await.unwrap();
         let config_dir = empty_config.to_string_lossy().to_string();
@@ -1222,7 +1222,7 @@ mod tests {
 
         let sock_name = format!(
             "lasterm-test-state-end-{}.sock",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
         let path = std::env::temp_dir().join(&sock_name);
         let path_str = path.to_string_lossy().to_string();
@@ -1427,7 +1427,7 @@ mod tests {
             std::env::temp_dir().join(format!(
                 "lasterm-daemon-shutdown-{}-{}.pid",
                 prefix,
-                ulid::Ulid::new().to_string().to_lowercase()
+                ulid::Ulid::generate().to_string().to_lowercase()
             ))
         }
 
@@ -1683,7 +1683,7 @@ mod tests {
 
         let pipe_name = format!(
             r"\\.\pipe\lasterm-test-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
 
         // Create server
@@ -1812,7 +1812,7 @@ mod tests {
     async fn test_read_auth_token_valid() {
         let dir = std::env::temp_dir().join(format!(
             "lasterm-auth-test-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let auth_path = dir.join("auth.json");
@@ -1833,7 +1833,7 @@ mod tests {
     async fn test_read_auth_token_malformed() {
         let dir = std::env::temp_dir().join(format!(
             "lasterm-auth-bad-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let auth_path = dir.join("auth.json");
@@ -1859,7 +1859,7 @@ mod tests {
     async fn test_read_auth_token_missing_token_field() {
         let dir = std::env::temp_dir().join(format!(
             "lasterm-auth-nofield-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let auth_path = dir.join("auth.json");
@@ -1891,7 +1891,7 @@ mod tests {
         // Write auth.json to a temp dir and pass it directly as config_dir to run_daemon_impl.
         let config_dir_path = std::env::temp_dir().join(format!(
             "lasterm-test-cfg-auth-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&config_dir_path).await.unwrap();
         let auth_path = config_dir_path.join("auth.json");
@@ -1904,7 +1904,7 @@ mod tests {
 
         let sock_dir = std::env::temp_dir().join(format!(
             "lasterm-daemon-auth-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&sock_dir).await.unwrap();
         let sock_path = sock_dir.join("agent.sock");
@@ -1967,7 +1967,7 @@ mod tests {
 
         let config_dir_path = std::env::temp_dir().join(format!(
             "lasterm-test-cfg-authok-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&config_dir_path).await.unwrap();
         let auth_path = config_dir_path.join("auth.json");
@@ -1980,7 +1980,7 @@ mod tests {
 
         let sock_dir = std::env::temp_dir().join(format!(
             "lasterm-daemon-authok-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         tokio::fs::create_dir_all(&sock_dir).await.unwrap();
         let sock_path = sock_dir.join("agent.sock");
@@ -2042,7 +2042,7 @@ mod tests {
 
         let pipe_name = format!(
             r"\\.\pipe\lasterm-test-secure-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
 
         let server =
@@ -2078,7 +2078,7 @@ mod tests {
 
         let pipe_name = format!(
             r"\\.\pipe\lasterm-test-hello-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         );
 
         let daemon_handle =

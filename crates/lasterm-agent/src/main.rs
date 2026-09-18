@@ -666,7 +666,8 @@ mod tests {
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     #[test]
     fn daemon_without_a_safe_fingerprint_starts_without_an_identity() {
-        let state_dir = std::env::temp_dir().join(format!("lasterm-agent-{}", ulid::Ulid::new()));
+        let state_dir =
+            std::env::temp_dir().join(format!("lasterm-agent-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&state_dir).expect("create state directory");
         assert!(daemon_identity_for_endpoint("socket".into(), &state_dir)
             .expect("unsupported fingerprint must not fail daemon startup")

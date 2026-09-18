@@ -1892,7 +1892,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tokio-tungstenite",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1900,7 +1900,7 @@ name = "lasterm-process-lock"
 version = "0.1.0"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1908,7 +1908,7 @@ name = "lasterm-protected-fs"
 version = "0.1.0"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

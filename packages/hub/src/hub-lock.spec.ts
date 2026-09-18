@@ -9,6 +9,13 @@ import { startHub } from "./hub-startup.js";
 
 const tempDirs: string[] = [];
 
+// These tests start the real hub through tsx. Alone it listens in about 2.5 s
+// on Windows; under the full parallel suite it took longer than the 5 s
+// default, and a test aborted mid-wait left its hub holding the state
+// directory, so cleanup then failed with EPERM.
+const HUB_PROCESS_TIMEOUT_MS = 30_000;
+const HUB_LISTEN_TIMEOUT_MS = 20_000;
+
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -20,7 +27,9 @@ describe.sequential("hub startup lock", () => {
 		expect(getHubLockPath(stateDir)).not.toContain("runtime.json");
 	});
 
-	it("refuses a second hub before it can bind a port", async () => {
+	it("refuses a second hub before it can bind a port", {
+		timeout: HUB_PROCESS_TIMEOUT_MS,
+	}, async () => {
 		const stateRoot = makeStateDir();
 		const stateDir = path.join(stateRoot, "lasterm");
 		// A discovery record cannot authorize or veto serving; only this lock does.
@@ -163,7 +172,9 @@ describe.sequential("hub startup lock", () => {
 		expect(order).toEqual(["server", "databases", "record"]);
 	});
 
-	it("starts with an unreadable runtime record when the authoritative lock is free", async () => {
+	it("starts with an unreadable runtime record when the authoritative lock is free", {
+		timeout: HUB_PROCESS_TIMEOUT_MS,
+	}, async () => {
 		const stateRoot = makeStateDir();
 		const stateDir = path.join(stateRoot, "lasterm");
 		const port = await unusedPort();
@@ -181,7 +192,9 @@ describe.sequential("hub startup lock", () => {
 		}
 	});
 
-	it("fails closed when the native addon cannot be loaded", async () => {
+	it("fails closed when the native addon cannot be loaded", {
+		timeout: HUB_PROCESS_TIMEOUT_MS,
+	}, async () => {
 		const stateRoot = makeStateDir();
 		const missingAddon = path.join(stateRoot, "missing-lasterm_hub_lock.node");
 		const result = await runMain({
@@ -267,7 +280,10 @@ function waitForPort(port: number, child: ChildProcess): Promise<void> {
 			else resolve();
 		};
 		const onExit = (code: number | null) => finish(new Error(`hub exited ${code}: ${stderr}`));
-		timeout = setTimeout(() => finish(new Error(`hub did not listen: ${stderr}`)), 5_000);
+		timeout = setTimeout(
+			() => finish(new Error(`hub did not listen: ${stderr}`)),
+			HUB_LISTEN_TIMEOUT_MS,
+		);
 		child.stderr?.on("data", (chunk: Buffer) => {
 			stderr += chunk.toString();
 		});

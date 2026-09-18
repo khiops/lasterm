@@ -23,6 +23,9 @@ function createMockDaemon(socketPath: string): Promise<{
 
 		const server = net.createServer((socket) => {
 			connections.push(socket);
+			// The client may close before these writes land. On a Windows named pipe
+			// that is EPIPE, and an unobserved socket error fails the whole run.
+			socket.on("error", () => {});
 
 			const hello = encodeFrame({
 				type: "HELLO",
@@ -56,6 +59,9 @@ function createMockDaemonWithChannels(
 
 		const server = net.createServer((socket) => {
 			connections.push(socket);
+			// The client may close before these writes land. On a Windows named pipe
+			// that is EPIPE, and an unobserved socket error fails the whole run.
+			socket.on("error", () => {});
 
 			const hello = encodeFrame({
 				type: "HELLO",

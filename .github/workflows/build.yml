@@ -248,9 +248,15 @@ jobs:
       - run: pnpm exec biome check . --error-on-warnings
 
   test:
-    name: Test (TypeScript)
+    # Windows too: the Windows hub is the one a release ships, and a break that
+    # only shows there went unseen while this ran on Linux alone (#309).
+    name: Test (TypeScript, ${{ matrix.os }})
     if: ${{ !inputs.release }}
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

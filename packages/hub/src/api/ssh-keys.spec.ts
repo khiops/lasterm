@@ -68,13 +68,20 @@ function buildMultipart(
 	};
 }
 
-// Generate a real ED25519 key using ssh2
+// Generate a real ED25519 key using ssh2. About one key in 300 that ssh2
+// generates is malformed: ssh2.utils.parseKey and ssh-keygen both reject it,
+// so the route answers INVALID_KEY where a test expects success or DUPLICATE.
+// Keep generating until ssh2 can read the key back.
 function generateEd25519Key(): Buffer {
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
 	const ssh2mod = require("ssh2") as typeof import("ssh2");
-	const kp = ssh2mod.utils.generateKeyPairSync("ed25519");
-	// ssh2 returns { private, public } (not privateKey/publicKey)
-	return Buffer.from((kp as unknown as { private: string }).private);
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const kp = ssh2mod.utils.generateKeyPairSync("ed25519");
+		// ssh2 returns { private, public } (not privateKey/publicKey)
+		const key = Buffer.from((kp as unknown as { private: string }).private);
+		if (!(ssh2mod.utils.parseKey(key) instanceof Error)) return key;
+	}
+	throw new Error("ssh2 produced no parseable ED25519 key in 20 attempts");
 }
 
 // --- Test suite -------------------------------------------------------------

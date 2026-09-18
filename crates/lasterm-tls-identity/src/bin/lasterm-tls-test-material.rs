@@ -5,8 +5,8 @@
 //! binary before its hub project starts.
 
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose, SanType,
+    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer,
+    KeyPair, KeyUsagePurpose, PublicKeyData, SanType,
 };
 use std::env;
 use std::error::Error;
@@ -40,9 +40,14 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let now = OffsetDateTime::now_utc();
     let authority_key = KeyPair::generate()?;
-    let authority = authority_certificate(now, &authority_key)?;
-    let pinned = signed_leaf(now, &authority, &authority_key)?;
-    let other = signed_leaf(now, &authority, &authority_key)?;
+    let authority_params = authority_params(now)?;
+    let authority = authority_params.self_signed(&authority_key)?;
+    // rcgen 0.14 certificates no longer carry their parameters, so the issuer
+    // is built from the authority's own: the same distinguished name, key
+    // identifier method and key usages 0.13's signed_by read off the certificate.
+    let issuer = Issuer::from_params(&authority_params, &authority_key);
+    let pinned = signed_leaf(now, &issuer)?;
+    let other = signed_leaf(now, &issuer)?;
     let expired = self_signed_leaf(now - Duration::days(2), now - Duration::days(1))?;
     let server = self_signed_leaf(now, now + TEST_CERTIFICATE_VALIDITY)?;
 
@@ -53,7 +58,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     write_identity(&output_dir, "server", &server)?;
     write_manifest(
         &output_dir,
-        &base64(&authority_key.public_key_der()),
+        &base64(&authority_key.subject_public_key_info()),
         &pinned,
         &other,
         &expired,
@@ -86,23 +91,22 @@ fn ensure_empty_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn authority_certificate(now: OffsetDateTime, key: &KeyPair) -> Result<Certificate, rcgen::Error> {
+fn authority_params(now: OffsetDateTime) -> Result<CertificateParams, rcgen::Error> {
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = now - Duration::days(1);
     params.not_after = now + TEST_CERTIFICATE_VALIDITY;
-    params.self_signed(key)
+    Ok(params)
 }
 
 fn signed_leaf(
     now: OffsetDateTime,
-    authority: &Certificate,
-    authority_key: &KeyPair,
+    issuer: &Issuer<'_, &KeyPair>,
 ) -> Result<Identity, rcgen::Error> {
     let key = KeyPair::generate()?;
     let params = server_leaf_params(now, now + TEST_CERTIFICATE_VALIDITY)?;
-    let certificate = params.signed_by(&key, authority, authority_key)?;
+    let certificate = params.signed_by(&key, issuer)?;
     Ok(identity(certificate, key))
 }
 
@@ -132,7 +136,7 @@ fn server_leaf_params(
 
 fn identity(certificate: Certificate, key: KeyPair) -> Identity {
     let certificate_pem = certificate.pem();
-    let spki = base64(&key.public_key_der());
+    let spki = base64(&key.subject_public_key_info());
     Identity {
         certificate_pem,
         key_pem: key.serialize_pem(),

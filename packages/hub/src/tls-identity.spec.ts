@@ -10,6 +10,7 @@ import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
+import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { createServer, startServer } from "./server.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
 import { resolveHubTlsIdentity } from "./tls-identity.js";
@@ -18,7 +19,7 @@ describe("generated hub TLS identity", () => {
 	let server: Awaited<ReturnType<typeof createServer>> | undefined;
 	let tlsServers: HttpsServer[] = [];
 	let stateRoot: string | undefined;
-	let originalStateRoot: string | undefined;
+	let restoreStateRoot: (() => void) | undefined;
 
 	afterEach(async () => {
 		const serverToClose = server;
@@ -27,8 +28,8 @@ describe("generated hub TLS identity", () => {
 		tlsServers = [];
 		const stateRootToRemove = stateRoot;
 		stateRoot = undefined;
-		const stateRootToRestore = originalStateRoot;
-		originalStateRoot = undefined;
+		const stateRootToRestore = restoreStateRoot;
+		restoreStateRoot = undefined;
 
 		const cleanupErrors = await runCleanup([
 			async () => {
@@ -48,7 +49,7 @@ describe("generated hub TLS identity", () => {
 				if (stateRootToRemove !== undefined)
 					rmSync(stateRootToRemove, { recursive: true, force: true });
 			},
-			() => restoreEnvironmentVariable("XDG_STATE_HOME", stateRootToRestore),
+			() => stateRootToRestore?.(),
 		]);
 		if (cleanupErrors.length > 0) {
 			throw new AggregateError(cleanupErrors, "TLS identity test cleanup failed");
@@ -83,9 +84,8 @@ describe("generated hub TLS identity", () => {
 	});
 
 	function prepareStateDir(): string {
-		originalStateRoot = process.env.XDG_STATE_HOME;
 		stateRoot = join(tmpdir(), `lasterm-tls-${randomBytes(8).toString("hex")}`);
-		process.env.XDG_STATE_HOME = stateRoot;
+		restoreStateRoot = usePlatformDirs({ state: stateRoot });
 		const stateDir = getStateDir();
 		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 		return stateDir;

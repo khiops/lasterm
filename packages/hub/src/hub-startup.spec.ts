@@ -12,6 +12,7 @@ import {
 } from "./auth.js";
 import { getStateDir, loadRuntime } from "./cli.js";
 import { startHub } from "./hub-startup.js";
+import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
 
@@ -71,9 +72,8 @@ describe("startHub refuses beside a previous installation", () => {
 
 describe("startHub token restart sweep", () => {
 	it("leaves no readable runtime record when publication fails after TLS bind", async () => {
-		const originalStateRoot = process.env.XDG_STATE_HOME;
 		const stateRoot = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
-		process.env.XDG_STATE_HOME = stateRoot;
+		const restoreStateRoot = usePlatformDirs({ state: stateRoot });
 		const dbs = openTestDatabases();
 		try {
 			await expect(
@@ -102,13 +102,7 @@ describe("startHub token restart sweep", () => {
 		} finally {
 			dbs.close();
 			rmSync(stateRoot, { recursive: true, force: true });
-			// `process.env.X = undefined` stores the string "undefined", so an
-			// unset variable restored this way leaves XDG_STATE_HOME="undefined"
-			// for every later test in the process, and getStateDir then resolves
-			// "undefined/lasterm" relative to the working directory. Same form as
-			// cli.spec.ts:721.
-			if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
-			else process.env.XDG_STATE_HOME = originalStateRoot;
+			restoreStateRoot();
 		}
 	});
 

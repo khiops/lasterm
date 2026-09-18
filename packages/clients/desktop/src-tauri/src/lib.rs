@@ -2909,7 +2909,7 @@ fn response_head(response: &reqwest::blocking::Response, id: u64) -> RelayHubHea
 /// too and TCP carries lossless backpressure to the hub.
 fn new_relay_frame_identity(relay_id: u64, sequence: u64) -> Result<RelayFrameIdentity, String> {
     let mut acknowledgement_token = [0_u8; 16];
-    getrandom::getrandom(&mut acknowledgement_token)
+    getrandom::fill(&mut acknowledgement_token)
         .map_err(|error| format!("could not create relay acknowledgement identity: {error}"))?;
     Ok(RelayFrameIdentity {
         relay_id,

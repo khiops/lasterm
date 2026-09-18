@@ -2779,7 +2779,8 @@ fn prove_announced_hub_key(client: &reqwest::blocking::Client, port: u16) -> Res
                 "The announced hub peer presented another TLS key; refusing to trust it. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again.".to_string()
             } else {
                 format!(
-                    "The announced hub peer could not be reached to prove its TLS key: {error}"
+                    "The announced hub peer could not be reached to prove its TLS key: {}",
+                    error_with_sources(&error)
                 )
             }
         })
@@ -2808,6 +2809,20 @@ fn error_chain_has_spki_mismatch(error: &(dyn Error + 'static)) -> bool {
         }
     }
     error.source().is_some_and(error_chain_has_spki_mismatch)
+}
+
+/// An error followed by each of its sources. A `reqwest::Error` displays only
+/// "error sending request for url (…)"; whether the connection was refused,
+/// reset or failed its handshake is in the source chain.
+fn error_with_sources(error: &(dyn Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 fn relay_hub_url(port: u16, path: &str) -> Result<String, String> {
@@ -2841,7 +2856,7 @@ fn send_relay_hub_request(
     }
     builder
         .send()
-        .map_err(|error| format!("pinned hub request failed: {error}"))
+        .map_err(|error| format!("pinned hub request failed: {}", error_with_sources(&error)))
 }
 
 /// The renderer supplies the URL authority alongside the path. Native still
@@ -5166,6 +5181,66 @@ mod tests {
 
     static HUB_CONNECTION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Serialises the tests that use the process-wide HUB_CONNECTION and
+    /// HUB_PORT. A test that panics poisons the lock and skips its own reset,
+    /// so the next one takes the lock anyway and starts from a cleared state:
+    /// it reports its own result rather than a PoisonError.
+    fn hub_connection_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = HUB_CONNECTION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *HUB_CONNECTION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        HUB_PORT.store(0, Ordering::Relaxed);
+        guard
+    }
+
+    #[test]
+    fn an_unreachable_peer_reports_every_cause_in_the_chain() {
+        #[derive(Debug)]
+        struct Layer(&'static str, Option<Box<Layer>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.0)
+            }
+        }
+        impl Error for Layer {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                self.1
+                    .as_deref()
+                    .map(|cause| cause as &(dyn Error + 'static))
+            }
+        }
+
+        let error = Layer(
+            "error sending request for url (https://127.0.0.1:1/)",
+            Some(Box::new(Layer(
+                "client error (Connect)",
+                Some(Box::new(Layer("connection refused", None))),
+            ))),
+        );
+        assert_eq!(
+            error_with_sources(&error),
+            "error sending request for url (https://127.0.0.1:1/): client error (Connect): connection refused"
+        );
+        assert_eq!(error_with_sources(&Layer("alone", None)), "alone");
+    }
+
+    #[test]
+    fn a_poisoned_hub_connection_lock_still_serialises_the_next_test() {
+        let poisoner = std::thread::spawn(|| {
+            let _guard = hub_connection_test_guard();
+            HUB_PORT.store(4242, Ordering::Relaxed);
+            panic!("a test failing while it holds the hub connection lock");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(HUB_CONNECTION_TEST_LOCK.is_poisoned());
+
+        let _guard = hub_connection_test_guard();
+        assert_eq!(HUB_PORT.load(Ordering::Relaxed), 0);
+    }
+
     struct TestTlsPeer {
         port: u16,
         received_http_request: std::sync::mpsc::Receiver<bool>,
@@ -5276,7 +5351,7 @@ mod tests {
 
     #[test]
     fn pin_survives_desktop_and_hub_restart_when_port_changes() {
-        let _guard = HUB_CONNECTION_TEST_LOCK.lock().unwrap();
+        let _guard = hub_connection_test_guard();
         let directory = instance_test_dir("pin-restart");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
         let key_pair = rcgen::KeyPair::generate().unwrap();
@@ -5332,7 +5407,7 @@ mod tests {
 
     #[test]
     fn first_pin_is_persisted_only_after_a_live_peer_proves_the_announced_key() {
-        let _guard = HUB_CONNECTION_TEST_LOCK.lock().unwrap();
+        let _guard = hub_connection_test_guard();
         let directory = instance_test_dir("first-pin-live-peer");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
         let key_pair = rcgen::KeyPair::generate().unwrap();

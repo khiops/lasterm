@@ -42,7 +42,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes"] }
 
 [dev-dependencies]
-rcgen = "0.13"
+rcgen = "0.14"
 
 [profile.release]
 # Keep lto = false (Cargo default) for fast CI builds.

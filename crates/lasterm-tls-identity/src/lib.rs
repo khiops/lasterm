@@ -6,7 +6,10 @@
 
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
+use rcgen::{
+    CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PublicKeyData,
+    SanType,
+};
 use std::collections::HashSet;
 #[cfg(not(any(unix, windows)))]
 use std::fs;
@@ -113,7 +116,7 @@ fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
         sync_parent_for(&certificate_path)?;
         return Ok(TlsIdentity {
             certificate_pem,
-            spki: key_pair.public_key_der(),
+            spki: key_pair.subject_public_key_info(),
         });
     }
 
@@ -122,7 +125,7 @@ fn generate_identity(identity_directory: &Path) -> io::Result<TlsIdentity> {
 
     Ok(TlsIdentity {
         certificate_pem,
-        spki: key_pair.public_key_der(),
+        spki: key_pair.subject_public_key_info(),
     })
 }
 
@@ -208,7 +211,7 @@ fn certificate_matches_profile(
         return false;
     };
     if !remaining.is_empty()
-        || certificate.public_key().raw != key_pair.public_key_der().as_slice()
+        || certificate.public_key().raw != key_pair.subject_public_key_info().as_slice()
         || certificate.issuer() != certificate.subject()
         || certificate.verify_signature(None).is_err()
     {
@@ -877,7 +880,7 @@ mod tests {
     use super::{FAIL_NEXT_PARENT_SYNC, PARENT_SYNCED};
     use rcgen::{
         BasicConstraints, CertificateParams, CustomExtension, ExtendedKeyUsagePurpose, IsCa,
-        KeyUsagePurpose, SanType,
+        KeyUsagePurpose, PublicKeyData, SanType,
     };
     use rustls_pki_types::CertificateDer;
     use std::env;
@@ -1229,7 +1232,7 @@ mod tests {
         assert_ne!(replacement.certificate_pem, stored);
         assert_eq!(
             replacement.spki,
-            key.public_key_der(),
+            key.subject_public_key_info(),
             "the renewed leaf publishes the existing key fingerprint"
         );
         let restart = generate_identity(&directory.0).expect("reuse renewed leaf");
@@ -1479,10 +1482,10 @@ mod tests {
             "the injected cleanup failure leaves an observable temporary key copy"
         );
         assert_eq!(
-            installed.public_key_der(),
+            installed.subject_public_key_info(),
             load_or_create_key(&key_path)
                 .expect("the installed key remains usable after its cleanup warning")
-                .public_key_der(),
+                .subject_public_key_info(),
             "the installed key remains usable"
         );
     }

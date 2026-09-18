@@ -7,6 +7,7 @@ import { type Ref, ref } from "vue";
 import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
+import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
 
 /** Maximum number of entries in the title stack (SC-05). */
@@ -29,6 +30,8 @@ export function useTerminal(
 	let channelId: string | null = null;
 	let resizeObserver: ResizeObserver | null = null;
 	let onScrollbarChanged: (() => void) | null = null;
+	/** Whether search matches are marked in the scrollbar gutter (profile). */
+	let scrollbarMarkers = true;
 	let outputUnsubscribe: (() => void) | null = null;
 	let themeUnsubscribe: (() => void) | null = null;
 
@@ -63,6 +66,12 @@ export function useTerminal(
 	const currentDynamicTitle = ref<string | null>(null);
 	let titleChangeDispose: (() => void) | null = null;
 
+	/** Size xterm's scrollbar and ruler from the appearance setting and the profile. */
+	function applyScrollbarWidth(term: Terminal): void {
+		const width = terminalScrollbarWidth(useThemeStore().appearance.scrollbar, scrollbarMarkers);
+		term.options.overviewRuler = { ...term.options.overviewRuler, width };
+	}
+
 	function sendResize(cols: number, rows: number): void {
 		if (!channelId || !wsClient.isConnected) return;
 		if (cols === lastSentCols && rows === lastSentRows) return;
@@ -88,7 +97,7 @@ export function useTerminal(
 		const initialColors = (hostTheme ?? themeStore.activeTheme)?.colors;
 		const initialXtermTheme = initialColors ? themeStore.toXtermTheme(initialColors) : {};
 
-		const scrollbarMarkers = p?.scrollbarMarkers !== false; // default true
+		scrollbarMarkers = p?.scrollbarMarkers !== false; // default true
 		const term = new Terminal({
 			allowProposedApi: true,
 			allowTransparency: true,
@@ -97,7 +106,9 @@ export function useTerminal(
 			fontFamily: p?.fontFamily ?? '"Consolas", "Liberation Mono", "Courier New", monospace',
 			cursorStyle: p?.cursorStyle ?? "block",
 			scrollback: p?.scrollback ?? 5000,
-			overviewRulerWidth: scrollbarMarkers ? 15 : 0,
+			overviewRuler: {
+				width: terminalScrollbarWidth(themeStore.appearance.scrollbar, scrollbarMarkers),
+			},
 			theme: initialXtermTheme,
 		});
 
@@ -135,6 +146,7 @@ export function useTerminal(
 		});
 		resizeObserver.observe(containerRef.value);
 		onScrollbarChanged = (): void => {
+			applyScrollbarWidth(term);
 			fitAddon.fit();
 		};
 		window.addEventListener("nt:scrollbar-changed", onScrollbarChanged);
@@ -338,9 +350,9 @@ export function useTerminal(
 		term.options.fontSize = p.fontSize ?? 14;
 		term.options.cursorStyle = p.cursorStyle ?? "block";
 		term.options.scrollback = p.scrollback ?? 5000;
-		const markers = p.scrollbarMarkers !== false;
-		term.options.overviewRulerWidth = markers ? 15 : 0;
-		search.setScrollbarMarkers(markers);
+		scrollbarMarkers = p.scrollbarMarkers !== false;
+		applyScrollbarWidth(term);
+		search.setScrollbarMarkers(scrollbarMarkers);
 		// Bell audio handled by playBellSound() via onBell handler — not xterm.js
 		// bellStyle is not in the shipped @xterm/xterm type definition; cast to suppress
 		(term.options as Record<string, unknown>).bellStyle = "none";

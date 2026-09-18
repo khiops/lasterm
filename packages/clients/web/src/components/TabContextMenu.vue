@@ -99,17 +99,17 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-	(e: "close"): void;
-	(e: "rename", channelId: string): void;
-	(e: "reset-title", channelId: string): void;
-	(e: "close-tab", index: number): void;
-	(e: "close-others", index: number): void;
-	(e: "close-to-right", index: number): void;
-	(e: "close-all"): void;
-	(e: "split-right", channelId: string): void;
-	(e: "split-down", channelId: string): void;
-	(e: "set-welcome", channelId: string): void;
-	(e: "configure-command", channelId: string): void;
+	close: [];
+	rename: [channelId: string];
+	"reset-title": [channelId: string];
+	"close-tab": [index: number];
+	"close-others": [index: number];
+	"close-to-right": [index: number];
+	"close-all": [];
+	"split-right": [channelId: string];
+	"split-down": [channelId: string];
+	"set-welcome": [channelId: string];
+	"configure-command": [channelId: string];
 }>();
 
 const menuEl = ref<HTMLElement | null>(null);

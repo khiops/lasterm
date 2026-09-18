@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.1](https://github.com/khiops/lasterm/compare/v0.10.0...v0.10.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **root:** collect hub candidates by glob, and strip jq's CR with tr ([#308](https://github.com/khiops/lasterm/issues/308)) ([7d51cfb](https://github.com/khiops/lasterm/commit/7d51cfb24dea6030d8ac68fddf51f678d56a956e))
+* **root:** make the hub resolver's failure diagnosable from its own run ([#307](https://github.com/khiops/lasterm/issues/307)) ([f840df5](https://github.com/khiops/lasterm/commit/f840df5432355223c223e06db1410367fce5f144))
+* **root:** strip the CR jq leaves on the Windows runner's pattern lists ([#305](https://github.com/khiops/lasterm/issues/305)) ([5a927bd](https://github.com/khiops/lasterm/commit/5a927bd462b7f9ee9cfb4acdbccc282f44680e4c))
+
 ## [0.10.0](https://github.com/khiops/lasterm/compare/v0.9.1...v0.10.0) (2026-09-18)
 
 

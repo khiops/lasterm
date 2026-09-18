@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import path, { join, resolve } from "node:path";
 import type { SshKeyEntry } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import ssh2 from "ssh2";
@@ -84,13 +84,27 @@ function buildKeyEntry(name: string, filePath: string): SshKeyEntry | null {
 	return { name, type: "key", algorithm, bits, fingerprint, encrypted: false, mtime };
 }
 
-function containedPath(base: string, ...parts: string[]): string | null {
-	const resolvedBase = resolve(base);
-	const resolved = resolve(join(base, ...parts));
-	if (!resolved.startsWith(`${resolvedBase}/`) && resolved !== resolvedBase) {
+type PathApi = Pick<typeof path, "isAbsolute" | "join" | "relative" | "resolve" | "sep">;
+
+/**
+ * `parts` joined under `base`, or null when the result leaves `base`.
+ *
+ * Containment is read from `relative()`, not from a `${base}/` prefix: that
+ * prefix rejected every path on Windows, where `resolve()` returns backslashes
+ * (#309). `p` selects the platform's path rules, so both are testable anywhere.
+ */
+export function containedPathWith(p: PathApi, base: string, ...parts: string[]): string | null {
+	const resolvedBase = p.resolve(base);
+	const resolved = p.resolve(p.join(base, ...parts));
+	const rel = p.relative(resolvedBase, resolved);
+	if (rel === ".." || rel.startsWith(`..${p.sep}`) || p.isAbsolute(rel)) {
 		return null;
 	}
 	return resolved;
+}
+
+function containedPath(base: string, ...parts: string[]): string | null {
+	return containedPathWith(path, base, ...parts);
 }
 
 export function registerSshKeyRoutes(server: FastifyInstance, sshDir?: string): void {

@@ -327,12 +327,17 @@ struct PickedAgentFile {
 #[derive(Clone, Deserialize)]
 struct RuntimeInfo {
     pid: Option<u32>,
+    // `port` and `spki` are read only by the dev build, which alone trusts the
+    // record to find its hub (#183). The release build keeps them so a record is
+    // still parsed whole, a missing port included.
+    #[cfg_attr(not(dev), allow(dead_code))]
     port: u16,
     #[serde(rename = "instanceId")]
     instance_id: Option<String>,
     #[serde(rename = "ownerToken")]
     owner_token: Option<String>,
     /// Base64 DER SubjectPublicKeyInfo for the TLS listener named by `port`.
+    #[cfg_attr(not(dev), allow(dead_code))]
     spki: Option<String>,
 }
 
@@ -2620,7 +2625,8 @@ fn parse_listening_announcement(line: &str) -> Option<HubAnnouncement> {
     Some(HubAnnouncement { port, spki })
 }
 
-#[cfg_attr(dev, allow(dead_code))]
+/// Only the tests read the port on its own; the launch path keeps the SPKI too.
+#[cfg(test)]
 fn parse_listening_port(line: &str) -> Option<u16> {
     parse_listening_announcement(line).map(|announcement| announcement.port)
 }

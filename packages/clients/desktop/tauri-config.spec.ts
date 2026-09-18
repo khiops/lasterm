@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const DESKTOP_DIR = new URL(".", import.meta.url).pathname;
+const DESKTOP_DIR = fileURLToPath(new URL(".", import.meta.url));
 const SRC_TAURI = resolve(DESKTOP_DIR, "src-tauri");
 
 function readJson(relPath: string): unknown {

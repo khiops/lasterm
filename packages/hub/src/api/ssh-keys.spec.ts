@@ -352,7 +352,9 @@ describe("SSH key endpoints", () => {
 			expect(res.json().error.code).toBe("DUPLICATE");
 		});
 
-		it("sets file permissions to 0o600", async () => {
+		// Windows has no owner-only mode bits; stat reports 0o666 there whatever
+		// chmod asked for, so the property this test checks is POSIX-only.
+		it.skipIf(process.platform === "win32")("sets file permissions to 0o600", async () => {
 			const keyBuf = generateEd25519Key();
 			const { payload, headers } = buildMultipart("id_ed25519_perms", keyBuf);
 

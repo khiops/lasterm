@@ -42,7 +42,7 @@ catalog:
   "@xterm/addon-unicode11": "^0.8.0"
   "@rainbowatcher/toml-edit-js": "^0.6.5"
   esbuild: "^0.27.7"
-  file-type: "^21.3.4"
+  file-type: "^22.1.1"
   happy-dom: "^20.14.5"
   postject: "1.0.0-alpha.6"
   "@tauri-apps/api": "^2.11.1"

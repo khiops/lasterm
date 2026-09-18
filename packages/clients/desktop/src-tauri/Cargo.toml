@@ -29,7 +29,7 @@ rustls-webpki = "0.103"
 tokio = { version = "1", features = ["io-util", "macros", "net", "sync"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "connect"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-dirs = "6"
+dirs = "7"
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
 lasterm-process-lock = { path = "../../../../crates/lasterm-process-lock" }

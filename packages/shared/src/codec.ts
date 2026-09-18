@@ -65,7 +65,7 @@ export function toCamelCase(value: unknown, rawValue = false): unknown {
  * Encode a protocol message to MessagePack bytes.
  * Converts camelCase TypeScript fields → snake_case wire format.
  */
-export function encodeMessage(message: ProtocolMessage): Uint8Array {
+export function encodeMessage(message: ProtocolMessage): Uint8Array<ArrayBuffer> {
 	const wireObject = toSnakeCase(message);
 	return msgpackEncode(wireObject, { useBigInt64: false });
 }

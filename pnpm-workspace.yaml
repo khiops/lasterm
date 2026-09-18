@@ -12,7 +12,7 @@ overrides:
   "brace-expansion@^5.0.0": ">=5.0.6"
 
 catalog:
-  typescript: "~5.7.3"
+  typescript: "~6.0.3"
   "@biomejs/biome": "^2.5.14"
   vitest: "^4.1.11"
   "@msgpack/msgpack": "^3.1.3"

@@ -4923,6 +4923,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::PublicKeyData;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
@@ -5279,7 +5280,7 @@ mod tests {
         let directory = instance_test_dir("pin-restart");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
         let key_pair = rcgen::KeyPair::generate().unwrap();
-        let announced_spki = key_pair.public_key_der();
+        let announced_spki = key_pair.subject_public_key_info();
         let first_hub = TestTlsPeer::start(&key_pair);
         let first_port = first_hub.port;
 
@@ -5336,7 +5337,7 @@ mod tests {
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let peer = TestTlsPeer::start(&key_pair);
-        let announced_spki = key_pair.public_key_der();
+        let announced_spki = key_pair.subject_public_key_info();
 
         establish_hub_connection_at(&store_path, peer.port, &announced_spki).unwrap();
         peer.assert_http_request();
@@ -5359,7 +5360,7 @@ mod tests {
     fn unreachable_first_use_leaves_the_store_empty() {
         let directory = instance_test_dir("first-pin-unreachable");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
-        let announced_spki = rcgen::KeyPair::generate().unwrap().public_key_der();
+        let announced_spki = rcgen::KeyPair::generate().unwrap().subject_public_key_info();
 
         let error =
             establish_hub_connection_at(&store_path, unused_loopback_port(), &announced_spki)
@@ -5383,7 +5384,7 @@ mod tests {
         let error = establish_hub_connection_at(
             &store_path,
             peer.port,
-            &announced_key_pair.public_key_der(),
+            &announced_key_pair.subject_public_key_info(),
         )
         .unwrap_err();
 

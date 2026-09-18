@@ -87,7 +87,7 @@ impl ServerCertVerifier for SpkiPinVerifier {
 #[cfg(test)]
 mod tests {
     use super::SpkiPinVerifier;
-    use rcgen::{CertificateParams, KeyPair};
+    use rcgen::{CertificateParams, KeyPair, PublicKeyData};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ClientConfig, ServerConfig, ServerConnection, StreamOwned};
     use std::io::{Read, Write};
@@ -216,7 +216,7 @@ mod tests {
     fn pinned_spki_completes_reqwest_blocking_tls_request() {
         let key_pair = KeyPair::generate().expect("generate pinned key pair");
         let server = TestServer::start(certificate_for(&key_pair, false), key_pair.serialize_der());
-        let response = post_to(&server, &pinned_client(key_pair.public_key_der()))
+        let response = post_to(&server, &pinned_client(key_pair.subject_public_key_info()))
             .expect("the matching SPKI completes the blocking reqwest request");
 
         assert_eq!(response.as_bytes(), RESPONSE_BODY);
@@ -234,7 +234,7 @@ mod tests {
             std::process::id()
         ));
         let store_path = store_path.join("desktop-state").join("known_hubs.json");
-        let stored_pin = pinned_key.public_key_der();
+        let stored_pin = pinned_key.subject_public_key_info();
         let mut store = crate::HubPinStore::default();
         store.pins.insert(
             crate::LOOPBACK_HUB_PIN_KEY.to_string(),
@@ -265,7 +265,7 @@ mod tests {
     fn matching_spki_ignores_expiry_and_hostname() {
         let key_pair = KeyPair::generate().expect("generate pinned key pair");
         let server = TestServer::start(certificate_for(&key_pair, true), key_pair.serialize_der());
-        let response = post_to(&server, &pinned_client(key_pair.public_key_der()))
+        let response = post_to(&server, &pinned_client(key_pair.subject_public_key_info()))
             .expect("the matching SPKI ignores the expired wrong-hostname certificate");
 
         assert_eq!(response.as_bytes(), RESPONSE_BODY);

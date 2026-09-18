@@ -33,7 +33,7 @@ describe.sequential("hub startup lock", () => {
 		const stateRoot = makeStateDir();
 		const stateDir = path.join(stateRoot, "lasterm");
 		// A discovery record cannot authorize or veto serving; only this lock does.
-		mkdirSync(stateDir, { recursive: true });
+		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 		writeFileSync(path.join(stateDir, "runtime.json"), "{");
 		acquireHubLock(stateDir);
 		const listener = await listen();
@@ -178,7 +178,7 @@ describe.sequential("hub startup lock", () => {
 		const stateRoot = makeStateDir();
 		const stateDir = path.join(stateRoot, "lasterm");
 		const port = await unusedPort();
-		mkdirSync(stateDir, { recursive: true });
+		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 		writeFileSync(path.join(stateDir, "runtime.json"), "{");
 		const child = spawnMain({
 			...hermeticRootsEnv(stateRoot),

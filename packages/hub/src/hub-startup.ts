@@ -120,7 +120,7 @@ export async function startHub(
 	// attacker-chosen TLS paths from a directory the later check would refuse.
 	// initAuth keeps its own call for direct callers and to shorten the window.
 	checkConfigDirectoryPermissions(configDir);
-	mkdirSync(stateDir, { recursive: true });
+	createOwnerOnlyDirectory(stateDir);
 
 	let hubLogger: HubLogger | undefined;
 	let logConfig: ConfigResolver | undefined;

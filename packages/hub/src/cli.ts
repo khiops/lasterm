@@ -12,7 +12,6 @@ import {
 	copyFileSync,
 	existsSync,
 	fchmodSync,
-	mkdirSync,
 	openSync,
 	readFileSync,
 	renameSync,
@@ -24,6 +23,7 @@ import { request as httpsRequest } from "node:https";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { createOwnerOnlyDirectory } from "./auth.js";
 import {
 	buildDaemonSpawnPlan,
 	type ChildExitState,
@@ -74,6 +74,19 @@ export function getConfigDir(): string {
 	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
 }
 
+/**
+ * The state directory, created owner-only if this call is the first to need it.
+ * It holds the hub's TLS private key, whose writer refuses a parent that group
+ * or other can write. A plain `mkdirSync` leaves the mode to the umask, so under
+ * the common `umask 002` the directory arrived at 0775 and the hub then refused
+ * to start in it (#237).
+ */
+export function ensureStateDir(): string {
+	const stateDir = getStateDir();
+	createOwnerOnlyDirectory(stateDir);
+	return stateDir;
+}
+
 // ─── Runtime state ─────────────────────────────────────────────────────────────
 
 export interface RuntimeInfo {
@@ -107,8 +120,7 @@ export function loadRuntime(): RuntimeLoadResult {
 }
 
 export function persistRuntime(info: RuntimeInfo): void {
-	const stateDir = getStateDir();
-	mkdirSync(stateDir, { recursive: true });
+	const stateDir = ensureStateDir();
 	const runtimePath = join(stateDir, "runtime.json");
 	const tempPath = createRuntimeTempPath(runtimePath);
 	let fd: number | null = openSync(tempPath, "wx", 0o600);
@@ -784,8 +796,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	const port = args.port;
 
 	if (args.daemon) {
-		const stateDir = getStateDir();
-		mkdirSync(stateDir, { recursive: true });
+		const stateDir = ensureStateDir();
 		const logPath = join(stateDir, "hub-daemon.log");
 		const logFd = openDaemonLog(logPath);
 		const plan = buildDaemonSpawnPlan({

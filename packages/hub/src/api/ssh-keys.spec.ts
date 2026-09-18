@@ -350,7 +350,10 @@ describe("SSH key endpoints", () => {
 			const { payload, headers } = buildMultipart("id_ed25519_perms", keyBuf);
 
 			server = await makeServer();
-			await server.inject({ method: "POST", url: "/api/ssh-keys", headers, payload });
+			const res = await server.inject({ method: "POST", url: "/api/ssh-keys", headers, payload });
+			// A rejected upload otherwise surfaces as ENOENT on the stat below,
+			// which hides the route's own error code (#101).
+			expect(res.statusCode, res.body).toBe(200);
 
 			const info = await stat(join(sshDir, "id_ed25519_perms"));
 			// Check that only owner read/write bits are set (0o600)

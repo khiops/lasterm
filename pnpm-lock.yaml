@@ -264,8 +264,8 @@ catalogs:
       specifier: ^5.12.5
       version: 5.12.5
     file-type:
-      specifier: ^21.3.4
-      version: 21.3.4
+      specifier: ^22.1.1
+      version: 22.1.1
     happy-dom:
       specifier: ^20.14.5
       version: 20.14.5
@@ -477,7 +477,7 @@ importers:
         version: 5.12.5
       file-type:
         specifier: 'catalog:'
-        version: 21.3.4(supports-color@8.1.1)
+        version: 22.1.1(supports-color@8.1.1)
       ssh2:
         specifier: 'catalog:'
         version: 1.17.0
@@ -2277,9 +2277,9 @@ packages:
     resolution: {integrity: sha512-d+l3qxjSesT4V7v2fh+QnmFnUWv9lSpjarhShNTgBOfA0ttejbQUAlHLitbjkoRiDulW0OPoQPYIGhIC8ohejg==}
     engines: {node: '>=18'}
 
-  file-type@21.3.4:
-    resolution: {integrity: sha512-Ievi/yy8DS3ygGvT47PjSfdFoX+2isQueoYP1cntFW1JLYAuS4GD7NUPGg4zv2iZfV52uDyk5w5Z0TdpRS6Q1g==}
-    engines: {node: '>=20'}
+  file-type@22.1.1:
+    resolution: {integrity: sha512-sEB0oStmeLGtpmSAD88RDNuLsvhv4iC3u0lE25CUvfCULvj49xoQ3l3K525Vn+ZzsZ6DOLajQCV6RmhwwhqiJg==}
+    engines: {node: '>=22'}
 
   file-uri-to-path@1.0.0:
     resolution: {integrity: sha512-0Zt+s3L7Vf1biwWZ29aARiVYLx7iMGnEUl9x33fbB/j3jR81u/O2LbqK+Bm1CDSNDKVtJ/YjwY7TUd5SkeLQLw==}
@@ -5454,7 +5454,7 @@ snapshots:
     dependencies:
       is-unicode-supported: 2.1.0
 
-  file-type@21.3.4(supports-color@8.1.1):
+  file-type@22.1.1(supports-color@8.1.1):
     dependencies:
       '@tokenizer/inflate': 0.4.1(supports-color@8.1.1)
       strtok3: 10.3.5

@@ -578,14 +578,34 @@ jobs:
           HUB_PATTERN_LIST="$RUNNER_TEMP/hub-artifact-patterns"
           # These are the two distributable executable names. A prefix glob also
           # matches lasterm-hub.cjs, the required SEA input and not a deliverable.
-          # Enumerate the names rather than searching: GNU's depth-limit option is unavailable on macOS.
+          # `find -maxdepth` is a GNU extension the BSD find on macOS rejects.
+          #
+          # Read the directory and compare real filenames rather than testing
+          # each name: on the Windows runner `[ -f dist/sea/lasterm-hub ]`
+          # succeeds because MSYS resolves a bare name to its .exe, so a single
+          # built file produced two candidates and the extensionless one matched
+          # no declaration. A glob only ever yields names that exist.
           : > "$HUB_LIST"
-          for candidate in dist/sea/lasterm-hub dist/sea/lasterm-hub.exe; do
-            [ -f "$candidate" ] && printf '%s\0' "$candidate"
+          shopt -s nullglob
+          for candidate in dist/sea/*; do
+            case "${candidate##*/}" in
+              lasterm-hub|lasterm-hub.exe) printf '%s\0' "$candidate" ;;
+            esac
           done >> "$HUB_LIST"
+          shopt -u nullglob
+          # tr, not a bash suffix removal: jq on the Windows runner writes CRLF,
+          # and `${pattern%$'\r'}` in the reader was observed leaving the CR in
+          # place there. An external filter does not depend on how the runner's
+          # shell handles that escape.
+          #
+          # jq's own output is kept, because the failure path dumps it to show
+          # what arrived before this filter ran. Reading the filtered file there
+          # would prove nothing about the transport.
+          HUB_PATTERN_RAW="$RUNNER_TEMP/hub-artifact-patterns-raw"
           jq -r --arg triple "$TRIPLE" \
             '.targets[] | select(.enabled and .triple == $triple) | .artifacts.hub[]' \
-            .github/build-matrix.json > "$HUB_PATTERN_LIST"
+            .github/build-matrix.json > "$HUB_PATTERN_RAW"
+          tr -d '\r' < "$HUB_PATTERN_RAW" > "$HUB_PATTERN_LIST"
 
           HUB_SOURCES=()
           HUB_NAMES=()
@@ -596,12 +616,8 @@ jobs:
             HUB_NAMES+=("lasterm-hub-${TRIPLE}${ext}")
           done < "$HUB_LIST"
           HUB_PATTERNS=()
-          # Strip a trailing CR: the jq on the Windows runner opens stdout in
-          # text mode and writes CRLF, so `read` hands back a pattern ending in
-          # CR and every comparison below fails. The matrix validator rejects
-          # control characters in a declaration, so this can only be the line
-          # ending, never part of a declared pattern.
-          while IFS= read -r pattern; do HUB_PATTERNS+=("${pattern%$'\r'}"); done < "$HUB_PATTERN_LIST"
+          # Already CR-free: tr normalised jq's output above.
+          while IFS= read -r pattern; do HUB_PATTERNS+=("$pattern"); done < "$HUB_PATTERN_LIST"
           pattern_matches() {
             # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
             [[ "$1" == $2 ]]
@@ -655,16 +671,16 @@ jobs:
                   "$d" "$(LC_ALL=C; name="${HUB_NAMES[d]}"; echo "${#name}")" "${HUB_SOURCES[d]}"
                 printf '%s' "${HUB_NAMES[d]}" | od -c
               done
-              printf 'all declarations (%s), after the CR strip above:\n' "${#HUB_PATTERNS[@]}"
+              printf 'all declarations (%s), after tr removed the CR:\n' "${#HUB_PATTERNS[@]}"
               for ((d = 0; d < ${#HUB_PATTERNS[@]}; d++)); do
                 printf '  artifacts.hub[%s]:\n' "$d"
                 printf '%s' "${HUB_PATTERNS[d]}" | od -c
               done
-              # Labelled for the layer it comes from: jq on Windows writes CRLF,
-              # and the loop above strips that CR, so a `\r` here says nothing
-              # about what build-matrix.json declares.
-              printf 'jq output, before the CR strip:\n'
-              od -c "$HUB_PATTERN_LIST"
+              # Labelled for the layer it comes from: jq on Windows writes CRLF
+              # and tr removes it upstream, so a `\r` here is transport, not
+              # something build-matrix.json declares.
+              printf 'jq output, before tr:\n'
+              od -c "$HUB_PATTERN_RAW"
               printf 'dist/sea:\n'
               ls -la dist/sea || true
               exit 1
@@ -873,12 +889,12 @@ jobs:
           DESKTOP_PATTERN_LIST="$RUNNER_TEMP/desktop-artifact-patterns"
           jq -r --arg triple "$TRIPLE" \
             '.targets[] | select(.enabled and .triple == $triple) | .artifacts.desktop[]' \
-            .github/build-matrix.json > "$DESKTOP_PATTERN_LIST"
+            .github/build-matrix.json | tr -d '\r' > "$DESKTOP_PATTERN_LIST"
           BUNDLE_FILES=()
           while IFS= read -r -d '' path; do BUNDLE_FILES+=("$path"); done < "$BUNDLE_LIST"
           DESKTOP_PATTERNS=()
-          # Trailing CR, same reason as the hub collector: jq on Windows writes CRLF.
-          while IFS= read -r pattern; do DESKTOP_PATTERNS+=("${pattern%$'\r'}"); done < "$DESKTOP_PATTERN_LIST"
+          # Already CR-free: tr normalised jq's output above.
+          while IFS= read -r pattern; do DESKTOP_PATTERNS+=("$pattern"); done < "$DESKTOP_PATTERN_LIST"
           pattern_matches() {
             # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
             [[ "$1" == $2 ]]
@@ -945,12 +961,12 @@ jobs:
               -print0 > "$MSIX_LIST"
             jq -r --arg triple "$TRIPLE" \
               '.targets[] | select(.enabled and .triple == $triple) | .artifacts.msix[]?' \
-              .github/build-matrix.json > "$MSIX_PATTERN_LIST"
+              .github/build-matrix.json | tr -d '\r' > "$MSIX_PATTERN_LIST"
             MSIX_FILES=()
             while IFS= read -r -d '' path; do MSIX_FILES+=("$path"); done < "$MSIX_LIST"
             MSIX_PATTERNS=()
-            # Trailing CR, same reason as the hub collector: jq on Windows writes CRLF.
-            while IFS= read -r pattern; do MSIX_PATTERNS+=("${pattern%$'\r'}"); done < "$MSIX_PATTERN_LIST"
+            # Already CR-free: tr normalised jq's output above.
+            while IFS= read -r pattern; do MSIX_PATTERNS+=("$pattern"); done < "$MSIX_PATTERN_LIST"
             if [ "${#MSIX_PATTERNS[@]}" -eq 0 ]; then
               echo "::error::MSIX publication is enabled but target $TRIPLE has no artifacts.msix declaration"
               exit 1

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.3](https://github.com/khiops/lasterm/compare/v0.10.2...v0.10.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* **root:** fail the matrix job when the build matrix cannot be read ([#325](https://github.com/khiops/lasterm/issues/325)) ([88c2528](https://github.com/khiops/lasterm/commit/88c2528385e075fd7c1773171981d38f6834a170))
+* **root:** let release-please bump both Cargo.lock files ([#327](https://github.com/khiops/lasterm/issues/327)) ([5bc2c2d](https://github.com/khiops/lasterm/commit/5bc2c2de47fe3c08343224de97a660d1dc2b4cc3))
+* **root:** pass release builds through artifacts, and publish from one job ([#315](https://github.com/khiops/lasterm/issues/315)) ([6d5be40](https://github.com/khiops/lasterm/commit/6d5be40e50ad56ea2b78e3d1967ce9a3aee893d4))
+
+
+### CI/CD
+
+* remove cleanup-caches.yml ([#328](https://github.com/khiops/lasterm/issues/328)) ([17d79df](https://github.com/khiops/lasterm/commit/17d79df78a741922b75cb69d6e80a661221a6c05))
+
 ## [0.10.2](https://github.com/khiops/lasterm/compare/v0.10.1...v0.10.2) (2026-09-18)
 
 

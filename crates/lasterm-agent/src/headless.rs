@@ -1,9 +1,26 @@
 use std::time::Instant;
 
+/// Receives the window title. vt100 reports it through callbacks rather than
+/// keeping it on the screen; OSC 0 and OSC 2 both arrive here.
+#[derive(Default)]
+struct TitleCallbacks {
+    title: String,
+}
+
+impl vt100::Callbacks for TitleCallbacks {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        // A title that is not UTF-8 is ignored, as vt100 did before it moved
+        // titles to callbacks.
+        if let Ok(title) = std::str::from_utf8(title) {
+            self.title = title.to_string();
+        }
+    }
+}
+
 /// Terminal state mirror backed by vt100::Parser.
 /// Tracks screen content, cursor, title, bell, and notifications.
 pub struct HeadlessMirror {
-    parser: vt100::Parser,
+    parser: vt100::Parser<TitleCallbacks>,
     current_title: String,
     last_bell: Option<Instant>,
     last_notification: Option<Instant>,
@@ -20,7 +37,8 @@ impl HeadlessMirror {
     /// Create a new headless terminal mirror.
     /// scrollback: number of scrollback lines (default 1000)
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
-        let parser = vt100::Parser::new(rows, cols, scrollback);
+        let parser =
+            vt100::Parser::new_with_callbacks(rows, cols, scrollback, TitleCallbacks::default());
         Self {
             parser,
             current_title: String::new(),
@@ -39,10 +57,10 @@ impl HeadlessMirror {
         self.parser.process(data);
 
         // Check for title change (OSC 0/2)
-        let new_title = self.parser.screen().title().to_string();
-        if new_title != self.current_title {
+        let new_title = &self.parser.callbacks().title;
+        if *new_title != self.current_title {
             self.current_title = new_title.clone();
-            self.pending_title_change = Some(new_title);
+            self.pending_title_change = Some(new_title.clone());
         }
 
         // Check for bell.
@@ -82,7 +100,7 @@ impl HeadlessMirror {
 
     /// Resize the terminal mirror.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.parser.set_size(rows, cols);
+        self.parser.screen_mut().set_size(rows, cols);
     }
 
     /// Produce a snapshot of the current terminal state.
@@ -206,6 +224,24 @@ mod tests {
         mirror.process(b"\x1b]2;Window Title\x07");
         let title = mirror.take_title_change();
         assert_eq!(title, Some("Window Title".to_string()));
+    }
+
+    #[test]
+    fn test_same_title_again_is_not_a_change() {
+        let mut mirror = HeadlessMirror::new(80, 24, 1000);
+        mirror.process(b"\x1b]2;Build\x07");
+        assert_eq!(mirror.take_title_change(), Some("Build".to_string()));
+        mirror.process(b"\x1b]2;Build\x07");
+        assert_eq!(mirror.take_title_change(), None);
+    }
+
+    #[test]
+    fn test_title_not_utf8_is_ignored() {
+        let mut mirror = HeadlessMirror::new(80, 24, 1000);
+        mirror.process(b"\x1b]2;Kept\x07");
+        assert_eq!(mirror.take_title_change(), Some("Kept".to_string()));
+        mirror.process(b"\x1b]2;\xff\xfe\x07");
+        assert_eq!(mirror.take_title_change(), None);
     }
 
     #[test]

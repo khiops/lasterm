@@ -227,7 +227,7 @@ impl PtyManager {
             }
         }
 
-        let id = channel_id.unwrap_or_else(|| ulid::Ulid::new().to_string().to_lowercase());
+        let id = channel_id.unwrap_or_else(|| ulid::Ulid::generate().to_string().to_lowercase());
 
         let mut cmd = CommandBuilder::new(shell);
         for arg in args {
@@ -694,7 +694,7 @@ mod tests {
             std::env::temp_dir().join(format!(
                 "lasterm-agent-tree-teardown-{}-{}.pid",
                 std::process::id(),
-                ulid::Ulid::new()
+                ulid::Ulid::generate()
             ))
         }
 

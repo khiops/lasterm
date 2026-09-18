@@ -251,7 +251,7 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
     let temporary = parent.join(format!(
         ".{}-{}.tmp",
         path.file_name().unwrap().to_string_lossy(),
-        ulid::Ulid::new()
+        ulid::Ulid::generate()
     ));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -962,7 +962,7 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("lasterm-identity-test-{}", ulid::Ulid::new()));
+            std::env::temp_dir().join(format!("lasterm-identity-test-{}", ulid::Ulid::generate()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -982,7 +982,7 @@ mod tests {
     }
 
     fn test_socket(label: &str) -> String {
-        socket_identity(&format!("identity-test-{label}-{}", ulid::Ulid::new()))
+        socket_identity(&format!("identity-test-{label}-{}", ulid::Ulid::generate()))
     }
 
     #[test]

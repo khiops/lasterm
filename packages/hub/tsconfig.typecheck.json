@@ -2,9 +2,9 @@
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
 		"noEmit": true,
-		"baseUrl": "../..",
+		"types": ["node"],
 		"paths": {
-			"fastify": ["packages/hub/node_modules/fastify/fastify.d.ts"]
+			"fastify": ["./node_modules/fastify/fastify.d.ts"]
 		}
 	},
 	// #206: keep this deliberately narrow until the 198 pre-existing strict test-code

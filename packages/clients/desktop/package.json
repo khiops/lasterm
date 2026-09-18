@@ -1,6 +1,6 @@
 {
 	"name": "@lasterm/desktop",
-	"version": "0.10.1",
+	"version": "0.10.2",
 	"private": true,
 	"description": "Lasterm desktop app (Tauri v2)",
 	"license": "AGPL-3.0-only",

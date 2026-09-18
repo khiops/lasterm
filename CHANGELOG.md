@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/khiops/lasterm/compare/v0.10.1...v0.10.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* **hub:** accept SSH key paths on a Windows hub ([#311](https://github.com/khiops/lasterm/issues/311)) ([8b70679](https://github.com/khiops/lasterm/commit/8b706791ff18a2ee61795aefbce3033df8f34177))
+
 ## [0.10.1](https://github.com/khiops/lasterm/compare/v0.10.0...v0.10.1) (2026-09-18)
 
 

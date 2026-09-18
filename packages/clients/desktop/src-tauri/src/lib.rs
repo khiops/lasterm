@@ -6677,7 +6677,8 @@ mod tests {
 
     #[test]
     fn failed_upload_chunk_releases_its_slot() {
-        let before = hub_uploads().lock().unwrap().len();
+        // hub_uploads() is process-wide and sibling tests run on other threads,
+        // so the assertion is on this upload's own id, never on the map's size.
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
@@ -6688,9 +6689,8 @@ mod tests {
             .insert(id, test_upload(sender, response, id));
 
         assert!(send_hub_upload_chunk(id, vec![1]).is_err());
-        let after = hub_uploads().lock().unwrap().len();
-        assert_eq!(
-            before, after,
+        assert!(
+            !hub_uploads().lock().unwrap().contains_key(&id),
             "a rejected chunk must release its upload slot"
         );
     }
@@ -6907,7 +6907,6 @@ mod tests {
 
     #[test]
     fn stalled_upload_expiry_releases_its_pipe() {
-        let before = hub_uploads().lock().unwrap().len();
         let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel(1);
         let (_response_sender, response) = mpsc::channel();
@@ -6917,7 +6916,7 @@ mod tests {
             .insert(id, test_upload(sender, response, id));
 
         expire_hub_upload(id);
-        assert_eq!(hub_uploads().lock().unwrap().len(), before);
+        assert!(!hub_uploads().lock().unwrap().contains_key(&id));
         assert!(matches!(receiver.try_recv(), Ok(HubUploadFrame::Aborted)));
     }
 

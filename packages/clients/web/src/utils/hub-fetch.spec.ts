@@ -148,7 +148,10 @@ describe("hubFetch desktop transport", () => {
 			relayed.set(chunk, offset);
 			offset += chunk.byteLength;
 		}
-		expect(relayed).toEqual(body);
+		// toEqual walks 786 KiB element by element through vitest's generic
+		// equality, which alone took over a second; the first differing offset
+		// says as much when the bytes disagree.
+		expect(relayed.findIndex((byte, index) => byte !== body[index])).toBe(-1);
 		expect(invoke).not.toHaveBeenCalledWith("relay_hub_request", expect.anything(), undefined);
 	});
 

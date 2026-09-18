@@ -596,7 +596,12 @@ jobs:
             HUB_NAMES+=("lasterm-hub-${TRIPLE}${ext}")
           done < "$HUB_LIST"
           HUB_PATTERNS=()
-          while IFS= read -r pattern; do HUB_PATTERNS+=("$pattern"); done < "$HUB_PATTERN_LIST"
+          # Strip a trailing CR: the jq on the Windows runner opens stdout in
+          # text mode and writes CRLF, so `read` hands back a pattern ending in
+          # CR and every comparison below fails. The matrix validator rejects
+          # control characters in a declaration, so this can only be the line
+          # ending, never part of a declared pattern.
+          while IFS= read -r pattern; do HUB_PATTERNS+=("${pattern%$'\r'}"); done < "$HUB_PATTERN_LIST"
           pattern_matches() {
             # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
             [[ "$1" == $2 ]]
@@ -825,7 +830,8 @@ jobs:
           BUNDLE_FILES=()
           while IFS= read -r -d '' path; do BUNDLE_FILES+=("$path"); done < "$BUNDLE_LIST"
           DESKTOP_PATTERNS=()
-          while IFS= read -r pattern; do DESKTOP_PATTERNS+=("$pattern"); done < "$DESKTOP_PATTERN_LIST"
+          # Trailing CR, same reason as the hub collector: jq on Windows writes CRLF.
+          while IFS= read -r pattern; do DESKTOP_PATTERNS+=("${pattern%$'\r'}"); done < "$DESKTOP_PATTERN_LIST"
           pattern_matches() {
             # shellcheck disable=SC2053 # Matrix declarations are intentionally shell glob patterns.
             [[ "$1" == $2 ]]
@@ -896,7 +902,8 @@ jobs:
             MSIX_FILES=()
             while IFS= read -r -d '' path; do MSIX_FILES+=("$path"); done < "$MSIX_LIST"
             MSIX_PATTERNS=()
-            while IFS= read -r pattern; do MSIX_PATTERNS+=("$pattern"); done < "$MSIX_PATTERN_LIST"
+            # Trailing CR, same reason as the hub collector: jq on Windows writes CRLF.
+            while IFS= read -r pattern; do MSIX_PATTERNS+=("${pattern%$'\r'}"); done < "$MSIX_PATTERN_LIST"
             if [ "${#MSIX_PATTERNS[@]}" -eq 0 ]; then
               echo "::error::MSIX publication is enabled but target $TRIPLE has no artifacts.msix declaration"
               exit 1

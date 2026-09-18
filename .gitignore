@@ -61,3 +61,6 @@ packages/hub/static/index.html
 sea-config.json
 .workflow-state.*.json
 .superpowers/
+
+# Output of packages/clients/desktop/msix/pack-msix.ps1
+packages/clients/desktop/msix/out/

@@ -39,7 +39,10 @@ Copy-Item "$env:LASTERM_DIST_DIR\lasterm-hub.exe" "$tauriDir\lasterm-hub-$triple
 Write-Host "  → Sidecars placed in src-tauri/" -ForegroundColor DarkGray
 
 Set-Location $Root
-pnpm -F @lasterm/desktop tauri build --config '{\"build\":{\"beforeBuildCommand\":\"\"}}'
+# The override travels as a file, relative to the package pnpm runs in. As an
+# inline JSON string it reached tauri intact through a .cmd pnpm launcher and
+# with literal backslashes through an .exe one (Volta), so it failed to parse.
+pnpm -F @lasterm/desktop tauri build --config tauri.prebuilt-frontend.json
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
 
 Write-Host ""

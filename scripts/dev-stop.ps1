@@ -30,12 +30,10 @@ function Stop-Hub {
         $proc = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
         if ($proc) {
             Write-Host "Stopping dev servers (PID $savedPid)..." -ForegroundColor DarkGray
-            # Kill the process tree
-            $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $savedPid" -ErrorAction SilentlyContinue
-            foreach ($child in $children) {
-                Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
-            }
-            Stop-Process -Id $savedPid -Force -ErrorAction SilentlyContinue
+            # The whole tree, not one level: pnpm -> concurrently -> pnpm -F ->
+            # tsx watch -> node is five deep, and stopping direct children only
+            # left the hub and its watcher running with no parent.
+            taskkill /PID $savedPid /T /F *> $null
             Write-Host "Stopped."
         } else {
             Write-Host "Process $savedPid already dead." -ForegroundColor DarkGray

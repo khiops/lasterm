@@ -62,14 +62,14 @@
 | Threat | Vector | Impact | Likelihood | Mitigation |
 |--------|--------|--------|------------|------------|
 | Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
-| Token theft | Read auth.json | HIGH — full access | LOW on a current install, where the hub creates auth.json 0600 and its directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one whose permissions were widened by hand | chmod 600, and on Unix the hub refuses to start when the file is group- or world-readable or writable. Windows is not checked: both checks return before doing anything there, and the ACL validation that would replace them is #200 |
-| Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a current install, where the hub creates the directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one widened by hand | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix both the desktop and the hub now refuse a directory group or other can write, before reading a token from it and before writing one into it, and the hub also refuses a directory it does not own. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL, and the hub's check returns immediately there — #200 |
+| Token theft | Read auth.json | HIGH — full access | LOW on a current install, where the hub creates auth.json 0600 and its directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one whose permissions were widened by hand | chmod 600, and on Unix the hub refuses to start when the file is group- or world-readable or writable. Windows is not checked: both checks return before doing anything there, and the file relies on the profile's default ACL; a DACL check was judged not worth its cost (#200) |
+| Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a current install, where the hub creates the directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one widened by hand | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix both the desktop and the hub now refuse a directory group or other can write, before reading a token from it and before writing one into it, and the hub also refuses a directory it does not own. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL, and the hub's check returns immediately there, which relies on the profile's default ACL (#200) |
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
-| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#199)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until #199, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
+| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 | Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
 
 ## 2. Authentication
@@ -82,7 +82,8 @@
 2. Encode as hex string (64 chars)
 3. Write to $LASTERM_CONFIG_DIR/auth.json: { "token": "<hex>" }
 4. Set file permissions: chmod 600 (Linux/macOS). On Windows the file inherits the
-   profile's ACL and nothing here sets or checks one — #200
+   profile's ACL and nothing here sets or checks one; the profile's default ACL is
+   relied on (#200)
 ```
 
 **Token validation:**
@@ -92,8 +93,8 @@
 
 **Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
 clients to re-authenticate. Replacing it today means stopping the hub, removing `auth.json`, and
-starting again, which invalidates every browser pairing. A supported rotation is tracked in **#199**
-alongside the TLS key's.
+starting again, which invalidates every browser pairing. No issue tracks a token rotation; replacing
+the TLS key is part of **#193**.
 
 ### 2.2 Startup Security Check
 
@@ -101,7 +102,7 @@ On every hub start:
 
 ```
 The permission checks below — items 1 to 3 — are Unix-only: each returns immediately on
-Windows, where the equivalent ACL validation is #200. The token-format check in item 4
+Windows, which relies on the profile's default ACL (#200). The token-format check in item 4
 runs everywhere.
 
 1. Check the configuration directory holding auth.json, before reading a token from it
@@ -121,7 +122,8 @@ runs everywhere.
    - Nothing inspects the state directory holding meta.db and spool.db. The hub's
      only permission checks are the two above, both in `auth.ts`
    - Expected once it exists: 0700 (drwx------)
-   - #200
+   - The hub creates that directory 0700 wherever it first makes it (#352), but does not
+     inspect one that already exists
 
 4. Verify auth.json contains valid token (64 lowercase hex characters, as the hub generates)
    - If missing: generate one
@@ -138,12 +140,12 @@ runs everywhere.
 ```
 Device A (has token):
   $ lasterm pair
-  Pairing code: 847293
+  Pairing code: 84729316
   Expires in 60 seconds.
   Enter this code on the other device.
 ```
 
-Remote-device pairing is not delivered in this branch (#183). The hub remains
+Remote-device pairing is not delivered (#193). The hub remains
 loopback-only; do not open a LAN port or direct another device to a hub URL.
 
 ## 3. SSH Security
@@ -246,7 +248,7 @@ stored one is absent, unreadable, belonging to another key, expired or within se
 dated in the future, or no longer matching the shape a generated leaf must have.
 **That decision is taken when the hub starts, and not again while it runs** — a hub up for longer than
 its leaf's remaining validity serves an expired certificate until it is restarted, which browsers
-refuse and pinning clients do not care about (#199). A
+refuse and pinning clients do not care about (#193). A
 client pins the key, so a reissue costs it nothing; a browser that accepted the certificate is asked
 again, which is now roughly every two and a quarter years rather than every restart.
 
@@ -274,8 +276,9 @@ mean something else between the check and the read.
 A later operation on the same path descends again, and that is where the guarantee currently
 stops: a protected file's parent policy and its use can be established by two separate descents,
 so an actor with rename rights over an ancestor can replace it — with a different real directory,
-not a link — between them. #235 carries the repair, which is to hold one directory capability
-across a whole operation.
+not a link — between them. Holding one directory capability across a whole operation would close
+it. That actor already has rename rights over the user's own directories, so this is an accepted
+residual rather than planned work (#231, #235).
 
 Each ancestor must be readable as well as searchable: the walk opens directories, and no portable
 search-only descriptor exists.

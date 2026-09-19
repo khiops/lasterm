@@ -68,8 +68,8 @@ export function hashToken(token: string): string {
 
 /**
  * Check file permissions on auth.json.
- * Skipped on Windows because this needs an ACL check; #200's Windows half is
- * not in this change.
+ * Skipped on Windows, where the file relies on the profile's default ACL: a DACL
+ * check was judged not worth its cost (#200).
  */
 /**
  * Single-quote a path for a shell command a reader is meant to paste. Same form

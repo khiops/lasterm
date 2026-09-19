@@ -2637,7 +2637,7 @@ fn parse_listening_port(line: &str) -> Option<u16> {
 // are reused, another user's process answers the same probe, and the Windows probe
 // answers "alive" when it cannot tell — correct for the quit path it was written
 // for, inverted here. Attaching to a hub this process did not launch needs that hub
-// to prove it holds the record's `ownerToken`, and no endpoint offers that yet: #183.
+// to prove it holds the record's `ownerToken`, and no endpoint offers that yet: #188.
 
 #[tauri::command]
 fn get_hub_auth_token() -> Result<Option<String>, String> {
@@ -4716,11 +4716,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 // the same probe, and the Windows probe deliberately answers "alive"
                 // when it cannot tell, which is right for the quit path that owns it
                 // and wrong here. Attaching safely needs the hub to prove it holds the
-                // record's `ownerToken`, which no endpoint offers yet: #183.
+                // record's `ownerToken`, which no endpoint offers yet: #188.
                 show_startup_failure_then_exit(
                     app.handle().clone(),
                     "A hub of this user is already running. Lasterm will not attach to it \
-                     yet (#183): stop that hub, or open its address in a browser."
+                     yet (#188): stop that hub, or open its address in a browser."
                         .to_string(),
                 );
                 return Ok(());

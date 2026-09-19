@@ -405,8 +405,8 @@ jobs:
       # Version-SHAPED, not semver-valid, and not checked against anything here.
       # The question is whether the bundle reached its entry point and reported;
       # digits-and-dots answers it. That the version is the right one is
-      # release.yml's check against the tag, and what the artefacts actually
-      # contain is #155.
+      # release.yml's check against the tag. Every hub row builds its own Node
+      # into its artefact; with one hub target that is one Node per tag (#155).
       #
       # Gated on the shell alone, so every hub row runs one of the two. Every hub
       # target in .github/build-matrix.json is native to its runner, and a condition

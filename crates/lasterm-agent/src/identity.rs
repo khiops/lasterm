@@ -185,7 +185,8 @@ pub(crate) fn write_live_record(state_dir: &Path, record: &IdentityRecord) -> io
 /// owner may unlink it, unlike a plain writable directory. This is a guard,
 /// not a boundary: before the daemon publishes, an attacker can still create
 /// the predictable record filename, leaving a reader to encounter a record
-/// the daemon never wrote. #121 owns the full treatment.
+/// the daemon never wrote. An owner check on the open handle would close that,
+/// and only matters once local users are a trust boundary (#121).
 #[cfg(unix)]
 pub(crate) fn ensure_private_state_dir(state_dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;

@@ -20,8 +20,8 @@ import { PlatformDirError, platformBaseDir } from "@lasterm/shared/dist/platform
 //   It cannot make the old generation participate. The old executable knows
 //   nothing about this namespace, so it can still be launched afterwards, and a
 //   previous installation living under an environment this process was not given
-//   is not visible to it. Those are properties of the old binary, not gaps here;
-//   #168 and #169 track them.
+//   is not visible to it. Those are properties of the old binary, not gaps here,
+//   and nothing will lift them (#168, #169).
 //
 // Nothing is read, copied or deleted beyond the runtime record: the old
 // directories are named and left alone, because they hold hosts, profile data

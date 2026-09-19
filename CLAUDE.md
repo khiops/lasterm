@@ -104,12 +104,15 @@ cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
 pnpm -F @lasterm/hub test # or: pnpm test
 ```
 
-### Production build & run (local, Linux/macOS native)
+### Production build & run (local, Linux native)
+
+macOS is not a supported target: nothing builds or tests it (#224). On Windows, use
+`scripts/build-hub.ps1` and `scripts/build-desktop.ps1`.
 
 ```bash
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent (cargo --release)
 ./scripts/build-hub.sh     # Hub SEA (builds+embeds web, bundles better-sqlite3) → dist/sea/lasterm-hub
-cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at http://127.0.0.1:4100 (--daemon/--open)
+cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.1:4100 (--daemon/--open)
 ./lasterm-hub pair         # 8-digit code to authorise a browser client; also: status | stop
 ```
 
@@ -216,11 +219,11 @@ Workspace (layout persistence)
 3.5. Agent visual hints (from HELLO, ephemeral)
 4. `channels.profile_json` (per-channel, meta.db)
 
-**Port:** default 4100, intended precedence CLI flag > `LASTERM_PORT` env > config.toml >
-default. **Only the flag and, on the `main.ts` entry point, the environment variable are
-actually read — `lasterm start` computes `args.port ?? 4100` and ignores both the variable
-and the configured value (#175).** Read that as the state of the code, not the design.
-`zero_conf` mode: auto-increment 4100→4199 if port taken, write `runtime.json` in state dir.
+**Port:** a CLI flag or `LASTERM_PORT` gives an explicit port; otherwise the OS assigns a free
+one, and the hub writes the port it took to `runtime.json` in the state dir (SPEC.md § 3).
+**`lasterm start` reads only the flag and ignores `LASTERM_PORT`, which only the `main.ts`
+entry point reads (#175).** An explicit port that is taken moves up to 99 ports higher
+(`zero_conf`).
 
 ## Common Pitfalls
 

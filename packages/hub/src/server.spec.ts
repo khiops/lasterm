@@ -47,6 +47,16 @@ describe("Hub Server", () => {
 		const response = await server.inject({ method: "GET", url: "/unknown" });
 		expect(response.statusCode).toBe(404);
 	});
+
+	it("lets a served page connect back to this hub only", async () => {
+		server = await createServer({ tls: getTestTls(), logger: false });
+		const response = await server.inject({ method: "GET", url: "/api/health" });
+		const policy = String(response.headers["content-security-policy"]);
+		const connectSrc = policy.split(";").find((d) => d.trim().startsWith("connect-src"));
+		// Mutation caught: the ws: and wss: scheme sources allowed a socket to any
+		// host; 'self' alone still covers the same-origin WebSocket (#210).
+		expect(connectSrc?.trim()).toBe("connect-src 'self'");
+	});
 });
 
 describe("Hub Server — Bearer auth", () => {

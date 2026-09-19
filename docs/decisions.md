@@ -454,7 +454,8 @@ The drag-and-drop mechanics below still hold.
 - closeAll accepts optional exceptWelcomeId for welcome tab protection (INV-06)
 - Vacant nodes carry unique id (generateId()) to distinguish multiple vacant slots in same tree
 - vacatePane replaces terminal node in-place with vacant (preserving split structure)
-- rearrangeVacant collapses parent split; does nothing if root vacant (INV-04: tab never auto-closes)
+- rearrangeVacant collapses parent split. A root vacant has no sibling: "Close Pane" on it closes the tab, as the tab's × does (#405). INV-04 still holds: that is the user closing the tab, never the tab closing on its own
+- The vacant picker offers only detached channels, shown in no pane of any tab (EFF-03); it offered every live channel of the host, which put the same terminal twice in one tab
 - onClosePane no longer kills terminals — INV-03 compliance (detach, never kill)
 - countPanes exported as standalone function for max-4-pane enforcement (INV-02)
 - Welcome tab: per-host, enforced via transaction (clears previous before setting new), migration 003

@@ -38,6 +38,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "catalog:",
+		"@types/node": "catalog:",
 		"concurrently": "catalog:",
 		"esbuild": "catalog:",
 		"happy-dom": "catalog:",

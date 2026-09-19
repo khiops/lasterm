@@ -318,6 +318,13 @@
 											: testResult.message
 									}}
 								</span>
+								<span
+									v-if="testResult?.ok && testPlatform"
+									class="test-platform"
+									:class="{ 'test-platform-warning': testPlatform.warning }"
+								>
+									{{ testPlatform.text }}
+								</span>
 							</div>
 						</div>
 
@@ -541,6 +548,7 @@ import { useHostsStore } from "../stores/hosts.js";
 import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
 import { iconImageFromFile, isDisplayableIconImage } from "../utils/host-icon.js";
+import { describeTestPlatform } from "../utils/test-connect-platform.js";
 import VisualProfileSettings from "./VisualProfileSettings.vue";
 import EmojiPicker from "./EmojiPicker.vue";
 import SshKeyPicker from "./SshKeyPicker.vue";
@@ -578,6 +586,11 @@ const {
 	save,
 	quickConnect,
 } = useHostForm(props.editHost ?? undefined);
+
+// What the first session on this host will need, from the connection test.
+const testPlatform = computed(() =>
+	testResult.value?.platform ? describeTestPlatform(testResult.value.platform) : null,
+);
 
 // Visual profile state — initialized from editHost.profileJson
 const visualProfile = ref<VisualProfile>((() => {
@@ -806,8 +819,19 @@ async function onSave(): Promise<void> {
 
 .field-test {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 10px;
+	gap: 4px 10px;
+}
+
+.test-platform {
+	flex-basis: 100%;
+	font-size: 12px;
+	color: var(--nt-fg-muted);
+}
+
+.test-platform-warning {
+	color: var(--nt-yellow, #e5c07b);
 }
 
 .form-row {

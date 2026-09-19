@@ -314,7 +314,14 @@
 						/>
 					</div>
 					<div v-if="layout.tabs.value.length === 0" class="pane-empty">
-						Select a channel or click + to open a terminal.
+						<!-- Selecting a host does not connect it: its first terminal does. -->
+						<template v-if="activeHostLabel !== null">
+							<button type="button" class="pane-empty-action" @click="onAddTab">
+								Open a terminal on {{ activeHostLabel }}
+							</button>
+							<span class="pane-empty-hint">or select one of its channels</span>
+						</template>
+						<template v-else>Select a channel or click + to open a terminal.</template>
 					</div>
 				</div>
 			</div>
@@ -1254,6 +1261,13 @@ async function onAuthenticated(): Promise<void> {
  * "+" button in the tab bar: open a pending tab whose TerminalPane
  * will handle the actual SPAWN with correct terminal dimensions.
  */
+/** The selected host's name, for the empty pane's "Open a terminal" button. */
+const activeHostLabel = computed(() => {
+	const hostId = channelsStore.activeHostId;
+	if (hostId === null) return null;
+	return hostsStore.hosts.find((host) => host.id === hostId)?.label ?? null;
+});
+
 function onAddTab(): void {
 	const hostId = channelsStore.activeHostId;
 	if (hostId === null) return;
@@ -1637,11 +1651,30 @@ body,
 .pane-empty {
 	flex: 1;
 	display: flex;
+	flex-direction: column;
+	gap: 8px;
 	align-items: center;
 	justify-content: center;
 	color: var(--nt-tab-hover);
 	font-size: 13px;
 	font-style: italic;
+}
+
+.pane-empty-action {
+	padding: 8px 16px;
+	font-size: 13px;
+	font-family: inherit;
+	font-style: normal;
+	font-weight: 600;
+	color: #fff;
+	background: var(--nt-accent);
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+.pane-empty-hint {
+	font-size: 12px;
 }
 
 body.lasterm-dragging * {

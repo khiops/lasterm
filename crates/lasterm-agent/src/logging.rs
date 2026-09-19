@@ -1,25 +1,20 @@
-/// Get the daemon log file path.
-/// Linux/macOS: $XDG_STATE_HOME/lasterm/logs/agent-daemon.jsonl
-/// Windows: %LOCALAPPDATA%\lasterm\logs\agent-daemon.jsonl
-pub fn daemon_log_path() -> std::path::PathBuf {
-    let state_dir = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("LOCALAPPDATA"))
-            .unwrap_or_else(|_| "/tmp".into());
-        #[cfg(windows)]
-        {
-            home
-        }
-        #[cfg(not(windows))]
-        {
-            format!("{}/.local/state", home)
-        }
-    });
-    let dir = std::path::PathBuf::from(state_dir)
-        .join("lasterm")
-        .join("logs");
-    std::fs::create_dir_all(&dir).ok();
-    dir.join("agent-daemon.jsonl")
+use std::path::{Path, PathBuf};
+
+use crate::platform_dirs::{lasterm_dir, DirKind};
+
+/// Get the daemon log file path, creating its directory:
+/// `<state>/logs/agent-daemon.jsonl`, in the state directory the hub uses
+/// (`$XDG_STATE_HOME/lasterm` or `~/.local/state/lasterm`, `%LOCALAPPDATA%\lasterm`).
+pub fn daemon_log_path() -> std::io::Result<PathBuf> {
+    let path = log_path_under(&lasterm_dir(DirKind::State)?);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    Ok(path)
+}
+
+fn log_path_under(state_dir: &Path) -> PathBuf {
+    state_dir.join("logs").join("agent-daemon.jsonl")
 }
 
 #[cfg(test)]
@@ -27,25 +22,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_log_path_returns_jsonl() {
-        let path = daemon_log_path();
-        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("jsonl"));
-        assert!(path.to_string_lossy().contains("lasterm"));
-        assert!(path.to_string_lossy().contains("logs"));
-        assert!(path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .starts_with("agent-daemon"));
-    }
-
-    #[test]
-    fn daemon_log_path_xdg_state_home_respected() {
-        // Override XDG_STATE_HOME for this test.
-        let tmp = std::env::temp_dir().join("lasterm-test-logging-state");
-        std::env::set_var("XDG_STATE_HOME", tmp.to_str().unwrap());
-        let path = daemon_log_path();
-        assert!(path.starts_with(&tmp));
-        std::env::remove_var("XDG_STATE_HOME");
+    fn the_daemon_log_is_a_jsonl_file_in_the_state_logs_directory() {
+        // Which state directory is platform_dirs' concern and tested there;
+        // resolving it here would read, and create inside, the real profile.
+        let state = PathBuf::from("state-root").join("lasterm");
+        assert_eq!(
+            log_path_under(&state),
+            state.join("logs").join("agent-daemon.jsonl")
+        );
     }
 }

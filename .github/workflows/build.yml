@@ -272,7 +272,7 @@ jobs:
           toolchain: stable
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
-      - run: cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
+      - run: cargo build --locked --release -p lasterm-hub-lock -p lasterm-tls-identity
       - run: pnpm test:run
 
   build-agent:
@@ -487,6 +487,14 @@ jobs:
           jq --arg v "$VERSION" '.version = $v' "$CONF" > "${CONF}.tmp" && mv "${CONF}.tmp" "$CONF"
           sed -i "0,/^version = .*/s//version = \"$VERSION\"/" "$CARGO"
           echo "Set desktop versions to $VERSION"
+      # `tauri build` resolves the lockfile itself and would silently rewrite a
+      # stale one (#180). Refuse instead. In a release the alignment above
+      # changes nothing, because release-please bumps the manifest and this lock
+      # together; if it ever did change the version, this fails rather than ship
+      # a build whose lock was regenerated on the runner.
+      - name: Check the desktop lockfile is current
+        shell: bash
+        run: cargo metadata --locked --format-version 1 --manifest-path packages/clients/desktop/src-tauri/Cargo.toml > /dev/null
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: agent-${{ matrix.triple }}

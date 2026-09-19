@@ -15,7 +15,7 @@ New-Item -ItemType Directory -Force -Path $env:LASTERM_DIST_DIR | Out-Null
 Set-Location $Root
 # Note: native build only (no --target). Cross-compilation would need --target.
 # LASTERM_TARGET_TRIPLE is used for artifact naming and CI metadata.
-cargo build -p lasterm-agent --release --target-dir $env:LASTERM_CARGO_TARGET_DIR
+cargo build --locked -p lasterm-agent --release --target-dir $env:LASTERM_CARGO_TARGET_DIR
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 $binary = "$env:LASTERM_CARGO_TARGET_DIR\release\lasterm-agent.exe"

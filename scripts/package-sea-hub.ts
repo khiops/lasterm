@@ -224,14 +224,21 @@ export function locateTlsIdentityAddon(): string {
 
 /**
  * Loading proves the file is a usable Node addon, which is the only packaging
- * check bytes cannot fake.
+ * check bytes cannot fake; its exports prove it is the hub lock and not some
+ * other addon at that path, as the TLS identity check already does.
  */
 export function loadHubLockAddon(addonPath: string): void {
+	const mod = { exports: {} as Record<string, unknown> };
 	try {
-		process.dlopen({ exports: {} }, addonPath);
+		process.dlopen(mod, addonPath);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(`[package-sea-hub] hub lock addon cannot be loaded: ${addonPath}: ${detail}`);
+	}
+	if (typeof mod.exports.HubLock !== "function" || typeof mod.exports.tryAcquire !== "function") {
+		throw new Error(
+			`[package-sea-hub] hub lock addon at ${addonPath} has no HubLock/tryAcquire export.`,
+		);
 	}
 }
 

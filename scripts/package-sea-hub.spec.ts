@@ -78,6 +78,21 @@ describe("loadHubLockAddon", () => {
 		// container; process.dlopen proves this exact file is loadable.
 		expect(() => loadHubLockAddon(addon)).toThrow("cannot be loaded");
 	});
+
+	it("refuses a loadable addon that is not the hub lock", async () => {
+		const { loadHubLockAddon } = await import("./package-sea-hub.js");
+		const tlsIdentity = join(
+			ROOT,
+			"target",
+			"release",
+			process.platform === "win32"
+				? "lasterm_tls_identity.dll"
+				: process.platform === "darwin"
+					? "liblasterm_tls_identity.dylib"
+					: "liblasterm_tls_identity.so",
+		);
+		expect(() => loadHubLockAddon(tlsIdentity)).toThrow("no HubLock/tryAcquire export");
+	});
 });
 
 describe("assertNativeHubTarget", () => {

@@ -2,6 +2,9 @@
 import { ref, onMounted, onUnmounted } from "vue";
 
 const BUILD_HASH: string = import.meta.env.VITE_BUILD_HASH ?? "dev";
+const APP_VERSION: string | undefined = import.meta.env.VITE_APP_VERSION;
+/** The release first, then the commit it was built from: "v0.11.0 · 61f859e". */
+const BUILD_LABEL = APP_VERSION ? `v${APP_VERSION} · ${BUILD_HASH}` : BUILD_HASH;
 
 const isTauri = ref(false);
 const isMaximized = ref(false);
@@ -56,7 +59,7 @@ onUnmounted(() => {
 				<text x="570" y="600" font-family="monospace" font-weight="bold" font-size="260" fill="#a0e8af">_</text>
 			</svg>
 			<span class="titlebar-title">Lasterm</span>
-			<span class="titlebar-build">{{ BUILD_HASH }}</span>
+			<span class="titlebar-build">{{ BUILD_LABEL }}</span>
 		</div>
 
 		<!-- Buttons: separate from drag region, no interference -->

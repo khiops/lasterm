@@ -896,7 +896,19 @@ function onDragEnd(): void {
 	font-size: 13px;
 	color: var(--nt-text-secondary);
 	pointer-events: none;
-	z-index: 1;
+	/* Above .terminal-container (2) and .tint-overlay (3): below them, the
+	   terminal's own background hid every message a pane had to give. */
+	z-index: 4;
+}
+
+/* The pane keeps whatever the terminal already showed, so the message needs a
+   ground of its own to be read over it. */
+.terminal-loading span,
+.terminal-error span {
+	padding: 6px 12px;
+	border-radius: 6px;
+	background: var(--nt-bg);
+	border: 1px solid var(--nt-border);
 }
 
 .terminal-error {

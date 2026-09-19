@@ -2146,7 +2146,7 @@ fn record_or_match_hub_pin_after_proof_at(
         }
         if stored != presented_spki {
             return Err(format!(
-                "Hub identity changed for {identity}; refusing to send credentials. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again."
+                "Hub identity changed for {identity}; refusing to send credentials. Stop the hub, verify its replacement, quit Lasterm, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again."
             ));
         }
         return Ok(stored);
@@ -2268,7 +2268,7 @@ fn existing_hub_pin_at(path: &Path, identity: &str) -> Result<Option<Vec<u8>>, S
 fn match_existing_hub_pin(stored_spki: Vec<u8>, presented_spki: &[u8]) -> Result<Vec<u8>, String> {
     if stored_spki != presented_spki {
         return Err(format!(
-            "Hub identity changed for {LOOPBACK_HUB_PIN_KEY}; refusing to send credentials. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again."
+            "Hub identity changed for {LOOPBACK_HUB_PIN_KEY}; refusing to send credentials. Stop the hub, verify its replacement, quit Lasterm, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again."
         ));
     }
     Ok(stored_spki)
@@ -2487,12 +2487,33 @@ fn create_then_fill(
 }
 
 fn reset_loopback_hub_pin() -> Result<(), String> {
-    let path = hub_pin_store_path()?;
-    let mut store = load_hub_pin_store(&path)?;
+    reset_loopback_hub_pin_at(&desktop_instance_lock_path()?, &hub_pin_store_path()?)
+}
+
+/// Removes the pin while holding the desktop's single-instance lock (#230).
+///
+/// A running desktop keeps its connection and the pin in memory, so rewriting the
+/// store under it would revoke nothing; and a desktop starting during the rewrite
+/// could read a half-updated store. Holding the lock refuses the first case and
+/// makes the second wait, so a reset that succeeds leaves no process trusting the
+/// old key.
+fn reset_loopback_hub_pin_at(lock_path: &Path, store_path: &Path) -> Result<(), String> {
+    let _instance = ProcessLock::try_acquire(lock_path)
+        .map_err(|error| {
+            format!(
+                "cannot acquire desktop lock {}: {error}",
+                lock_path.display()
+            )
+        })?
+        .ok_or_else(|| {
+            "Lasterm is running. Quit it, including from the tray, then reset the pin again."
+                .to_string()
+        })?;
+    let mut store = load_hub_pin_store(store_path)?;
     if store.pins.remove(LOOPBACK_HUB_PIN_KEY).is_none() {
         return Err("there is no stored loopback hub pin to reset".to_string());
     }
-    write_hub_pin_store(&path, &store)
+    write_hub_pin_store(store_path, &store)
 }
 
 /// Print the recovery result and return the process status used by the command.
@@ -2864,7 +2885,7 @@ fn prove_announced_hub_key(client: &reqwest::blocking::Client, port: u16) -> Res
         .map(|_| ())
         .map_err(|error| {
             if tls_peer_presented_another_key(&error) {
-                "The announced hub peer presented another TLS key; refusing to trust it. Stop the hub, verify its replacement, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again.".to_string()
+                "The announced hub peer presented another TLS key; refusing to trust it. Stop the hub, verify its replacement, quit Lasterm, then run `lasterm-desktop --reset-hub-pin` and start Lasterm again.".to_string()
             } else {
                 format!(
                     "The announced hub peer could not be reached to prove its TLS key: {}",
@@ -5072,6 +5093,46 @@ mod tests {
         assert_eq!(
             report_reset_hub_pin_result(Err("store is unreadable".to_string())),
             1
+        );
+    }
+
+    #[test]
+    fn resetting_the_pin_refuses_while_a_desktop_holds_the_instance_lock() {
+        let dir = instance_test_dir("reset-pin-running");
+        let lock_path = dir.join("desktop.lock");
+        let store_path = dir.join("desktop-state").join(HUB_PIN_STORE_FILE);
+        record_or_match_hub_pin_after_proof_at(&store_path, LOOPBACK_HUB_PIN_KEY, &[7; 32])
+            .unwrap();
+        let running = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+
+        let error = reset_loopback_hub_pin_at(&lock_path, &store_path).unwrap_err();
+
+        assert!(error.contains("Lasterm is running"), "{error}");
+        assert_eq!(
+            existing_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY).unwrap(),
+            Some(vec![7; 32]),
+            "a refused reset leaves the store as it was"
+        );
+        drop(running);
+    }
+
+    #[test]
+    fn resetting_the_pin_removes_it_and_releases_the_instance_lock() {
+        let dir = instance_test_dir("reset-pin-idle");
+        let lock_path = dir.join("desktop.lock");
+        let store_path = dir.join("desktop-state").join(HUB_PIN_STORE_FILE);
+        record_or_match_hub_pin_after_proof_at(&store_path, LOOPBACK_HUB_PIN_KEY, &[7; 32])
+            .unwrap();
+
+        reset_loopback_hub_pin_at(&lock_path, &store_path).unwrap();
+
+        assert_eq!(
+            existing_hub_pin_at(&store_path, LOOPBACK_HUB_PIN_KEY).unwrap(),
+            None
+        );
+        assert!(
+            ProcessLock::try_acquire(&lock_path).unwrap().is_some(),
+            "the next desktop can start once the reset is done"
         );
     }
 

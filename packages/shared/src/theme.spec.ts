@@ -85,7 +85,9 @@ describe("validateTheme", () => {
 
 	it("rejects missing required color field with specific error", () => {
 		const theme = makeValidTheme();
-		const colors = { ...(theme.colors as Record<string, string>) };
+		const colors: Record<string, string | undefined> = {
+			...(theme.colors as Record<string, string>),
+		};
 		colors.red = undefined;
 		colors.brightCyan = undefined;
 		theme.colors = colors;
@@ -120,7 +122,7 @@ describe("validateTheme", () => {
 
 	it("rejects missing required ui field with specific error", () => {
 		const theme = makeValidTheme();
-		const ui = { ...(theme.ui as Record<string, string>) };
+		const ui: Record<string, string | undefined> = { ...(theme.ui as Record<string, string>) };
 		ui.accent = undefined;
 		ui.badge = undefined;
 		theme.ui = ui;

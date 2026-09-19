@@ -1,0 +1,10 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true
+	},
+	// The build config leaves the specs out of dist; this one checks them too,
+	// because a spec's calls are the same contract as any other caller's (#214).
+	"include": ["src/**/*"],
+	"exclude": ["node_modules", "dist"]
+}

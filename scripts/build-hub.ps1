@@ -13,6 +13,12 @@ if (-not $env:LASTERM_BUILD_HASH) {
 $env:LASTERM_SKIP_WEB ??= "false"
 $env:LASTERM_CARGO_TARGET_DIR ??= "$Root\target"
 
+# The hub embeds the Node running this build, so it is built on the platform it
+# targets; package-sea-hub refuses anything else (#148).
+if ($env:LASTERM_TARGET_TRIPLE -ne "$arch-pc-windows-msvc") {
+    throw "The hub is built on the platform it targets: this host builds $arch-pc-windows-msvc, not $env:LASTERM_TARGET_TRIPLE."
+}
+
 Write-Host "🔨 Building hub SEA (triple: $env:LASTERM_TARGET_TRIPLE)..." -ForegroundColor Cyan
 
 Set-Location $Root

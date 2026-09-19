@@ -49,28 +49,33 @@ function tripleToNodeArch(triple: string | undefined): string | undefined {
 	return undefined;
 }
 
-/** Parse --target-platform and --target-arch from CLI args. */
-const targetPlatformArg = process.argv
-	.find((a) => a.startsWith("--target-platform="))
-	?.split("=")[1];
-const targetArchArg = process.argv.find((a) => a.startsWith("--target-arch="))?.split("=")[1];
-const targetNodeVersionArg = process.argv
-	.find((a) => a.startsWith("--node-version="))
-	?.split("=")[1];
-// Priority: CLI arg > LASTERM_TARGET_TRIPLE env var > host process defaults.
-const effectivePlatform =
-	(targetPlatformArg as NodeJS.Platform | undefined) ??
-	tripleToNodePlatform(process.env.LASTERM_TARGET_TRIPLE) ??
-	process.platform;
-const effectiveArch =
-	targetArchArg ?? tripleToNodeArch(process.env.LASTERM_TARGET_TRIPLE) ?? process.arch;
-const effectiveNodeVersion =
-	targetNodeVersionArg ?? process.env.LASTERM_NODE_VERSION ?? process.version;
+/**
+ * The hub executable embeds the Node running this build, so it is built on the
+ * platform and architecture it targets. A triple naming anything else is
+ * refused rather than cross-built: a cross-build would download another Node
+ * unverified, and its native addons could not be loaded here to be checked
+ * (#148, #151).
+ */
+export function assertNativeHubTarget(triple: string | undefined): void {
+	if (!triple) return;
+	const platform = tripleToNodePlatform(triple);
+	const arch = tripleToNodeArch(triple);
+	if (platform === undefined || arch === undefined) {
+		throw new Error(`[package-sea-hub] unrecognised target triple: ${triple}`);
+	}
+	if (platform !== process.platform || arch !== process.arch) {
+		throw new Error(
+			`[package-sea-hub] the hub embeds the Node running this build (${process.platform}-${process.arch}), ` +
+				`so it cannot target ${triple}: build it on that platform.`,
+		);
+	}
+}
+
 /** Output directory for SEA artefacts. Override with LASTERM_DIST_DIR env var. */
 const distDir = process.env.LASTERM_DIST_DIR ?? join(ROOT, "dist", "sea");
 
-/** Binary extension — empty on Linux/macOS, .exe on Windows. */
-const EXE_EXT = effectivePlatform === "win32" ? ".exe" : "";
+/** Binary extension — empty on Linux, .exe on Windows. */
+const EXE_EXT = process.platform === "win32" ? ".exe" : "";
 
 /** Extension → MIME content-type map for web assets. */
 const CONTENT_TYPES: Record<string, string> = {
@@ -194,7 +199,7 @@ export function locateHubLockAddon(): string {
 				"Run scripts/build-hub.sh or scripts/build-hub.ps1 instead of package:sea-hub directly.",
 		);
 	}
-	loadHubLockAddon(addonPath, isCrossBuild());
+	loadHubLockAddon(addonPath);
 	return addonPath;
 }
 
@@ -207,44 +212,21 @@ export function locateTlsIdentityAddon(): string {
 				"Run scripts/build-hub.sh or scripts/build-hub.ps1 instead of package:sea-hub directly.",
 		);
 	}
-	if (!isCrossBuild()) {
-		const mod = { exports: {} as Record<string, unknown> };
-		process.dlopen(mod, addonPath);
-		if (typeof mod.exports.generateTlsIdentity !== "function") {
-			throw new Error(
-				`[package-sea-hub] TLS identity addon at ${addonPath} has no generator export.`,
-			);
-		}
+	const mod = { exports: {} as Record<string, unknown> };
+	process.dlopen(mod, addonPath);
+	if (typeof mod.exports.generateTlsIdentity !== "function") {
+		throw new Error(
+			`[package-sea-hub] TLS identity addon at ${addonPath} has no generator export.`,
+		);
 	}
 	return addonPath;
 }
 
 /**
- * True when this build targets something the host cannot execute.
- *
- * `build-hub.sh` and `build-hub.ps1` cross-compile whenever the requested triple
- * differs from the host's, so a build for another architecture produces an addon
- * this process could never load. The check below is skipped there rather than
- * failing a legitimate cross-build.
- */
-function isCrossBuild(): boolean {
-	const triple = process.env.LASTERM_TARGET_TRIPLE;
-	if (!triple) return false;
-	const arch = tripleToNodeArch(triple);
-	const targetPlatform = tripleToNodePlatform(triple);
-	// An unrecognised triple is not evidence of a cross-build; load and let the
-	// loader answer.
-	if (arch === undefined || targetPlatform === undefined) return false;
-	return arch !== process.arch || targetPlatform !== process.platform;
-}
-
-/**
  * Loading proves the file is a usable Node addon, which is the only packaging
- * check bytes cannot fake — and the only one available, since a cross-built
- * artefact cannot be loaded here at all.
+ * check bytes cannot fake.
  */
-export function loadHubLockAddon(addonPath: string, skip = false): void {
-	if (skip) return;
+export function loadHubLockAddon(addonPath: string): void {
 	try {
 		process.dlopen({ exports: {} }, addonPath);
 	} catch (error) {
@@ -319,6 +301,7 @@ export function buildStaticManifest(staticDir: string): string {
 
 async function main(): Promise<void> {
 	console.log("[package-sea-hub] starting hub SEA packaging...");
+	assertNativeHubTarget(process.env.LASTERM_TARGET_TRIPLE);
 
 	const staticDir = join(ROOT, "packages", "hub", "static");
 
@@ -430,9 +413,6 @@ async function main(): Promise<void> {
 		},
 		useCodeCache: true,
 		disableExperimentalSEAWarning: true,
-		targetPlatform: effectivePlatform,
-		targetArch: effectiveArch,
-		targetNodeVersion: effectiveNodeVersion,
 	};
 
 	await buildSeaBinary(seaCfg);

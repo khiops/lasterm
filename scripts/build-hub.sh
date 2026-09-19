@@ -18,6 +18,13 @@ LASTERM_BUILD_HASH="${LASTERM_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 H
 LASTERM_SKIP_WEB="${LASTERM_SKIP_WEB:-false}"
 LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-$ROOT/target}"
 
+# The hub embeds the Node running this build, so it is built on the platform it
+# targets; package-sea-hub refuses anything else (#148).
+if [ "$LASTERM_TARGET_TRIPLE" != "$DETECTED_TRIPLE" ]; then
+  echo "❌ The hub is built on the platform it targets: this host builds $DETECTED_TRIPLE, not $LASTERM_TARGET_TRIPLE." >&2
+  exit 1
+fi
+
 echo "🔨 Building hub SEA (triple: $LASTERM_TARGET_TRIPLE)..."
 
 cd "$ROOT"
@@ -25,15 +32,9 @@ pnpm -F @lasterm/shared build
 
 # The hub's single-instance authority is a napi cdylib. Build it on the same
 # host that packages this hub, then give the SEA asset its Node addon name.
-if [ "$LASTERM_TARGET_TRIPLE" != "$DETECTED_TRIPLE" ]; then
-  cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target "$LASTERM_TARGET_TRIPLE" --target-dir "$LASTERM_CARGO_TARGET_DIR"
-  LOCK_LIBRARY="$LASTERM_CARGO_TARGET_DIR/$LASTERM_TARGET_TRIPLE/release/$LOCK_LIBRARY_NAME"
-  TLS_LIBRARY="$LASTERM_CARGO_TARGET_DIR/$LASTERM_TARGET_TRIPLE/release/$TLS_LIBRARY_NAME"
-else
-  cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
-  LOCK_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$LOCK_LIBRARY_NAME"
-  TLS_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$TLS_LIBRARY_NAME"
-fi
+cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
+LOCK_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$LOCK_LIBRARY_NAME"
+TLS_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$TLS_LIBRARY_NAME"
 if [ ! -f "$LOCK_LIBRARY" ]; then
   echo "❌ Hub lock addon not found at $LOCK_LIBRARY" >&2
   exit 1
@@ -50,8 +51,6 @@ fi
 export LASTERM_TARGET_TRIPLE LASTERM_DIST_DIR LASTERM_BUILD_HASH
 export LASTERM_HUB_LOCK_ADDON="$LOCK_LIBRARY"
 export LASTERM_TLS_IDENTITY_ADDON="$TLS_LIBRARY"
-# Also export LASTERM_NODE_VERSION if set (for cross-build Node version override)
-[ -n "${LASTERM_NODE_VERSION:-}" ] && export LASTERM_NODE_VERSION
 pnpm run package:sea-hub
 
 SIZE=$(du -h "$LASTERM_DIST_DIR/lasterm-hub" 2>/dev/null | cut -f1 || echo "?")

@@ -2322,7 +2322,16 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
             Ok(temporary_file) => {
                 drop(temporary_file);
                 match directory.rename(&temporary, &leaf, true) {
-                    Ok(()) => return Ok(()),
+                    // The rename is atomic but not durable until the directory is
+                    // synced: a crash could lose it, and the next start would then
+                    // trust whichever hub answered first (#223, #211).
+                    Ok(()) => {
+                        return directory.sync_all().map_err(|error| {
+                            format!(
+                                "the desktop hub pin store was replaced, but the change could not be made durable: {error}"
+                            )
+                        });
+                    }
                     Err(error) => {
                         let _ = directory.remove_file(&temporary);
                         return Err(format!(
@@ -2366,6 +2375,8 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
         match create_owner_only_file(&directory, &temporary, &bytes) {
             Ok(temporary_file) => {
                 drop(temporary_file);
+                // The rename is MOVEFILE_WRITE_THROUGH: it returns once the change
+                // is on disk, so there is no directory sync to add here.
                 match directory.rename(&temporary, &leaf, true) {
                     Ok(()) => return Ok(()),
                     Err(error) => {
@@ -2433,32 +2444,45 @@ fn prepare_hub_pin_store_dir(path: &Path) -> Result<lasterm_protected_fs::Direct
     Ok(directory)
 }
 
-#[cfg(unix)]
+/// Create `name` owner-only and write `bytes` to it durably.
 fn create_owner_only_file(
     directory: &lasterm_protected_fs::Directory,
     name: &lasterm_protected_fs::LeafName,
     bytes: &[u8],
 ) -> std::io::Result<std::fs::File> {
-    use std::os::fd::AsRawFd;
-
-    let mut file = directory.create_new(name)?;
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(file)
+    create_then_fill(directory, name, |file| {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
 }
 
-#[cfg(windows)]
-fn create_owner_only_file(
+/// Create `name`, then fill it. When filling fails, the partial file is
+/// removed before the error is returned, so a disk-full or interrupted write
+/// leaves no temporary behind in a predictable namespace (#223). A failed
+/// removal is reported with the original error rather than instead of it.
+fn create_then_fill(
     directory: &lasterm_protected_fs::Directory,
     name: &lasterm_protected_fs::LeafName,
-    bytes: &[u8],
+    fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<std::fs::File> {
     let mut file = directory.create_new(name)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    if let Err(error) = fill(&mut file) {
+        drop(file);
+        return Err(match directory.remove_file(name) {
+            Ok(()) => error,
+            Err(cleanup) => std::io::Error::new(
+                error.kind(),
+                format!("{error}; the partial file could not be removed: {cleanup}"),
+            ),
+        });
+    }
     Ok(file)
 }
 
@@ -5486,6 +5510,28 @@ mod tests {
         );
         *HUB_CONNECTION.lock().unwrap() = None;
         HUB_PORT.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_failed_fill_removes_the_partial_file() {
+        let dir = instance_test_dir("partial-pin-file");
+        let directory = lasterm_protected_fs::open_directory(&dir, true, 0o700).unwrap();
+        let name =
+            lasterm_protected_fs::LeafName::new(std::ffi::OsStr::new("partial.tmp")).unwrap();
+
+        let error = create_then_fill(&directory, &name, |file| {
+            file.write_all(b"half a pin store")?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+
+        // Mutation caught: returning on the fill error without removing the leaf
+        // left a partial pin file behind (#223).
+        assert_eq!(error.to_string(), "disk full");
+        assert!(
+            !dir.join("partial.tmp").exists(),
+            "a failed write must not leave its temporary file"
+        );
     }
 
     #[test]

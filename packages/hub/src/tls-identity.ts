@@ -9,6 +9,7 @@ import {
 	detectSea,
 	extractAddonToDir,
 	getAddonCacheDir,
+	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
 const SEA_ASSET_NAME = "lasterm_tls_identity.node";
@@ -72,15 +73,9 @@ function loadSeaAddon(): TlsIdentityAddon {
 		getRawAsset: (name: string) => ArrayBuffer;
 		getAsset?: (name: string, encoding: BufferEncoding) => string;
 	};
-	let version = "0.0.0";
-	try {
-		version = sea.getAsset?.("VERSION", "utf8").trim() || version;
-	} catch {
-		// The version only determines the extraction cache path.
-	}
 	const addonPath = extractAddonToDir(
 		SEA_ASSET_NAME,
-		getAddonCacheDir(version),
+		getAddonCacheDir(readSeaVersion(sea)),
 		Buffer.from(sea.getRawAsset(SEA_ASSET_NAME)),
 	);
 	return dlopenAddon(addonPath);

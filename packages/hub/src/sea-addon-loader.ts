@@ -17,6 +17,7 @@ import {
 	detectSea,
 	getAddonCacheDir,
 	loadNativeAddon,
+	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
 // Re-export shared helpers so existing callers/tests that import from this
@@ -27,6 +28,7 @@ export {
 	extractAddonToDir,
 	getAddonCacheDir,
 	loadNativeAddon,
+	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
 /** Names of .node assets embedded in the hub SEA binary. */
@@ -55,18 +57,14 @@ export function initSeaAddons(): void {
 		getAsset?: (name: string, encoding: BufferEncoding) => string;
 	};
 
-	// Read the package version from SEA asset manifest (injected at build time).
-	// Fall back to "0.0.0" if not present so we don't crash startup.
-	let version = "0.0.0";
+	let cacheDir: string;
 	try {
-		if (typeof seaMod.getAsset === "function") {
-			version = seaMod.getAsset("VERSION", "utf8").trim();
-		}
-	} catch {
-		// Non-fatal: use default version.
+		cacheDir = getAddonCacheDir(readSeaVersion(seaMod));
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[lasterm-hub] fatal: ${msg}\n`);
+		process.exit(1);
 	}
-
-	const cacheDir = getAddonCacheDir(version);
 
 	for (const assetName of SEA_ADDON_ASSETS) {
 		try {

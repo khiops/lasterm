@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as https from "node:https";
-import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import vue from "@vitejs/plugin-vue";
 import { defineConfig, type ProxyOptions } from "vite";
 import { createHubTlsConnector, type HubTlsRuntime } from "../../hub/src/hub-transport.js";
+import { lastermDir } from "../../shared/src/platform-dirs.js";
 
 function resolveBuildHash(): string {
 	const env = process.env.LASTERM_BUILD_HASH;
@@ -23,9 +23,7 @@ function resolveBuildHash(): string {
 const BUILD_HASH = resolveBuildHash();
 
 function hubStateDir(): string {
-	return platform() === "win32"
-		? join(process.env.LOCALAPPDATA ?? "", "lasterm")
-		: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
+	return lastermDir("state");
 }
 
 function readHubRuntime(): HubTlsRuntime {

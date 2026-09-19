@@ -25,6 +25,10 @@
 		"./dist/sea-addon-loader.js": {
 			"import": "./dist/sea-addon-loader.js",
 			"types": "./dist/sea-addon-loader.d.ts"
+		},
+		"./dist/platform-dirs.js": {
+			"import": "./dist/platform-dirs.js",
+			"types": "./dist/platform-dirs.d.ts"
 		}
 	},
 	"scripts": {

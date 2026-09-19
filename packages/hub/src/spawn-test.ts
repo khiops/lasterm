@@ -1,20 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request } from "node:https";
-import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
+import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { createHubTlsAgent } from "./hub-transport.js";
 
-const stateDir =
-	platform() === "win32"
-		? join(process.env.LOCALAPPDATA ?? "", "lasterm")
-		: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
-const configDir =
-	platform() === "win32"
-		? join(process.env.APPDATA ?? "", "lasterm")
-		: join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
+const stateDir = lastermDir("state");
+const configDir = lastermDir("config");
 const runtime = JSON.parse(readFileSync(join(stateDir, "runtime.json"), "utf8")) as {
 	port?: unknown;
 	spki?: string;

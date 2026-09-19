@@ -2,7 +2,6 @@ import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { access } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -11,7 +10,9 @@ import {
 	type AgentConfig,
 	getSocketPath,
 } from "@lasterm/shared";
+import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";
+import { createOwnerOnlyDirectory } from "../auth.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { resolveAgentBinaryPath } from "../sea-agent-resolver.js";
 import { LastermAgent } from "./lasterm-agent.js";
@@ -234,11 +235,11 @@ function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig
 		? [agentPath, daemonArgs]
 		: [process.execPath, [agentPath, ...daemonArgs]];
 
-	const stateDir =
-		process.platform === "win32"
-			? join(process.env.LOCALAPPDATA ?? homedir(), "lasterm")
-			: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
-	mkdirSync(stateDir, { recursive: true });
+	// The same directory, created the same way, as the hub's own state dir: this
+	// can be its first creation, and the TLS key it holds refuses a parent that
+	// the umask left group-writable (#237).
+	const stateDir = lastermDir("state");
+	createOwnerOnlyDirectory(stateDir);
 
 	// Ensure the socket's parent directory exists — on WSL / XDG_RUNTIME_DIR
 	// environments the directory may not yet exist, causing the agent's

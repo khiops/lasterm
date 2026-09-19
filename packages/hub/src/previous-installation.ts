@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { PlatformDirError, platformBaseDir } from "@lasterm/shared/dist/platform-dirs.js";
 
 // ─── The installation this one replaced ────────────────────────────────────────
 //
@@ -37,21 +37,30 @@ export class PreviousInstallationError extends Error {
 	}
 }
 
-function previousStateDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", PREVIOUS_NAME);
-	}
-	return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), PREVIOUS_NAME);
+/**
+ * Where the previous generation kept `kind`, or undefined when this environment
+ * cannot say: a directory made up from a missing variable would be some other
+ * path relative to wherever the hub was started, not the old installation.
+ */
+function previousDir(kind: "state" | "config"): string | undefined {
+	const base =
+		platformBaseDirOrUndefined(kind) ??
+		// `APPDATA` first, then `LOCALAPPDATA`, matching how the previous
+		// generation's agent resolved its own config directory: without APPDATA, a
+		// real `%LOCALAPPDATA%\termora` must still be found.
+		(kind === "config" && process.platform === "win32"
+			? platformBaseDirOrUndefined("state")
+			: undefined);
+	return base === undefined ? undefined : join(base, PREVIOUS_NAME);
 }
 
-function previousConfigDir(): string {
-	if (process.platform === "win32") {
-		// `APPDATA` first, then `LOCALAPPDATA`, matching how the previous generation's
-		// agent resolved its own config directory. Reading only `APPDATA` would yield a
-		// relative path when it is unset, and miss a real `%LOCALAPPDATA%\termora`.
-		return join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? "", PREVIOUS_NAME);
+function platformBaseDirOrUndefined(kind: "state" | "config"): string | undefined {
+	try {
+		return platformBaseDir(kind);
+	} catch (error) {
+		if (error instanceof PlatformDirError) return undefined;
+		throw error;
 	}
-	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), PREVIOUS_NAME);
 }
 
 type Presence = "present" | "absent" | { readonly undecidable: string };
@@ -107,14 +116,15 @@ function previousRecordedPid(stateDir: string): number | undefined {
  * from this process. Exported for tests; `startHub` refuses on any description.
  */
 export function describePreviousInstallation(): string | undefined {
-	const config = previousConfigDir();
-	const state = previousStateDir();
+	const config = previousDir("config");
+	const state = previousDir("state");
 	const found: string[] = [];
 
 	for (const [dir, holds] of [
 		[config, "hosts, profiles, auth token"],
 		[state, "session and output databases"],
 	] as const) {
+		if (dir === undefined) continue;
 		const presence = presenceOf(dir);
 		if (presence === "present") found.push(`  ${dir}  (${holds})`);
 		else if (presence !== "absent") {
@@ -123,7 +133,7 @@ export function describePreviousInstallation(): string | undefined {
 	}
 	if (found.length === 0) return undefined;
 
-	const pid = previousRecordedPid(state);
+	const pid = state === undefined ? undefined : previousRecordedPid(state);
 	if (pid !== undefined) {
 		found.push(`  its runtime record names pid ${pid}, and that pid is in use`);
 	}

@@ -19,8 +19,8 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { lastermDir } from "./platform-dirs.js";
 
 /** Detect whether we are running inside a Node SEA binary. */
 export function detectSea(): boolean {
@@ -41,11 +41,7 @@ export function detectSea(): boolean {
  * upgrades always extract fresh binaries.
  */
 export function getAddonCacheDir(version: string): string {
-	const base =
-		platform() === "win32"
-			? join(process.env.LOCALAPPDATA ?? homedir(), "lasterm", "cache")
-			: join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "lasterm");
-	return join(base, "addons", version);
+	return join(lastermDir("cache"), "addons", version);
 }
 
 /**

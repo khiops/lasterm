@@ -158,7 +158,8 @@ before relying on the agent daemon log tail.
 
 ### Production build (single executable)
 
-Build a self-contained release locally (Linux/macOS native):
+Build a self-contained release locally (Linux native; on Windows, `scripts/build-hub.ps1`). macOS is
+not a supported target: nothing builds or tests it (#224).
 
 ```sh
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent  (cargo --release)
@@ -203,12 +204,12 @@ unconditionally.
 
 lasterm reads configuration from a TOML file:
 
-- **Linux / macOS:** `~/.config/lasterm/config.toml`
+- **Linux:** `~/.config/lasterm/config.toml`
 - **Windows:** `%APPDATA%\lasterm\config.toml`
 
 State (databases, runtime socket) is stored in:
 
-- **Linux / macOS:** `~/.local/state/lasterm/`
+- **Linux:** `~/.local/state/lasterm/`
 - **Windows:** `%LOCALAPPDATA%\lasterm\`
 
 The hub chooses an OS-assigned free port by default. Set an explicit port via:

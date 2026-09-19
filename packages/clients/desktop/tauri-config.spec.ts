@@ -157,25 +157,16 @@ describe("tauri.conf.json", () => {
 describe("capabilities/default.json", () => {
 	const caps = readJson("src-tauri/capabilities/default.json") as Record<string, unknown>;
 
-	it("grants shell:allow-execute for the sidecar", () => {
+	// The Rust side launches the sidecars through the plugin's own API, which no
+	// capability gates. A shell grant here would only let page script run them,
+	// with any arguments: nothing in the web client does, so none is granted.
+	it("grants the webview no shell permission", () => {
 		const permissions = caps.permissions as unknown[];
 		expect(Array.isArray(permissions)).toBe(true);
-
-		// Find the permission object for shell:allow-execute
-		const shellExec = permissions.find(
-			(p): p is Record<string, unknown> =>
-				typeof p === "object" &&
-				p !== null &&
-				(p as Record<string, unknown>).identifier === "shell:allow-execute",
+		const identifiers = permissions.map((p) =>
+			typeof p === "string" ? p : String((p as Record<string, unknown>).identifier),
 		);
-
-		expect(shellExec).toBeDefined();
-		const allow = shellExec?.allow as Array<Record<string, unknown>>;
-		expect(Array.isArray(allow)).toBe(true);
-
-		const hubRule = allow.find((a) => a.name === "lasterm-hub");
-		expect(hubRule).toBeDefined();
-		expect(hubRule?.sidecar).toBe(true);
+		expect(identifiers.filter((id) => id.startsWith("shell:"))).toEqual([]);
 	});
 
 	it("grants the set-effects window capability and narrow OS info reads", () => {

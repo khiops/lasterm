@@ -19,23 +19,6 @@
 		"dialog:allow-open",
 		"os:allow-platform",
 		"os:allow-version",
-		{
-			"identifier": "shell:allow-execute",
-			"allow": [
-				{
-					"args": true,
-					"name": "lasterm-hub",
-					"sidecar": true
-				},
-				{
-					"args": true,
-					"name": "lasterm-agent",
-					"sidecar": true
-				}
-			]
-		},
-		"shell:allow-spawn",
-		"shell:allow-stdin-write",
 		"updater:default"
 	]
 }

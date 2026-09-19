@@ -830,13 +830,24 @@ fn desktop_raise_endpoint(lock_path: &Path) -> Result<DesktopRaiseEndpoint, Stri
 }
 
 #[cfg(windows)]
-fn desktop_raise_endpoint(_: &Path) -> Result<DesktopRaiseEndpoint, String> {
+fn desktop_raise_endpoint(lock_path: &Path) -> Result<DesktopRaiseEndpoint, String> {
     // Named pipes are machine-global. Match the agent daemon's user-scoped
     // naming, while the owner-only DACL below is the actual access boundary.
     let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
-    Ok(DesktopRaiseEndpoint {
-        pipe_name: format!(r"\\.\pipe\lasterm-desktop-raise-{username}"),
-    })
+    let pipe_name = format!(r"\\.\pipe\lasterm-desktop-raise-{username}");
+    // A test takes a lock of its own, in a directory of its own. A pipe of its
+    // own too keeps it from reaching, and raising, a Lasterm running on the
+    // same machine, which also made the handoff test fail there.
+    #[cfg(test)]
+    let pipe_name = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        lock_path.hash(&mut hasher);
+        format!("{pipe_name}-test-{:016x}", hasher.finish())
+    };
+    #[cfg(not(test))]
+    let _ = lock_path;
+    Ok(DesktopRaiseEndpoint { pipe_name })
 }
 
 #[cfg(any(target_os = "windows", test))]

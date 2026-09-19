@@ -59,6 +59,10 @@ jobs:
         run: |
           cp dist/sea/lasterm-agent packages/clients/desktop/src-tauri/lasterm-agent-x86_64-unknown-linux-gnu
           cp dist/sea/lasterm-hub packages/clients/desktop/src-tauri/lasterm-hub-x86_64-unknown-linux-gnu
+      # Its cfg(unix) paths, the raise socket among them, run only here.
+      - name: Test the desktop crate
+        working-directory: packages/clients/desktop/src-tauri
+        run: cargo test
       - name: Build packaged desktop application
         run: pnpm -F @lasterm/desktop tauri build --debug --no-bundle
       - name: Install tauri-driver
@@ -88,6 +92,11 @@ jobs:
       - name: Clippy
         working-directory: packages/clients/desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings
+      # The desktop crate is its own workspace, so the root `cargo test` in
+      # build.yml never reaches it: without this step its tests ran nowhere.
+      - name: Test
+        working-directory: packages/clients/desktop/src-tauri
+        run: cargo test
 
   lint-tls-identity-windows:
     name: Clippy (tls identity, Windows)

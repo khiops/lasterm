@@ -14,6 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::batch::{batch_loop, BatchedOutput, OutputEvent};
 use crate::framing::{encode_frame, FrameReader};
 use crate::handler::{handle_message, iso_now, FrameSender, SnapshotSenders};
+use crate::platform_dirs::{lasterm_dir, DirKind};
 use crate::protocol::AgentToHub;
 use crate::pty::{DestroyAllSummary, PtyManager};
 
@@ -107,41 +108,16 @@ fn next_connection_id() -> u64 {
     CONNECTION_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Returns the XDG config directory for lasterm (`~/.config/lasterm` on Linux/macOS).
-/// This is where `auth.json` lives — NOT the socket or state directory.
-#[cfg(not(windows))]
-fn get_config_dir() -> String {
-    std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{}/.config", home)
-    }) + "/lasterm"
+/// The directory holding `auth.json`, the hub's, not the socket or state
+/// directory. A daemon that cannot locate it refuses to start: guessing one
+/// would find no token there and run as a first start, unauthenticated.
+fn config_dir() -> std::io::Result<String> {
+    Ok(lasterm_dir(DirKind::Config)?.to_string_lossy().into_owned())
 }
 
-/// Returns the XDG state directory for lasterm (`~/.local/state/lasterm` on Linux/macOS).
-/// This is where `meta.db` and `spool.db` live.
-#[cfg(not(windows))]
-fn get_state_dir() -> std::path::PathBuf {
-    let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{}/.local/state", home)
-    });
-    std::path::PathBuf::from(base).join("lasterm")
-}
-
-/// Returns the LOCALAPPDATA state directory for lasterm (`%LOCALAPPDATA%\lasterm` on Windows).
-#[cfg(windows)]
-fn get_state_dir() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\lasterm-state".into());
-    std::path::PathBuf::from(base).join("lasterm")
-}
-
-/// Returns the APPDATA config directory for lasterm (`%APPDATA%\lasterm` on Windows).
-#[cfg(windows)]
-fn get_config_dir() -> String {
-    std::env::var("APPDATA")
-        .or_else(|_| std::env::var("LOCALAPPDATA"))
-        .unwrap_or_else(|_| "C:\\lasterm-config".into())
-        + "\\lasterm"
+/// The directory holding `meta.db` and `spool.db`.
+fn state_dir() -> std::io::Result<std::path::PathBuf> {
+    lasterm_dir(DirKind::State)
 }
 
 /// Run the agent in daemon mode.
@@ -155,14 +131,7 @@ pub(crate) async fn run_daemon(
     shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
-    run_daemon_impl(
-        socket_path,
-        get_config_dir(),
-        get_state_dir(),
-        shutdown,
-        bound,
-    )
-    .await
+    run_daemon_impl(socket_path, config_dir()?, state_dir()?, shutdown, bound).await
 }
 
 /// Internal implementation — takes an explicit config_dir so tests can inject a temp dir
@@ -369,11 +338,11 @@ async fn run_daemon_impl(
 
     tracing::info!("daemon listening on {}", pipe_name);
 
-    // Use the canonical Windows config dir (auth.json lives in %APPDATA%\lasterm\)
-    let config_dir = get_config_dir();
+    // auth.json lives in the hub's configuration directory, %APPDATA%\lasterm.
+    let config_dir = config_dir()?;
 
     // Load auth token once at startup (None → first-run, skip auth)
-    let expected_token = read_auth_token(&config_dir).await;
+    let expected_token = read_auth_token_with_state_dir(&config_dir, &state_dir()?).await;
     if expected_token.is_some() {
         tracing::info!("auth token loaded — connections will be authenticated");
     } else {
@@ -500,11 +469,10 @@ async fn run_daemon_impl(
 /// Returns `Some(String::new())` if auth.json is absent but meta.db exists (fail-closed: auth bypass refused).
 /// Returns `Some(String::new())` if the file exists but is unreadable or malformed (fail-closed).
 /// Returns `Some(token)` on success.
-#[cfg(windows)]
-async fn read_auth_token(config_dir: &str) -> Option<String> {
-    read_auth_token_with_state_dir(config_dir, &get_state_dir()).await
-}
-
+///
+/// The first-run answer is only as good as the two directories: both must be
+/// the hub's, which is why they come from the shared rule and a daemon that
+/// cannot resolve them does not start.
 async fn read_auth_token_with_state_dir(
     config_dir: &str,
     state_dir: &std::path::Path,

@@ -75,14 +75,16 @@ impl StopOutcome {
 }
 
 /// Return the record directory for an already-normalized endpoint identity.
-pub(crate) fn state_dir_for_socket(socket_identity: &str) -> PathBuf {
+pub(crate) fn state_dir_for_socket(socket_identity: &str) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        Path::new(socket_identity)
+        match Path::new(socket_identity)
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(default_state_dir)
+        {
+            Some(parent) => Ok(parent.to_path_buf()),
+            None => default_state_dir(),
+        }
     }
     #[cfg(windows)]
     {
@@ -132,20 +134,8 @@ pub(crate) fn socket_identity(socket: &str) -> String {
     }
 }
 
-fn default_state_dir() -> PathBuf {
-    #[cfg(not(windows))]
-    {
-        let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            format!("{home}/.local/state")
-        });
-        PathBuf::from(base).join("lasterm")
-    }
-    #[cfg(windows)]
-    {
-        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\lasterm-state".into());
-        PathBuf::from(base).join("lasterm")
-    }
+fn default_state_dir() -> io::Result<PathBuf> {
+    crate::platform_dirs::lasterm_dir(crate::platform_dirs::DirKind::State)
 }
 
 pub(crate) fn live_record_path(state_dir: &Path, socket: &str) -> PathBuf {

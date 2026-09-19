@@ -7,6 +7,7 @@ mod handler;
 mod headless;
 mod identity;
 mod logging;
+mod platform_dirs;
 mod process;
 mod protocol;
 mod pty;
@@ -183,10 +184,13 @@ async fn main() -> std::io::Result<()> {
     init_tracing(logging_config, cli.daemon)?;
 
     if cli.stop {
-        let socket = cli.socket.unwrap_or_else(default_socket_path);
+        let socket = match cli.socket {
+            Some(socket) => socket,
+            None => default_socket_path()?,
+        };
         let socket_identity = identity::socket_identity(&socket);
         let outcome = identity::stop(
-            &identity::state_dir_for_socket(&socket_identity),
+            &identity::state_dir_for_socket(&socket_identity)?,
             &socket_identity,
             DAEMON_GRACEFUL_SHUTDOWN_DEADLINE,
         )?;
@@ -201,10 +205,13 @@ async fn main() -> std::io::Result<()> {
 
     if cli.daemon {
         // Daemon mode writes to its own log file; stdio mode writes to stderr.
-        let log_path = logging::daemon_log_path();
+        let log_path = logging::daemon_log_path()?;
         tracing::info!(log_path = %log_path.display(), "daemon log file opened");
         // Resolve socket path — platform-specific default when not provided via --socket
-        let socket = cli.socket.unwrap_or_else(default_socket_path);
+        let socket = match cli.socket {
+            Some(socket) => socket,
+            None => default_socket_path()?,
+        };
 
         // Ensure the socket's parent directory exists when --socket is provided.
         // The unwrap_or_else default branch already calls create_dir_all for its
@@ -229,7 +236,7 @@ async fn main() -> std::io::Result<()> {
         }
 
         let socket_identity = identity::socket_identity(&socket);
-        let identity_state_dir = identity::state_dir_for_socket(&socket_identity);
+        let identity_state_dir = identity::state_dir_for_socket(&socket_identity)?;
         let daemon_identity = daemon_identity_for_endpoint(socket_identity, &identity_state_dir)?;
 
         let (shutdown_tx, shutdown_rx) = daemon::shutdown_channel();
@@ -412,24 +419,24 @@ async fn main() -> std::io::Result<()> {
     }
 }
 
-fn default_socket_path() -> String {
+fn default_socket_path() -> std::io::Result<String> {
     #[cfg(unix)]
     {
-        let state_dir = identity::state_dir_for_socket("");
+        let state_dir = identity::state_dir_for_socket("")?;
         let _ = std::fs::create_dir_all(&state_dir);
-        state_dir
+        Ok(state_dir
             .join("agent.socket")
             .to_string_lossy()
-            .into_owned()
+            .into_owned())
     }
     #[cfg(windows)]
     {
         let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-        format!(r"\\.\pipe\lasterm-agent-{username}")
+        Ok(format!(r"\\.\pipe\lasterm-agent-{username}"))
     }
     #[cfg(not(any(unix, windows)))]
     {
-        "/tmp/lasterm-agent.socket".into()
+        Ok("/tmp/lasterm-agent.socket".into())
     }
 }
 
@@ -487,7 +494,7 @@ fn write_clean_exit_record(
 
 fn init_tracing(config: LoggingConfig, daemon: bool) -> std::io::Result<()> {
     if daemon {
-        let log_path = logging::daemon_log_path();
+        let log_path = logging::daemon_log_path()?;
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

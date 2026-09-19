@@ -26,6 +26,15 @@ describe("tauri.conf.json", () => {
 		expect(conf.version).toMatch(/^\d+\.\d+\.\d+$/);
 	});
 
+	it("leaves drag and drop to the web page", () => {
+		// Tauri's native drop handler consumes the OS drag events, so the page
+		// never sees the HTML5 drag-and-drop it uses for uploads and to move
+		// hosts and panes (#67). Nothing here uses the native drop API.
+		const app = conf.app as { windows: Array<Record<string, unknown>> };
+		const main = app.windows.find((w) => w.label === "main");
+		expect(main?.dragDropEnabled).toBe(false);
+	});
+
 	it("externalBin includes lasterm-hub", () => {
 		const bundle = conf.bundle as Record<string, unknown>;
 		expect(bundle).toBeDefined();

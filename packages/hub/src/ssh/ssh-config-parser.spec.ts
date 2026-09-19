@@ -12,11 +12,11 @@ Host myserver
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].name).toBe("myserver");
-		expect(result.entries[0].hostname).toBe("192.168.1.100");
-		expect(result.entries[0].user).toBe("admin");
-		expect(result.entries[0].port).toBe(22);
-		expect(result.entries[0].isGitHost).toBe(false);
+		expect(result.entries[0]?.name).toBe("myserver");
+		expect(result.entries[0]?.hostname).toBe("192.168.1.100");
+		expect(result.entries[0]?.user).toBe("admin");
+		expect(result.entries[0]?.port).toBe(22);
+		expect(result.entries[0]?.isGitHost).toBe(false);
 		expect(result.hasInclude).toBe(false);
 	});
 
@@ -32,10 +32,10 @@ Host server2
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(2);
-		expect(result.entries[0].name).toBe("server1");
-		expect(result.entries[0].hostname).toBe("10.0.0.1");
-		expect(result.entries[1].name).toBe("server2");
-		expect(result.entries[1].hostname).toBe("10.0.0.2");
+		expect(result.entries[0]?.name).toBe("server1");
+		expect(result.entries[0]?.hostname).toBe("10.0.0.1");
+		expect(result.entries[1]?.name).toBe("server2");
+		expect(result.entries[1]?.hostname).toBe("10.0.0.2");
 	});
 
 	it("handles HostName, Port, User, IdentityFile, ProxyJump", () => {
@@ -50,12 +50,12 @@ Host full-config
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
 		const entry = result.entries[0];
-		expect(entry.name).toBe("full-config");
-		expect(entry.hostname).toBe("example.com");
-		expect(entry.port).toBe(2222);
-		expect(entry.user).toBe("deploy");
-		expect(entry.identityFile).toBe(resolve(homedir(), ".ssh/id_ed25519"));
-		expect(entry.proxyJump).toBe("bastion.example.com");
+		expect(entry?.name).toBe("full-config");
+		expect(entry?.hostname).toBe("example.com");
+		expect(entry?.port).toBe(2222);
+		expect(entry?.user).toBe("deploy");
+		expect(entry?.identityFile).toBe(resolve(homedir(), ".ssh/id_ed25519"));
+		expect(entry?.proxyJump).toBe("bastion.example.com");
 	});
 
 	it("skips wildcard hosts (Host *)", () => {
@@ -69,7 +69,7 @@ Host myserver
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].name).toBe("myserver");
+		expect(result.entries[0]?.name).toBe("myserver");
 	});
 
 	it("detects git hosts by hostname", () => {
@@ -80,7 +80,7 @@ Host gh
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].isGitHost).toBe(true);
+		expect(result.entries[0]?.isGitHost).toBe(true);
 	});
 
 	it("detects git hosts by alias", () => {
@@ -91,7 +91,7 @@ Host github.com
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].isGitHost).toBe(true);
+		expect(result.entries[0]?.isGitHost).toBe(true);
 	});
 
 	it("detects Include directives", () => {
@@ -125,7 +125,7 @@ Host badport
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].port).toBe(22); // default preserved
+		expect(result.entries[0]?.port).toBe(22); // default preserved
 	});
 
 	it("resolves ~ in IdentityFile paths", () => {
@@ -135,7 +135,7 @@ Host tilde-test
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].identityFile).toBe(resolve(homedir(), "my-keys/id_rsa"));
+		expect(result.entries[0]?.identityFile).toBe(resolve(homedir(), "my-keys/id_rsa"));
 	});
 
 	it("handles multiple patterns on one Host line", () => {
@@ -146,9 +146,9 @@ Host web1 web2 web3
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(3);
-		expect(result.entries[0].name).toBe("web1");
-		expect(result.entries[1].name).toBe("web2");
-		expect(result.entries[2].name).toBe("web3");
+		expect(result.entries[0]?.name).toBe("web1");
+		expect(result.entries[1]?.name).toBe("web2");
+		expect(result.entries[2]?.name).toBe("web3");
 		// All should share the same settings
 		for (const entry of result.entries) {
 			expect(entry.hostname).toBe("10.0.0.1");
@@ -168,11 +168,11 @@ Host case-test
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
 		const entry = result.entries[0];
-		expect(entry.hostname).toBe("example.com");
-		expect(entry.port).toBe(3333);
-		expect(entry.user).toBe("admin");
-		expect(entry.identityFile).toBe(resolve(homedir(), ".ssh/id_rsa"));
-		expect(entry.proxyJump).toBe("bastion");
+		expect(entry?.hostname).toBe("example.com");
+		expect(entry?.port).toBe(3333);
+		expect(entry?.user).toBe("admin");
+		expect(entry?.identityFile).toBe(resolve(homedir(), ".ssh/id_rsa"));
+		expect(entry?.proxyJump).toBe("bastion");
 	});
 
 	it("skips wildcard patterns but keeps non-wildcard on same Host line", () => {
@@ -182,7 +182,7 @@ Host *.example.com myserver
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].name).toBe("myserver");
+		expect(result.entries[0]?.name).toBe("myserver");
 	});
 
 	it("detects all known git hosts", () => {
@@ -214,9 +214,9 @@ Host=eqtest
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].name).toBe("eqtest");
-		expect(result.entries[0].hostname).toBe("example.com");
-		expect(result.entries[0].port).toBe(4444);
+		expect(result.entries[0]?.name).toBe("eqtest");
+		expect(result.entries[0]?.hostname).toBe("example.com");
+		expect(result.entries[0]?.port).toBe(4444);
 	});
 
 	it("handles empty input", () => {
@@ -232,7 +232,7 @@ Host abs-path
 `;
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0].identityFile).toBe("/etc/ssh/keys/id_rsa");
+		expect(result.entries[0]?.identityFile).toBe("/etc/ssh/keys/id_rsa");
 	});
 
 	it("handles alias-only Host block (no HostName directive)", () => {
@@ -246,9 +246,9 @@ Host myalias
 		const result = parseSshConfig(config);
 		expect(result.entries).toHaveLength(1);
 		const entry = result.entries[0];
-		expect(entry.name).toBe("myalias");
-		expect(entry.hostname).toBeNull();
-		expect(entry.user).toBe("admin");
-		expect(entry.port).toBe(2222);
+		expect(entry?.name).toBe("myalias");
+		expect(entry?.hostname).toBeNull();
+		expect(entry?.user).toBe("admin");
+		expect(entry?.port).toBe(2222);
 	});
 });

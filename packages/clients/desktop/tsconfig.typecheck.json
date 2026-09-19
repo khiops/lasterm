@@ -1,0 +1,13 @@
+{
+	"extends": "../../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"types": ["node"],
+		// Vitest resolves these specs the way a bundler does, and this package
+		// is not an ES module package, so NodeNext would read them as CommonJS.
+		"module": "ESNext",
+		"moduleResolution": "Bundler"
+	},
+	// The specs next to the desktop sources; e2e has its own tsconfig (#214).
+	"include": ["*.spec.ts"]
+}

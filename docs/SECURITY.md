@@ -68,7 +68,7 @@
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
-| Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | Pairing codes (short-lived, one-time) |
+| Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | For a browser on this machine, `lasterm pair` issues an 8-digit code valid for 60 seconds and usable once. No other device can pair yet (#193) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 | Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
 
@@ -343,19 +343,21 @@ All incoming messages (from agent or UI) must be validated:
 
 ## 7. Logging & Audit
 
-### 7.1 Security Events (always logged at INFO)
+### 7.1 Security Events — what is logged today
 
-| Event | Log fields |
-|-------|-----------|
-| Hub start | bind address, port, permissions check result |
-| Auth success | client_id, source IP (always 127.0.0.1 MVP) |
-| Auth failure | source IP, reason |
-| Pairing code generated | expires_at (NOT the code) |
-| Pairing code verified | client_id |
-| SSH connect | host_id, host label, auth method |
-| SSH disconnect | host_id, reason |
-| Write-lock force | channel_id, by client_id, from client_id |
-| Token rotated | timestamp |
+This table says what the hub records now, not what it should: the missing events are #277.
+
+| Event | Logged today |
+|-------|--------------|
+| Hub start | Printed on stdout at start: address, SPKI, build, configuration and state directories. Not through the logger |
+| Auth success | WebSocket AUTH accepted: INFO, with the client id |
+| Auth failure | WARN, with the reason: missing or invalid bearer on REST; on the WebSocket, AUTH timeout, first message not AUTH, invalid, expired or revoked token, database unavailable |
+| Pairing code generated | Not logged |
+| Pairing code verified | Not logged |
+| SSH connect | Only as unstructured stderr lines (`[lasterm-ssh] resolved user@host:port auth=…`, `SSH ready`) |
+| SSH disconnect | Not logged |
+| Write-lock force | Not logged |
+| Token rotated | Not applicable: there is no token rotation (§ 2.1) |
 
 ### 7.2 What is NOT logged
 
@@ -366,16 +368,17 @@ All incoming messages (from agent or UI) must be validated:
 
 ## 8. Security Recommendations for Users
 
-Included in first-run output and `lasterm --help`:
+Neither the first-run output nor `lasterm --help` prints these notes today. They are what a user
+should know:
 
 ```
 Security notes:
   • Hub listens on 127.0.0.1 only (not exposed to network)
   • Use ssh-agent for key management (recommended over key files)
   • auth.json must be readable only by you (chmod 600)
-  • Do not share your auth token — use 'lasterm pair' for other devices
+  • Do not share your auth token — use 'lasterm pair' for another browser on this machine
   • Terminal output is stored locally in data dir (see SPEC.md § 7 for platform paths)
-  • To encrypt stored data, enable SQLCipher (P2 feature)
+  • Stored data is not encrypted at rest (SQLCipher is a P2 idea, not a feature)
 ```
 
 ## 9. Future Security Enhancements (post-MVP)

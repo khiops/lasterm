@@ -6,7 +6,10 @@
 				<p class="hub-exit-message">{{ hubExitMessage(code) }}</p>
 				<p v-if="error" class="hub-exit-error">{{ error }}</p>
 				<div class="hub-exit-actions">
-					<button class="btn btn-danger" type="button" :disabled="busy" @click="quit">Quit Lasterm</button>
+					<button class="btn btn-secondary" type="button" :disabled="busy" @click="quit">Quit Lasterm</button>
+					<button class="btn btn-primary" type="button" :disabled="busy" @click="restart">
+						{{ restarting ? "Restarting…" : "Restart the hub" }}
+					</button>
 				</div>
 			</div>
 		</div>
@@ -21,7 +24,27 @@ import { hubExitMessage } from "../utils/hub-exit.js";
 defineProps<{ code: number | null | undefined }>();
 
 const busy = ref(false);
+const restarting = ref(false);
 const error = ref<string | null>(null);
+
+/**
+ * Launch a new hub (#143). The page then reloads: the new hub has another port,
+ * and a reload takes it up exactly as a fresh launch would.
+ */
+async function restart(): Promise<void> {
+	busy.value = true;
+	restarting.value = true;
+	error.value = null;
+	try {
+		const { invoke } = await import("@tauri-apps/api/core");
+		await invoke("restart_hub_after_exit");
+		window.location.reload();
+	} catch (err) {
+		error.value = `The hub could not restart: ${err instanceof Error ? err.message : String(err)}`;
+		busy.value = false;
+		restarting.value = false;
+	}
+}
 
 async function quit(): Promise<void> {
 	busy.value = true;
@@ -79,6 +102,7 @@ async function quit(): Promise<void> {
 .hub-exit-actions {
 	display: flex;
 	justify-content: flex-end;
+	gap: 8px;
 }
 
 .btn {
@@ -96,8 +120,14 @@ async function quit(): Promise<void> {
 	opacity: 0.65;
 }
 
-.btn-danger {
-	background: var(--nt-red, #e06c75);
+.btn-primary {
+	background: var(--nt-accent);
 	color: #fff;
+}
+
+.btn-secondary {
+	background: var(--nt-bg-surface);
+	border: 1px solid var(--nt-border);
+	color: var(--nt-fg);
 }
 </style>

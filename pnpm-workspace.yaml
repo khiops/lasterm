@@ -3,13 +3,13 @@ packages:
   - 'packages/clients/*'
 
 overrides:
-  "shell-quote@<1.8.4": ">=1.8.4"
+  "shell-quote@<1.8.4": ">=1.8.4 <2.0.0"
   "fast-uri@<=3.1.4": ">=3.1.5 <4.0.0"
-  "picomatch@>=4.0.0 <4.0.4": ">=4.0.4"
-  "postcss@<8.5.10": ">=8.5.10"
-  "ws@>=8.0.0 <8.20.1": ">=8.20.1"
+  "picomatch@>=4.0.0 <4.0.4": ">=4.0.4 <5.0.0"
+  "postcss@<8.5.10": ">=8.5.10 <9.0.0"
+  "ws@>=8.0.0 <8.20.1": ">=8.20.1 <9.0.0"
   "brace-expansion@^2.0.0": ">=2.0.3 <3.0.0"
-  "brace-expansion@^5.0.0": ">=5.0.6"
+  "brace-expansion@^5.0.0": ">=5.0.6 <6.0.0"
 
 catalog:
   typescript: "~6.0.3"

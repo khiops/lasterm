@@ -43,7 +43,11 @@
 				v-else-if="channelsStore.channels.length === 0"
 				class="sidebar-state"
 			>
-				No channels yet — click + to start one.
+				<p class="sidebar-state-text">No terminals yet on this host.</p>
+				<!-- Selecting a host does not connect it: a first terminal does. -->
+				<button type="button" class="sidebar-state-action" @click="emit('new-channel')">
+					Open a terminal
+				</button>
 			</div>
 
 			<!-- Populated channel list -->
@@ -450,6 +454,26 @@ function onAddGroup(): void {
 	font-size: 12px;
 	color: var(--nt-tab-hover);
 	font-style: italic;
+}
+
+.sidebar-state-text {
+	margin: 0 0 8px;
+}
+
+.sidebar-state-action {
+	padding: 4px 10px;
+	font-size: 12px;
+	font-family: inherit;
+	font-style: normal;
+	color: var(--nt-fg);
+	background: var(--nt-bg-surface);
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.sidebar-state-action:hover {
+	border-color: var(--nt-accent);
 }
 
 .sidebar-state--error {

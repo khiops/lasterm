@@ -14,6 +14,7 @@ import {
 	getBinaryCacheDir,
 	getLocalSha256,
 	getRemoteSha256,
+	readRemoteSystem,
 	uploadAgentBinary,
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
@@ -309,6 +310,19 @@ describe("detectRemoteOsArch", () => {
 		});
 		const result = await detectRemoteOsArch(client);
 		expect(result).toBeNull();
+	});
+
+	it("keeps the name of a system no agent is built for (#401)", async () => {
+		const client = makeMockClient({
+			"uname -sm": { stdout: "Linux armv7l\n", stderr: "", exitCode: 0 },
+			"echo %PROCESSOR_ARCHITECTURE%": {
+				stdout: "%PROCESSOR_ARCHITECTURE%\n",
+				stderr: "",
+				exitCode: 0,
+			},
+		});
+		expect(await readRemoteSystem(client)).toEqual({ system: "Linux armv7l", parsed: null });
+		expect(await detectRemoteOsArch(client)).toBeNull();
 	});
 
 	it("returns null when uname output is unrecognized", async () => {
@@ -939,6 +953,39 @@ describe("deployAgentIfNeeded — agent not found", () => {
 		await expect(
 			deployAgentIfNeeded(client, { os: null, arch: null }, makeOptions()),
 		).rejects.toThrow("Cannot detect remote OS/arch");
+	});
+
+	it("names a system no agent is built for instead of calling it undetectable (#401)", async () => {
+		const client = makeMockClient({
+			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
+				stdout: "",
+				stderr: "",
+				exitCode: 1,
+			},
+			'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
+				stdout: "",
+				stderr: "",
+				exitCode: 1,
+			},
+			'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
+				stdout: "",
+				stderr: "",
+				exitCode: 1,
+			},
+			'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
+				stdout: "",
+				stderr: "",
+				exitCode: 1,
+			},
+			"uname -sm": { stdout: "Linux armv7l\n", stderr: "", exitCode: 0 },
+			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "", stderr: "", exitCode: 1 },
+		});
+
+		await expect(
+			deployAgentIfNeeded(client, { os: null, arch: null }, makeOptions()),
+		).rejects.toThrow("No Lasterm agent is built for this system (Linux armv7l)");
 	});
 
 	it("uses windows path for windows host", async () => {

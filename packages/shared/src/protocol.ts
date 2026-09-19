@@ -559,9 +559,27 @@ export interface TestConnectMessage {
 }
 
 /** Hub → UI: test connectivity succeeded */
+/** What a successful connection test learned about the remote, for its first session. */
+export interface TestConnectPlatform {
+	/** The system as the remote reported it: `uname -sm`, or the Windows architecture. */
+	system: string;
+	/** The agent target, when the system is one Lasterm builds an agent for. */
+	os?: string;
+	arch?: string;
+	/**
+	 * `ready`: the hub already holds that agent. `download`: it is fetched from the
+	 * release `agentVersion` on the first session. `unsupported`: no agent is built
+	 * for this system. `unknown`: the hub could not tell.
+	 */
+	agent: "ready" | "download" | "unsupported" | "unknown";
+	agentVersion: string;
+}
+
 export interface TestConnectOkMessage {
 	type: "TEST_CONNECT_OK";
 	hostId: string;
+	/** Absent when the remote let nothing be read. */
+	platform?: TestConnectPlatform;
 }
 
 /** Hub → UI: test connectivity failed */

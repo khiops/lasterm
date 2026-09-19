@@ -1,4 +1,4 @@
-import type { Host, SshConfigEntry } from "@lasterm/shared";
+import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
 import { computed, ref, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
@@ -75,7 +75,11 @@ export function useHostForm(editHost?: Host) {
 	const selectedSshConfigHost = ref<string>("");
 	const loadingSshConfig = ref(false);
 
-	const testResult = ref<{ ok: boolean; message?: string } | null>(null);
+	const testResult = ref<{
+		ok: boolean;
+		message?: string;
+		platform?: TestConnectPlatform;
+	} | null>(null);
 	const testing = ref(false);
 	const saving = ref(false);
 
@@ -166,7 +170,11 @@ export function useHostForm(editHost?: Host) {
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
 
-			const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
+			const result = await new Promise<{
+				ok: boolean;
+				message?: string;
+				platform?: TestConnectPlatform;
+			}>((resolve) => {
 				const cleanup = (): void => {
 					unsubOk();
 					unsubFail();
@@ -175,7 +183,7 @@ export function useHostForm(editHost?: Host) {
 				const unsubOk = wsClient.on("TEST_CONNECT_OK", (msg) => {
 					if (msg.type === "TEST_CONNECT_OK" && msg.hostId === testHostId) {
 						cleanup();
-						resolve({ ok: true });
+						resolve(msg.platform ? { ok: true, platform: msg.platform } : { ok: true });
 					}
 				});
 

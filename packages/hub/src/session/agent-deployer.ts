@@ -196,34 +196,63 @@ export async function checkRemoteAgent(client: SshClient): Promise<string | null
 	return null;
 }
 
+/** The remote system as it reported itself, and the agent target it maps to, if any. */
+export interface RemoteSystem {
+	/** `uname -sm`, or `Windows <arch>`: what the remote said, supported or not. */
+	readonly system: string;
+	readonly parsed: OsDetectResult | null;
+}
+
 /**
- * Detect OS and architecture of the remote host.
- * Tries uname -sm (Linux/macOS) first, then PROCESSOR_ARCHITECTURE (Windows).
+ * Read the remote system: `uname -sm` (Linux / macOS) first, then the Windows
+ * PROCESSOR_ARCHITECTURE. `null` when the remote answered neither. A system it
+ * did name but no agent is built for keeps its name, so that a refusal can say
+ * which system it is (#401) rather than that none could be detected.
  */
-export async function detectRemoteOsArch(client: SshClient): Promise<OsDetectResult | null> {
-	// 1. Try uname -sm (Linux / macOS)
+export async function readRemoteSystem(
+	client: SshClient,
+	timeoutMs?: number,
+): Promise<RemoteSystem | null> {
+	let unix: string | null = null;
 	try {
-		const { stdout, exitCode } = await sshExec(client, "uname -sm");
-		if (exitCode === 0) {
-			const result = parseUnameOutput(stdout);
-			if (result) return result;
+		const { stdout, exitCode } = await sshExec(client, "uname -sm", timeoutMs);
+		if (exitCode === 0 && stdout.trim()) {
+			unix = stdout.trim();
+			const parsed = parseUnameOutput(unix);
+			if (parsed) return { system: unix, parsed };
 		}
 	} catch {
 		// ignore — Windows does not have uname
 	}
 
-	// 2. Try Windows PROCESSOR_ARCHITECTURE
 	try {
-		const { stdout, exitCode } = await sshExec(client, "echo %PROCESSOR_ARCHITECTURE%");
-		if (exitCode === 0) {
-			const result = parseWindowsArchOutput(stdout);
-			if (result) return result;
-		}
+		const { stdout, exitCode } = await sshExec(client, "echo %PROCESSOR_ARCHITECTURE%", timeoutMs);
+		const arch = stdout.trim();
+		const parsed = exitCode === 0 ? parseWindowsArchOutput(arch) : null;
+		if (parsed) return { system: `Windows ${arch}`, parsed };
 	} catch {
 		// ignore
 	}
 
-	return null;
+	return unix === null ? null : { system: unix, parsed: null };
+}
+
+/** Detect OS and architecture of the remote host, when an agent target exists for it. */
+export async function detectRemoteOsArch(client: SshClient): Promise<OsDetectResult | null> {
+	return (await readRemoteSystem(client))?.parsed ?? null;
+}
+
+/** Why no agent target could be resolved for this remote. */
+function noAgentTargetError(read: RemoteSystem | null): Error {
+	if (read) {
+		return new Error(
+			`No Lasterm agent is built for this system (${read.system}), so sessions cannot start on it.`,
+		);
+	}
+	return new Error(
+		"Cannot detect remote OS/arch for agent deployment. " +
+			"Set os/arch on the host manually or check SSH connectivity.",
+	);
 }
 
 /**
@@ -384,13 +413,9 @@ export async function deployAgentIfNeeded(
 		let os = host.os;
 		let arch = host.arch;
 		if (!os || !arch) {
-			const detected = await detectRemoteOsArch(client);
-			if (!detected) {
-				throw new Error(
-					"Cannot detect remote OS/arch for agent deployment. " +
-						"Set os/arch on the host manually or check SSH connectivity.",
-				);
-			}
+			const read = await readRemoteSystem(client);
+			const detected = read?.parsed;
+			if (!detected) throw noAgentTargetError(read);
 			os = detected.os;
 			arch = detected.arch;
 		}
@@ -515,13 +540,9 @@ export async function deployAgentIfNeeded(
 	let os = host.os;
 	let arch = host.arch;
 	if (!os || !arch) {
-		const detected = await detectRemoteOsArch(client);
-		if (!detected) {
-			throw new Error(
-				"Cannot detect remote OS/arch for agent deployment. " +
-					"Set os/arch on the host manually or check SSH connectivity.",
-			);
-		}
+		const read = await readRemoteSystem(client);
+		const detected = read?.parsed;
+		if (!detected) throw noAgentTargetError(read);
 		os = detected.os;
 		arch = detected.arch;
 	}

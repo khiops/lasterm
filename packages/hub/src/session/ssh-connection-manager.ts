@@ -14,10 +14,13 @@ import type {
 	HostOs,
 	HostVerifyMessage,
 	TestConnectMessage,
+	TestConnectPlatform,
 } from "@lasterm/shared";
 import { Client as SshClient } from "ssh2";
+import { HUB_VERSION } from "../build-version.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
+import { computeTargetStatus } from "./agent-status.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import {
 	clearContext,
@@ -39,6 +42,7 @@ import {
 	type SshAgentDeployOptions,
 } from "./ssh-agent.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
+import { probeTestConnectPlatform } from "./test-connect-platform.js";
 
 /** Reconnect backoff steps in ms (capped at 30s, total budget 5 min) */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -637,7 +641,11 @@ export class SshConnectionManager {
 		try {
 			const result = await this._testSshConnectivity(msg, promptAuth, verifyHostKey);
 			if (result.ok) {
-				client.send({ type: "TEST_CONNECT_OK", hostId: msg.hostId });
+				client.send({
+					type: "TEST_CONNECT_OK",
+					hostId: msg.hostId,
+					...(result.platform ? { platform: result.platform } : {}),
+				});
 			} else {
 				client.send({
 					type: "TEST_CONNECT_FAIL",
@@ -667,7 +675,7 @@ export class SshConnectionManager {
 		msg: TestConnectMessage,
 		promptAuth: AuthPromptFn,
 		verifyHostKey: HostKeyVerifyFn,
-	): Promise<{ ok: boolean; message?: string }> {
+	): Promise<TestConnectResult> {
 		const username = msg.sshUser ?? process.env.USER ?? "root";
 
 		let connectConfig: SshConnectConfig;
@@ -703,7 +711,7 @@ export class SshConnectionManager {
 		const sessionTrusted = this.ctx.trustedOnceFingerprints.get(hostKey);
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
-		const first = await attemptSshTest(connectConfig, trusted);
+		const first = await attemptSshTest(connectConfig, trusted, probePlatform);
 		if (first.unverifiedFingerprint === undefined) return first.result;
 
 		const fingerprint = first.unverifiedFingerprint;
@@ -720,7 +728,7 @@ export class SshConnectionManager {
 			// hub run, so its first session does not ask again.
 			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
 		}
-		const second = await attemptSshTest(connectConfig, new Set([fingerprint]));
+		const second = await attemptSshTest(connectConfig, new Set([fingerprint]), probePlatform);
 		if (second.unverifiedFingerprint !== undefined) {
 			return { ok: false, message: "SSH host key changed during the test" };
 		}
@@ -729,6 +737,19 @@ export class SshConnectionManager {
 }
 
 type SshConnectConfig = Parameters<InstanceType<typeof SshClient>["connect"]>[0];
+
+type TestConnectResult = { ok: boolean; message?: string; platform?: TestConnectPlatform };
+
+/** Read the remote system, and the hub's agent for it, once the test has connected. */
+function probePlatform(client: SshClient): Promise<TestConnectPlatform | undefined> {
+	return probeTestConnectPlatform(
+		client,
+		async (os, arch) =>
+			(await computeTargetStatus()).targets.find((row) => row.os === os && row.arch === arch)
+				?.status,
+		HUB_VERSION,
+	);
+}
 
 type HostKeyVerifyFn = (
 	oldFingerprint: string,
@@ -745,8 +766,9 @@ const SSH_TEST_TIMEOUT_MS = 10_000;
 export function attemptSshTest(
 	connectConfig: SshConnectConfig,
 	trusted: ReadonlySet<string>,
+	probe?: (client: SshClient) => Promise<TestConnectPlatform | undefined>,
 	createClient: () => SshClient = () => new SshClient(),
-): Promise<{ result: { ok: boolean; message?: string }; unverifiedFingerprint?: string }> {
+): Promise<{ result: TestConnectResult; unverifiedFingerprint?: string }> {
 	const sshClient = createClient();
 	let unverifiedFingerprint: string | undefined;
 	const config: SshConnectConfig = {
@@ -761,7 +783,7 @@ export function attemptSshTest(
 
 	return new Promise((resolve) => {
 		let settled = false;
-		const finish = (result: { ok: boolean; message?: string }): void => {
+		const finish = (result: TestConnectResult): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
@@ -773,8 +795,14 @@ export function attemptSshTest(
 		}, SSH_TEST_TIMEOUT_MS);
 
 		sshClient.on("ready", () => {
-			sshClient.end();
-			finish({ ok: true });
+			// Connected: what is left is reading the remote system, under its own bounds.
+			clearTimeout(timer);
+			void (probe ? probe(sshClient).catch(() => undefined) : Promise.resolve(undefined)).then(
+				(platform) => {
+					sshClient.end();
+					finish(platform ? { ok: true, platform } : { ok: true });
+				},
+			);
 		});
 
 		sshClient.on("error", (err: Error) => {

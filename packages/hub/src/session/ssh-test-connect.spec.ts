@@ -8,6 +8,7 @@ import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import { attemptSshTest, SshConnectionManager } from "./ssh-connection-manager.js";
+import { probeTestConnectPlatform } from "./test-connect-platform.js";
 
 const { privateKey: HOST_KEY } = generateKeyPairSync("rsa", {
 	modulusLength: 2048,
@@ -25,8 +26,13 @@ writeFileSync(CLIENT_KEY_PATH, CLIENT_KEY, { mode: 0o600 });
 
 afterAll(() => rmSync(KEY_DIR, { recursive: true, force: true }));
 
-/** An SSH server that accepts any client, and counts authentication attempts. */
-function sshServer(): Promise<{ server: SshServer; port: number; auth: { attempts: number } }> {
+/**
+ * An SSH server that accepts any client and counts authentication attempts.
+ * With `uname`, it answers `uname -sm` with that system; any other command fails.
+ */
+function sshServer(
+	uname?: string,
+): Promise<{ server: SshServer; port: number; auth: { attempts: number } }> {
 	const auth = { attempts: 0 };
 	return new Promise((resolve) => {
 		const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
@@ -34,6 +40,21 @@ function sshServer(): Promise<{ server: SshServer; port: number; auth: { attempt
 			client.on("authentication", (context) => {
 				auth.attempts++;
 				context.accept();
+			});
+			client.on("ready", () => {
+				client.on("session", (accept) => {
+					accept().on("exec", (acceptExec, _reject, info) => {
+						const stream = acceptExec();
+						if (uname !== undefined && info.command === "uname -sm") {
+							stream.write(`${uname}
+`);
+							stream.exit(0);
+						} else {
+							stream.exit(127);
+						}
+						stream.end();
+					});
+				});
 			});
 		});
 		server.on("error", () => {});
@@ -83,6 +104,16 @@ function testMessage(hostId: string, port: number): TestConnectMessage {
 		sshKeyPath: CLIENT_KEY_PATH,
 		sshUser: "tester",
 	};
+}
+
+/** The fingerprint a server presents, read by a test attempt that trusts nothing. */
+async function serverFingerprint(port: number): Promise<string> {
+	const probe = await attemptSshTest(
+		{ host: "127.0.0.1", port, username: "tester", privateKey: CLIENT_KEY },
+		new Set(),
+	);
+	if (!probe.unverifiedFingerprint) throw new Error("the server presented no key");
+	return probe.unverifiedFingerprint;
 }
 
 async function hostVerifyPrompt(client: { send: Mock }) {
@@ -206,5 +237,71 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 
 		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 		expect(client.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "HOST_VERIFY" }));
+	});
+
+	it("names a system no agent is built for, before any session (#401)", async () => {
+		const mock = await sshServer("Linux armv7l");
+		server = mock.server;
+		const fingerprint = await serverFingerprint(mock.port);
+		const { client, mgr } = setup({
+			type: "ssh",
+			sshHost: "127.0.0.1",
+			sshPort: mock.port,
+			fingerprint,
+		});
+
+		await mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
+
+		expect(client.send).toHaveBeenCalledWith({
+			type: "TEST_CONNECT_OK",
+			hostId: "saved-host",
+			platform: expect.objectContaining({ system: "Linux armv7l", agent: "unsupported" }),
+		});
+	});
+});
+
+describe("the connection test's platform report", { timeout: 20_000 }, () => {
+	let server: SshServer | undefined;
+
+	afterEach(() => {
+		server?.close();
+		server = undefined;
+	});
+
+	async function probeWith(uname: string | undefined, state: string | undefined) {
+		const mock = await sshServer(uname);
+		server = mock.server;
+		const fingerprint = await serverFingerprint(mock.port);
+		const attempt = await attemptSshTest(
+			{ host: "127.0.0.1", port: mock.port, username: "tester", privateKey: CLIENT_KEY },
+			new Set([fingerprint]),
+			(connected) => probeTestConnectPlatform(connected, async () => state as never, "9.9.9"),
+		);
+		return attempt.result;
+	}
+
+	it("says the agent is at hand when the hub holds it", async () => {
+		expect(await probeWith("Linux aarch64", "cached")).toEqual({
+			ok: true,
+			platform: {
+				system: "Linux aarch64",
+				os: "linux",
+				arch: "arm64",
+				agent: "ready",
+				agentVersion: "9.9.9",
+			},
+		});
+	});
+
+	it("says the agent will be downloaded when the hub does not hold it", async () => {
+		expect((await probeWith("Linux x86_64", "missing")).platform).toMatchObject({
+			arch: "x64",
+			agent: "download",
+			agentVersion: "9.9.9",
+		});
+	});
+
+	it("reports nothing when the remote lets nothing be read", async () => {
+		expect(await probeWith(undefined, "cached")).toEqual({ ok: true });
 	});
 });

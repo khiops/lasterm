@@ -162,12 +162,7 @@ export function initAuth(configDir: string): string {
 	if (existsSync(authFilePath)) {
 		checkConfigDirectoryPermissions(configDir);
 		checkPermissions(authFilePath);
-		const raw = readFileSync(authFilePath, "utf-8");
-		const parsed = JSON.parse(raw) as { token: string };
-		if (typeof parsed.token !== "string" || !/^[0-9a-f]{64}$/.test(parsed.token)) {
-			throw new Error(`Invalid token format in ${authFilePath} — expected 64-char hex string`);
-		}
-		return parsed.token;
+		return readExistingToken(authFilePath);
 	}
 
 	// First run — generate and store token
@@ -184,6 +179,35 @@ export function initAuth(configDir: string): string {
 		closeSync(fd);
 	}
 
+	return token;
+}
+
+/**
+ * The token an existing auth.json holds, as written: never regenerated, never
+ * rewritten. Anything else refuses to start, naming the file, because a hub that
+ * replaced an unreadable token would invalidate every paired client without
+ * saying so (SECURITY.md § 2.2). The generator emits lowercase hex, and the
+ * reader accepts exactly that (#264).
+ */
+function readExistingToken(authFilePath: string): string {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(authFilePath, "utf-8"));
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`${authFilePath} is not valid JSON (${reason}); expected {"token": "<64 lowercase hex characters>"}`,
+		);
+	}
+	const token =
+		typeof parsed === "object" && parsed !== null
+			? (parsed as { token?: unknown }).token
+			: undefined;
+	if (typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token)) {
+		throw new Error(
+			`Invalid token format in ${authFilePath} — expected 64 lowercase hex characters`,
+		);
+	}
 	return token;
 }
 

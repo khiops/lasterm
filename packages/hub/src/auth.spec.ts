@@ -84,6 +84,60 @@ describe("initAuth", () => {
 		expect(token1).toBe(token2);
 	});
 
+	describe("with an auth.json already there", () => {
+		// An earlier install, another hub version or an operator wrote it. Paired
+		// clients hold its token, so the hub must use it as it is or refuse.
+		function writeExistingAuth(content: string): string {
+			mkdirSync(testDir, { recursive: true, mode: 0o700 });
+			chmodSync(testDir, 0o700);
+			const authFile = join(testDir, "auth.json");
+			writeFileSync(authFile, content, { mode: 0o600 });
+			chmodSync(authFile, 0o600);
+			return authFile;
+		}
+
+		it("uses the token it holds and leaves the file byte for byte as it was", () => {
+			const token = randomBytes(32).toString("hex");
+			// Not the generator's layout: compact, with a trailing newline.
+			const content = `${JSON.stringify({ token })}\n`;
+			const authFile = writeExistingAuth(content);
+			const before = statSync(authFile).mtimeMs;
+
+			expect(initAuth(testDir)).toBe(token);
+			expect(readFileSync(authFile, "utf-8")).toBe(content);
+			expect(statSync(authFile).mtimeMs).toBe(before);
+		});
+
+		it.each([
+			["truncated JSON", '{"token": "'],
+			["an empty file", ""],
+			["null", "null"],
+			["an array", "[]"],
+			["no token field", "{}"],
+			["a numeric token", '{"token": 42}'],
+		])("refuses %s, naming the file and leaving it untouched", (_case, content) => {
+			const authFile = writeExistingAuth(content);
+
+			expect(() => initAuth(testDir)).toThrow(authFile);
+			expect(readFileSync(authFile, "utf-8")).toBe(content);
+		});
+
+		it.each([
+			["uppercase hex", "A".repeat(64)],
+			["63 characters", "a".repeat(63)],
+			["65 characters", "a".repeat(65)],
+			["surrounding whitespace", ` ${"a".repeat(64)} `],
+			["non-hex characters", "g".repeat(64)],
+		])("refuses a token in %s, saying what the format is", (_case, token) => {
+			const content = JSON.stringify({ token });
+			const authFile = writeExistingAuth(content);
+
+			expect(() => initAuth(testDir)).toThrow(/64 lowercase hex characters/);
+			expect(() => initAuth(testDir)).toThrow(authFile);
+			expect(readFileSync(authFile, "utf-8")).toBe(content);
+		});
+	});
+
 	it("sets chmod 600 on auth.json (non-Windows)", () => {
 		if (process.platform === "win32") return;
 		initAuth(testDir);

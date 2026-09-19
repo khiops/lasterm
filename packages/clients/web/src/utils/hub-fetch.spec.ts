@@ -197,6 +197,51 @@ describe("hubFetch desktop transport", () => {
 				undefined,
 			),
 		);
+		// The END frame is held to the same credit as the data before it (#219).
+		await vi.waitFor(() =>
+			expect(invoke).toHaveBeenCalledWith(
+				"relay_hub_response_ack",
+				{
+					responseId: "55",
+					sequence: "2",
+					acknowledgementToken: "BwcHBwcHBwcHBwcHBwcHBw",
+				},
+				undefined,
+			),
+		);
+	});
+
+	it("acknowledges the ERROR frame that ends a response (#219)", async () => {
+		let channelCallback: ((message: { index: number; message: ArrayBuffer }) => void) | undefined;
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_request") {
+				channelCallback?.({
+					index: 0,
+					message: responseFrame(56n, 1n, 2, new TextEncoder().encode("hub went away")),
+				});
+				return { id: 56, status: 200, statusText: "OK", headers: [] };
+			}
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: {
+				invoke,
+				transformCallback: (callback: typeof channelCallback) => {
+					channelCallback = callback;
+					return 1;
+				},
+			},
+		});
+
+		await expect(hubFetch("https://127.0.0.1:4242/api/failing")).rejects.toThrow("hub went away");
+		await vi.waitFor(() =>
+			expect(invoke).toHaveBeenCalledWith(
+				"relay_hub_response_ack",
+				expect.objectContaining({ responseId: "56", sequence: "1" }),
+				undefined,
+			),
+		);
 	});
 
 	it("settles a response body when its acknowledgement never arrives", async () => {
@@ -405,6 +450,66 @@ describe("hubFetch desktop transport", () => {
 			"relay_hub_upload_finish",
 			expect.anything(),
 			undefined,
+		);
+	});
+
+	it("releases the body of an upload whose admission is refused (#219)", async () => {
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_upload_start") throw new Error("too many active hub uploads");
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const cancel = vi.fn();
+		const body = new ReadableStream<Uint8Array>({ cancel });
+
+		await expect(
+			hubFetch("https://127.0.0.1:4242/api/fonts", { method: "POST", body }),
+		).rejects.toThrow("too many active hub uploads");
+		await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+		expect(invoke).not.toHaveBeenCalledWith(
+			"relay_hub_upload_cancel",
+			expect.anything(),
+			undefined,
+		);
+	});
+
+	it("does not count empty body chunks as progress (#219)", async () => {
+		vi.useFakeTimers();
+		const invoke = vi.fn((command: string) => {
+			if (command === "relay_hub_upload_start") return Promise.resolve(34);
+			return Promise.resolve(undefined);
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		// A producer that yields nothing, forever, one empty chunk every ten seconds.
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				return new Promise<void>((resolve) => {
+					setTimeout(() => {
+						controller.enqueue(new Uint8Array());
+						resolve();
+					}, 10_000);
+				});
+			},
+		});
+
+		const pending = hubFetch("https://127.0.0.1:4242/api/empty-producer", {
+			method: "POST",
+			body,
+		});
+		const settled = expect(pending).rejects.toThrow("timed out while waiting for its producer");
+		await vi.advanceTimersByTimeAsync(26_000);
+
+		await settled;
+		expect(invoke).not.toHaveBeenCalledWith(
+			"relay_hub_upload_chunk",
+			expect.anything(),
+			expect.anything(),
 		);
 	});
 

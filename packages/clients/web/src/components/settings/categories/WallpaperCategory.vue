@@ -40,6 +40,11 @@
 					<div class="wallpaper-drop-hint">Drop image to add</div>
 				</div>
 
+				<!-- Empty state: the grid is also the drop zone, so it keeps a target to drop on -->
+				<div v-if="wallpapers.length === 0" class="wallpaper-empty">
+					No wallpapers yet. Drop an image here, or use Upload wallpaper.
+				</div>
+
 				<!-- Wallpaper thumbnails -->
 				<div
 					v-for="wp in wallpapers"
@@ -412,6 +417,20 @@ onMounted(loadWallpapers);
 	grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
 	gap: 8px;
 	margin-bottom: 12px;
+	/* Keeps a drop target when there is nothing in the grid yet. */
+	min-height: 72px;
+}
+
+.wallpaper-empty {
+	grid-column: 1 / -1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 12px;
+	border: 1px dashed var(--nt-border);
+	border-radius: 6px;
+	color: var(--nt-text-secondary);
+	font-size: 12px;
 }
 
 .wallpaper-drop-overlay {

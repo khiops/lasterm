@@ -145,6 +145,7 @@ mod tests {
                         .expect("write test HTTP response body");
                     tls.flush().expect("flush test HTTP response");
                 }
+                crate::tests::let_the_client_close_first(&mut tls.sock);
             });
 
             Self {

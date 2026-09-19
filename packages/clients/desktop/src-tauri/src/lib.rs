@@ -2796,9 +2796,38 @@ fn build_pinned_hub_client(expected_spki: Vec<u8>) -> Result<reqwest::blocking::
     reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(HUB_REQUEST_TIMEOUT)
+        .redirect(same_endpoint_redirects())
         .use_preconfigured_tls(config)
         .build()
         .map_err(|error| format!("failed to build the pinned hub client: {error}"))
+}
+
+/// The most redirects the pinned client follows for one request.
+const MAX_HUB_REDIRECTS: usize = 5;
+
+/// Follow a redirect only back to the endpoint the request was sent to: same
+/// scheme, host and port, and at most `MAX_HUB_REDIRECTS` times. By default
+/// reqwest follows ten, anywhere, and keeps custom headers such as the owner
+/// header across authorities, so a `Location` pointing elsewhere would have sent
+/// the request without TLS or the pin (#219).
+fn same_endpoint_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let Some(origin) = attempt.previous().first().cloned() else {
+            return attempt.stop();
+        };
+        let target = attempt.url();
+        let same_endpoint = target.scheme() == origin.scheme()
+            && target.host_str() == origin.host_str()
+            && target.port_or_known_default() == origin.port_or_known_default();
+        if !same_endpoint {
+            let refused = format!("the hub redirected to another endpoint ({target})");
+            attempt.error(refused)
+        } else if attempt.previous().len() > MAX_HUB_REDIRECTS {
+            attempt.error("the hub redirected too many times")
+        } else {
+            attempt.follow()
+        }
+    })
 }
 
 /// The first-use probe deliberately carries no hub credential. Any HTTP status
@@ -5486,6 +5515,106 @@ mod tests {
         );
         *HUB_CONNECTION.lock().unwrap() = None;
         HUB_PORT.store(0, Ordering::Relaxed);
+    }
+
+    /// Answer `count` plain HTTP connections, one request each, with `respond(path)`,
+    /// and report the paths requested. Each socket stays open until the client closes
+    /// it, as the TLS test peers do (#349).
+    fn serve_http(
+        listener: std::net::TcpListener,
+        count: usize,
+        respond: fn(&str) -> String,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        use std::io::{Read, Write};
+        std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..count {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let line = String::from_utf8_lossy(&request).lines().next().unwrap_or("").to_string();
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                socket.write_all(respond(&path).as_bytes()).unwrap();
+                let_the_client_close_first(&mut socket);
+                paths.push(path);
+            }
+            paths
+        })
+    }
+
+    fn redirect_test_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .redirect(same_endpoint_redirects())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_redirect_to_another_endpoint_is_refused_and_never_sent() {
+        let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        let elsewhere_port = elsewhere.local_addr().unwrap().port();
+        static ELSEWHERE: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+        ELSEWHERE.set(elsewhere_port).unwrap();
+        let server = serve_http(origin, 1, |_| {
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ELSEWHERE.get().unwrap()
+            )
+        });
+
+        let error = redirect_test_client()
+            .get(format!("http://127.0.0.1:{origin_port}/start"))
+            .send()
+            .expect_err("a redirect to another port must not be followed");
+        assert_eq!(server.join().unwrap(), vec!["/start".to_string()]);
+
+        // Mutation caught: reqwest's default policy followed it and sent the request on.
+        assert!(
+            format!("{error:?}").contains("another endpoint"),
+            "error: {error:?}"
+        );
+        elsewhere.set_nonblocking(true).unwrap();
+        assert_eq!(
+            elsewhere.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the other endpoint must never be contacted"
+        );
+    }
+
+    #[test]
+    fn a_redirect_back_to_the_same_endpoint_is_followed() {
+        let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = origin.local_addr().unwrap().port();
+        let server = serve_http(origin, 2, |path| {
+            if path == "/start" {
+                "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone".to_string()
+            }
+        });
+
+        let response = redirect_test_client()
+            .get(format!("http://127.0.0.1:{port}/start"))
+            .send()
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.text().unwrap(), "done");
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["/start".to_string(), "/final".to_string()]
+        );
     }
 
     #[test]

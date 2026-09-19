@@ -42,8 +42,12 @@ export const useSessionStore = defineStore("session", () => {
 	 * On AUTH_FAIL: sets authFailed flag and rejects.
 	 */
 	async function connect(): Promise<void> {
-		if (wsClient.isConnected) return;
+		// A caller arriving while the handshake is in flight waits for it. The hub
+		// closes any connection whose first message is not AUTH, so a pane that
+		// sent its ATTACH in between lost the connection and its own work with it:
+		// it then waited out its timeout on a socket that had already gone.
 		if (_connectPromise) return _connectPromise;
+		if (wsClient.isConnected && authenticated.value) return;
 		_connectPromise = _doConnect();
 		try {
 			await _connectPromise;
@@ -61,12 +65,14 @@ export const useSessionStore = defineStore("session", () => {
 		// Desktop transport errors and clean closes both mean no live session.
 		_unsubs.disconnect = wsClient.onDisconnect(() => {
 			connected.value = false;
+			authenticated.value = false;
 		});
 
 		// Re-authenticate and refresh state after each WS auto-reconnect.
 		_unsubs.reconnect = wsClient.onReconnect(async () => {
 			try {
 				connected.value = true;
+				authenticated.value = false;
 				await _authenticate();
 				// Re-fetch state after reconnect
 				const hostsStore2 = useHostsStore();

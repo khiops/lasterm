@@ -14,6 +14,8 @@ interface MockWsInstance {
 
 const wsHarness = vi.hoisted(() => ({
 	instances: [] as MockWsInstance[],
+	/** Hold AUTH_OK back, the way a hub answering over the network does. */
+	deferAuth: false,
 }));
 
 vi.mock("../utils/hub-url.js", () => ({
@@ -37,7 +39,7 @@ vi.mock("../services/ws-client.js", () => {
 
 		send(msg: ProtocolMessage): void {
 			this.sent.push(msg);
-			if (msg.type === "AUTH") {
+			if (msg.type === "AUTH" && !wsHarness.deferAuth) {
 				this.emit({ type: "AUTH_OK", clientId: "client-1" });
 			}
 		}
@@ -100,6 +102,7 @@ describe("useSessionStore — agent sync messages", () => {
 		localStorageMap.clear();
 		localStorageMap.set("lasterm_token", "test-token");
 		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
 		setActivePinia(createPinia());
 	});
 
@@ -148,5 +151,49 @@ describe("useSessionStore — agent sync messages", () => {
 
 		wsHarness.instances[0]?.emitDisconnect();
 		expect(sessionStore.connected).toBe(false);
+	});
+});
+
+describe("useSessionStore — connect()", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	// The hub closes any connection whose first message is not AUTH. A pane that
+	// awaited connect() while the handshake was still in flight was told it could
+	// go ahead, sent its ATTACH, and lost the connection and its own work with it.
+	it("holds every caller until the handshake is answered", async () => {
+		wsHarness.deferAuth = true;
+		const sessionStore = useSessionStore();
+
+		const first = sessionStore.connect();
+		await Promise.resolve();
+		const ws = wsHarness.instances[0];
+		expect(ws?.sent.map((m) => m.type)).toEqual(["AUTH"]);
+
+		let secondResolved = false;
+		const second = sessionStore.connect().then(() => {
+			secondResolved = true;
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(secondResolved, "a caller was let through before AUTH_OK").toBe(false);
+
+		ws?.emit({ type: "AUTH_OK", clientId: "client-1" });
+		await first;
+		await second;
+
+		expect(secondResolved).toBe(true);
+		// One handshake for both callers, and no second connection.
+		expect(ws?.sent.filter((m) => m.type === "AUTH")).toHaveLength(1);
+		expect(wsHarness.instances).toHaveLength(1);
 	});
 });

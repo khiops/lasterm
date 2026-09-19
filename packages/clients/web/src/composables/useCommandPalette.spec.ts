@@ -204,6 +204,30 @@ describe("useCommandPalette", () => {
 			expect(channelResults[0]?.label).toBe("Build Runner");
 		});
 
+		it("names a terminal as its tab does, not by its id", () => {
+			const channelsStore = useChannelsStore();
+			channelsStore.channels = [
+				{
+					id: "01m2wzzfrxpkm8h79wmdfkeszm",
+					sessionId: "s1",
+					shell: "pwsh.exe",
+					cols: 80,
+					rows: 24,
+					status: "live",
+					// No rename: the hub-resolved name comes from the shell's title.
+					displayTitle: "pwsh in project",
+					createdAt: "2025-01-01T00:00:00Z",
+					updatedAt: "2025-01-01T00:00:00Z",
+				},
+			];
+
+			const palette = useCommandPalette();
+			palette.search("#");
+
+			const labels = palette.results.value.filter((r) => r.type === "channel").map((r) => r.label);
+			expect(labels).toEqual(["pwsh in project"]);
+		});
+
 		it("filters builtin actions by label", () => {
 			const palette = useCommandPalette();
 			palette.search("split");

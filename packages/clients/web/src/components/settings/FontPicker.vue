@@ -27,10 +27,76 @@
 				<!-- Error banner -->
 				<div v-if="error" class="font-picker-error">{{ error }}</div>
 
+				<div class="font-picker-tabs" role="tablist">
+					<button
+						type="button"
+						role="tab"
+						class="font-picker-tab"
+						:class="{ active: tab === 'system' }"
+						:aria-selected="tab === 'system'"
+						@click="tab = 'system'"
+					>
+						System
+					</button>
+					<button
+						type="button"
+						role="tab"
+						class="font-picker-tab"
+						:class="{ active: tab === 'imported' }"
+						:aria-selected="tab === 'imported'"
+						@click="tab = 'imported'"
+					>
+						Imported
+					</button>
+				</div>
+
+				<!-- Fonts installed where the hub runs (#100) -->
+				<div v-if="tab === 'system'" class="font-picker-body">
+					<div class="system-font-controls">
+						<input
+							v-model="query"
+							type="search"
+							class="system-font-search"
+							placeholder="Search installed fonts"
+							aria-label="Search installed fonts"
+						/>
+						<label class="system-font-mono">
+							<input v-model="monospaceOnly" type="checkbox" />
+							Monospace only
+						</label>
+					</div>
+					<div v-if="systemError" class="font-picker-empty">{{ systemError }}</div>
+					<div v-else-if="systemFonts === null" class="font-picker-empty">Looking for installed fonts…</div>
+					<div v-else-if="shownSystemFonts.length === 0" class="font-picker-empty">
+						No installed font matches.
+					</div>
+					<ul v-else class="system-font-list" role="listbox" aria-label="Installed fonts">
+						<li v-for="font in shownSystemFonts" :key="font.family">
+							<button
+								type="button"
+								role="option"
+								class="system-font-item"
+								:class="{ selected: modelValue === font.family }"
+								:aria-selected="modelValue === font.family"
+								@click="onSelect(font.family)"
+							>
+								<span class="system-font-name">{{ font.family }}</span>
+								<span
+									v-if="showSamples"
+									class="system-font-sample"
+									:style="{ fontFamily: cssString(font.family) }"
+									>0Oo 1lI {}</span
+								>
+							</button>
+						</li>
+					</ul>
+					<p class="system-font-note">Installed on the machine where the hub runs. Nothing is uploaded.</p>
+				</div>
+
 				<!-- Font list -->
-				<div class="font-picker-body">
+				<div v-else class="font-picker-body">
 					<div v-if="fonts.length === 0" class="font-picker-empty">
-						No custom fonts installed. Drop font files here or click "+ Add font" below.
+						No imported fonts. Drop font files here or click "+ Add font" below.
 					</div>
 					<div v-else class="font-picker-list">
 						<FontCard
@@ -45,7 +111,7 @@
 				</div>
 
 				<!-- Footer -->
-				<div class="font-picker-footer">
+				<div v-if="tab === 'imported'" class="font-picker-footer">
 					<button class="font-picker-add-btn" :disabled="uploading" @click="fileInput?.click()">
 						{{ uploading ? "Uploading…" : "+ Add font" }}
 					</button>
@@ -64,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import FontCard from "./FontCard.vue";
 import { useFileDrop } from "../../composables/useFileDrop.js";
@@ -72,6 +138,8 @@ import { useConfigStore } from "../../stores/config.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { hubBaseUrl } from "../../utils/hub-url.js";
 import { hubFetch } from "../../utils/hub-fetch.js";
+import { cssString, filterSystemFonts } from "../../utils/system-fonts.js";
+import { isTauriRuntime } from "../../utils/tauri-runtime.js";
 
 const props = defineProps<{
 	modelValue: string | undefined;
@@ -87,17 +155,42 @@ const configStore = useConfigStore();
 const authStore = useAuthStore();
 // storeToRefs keeps `fonts` reactive — plain destructuring would snapshot the
 // value and the list would never update after an upload/delete refresh.
-const { fonts } = storeToRefs(configStore);
+const { fonts, systemFonts } = storeToRefs(configStore);
 
 const uploading = ref(false);
 const error = ref<string | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
+
+const tab = ref<"system" | "imported">("system");
+const query = ref("");
+const monospaceOnly = ref(true);
+const systemError = ref<string | null>(null);
+const shownSystemFonts = computed(() =>
+	filterSystemFonts(systemFonts.value ?? [], query.value, monospaceOnly.value),
+);
+// The desktop drives its own local hub, so every listed font is installed here
+// and a sample costs nothing. In a browser a sample could download each font.
+const showSamples = isTauriRuntime();
+
+watch(
+	() => props.show,
+	(shown) => {
+		if (!shown) return;
+		tab.value = fonts.value.some((font) => font.family === props.modelValue) ? "imported" : "system";
+		systemError.value = null;
+		configStore.loadSystemFonts().catch((e: unknown) => {
+			systemError.value = `Could not list the installed fonts: ${e instanceof Error ? e.message : String(e)}`;
+		});
+	},
+	{ immediate: true },
+);
 
 function authHeader(): Record<string, string> {
 	return authStore.token ? { Authorization: `Bearer ${authStore.token}` } : {};
 }
 
 async function uploadFiles(files: File[]): Promise<void> {
+	tab.value = "imported";
 	uploading.value = true;
 	error.value = null;
 
@@ -260,6 +353,124 @@ async function onFileInputChange(event: Event): Promise<void> {
 	padding: 12px 16px;
 	overflow-y: auto;
 	max-height: 360px;
+}
+
+.font-picker-tabs {
+	display: flex;
+	gap: 4px;
+	padding: 8px 16px 0;
+	border-bottom: 1px solid var(--nt-border);
+}
+
+.font-picker-tab {
+	padding: 6px 12px;
+	font-size: 12px;
+	font-family: inherit;
+	font-weight: 600;
+	background: transparent;
+	border: none;
+	border-bottom: 2px solid transparent;
+	color: var(--nt-fg-muted);
+	cursor: pointer;
+}
+
+.font-picker-tab:hover {
+	color: var(--nt-fg);
+}
+
+.font-picker-tab.active {
+	color: var(--nt-fg);
+	border-bottom-color: var(--nt-accent);
+}
+
+.system-font-controls {
+	position: sticky;
+	top: -12px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin: -12px -16px 8px;
+	padding: 12px 16px 8px;
+	background: var(--nt-bg);
+}
+
+.system-font-search {
+	flex: 1;
+	min-width: 0;
+	padding: 5px 8px;
+	font-size: 12px;
+	font-family: inherit;
+	color: var(--nt-fg);
+	background: var(--nt-bg-surface);
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+}
+
+.system-font-search:focus {
+	outline: none;
+	border-color: var(--nt-accent);
+}
+
+.system-font-mono {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 12px;
+	color: var(--nt-fg-muted);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.system-font-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.system-font-item {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	width: 100%;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: 13px;
+	text-align: left;
+	color: var(--nt-fg);
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.system-font-item:hover {
+	background: var(--nt-hover);
+}
+
+.system-font-item.selected {
+	border-color: var(--nt-accent);
+}
+
+.system-font-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.system-font-sample {
+	flex-shrink: 0;
+	font-size: 14px;
+	color: var(--nt-fg-muted);
+}
+
+.system-font-note {
+	margin: 10px 0 0;
+	font-size: 11px;
+	color: var(--nt-fg-muted);
 }
 
 .font-picker-empty {

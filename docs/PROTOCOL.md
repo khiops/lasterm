@@ -817,7 +817,8 @@ Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthent
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/fonts` | ● | `FontFamily[]` — scans system + user font dirs; returned public font URLs carry the per-boot asset token |
+| GET | `/api/fonts` | ● | `FontFamily[]` — the imported fonts in the config dir's `fonts/`; returned public font URLs carry the per-boot asset token |
+| GET | `/api/fonts/system` | ● | `SystemFontFamily[]` — `.ttf`/`.otf` fonts installed where the hub runs (#100), with `monospace` and each face's `localNames` for `local()`. Scanned from the OS font directories at most every five minutes |
 
 #### Themes
 
@@ -864,6 +865,7 @@ Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthent
 | Prefix | Source | Notes |
 |--------|--------|-------|
 | `/public/fonts/` | `~/.config/lasterm/fonts/` | User custom fonts; `Cross-Origin-Resource-Policy: cross-origin` only when `asset_token` is valid |
+| `/public/system-fonts/<id>.ttf\|.otf` | OS font directories | A font the last `/api/fonts/system` scan found, by an opaque id (never a path); asset token required |
 | `/public/sounds/` | `~/.config/lasterm/sounds/` | User custom bell sounds; `Cross-Origin-Resource-Policy: cross-origin` only when `asset_token` is valid |
 | `/public/wallpapers/` | `~/.config/lasterm/wallpapers/` | User wallpapers; `Cross-Origin-Resource-Policy: cross-origin` only when `asset_token` is valid |
 | `/` (fallback) | `static/` dir or SEA blob | Web UI bundle (unauthenticated) |

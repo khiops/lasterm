@@ -54,7 +54,12 @@ import { registerWsRoutes } from "./ws/ws-handler.js";
  * starts and the actual port is known — call addStartupCorsOrigins() after listen.
  */
 const _corsAllowedOrigins = new Set<string>();
-const PROTECTED_PUBLIC_ASSET_PREFIXES = ["/public/fonts", "/public/sounds", "/public/wallpapers"];
+const PROTECTED_PUBLIC_ASSET_PREFIXES = [
+	"/public/fonts",
+	"/public/system-fonts",
+	"/public/sounds",
+	"/public/wallpapers",
+];
 
 function isProtectedPublicAssetPath(pathname: string): boolean {
 	return PROTECTED_PUBLIC_ASSET_PREFIXES.some(

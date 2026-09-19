@@ -244,6 +244,19 @@ export interface FontFamily {
 	files: FontFile[];
 }
 
+/** A face installed on the hub's machine (#100), served without an upload. */
+export interface SystemFontFile extends FontFile {
+	/** Full and PostScript names, for `local()`: a client with the font installed need not download it. */
+	localNames: string[];
+}
+
+export interface SystemFontFamily {
+	family: string;
+	/** Some face of the family declares a fixed pitch. */
+	monospace: boolean;
+	files: SystemFontFile[];
+}
+
 export interface LogConfig {
 	level: "trace" | "debug" | "info" | "warn" | "error";
 	format: "text" | "jsonl";

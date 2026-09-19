@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.6](https://github.com/khiops/lasterm/compare/v0.10.5...v0.10.6) (2026-09-19)
+
+
+### Bug Fixes
+
+* **agent:** locate state and configuration by the hub's rule, or refuse ([#361](https://github.com/khiops/lasterm/issues/361)) ([9d9bf6f](https://github.com/khiops/lasterm/commit/9d9bf6f8303a6e39764b98368796d5b035880efb)), closes [#165](https://github.com/khiops/lasterm/issues/165)
+* **hub:** locate state, config and cache through one resolver ([#360](https://github.com/khiops/lasterm/issues/360)) ([4d55d50](https://github.com/khiops/lasterm/commit/4d55d5050b247897ff592a5c375be7e199c1ad60)), closes [#297](https://github.com/khiops/lasterm/issues/297)
+* **root:** stop only what the dev scripts started, at the paths the hub uses ([#363](https://github.com/khiops/lasterm/issues/363)) ([28d3e5e](https://github.com/khiops/lasterm/commit/28d3e5e2c787823614a9ef432cf5022d2abb9069)), closes [#161](https://github.com/khiops/lasterm/issues/161) [#173](https://github.com/khiops/lasterm/issues/173)
+
+
+### Tests
+
+* type-check every spec by default, excluding only today's known failures ([#364](https://github.com/khiops/lasterm/issues/364)) ([eddc3aa](https://github.com/khiops/lasterm/commit/eddc3aada1065ef8d1a84b5cd3296dcfc9581278))
+
 ## [0.10.5](https://github.com/khiops/lasterm/compare/v0.10.4...v0.10.5) (2026-09-19)
 
 

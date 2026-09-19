@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -158,15 +158,47 @@ describe("capabilities/default.json", () => {
 	const caps = readJson("src-tauri/capabilities/default.json") as Record<string, unknown>;
 
 	// The Rust side launches the sidecars through the plugin's own API, which no
-	// capability gates. A shell grant here would only let page script run them,
-	// with any arguments: nothing in the web client does, so none is granted.
-	it("grants the webview no shell permission", () => {
+	// capability gates. An execute or spawn grant here would only let page script
+	// run them, with any arguments: nothing in the web client does, so none is
+	// granted. Opening a link is the one shell permission the page needs: the
+	// plugin intercepts every target="_blank" click to open it itself, and
+	// without the grant such links did nothing.
+	it("grants the webview no shell permission but opening https links", () => {
 		const permissions = caps.permissions as unknown[];
 		expect(Array.isArray(permissions)).toBe(true);
 		const identifiers = permissions.map((p) =>
 			typeof p === "string" ? p : String((p as Record<string, unknown>).identifier),
 		);
-		expect(identifiers.filter((id) => id.startsWith("shell:"))).toEqual([]);
+		expect(identifiers.filter((id) => id.startsWith("shell:"))).toEqual(["shell:allow-open"]);
+	});
+
+	// The plugin anchors the configured pattern itself, as `^pattern$`: a pattern
+	// written with its own `^` then accepts only the bare prefix, and every link
+	// fails the scope check without a word.
+	it("opens every external link of the web client, and only https", () => {
+		const conf = readJson("src-tauri/tauri.conf.json") as Record<string, unknown>;
+		const open = (conf.plugins as Record<string, Record<string, unknown>>).shell?.open;
+		expect(typeof open).toBe("string");
+		const scope = new RegExp(`^${open}$`);
+
+		const webSrc = resolve(DESKTOP_DIR, "../web/src");
+		const links = readdirSync(webSrc, { recursive: true, encoding: "utf-8" })
+			.filter((file) => file.endsWith(".vue"))
+			.flatMap((file) => [
+				...readFileSync(resolve(webSrc, file), "utf-8").matchAll(/\shref="([a-z]+:[^"]*)"/g),
+			])
+			.map((match) => match[1]);
+		expect(links.length, "the About links at least").toBeGreaterThan(0);
+		for (const link of links) expect(link, "a link the page offers").toMatch(scope);
+
+		for (const refused of [
+			"https://",
+			"http://example.com",
+			"file:///C:/",
+			"javascript:alert(1)",
+		]) {
+			expect(refused).not.toMatch(scope);
+		}
 	});
 
 	it("grants the set-effects window capability and narrow OS info reads", () => {

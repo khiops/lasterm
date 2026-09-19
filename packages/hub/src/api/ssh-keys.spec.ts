@@ -162,11 +162,11 @@ describe("SSH key endpoints", () => {
 			}>();
 			expect(body.entries).toHaveLength(1);
 			const entry = body.entries[0];
-			expect(entry.name).toBe("id_ed25519");
-			expect(entry.type).toBe("key");
-			expect(entry.algorithm).toBe("ED25519");
-			expect(entry.bits).toBe(256);
-			expect(entry.fingerprint).toMatch(/^SHA256:/);
+			expect(entry?.name).toBe("id_ed25519");
+			expect(entry?.type).toBe("key");
+			expect(entry?.algorithm).toBe("ED25519");
+			expect(entry?.bits).toBe(256);
+			expect(entry?.fingerprint).toMatch(/^SHA256:/);
 		});
 
 		it("lists subdirectories with item count", async () => {

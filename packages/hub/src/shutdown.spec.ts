@@ -22,6 +22,12 @@ import { getTestTls } from "./test-tls.fixture.js";
 
 const TEST_TOKEN = "a".repeat(64);
 const OWNER_TOKEN = "b".repeat(64);
+// An owner token comes with the quit capability; these tests only reach
+// /api/shutdown, so quit fails loudly if anything calls it.
+const QUIT_NOT_UNDER_TEST = {
+	onQuit: () => Promise.reject(new Error("quit is not under test")),
+	onQuitDelivered: () => {},
+};
 
 describe("gracefulShutdown", () => {
 	afterEach(() => {
@@ -329,6 +335,7 @@ describe("POST /api/shutdown", () => {
 			tls: getTestTls(),
 			logger: false,
 			ownerToken: OWNER_TOKEN,
+			...QUIT_NOT_UNDER_TEST,
 			onShutdown: () => {
 				shutdownCalls++;
 			},
@@ -403,7 +410,9 @@ describe("POST /api/shutdown", () => {
 				calls.push("stop-agent");
 				return { ok: true, message: "stopped", stdout: "", stderr: "" };
 			},
-			onQuitDelivered: () => calls.push("teardown"),
+			onQuitDelivered: () => {
+				calls.push("teardown");
+			},
 		});
 		const address = await startServer(server, { port: 0 });
 		const first = await connectAuthedWebSocket(address, TEST_TOKEN);
@@ -564,6 +573,7 @@ describe("POST /api/shutdown", () => {
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
+			...QUIT_NOT_UNDER_TEST,
 			dbManager: dbs,
 			skipShellDiscovery: true,
 			onShutdown: () => {
@@ -589,6 +599,7 @@ describe("POST /api/shutdown", () => {
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
+			...QUIT_NOT_UNDER_TEST,
 			dbManager: dbs,
 			skipShellDiscovery: true,
 		});
@@ -612,6 +623,7 @@ describe("POST /api/shutdown", () => {
 			logger: false,
 			authToken: TEST_TOKEN,
 			ownerToken: OWNER_TOKEN,
+			...QUIT_NOT_UNDER_TEST,
 			dbManager: dbs,
 			skipShellDiscovery: true,
 			onShutdown: () => {
@@ -772,8 +784,8 @@ function encodeClientWebSocketFrame(payload: Uint8Array, opcode = 0x82): Buffer 
 	frame[0] = opcode;
 	frame[1] = 0x80 | payload.length;
 	mask.copy(frame, 2);
-	for (let index = 0; index < payload.length; index++) {
-		frame[6 + index] = payload[index] ^ mask[index % mask.length];
+	for (const [index, byte] of payload.entries()) {
+		frame[6 + index] = byte ^ mask.readUInt8(index % mask.length);
 	}
 	return frame;
 }
@@ -784,7 +796,7 @@ function readWebSocketPayload(socket: tls.TLSSocket): Promise<Uint8Array> {
 		const onData = (chunk: Buffer) => {
 			frame = Buffer.concat([frame, chunk]);
 			if (frame.length < 2) return;
-			const length = frame[1] & 0x7f;
+			const length = frame.readUInt8(1) & 0x7f;
 			if (length > 125) {
 				cleanup();
 				reject(new Error("Test WebSocket response unexpectedly exceeds 125 bytes"));

@@ -770,8 +770,8 @@ describe("GET /api/groups", () => {
 		expect(res.statusCode).toBe(200);
 		const groups = res.json<Array<{ name: string; host_id: string }>>();
 		expect(groups.length).toBe(1);
-		expect(groups[0].name).toBe("My Group");
-		expect(groups[0].host_id).toBe(host.id);
+		expect(groups[0]?.name).toBe("My Group");
+		expect(groups[0]?.host_id).toBe(host.id);
 	});
 });
 
@@ -1134,10 +1134,11 @@ describe("PATCH /api/channels/:id — group_id", () => {
 		// Create a group to assign
 		const hostRes = await server.inject({ method: "GET", url: "/api/hosts" });
 		const hosts = hostRes.json<Array<{ id: string }>>();
+		expect(hosts[0]).toBeDefined();
 		const groupRes = await server.inject({
 			method: "POST",
 			url: "/api/groups",
-			payload: { host_id: hosts[0].id, name: "AssignGroup" },
+			payload: { host_id: hosts[0]?.id, name: "AssignGroup" },
 		});
 		const group = groupRes.json<{ id: string }>();
 
@@ -1618,8 +1619,8 @@ describe("POST /api/hosts/import — sshAuth inferred from identityFile (kept as
 
 		expect(res.statusCode).toBe(201);
 		const hosts = res.json<Array<{ ssh_auth: string; ssh_key_path: string }>>();
-		expect(hosts[0].ssh_auth).toBe("key");
-		expect(hosts[0].ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
+		expect(hosts[0]?.ssh_auth).toBe("key");
+		expect(hosts[0]?.ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
 	});
 
 	it("does not set sshAuth when identityFile is absent", async () => {
@@ -1650,6 +1651,7 @@ describe("POST /api/hosts/import — sshAuth inferred from identityFile (kept as
 		expect(res.statusCode).toBe(201);
 		const hosts = res.json<Array<{ ssh_auth: string | null }>>();
 		// ssh_auth should be null/undefined (not set to "key")
-		expect(hosts[0].ssh_auth == null).toBe(true);
+		expect(hosts[0]).toBeDefined();
+		expect(hosts[0]?.ssh_auth == null).toBe(true);
 	});
 });

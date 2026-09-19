@@ -117,12 +117,12 @@ describe("GET /api/host-groups", () => {
 			>();
 		expect(body.length).toBe(1);
 		const g = body[0];
-		expect(typeof g.id).toBe("string");
-		expect(g.name).toBe("WireShape");
-		expect(g.color).toBe("#aabbcc");
-		expect(typeof g.sort_order).toBe("number");
-		expect(typeof g.created_at).toBe("string");
-		expect(typeof g.updated_at).toBe("string");
+		expect(typeof g?.id).toBe("string");
+		expect(g?.name).toBe("WireShape");
+		expect(g?.color).toBe("#aabbcc");
+		expect(typeof g?.sort_order).toBe("number");
+		expect(typeof g?.created_at).toBe("string");
+		expect(typeof g?.updated_at).toBe("string");
 	});
 
 	it("paginates with limit and offset", async () => {
@@ -160,7 +160,7 @@ describe("GET /api/host-groups", () => {
 		const body = res.json<{ data: Array<{ name: string }>; total: number }>();
 		expect(body.data.length).toBe(1);
 		expect(body.total).toBe(3);
-		expect(body.data[0].name).toBe("Page-C");
+		expect(body.data[0]?.name).toBe("Page-C");
 	});
 
 	it("returns 400 VALIDATION_ERROR for non-digit limit (10abc)", async () => {

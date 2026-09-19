@@ -71,7 +71,7 @@ describe("ChannelLifecycleManager — SEC-015 pending auth prompt security", () 
 			const buildPromptAuth = (
 				lifecycle as unknown as {
 					_buildPromptAuth: (
-						client: typeof client,
+						wsClient: typeof client,
 					) => (hostId: string, promptType: string, message: string) => Promise<string | null>;
 				}
 			)._buildPromptAuth.bind(lifecycle);
@@ -117,7 +117,7 @@ describe("ChannelLifecycleManager — SEC-015 pending auth prompt security", () 
 			const buildPromptAuth = (
 				lifecycle as unknown as {
 					_buildPromptAuth: (
-						client: typeof client,
+						wsClient: typeof client,
 					) => (hostId: string, promptType: string, message: string) => Promise<string | null>;
 				}
 			)._buildPromptAuth.bind(lifecycle);
@@ -165,7 +165,7 @@ describe("ChannelLifecycleManager — SEC-015 pending auth prompt security", () 
 			const buildPromptAuth = (
 				lifecycle as unknown as {
 					_buildPromptAuth: (
-						client: typeof client,
+						wsClient: typeof client,
 					) => (hostId: string, promptType: string, message: string) => Promise<string | null>;
 				}
 			)._buildPromptAuth.bind(lifecycle);
@@ -248,7 +248,7 @@ describe("ChannelLifecycleManager — SEC-015 pending auth prompt security", () 
 			expect(promptId).toBeTruthy();
 
 			clientDisconnect(ctx as unknown as SharedSessionContext, "c-c", (clientId, msg) => {
-				ctx.clients.get(clientId)?.send(msg as ProtocolMessage);
+				ctx.clients.get(clientId)?.send(msg as unknown as ProtocolMessage);
 			});
 
 			expect(oldMessages).toContainEqual({ type: "PROMPT_CANCEL", promptId });
@@ -282,7 +282,7 @@ describe("ChannelLifecycleManager — SEC-015 pending auth prompt security", () 
 			const buildPromptAuth = (
 				lifecycle as unknown as {
 					_buildPromptAuth: (
-						client: typeof client,
+						wsClient: typeof client,
 					) => (hostId: string, promptType: string, message: string) => Promise<string | null>;
 				}
 			)._buildPromptAuth.bind(lifecycle);

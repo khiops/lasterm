@@ -160,7 +160,7 @@ describe("initAuth", () => {
 		if (process.platform === "win32") return;
 
 		mkdirSync(testDir, { recursive: true, mode: 0o700 });
-		writeFileSync(testDir + "/auth.json", JSON.stringify({ token: "a".repeat(64) }));
+		writeFileSync(`${testDir}/auth.json`, JSON.stringify({ token: "a".repeat(64) }));
 		chmodSync(testDir, 0o770);
 
 		expect(() => initAuth(testDir)).toThrow(/group- or world-writable/);

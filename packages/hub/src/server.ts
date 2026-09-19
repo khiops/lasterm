@@ -149,7 +149,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 				defaultSrc: ["'self'"],
 				scriptSrc: ["'self'"],
 				styleSrc: ["'self'", "'unsafe-inline'"],
-				connectSrc: ["'self'", "ws:", "wss:"],
+				// 'self' covers the same-origin WebSocket; ws: and wss: would allow any host (#210).
+				connectSrc: ["'self'"],
 				imgSrc: ["'self'", "data:", "blob:"],
 				fontSrc: ["'self'", "data:"],
 				workerSrc: ["'self'", "blob:"],

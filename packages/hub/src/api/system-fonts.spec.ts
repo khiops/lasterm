@@ -249,7 +249,7 @@ describe("scanSystemFonts (#100)", () => {
 			expect(served.rawPayload.subarray(0, 4)).toEqual(Buffer.from([0, 1, 0, 0]));
 
 			const wrongType = name.replace(/\.ttf$/, ".otf");
-			for (const other of [wrongType, "0".repeat(32) + ".ttf", "..%2F..%2Fetc%2Fpasswd", "x.ttf"]) {
+			for (const other of [wrongType, `${"0".repeat(32)}.ttf`, "..%2F..%2Fetc%2Fpasswd", "x.ttf"]) {
 				const refused = await server.inject({
 					method: "GET",
 					url: `/public/system-fonts/${other}`,

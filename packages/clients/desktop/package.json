@@ -10,7 +10,7 @@
 		"build": "tauri build",
 		"test": "pnpm -w exec vitest run --project desktop",
 		"test:e2e": "tsx e2e/run.ts",
-		"typecheck": "tsc --noEmit -p e2e/tsconfig.json"
+		"typecheck": "tsc --noEmit -p e2e/tsconfig.json && tsc -p tsconfig.typecheck.json"
 	},
 	"devDependencies": {
 		"@tauri-apps/cli": "catalog:",

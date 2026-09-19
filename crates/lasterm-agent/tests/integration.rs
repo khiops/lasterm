@@ -247,7 +247,11 @@ async fn spawn_daemon_from(binary: &str, socket: &std::path::Path) -> Child {
             "--socket",
             socket.to_str().expect("UTF-8 socket path"),
         ])
+        // Both directories the daemon reads: with the real XDG_CONFIG_HOME, an
+        // auth.json on the developer's machine would switch these tests to
+        // authenticated mode, so their outcome would depend on that machine.
         .env("XDG_STATE_HOME", state_home)
+        .env("XDG_CONFIG_HOME", state_home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -494,6 +498,7 @@ async fn stop_normalizes_relative_socket_spellings() {
             .args(["--daemon", "--socket", raw_socket])
             .current_dir(&dir)
             .env("XDG_STATE_HOME", &dir)
+            .env("XDG_CONFIG_HOME", &dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())

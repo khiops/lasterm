@@ -75,6 +75,35 @@ fn publish_hub_state(next: HubState) {
     *state = next;
 }
 
+/// What the window is told when the hub it was using dies (#143).
+#[derive(Clone, serde::Serialize)]
+struct HubExitNotice {
+    code: Option<i32>,
+}
+
+/// Tell the window that the hub it was using is gone. A failure before the hub
+/// ever served is the startup dialog's to report, so only a hub that served
+/// gets here.
+#[cfg_attr(dev, allow(dead_code))]
+fn notify_hub_exit(app: &tauri::AppHandle, code: Option<i32>) {
+    if let Err(error) = app.emit("hub-exited", HubExitNotice { code }) {
+        eprintln!("[lasterm] could not tell the window the hub exited: {error}");
+    }
+}
+
+/// Quit once the hub has died (#143). There is nothing for the quit coordinator
+/// to do: the hub it talks to is gone, and the agent keeps the local terminals
+/// for the next launch to reattach. While the hub runs, quitting goes through
+/// the close gesture instead, so this refuses.
+#[tauri::command]
+fn quit_after_hub_exit(app: tauri::AppHandle) -> Result<(), String> {
+    if !matches!(hub_state(), HubState::Exited(_)) {
+        return Err("the hub is still running; quit through the close gesture".to_string());
+    }
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(dev, allow(dead_code))]
 fn hub_state() -> HubState {
     match HUB_STATE.lock() {
@@ -4594,6 +4623,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("[lasterm] cannot create {}: {error}", log_dir.display());
         }
         let log_path = log_dir.join("hub.log");
+        let exit_notice = app.handle().clone();
 
         tauri::async_runtime::spawn(async move {
             // A log this task cannot open must not stop it consuming events: the
@@ -4622,6 +4652,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             // port the instant it is parsed is what let startup succeed against a
             // child whose termination event was already queued behind that line.
             let mut announced: Option<HubAnnouncement> = None;
+            let mut served = false;
             let mut exited = false;
             loop {
                 // Anything already queued is taken first, so a pending exit is seen
@@ -4637,6 +4668,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => {
                         if let Some(announcement) = announced.take() {
                             publish_hub_state(HubState::Serving(announcement));
+                            served = true;
                         }
                         match rx.recv().await {
                             Some(event) => event,
@@ -4662,6 +4694,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             payload.code, payload.signal
                         ));
                         publish_hub_state(HubState::Exited(payload.code));
+                        if served {
+                            notify_hub_exit(&exit_notice, payload.code);
+                        }
                         exited = true;
                         break;
                     }
@@ -4674,6 +4709,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             if !exited {
                 record("[hub:exit] event stream ended without a termination event".to_string());
                 publish_hub_state(HubState::Exited(None));
+                if served {
+                    notify_hub_exit(&exit_notice, None);
+                }
             }
         });
 
@@ -4926,7 +4964,8 @@ pub fn run() {
             acknowledge_desktop_close,
             answer_desktop_close,
             cancel_desktop_close,
-            pick_and_read_agent_file
+            pick_and_read_agent_file,
+            quit_after_hub_exit
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {

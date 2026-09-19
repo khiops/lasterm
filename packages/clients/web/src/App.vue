@@ -29,6 +29,7 @@
 			@close="showSettings = false"
 		/>
 
+		<HubExitedModal :code="hubExitCode" />
 		<CloseModal
 			:visible="closeModalVisible"
 			:busy="false"
@@ -332,6 +333,7 @@ import AuthPromptDialog from './components/AuthPromptDialog.vue';
 import BatchImportModal from './components/BatchImportModal.vue';
 import ChannelSidebar from './components/ChannelSidebar.vue';
 import CloseModal from './components/CloseModal.vue';
+import HubExitedModal from './components/HubExitedModal.vue';
 import CommandPalette from './components/CommandPalette.vue';
 import ConfigureCommandDialog from './components/ConfigureCommandDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
@@ -498,6 +500,9 @@ const showBatchImport = ref(false);
 
 const showPairingGenerator = ref(false);
 let desktopCloseUnlisten: (() => void) | null = null;
+let hubExitUnlisten: (() => void) | null = null;
+/** Set once the desktop reports that its hub died (#143). */
+const hubExitCode = ref<number | null | undefined>(undefined);
 let desktopCloseExpiryUnlisten: (() => void) | null = null;
 
 watch(
@@ -752,6 +757,9 @@ onMounted(async () => {
 				}
 			},
 		);
+		hubExitUnlisten = await listen<{ code: number | null }>('hub-exited', (event) => {
+			hubExitCode.value = event.payload.code;
+		});
 		desktopCloseExpiryUnlisten = await listen<{ attemptId: number }>('desktop-close-expired', (event) => {
 			if (desktopCloseAttempt.value === event.payload.attemptId) {
 				desktopCloseAttempt.value = null;
@@ -832,6 +840,7 @@ onMounted(async () => {
 onUnmounted(() => {
 	window.removeEventListener('keydown', onGlobalKeydown, { capture: true });
 	desktopCloseUnlisten?.();
+	hubExitUnlisten?.();
 	desktopCloseExpiryUnlisten?.();
 });
 

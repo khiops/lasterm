@@ -1,6 +1,6 @@
 import { DEFAULT_CHANNEL_NAME, DEFAULT_NOTIFICATION_CONFIG, generateId } from "@lasterm/shared";
 import { defineStore } from "pinia";
-import { markRaw, ref } from "vue";
+import { markRaw, ref, watch } from "vue";
 import { showSimpleNotification } from "../composables/useDesktopNotifications.js";
 import { createWsClient } from "../services/ws-client.js";
 import { hubWsUrl } from "../utils/hub-url.js";
@@ -35,6 +35,8 @@ export const useSessionStore = defineStore("session", () => {
 	};
 	/** Guard against multiple concurrent connect() calls from parallel pane mounts. */
 	let _connectPromise: Promise<void> | null = null;
+	/** The handshake in flight on the socket now open, joined rather than redone. */
+	let _authPromise: Promise<void> | null = null;
 
 	/**
 	 * Connect to hub WebSocket, send AUTH, then wait for AUTH_OK or AUTH_FAIL.
@@ -47,13 +49,38 @@ export const useSessionStore = defineStore("session", () => {
 		// sent its ATTACH in between lost the connection and its own work with it:
 		// it then waited out its timeout on a socket that had already gone.
 		if (_connectPromise) return _connectPromise;
-		if (wsClient.isConnected && authenticated.value) return;
+		// Never dial over a live socket. Closing it under everyone is what the
+		// drop-and-reconnect loop was made of: the transport can be back before
+		// the store has re-authenticated, and a caller landing in that window
+		// used to open a second connection. Wait for the handshake instead.
+		if (wsClient.isConnected) return _whenAuthenticated();
 		_connectPromise = _doConnect();
 		try {
 			await _connectPromise;
 		} finally {
 			_connectPromise = null;
 		}
+	}
+
+	/**
+	 * Resolve once the open socket is authenticated: the handshake in flight, or
+	 * the one the reconnect handler is about to run.
+	 */
+	function _whenAuthenticated(): Promise<void> {
+		if (authenticated.value) return Promise.resolve();
+		if (_authPromise) return _authPromise;
+		return new Promise<void>((resolve, reject) => {
+			const stop = watch(authenticated, (ok) => {
+				if (!ok) return;
+				stop();
+				clearTimeout(timer);
+				resolve();
+			});
+			const timer = setTimeout(() => {
+				stop();
+				reject(new Error("AUTH timeout — the connection did not authenticate"));
+			}, 10_000);
+		});
 	}
 
 	async function _doConnect(): Promise<void> {
@@ -135,7 +162,21 @@ export const useSessionStore = defineStore("session", () => {
 	 * Send AUTH and wait for AUTH_OK or AUTH_FAIL.
 	 * Resolves on success, rejects on failure.
 	 */
+	/**
+	 * Authenticate the socket now open, and publish the attempt so a caller
+	 * arriving mid-handshake joins it instead of dialing a second socket.
+	 */
 	function _authenticate(): Promise<void> {
+		const attempt = _sendAuth();
+		_authPromise = attempt;
+		const forget = () => {
+			if (_authPromise === attempt) _authPromise = null;
+		};
+		attempt.then(forget, forget);
+		return attempt;
+	}
+
+	function _sendAuth(): Promise<void> {
 		const authStore = useAuthStore();
 
 		return new Promise<void>((resolve, reject) => {

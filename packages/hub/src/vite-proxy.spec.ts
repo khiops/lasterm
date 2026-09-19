@@ -6,7 +6,7 @@ import * as http from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { platformDirEnv } from "./platform-dirs.fixture.js";
 
@@ -70,10 +70,20 @@ describe("Vite development proxy", () => {
 	}, 60_000);
 });
 
+/**
+ * Run the hub in the spawned process itself, through tsx's loader. The tsx CLI
+ * would run it in a child of its own: on Windows `kill()` then ends only the
+ * CLI, and the hub keeps the state directory's files open until it notices,
+ * which under load outlasted the cleanup's retries (EPERM).
+ */
 function startHub(stateDirectory: string, port: number): ChildProcess {
 	return spawn(
 		process.execPath,
-		[join(hubDirectory, "node_modules", "tsx", "dist", "cli.mjs"), "src/main.ts"],
+		[
+			"--import",
+			pathToFileURL(join(hubDirectory, "node_modules", "tsx", "dist", "loader.mjs")).href,
+			"src/main.ts",
+		],
 		{
 			cwd: hubDirectory,
 			env: {

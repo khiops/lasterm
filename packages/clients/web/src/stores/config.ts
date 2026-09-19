@@ -6,6 +6,7 @@ import {
 	type PanesConfig,
 	type SearchConfig,
 	type StartupConfig,
+	type SystemFontFamily,
 	type TabsConfig,
 	type TerminalProfile,
 	type TitleConfig,
@@ -13,7 +14,9 @@ import {
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
-import { domPublicAssetUrl, hubBaseUrl } from "../utils/hub-url.js";
+import { domPublicAssetUrl, hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
+import { systemFontFaceRules } from "../utils/system-fonts.js";
+import { isTauriRuntime } from "../utils/tauri-runtime.js";
 import { useAuthStore } from "./auth.js";
 
 // ─── Profile change event bus ─────────────────────────────────────────────────
@@ -113,6 +116,8 @@ interface UiConfig {
 export const useConfigStore = defineStore("config", () => {
 	const profile = ref<TerminalProfile>({ ...DEFAULT_PROFILE });
 	const fonts = ref<FontFamily[]>([]);
+	/** Fonts installed where the hub runs (#100); `null` until first asked for. */
+	const systemFonts = ref<SystemFontFamily[] | null>(null);
 	const loaded = ref(false);
 	const uiConfig = ref<UiConfig>({ onChannelDead: "readonly" });
 
@@ -163,6 +168,11 @@ export const useConfigStore = defineStore("config", () => {
 		} catch (err) {
 			console.warn("[config] failed to load fonts:", err);
 		}
+		// A browser may render a system font of the hub's machine as soon as a
+		// profile names it. Not awaited: the first scan must not delay startup.
+		if (!isTauriRuntime()) {
+			loadSystemFonts().catch((err) => console.warn("[config] failed to load system fonts:", err));
+		}
 	}
 
 	/**
@@ -205,12 +215,41 @@ export const useConfigStore = defineStore("config", () => {
 		}
 	}
 
+	/**
+	 * List the fonts installed where the hub runs (#100). A browser also gets
+	 * their @font-face rules, since it may be on another machine. The desktop
+	 * shell only ever drives its own local hub, so those fonts are installed
+	 * right here and need no rules — nor a download through the relay.
+	 */
+	async function loadSystemFonts(): Promise<void> {
+		const authStore = useAuthStore();
+		const response = await hubFetch(`${hubBaseUrl()}/api/fonts/system`, {
+			...(authStore.token ? { headers: { Authorization: `Bearer ${authStore.token}` } } : {}),
+		});
+		if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		const families: SystemFontFamily[] = await response.json();
+		systemFonts.value = families;
+		if (isTauriRuntime()) return;
+		const style = document.createElement("style");
+		style.id = "lasterm-system-fonts";
+		style.textContent = systemFontFaceRules(
+			families,
+			(url) => publicAssetUrl(url),
+			new Set(fonts.value.map((font) => font.family)),
+		);
+		const existing = document.getElementById("lasterm-system-fonts");
+		if (existing) existing.replaceWith(style);
+		else document.head.appendChild(style);
+	}
+
 	return {
 		profile,
 		fonts,
+		systemFonts,
 		loaded,
 		uiConfig,
 		loadFonts,
+		loadSystemFonts,
 		loadProfile,
 		loadUiConfig,
 		onProfileChange,

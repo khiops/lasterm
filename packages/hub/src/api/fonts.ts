@@ -5,6 +5,7 @@ import type { FontFamily, FontFile } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { fileTypeFromBuffer } from "file-type";
 import { buildSignedPublicAssetUrl } from "../asset-token.js";
+import { registerSystemFontRoutes } from "./system-fonts.js";
 import { sanitizeFilename } from "./upload-utils.js";
 
 /** Supported font file extensions */
@@ -212,6 +213,7 @@ export function scanFonts(fontsDir: string): FontFamily[] {
  */
 export function registerFontRoutes(server: FastifyInstance, configDir: string): void {
 	const fontsDir = join(configDir, "fonts");
+	registerSystemFontRoutes(server);
 
 	server.get("/api/fonts", async () => {
 		return scanFonts(fontsDir);

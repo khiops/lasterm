@@ -479,6 +479,25 @@ describe("Hub Server — security headers", () => {
 		},
 	);
 
+	it("GET /public/system-fonts/:file needs the asset token like every served asset (#100)", async () => {
+		const assetToken = await createProtectedAssetServer("fonts", "unused.woff2", "x");
+
+		const missing = await server?.inject({
+			method: "GET",
+			url: "/public/system-fonts/unknown.ttf",
+		});
+		expect(missing?.statusCode).toBe(403);
+		expect(missing?.json<{ error: { code: string } }>().error.code).toBe("ASSET_TOKEN_REQUIRED");
+
+		// With the token the request reaches the route, which knows no such font.
+		const signed = await server?.inject({
+			method: "GET",
+			url: `/public/system-fonts/unknown.ttf?asset_token=${assetToken}`,
+		});
+		expect(signed?.statusCode).toBe(404);
+		expect(signed?.json<{ error: { code: string } }>().error.code).toBe("FONT_NOT_FOUND");
+	});
+
 	it("GET /api/health keeps Helmet's same-origin CORP", async () => {
 		server = await createServer({ tls: getTestTls(), logger: false });
 

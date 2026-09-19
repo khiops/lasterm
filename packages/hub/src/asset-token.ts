@@ -3,7 +3,7 @@ import type { FastifyRequest } from "fastify";
 
 export const ASSET_TOKEN_QUERY_PARAM = "asset_token";
 
-export type PublicAssetKind = "fonts" | "sounds" | "wallpapers";
+export type PublicAssetKind = "fonts" | "system-fonts" | "sounds" | "wallpapers";
 
 const bootAssetToken = randomBytes(32).toString("base64url");
 

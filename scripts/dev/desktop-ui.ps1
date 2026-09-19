@@ -5,10 +5,14 @@
 #   .\scripts\dev\desktop-ui.ps1 [-Build] [-Port 9333]   (re)start it
 #   .\scripts\dev\desktop-ui.ps1 -Stop                    stop it
 #
-# -Build rebuilds first with scripts/build-desktop.ps1, reusing the normal
-# cache. The binaries then run from a copy in %LOCALAPPDATA%\lasterm-ui-test,
-# never from target\release: an agent started there keeps its executable
-# locked, and the next build fails to replace the sidecar ("access denied").
+# -Build rebuilds first with scripts/build-desktop.ps1 -NoBundle, always in the
+# same directory, target\desktop-ui\build, so cargo recompiles only what
+# changed: a fresh directory would rerun every crate's build script, each a new
+# executable for an antivirus to inspect. Both directories stay inside the
+# repository, so a folder excluded from scanning for development covers them.
+# The binaries then run from a copy in target\desktop-ui\bin, never from a
+# build directory: an agent started there keeps its executable locked, and the
+# next build fails to replace the sidecar ("access denied").
 #
 # It runs against the user's real profile, like an installed app. The agent is
 # never stopped here: it holds the terminals, and a restarted hub reattaches
@@ -20,8 +24,10 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$Release = Join-Path $Root "packages\clients\desktop\src-tauri\target\release"
-$RunDir = Join-Path $env:LOCALAPPDATA "lasterm-ui-test"
+$UiRoot = Join-Path $Root "target\desktop-ui"
+$BuildDir = Join-Path $UiRoot "build"
+$Release = Join-Path $BuildDir "release"
+$RunDir = Join-Path $UiRoot "bin"
 
 function Stop-UiApp {
 	# The desktop first: stopping only the hub would show the "hub stopped" dialog,
@@ -37,8 +43,15 @@ function Stop-UiApp {
 if ($Stop) { Stop-UiApp; return }
 
 if ($Build) {
-	& (Join-Path $Root "scripts\build-desktop.ps1")
-	if ($LASTEXITCODE -ne 0) { throw "build-desktop.ps1 failed" }
+	# Only the Tauri build reads CARGO_TARGET_DIR: the agent and the hub pass
+	# their own --target-dir and keep the repository's target\.
+	$env:CARGO_TARGET_DIR = $BuildDir
+	try {
+		& (Join-Path $Root "scripts\build-desktop.ps1") -NoBundle
+		if ($LASTEXITCODE -ne 0) { throw "build-desktop.ps1 failed" }
+	} finally {
+		Remove-Item Env:CARGO_TARGET_DIR
+	}
 }
 
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue

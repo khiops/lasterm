@@ -235,11 +235,10 @@ Workspace (layout persistence)
 3.5. Agent visual hints (from HELLO, ephemeral)
 4. `channels.profile_json` (per-channel, meta.db)
 
-**Port:** a CLI flag or `LASTERM_PORT` gives an explicit port; otherwise the OS assigns a free
-one, and the hub writes the port it took to `runtime.json` in the state dir (SPEC.md § 3).
-**`lasterm start` reads only the flag and ignores `LASTERM_PORT`, which only the `main.ts`
-entry point reads (#175).** An explicit port that is taken moves up to 99 ports higher
-(`zero_conf`).
+**Port:** the `--port` flag, else `LASTERM_PORT`, gives an explicit port; otherwise the OS assigns
+a free one, and the hub writes the port it took to `runtime.json` in the state dir (SPEC.md § 3).
+Both entry points resolve it through `resolveStartPort` (`packages/hub/src/start-port.ts`). An
+explicit port that is taken moves up to 99 ports higher (`zero_conf`).
 
 ## Common Pitfalls
 

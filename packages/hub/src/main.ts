@@ -1,16 +1,11 @@
 import { startHub } from "./hub-startup.js";
 import { PreviousInstallationError } from "./previous-installation.js";
+import { resolveStartPort } from "./start-port.js";
 
 async function main() {
-	const envPort = process.env.LASTERM_PORT;
-	if (envPort !== undefined) {
-		const parsedEnvPort = Number(envPort);
-		if (!Number.isInteger(parsedEnvPort) || parsedEnvPort < 1 || parsedEnvPort > 65535) {
-			throw new Error(`Invalid LASTERM_PORT: ${envPort} — must be an integer between 1 and 65535`);
-		}
-	}
+	const port = resolveStartPort(undefined, process.env.LASTERM_PORT);
 	await startHub({
-		...(envPort !== undefined ? { port: Number(envPort) } : {}),
+		...(port !== undefined ? { port } : {}),
 		openBrowser: process.env.LASTERM_OPEN === "1",
 		logging: true,
 	});

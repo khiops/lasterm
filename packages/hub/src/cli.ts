@@ -789,7 +789,8 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	// A previous installation is refused by `startHub`, not here: the check belongs
 	// to the operation that constructs a hub, so the daemon child and `pnpm dev`
 	// cannot reach it by another door. This handler only renders the refusal.
-	const port = args.port;
+	const { resolveStartPort } = await import("./start-port.js");
+	const port = resolveStartPort(args.port, process.env.LASTERM_PORT);
 
 	if (args.daemon) {
 		const stateDir = ensureStateDir();

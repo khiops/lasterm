@@ -192,9 +192,10 @@ export async function connectOrLaunch(
 	assertRunning();
 	const daemonLogPath = launchDaemon(agentPath, socketPath, config);
 
-	// Connect by polling the real agent handshake. Do not use a throwaway
-	// socket probe here: the daemon treats every accepted connection as the
-	// active hub and will displace the previous one before AUTH completes.
+	// Connect by polling the real agent handshake rather than a throwaway
+	// socket probe: the connection that proves the daemon ready is the one this
+	// hub keeps. The daemon makes a connection active, displacing the previous
+	// one, only once it has authenticated (#127).
 	const connected = await connectWhenReady(socketPath, daemonLogPath, hubLogger);
 	try {
 		assertRunning();
@@ -328,9 +329,9 @@ export function readBoundedLogTail(
 /**
  * Poll until the daemon accepts the authoritative hub connection.
  *
- * This intentionally uses LastermAgent.connectLocal instead of probeSocket.
- * A probe opens a real socket, and the daemon's single-active-connection
- * policy treats that as a hub connection that displaces the previous one.
+ * This intentionally uses LastermAgent.connectLocal instead of probeSocket:
+ * the connection that proves the daemon ready is the one this hub keeps, and
+ * it becomes the daemon's active hub connection once it has authenticated.
  *
  * Retries every AGENT_SOCKET_POLL_MS (100ms), gives up after AGENT_SOCKET_TIMEOUT (5s).
  *

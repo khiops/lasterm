@@ -123,7 +123,7 @@ fn state_dir() -> std::io::Result<std::path::PathBuf> {
 /// Run the agent in daemon mode.
 ///
 /// Listens on a Unix domain socket. Handles one connection at a time
-/// (last-writer-wins: new connections displace the previous one).
+/// (the latest authenticated connection wins and displaces the previous one).
 /// PTY channels persist across hub reconnections.
 #[cfg(unix)]
 pub(crate) async fn run_daemon(
@@ -246,24 +246,8 @@ async fn run_daemon_impl_with_manager(
                 // Create per-connection frame channel
                 let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-                // Displace previous connection and register new one
-                {
-                    let mut conn = active_conn.lock().await;
-                    if let Some(old) = conn.take() {
-                        tracing::debug!(
-                            connection_id,
-                            displaced_connection_id = old.connection_id,
-                            "displacing previous hub connection"
-                        );
-                        // notify_waiters wakes ALL listeners (writer task + read loop)
-                        old.cancel.notify_waiters();
-                    }
-                    *conn = Some(ActiveConnection {
-                        connection_id,
-                        cancel: Arc::clone(&cancel),
-                        frame_tx: frame_tx.clone(),
-                    });
-                }
+                // The connection becomes the active hub, displacing the previous
+                // one, only once it has authenticated: see `register_active`.
 
                 // Spawn the connection handler — does NOT block the accept loop
                 tokio::spawn(handle_connection(
@@ -312,7 +296,7 @@ fn get_pipe_name() -> String {
 /// Run the agent in daemon mode (Windows named pipe).
 ///
 /// Listens on a Windows named pipe. Handles one connection at a time
-/// (last-writer-wins: new connections displace the previous one).
+/// (the latest authenticated connection wins and displaces the previous one).
 /// PTY channels persist across hub reconnections.
 #[cfg(windows)]
 pub(crate) async fn run_daemon(
@@ -414,24 +398,8 @@ async fn run_daemon_impl(
         // Create per-connection frame channel
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-        // Displace previous connection and register new one
-        {
-            let mut conn = active_conn.lock().await;
-            if let Some(old) = conn.take() {
-                tracing::debug!(
-                    connection_id,
-                    displaced_connection_id = old.connection_id,
-                    "displacing previous hub connection"
-                );
-                // notify_waiters wakes ALL listeners (writer task + read loop)
-                old.cancel.notify_waiters();
-            }
-            *conn = Some(ActiveConnection {
-                connection_id,
-                cancel: Arc::clone(&cancel),
-                frame_tx: frame_tx.clone(),
-            });
-        }
+        // The connection becomes the active hub, displacing the previous one,
+        // only once it has authenticated: see `register_active`.
 
         // Spawn the connection handler — does NOT block the accept loop
         tokio::spawn(handle_connection_inner(
@@ -764,6 +732,7 @@ async fn handle_connection_inner<S>(
     } else {
         tracing::debug!(connection_id, "auth skipped because no token is configured");
     }
+    register_active(&active_conn, connection_id, &cancel, &frame_tx).await;
 
     // Send AGENT_CHANNEL_STATE for each existing channel
     let mut channel_state_count = 0usize;
@@ -905,7 +874,35 @@ async fn handle_connection(
     .await
 }
 
-/// Clear the active connection slot after a connection ends.
+/// Make an authenticated connection the active hub, displacing the previous one.
+///
+/// Only an authenticated peer gets here. Before this, a connection receives no
+/// terminal output (the output router writes to the active connection only)
+/// and cannot push the incumbent off: a peer that fails AUTH, such as a second
+/// hub holding another token, used to displace a working hub (#127).
+async fn register_active(
+    active_conn: &Arc<Mutex<Option<ActiveConnection>>>,
+    connection_id: u64,
+    cancel: &Arc<Notify>,
+    frame_tx: &FrameSender,
+) {
+    let mut conn = active_conn.lock().await;
+    if let Some(old) = conn.take() {
+        tracing::debug!(
+            connection_id,
+            displaced_connection_id = old.connection_id,
+            "displacing previous hub connection"
+        );
+        // notify_waiters wakes ALL listeners (writer task + read loop)
+        old.cancel.notify_waiters();
+    }
+    *conn = Some(ActiveConnection {
+        connection_id,
+        cancel: Arc::clone(cancel),
+        frame_tx: frame_tx.clone(),
+    });
+}
+
 /// Clear the active connection slot only if it belongs to this connection.
 /// Uses Arc pointer equality on the cancel token to avoid clearing a newer connection.
 async fn clear_active_if_ours(
@@ -1700,6 +1697,105 @@ mod tests {
     #[test]
     fn test_ct_eq_length_mismatch() {
         assert!(!ct_eq(b"short", b"longer"));
+    }
+
+    const HUB_TOKEN: &str = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
+
+    /// An active hub connection, and a waiter that records whether it was displaced.
+    fn incumbent_hub() -> (Arc<Mutex<Option<ActiveConnection>>>, Arc<Notify>) {
+        let cancel = Arc::new(Notify::new());
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let active = Arc::new(Mutex::new(Some(ActiveConnection {
+            connection_id: 7,
+            cancel: Arc::clone(&cancel),
+            frame_tx,
+        })));
+        (active, cancel)
+    }
+
+    /// Run the connection handshake over an in-memory stream, sending `token`.
+    /// Returns the client end, which keeps the connection open while held.
+    async fn connect_with_token(
+        active_conn: &Arc<Mutex<Option<ActiveConnection>>>,
+        token: &str,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+        use crate::framing::encode_frame;
+        use crate::protocol::HubToAgent;
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (output_tx, _output_rx) = mpsc::unbounded_channel::<OutputEvent>();
+        let auth = encode_frame(&HubToAgent::Auth {
+            token: token.to_string(),
+        })
+        .expect("encode AUTH");
+        let handler = tokio::spawn(handle_connection_inner(
+            server,
+            Arc::new(Mutex::new(PtyManager::new())),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            output_tx,
+            frame_tx,
+            frame_rx,
+            Arc::clone(active_conn),
+            Arc::new(Notify::new()),
+            Some(HUB_TOKEN.to_string()),
+            42,
+        ));
+        client.write_all(&auth).await.expect("send AUTH");
+        (client, handler)
+    }
+
+    /// A peer that fails AUTH neither displaces the active hub nor becomes it (#127).
+    #[tokio::test]
+    async fn failed_auth_leaves_the_active_hub_in_place() {
+        let (active_conn, incumbent_cancel) = incumbent_hub();
+        let displaced = incumbent_cancel.notified();
+        tokio::pin!(displaced);
+        displaced.as_mut().enable();
+
+        let (_client, handler) = connect_with_token(
+            &active_conn,
+            "000000def456abc123def456abc123def456abc123def456abc123def456abc1",
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+            .await
+            .expect("a refused peer's handler ends")
+            .expect("handler does not panic");
+
+        // Mutation caught: registering at accept time made this peer the
+        // active connection and cancelled the incumbent before AUTH was read.
+        assert_eq!(
+            active_conn.lock().await.as_ref().map(|c| c.connection_id),
+            Some(7)
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), displaced)
+                .await
+                .is_err(),
+            "the incumbent hub must not be displaced by a peer that failed AUTH"
+        );
+    }
+
+    /// An authenticated hub takes over from the previous one.
+    #[tokio::test]
+    async fn authenticated_hub_displaces_the_previous_one() {
+        let (active_conn, incumbent_cancel) = incumbent_hub();
+        let displaced = incumbent_cancel.notified();
+        tokio::pin!(displaced);
+        displaced.as_mut().enable();
+
+        let (client, handler) = connect_with_token(&active_conn, HUB_TOKEN).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), displaced)
+            .await
+            .expect("the previous hub is displaced once the new one authenticates");
+        assert_eq!(
+            active_conn.lock().await.as_ref().map(|c| c.connection_id),
+            Some(42)
+        );
+
+        drop(client);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler).await;
     }
 
     /// validate_auth accepts a correctly framed AUTH message with the right token.

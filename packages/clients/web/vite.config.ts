@@ -22,6 +22,13 @@ function resolveBuildHash(): string {
 
 const BUILD_HASH = resolveBuildHash();
 
+/** The release this build belongs to: release-please bumps this package's version. */
+const APP_VERSION = (
+	JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
+		version: string;
+	}
+).version;
+
 function hubStateDir(): string {
 	return lastermDir("state");
 }
@@ -76,6 +83,7 @@ export default defineConfig({
 	define: {
 		// Inject build hash as a compile-time constant accessible via import.meta.env.VITE_BUILD_HASH
 		"import.meta.env.VITE_BUILD_HASH": JSON.stringify(BUILD_HASH),
+		"import.meta.env.VITE_APP_VERSION": JSON.stringify(APP_VERSION),
 	},
 	build: {
 		outDir: "dist",

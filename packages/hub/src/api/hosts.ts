@@ -58,6 +58,28 @@ export interface UpdateHostBody {
 	arch?: "x64" | "arm64" | null;
 }
 
+/** The longest image icon accepted: a small picture, never a stored file. */
+export const MAX_ICON_IMAGE_LENGTH = 65_536;
+
+/**
+ * An image icon must be something a client can display. Pages load images only
+ * from the hub or from data: and blob: URIs, so a remote URL never loads (#208):
+ * an image icon is a base64 data URI of a raster format, bounded in size.
+ */
+export function validateIconImage(
+	iconType: string | undefined,
+	iconValue: string | null | undefined,
+): string | null {
+	if (iconType !== "image" || iconValue == null || iconValue === "") return null;
+	if (iconValue.length > MAX_ICON_IMAGE_LENGTH) {
+		return `an image icon must be at most ${MAX_ICON_IMAGE_LENGTH} characters`;
+	}
+	if (!/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(iconValue)) {
+		return "an image icon must be a data:image/png, jpeg, gif or webp URI: pick an image file";
+	}
+	return null;
+}
+
 export function validateCreateHost(body: CreateHostBody): string | null {
 	if (!body.label || body.label.trim().length === 0) {
 		return "Label is required";

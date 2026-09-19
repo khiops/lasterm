@@ -156,7 +156,9 @@ export function useCommandPalette() {
 		// ── Channels (SC-18) ──────────────────────────────────────────────────
 		if (prefix === null || prefix === "channel") {
 			for (const c of channelsStore.channels) {
-				const title = c.title ?? `Terminal ${c.id.slice(-8)}`;
+				// The name the tab and the sidebar show, which a rename sets; `title` is
+				// only that rename, so without one every terminal read "Terminal <id>".
+				const title = c.displayTitle ?? c.title ?? `Terminal ${c.id.slice(-8)}`;
 				const score = q ? fuzzyMatch(q, title) : 1;
 				if (score > 0) {
 					scored.push({

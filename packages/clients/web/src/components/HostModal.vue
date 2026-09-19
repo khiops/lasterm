@@ -438,13 +438,13 @@
 										</label>
 										<label class="radio-label">
 											<input type="radio" v-model="form.iconType" value="image" />
-											Image URL
+											Image
 										</label>
 									</div>
 								</div>
 								<div v-if="form.iconType !== 'auto'" class="field">
 								<label class="field-label" for="icon-value">
-									{{ form.iconType === 'emoji' ? 'Emoji' : 'Image URL' }}
+									{{ form.iconType === 'emoji' ? 'Emoji' : 'Image' }}
 								</label>
 								<div
 									v-if="form.iconType === 'emoji'"
@@ -477,15 +477,31 @@
 										@close="showEmojiPicker = false"
 									/>
 								</div>
-								<input
-									v-else
-									id="icon-value"
-									v-model="form.iconValue"
-									type="text"
-									class="field-input"
-									placeholder="https://example.com/icon.png"
-								/>
+								<div v-else class="identity-color-row">
+									<input
+										id="icon-value"
+										ref="iconFileInput"
+										type="file"
+										accept="image/png,image/jpeg,image/gif,image/webp"
+										class="icon-file-input"
+										@change="onIconFilePicked"
+									/>
+									<button type="button" class="btn btn-secondary btn-sm" @click="iconFileInput?.click()">
+										Choose image…
+									</button>
+									<button
+										v-if="form.iconValue"
+										type="button"
+										class="btn btn-secondary btn-sm"
+										@click="form.iconValue = ''"
+									>Remove</button>
+								</div>
 								<span v-if="form.iconType === 'emoji'" class="field-hint">Type an emoji or shortcode like :rocket:</span>
+								<span
+									v-if="form.iconType === 'image' && form.iconValue && !isDisplayableIconImage(form.iconValue)"
+									class="field-error"
+								>This icon is a web address, which Lasterm cannot load. Choose an image file instead.</span>
+								<span v-if="form.iconType === 'image' && iconError" class="field-error">{{ iconError }}</span>
 							</div>
 							</div>
 							<VisualProfileSettings v-model="visualProfile" />
@@ -524,6 +540,7 @@ import { getColorFromLabel } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
+import { iconImageFromFile, isDisplayableIconImage } from "../utils/host-icon.js";
 import VisualProfileSettings from "./VisualProfileSettings.vue";
 import EmojiPicker from "./EmojiPicker.vue";
 import SshKeyPicker from "./SshKeyPicker.vue";
@@ -581,6 +598,22 @@ const visualProfile = ref<VisualProfile>((() => {
 const activeTab = ref<"connection" | "terminal" | "appearance">("connection");
 
 const showEmojiPicker = ref(false);
+const iconFileInput = ref<HTMLInputElement | null>(null);
+const iconError = ref<string | null>(null);
+
+/** An image icon is stored as a small data URI: a page cannot load a web address (#208). */
+async function onIconFilePicked(event: Event): Promise<void> {
+	const input = event.target as HTMLInputElement;
+	const file = input.files?.[0];
+	input.value = "";
+	if (!file) return;
+	iconError.value = null;
+	try {
+		form.value.iconValue = await iconImageFromFile(file);
+	} catch (error) {
+		iconError.value = `Could not use that image: ${error instanceof Error ? error.message : String(error)}`;
+	}
+}
 const showKeyPicker = ref(false);
 const emojiPickerRef = ref<InstanceType<typeof EmojiPicker> | null>(null);
 
@@ -759,6 +792,10 @@ async function onSave(): Promise<void> {
 .field-hint {
 	font-size: 11px;
 	color: var(--nt-text-secondary);
+}
+
+.icon-file-input {
+	display: none;
 }
 
 .auth-note {

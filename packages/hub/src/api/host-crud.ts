@@ -2,7 +2,7 @@ import { ELEVATION_METHODS_ALL, toSnakeCase, validateCustomCommand } from "@last
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
-import { validateCreateHost, validateProfileJson } from "./hosts.js";
+import { validateCreateHost, validateIconImage, validateProfileJson } from "./hosts.js";
 
 export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
 	// GET /api/hosts?limit=N&offset=M
@@ -49,6 +49,11 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 				const e = err as { code: string; message: string };
 				return reply.code(400).send({ error: { code: e.code, message: e.message } });
 			}
+		}
+
+		const iconError = validateIconImage(body.icon_type, body.icon_value);
+		if (iconError) {
+			return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: iconError } });
 		}
 
 		// Validate visual profile colors in profile_json (INV-09)
@@ -154,6 +159,14 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 					return reply.code(400).send({
 						error: { code: "VALIDATION_ERROR", message: "ssh_port must be between 1 and 65535" },
 					});
+				}
+			}
+
+			// An icon value is checked against the type it will have once saved.
+			if (body.icon_value !== undefined) {
+				const iconError = validateIconImage(body.icon_type ?? host.iconType, body.icon_value);
+				if (iconError) {
+					return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: iconError } });
 				}
 			}
 

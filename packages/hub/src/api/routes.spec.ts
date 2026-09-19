@@ -212,6 +212,73 @@ describe("POST /api/hosts", () => {
 	});
 });
 
+describe("host image icons (#208)", () => {
+	const PNG =
+		"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+	it("stores an image icon given as a data URI", async () => {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "local", label: "icon-ok", icon_type: "image", icon_value: PNG },
+		});
+		expect(res.statusCode).toBe(201);
+		expect(res.json<Record<string, unknown>>().icon_value).toBe(PNG);
+	});
+
+	it("refuses a remote URL, which a page can never load", async () => {
+		// Mutation caught: the URL was stored and the icon stayed empty in every client.
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: {
+				type: "local",
+				label: "icon-url",
+				icon_type: "image",
+				icon_value: "https://example.com/icon.png",
+			},
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json<{ error: { message: string } }>().error.message).toContain("data:image");
+	});
+
+	it("checks an updated value against the host's current icon type", async () => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "local", label: "icon-update", icon_type: "image", icon_value: PNG },
+			})
+		).json<Record<string, unknown>>();
+		const refused = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { icon_value: "http://example.com/other.png" },
+		});
+		expect(refused.statusCode).toBe(400);
+		const emoji = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { icon_type: "emoji", icon_value: "🚀" },
+		});
+		expect(emoji.statusCode).toBe(200);
+	});
+
+	it("refuses an image icon larger than the bound", async () => {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: {
+				type: "local",
+				label: "icon-big",
+				icon_type: "image",
+				icon_value: `data:image/png;base64,${"A".repeat(70_000)}`,
+			},
+		});
+		expect(res.statusCode).toBe(400);
+	});
+});
+
 describe("GET /api/hosts/:id", () => {
 	it("returns the host", async () => {
 		const createRes = await server.inject({

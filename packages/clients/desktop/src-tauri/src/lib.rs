@@ -75,6 +75,32 @@ fn publish_hub_state(next: HubState) {
     *state = next;
 }
 
+/// Put a hub that died back to `Starting`, so a new one can be launched (#143).
+/// This is the one way out of `Exited`, and only one launch at a time takes it:
+/// a second request finds `Starting`, and one while a hub serves finds `Serving`.
+#[cfg_attr(dev, allow(dead_code))]
+fn begin_hub_restart() -> bool {
+    let Ok(mut state) = HUB_STATE.lock() else {
+        return false;
+    };
+    if !matches!(&*state, HubState::Exited(_)) {
+        return false;
+    }
+    *state = HubState::Starting;
+    true
+}
+
+/// A relaunch that failed before its child said anything leaves no event to end
+/// `Starting`. Ending it here keeps the dialog's Quit and Restart usable.
+#[cfg_attr(dev, allow(dead_code))]
+fn end_failed_hub_restart() {
+    if let Ok(mut state) = HUB_STATE.lock() {
+        if matches!(&*state, HubState::Starting) {
+            *state = HubState::Exited(None);
+        }
+    }
+}
+
 /// What the window is told when the hub it was using dies (#143).
 #[derive(Clone, serde::Serialize)]
 struct HubExitNotice {
@@ -102,6 +128,39 @@ fn quit_after_hub_exit(app: tauri::AppHandle) -> Result<(), String> {
     }
     app.exit(0);
     Ok(())
+}
+
+/// Launch a new hub after the one this desktop launched died (#143). The agent
+/// kept the local terminals, so the new hub reattaches them. The window reloads
+/// once this succeeds and reads the new port as a fresh launch would.
+#[tauri::command]
+async fn restart_hub_after_exit(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(dev)]
+    {
+        let _ = app;
+        Err("a dev build does not launch its hub: restart `pnpm dev` instead".to_string())
+    }
+    #[cfg(not(dev))]
+    {
+        if !begin_hub_restart() {
+            return Err("the hub is running, or already restarting".to_string());
+        }
+        // The launch waits on the child for up to 15 seconds: off the async runtime.
+        let launched = tauri::async_runtime::spawn_blocking(move || launch_hub(&app))
+            .await
+            .map_err(|error| format!("the restart did not complete: {error}"))
+            .and_then(|result| result);
+        match launched {
+            Ok(port) => {
+                eprintln!("[lasterm] hub restarted on port {port}");
+                Ok(())
+            }
+            Err(error) => {
+                end_failed_hub_restart();
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg_attr(dev, allow(dead_code))]
@@ -4575,6 +4634,243 @@ fn set_windows_transparent_background(window: &tauri::WebviewWindow) -> tauri::R
     window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)))
 }
 
+/// The hub this desktop launched. Holding its child keeps open the stdin pipe the
+/// hub watches (#188) for as long as the app runs; a restart replaces it (#143).
+#[cfg(not(dev))]
+#[derive(Default)]
+struct LaunchedHub(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
+
+/// Launch the hub sidecar and wait until it serves or fails: at startup, and again
+/// when the user restarts a hub that died (#143). On success the child is kept, the
+/// connection pinned and the port published. On failure the message is the user's.
+#[cfg(not(dev))]
+fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
+    use tauri_plugin_shell::ShellExt;
+
+    // Nothing here probes a port to decide anything. The desktop launches the
+    // sidecar, so the only facts it needs come from a process it owns and from
+    // files only this user can read:
+    //
+    //   * the child's own stdout announces the port it bound. Another user
+    //     cannot write to our child's pipe, so this cannot be forged — whereas
+    //     an unauthenticated `/api/health` can be answered by anyone who binds
+    //     the port first, which is how a stale record used to hand this client's
+    //     bearer token to a stranger (#170).
+    //   * exit 73 means a hub of this user already holds `hub.lock`. That file is
+    //     0600 in the user's state directory, so no other user can hold it.
+    //   * `runtime.json` is 0600 and written by the lock holder after it binds.
+    //
+    // Readiness is therefore observed, never polled, and the wait ends the moment
+    // the child resolves either way (#171).
+    // A missing bundle, a permissions error or an OS refusal used to panic here,
+    // which bypasses the failure dialog entirely — the one path where the user most
+    // needs to be told what is wrong, since nothing they can see explains it.
+    // `--exit-with-stdin`: the hub stops when this process's end of its stdin
+    // pipe closes, which the OS does however this process ends (#188). The pipe
+    // lives in the child handle, managed below for the life of the app.
+    let sidecar = app
+        .shell()
+        .sidecar("lasterm-hub")
+        .map_err(|error| format!("The hub program could not be located in this build: {error}"))?
+        .args(["start", "--exit-with-stdin"]);
+    let (mut rx, child) = sidecar
+        .spawn()
+        .map_err(|error| format!("The hub could not be started: {error}"))?;
+
+    let log_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("lasterm");
+    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("[lasterm] cannot create {}: {error}", log_dir.display());
+    }
+    let log_path = log_dir.join("hub.log");
+    let exit_notice = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        // A log this task cannot open must not stop it consuming events: the
+        // outcome of startup is decided by what arrives here, and an unread
+        // channel would also leave a chatty child blocked on a full pipe.
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => Some(f),
+            Err(error) => {
+                eprintln!("[lasterm] cannot open {}: {error}", log_path.display());
+                None
+            }
+        };
+        let mut record = |line: String| match file.as_mut() {
+            Some(f) => {
+                let _ = writeln!(f, "{line}");
+            }
+            None => eprintln!("[lasterm] {line}"),
+        };
+
+        use tauri_plugin_shell::process::CommandEvent;
+        // Held back until nothing else is waiting to contradict it. Publishing a
+        // port the instant it is parsed is what let startup succeed against a
+        // child whose termination event was already queued behind that line.
+        let mut announced: Option<HubAnnouncement> = None;
+        let mut served = false;
+        let mut exited = false;
+        loop {
+            // Anything already queued is taken first, so a pending exit is seen
+            // before an announcement is believed. `Empty` means the child has
+            // said all it has to say for now, which is when a port becomes usable.
+            let event = match rx.try_recv() {
+                Ok(event) => event,
+                // Empty or disconnected, treated the same and deliberately: on a
+                // closed channel the await below returns immediately, and the tail
+                // of this task then publishes the exit, which supersedes a port.
+                // Naming the two apart would need tokio as a direct dependency for
+                // no behavioural difference.
+                Err(_) => {
+                    if let Some(announcement) = announced.take() {
+                        publish_hub_state(HubState::Serving(announcement));
+                        served = true;
+                    }
+                    match rx.recv().await {
+                        Some(event) => event,
+                        None => break,
+                    }
+                }
+            };
+
+            match event {
+                CommandEvent::Stdout(line) => {
+                    let text = String::from_utf8_lossy(&line).to_string();
+                    if let Some(announcement) = parse_listening_announcement(&text) {
+                        announced = Some(announcement);
+                    }
+                    record(format!("[hub:stdout] {text}"));
+                }
+                CommandEvent::Stderr(line) => {
+                    record(format!("[hub:stderr] {}", String::from_utf8_lossy(&line)));
+                }
+                CommandEvent::Terminated(payload) => {
+                    record(format!(
+                        "[hub:exit] code={:?} signal={:?}",
+                        payload.code, payload.signal
+                    ));
+                    publish_hub_state(HubState::Exited(payload.code));
+                    if served {
+                        notify_hub_exit(&exit_notice, payload.code);
+                    }
+                    exited = true;
+                    break;
+                }
+                CommandEvent::Error(err) => record(format!("[hub:error] {err}")),
+                _ => {}
+            }
+        }
+        // The stream ending without a `Terminated` event leaves the child's fate
+        // unknown, which must not read as "still starting" for ever.
+        if !exited {
+            record("[hub:exit] event stream ended without a termination event".to_string());
+            publish_hub_state(HubState::Exited(None));
+            if served {
+                notify_hub_exit(&exit_notice, None);
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    // One read of one state, so there is no pair of cells to see out of step.
+    let outcome = loop {
+        match hub_state() {
+            HubState::Serving(announcement) => break HubStartOutcome::Serving(announcement),
+            HubState::Exited(code) => break HubStartOutcome::Exited(code),
+            HubState::Starting if std::time::Instant::now() >= deadline => {
+                break HubStartOutcome::Silent;
+            }
+            HubState::Starting => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    };
+
+    let hub_port = match outcome {
+        HubStartOutcome::Serving(announcement) => {
+            // No second look, and none possible: `Serving` is published only when
+            // the event queue was momentarily empty, and an exit supersedes it, so
+            // there is no pair of readings to disagree. A child dying a moment after
+            // this is #184, which nothing here can see.
+            if let Err(error) = establish_hub_connection(announcement.port, &announcement.spki) {
+                if let Err(kill_error) = child.kill() {
+                    eprintln!("[lasterm] could not stop hub after pin refusal: {kill_error}");
+                }
+                return Err(error);
+            }
+            let launched = app.state::<LaunchedHub>();
+            *launched
+                .0
+                .lock()
+                .map_err(|_| "the launched hub lock is poisoned".to_string())? = Some(child);
+            announcement.port
+        }
+        HubStartOutcome::Exited(Some(code)) if code == HUB_LOCK_HELD_EXIT_CODE => {
+            // A hub of this user is already running, and this build will not attach
+            // to it. Finding its port would mean trusting `runtime.json`, and a
+            // record proves nothing about who is on the port it names: a leftover
+            // from a crashed hub names a port anyone may bind, and the recorded pid
+            // cannot settle it — pids are reused, another user's process answers
+            // the same probe, and the Windows probe deliberately answers "alive"
+            // when it cannot tell, which is right for the quit path that owns it
+            // and wrong here. Attaching safely needs the hub to prove it holds the
+            // record's `ownerToken`, which no endpoint offers yet. A hub this desktop
+            // launched no longer outlives it (#188), so this one was started another way.
+            return Err(
+                "A hub of this user is already running. Lasterm will not attach to it: \
+                 stop that hub, or open its address in a browser."
+                    .to_string(),
+            );
+        }
+        HubStartOutcome::Exited(code) => {
+            // The stream can end with the child still alive, and this branch is
+            // where that arrives. Killing it here is what keeps an untracked hub
+            // from holding the lock after this launch is gone; a child that had
+            // already exited makes this a no-op.
+            if code.is_none() {
+                if let Err(error) = child.kill() {
+                    eprintln!("[lasterm] could not stop a hub whose fate is unknown: {error}");
+                }
+            }
+            // `None` is a signal, or a stream that ended without a termination
+            // event. It is described rather than printed as a number the operating
+            // system never produced.
+            let how = match code {
+                Some(code) => format!("exited with code {code}"),
+                None => "was signalled, or its output stream ended without reporting an exit"
+                    .to_string(),
+            };
+            return Err(format!(
+                "The hub {how} instead of serving. Its output is in hub.log in the \
+                 application data directory."
+            ));
+        }
+        HubStartOutcome::Silent => {
+            // Neither serving nor exited. The child must not be left behind to bind
+            // a port and hold the lock after this launch gave up, and a kill that
+            // fails must be said rather than dropped: the next launch would meet a
+            // holder nobody knows about.
+            let message = match child.kill() {
+                Ok(()) => "The hub neither reported a listening port nor exited within 15 \
+                           seconds, and was stopped. Its output is in hub.log in the \
+                           application data directory."
+                    .to_string(),
+                Err(error) => format!(
+                    "The hub neither reported a listening port nor exited within 15 seconds, \
+                     and stopping it failed ({error}). It may still be holding the hub lock; \
+                     its output is in hub.log in the application data directory."
+                ),
+            };
+            return Err(message);
+        }
+    };
+
+    Ok(hub_port)
+}
+
 /// In release builds, spawn the hub sidecar and wait for it to become ready.
 /// In dev builds, the hub is already running externally — just show the window.
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -4649,247 +4945,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // In release mode, spawn the hub sidecar
     #[cfg(not(dev))]
     {
-        use tauri_plugin_shell::ShellExt;
-
-        // Nothing here probes a port to decide anything. The desktop launches the
-        // sidecar, so the only facts it needs come from a process it owns and from
-        // files only this user can read:
-        //
-        //   * the child's own stdout announces the port it bound. Another user
-        //     cannot write to our child's pipe, so this cannot be forged — whereas
-        //     an unauthenticated `/api/health` can be answered by anyone who binds
-        //     the port first, which is how a stale record used to hand this client's
-        //     bearer token to a stranger (#170).
-        //   * exit 73 means a hub of this user already holds `hub.lock`. That file is
-        //     0600 in the user's state directory, so no other user can hold it.
-        //   * `runtime.json` is 0600 and written by the lock holder after it binds.
-        //
-        // Readiness is therefore observed, never polled, and the wait ends the moment
-        // the child resolves either way (#171).
-        // A missing bundle, a permissions error or an OS refusal used to panic here,
-        // which bypasses the failure dialog entirely — the one path where the user most
-        // needs to be told what is wrong, since nothing they can see explains it.
-        // `--exit-with-stdin`: the hub stops when this process's end of its stdin
-        // pipe closes, which the OS does however this process ends (#188). The pipe
-        // lives in the child handle, managed below for the life of the app.
-        let sidecar = match app.shell().sidecar("lasterm-hub") {
-            Ok(sidecar) => sidecar.args(["start", "--exit-with-stdin"]),
-            Err(error) => {
-                show_startup_failure_then_exit(
-                    app.handle().clone(),
-                    format!("The hub program could not be located in this build: {error}"),
-                );
-                return Ok(());
-            }
-        };
-        let (mut rx, child) = match sidecar.spawn() {
-            Ok(pair) => pair,
-            Err(error) => {
-                show_startup_failure_then_exit(
-                    app.handle().clone(),
-                    format!("The hub could not be started: {error}"),
-                );
-                return Ok(());
-            }
-        };
-
-        let log_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("lasterm");
-        if let Err(error) = std::fs::create_dir_all(&log_dir) {
-            eprintln!("[lasterm] cannot create {}: {error}", log_dir.display());
-        }
-        let log_path = log_dir.join("hub.log");
-        let exit_notice = app.handle().clone();
-
-        tauri::async_runtime::spawn(async move {
-            // A log this task cannot open must not stop it consuming events: the
-            // outcome of startup is decided by what arrives here, and an unread
-            // channel would also leave a chatty child blocked on a full pipe.
-            let mut file = match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-            {
-                Ok(f) => Some(f),
-                Err(error) => {
-                    eprintln!("[lasterm] cannot open {}: {error}", log_path.display());
-                    None
-                }
-            };
-            let mut record = |line: String| match file.as_mut() {
-                Some(f) => {
-                    let _ = writeln!(f, "{line}");
-                }
-                None => eprintln!("[lasterm] {line}"),
-            };
-
-            use tauri_plugin_shell::process::CommandEvent;
-            // Held back until nothing else is waiting to contradict it. Publishing a
-            // port the instant it is parsed is what let startup succeed against a
-            // child whose termination event was already queued behind that line.
-            let mut announced: Option<HubAnnouncement> = None;
-            let mut served = false;
-            let mut exited = false;
-            loop {
-                // Anything already queued is taken first, so a pending exit is seen
-                // before an announcement is believed. `Empty` means the child has
-                // said all it has to say for now, which is when a port becomes usable.
-                let event = match rx.try_recv() {
-                    Ok(event) => event,
-                    // Empty or disconnected, treated the same and deliberately: on a
-                    // closed channel the await below returns immediately, and the tail
-                    // of this task then publishes the exit, which supersedes a port.
-                    // Naming the two apart would need tokio as a direct dependency for
-                    // no behavioural difference.
-                    Err(_) => {
-                        if let Some(announcement) = announced.take() {
-                            publish_hub_state(HubState::Serving(announcement));
-                            served = true;
-                        }
-                        match rx.recv().await {
-                            Some(event) => event,
-                            None => break,
-                        }
-                    }
-                };
-
-                match event {
-                    CommandEvent::Stdout(line) => {
-                        let text = String::from_utf8_lossy(&line).to_string();
-                        if let Some(announcement) = parse_listening_announcement(&text) {
-                            announced = Some(announcement);
-                        }
-                        record(format!("[hub:stdout] {text}"));
-                    }
-                    CommandEvent::Stderr(line) => {
-                        record(format!("[hub:stderr] {}", String::from_utf8_lossy(&line)));
-                    }
-                    CommandEvent::Terminated(payload) => {
-                        record(format!(
-                            "[hub:exit] code={:?} signal={:?}",
-                            payload.code, payload.signal
-                        ));
-                        publish_hub_state(HubState::Exited(payload.code));
-                        if served {
-                            notify_hub_exit(&exit_notice, payload.code);
-                        }
-                        exited = true;
-                        break;
-                    }
-                    CommandEvent::Error(err) => record(format!("[hub:error] {err}")),
-                    _ => {}
-                }
-            }
-            // The stream ending without a `Terminated` event leaves the child's fate
-            // unknown, which must not read as "still starting" for ever.
-            if !exited {
-                record("[hub:exit] event stream ended without a termination event".to_string());
-                publish_hub_state(HubState::Exited(None));
-                if served {
-                    notify_hub_exit(&exit_notice, None);
-                }
-            }
-        });
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        // One read of one state, so there is no pair of cells to see out of step.
-        let outcome = loop {
-            match hub_state() {
-                HubState::Serving(announcement) => break HubStartOutcome::Serving(announcement),
-                HubState::Exited(code) => break HubStartOutcome::Exited(code),
-                HubState::Starting if std::time::Instant::now() >= deadline => {
-                    break HubStartOutcome::Silent;
-                }
-                HubState::Starting => std::thread::sleep(std::time::Duration::from_millis(100)),
-            }
-        };
-
-        let hub_port = match outcome {
-            HubStartOutcome::Serving(announcement) => {
-                // No second look, and none possible: `Serving` is published only when
-                // the event queue was momentarily empty, and an exit supersedes it, so
-                // there is no pair of readings to disagree. A child dying a moment after
-                // this is #184, which nothing here can see.
-                if let Err(error) = establish_hub_connection(announcement.port, &announcement.spki)
-                {
-                    if let Err(kill_error) = child.kill() {
-                        eprintln!("[lasterm] could not stop hub after pin refusal: {kill_error}");
-                    }
-                    show_startup_failure_then_exit(app.handle().clone(), error);
-                    return Ok(());
-                }
-                app.manage(child);
-                announcement.port
-            }
-            HubStartOutcome::Exited(Some(code)) if code == HUB_LOCK_HELD_EXIT_CODE => {
-                // A hub of this user is already running, and this build will not attach
-                // to it. Finding its port would mean trusting `runtime.json`, and a
-                // record proves nothing about who is on the port it names: a leftover
-                // from a crashed hub names a port anyone may bind, and the recorded pid
-                // cannot settle it — pids are reused, another user's process answers
-                // the same probe, and the Windows probe deliberately answers "alive"
-                // when it cannot tell, which is right for the quit path that owns it
-                // and wrong here. Attaching safely needs the hub to prove it holds the
-                // record's `ownerToken`, which no endpoint offers yet. A hub this desktop
-                // launched no longer outlives it (#188), so this one was started another way.
-                show_startup_failure_then_exit(
-                    app.handle().clone(),
-                    "A hub of this user is already running. Lasterm will not attach to it: \
-                     stop that hub, or open its address in a browser."
-                        .to_string(),
-                );
-                return Ok(());
-            }
-            HubStartOutcome::Exited(code) => {
-                // The stream can end with the child still alive, and this branch is
-                // where that arrives. Killing it here is what keeps an untracked hub
-                // from holding the lock after this launch is gone; a child that had
-                // already exited makes this a no-op.
-                if code.is_none() {
-                    if let Err(error) = child.kill() {
-                        eprintln!("[lasterm] could not stop a hub whose fate is unknown: {error}");
-                    }
-                }
-                // `None` is a signal, or a stream that ended without a termination
-                // event. It is described rather than printed as a number the operating
-                // system never produced.
-                let how = match code {
-                    Some(code) => format!("exited with code {code}"),
-                    None => "was signalled, or its output stream ended without reporting an exit"
-                        .to_string(),
-                };
-                show_startup_failure_then_exit(
-                    app.handle().clone(),
-                    format!(
-                        "The hub {how} instead of serving. Its output is in hub.log in the \
-                         application data directory."
-                    ),
-                );
-                return Ok(());
-            }
-            HubStartOutcome::Silent => {
-                // Neither serving nor exited. The child must not be left behind to bind
-                // a port and hold the lock after this launch gave up, and a kill that
-                // fails must be said rather than dropped: the next launch would meet a
-                // holder nobody knows about.
-                let message = match child.kill() {
-                    Ok(()) => "The hub neither reported a listening port nor exited within 15 \
-                               seconds, and was stopped. Its output is in hub.log in the \
-                               application data directory."
-                        .to_string(),
-                    Err(error) => format!(
-                        "The hub neither reported a listening port nor exited within 15 seconds, \
-                         and stopping it failed ({error}). It may still be holding the hub lock; \
-                         its output is in hub.log in the application data directory."
-                    ),
-                };
+        app.manage(LaunchedHub::default());
+        match launch_hub(app.handle()) {
+            Ok(port) => eprintln!("[lasterm] hub port resolved to {port}"),
+            Err(message) => {
                 show_startup_failure_then_exit(app.handle().clone(), message);
                 return Ok(());
             }
-        };
-
-        eprintln!("[lasterm] hub port resolved to {}", hub_port);
+        }
     }
 
     // Under `tauri dev` no sidecar is launched: `pnpm dev` runs the hub separately, so
@@ -5043,7 +5106,8 @@ pub fn run() {
             answer_desktop_close,
             cancel_desktop_close,
             pick_and_read_agent_file,
-            quit_after_hub_exit
+            quit_after_hub_exit,
+            restart_hub_after_exit
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
@@ -6585,6 +6649,32 @@ mod tests {
         // A later exit still replaces an earlier one: the last word on how it went.
         publish_hub_state(HubState::Exited(None));
         assert_eq!(hub_state(), HubState::Exited(None));
+
+        // A restart is the one way out of an exit (#143), and one launch at a time.
+        assert!(begin_hub_restart());
+        assert_eq!(hub_state(), HubState::Starting);
+        assert!(
+            !begin_hub_restart(),
+            "a second restart joined a launch in progress"
+        );
+        // A launch that failed before its child reported anything ends as an exit.
+        end_failed_hub_restart();
+        assert_eq!(hub_state(), HubState::Exited(None));
+
+        assert!(begin_hub_restart());
+        let restarted = HubAnnouncement {
+            port: 4300,
+            spki: vec![3],
+        };
+        publish_hub_state(HubState::Serving(restarted.clone()));
+        assert!(!begin_hub_restart(), "a serving hub was restarted");
+        end_failed_hub_restart();
+        assert_eq!(
+            hub_state(),
+            HubState::Serving(restarted),
+            "ending a failed restart touched a hub that serves"
+        );
+        publish_hub_state(HubState::Exited(None));
     }
 
     static CLOSE_BEHAVIOR_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);

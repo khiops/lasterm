@@ -9,6 +9,6 @@ describe("hubExitMessage", () => {
 	it("still explains the way back when the code is unknown", () => {
 		const message = hubExitMessage(null);
 		expect(message).toContain("The Lasterm hub stopped,");
-		expect(message).toContain("quit Lasterm and open it again");
+		expect(message).toContain("restart the hub to reconnect");
 	});
 });

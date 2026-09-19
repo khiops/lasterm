@@ -267,9 +267,8 @@ jobs:
           node-version-file: .nvmrc
           check-latest: true
           cache: "pnpm"
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      # The compiler and its components come from rust-toolchain.toml (#248).
+      - run: rustup toolchain install
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
       - run: cargo build --locked --release -p lasterm-hub-lock -p lasterm-tls-identity
@@ -287,11 +286,9 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          components: clippy, rustfmt
-          targets: ${{ matrix.triple }}
+      # The compiler and its components come from rust-toolchain.toml (#248).
+      - run: rustup toolchain install
+      - run: rustup target add ${{ matrix.triple }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install aarch64 cross-compile tools
         if: matrix.triple == 'aarch64-unknown-linux-gnu'
@@ -467,10 +464,8 @@ jobs:
           node-version-file: .nvmrc
           check-latest: true
           cache: "pnpm"
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          components: clippy
+      # The compiler and its components come from rust-toolchain.toml (#248).
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri

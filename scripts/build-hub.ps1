@@ -19,7 +19,7 @@ Set-Location $Root
 pnpm -F @lasterm/shared build
 if ($LASTEXITCODE -ne 0) { throw "shared build failed" }
 
-cargo build -p lasterm-hub-lock -p lasterm-tls-identity --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $env:LASTERM_CARGO_TARGET_DIR
+cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $env:LASTERM_CARGO_TARGET_DIR
 if ($LASTEXITCODE -ne 0) { throw "native hub addons build failed" }
 $lockLibrary = Join-Path $env:LASTERM_CARGO_TARGET_DIR "$env:LASTERM_TARGET_TRIPLE\release\lasterm_hub_lock.dll"
 if (-not (Test-Path $lockLibrary)) { throw "Hub lock addon not found at $lockLibrary" }

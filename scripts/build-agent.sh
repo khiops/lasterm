@@ -23,10 +23,10 @@ cd "$ROOT"
 # Use --target for cross-compilation, skip for native builds
 if [ "$LASTERM_TARGET_TRIPLE" != "$DETECTED_TRIPLE" ]; then
   echo "  Cross-compiling for $LASTERM_TARGET_TRIPLE (native: $DETECTED_TRIPLE)"
-  cargo build -p lasterm-agent --release --target "$LASTERM_TARGET_TRIPLE" --target-dir "$LASTERM_CARGO_TARGET_DIR"
+  cargo build --locked -p lasterm-agent --release --target "$LASTERM_TARGET_TRIPLE" --target-dir "$LASTERM_CARGO_TARGET_DIR"
   BINARY="$LASTERM_CARGO_TARGET_DIR/$LASTERM_TARGET_TRIPLE/release/lasterm-agent"
 else
-  cargo build -p lasterm-agent --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
+  cargo build --locked -p lasterm-agent --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
   BINARY="$LASTERM_CARGO_TARGET_DIR/release/lasterm-agent"
 fi
 

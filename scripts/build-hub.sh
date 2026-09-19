@@ -26,11 +26,11 @@ pnpm -F @lasterm/shared build
 # The hub's single-instance authority is a napi cdylib. Build it on the same
 # host that packages this hub, then give the SEA asset its Node addon name.
 if [ "$LASTERM_TARGET_TRIPLE" != "$DETECTED_TRIPLE" ]; then
-  cargo build -p lasterm-hub-lock -p lasterm-tls-identity --release --target "$LASTERM_TARGET_TRIPLE" --target-dir "$LASTERM_CARGO_TARGET_DIR"
+  cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target "$LASTERM_TARGET_TRIPLE" --target-dir "$LASTERM_CARGO_TARGET_DIR"
   LOCK_LIBRARY="$LASTERM_CARGO_TARGET_DIR/$LASTERM_TARGET_TRIPLE/release/$LOCK_LIBRARY_NAME"
   TLS_LIBRARY="$LASTERM_CARGO_TARGET_DIR/$LASTERM_TARGET_TRIPLE/release/$TLS_LIBRARY_NAME"
 else
-  cargo build -p lasterm-hub-lock -p lasterm-tls-identity --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
+  cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
   LOCK_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$LOCK_LIBRARY_NAME"
   TLS_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$TLS_LIBRARY_NAME"
 fi

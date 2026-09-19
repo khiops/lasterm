@@ -143,6 +143,8 @@ fn is_ordinary_child_name(name: &OsStr) -> bool {
     !matches!(
         base.as_str(),
         "CON"
+            | "CONIN$"
+            | "CONOUT$"
             | "PRN"
             | "AUX"
             | "NUL"
@@ -1186,6 +1188,10 @@ mod tests {
             "NUL.tar.gz",
             "COM1",
             "LPT9",
+            // Documented beside the rest; the list missed them (#227).
+            "CONIN$",
+            "conout$",
+            "CoNiN$.log",
             "auth.json:stream",
             "trailing.",
             "trailing ",

@@ -98,8 +98,9 @@ export function useTabTitle(
 		if (ch === null) return DEFAULT_CHANNEL_NAME;
 
 		// liveDynamicTitle: optimistic override for the active terminal pane.
-		// Only applies when source=dynamic — other sources ignore it.
-		if (source === "dynamic") {
+		// Only applies when source=dynamic — other sources ignore it — and never
+		// over a custom title: a rename wins, as it does in the hub's resolution.
+		if (source === "dynamic" && !isCustom.value) {
 			const live = liveDynamicTitle?.value;
 			if (live != null && live !== "") return live;
 		}

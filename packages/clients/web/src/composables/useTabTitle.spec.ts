@@ -91,6 +91,24 @@ describe("useTabTitle", () => {
 		expect(isDynamic.value).toBe(true);
 	});
 
+	it("never lets liveDynamicTitle override a custom title", () => {
+		// A renamed channel: the hub resolves displayTitle to the custom title.
+		const ch = makeChannel({
+			id: "ch-1",
+			title: "Build server",
+			displayTitle: "Build server",
+			dynamicTitle: "cmd.exe - build",
+		});
+		const channelId = ref<string | null>("ch-1");
+		const channels = ref<Channel[]>([ch]);
+		const live = ref<string | null>("cmd.exe - build");
+
+		const { tabTitle, isCustom } = useTabTitle(channelId, channels, live);
+
+		expect(isCustom.value).toBe(true);
+		expect(tabTitle.value, "the pane header ignored the rename").toBe("Build server");
+	});
+
 	it("falls back to displayTitle when liveDynamicTitle is null", () => {
 		const ch = makeChannel({ id: "ch-1", displayTitle: "hub title", dynamicTitle: "hub title" });
 		const channelId = ref<string | null>("ch-1");

@@ -31,7 +31,10 @@ describe("Vite development proxy", () => {
 		hub = undefined;
 		for (const process of processes) await stopProcess(process);
 		if (stateRoot !== undefined) {
-			rmSync(stateRoot, { recursive: true, force: true });
+			// On Windows a hub stopped by kill() is terminated outright, and its
+			// databases and log can stay locked for a moment after the exit event
+			// (EPERM seen on CI), so the removal retries rather than failing.
+			rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 			stateRoot = undefined;
 		}
 	});

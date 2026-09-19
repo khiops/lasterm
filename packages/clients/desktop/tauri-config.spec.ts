@@ -112,6 +112,12 @@ describe("tauri.conf.json", () => {
 		expect(csp["form-action"]).toEqual(["'none'"]);
 		expect(csp["frame-ancestors"]).toEqual(["'none'"]);
 
+		// Tauri adds a nonce to style-src when it serves the assets, and a nonce
+		// makes the browser ignore 'unsafe-inline': the <style> elements xterm's
+		// DOM renderer and injectFontFaces() create at run time were refused, so
+		// the terminal lost its font and fell back to the page's proportional one.
+		expect(security.dangerousDisableAssetCspModification).toEqual(["style-src"]);
+
 		expect(Object.keys(csp).sort()).toEqual(
 			[
 				"default-src",

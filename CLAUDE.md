@@ -120,6 +120,22 @@ cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.
 - Native SEA embeds the host Node — build cross-platform binaries on their target OS (Windows hub on Windows). Rust agent verify must include `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` (cfg(windows) lints invisible to Linux clippy).
 - Config: `~/.config/lasterm` · State: `~/.local/state/lasterm`.
 
+### Desktop UI tests (Windows)
+
+```powershell
+.\scripts\dev\desktop-ui.ps1 [-Build]        # run the built app with a CDP port (9333)
+node scripts/dev/ui/cdp.mjs eval "<js>"      # also: type "<text>", shot <file.png>, watch <s> "<js>"
+powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <cssX> -Y <cssY>
+.\scripts\dev\desktop-ui.ps1 -Stop
+```
+
+- The app runs from a copy in `%LOCALAPPDATA%\lasterm-ui-test`, against the real profile. An agent
+  started from `target\release` locks its executable, and the next build then fails with "access
+  denied".
+- A drag dispatched over CDP skips the window's native drop handling. `drag-file.ps1` performs a real
+  OLE drag instead: it moves the user's mouse for a few seconds, then puts it back. Run it with
+  `-SelfTest` first, before trusting a result it gives on the app.
+
 ## Conventions
 
 ### Code

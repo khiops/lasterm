@@ -91,7 +91,6 @@
 							:is-unread="channelsStore.unreadChannels.has(ch.id)"
 							:available-groups="otherGroups(group.id)"
 							@select="emit('select-channel', ch.id)"
-							@close-channel="onCloseChannel"
 							@move-to-group="channelsStore.moveChannelToGroup"
 							@rename="onRenameChannel"
 							@open-new-tab="emit('open-new-tab', $event)"
@@ -125,7 +124,6 @@
 						:is-unread="channelsStore.unreadChannels.has(ch.id)"
 						:available-groups="channelsStore.groups.filter((g) => g.hostId === activeHostId || g.hostId === '')"
 						@select="emit('select-channel', ch.id)"
-						@close-channel="onCloseChannel"
 						@move-to-group="channelsStore.moveChannelToGroup"
 						@rename="onRenameChannel"
 						@open-new-tab="emit('open-new-tab', $event)"
@@ -172,6 +170,7 @@ const emit = defineEmits<{
 	"add-channel-group": [];
 	"purge-dead": [];
 	"delete-channel": [channelId: string];
+	"kill-channel": [channelId: string];
 	"new-channel": [];
 }>();
 
@@ -309,10 +308,6 @@ function onNewChannel(): void {
 	emit("new-channel");
 }
 
-function onCloseChannel(channelId: string): void {
-	channelsStore.removeChannel(channelId);
-}
-
 function onRenameChannel(channelId: string, title: string): void {
 	channelsStore.renameChannel(channelId, title);
 }
@@ -321,8 +316,9 @@ function onRestartChannel(channelId: string): void {
 	channelsStore.restartChannel(channelId);
 }
 
+/** Killing is irreversible: the window asks first (see App.vue onKillChannel). */
 function onDestroyChannel(channelId: string): void {
-	channelsStore.removeChannel(channelId);
+	emit("kill-channel", channelId);
 }
 
 function onPurgeDeadInGroup(groupId: string): void {

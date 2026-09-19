@@ -2,6 +2,9 @@
 
 Decisions archived from workflow — newest first.
 
+A section whose decision no longer holds, entirely or in part, says so on a **Status** line under its
+heading, with a pointer to the section that replaced it. A section without one is current.
+
 ---
 
 ## RELEASE-PM-PIN — the release workflow rebuilds only tags that pin the package manager (#236, 2026-09-05)
@@ -232,6 +235,9 @@ Decisions archived from workflow — newest first.
 
 ## SSH-AUTH-PROMPT — SSH key passphrase + password prompting via AUTH_PROMPT/AUTH_PROMPT_RESPONSE (2026-03-10)
 
+**Status:** one point superseded by MULTICLIENT-SYNC — a key's passphrase is cached for a limited
+time, so a reconnect needs no prompt; it is no longer used once and dropped. The rest still holds.
+
 - AUTH_PROMPT/AUTH_PROMPT_RESPONSE protocol messages (same pattern as HOST_VERIFY)
 - SshAgent takes AuthPromptFn callback (DI) — hub provides WS-based impl
 - Detect encrypted key via PEM header before connect (proactive prompt)
@@ -263,6 +269,9 @@ Decisions archived from workflow — newest first.
 ---
 
 ## SC-22 — Host group DnD reorder in host rail (2026-03-09)
+
+**Status:** partly superseded by SC-23 — group order is stored in the database, not localStorage.
+The drag-and-drop mechanics below still hold.
 
 - localStorage-based group ordering (not API) — host rail groups are derived from host.hostGroup strings, not ChannelGroup entities. Existing PUT /api/groups/reorder is for channel groups per host, not rail sections
 - HTML5 DnD with text/x-lasterm-group dataTransfer type — same pattern as SC-21 tab reorder
@@ -469,6 +478,9 @@ Decisions archived from workflow — newest first.
 
 ## UX-06 — Theming & Color Schemes (2026-03-07)
 
+**Status:** one point superseded by UX-09 (D14) — appearance settings live in `config.toml`
+under `[appearance]`, not in `appearance.json`. The rest still holds.
+
 - CSS custom properties as single source of truth for all chrome colors (--nt-* prefix, 48+ vars in 3 tiers)
 - Theme files on disk (~/.config/lasterm/themes/), not DB — portable, git-friendly
 - 9 bundled presets (6 dark, 3 light), default catppuccin-mocha, copy-if-missing strategy
@@ -492,6 +504,10 @@ Decisions archived from workflow — newest first.
 ---
 
 ## AGENT-DAEMON — Standalone agent daemon with UDS/named pipe transport (2026-03-06)
+
+**Status:** partly superseded by RUST-AGENT — the daemon is the Rust agent, not a Node `net`
+server. The socket paths, the framing and the reconnect messages below still hold, and
+last-connection-wins now applies only once a connection has authenticated (#127).
 
 - Node.js net module for cross-platform socket transport (UDS + named pipes, same API)
 - Socket path per-user: $XDG_RUNTIME_DIR/lasterm/agent.sock (Linux) / \\.\pipe\lasterm-agent-<username> (Windows)

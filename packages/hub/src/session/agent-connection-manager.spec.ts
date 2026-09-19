@@ -211,7 +211,7 @@ function makeHarness(): {
 		pendingPrompts: new Map(),
 		promptContexts: new Map(),
 		promptIndex: new Map(),
-	} as SharedSessionContext;
+	} as unknown as SharedSessionContext;
 	const broadcaster = {
 		broadcastToAllClients: vi.fn(),
 		broadcastToChannel: vi.fn(),

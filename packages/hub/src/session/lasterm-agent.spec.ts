@@ -282,7 +282,9 @@ describe("LastermAgent", () => {
 		it(
 			"emits message events for received protocol messages",
 			async () => {
-				let serverSocket: net.Socket | null = null;
+				// Asserted rather than annotated: assigned in a callback, so a
+				// `null` initialiser would narrow it to `null` for good.
+				let serverSocket = null as net.Socket | null;
 
 				await new Promise<void>((resolve) => {
 					const server = net.createServer((socket) => {

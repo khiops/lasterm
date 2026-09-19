@@ -912,7 +912,7 @@ describe("runtime state", () => {
 		() => {
 			const originalStateRoot = process.env.XDG_STATE_HOME;
 			process.env.XDG_STATE_HOME = makeTempDir();
-			const legacy = runtimeRecord({ instanceId: undefined, ownerToken: undefined });
+			const { ownerToken: _ownerToken, ...legacy } = runtimeRecord();
 			try {
 				persistRuntime(legacy);
 				expect(runtimeMatches(legacy, legacy)).toBe(true);

@@ -158,6 +158,24 @@ export function useLayout() {
 		paneTree.vacatePaneInTab,
 	);
 
+	/**
+	 * "Close Pane" on a vacant slot gives its space to the sibling. A tab's only
+	 * pane has no sibling: closing it closes the tab, as the tab's × does. It used
+	 * to do nothing, under a button that says it closes — which is where deleting
+	 * a host leaves the tabs its terminals were in.
+	 */
+	function closeVacantPane(vacantId: string): void {
+		const tab = paneTree.activeTab.value;
+		if (tab === null) return;
+		const root = layouts.value[tab.id];
+		if (root?.type === "vacant" && root.id === vacantId) {
+			const index = tabs.value.findIndex((candidate) => candidate.id === tab.id);
+			if (index !== -1) tabManager.closeTab(index);
+			return;
+		}
+		paneTree.rearrangeVacant(vacantId);
+	}
+
 	// ------------------------------------------------------------------
 	// Persistence: auto-save on any state change
 	// ------------------------------------------------------------------
@@ -214,7 +232,7 @@ export function useLayout() {
 		detachPane: paneTree.detachPane,
 		closePane: paneTree.closePane,
 		fillVacant: paneTree.fillVacant,
-		rearrangeVacant: paneTree.rearrangeVacant,
+		rearrangeVacant: closeVacantPane,
 		movePaneTo: paneTree.movePaneTo,
 		findTabForChannel: paneTree.findTabForChannel,
 	};

@@ -535,8 +535,9 @@ describe("rearrangeVacant", () => {
 		}
 	});
 
-	it("does nothing when vacant is root node (single pane)", () => {
-		openTabs("A");
+	it("closes the tab when its only pane is the vacant one", () => {
+		openTabs("A", "B");
+		layout.setActiveTab(0);
 		// Vacate root pane
 		layout.vacatePane("ch-A");
 		const tabId = layout.activeTab.value?.id;
@@ -550,11 +551,12 @@ describe("rearrangeVacant", () => {
 			vacantId = afterVacate.id;
 		}
 
-		// Rearranging root vacant should be a no-op
+		// No sibling to give the space to: the tab goes, as its × would close it.
 		layout.rearrangeVacant(vacantId);
 
-		const afterRearrange = layout.layouts.value[tabId];
-		expect(afterRearrange?.type).toBe("vacant");
+		expect(layout.tabs.value.map((tab) => tab.id)).not.toContain(tabId);
+		expect(layout.layouts.value[tabId]).toBeUndefined();
+		expect(layout.tabs.value).toHaveLength(1);
 	});
 });
 

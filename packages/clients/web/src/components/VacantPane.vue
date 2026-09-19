@@ -22,7 +22,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, inject } from "vue";
+import { DISPLAYED_CHANNELS_KEY, pickableChannels } from "../composables/displayedChannels.js";
 import { useChannelsStore } from "../stores/channels.js";
 
 const props = defineProps<{
@@ -38,17 +39,21 @@ const emit = defineEmits<{
 
 const channelsStore = useChannelsStore();
 
-/**
- * Channels that are alive and could be attached to this vacant slot.
- * Full "detached" filtering (not in any visible pane) will be refined
- * in later blocks.
- */
-const detachedChannels = computed(() => {
-	if (!props.hostId) return [];
-	return channelsStore.channels.filter(
-		(c) => c.status !== "dead" && channelsStore.channelHostMap.get(c.id) === props.hostId,
-	);
-});
+/** Channels a pane shows already, in any tab (provided by App.vue). */
+const displayed = inject(
+	DISPLAYED_CHANNELS_KEY,
+	computed(() => new Set<string>()),
+);
+
+/** Offering a shown channel put the same terminal twice in one tab. */
+const detachedChannels = computed(() =>
+	pickableChannels(
+		channelsStore.channels,
+		channelsStore.channelHostMap,
+		props.hostId,
+		displayed.value,
+	),
+);
 </script>
 
 <style scoped>

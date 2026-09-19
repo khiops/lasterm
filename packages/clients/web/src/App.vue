@@ -376,6 +376,7 @@ import {
 	purgeOrphanedTabs,
 	useLayout,
 } from './composables/useLayout.js';
+import { DISPLAYED_CHANNELS_KEY, displayedChannelIds } from './composables/displayedChannels.js';
 import { MULTI_PANE_SEARCH_KEY, useMultiPaneSearch } from './composables/useMultiPaneSearch.js';
 import { useResizable } from './composables/useResizable.js';
 import { useTabTitle } from './composables/useTabTitle.js';
@@ -493,6 +494,10 @@ const windowWallpaperLayerKey = computed(() => {
 });
 const multiPaneSearch = useMultiPaneSearch();
 provide(MULTI_PANE_SEARCH_KEY, multiPaneSearch);
+provide(
+	DISPLAYED_CHANNELS_KEY,
+	computed(() => displayedChannelIds(layout.layouts.value)),
+);
 const commandPalette = useCommandPalette();
 const profilesStore = useProfilesStore();
 const showSettings = ref(false);

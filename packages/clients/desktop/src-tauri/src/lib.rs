@@ -5292,6 +5292,7 @@ mod tests {
                         .unwrap();
                     tls.flush().unwrap();
                 }
+                let_the_client_close_first(&mut tls.sock);
             });
             Self {
                 port,
@@ -5320,6 +5321,17 @@ mod tests {
             );
             self.thread.join().unwrap();
         }
+    }
+
+    /// Keep a test peer's socket open until the client closes it. On Windows,
+    /// a peer that dropped its socket right after writing the response lost
+    /// that response about half the time under the full suite: the client
+    /// heard nothing for 19 s, then a connection reset (#349). The client
+    /// closes as soon as it has read the response, so this waits a millisecond
+    /// or less, and the socket's read timeout bounds it otherwise.
+    pub(crate) fn let_the_client_close_first(socket: &mut std::net::TcpStream) {
+        let mut sink = [0_u8; 4096];
+        while matches!(std::io::Read::read(socket, &mut sink), Ok(read) if read > 0) {}
     }
 
     fn unused_loopback_port() -> u16 {

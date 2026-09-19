@@ -1,9 +1,9 @@
-import type { Host, LaunchProfile } from "@lasterm/shared";
+import type { Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
-import { useProfilesStore } from "../stores/profiles.js";
+import { type HostVisibleProfile, useProfilesStore } from "../stores/profiles.js";
 import { fuzzyMatch, useCommandPalette } from "./useCommandPalette.js";
 
 vi.hoisted(() => {
@@ -67,11 +67,12 @@ vi.mock("./useRecentPaletteItems.js", async () => {
 	};
 });
 
-function makeProfile(id: string, name: string, shell = "/bin/bash"): LaunchProfile {
+function makeProfile(id: string, name: string, shell = "/bin/bash"): HostVisibleProfile {
 	return {
 		id,
 		name,
 		shell,
+		effectiveSort: 0,
 		mode: "shell",
 		elevated: false,
 		supportedOs: "any",
@@ -556,7 +557,7 @@ describe("useCommandPalette", () => {
 	describe("profile items (SC-28)", () => {
 		it("profile items appear in general search results", () => {
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [makeProfile("p1", "Python REPL")];
+			profilesStore.hostProfiles = [makeProfile("p1", "Python REPL")];
 
 			const palette = useCommandPalette();
 			palette.search("python");
@@ -568,7 +569,7 @@ describe("useCommandPalette", () => {
 
 		it("profile item has shell as description", () => {
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [makeProfile("p1", "Fish Shell", "/usr/bin/fish")];
+			profilesStore.hostProfiles = [makeProfile("p1", "Fish Shell", "/usr/bin/fish")];
 
 			const palette = useCommandPalette();
 			palette.search("~");
@@ -582,7 +583,7 @@ describe("useCommandPalette", () => {
 			hostsStore.hosts = [makeHost("h1", "Production")];
 
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [makeProfile("p1", "Python REPL")];
+			profilesStore.hostProfiles = [makeProfile("p1", "Python REPL")];
 
 			const palette = useCommandPalette();
 			palette.search("~");
@@ -596,7 +597,7 @@ describe("useCommandPalette", () => {
 
 		it("~ prefix with search query fuzzy-matches profile names", () => {
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [
+			profilesStore.hostProfiles = [
 				makeProfile("p1", "Python REPL"),
 				makeProfile("p2", "Node REPL"),
 				makeProfile("p3", "PyPy"),
@@ -614,13 +615,31 @@ describe("useCommandPalette", () => {
 
 		it("~ prefix with empty query shows all profiles", () => {
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [makeProfile("p1", "Bash"), makeProfile("p2", "Zsh")];
+			profilesStore.hostProfiles = [makeProfile("p1", "Bash"), makeProfile("p2", "Zsh")];
 
 			const palette = useCommandPalette();
 			palette.search("~");
 
 			expect(palette.results.value).toHaveLength(2);
 			expect(palette.results.value.every((r) => r.type === "profile")).toBe(true);
+		});
+
+		it("offers the profiles of the active host, read when it opens", async () => {
+			const profilesStore = useProfilesStore();
+			// A profile the host cannot run, such as a Linux shell on Windows, is
+			// not in its menu, so the palette must not offer it either.
+			profilesStore.profiles = [makeProfile("p1", "Bash"), makeProfile("p2", "Zsh")];
+			const load = vi.spyOn(profilesStore, "loadHostProfiles").mockImplementation(async () => {
+				profilesStore.hostProfiles = [makeProfile("p2", "Zsh")];
+			});
+
+			const palette = useCommandPalette();
+			palette.open();
+			await load.mock.results[0]?.value;
+			palette.search("~");
+
+			expect(load).toHaveBeenCalled();
+			expect(palette.results.value.map((r) => r.label)).toEqual(["Zsh"]);
 		});
 
 		it("execute() on profile item calls spawnFromProfile", () => {
@@ -630,7 +649,7 @@ describe("useCommandPalette", () => {
 			const channelsStore = useChannelsStore();
 			channelsStore.activeHostId = "h1";
 
-			profilesStore.profiles = [makeProfile("p1", "Python REPL")];
+			profilesStore.hostProfiles = [makeProfile("p1", "Python REPL")];
 
 			const palette = useCommandPalette();
 			palette.execute({
@@ -646,7 +665,7 @@ describe("useCommandPalette", () => {
 
 		it("profile item uses emoji icon when iconType is emoji", () => {
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [
+			profilesStore.hostProfiles = [
 				{
 					...makeProfile("p1", "Python REPL"),
 					iconType: "emoji",
@@ -663,7 +682,7 @@ describe("useCommandPalette", () => {
 
 		it("profile item uses default icon when iconType is not emoji", () => {
 			const profilesStore = useProfilesStore();
-			profilesStore.profiles = [makeProfile("p1", "Bash")];
+			profilesStore.hostProfiles = [makeProfile("p1", "Bash")];
 
 			const palette = useCommandPalette();
 			palette.search("~");

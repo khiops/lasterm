@@ -1063,11 +1063,10 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 	if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey) {
 		const digit = parseInt(event.key, 10);
 		if (digit >= 1 && digit <= 9 && !isPtyFocused()) {
-			const profile = profilesStore.profiles[digit - 1];
-			if (profile !== undefined) {
-				event.preventDefault();
-				profilesStore.spawnFromProfile(profile.id);
-			}
+			// The Nth profile of this host's menu, as the dropdown lists it — not
+			// the Nth of every profile, which on Windows launched a Linux shell.
+			event.preventDefault();
+			void profilesStore.spawnNthHostProfile(digit);
 			return;
 		}
 	}

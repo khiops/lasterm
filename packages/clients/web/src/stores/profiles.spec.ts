@@ -216,6 +216,51 @@ describe("useProfilesStore — spawnFromProfile", () => {
 });
 
 // ---------------------------------------------------------------------------
+// spawnNthHostProfile — Ctrl+Shift+1..9
+// ---------------------------------------------------------------------------
+
+describe("useProfilesStore — spawnNthHostProfile", () => {
+	it("spawns the Nth profile of the host's menu, not of every profile", async () => {
+		const { useChannelsStore } = await import("./channels.js");
+		const { useSessionStore } = await import("./session.js");
+		const channelsStore = useChannelsStore();
+		channelsStore.activeHostId = "host-1";
+		const sessionStore = useSessionStore();
+		const mockWsClient = new MockWsClient();
+		// @ts-expect-error — replace markRaw wsClient for test
+		sessionStore.wsClient = mockWsClient;
+
+		const store = useProfilesStore();
+		// What the host cannot run does not count: on Windows the second of all
+		// profiles was a remote host's Linux shell, and launching it failed.
+		store.profiles = [makeProfile({ id: "linux-only" }), makeProfile({ id: "p-other" })];
+		mockFetch.mockResolvedValueOnce(
+			makeJsonResponse([makeProfile({ id: "p-first" }), makeProfile({ id: "p-second" })]),
+		);
+
+		await store.spawnNthHostProfile(2);
+
+		expect(mockFetch.mock.calls[0]?.[0]).toContain("/api/hosts/host-1/profiles");
+		expect(mockWsClient.sent[0]).toMatchObject({ type: "SPAWN", launchProfileId: "p-second" });
+	});
+
+	it("does nothing when the host's menu is shorter", async () => {
+		const { useChannelsStore } = await import("./channels.js");
+		const { useSessionStore } = await import("./session.js");
+		useChannelsStore().activeHostId = "host-1";
+		const sessionStore = useSessionStore();
+		const mockWsClient = new MockWsClient();
+		// @ts-expect-error — replace markRaw wsClient for test
+		sessionStore.wsClient = mockWsClient;
+		mockFetch.mockResolvedValueOnce(makeJsonResponse([makeProfile({ id: "p-first" })]));
+
+		await useProfilesStore().spawnNthHostProfile(4);
+
+		expect(mockWsClient.sent).toHaveLength(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // spawnQuickCommand — SC-27, SC-29
 // ---------------------------------------------------------------------------
 

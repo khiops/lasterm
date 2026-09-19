@@ -28,6 +28,9 @@
 		],
 		"macOSPrivateApi": true,
 		"security": {
+			"dangerousDisableAssetCspModification": [
+				"style-src"
+			],
 			"csp": {
 				"default-src": [
 					"'none'"

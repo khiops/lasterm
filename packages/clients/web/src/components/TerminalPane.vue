@@ -96,7 +96,7 @@
 
 <script setup lang="ts">
 import { DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
-import { computed, inject, onMounted, onUnmounted, ref, toRef, watch } from 'vue';
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, toRef, watch } from 'vue';
 import { useActivityTracker } from '../composables/useActivityTracker.js';
 import { playBellSound } from '../composables/useBellSound.js';
 import type { SearchScope } from '../composables/useMultiPaneSearch.js';
@@ -745,6 +745,17 @@ watch(terminal, (term) => {
 		}
 	});
 });
+
+// The terminal that becomes the selected one takes the keyboard: a new
+// terminal, or a tab switched to, left it on the page body, so the first keys
+// went nowhere until a click.
+watch(
+	[isActiveTab, terminal],
+	([active, term]) => {
+		if (active && term) void nextTick(() => term.focus());
+	},
+	{ immediate: true },
+);
 
 // Intercept Ctrl+Shift+F before xterm.js captures it.
 // attachCustomKeyEventHandler runs for every key event; returning false

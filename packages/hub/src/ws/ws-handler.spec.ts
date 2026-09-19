@@ -283,7 +283,7 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 				log: {} as never,
 				sessionManager,
 				writeLockManager: {} as never,
-			} as WsHandlerContext,
+			} as unknown as WsHandlerContext,
 			client,
 			sessionManager,
 		};

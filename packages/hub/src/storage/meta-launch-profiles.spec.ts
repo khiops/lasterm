@@ -165,7 +165,7 @@ describe("MetaDAL — Launch Profiles", () => {
 			const before = created.updatedAt;
 			const updated = dal.updateLaunchProfile(created.id, { name: "Changed" });
 			// updatedAt should be >= createdAt
-			expect(updated?.updatedAt >= before).toBe(true);
+			expect((updated?.updatedAt ?? "") >= before).toBe(true);
 		});
 
 		it("returns undefined for unknown ID", () => {

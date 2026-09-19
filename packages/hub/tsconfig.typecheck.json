@@ -8,35 +8,23 @@
 		}
 	},
 	// Every spec is checked, so a new one is too (#214). The files excluded
-	// below still carry the pre-existing strict diagnostics #206 counted, 198 in
-	// all; take a file off the list once it type-checks, and never add one.
+	// below still carry pre-existing strict diagnostics (#206 counted 198; 184
+	// remain); take a file off the list once it type-checks, and never add one.
 	"include": ["src/**/*.spec.ts", "src/**/*.fixture.ts", "src/**/*.setup.ts", "../../scripts/**/*"],
 	"exclude": [
 		"node_modules",
 		"dist",
 		"src/api/agents.spec.ts",
 		"src/api/host-groups.spec.ts",
-		"src/api/launch-profiles.spec.ts",
 		"src/api/routes.spec.ts",
 		"src/api/ssh-keys.spec.ts",
-		"src/cli.spec.ts",
-		"src/config.spec.ts",
-		"src/hub-startup.spec.ts",
-		"src/open-browser.spec.ts",
-		"src/session/agent-connection-manager.spec.ts",
-		"src/session/agent-fetch.spec.ts",
 		"src/session/channel-lifecycle-manager.spec.ts",
-		"src/session/lasterm-agent.spec.ts",
 		"src/session/prompt-context.spec.ts",
-		"src/session/session-acquisition.spec.ts",
 		"src/session/session-manager.spec.ts",
-		"src/session/ssh-agent.spec.ts",
 		"src/session/ssh-connection-manager.spec.ts",
 		"src/shell-discovery.spec.ts",
 		"src/shutdown.spec.ts",
 		"src/ssh/ssh-config-parser.spec.ts",
-		"src/storage/meta-launch-profiles.spec.ts",
-		"src/storage/migrate-launch-profiles.spec.ts",
-		"src/ws/ws-handler.spec.ts"
+		"src/storage/migrate-launch-profiles.spec.ts"
 	]
 }

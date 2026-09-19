@@ -494,7 +494,7 @@ describe("B4 regression: agent not visible until commit (P2 single-authority)", 
 		const agents = new Map<string, object>();
 		const hostId = "host-b4";
 
-		const { acq } = Acq.acquire(ctx, hostId);
+		const { acq } = Acq.acquire(ctx, hostId, "client-test");
 
 		// BEFORE commit: agent must not be in ctx.agents.
 		// (In fixed code, _connectSshAgent returns the agent without setting agents map;

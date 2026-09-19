@@ -2318,7 +2318,8 @@ describe("extractLogConfig", () => {
 	});
 
 	it("ignores null [logging] section", () => {
-		const result = extractLogConfig({ logging: null });
+		// TOML has no null, so the parser cannot produce this; the guard covers it anyway.
+		const result = extractLogConfig({ logging: null } as unknown as JsonMap);
 		expect(result).toEqual(DEFAULT_LOG_CONFIG);
 	});
 

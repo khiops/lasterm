@@ -825,7 +825,10 @@ function response(
 	body: BodyInit | null,
 	init: { readonly status?: number; readonly headers?: HeadersInit } = {},
 ): Response {
-	return new Response(body, { status: init.status ?? 200, headers: init.headers });
+	return new Response(body, {
+		status: init.status ?? 200,
+		...(init.headers !== undefined && { headers: init.headers }),
+	});
 }
 
 function versionedAssetName(version: string): string {

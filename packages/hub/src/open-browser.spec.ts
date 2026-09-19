@@ -75,8 +75,7 @@ describe("openBrowser", () => {
 		expect(execFile).toHaveBeenCalledOnce();
 		const calls = vi.mocked(execFile).mock.calls;
 		expect(calls.length).toBeGreaterThan(0);
-		const bin = calls[0][0] as string;
-		const args = calls[0][1] as string[];
+		const [bin, args] = calls[0] ?? [];
 		expect(bin).toBe("xdg-open");
 		expect(args).toEqual(["http://127.0.0.1:4100"]);
 	});

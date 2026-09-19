@@ -140,7 +140,7 @@ describe("startHub token restart sweep", () => {
 				},
 				addStartupCorsOrigins: () => 4100,
 				persistRuntime: () => undefined,
-				deleteRuntime: () => undefined,
+				deleteRuntime: () => false,
 			},
 		);
 
@@ -173,7 +173,7 @@ describe("startHub token restart sweep", () => {
 				startServer: async () => "https://127.0.0.1:4100",
 				addStartupCorsOrigins: () => 4100,
 				persistRuntime: () => undefined,
-				deleteRuntime: () => undefined,
+				deleteRuntime: () => false,
 			},
 		);
 

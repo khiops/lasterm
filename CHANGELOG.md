@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.4](https://github.com/khiops/lasterm/compare/v0.10.3...v0.10.4) (2026-09-19)
+
+
+### Bug Fixes
+
+* **desktop:** build the release without dead-code warnings ([#353](https://github.com/khiops/lasterm/issues/353)) ([121a97b](https://github.com/khiops/lasterm/commit/121a97b31f3dd31460cbe7873ac51820869b3bc8))
+* **desktop:** name the cause when a hub peer cannot be reached ([#348](https://github.com/khiops/lasterm/issues/348)) ([a16ab62](https://github.com/khiops/lasterm/commit/a16ab6229a886db670ee9229cf2cd3cda9f4226a))
+* **hub:** create the state directory owner-only wherever it is first made ([#352](https://github.com/khiops/lasterm/issues/352)) ([a2d8b2c](https://github.com/khiops/lasterm/commit/a2d8b2c2b759dd4943030b54bb715fa58e39376a)), closes [#237](https://github.com/khiops/lasterm/issues/237)
+* **root:** make the local dev and desktop build scripts work again ([#334](https://github.com/khiops/lasterm/issues/334)) ([04ff046](https://github.com/khiops/lasterm/commit/04ff0463d0d8b22533b6955881b394e63911a11b))
+* **root:** run the SEA build's tools without a shell ([#354](https://github.com/khiops/lasterm/issues/354)) ([bdd2b0d](https://github.com/khiops/lasterm/commit/bdd2b0d5ac23b453c2ab1b71e9bc0876ae094eea))
+* **web:** title the page lasterm before the app sets it ([#345](https://github.com/khiops/lasterm/issues/345)) ([e111105](https://github.com/khiops/lasterm/commit/e11110584343d97e13f60bc9bd6b738b257f5489))
+
+
+### Tests
+
+* **hub:** keep specs out of the real app data directories on Windows ([#346](https://github.com/khiops/lasterm/issues/346)) ([452b721](https://github.com/khiops/lasterm/commit/452b721e0b1057d655479e275bda47b2925da0bc)), closes [#333](https://github.com/khiops/lasterm/issues/333)
+* **hub:** stop the ssh-keys specs failing on malformed generated keys ([#342](https://github.com/khiops/lasterm/issues/342)) ([aba3787](https://github.com/khiops/lasterm/commit/aba3787c0809c889fde30ebda7ed5b1dfac27ff3)), closes [#101](https://github.com/khiops/lasterm/issues/101)
+* make the TypeScript suite pass on Windows and run it there in CI ([#351](https://github.com/khiops/lasterm/issues/351)) ([b95b443](https://github.com/khiops/lasterm/commit/b95b443ac47bf9ab27cc3fa56e1d9510c34ca507)), closes [#309](https://github.com/khiops/lasterm/issues/309)
+* stop specs assuming POSIX paths and permission bits ([#350](https://github.com/khiops/lasterm/issues/350)) ([6a1670b](https://github.com/khiops/lasterm/commit/6a1670b6707bf83a2cc1951ab7968f90b710bc15))
+* stop two relay tests depending on what runs beside them ([#347](https://github.com/khiops/lasterm/issues/347)) ([943ef96](https://github.com/khiops/lasterm/commit/943ef9644dcf8aa72dfd9432ffd60bea4ce9e0cb)), closes [#222](https://github.com/khiops/lasterm/issues/222) [#284](https://github.com/khiops/lasterm/issues/284)
+
 ## [0.10.3](https://github.com/khiops/lasterm/compare/v0.10.2...v0.10.3) (2026-09-18)
 
 

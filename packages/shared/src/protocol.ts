@@ -421,6 +421,8 @@ export interface HostVerifyMessage {
 	promptId: string;
 	/** Set on first connection (TOFU) — no stored fingerprint yet. */
 	firstConnect?: boolean;
+	/** The address that presented the key: the host may not be saved yet, so its id names nothing. */
+	hostname?: string;
 }
 
 /** UI → Hub: user decision on unknown fingerprint */

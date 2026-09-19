@@ -274,6 +274,7 @@ export class SshConnectionManager {
 		const verifyMsgBase: Omit<HostVerifyMessage, "promptId"> & { promptId: string } = {
 			type: "HOST_VERIFY",
 			hostId,
+			hostname,
 			fingerprint: newFingerprint,
 			algorithm: "SHA256",
 			...(oldFingerprint ? { oldFingerprint } : {}),
@@ -620,6 +621,7 @@ export class SshConnectionManager {
 				{
 					type: "HOST_VERIFY",
 					hostId: msg.hostId,
+					hostname: msg.port === 22 ? msg.hostname : `${msg.hostname}:${msg.port}`,
 					fingerprint: newFingerprint,
 					algorithm: "SHA256",
 					...(oldFingerprint ? { oldFingerprint } : {}),

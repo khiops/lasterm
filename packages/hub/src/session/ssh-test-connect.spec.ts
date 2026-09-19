@@ -91,7 +91,12 @@ async function hostVerifyPrompt(client: { send: Mock }) {
 			.map(([message]) => message)
 			.find((message) => message.type === "HOST_VERIFY");
 		if (!prompt) throw new Error("no host key prompt yet");
-		return prompt as { promptId: string; fingerprint: string; firstConnect?: boolean };
+		return prompt as {
+			promptId: string;
+			fingerprint: string;
+			firstConnect?: boolean;
+			hostname?: string;
+		};
 	});
 }
 
@@ -114,6 +119,8 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		expect(prompt).toMatchObject({
 			firstConnect: true,
 			fingerprint: expect.stringMatching(/^SHA256:/),
+			// The host is not saved: its address is what the dialog can name it by.
+			hostname: `127.0.0.1:${mock.port}`,
 		});
 		expect(mock.auth.attempts, "credentials went to an unchecked server").toBe(0);
 		mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");

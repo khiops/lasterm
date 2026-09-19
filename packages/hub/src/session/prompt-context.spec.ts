@@ -20,7 +20,7 @@
  *   D: stale deliveryEpoch rejected by respond().
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock, vi } from "vitest";
 import * as PC from "./prompt-context.js";
 import type {
 	Lease,
@@ -92,7 +92,7 @@ function addLease(
 }
 
 /** No-op send spy. */
-function makeSend(): ReturnType<typeof vi.fn> {
+function makeSend(): Mock<(clientId: string, msg: Record<string, unknown>) => void> {
 	return vi.fn();
 }
 

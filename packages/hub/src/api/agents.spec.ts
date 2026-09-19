@@ -271,7 +271,9 @@ describe("POST /api/agents/fetch", () => {
 		const assetBody = "deduped-agent";
 		const assetUrl = versionedAssetUrl("linux", "arm64", HUB_VERSION);
 		const assetName = versionedAssetName("linux", "arm64", HUB_VERSION);
-		let resolveAsset: ((response: Response) => void) | null = null;
+		// Asserted rather than annotated: assigned in a callback, so a `null`
+		// initialiser would narrow it to `null` for good.
+		let resolveAsset = null as ((response: Response) => void) | null;
 		const pendingAsset = new Promise<Response>((resolve) => {
 			resolveAsset = resolve;
 		});
@@ -720,7 +722,7 @@ function makeAgentRouteServer(
 	return instance;
 }
 
-function postFetch(payload: unknown) {
+function postFetch(payload: Record<string, unknown>) {
 	return server!.inject({
 		method: "POST",
 		url: "/api/agents/fetch",
@@ -729,7 +731,7 @@ function postFetch(payload: unknown) {
 	});
 }
 
-function postPrune(payload: unknown) {
+function postPrune(payload: Record<string, unknown>) {
 	return server!.inject({
 		method: "POST",
 		url: "/api/agents/prune",
@@ -811,7 +813,10 @@ function response(
 	body: BodyInit | null,
 	init: { readonly status?: number; readonly headers?: HeadersInit } = {},
 ): Response {
-	return new Response(body, { status: init.status ?? 200, headers: init.headers });
+	return new Response(body, {
+		status: init.status ?? 200,
+		...(init.headers !== undefined && { headers: init.headers }),
+	});
 }
 
 function deferredResponse(): {

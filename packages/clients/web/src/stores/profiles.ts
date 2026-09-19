@@ -25,6 +25,8 @@ export const useProfilesStore = defineStore("profiles", () => {
 	const authStore = useAuthStore();
 
 	const profiles = ref<LaunchProfile[]>([]);
+	/** The active host's menu — what it can launch, not every profile there is. */
+	const hostProfiles = ref<HostVisibleProfile[]>([]);
 	const loading = ref(false);
 
 	// -------------------------------------------------------------------------
@@ -134,6 +136,34 @@ export const useProfilesStore = defineStore("profiles", () => {
 	}
 
 	/**
+	 * Read the active host's menu: the profiles it can run, in the order the
+	 * "Launch from profile" dropdown lists them. A host answering late does not
+	 * overwrite the one selected since.
+	 */
+	async function loadHostProfiles(): Promise<void> {
+		const hostId = useChannelsStore().activeHostId;
+		if (hostId === null) {
+			hostProfiles.value = [];
+			return;
+		}
+		const loaded = await fetchHostProfiles(hostId);
+		if (useChannelsStore().activeHostId === hostId) hostProfiles.value = loaded;
+	}
+
+	/**
+	 * Spawn the Nth profile of the active host's menu (Ctrl+Shift+N). The host
+	 * is asked at each press, so the menu is the one the dropdown would show.
+	 */
+	async function spawnNthHostProfile(n: number): Promise<void> {
+		const channelsStore = useChannelsStore();
+		const hostId = channelsStore.activeHostId;
+		if (hostId === null) return;
+		const profile = (await fetchHostProfiles(hostId))[n - 1];
+		if (profile === undefined) return;
+		void channelsStore.spawnChannel(hostId, { launchProfileId: profile.id });
+	}
+
+	/**
 	 * Spawn a one-off command (process mode).
 	 * Parses the command string: first token is shell/command, rest are args.
 	 * Empty input is a no-op.
@@ -159,9 +189,12 @@ export const useProfilesStore = defineStore("profiles", () => {
 
 	return {
 		profiles,
+		hostProfiles,
 		loading,
 		fetchProfiles,
 		fetchHostProfiles,
+		loadHostProfiles,
+		spawnNthHostProfile,
 		createProfile,
 		updateProfile,
 		deleteProfile,

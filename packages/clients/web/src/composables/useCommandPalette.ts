@@ -255,7 +255,8 @@ export function useCommandPalette() {
 
 		// ── Profiles (SC-28) ──────────────────────────────────────────────────
 		if (prefix === null || prefix === "profile") {
-			for (const p of profilesStore.profiles) {
+			// The active host's menu: a profile it cannot run is not offered.
+			for (const p of profilesStore.hostProfiles) {
 				const score = q ? fuzzyMatch(q, p.name) : 1;
 				if (score > 0) {
 					// Profiles in general search get lower priority (score halved)
@@ -319,6 +320,9 @@ export function useCommandPalette() {
 		isOpen.value = true;
 		query.value = "";
 		selectedIndex.value = 0;
+		// Read the host's menu now: it changes with the host, and with a seeding
+		// an agent triggers when it says hello.
+		void profilesStore.loadHostProfiles();
 	}
 
 	function close(): void {

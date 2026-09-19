@@ -20,7 +20,13 @@
 		/>
 
 		<div v-if="error" class="terminal-error">
-			<span>{{ error }}</span>
+			<div class="terminal-error__box">
+				<span>{{ error }}</span>
+				<div class="terminal-error__actions">
+					<button class="exit-btn" @click="onRetry">Retry</button>
+					<button class="exit-btn exit-btn--danger" @click="onClosePaneFromOverlay">Close</button>
+				</div>
+			</div>
 		</div>
 		<div v-else-if="!ready" class="terminal-loading">
 			<span>Connecting…</span>
@@ -167,6 +173,13 @@ const notificationStore = useNotificationStore();
 const terminalContainer = ref<HTMLElement | null>(null);
 const ready = ref(false);
 const error = ref<string | null>(null);
+/** Host of a spawn this pane owes, kept until the channel exists. */
+const pendingHostId = ref<string | null>(null);
+/** The BEL handler is registered on the terminal, so once is enough. */
+let bellBound = false;
+/** A reconnect landed while this pane was still opening: what it sent went out
+ * on a socket that is gone, so the failure to come is not the channel's fault. */
+let reconnectedWhileOpening = false;
 
 const hostsStore = useHostsStore();
 
@@ -324,15 +337,20 @@ watch(isDead, (dead) => {
 // Lifecycle: init terminal + attach/reattach channel
 // ---------------------------------------------------------------------------
 
-onMounted(async () => {
+/**
+ * Spawn or attach the pane's channel, and report what stopped it.
+ *
+ * Called on mount and again by a retry: the terminal itself is created once, by
+ * init(), so this takes the size it already has. A spawn that never completed
+ * keeps its host in `pendingHostId`, so the retry spawns rather than attaching a
+ * channel that was never created.
+ */
+async function openChannel(cols: number, rows: number): Promise<void> {
 	try {
 		await sessionStore.connect();
 
-		const { cols, rows } = init();
-
 		if (props.channelId !== null && props.channelId !== undefined) {
-			// Check if this is a pending spawn (temp ID created by App.vue)
-			const hostId = channelsStore.consumePendingSpawn(props.channelId);
+			const hostId = pendingHostId.value;
 
 			if (hostId !== null) {
 				// Fresh spawn — PTY is created with actual terminal dimensions
@@ -342,6 +360,7 @@ onMounted(async () => {
 					rows,
 					select: false,
 				});
+				pendingHostId.value = null;
 				internalChannelId.value = realId;
 				// PTY was spawned at exact terminal dims — suppress the RESIZE
 				// that attachChannel would otherwise send (prevents SIGWINCH)
@@ -366,6 +385,8 @@ onMounted(async () => {
 			ready.value = true;
 			applyProfile(resolvedProfile.value);
 			// Register xterm.js BEL handler — fires on \x07 from PTY output
+			if (bellBound) return;
+			bellBound = true;
 			terminal.value?.onBell(() => {
 				const chId = props.channelId;
 				// Increment bell badge (agent BELL WS message not reliable for all shells)
@@ -406,8 +427,32 @@ onMounted(async () => {
 		}
 		error.value = msg;
 		console.error('[TerminalPane] Initialization failed:', err);
+		// An attach lost with its socket is worth sending again by itself. A
+		// spawn is not: the hub may have created the channel and only the answer
+		// was lost, and a second one would leave a terminal nobody asked for.
+		if (reconnectedWhileOpening && pendingHostId.value === null) {
+			reconnectedWhileOpening = false;
+			await onRetry();
+		}
 	}
+}
+
+onMounted(async () => {
+	// The spawn App.vue registered for this tab, kept so a retry can spawn it.
+	pendingHostId.value =
+		props.channelId !== null && props.channelId !== undefined
+			? channelsStore.consumePendingSpawn(props.channelId)
+			: null;
+	const { cols, rows } = init();
+	await openChannel(cols, rows);
 });
+
+/** Try again after a failure — the button the error offers. */
+async function onRetry(): Promise<void> {
+	error.value = null;
+	const term = terminal.value;
+	await openChannel(term?.cols ?? 80, term?.rows ?? 24);
+}
 
 // Re-attach when the channelId prop changes (e.g. pane reuse after tab switch).
 // Skip when the new ID matches internalChannelId (happens after pending spawn
@@ -435,7 +480,16 @@ watch(
 watch(
 	() => sessionStore.reconnectCount,
 	async () => {
-		if (effectiveChannelId.value && ready.value) {
+		// A pane that failed to open never became ready: the connection coming
+		// back is its chance to try again, which is what left it stuck before.
+		if (!ready.value) {
+			if (error.value !== null) await onRetry();
+			// Still opening: the attempt in flight speaks to a socket that is
+			// gone, so let it fail and try again then.
+			else reconnectedWhileOpening = true;
+			return;
+		}
+		if (effectiveChannelId.value) {
 			try {
 				error.value = null;
 				await reattachChannel(effectiveChannelId.value);
@@ -904,7 +958,7 @@ function onDragEnd(): void {
 /* The pane keeps whatever the terminal already showed, so the message needs a
    ground of its own to be read over it. */
 .terminal-loading span,
-.terminal-error span {
+.terminal-error__box {
 	padding: 6px 12px;
 	border-radius: 6px;
 	background: var(--nt-bg);
@@ -913,6 +967,22 @@ function onDragEnd(): void {
 
 .terminal-error {
 	color: var(--nt-badge);
+}
+
+.terminal-error__box {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	padding: 14px 18px;
+	text-align: center;
+	/* The overlay lets clicks through to the terminal; its buttons must not. */
+	pointer-events: auto;
+}
+
+.terminal-error__actions {
+	display: flex;
+	gap: 8px;
 }
 
 /* Context menu */

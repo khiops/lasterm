@@ -20,9 +20,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { request as httpsRequest } from "node:https";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { createOwnerOnlyDirectory } from "./auth.js";
 import {
 	buildDaemonSpawnPlan,
@@ -60,18 +60,14 @@ import {
 
 // ─── Platform paths ────────────────────────────────────────────────────────────
 
+// Both follow the shared resolver's rule (#297): an unusable platform variable
+// is refused, naming it, rather than turned into a directory of its own.
 export function getStateDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.LOCALAPPDATA ?? "", "lasterm");
-	}
-	return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
+	return lastermDir("state");
 }
 
 export function getConfigDir(): string {
-	if (process.platform === "win32") {
-		return join(process.env.APPDATA ?? "", "lasterm");
-	}
-	return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
+	return lastermDir("config");
 }
 
 /**

@@ -1,4 +1,6 @@
 #Requires -Version 7.0
+# -NoBundle builds the executables and skips the installers.
+param([switch]$NoBundle)
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -42,7 +44,9 @@ Set-Location $Root
 # The override travels as a file, relative to the package pnpm runs in. As an
 # inline JSON string it reached tauri intact through a .cmd pnpm launcher and
 # with literal backslashes through an .exe one (Volta), so it failed to parse.
-pnpm -F @lasterm/desktop tauri build --config tauri.prebuilt-frontend.json
+$bundleArgs = @()
+if ($NoBundle) { $bundleArgs += "--no-bundle" }
+pnpm -F @lasterm/desktop tauri build --config tauri.prebuilt-frontend.json @bundleArgs
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
 
 Write-Host ""

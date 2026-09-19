@@ -129,9 +129,12 @@ powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <c
 .\scripts\dev\desktop-ui.ps1 -Stop
 ```
 
-- The app runs from a copy in `%LOCALAPPDATA%\lasterm-ui-test`, against the real profile. An agent
-  started from `target\release` locks its executable, and the next build then fails with "access
-  denied".
+- `-Build` always compiles into `target\desktop-ui\build` and keeps it, so a rebuild recompiles only
+  what changed. Never build in a fresh target directory, and never outside the repository: every
+  crate's build script is a new executable, and the maintainer's antivirus flags each one outside
+  their development folder.
+- The app runs from a copy in `target\desktop-ui\bin`, against the real profile. An agent started
+  from a `target\release` locks its executable, and the next build then fails with "access denied".
 - A drag dispatched over CDP skips the window's native drop handling. `drag-file.ps1` performs a real
   OLE drag instead: it moves the user's mouse for a few seconds, then puts it back. Run it with
   `-SelfTest` first, before trusting a result it gives on the app.

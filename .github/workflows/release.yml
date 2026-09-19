@@ -227,9 +227,9 @@ jobs:
             # not assume a shape.
             #
             # Cutting a new version leaves the published release exactly as it is.
-            # If the tag also carries drafts, delete them first: the cleanup below
-            # keeps whichever release the API lists first, which may not be the one
-            # that was public (#270).
+            # If the tag also carries drafts, delete them first: a rebuild keeps a
+            # draft only when it targets this commit or is the tag's only draft,
+            # and refuses otherwise (#270).
             #
             # A publication that GitHub applied while the CLI lost the response
             # lands here too, and this refuses it. The release is already complete;
@@ -247,32 +247,31 @@ jobs:
             echo "::error::release is already complete: check its assets instead of re-running."
             exit 1
           else
-            DRAFT_IDS="$(printf '%s' "$RELEASES_JSON" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag and .draft) | .id')"
-            KEEP_DRAFT_ID=""
-            for id in $DRAFT_IDS; do
-              if [ -z "$KEEP_DRAFT_ID" ]; then
-                KEEP_DRAFT_ID="$id"
-                echo "Keeping draft release id=$id"
-              else
-                echo "Deleting duplicate draft release id=$id"
-                gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
-              fi
+            # Which draft to keep is decided before anything is deleted, by what
+            # each draft targets rather than by where the API listed it (#270).
+            # With no tag yet, target_commitish is the only link between a draft
+            # and the commit: release-please sets it, and a draft aimed elsewhere
+            # would publish a tag on another commit. The rules and their cases
+            # are in scripts/select-release-draft.jq and its spec.
+            TAGGED=false
+            [ -n "$TAG_SHA" ] && TAGGED=true
+            SELECTION="$(printf '%s' "$RELEASES_JSON" | jq -c --arg tag "$TAG_NAME" --arg sha "$FROZEN_SHA" --arg tagged "$TAGGED" -f scripts/select-release-draft.jq)"
+            if printf '%s' "$SELECTION" | jq -e 'has("error")' > /dev/null; then
+              echo "::error::$(printf '%s' "$SELECTION" | jq -r '.error')"
+              printf '%s' "$SELECTION" | jq -r '.drafts[] | "::error::  draft id=\(.id) targets \(.target_commitish)"'
+              echo "::error::Delete the drafts that are not this release's, or dispatch the commit they target."
+              exit 1
+            fi
+            KEEP_DRAFT_ID="$(printf '%s' "$SELECTION" | jq -r '.keep // empty')"
+            for id in $(printf '%s' "$SELECTION" | jq -r '.delete[]'); do
+              echo "Deleting duplicate draft release id=$id"
+              gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
             done
             if [ -n "$KEEP_DRAFT_ID" ]; then
               # Reuse release-please's draft as-is: it carries the curated
               # changelog body, and the tag-vs-HEAD guard above already
               # rules out building a commit the tag does not point at.
               echo "Reusing draft release $TAG_NAME id=$KEEP_DRAFT_ID"
-              # With no tag yet, this is the only link between the draft and the
-              # commit: release-please creates the draft with target_commitish set,
-              # and a draft aimed elsewhere would publish a tag on another commit.
-              DRAFT_TARGET="$(printf '%s' "$RELEASES_JSON" | jq -r --arg id "$KEEP_DRAFT_ID" '.[] | select((.id|tostring) == $id) | .target_commitish')"
-              if [ -n "$TAG_SHA" ] || [ "$DRAFT_TARGET" = "$FROZEN_SHA" ]; then
-                :
-              else
-                echo "::error::Draft $TAG_NAME targets $DRAFT_TARGET but this run froze $FROZEN_SHA"
-                exit 1
-              fi
               # Whatever a reused draft already carries came from an earlier run.
               # publish-release, the only job that attaches assets, deletes all of
               # it before uploading this run's, so nothing is removed here.

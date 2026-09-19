@@ -7,9 +7,7 @@
 			"fastify": ["./node_modules/fastify/fastify.d.ts"]
 		}
 	},
-	// Every spec is checked, so a new one is too (#214). The files excluded
-	// below still carry pre-existing strict diagnostics (#206 counted 198; 38
-	// remain); take a file off the list once it type-checks, and never add one.
+	// Every spec is checked, so a new one is too (#214).
 	"include": ["src/**/*.spec.ts", "src/**/*.fixture.ts", "src/**/*.setup.ts", "../../scripts/**/*"],
-	"exclude": ["node_modules", "dist", "src/session/session-manager.spec.ts"]
+	"exclude": ["node_modules", "dist"]
 }

@@ -1,5 +1,5 @@
 import type { AuthPromptMessage, ProtocolMessage } from "@lasterm/shared";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { ConfigResolver } from "../config.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
@@ -12,6 +12,7 @@ import {
 	prompt as promptCtx,
 	reconnectContextId,
 } from "./prompt-context.js";
+import type { CommitProtectedMap } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
 
 // ─── Mock channel ID helpers ──────────────────────────────────────────────────
@@ -278,6 +279,15 @@ async function flushImmediate(): Promise<void> {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
+/**
+ * Arrange session and agent state directly. Production code reaches these
+ * maps only through ctx.commits, which their type enforces; a test setting up
+ * a precondition is the one caller allowed around it.
+ */
+function seedMap<K, V>(map: CommitProtectedMap<K, V>, key: K, value: V): void {
+	(map as Map<K, V>).set(key, value);
+}
+
 describe("SessionManager", () => {
 	let sm: SessionManager;
 	let dbManager: ReturnType<typeof openTestDatabases>;
@@ -386,14 +396,14 @@ describe("SessionManager", () => {
 		expect(snapshot.type).toBe("STATE_SYNC");
 		expect(snapshot.sessions.length).toBeGreaterThan(0);
 		const session = snapshot.sessions[0];
-		expect(session.status).toBe("active");
-		expect(session.hostId).toBeTruthy();
-		expect(session.sessionId).toBeTruthy();
+		expect(session?.status).toBe("active");
+		expect(session?.hostId).toBeTruthy();
+		expect(session?.sessionId).toBeTruthy();
 		expect(snapshot.channels.length).toBeGreaterThan(0);
 		const channel = snapshot.channels[0];
-		expect(channel.status).toBe("live");
-		expect(channel.channelId).toBeTruthy();
-		expect(channel.sessionId).toBe(session.sessionId);
+		expect(channel?.status).toBe("live");
+		expect(channel?.channelId).toBeTruthy();
+		expect(channel?.sessionId).toBe(session?.sessionId);
 	});
 
 	it("handleSpawn sends SPAWN_OK to the requesting client", async () => {
@@ -474,8 +484,12 @@ describe("SessionManager", () => {
 		const localHostId = await sm.ensureLocalHost();
 		const sessionId = "LOCALATTACH0000000000000000001";
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		ctx.metaDal.createSession({ id: sessionId, hostId: localHostId, status: "starting" });
-		ctx.sessions.set(localHostId, { id: sessionId, hostId: localHostId, status: "starting" });
+		new MetaDAL(dbManager.meta).createSession({
+			id: sessionId,
+			hostId: localHostId,
+			status: "starting",
+		});
+		seedMap(ctx.sessions, localHostId, { id: sessionId, hostId: localHostId, status: "starting" });
 		vi.mocked(_connectOrLaunchForMock).mockClear();
 
 		const agentMgr = (
@@ -1781,7 +1795,6 @@ describe("SessionManager", () => {
 				sessionId,
 				status: "orphan",
 				shell: "/bin/sh",
-				cwd: null,
 			});
 
 			// startup() should warm-restart the local agent
@@ -3669,10 +3682,10 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 
 		// Make SshAgent.start() block until we release it.
 		vi.mocked(_SshAgentForMock).mockImplementationOnce((() => {
-			const inst = new MockSshAgent();
+			const inst = new MockSshAgent({ id: hostId });
 			inst.start = vi.fn().mockReturnValue(connectBarrier);
 			return inst;
-		}) as unknown as typeof MockSshAgent);
+		}) as never);
 
 		const c1Received: ProtocolMessage[] = [];
 		const c1 = makeClient("c-disc-1", c1Received);
@@ -3721,8 +3734,9 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const dal = new MetaDAL(dbManager.meta);
 		dal.createSession({ id: disconnectedSessionId, hostId, status: "disconnected" });
 
-		const sessions = (sm as unknown as { sessions: Map<string, { id: string; status: string }> })
-			.sessions;
+		const sessions = (
+			sm as unknown as { sessions: Map<string, { id: string; hostId: string; status: string }> }
+		).sessions;
 		sessions.set(hostId, { id: disconnectedSessionId, hostId, status: "disconnected" });
 
 		// Make the next SSH connect fail
@@ -3841,7 +3855,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const connectBarrier = new Promise<void>((resolve) => {
 			releaseConnect = resolve;
 		});
-		const connectedAgent = new MockSshAgent();
+		const connectedAgent = new MockSshAgent({ id: hostId });
 		(
 			sm as unknown as {
 				_connectSshAgent: () => Promise<import("./agent-connection.js").AgentConnection>;
@@ -3962,7 +3976,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			send: vi.fn(),
 			connected: true,
 		} as unknown as AgentConnection;
-		ctx.agents.set("host-await-close", agent);
+		seedMap(ctx.agents, "host-await-close", agent);
 
 		const shutdownPromise = sm.shutdown();
 		await flushImmediate();
@@ -3987,7 +4001,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			send: vi.fn(),
 			connected: true,
 		} as unknown as AgentConnection;
-		ctx.agents.set("host-slow-close", agent);
+		seedMap(ctx.agents, "host-slow-close", agent);
 
 		const controller = new AbortController();
 		const rejectSpy = vi.fn();
@@ -4180,12 +4194,12 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	// Mutation oracle: without calling entry.reject() before clear(), awaiting followers
 	// hang forever — their catch blocks are never reached, keeping the process alive.
 	it("shutdown rejects all in-flight acquires with hub shutting down error", async () => {
-		const rejectSpy1 = vi.fn();
-		const rejectSpy2 = vi.fn();
+		const rejectSpy1 = vi.fn<(e: Error) => void>();
+		const rejectSpy2 = vi.fn<(e: Error) => void>();
 		function makeStaleAcq(
 			id: string,
 			hostId: string,
-			rejectSpy: ReturnType<typeof vi.fn>,
+			rejectSpy: Mock<(e: Error) => void>,
 		): import("./session-context.js").SessionAcquisition {
 			let _resolve!: (s: import("./session-context.js").SessionState) => void;
 			const connectPromise = new Promise<import("./session-context.js").SessionState>((res) => {
@@ -4289,13 +4303,13 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		// Inject two in-flight entries with real AbortControllers.
 		const controller1 = new AbortController();
 		const controller2 = new AbortController();
-		const rejectSpy1 = vi.fn();
-		const rejectSpy2 = vi.fn();
+		const rejectSpy1 = vi.fn<(e: Error) => void>();
+		const rejectSpy2 = vi.fn<(e: Error) => void>();
 		function makeAcq(
 			id: string,
 			hostId: string,
 			ctrl: AbortController,
-			rejectSpy: ReturnType<typeof vi.fn>,
+			rejectSpy: Mock<(e: Error) => void>,
 		): import("./session-context.js").SessionAcquisition {
 			let _resolve!: (s: import("./session-context.js").SessionState) => void;
 			const connectPromise = new Promise<import("./session-context.js").SessionState>((res) => {
@@ -4453,7 +4467,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const fakeSessionId = "F1A0SESS0000000000000000000001";
 		dal.createSession({ id: fakeSessionId, hostId, status: "active" });
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		ctx.sessions.set(hostId, { id: fakeSessionId, hostId, status: "active" } as never);
+		seedMap(ctx.sessions, hostId, { id: fakeSessionId, hostId, status: "active" } as never);
 		ctx.clients.set("c-f1a-1", makeClient("c-f1a-1", []));
 		ctx.clients.set("c-f1a-other", makeClient("c-f1a-other", []));
 
@@ -4508,7 +4522,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const fakeSessionId = "F1B0SESS0000000000000000000002";
 		dal.createSession({ id: fakeSessionId, hostId, status: "active" });
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		ctx.sessions.set(hostId, { id: fakeSessionId, hostId, status: "active" } as never);
+		seedMap(ctx.sessions, hostId, { id: fakeSessionId, hostId, status: "active" } as never);
 		ctx.clients.set("c-f1b-1", makeClient("c-f1b-1", []));
 
 		openContext(ctx, "session", hostId, "c-f1b-1", reconnectContextId(fakeSessionId));
@@ -4642,7 +4656,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const dal = new MetaDAL(dbManager.meta);
 		const fakeSessionId = "F1D0SESS0000000000000000000004";
 		dal.createSession({ id: fakeSessionId, hostId, status: "starting" });
-		ctx.sessions.set(hostId, { id: fakeSessionId, hostId, status: "starting" } as never);
+		seedMap(ctx.sessions, hostId, { id: fakeSessionId, hostId, status: "starting" } as never);
 
 		// Call _connectSshAgent directly with the pre-aborted signal.
 		const connectSshAgent = (
@@ -4700,7 +4714,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		vi.mocked((await import("./ssh-agent.js")).SshAgent).mockImplementationOnce(function (
 			this: unknown,
 		) {
-			mockSshAgentInstance = new MockSshAgent();
+			mockSshAgentInstance = new MockSshAgent({ id: hostId });
 			// Remove the client synchronously — simulates disconnect during connect.
 			sm.removeClient("c-sole-1");
 			return mockSshAgentInstance;
@@ -4806,11 +4820,11 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		// Must use a regular function (constructable) for new-ed mocks — same pattern as
 		// the other override tests in this file.
 		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (this: unknown) {
-			const inst = new MockSshAgent();
+			const inst = new MockSshAgent({ id: hostId });
 			inst.start = vi.fn().mockReturnValue(connectBarrier);
 			mockSshAgentInstance = inst;
 			return inst;
-		} as unknown as typeof MockSshAgent);
+		} as never);
 
 		const c1 = makeClient("c-follower-race-1", []);
 		const c2 = makeClient("c-follower-race-2", []);
@@ -4878,7 +4892,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		vi.mocked((await import("./ssh-agent.js")).SshAgent).mockImplementationOnce(function (
 			this: unknown,
 		) {
-			mockSshAgentInstance = new MockSshAgent();
+			mockSshAgentInstance = new MockSshAgent({ id: hostId });
 			// Remove client synchronously — simulates disconnect during SSH connect.
 			sm.removeClient("c-sole-count-1");
 			return mockSshAgentInstance;
@@ -4968,6 +4982,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			id: "l1",
 			hostId: "stale-host-waiter",
 			acqId: "stale-waiter-acq",
+			clientId: "stale-waiter-client",
 			released: false,
 			_acq: staleAcq,
 		});
@@ -5009,11 +5024,11 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		});
 
 		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (this: unknown) {
-			const inst = new MockSshAgent();
+			const inst = new MockSshAgent({ id: hostId });
 			inst.start = vi.fn().mockReturnValue(connectBarrier);
 			mockSshAgentInstance = inst;
 			return inst;
-		} as unknown as typeof MockSshAgent);
+		} as never);
 
 		const c1 = makeClient("c-fixa-leader", []);
 		const c2 = makeClient("c-fixa-follower", []);
@@ -5135,7 +5150,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		dal.createSession({ id: fakeSessionId, hostId, status: "active" });
 
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
-		ctx.sessions.set(hostId, {
+		seedMap(ctx.sessions, hostId, {
 			id: fakeSessionId,
 			hostId,
 			status: "active",
@@ -5238,8 +5253,8 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			leases: new Set([leaseA, leaseB]),
 		};
 		acq.connectPromise.catch(() => {});
-		leaseA._acq = acq;
-		leaseB._acq = acq;
+		Object.assign(leaseA, { _acq: acq });
+		Object.assign(leaseB, { _acq: acq });
 		ctx.acquisitions.set(hostId, acq);
 
 		// Open a PromptContext for this acq and issue a host_verify prompt via the ops.
@@ -5315,7 +5330,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const hostId = "host-d3-reconnect";
 		const sessionId = "D3RECONNECTSESSION000000000001";
 		const contextId = reconnectContextId(sessionId);
-		ctx.sessions.set(hostId, { id: sessionId, hostId, status: "detached" });
+		seedMap(ctx.sessions, hostId, { id: sessionId, hostId, status: "detached" });
 		ctx.channels.set("ch-d3-reconnect", {
 			sessionId,
 			hostId,
@@ -5344,7 +5359,9 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 				promptId: "",
 			},
 			(routeClientId, msg) => {
-				ctx.clients.get(routeClientId)?.send(msg as import("@lasterm/shared").HostVerifyMessage);
+				ctx.clients
+					.get(routeClientId)
+					?.send(msg as unknown as import("@lasterm/shared").HostVerifyMessage);
 			},
 		)!;
 
@@ -5377,7 +5394,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		const hostId = "host-d3b-reconnect";
 		const sessionId = "D3RECONNECTSESSION000000000002";
 		const contextId = reconnectContextId(sessionId);
-		ctx.sessions.set(hostId, { id: sessionId, hostId, status: "detached" });
+		seedMap(ctx.sessions, hostId, { id: sessionId, hostId, status: "detached" });
 		ctx.channels.set("ch-d3b-reconnect", {
 			sessionId,
 			hostId,
@@ -5405,7 +5422,9 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 				promptId: "",
 			},
 			(routeClientId, msg) => {
-				ctx.clients.get(routeClientId)?.send(msg as import("@lasterm/shared").HostVerifyMessage);
+				ctx.clients
+					.get(routeClientId)
+					?.send(msg as unknown as import("@lasterm/shared").HostVerifyMessage);
 			},
 		)!;
 		const promptId = [...ctx.pendingPrompts.keys()][0]!;
@@ -5456,7 +5475,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			leases: new Set([leaseA]),
 		};
 		acq.connectPromise.catch(() => {});
-		leaseA._acq = acq;
+		Object.assign(leaseA, { _acq: acq });
 		ctx.acquisitions.set(hostId, acq);
 
 		openContext(ctx, "session", hostId, "rt2-clientA", acqId);
@@ -5619,7 +5638,7 @@ describe("SessionManager — Fix B: onReconnectAgent restart-reconnect revive gu
 		const reconnectAgentClose = vi.fn();
 		// biome-ignore lint/complexity/useArrowFunction: vitest needs a constructable function for new-ed mocks
 		vi.mocked(_SshAgentForMock).mockImplementationOnce(function () {
-			const agent = new MockSshAgent();
+			const agent = new MockSshAgent({ id: hostId });
 			agent.start = vi.fn().mockReturnValue(startGate);
 			agent.close = reconnectAgentClose;
 			return agent as never;
@@ -5783,7 +5802,7 @@ describe("SessionManager — Fix C2: onReconnectAgent abort-safe on closeSession
 		const reconnectAgentClose = vi.fn();
 		// biome-ignore lint/complexity/useArrowFunction: vitest needs a constructable function for new-ed mocks
 		vi.mocked(_SshAgentForMock).mockImplementationOnce(function () {
-			const agent = new MockSshAgent();
+			const agent = new MockSshAgent({ id: hostId });
 			// start() hangs — it will be aborted by closeSession
 			agent.start = vi.fn().mockReturnValue(startGate);
 			agent.close = reconnectAgentClose;

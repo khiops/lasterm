@@ -1,0 +1,7 @@
+# One Rust compiler for every CI job and every checkout (#248). CI installs it
+# with `rustup toolchain install` and keys its build cache on it, so move it on
+# purpose, in its own change, when adopting a new stable.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

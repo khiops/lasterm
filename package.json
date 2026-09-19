@@ -1,6 +1,6 @@
 {
 	"name": "lasterm",
-	"version": "0.10.6",
+	"version": "0.11.0",
 	"private": true,
 	"type": "module",
 	"description": "Local-first session terminal platform — hub daemon + agent + SSH + PWA UI",

@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.11.0](https://github.com/khiops/lasterm/compare/v0.10.6...v0.11.0) (2026-09-19)
+
+
+### Features
+
+* **desktop,web:** restart the hub from the window when it dies ([#397](https://github.com/khiops/lasterm/issues/397)) ([bacd686](https://github.com/khiops/lasterm/commit/bacd686f4912d7defc1f16cd94f5073cdde71baa)), closes [#143](https://github.com/khiops/lasterm/issues/143)
+* **hub,web:** pick a font installed where the hub runs ([#394](https://github.com/khiops/lasterm/issues/394)) ([840f179](https://github.com/khiops/lasterm/commit/840f179af6df8a0d65ce50572babda91389a24fb)), closes [#100](https://github.com/khiops/lasterm/issues/100)
+
+
+### Bug Fixes
+
+* **agent:** make a hub connection active only once it has authenticated ([#374](https://github.com/khiops/lasterm/issues/374)) ([abd01a1](https://github.com/khiops/lasterm/commit/abd01a1fa8a512dae74d0a84e30e387442eec253))
+* **desktop:** follow a hub redirect only back to the same endpoint ([#388](https://github.com/khiops/lasterm/issues/388)) ([0e207c2](https://github.com/khiops/lasterm/commit/0e207c2410481f4dca7752f9d73ab321f4275685)), closes [#219](https://github.com/khiops/lasterm/issues/219)
+* **desktop:** leave drag and drop to the web page ([#380](https://github.com/khiops/lasterm/issues/380)) ([fe6eca3](https://github.com/khiops/lasterm/commit/fe6eca3e200b5c602d5c3feb0fdb9028e7cc17ab))
+* **desktop:** leave no partial pin file behind, and make a new pin durable ([#384](https://github.com/khiops/lasterm/issues/384)) ([e882f5e](https://github.com/khiops/lasterm/commit/e882f5e877b6aab6b6cf75a3bb901ddf58e53500)), closes [#223](https://github.com/khiops/lasterm/issues/223) [#211](https://github.com/khiops/lasterm/issues/211)
+* **desktop:** let the terminal's run-time styles through the CSP ([#381](https://github.com/khiops/lasterm/issues/381)) ([2ca945a](https://github.com/khiops/lasterm/commit/2ca945a1d9e6aad16dd47da40f8f4b1a09f14515))
+* **desktop:** reset the hub pin only while no desktop runs ([#391](https://github.com/khiops/lasterm/issues/391)) ([88c2748](https://github.com/khiops/lasterm/commit/88c2748e85ca808203a7fb84443a9f728ce6a21d)), closes [#230](https://github.com/khiops/lasterm/issues/230)
+* **desktop:** say so when the hub dies instead of reconnecting for ever ([#379](https://github.com/khiops/lasterm/issues/379)) ([fc92848](https://github.com/khiops/lasterm/commit/fc9284809ae9d9b3da0daae853714c72605c041b))
+* **desktop:** stop granting page script the right to run the sidecars ([#396](https://github.com/khiops/lasterm/issues/396)) ([5fd3073](https://github.com/khiops/lasterm/commit/5fd3073f6c06f17fc456f7767d238e9c547a2fe9))
+* **desktop:** stop the hub a desktop launched when that desktop ends ([#393](https://github.com/khiops/lasterm/issues/393)) ([1c3943f](https://github.com/khiops/lasterm/commit/1c3943f2f651a31762c7fcb55d7a086ea951d75e)), closes [#188](https://github.com/khiops/lasterm/issues/188)
+* **hub:** let `lasterm start` honour LASTERM_PORT ([#383](https://github.com/khiops/lasterm/issues/383)) ([5226454](https://github.com/khiops/lasterm/commit/5226454d6875c701164808cf075fdeb67004ac01)), closes [#175](https://github.com/khiops/lasterm/issues/175)
+* **hub:** let a served page open a WebSocket back to the hub only ([#375](https://github.com/khiops/lasterm/issues/375)) ([16713a2](https://github.com/khiops/lasterm/commit/16713a2d927f1e2aa3f13fac761090d22f6ad060)), closes [#210](https://github.com/khiops/lasterm/issues/210)
+* **hub:** reuse a cached native addon only when its bytes are the embedded ones ([#373](https://github.com/khiops/lasterm/issues/373)) ([ad6a1f2](https://github.com/khiops/lasterm/commit/ad6a1f20ca14fcb563cbe42b97e428e327a7ca5b)), closes [#128](https://github.com/khiops/lasterm/issues/128) [#216](https://github.com/khiops/lasterm/issues/216)
+* **protected-fs:** refuse CONIN$ and CONOUT$ as leaf names ([#385](https://github.com/khiops/lasterm/issues/385)) ([25ef27a](https://github.com/khiops/lasterm/commit/25ef27a52aa510709fcb63adecfa33596f6fd114)), closes [#227](https://github.com/khiops/lasterm/issues/227)
+* **web:** make a host's image icon a picked image, not a URL a page cannot load ([#389](https://github.com/khiops/lasterm/issues/389)) ([6ee60a8](https://github.com/khiops/lasterm/commit/6ee60a8f67df86e5c9ef48c4c6d8b6b5e4e9f20f)), closes [#208](https://github.com/khiops/lasterm/issues/208)
+
+
+### Tests
+
+* **agent:** give the daemons the integration tests spawn their own config directory ([#365](https://github.com/khiops/lasterm/issues/365)) ([3e2a484](https://github.com/khiops/lasterm/commit/3e2a484ea95bf70eb2821405286df7b3f4c6c52b))
+* **desktop:** let the client close first in the TLS test peers ([#370](https://github.com/khiops/lasterm/issues/370)) ([cfe0973](https://github.com/khiops/lasterm/commit/cfe09737e33cb81564bf60b5f14403b1d81c2cf5)), closes [#349](https://github.com/khiops/lasterm/issues/349)
+* **hub:** retry removing the Vite proxy fixture's state on Windows ([#377](https://github.com/khiops/lasterm/issues/377)) ([8a0e4ac](https://github.com/khiops/lasterm/commit/8a0e4ac04af4309144ca536cbb856fa731d4f518))
+* **hub:** run the vite-proxy fixture hub in the process the test stops ([#392](https://github.com/khiops/lasterm/issues/392)) ([bc6a497](https://github.com/khiops/lasterm/commit/bc6a497ac4952af6de8bb1752f30117eb588cfae))
+* **hub:** type-check eight more specs ([#368](https://github.com/khiops/lasterm/issues/368)) ([587ed19](https://github.com/khiops/lasterm/commit/587ed19aba82151c2bcc7f8aa9dd4e0c419bea8a))
+* **hub:** type-check twelve more specs ([#367](https://github.com/khiops/lasterm/issues/367)) ([bd02a78](https://github.com/khiops/lasterm/commit/bd02a78d63f128500b4d6002e73cf21a51abea19))
+* type-check the last specs and drop the exclusion list ([#369](https://github.com/khiops/lasterm/issues/369)) ([a20e479](https://github.com/khiops/lasterm/commit/a20e479150bb369b6ad0182b95e7eba333efc53b)), closes [#214](https://github.com/khiops/lasterm/issues/214)
+
+
+### Documentation
+
+* say what the security logging and pairing do today, and mark superseded decisions ([#386](https://github.com/khiops/lasterm/issues/386)) ([48552c8](https://github.com/khiops/lasterm/commit/48552c8c11a4ae0e9022f33cbf3d97bcf693dc3b)), closes [#266](https://github.com/khiops/lasterm/issues/266) [#282](https://github.com/khiops/lasterm/issues/282)
+* state macOS as unsupported and retire references to closed issues ([#371](https://github.com/khiops/lasterm/issues/371)) ([475c490](https://github.com/khiops/lasterm/commit/475c49083700a4cf21e9a47eba863c27e0d03d1d)), closes [#224](https://github.com/khiops/lasterm/issues/224)
+
 ## [0.10.6](https://github.com/khiops/lasterm/compare/v0.10.5...v0.10.6) (2026-09-19)
 
 

@@ -1244,7 +1244,12 @@ describe("runtime state", () => {
 		}
 	});
 
-	it("cmdStop validates legacy process identity before signaling the pid", async () => {
+	// On Windows the identity check reads the command line through a PowerShell
+	// CIM query: about 2.3 s alone on a warm machine, and 11 s once on a
+	// windows-latest runner under the full suite, past the 5 s default.
+	it("cmdStop validates legacy process identity before signaling the pid", {
+		timeout: 30_000,
+	}, async () => {
 		const { root, restore } = useTempStateRoot();
 		let child: ReturnType<typeof spawn> | undefined;
 		let childDone: Promise<void> | undefined;

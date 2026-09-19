@@ -8,7 +8,7 @@
 		}
 	},
 	// Every spec is checked, so a new one is too (#214). The files excluded
-	// below still carry pre-existing strict diagnostics (#206 counted 198; 153
+	// below still carry pre-existing strict diagnostics (#206 counted 198; 114
 	// remain); take a file off the list once it type-checks, and never add one.
 	"include": ["src/**/*.spec.ts", "src/**/*.fixture.ts", "src/**/*.setup.ts", "../../scripts/**/*"],
 	"exclude": [
@@ -17,9 +17,6 @@
 		"src/api/agents.spec.ts",
 		"src/session/prompt-context.spec.ts",
 		"src/session/session-manager.spec.ts",
-		"src/session/ssh-connection-manager.spec.ts",
-		"src/shell-discovery.spec.ts",
-		"src/ssh/ssh-config-parser.spec.ts",
-		"src/storage/migrate-launch-profiles.spec.ts"
+		"src/ssh/ssh-config-parser.spec.ts"
 	]
 }

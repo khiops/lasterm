@@ -1,5 +1,5 @@
 import type { TestConnectMessage } from "@lasterm/shared";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import {
 	clearContext,
 	clientDisconnect,
@@ -8,6 +8,7 @@ import {
 	reconnectContextId,
 } from "./prompt-context.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
+import type { WsClient } from "./session-manager.js";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 
@@ -81,8 +82,8 @@ function makeMgr(ctx: ReturnType<typeof makeCtx>): SshConnectionManager {
 	);
 }
 
-function makeClient(id: string) {
-	return { id, send: vi.fn() } as never;
+function makeClient(id: string): WsClient & { send: Mock } {
+	return { id, send: vi.fn() } as unknown as WsClient & { send: Mock };
 }
 
 function registerClient(
@@ -358,7 +359,8 @@ describe("SshConnectionManager — passphrase cache", () => {
 describe("SshConnectionManager — reconnect cache-only promptAuth", () => {
 	it("scheduleReconnect passes a non-undefined promptAuth to SshAgent when cache is warm", async () => {
 		const { SshAgent } = await import("./ssh-agent.js");
-		capturedSshAgentArgs = null;
+		// The mock assigns it later; a bare `null` would narrow it to null for good.
+		capturedSshAgentArgs = null as typeof capturedSshAgentArgs;
 
 		const hostId = "host-reconnect-1";
 		const passphrase = "correct-horse-battery-staple";
@@ -885,14 +887,19 @@ describe("Fix A: reconnect abort-awareness — closeSession during in-flight sta
 			hubLogger: null,
 		} as unknown as SharedSessionContext;
 
-		const broadcaster = { updateSessionStatus: vi.fn() } as never;
+		const broadcaster = { updateSessionStatus: vi.fn() };
 		const lifecycle = {
 			closeSession: vi.fn(),
 			reAttachChannels: vi.fn(),
-		} as never;
-		const agentMgr = { wireAgentEvents: vi.fn() } as never;
+		};
+		const agentMgr = { wireAgentEvents: vi.fn() };
 
-		const mgr = new SshConnectionManager(ctx, broadcaster, lifecycle, agentMgr);
+		const mgr = new SshConnectionManager(
+			ctx,
+			broadcaster as never,
+			lifecycle as never,
+			agentMgr as never,
+		);
 		return { ctx, broadcaster, lifecycle, agentMgr, mgr };
 	}
 

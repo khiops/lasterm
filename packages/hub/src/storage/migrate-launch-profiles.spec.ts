@@ -49,14 +49,14 @@ describe("migrateLegacyShellDefaults", () => {
 
 			const profiles = dal.listLaunchProfiles();
 			expect(profiles).toHaveLength(1);
-			expect(profiles[0].name).toBe("zsh");
-			expect(profiles[0].shell).toBe("/bin/zsh");
+			expect(profiles[0]?.name).toBe("zsh");
+			expect(profiles[0]?.shell).toBe("/bin/zsh");
 
 			// The profile must be registered as default for the host
 			const hostProfiles = dal.listHostProfiles(host.id, "linux");
 			expect(hostProfiles).toHaveLength(1);
-			expect(hostProfiles[0].shell).toBe("/bin/zsh");
-			expect(hostProfiles[0].overrideType).toBe("default");
+			expect(hostProfiles[0]?.shell).toBe("/bin/zsh");
+			expect(hostProfiles[0]?.overrideType).toBe("default");
 		});
 
 		it("reads shell from profile_json.defaultShell when default_shell column is absent", () => {
@@ -72,10 +72,10 @@ describe("migrateLegacyShellDefaults", () => {
 			expect(result.hostsLinked).toBe(1);
 
 			const profiles = dal.listLaunchProfiles();
-			expect(profiles[0].shell).toBe("/bin/zsh");
+			expect(profiles[0]?.shell).toBe("/bin/zsh");
 
 			const hostProfiles = dal.listHostProfiles(host.id, "linux");
-			expect(hostProfiles[0].overrideType).toBe("default");
+			expect(hostProfiles[0]?.overrideType).toBe("default");
 		});
 
 		it("reads shell from profile_json.shell when defaultShell is absent", () => {
@@ -89,7 +89,7 @@ describe("migrateLegacyShellDefaults", () => {
 
 			expect(result.profilesCreated).toBe(1);
 			const profiles = dal.listLaunchProfiles();
-			expect(profiles[0].shell).toBe("/bin/fish");
+			expect(profiles[0]?.shell).toBe("/bin/fish");
 		});
 	});
 
@@ -108,8 +108,8 @@ describe("migrateLegacyShellDefaults", () => {
 
 			const profiles = dal.listLaunchProfiles();
 			expect(profiles).toHaveLength(1);
-			expect(profiles[0].name).toBe("fish");
-			expect(profiles[0].shell).toBe("/bin/fish");
+			expect(profiles[0]?.name).toBe("fish");
+			expect(profiles[0]?.shell).toBe("/bin/fish");
 		});
 
 		it("does not create a host override for the global profile", () => {
@@ -125,9 +125,9 @@ describe("migrateLegacyShellDefaults", () => {
 			const hostProfiles = dal.listHostProfiles(host.id, "linux");
 			// The fish profile is globally visible (supported_os=any, no hide override)
 			expect(hostProfiles.length).toBe(1);
-			expect(hostProfiles[0].shell).toBe("/bin/fish");
+			expect(hostProfiles[0]?.shell).toBe("/bin/fish");
 			// No host-specific override type — it's just globally visible
-			expect(hostProfiles[0].overrideType).toBeUndefined();
+			expect(hostProfiles[0]?.overrideType).toBeUndefined();
 		});
 	});
 

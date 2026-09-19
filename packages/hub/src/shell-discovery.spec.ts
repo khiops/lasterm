@@ -106,8 +106,8 @@ describe("parseWindowsTerminalSettings", () => {
 		});
 		const result = parseWindowsTerminalSettings(settings);
 		expect(result).toHaveLength(2);
-		expect(result[0].name).toBe("PowerShell");
-		expect(result[1].name).toBe("Command Prompt");
+		expect(result[0]?.name).toBe("PowerShell");
+		expect(result[1]?.name).toBe("Command Prompt");
 	});
 
 	it("filters out hidden profiles", () => {
@@ -121,7 +121,7 @@ describe("parseWindowsTerminalSettings", () => {
 		});
 		const result = parseWindowsTerminalSettings(settings);
 		expect(result).toHaveLength(1);
-		expect(result[0].name).toBe("PowerShell");
+		expect(result[0]?.name).toBe("PowerShell");
 	});
 
 	it("returns empty array for invalid JSON", () => {
@@ -150,8 +150,8 @@ describe("parseWindowsTerminalSettings", () => {
 			},
 		});
 		const result = parseWindowsTerminalSettings(settings);
-		expect(result[0].startingDirectory).toBe("C:\\dev");
-		expect(result[0].icon).toBe("ms-appx:///Images/icon.png");
+		expect(result[0]?.startingDirectory).toBe("C:\\dev");
+		expect(result[0]?.icon).toBe("ms-appx:///Images/icon.png");
 	});
 });
 
@@ -182,8 +182,8 @@ describe("importWindowsTerminalProfiles", () => {
 
 		const profiles = dal.listLaunchProfiles();
 		expect(profiles).toHaveLength(2);
-		expect(profiles[0].shell).toBe("pwsh.exe");
-		expect(profiles[1].shell).toBe("cmd.exe");
+		expect(profiles[0]?.shell).toBe("pwsh.exe");
+		expect(profiles[1]?.shell).toBe("cmd.exe");
 	});
 
 	it("skips profiles with no commandline", () => {
@@ -215,8 +215,8 @@ describe("importWindowsTerminalProfiles", () => {
 		]);
 
 		const profiles = dal.listLaunchProfiles();
-		expect(profiles[0].shell).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
-		expect(profiles[0].args).toEqual(["--login", "-i"]);
+		expect(profiles[0]?.shell).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
+		expect(profiles[0]?.args).toEqual(["--login", "-i"]);
 	});
 
 	it("stores startingDirectory as cwd", () => {
@@ -229,14 +229,14 @@ describe("importWindowsTerminalProfiles", () => {
 		]);
 
 		const profiles = dal.listLaunchProfiles();
-		expect(profiles[0].cwd).toBe("C:\\dev");
+		expect(profiles[0]?.cwd).toBe("C:\\dev");
 	});
 
 	it("sets supportedOs to windows for all imported profiles", () => {
 		importWindowsTerminalProfiles(dal, [{ name: "PowerShell", commandline: "pwsh.exe" }]);
 
 		const profiles = dal.listLaunchProfiles();
-		expect(profiles[0].supportedOs).toBe("windows");
+		expect(profiles[0]?.supportedOs).toBe("windows");
 	});
 
 	it("handles empty list gracefully", () => {
@@ -344,8 +344,8 @@ describe.skipIf(process.platform === "win32")("discoverUnixShells", () => {
 
 		const shells = discoverUnixShells();
 		expect(shells.length).toBeGreaterThanOrEqual(1);
-		expect(shells[0].shell).toBe("/bin/zsh");
-		expect(shells[0].label).toBe("Zsh");
+		expect(shells[0]?.shell).toBe("/bin/zsh");
+		expect(shells[0]?.label).toBe("Zsh");
 	});
 
 	it("deduplicates $SHELL against /etc/shells entries with the same basename", () => {
@@ -400,7 +400,7 @@ describe.skipIf(process.platform === "win32")("discoverUnixShells", () => {
 		vi.spyOn(process, "platform", "get").mockReturnValue("linux");
 
 		const shells = discoverUnixShells();
-		expect(shells[0].supportedOs).toBe("linux");
+		expect(shells[0]?.supportedOs).toBe("linux");
 	});
 });
 

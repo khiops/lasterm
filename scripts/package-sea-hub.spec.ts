@@ -80,6 +80,37 @@ describe("loadHubLockAddon", () => {
 	});
 });
 
+describe("assertNativeHubTarget", () => {
+	const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+	const hostTriple =
+		process.platform === "win32"
+			? `${arch}-pc-windows-msvc`
+			: process.platform === "darwin"
+				? `${arch}-apple-darwin`
+				: `${arch}-unknown-linux-gnu`;
+	const otherArchTriple = hostTriple.replace(arch, arch === "x86_64" ? "aarch64" : "x86_64");
+
+	it("accepts no triple and the host's own triple", async () => {
+		const { assertNativeHubTarget } = await import("./package-sea-hub.js");
+		expect(() => assertNativeHubTarget(undefined)).not.toThrow();
+		expect(() => assertNativeHubTarget(hostTriple)).not.toThrow();
+	});
+
+	it("refuses another architecture instead of cross-building", async () => {
+		const { assertNativeHubTarget } = await import("./package-sea-hub.js");
+		// Mutation caught: a check on the platform alone would let an x64 host
+		// package an arm64 hub around its own x64 Node.
+		expect(() => assertNativeHubTarget(otherArchTriple)).toThrow("build it on that platform");
+	});
+
+	it("refuses a triple it cannot read", async () => {
+		const { assertNativeHubTarget } = await import("./package-sea-hub.js");
+		expect(() => assertNativeHubTarget("riscv64gc-unknown-none")).toThrow(
+			"unrecognised target triple",
+		);
+	});
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // Test 2: static manifest generation
 // ────────────────────────────────────────────────────────────────────────────

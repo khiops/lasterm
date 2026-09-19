@@ -309,10 +309,14 @@ export class AgentConnectionManager {
 					rows: ch.rows,
 					...(ch.cwd !== null && { cwd: ch.cwd }),
 					...(ch.directProcess && { directProcess: true }),
-					dynamicTitle: null,
-					processTitle: null,
+					// The process outlived the hub: its titles are the last ones the
+					// database kept, until the agent reports new ones. Starting from
+					// null named every restored terminal "Terminal".
+					dynamicTitle: ch.dynamicTitle,
+					processTitle: ch.processTitle,
 					displayTitle: DEFAULT_CHANNEL_NAME,
 				});
+				this.broadcaster.resolveDisplayTitle(ch.id);
 			}
 
 			if (hostType === "local") {

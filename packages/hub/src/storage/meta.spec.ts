@@ -857,6 +857,21 @@ describe("MetaDAL — listAliveChannelsWithHost", () => {
 		expect(row?.status).toBe("born");
 		expect(row?.hostId).toBe(host.id);
 		expect(row?.hostType).toBe("local");
+		expect(row?.dynamicTitle).toBeNull();
+		expect(row?.processTitle).toBeNull();
+	});
+
+	it("carries the last titles, which the restored terminals still show", () => {
+		const host = dal.createHost({ type: "local", label: "title-host" });
+		const sessionId = "TITLESESS01AAAAAAAAAAAAAAAAAAA";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		dal.createChannel({ id: "TITLECH01AAAAAAAAAAAAAAAAAAAAA", sessionId, status: "live" });
+		dal.updateDynamicTitle("TITLECH01AAAAAAAAAAAAAAAAAAAAA", "pwsh in project");
+		dal.updateProcessTitle("TITLECH01AAAAAAAAAAAAAAAAAAAAA", "pwsh.exe");
+
+		expect(dal.listAliveChannelsWithHost()).toEqual([
+			expect.objectContaining({ dynamicTitle: "pwsh in project", processTitle: "pwsh.exe" }),
+		]);
 	});
 });
 

@@ -329,11 +329,13 @@ export class ChannelsDAL {
 		hostId: string;
 		hostType: string;
 		directProcess: boolean;
+		dynamicTitle: string | null;
+		processTitle: string | null;
 	}> {
 		const rows = this.db
 			.prepare(
 				`SELECT c.id, c.session_id, c.shell, c.args, c.cwd, c.cols, c.rows,
-				        c.status, c.direct_process,
+				        c.status, c.direct_process, c.dynamic_title, c.process_title,
 				        s.host_id, h.type AS host_type
 				 FROM channels c
 				 JOIN sessions s ON c.session_id = s.id
@@ -350,6 +352,8 @@ export class ChannelsDAL {
 			rows: number;
 			status: string;
 			direct_process: number;
+			dynamic_title: string | null;
+			process_title: string | null;
 			host_id: string;
 			host_type: string;
 		}>;
@@ -372,6 +376,8 @@ export class ChannelsDAL {
 				hostId: r.host_id,
 				hostType: r.host_type,
 				directProcess: r.direct_process === 1,
+				dynamicTitle: r.dynamic_title,
+				processTitle: r.process_title,
 			};
 		});
 	}

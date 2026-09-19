@@ -333,6 +333,8 @@ export class MetaDAL {
 		hostId: string;
 		hostType: string;
 		directProcess: boolean;
+		dynamicTitle: string | null;
+		processTitle: string | null;
 	}> {
 		return this.channels.listAliveChannelsWithHost();
 	}

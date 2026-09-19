@@ -8,8 +8,9 @@ TARGET="${1:-all}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="/tmp/lasterm-dev"
 PID_FILE="$LOG_DIR/dev.pid"
-AGENT_SOCK="${XDG_RUNTIME_DIR:-/tmp/lasterm-$(id -u)}/lasterm/agent.sock"
-HUB_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lasterm"
+# Both come from the hub's own resolvers (#161): a shell copy of the rule drifted.
+AGENT_SOCK="$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts agent-socket)"
+HUB_STATE_DIR="$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts state-dir)"
 
 mkdir -p "$LOG_DIR"
 

@@ -1,6 +1,6 @@
 import type { Channel, ChannelCreatedMessage, ChannelGroup } from "@lasterm/shared";
 import { defineStore } from "pinia";
-import { computed, nextTick, ref } from "vue";
+import { computed, ref } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
@@ -508,41 +508,26 @@ export const useChannelsStore = defineStore("channels", () => {
 	}
 
 	/**
-	 * Destroy a channel on the hub (kills its PTY) and remove it from the
-	 * local sidebar. Best-effort: if the DELETE request fails the channel is
-	 * still removed from the local list.
+	 * Kill a channel on the hub (its PTY and everything started in it). It stays
+	 * listed as dead, as the hub keeps it, like a terminal whose shell exited:
+	 * removing it only here made it come back as dead at the next launch.
+	 * "Delete" on the dead channel purges it.
 	 */
-	async function removeChannel(channelId: string): Promise<void> {
+	async function killChannel(channelId: string): Promise<void> {
 		try {
 			await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}`, {
 				method: "DELETE",
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 		} catch {
-			// Best-effort: even if DELETE fails (channel already dead, hub
-			// unreachable), still remove from local sidebar below.
+			// Best-effort: the hub may be unreachable, or the channel already dead.
 		}
-		// Mark dead so the App.vue dead-channel watcher can close the tab
 		const idx = channels.value.findIndex((c) => c.id === channelId);
-		if (idx !== -1) {
-			const existing = channels.value[idx];
-			if (existing && existing.status !== "dead") {
-				const next = [...channels.value];
-				next[idx] = { ...existing, status: "dead" as const };
-				channels.value = next;
-			}
-		}
-		// Wait for watchers to process the status change (closes tab)
-		await nextTick();
-		// Then remove from sidebar list
-		channels.value = channels.value.filter((c) => c.id !== channelId);
-		if (selectedChannelId.value === channelId) {
-			const fallback = channels.value.find((c) => c.status !== "dead");
-			if (fallback) {
-				selectChannel(fallback.id);
-			} else {
-				selectedChannelId.value = null;
-			}
+		const existing = channels.value[idx];
+		if (existing && existing.status !== "dead") {
+			const next = [...channels.value];
+			next[idx] = { ...existing, status: "dead" as const };
+			channels.value = next;
 		}
 	}
 
@@ -1104,7 +1089,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		setDisplayTitle,
 		updateProcessTitle,
 		applyStateSync,
-		removeChannel,
+		killChannel,
 		handleChannelCreated,
 		spawnChannel,
 		registerPendingSpawn,

@@ -106,7 +106,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
 	select: [];
-	closeChannel: [channelId: string];
 	moveToGroup: [channelId: string, groupId: string | null];
 	rename: [channelId: string, title: string];
 	openNewTab: [channelId: string];

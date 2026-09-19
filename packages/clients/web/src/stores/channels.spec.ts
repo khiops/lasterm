@@ -1173,3 +1173,39 @@ describe("useChannelsStore — G3: stale fetch finally must not flip loading for
 		},
 	);
 });
+
+// ---------------------------------------------------------------------------
+// killChannel: a killed terminal stays listed as dead, as the hub keeps it
+// ---------------------------------------------------------------------------
+
+describe("useChannelsStore — killChannel", () => {
+	it("kills on the hub and keeps the terminal listed as dead, until it is deleted", async () => {
+		const liveRow = {
+			id: "ch-kill",
+			session_id: "sess-1",
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status: "live",
+			created_at: "2026-01-01T00:00:00Z",
+			updated_at: "2026-01-01T00:00:00Z",
+		};
+		const requests: Array<{ url: string; method: string }> = [];
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
+			requests.push({ url, method: init?.method ?? "GET" });
+			const body = url.includes("/api/groups") ? [] : [liveRow];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		await store.killChannel("ch-kill");
+
+		expect(requests).toContainEqual({
+			url: expect.stringContaining("/api/channels/ch-kill"),
+			method: "DELETE",
+		});
+		// Removing it only here made it come back as dead at the next launch.
+		expect(store.channels.find((c) => c.id === "ch-kill")?.status).toBe("dead");
+	});
+});

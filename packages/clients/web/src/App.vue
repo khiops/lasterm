@@ -50,7 +50,7 @@
 			:visible="confirmDialog.visible"
 			:title="confirmDialog.title"
 			:message="confirmDialog.message"
-			confirm-label="Close"
+			:confirm-label="confirmDialog.confirmLabel"
 			:show-remember="true"
 			@confirm="onConfirmAction"
 			@cancel="confirmDialog.visible = false"
@@ -254,6 +254,7 @@
 				@add-channel-group="onAddChannelGroupFromSidebar"
 				@purge-dead="onPurgeDead"
 				@delete-channel="onDeleteChannel"
+				@kill-channel="onKillChannel"
 				@new-channel="onAddTab"
 			/>
 			<!-- Resize handle after channel sidebar -->
@@ -332,7 +333,7 @@
 
 <script setup lang="ts">
 import type { Host } from '@lasterm/shared';
-import { generateId } from '@lasterm/shared';
+import { DEFAULT_CHANNEL_NAME, generateId } from '@lasterm/shared';
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
 import AgentBinaryVerify from './components/AgentBinaryVerify.vue';
 import AgentDeployFailed from './components/AgentDeployFailed.vue';
@@ -692,6 +693,7 @@ const confirmDialog = ref({
 	visible: false,
 	title: '',
 	message: '',
+	confirmLabel: 'Close',
 	action: null as (() => void) | null,
 	actionKey: '' as string,
 });
@@ -933,8 +935,8 @@ watch(
 );
 
 /**
- * When a channel is selected programmatically (e.g. after removeChannel
- * fallback or fetchChannels auto-select), open its tab.
+ * When a channel is selected programmatically (e.g. fetchChannels
+ * auto-select), open its tab.
  */
 watch(
 	() => channelsStore.selectedChannelId,
@@ -1201,6 +1203,30 @@ async function onPurgeDead(): Promise<void> {
 	await channelsStore.purgeDeadChannels();
 }
 
+/**
+ * "Kill Terminal": ends the shell and everything started in it, which nothing
+ * brings back, so the window asks first unless told not to again. The terminal
+ * then stays listed as dead, with "Delete" to purge it.
+ */
+function onKillChannel(channelId: string): void {
+	const channel = channelsStore.channels.find((c) => c.id === channelId);
+	if (!channel || channel.status === 'dead') return;
+	const kill = () => void channelsStore.killChannel(channelId);
+	if (shouldSkipConfirm('ConfirmKill')) {
+		kill();
+		return;
+	}
+	confirmDialog.value = {
+		visible: true,
+		title: `Kill "${channel.displayTitle ?? DEFAULT_CHANNEL_NAME}"?`,
+		message:
+			'Its shell and every process started in it will be terminated. The terminal stays listed as dead until you delete it.',
+		confirmLabel: 'Kill',
+		action: kill,
+		actionKey: 'ConfirmKill',
+	};
+}
+
 async function onDeleteChannel(channelId: string): Promise<void> {
 	// Close the tab if this channel is its only terminal pane
 	const tabId = layout.findTabForChannel(channelId);
@@ -1301,6 +1327,7 @@ function onCloseAll(): void {
 			visible: true,
 			title: `Close ${closingCount} terminal${closingCount > 1 ? 's' : ''}?`,
 			message: 'Terminals will be detached but continue running.',
+			confirmLabel: 'Close',
 			action: () => layout.closeAll(welcomeId),
 			actionKey: 'ConfirmCloseAll',
 		};
@@ -1325,6 +1352,7 @@ function onCloseOthers(keepIndex: number): void {
 			visible: true,
 			title: `Close ${closingCount} other terminal${closingCount > 1 ? 's' : ''}?`,
 			message: 'Terminals will be detached but continue running.',
+			confirmLabel: 'Close',
 			action: () => layout.closeOthers(keepIndex),
 			actionKey: 'ConfirmCloseOthers',
 		};

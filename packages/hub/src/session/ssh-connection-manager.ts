@@ -6,6 +6,7 @@
  *   - test connectivity
  */
 
+import { createHash } from "node:crypto";
 import type {
 	AgentBinaryVerifyMessage,
 	AuthPromptMessage,
@@ -273,6 +274,7 @@ export class SshConnectionManager {
 		const verifyMsgBase: Omit<HostVerifyMessage, "promptId"> & { promptId: string } = {
 			type: "HOST_VERIFY",
 			hostId,
+			hostname,
 			fingerprint: newFingerprint,
 			algorithm: "SHA256",
 			...(oldFingerprint ? { oldFingerprint } : {}),
@@ -610,8 +612,30 @@ export class SshConnectionManager {
 			return result as string | null;
 		};
 
+		// The key prompt belongs to the same test context as the passphrase one.
+		const verifyHostKey: HostKeyVerifyFn = async (oldFingerprint, newFingerprint, firstConnect) => {
+			const result = await promptCtx(
+				this.ctx,
+				testCtxId,
+				"host_verify",
+				{
+					type: "HOST_VERIFY",
+					hostId: msg.hostId,
+					hostname: msg.port === 22 ? msg.hostname : `${msg.hostname}:${msg.port}`,
+					fingerprint: newFingerprint,
+					algorithm: "SHA256",
+					...(oldFingerprint ? { oldFingerprint } : {}),
+					promptId: "",
+					...(firstConnect ? { firstConnect: true } : {}),
+				},
+				deliverySend,
+				HOST_KEY_MISMATCH_TIMEOUT_MS,
+			);
+			return (result ?? "reject") as "trust_permanent" | "trust_once" | "reject";
+		};
+
 		try {
-			const result = await this._testSshConnectivity(msg, promptAuth);
+			const result = await this._testSshConnectivity(msg, promptAuth, verifyHostKey);
 			if (result.ok) {
 				client.send({ type: "TEST_CONNECT_OK", hostId: msg.hostId });
 			} else {
@@ -633,16 +657,20 @@ export class SshConnectionManager {
 		}
 	}
 
+	/**
+	 * The test goes through the host key check a session does: without it, it
+	 * authenticated, with a password when so configured, to a server whose
+	 * identity nobody had checked. A known key is accepted; an unknown or changed
+	 * one is put to the user, and the connection is retried under their decision.
+	 */
 	private async _testSshConnectivity(
 		msg: TestConnectMessage,
 		promptAuth: AuthPromptFn,
+		verifyHostKey: HostKeyVerifyFn,
 	): Promise<{ ok: boolean; message?: string }> {
-		const sshClient = new SshClient();
-		const SSH_TEST_TIMEOUT_MS = 10_000;
-
 		const username = msg.sshUser ?? process.env.USER ?? "root";
 
-		let connectConfig: Parameters<InstanceType<typeof SshClient>["connect"]>[0];
+		let connectConfig: SshConnectConfig;
 		try {
 			connectConfig = await buildSshConnectConfig(
 				{ method: msg.sshAuth ?? "key", keyPath: msg.sshKeyPath },
@@ -660,53 +688,132 @@ export class SshConnectionManager {
 		}
 		connectConfig.readyTimeout = SSH_TEST_TIMEOUT_MS;
 
-		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
-				sshClient.destroy();
-				resolve({ ok: false, message: "Connection timed out" });
-			}, SSH_TEST_TIMEOUT_MS);
+		// Same identity as a session's: a saved host's key counts only while the
+		// test targets the address it was recorded for.
+		const saved = this.ctx.metaDal.getHost(msg.hostId);
+		const savedAddress =
+			saved?.type === "ssh" && saved.sshHost === msg.hostname && (saved.sshPort ?? 22) === msg.port;
+		const storedFingerprint = savedAddress ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
+		const sshHostname = msg.hostname.includes("@")
+			? (msg.hostname.split("@")[1] ?? msg.hostname)
+			: msg.hostname;
+		const hostKey = `${sshHostname}:${msg.port}`;
+		const trusted = new Set<string>();
+		if (storedFingerprint) trusted.add(storedFingerprint);
+		const sessionTrusted = this.ctx.trustedOnceFingerprints.get(hostKey);
+		if (sessionTrusted) trusted.add(sessionTrusted);
 
-			sshClient.on("ready", () => {
-				clearTimeout(timer);
+		const first = await attemptSshTest(connectConfig, trusted);
+		if (first.unverifiedFingerprint === undefined) return first.result;
+
+		const fingerprint = first.unverifiedFingerprint;
+		const action = await verifyHostKey(
+			storedFingerprint ?? "",
+			fingerprint,
+			storedFingerprint === null,
+		);
+		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
+		if (action === "trust_permanent" && savedAddress) {
+			this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint);
+		} else {
+			// An unsaved host has no row to hold the key yet: it is trusted for this
+			// hub run, so its first session does not ask again.
+			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
+		}
+		const second = await attemptSshTest(connectConfig, new Set([fingerprint]));
+		if (second.unverifiedFingerprint !== undefined) {
+			return { ok: false, message: "SSH host key changed during the test" };
+		}
+		return second.result;
+	}
+}
+
+type SshConnectConfig = Parameters<InstanceType<typeof SshClient>["connect"]>[0];
+
+type HostKeyVerifyFn = (
+	oldFingerprint: string,
+	newFingerprint: string,
+	firstConnect: boolean,
+) => Promise<"trust_permanent" | "trust_once" | "reject">;
+
+const SSH_TEST_TIMEOUT_MS = 10_000;
+
+/**
+ * One bounded connection attempt. A server key outside `trusted` ends it with
+ * that key's fingerprint, before any authentication is sent.
+ */
+export function attemptSshTest(
+	connectConfig: SshConnectConfig,
+	trusted: ReadonlySet<string>,
+	createClient: () => SshClient = () => new SshClient(),
+): Promise<{ result: { ok: boolean; message?: string }; unverifiedFingerprint?: string }> {
+	const sshClient = createClient();
+	let unverifiedFingerprint: string | undefined;
+	const config: SshConnectConfig = {
+		...connectConfig,
+		hostVerifier: ((key: Buffer) => {
+			const fingerprint = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
+			if (trusted.has(fingerprint)) return true;
+			unverifiedFingerprint = fingerprint;
+			return false;
+		}) as NonNullable<SshConnectConfig["hostVerifier"]>,
+	};
+
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (result: { ok: boolean; message?: string }): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(unverifiedFingerprint === undefined ? { result } : { result, unverifiedFingerprint });
+		};
+		const timer = setTimeout(() => {
+			sshClient.destroy();
+			finish({ ok: false, message: "Connection timed out" });
+		}, SSH_TEST_TIMEOUT_MS);
+
+		sshClient.on("ready", () => {
+			sshClient.end();
+			finish({ ok: true });
+		});
+
+		sshClient.on("error", (err: Error) => {
+			if (unverifiedFingerprint !== undefined) {
 				sshClient.end();
-				resolve({ ok: true });
-			});
-
-			sshClient.on("error", (err: Error) => {
-				clearTimeout(timer);
-				const errMsg = err.message ?? "Unknown error";
-				const lower = errMsg.toLowerCase();
-				if (
-					errMsg.includes("ECONNREFUSED") ||
-					errMsg.includes("ETIMEDOUT") ||
-					errMsg.includes("EHOSTUNREACH") ||
-					errMsg.includes("ENOTFOUND")
-				) {
-					resolve({ ok: false, message: errMsg });
-				} else if (
-					lower.includes("authentication") ||
-					lower.includes("permission denied") ||
-					lower.includes("publickey") ||
-					lower.includes("keyboard-interactive") ||
-					lower.includes("all configured authentication methods failed")
-				) {
-					sshClient.end();
-					resolve({ ok: false, message: "Authentication failed" });
-				} else {
-					sshClient.end();
-					resolve({ ok: false, message: errMsg });
-				}
-			});
-
-			try {
-				sshClient.connect(connectConfig);
-			} catch (err) {
-				clearTimeout(timer);
-				resolve({
-					ok: false,
-					message: err instanceof Error ? err.message : "Connection failed",
-				});
+				finish({ ok: false, message: "SSH host key not trusted" });
+				return;
+			}
+			const errMsg = err.message ?? "Unknown error";
+			const lower = errMsg.toLowerCase();
+			if (
+				errMsg.includes("ECONNREFUSED") ||
+				errMsg.includes("ETIMEDOUT") ||
+				errMsg.includes("EHOSTUNREACH") ||
+				errMsg.includes("ENOTFOUND")
+			) {
+				finish({ ok: false, message: errMsg });
+			} else if (
+				lower.includes("authentication") ||
+				lower.includes("permission denied") ||
+				lower.includes("publickey") ||
+				lower.includes("keyboard-interactive") ||
+				lower.includes("all configured authentication methods failed")
+			) {
+				sshClient.end();
+				finish({ ok: false, message: "Authentication failed" });
+			} else {
+				sshClient.end();
+				finish({ ok: false, message: errMsg });
 			}
 		});
-	}
+
+		try {
+			sshClient.connect(config);
+		} catch (err) {
+			finish({
+				ok: false,
+				message: err instanceof Error ? err.message : "Connection failed",
+			});
+		}
+	});
 }

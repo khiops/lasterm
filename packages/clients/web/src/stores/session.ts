@@ -223,7 +223,11 @@ export const useSessionStore = defineStore("session", () => {
 		wsClient.on("HOST_VERIFY", (msg) => {
 			if (msg.type === "HOST_VERIFY" && msg.promptId) {
 				// Surface dialog for both TOFU (firstConnect) and mismatch (oldFingerprint) prompts
-				const hostname = msg.hostId; // best-effort; hub doesn't send hostname yet
+				// A saved host is named by its label; one being tested is not saved yet,
+				// and its address is all there is to name it by.
+				const label = useHostsStore().hosts.find((host) => host.id === msg.hostId)?.label;
+				const address = msg.hostname ?? msg.hostId;
+				const hostname = label ? `${label} (${address})` : address;
 				hostVerifyStore.handleHostVerify(
 					msg.hostId,
 					hostname,

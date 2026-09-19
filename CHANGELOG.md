@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.5](https://github.com/khiops/lasterm/compare/v0.10.4...v0.10.5) (2026-09-19)
+
+
+### Bug Fixes
+
+* **hub:** refuse an unreadable auth.json by name, and test the existing-token path ([#359](https://github.com/khiops/lasterm/issues/359)) ([4b4e6bc](https://github.com/khiops/lasterm/commit/4b4e6bc15b9d39951bf062a701c99af44e942829)), closes [#264](https://github.com/khiops/lasterm/issues/264)
+* **root:** build the Rust release artifacts from their lockfiles as committed ([#355](https://github.com/khiops/lasterm/issues/355)) ([e1e2131](https://github.com/khiops/lasterm/commit/e1e213165a86d50db1617ca372757343b93f9dc5)), closes [#180](https://github.com/khiops/lasterm/issues/180)
+* **root:** keep the release draft that targets the commit being built ([#356](https://github.com/khiops/lasterm/issues/356)) ([5c592ac](https://github.com/khiops/lasterm/commit/5c592accf1fe35738a8401f2388c636c18067652)), closes [#270](https://github.com/khiops/lasterm/issues/270)
+
+
+### Tests
+
+* **hub:** give the Windows cmdStop identity test time for its PowerShell query ([#357](https://github.com/khiops/lasterm/issues/357)) ([6bd0d6a](https://github.com/khiops/lasterm/commit/6bd0d6a3d12c470e87d9fcd209ff6474abda901e))
+
 ## [0.10.4](https://github.com/khiops/lasterm/compare/v0.10.3...v0.10.4) (2026-09-19)
 
 

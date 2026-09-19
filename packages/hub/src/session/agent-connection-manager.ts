@@ -21,17 +21,16 @@ import type {
 	OutputMessage,
 	ProtocolMessage,
 	SessionStatus,
-	SupportedOs,
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, generateId, getSocketPath } from "@lasterm/shared";
 import { HUB_VERSION } from "../build-version.js";
-import type { MetaDAL } from "../storage/meta.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch } from "./agent-launcher.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
+import { seedShellProfiles } from "./shell-profile-seed.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
 
@@ -44,81 +43,6 @@ export class AgentVersionMismatchError extends Error {
 		);
 		this.name = "AgentVersionMismatchError";
 	}
-}
-
-/**
- * Map a raw OS string from HELLO to a SupportedOs value for launch profiles.
- */
-function remoteOsToSupportedOs(os: string | null): SupportedOs {
-	if (os === "darwin") return "darwin";
-	if (os === "windows") return "windows";
-	if (os === "linux") return "linux";
-	return "linux"; // safe default for unknown remote OS
-}
-
-/**
- * Auto-seed launch profiles for shells discovered on a remote agent via HELLO.
- *
- * Idempotent: skips profiles that already exist (by name, case-insensitive)
- * and skips pin overrides already present for this host.
- */
-async function seedRemoteShellProfiles(
-	hostId: string,
-	availableShells: string[],
-	defaultShell: string | undefined,
-	os: string | null,
-	metaDal: Pick<
-		MetaDAL,
-		| "listHostProfiles"
-		| "getLaunchProfileByName"
-		| "createLaunchProfile"
-		| "upsertHostProfileOverride"
-	>,
-): Promise<void> {
-	const supportedOs = remoteOsToSupportedOs(os);
-
-	// Collect existing pinned/default profiles for this host to avoid redundant upserts
-	const existingOverrides = new Set<string>(
-		metaDal.listHostProfiles(hostId, supportedOs).map((p) => p.id),
-	);
-
-	let seededCount = 0;
-	let defaultProfileId: string | undefined;
-
-	for (const [i, shellPath] of availableShells.entries()) {
-		const name = shellPath.split("/").at(-1) ?? shellPath;
-
-		// Reuse existing global profile with same name, or create a new one
-		let profile = metaDal.getLaunchProfileByName(name);
-		if (!profile) {
-			profile = metaDal.createLaunchProfile({
-				name,
-				shell: shellPath,
-				mode: "shell",
-				elevated: false,
-				supportedOs,
-				iconType: "auto",
-				sortOrder: i,
-			});
-			seededCount++;
-		}
-
-		// Pin this profile for the host if not already visible/pinned
-		if (!existingOverrides.has(profile.id)) {
-			metaDal.upsertHostProfileOverride(hostId, profile.id, "pin", i);
-		}
-
-		if (shellPath === defaultShell) {
-			defaultProfileId = profile.id;
-		}
-	}
-
-	// Mark the default shell profile as host default
-	if (defaultProfileId !== undefined) {
-		metaDal.upsertHostProfileOverride(hostId, defaultProfileId, "default");
-	}
-
-	console.error(`[lasterm-ssh] seeded ${seededCount} remote shell profiles for host ${hostId}`);
 }
 
 export class AgentConnectionManager {
@@ -239,17 +163,17 @@ export class AgentConnectionManager {
 				helloMsg.availableShells,
 				helloMsg.defaultShell,
 			);
-			// Auto-seed launch profiles for remote shells
+			// Auto-seed launch profiles for the agent's shells
 			if (helloMsg.availableShells.length > 0) {
 				const host = this.ctx.metaDal.getHost(hostId);
-				seedRemoteShellProfiles(
+				seedShellProfiles(
 					hostId,
 					helloMsg.availableShells,
 					helloMsg.defaultShell,
 					host?.os ?? null,
 					this.ctx.metaDal,
 				).catch((err: unknown) => {
-					console.error("[lasterm-ssh] seedRemoteShellProfiles failed:", err);
+					console.error("[lasterm-ssh] seedShellProfiles failed:", err);
 				});
 			}
 		}

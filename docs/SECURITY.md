@@ -123,9 +123,9 @@ runs everywhere.
    - Expected once it exists: 0700 (drwx------)
    - #200
 
-4. Verify auth.json contains valid token (64 hex chars)
+4. Verify auth.json contains valid token (64 lowercase hex characters, as the hub generates)
    - If missing: generate one
-   - If present but not 64 hex characters: refuse to start, naming the file. A hub that quietly
+   - If present but not JSON, or not 64 lowercase hex characters: refuse to start, naming the file. A hub that quietly
      replaced an unreadable token would invalidate every paired client without saying so.
 ```
 

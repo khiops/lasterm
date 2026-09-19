@@ -2711,7 +2711,7 @@ fn parse_listening_port(line: &str) -> Option<u16> {
 // are reused, another user's process answers the same probe, and the Windows probe
 // answers "alive" when it cannot tell — correct for the quit path it was written
 // for, inverted here. Attaching to a hub this process did not launch needs that hub
-// to prove it holds the record's `ownerToken`, and no endpoint offers that yet: #188.
+// to prove it holds the record's `ownerToken`, and no endpoint offers that yet.
 
 #[tauri::command]
 fn get_hub_auth_token() -> Result<Option<String>, String> {
@@ -4669,8 +4669,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         // A missing bundle, a permissions error or an OS refusal used to panic here,
         // which bypasses the failure dialog entirely — the one path where the user most
         // needs to be told what is wrong, since nothing they can see explains it.
+        // `--exit-with-stdin`: the hub stops when this process's end of its stdin
+        // pipe closes, which the OS does however this process ends (#188). The pipe
+        // lives in the child handle, managed below for the life of the app.
         let sidecar = match app.shell().sidecar("lasterm-hub") {
-            Ok(sidecar) => sidecar.args(["start"]),
+            Ok(sidecar) => sidecar.args(["start", "--exit-with-stdin"]),
             Err(error) => {
                 show_startup_failure_then_exit(
                     app.handle().clone(),
@@ -4828,11 +4831,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 // the same probe, and the Windows probe deliberately answers "alive"
                 // when it cannot tell, which is right for the quit path that owns it
                 // and wrong here. Attaching safely needs the hub to prove it holds the
-                // record's `ownerToken`, which no endpoint offers yet: #188.
+                // record's `ownerToken`, which no endpoint offers yet. A hub this desktop
+                // launched no longer outlives it (#188), so this one was started another way.
                 show_startup_failure_then_exit(
                     app.handle().clone(),
-                    "A hub of this user is already running. Lasterm will not attach to it \
-                     yet (#188): stop that hub, or open its address in a browser."
+                    "A hub of this user is already running. Lasterm will not attach to it: \
+                     stop that hub, or open its address in a browser."
                         .to_string(),
                 );
                 return Ok(());

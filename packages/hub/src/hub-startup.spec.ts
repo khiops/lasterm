@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -183,6 +184,44 @@ describe("startHub token restart sweep", () => {
 			spki: TEST_TLS_IDENTITY.spki,
 		});
 		dbs.close();
+	});
+
+	it("shuts down gracefully when the launcher's stdin closes (#188)", async () => {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
+		const stdin = new PassThrough();
+		const close = vi.fn(async () => undefined);
+		const deleteRuntime = vi.fn(() => true);
+		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+		try {
+			await startHub(
+				{ port: 4100, shutdownWhenClosed: stdin },
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => stateDir,
+					getConfigDir: () => stateDir,
+					acquireHubLock: () => null as never,
+					initAuth: () => randomBytes(32).toString("hex"),
+					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+					openDatabases: () => dbs,
+					createServer: async () => ({ close, log: { error: vi.fn() } }) as never,
+					startServer: async () => "https://127.0.0.1:4100",
+					addStartupCorsOrigins: () => 4100,
+					persistRuntime: () => undefined,
+					deleteRuntime,
+				},
+			);
+			expect(close).not.toHaveBeenCalled();
+
+			stdin.end();
+
+			await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+			expect(close).toHaveBeenCalledTimes(1);
+			expect(deleteRuntime).toHaveBeenCalledTimes(1);
+		} finally {
+			exit.mockRestore();
+		}
 	});
 
 	it("refuses startup before server construction when the sweep column is missing", async () => {

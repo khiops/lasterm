@@ -139,7 +139,17 @@ async function relayUploadToResponse(
 
 	let uploadId: string | null = null;
 	try {
-		uploadId = String(await invoke<string>("relay_hub_upload_start", { request }));
+		try {
+			uploadId = String(await invoke<string>("relay_hub_upload_start", { request }));
+		} catch (error) {
+			// Refused admission: no reader will ever take this body, so release its
+			// producer now rather than leave it holding what it holds (#219).
+			void relayWait(body.cancel(error), "hub relay request stream cancellation timed out").catch(
+				(cancelError) =>
+					console.error(`hub relay request stream cancellation failed: ${String(cancelError)}`),
+			);
+			throw error;
+		}
 		await sendRequestChunks(uploadId, body, invoke);
 
 		const stream = responseStream(
@@ -176,11 +186,15 @@ async function sendRequestChunks(
 	invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T>,
 ): Promise<void> {
 	const reader = body.getReader();
+	// The producer has one deadline for its next chunk that carries bytes. An empty
+	// chunk is not progress and must not restart the watchdog (#219).
+	let progressDeadline = Date.now() + HUB_RELAY_WAIT_TIMEOUT_MS;
 	try {
 		for (;;) {
 			const { done, value } = await relayWait(
 				reader.read(),
 				"hub relay request body timed out while waiting for its producer",
+				progressDeadline - Date.now(),
 			);
 			if (done) return;
 			if (value.byteLength === 0) continue;
@@ -195,6 +209,7 @@ async function sendRequestChunks(
 					"hub relay request body timed out while sending a chunk",
 				);
 			}
+			progressDeadline = Date.now() + HUB_RELAY_WAIT_TIMEOUT_MS;
 		}
 	} catch (error) {
 		// Some underlying stream sources never settle `cancel`. Start cleanup but
@@ -207,12 +222,16 @@ async function sendRequestChunks(
 	}
 }
 
-function relayWait<T>(promise: Promise<T>, timeoutMessage: string): Promise<T> {
+function relayWait<T>(
+	promise: Promise<T>,
+	timeoutMessage: string,
+	timeoutMs = HUB_RELAY_WAIT_TIMEOUT_MS,
+): Promise<T> {
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	return new Promise<T>((resolve, reject) => {
 		timeout = setTimeout(
 			() => reject(new HubRelayTransportError(timeoutMessage)),
-			HUB_RELAY_WAIT_TIMEOUT_MS,
+			Math.max(0, timeoutMs),
 		);
 		promise.then(resolve, reject);
 	}).finally(() => {
@@ -302,10 +321,13 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 			acknowledge(frame);
 			return;
 		}
+		// The last frame carries credit like the others (#219): native holds the
+		// relay until it has been taken.
 		if (frame.kind === RELAY_END_FRAME) {
 			finished = true;
 			clearInactivityTimer();
 			controller.close();
+			acknowledge(frame);
 			return;
 		}
 		if (frame.kind === RELAY_ERROR_FRAME) {
@@ -313,6 +335,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 			clearInactivityTimer();
 			failure = new HubRelayTransportError(new TextDecoder().decode(frame.payload));
 			controller.error(failure);
+			acknowledge(frame);
 			return;
 		}
 		fail("hub relay sent an unknown response frame");

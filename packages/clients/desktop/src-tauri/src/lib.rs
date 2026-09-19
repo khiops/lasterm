@@ -3120,24 +3120,23 @@ fn publish_relay_response_frame(
 ) -> bool {
     // The token is unguessable until the frame has been constructed, so install
     // its credit before publication.  A synchronous Channel callback can now
-    // acknowledge the frame without falling into a post-publication gap.
-    if kind == RELAY_RESPONSE_DATA_FRAME {
-        let Ok(mut outstanding) = acknowledgement.outstanding.lock() else {
-            return false;
-        };
-        *outstanding = Some(identity.clone());
-    }
+    // acknowledge the frame without falling into a post-publication gap. Every
+    // kind carries credit, the terminal frame included (#219): the relay and its
+    // admission are held until the webview has taken the last frame too.
+    let Ok(mut outstanding) = acknowledgement.outstanding.lock() else {
+        return false;
+    };
+    *outstanding = Some(identity.clone());
+    drop(outstanding);
     if channel
         .send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
             &identity, kind, payload,
         )))
         .is_err()
     {
-        if kind == RELAY_RESPONSE_DATA_FRAME {
-            if let Ok(mut outstanding) = acknowledgement.outstanding.lock() {
-                if outstanding.as_ref() == Some(&identity) {
-                    *outstanding = None;
-                }
+        if let Ok(mut outstanding) = acknowledgement.outstanding.lock() {
+            if outstanding.as_ref() == Some(&identity) {
+                *outstanding = None;
             }
         }
         return false;
@@ -3145,26 +3144,131 @@ fn publish_relay_response_frame(
     true
 }
 
-fn wait_for_relay_response_ack(
-    receiver: &mpsc::Receiver<bool>,
-    deadline: Duration,
-) -> Result<bool, mpsc::RecvTimeoutError> {
-    receiver.recv_timeout(deadline)
+/// End a response with an ERROR frame that carries no credit, because there is
+/// no unguessable token to give it: the system random source failed (#219). The
+/// webview then learns that cause rather than waiting for its own timeout.
+fn publish_uncredited_relay_error(
+    channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    relay_id: u64,
+    sequence: u64,
+    message: &str,
+) {
+    let identity = RelayFrameIdentity {
+        relay_id,
+        sequence,
+        acknowledgement_token: [0; 16],
+    };
+    let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(relay_response_frame(
+        &identity,
+        RELAY_RESPONSE_ERROR_FRAME,
+        message.as_bytes(),
+    )));
 }
 
-fn relay_response_ack_failure_message(error: mpsc::RecvTimeoutError) -> String {
-    match error {
-        mpsc::RecvTimeoutError::Timeout => {
-            "desktop response relay acknowledgement timed out".to_string()
+/// Decide an acknowledgement timeout under the lock an acknowledgement takes
+/// (#219). An acknowledgement takes the outstanding identity under that lock and
+/// only then signals, so it can be accepted before the deadline and signalled
+/// after it. `true`: the frame is still outstanding, and the relay timed out.
+/// `false`: an acknowledgement, or a cancellation, took it first.
+fn take_timed_out_frame(outstanding: &Mutex<Option<RelayFrameIdentity>>) -> bool {
+    outstanding
+        .lock()
+        .map(|mut frame| frame.take().is_some())
+        .unwrap_or(true)
+}
+
+/// Wait for the outstanding frame's credit: `Ok(true)` when the relay was
+/// cancelled, `Ok(false)` when the frame was acknowledged. A deadline that passes
+/// after the frame was taken waits for that signal rather than failing.
+fn await_relay_response_credit(
+    acknowledgement: &RelayResponseAck,
+    receiver: &mpsc::Receiver<bool>,
+    timeout: Duration,
+) -> Result<bool, String> {
+    let stopped = || "desktop response relay acknowledgement stopped".to_string();
+    match receiver.recv_timeout(timeout) {
+        Ok(cancelled) => Ok(cancelled),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(stopped()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if take_timed_out_frame(&acknowledgement.outstanding) {
+                return Err("desktop response relay acknowledgement timed out".to_string());
+            }
+            receiver.recv_timeout(timeout).map_err(|_| stopped())
         }
-        mpsc::RecvTimeoutError::Disconnected => {
-            "desktop response relay acknowledgement stopped".to_string()
+    }
+}
+
+/// Stream a response body to the webview, one credited frame at a time, and
+/// end it with a credited END or ERROR frame. `new_identity` is the frame
+/// identity source: the system random source outside tests.
+fn stream_relay_response(
+    mut body: impl Read,
+    channel: &tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    acknowledgement: &RelayResponseAck,
+    receiver: &mpsc::Receiver<bool>,
+    relay_id: u64,
+    new_identity: fn(u64, u64) -> Result<RelayFrameIdentity, String>,
+) {
+    let finish = |sequence: u64, kind: u8, payload: &[u8]| match new_identity(relay_id, sequence) {
+        Ok(identity) => {
+            if publish_relay_response_frame(channel, acknowledgement, identity, kind, payload) {
+                let _ =
+                    await_relay_response_credit(acknowledgement, receiver, HUB_RELAY_ACK_TIMEOUT);
+            }
+        }
+        Err(error) => publish_uncredited_relay_error(channel, relay_id, sequence, &error),
+    };
+    let mut buffer = vec![0_u8; RELAY_CHUNK_BYTES];
+    let mut sequence = 1_u64;
+    loop {
+        if acknowledgement.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let read = match body.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) => {
+                let message = format!("pinned hub response failed: {error}");
+                finish(sequence, RELAY_RESPONSE_ERROR_FRAME, message.as_bytes());
+                return;
+            }
+        };
+        if read == 0 {
+            finish(sequence, RELAY_RESPONSE_END_FRAME, &[]);
+            return;
+        }
+        let identity = match new_identity(relay_id, sequence) {
+            Ok(identity) => identity,
+            Err(error) => {
+                publish_uncredited_relay_error(channel, relay_id, sequence, &error);
+                return;
+            }
+        };
+        if !publish_relay_response_frame(
+            channel,
+            acknowledgement,
+            identity,
+            RELAY_RESPONSE_DATA_FRAME,
+            &buffer[..read],
+        ) {
+            return;
+        }
+        let Some(next_sequence) = sequence.checked_add(1) else {
+            return;
+        };
+        sequence = next_sequence;
+        match await_relay_response_credit(acknowledgement, receiver, HUB_RELAY_ACK_TIMEOUT) {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(message) => {
+                finish(sequence, RELAY_RESPONSE_ERROR_FRAME, message.as_bytes());
+                return;
+            }
         }
     }
 }
 
 fn relay_response(
-    mut response: reqwest::blocking::Response,
+    response: reqwest::blocking::Response,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     admission: HubRelayAdmission,
 ) -> RelayHubHead {
@@ -3185,75 +3289,14 @@ fn relay_response(
     std::thread::spawn(move || {
         // `admission` stays with this response and its socket until both end.
         let _admission = admission;
-        let mut buffer = vec![0_u8; RELAY_CHUNK_BYTES];
-        let mut sequence = 1_u64;
-        loop {
-            if acknowledgement.cancelled.load(Ordering::Acquire) {
-                break;
-            }
-            let read = match response.read(&mut buffer) {
-                Ok(read) => read,
-                Err(error) => {
-                    let message = format!("pinned hub response failed: {error}");
-                    if let Ok(identity) = new_relay_frame_identity(id, sequence) {
-                        let _ = publish_relay_response_frame(
-                            &channel,
-                            &acknowledgement,
-                            identity,
-                            RELAY_RESPONSE_ERROR_FRAME,
-                            message.as_bytes(),
-                        );
-                    }
-                    break;
-                }
-            };
-            if read == 0 {
-                if let Ok(identity) = new_relay_frame_identity(id, sequence) {
-                    let _ = publish_relay_response_frame(
-                        &channel,
-                        &acknowledgement,
-                        identity,
-                        RELAY_RESPONSE_END_FRAME,
-                        &[],
-                    );
-                }
-                break;
-            }
-            let identity = match new_relay_frame_identity(id, sequence) {
-                Ok(identity) => identity,
-                Err(_) => break,
-            };
-            if !publish_relay_response_frame(
-                &channel,
-                &acknowledgement,
-                identity,
-                RELAY_RESPONSE_DATA_FRAME,
-                &buffer[..read],
-            ) {
-                break;
-            }
-            let Some(next_sequence) = sequence.checked_add(1) else {
-                break;
-            };
-            sequence = next_sequence;
-            match wait_for_relay_response_ack(&ack_receiver, HUB_RELAY_ACK_TIMEOUT) {
-                Ok(false) => {}
-                Ok(true) => break,
-                Err(error) => {
-                    let message = relay_response_ack_failure_message(error);
-                    if let Ok(identity) = new_relay_frame_identity(id, sequence) {
-                        let _ = publish_relay_response_frame(
-                            &channel,
-                            &acknowledgement,
-                            identity,
-                            RELAY_RESPONSE_ERROR_FRAME,
-                            message.as_bytes(),
-                        );
-                    }
-                    break;
-                }
-            }
-        }
+        stream_relay_response(
+            response,
+            &channel,
+            &acknowledgement,
+            &ack_receiver,
+            id,
+            new_relay_frame_identity,
+        );
         let _ = relay_response_acks()
             .lock()
             .map(|mut acknowledgements| acknowledgements.remove(&id));
@@ -3694,7 +3737,10 @@ async fn relay_hub_ws_binary(
         {
             return HubWsRelayEnd::Stopped;
         }
+        // `biased`: when the acknowledgement and the deadline are both ready, the
+        // acknowledgement wins rather than a coin toss (#219).
         tokio::select! {
+            biased;
             acknowledged = acknowledgement.recv() => {
                 if acknowledged.is_none() {
                     return HubWsRelayEnd::Stopped;
@@ -3702,10 +3748,22 @@ async fn relay_hub_ws_binary(
             }
             _ = close.recv() => return HubWsRelayEnd::Stopped,
             _ = tokio::time::sleep(HUB_RELAY_ACK_TIMEOUT) => {
-                if let Ok(mut pending) = outstanding.lock() {
-                    *pending = None;
+                // A frame already taken was acknowledged in time: wait for that
+                // signal instead of failing a relay that was about to be credited.
+                if take_timed_out_frame(outstanding) {
+                    return HubWsRelayEnd::TransportFailure(
+                        "desktop WebSocket relay acknowledgement timed out".to_string(),
+                    );
                 }
-                return HubWsRelayEnd::TransportFailure("desktop WebSocket relay acknowledgement timed out".to_string());
+                match tokio::time::timeout(HUB_RELAY_ACK_TIMEOUT, acknowledgement.recv()).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return HubWsRelayEnd::Stopped,
+                    Err(_) => {
+                        return HubWsRelayEnd::TransportFailure(
+                            "desktop WebSocket relay acknowledgement stopped".to_string(),
+                        )
+                    }
+                }
             }
         }
     }
@@ -7493,6 +7551,133 @@ mod tests {
         );
     }
 
+    /// A response relay under test: its acknowledgement state, credit receiver and
+    /// a channel that hands every published frame to the test.
+    fn response_relay_fixture() -> (
+        Arc<RelayResponseAck>,
+        mpsc::Receiver<bool>,
+        tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let acknowledgement = Arc::new(RelayResponseAck {
+            sender,
+            outstanding: Mutex::new(None),
+            cancelled: AtomicBool::new(false),
+        });
+        let (frame_sender, frames) = mpsc::channel();
+        let channel = tauri::ipc::Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Raw(bytes) = body else {
+                panic!("the relay must send raw binary IPC frames");
+            };
+            let _ = frame_sender.send(bytes);
+            Ok(())
+        });
+        (acknowledgement, receiver, channel, frames)
+    }
+
+    /// The identity and kind a published response frame carries.
+    fn published_frame(frame: &[u8]) -> (RelayFrameIdentity, u8) {
+        let identity = RelayFrameIdentity {
+            relay_id: u64::from_le_bytes(frame[0..8].try_into().unwrap()),
+            sequence: u64::from_le_bytes(frame[8..16].try_into().unwrap()),
+            acknowledgement_token: frame[16..32].try_into().unwrap(),
+        };
+        (identity, frame[32])
+    }
+
+    #[test]
+    fn the_last_frame_of_a_response_is_held_to_its_credit() {
+        let (acknowledgement, receiver, channel, frames) = response_relay_fixture();
+        let relay = acknowledgement.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_flag = finished.clone();
+        let worker = std::thread::spawn(move || {
+            stream_relay_response(
+                std::io::Cursor::new(b"body".to_vec()),
+                &channel,
+                &relay,
+                &receiver,
+                9,
+                new_relay_frame_identity,
+            );
+            finished_flag.store(true, Ordering::SeqCst);
+        });
+
+        let (data, kind) = published_frame(&frames.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert_eq!(kind, RELAY_RESPONSE_DATA_FRAME);
+        accept_relay_response_ack(&acknowledgement, &data);
+        let (end, kind) = published_frame(&frames.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert_eq!(kind, RELAY_RESPONSE_END_FRAME);
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "the relay, and its admission, ended before the webview took the END frame (#219)"
+        );
+        accept_relay_response_ack(&acknowledgement, &end);
+        worker.join().unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_failed_random_source_ends_the_response_with_that_cause() {
+        fn no_randomness(_: u64, _: u64) -> Result<RelayFrameIdentity, String> {
+            Err("could not create relay acknowledgement identity: no entropy".to_string())
+        }
+        let (acknowledgement, receiver, channel, frames) = response_relay_fixture();
+
+        stream_relay_response(
+            std::io::Cursor::new(b"body".to_vec()),
+            &channel,
+            &acknowledgement,
+            &receiver,
+            9,
+            no_randomness,
+        );
+
+        let frame = frames.try_recv().expect("the relay said why it ended");
+        let (identity, kind) = published_frame(&frame);
+        assert_eq!(kind, RELAY_RESPONSE_ERROR_FRAME);
+        assert_eq!(identity.acknowledgement_token, [0; 16]);
+        assert_eq!(
+            &frame[RELAY_RESPONSE_FRAME_HEADER_BYTES..],
+            b"could not create relay acknowledgement identity: no entropy",
+            "the webview must see the real cause, not its own inactivity timeout (#219)"
+        );
+        assert!(frames.try_recv().is_err());
+        assert!(
+            acknowledgement.outstanding.lock().unwrap().is_none(),
+            "a frame without an unguessable token carries no credit"
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_taken_before_the_deadline_is_not_lost_to_it() {
+        let (acknowledgement, receiver, _channel, _frames) = response_relay_fixture();
+        // The webview's acknowledgement has taken the identity, and signals only
+        // after the deadline has passed.
+        *acknowledgement.outstanding.lock().unwrap() = None;
+        let late = acknowledgement.clone();
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = late.sender.try_send(false);
+        });
+        assert_eq!(
+            await_relay_response_credit(&acknowledgement, &receiver, Duration::from_millis(200)),
+            Ok(false),
+            "a credited frame failed as a timeout (#219)"
+        );
+        signal.join().unwrap();
+
+        // A frame nobody took still times out.
+        *acknowledgement.outstanding.lock().unwrap() = Some(test_identity(9, 2));
+        assert_eq!(
+            await_relay_response_credit(&acknowledgement, &receiver, Duration::from_millis(50)),
+            Err("desktop response relay acknowledgement timed out".to_string())
+        );
+    }
+
     #[test]
     fn concurrent_finish_and_cancel_calls_end_an_upload_once() {
         for reasons in [
@@ -7561,22 +7746,26 @@ mod tests {
 
     #[test]
     fn response_ack_wait_has_a_finite_deadline() {
-        let (_sender, receiver) = mpsc::sync_channel(1);
-        assert!(matches!(
-            wait_for_relay_response_ack(&receiver, Duration::from_millis(1)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        let (acknowledgement, receiver, _channel, _frames) = response_relay_fixture();
+        *acknowledgement.outstanding.lock().unwrap() = Some(test_identity(9, 1));
+        assert!(
+            await_relay_response_credit(&acknowledgement, &receiver, Duration::from_millis(1))
+                .unwrap_err()
+                .contains("acknowledgement timed out")
+        );
         assert!(HUB_RELAY_ACK_TIMEOUT <= HUB_REQUEST_TIMEOUT);
     }
 
     #[test]
     fn response_ack_timeout_is_reported_to_the_waiting_webview() {
+        let (acknowledgement, _receiver, _channel, _frames) = response_relay_fixture();
+        *acknowledgement.outstanding.lock().unwrap() = Some(test_identity(9, 1));
+        // Nothing can signal on this receiver any more: the relay stopped.
+        let (sender, receiver) = mpsc::sync_channel::<bool>(1);
+        drop(sender);
         assert!(
-            relay_response_ack_failure_message(mpsc::RecvTimeoutError::Timeout)
-                .contains("acknowledgement timed out")
-        );
-        assert!(
-            relay_response_ack_failure_message(mpsc::RecvTimeoutError::Disconnected)
+            await_relay_response_credit(&acknowledgement, &receiver, Duration::from_millis(1))
+                .unwrap_err()
                 .contains("acknowledgement stopped")
         );
     }

@@ -75,6 +75,13 @@ describe("parseArgs", () => {
 			expect(r?.command).toBe("start");
 			expect(r?.port).toBeUndefined();
 			expect(r?.daemon).toBeUndefined();
+			expect(r?.exitWithStdin).toBeUndefined();
+		});
+
+		it("parses start --exit-with-stdin, which only the desktop passes (#188)", () => {
+			const r = parseArgs(["start", "--exit-with-stdin"]);
+			expect(r?.command).toBe("start");
+			expect(r?.exitWithStdin).toBe(true);
 		});
 
 		it("parses start --port 4200", () => {

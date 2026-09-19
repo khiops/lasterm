@@ -361,6 +361,8 @@ export interface ParsedArgs {
 	// start
 	port?: number;
 	daemon?: boolean;
+	/** Only the desktop passes it: stop when the launcher's stdin pipe closes (#188). */
+	exitWithStdin?: boolean;
 	// host add
 	label?: string;
 	host?: string;
@@ -449,6 +451,7 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 	if (agentArchVal !== undefined) result.agentArch = agentArchVal;
 
 	if (hasFlag("--daemon")) result.daemon = true;
+	if (hasFlag("--exit-with-stdin")) result.exitWithStdin = true;
 	if (hasFlag("--json")) result.json = true;
 	if (hasFlag("--open")) result.open = true;
 	if (hasFlag("--all")) result.all = true;
@@ -881,6 +884,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 		await startHub({
 			...(port !== undefined ? { port } : {}),
 			openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
+			...(args.exitWithStdin ? { shutdownWhenClosed: process.stdin } : {}),
 			announce: ({ address, spki, configDir, stateDir }) => {
 				// This line is consumed by the desktop parent from the child's stdout.
 				// Unlike runtime.json, another process cannot replace that pipe, so it is

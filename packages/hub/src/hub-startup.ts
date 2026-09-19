@@ -19,6 +19,7 @@ import { acquireHubLock } from "./hub-lock.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
 import { openBrowser } from "./open-browser.js";
+import { shutdownWhenStdinCloses } from "./parent-stdin.js";
 import {
 	describePreviousInstallation,
 	PreviousInstallationError,
@@ -32,6 +33,8 @@ export interface HubStartupOptions {
 	readonly port?: number;
 	readonly openBrowser?: boolean;
 	readonly logging?: boolean;
+	/** Stop once this stream ends: the desktop's stdin pipe, for `start --exit-with-stdin`. */
+	readonly shutdownWhenClosed?: NodeJS.ReadableStream;
 	readonly announce?: (details: {
 		address: string;
 		port: number;
@@ -201,6 +204,11 @@ export async function startHub(
 		process.on("SIGINT", () => {
 			void shutdown();
 		});
+		if (options.shutdownWhenClosed) {
+			shutdownWhenStdinCloses(options.shutdownWhenClosed, () => {
+				void shutdown();
+			});
+		}
 	} catch (error) {
 		// Same order as a graceful shutdown, and for the same reason: the record is
 		// what tells the world this hub exists, so it must not be withdrawn while the

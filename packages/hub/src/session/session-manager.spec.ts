@@ -869,6 +869,57 @@ describe("SessionManager", () => {
 		// the resolvedEnv assignment in _spawnChannel.
 	});
 
+	// The scope says what its terminals are started with; a launch profile
+	// speaks for the terminal it launches, and the request for this one.
+	it("puts the scope's variables under the profile's and the request's", async () => {
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const scoped = new SessionManager(dbManager, undefined, undefined, {
+			uiConfig: { title: { source: "dynamic", staticTitle: "" } },
+			resolve: () => ({
+				envMode: "inherit",
+				env: { FROM_SCOPE: "yes", SHARED: "scope" },
+			}),
+			resolveElevationMethod: () => "sudo",
+		} as unknown as ConfigResolver);
+		const received: ProtocolMessage[] = [];
+		scoped.addClient(makeClient("c1", received));
+
+		const host = dal.createHost({
+			type: "ssh",
+			label: "test-ssh-env",
+			sshHost: "user@localhost",
+			sshAuth: "key",
+			sshKeyPath: "/nonexistent/key",
+		});
+		const profile = dal.createLaunchProfile({
+			name: "Env Profile",
+			shell: "/usr/bin/zsh",
+			env: { FROM_PROFILE: "yes", SHARED: "profile" },
+			mode: "shell",
+			elevated: false,
+			supportedOs: "any",
+			iconType: "auto",
+			sortOrder: 0,
+		});
+
+		await scoped.handleSpawn("c1", {
+			type: "SPAWN",
+			hostId: host.id,
+			launchProfileId: profile.id,
+			env: { SHARED: "request" },
+		});
+
+		const spawn = mockSshAgentInstance?.send.mock.calls
+			.map(([message]) => message as unknown as { type: string; env?: Record<string, string> })
+			.find((message) => message.type === "SPAWN");
+		expect(spawn?.env).toEqual({
+			FROM_SCOPE: "yes",
+			FROM_PROFILE: "yes",
+			SHARED: "request",
+		});
+	});
+
 	// ── End launch profile resolution ─────────────────────────────────────────
 
 	it("spawned channels have null title (dynamic title takes precedence)", async () => {

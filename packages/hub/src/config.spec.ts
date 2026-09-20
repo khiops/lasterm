@@ -187,6 +187,39 @@ describe("ConfigResolver.resolve", () => {
 		expect(result.fontFamily).toBe('"Consolas", "Liberation Mono", "Courier New", monospace'); // layer 1 default still present
 	});
 
+	// Every other field replaces the layer under it. Environment variables must
+	// not: a host that sets a proxy would erase the editor set globally.
+	it("merges environment variables key by key down the layers", () => {
+		const host = metaDal.createHost({ type: "local", label: "test-host-env" });
+		metaDal.updateHostProfile(
+			host.id,
+			JSON.stringify({ env: { PROXY: "http://proxy:3128", EDITOR: "vi" } }),
+		);
+		metaDal.createSession({ id: "ses-env", hostId: host.id, status: "starting" });
+		metaDal.createChannel({ id: "ch-env", sessionId: "ses-env", status: "born" });
+		metaDal.updateChannelProfile("ch-env", JSON.stringify({ env: { EDITOR: "hx" } }));
+
+		const resolver = new ConfigResolver(metaDal);
+		const result = resolver.resolve(host.id, "ch-env");
+
+		expect(result.env).toEqual({ PROXY: "http://proxy:3128", EDITOR: "hx" });
+	});
+
+	// The cascade reads null as "drop this key", which is the only way a scope
+	// can refuse what an outer one set.
+	it("lets a scope drop a variable an outer scope set", () => {
+		const host = metaDal.createHost({ type: "local", label: "test-host-env-drop" });
+		metaDal.updateHostProfile(host.id, JSON.stringify({ env: { NO_COLOR: "1", LANG: "C" } }));
+		metaDal.createSession({ id: "ses-drop", hostId: host.id, status: "starting" });
+		metaDal.createChannel({ id: "ch-drop", sessionId: "ses-drop", status: "born" });
+		metaDal.updateChannelProfile("ch-drop", JSON.stringify({ env: { NO_COLOR: null } }));
+
+		const resolver = new ConfigResolver(metaDal);
+		const result = resolver.resolve(host.id, "ch-drop");
+
+		expect(result.env).toEqual({ LANG: "C" });
+	});
+
 	it("layer 3.5: agent hints override host profile", () => {
 		const host = metaDal.createHost({ type: "local", label: "test-host-hints" });
 		metaDal.updateHostProfile(host.id, JSON.stringify({ fontSize: 20 }));

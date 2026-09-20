@@ -1,5 +1,7 @@
 use lasterm_process_lock::ProcessLock;
+use window_material::WindowSurface;
 pub mod tls_identity;
+pub mod window_material;
 use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -1123,6 +1125,178 @@ enum MainWindowStartupOutcome {
     Fatal(String),
     Shown { focus_error: Option<String> },
 }
+
+// ── Window surface (see-through vs material) ─────────────────────────────────
+
+/// The file where the desktop keeps the background its window was last asked
+/// for. The setting of record lives in the profile the hub resolves; this is
+/// only what the window must be built as, and it has to be readable before
+/// there is a hub to ask.
+const WINDOW_BACKGROUND_FILE: &str = "window-background";
+
+/// Build the main window on the given surface, with the new-window boundary.
+fn build_main_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    surface: WindowSurface,
+) -> Result<tauri::WebviewWindow<R>, Box<dyn Error>> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or("tauri.conf.json is missing the main window configuration")?
+        .clone();
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?
+        .transparent(matches!(surface, WindowSurface::Alpha))
+        .on_new_window(|url, _features| {
+            if !allows_webview_new_window(&url) {
+                eprintln!("[lasterm] refused webview new-window request to {url}");
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .build()?;
+    if matches!(surface, WindowSurface::Material) {
+        clear_webview_background(&window);
+    }
+    Ok(window)
+}
+
+/// Clear the webview's own background so the material DWM paints for the
+/// window reaches the page. Without this the webview paints every pixel and
+/// the material is never seen.
+#[cfg(windows)]
+fn clear_webview_background<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+    };
+    use windows::core::Interface;
+
+    if let Err(error) = window.with_webview(|webview| unsafe {
+        match webview.controller().cast::<ICoreWebView2Controller2>() {
+            Ok(controller) => {
+                if let Err(error) = controller.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                    A: 0,
+                    R: 0,
+                    G: 0,
+                    B: 0,
+                }) {
+                    eprintln!("[lasterm] WARN: cannot clear the webview background: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("[lasterm] WARN: this WebView2 has no clearable background: {error}");
+            }
+        }
+    }) {
+        eprintln!("[lasterm] WARN: cannot reach the webview: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn clear_webview_background<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
+/// The background the window was last asked for, as the web client named it.
+fn remembered_window_background() -> String {
+    lasterm_config_dir()
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join(WINDOW_BACKGROUND_FILE)).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| window_material::EFFECT_NONE.to_string())
+}
+
+/// Remember the background for the next launch, which is when a change of
+/// surface takes effect.
+fn remember_window_background(effect: &str) {
+    let Ok(dir) = lasterm_config_dir() else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(dir.join(WINDOW_BACKGROUND_FILE), effect))
+    {
+        eprintln!("[lasterm] WARN: cannot remember the window background: {error}");
+    }
+}
+
+/// What became of a background the web client asked for.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowBackgroundOutcome {
+    /// The window wears it now.
+    applied: bool,
+    /// The window must be built for it, which happens at the next launch.
+    needs_restart: bool,
+}
+
+/// Apply the native effect the web client resolved, or clear what is applied.
+fn apply_window_effect<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    effect: &str,
+) -> Result<(), String> {
+    use tauri::utils::config::WindowEffectsConfig;
+    use tauri::window::Effect;
+
+    let native = match effect {
+        "mica" => Some(Effect::Mica),
+        "micaDark" => Some(Effect::MicaDark),
+        "micaLight" => Some(Effect::MicaLight),
+        "tabbed" => Some(Effect::Tabbed),
+        "acrylic" => Some(Effect::Acrylic),
+        "blur" => Some(Effect::Blur),
+        "underWindowBackground" => Some(Effect::UnderWindowBackground),
+        "sidebar" => Some(Effect::Sidebar),
+        "hudWindow" => Some(Effect::HudWindow),
+        _ => None,
+    };
+
+    window
+        .set_effects(native.map(|native| WindowEffectsConfig {
+            effects: vec![native],
+            state: None,
+            radius: None,
+            color: None,
+        }))
+        .map_err(|error| error.to_string())
+}
+
+/// Take the background the web client resolved.
+///
+/// An effect the window's surface can carry is applied at once. One that needs
+/// the other surface is remembered instead: `transparent` is settled when a
+/// window is created, and rebuilding the window under a running app cost more
+/// than it bought — so the change lands at the next launch.
+#[tauri::command]
+fn apply_window_background(app: tauri::AppHandle, effect: String) -> Result<WindowBackgroundOutcome, String> {
+    remember_window_background(&effect);
+    if window_material::needs_restart(&remembered_at_launch(), &effect, cfg!(windows)) {
+        return Ok(WindowBackgroundOutcome {
+            applied: false,
+            needs_restart: true,
+        });
+    }
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "the main window is unavailable".to_string())?;
+    apply_window_effect(&window, &effect)?;
+    Ok(WindowBackgroundOutcome {
+        applied: true,
+        needs_restart: false,
+    })
+}
+
+/// The background this launch built its window for.
+fn remembered_at_launch() -> String {
+    WINDOW_BACKGROUND_AT_LAUNCH
+        .get()
+        .cloned()
+        .unwrap_or_else(|| window_material::EFFECT_NONE.to_string())
+}
+
+/// Read once, before the window is built, and kept: the file may change under
+/// a running app, but the window it built cannot.
+static WINDOW_BACKGROUND_AT_LAUNCH: OnceLock<String> = OnceLock::new();
 
 trait WindowStartupTarget {
     fn show(&self) -> Result<(), String>;
@@ -4963,21 +5137,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // `create: false` keeps the main window config in tauri.conf.json while
     // letting us install the builder-only new-window boundary. Construct it
     // before any startup path can look it up by label.
-    let main_window_config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|window| window.label == "main")
-        .ok_or("tauri.conf.json is missing the main window configuration")?;
-    tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_config)?
-        .on_new_window(|url, _features| {
-            if !allows_webview_new_window(&url) {
-                eprintln!("[lasterm] refused webview new-window request to {url}");
-            }
-            tauri::webview::NewWindowResponse::Deny
-        })
-        .build()?;
+    let background = remembered_window_background();
+    let _ = WINDOW_BACKGROUND_AT_LAUNCH.set(background.clone());
+    let window = build_main_window(app.handle(), window_material::surface_for_host(&background))?;
+    if let Err(error) = apply_window_effect(&window, &background) {
+        eprintln!("[lasterm] WARN: cannot apply the window background {background}: {error}");
+    }
 
     // System tray
     let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
@@ -5176,7 +5341,8 @@ pub fn run() {
             cancel_desktop_close,
             pick_and_read_agent_file,
             quit_after_hub_exit,
-            restart_hub_after_exit
+            restart_hub_after_exit,
+            apply_window_background
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
@@ -5187,8 +5353,9 @@ pub fn run() {
             }
         })
         .setup(setup_app)
-        .run(tauri::generate_context!())
-        .expect("error while running lasterm");
+        .build(tauri::generate_context!())
+        .expect("error while running lasterm")
+        .run(|_app, _event| {});
 }
 
 #[cfg(test)]

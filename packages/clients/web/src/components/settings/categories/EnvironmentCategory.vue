@@ -22,8 +22,9 @@
 			<div class="env-editor">
 				<p class="env-help">
 					Variables the terminals of this scope are started with. A host adds to what
-					Global sets, a channel to both; the same name set here wins. They take effect
-					on the next terminal, and are stored in the clear — no place for secrets.
+					Global sets, a channel to both; the same name set here wins. A running
+					terminal keeps the environment it was given — these reach the next one, and
+					the ones you restart. They are stored in the clear: no place for secrets.
 				</p>
 
 				<div v-for="(entry, index) in entries" :key="index" class="env-row">

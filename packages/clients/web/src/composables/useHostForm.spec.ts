@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import { useHostForm } from "./useHostForm.js";
+import { proxyFields, useHostForm } from "./useHostForm.js";
 
 const createHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
 const updateHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
@@ -273,5 +273,31 @@ describe("useHostForm", () => {
 			expect(form.value.sshUser).toBe("admin");
 			expect(form.value.sshPort).toBe(3333);
 		});
+	});
+});
+
+describe("proxyFields", () => {
+	const known = ["host-1", "host-2"];
+
+	// Never both: an id names a host this hub knows, and anything else is an
+	// address written the way ssh_config writes it.
+	it("names a host of the list by its id", () => {
+		expect(proxyFields("host-2", known)).toEqual({
+			ssh_proxy_host_id: "host-2",
+			ssh_proxy_spec: null,
+		});
+	});
+
+	it("keeps anything else as the address it is", () => {
+		expect(proxyFields("jump@bastion:2222", known)).toEqual({
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: "jump@bastion:2222",
+		});
+	});
+
+	// A host that stops going through a bastion stops, rather than keeping a
+	// leftover nobody can see.
+	it("clears both when nothing is chosen", () => {
+		expect(proxyFields("   ", known)).toEqual({ ssh_proxy_host_id: null, ssh_proxy_spec: null });
 	});
 });

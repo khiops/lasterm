@@ -23,6 +23,8 @@ export interface CreateHostBody {
 	host_group_id?: string | null;
 	ssh_config_host?: string | null;
 	ssh_user?: string | null;
+	ssh_proxy_host_id?: string | null;
+	ssh_proxy_spec?: string | null;
 	keep_alive_seconds?: number;
 	history_retention_days?: number;
 	profile_json?: string;
@@ -49,6 +51,8 @@ export interface UpdateHostBody {
 	host_group_id?: string | null;
 	ssh_config_host?: string | null;
 	ssh_user?: string | null;
+	ssh_proxy_host_id?: string | null;
+	ssh_proxy_spec?: string | null;
 	keep_alive_seconds?: number;
 	history_retention_days?: number;
 	profile_json?: string;

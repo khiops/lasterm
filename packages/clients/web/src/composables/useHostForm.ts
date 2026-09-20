@@ -3,6 +3,23 @@ import { generateId } from "@lasterm/shared";
 import { computed, ref, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
+
+/**
+ * The jump, as the hub stores it: a host of this list, or an address.
+ *
+ * Never both, and an empty choice clears the two — so a host that stops going
+ * through a bastion stops, rather than keeping a leftover nobody can see.
+ */
+export function proxyFields(
+	chosen: string,
+	knownHostIds: string[],
+): { ssh_proxy_host_id: string | null; ssh_proxy_spec: string | null } {
+	const value = chosen.trim();
+	if (value === "") return { ssh_proxy_host_id: null, ssh_proxy_spec: null };
+	if (knownHostIds.includes(value)) return { ssh_proxy_host_id: value, ssh_proxy_spec: null };
+	return { ssh_proxy_host_id: null, ssh_proxy_spec: value };
+}
+
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
@@ -16,6 +33,8 @@ export interface HostFormData {
 	sshUser: string;
 	sshAuth: "agent" | "key" | "password";
 	sshKeyPath: string;
+	/** The host this one is reached through: "" none, an id, or an address. */
+	sshProxy: string;
 	iconType: "auto" | "emoji" | "image";
 	iconValue: string;
 	color: string;
@@ -44,6 +63,7 @@ export function useHostForm(editHost?: Host) {
 		sshUser: editHost?.sshUser ?? "",
 		sshAuth: editHost?.sshAuth ?? "key",
 		sshKeyPath: editHost?.sshKeyPath ?? "",
+		sshProxy: editHost?.sshProxyHostId ?? editHost?.sshProxySpec ?? "",
 		iconType: editHost?.iconType ?? "auto",
 		iconValue: editHost?.iconValue ?? "",
 		color: editHost?.color ?? "",
@@ -240,6 +260,13 @@ export function useHostForm(editHost?: Host) {
 					...(form.value.sshAuth === "key" && {
 						ssh_key_path: form.value.sshKeyPath,
 					}),
+					// One of the two, never both: an id names a host this hub knows,
+					// anything else is an address written the way ssh_config writes
+					// it. Empty clears whichever was set.
+					...proxyFields(
+						form.value.sshProxy,
+						hostsStore.hosts.map((candidate) => candidate.id),
+					),
 				}),
 				icon_type: form.value.iconType,
 				...(form.value.iconValue && {

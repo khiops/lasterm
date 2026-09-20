@@ -1,6 +1,7 @@
 import type { SshConfigImport } from "@lasterm/shared";
 import { toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
+import { parseJumpSpec } from "../session/proxy-jump.js";
 import { sshAgentAddress, windowsAgentPipeExists } from "../session/ssh-agent-address.js";
 import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";
@@ -124,12 +125,40 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 							? { sshAuth: "agent" as const }
 							: {}),
 					sshConfigHost: sshEntry.name,
+					// Kept as written for now; the pass below links it to a host of
+					// this list when one turns out to be that bastion.
+					...(sshEntry.proxyJump != null ? { sshProxySpec: sshEntry.proxyJump } : {}),
 					...(entry.hostGroup !== undefined && { hostGroup: entry.hostGroup }),
 				};
 			});
 
 			const hosts = metaDal.importHosts(inputs);
-			return reply.code(201).send(toSnakeCase(hosts));
+
+			// A bastion is usually a host of its own, imported in the same breath.
+			// Linking to it rather than keeping its address twice is what lets it
+			// carry its own authentication and its own pinned key.
+			const linked = hosts.map((host) => {
+				const spec = host.sshProxySpec;
+				if (!spec) return host;
+				const parsed = parseJumpSpec(spec);
+				if (parsed.kind !== "spec") return host;
+				const match = metaDal
+					.listHosts()
+					.find(
+						(candidate) =>
+							candidate.id !== host.id &&
+							candidate.type === "ssh" &&
+							(candidate.sshConfigHost === parsed.spec.host ||
+								candidate.sshHost === parsed.spec.host),
+					);
+				if (!match) return host;
+				return metaDal.updateHost(host.id, {
+					sshProxyHostId: match.id,
+					sshProxySpec: null,
+				});
+			});
+
+			return reply.code(201).send(toSnakeCase(linked));
 		},
 	);
 }

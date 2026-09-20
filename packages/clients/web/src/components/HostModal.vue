@@ -242,6 +242,29 @@
 							</div>
 
 							<div class="field">
+								<label class="field-label">Reached through (ProxyJump)</label>
+								<input
+									v-model="form.sshProxy"
+									list="host-proxy-options"
+									class="field-input"
+									type="text"
+									placeholder="Directly — or a host, or user@bastion:port"
+									spellcheck="false"
+									autocapitalize="off"
+								/>
+								<datalist id="host-proxy-options">
+									<option
+										v-for="candidate in proxyCandidates"
+										:key="candidate.id"
+										:value="candidate.id"
+									>{{ candidate.label }}</option>
+								</datalist>
+								<p class="field-hint auth-note">
+									{{ proxyHint }}
+								</p>
+							</div>
+
+							<div class="field">
 								<label class="field-label">Auth Method</label>
 								<select v-model="form.sshAuth" class="field-select">
 									<option value="key">SSH Key</option>
@@ -565,6 +588,20 @@ const emit = defineEmits<{
 }>();
 
 const hostsStore = useHostsStore();
+
+/** The hosts this one could be reached through: any SSH host but itself. */
+const proxyCandidates = computed(() =>
+	hostsStore.hosts.filter((candidate) => candidate.type === 'ssh' && candidate.id !== props.editHost?.id),
+);
+
+/** What the field is understood to mean, said back in the person's words. */
+const proxyHint = computed(() => {
+	const value = form.value.sshProxy.trim();
+	if (value === '') return 'Connected to directly.';
+	const known = proxyCandidates.value.find((candidate) => candidate.id === value);
+	if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
+	return `Through ${value}, using your SSH agent. Add it as a host to give it a key of its own.`;
+});
 const {
 	form,
 	source,

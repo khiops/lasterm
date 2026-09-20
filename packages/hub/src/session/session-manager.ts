@@ -56,6 +56,7 @@ import {
 	reconnectContextId,
 	trackElevationContext,
 } from "./prompt-context.js";
+import { planJump, type ResolvedJump } from "./proxy-jump.js";
 import {
 	assertQuitFence,
 	captureQuitFence,
@@ -73,7 +74,7 @@ import type {
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { SpoolGarbageCollector } from "./spool-gc.js";
 import type { SshAgentDeployOptions } from "./ssh-agent.js";
-import { SshAgent } from "./ssh-agent.js";
+import { parseSshHost, SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 import { StateBroadcaster } from "./state-broadcaster.js";
 
@@ -1498,13 +1499,87 @@ export class SessionManager {
 
 		const deployOpts = this._buildDeployOpts(hostId, host, client, ownerAcqId);
 
+		// The route this host is reached by, when it is reached through another.
+		const plan = planJump(host);
+		if (plan.kind === "refused") {
+			client.send({
+				type: "ERROR",
+				code: "SSH_JUMP_UNUSABLE",
+				message: plan.message,
+				hostId,
+			} satisfies ErrorMessage);
+			throw new Error(plan.message);
+		}
+		let resolvedJump: ResolvedJump | undefined;
+		if (plan.kind === "host") {
+			const jumpHost = this.ctx.metaDal.getHost(plan.hostId);
+			if (jumpHost?.type !== "ssh" || !jumpHost.sshHost) {
+				const message =
+					"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.";
+				client.send({
+					type: "ERROR",
+					code: "SSH_JUMP_UNUSABLE",
+					message,
+					hostId,
+				} satisfies ErrorMessage);
+				throw new Error(message);
+			}
+			const jumpParsed = parseSshHost(jumpHost.sshHost);
+			resolvedJump = {
+				jump: {
+					host: jumpParsed.hostname,
+					port: jumpHost.sshPort ?? 22,
+					username: jumpHost.sshUser || jumpParsed.username,
+				},
+				auth: {
+					method: jumpHost.sshAuth ?? "agent",
+					keyPath: jumpHost.sshKeyPath ?? undefined,
+				},
+				promptHostId: jumpHost.id,
+				pinnedFingerprint: this.ctx.metaDal.getHostFingerprint(jumpHost.id),
+				trustKnownHosts: this.ctx.configResolver?.sshConfig.trustKnownHosts === true,
+				pinTo: { kind: "host", hostId: jumpHost.id },
+			};
+		} else if (plan.kind === "spec") {
+			// A bastion named as an address is reached the way bastions are: with
+			// whatever the agent holds. A key of its own would be a second host,
+			// which is the other way of naming it.
+			resolvedJump = {
+				jump: {
+					host: plan.spec.host,
+					port: plan.spec.port,
+					username: plan.spec.user ?? host.sshUser ?? parseSshHost(host.sshHost ?? "").username,
+				},
+				auth: { method: "agent" },
+				promptHostId: hostId,
+				pinnedFingerprint: host.sshProxyFingerprint ?? null,
+				trustKnownHosts: this.ctx.configResolver?.sshConfig.trustKnownHosts === true,
+				pinTo: { kind: "spec", hostId },
+			};
+		}
+
 		console.error(`[lasterm-ssh] creating SshAgent for host ${host.id}`);
 		const sshAgent = new SshAgent(host, promptAuth, deployOpts, this.ctx.agentConfig);
 
 		console.error(`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);
 		try {
 			console.error("[lasterm-ssh] deploying agent...");
-			await sshAgent.start(storedFingerprint, sessionTrustedFp, signal);
+			await sshAgent.start(storedFingerprint, sessionTrustedFp, signal, resolvedJump);
+			// A jump that worked and had nothing pinned is pinned now: it was
+			// trusted on the strength of known_hosts, and that answer is recorded
+			// here so a later change of key is this hub's business too.
+			if (resolvedJump !== undefined && sshAgent.lastJumpFingerprint !== null) {
+				if (resolvedJump.pinTo.kind === "host") {
+					this.ctx.metaDal.updateHostFingerprint(
+						resolvedJump.pinTo.hostId,
+						sshAgent.lastJumpFingerprint,
+					);
+				} else {
+					this.ctx.metaDal.updateHost(resolvedJump.pinTo.hostId, {
+						sshProxyFingerprint: sshAgent.lastJumpFingerprint,
+					});
+				}
+			}
 			console.error("[lasterm-ssh] agent deployed, exec starting");
 			console.error("[lasterm-ssh] SSH connection established");
 		} catch (err) {

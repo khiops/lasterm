@@ -43,6 +43,9 @@ interface HostRow {
 	arch: string | null;
 	agent_sha256: string | null;
 	ssh_fingerprint: string | null;
+	ssh_proxy_host_id: string | null;
+	ssh_proxy_spec: string | null;
+	ssh_proxy_fingerprint: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -99,6 +102,9 @@ function rowToHost(row: HostRow): Host {
 	if (row.agent_sha256 != null) host.agentSha256 = row.agent_sha256;
 	// ssh_fingerprint is always set (null = not yet seen)
 	host.sshFingerprint = row.ssh_fingerprint;
+	if (row.ssh_proxy_host_id != null) host.sshProxyHostId = row.ssh_proxy_host_id;
+	if (row.ssh_proxy_spec != null) host.sshProxySpec = row.ssh_proxy_spec;
+	if (row.ssh_proxy_fingerprint != null) host.sshProxyFingerprint = row.ssh_proxy_fingerprint;
 	return host;
 }
 
@@ -131,6 +137,7 @@ export class HostsDAL {
 				icon_type, icon_value, color, profile_json, trust_remote_hints,
 				default_shell, default_cwd,
 				host_group, host_group_id, sort_order, ssh_config_host, ssh_user,
+				ssh_proxy_host_id, ssh_proxy_spec,
 				keep_alive_seconds, history_retention_days,
 				elevation_method, custom_command,
 				os, arch,
@@ -140,6 +147,7 @@ export class HostsDAL {
 				?, ?, ?, ?, ?,
 				?, ?,
 				?, ?, ?, ?, ?,
+				?, ?,
 				?, ?,
 				?, ?,
 				?, ?,
@@ -166,6 +174,8 @@ export class HostsDAL {
 				input.sortOrder ?? 0,
 				input.sshConfigHost ?? null,
 				input.sshUser ?? null,
+				input.sshProxyHostId ?? null,
+				input.sshProxySpec ?? null,
 				input.keepAliveSeconds ?? 60,
 				input.historyRetentionDays ?? 30,
 				input.elevationMethod ?? null,
@@ -237,6 +247,9 @@ export class HostsDAL {
 			sortOrder: "sort_order",
 			sshConfigHost: "ssh_config_host",
 			sshUser: "ssh_user",
+			sshProxyHostId: "ssh_proxy_host_id",
+			sshProxySpec: "ssh_proxy_spec",
+			sshProxyFingerprint: "ssh_proxy_fingerprint",
 			keepAliveSeconds: "keep_alive_seconds",
 			historyRetentionDays: "history_retention_days",
 			elevationMethod: "elevation_method",

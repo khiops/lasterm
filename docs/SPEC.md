@@ -459,9 +459,22 @@ User-configured host overrides (Layer 3) are persistent in meta.db and are not a
 
 Each host record specifies exactly one auth method via `ssh_auth` field (`'agent'`, `'key'`, `'password'`). There is **no fallback chain**. If the chosen method fails, the connection fails and the user must reconfigure.
 
-- `agent`: use SSH_AUTH_SOCK (ssh-agent). Fail if agent unavailable.
+- `agent`: the agent this machine publishes — `SSH_AUTH_SOCK` where there is one, and on Windows the OpenSSH agent's named pipe, which no variable announces. Fail if no agent answers.
 - `key`: read private key from `ssh_key_path`. If passphrase-protected, prompt user via UI dialog.
 - `password`: prompt user via UI dialog at connect time. **Never stored.**
+
+### 4.5b Reaching a host through another (ProxyJump)
+
+A host may declare a jump, in one of two ways and never both:
+
+| Field | Meaning |
+|---|---|
+| `ssh_proxy_host_id` | A host this hub knows. It brings its own `ssh_auth`, its own key path and its own pinned host key — nothing about it is described twice. |
+| `ssh_proxy_spec` | `user@host:port`, the form `~/.ssh/config` writes. For a bastion that is not a host here: it authenticates through the SSH agent, and its key is pinned in `ssh_proxy_fingerprint` on the host that jumps through it, since it has no row of its own. |
+
+The target's connection runs inside a channel opened on the jump (`forwardOut`), so the jump's connection ends with it. The jump's host key is verified against what is already trusted for it, and a jump nothing trusts yet is refused rather than accepted on sight (SECURITY.md §3.3b). A chain (`ProxyJump a,b`) is refused, naming the number of hops.
+
+Importing from `~/.ssh/config` keeps a `ProxyJump` as a spec, then links it to a host of the same import when one turns out to be that bastion.
 
 ### 4.6 Known Hosts Verification
 

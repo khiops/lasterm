@@ -1731,6 +1731,56 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		expect(hosts[0]?.ssh_key_path).toBeUndefined();
 	});
 
+	// A bastion is usually a host of its own, imported in the same breath.
+	// Linking to it is what lets it carry its own key and its own sign-in.
+	it("links an imported ProxyJump to the host it names", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValue({
+			entries: [
+				{
+					name: "bastion",
+					hostname: "bastion.example.com",
+					port: 22,
+					user: "jump",
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+				{
+					name: "behind",
+					hostname: "10.0.0.9",
+					port: 22,
+					user: "deploy",
+					identityFile: null,
+					proxyJump: "bastion",
+					isGitHost: false,
+				},
+			],
+			hasInclude: false,
+		});
+
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: {
+				entries: [
+					{ name: "bastion", label: "bastion-host" },
+					{ name: "behind", label: "behind-host" },
+				],
+			},
+		});
+
+		expect(res.statusCode).toBe(201);
+		const hosts =
+			res.json<
+				Array<{ id: string; label: string; ssh_proxy_host_id?: string; ssh_proxy_spec?: string }>
+			>();
+		const bastion = hosts.find((host) => host.label === "bastion-host");
+		const behind = hosts.find((host) => host.label === "behind-host");
+		expect(behind?.ssh_proxy_host_id).toBe(bastion?.id);
+		expect(behind?.ssh_proxy_spec).toBeUndefined();
+	});
+
 	it("does not set sshAuth when identityFile is absent and no agent is running", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
 		vi.mocked(readSshConfig).mockReturnValueOnce({

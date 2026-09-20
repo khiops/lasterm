@@ -12,6 +12,8 @@ import {
 	type DeployResult,
 	deployAgentIfNeeded,
 } from "./agent-deployer.js";
+import { openJumpRoute } from "./jump-connection.js";
+import type { ResolvedJump } from "./proxy-jump.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 
@@ -42,7 +44,7 @@ export type AuthPromptFn = (
  * Parse the username and hostname from an sshHost string.
  * Accepts "user@hostname" or just "hostname".
  */
-function parseSshHost(sshHost: string): { username: string; hostname: string } {
+export function parseSshHost(sshHost: string): { username: string; hostname: string } {
 	const atIdx = sshHost.indexOf("@");
 	if (atIdx !== -1) {
 		return {
@@ -247,6 +249,13 @@ function toDeployOptions(
 
 export class SshAgent extends AgentConnection {
 	private client: Client | null = null;
+	/** The bastion this connection travels through, while it does. */
+	private jumpRoute: { close: () => void } | null = null;
+	/**
+	 * The key the jump presented on the connection that worked, for the caller
+	 * to pin. Null when there was no jump, or when it was already pinned.
+	 */
+	lastJumpFingerprint: string | null = null;
 	private channel: ClientChannel | null = null;
 	private channelOpen = false;
 	private readonly sendQueue = new SendQueue("ssh-agent");
@@ -286,6 +295,7 @@ export class SshAgent extends AgentConnection {
 		storedFingerprint?: string | null,
 		sessionTrustedFingerprint?: string | null,
 		signal?: AbortSignal,
+		jump?: ResolvedJump,
 	): Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }> {
 		this.deployedThisSession = false;
 		this.remoteMatchesHubVersionCache = false;
@@ -334,6 +344,29 @@ export class SshAgent extends AgentConnection {
 			tofu: false,
 		};
 		this.lastKeyVerification = keyVerification;
+
+		// The route first, when there is one: the target's connection runs inside a
+		// channel on the bastion, so there is nothing to connect until it is open.
+		if (jump !== undefined) {
+			const jumpAuth = await buildSshConnectConfig(
+				jump.auth,
+				jump.jump.host,
+				jump.jump.port,
+				jump.jump.username,
+				this.promptAuth ?? undefined,
+				jump.promptHostId,
+			);
+			const route = await openJumpRoute({
+				jump: jump.jump,
+				auth: jumpAuth as unknown as Record<string, unknown>,
+				pinnedFingerprint: jump.pinnedFingerprint,
+				trustKnownHosts: jump.trustKnownHosts,
+				destination: { host: hostname, port },
+			});
+			this.jumpRoute = route;
+			this.lastJumpFingerprint = jump.pinnedFingerprint ? null : route.fingerprint;
+			connectConfig.sock = route.stream;
+		}
 
 		connectConfig.hostVerifier = ((key: Buffer) => {
 			const hash = createHash("sha256").update(key).digest("base64");
@@ -574,6 +607,16 @@ export class SshAgent extends AgentConnection {
 
 	private cleanup(): void {
 		this.sendQueue.clear();
+		if (this.jumpRoute) {
+			try {
+				// A bastion left logged in with nothing going through it is this
+				// connection's leftover, not someone else's problem.
+				this.jumpRoute.close();
+			} catch {
+				// ignore errors during cleanup
+			}
+			this.jumpRoute = null;
+		}
 		if (this.channel) {
 			try {
 				this.channel.close();

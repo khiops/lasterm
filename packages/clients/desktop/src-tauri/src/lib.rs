@@ -1161,6 +1161,16 @@ enum MainWindowStartupOutcome {
 /// other window is worn after a relaunch and not before.
 static RESTART_AFTER_QUIT: AtomicBool = AtomicBool::new(false);
 
+/// Set once leaving has been decided, and never cleared.
+///
+/// Every close of the main window is turned into the question of what closing
+/// should do — except the close that *is* the leaving. Tauri asks a window to
+/// close on its way out, and a handler that answers that one with the question
+/// again vetoes the exit it was told to perform: the hub stops, the agent with
+/// it, and the window stays on screen showing terminals whose hub is gone
+/// (#440).
+static QUIT_DECIDED: AtomicBool = AtomicBool::new(false);
+
 /// Passed to the process a restart starts, which must wait for the one it
 /// replaces to let go of the single-instance lock. Without the wait the new
 /// process reads a held lock, calls itself a second instance, and leaves —
@@ -4627,32 +4637,43 @@ where
     }
 }
 
+/// Whether a process id still names a running process.
+///
+/// Asked of the kernel, not of a command-line tool: `tasklist` answers a
+/// no-match with a sentence in the system's own language — on a French Windows,
+/// "Information : aucune tâche en service ne correspond aux critères spécifiés"
+/// — and exits 0. Parsed as CSV that yields no row, which cannot be told apart
+/// from a failure to read the output, so the honest answer was "still alive".
+/// The hub could then never be confirmed gone, and quitting ended in "Quit
+/// failed" on every localized Windows (#440).
 #[cfg(target_os = "windows")]
 fn is_pid_alive(pid: u32) -> bool {
-    let filter = format!("PID eq {}", pid);
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
-        .output();
-    let Ok(output) = output else {
-        return true;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    if !output.status.success() {
-        return true;
-    }
-    let expected = pid.to_string();
-    let mut parsed_a_row = false;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some(field) = line.split(',').nth(1) else {
-            continue;
-        };
-        parsed_a_row = true;
-        if field.trim().trim_matches('"') == expected {
-            return true;
+
+    /// What `GetExitCodeProcess` reports for a process that has not exited.
+    const STILL_ACTIVE: u32 = 259;
+
+    // SAFETY: every call is given a handle this function owns and closes, and
+    // an out-parameter it owns.
+    unsafe {
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => {
+                let mut exit_code = 0u32;
+                // A handle can outlive the process it names, so a successful
+                // open is not yet life.
+                let alive =
+                    GetExitCodeProcess(handle, &mut exit_code).is_ok() && exit_code == STILL_ACTIVE;
+                let _ = CloseHandle(handle);
+                alive
+            }
+            // Only "no such process" establishes absence. Access denied says
+            // the process is someone else's, not that it is gone.
+            Err(error) => error.code() != ERROR_INVALID_PARAMETER.to_hresult(),
         }
     }
-    // A command failure, localized no-match text, or malformed CSV cannot
-    // establish ESRCH's equivalent. Only a successfully parsed task list does.
-    !parsed_a_row
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -4759,7 +4780,7 @@ fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
 }
 
 fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
-    match action {
+        match action {
         QuitAction::AskNative { others } => present_native_quit_consent(app, others),
         QuitAction::SendForced { attempt_id } => {
             std::thread::spawn(move || {
@@ -4823,6 +4844,8 @@ fn request_app_quit(app: tauri::AppHandle) {
 /// The hub was asked to stop by the same coordination a real quit uses, so the
 /// replacement starts against a hub that is gone rather than one it must fight.
 fn finish_quit(app: &tauri::AppHandle) {
+    // From here the window closing is the leaving, not a question about it.
+    QUIT_DECIDED.store(true, Ordering::SeqCst);
     if RESTART_AFTER_QUIT.swap(false, Ordering::SeqCst) {
         match relaunch_detached() {
             // Leave the way a killed desktop does, without the cleanup that
@@ -5372,7 +5395,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
 
+    // A tray entry with no icon is a blank slot: the window can be sent there
+    // and never found again. The app's own icon is the one already bundled for
+    // every other surface, so the thing in the tray looks like the thing it is.
     let tray = TrayIconBuilder::new()
+        .tooltip("Lasterm")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
@@ -5390,6 +5417,13 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     match tray {
         Ok(tray) => {
+            if let Some(icon) = app.default_window_icon().cloned() {
+                if let Err(error) = tray.set_icon(Some(icon)) {
+                    eprintln!("[lasterm] WARN: cannot give the tray its icon: {error}");
+                }
+            } else {
+                eprintln!("[lasterm] WARN: this build bundles no window icon for the tray");
+            }
             TRAY_AVAILABLE.store(true, Ordering::Relaxed);
             app.manage(tray);
         }
@@ -5594,6 +5628,12 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
+                    // The close that carries out a decided quit is let through:
+                    // holding it back would keep the app running with the hub it
+                    // has just stopped.
+                    if QUIT_DECIDED.load(Ordering::SeqCst) {
+                        return;
+                    }
                     api.prevent_close();
                     handle_native_window_close(window.app_handle().clone());
                 }
@@ -5614,6 +5654,32 @@ mod tests {
     use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    /// A process that has exited must read as gone.
+    ///
+    /// The previous probe shelled out to `tasklist`, whose no-match answer is a
+    /// sentence in the system's language: unparseable as CSV, indistinguishable
+    /// from a failure to read it, and so reported as "still alive" forever.
+    #[test]
+    fn a_process_that_has_exited_is_not_alive() {
+        assert!(is_pid_alive(std::process::id()), "this very process is alive");
+
+        let program = if cfg!(windows) { "cmd" } else { "/bin/sh" };
+        let args: &[&str] = if cfg!(windows) {
+            &["/C", "exit"]
+        } else {
+            &["-c", "exit"]
+        };
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .spawn()
+            .expect("spawn a process that exits at once");
+        let pid = child.id();
+        child.wait().expect("wait for it to exit");
+
+        assert!(!is_pid_alive(pid), "a process that has exited is gone");
+    }
+
 
     fn test_upload(
         sender: mpsc::SyncSender<HubUploadFrame>,

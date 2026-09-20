@@ -36,7 +36,7 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-# nexterm runtime data (never commit)
+# lasterm runtime data (never commit)
 *.db
 *.db-wal
 *.db-shm

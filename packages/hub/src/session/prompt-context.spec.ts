@@ -5,7 +5,7 @@
  * Each test carries a "Mutation oracle" comment naming the exact code mutation
  * that would make the test fail.
  *
- * Invariant summary (from docs/plans/prompt-routing-redesign.md §Invariants):
+ * Invariant summary:
  *   1. Cross-context isolation — test context never touches session context for same host.
  *   2. Whole-sequence route — prompt() uses current routeClientId; post-retarget sends new route.
  *   3. Response authorization — respond() accepts only from the CURRENT routeClientId.

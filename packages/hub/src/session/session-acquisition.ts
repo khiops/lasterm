@@ -1,8 +1,6 @@
 /**
  * session-acquisition.ts — Session-acquisition state machine primitives.
  *
- * Implements the P1/P2/P3 design from docs/plans/session-acquisition-redesign.md.
- *
  * Six synchronous primitives (acquire, join, commit, fail, release, close) +
  * shutdownAll. Every state mutation is a synchronous check-and-mutate block —
  * no await between reading state and writing it. JS is single-threaded, so

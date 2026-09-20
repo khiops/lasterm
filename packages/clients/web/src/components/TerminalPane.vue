@@ -203,6 +203,7 @@ const { profile: resolvedProfile } = useResolvedProfile(
 
 const {
 	init,
+	awaitFont,
 	attachChannel,
 	reattachChannel,
 	applyProfile,
@@ -443,6 +444,9 @@ onMounted(async () => {
 		props.channelId !== null && props.channelId !== undefined
 			? channelsStore.consumePendingSpawn(props.channelId)
 			: null;
+	// Measure with the font the terminal will use: against a fallback the fit
+	// counts columns the window does not have, and the PTY is spawned that wide.
+	await awaitFont();
 	const { cols, rows } = init();
 	await openChannel(cols, rows);
 });

@@ -163,6 +163,16 @@ body {
 	background-color: transparent;
 }
 
+/* The terminal colour is painted once, by the pane (`.terminal-container`).
+   xterm sets this same colour, at the same opacity, as an inline style — hence
+   `!important`, which an inline style otherwise wins against — and its element
+   is as tall as a whole number of rows, so the leftover strip along the bottom
+   carried no tint and showed as a step against the material. With the DOM
+   renderer this app uses, nothing else paints a default cell background. */
+.terminal-container .xterm-scrollable-element {
+	background-color: transparent !important;
+}
+
 .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
 	background: var(--nt-scrollbar-thumb);
 	border-radius: 3px;

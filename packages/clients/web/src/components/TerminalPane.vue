@@ -936,7 +936,10 @@ function onDragEnd(): void {
 .terminal-container {
 	flex: 1;
 	overflow: hidden;
-	background: rgba(var(--nt-bg-rgb), var(--nt-terminal-alpha));
+	/* No background of its own: xterm paints the terminal colour at the very
+	   same opacity (`toXtermTheme`), and two layers of it multiplied — 69 %
+	   asked for, 90 % on screen, which is most of what made the window
+	   materials look like no material at all. */
 	position: relative;
 	z-index: 2;
 }

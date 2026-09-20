@@ -1236,6 +1236,57 @@ fn clear_webview_background<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>)
 #[cfg(not(windows))]
 fn clear_webview_background<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 
+/// Put the page in front of the material DWM paints, rather than in front of
+/// the window's own opaque client area.
+///
+/// `DWMWA_SYSTEMBACKDROP_TYPE`, which is all `window-vibrancy` sets, only says
+/// *which* material DWM should paint. It paints it behind a client area the
+/// window still fills, so none of it is ever seen: measured on this machine,
+/// the backdrop was live on the window while every pixel of the terminal
+/// composited over black — a light theme at 69 % read as flat grey, and the
+/// three modes looked identical (#62).
+///
+/// Extending the frame across the whole client area is the sheet of glass that
+/// lets what the page leaves unpainted be the material instead. A window
+/// carrying no material takes its client area back.
+#[cfg(windows)]
+fn extend_frame_for_material<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, material: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+    use windows::Win32::UI::Controls::MARGINS;
+
+    let handle = match window.hwnd() {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("[lasterm] WARN: cannot reach the window to extend its frame: {error}");
+            return;
+        }
+    };
+    // -1 on every side is the documented "sheet of glass": the frame covers the
+    // client area whole. 0 gives it back.
+    let margins = if material {
+        MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        }
+    } else {
+        MARGINS::default()
+    };
+    // SAFETY: the handle belongs to a window this process owns and is alive for
+    // the call; the margins live until it returns.
+    if let Err(error) =
+        unsafe { DwmExtendFrameIntoClientArea(HWND(handle.0 as *mut _), &margins) }
+    {
+        eprintln!("[lasterm] WARN: cannot extend the window frame: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn extend_frame_for_material<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>, _material: bool) {
+}
+
 /// The background the window was last asked for, as the web client named it.
 fn remembered_window_background() -> String {
     lasterm_config_dir()
@@ -1297,7 +1348,18 @@ fn apply_window_effect<R: tauri::Runtime>(
             radius: None,
             color: None,
         }))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    // The material is only half of it: DWM paints it behind a client area the
+    // window would otherwise fill.
+    extend_frame_for_material(
+        window,
+        matches!(
+            window_material::surface_for_host(effect),
+            WindowSurface::Material
+        ),
+    );
+    Ok(())
 }
 
 /// Take the background the web client resolved.

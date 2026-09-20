@@ -2,6 +2,7 @@ import type { AppearanceConfig, LastermTheme, LastermThemeColors } from "@laster
 import { BUNDLED_THEMES, DEFAULT_APPEARANCE, DEFAULT_THEME_NAME } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { applyWindowTone } from "../composables/window-tone.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
@@ -87,6 +88,10 @@ export const useThemeStore = defineStore("theme", () => {
 
 	function applyTheme(theme: LastermTheme): void {
 		const root = document.documentElement.style;
+
+		// The window material is painted by DWM, which takes its light or dark
+		// tint from the window and not from these variables.
+		applyWindowTone(theme.type === "dark");
 
 		// Tier 1: terminal colors
 		root.setProperty("--nt-fg", theme.colors.foreground);

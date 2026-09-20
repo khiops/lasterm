@@ -15,8 +15,11 @@
 # next build fails to replace the sidecar ("access denied").
 #
 # It runs against the user's real profile, like an installed app. The agent is
-# never stopped here: it holds the terminals, and a restarted hub reattaches
-# them. The port must be free: another WebView2 app may already use 9222.
+# left running when it is the one just built: it holds the terminals, and a
+# restarted hub reattaches them. A newly built agent does replace it — a
+# running agent keeps its file, so the copy used to fail in silence and the hub
+# went on spawning the old binary, which looks exactly like a fix that did not
+# work. The port must be free: another WebView2 app may already use 9222.
 param(
 	[switch]$Build,
 	[switch]$Stop,
@@ -60,15 +63,38 @@ if ($listener) {
 	if ($owner -notmatch "msedgewebview2") { throw "port $Port is held by $owner; pass -Port" }
 }
 
+function Get-RunningFromRunDir([string]$name) {
+	Get-CimInstance Win32_Process -Filter "Name='$name'" |
+		Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($RunDir, [StringComparison]::OrdinalIgnoreCase) }
+}
+
+# Stop the running agent so the one just built can take its place. Its
+# terminals end with it: that is the price of testing the agent you built.
+function Stop-RunningAgent {
+	$running = Get-RunningFromRunDir "lasterm-agent.exe"
+	if (-not $running) { return }
+	Write-Host "replacing the running agent with the one just built; its terminals end here"
+	$running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+	for ($i = 0; $i -lt 40; $i++) {
+		Start-Sleep -Milliseconds 250
+		if (-not (Get-RunningFromRunDir "lasterm-agent.exe")) { return }
+	}
+	Write-Host "the agent did not stop; keeping the one that runs"
+}
+
 Stop-UiApp
 New-Item -ItemType Directory -Force $RunDir | Out-Null
 foreach ($exe in "lasterm-desktop.exe", "lasterm-hub.exe", "lasterm-agent.exe") {
 	$from = Join-Path $Release $exe
 	if (-not (Test-Path $from)) { throw "$from is missing; run with -Build" }
+	$to = Join-Path $RunDir $exe
+	$newer = -not (Test-Path $to) -or (Get-Item $from).LastWriteTimeUtc -gt (Get-Item $to).LastWriteTimeUtc
+	if ($exe -eq "lasterm-agent.exe" -and $newer) { Stop-RunningAgent }
 	try {
 		Copy-Item $from $RunDir -Force
 	} catch {
-		# A running agent of this copy keeps its file; the hub will use that agent.
+		# A running agent of this copy keeps its file. Reaching here means it is
+		# the same build, or it refused to stop: either way the hub uses it.
 		Write-Host "kept the running $exe"
 	}
 }

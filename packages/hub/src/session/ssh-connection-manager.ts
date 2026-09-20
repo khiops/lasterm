@@ -56,6 +56,14 @@ const RECONNECT_TIMEOUT_MS = 5 * 60 * 1_000; // 5 minutes
  * not happen in thirty seconds. A question that expires while it is being
  * answered teaches people to answer it without looking (#437).
  */
+/**
+ * How long the agent-binary question waits.
+ *
+ * Unlike the host-key and password questions, this one is asked *over a live
+ * SSH connection*: the remote binary is being inspected. A connection held open
+ * to a remote machine while a person thinks is the thing this bound exists for,
+ * and it goes when that wait learns to release its transport and resume (#444).
+ */
 const HOST_KEY_MISMATCH_TIMEOUT_MS = 120_000;
 const AUTH_PROMPT_TIMEOUT_MS = 120_000; // 2 min — unanswered prompt must not wedge the host
 type PendingPromptEntry =
@@ -215,7 +223,12 @@ export class SshConnectionManager {
 					"passphrase",
 					promptMsgBase,
 					send,
-					AUTH_PROMPT_TIMEOUT_MS,
+					// A password or passphrase is asked before anything is
+					// connected — `buildSshConnectConfig` prompts, then dials — so
+					// the wait holds nothing open and ends when it is answered.
+					// Elevation is asked over a live session, and keeps its bound
+					// until that case is handled too (#444).
+					promptType === "elevation" ? AUTH_PROMPT_TIMEOUT_MS : null,
 				);
 				return result as string | null;
 			} finally {
@@ -312,7 +325,10 @@ export class SshConnectionManager {
 			"host_verify",
 			verifyMsgBase,
 			send,
-			HOST_KEY_MISMATCH_TIMEOUT_MS,
+			// Nothing is connected while this is read: the verifier refused the
+			// key and the client was destroyed. Comparing a fingerprint against
+			// another source takes as long as it takes.
+			null,
 		);
 		if (clearOnSettle) {
 			clearContext(this.ctx, context.id, send);
@@ -622,7 +638,8 @@ export class SshConnectionManager {
 				"passphrase",
 				promptMsgBase,
 				deliverySend,
-				AUTH_PROMPT_TIMEOUT_MS,
+				// Asked before the dial, like the one above.
+				null,
 			);
 			return result as string | null;
 		};
@@ -644,7 +661,9 @@ export class SshConnectionManager {
 					...(firstConnect ? { firstConnect: true } : {}),
 				},
 				deliverySend,
-				HOST_KEY_MISMATCH_TIMEOUT_MS,
+				// The same question as the one above, asked while testing a host:
+				// the key was refused, so nothing is connected while it is read.
+				null,
 			);
 			return (result ?? "reject") as "trust_permanent" | "trust_once" | "reject";
 		};

@@ -2345,7 +2345,10 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 		expect(ctx.pendingPrompts.size).toBe(0);
 	});
 
-	it("auth prompt times out after 120s and resolves to null", async () => {
+	// A password is asked before anything is dialled, so the wait holds nothing
+	// open. Ending it on a clock would throw away the answer that arrives a
+	// second later, for a question the person did answer (#444).
+	it("waits for a password however long it takes", async () => {
 		vi.useFakeTimers();
 		try {
 			const received: ProtocolMessage[] = [];
@@ -2354,17 +2357,20 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 			const sshMgr = (
 				sm as unknown as { sshMgr: import("./ssh-connection-manager.js").SshConnectionManager }
 			).sshMgr;
-			const resolvePromise = sshMgr.buildPromptAuth(client)("host-03", "password", "test");
+			const answer = sshMgr.buildPromptAuth(client)("host-03", "password", "test");
+			const settled = vi.fn();
+			void answer.then(settled, settled);
 			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
 				.ctx;
 			const promptId = [...ctx.pendingPrompts.keys()][0]!;
 
-			// No handleAuthPromptResponse call — advance time past 60s
-			await vi.advanceTimersByTimeAsync(120_000);
+			await vi.advanceTimersByTimeAsync(600_000);
 
-			const result = await resolvePromise;
-			expect(result).toBeFalsy();
-			expect(ctx.pendingPrompts.has(promptId)).toBe(false);
+			expect(settled).not.toHaveBeenCalled();
+			expect(ctx.pendingPrompts.has(promptId)).toBe(true);
+
+			sm.handleAuthPromptResponse("client-1", "host-03", "answered at last", false, promptId);
+			await expect(answer).resolves.toBe("answered at last");
 		} finally {
 			vi.useRealTimers();
 		}
@@ -4124,7 +4130,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	//
 	// Mutation oracle: hostId-keyed replacement/timers let the first prompt's timer
 	// delete the new prompt, permanently wedging the host.
-	it("second buildPromptAuth for same host from SAME client gets its own timer — no timer clobber", async () => {
+	it("second buildPromptAuth for same host from SAME client keeps its own answer", async () => {
 		vi.useFakeTimers();
 		try {
 			const hostId = "host-clobber-1";
@@ -4166,12 +4172,19 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
 			expect(ctx.pendingPrompts.has(secondPromptId)).toBe(true);
 
-			// Advancing past the full timeout must NOT corrupt the second entry.
-			await vi.advanceTimersByTimeAsync(120_000);
-			expect(ctx.pendingPrompts.has(firstPromptId)).toBe(false);
-			expect(ctx.pendingPrompts.has(secondPromptId)).toBe(false);
-			await expect(p1).resolves.toBeNull();
-			await expect(p2).resolves.toBeNull();
+			// Neither waits on a clock any more, so what must not be clobbered is
+			// the other's entry and the other's answer: each prompt keeps its own,
+			// and answering one settles one.
+			await vi.advanceTimersByTimeAsync(600_000);
+			expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
+			expect(ctx.pendingPrompts.has(secondPromptId)).toBe(true);
+
+			sm.handleAuthPromptResponse(sameClient.id, hostId, "second", false, secondPromptId);
+			await expect(p2).resolves.toBe("second");
+			expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
+
+			sm.handleAuthPromptResponse(sameClient.id, hostId, "first", false, firstPromptId);
+			await expect(p1).resolves.toBe("first");
 		} finally {
 			vi.useRealTimers();
 		}

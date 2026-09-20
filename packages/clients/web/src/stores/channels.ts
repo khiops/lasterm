@@ -561,8 +561,30 @@ export const useChannelsStore = defineStore("channels", () => {
 			pendingStatuses.value = next;
 		}
 
-		// Deduplicate: spawning client already has the channel via fetchChannels.
-		if (channels.value.some((c) => c.id === msg.channelId)) return;
+		// A channel this client already knows is either one it just fetched after
+		// its own SPAWN_OK, or a dead terminal that has just been brought back
+		// under its own id. Both are the hub's truth about it, so take it: the
+		// one that was dead is live again, on a new session, and skipping this
+		// left it greyed out in the sidebar with its terminal running behind it.
+		const knownIndex = channels.value.findIndex((c) => c.id === msg.channelId);
+		if (knownIndex !== -1) {
+			const known = channels.value[knownIndex];
+			if (known !== undefined) {
+				const revived: Channel = {
+					...known,
+					sessionId: msg.sessionId,
+					status: msg.status,
+					cols: msg.cols,
+					rows: msg.rows,
+					updatedAt: msg.updatedAt,
+					...(msg.displayTitle !== undefined && { displayTitle: msg.displayTitle }),
+				};
+				const next = [...channels.value];
+				next[knownIndex] = revived;
+				channels.value = next;
+			}
+			return;
+		}
 
 		const channel: Channel = {
 			id: msg.channelId,

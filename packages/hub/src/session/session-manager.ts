@@ -578,14 +578,23 @@ export class SessionManager {
 			if (existing && existing.hostId === hostId && live === undefined) {
 				reuseChannelId = msg.reuseChannelId;
 			} else {
+				// Spawning a stranger instead would put a terminal on screen that
+				// nobody asked for, beside the one that was meant to come back.
+				const reason = !existing
+					? "it is not a terminal this hub knows"
+					: existing.hostId !== hostId
+						? "it belongs to another host"
+						: "it is still running";
 				this.ctx.hubLogger?.log("warn", "handleSpawn: refusing to reuse that channel", {
 					channelId: msg.reuseChannelId,
-					reason: !existing
-						? "unknown"
-						: existing.hostId !== hostId
-							? "another host"
-							: "still live",
+					reason,
 				});
+				client.send({
+					type: "ERROR",
+					code: "CHANNEL_NOT_REUSABLE",
+					message: `Cannot bring that terminal back: ${reason}.`,
+				} satisfies ErrorMessage);
+				return null;
 			}
 		}
 		this.ctx.hubLogger?.log("debug", "handleSpawn: resolvedHostId", { hostId });

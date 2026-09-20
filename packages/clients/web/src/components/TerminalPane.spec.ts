@@ -36,6 +36,25 @@ describe("TerminalPane layers", () => {
 	});
 });
 
+describe("TerminalPane spawn size", () => {
+	const spawnBlock =
+		/const realId = await channelsStore\.spawnChannel[\s\S]*?syncChannelSize\(\);/.exec(
+			SOURCE,
+		)?.[0];
+
+	// The fit that follows a font arriving late has no channel to tell while the
+	// channel is still being created, and recording its size as though it had
+	// been sent left the PTY a width the window never had: the shell then drew
+	// its prompt wider than the window and the caret fell a line below.
+	it("tells the channel the size the terminal has, once there is a channel", () => {
+		expect(spawnBlock, "the spawn block moved").toBeDefined();
+		expect(spawnBlock).toContain("suppressNextResize(cols, rows)");
+		expect(spawnBlock?.indexOf("attachChannel(realId)")).toBeLessThan(
+			spawnBlock?.indexOf("syncChannelSize()") ?? -1,
+		);
+	});
+});
+
 describe("TerminalPane recovery", () => {
 	const errorBlock = /class="terminal-error"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/.exec(SOURCE)?.[0];
 

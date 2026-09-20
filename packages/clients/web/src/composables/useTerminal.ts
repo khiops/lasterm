@@ -351,16 +351,26 @@ export function useTerminal(
 	}
 
 	/**
-	 * Pre-set the RESIZE dedup state to the terminal's current dimensions.
-	 * Call BEFORE attachChannel when the PTY was already spawned at the correct
-	 * size (deferred spawn) so that attachChannel's sendResize is a no-op and
-	 * no SIGWINCH is fired (which would cause oh-my-posh to redraw the prompt).
+	 * Pre-set the RESIZE dedup state to the size the PTY was spawned at, so
+	 * attachChannel's resize is a no-op and no SIGWINCH redraws the prompt.
+	 *
+	 * Those are the dimensions the caller asked the hub for, not the ones the
+	 * terminal has now: a font that arrived while the channel was being created
+	 * refits it, and a fit with no channel yet has nobody to tell. Recording
+	 * the new size as though it had been sent left the PTY a width the window
+	 * never had — the prompt then wrapped, a line early.
 	 */
-	function suppressNextResize(): void {
-		if (terminal.value) {
-			lastSentCols = terminal.value.cols;
-			lastSentRows = terminal.value.rows;
-		}
+	function suppressNextResize(spawnedCols?: number, spawnedRows?: number): void {
+		const term = terminal.value;
+		if (!term) return;
+		lastSentCols = spawnedCols ?? term.cols;
+		lastSentRows = spawnedRows ?? term.rows;
+	}
+
+	/** Tell the channel the size the terminal actually has, if it differs. */
+	function syncChannelSize(): void {
+		const term = terminal.value;
+		if (term) sendResize(term.cols, term.rows);
 	}
 
 	/** Re-apply profile options (font, cursor, scrollback, scrollbar markers) to the live terminal. */
@@ -462,6 +472,7 @@ export function useTerminal(
 		reattachChannel,
 		applyProfile,
 		suppressNextResize,
+		syncChannelSize,
 		dispose,
 		fitAddon,
 	};

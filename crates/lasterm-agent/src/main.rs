@@ -1,4 +1,5 @@
 mod batch;
+mod color_veto;
 mod daemon;
 mod elevation;
 mod expand;
@@ -182,6 +183,13 @@ async fn main() -> std::io::Result<()> {
     let logging_config = LoggingConfig::from(&cli);
 
     init_tracing(logging_config, cli.daemon)?;
+
+    // Before any shell is spawned: what the chain above said about its own
+    // output is not said about the programs the user runs in a terminal.
+    let stripped = color_veto::strip_inherited_from_process();
+    if !stripped.is_empty() {
+        tracing::info!(variables = ?stripped, "not passing these on to spawned shells");
+    }
 
     if cli.stop {
         let socket = match cli.socket {

@@ -13,6 +13,7 @@ export const ALL_CATEGORIES: CategoryDef[] = [
 	{ id: "terminal", label: "Terminal", scopes: ["global", "host", "channel"] },
 	{ id: "environment", label: "Environment", scopes: ["global", "host", "channel"] },
 	{ id: "tabs", label: "Tabs", scopes: ["global"] },
+	{ id: "confirmations", label: "Confirmations", scopes: ["global"] },
 	{ id: "channels", label: "Channels", scopes: ["global"] },
 	{ id: "panes", label: "Panes", scopes: ["global"] },
 	{ id: "search", label: "Search", scopes: ["global"] },

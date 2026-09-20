@@ -70,6 +70,8 @@ export interface SendSpawnOpts {
 	suppressClientError?: boolean;
 	resolvedElevated?: boolean;
 	resolvedElevationMethod?: string;
+	/** The dead channel this spawn brings back, if it is one. */
+	reuseChannelId?: string;
 }
 
 export class ChannelLifecycleManager {
@@ -140,6 +142,7 @@ export class ChannelLifecycleManager {
 			suppressClientError = false,
 			resolvedElevated = false,
 			resolvedElevationMethod = undefined,
+			reuseChannelId = undefined,
 		} = opts;
 		this.ctx.hubLogger?.log("debug", "channel-lifecycle: sendSpawnAndWait entry", {
 			hostId,
@@ -203,24 +206,37 @@ export class ChannelLifecycleManager {
 
 					const { channelId } = spawnOk;
 
-					this.ctx.metaDal.createChannel({
-						id: channelId,
-						sessionId: session.id,
-						status: "born",
-						...(resolvedShell !== undefined ? { shell: resolvedShell } : {}),
-						...(resolvedArgs.length > 0 && { args: resolvedArgs }),
-						...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
-						cols,
-						rows,
-						...(resolvedDirectProcess && { directProcess: resolvedDirectProcess }),
-						...(resolvedLaunchProfileId !== undefined && {
-							launchProfileId: resolvedLaunchProfileId,
-						}),
-						...(resolvedElevated && { elevated: true }),
-						...(resolvedElevationMethod !== undefined && {
-							elevationMethod: resolvedElevationMethod,
-						}),
-					});
+					// A terminal being brought back keeps its row: its tab, its
+					// scrollback and everything else keyed by this id. What it needs
+					// is the session it now belongs to, which is a new one whenever
+					// the hub has been restarted since it died.
+					if (reuseChannelId !== undefined && reuseChannelId === channelId) {
+						this.ctx.metaDal.reviveChannel(channelId, session.id, cols, rows);
+						this.ctx.metaDal.updateChannelConfig(channelId, {
+							...(resolvedShell !== undefined ? { shell: resolvedShell } : {}),
+							...(resolvedArgs.length > 0 ? { args: resolvedArgs } : {}),
+							...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
+						});
+					} else {
+						this.ctx.metaDal.createChannel({
+							id: channelId,
+							sessionId: session.id,
+							status: "born",
+							...(resolvedShell !== undefined ? { shell: resolvedShell } : {}),
+							...(resolvedArgs.length > 0 && { args: resolvedArgs }),
+							...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
+							cols,
+							rows,
+							...(resolvedDirectProcess && { directProcess: resolvedDirectProcess }),
+							...(resolvedLaunchProfileId !== undefined && {
+								launchProfileId: resolvedLaunchProfileId,
+							}),
+							...(resolvedElevated && { elevated: true }),
+							...(resolvedElevationMethod !== undefined && {
+								elevationMethod: resolvedElevationMethod,
+							}),
+						});
+					}
 
 					this.ctx.channels.set(channelId, {
 						sessionId: session.id,

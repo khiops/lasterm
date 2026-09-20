@@ -75,6 +75,9 @@
 									<DesktopCategory
 										v-else-if="settingsStore.activeCategory === 'desktop'"
 									/>
+									<ConfirmationsCategory
+										v-else-if="settingsStore.activeCategory === 'confirmations'"
+									/>
 									<SchemaCategory
 										v-else-if="settingsStore.activeCategory !== 'keybindings'"
 										:category="settingsStore.activeCategory"
@@ -117,6 +120,7 @@ import CategoryNav from './CategoryNav.vue';
 import AgentManagerCategory from './categories/AgentManagerCategory.vue';
 import AppearanceCategory from './categories/AppearanceCategory.vue';
 import DesktopCategory from './categories/DesktopCategory.vue';
+import ConfirmationsCategory from './categories/ConfirmationsCategory.vue';
 import ElevationCategory from './categories/ElevationCategory.vue';
 import EnvironmentCategory from './categories/EnvironmentCategory.vue';
 import KeybindingsCategory from './categories/KeybindingsCategory.vue';

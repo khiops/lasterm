@@ -264,6 +264,10 @@ export class MetaDAL {
 		this.channels.updateChannelStatus(id, status, exitCode);
 	}
 
+	reviveChannel(id: string, sessionId: string, cols: number, rows: number): boolean {
+		return this.channels.reviveChannel(id, sessionId, cols, rows);
+	}
+
 	updateChannelDimensions(id: string, cols: number, rows: number): boolean {
 		return this.channels.updateChannelDimensions(id, cols, rows);
 	}

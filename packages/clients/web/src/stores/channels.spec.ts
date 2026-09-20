@@ -613,6 +613,47 @@ describe("useChannelsStore — handleChannelCreated", () => {
 		expect(store.channels[0]?.status).toBe("live");
 	});
 
+	// A dead terminal brought back keeps its id, so the message about it arrives
+	// for a channel the client already has. Skipping it left the terminal greyed
+	// out in the sidebar with its shell running behind it, and a second Restart
+	// then opened a stranger beside it.
+	it("takes the hub's word for a terminal that has come back", async () => {
+		mockFetch.mockImplementation((url: string) =>
+			Promise.resolve({
+				ok: true,
+				json: () =>
+					Promise.resolve(
+						url.includes("/api/channels")
+							? [
+									{
+										id: "ch-new",
+										session_id: "sess-old",
+										shell: "/bin/bash",
+										cols: 80,
+										rows: 24,
+										status: "dead",
+										created_at: "2026-01-01T00:00:00Z",
+										updated_at: "2026-01-01T00:00:00Z",
+									},
+								]
+							: [],
+					),
+			}),
+		);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		expect(store.channels[0]?.status).toBe("dead");
+
+		store.handleChannelCreated(
+			makeCreatedMsg({ sessionId: "sess-new", status: "live", cols: 120, rows: 40 }),
+		);
+
+		expect(store.channels).toHaveLength(1);
+		expect(store.channels[0]?.status).toBe("live");
+		expect(store.channels[0]?.sessionId).toBe("sess-new");
+		expect(store.channels[0]?.cols).toBe(120);
+	});
+
 	it("channel becomes visible with status live — no pendingStatuses gap", async () => {
 		// This proves the grey-icon race is gone: the channel enters the list
 		// already-live so updateChannelStatus never needs to buffer it.

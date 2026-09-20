@@ -247,6 +247,16 @@ export interface UiSpawnMessage {
 	directProcess?: boolean;
 	launchProfileId?: string;
 	elevated?: boolean;
+	/**
+	 * Restart a terminal that has died, keeping it the same terminal.
+	 *
+	 * A dead channel has no session and no agent left — the hub it belonged to
+	 * may be gone — so bringing it back is a spawn, not a restart of something
+	 * running. Naming its id here keeps the tab, the scrollback and the
+	 * settings that hang off it, where a plain spawn would leave the dead one
+	 * behind and open a stranger beside it.
+	 */
+	reuseChannelId?: string;
 }
 
 /** Hub → UI: channel spawned successfully */

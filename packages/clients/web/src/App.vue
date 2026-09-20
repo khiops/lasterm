@@ -273,7 +273,7 @@
 					:get-tab-label="layout.getTabLabel"
 					:get-active-channel-id="layout.getActiveChannelId"
 					@select-tab="layout.setActiveTab"
-					@close-tab="layout.closeTab"
+					@close-tab="onCloseTab"
 					@close-others="onCloseOthers"
 					@close-to-right="layout.closeToRight"
 					@close-all="onCloseAll"
@@ -1243,6 +1243,46 @@ async function onPurgeDead(): Promise<void> {
 		}
 	}
 	await channelsStore.purgeDeadChannels();
+}
+
+/**
+ * Close a tab, and with it the dead terminals it was showing.
+ *
+ * A live terminal keeps running when its tab goes: that is the promise of the
+ * thing, and the tab can be opened again from the sidebar. A dead one has
+ * nothing left to come back to, and leaving it listed is how a sidebar fills
+ * with terminals nobody will ever look at again — so closing its tab deletes
+ * it, and its scrollback goes too, which is worth asking about once.
+ */
+function onCloseTab(index: number): void {
+	const tab = layout.tabs.value[index];
+	const root = tab ? layout.layouts.value[tab.id] : undefined;
+	const deadIds =
+		root === null || root === undefined
+			? []
+			: collectTerminalChannelIds(root).filter(
+					(id) => channelsStore.channels.find((c) => c.id === id)?.status === 'dead',
+				);
+
+	const closeAndDelete = () => {
+		layout.closeTab(index);
+		for (const id of deadIds) void channelsStore.deleteChannel(id);
+	};
+
+	if (deadIds.length === 0 || shouldSkipConfirm('ConfirmCloseDeadTab')) {
+		closeAndDelete();
+		return;
+	}
+	confirmDialog.value = {
+		visible: true,
+		title: deadIds.length === 1 ? 'Delete this dead terminal?' : `Delete ${deadIds.length} dead terminals?`,
+		message:
+			'The tab is closing on a terminal that has already ended. Deleting it takes its scrollback with it; keeping it leaves it listed in the sidebar.',
+		confirmLabel: 'Close and delete',
+		action: closeAndDelete,
+		actionKey: 'ConfirmCloseDeadTab',
+		showRemember: true,
+	};
 }
 
 /**

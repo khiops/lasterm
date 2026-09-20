@@ -141,6 +141,15 @@ export function usePlatformInfo(): Ref<WindowEffectsPlatformInfo | null> {
 	return platformInfo;
 }
 
+/** Asks the app to offer the restart a background is waiting for. */
+export const WINDOW_BACKGROUND_RESTART_EVENT = "nt:window-background-restart";
+
+/** What the restart offer carries: the effect, and how to name it. */
+export interface WindowBackgroundRestartDetail {
+	effect: string;
+	name: string;
+}
+
 /** What the desktop answers when it is asked for a background. */
 interface WindowBackgroundOutcome {
 	applied: boolean;
@@ -165,12 +174,12 @@ async function askForWindowBackground(effect: string): Promise<void> {
 	// The window a Windows material needs is not the window a see-through
 	// background needs — DWM paints its material for an opaque window and skips
 	// one carrying per-pixel alpha — and which of the two a window is, is
-	// settled when it is created. So this one is kept for the next launch.
-	const { useToastStore } = await import("../stores/toast.js");
-	useToastStore().show(
-		"info",
-		`${EFFECT_NAMES[effect] ?? effect} needs a window of its own — restart Lasterm to see it.`,
-		8000,
+	// settled when it is created. The background is kept for the next launch,
+	// and the app offers to make that launch now.
+	window.dispatchEvent(
+		new CustomEvent(WINDOW_BACKGROUND_RESTART_EVENT, {
+			detail: { effect, name: EFFECT_NAMES[effect] ?? effect },
+		}),
 	);
 }
 
@@ -197,33 +206,20 @@ export function useWindowEffects(options: {
 	let appliedEffect: NativeWindowEffect | null = null;
 	let applying = false;
 	let stopped = false;
-	/** Nothing has been said to the window yet, whatever it may already carry. */
-	let neverApplied = true;
-
-	/**
-	 * Whether the window still has to be told its background once.
-	 *
-	 * Only Windows moves the window between two shapes, and a window rebuilt
-	 * for a material stays one: at startup it must hear the stored background
-	 * even when that is see-through. Nowhere else is there anything to say.
-	 */
-	function owesFirstWord(): boolean {
-		return neverApplied && options.platformInfo.value?.os === "windows";
-	}
 
 	function runApply(): void {
 		if (applying || stopped) return;
-		if (desiredEffect === appliedEffect && !owesFirstWord()) return;
+		if (desiredEffect === appliedEffect) return;
 
 		const runGeneration = generation;
 		const effectAtStart = desiredEffect;
 		applying = true;
 		void (async () => {
-			// The window keeps the shape a previous run left it in, so the first
-			// word is always said: a window rebuilt for a material stays one
-			// until it is told the background is see-through again.
-			if (effectAtStart === null && appliedEffect === null && !owesFirstWord()) return;
-			neverApplied = false;
+			// The desktop was built for the background it remembers, so there is
+			// nothing to say until the resolved one changes. Saying it anyway
+			// would speak for the default this state holds until the active
+			// pane's profile arrives — and offer a restart nobody asked for.
+			if (effectAtStart === null && appliedEffect === null) return;
 
 			const win = await getWindow();
 			if (win === null || stopped) return;
@@ -255,7 +251,7 @@ export function useWindowEffects(options: {
 				options.displayedEffectState.value,
 				options.platformInfo.value,
 			);
-			if (nextEffect === desiredEffect && nextEffect === appliedEffect && !owesFirstWord()) return;
+			if (nextEffect === desiredEffect && nextEffect === appliedEffect) return;
 			desiredEffect = nextEffect;
 			generation += 1;
 			runApply();

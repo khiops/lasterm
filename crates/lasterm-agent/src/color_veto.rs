@@ -35,6 +35,12 @@ where
 }
 
 /// Drop them from this process, so no shell it spawns inherits them.
+///
+/// Call this before the process has threads. The PTY spawn reads the same
+/// environment to build each child's, and changing it under a running runtime
+/// is unsound — `std::env::remove_var` is `unsafe` from the 2024 edition for
+/// that reason. Done from inside the runtime, the agent wedged: it accepted
+/// connections and answered no SPAWN.
 pub fn strip_inherited_from_process() -> Vec<&'static str> {
     strip_inherited(
         |name| std::env::var_os(name).is_some(),

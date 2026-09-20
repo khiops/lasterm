@@ -176,17 +176,28 @@ fn daemon_process_exit_status(result: &std::io::Result<pty::DestroyAllSummary>) 
     }
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
+    // Before the runtime starts a single thread. Changing the environment of a
+    // process that already has threads is the one thing this must not do: the
+    // PTY spawn reads that same environment to build each child's, and Rust
+    // makes the call `unsafe` from the 2024 edition for exactly that reason.
+    // Done from inside the runtime, the agent wedged — accepting connections,
+    // answering no SPAWN — and every terminal in the window went quiet.
+    let stripped = color_veto::strip_inherited_from_process();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(stripped))
+}
+
+async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     // Parse CLI args
     let cli = Cli::parse();
     let logging_config = LoggingConfig::from(&cli);
 
     init_tracing(logging_config, cli.daemon)?;
 
-    // Before any shell is spawned: what the chain above said about its own
-    // output is not said about the programs the user runs in a terminal.
-    let stripped = color_veto::strip_inherited_from_process();
     if !stripped.is_empty() {
         tracing::info!(variables = ?stripped, "not passing these on to spawned shells");
     }

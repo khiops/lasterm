@@ -24,6 +24,7 @@ import type {
 	LogConfig,
 	PanesConfig,
 	SearchConfig,
+	SshConfig,
 	StartupConfig,
 	TabsConfig,
 	TerminalProfile,
@@ -37,6 +38,7 @@ import {
 	DEFAULT_ELEVATION_CONFIG,
 	DEFAULT_LAYOUT_CONFIG,
 	DEFAULT_PROFILE,
+	DEFAULT_SSH_CONFIG,
 	deepMerge,
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
@@ -495,6 +497,21 @@ export function extractAppearanceConfig(parsed: TOML.JsonMap): AppearanceConfig 
 	return config;
 }
 
+/** Extract SshConfig from a parsed TOML map's [ssh] section. */
+export function extractSshConfig(parsed: TOML.JsonMap): Partial<SshConfig> {
+	const result: Partial<SshConfig> = {};
+
+	const section = parsed.ssh;
+	if (section == null || typeof section !== "object") return result;
+	const raw = section as Record<string, unknown>;
+
+	if (typeof raw.trust_known_hosts === "boolean") {
+		result.trustKnownHosts = raw.trust_known_hosts;
+	}
+
+	return result;
+}
+
 /** Extract ElevationConfig from a parsed TOML map's [elevation] section. */
 export function extractElevationConfig(parsed: TOML.JsonMap): Partial<ElevationConfig> {
 	const result: Partial<ElevationConfig> = {};
@@ -729,6 +746,7 @@ export class ConfigResolver {
 	private _uiConfig: UiConfig = { ...DEFAULT_UI_CONFIG };
 	private _appearance: AppearanceConfig = { ...DEFAULT_APPEARANCE };
 	private _elevation: ElevationConfig = { ...DEFAULT_ELEVATION_CONFIG };
+	private _ssh: SshConfig = { ...DEFAULT_SSH_CONFIG };
 	private _corsOrigins: string[] = [...DEFAULT_CORS_ORIGINS];
 	private _logConfig: LogConfig = { ...DEFAULT_LOG_CONFIG };
 	private _agentConfig: AgentConfig = { ...DEFAULT_AGENT_CONFIG };
@@ -754,6 +772,11 @@ export class ConfigResolver {
 	/** Returns the resolved elevation configuration (defaults merged with [elevation] from config.toml). */
 	get elevationConfig(): ElevationConfig {
 		return this._elevation;
+	}
+
+	/** Returns the resolved SSH configuration (defaults merged with [ssh] from config.toml). */
+	get sshConfig(): SshConfig {
+		return this._ssh;
 	}
 
 	/** Returns the resolved CORS origin patterns (defaults or [server] cors_origins from config.toml). */
@@ -818,6 +841,9 @@ export class ConfigResolver {
 		// ── [elevation] section ────────────────────────────────────────────
 		const elevationOverrides = extractElevationConfig(parsed);
 		this._elevation = { ...DEFAULT_ELEVATION_CONFIG, ...elevationOverrides };
+
+		// ── [ssh] section ──────────────────────────────────────────────────
+		this._ssh = { ...DEFAULT_SSH_CONFIG, ...extractSshConfig(parsed) };
 
 		// ── [server] cors_origins ───────────────────────────────────────────
 		const corsOverride = extractCorsConfig(parsed);
@@ -917,6 +943,7 @@ export class ConfigResolver {
 			},
 			appearance: this._appearance,
 			elevation: { ...this._elevation },
+			ssh: { ...this._ssh },
 		};
 
 		return response;

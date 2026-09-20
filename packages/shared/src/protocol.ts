@@ -423,6 +423,21 @@ export interface HostVerifyMessage {
 	firstConnect?: boolean;
 	/** The address that presented the key: the host may not be saved yet, so its id names nothing. */
 	hostname?: string;
+	/**
+	 * What this machine's OpenSSH configuration already says about this key.
+	 *
+	 * `trusted` — the very key is in `known_hosts`, and the prompt can say so
+	 * and offer to take that as reason enough from now on. `other-key` — the
+	 * host is known there under a *different* key, which is the case the loud
+	 * warning exists for and never a reason to trust.
+	 */
+	knownHosts?: {
+		verdict: "trusted" | "other-key";
+		/** The file that holds the line, as a person would name it. */
+		file: string;
+		/** 1-based, as `ssh -v` reports it. */
+		line: number;
+	};
 }
 
 /** UI → Hub: user decision on unknown fingerprint */

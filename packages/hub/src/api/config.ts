@@ -5,6 +5,7 @@ import {
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
+	SSH_CONFIG_KEYS,
 	TERMINAL_PROFILE_KEYS,
 	UI_CONFIG_SECTIONS,
 	UI_SECTION_KEYS,
@@ -274,6 +275,41 @@ export function registerConfigRoutes(
 		}
 		const profileRaw = metaDal.getChannelProfile(id);
 		return { profile: profileRaw ? JSON.parse(profileRaw) : {} };
+	});
+
+	// GET /api/config/ssh — read the SSH section
+	server.get("/api/config/ssh", async () => {
+		return configResolver.sshConfig;
+	});
+
+	// PUT /api/config/ssh — write SSH keys to config.toml
+	server.put("/api/config/ssh", async (request, reply) => {
+		const body = request.body as Record<string, unknown> | null;
+		if (!body || typeof body !== "object") {
+			return reply.code(400).send({
+				error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+			});
+		}
+
+		for (const [key, value] of Object.entries(body)) {
+			if (!(SSH_CONFIG_KEYS as readonly string[]).includes(key)) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: `Unknown ssh key: ${key}` },
+				});
+			}
+			if (typeof value !== "boolean") {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: `ssh.${key} must be a boolean` },
+				});
+			}
+		}
+
+		for (const [key, value] of Object.entries(body)) {
+			// saveGlobalKey reloads the file, so the getter below answers with
+			// what was just written.
+			await configResolver.saveGlobalKey("ssh", key, value);
+		}
+		return configResolver.sshConfig;
 	});
 
 	// GET /api/config/elevation — read current elevation config

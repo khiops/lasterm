@@ -28,6 +28,7 @@ import {
 	extractAppearanceConfig,
 	extractElevationConfig,
 	extractLogConfig,
+	extractSshConfig,
 	extractUiConfig,
 	loadGcConfig,
 	loadTlsConfig,
@@ -56,6 +57,22 @@ vi.mock("./session/ssh-agent.js", () => {
 });
 
 // ─── deepMerge unit tests ─────────────────────────────────────────────────────
+
+describe("extractSshConfig", () => {
+	it("takes the trust setting from the [ssh] section", () => {
+		expect(extractSshConfig({ ssh: { trust_known_hosts: true } })).toEqual({
+			trustKnownHosts: true,
+		});
+	});
+
+	// A key that is not a boolean was never an answer to this question, and the
+	// default it falls back to is the careful one.
+	it("ignores a section that says nothing usable", () => {
+		expect(extractSshConfig({})).toEqual({});
+		expect(extractSshConfig({ ssh: "yes" } as never)).toEqual({});
+		expect(extractSshConfig({ ssh: { trust_known_hosts: "yes" } })).toEqual({});
+	});
+});
 
 describe("deepMerge", () => {
 	it("scalar override: later value wins", () => {

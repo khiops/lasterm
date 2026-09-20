@@ -110,6 +110,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 			methodDarwin: "sudo",
 			methodWindows: "gsudo",
 		},
+		ssh: { trustKnownHosts: false },
 		...overrides,
 	};
 }

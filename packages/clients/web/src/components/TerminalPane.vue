@@ -208,6 +208,7 @@ const {
 	reattachChannel,
 	applyProfile,
 	suppressNextResize,
+	syncChannelSize,
 	dispose,
 	canWrite,
 	currentDynamicTitle,
@@ -363,10 +364,14 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				});
 				pendingHostId.value = null;
 				internalChannelId.value = realId;
-				// PTY was spawned at exact terminal dims — suppress the RESIZE
-				// that attachChannel would otherwise send (prevents SIGWINCH)
-				suppressNextResize();
+				// PTY was spawned at these dims — suppress the RESIZE that
+				// attachChannel would otherwise send (prevents SIGWINCH)
+				suppressNextResize(cols, rows);
 				attachChannel(realId);
+				// And now that there is a channel to tell: a font arriving while
+				// it was being created refits the terminal, and that fit had
+				// nobody to send its size to.
+				syncChannelSize();
 				emit('channel-spawned', props.channelId, realId);
 			} else {
 				// Dead channels must not send ATTACH — the hub rejects with

@@ -77,6 +77,18 @@ function apiGroupToChannelGroup(
  *
  * CHANNEL_STATE WebSocket messages update channel status in real time.
  */
+/** How long a spawn waits for the hub, when the hub has only itself to consult. */
+const SPAWN_DEADLINE_MS = 10_000;
+
+/**
+ * How long it waits once a prompt is on screen.
+ *
+ * Long enough to compare a fingerprint against another source, or to go and
+ * fetch a passphrase, and short enough that a hub which has genuinely stopped
+ * answering does not leave a spawn pending for ever.
+ */
+const SPAWN_PROMPTED_DEADLINE_MS = 300_000;
+
 export const useChannelsStore = defineStore("channels", () => {
 	const authStore = useAuthStore();
 
@@ -672,18 +684,42 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Both are assigned synchronously before any async event fires.
 			let unsubOk: () => void;
 			let unsubErr: () => void;
+			let unsubPrompts: Array<() => void> = [];
 
-			const timer = setTimeout(() => {
+			const stopWaiting = (): void => {
 				unsubOk();
 				unsubErr();
+				for (const unsub of unsubPrompts) unsub();
+			};
+
+			let timer = setTimeout(() => {
+				stopWaiting();
 				reject(new Error("SPAWN timeout — no SPAWN_OK after 10s"));
-			}, 10_000);
+			}, SPAWN_DEADLINE_MS);
+
+			// A prompt this spawn caused is a question for a person — a fingerprint
+			// to compare, a passphrase to fetch — and ten seconds is not that. The
+			// clock stops while one is on screen, leaving the long backstop for a
+			// hub that has genuinely stopped answering; what comes back is
+			// SPAWN_OK, or the ERROR the hub sends when the answer was no.
+			const holdForAnAnswer = (msg: { type: string; hostId?: string }): void => {
+				if (msg.hostId !== undefined && msg.hostId !== hostId) return;
+				clearTimeout(timer);
+				timer = setTimeout(() => {
+					stopWaiting();
+					reject(new Error("The hub stopped answering while a prompt was open."));
+				}, SPAWN_PROMPTED_DEADLINE_MS);
+			};
+			unsubPrompts = (["HOST_VERIFY", "AUTH_PROMPT", "AGENT_BINARY_VERIFY"] as const).map((type) =>
+				sessionStore.wsClient.on(type, (msg) => {
+					holdForAnAnswer(msg as unknown as { type: string; hostId?: string });
+				}),
+			);
 
 			unsubOk = sessionStore.wsClient.on("SPAWN_OK", (msg) => {
 				if (msg.type === "SPAWN_OK") {
 					clearTimeout(timer);
-					unsubOk();
-					unsubErr();
+					stopWaiting();
 					void fetchChannels(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);
@@ -703,8 +739,7 @@ export const useChannelsStore = defineStore("channels", () => {
 						return;
 					}
 					clearTimeout(timer);
-					unsubOk();
-					unsubErr();
+					stopWaiting();
 					reject(new Error(`${msg.code}: ${msg.message}`));
 				}
 			});

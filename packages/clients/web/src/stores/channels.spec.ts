@@ -572,6 +572,83 @@ describe("useChannelsStore — spawnChannel agent sync handling", () => {
 });
 
 // ---------------------------------------------------------------------------
+// spawnChannel — the clock while a prompt is on screen
+// ---------------------------------------------------------------------------
+
+describe("useChannelsStore — spawnChannel waiting on a person", () => {
+	/** A hub that answers nothing until this test says so. */
+	function silentWsClient(): {
+		on: ReturnType<typeof vi.fn>;
+		send: ReturnType<typeof vi.fn>;
+		emit: (msg: Record<string, unknown>) => void;
+	} {
+		const listeners = new Map<string, ((msg: unknown) => void)[]>();
+		const on = vi.fn((type: string, cb: (msg: unknown) => void) => {
+			if (!listeners.has(type)) listeners.set(type, []);
+			listeners.get(type)?.push(cb);
+			return () => {
+				const arr = listeners.get(type) ?? [];
+				const idx = arr.indexOf(cb);
+				if (idx !== -1) arr.splice(idx, 1);
+			};
+		});
+		const send = vi.fn();
+		const emit = (msg: Record<string, unknown>): void => {
+			for (const cb of listeners.get(msg.type as string) ?? []) cb(msg);
+		};
+		return { on, send, emit };
+	}
+
+	// Ten seconds is the hub's own budget; it is not a budget for comparing a
+	// fingerprint against another source. A spawn that fails under the prompt it
+	// caused reports a timeout for something nobody was late for (#437).
+	it("stops counting the ten seconds once a prompt for this host arrives", async () => {
+		vi.useFakeTimers();
+		try {
+			const sessionStore = useSessionStore();
+			const ws = silentWsClient();
+			// @ts-expect-error — overwrite reactive wsClient for test
+			sessionStore.wsClient = { on: ws.on, send: ws.send };
+			const store = useChannelsStore();
+
+			const spawn = store.spawnChannel("host-1", { select: false });
+			const settled = vi.fn();
+			void spawn.then(settled, settled);
+
+			ws.emit({ type: "HOST_VERIFY", hostId: "host-1", promptId: "p1" });
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(settled).not.toHaveBeenCalled();
+
+			ws.emit({ type: "SPAWN_OK", channelId: "ch-new" });
+			await expect(spawn).resolves.toBe("ch-new");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("still gives up when nothing answers at all", async () => {
+		vi.useFakeTimers();
+		try {
+			const sessionStore = useSessionStore();
+			const ws = silentWsClient();
+			// @ts-expect-error — overwrite reactive wsClient for test
+			sessionStore.wsClient = { on: ws.on, send: ws.send };
+			const store = useChannelsStore();
+
+			const spawn = store.spawnChannel("host-1", { select: false });
+			const rejected = vi.fn();
+			void spawn.catch(rejected);
+
+			await vi.advanceTimersByTimeAsync(10_001);
+
+			expect(rejected).toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
 // handleChannelCreated — multi-client sync (CHANNEL_CREATED WS message)
 // ---------------------------------------------------------------------------
 

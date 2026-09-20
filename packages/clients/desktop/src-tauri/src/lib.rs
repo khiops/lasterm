@@ -4688,10 +4688,35 @@ fn request_app_quit(app: tauri::AppHandle) {
 /// replacement starts against a hub that is gone rather than one it must fight.
 fn finish_quit(app: &tauri::AppHandle) {
     if RESTART_AFTER_QUIT.swap(false, Ordering::SeqCst) {
-        std::env::set_var(RESTART_WAIT_ENV, "1");
-        app.restart();
+        match relaunch_detached() {
+            // Leave the way a killed desktop does, without the cleanup that
+            // kills the hub outright. A hub killed outright takes the agent
+            // with it, and the agent is what holds the terminals; a hub that
+            // sees its parent's pipe close ends of its own accord and leaves
+            // them running for the next hub to reattach.
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("[lasterm] WARN: cannot start the replacement desktop: {error}");
+            }
+        }
     }
     app.exit(0);
+}
+
+/// Start the desktop that replaces this one, told to wait for the lock.
+fn relaunch_detached() -> std::io::Result<()> {
+    let executable = std::env::current_exe()?;
+    let mut command = std::process::Command::new(executable);
+    command.env(RESTART_WAIT_ENV, "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Its own process group and console: the replacement outlives this one.
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    command.spawn().map(|_| ())
 }
 
 /// Leave and come back, so a background that needs the other window can be worn.

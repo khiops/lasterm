@@ -1625,6 +1625,40 @@ describe("SessionManager", () => {
 		expect(ch?.status).toBe("live");
 	});
 
+	// A restart is the same terminal asked for a second time, and the only
+	// moment a change of environment can reach one that already exists.
+	it("restarts a terminal with the environment its scopes set", async () => {
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const scoped = new SessionManager(dbManager, undefined, undefined, {
+			uiConfig: { title: { source: "dynamic", staticTitle: "" } },
+			resolve: () => ({ envMode: "inherit", env: { FROM_SCOPE: "yes" } }),
+			resolveElevationMethod: () => "sudo",
+		} as unknown as ConfigResolver);
+		scoped.addClient(makeClient("c-restart-env", []));
+
+		const host = dal.createHost({
+			type: "ssh",
+			label: "test-ssh-restart-env",
+			sshHost: "user@localhost",
+			sshAuth: "key",
+			sshKeyPath: "/nonexistent/key",
+		});
+		const channelId = await scoped.handleSpawn("c-restart-env", {
+			type: "SPAWN",
+			hostId: host.id,
+		});
+		if (channelId === null) throw new Error("expected a channel");
+
+		expect(await scoped.restartChannel(channelId)).toBe(true);
+
+		const spawns = (mockSshAgentInstance?.send.mock.calls ?? [])
+			.map(([message]) => message as unknown as { type: string; env?: Record<string, string> })
+			.filter((message) => message.type === "SPAWN");
+		expect(spawns).toHaveLength(2);
+		expect(spawns[1]?.env).toEqual({ FROM_SCOPE: "yes" });
+	});
+
 	it("restartChannel uses the channel id returned by SPAWN_OK for attach and snapshots", async () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeClient("c-restart-live-id", received);

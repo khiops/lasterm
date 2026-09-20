@@ -35,6 +35,7 @@ import {
 	isQuitFenceCurrent,
 	type QuitFence,
 } from "./quit-fence.js";
+import { scopedEnv } from "./scoped-env.js";
 import type {
 	ChannelState,
 	ElevationPromptOwner,
@@ -79,6 +80,27 @@ export class ChannelLifecycleManager {
 		private readonly ctx: SharedSessionContext,
 		private readonly broadcaster: StateBroadcaster,
 	) {}
+
+	/**
+	 * The environment a terminal is started again with.
+	 *
+	 * A restart is the same terminal asked for a second time, so it gets what a
+	 * new one would: the variables its scopes set, under the ones its launch
+	 * profile names. Without this a restart spawned with none of them, and a
+	 * change of environment could never reach a terminal that already existed —
+	 * the only moment it ever can.
+	 *
+	 * What the spawn request carried is not remembered: it spoke for that one
+	 * spawn, not for the terminal.
+	 */
+	private restartEnv(channelId: string, hostId: string): Record<string, string> {
+		const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
+		const channel = this.ctx.metaDal.getChannel(channelId);
+		const launchProfile = channel?.launchProfileId
+			? this.ctx.metaDal.getLaunchProfile(channel.launchProfileId)
+			: undefined;
+		return { ...scopedEnv(profile), ...(launchProfile?.env ?? {}) };
+	}
 
 	/** The only primitive allowed to emit a SPAWN frame. */
 	private sendGuardedSpawn(
@@ -396,7 +418,7 @@ export class ChannelLifecycleManager {
 				shell,
 				...(args.length > 0 && { args }),
 				cwd,
-				env: {},
+				env: this.restartEnv(channelId, hostId),
 				cols,
 				rows,
 				elevated: true,
@@ -573,7 +595,7 @@ export class ChannelLifecycleManager {
 			shell,
 			...(args.length > 0 && { args }),
 			cwd,
-			env: {},
+			env: this.restartEnv(channelId, hostId),
 			cols,
 			rows,
 		};
@@ -900,7 +922,7 @@ export class ChannelLifecycleManager {
 			shell,
 			...(args.length > 0 && { args }),
 			cwd,
-			env: {},
+			env: this.restartEnv(deadChannelId, hostId),
 			cols,
 			rows,
 		};
@@ -1041,7 +1063,7 @@ export class ChannelLifecycleManager {
 					shell: ch.shell,
 					...(ch.args !== undefined && ch.args.length > 0 && { args: ch.args }),
 					cwd: ch.cwd ?? process.env.HOME ?? process.env.USERPROFILE ?? "/",
-					env: {},
+					env: this.restartEnv(channelId, hostId),
 					cols: ch.cols,
 					rows: ch.rows,
 				},

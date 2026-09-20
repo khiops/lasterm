@@ -8,6 +8,7 @@ import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
 import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
+import { awaitTerminalFont } from "./terminal-font.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
 
 /** Maximum number of entries in the title stack (SC-05). */
@@ -17,6 +18,9 @@ const MAX_TITLE_STACK = 5;
  * xterm.js composable.
  * Manages terminal lifecycle, input/output bridging to hub via WS, and resize handling.
  */
+const DEFAULT_FONT_FAMILY = '"Consolas", "Liberation Mono", "Courier New", monospace';
+const DEFAULT_FONT_SIZE = 14;
+
 export function useTerminal(
 	containerRef: Ref<HTMLElement | null>,
 	wsClient: IWsClient,
@@ -80,6 +84,15 @@ export function useTerminal(
 		wsClient.send({ type: "RESIZE", channelId, cols, rows });
 	}
 
+	/** Wait for the font this terminal will measure itself with. */
+	function awaitFont(): Promise<void> {
+		return awaitTerminalFont(
+			document.fonts,
+			profile?.fontFamily ?? DEFAULT_FONT_FAMILY,
+			profile?.fontSize ?? DEFAULT_FONT_SIZE,
+		);
+	}
+
 	function init(): { cols: number; rows: number } {
 		if (!containerRef.value) {
 			console.error("[useTerminal] containerRef is null — cannot init");
@@ -102,8 +115,8 @@ export function useTerminal(
 			allowProposedApi: true,
 			allowTransparency: true,
 			cursorBlink: p?.cursorStyle !== "underline", // blink except underline (xterm default)
-			fontSize: p?.fontSize ?? 14,
-			fontFamily: p?.fontFamily ?? '"Consolas", "Liberation Mono", "Courier New", monospace',
+			fontSize: p?.fontSize ?? DEFAULT_FONT_SIZE,
+			fontFamily: p?.fontFamily ?? DEFAULT_FONT_FAMILY,
 			cursorStyle: p?.cursorStyle ?? "block",
 			scrollback: p?.scrollback ?? 5000,
 			overviewRuler: {
@@ -116,7 +129,16 @@ export function useTerminal(
 		term.loadAddon(new Unicode11Addon());
 		term.unicode.activeVersion = "11";
 		term.open(containerRef.value);
+		// Before the first fit, since what it counts is what the PTY is spawned with.
+		syncMeasuredFont(term);
 		fitAddon.fit();
+		// A font arriving late changes the cell, and with it the count: fit again
+		// so the terminal and its PTY agree even when the wait above was skipped.
+		void refitWhenFontSettles(
+			term,
+			p?.fontFamily ?? DEFAULT_FONT_FAMILY,
+			p?.fontSize ?? DEFAULT_FONT_SIZE,
+		);
 		search.init(term, { scrollbarMarkers });
 		terminal.value = term;
 
@@ -345,9 +367,8 @@ export function useTerminal(
 	function applyProfile(p: TerminalProfile): void {
 		const term = terminal.value;
 		if (!term) return;
-		term.options.fontFamily =
-			p.fontFamily ?? '"Consolas", "Liberation Mono", "Courier New", monospace';
-		term.options.fontSize = p.fontSize ?? 14;
+		term.options.fontFamily = p.fontFamily ?? DEFAULT_FONT_FAMILY;
+		term.options.fontSize = p.fontSize ?? DEFAULT_FONT_SIZE;
 		term.options.cursorStyle = p.cursorStyle ?? "block";
 		term.options.scrollback = p.scrollback ?? 5000;
 		scrollbarMarkers = p.scrollbarMarkers !== false;
@@ -357,6 +378,54 @@ export function useTerminal(
 		// bellStyle is not in the shipped @xterm/xterm type definition; cast to suppress
 		(term.options as Record<string, unknown>).bellStyle = "none";
 		fitAddon.fit();
+		// xterm measures a cell from the font in use, and a family just set — or
+		// still loading — is measured only once the browser has drawn with it. A
+		// fit in this tick keeps the old cell, which is how a PTY ended up 231
+		// columns wide in a window that holds 206.
+		void refitWhenFontSettles(
+			term,
+			p.fontFamily ?? DEFAULT_FONT_FAMILY,
+			p.fontSize ?? DEFAULT_FONT_SIZE,
+		);
+	}
+
+	/** Fit again once the font is loaded and the terminal has drawn with it. */
+	async function refitWhenFontSettles(
+		term: Terminal,
+		fontFamily: string,
+		fontSize: number,
+	): Promise<void> {
+		await awaitTerminalFont(document.fonts, fontFamily, fontSize);
+		if (terminal.value !== term) return;
+		syncMeasuredFont(term);
+		// The cell is measured while the terminal draws, so the fit that reads it
+		// has to come after that frame, not in the tick that asked for it.
+		await new Promise<void>((resolve) => {
+			requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+		});
+		if (terminal.value !== term) return;
+		fitAddon.fit();
+	}
+
+	/**
+	 * Tell xterm the font the page is actually rendering.
+	 *
+	 * The terminal's rows inherit their family from the pane's CSS, so a font
+	 * arriving late changes what is drawn without xterm noticing: it keeps the
+	 * cell it measured first — a fallback — and a window holding 206 columns was
+	 * fitted to 231, the width the PTY was then spawned and kept at.
+	 */
+	function syncMeasuredFont(term: Terminal): void {
+		const rows = containerRef.value?.querySelector(".xterm-rows");
+		if (!rows) return;
+		const rendered = getComputedStyle(rows).fontFamily;
+		if (!rendered) return;
+		// Assigning is what makes xterm measure a cell again, and it only reacts
+		// to a change. The first measure — taken before the web font arrived —
+		// would otherwise stand for the life of the terminal, so when the family
+		// already reads as the rendered one, go through another to come back.
+		if (term.options.fontFamily === rendered) term.options.fontFamily = "monospace";
+		term.options.fontFamily = rendered;
 	}
 
 	function dispose(): void {
@@ -384,6 +453,7 @@ export function useTerminal(
 
 	return {
 		terminal,
+		awaitFont,
 		canWrite,
 		currentDynamicTitle,
 		search,

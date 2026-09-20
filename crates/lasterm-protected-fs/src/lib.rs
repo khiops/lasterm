@@ -885,8 +885,20 @@ mod tests {
             AllowedCall {
                 source: "desktop",
                 call: "std::fs::create_dir_all(&dir)",
+                expected_occurrences: 2,
+                why: "creates the non-protected window-background and window-tone preference directory",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "std::fs::read_to_string(dir.join(WINDOW_TONE_FILE))",
                 expected_occurrences: 1,
-                why: "creates the non-protected window-background preference directory",
+                why: "reads the non-protected window-tone preference",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "std::fs::write(dir.join(WINDOW_TONE_FILE), if dark",
+                expected_occurrences: 1,
+                why: "writes the non-protected window-tone preference",
             },
             AllowedCall {
                 source: "desktop",

@@ -1287,6 +1287,80 @@ fn extend_frame_for_material<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>
 fn extend_frame_for_material<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>, _material: bool) {
 }
 
+/// The file remembering whether the theme in use is a dark one.
+const WINDOW_TONE_FILE: &str = "window-tone";
+
+/// Tell DWM which tint to paint its material in.
+///
+/// Mica and Acrylic come in a light and a dark tint, and DWM takes the choice
+/// from the window, never from the page: a dark theme under the light tint
+/// reads as a pale film over everything. The window carries no decorations, so
+/// this attribute does nothing else here.
+#[cfg(windows)]
+fn set_window_tone<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, dark: bool) {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+
+    let handle = match window.hwnd() {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("[lasterm] WARN: cannot reach the window to set its tone: {error}");
+            return;
+        }
+    };
+    let dark = BOOL::from(dark);
+    // SAFETY: the handle belongs to a window this process owns and is alive for
+    // the call; the value lives until it returns.
+    if let Err(error) = unsafe {
+        DwmSetWindowAttribute(
+            HWND(handle.0 as *mut _),
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &raw const dark as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        )
+    } {
+        eprintln!("[lasterm] WARN: cannot set the window tone: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn set_window_tone<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>, _dark: bool) {}
+
+/// The tone the window was last told about, for the launch that comes before
+/// the page can say it again.
+fn remembered_window_tone() -> bool {
+    lasterm_config_dir()
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join(WINDOW_TONE_FILE)).ok())
+        .map(|value| value.trim() == "dark")
+        .unwrap_or(false)
+}
+
+fn remember_window_tone(dark: bool) {
+    let Ok(dir) = lasterm_config_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(dir.join(WINDOW_TONE_FILE), if dark { "dark" } else { "light" });
+}
+
+/// Take the tone of the theme the page is showing.
+///
+/// Applied at once — no surface depends on it — and remembered, so the next
+/// launch paints its material in the right tint before the page has loaded.
+#[tauri::command]
+fn apply_window_tone(app: tauri::AppHandle, dark: bool) -> Result<(), String> {
+    remember_window_tone(dark);
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    set_window_tone(&window, dark);
+    Ok(())
+}
+
 /// The background the window was last asked for, as the web client named it.
 fn remembered_window_background() -> String {
     lasterm_config_dir()
@@ -5415,6 +5489,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         if matches!(surface_at_launch, WindowSurface::Material) {
             clear_webview_background(window);
         }
+        // Before the page can say it again: a material painted in the wrong
+        // tint is the first thing seen of a launch.
+        set_window_tone(window, remembered_window_tone());
         if let Err(error) = apply_window_effect(window, &background_at_launch) {
             eprintln!(
                 "[lasterm] WARN: cannot apply the window background {background_at_launch}: {error}"
@@ -5511,6 +5588,7 @@ pub fn run() {
             quit_after_hub_exit,
             restart_hub_after_exit,
             apply_window_background,
+            apply_window_tone,
             restart_desktop
         ])
         .on_window_event(|window, event| {

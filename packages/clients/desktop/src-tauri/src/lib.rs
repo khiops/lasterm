@@ -1016,7 +1016,35 @@ fn validate_runtime_dir(path: &Path, metadata: &std::fs::Metadata) -> Result<(),
 fn acquire_desktop_instance() -> Result<DesktopInstanceStartup, String> {
     let lock_path = desktop_instance_lock_path()?;
     let endpoint = desktop_raise_endpoint(&lock_path)?;
+    if started_by_restart() {
+        wait_for_desktop_instance_lock(&lock_path);
+    }
     acquire_desktop_instance_at(&lock_path, &endpoint)
+}
+
+/// Whether this process is the one a restart started, asked once: a child of
+/// this process must not inherit the wait.
+fn started_by_restart() -> bool {
+    let restarted = std::env::var_os(RESTART_WAIT_ENV).is_some();
+    if restarted {
+        std::env::remove_var(RESTART_WAIT_ENV);
+    }
+    restarted
+}
+
+/// Wait for the process being replaced to let go of the single-instance lock.
+/// Giving up means starting anyway, which ends as a second instance would.
+fn wait_for_desktop_instance_lock(lock_path: &Path) {
+    for _ in 0..RESTART_LOCK_TRIES {
+        match ProcessLock::try_acquire(lock_path) {
+            Ok(Some(lock)) => {
+                drop(lock);
+                return;
+            }
+            _ => std::thread::sleep(RESTART_LOCK_WAIT),
+        }
+    }
+    eprintln!("[lasterm] WARN: the replaced desktop still holds the instance lock");
 }
 
 fn acquire_desktop_instance_at(
@@ -1128,6 +1156,21 @@ enum MainWindowStartupOutcome {
 
 // ── Window surface (see-through vs material) ─────────────────────────────────
 
+/// Set when the quit under way is a restart: the app comes back instead of
+/// ending. A window is built for its background, so a background that needs the
+/// other window is worn after a relaunch and not before.
+static RESTART_AFTER_QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Passed to the process a restart starts, which must wait for the one it
+/// replaces to let go of the single-instance lock. Without the wait the new
+/// process reads a held lock, calls itself a second instance, and leaves —
+/// raising a window that is on its way out.
+const RESTART_WAIT_ENV: &str = "LASTERM_RESTART_WAIT";
+
+/// How long the replacement waits for the lock, and how often it looks.
+const RESTART_LOCK_TRIES: u32 = 200;
+const RESTART_LOCK_WAIT: Duration = Duration::from_millis(50);
+
 /// The file where the desktop keeps the background its window was last asked
 /// for. The setting of record lives in the profile the hub resolves; this is
 /// only what the window must be built as, and it has to be readable before
@@ -1156,9 +1199,6 @@ fn build_main_window<R: tauri::Runtime>(
             tauri::webview::NewWindowResponse::Deny
         })
         .build()?;
-    if matches!(surface, WindowSurface::Material) {
-        clear_webview_background(&window);
-    }
     Ok(window)
 }
 
@@ -4609,7 +4649,7 @@ fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
                 apply_quit_action(app, action);
             });
         }
-        QuitAction::Exit => app.exit(0),
+        QuitAction::Exit => finish_quit(&app),
         QuitAction::ExitWithDiagnostic(diagnostic) => {
             show_quit_diagnostic_then_exit(app, diagnostic)
         }
@@ -4640,6 +4680,31 @@ fn request_app_quit(app: tauri::AppHandle) {
             // acknowledgement or expiry path to manage here.
         }
     }
+}
+
+/// End the quit: leave, or come back when the quit was a restart.
+///
+/// The hub was asked to stop by the same coordination a real quit uses, so the
+/// replacement starts against a hub that is gone rather than one it must fight.
+fn finish_quit(app: &tauri::AppHandle) {
+    if RESTART_AFTER_QUIT.swap(false, Ordering::SeqCst) {
+        std::env::set_var(RESTART_WAIT_ENV, "1");
+        app.restart();
+    }
+    app.exit(0);
+}
+
+/// Leave and come back, so a background that needs the other window can be worn.
+///
+/// The hub is not asked to quit: it is this process's child and ends with it,
+/// exactly as it does when the app is closed and started again. The quit
+/// coordination is for a user who is leaving — it tells the hub to stop serving
+/// and the replacement would then meet a hub on its way out rather than start
+/// its own.
+#[tauri::command]
+fn restart_desktop(app: tauri::AppHandle) {
+    RESTART_AFTER_QUIT.store(true, Ordering::SeqCst);
+    finish_quit(&app);
 }
 
 fn handle_tray_quit(app: tauri::AppHandle) {
@@ -5139,10 +5204,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // before any startup path can look it up by label.
     let background = remembered_window_background();
     let _ = WINDOW_BACKGROUND_AT_LAUNCH.set(background.clone());
-    let window = build_main_window(app.handle(), window_material::surface_for_host(&background))?;
-    if let Err(error) = apply_window_effect(&window, &background) {
-        eprintln!("[lasterm] WARN: cannot apply the window background {background}: {error}");
-    }
+    build_main_window(app.handle(), window_material::surface_for_host(&background))?;
 
     // System tray
     let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
@@ -5233,9 +5295,15 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Show the main window (hidden by default in config).
     let main_window = app.get_webview_window("main");
+    let background_at_launch = remembered_at_launch();
+    let surface_at_launch = window_material::surface_for_host(&background_at_launch);
     if let Some(window) = main_window.as_ref() {
+        // A window carrying a material has its webview cleared for it instead:
+        // this colour is the see-through window's own.
         #[cfg(target_os = "windows")]
-        set_windows_transparent_background(window)?;
+        if matches!(surface_at_launch, WindowSurface::Alpha) {
+            set_windows_transparent_background(window)?;
+        }
 
         // Enable DevTools in debug builds only
         #[cfg(debug_assertions)]
@@ -5252,6 +5320,19 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("[lasterm] could not focus the shown main window: {error}");
         }
         MainWindowStartupOutcome::Shown { focus_error: None } => {}
+    }
+
+    // Only now: a window told its material while hidden loses it as it is
+    // shown, and comes up with the plain background it was built with.
+    if let Some(window) = main_window.as_ref() {
+        if matches!(surface_at_launch, WindowSurface::Material) {
+            clear_webview_background(window);
+        }
+        if let Err(error) = apply_window_effect(window, &background_at_launch) {
+            eprintln!(
+                "[lasterm] WARN: cannot apply the window background {background_at_launch}: {error}"
+            );
+        }
     }
 
     // Publish the handoff endpoint only after primary setup is complete. Until
@@ -5342,7 +5423,8 @@ pub fn run() {
             pick_and_read_agent_file,
             quit_after_hub_exit,
             restart_hub_after_exit,
-            apply_window_background
+            apply_window_background,
+            restart_desktop
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {

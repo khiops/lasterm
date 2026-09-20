@@ -51,7 +51,7 @@
 			:title="confirmDialog.title"
 			:message="confirmDialog.message"
 			:confirm-label="confirmDialog.confirmLabel"
-			:show-remember="true"
+			:show-remember="confirmDialog.showRemember"
 			@confirm="onConfirmAction"
 			@cancel="confirmDialog.visible = false"
 		/>
@@ -384,6 +384,8 @@ import {
 	isTauriRuntime,
 	usePlatformInfo,
 	useWindowEffects,
+	WINDOW_BACKGROUND_RESTART_EVENT,
+	type WindowBackgroundRestartDetail,
 } from './composables/useWindowEffects.js';
 import { useWindowTitle } from './composables/useWindowTitle.js';
 import { useAuthStore } from './stores/auth.js';
@@ -701,6 +703,8 @@ const confirmDialog = ref({
 	confirmLabel: 'Close',
 	action: null as (() => void) | null,
 	actionKey: '' as string,
+	// Offered once, for one choice: there is nothing to remember about it.
+	showRemember: true,
 });
 
 /**
@@ -718,6 +722,38 @@ function shouldSkipConfirm(action: string): boolean {
 /**
  * Handle confirm dialog result, including "Remember" persistence.
  */
+/**
+ * A background the running window cannot wear: offer the launch that can.
+ *
+ * A window is built see-through or built for a material, and which it is is
+ * settled when it is created — so this one waits for a new window, and the
+ * choice of when belongs to whoever asked for it.
+ */
+function onWindowBackgroundNeedsRestart(event: Event): void {
+	const detail = (event as CustomEvent<WindowBackgroundRestartDetail>).detail;
+	if (!detail) return;
+	confirmDialog.value = {
+		visible: true,
+		title: `Restart to show ${detail.name}?`,
+		message:
+			'A window wears this background from the moment it is created, so Lasterm has to start again to show it. Your terminals keep running and are re-attached.',
+		confirmLabel: 'Restart now',
+		action: () => {
+			void (async () => {
+				try {
+					const { invoke } = await import('@tauri-apps/api/core');
+					await invoke('restart_desktop');
+				} catch (error) {
+					console.error('[App] restart failed:', error);
+					toastStore.show('error', 'Lasterm could not restart; quit and start it again.');
+				}
+			})();
+		},
+		actionKey: 'ConfirmBackgroundRestart',
+		showRemember: false,
+	};
+}
+
 function onConfirmAction(remember: { host: boolean; global: boolean }): void {
 	const action = confirmDialog.value.action;
 	const actionKey = confirmDialog.value.actionKey;
@@ -756,6 +792,7 @@ function openPendingTab(hostId: string): void {
 onMounted(async () => {
 	// Ctrl+K / Cmd+K must be captured before Chrome's omnibox intercepts it (SC-14)
 	window.addEventListener('keydown', onGlobalKeydown, { capture: true });
+	window.addEventListener(WINDOW_BACKGROUND_RESTART_EVENT, onWindowBackgroundNeedsRestart);
 	try {
 		const { listen } = await import('@tauri-apps/api/event');
 		desktopCloseUnlisten = await listen<{ attemptId: number }>(
@@ -853,6 +890,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
 	window.removeEventListener('keydown', onGlobalKeydown, { capture: true });
+	window.removeEventListener(WINDOW_BACKGROUND_RESTART_EVENT, onWindowBackgroundNeedsRestart);
 	desktopCloseUnlisten?.();
 	hubExitUnlisten?.();
 	desktopCloseExpiryUnlisten?.();
@@ -1228,6 +1266,7 @@ function onKillChannel(channelId: string): void {
 		confirmLabel: 'Kill',
 		action: kill,
 		actionKey: 'ConfirmKill',
+		showRemember: true,
 	};
 }
 
@@ -1334,6 +1373,7 @@ function onCloseAll(): void {
 			confirmLabel: 'Close',
 			action: () => layout.closeAll(welcomeId),
 			actionKey: 'ConfirmCloseAll',
+			showRemember: true,
 		};
 	} else {
 		layout.closeAll(welcomeId);
@@ -1359,6 +1399,7 @@ function onCloseOthers(keepIndex: number): void {
 			confirmLabel: 'Close',
 			action: () => layout.closeOthers(keepIndex),
 			actionKey: 'ConfirmCloseOthers',
+			showRemember: true,
 		};
 	} else {
 		layout.closeOthers(keepIndex);

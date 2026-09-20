@@ -702,7 +702,11 @@ describe("SshConnectionManager — auth prompt timeout de-wedges host", () => {
 		vi.useRealTimers();
 	});
 
-	it("unanswered auth prompt resolves null after 120s, clears pending entry, and de-wedges acquiring slot", async () => {
+	// A passphrase is asked before anything is dialled, so the wait holds nothing
+	// open — and a wait on a person that expires throws away the answer that
+	// arrives a second later (#444). What ends it is the answer, or the person
+	// going away.
+	it("waits on a passphrase for as long as it takes", async () => {
 		vi.useFakeTimers();
 
 		const hostId = "host-timeout-1";
@@ -710,27 +714,41 @@ describe("SshConnectionManager — auth prompt timeout de-wedges host", () => {
 		const mgr = makeMgr(ctx);
 		const client = registerClient(ctx, "c-timeout-1");
 
-		// Invoke buildPromptAuth — this sends AUTH_PROMPT and registers the pending entry.
 		const promptAuth = mgr.buildPromptAuth(client);
+		const settled = vi.fn();
 		const promptPromise = promptAuth(hostId, "passphrase", "Enter passphrase");
+		void promptPromise.then(settled, settled);
 
-		// Entry must be registered with an armed timer (not null).
 		const promptId = onlyPromptId(ctx);
-		const pending = ctx.pendingPrompts.get(promptId);
-		expect(pending).toBeDefined();
-		expect(pending?.timer).not.toBeNull();
+		expect(ctx.pendingPrompts.get(promptId)?.timer).toBeNull();
+
+		await vi.advanceTimersByTimeAsync(600_000);
+
+		expect(settled).not.toHaveBeenCalled();
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
 
-		// Advance fake timers past AUTH_PROMPT_TIMEOUT_MS (120 000 ms).
-		// The async variant flushes the microtask queue so the resolved promise chain runs.
-		await vi.advanceTimersByTimeAsync(120_000);
+		mgr.handleAuthPromptResponse(client.id, hostId, "late but mine", false, promptId);
+		await expect(promptPromise).resolves.toBe("late but mine");
+	});
 
-		// The timeout callback must have: (1) deleted the entry, (2) resolved null.
-		expect(ctx.pendingPrompts.has(promptId)).toBe(false);
+	// Since time no longer ends it, the person leaving must: a context whose
+	// client is gone, with no other to route to, is cleared — and clearing
+	// resolves every prompt it holds, so the connect fails cleanly.
+	it("ends a passphrase wait when the person it was asked of is gone", async () => {
+		const hostId = "host-timeout-gone";
+		const ctx = makeCtx();
+		const mgr = makeMgr(ctx);
+		const client = registerClient(ctx, "c-timeout-gone");
 
-		const result = await promptPromise;
-		// null → SSH connect fails cleanly → acquire promise rejects → .finally clears acquiringSessions.
-		expect(result).toBeNull();
+		const promptAuth = mgr.buildPromptAuth(client);
+		const promptPromise = promptAuth(hostId, "passphrase", "Enter passphrase");
+		expect(ctx.pendingPrompts.size).toBe(1);
+
+		ctx.clients.delete(client.id);
+		clientDisconnect(ctx, client.id, () => {});
+
+		await expect(promptPromise).resolves.toBeNull();
+		expect(ctx.pendingPrompts.size).toBe(0);
 	});
 
 	it("answered prompt before timeout clears the timer so no double-resolve", async () => {

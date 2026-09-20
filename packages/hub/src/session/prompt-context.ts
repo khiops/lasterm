@@ -112,7 +112,13 @@ export function openContext(
  * failure the prompt is immediately cleaned up (no orphaned entry).
  * Guard B: context must be OPEN; rejected if absent or CLOSED.
  *
- * @param timeoutMs  Optional per-prompt timeout in ms. Defaults to PROMPT_TIMEOUT_MS (120s).
+ * @param timeoutMs  Optional per-prompt timeout in ms. Defaults to PROMPT_TIMEOUT_MS
+ *   (120 s). Pass `null` for a question that waits on a person with nothing
+ *   connected while it does: the answer ends the wait whenever it comes, and so
+ *   does the person leaving — a context whose client is gone, with no other to
+ *   route to, is cleared, and clearing resolves every prompt it holds. An hour
+ *   on the clock ends nothing that matters here, and teaches the one lesson a
+ *   security question must never teach: answer without reading (#444).
  *                   Pass a shorter value for prompt types that originally had tighter timeouts
  *                   (e.g. host-key verify and agent-binary verify both used 30s on origin/main).
  * @returns Promise resolved by respond() with the user's answer, or null on
@@ -124,7 +130,7 @@ export function prompt(
 	type: "passphrase" | "host_verify" | "agent_verify" | "elevation",
 	payload: unknown,
 	send: (clientId: string, msg: Record<string, unknown>) => void,
-	timeoutMs?: number,
+	timeoutMs?: number | null,
 ): Promise<unknown> | null {
 	// Guard B: re-read context and check CLOSED before doing anything.
 	const context = ctx.promptContexts.get(contextId);
@@ -179,11 +185,15 @@ export function prompt(
 	});
 	_inFlight.set(promptId, inFlight);
 
-	// Arm timeout (caller-supplied or 120 s default).
-	const timer = setTimeout(() => {
-		_clearPrompt(ctx, promptId);
-		_resolve(null);
-	}, timeoutMs ?? PROMPT_TIMEOUT_MS);
+	// Arm the timeout — unless this is a question for a person that holds
+	// nothing open while it waits, which is asked with `null` and expires never.
+	const timer =
+		timeoutMs === null
+			? null
+			: setTimeout(() => {
+					_clearPrompt(ctx, promptId);
+					_resolve(null);
+				}, timeoutMs ?? PROMPT_TIMEOUT_MS);
 	inFlight.timer = timer;
 	// Keep pendingPrompts in sync with the timer ref.
 	const pending = ctx.pendingPrompts.get(promptId);

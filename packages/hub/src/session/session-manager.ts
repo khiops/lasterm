@@ -568,6 +568,26 @@ export class SessionManager {
 		}
 
 		const hostId = await this.agentMgr.resolveHostId(msg.hostId);
+		// A terminal being brought back names itself. Only a dead channel of this
+		// very host qualifies: anything else would have this spawn take over a
+		// terminal that is someone's, or one that is still running.
+		let reuseChannelId: string | undefined;
+		if (msg.reuseChannelId !== undefined) {
+			const existing = this.ctx.metaDal.getChannelWithHost(msg.reuseChannelId);
+			const live = this.ctx.channels.get(msg.reuseChannelId);
+			if (existing && existing.hostId === hostId && live === undefined) {
+				reuseChannelId = msg.reuseChannelId;
+			} else {
+				this.ctx.hubLogger?.log("warn", "handleSpawn: refusing to reuse that channel", {
+					channelId: msg.reuseChannelId,
+					reason: !existing
+						? "unknown"
+						: existing.hostId !== hostId
+							? "another host"
+							: "still live",
+				});
+			}
+		}
 		this.ctx.hubLogger?.log("debug", "handleSpawn: resolvedHostId", { hostId });
 		const host = this.ctx.metaDal.getHost(hostId);
 		if (!host) {
@@ -947,6 +967,7 @@ export class SessionManager {
 				const baseSpawnMsg: AgentSpawnMessage = {
 					type: "SPAWN",
 					requestId,
+					...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
 					...(resolvedShell !== undefined ? { shell: resolvedShell } : {}),
 					...(resolvedArgs.length > 0 && { args: resolvedArgs }),
 					...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
@@ -998,6 +1019,7 @@ export class SessionManager {
 								cols,
 								rows,
 								suppressClientError: false,
+								...(reuseChannelId !== undefined && { reuseChannelId }),
 								resolvedElevated: true,
 								resolvedElevationMethod: method,
 							})
@@ -1019,6 +1041,7 @@ export class SessionManager {
 						cols,
 						rows,
 						suppressClientError: true,
+						...(reuseChannelId !== undefined && { reuseChannelId }),
 						resolvedElevated: true,
 						resolvedElevationMethod: method,
 					});
@@ -1105,6 +1128,7 @@ export class SessionManager {
 							cols,
 							rows,
 							suppressClientError: false,
+							...(reuseChannelId !== undefined && { reuseChannelId }),
 							resolvedElevated: true,
 							resolvedElevationMethod: method,
 						})
@@ -1130,6 +1154,7 @@ export class SessionManager {
 					resolvedLaunchProfileId,
 					cols,
 					rows,
+					...(reuseChannelId !== undefined && { reuseChannelId }),
 				});
 				this.ctx.hubLogger?.log("debug", "handleSpawn: sendSpawnAndWait returned", {
 					channelId: spawnResult.channelId,

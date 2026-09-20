@@ -638,6 +638,8 @@ export const useChannelsStore = defineStore("channels", () => {
 			shell?: string;
 			args?: string[];
 			directProcess?: boolean;
+			/** Bring this dead terminal back rather than open a new one beside it. */
+			reuseChannelId?: string;
 		},
 	): Promise<string> {
 		const sessionStore = useSessionStore();
@@ -705,6 +707,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				...(opts?.shell !== undefined ? { shell: opts.shell } : {}),
 				...(opts?.args !== undefined && opts.args.length > 0 ? { args: opts.args } : {}),
 				...(opts?.directProcess ? { directProcess: true } : {}),
+				...(opts?.reuseChannelId !== undefined ? { reuseChannelId: opts.reuseChannelId } : {}),
 			});
 		});
 	}
@@ -1005,6 +1008,28 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	async function restartChannel(channelId: string): Promise<boolean> {
 		if (authStore.token === null) return false;
+
+		// A dead terminal has no session and no agent left — the hub it belonged
+		// to may be gone — so there is nothing for the hub to restart. Bringing it
+		// back is a spawn under its own id, which is the path that knows how to
+		// start a session and an agent from nothing.
+		const channel = channels.value.find((entry) => entry.id === channelId);
+		if (channel?.status === "dead") {
+			// A channel names its session, and the store holds channels of the host
+			// in view: that host is the one it belongs to.
+			const hostId = activeHostId.value;
+			if (hostId === null) return false;
+			try {
+				await spawnChannel(hostId, {
+					reuseChannelId: channelId,
+					...(channel.shell !== undefined ? { shell: channel.shell } : {}),
+					...(channel.args !== undefined && channel.args.length > 0 ? { args: channel.args } : {}),
+				});
+				return true;
+			} catch {
+				return false;
+			}
+		}
 
 		const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}/restart`, {
 			method: "POST",

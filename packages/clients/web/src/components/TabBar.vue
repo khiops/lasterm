@@ -477,8 +477,12 @@ function onTabDragEnd(): void {
 
 .tab__close {
 	flex-shrink: 0;
-	width: 16px;
-	height: 16px;
+	/* The glyph is 16px; the target around it is not. A close that misses lands
+	   on the tab, which selects it instead — the gesture appears to do nothing,
+	   and is tried again. The negative margin keeps the tab the size it was. */
+	width: 24px;
+	height: 24px;
+	margin: -4px -4px -4px 0;
 	display: flex;
 	align-items: center;
 	justify-content: center;

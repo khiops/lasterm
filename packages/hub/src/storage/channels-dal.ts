@@ -158,6 +158,27 @@ export class ChannelsDAL {
 		}
 	}
 
+	/**
+	 * Put a dead channel back on a live session, for the shell that replaces it.
+	 *
+	 * Restarting a terminal keeps the terminal: the same id, the same tab, the
+	 * same scrollback. What changes is the session it belongs to, which is a
+	 * new one whenever the hub has been restarted since — and a row left on a
+	 * closed session would be a channel nothing can reach.
+	 */
+	reviveChannel(id: string, sessionId: string, cols: number, rows: number): boolean {
+		const now = new Date().toISOString();
+		const result = this.db
+			.prepare(
+				`UPDATE channels
+				 SET session_id = @sessionId, status = 'born', exit_code = NULL,
+				     cols = @cols, rows = @rows, updated_at = @updatedAt
+				 WHERE id = @id`,
+			)
+			.run({ id, sessionId, cols, rows, updatedAt: now });
+		return result.changes > 0;
+	}
+
 	updateChannelDimensions(id: string, cols: number, rows: number): boolean {
 		const now = new Date().toISOString();
 		const result = this.db

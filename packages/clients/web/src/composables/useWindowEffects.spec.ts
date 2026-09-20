@@ -437,6 +437,38 @@ describe("useWindowEffects", () => {
 		unmount();
 	});
 
+	// The window keeps the shape the last run left it in: rebuilt opaque for a
+	// material, it stays opaque. A start on a see-through background has to say
+	// so, or the window would wear the old material with nothing asking for it.
+	it("tells the window its background at startup, even when that is see-through", async () => {
+		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "none"));
+		const platformInfo = ref<WindowEffectsPlatformInfo | null>({
+			os: "windows",
+			windowsBuild: 26_100,
+		});
+		const calls: string[] = [];
+		const win: WindowEffectsWindow = {
+			setEffects: vi.fn(async ({ effects }) => {
+				calls.push(`set:${effects[0]}`);
+			}),
+			clearEffects: vi.fn(async () => {
+				calls.push("clear");
+			}),
+		};
+
+		const { unmount } = withSetup(() =>
+			useWindowEffects({
+				displayedEffectState: displayed,
+				platformInfo,
+				getWindow: async () => win,
+			}),
+		);
+		await flushAsync();
+
+		expect(calls).toEqual(["clear"]);
+		unmount();
+	});
+
 	it("does not call into Tauri for platform paths that never applied an effect", async () => {
 		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "auto"));
 		const platformInfo = ref<WindowEffectsPlatformInfo | null>({

@@ -878,6 +878,24 @@ mod tests {
             },
             AllowedCall {
                 source: "desktop",
+                call: "std::fs::read_to_string(dir.join(WINDOW_BACKGROUND_FILE))",
+                expected_occurrences: 1,
+                why: "reads the non-protected window-background preference",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "std::fs::create_dir_all(&dir)",
+                expected_occurrences: 1,
+                why: "creates the non-protected window-background preference directory",
+            },
+            AllowedCall {
+                source: "desktop",
+                call: "std::fs::write(dir.join(WINDOW_BACKGROUND_FILE), effect)",
+                expected_occurrences: 1,
+                why: "writes the non-protected window-background preference",
+            },
+            AllowedCall {
+                source: "desktop",
                 call: "std::fs::rename(source, target)",
                 expected_occurrences: 1,
                 why: "replaces the non-protected close-behavior preference",

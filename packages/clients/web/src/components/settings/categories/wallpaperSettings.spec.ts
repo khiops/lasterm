@@ -33,7 +33,23 @@ describe("wallpaper settings helpers", () => {
 		expect(shouldShowWindowEffectPicker(false, win11)).toBe(false);
 		expect(shouldShowWindowEffectPicker(true, null)).toBe(false);
 		expect(shouldShowWindowEffectPicker(true, win11)).toBe(true);
-		expect(windowEffectSettingsOptions(win11)).toContainEqual({ label: "Mica", value: "mica" });
+		// Windows 11 offers the two materials DWM paints, and see-through.
+		expect(windowEffectSettingsOptions(win11).map((option) => option.value)).toEqual([
+			"none",
+			"mica",
+			"acrylic",
+		]);
+	});
+
+	// Blur is the legacy accent — it drags badly on 22621+ and looks like a
+	// material without being one, which is what made the picker read as broken.
+	it("offers no blur and no auto, which hid which material you would get", () => {
+		const values = windowEffectSettingsOptions({
+			os: "windows" as const,
+			windowsBuild: 26_100,
+		}).map((option) => option.value);
+		expect(values).not.toContain("blur");
+		expect(values).not.toContain("auto");
 	});
 
 	it("hides the effect picker entirely on Linux (every effect resolves to none there)", () => {

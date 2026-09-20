@@ -695,7 +695,7 @@ Terminal background profile keys cascade through the same four layers:
 | TOML key | Profile key | Values | Default | Notes |
 |----------|-------------|--------|---------|-------|
 | `background_mode` | `backgroundMode` | `image`, `solid`, `transparent` | `image` | `image` keeps existing wallpaper behavior; `image` with no wallpaper renders solid. In browser clients, `transparent` renders solid. |
-| `window_effect` | `windowEffect` | `none`, `auto`, `mica`, `blur`, `acrylic`, `vibrancy-under-window`, `vibrancy-sidebar`, `vibrancy-hud` | `none` | Desktop-only native effect, used only when `backgroundMode` resolves to `transparent`. |
+| `window_effect` | `windowEffect` | `none`, `auto`, `mica`, `blur`, `acrylic`, `vibrancy-under-window`, `vibrancy-sidebar`, `vibrancy-hud` | `none` | Desktop-only native effect, used only when `backgroundMode` resolves to `transparent`. A Windows material (`mica`, `acrylic`) needs an opaque main window, since DWM paints its materials for a window and skips one carrying per-pixel alpha; every other value needs the transparent one. Which of the two a window is, is settled when it is created, so moving between them takes effect at the next launch and the client says so; moving between materials applies at once. The picker offers `none`, `mica` and `acrylic` on Windows 11 and the vibrancy variants on macOS; `auto` and `blur` still resolve for profiles that carry them. |
 
 Native effect resolution:
 

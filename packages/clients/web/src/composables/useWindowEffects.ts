@@ -85,15 +85,18 @@ export function windowEffectOptionsForPlatform(
 	currentPlatformInfo: WindowEffectsPlatformInfo | null,
 ): WindowEffectOption[] {
 	if (currentPlatformInfo === null) return [];
-	const options: WindowEffectOption[] = [
-		{ label: "None", value: "none" },
-		{ label: "Auto", value: "auto" },
-	];
+	const options: WindowEffectOption[] = [{ label: "None — see through", value: "none" }];
 
 	if (currentPlatformInfo.os === "windows") {
-		if (isWindows11(currentPlatformInfo)) options.push({ label: "Mica", value: "mica" });
-		options.push({ label: "Blur", value: "blur" });
-		options.push({ label: "Acrylic", value: "acrylic" });
+		// Windows 11 materials only. Blur is the legacy accent: it drags and
+		// resizes badly on 22621+, and it looks like the materials without
+		// being one, which is how the picker read as broken (#62).
+		if (isWindows11(currentPlatformInfo)) {
+			options.push(
+				{ label: "Mica — wallpaper tint", value: "mica" },
+				{ label: "Acrylic — frosted blur", value: "acrylic" },
+			);
+		}
 	} else if (currentPlatformInfo.os === "macos") {
 		options.push(
 			{ label: "Vibrancy Under Window", value: "vibrancy-under-window" },
@@ -138,13 +141,49 @@ export function usePlatformInfo(): Ref<WindowEffectsPlatformInfo | null> {
 	return platformInfo;
 }
 
+/** What the desktop answers when it is asked for a background. */
+interface WindowBackgroundOutcome {
+	applied: boolean;
+	needsRestart: boolean;
+}
+
+/** Named for the person reading the notice, not for the enum. */
+const EFFECT_NAMES: Record<string, string> = {
+	none: "See through",
+	mica: "Mica",
+	micaDark: "Mica",
+	micaLight: "Mica",
+	tabbed: "Mica",
+	acrylic: "Acrylic",
+	blur: "Blur",
+};
+
+async function askForWindowBackground(effect: string): Promise<void> {
+	const { invoke } = await import("@tauri-apps/api/core");
+	const outcome = await invoke<WindowBackgroundOutcome>("apply_window_background", { effect });
+	if (!outcome?.needsRestart) return;
+	// The window a Windows material needs is not the window a see-through
+	// background needs — DWM paints its material for an opaque window and skips
+	// one carrying per-pixel alpha — and which of the two a window is, is
+	// settled when it is created. So this one is kept for the next launch.
+	const { useToastStore } = await import("../stores/toast.js");
+	useToastStore().show(
+		"info",
+		`${EFFECT_NAMES[effect] ?? effect} needs a window of its own — restart Lasterm to see it.`,
+		8000,
+	);
+}
+
 async function getCurrentTauriWindowForEffects(): Promise<WindowEffectsWindow | null> {
-	try {
-		const { getCurrentWindow } = await import("@tauri-apps/api/window");
-		return getCurrentWindow() as WindowEffectsWindow;
-	} catch {
-		return null;
-	}
+	if (!isTauriRuntime()) return null;
+	return {
+		async setEffects({ effects }) {
+			await askForWindowBackground(effects[0] ?? "none");
+		},
+		async clearEffects() {
+			await askForWindowBackground("none");
+		},
+	};
 }
 
 export function useWindowEffects(options: {
@@ -158,16 +197,33 @@ export function useWindowEffects(options: {
 	let appliedEffect: NativeWindowEffect | null = null;
 	let applying = false;
 	let stopped = false;
+	/** Nothing has been said to the window yet, whatever it may already carry. */
+	let neverApplied = true;
+
+	/**
+	 * Whether the window still has to be told its background once.
+	 *
+	 * Only Windows moves the window between two shapes, and a window rebuilt
+	 * for a material stays one: at startup it must hear the stored background
+	 * even when that is see-through. Nowhere else is there anything to say.
+	 */
+	function owesFirstWord(): boolean {
+		return neverApplied && options.platformInfo.value?.os === "windows";
+	}
 
 	function runApply(): void {
 		if (applying || stopped) return;
-		if (desiredEffect === appliedEffect) return;
+		if (desiredEffect === appliedEffect && !owesFirstWord()) return;
 
 		const runGeneration = generation;
 		const effectAtStart = desiredEffect;
 		applying = true;
 		void (async () => {
-			if (effectAtStart === null && appliedEffect === null) return;
+			// The window keeps the shape a previous run left it in, so the first
+			// word is always said: a window rebuilt for a material stays one
+			// until it is told the background is see-through again.
+			if (effectAtStart === null && appliedEffect === null && !owesFirstWord()) return;
+			neverApplied = false;
 
 			const win = await getWindow();
 			if (win === null || stopped) return;
@@ -199,7 +255,7 @@ export function useWindowEffects(options: {
 				options.displayedEffectState.value,
 				options.platformInfo.value,
 			);
-			if (nextEffect === desiredEffect && nextEffect === appliedEffect) return;
+			if (nextEffect === desiredEffect && nextEffect === appliedEffect && !owesFirstWord()) return;
 			desiredEffect = nextEffect;
 			generation += 1;
 			runApply();

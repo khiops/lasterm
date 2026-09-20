@@ -178,6 +178,14 @@ loopback-only; do not open a LAN port or direct another device to a hub URL.
   - A host known there under a **different** key is shown as the warning it is, and never offered as a reason to trust.
 - `[ssh] trust_known_hosts` (default `false`) lets someone say, once and in front of the evidence, that a key their own SSH already trusts needs no second question. It applies only to first connections; a key that changes under a pinned one still stops everything. Accepting this way still pins the fingerprint in meta.db, so the trust decision is recorded here and survives a later edit of `known_hosts`.
 
+### 3.3b Jump hosts (ProxyJump)
+
+- A host may be reached through another: the SSH connection to it is carried inside a channel opened on a bastion, so the target needs no route of its own.
+- The jump is named **either** as a host this hub knows — which brings its own authentication and its own pinned host key, described once — **or** as a `user@host:port` spec, which authenticates through the SSH agent and is pinned on the host that jumps through it (`hosts.ssh_proxy_fingerprint`).
+- **The jump's host key is verified like any other.** It is matched against what is already trusted for it: its pin, or `known_hosts` when `[ssh] trust_known_hosts` allows. A jump nothing trusts yet is **refused**, with a message saying to connect to it once as a host of its own. A first connection is a question for a person, and this one happens on the way to somewhere else, where nobody is looking.
+- A chain (`ProxyJump a,b`) is refused rather than half-honoured: taking only the first hop would connect somewhere nobody asked for.
+- The bastion's connection ends with the connection it carries: nothing is left logged in with nothing going through it.
+
 ### 3.4 Agent Launch Security
 
 **Remote (SSH stdio):**

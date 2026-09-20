@@ -90,6 +90,8 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 			...(body.host_group_id !== undefined && { hostGroupId: body.host_group_id }),
 			...(body.ssh_config_host !== undefined && { sshConfigHost: body.ssh_config_host }),
 			...(body.ssh_user !== undefined && { sshUser: body.ssh_user }),
+			...(body.ssh_proxy_host_id !== undefined && { sshProxyHostId: body.ssh_proxy_host_id }),
+			...(body.ssh_proxy_spec !== undefined && { sshProxySpec: body.ssh_proxy_spec }),
 			...(body.keep_alive_seconds !== undefined && { keepAliveSeconds: body.keep_alive_seconds }),
 			...(body.history_retention_days !== undefined && {
 				historyRetentionDays: body.history_retention_days,
@@ -224,6 +226,10 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 			if (body.host_group_id !== undefined) updateInput.hostGroupId = body.host_group_id;
 			if (body.ssh_config_host !== undefined) updateInput.sshConfigHost = body.ssh_config_host;
 			if (body.ssh_user !== undefined) updateInput.sshUser = body.ssh_user;
+			// One of the two, never both: the client sends both keys, and the one
+			// it did not choose arrives as null, which clears it.
+			if (body.ssh_proxy_host_id !== undefined) updateInput.sshProxyHostId = body.ssh_proxy_host_id;
+			if (body.ssh_proxy_spec !== undefined) updateInput.sshProxySpec = body.ssh_proxy_spec;
 			if (body.keep_alive_seconds !== undefined)
 				updateInput.keepAliveSeconds = body.keep_alive_seconds;
 			if (body.history_retention_days !== undefined)

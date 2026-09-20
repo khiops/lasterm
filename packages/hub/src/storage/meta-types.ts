@@ -29,6 +29,9 @@ export interface CreateHostInput {
 	hostGroupId?: string | null;
 	sortOrder?: number;
 	sshConfigHost?: string | null;
+	sshProxyHostId?: string | null;
+	sshProxySpec?: string | null;
+	sshProxyFingerprint?: string | null;
 	sshUser?: string | null;
 	keepAliveSeconds?: number;
 	historyRetentionDays?: number;

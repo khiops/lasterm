@@ -107,6 +107,25 @@ export interface Host {
 	arch: HostArch | null;
 	/** SHA256:<base64> fingerprint of the trusted SSH host key (null = not yet seen) */
 	sshFingerprint?: string | null;
+	/**
+	 * The host this one is reached through, when it is one this hub knows.
+	 *
+	 * A jump named this way brings its own authentication and its own pinned
+	 * host key: it is a host like any other, and nothing about it is described
+	 * twice.
+	 */
+	sshProxyHostId?: string | null;
+	/**
+	 * The bastion this one is reached through, written as `~/.ssh/config` writes
+	 * it: `user@host:port`. For a jump that is not a host here — imported, or
+	 * one nobody wants in the list.
+	 */
+	sshProxySpec?: string | null;
+	/**
+	 * The key trusted for a jump given as a spec, which has no row to pin it on.
+	 * Unused when the jump is a host: that host pins its own.
+	 */
+	sshProxyFingerprint?: string | null;
 	/** SHA256 of the pinned remote agent binary (null = not yet verified). */
 	agentSha256?: string | null;
 	createdAt: string; // ISO 8601

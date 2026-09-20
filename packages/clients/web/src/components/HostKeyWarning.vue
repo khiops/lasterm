@@ -50,6 +50,28 @@
 					>{{ prompt.fingerprint }}</button>
 				</div>
 
+				<template v-if="prompt.knownHosts?.verdict === 'trusted'">
+					<p class="hkw-known">
+						Your SSH configuration already trusts this exact key
+						(<code>{{ prompt.knownHosts.file }}:{{ prompt.knownHosts.line }}</code>), which
+						is why <code>ssh</code> connects to this host without asking.
+					</p>
+					<label class="hkw-known-choice">
+						<input v-model="trustKnownHosts" type="checkbox" :disabled="savingPreference" />
+						<span>
+							Take that as reason enough from now on — hosts whose key is already in
+							<code>known_hosts</code> will not be asked about again.
+						</span>
+					</label>
+					<p v-if="preferenceError" class="hkw-known-error">{{ preferenceError }}</p>
+				</template>
+
+				<p v-else-if="prompt.knownHosts?.verdict === 'other-key'" class="hkw-known-warning">
+					⚠ Your SSH configuration knows this host under a <strong>different</strong> key
+					(<code>{{ prompt.knownHosts.file }}:{{ prompt.knownHosts.line }}</code>). Do not
+					trust this one unless you know why it changed.
+				</p>
+
 				<div class="hkw-actions">
 					<button
 						class="hkw-btn hkw-reject"
@@ -75,14 +97,50 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { useAuthStore } from "../stores/auth.js";
 import { useHostVerifyStore } from "../stores/host-verify.js";
+import { hubFetch } from "../utils/hub-fetch.js";
+import { hubBaseUrl } from "../utils/hub-url.js";
 
 const store = useHostVerifyStore();
 const prompt = computed(() => store.pendingPrompt);
 
 const copiedOld = ref(false);
 const copiedNew = ref(false);
+
+/**
+ * The checkbox is a setting, not part of the answer to this prompt: it says
+ * what to do with the *next* host whose key is already known here. It is
+ * written the moment it is ticked, so the decision survives whatever is
+ * clicked next — including Reject.
+ */
+const trustKnownHosts = ref(false);
+const savingPreference = ref(false);
+const preferenceError = ref("");
+
+watch(trustKnownHosts, async (wanted) => {
+	savingPreference.value = true;
+	preferenceError.value = "";
+	try {
+		const response = await hubFetch(`${hubBaseUrl()}/api/config/ssh`, {
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${useAuthStore().token ?? ""}`,
+			},
+			body: JSON.stringify({ trustKnownHosts: wanted }),
+		});
+		if (!response.ok) throw new Error(`hub answered ${response.status}`);
+	} catch (error) {
+		// Saying it did not take is the point: a checkbox that silently failed
+		// would be read as a decision made.
+		preferenceError.value = `Could not save that preference: ${error instanceof Error ? error.message : String(error)}`;
+		trustKnownHosts.value = !wanted;
+	} finally {
+		savingPreference.value = false;
+	}
+});
 
 async function copyOld(): Promise<void> {
 	if (!prompt.value) return;
@@ -221,6 +279,38 @@ function handleReject(event: MouseEvent): void {
 
 .hkw-fp-new {
 	border-color: rgba(229, 83, 75, 0.4);
+}
+
+.hkw-known {
+	margin: 0 0 8px;
+	font-size: 12px;
+	color: var(--nt-text-secondary);
+}
+
+.hkw-known code {
+	font-size: 11px;
+}
+
+.hkw-known-choice {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+	margin: 0 0 12px;
+	font-size: 12px;
+	color: var(--nt-text-secondary);
+	cursor: pointer;
+}
+
+.hkw-known-error {
+	margin: -6px 0 12px;
+	font-size: 12px;
+	color: var(--nt-danger);
+}
+
+.hkw-known-warning {
+	margin: 0 0 12px;
+	font-size: 12px;
+	color: var(--nt-badge-warning, #f9e2af);
 }
 
 .hkw-actions {

@@ -169,6 +169,14 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 
 ---
 
+### [ssh] — Reaching hosts over SSH
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| trust_known_hosts | boolean | `false` | Trust a host key that `~/.ssh/known_hosts` already holds, without asking. Applies to first connections only; a key that changed under a trusted one still stops the connection, and `@revoked` still refuses. See SECURITY.md §3.3. |
+
+---
+
 ### [agent] — Agent Daemon
 
 | Key | Type | Default | Description |

@@ -11,6 +11,8 @@ export interface HostVerifyRequest {
 	promptId: string;
 	/** True on first connection (TOFU) — no previous fingerprint. */
 	firstConnect?: boolean;
+	/** What this machine's own OpenSSH configuration says about this key. */
+	knownHosts?: { verdict: "trusted" | "other-key"; file: string; line: number };
 }
 
 /**
@@ -44,6 +46,7 @@ export const useHostVerifyStore = defineStore("hostVerify", () => {
 		oldFingerprint: string,
 		promptId: string,
 		firstConnect = false,
+		knownHosts?: HostVerifyRequest["knownHosts"],
 	): void {
 		enqueue({
 			hostId,
@@ -53,6 +56,7 @@ export const useHostVerifyStore = defineStore("hostVerify", () => {
 			oldFingerprint,
 			promptId,
 			...(firstConnect ? { firstConnect: true } : {}),
+			...(knownHosts ? { knownHosts } : {}),
 		});
 	}
 

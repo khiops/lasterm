@@ -269,6 +269,7 @@ export class SshConnectionManager {
 		newFingerprint: string,
 		firstConnect = false,
 		ownerAcqId?: string,
+		knownHosts?: HostVerifyMessage["knownHosts"],
 	): Promise<"trust_permanent" | "trust_once" | "reject"> {
 		const context = this._getOrOpenSessionPromptContext(ownerAcqId, hostId, client);
 		if (!context) return "reject";
@@ -284,6 +285,7 @@ export class SshConnectionManager {
 			...(oldFingerprint ? { oldFingerprint } : {}),
 			promptId: "", // placeholder; prompt() overwrites with the real promptId
 			...(firstConnect ? { firstConnect: true } : {}),
+			...(knownHosts ? { knownHosts } : {}),
 		};
 
 		// send callback: prompt() merges promptId + deliveryEpoch onto the payload,

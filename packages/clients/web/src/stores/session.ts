@@ -283,6 +283,7 @@ export const useSessionStore = defineStore("session", () => {
 					msg.oldFingerprint ?? "",
 					msg.promptId,
 					msg.firstConnect ?? false,
+					msg.knownHosts,
 				);
 			}
 		});

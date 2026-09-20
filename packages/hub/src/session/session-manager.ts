@@ -34,6 +34,11 @@ import { DEFAULT_AGENT_CONFIG, generateId, validateCustomCommand } from "@laster
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { LoggerRegistry } from "../logging/index.js";
+import {
+	findKnownHostKeys,
+	judgeAgainstKnownHosts,
+	readUserKnownHosts,
+} from "../ssh/known-hosts.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
@@ -1489,6 +1494,45 @@ export class SessionManager {
 
 			const kv = sshAgent.lastKeyVerification;
 			if (kv.tofu || kv.mismatch) {
+				// What this machine's own SSH already says about the key, which is
+				// the difference between a host nobody has ever seen and one the
+				// person has been reaching from a shell for months.
+				// Under whichever name it was reached: OpenSSH records the name that
+				// was typed, so a host added from ~/.ssh/config can be in there
+				// under its alias rather than the address it resolves to.
+				const knownHostsSources = readUserKnownHosts();
+				const namesToLookUp = [sshHostname, host.sshConfigHost].filter(
+					(name): name is string => typeof name === "string" && name.length > 0,
+				);
+				const verdict = judgeAgainstKnownHosts(
+					kv.capturedFingerprint,
+					namesToLookUp.flatMap((name) => findKnownHostKeys(name, sshPort, knownHostsSources)),
+				);
+
+				// A key its owner has withdrawn is the one verdict with no question
+				// attached: not offered for trust, at any level.
+				if (verdict.kind === "revoked") {
+					client.send({
+						type: "ERROR",
+						code: "SSH_HOST_KEY_REVOKED",
+						message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
+						hostId,
+					} satisfies ErrorMessage);
+					throw new Error("SSH host key revoked in known_hosts");
+				}
+
+				// Trusted there, and the person has said once that this is reason
+				// enough: pinned here without asking again. Only ever for a first
+				// connection — a key that changed under a pin is never silent.
+				if (
+					kv.tofu &&
+					verdict.kind === "trusted" &&
+					this.ctx.configResolver?.sshConfig.trustKnownHosts === true
+				) {
+					this.ctx.metaDal.updateHostFingerprint(hostId, kv.capturedFingerprint);
+					return await this._connectSshAgent(hostId, host, client, sessionId, signal, ownerAcqId);
+				}
+
 				const action = await this.sshMgr.promptHostKeyVerify(
 					client,
 					hostId,
@@ -1497,6 +1541,9 @@ export class SessionManager {
 					kv.capturedFingerprint,
 					kv.tofu,
 					ownerAcqId,
+					verdict.kind === "trusted" || verdict.kind === "other-key"
+						? { verdict: verdict.kind, file: verdict.file, line: verdict.line }
+						: undefined,
 				);
 				if (action === "reject") {
 					client.send({

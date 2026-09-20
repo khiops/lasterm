@@ -294,6 +294,7 @@ export interface CascadeResponse {
 	};
 	appearance: AppearanceConfig;
 	elevation: ElevationConfig;
+	ssh: SshConfig;
 }
 
 // ─── Key whitelists for config write-back validation ──────────────────────────
@@ -390,6 +391,23 @@ export const DEFAULT_ELEVATION_CONFIG: ElevationConfig = {
 	methodDarwin: "sudo",
 	methodWindows: "gsudo",
 };
+
+/** How this hub reaches hosts over SSH. */
+export interface SshConfig {
+	/**
+	 * Whether a host key OpenSSH already trusts is trusted here without asking.
+	 *
+	 * Off until someone says otherwise: it hands this app a trust decision
+	 * taken elsewhere, and that is theirs to extend, once, knowingly.
+	 */
+	trustKnownHosts: boolean;
+}
+
+export const DEFAULT_SSH_CONFIG: SshConfig = {
+	trustKnownHosts: false,
+};
+
+export const SSH_CONFIG_KEYS = ["trustKnownHosts"] as const;
 
 export const ELEVATION_CONFIG_KEYS = [
 	"methodLinux",

@@ -169,9 +169,14 @@ loopback-only; do not open a LAN port or direct another device to a hub URL.
 
 ### 3.3 Known Hosts
 
-- MVP: use system's `~/.ssh/known_hosts` (ssh2 `hostVerifier` callback)
-- On first connect to unknown host: prompt user "Trust this host fingerprint? [Yes/No]"
-- Store accepted fingerprints in meta.db (hosts table, optional column)
+- A host key is trusted per host, in meta.db: nothing is accepted until someone accepts it, and a key that changes under an accepted one stops the connection.
+- On a first connection the fingerprint is shown and the answer is the person's: trust permanently, trust for this run, or refuse.
+- `~/.ssh/known_hosts` (and `known_hosts2`) are **read** to tell the person what their own SSH already believes: "your SSH configuration already trusts this exact key, `~/.ssh/known_hosts:10`". These files are never written — what OpenSSH trusts is OpenSSH's to record.
+  - Hashed names (`HashKnownHosts yes`, the default on many distributions), `[host]:port`, comma-separated patterns, wildcards and negations are all read as `sshd(8)` defines them. A parser that missed them would report "unknown host" on a machine that knows the host perfectly well.
+  - `@revoked` is a refusal, not a hesitation: the connection stops and no prompt offers to trust it.
+  - `@cert-authority` delegates to a signature this does not check, so such a line says nothing about the key in hand and is ignored.
+  - A host known there under a **different** key is shown as the warning it is, and never offered as a reason to trust.
+- `[ssh] trust_known_hosts` (default `false`) lets someone say, once and in front of the evidence, that a key their own SSH already trusts needs no second question. It applies only to first connections; a key that changes under a pinned one still stops everything. Accepting this way still pins the fingerprint in meta.db, so the trust decision is recorded here and survives a later edit of `known_hosts`.
 
 ### 3.4 Agent Launch Security
 

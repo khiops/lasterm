@@ -47,7 +47,16 @@ import { probeTestConnectPlatform } from "./test-connect-platform.js";
 /** Reconnect backoff steps in ms (capped at 30s, total budget 5 min) */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const RECONNECT_TIMEOUT_MS = 5 * 60 * 1_000; // 5 minutes
-const HOST_KEY_MISMATCH_TIMEOUT_MS = 30_000; // original 30 s timeout for host-key + agent-binary verify
+/**
+ * How long a host-key or agent-binary question waits for its answer.
+ *
+ * The same two minutes an auth prompt gets, and for the same reason: this is
+ * the one question that must never become a reflex, and comparing a
+ * fingerprint against another source — a terminal, a wiki, a colleague — does
+ * not happen in thirty seconds. A question that expires while it is being
+ * answered teaches people to answer it without looking (#437).
+ */
+const HOST_KEY_MISMATCH_TIMEOUT_MS = 120_000;
 const AUTH_PROMPT_TIMEOUT_MS = 120_000; // 2 min — unanswered prompt must not wedge the host
 type PendingPromptEntry =
 	SharedSessionContext["pendingPrompts"] extends Map<string, infer P> ? P : never;

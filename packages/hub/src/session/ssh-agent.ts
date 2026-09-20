@@ -13,6 +13,7 @@ import {
 	deployAgentIfNeeded,
 } from "./agent-deployer.js";
 import { SendQueue } from "./send-queue.js";
+import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 
 const HELLO_TIMEOUT_MS = 5_000;
 type AgentLoggingConfig = Pick<AgentConfig, "logLevel" | "logFormat">;
@@ -137,11 +138,15 @@ export async function buildSshConnectConfig(
 		}
 		connectConfig.password = secret;
 	} else if (auth.method === "agent") {
-		const authSock = process.env.SSH_AUTH_SOCK;
-		if (!authSock) {
-			throw new Error("SSH_AUTH_SOCK is not set; cannot use agent auth");
+		const address = sshAgentAddress({
+			env: process.env,
+			platform: process.platform,
+			pipeExists: windowsAgentPipeExists,
+		});
+		if (!address) {
+			throw new Error(noSshAgentMessage(process.platform));
 		}
-		connectConfig.agent = authSock;
+		connectConfig.agent = address;
 	} else {
 		// "key" auth — read the private key file
 		if (!auth.keyPath) {

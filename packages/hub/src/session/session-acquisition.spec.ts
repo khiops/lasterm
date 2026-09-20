@@ -5,7 +5,7 @@
  * code mutation that would make the test fail. This proves the test
  * is testing the stated invariant and not an accident.
  *
- * Invariant summary (from docs/plans/session-acquisition-redesign.md):
+ * Invariant summary:
  *   1. Follower lease keeps refcount ≥ 1 until release() — no premature reap.
  *   2. Outer finally releases the lease on every exit path (throw-safe).
  *   3. Reap triggered by lease count reaching 0, not channel-presence alone.

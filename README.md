@@ -232,9 +232,12 @@ wallpaper_dim = 25
 # transparent = desktop transparency in Tauri, solid fallback in browsers.
 background_mode = "transparent"
 
-# Desktop-only native effect. auto maps to blur on Windows 10, mica on Windows 11,
-# vibrancy-under-window on macOS, and none on Linux.
-window_effect = "auto"
+# Desktop-only native background. On Windows 11 the picker offers none (see
+# through, the page's own opacity reaches the desktop), mica and acrylic (DWM
+# paints the material behind the page). A window is built see-through or built
+# for a material and cannot change under a running app, so moving between the
+# two takes effect at the next launch, which the app offers to do.
+window_effect = "none"
 ```
 
 The chosen endpoint and its SPKI are written to `runtime.json` in the state directory.

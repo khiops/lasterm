@@ -3,8 +3,6 @@
  *
  * Free functions over a Pick<SharedSessionContext, …> slice (mirrors session-acquisition.ts style).
  *
- * Design: docs/plans/prompt-routing-redesign.md
- *
  * Key principles:
  *   P1: All critical-section mutations are synchronous — no await between read and write.
  *   Guard A: store-before-send in one synchronous block; on send failure, clear immediately.

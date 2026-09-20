@@ -157,12 +157,14 @@ describe("DesktopWsClient", () => {
 		client.close();
 	});
 
-	it("fails the relay rather than retaining more than two fire-and-forget sends", async () => {
-		let sendCount = 0;
+	/** A relay that accepts a connect and never settles a send. */
+	async function clientWithStalledSends(): Promise<{
+		client: ReturnType<typeof createWsClient>;
+		consoleError: ReturnType<typeof vi.spyOn>;
+	}> {
 		ipc.invoke.mockImplementation((command: string) => {
 			if (command === "relay_hub_ws_connect") return Promise.resolve(41);
 			if (command !== "relay_hub_ws_send") return Promise.resolve();
-			sendCount++;
 			return new Promise<void>(() => undefined);
 		});
 		Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -172,11 +174,48 @@ describe("DesktopWsClient", () => {
 		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const client = createWsClient();
 		await client.connect("ws://127.0.0.1:4100/ws");
+		return { client, consoleError };
+	}
 
-		client.send({ type: "AUTH", token: "one" });
-		client.send({ type: "AUTH", token: "two" });
-		await vi.waitFor(() => expect(sendCount).toBe(1));
-		client.send({ type: "AUTH", token: "three" });
+	// Every reconnect brings one ATTACH per open pane at once. Room for two was
+	// less than a three-tab window sends, and the overflow failed the transport,
+	// whose reconnect sent the same burst again: the app span until it was shut.
+	it("carries the burst a reconnect brings, one attach per pane", async () => {
+		const { client } = await clientWithStalledSends();
+
+		for (let i = 0; i < 12; i++) {
+			client.send({ type: "ATTACH", channelId: `01ARZ3NDEKTSV4RRFFQ69G5FA${i}` });
+		}
+
+		expect(client.isConnected).toBe(true);
+		client.close();
+	});
+
+	it("fails the relay rather than retaining sends without end", async () => {
+		const { client, consoleError } = await clientWithStalledSends();
+
+		// Sending past the failure would throw on a relay that is already gone.
+		for (let i = 0; i < 80 && client.isConnected; i++) {
+			client.send({ type: "ATTACH", channelId: `01ARZ3NDEKTSV4RRFFQ69G5FA${i % 10}` });
+		}
+
+		expect(client.isConnected).toBe(false);
+		expect(consoleError).toHaveBeenCalledWith(
+			"[DesktopWsClient] Transport failure:",
+			"WebSocket relay send queue is full",
+		);
+		client.close();
+	});
+
+	it("fails the relay rather than holding more bytes than it may", async () => {
+		const { client, consoleError } = await clientWithStalledSends();
+
+		// Two sends, each a third of a megabyte, fit; the third does not.
+		const wide = new Uint8Array(340 * 1024).fill(120);
+		for (let i = 0; i < 4 && client.isConnected; i++) {
+			client.send({ type: "INPUT", channelId: "c1", data: wide });
+		}
+
 		expect(client.isConnected).toBe(false);
 		expect(consoleError).toHaveBeenCalledWith(
 			"[DesktopWsClient] Transport failure:",

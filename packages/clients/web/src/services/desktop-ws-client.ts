@@ -13,7 +13,15 @@ type PendingRelaySend = {
 type ConnectionState = "connected" | "closed" | "superseded";
 
 const MAX_RELAYED_MESSAGE_BYTES = 512 * 1024;
-const MAX_PENDING_RELAY_SENDS = 2;
+/**
+ * Room for the burst every reconnect brings: one ATTACH per open pane, the
+ * AUTH before them, and the resize each pane sends once it is attached. Two
+ * was less than a three-tab window sends in a single tick, and overflowing
+ * fails the transport — whose reconnect sent the same burst again.
+ */
+const MAX_PENDING_RELAY_SENDS = 64;
+/** What those sends may hold, so a bounded count cannot mean unbounded memory. */
+const MAX_PENDING_RELAY_BYTES = 1024 * 1024;
 const RELAY_FRAME_ENVELOPE_BYTES = 33;
 
 /**
@@ -104,7 +112,20 @@ export class DesktopWsClient implements IWsClient {
 		// Encode before reserving a queue slot. Invalid work must not consume the
 		// bounded capacity needed by valid protocol messages behind it.
 		const payload = encodeMessage(msg).slice().buffer;
-		if (this.pendingSends.length >= MAX_PENDING_RELAY_SENDS) {
+		// Work for a relay that is gone can never leave: it must not hold room a
+		// live connection needs. The entry in flight is removed by identity when
+		// it settles, so dropping it here is safe.
+		this.pendingSends = this.pendingSends.filter((pending) =>
+			this._isCurrentRelay(pending.relayId, pending.generation),
+		);
+		const queuedBytes = this.pendingSends.reduce(
+			(total, pending) => total + pending.payload.byteLength,
+			0,
+		);
+		if (
+			this.pendingSends.length >= MAX_PENDING_RELAY_SENDS ||
+			queuedBytes + payload.byteLength > MAX_PENDING_RELAY_BYTES
+		) {
 			this._transportFailure("WebSocket relay send queue is full", relayId, generation);
 			return;
 		}

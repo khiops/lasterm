@@ -147,6 +147,15 @@ First message, sent immediately on start.
 }
 ```
 
+A warm restart reuses the channel id of the terminal it replaces, so an id
+names a *terminal*, not a workload: after the DESTROY that precedes the SPAWN,
+the same id can briefly cover the shell that is ending and the one that is
+starting. Inside the agent only the pid tells them apart, and the reader of the
+ending shell must speak for its own pid alone — one that waited on whatever the
+id held wedged the agent for good (#432). No CHANNEL_EXIT is sent for a
+workload whose id has already been taken over: the hub asked for it to end and
+has the SPAWN_OK that says what replaced it.
+
 ### 3.3 ATTACH / ATTACH_OK
 
 Re-attach to existing channel (after reconnect).

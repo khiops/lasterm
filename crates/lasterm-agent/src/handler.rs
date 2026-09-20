@@ -33,15 +33,41 @@ pub(crate) type FrameSender = mpsc::UnboundedSender<Vec<u8>>;
 pub(crate) type SnapshotSenders =
     Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ChannelCommand>>>>;
 
-/// Preserve the pre-existing manager-lock lifetime around `wait()`.
-async fn wait_for_reader_exit(
+/// What a reader whose PTY has closed still speaks for.
+pub(crate) enum ReaderWorkload {
+    /// The workload this reader was started for, taken back for its exit status.
+    Own(Box<async_xpty::PtyProcess>),
+    /// Nothing is registered under this channel any more: it was destroyed.
+    Gone,
+    /// A restart put another workload under this channel id. This reader speaks
+    /// for a shell that has already ended, and for nothing that is registered.
+    Replaced,
+}
+
+/// Take back the workload a reader was started for, once its PTY has closed.
+///
+/// A restart spawns the replacement under the *same* channel id, so an id alone
+/// no longer says which workload is which: the pid does. Without that check a
+/// dying reader waited on the shell that had just replaced it — and it waited
+/// holding the manager lock, which stopped every message the agent had left to
+/// answer, including the SPAWN_OK for that very restart (#432).
+///
+/// Taking the workload out is also what lets the wait happen without the lock:
+/// a wait of unknown length has no business holding the one thing every other
+/// message needs.
+pub(crate) async fn take_own_workload(
     pty_manager: &Arc<Mutex<PtyManager>>,
     channel_id: &str,
-) -> Option<async_xpty::ExitStatus> {
+    pty_pid: u32,
+) -> ReaderWorkload {
     let mut mgr = pty_manager.lock().await;
-    match mgr.channels.get_mut(channel_id) {
-        Some(channel) => channel.process.wait().await.ok(),
-        None => None,
+    match mgr.channels.get(channel_id) {
+        None => ReaderWorkload::Gone,
+        Some(channel) if channel.process.pid() != pty_pid => ReaderWorkload::Replaced,
+        Some(_) => match mgr.remove(channel_id) {
+            Some(process) => ReaderWorkload::Own(Box::new(process)),
+            None => ReaderWorkload::Gone,
+        },
     }
 }
 
@@ -641,7 +667,7 @@ async fn handle_spawn(
                 let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ChannelCommand>();
                 {
                     let mut senders = cmd_senders.lock().await;
-                    senders.insert(ch_id.clone(), cmd_tx);
+                    senders.insert(ch_id.clone(), cmd_tx.clone());
                 }
 
                 // Send SPAWN_OK *before* starting the reader task.
@@ -680,6 +706,7 @@ async fn handle_spawn(
                     pty_reader,
                     mirror,
                     cmd_rx,
+                    cmd_tx,
                     output_tx,
                     frame_tx.clone(),
                     Arc::clone(&pty_manager),
@@ -739,6 +766,7 @@ fn spawn_reader_task(
     mut pty_reader: async_xpty::PtyReader,
     mirror: HeadlessMirror,
     mut cmd_rx: mpsc::UnboundedReceiver<ChannelCommand>,
+    own_cmd_tx: mpsc::UnboundedSender<ChannelCommand>,
     output_tx: mpsc::UnboundedSender<OutputEvent>,
     frame_tx: FrameSender,
     pty_manager: Arc<Mutex<PtyManager>>,
@@ -887,15 +915,28 @@ fn spawn_reader_task(
             }
         }
 
-        // PTY EOF: clean up cmd sender entry
+        // PTY EOF: clean up cmd sender entry — but only this reader's own. A
+        // restart registers the replacement under the same channel id, and
+        // removing that one would leave the new terminal deaf to resizes and
+        // snapshots.
         {
             let mut senders = cmd_senders.lock().await;
-            senders.remove(&channel_id);
+            if senders
+                .get(&channel_id)
+                .is_some_and(|tx| tx.same_channel(&own_cmd_tx))
+            {
+                senders.remove(&channel_id);
+            }
         }
 
-        let exit_status = wait_for_reader_exit(&pty_manager, &channel_id).await;
-        let mut mgr = pty_manager.lock().await;
-        mgr.remove(&channel_id);
+        let exit_status = match take_own_workload(&pty_manager, &channel_id, pty_pid).await {
+            ReaderWorkload::Own(mut process) => process.wait().await.ok(),
+            ReaderWorkload::Gone => None,
+            // The hub asked for this workload to end and already knows it did:
+            // an exit reported now would be read against the terminal that took
+            // its place.
+            ReaderWorkload::Replaced => return,
+        };
 
         let (exit_code, signal) = match exit_status {
             Some(s) => (s.code().unwrap_or(-1), s.signal().map(|n| format!("{}", n))),
@@ -997,6 +1038,97 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod restart_identity_tests {
+    use super::*;
+
+    /// A shell that exists on both platforms and, on a PTY with nobody typing,
+    /// blocks rather than exiting.
+    fn test_shell() -> &'static str {
+        if cfg!(windows) {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        }
+    }
+
+    async fn spawn_under(manager: &Arc<Mutex<PtyManager>>, channel_id: &str) -> u32 {
+        manager
+            .lock()
+            .await
+            .spawn(
+                Some(channel_id.to_owned()),
+                test_shell(),
+                &[],
+                None,
+                None,
+                80,
+                24,
+            )
+            .await
+            .expect("spawn terminal workload")
+            .1
+    }
+
+    async fn end(manager: &Arc<Mutex<PtyManager>>, channel_id: &str) {
+        if let Some(process) = manager.lock().await.remove(channel_id) {
+            let _ = process.kill_tree();
+        }
+    }
+
+    /// A restart reuses the channel id, so the reader of the shell that was
+    /// replaced must not take the replacement for its own: it used to wait on
+    /// it, holding the manager lock, and the agent answered nothing again (#432).
+    #[tokio::test]
+    async fn a_reader_does_not_claim_the_workload_that_replaced_it() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let channel_id = "restarted-channel";
+        let replaced_pid = spawn_under(&manager, channel_id).await;
+        end(&manager, channel_id).await;
+        let live_pid = spawn_under(&manager, channel_id).await;
+        assert_ne!(replaced_pid, live_pid, "the restart spawned another shell");
+
+        let workload = take_own_workload(&manager, channel_id, replaced_pid).await;
+
+        assert!(matches!(workload, ReaderWorkload::Replaced));
+        assert!(
+            manager.lock().await.contains(channel_id),
+            "the terminal that took the id over stays registered"
+        );
+        end(&manager, channel_id).await;
+    }
+
+    #[tokio::test]
+    async fn a_reader_takes_back_its_own_workload() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let channel_id = "own-channel";
+        let pid = spawn_under(&manager, channel_id).await;
+
+        let workload = take_own_workload(&manager, channel_id, pid).await;
+
+        match workload {
+            ReaderWorkload::Own(process) => {
+                assert_eq!(process.pid(), pid);
+                let _ = process.kill_tree();
+            }
+            _ => panic!("the reader must get its own workload back"),
+        }
+        assert!(
+            !manager.lock().await.contains(channel_id),
+            "a workload waited on outside the lock is no longer registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reader_of_a_destroyed_channel_has_nothing_to_wait_on() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+
+        let workload = take_own_workload(&manager, "never-registered", 1).await;
+
+        assert!(matches!(workload, ReaderWorkload::Gone));
+    }
 }
 
 #[cfg(test)]

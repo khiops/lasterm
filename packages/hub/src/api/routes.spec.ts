@@ -12,6 +12,13 @@ vi.mock("../ssh/ssh-config-parser.js", () => ({
 	parseSshConfig: vi.fn(() => ({ entries: [], hasInclude: false })),
 }));
 
+// Whether an agent is running is a fact about the machine the tests happen to
+// run on, and the import reads it. Held here so each case states its own.
+vi.mock("../session/ssh-agent-address.js", () => ({
+	sshAgentAddress: vi.fn(() => null),
+	windowsAgentPipeExists: vi.fn(() => false),
+}));
+
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
 
 vi.mock("../session/ssh-agent.js", () => {
@@ -1656,9 +1663,9 @@ describe("PATCH /api/channels/:id/profile — key validation", () => {
 	});
 });
 
-// ─── POST /api/hosts/import — sshAuth set from identityFile (kept as-is) ─────
+// ─── POST /api/hosts/import — the auth an entry is imported with ────────────
 
-describe("POST /api/hosts/import — sshAuth inferred from identityFile (kept as-is)", () => {
+describe("POST /api/hosts/import — the auth an entry is imported with", () => {
 	it("sets sshAuth to 'key' when identityFile is present in SSH config entry", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
 		vi.mocked(readSshConfig).mockReturnValueOnce({
@@ -1690,7 +1697,41 @@ describe("POST /api/hosts/import — sshAuth inferred from identityFile (kept as
 		expect(hosts[0]?.ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
 	});
 
-	it("does not set sshAuth when identityFile is absent", async () => {
+	// An entry naming no key is one `ssh` logs into with whatever the agent
+	// holds. Imported with no method at all, it could only ask for a password
+	// on a host that has never needed one (#436).
+	it("imports an entry with no identityFile as agent auth when an agent is running", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		const { sshAgentAddress } = await import("../session/ssh-agent-address.js");
+		vi.mocked(sshAgentAddress).mockReturnValueOnce("//./pipe/openssh-ssh-agent");
+		vi.mocked(readSshConfig).mockReturnValueOnce({
+			entries: [
+				{
+					name: "agentonly",
+					hostname: "10.0.0.3",
+					port: 22,
+					user: "pi",
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+			],
+			hasInclude: false,
+		});
+
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [{ name: "agentonly", label: "agent-only-host" }] },
+		});
+
+		expect(res.statusCode).toBe(201);
+		const hosts = res.json<Array<{ ssh_auth: string | null; ssh_key_path?: string }>>();
+		expect(hosts[0]?.ssh_auth).toBe("agent");
+		expect(hosts[0]?.ssh_key_path).toBeUndefined();
+	});
+
+	it("does not set sshAuth when identityFile is absent and no agent is running", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
 		vi.mocked(readSshConfig).mockReturnValueOnce({
 			entries: [

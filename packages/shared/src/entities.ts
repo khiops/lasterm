@@ -33,6 +33,17 @@ export interface TerminalProfile {
 	windowEffect?: WindowEffect;
 	/** Controls how process.env is merged into PTY environment. Default: 'inherit'. */
 	envMode?: "minimal" | "inherit";
+	/**
+	 * Variables the terminals of this scope are spawned with, merged key by key
+	 * down the cascade: a host adds to what the global scope set, a channel to
+	 * both. `null` on a key drops what an outer scope put there.
+	 *
+	 * Applied after `envMode`, and overridden by a launch profile's own `env`
+	 * and by the spawn request. Read by whoever can read the hub's database, so
+	 * it is no place for secrets — the same reason SSH passwords are never
+	 * stored.
+	 */
+	env?: Record<string, string>;
 	[key: string]: unknown;
 }
 

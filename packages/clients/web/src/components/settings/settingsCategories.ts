@@ -11,6 +11,7 @@ export const ALL_CATEGORIES: CategoryDef[] = [
 	{ id: "appearance", label: "Appearance", scopes: ["global", "host", "channel"] },
 	{ id: "wallpaper", label: "Wallpaper", scopes: ["global", "host", "channel"] },
 	{ id: "terminal", label: "Terminal", scopes: ["global", "host", "channel"] },
+	{ id: "environment", label: "Environment", scopes: ["global", "host", "channel"] },
 	{ id: "tabs", label: "Tabs", scopes: ["global"] },
 	{ id: "channels", label: "Channels", scopes: ["global"] },
 	{ id: "panes", label: "Panes", scopes: ["global"] },

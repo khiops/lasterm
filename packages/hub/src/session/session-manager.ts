@@ -57,6 +57,7 @@ import {
 	HubQuittingError,
 	type QuitFence,
 } from "./quit-fence.js";
+import { scopedEnv } from "./scoped-env.js";
 import * as Acq from "./session-acquisition.js";
 import type {
 	Lease,
@@ -933,6 +934,10 @@ export class SessionManager {
 					? this.ctx.configResolver.resolve(hostId)
 					: null;
 				const resolvedEnvMode = terminalProfile?.envMode ?? "inherit";
+				// What the scope sets is the ground the rest stands on: a launch
+				// profile speaks for the terminal it launches, and the request for
+				// this one terminal, so each overrides what came before it.
+				resolvedEnv = { ...scopedEnv(terminalProfile), ...resolvedEnv };
 
 				const baseSpawnMsg: AgentSpawnMessage = {
 					type: "SPAWN",

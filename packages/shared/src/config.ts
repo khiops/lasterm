@@ -239,6 +239,7 @@ export const DEFAULT_PROFILE: TerminalProfile = {
 	backgroundMode: "image",
 	windowEffect: "none",
 	envMode: "inherit",
+	env: {},
 };
 
 // ─── UI behavioral config (combined) ─────────────────────────────────────────
@@ -313,6 +314,8 @@ export const TERMINAL_PROFILE_KEYS = [
 	"wallpaperDim",
 	"backgroundMode",
 	"windowEffect",
+	"envMode",
+	"env",
 ] as const;
 
 export const MAX_WALLPAPER_BLUR = 20;

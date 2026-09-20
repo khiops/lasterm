@@ -60,6 +60,10 @@
 									<ProfilesSettings
 										v-else-if="settingsStore.activeCategory === 'profiles'"
 									/>
+									<EnvironmentCategory
+										v-else-if="settingsStore.activeCategory === 'environment'"
+										:scope="settingsStore.activeScope"
+									/>
 									<ElevationCategory
 										v-else-if="settingsStore.activeCategory === 'elevation'"
 										:scope="settingsStore.activeScope"
@@ -114,6 +118,7 @@ import AgentManagerCategory from './categories/AgentManagerCategory.vue';
 import AppearanceCategory from './categories/AppearanceCategory.vue';
 import DesktopCategory from './categories/DesktopCategory.vue';
 import ElevationCategory from './categories/ElevationCategory.vue';
+import EnvironmentCategory from './categories/EnvironmentCategory.vue';
 import KeybindingsCategory from './categories/KeybindingsCategory.vue';
 import SchemaCategory from './categories/SchemaCategory.vue';
 import WallpaperCategory from './categories/WallpaperCategory.vue';

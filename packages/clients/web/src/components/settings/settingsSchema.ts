@@ -23,6 +23,12 @@ export interface SettingDefinition {
 	 * same section matches a specific value.
 	 */
 	showWhen?: { key: string; section: string; value: string };
+	/**
+	 * A setting that exists but cannot act while another one says so: shown, and
+	 * disabled, with `reason` in place of its description. Hiding it instead
+	 * would only raise the question of where it went.
+	 */
+	disabledWhen?: { key: string; section: string; value: string; reason: string };
 }
 
 /** UI config sub-sections — these route through PUT /api/config/ui */
@@ -191,12 +197,31 @@ export const settingsSchema: SettingDefinition[] = [
 		],
 	},
 	{
+		key: "scope",
+		label: "Tabs Shown",
+		type: "select",
+		category: "tabs",
+		section: "tabs",
+		scopes: ["global"],
+		options: [
+			{ label: "Every host", value: "global" },
+			{ label: "The host in view", value: "perHost" },
+		],
+		description: "Whether the tab bar keeps every terminal in view or only this host's.",
+	},
+	{
 		key: "hostMarker",
 		label: "Host Marker",
 		type: "select",
 		category: "tabs",
 		section: "tabs",
 		scopes: ["global"],
+		disabledWhen: {
+			key: "scope",
+			section: "tabs",
+			value: "perHost",
+			reason: "Every tab in view is already on this host, so there is nothing to tell apart.",
+		},
 		options: [
 			{ label: "Colour dot", value: "dot" },
 			{ label: "Host initials", value: "initials" },

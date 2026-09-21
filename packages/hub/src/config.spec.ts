@@ -839,6 +839,16 @@ describe("extractUiConfig — tabs section", () => {
 		expect(config.tabs.closeButton).toBe(false);
 	});
 
+	it('parses scope = "perHost"', () => {
+		const config = extractUiConfig({ tabs: { scope: "perHost" } });
+		expect(config.tabs.scope).toBe("perHost");
+	});
+
+	it("ignores an unknown scope and keeps the default", () => {
+		const config = extractUiConfig({ tabs: { scope: "per-window" } });
+		expect(config.tabs.scope).toBe("global");
+	});
+
 	it('parses host_marker = "initials"', () => {
 		const config = extractUiConfig({ tabs: { host_marker: "initials" } });
 		expect(config.tabs.hostMarker).toBe("initials");

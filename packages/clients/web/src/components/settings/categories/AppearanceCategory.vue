@@ -92,6 +92,26 @@
 				</SettingRow>
 			</section>
 
+			<!-- Dim behind a see-through window (global scope only) -->
+			<section v-if="scope === 'global'" class="settings-section">
+				<h3 class="section-title">See-through window</h3>
+				<SettingRow
+					label="Dim what shows through"
+					:scope="scope"
+					:is-overridden="true"
+					description="Darkens whatever is behind the window — another window, the desktop — without touching what Lasterm draws over it. Only the see-through background has something behind to darken; mica and acrylic are tinted by Windows itself, and nothing here can blur what is behind a window."
+				>
+					<SettingControl
+						type="range"
+						:model-value="windowDim"
+						:min="0"
+						:max="90"
+						:step="1"
+						@update:model-value="(v: unknown) => onWindowDimInput(v as number)"
+					/>
+				</SettingRow>
+			</section>
+
 			<!-- Scrollbar (global scope only) -->
 			<section v-if="scope === 'global'" class="settings-section">
 				<h3 class="section-title">Scrollbar</h3>
@@ -323,6 +343,21 @@ watch(
 
 let opacityDebounce: ReturnType<typeof setTimeout> | null = null;
 let opacityRaf: number | null = null;
+
+const windowDim = ref(themeStore.appearance.window?.dim ?? 0);
+let windowDimDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function onWindowDimInput(value: number): void {
+	windowDim.value = value;
+	// Applied at once so the slider shows what it does, then written once the
+	// hand stops moving.
+	themeStore.appearance.window = { ...themeStore.appearance.window, dim: value };
+	if (windowDimDebounce !== null) clearTimeout(windowDimDebounce);
+	windowDimDebounce = setTimeout(() => {
+		void themeStore.updateAppearance({ window: { dim: value } });
+		windowDimDebounce = null;
+	}, 300);
+}
 
 function onOpacityInput(
 	key: keyof AppearanceConfig["opacity"],

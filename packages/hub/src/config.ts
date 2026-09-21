@@ -448,6 +448,7 @@ export function extractAppearanceConfig(parsed: TOML.JsonMap): AppearanceConfig 
 		theme: DEFAULT_APPEARANCE.theme,
 		autoSwitch: { ...DEFAULT_APPEARANCE.autoSwitch },
 		opacity: { ...DEFAULT_APPEARANCE.opacity },
+		window: { ...DEFAULT_APPEARANCE.window },
 		scrollbar: { ...DEFAULT_APPEARANCE.scrollbar },
 	};
 
@@ -476,6 +477,16 @@ export function extractAppearanceConfig(parsed: TOML.JsonMap): AppearanceConfig 
 		if (typeof op.sidebar === "number") config.opacity.sidebar = op.sidebar;
 		if (typeof op.host_rail === "number") config.opacity.hostRail = op.host_rail;
 		if (typeof op.tab_bar === "number") config.opacity.tabBar = op.tab_bar;
+	}
+
+	// [appearance.window] — a veil over whatever is behind a see-through window,
+	// kept in range: a number outside it is not a percentage.
+	const windowSection = raw.window;
+	if (windowSection != null && typeof windowSection === "object") {
+		const win = windowSection as Record<string, unknown>;
+		if (typeof win.dim === "number" && win.dim >= 0 && win.dim <= 100) {
+			config.window.dim = win.dim;
+		}
 	}
 
 	// [appearance.scrollbar]

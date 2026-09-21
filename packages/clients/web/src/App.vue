@@ -222,6 +222,12 @@
 					class="window-wallpaper__dim"
 					:style="windowWallpaperDimStyle"
 				/>
+				<div
+					v-if="seeThroughDimStyle"
+					key="see-through-dim"
+					class="window-wallpaper__dim"
+					:style="seeThroughDimStyle"
+				/>
 			</TransitionGroup>
 
 			<!-- Main layout — only shown when authenticated and WS ready -->
@@ -334,7 +340,7 @@
 <script setup lang="ts">
 import type { Host } from '@lasterm/shared';
 import { DEFAULT_CHANNEL_NAME, generateId } from '@lasterm/shared';
-import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
+import { computed, type CSSProperties, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
 import AgentBinaryVerify from './components/AgentBinaryVerify.vue';
 import AgentDeployFailed from './components/AgentDeployFailed.vue';
 import AuthPromptDialog from './components/AuthPromptDialog.vue';
@@ -463,6 +469,22 @@ const hostsStore = useHostsStore();
 const channelsStore = useChannelsStore();
 const themeStore = useThemeStore();
 const writeLockStore = useWriteLockStore();
+
+/**
+ * A veil over whatever is behind a see-through window.
+ *
+ * It sits with the wallpaper layers, behind everything the app draws, so it
+ * darkens what shows through without touching the text over it. It has
+ * something to do only when the window is see-through: with a wallpaper or a
+ * solid background there is nothing behind to darken, and a material is DWM's
+ * to tint.
+ */
+const seeThroughDimStyle = computed<CSSProperties | null>(() => {
+	if (windowBackgroundMode.value !== 'transparent') return null;
+	const dim = themeStore.appearance.window?.dim ?? 0;
+	if (dim <= 0) return null;
+	return { background: `rgba(0, 0, 0, ${Math.min(dim, 100) / 100})` };
+});
 const autoSwitch = useAutoSwitch();
 const layout = useLayout();
 const {

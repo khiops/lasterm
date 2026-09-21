@@ -18,7 +18,7 @@ interface ProfilePatchBody {
 	profile: Partial<TerminalProfile>;
 }
 
-const APPEARANCE_KEYS = ["theme", "autoSwitch", "opacity", "scrollbar"] as const;
+const APPEARANCE_KEYS = ["theme", "autoSwitch", "opacity", "window", "scrollbar"] as const;
 
 const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => boolean>> = {
 	tabs: {

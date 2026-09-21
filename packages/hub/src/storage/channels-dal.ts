@@ -134,6 +134,26 @@ export class ChannelsDAL {
 		};
 	}
 
+	/**
+	 * Which host every channel belongs to, by channel id.
+	 *
+	 * A channel row names its session, not its host, so a client holding a
+	 * channel id and nothing else cannot say where that terminal lives. That is
+	 * exactly the client's position for a tab left over from a previous run: it
+	 * knows the channel, and until it knows the host it can neither name the tab
+	 * nor mark it.
+	 */
+	listChannelHosts(): Map<string, string> {
+		const rows = this.db
+			.prepare(
+				`SELECT c.id, s.host_id
+				 FROM channels c
+				 JOIN sessions s ON c.session_id = s.id`,
+			)
+			.all() as Array<{ id: string; host_id: string }>;
+		return new Map(rows.map((row) => [row.id, row.host_id]));
+	}
+
 	listChannels(sessionId?: string): Channel[] {
 		const rows = (
 			sessionId

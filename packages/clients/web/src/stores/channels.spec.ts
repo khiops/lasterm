@@ -373,6 +373,65 @@ describe("useChannelsStore — fetchChannels clears stale state", () => {
 // spawnChannel — autoGroup behaviour
 // ---------------------------------------------------------------------------
 
+describe("useChannelsStore — fetchChannelIndex", () => {
+	function row(id: string, hostId: string | null, title: string): Record<string, unknown> {
+		return {
+			id,
+			session_id: "sess-1",
+			host_id: hostId,
+			display_title: title,
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status: "live",
+			created_at: "2026-01-01T00:00:00Z",
+			updated_at: "2026-01-01T00:00:00Z",
+		};
+	}
+
+	it("indexes every channel by host, whichever host is loaded", async () => {
+		mockFetch.mockImplementation(() =>
+			Promise.resolve({
+				ok: true,
+				json: () => Promise.resolve([row("ch-1", "host-1", "vim"), row("ch-2", "host-2", "htop")]),
+			}),
+		);
+		const store = useChannelsStore();
+		await store.fetchChannelIndex();
+
+		expect(store.channelIndex.get("ch-1")).toEqual({ hostId: "host-1", displayTitle: "vim" });
+		expect(store.channelIndex.get("ch-2")).toEqual({ hostId: "host-2", displayTitle: "htop" });
+		// The host map is what the tab bar marks with.
+		expect(store.channelHostMap.get("ch-2")).toBe("host-2");
+	});
+
+	it("skips a row with no host rather than indexing it under nothing", async () => {
+		mockFetch.mockImplementation(() =>
+			Promise.resolve({
+				ok: true,
+				json: () => Promise.resolve([row("ch-3", null, "orphan")]),
+			}),
+		);
+		const store = useChannelsStore();
+		await store.fetchChannelIndex();
+
+		expect(store.channelIndex.has("ch-3")).toBe(false);
+	});
+
+	it("leaves the index alone when the hub refuses the listing", async () => {
+		mockFetch.mockImplementation(() =>
+			Promise.resolve({ ok: true, json: () => Promise.resolve([row("ch-4", "host-1", "kept")]) }),
+		);
+		const store = useChannelsStore();
+		await store.fetchChannelIndex();
+
+		mockFetch.mockImplementation(() => Promise.resolve({ ok: false, status: 503 }));
+		await store.fetchChannelIndex();
+
+		expect(store.channelIndex.get("ch-4")?.displayTitle).toBe("kept");
+	});
+});
+
 describe("useChannelsStore — spawnChannel autoGroup", () => {
 	function makeGroupRowWithOrder(
 		id: string,

@@ -512,6 +512,23 @@ describe("MetaDAL — Channels CRUD", () => {
 		expect(dal.listChannels()).toHaveLength(2);
 	});
 
+	it("listChannelHosts names the host of every channel, across sessions", () => {
+		const host2 = dal.createHost({ type: "ssh", label: "ch-host-hosts" });
+		const sessionId2 = "SESS3AAAAAAAAAAAAAAAAAAAAAAAA";
+		dal.createSession({ id: sessionId2, hostId: host2.id, status: "active" });
+		dal.createChannel({ id: "CHN00HAAAAAAAAAAAAAAAAAAAAAA", sessionId, status: "born" });
+		dal.createChannel({
+			id: "CHN00IAAAAAAAAAAAAAAAAAAAAAA",
+			sessionId: sessionId2,
+			status: "born",
+		});
+
+		const hosts = dal.listChannelHosts();
+		expect(hosts.get("CHN00HAAAAAAAAAAAAAAAAAAAAAA")).toBe(hostId);
+		expect(hosts.get("CHN00IAAAAAAAAAAAAAAAAAAAAAA")).toBe(host2.id);
+		expect(hosts.has("no-such-channel")).toBe(false);
+	});
+
 	it("listChannels filters by sessionId", () => {
 		const host2 = dal.createHost({ type: "local", label: "ch-host-2" });
 		const sessionId2 = "SESS2AAAAAAAAAAAAAAAAAAAAAAAA";

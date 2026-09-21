@@ -76,6 +76,16 @@ export interface TabsConfig {
 	confirmCloseAll?: boolean;
 	/** Confirm before Close Others. Default: true */
 	confirmCloseOthers?: boolean;
+	/**
+	 * How a tab says which host its terminal is on. Default: "dot"
+	 *
+	 * Tabs are global while terminals belong to hosts, so a tab bar with no
+	 * marker is a list of names that may come from anywhere. The styles differ
+	 * only in what they cost the eye: "dot" is a coloured bead, "initials"
+	 * names the host outright and takes the most room, "underline" tints the
+	 * tab's edge and adds nothing to its width, "none" says nothing.
+	 */
+	hostMarker?: "dot" | "initials" | "underline" | "none";
 }
 
 export interface PanesConfig {
@@ -339,6 +349,7 @@ export const TABS_CONFIG_KEYS = [
 	"newTabPosition",
 	"confirmCloseAll",
 	"confirmCloseOthers",
+	"hostMarker",
 ] as const;
 
 export const PANES_CONFIG_KEYS = ["maxPanes", "defaultSplitDirection"] as const;

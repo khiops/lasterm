@@ -339,7 +339,7 @@ const isGone = ref(false);
  * `isDead` reads the list of the host in view, and that list is the current
  * session's: a tab left over from before a restart names a terminal the hub
  * still knows and the list no longer carries. Trusting only the list left such
- * a pane blank and inert — no message, no button, nothing to do (#449).
+ * a pane blank and inert — no message, no button, nothing to do.
  */
 const hasEnded = ref(false);
 const goneMessage = 'This terminal no longer exists.';

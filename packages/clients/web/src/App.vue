@@ -952,7 +952,7 @@ watch(
 		// A tab whose terminals this host no longer lists is a tab of terminals
 		// that have ended — the same thing as a dead one, and it answers to the
 		// same setting. Closing it regardless used to make tabs vanish on the way
-		// back to a host, with nothing said and nothing left to restart (#449).
+		// back to a host, with nothing said and nothing left to restart.
 		if (configStore.uiConfig.onChannelDead === 'close') {
 			purgeOrphanedTabs(
 				channelsStore.channels,
@@ -1036,7 +1036,7 @@ watch(
 		if (!previousState) return;
 		// A host switch replaced the list wholesale. Nothing was deleted and
 		// nothing died; the tabs of the host being left keep their terminals,
-		// and closing them here is what made tabs vanish on changing host (#449).
+		// and closing them here is what made tabs vanish on changing host.
 		if (previousState.hostId !== currentState.hostId) return;
 		const current = currentState.channels;
 		const previous = previousState.channels;

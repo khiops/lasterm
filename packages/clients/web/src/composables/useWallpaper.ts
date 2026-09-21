@@ -48,10 +48,23 @@ export function useWallpaper(profile: Ref<TerminalProfile>) {
 		};
 	});
 
+	/**
+	 * The dim veils whatever is behind the app's own drawing.
+	 *
+	 * With a wallpaper that is the image; on a see-through window it is the
+	 * desktop, or whatever window is under this one. Same setting, because it
+	 * is the same gesture — turn down what is behind — and a second slider
+	 * elsewhere would only ask which of the two you meant.
+	 *
+	 * A solid background has nothing behind it, so there the dim does nothing
+	 * and says so in the settings rather than moving in silence.
+	 */
 	const dimStyle = computed<CSSProperties | null>(() => {
-		if (!profile.value.wallpaper) return null;
 		const dim = profile.value.wallpaperDim ?? 0;
 		if (dim === 0) return null;
+		const showsSomethingBehind =
+			profile.value.backgroundMode === "transparent" || Boolean(profile.value.wallpaper);
+		if (!showsSomethingBehind) return null;
 		return { background: `rgba(0, 0, 0, ${dim / 100})` };
 	});
 

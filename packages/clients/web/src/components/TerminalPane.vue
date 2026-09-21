@@ -37,7 +37,7 @@
 		<div v-if="tintStyle" class="tint-overlay" :style="tintStyle" />
 
 		<!-- Exit overlay for all dead channels, and for one the hub has never heard of -->
-		<div v-if="isDead || isGone" class="exit-overlay">
+		<div v-if="isDead || hasEnded || isGone" class="exit-overlay">
 			<div class="exit-message">{{ isGone ? goneMessage : exitMessage }}</div>
 			<div class="exit-actions">
 				<button v-if="!isGone" class="exit-btn" @click="onRestart">Restart</button>
@@ -332,6 +332,16 @@ const isDirectProcess = computed(() => {
  * reading it.
  */
 const isGone = ref(false);
+
+/**
+ * The hub said this terminal has ended, whatever the channel list holds.
+ *
+ * `isDead` reads the list of the host in view, and that list is the current
+ * session's: a tab left over from before a restart names a terminal the hub
+ * still knows and the list no longer carries. Trusting only the list left such
+ * a pane blank and inert — no message, no button, nothing to do.
+ */
+const hasEnded = ref(false);
 const goneMessage = 'This terminal no longer exists.';
 
 const exitMessage = computed(() => {
@@ -439,6 +449,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 		// The channel died between page load and ATTACH: the pane shows it dead,
 		// which is a state, not an error.
 		if (code === 'CHANNEL_DEAD' || msg.includes('is dead') || msg.includes('CHANNEL_DEAD')) {
+			hasEnded.value = true;
 			ready.value = true;
 			return;
 		}
@@ -560,7 +571,7 @@ async function onRestart(): Promise<void> {
 	// for, since that path carries the prompts a passphrase or a host key need.
 	// It used to open a stranger and delete the terminal being restarted, which
 	// is the opposite of what the button says.
-	const ok = await channelsStore.restartChannel(chId);
+	const ok = await channelsStore.restartChannel(chId, props.hostId ?? undefined);
 	if (ok) {
 		const result = await reattachChannel(chId, { preserveContent: true });
 		if (result.writeLockHolder) {

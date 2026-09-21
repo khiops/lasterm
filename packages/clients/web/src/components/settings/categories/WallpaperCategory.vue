@@ -114,7 +114,7 @@
 
 			<SettingRow
 				label="Blur"
-				description="Background blur in pixels (0 = sharp)"
+				:description="blurDescription"
 				:scope="scope"
 				:is-overridden="settingsStore.isOverridden(scope, 'terminal', 'wallpaperBlur')"
 				:inherited-from="settingsStore.inheritedFrom(scope, 'terminal', 'wallpaperBlur')"
@@ -126,13 +126,14 @@
 					:min="0"
 					:max="20"
 					:step="1"
+					:disabled="!blurApplies"
 					@update:model-value="updateBlur"
 				/>
 			</SettingRow>
 
 			<SettingRow
 				label="Dim"
-				description="Background dimming percentage (0 = no dimming)"
+				:description="dimDescription"
 				:scope="scope"
 				:is-overridden="settingsStore.isOverridden(scope, 'terminal', 'wallpaperDim')"
 				:inherited-from="settingsStore.inheritedFrom(scope, 'terminal', 'wallpaperDim')"
@@ -144,6 +145,7 @@
 					:min="0"
 					:max="100"
 					:step="5"
+					:disabled="!dimApplies"
 					@update:model-value="updateDim"
 				/>
 			</SettingRow>
@@ -222,6 +224,32 @@ function wallpaperThumbnailSrc(filename: string): string {
 }
 
 // ─── Computed ──────────────────────────────────────────────────────────
+
+/**
+ * What each of these can act on, in the background in use.
+ *
+ * A control that cannot do anything says so and stops taking input, rather
+ * than moving and changing nothing — which is how someone ends up asking
+ * whether the setting works at all.
+ */
+const blurApplies = computed(() => currentBackgroundMode.value === "image");
+const dimApplies = computed(() => currentBackgroundMode.value !== "solid");
+
+const blurDescription = computed(() =>
+	blurApplies.value
+		? "Blurs the wallpaper image, in pixels (0 = sharp)."
+		: currentBackgroundMode.value === "transparent"
+			? "A page cannot blur what is behind its own window — that is the compositor's, and it is the Acrylic window effect. Nothing to blur here."
+			: "Nothing to blur: a solid background has no image and nothing behind it.",
+);
+
+const dimDescription = computed(() =>
+	currentBackgroundMode.value === "transparent"
+		? "Darkens what shows through the window — another window, the desktop — without touching what Lasterm draws over it."
+		: dimApplies.value
+			? "Darkens the wallpaper image, as a percentage (0 = no dimming)."
+			: "Nothing to dim: a solid background has no image and nothing behind it.",
+);
 
 const currentBackgroundMode = computed<BackgroundMode>(() => {
 	const value = settingsStore.getValue(props.scope, "terminal", "backgroundMode");

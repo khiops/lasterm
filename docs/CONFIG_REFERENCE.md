@@ -139,13 +139,6 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | dark_theme | string | `"catppuccin-mocha"` | Theme to apply in dark mode |
 | light_theme | string | `"one-half-light"` | Theme to apply in light mode |
 
-
-#### [appearance.window] — See-through window
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| dim | number (0-100) | `0` | Darkens whatever is behind a **see-through** window — another window, the desktop — without touching what Lasterm draws over it. Distinct from `wallpaper.dim`, which veils a wallpaper image and does nothing without one. Nothing here can *blur* what is behind a window: that is the compositor's, and it is called acrylic. |
-
 #### [appearance.opacity] — Component Opacity
 
 | Key | Type | Default | Description |

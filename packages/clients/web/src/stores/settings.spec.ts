@@ -103,7 +103,6 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 			theme: "catppuccin-mocha",
 			autoSwitch: { enabled: false, darkTheme: "catppuccin-mocha", lightTheme: "catppuccin-latte" },
 			opacity: { terminal: 100, sidebar: 100, hostRail: 100, tabBar: 100 },
-			window: { dim: 0 },
 			scrollbar: { style: "thin", thumbColor: "", trackColor: "", widthThin: 6, widthWide: 14 },
 		},
 		elevation: {

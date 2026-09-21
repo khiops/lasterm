@@ -13,19 +13,6 @@ export interface AppearanceConfig {
 		hostRail: number;
 		tabBar: number;
 	};
-	/** What the window itself does with what is behind it. */
-	window: {
-		/**
-		 * How much to darken what shows through a see-through window, 0-100.
-		 *
-		 * Distinct from `wallpaper.dim`, which veils a wallpaper image and does
-		 * nothing without one. This one veils whatever is behind the window —
-		 * another window, the desktop — and so has something to do only when the
-		 * window is see-through. Nothing here can *blur* what is behind: that is
-		 * the compositor's to do, and it is called acrylic.
-		 */
-		dim: number;
-	};
 	scrollbar: {
 		style: "thin" | "wide" | "hidden";
 		thumbColor: string; // empty = from theme
@@ -47,9 +34,6 @@ export const DEFAULT_APPEARANCE: AppearanceConfig = {
 		sidebar: 100,
 		hostRail: 100,
 		tabBar: 100,
-	},
-	window: {
-		dim: 0,
 	},
 	scrollbar: {
 		style: "thin",

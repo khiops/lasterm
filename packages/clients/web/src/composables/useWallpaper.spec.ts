@@ -172,6 +172,24 @@ describe("useWallpaper", () => {
 			expect(dimStyle.value).toBeNull();
 		});
 
+		// Same setting, same gesture — turn down what is behind — whether that is
+		// a wallpaper image or the window under a see-through one.
+		it("dims what shows through a see-through window, with no wallpaper at all", () => {
+			const profile = ref(makeProfile({ backgroundMode: "transparent", wallpaperDim: 40 }));
+
+			const { dimStyle } = useWallpaper(profile);
+
+			expect(dimStyle.value).toEqual({ background: "rgba(0, 0, 0, 0.4)" });
+		});
+
+		it("has nothing to dim behind a solid background", () => {
+			const profile = ref(makeProfile({ backgroundMode: "solid", wallpaperDim: 40 }));
+
+			const { dimStyle } = useWallpaper(profile);
+
+			expect(dimStyle.value).toBeNull();
+		});
+
 		it("should return null when wallpaperDim is 0", () => {
 			// Arrange
 			const profile = ref(makeProfile({ wallpaper: "bg.png", wallpaperDim: 0 }));

@@ -294,7 +294,9 @@ export function useTerminal(
 					clearTimeout(timer);
 					unsubOk();
 					unsubErr();
-					reject(new Error(msg.message ?? msg.code));
+					// The code travels with it: what a pane does about this is not a
+					// decision to make by reading a sentence, which changes.
+					reject(Object.assign(new Error(msg.message ?? msg.code), { code: msg.code }));
 				}
 			});
 

@@ -1490,7 +1490,33 @@ function onChannelSpawned(tempId: string, realId: string): void {
  * INV-03: closing never kills the terminal — channel keeps running.
  */
 function onClosePane(channelId: string): void {
-	layout.closePane(channelId);
+	const channel = channelsStore.channels.find((c) => c.id === channelId);
+	// A live terminal keeps running when its pane goes — it can be put back in
+	// one from the sidebar. A dead one has nothing to come back to, and closing
+	// it while leaving it listed is what makes "Close" feel like it did nothing.
+	if (channel?.status !== 'dead') {
+		layout.closePane(channelId);
+		return;
+	}
+
+	const closeAndDelete = () => {
+		layout.closePane(channelId);
+		void channelsStore.deleteChannel(channelId);
+	};
+	if (shouldSkipConfirm('ConfirmCloseDeadTab')) {
+		closeAndDelete();
+		return;
+	}
+	confirmDialog.value = {
+		visible: true,
+		title: 'Delete this dead terminal?',
+		message:
+			'It has already ended. Closing it here deletes it, which takes its scrollback; keeping it leaves it listed in the sidebar.',
+		confirmLabel: 'Close and delete',
+		action: closeAndDelete,
+		actionKey: 'ConfirmCloseDeadTab',
+		showRemember: true,
+	};
 }
 
 /**

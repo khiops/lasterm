@@ -36,12 +36,16 @@
 		<!-- Background tint overlay (UX-07) -->
 		<div v-if="tintStyle" class="tint-overlay" :style="tintStyle" />
 
-		<!-- Exit overlay for all dead channels -->
-		<div v-if="isDead" class="exit-overlay">
-			<div class="exit-message">{{ exitMessage }}</div>
+		<!-- Exit overlay for all dead channels, and for one the hub has never heard of -->
+		<div v-if="isDead || isGone" class="exit-overlay">
+			<div class="exit-message">{{ isGone ? goneMessage : exitMessage }}</div>
 			<div class="exit-actions">
-				<button class="exit-btn" @click="onRestart">Restart</button>
-				<button v-if="isDirectProcess" class="exit-btn" @click="onConfigure">Configure</button>
+				<button v-if="!isGone" class="exit-btn" @click="onRestart">Restart</button>
+				<button
+					v-if="isDirectProcess && !isGone"
+					class="exit-btn"
+					@click="onConfigure"
+				>Configure</button>
 				<button class="exit-btn exit-btn--danger" @click="onClosePaneFromOverlay">Close</button>
 			</div>
 		</div>
@@ -319,6 +323,17 @@ const isDirectProcess = computed(() => {
 	return channel?.directProcess === true;
 });
 
+/**
+ * A terminal this hub has no record of — deleted from another window, or left
+ * over from a hub that is gone.
+ *
+ * It is shown here rather than announced: the pane is where this terminal is
+ * looked at, and a red banner carrying its id says nothing to the person
+ * reading it.
+ */
+const isGone = ref(false);
+const goneMessage = 'This terminal no longer exists.';
+
 const exitMessage = computed(() => {
 	const chId = effectiveChannelId.value;
 	if (!chId) return 'Exited';
@@ -420,9 +435,17 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 		}
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		// CHANNEL_DEAD from hub means the channel died between page load and ATTACH.
-		// Treat as dead channel (show overlay) rather than an error state.
-		if (msg.includes('is dead') || msg.includes('CHANNEL_DEAD')) {
+		const code = (err as { code?: string } | null)?.code;
+		// The channel died between page load and ATTACH: the pane shows it dead,
+		// which is a state, not an error.
+		if (code === 'CHANNEL_DEAD' || msg.includes('is dead') || msg.includes('CHANNEL_DEAD')) {
+			ready.value = true;
+			return;
+		}
+		// The hub has no record of it — deleted from another window, or left over
+		// from a hub that is gone. The same shape of news, shown the same way.
+		if (code === 'CHANNEL_NOT_FOUND') {
+			isGone.value = true;
 			ready.value = true;
 			return;
 		}
@@ -532,19 +555,11 @@ async function onRestart(): Promise<void> {
 	const chId = effectiveChannelId.value;
 	if (chId === null) return;
 
-	// SSH hosts: restart goes through WS SPAWN flow (supports async prompts
-	// for passphrase/TOFU/deploy). REST restart can't handle interactive auth.
-	if (paneHost.value?.type === 'ssh' && props.hostId) {
-		const term = terminal.value;
-		await channelsStore.spawnChannel(props.hostId, {
-			...(term !== null ? { cols: term.cols, rows: term.rows } : {}),
-		});
-		// Remove the dead channel entirely and close its pane
-		await channelsStore.deleteChannel(chId);
-		emit('close-pane', chId);
-		return;
-	}
-
+	// Every host takes the same road now: restarting a dead terminal is a spawn
+	// under its own id, over the WS — which is what the SSH branch here existed
+	// for, since that path carries the prompts a passphrase or a host key need.
+	// It used to open a stranger and delete the terminal being restarted, which
+	// is the opposite of what the button says.
 	const ok = await channelsStore.restartChannel(chId);
 	if (ok) {
 		const result = await reattachChannel(chId, { preserveContent: true });

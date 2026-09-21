@@ -43,7 +43,7 @@ import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
-import { DeployError, getBinaryCacheDir } from "./agent-deployer.js";
+import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { OutputChunker } from "./output-chunker.js";
@@ -234,7 +234,7 @@ export class SessionManager {
 
 			try {
 				const promptAuth = this.sshMgr.buildPromptAuth(firstClient, ac.signal, reconnectCtxId);
-				const deployOpts = this._buildDeployOpts(hostId, host, firstClient, reconnectCtxId);
+				const deployOpts = this._buildDeployOpts(hostId, host);
 				const sshAgent = new SshAgent(host, promptAuth, deployOpts, ctx.agentConfig);
 
 				const storedFp = ctx.metaDal.getHostFingerprint(hostId);
@@ -487,12 +487,17 @@ export class SessionManager {
 
 	// ─── WS message handlers ──────────────────────────────────────────────────
 
-	/** Build SshAgentDeployOptions for a given host + WS client. */
+	/**
+	 * Build SshAgentDeployOptions for a host.
+	 *
+	 * No client here any more: the one question this used to route — whether a
+	 * remote binary is trusted — is asked by the caller, once the connection
+	 * that found it has been closed (#444).
+	 */
 	private _buildDeployOpts(
 		hostId: string,
 		host: Host,
-		client: WsClient,
-		ownerAcqId?: string,
+		approvedAgentSha?: string,
 	): SshAgentDeployOptions {
 		const sshHostname = host.sshHost?.includes("@")
 			? (host.sshHost.split("@")[1] ?? host.sshHost)
@@ -508,12 +513,9 @@ export class SessionManager {
 			onOsDetected: (hid, os, arch) => {
 				this.ctx.metaDal.updateHostOsArch(hid, os, arch);
 			},
-			promptBinaryVerify: this.sshMgr.buildBinaryVerifyPrompt(client, ownerAcqId),
+			...(approvedAgentSha !== undefined ? { approvedSha256: approvedAgentSha } : {}),
 			onAgentPinned: (hid, sha256) => {
 				this.ctx.metaDal.updateHostAgentSha256(hid, sha256);
-			},
-			onAgentTrustOnce: (hid, sha256) => {
-				this.ctx.trustedAgentSha256.set(hid, sha256);
 			},
 			onAgentUpdated: (hid) => {
 				this.ctx.hubLogger?.log(
@@ -1486,6 +1488,7 @@ export class SessionManager {
 		sessionId: string,
 		signal?: AbortSignal,
 		ownerAcqId?: string,
+		approvedAgentSha?: string,
 	): Promise<import("./agent-connection.js").AgentConnection> {
 		const promptAuth = this.sshMgr.buildPromptAuth(client, signal, ownerAcqId);
 
@@ -1497,7 +1500,7 @@ export class SessionManager {
 		const hostKey = `${sshHostname}:${sshPort}`;
 		const sessionTrustedFp = this.ctx.trustedOnceFingerprints.get(hostKey);
 
-		const deployOpts = this._buildDeployOpts(hostId, host, client, ownerAcqId);
+		const deployOpts = this._buildDeployOpts(hostId, host, approvedAgentSha);
 
 		// The route this host is reached by, when it is reached through another.
 		const plan = planJump(host);
@@ -1584,6 +1587,54 @@ export class SessionManager {
 			console.error("[lasterm-ssh] SSH connection established");
 		} catch (err) {
 			console.error(`[lasterm-ssh] SSH error: ${err instanceof Error ? err.message : String(err)}`);
+
+			// A remote binary nobody here has approved. The connection that found
+			// it is already closed — the deploy handed this back instead of asking
+			// from inside it — so the question is asked with nothing of ours open
+			// on that machine, for as long as it takes to answer (#444).
+			if (err instanceof AgentBinaryDecisionNeeded) {
+				const action = await this.sshMgr.buildBinaryVerifyPrompt(client, ownerAcqId)(
+					err.hostId,
+					err.hostname,
+					err.remotePath,
+					err.remoteSha256,
+					err.os,
+					err.arch,
+					err.mismatch,
+					err.pinnedSha256,
+				);
+				if (action === "reject") {
+					const message = `Remote agent binary at ${err.remotePath} (sha256: ${err.remoteSha256}) was refused.`;
+					client.send({
+						type: "ERROR",
+						code: "AGENT_BINARY_REJECTED",
+						message,
+						hostId,
+					} satisfies ErrorMessage);
+					throw new DeployError("AGENT_BINARY_REJECTED", message);
+				}
+				if (action === "trust_permanent") {
+					this.ctx.metaDal.updateHostAgentSha256(hostId, err.remoteSha256);
+				} else {
+					this.ctx.trustedAgentSha256.set(hostId, err.remoteSha256);
+				}
+				// The answer was about the binary that was shown. The attempt that
+				// resumes compares what it finds against that hash, and asks again
+				// if the remote binary changed while the question was open.
+				if (signal?.aborted || this.ctx.sessions.get(hostId)?.id !== sessionId) {
+					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+				}
+				return await this._connectSshAgent(
+					hostId,
+					host,
+					client,
+					sessionId,
+					signal,
+					ownerAcqId,
+					err.remoteSha256,
+				);
+			}
+
 			// Handle deploy errors (user rejection, binary not available)
 			if (err instanceof DeployError) {
 				client.send({

@@ -186,6 +186,24 @@ loopback-only; do not open a LAN port or direct another device to a hub URL.
 - A chain (`ProxyJump a,b`) is refused rather than half-honoured: taking only the first hop would connect somewhere nobody asked for.
 - The bastion's connection ends with the connection it carries: nothing is left logged in with nothing going through it.
 
+### 3.3c Questions for a person
+
+A wait on a person does not expire. What must be bounded is what a machine waits for from another machine, where anything can happen — dialling, the SSH handshake, the agent's answer to a SPAWN, teardown confirmation — and those keep their bounds.
+
+A deadline on a human decision throws away the answer that arrives a second later, and teaches the one lesson a security question must never teach: answer without reading. So the host-key question, the password and passphrase questions, and the remote-agent-binary question wait for as long as they take.
+
+That is only safe because none of them holds anything open while it waits:
+
+- A password or passphrase is asked **before anything is dialled** (`buildSshConnectConfig` prompts, then connects).
+- A host key is asked **after the verifier refused it** and the client was destroyed.
+- The remote agent binary is found over a live connection — so that connection is **closed before the question is asked**. The deploy hands back what it saw (`AgentBinaryDecisionNeeded`) instead of asking from inside itself; the caller closes, asks, and connects again with the answer.
+
+**A resumed attempt re-reads the remote binary.** The person answered about the hash they were shown, and a binary that changed while the question was open was never the one anybody approved: the attempt that resumes compares what it finds against the approved hash and asks again if they differ.
+
+What ends such a wait, since time does not: the answer; the person leaving (their client is gone and no other can route the prompt, so the context is cleared and every prompt it holds resolves); an explicit cancel; the hub quitting. A **reconnect** asks nobody at all — it runs while the person may not be looking — so a binary nothing trusts ends the reconnect rather than deciding for them.
+
+Elevation keeps a bound: its connection is the session the person is already using, not something the question opened.
+
 ### 3.4 Agent Launch Security
 
 **Remote (SSH stdio):**

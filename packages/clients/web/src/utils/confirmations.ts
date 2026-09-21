@@ -35,8 +35,9 @@ export const CONFIRMATIONS: ConfirmationDescriptor[] = [
 	},
 	{
 		key: "ConfirmCloseDeadTab",
-		label: "Closing the tab of a dead terminal",
-		description: "The terminal is deleted with its tab, and its scrollback goes with it.",
+		label: "Closing a dead terminal",
+		description:
+			"Closing its tab or its pane deletes the terminal, and its scrollback goes with it.",
 	},
 	{
 		key: "ConfirmCloseAll",

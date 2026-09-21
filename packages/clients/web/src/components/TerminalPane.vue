@@ -555,19 +555,11 @@ async function onRestart(): Promise<void> {
 	const chId = effectiveChannelId.value;
 	if (chId === null) return;
 
-	// SSH hosts: restart goes through WS SPAWN flow (supports async prompts
-	// for passphrase/TOFU/deploy). REST restart can't handle interactive auth.
-	if (paneHost.value?.type === 'ssh' && props.hostId) {
-		const term = terminal.value;
-		await channelsStore.spawnChannel(props.hostId, {
-			...(term !== null ? { cols: term.cols, rows: term.rows } : {}),
-		});
-		// Remove the dead channel entirely and close its pane
-		await channelsStore.deleteChannel(chId);
-		emit('close-pane', chId);
-		return;
-	}
-
+	// Every host takes the same road now: restarting a dead terminal is a spawn
+	// under its own id, over the WS — which is what the SSH branch here existed
+	// for, since that path carries the prompts a passphrase or a host key need.
+	// It used to open a stranger and delete the terminal being restarted, which
+	// is the opposite of what the button says.
 	const ok = await channelsStore.restartChannel(chId);
 	if (ok) {
 		const result = await reattachChannel(chId, { preserveContent: true });

@@ -237,18 +237,18 @@ const dimApplies = computed(() => currentBackgroundMode.value !== "solid");
 
 const blurDescription = computed(() =>
 	blurApplies.value
-		? "Blurs the wallpaper image, in pixels (0 = sharp)."
+		? "Blurs the wallpaper image (0 = sharp)."
 		: currentBackgroundMode.value === "transparent"
-			? "A page cannot blur what is behind its own window — that is the compositor's, and it is the Acrylic window effect. Nothing to blur here."
-			: "Nothing to blur: a solid background has no image and nothing behind it.",
+			? "A page cannot blur what is behind the window. Use the Acrylic window effect for that."
+			: "Nothing to blur: a solid background has no image.",
 );
 
 const dimDescription = computed(() =>
 	currentBackgroundMode.value === "transparent"
-		? "Darkens what shows through the window — another window, the desktop — without touching what Lasterm draws over it."
+		? "Darkens what shows through the window."
 		: dimApplies.value
-			? "Darkens the wallpaper image, as a percentage (0 = no dimming)."
-			: "Nothing to dim: a solid background has no image and nothing behind it.",
+			? "Darkens the wallpaper image (0 = no dimming)."
+			: "Nothing to dim: a solid background has no image.",
 );
 
 const currentBackgroundMode = computed<BackgroundMode>(() => {

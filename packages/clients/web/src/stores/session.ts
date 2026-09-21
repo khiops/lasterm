@@ -322,6 +322,12 @@ export const useSessionStore = defineStore("session", () => {
 					// User chose to reject the binary — no toast needed.
 					return;
 				}
+				// News about one terminal belongs in that terminal's pane, which
+				// shows it as a state rather than a red banner that outlives the
+				// glance it was worth.
+				if (msg.code === "CHANNEL_NOT_FOUND" || msg.code === "CHANNEL_DEAD") {
+					return;
+				}
 				// All other error codes (SSH_CONNECT_FAILED, SPAWN_FAILED,
 				// SSH_HOST_KEY_REJECTED, etc.) are surfaced as error toasts.
 				const toastStore = useToastStore();

@@ -607,7 +607,8 @@ export class SessionManager {
 			const errorMsg: ErrorMessage = {
 				type: "ERROR",
 				code: "HOST_NOT_FOUND",
-				message: `Host ${hostId} not found`,
+				message: "That host is no longer in this hub's list.",
+				hostId,
 			};
 			client.send(errorMsg);
 			return null;
@@ -1215,7 +1216,14 @@ export class SessionManager {
 			const errorMsg: ErrorMessage = {
 				type: "ERROR",
 				code,
-				message: `Channel ${channelId} ${code === "CHANNEL_DEAD" ? "is dead" : "not found"}`,
+				// The id is in the field beside this and in the log. A sentence
+				// carrying it says nothing to the person reading it, and says it
+				// in twenty-six characters of noise.
+				message:
+					code === "CHANNEL_DEAD"
+						? "This terminal has ended."
+						: "This terminal no longer exists — it may have been deleted from another window.",
+				channelId,
 			};
 			client.send(errorMsg);
 			return false;
@@ -1314,7 +1322,7 @@ export class SessionManager {
 				client.send({
 					type: "ERROR",
 					code: "CHANNEL_DEAD",
-					message: `Channel ${channelId} is no longer live on the agent`,
+					message: "This terminal is no longer running on its host.",
 					channelId,
 				} satisfies ErrorMessage);
 				return false;

@@ -949,16 +949,19 @@ watch(
 		// Clear stale write-lock entries for dead channels
 		const deadIds = new Set(channelsStore.channels.filter((c) => c.status === 'dead').map((c) => c.id));
 		writeLockStore.pruneDeadLocks(deadIds);
-		// Always purge tabs for channels that no longer exist on this host
-		purgeOrphanedTabs(
-			channelsStore.channels,
-			layout.tabs.value,
-			layout.closeTab,
-			hostId,
-			channelsStore.channelHostMap,
-			layout.layouts.value,
-		);
+		// A tab whose terminals this host no longer lists is a tab of terminals
+		// that have ended — the same thing as a dead one, and it answers to the
+		// same setting. Closing it regardless used to make tabs vanish on the way
+		// back to a host, with nothing said and nothing left to restart (#449).
 		if (configStore.uiConfig.onChannelDead === 'close') {
+			purgeOrphanedTabs(
+				channelsStore.channels,
+				layout.tabs.value,
+				layout.closeTab,
+				hostId,
+				channelsStore.channelHostMap,
+				layout.layouts.value,
+			);
 			purgeDeadTabs(channelsStore.channels, layout.tabs.value, layout.closeTab, layout.layouts.value);
 		}
 		// Auto-open welcome tab if one exists and is alive
@@ -1023,9 +1026,20 @@ watch(
  * - Explicit removal (DELETE): always close the tab regardless of mode.
  */
 watch(
-	() => channelsStore.channels.map((c) => ({ id: c.id, status: c.status })),
-	(current, previous) => {
-		if (!previous) return;
+	() => ({
+		// The list is the channels *of the host in view*: without saying which
+		// host it was for, a change of host reads as every channel vanishing.
+		hostId: channelsStore.activeHostId,
+		channels: channelsStore.channels.map((c) => ({ id: c.id, status: c.status })),
+	}),
+	(currentState, previousState) => {
+		if (!previousState) return;
+		// A host switch replaced the list wholesale. Nothing was deleted and
+		// nothing died; the tabs of the host being left keep their terminals,
+		// and closing them here is what made tabs vanish on changing host (#449).
+		if (previousState.hostId !== currentState.hostId) return;
+		const current = currentState.channels;
+		const previous = previousState.channels;
 
 		// Close tabs for channels that died (only in "close" mode).
 		// In the new model, only close a tab if ALL its terminal panes are dead.

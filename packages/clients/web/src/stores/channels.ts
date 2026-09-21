@@ -1063,24 +1063,25 @@ export const useChannelsStore = defineStore("channels", () => {
 		return true;
 	}
 
-	async function restartChannel(channelId: string): Promise<boolean> {
+	async function restartChannel(channelId: string, hostIdHint?: string): Promise<boolean> {
 		if (authStore.token === null) return false;
 
 		// A dead terminal has no session and no agent left — the hub it belonged
 		// to may be gone — so there is nothing for the hub to restart. Bringing it
 		// back is a spawn under its own id, which is the path that knows how to
 		// start a session and an agent from nothing.
+		// A terminal this list does not carry is one from before a restart: the
+		// list holds the current session's, the hub still knows the rest. Either
+		// way it is not running, and bringing it back is the same gesture.
 		const channel = channels.value.find((entry) => entry.id === channelId);
-		if (channel?.status === "dead") {
-			// A channel names its session, and the store holds channels of the host
-			// in view: that host is the one it belongs to.
-			const hostId = activeHostId.value;
-			if (hostId === null) return false;
+		if (channel === undefined || channel.status === "dead") {
+			const hostId = hostIdHint ?? activeHostId.value;
+			if (hostId === null || hostId === undefined) return false;
 			try {
 				await spawnChannel(hostId, {
 					reuseChannelId: channelId,
-					...(channel.shell !== undefined ? { shell: channel.shell } : {}),
-					...(channel.args !== undefined && channel.args.length > 0 ? { args: channel.args } : {}),
+					...(channel?.shell !== undefined ? { shell: channel.shell } : {}),
+					...(channel?.args !== undefined && channel.args.length > 0 ? { args: channel.args } : {}),
 				});
 				return true;
 			} catch {

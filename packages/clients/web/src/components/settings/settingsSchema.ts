@@ -203,8 +203,7 @@ export const settingsSchema: SettingDefinition[] = [
 			{ label: "Coloured underline", value: "underline" },
 			{ label: "None", value: "none" },
 		],
-		description:
-			"How a tab shows which host its terminal is on. Tabs are shared by every host, so without a marker a tab bar is a list of names that could come from anywhere.",
+		description: "Shows which host a tab's terminal is on.",
 	},
 	{
 		key: "confirmCloseAll",

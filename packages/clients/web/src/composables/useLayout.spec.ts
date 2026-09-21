@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { effectScope, nextTick } from "vue";
+import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
 import type { PaneNode } from "./useLayout.js";
 import {
@@ -10,6 +11,7 @@ import {
 	findFirstLeafPaneId,
 	purgeOrphanedTabs,
 	resolveTabLabel,
+	tabIsOnHost,
 	useLayout,
 } from "./useLayout.js";
 
@@ -228,6 +230,112 @@ describe("activePaneIds", () => {
 		layout.vacatePane("ch-B");
 		const ch = layout.getActiveChannelId(tab.id);
 		expect(ch).toBe("ch-A");
+	});
+});
+
+// ── the bar showing one host ─────────────────────────────────────────────
+
+describe("tabIsOnHost", () => {
+	const terminal = (channelId: string): PaneNode => ({
+		type: "terminal",
+		channelId,
+		paneId: `p-${channelId}`,
+	});
+
+	it("is on the host its terminal is on", () => {
+		const layouts = { "tab-1": terminal("ch-1") };
+		const hosts = new Map([["ch-1", "host-1"]]);
+		expect(tabIsOnHost("tab-1", layouts, hosts, "host-1")).toBe(true);
+		expect(tabIsOnHost("tab-1", layouts, hosts, "host-2")).toBe(false);
+	});
+
+	it("is on both hosts when a split holds one terminal of each", () => {
+		const layouts = {
+			"tab-1": {
+				type: "split" as const,
+				direction: "horizontal" as const,
+				ratio: 0.5,
+				first: terminal("ch-1"),
+				second: terminal("ch-2"),
+			},
+		};
+		const hosts = new Map([
+			["ch-1", "host-1"],
+			["ch-2", "host-2"],
+		]);
+		expect(tabIsOnHost("tab-1", layouts, hosts, "host-1")).toBe(true);
+		expect(tabIsOnHost("tab-1", layouts, hosts, "host-2")).toBe(true);
+	});
+
+	it("stays in view while no terminal of it has a known host", () => {
+		const layouts = { "tab-1": terminal("ch-unknown") };
+		expect(tabIsOnHost("tab-1", layouts, new Map(), "host-1")).toBe(true);
+	});
+
+	it("stays in view when it has no layout at all", () => {
+		expect(tabIsOnHost("tab-1", {}, new Map(), "host-1")).toBe(true);
+	});
+});
+
+describe("closing several tabs while the bar shows one host", () => {
+	function showOneHost(hostId: string, channelHosts: Record<string, string>): void {
+		const configStore = useConfigStore();
+		configStore.uiConfig = {
+			...configStore.uiConfig,
+			tabs: { ...configStore.uiConfig.tabs, scope: "perHost" },
+		};
+		const channelsStore = useChannelsStore();
+		channelsStore.activeHostId = hostId;
+		channelsStore.channelHostMap = new Map(Object.entries(channelHosts));
+	}
+
+	it("closeOthers leaves the tabs of other hosts open", () => {
+		const [tabA, tabB, tabC] = openTabs("A", "B", "C");
+		showOneHost("host-1", { "ch-A": "host-1", "ch-B": "host-1", "ch-C": "host-2" });
+
+		layout.closeOthers(0); // keep A, which is on host-1
+
+		const ids = layout.tabs.value.map((t) => t.id);
+		expect(ids).toContain(tabA);
+		expect(ids).not.toContain(tabB);
+		expect(ids).toContain(tabC); // on another host: never on screen, never closed
+	});
+
+	it("closeAll leaves the tabs of other hosts open", () => {
+		const [, tabB, tabC] = openTabs("A", "B", "C");
+		showOneHost("host-1", { "ch-A": "host-1", "ch-B": "host-2", "ch-C": "host-2" });
+		layout.setActiveTab(0); // A, the only one on screen, is the active tab
+
+		layout.closeAll();
+
+		const ids = layout.tabs.value.map((t) => t.id);
+		expect(ids).toEqual([tabB, tabC]);
+		// The tab that was active is gone; the index lands on one that exists.
+		expect(layout.activeTabIndex.value).toBe(0);
+	});
+
+	it("closeToRight closes only what is on screen to the right", () => {
+		const [tabA, tabB, tabC, tabD] = openTabs("A", "B", "C", "D");
+		showOneHost("host-1", {
+			"ch-A": "host-1",
+			"ch-B": "host-2",
+			"ch-C": "host-1",
+			"ch-D": "host-1",
+		});
+
+		layout.closeToRight(0); // from A
+
+		const ids = layout.tabs.value.map((t) => t.id);
+		expect(ids).toContain(tabA);
+		expect(ids).toContain(tabB); // other host, out of sight
+		expect(ids).not.toContain(tabC);
+		expect(ids).not.toContain(tabD);
+	});
+
+	it("closes every tab when the bar shows them all", () => {
+		openTabs("A", "B", "C");
+		layout.closeAll();
+		expect(layout.tabs.value).toHaveLength(0);
 	});
 });
 

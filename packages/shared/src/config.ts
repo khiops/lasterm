@@ -77,6 +77,16 @@ export interface TabsConfig {
 	/** Confirm before Close Others. Default: true */
 	confirmCloseOthers?: boolean;
 	/**
+	 * Which tabs the bar shows. Default: "global"
+	 *
+	 * "global" keeps every tab in view whatever host is selected: one window,
+	 * one row of terminals, wherever they run. "perHost" shows only the tabs
+	 * whose terminals are on the host in view, so each host has its own bar and
+	 * changing host changes the row. Neither closes anything: a tab out of view
+	 * in "perHost" is still open, and comes back with its host.
+	 */
+	scope?: "global" | "perHost";
+	/**
 	 * How a tab says which host its terminal is on. Default: "dot"
 	 *
 	 * Tabs are global while terminals belong to hosts, so a tab bar with no
@@ -350,6 +360,7 @@ export const TABS_CONFIG_KEYS = [
 	"confirmCloseAll",
 	"confirmCloseOthers",
 	"hostMarker",
+	"scope",
 ] as const;
 
 export const PANES_CONFIG_KEYS = ["maxPanes", "defaultSplitDirection"] as const;

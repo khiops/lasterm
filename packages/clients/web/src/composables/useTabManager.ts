@@ -1,7 +1,8 @@
 import { generateId } from "@lasterm/shared";
 import { type Ref, triggerRef } from "vue";
+import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
-import type { PaneNode } from "./usePaneTree.js";
+import { type PaneNode, tabIsOnHost } from "./usePaneTree.js";
 
 // ---------------------------------------------------------------------------
 // Tab type
@@ -182,69 +183,122 @@ export function useTabManager(
 		activePaneIds.value = restPanes;
 	}
 
-	/** Close all tabs except the one at `keepIndex`. */
+	/**
+	 * The tabs on screen, or null when that is all of them.
+	 *
+	 * "Close the others" and "close every tab" mean the ones in front of the
+	 * person. While the bar shows one host, tabs on other hosts are not in the
+	 * room, and a gesture aimed at what is on screen must not reach them.
+	 */
+	function tabsInView(): ReadonlySet<string> | null {
+		const configStore = useConfigStore();
+		if (configStore.uiConfig.tabs?.scope !== "perHost") return null;
+		const channelsStore = useChannelsStore();
+		const hostId = channelsStore.activeHostId;
+		if (hostId === null) return null;
+		const inView = new Set<string>();
+		for (const tab of tabs.value) {
+			if (tabIsOnHost(tab.id, layouts.value, channelsStore.channelHostMap, hostId)) {
+				inView.add(tab.id);
+			}
+		}
+		return inView;
+	}
+
+	/** Close every tab on screen except the one at `keepIndex`. */
 	function closeOthers(keepIndex: number): void {
 		const kept = tabs.value[keepIndex];
 		if (!kept) return;
-		// Clean up layouts for removed tabs
-		const keptLayout = layouts.value[kept.id];
-		const keptPaneId = activePaneIds.value[kept.id];
-		layouts.value = keptLayout != null ? { [kept.id]: keptLayout } : {};
-		activePaneIds.value = keptPaneId !== undefined ? { [kept.id]: keptPaneId } : {};
-		tabs.value = [kept];
-		activeTabIndex.value = 0;
+		const inView = tabsInView();
+		const keepIds = new Set<string>([kept.id]);
+		if (inView !== null) {
+			for (const tab of tabs.value) {
+				if (!inView.has(tab.id)) keepIds.add(tab.id);
+			}
+		}
+
+		const nextLayouts: Record<string, PaneNode | null> = {};
+		const nextPanes: Record<string, string> = {};
+		for (const tab of tabs.value) {
+			if (!keepIds.has(tab.id)) continue;
+			const layout = layouts.value[tab.id];
+			if (layout != null) nextLayouts[tab.id] = layout;
+			const paneId = activePaneIds.value[tab.id];
+			if (paneId !== undefined) nextPanes[tab.id] = paneId;
+		}
+		const next = tabs.value.filter((t) => keepIds.has(t.id));
+		layouts.value = nextLayouts;
+		activePaneIds.value = nextPanes;
+		tabs.value = next;
+		activeTabIndex.value = Math.max(
+			0,
+			next.findIndex((t) => t.id === kept.id),
+		);
 	}
 
 	/** Close all tabs to the right of `fromIndex`. */
 	function closeToRight(fromIndex: number): void {
-		const removed = tabs.value.slice(fromIndex + 1);
+		const inView = tabsInView();
+		const removed = tabs.value
+			.slice(fromIndex + 1)
+			.filter((tab) => inView === null || inView.has(tab.id));
 		const nextLayouts = { ...layouts.value };
 		const nextPanes = { ...activePaneIds.value };
 		for (const tab of removed) {
 			delete nextLayouts[tab.id];
 			delete nextPanes[tab.id];
 		}
-		tabs.value = tabs.value.slice(0, fromIndex + 1);
+		const removedIds = new Set(removed.map((tab) => tab.id));
+		const anchor = tabs.value[fromIndex];
+		const wasActiveId = tabs.value[activeTabIndex.value]?.id;
+		const next = tabs.value.filter((tab) => !removedIds.has(tab.id));
+		tabs.value = next;
 		layouts.value = nextLayouts;
 		activePaneIds.value = nextPanes;
-		// Clamp active index if needed
-		if (activeTabIndex.value >= tabs.value.length) {
-			activeTabIndex.value = Math.max(0, tabs.value.length - 1);
+		// Keep whatever was active, unless it is one of the tabs just closed.
+		const stillActive = next.findIndex((t) => t.id === wasActiveId);
+		if (stillActive !== -1) {
+			activeTabIndex.value = stillActive;
+		} else {
+			const anchorIndex = anchor === undefined ? -1 : next.findIndex((t) => t.id === anchor.id);
+			activeTabIndex.value = Math.max(0, anchorIndex === -1 ? next.length - 1 : anchorIndex);
 		}
 	}
 
-	/** Close all tabs. If `exceptWelcomeChannelId` is provided, keep the tab that contains it. */
+	/**
+	 * Close every tab on screen. `exceptWelcomeChannelId` keeps the tab holding
+	 * that channel; tabs on other hosts are never on screen, so they stay.
+	 */
 	function closeAll(exceptWelcomeChannelId?: string): void {
-		if (exceptWelcomeChannelId) {
-			// Find the tab containing the welcome channel
-			const welcomeTabId = findTabForChannel(exceptWelcomeChannelId);
-			if (welcomeTabId !== null) {
-				const keepTab = tabs.value.find((t) => t.id === welcomeTabId);
-				const kept = keepTab !== undefined ? [keepTab] : [];
-				// Clean up layouts for removed tabs
-				const keptLayout = welcomeTabId ? layouts.value[welcomeTabId] : undefined;
-				const keptPaneId = welcomeTabId ? activePaneIds.value[welcomeTabId] : undefined;
-				const removedLayouts =
-					welcomeTabId && keptLayout != null ? { [welcomeTabId]: keptLayout } : {};
-				const removedPanes =
-					welcomeTabId && keptPaneId !== undefined ? { [welcomeTabId]: keptPaneId } : {};
-				tabs.value = kept;
-				layouts.value = removedLayouts;
-				activePaneIds.value = removedPanes;
-				activeTabIndex.value = 0;
-			} else {
-				// Welcome channel not in any tab — close all
-				tabs.value = [];
-				layouts.value = {};
-				activePaneIds.value = {};
-				activeTabIndex.value = 0;
+		const inView = tabsInView();
+		const welcomeTabId =
+			exceptWelcomeChannelId !== undefined ? findTabForChannel(exceptWelcomeChannelId) : null;
+
+		const keepIds = new Set<string>();
+		if (welcomeTabId !== null) keepIds.add(welcomeTabId);
+		if (inView !== null) {
+			for (const tab of tabs.value) {
+				if (!inView.has(tab.id)) keepIds.add(tab.id);
 			}
-		} else {
-			tabs.value = [];
-			layouts.value = {};
-			activePaneIds.value = {};
-			activeTabIndex.value = 0;
 		}
+
+		const wasActiveId = tabs.value[activeTabIndex.value]?.id;
+		const nextLayouts: Record<string, PaneNode | null> = {};
+		const nextPanes: Record<string, string> = {};
+		for (const tab of tabs.value) {
+			if (!keepIds.has(tab.id)) continue;
+			const layout = layouts.value[tab.id];
+			if (layout != null) nextLayouts[tab.id] = layout;
+			const paneId = activePaneIds.value[tab.id];
+			if (paneId !== undefined) nextPanes[tab.id] = paneId;
+		}
+
+		const next = tabs.value.filter((tab) => keepIds.has(tab.id));
+		tabs.value = next;
+		layouts.value = nextLayouts;
+		activePaneIds.value = nextPanes;
+		const stillActive = next.findIndex((t) => t.id === wasActiveId);
+		activeTabIndex.value = stillActive === -1 ? 0 : stillActive;
 	}
 
 	// ------------------------------------------------------------------
@@ -289,6 +343,7 @@ export function useTabManager(
 		setActiveTab,
 		reorderTab,
 		vacateAllPanesInTab,
+		tabsInView,
 		closeOthers,
 		closeToRight,
 		closeAll,

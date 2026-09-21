@@ -183,6 +183,7 @@ export const DEFAULT_TABS_CONFIG: TabsConfig = {
 	confirmCloseAll: true,
 	confirmCloseOthers: true,
 	hostMarker: "dot",
+	scope: "global",
 };
 
 export const DEFAULT_PANES_CONFIG: PanesConfig = {
@@ -282,6 +283,9 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 			raw.host_marker === "none"
 		) {
 			config.tabs.hostMarker = raw.host_marker;
+		}
+		if (raw.scope === "global" || raw.scope === "perHost") {
+			config.tabs.scope = raw.scope;
 		}
 	}
 

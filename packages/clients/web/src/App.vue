@@ -272,6 +272,7 @@
 					:active-tab-index="layout.activeTabIndex.value"
 					:get-tab-label="layout.getTabLabel"
 					:get-active-channel-id="layout.getActiveChannelId"
+					:visible-tab-ids="tabsInView"
 					@select-tab="layout.setActiveTab"
 					@close-tab="onCloseTab"
 					@close-others="onCloseOthers"
@@ -466,6 +467,14 @@ const writeLockStore = useWriteLockStore();
 
 const autoSwitch = useAutoSwitch();
 const layout = useLayout();
+
+/**
+ * The tabs the bar shows, by id, or null when it shows them all.
+ *
+ * The same answer the layout gives itself when it closes "the others", so the
+ * bar and those gestures always mean the same set.
+ */
+const tabsInView = computed(() => layout.tabsInView());
 const {
 	wallpaperStyle: windowWallpaperStyle,
 	dimStyle: windowWallpaperDimStyle,
@@ -968,6 +977,18 @@ watch(
 			);
 			purgeDeadTabs(channelsStore.channels, layout.tabs.value, layout.closeTab, layout.layouts.value);
 		}
+		// With the bar showing one host, the tab that was active may belong to
+		// the host just left. Land on one that is actually on screen, rather
+		// than on an index pointing at something nobody can see.
+		const inView = layout.tabsInView();
+		if (inView !== null) {
+			const active = layout.tabs.value[layout.activeTabIndex.value];
+			if (active === undefined || !inView.has(active.id)) {
+				const first = layout.tabs.value.findIndex((t) => inView.has(t.id));
+				if (first !== -1) layout.setActiveTab(first);
+			}
+		}
+
 		// Auto-open welcome tab if one exists and is alive
 		const welcomeCh = channelsStore.channels.find((c) => c.isWelcome && c.status !== 'dead');
 		if (welcomeCh) {

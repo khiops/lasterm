@@ -105,6 +105,42 @@ export function collectTerminalChannelIds(node: PaneNode): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Pure helper: which host a tab belongs to
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether this tab belongs on the bar while `hostId` is the host in view.
+ *
+ * A tab holds terminals, and terminals belong to hosts; the tab itself has no
+ * host of its own. It is on this host when any of its terminals is, which also
+ * keeps a split holding two hosts visible from either one.
+ *
+ * A tab whose terminals have no known host stays in view. The map fills in as
+ * hosts are loaded, and hiding what cannot be classified is how tabs vanish for
+ * no reason anyone can see.
+ */
+export function tabIsOnHost(
+	tabId: string,
+	layouts: Record<string, PaneNode | null>,
+	channelHostMap: ReadonlyMap<string, string>,
+	hostId: string,
+): boolean {
+	const root = layouts[tabId];
+	if (root === null || root === undefined) return true;
+	const channelIds = collectTerminalChannelIds(root);
+	if (channelIds.length === 0) return true;
+
+	let anyKnown = false;
+	for (const channelId of channelIds) {
+		const host = channelHostMap.get(channelId);
+		if (host === undefined) continue;
+		anyKnown = true;
+		if (host === hostId) return true;
+	}
+	return !anyKnown;
+}
+
+// ---------------------------------------------------------------------------
 // Pure helper: resolve tab label
 // ---------------------------------------------------------------------------
 

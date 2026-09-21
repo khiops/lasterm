@@ -10,12 +10,12 @@
 		@drop="onTabBarDrop"
 	>
 		<button
-			v-for="(tab, idx) in tabs"
+			v-for="{ tab, index: idx } in visibleTabs"
 			:key="tab.id"
 			role="tab"
 			:aria-selected="idx === activeTabIndex"
 			:draggable="editingTabIndex !== idx"
-			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === tabs.length - 1, 'tab--dragging': dragTabIndex === idx, 'tab--host-underline': hostMarkerStyle === 'underline' && hostMarkers.has(tab.id) }]"
+			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === lastVisibleIndex, 'tab--dragging': dragTabIndex === idx, 'tab--host-underline': hostMarkerStyle === 'underline' && hostMarkers.has(tab.id) }]"
 			:style="hostMarkers.get(tab.id) ? { '--tab-host-color': hostMarkers.get(tab.id)?.color } : undefined"
 			:title="hostMarkers.get(tab.id) ? `${getTabLabel(tab.id)} — on ${hostMarkers.get(tab.id)?.label}` : getTabLabel(tab.id)"
 			@click="emit('select-tab', idx)"
@@ -152,6 +152,11 @@ const props = defineProps<{
 	getTabLabel: (tabId: string) => string;
 	/** Get the channelId of the active pane for a tab by its tab.id. */
 	getActiveChannelId: (tabId: string) => string | null;
+	/**
+	 * The tabs to show, by id, or null to show them all. Resolved by the layout
+	 * so that closing "the others" and this bar agree on what is on screen.
+	 */
+	visibleTabIds?: ReadonlySet<string> | null;
 }>();
 
 const emit = defineEmits<{
@@ -186,10 +191,38 @@ function hostOfTab(tabId: string): Host | null {
 	return hostsStore.hosts.find((h) => h.id === hostId) ?? null;
 }
 
+// ─── Which tabs the bar shows ───────────────────────────────────────────────
+//
+// Global by default: one window, one row of terminals, wherever they run. Per
+// host, the bar shows only the terminals on the host in view; the others stay
+// open and come back with their host. A tab whose host is not known yet stays
+// in view either way — hiding what cannot be classified is how tabs disappear
+// for no reason anyone can see.
+
+const visibleTabs = computed(() => {
+	const all = props.tabs.map((tab, index) => ({ tab, index }));
+	const inView = props.visibleTabIds;
+	if (inView === null || inView === undefined) return all;
+	return all.filter(({ tab }) => inView.has(tab.id));
+});
+
+/** The global index of the last tab on screen, for the drop marker. */
+const lastVisibleIndex = computed(() => {
+	const visible = visibleTabs.value;
+	return visible.length === 0 ? -1 : (visible[visible.length - 1]?.index ?? -1);
+});
+
+/**
+ * Whether the bar marks hosts at all.
+ *
+ * Only when a tab on screen is on some other host than the one in view. With
+ * the bar showing one host, that never happens, and the marker would say the
+ * same thing on every tab.
+ */
 const marksHosts = computed(() => {
 	if (hostMarkerStyle.value === "none") return false;
 	const active = channelsStore.activeHostId;
-	return props.tabs.some((tab) => {
+	return visibleTabs.value.some(({ tab }) => {
 		const hostId = hostOfTab(tab.id)?.id;
 		return hostId !== undefined && hostId !== active;
 	});
@@ -199,7 +232,7 @@ const marksHosts = computed(() => {
 const hostMarkers = computed(() => {
 	const markers = new Map<string, { color: string; initials: string; label: string }>();
 	if (!marksHosts.value) return markers;
-	for (const tab of props.tabs) {
+	for (const { tab } of visibleTabs.value) {
 		const host = hostOfTab(tab.id);
 		if (host === null) continue;
 		markers.set(tab.id, {
@@ -230,7 +263,9 @@ watch(
 		await nextTick();
 		const el = tabBarEl.value;
 		if (!el) return;
-		const tab = el.children[props.activeTabIndex] as HTMLElement | undefined;
+		const onScreen = visibleTabs.value.findIndex((e) => e.index === props.activeTabIndex);
+		if (onScreen === -1) return;
+		const tab = el.children[onScreen] as HTMLElement | undefined;
 		tab?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
 	},
 );
@@ -320,18 +355,21 @@ const dropInsertIndex = ref<number | null>(null);
  */
 function getDropInsertIndex(event: DragEvent): number {
 	const el = tabBarEl.value;
-	if (!el) return props.tabs.length;
+	const pastTheEnd = lastVisibleIndex.value === -1 ? props.tabs.length : lastVisibleIndex.value + 1;
+	if (!el) return pastTheEnd;
 
-	// Iterate over tab buttons to find the insertion point
+	// Iterate over tab buttons to find the insertion point. A button's position
+	// on screen is not its position in the list when the bar shows one host's
+	// tabs, so the answer is the index that tab has in the full list.
 	const buttons = Array.from(el.querySelectorAll<HTMLElement>("[role=tab]"));
 	for (let i = 0; i < buttons.length; i++) {
 		const btn = buttons[i];
 		if (!btn) continue;
 		const rect = btn.getBoundingClientRect();
 		const midX = rect.left + rect.width / 2;
-		if (event.clientX < midX) return i;
+		if (event.clientX < midX) return visibleTabs.value[i]?.index ?? pastTheEnd;
 	}
-	return props.tabs.length;
+	return pastTheEnd;
 }
 
 function onTabBarDragOver(event: DragEvent): void {

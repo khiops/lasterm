@@ -91,10 +91,28 @@ function normalizedOptions(
  * Build SettingRow v-bind props — omit keys whose value is undefined to
  * satisfy exactOptionalPropertyTypes.
  */
+/**
+ * Whether this setting can act, and why not when it cannot.
+ *
+ * A setting another one has made meaningless stays on screen, disabled, saying
+ * what would bring it back. Removing it would leave someone looking for it.
+ */
+function disabledFor(def: SettingDefinition): { disabled: boolean; reason?: string } {
+	if (!def.disabledWhen) return { disabled: false };
+	const { key, section, value, reason } = def.disabledWhen;
+	const sibling = settingsSchema.find((s) => s.key === key && s.section === section);
+	if (!sibling) return { disabled: false };
+	const { storeSection, storeKey } = storeFor(sibling);
+	const current = settingsStore.getValue(props.scope, storeSection, storeKey);
+	return current === value ? { disabled: true, reason } : { disabled: false };
+}
+
 function rowBindings(def: SettingDefinition): Record<string, unknown> {
 	const inherited = inheritedFromForDef(def);
+	const blocked = disabledFor(def);
+	const description = blocked.reason ?? def.description;
 	return {
-		...(def.description !== undefined && { description: def.description }),
+		...(description !== undefined && { description }),
 		...(inherited !== null && { inheritedFrom: inherited }),
 		...(props.hostName !== undefined && { hostName: props.hostName }),
 	};
@@ -128,7 +146,7 @@ function controlBindings(def: SettingDefinition): Record<string, unknown> {
 			<SettingControl
 				:model-value="displayValue(def)"
 				:type="def.type"
-				:disabled="false"
+				:disabled="disabledFor(def).disabled"
 				v-bind="controlBindings(def)"
 				@update:model-value="handleUpdate(def, $event)"
 			/>

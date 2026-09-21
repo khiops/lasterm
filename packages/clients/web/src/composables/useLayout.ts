@@ -25,6 +25,7 @@ export {
 	purgeDeadTabs,
 	purgeOrphanedTabs,
 	resolveTabLabel,
+	tabIsOnHost,
 } from "./usePaneTree.js";
 export type { Tab } from "./useTabManager.js";
 
@@ -214,6 +215,7 @@ export function useLayout() {
 		setActiveTab: tabManager.setActiveTab,
 		reorderTab: tabManager.reorderTab,
 		vacateAllPanesInTab: tabManager.vacateAllPanesInTab,
+		tabsInView: tabManager.tabsInView,
 		closeOthers: tabManager.closeOthers,
 		closeToRight: tabManager.closeToRight,
 		closeAll: tabManager.closeAll,

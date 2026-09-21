@@ -839,6 +839,16 @@ describe("extractUiConfig — tabs section", () => {
 		expect(config.tabs.closeButton).toBe(false);
 	});
 
+	it('parses host_marker = "initials"', () => {
+		const config = extractUiConfig({ tabs: { host_marker: "initials" } });
+		expect(config.tabs.hostMarker).toBe("initials");
+	});
+
+	it("ignores an unknown host_marker and keeps the default", () => {
+		const config = extractUiConfig({ tabs: { host_marker: "flag" } });
+		expect(config.tabs.hostMarker).toBe("dot");
+	});
+
 	it('parses new_tab_position = "afterActive"', () => {
 		const config = extractUiConfig({ tabs: { new_tab_position: "afterActive" } });
 		expect(config.tabs.newTabPosition).toBe("afterActive");

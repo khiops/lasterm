@@ -191,6 +191,22 @@ export const settingsSchema: SettingDefinition[] = [
 		],
 	},
 	{
+		key: "hostMarker",
+		label: "Host Marker",
+		type: "select",
+		category: "tabs",
+		section: "tabs",
+		scopes: ["global"],
+		options: [
+			{ label: "Colour dot", value: "dot" },
+			{ label: "Host initials", value: "initials" },
+			{ label: "Coloured underline", value: "underline" },
+			{ label: "None", value: "none" },
+		],
+		description:
+			"How a tab shows which host its terminal is on. Tabs are shared by every host, so without a marker a tab bar is a list of names that could come from anywhere.",
+	},
+	{
 		key: "confirmCloseAll",
 		label: "Confirm Close All",
 		type: "toggle",

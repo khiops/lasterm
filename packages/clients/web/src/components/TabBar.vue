@@ -15,8 +15,9 @@
 			role="tab"
 			:aria-selected="idx === activeTabIndex"
 			:draggable="editingTabIndex !== idx"
-			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === tabs.length - 1, 'tab--dragging': dragTabIndex === idx }]"
-			:title="getTabLabel(tab.id)"
+			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === tabs.length - 1, 'tab--dragging': dragTabIndex === idx, 'tab--host-underline': hostMarkerStyle === 'underline' && hostMarkers.has(tab.id) }]"
+			:style="hostMarkers.get(tab.id) ? { '--tab-host-color': hostMarkers.get(tab.id)?.color } : undefined"
+			:title="hostMarkers.get(tab.id) ? `${getTabLabel(tab.id)} — on ${hostMarkers.get(tab.id)?.label}` : getTabLabel(tab.id)"
 			@click="emit('select-tab', idx)"
 			@mousedown.middle.prevent="emit('close-tab', idx)"
 			@contextmenu.prevent="onTabContextMenu(idx, $event)"
@@ -24,6 +25,16 @@
 			@dragend="onTabDragEnd"
 		>
 			<span v-if="isWelcomeTab(tab.id)" class="tab__welcome-star" title="Welcome Tab">&#x2605;</span>
+			<span
+				v-if="hostMarkerStyle === 'dot' && hostMarkers.has(tab.id)"
+				class="tab__host-dot"
+				:aria-label="`On ${hostMarkers.get(tab.id)?.label}`"
+			></span>
+			<span
+				v-else-if="hostMarkerStyle === 'initials' && hostMarkers.has(tab.id)"
+				class="tab__host-initials"
+				:aria-label="`On ${hostMarkers.get(tab.id)?.label}`"
+			>{{ hostMarkers.get(tab.id)?.initials }}</span>
 			<input
 				v-if="editingTabIndex === idx"
 				ref="editInput"
@@ -107,16 +118,20 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch, nextTick } from "vue";
+import type { Host } from "@lasterm/shared";
 import type { Tab } from "../composables/useLayout.js";
+import { getColorFromLabel, getInitials } from "../composables/useHostIcon.js";
 import { useRename } from "../composables/useRename.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
+import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import ProfileDropdown from "./ProfileDropdown.vue";
 import TabContextMenu from "./TabContextMenu.vue";
 
 const channelsStore = useChannelsStore();
 const configStore = useConfigStore();
+const hostsStore = useHostsStore();
 const notificationStore = useNotificationStore();
 
 // Profile dropdown state
@@ -153,6 +168,48 @@ const emit = defineEmits<{
 	(e: "reorder-tab", fromIndex: number, toIndex: number): void;
 	(e: "configure-command", channelId: string): void;
 }>();
+
+// ─── Which host a tab is on ─────────────────────────────────────────────────
+//
+// Tabs are global and terminals belong to hosts, so the bar can hold terminals
+// from several machines at once — and after a restart, often does. The marker
+// only appears when it says something: while every tab is on the host being
+// looked at, it is noise, and the bar stays as it was.
+
+const hostMarkerStyle = computed(() => configStore.uiConfig.tabs?.hostMarker ?? "dot");
+
+function hostOfTab(tabId: string): Host | null {
+	const channelId = props.getActiveChannelId(tabId);
+	if (channelId === null) return null;
+	const hostId = channelsStore.channelHostMap.get(channelId);
+	if (hostId === undefined) return null;
+	return hostsStore.hosts.find((h) => h.id === hostId) ?? null;
+}
+
+const marksHosts = computed(() => {
+	if (hostMarkerStyle.value === "none") return false;
+	const active = channelsStore.activeHostId;
+	return props.tabs.some((tab) => {
+		const hostId = hostOfTab(tab.id)?.id;
+		return hostId !== undefined && hostId !== active;
+	});
+});
+
+/** The marker each tab carries, by tab id — resolved once per render. */
+const hostMarkers = computed(() => {
+	const markers = new Map<string, { color: string; initials: string; label: string }>();
+	if (!marksHosts.value) return markers;
+	for (const tab of props.tabs) {
+		const host = hostOfTab(tab.id);
+		if (host === null) continue;
+		markers.set(tab.id, {
+			color: host.color || getColorFromLabel(host.label),
+			initials: getInitials(host.label),
+			label: host.label,
+		});
+	}
+	return markers;
+});
 
 // -------------------------------------------------------------------------
 // Horizontal scroll
@@ -451,6 +508,35 @@ function onTabDragEnd(): void {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	text-align: left;
+}
+
+/* The host marker. It sits before the label so a glance down the bar reads a
+   column of hosts, and it takes the host's own colour — the same one the host
+   rail uses, so the two agree. */
+.tab__host-dot {
+	flex-shrink: 0;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--tab-host-color, var(--nt-accent));
+}
+
+.tab__host-initials {
+	flex-shrink: 0;
+	padding: 0 4px;
+	border-radius: 3px;
+	font-size: 9px;
+	font-weight: 600;
+	line-height: 14px;
+	letter-spacing: 0.02em;
+	color: var(--nt-bright-white, #fff);
+	background: var(--tab-host-color, var(--nt-accent));
+}
+
+/* The underline costs no width at all: the tab keeps its size and takes the
+   host's colour along its bottom edge. */
+.tab--host-underline {
+	box-shadow: inset 0 -2px 0 0 var(--tab-host-color, var(--nt-accent));
 }
 
 .tab__activity-dot {

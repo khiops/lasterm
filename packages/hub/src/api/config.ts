@@ -26,6 +26,7 @@ const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => boolean
 		newTabPosition: (v) => v === "end" || v === "afterActive",
 		confirmCloseAll: (v) => typeof v === "boolean",
 		confirmCloseOthers: (v) => typeof v === "boolean",
+		hostMarker: (v) => v === "dot" || v === "initials" || v === "underline" || v === "none",
 	},
 	panes: {
 		maxPanes: (v) => typeof v === "number" && Number.isInteger(v) && v >= 1,

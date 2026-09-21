@@ -946,6 +946,10 @@ watch(
 	async (hostId) => {
 		if (hostId === null) return;
 		await channelsStore.fetchChannels(hostId);
+		// Tabs are global: some of them front terminals on other hosts. One
+		// unfiltered listing is what lets those tabs keep their name and say
+		// which host they are on.
+		void channelsStore.fetchChannelIndex();
 		// Clear stale write-lock entries for dead channels
 		const deadIds = new Set(channelsStore.channels.filter((c) => c.status === 'dead').map((c) => c.id));
 		writeLockStore.pruneDeadLocks(deadIds);

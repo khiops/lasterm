@@ -1334,6 +1334,21 @@ describe("resolveTabLabel", () => {
 		expect(resolveTabLabel("ch-1", [])).toBe("Terminal");
 	});
 
+	it("names a channel the loaded host does not list, from the index", () => {
+		const index = new Map([["ch-9", { displayTitle: "htop" }]]);
+		expect(resolveTabLabel("ch-9", [], index)).toBe("htop");
+	});
+
+	it("prefers the loaded host's channel over the index", () => {
+		const index = new Map([["ch-1", { displayTitle: "stale" }]]);
+		expect(resolveTabLabel("ch-1", [{ id: "ch-1", displayTitle: "live" }], index)).toBe("live");
+	});
+
+	it("falls back to DEFAULT_CHANNEL_NAME when the index has no title either", () => {
+		const index = new Map([["ch-9", { displayTitle: "" }]]);
+		expect(resolveTabLabel("ch-9", [], index)).toBe("Terminal");
+	});
+
 	it("ignores other channel fields, only uses displayTitle", () => {
 		// Hub pre-computes displayTitle — client should not re-derive from raw fields
 		const channels = [{ id: "ch-1", displayTitle: "hub-computed" }];

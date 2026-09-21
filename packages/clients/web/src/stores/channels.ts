@@ -133,6 +133,21 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	const channelHostMap = ref<Map<string, string>>(new Map());
 
+	/**
+	 * Every channel this hub knows — the host it is on and the title it carries
+	 * — whichever host is being looked at.
+	 *
+	 * `channels` holds one host at a time, which is right for the sidebar and
+	 * wrong for the tab bar: tabs are global, so a tab can front a terminal on a
+	 * host nobody is looking at. Without this, such a tab has no name to show
+	 * and no host to mark, which is what a restart used to look like — a row of
+	 * tabs all called "Terminal".
+	 *
+	 * It is a fallback, not a source of truth: `channels` wins for the active
+	 * host, where the live status lives.
+	 */
+	const channelIndex = ref<Map<string, { hostId: string; displayTitle: string }>>(new Map());
+
 	/** Channels that belong to the currently loaded host. */
 	const activeHostId = ref<string | null>(null);
 
@@ -208,6 +223,42 @@ export const useChannelsStore = defineStore("channels", () => {
 	// -------------------------------------------------------------------------
 	// REST: fetch channels for a host
 	// -------------------------------------------------------------------------
+
+	/**
+	 * Load the cross-host index: one unfiltered listing, every channel's host
+	 * and title.
+	 *
+	 * It never touches `channels`, `loading` or `error` — it is not what the
+	 * sidebar is waiting for, and a hub that refuses it leaves the app exactly
+	 * as it was, with tabs named the way they were before.
+	 */
+	async function fetchChannelIndex(): Promise<void> {
+		if (authStore.token === null) return;
+		try {
+			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
+				headers: { Authorization: `Bearer ${authStore.token}` },
+			});
+			if (!res.ok) return;
+			const rows = (await res.json()) as Array<Record<string, unknown>>;
+			if (!Array.isArray(rows)) return;
+
+			const nextIndex = new Map<string, { hostId: string; displayTitle: string }>();
+			const nextHostMap = new Map(channelHostMap.value);
+			for (const row of rows) {
+				const id = row.id;
+				const rowHostId = row.host_id;
+				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
+				const title = typeof row.display_title === "string" ? row.display_title : "";
+				nextIndex.set(id, { hostId: rowHostId, displayTitle: title });
+				nextHostMap.set(id, rowHostId);
+			}
+			channelIndex.value = nextIndex;
+			channelHostMap.value = nextHostMap;
+		} catch {
+			// An index that could not be read is an index that says nothing; the
+			// tab bar falls back to what it showed before.
+		}
+	}
 
 	async function fetchChannels(hostId: string): Promise<void> {
 		if (authStore.token === null) return;
@@ -317,12 +368,17 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Write channels ref once with the fully-reconciled list.
 			channels.value = merged;
 
-			// Populate persistent channelId → hostId map (survives host switch).
+			// Populate persistent channelId → hostId map (survives host switch),
+			// and the index that names this host's channels once another host is
+			// being looked at.
 			const nextHostMap = new Map(channelHostMap.value);
+			const nextIndex = new Map(channelIndex.value);
 			for (const ch of merged) {
 				nextHostMap.set(ch.id, hostId);
+				nextIndex.set(ch.id, { hostId, displayTitle: ch.displayTitle ?? "" });
 			}
 			channelHostMap.value = nextHostMap;
+			channelIndex.value = nextIndex;
 
 			// Clear selection if the previously selected channel is no longer
 			// present (e.g. host switched).
@@ -424,6 +480,16 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Silently ignored if the channel is not loaded yet.
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
+		// The index keeps up even for a channel this host does not list, so the
+		// tab still carries the last title it was given after a host switch.
+		const indexed = channelIndex.value.get(channelId);
+		if (indexed !== undefined && indexed.displayTitle !== displayTitle) {
+			channelIndex.value = new Map(channelIndex.value).set(channelId, {
+				...indexed,
+				displayTitle,
+			});
+		}
+
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) return;
 		const existing = channels.value[idx];
@@ -1162,9 +1228,11 @@ export const useChannelsStore = defineStore("channels", () => {
 		activeHostId,
 		channelsByGroup,
 		channelHostMap,
+		channelIndex,
 		welcomeChannel,
 		fetchGroups,
 		fetchChannels,
+		fetchChannelIndex,
 		selectChannel,
 		markUnread,
 		updateChannelStatus,

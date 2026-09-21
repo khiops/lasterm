@@ -6,7 +6,7 @@ import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@laster
 import ssh2, { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
 import { AgentConnection } from "./agent-connection.js";
 import {
-	type BinaryVerifyPromptFn,
+	AgentBinaryDecisionNeeded,
 	DeployError,
 	type DeployOptions,
 	type DeployResult,
@@ -211,12 +211,10 @@ export interface SshAgentDeployOptions {
 	sessionTrustedSha256?: string | null;
 	/** Called when OS/arch is detected on the remote host. */
 	onOsDetected?: (hostId: string, os: HostOs, arch: HostArch) => void;
-	/** Called to prompt user for binary trust decision. */
-	promptBinaryVerify?: BinaryVerifyPromptFn;
+	/** The hash a person approved on the attempt before this one, if any. */
+	approvedSha256?: string | null;
 	/** Called when user chose trust_permanent — persist SHA256 to DB. */
 	onAgentPinned?: (hostId: string, sha256: string) => void;
-	/** Called when user chose trust_once — store in session map. */
-	onAgentTrustOnce?: (hostId: string, sha256: string) => void;
 	/** Called when remote agent was re-uploaded (SHA256 mismatch with local cache). */
 	onAgentUpdated?: (hostId: string) => void;
 }
@@ -238,11 +236,8 @@ function toDeployOptions(
 		...(opts.sessionTrustedSha256 != null
 			? { sessionTrustedSha256: opts.sessionTrustedSha256 }
 			: {}),
-		...(opts.promptBinaryVerify !== undefined
-			? { promptBinaryVerify: opts.promptBinaryVerify }
-			: {}),
+		...(opts.approvedSha256 != null ? { approvedSha256: opts.approvedSha256 } : {}),
 		...(opts.onAgentPinned !== undefined ? { onAgentPinned: opts.onAgentPinned } : {}),
-		...(opts.onAgentTrustOnce !== undefined ? { onAgentTrustOnce: opts.onAgentTrustOnce } : {}),
 		...(opts.onAgentUpdated !== undefined ? { onAgentUpdated: opts.onAgentUpdated } : {}),
 	};
 }
@@ -552,6 +547,16 @@ export class SshAgent extends AgentConnection {
 								runAgent(buildAgentCommandForDeployResult(result, this.loggingConfig));
 							})
 							.catch((deployErr: unknown) => {
+								// A binary nobody has approved: the question belongs to a
+								// person, and nothing of ours stays open on the remote
+								// machine while it is being answered. The caller asks and
+								// comes again (#444).
+								if (deployErr instanceof AgentBinaryDecisionNeeded) {
+									console.error("[lasterm-ssh] deploy needs a decision; closing the connection");
+									this.cleanup();
+									rejectOnce(deployErr);
+									return;
+								}
 								// User-initiated rejections must propagate — no fallback.
 								if (deployErr instanceof DeployError) {
 									console.error(

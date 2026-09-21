@@ -56,15 +56,6 @@ const RECONNECT_TIMEOUT_MS = 5 * 60 * 1_000; // 5 minutes
  * not happen in thirty seconds. A question that expires while it is being
  * answered teaches people to answer it without looking (#437).
  */
-/**
- * How long the agent-binary question waits.
- *
- * Unlike the host-key and password questions, this one is asked *over a live
- * SSH connection*: the remote binary is being inspected. A connection held open
- * to a remote machine while a person thinks is the thing this bound exists for,
- * and it goes when that wait learns to release its transport and resume (#444).
- */
-const HOST_KEY_MISMATCH_TIMEOUT_MS = 120_000;
 const AUTH_PROMPT_TIMEOUT_MS = 120_000; // 2 min — unanswered prompt must not wedge the host
 type PendingPromptEntry =
 	SharedSessionContext["pendingPrompts"] extends Map<string, infer P> ? P : never;
@@ -408,7 +399,10 @@ export class SshConnectionManager {
 				"agent_verify",
 				verifyMsgBase,
 				send,
-				HOST_KEY_MISMATCH_TIMEOUT_MS,
+				// The connection that found this binary was closed before the
+				// question was asked, so nothing of ours is open on that machine
+				// while it is answered (#444).
+				null,
 			);
 			if (clearOnSettle) {
 				clearContext(this.ctx, context.id, send);
@@ -533,14 +527,12 @@ export class SshConnectionManager {
 					onOsDetected: (hid, os, arch) => {
 						this.ctx.metaDal.updateHostOsArch(hid, os, arch);
 					},
-					// No promptBinaryVerify — reconnect is non-interactive.
-					// If binary is untrusted, deploy will throw AGENT_BINARY_UNTRUSTED
-					// and reconnect will retry or give up (existing retry logic).
+					// A reconnect asks nobody: it runs while the person who owns this
+					// session may not even be looking. A binary nothing trusts hands
+					// back a decision nobody is here to make, and the reconnect gives
+					// up rather than deciding for them.
 					onAgentPinned: (hid, sha256) => {
 						this.ctx.metaDal.updateHostAgentSha256(hid, sha256);
-					},
-					onAgentTrustOnce: (hid, sha256) => {
-						this.ctx.trustedAgentSha256.set(hid, sha256);
 					},
 				};
 

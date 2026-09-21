@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import type { DeployOptions } from "./agent-deployer.js";
 import {
+	AgentBinaryDecisionNeeded,
 	checkRemoteAgent,
 	DeployError,
 	deployAgentIfNeeded,
@@ -517,144 +518,100 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect(sftp.fastPut).toHaveBeenCalled();
 	});
 
-	it("4. No local binary, no pin → calls promptBinaryVerify", async () => {
-		// Do NOT write local binary — cacheDir is empty
+	// Nobody can be asked from in here: this runs over a live SSH connection, and
+	// a connection held open while a person thinks is what #444 is about. What is
+	// known is handed back, and the caller closes, asks, and comes again.
+	it("4. No local binary, no pin → hands the decision back with what it saw", async () => {
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const promptBinaryVerify = vi.fn().mockResolvedValue("trust_once");
-		await deployAgentIfNeeded(
+		const error = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({ promptBinaryVerify }),
-		);
+			makeOptions(),
+		).catch((e: unknown) => e);
 
-		expect(promptBinaryVerify).toHaveBeenCalledWith(
-			"host-1",
-			"myhost.example.com",
-			existingPath,
-			REMOTE_SHA_DIFFERENT,
-			"linux",
-			"x64",
-			false, // mismatch=false when no pin
-			undefined, // no pinnedSha256
-		);
+		expect(error).toBeInstanceOf(AgentBinaryDecisionNeeded);
+		const decision = error as AgentBinaryDecisionNeeded;
+		expect(decision.hostId).toBe("host-1");
+		expect(decision.hostname).toBe("myhost.example.com");
+		expect(decision.remotePath).toBe(existingPath);
+		expect(decision.remoteSha256).toBe(REMOTE_SHA_DIFFERENT);
+		expect(decision.os).toBe("linux");
+		expect(decision.arch).toBe("x64");
+		expect(decision.mismatch).toBe(false);
+		expect(decision.pinnedSha256).toBeUndefined();
 	});
 
-	it("5. No local binary, pin matches remote → skip prompt, deployed: false", async () => {
+	it("5. No local binary, pin matches remote → nothing to decide, deployed: false", async () => {
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const promptBinaryVerify = vi.fn();
 		const result = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({ pinnedSha256: REMOTE_SHA_DIFFERENT, promptBinaryVerify }),
+			makeOptions({ pinnedSha256: REMOTE_SHA_DIFFERENT }),
 		);
 
 		expect(result.deployed).toBe(false);
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(promptBinaryVerify).not.toHaveBeenCalled();
 	});
 
-	it("6. No local binary, pin mismatches → prompt with mismatch=true", async () => {
+	it("6. No local binary, pin mismatches → says so in the decision it hands back", async () => {
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const promptBinaryVerify = vi.fn().mockResolvedValue("trust_once");
-		await deployAgentIfNeeded(
+		const error = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({ pinnedSha256: LOCAL_SHA, promptBinaryVerify }),
-		);
+			makeOptions({ pinnedSha256: "sha256-of-something-else" }),
+		).catch((e: unknown) => e);
 
-		expect(promptBinaryVerify).toHaveBeenCalledWith(
-			"host-1",
-			"myhost.example.com",
-			existingPath,
-			REMOTE_SHA_DIFFERENT,
-			"linux",
-			"x64",
-			true, // mismatch=true (pin differs from remote)
-			LOCAL_SHA,
-		);
+		expect(error).toBeInstanceOf(AgentBinaryDecisionNeeded);
+		expect((error as AgentBinaryDecisionNeeded).mismatch).toBe(true);
+		expect((error as AgentBinaryDecisionNeeded).pinnedSha256).toBe("sha256-of-something-else");
 	});
 
 	it("7. No local binary, sessionTrusted matches remote → skip, deployed: false", async () => {
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const promptBinaryVerify = vi.fn();
 		const result = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({ sessionTrustedSha256: REMOTE_SHA_DIFFERENT, promptBinaryVerify }),
+			makeOptions({ sessionTrustedSha256: REMOTE_SHA_DIFFERENT }),
 		);
 
 		expect(result.deployed).toBe(false);
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(promptBinaryVerify).not.toHaveBeenCalled();
 	});
 
-	it("8. No local binary, trust_permanent → onAgentPinned called", async () => {
+	// The answer comes back as an approved hash, and the attempt that resumes
+	// takes it — the trust itself is recorded by whoever asked.
+	it("8. Resumed with the hash that was approved → proceeds", async () => {
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const promptBinaryVerify = vi.fn().mockResolvedValue("trust_permanent");
-		const onAgentPinned = vi.fn();
 		const result = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({ promptBinaryVerify, onAgentPinned }),
+			makeOptions({ approvedSha256: REMOTE_SHA_DIFFERENT }),
 		);
 
 		expect(result.deployed).toBe(false);
-		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(onAgentPinned).toHaveBeenCalledWith("host-1", REMOTE_SHA_DIFFERENT);
+		expect(result.remotePath).toBe(existingPath);
 	});
 
-	it("9. No local binary, trust_once → onAgentTrustOnce called", async () => {
-		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
-
-		const promptBinaryVerify = vi.fn().mockResolvedValue("trust_once");
-		const onAgentTrustOnce = vi.fn();
-		const result = await deployAgentIfNeeded(
-			client,
-			{ os: "linux", arch: "x64" },
-			makeOptions({ promptBinaryVerify, onAgentTrustOnce }),
-		);
-
-		expect(result.deployed).toBe(false);
-		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(onAgentTrustOnce).toHaveBeenCalledWith("host-1", REMOTE_SHA_DIFFERENT);
-	});
-
-	it("10. No local binary, reject → throws AGENT_BINARY_REJECTED", async () => {
-		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
-
-		const promptBinaryVerify = vi.fn().mockResolvedValue("reject");
-		const error = await deployAgentIfNeeded(
-			client,
-			{ os: "linux", arch: "x64" },
-			makeOptions({ promptBinaryVerify }),
-		).catch((e: unknown) => e);
-
-		expect(error).toBeInstanceOf(DeployError);
-		expect((error as DeployError).code).toBe("AGENT_BINARY_REJECTED");
-	});
-
-	it("11. No local binary, no prompt fn → throws AGENT_BINARY_UNTRUSTED", async () => {
+	// The person answered about the hash they were shown. A remote binary that
+	// changed while the question was open was never the one anybody approved.
+	it("9. Resumed, but the remote binary changed → asks again about what is there", async () => {
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
 		const error = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions(), // no promptBinaryVerify
+			makeOptions({ approvedSha256: "sha256-of-what-was-shown" }),
 		).catch((e: unknown) => e);
 
-		expect(error).toBeInstanceOf(DeployError);
-		expect((error as DeployError).code).toBe("AGENT_BINARY_UNTRUSTED");
+		expect(error).toBeInstanceOf(AgentBinaryDecisionNeeded);
+		expect((error as AgentBinaryDecisionNeeded).remoteSha256).toBe(REMOTE_SHA_DIFFERENT);
 	});
-});
 
-// ---------- deployAgentIfNeeded — Branch B: agent not found ------------------
-
-describe("deployAgentIfNeeded — agent not found", () => {
 	it("12. Agent not found + local binary → upload, deployed: true", async () => {
 		const binaryName = agentCacheName("linux", "x64");
 		writeCachedAgentBinary("linux", "x64");
@@ -1259,34 +1216,19 @@ describe("deploy + verify integration", () => {
 		expect(onAgentUpdated).toHaveBeenCalledWith("host-1");
 	});
 
-	it("prompts user on first use (no pin, no cache), pins on trust_permanent", async () => {
-		// Remote agent found, no local binary, no pin — must prompt
+	it("asks for a decision on first use (no pin, no cache)", async () => {
 		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const onAgentPinned = vi.fn();
-		const promptBinaryVerify = vi.fn().mockResolvedValue("trust_permanent");
-
-		const result = await deployAgentIfNeeded(
+		const error = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({ promptBinaryVerify, onAgentPinned }),
-		);
+			makeOptions(),
+		).catch((e: unknown) => e);
 
-		expect(promptBinaryVerify).toHaveBeenCalledWith(
-			"host-1",
-			"myhost.example.com",
-			existingPath,
-			REMOTE_SHA_DIFFERENT,
-			"linux",
-			"x64",
-			false, // mismatch=false — no prior pin
-			undefined,
-		);
-		expect(onAgentPinned).toHaveBeenCalledWith("host-1", REMOTE_SHA_DIFFERENT);
-		expect(result.deployed).toBe(false);
-		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(result.remotePath).toBe(existingPath);
+		expect(error).toBeInstanceOf(AgentBinaryDecisionNeeded);
+		expect((error as AgentBinaryDecisionNeeded).remoteSha256).toBe(REMOTE_SHA_DIFFERENT);
+		expect((error as AgentBinaryDecisionNeeded).mismatch).toBe(false);
 	});
 
 	it("skips prompt when session-trusted SHA matches remote", async () => {
@@ -1295,7 +1237,7 @@ describe("deploy + verify integration", () => {
 		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		// No promptBinaryVerify provided — would throw AGENT_BINARY_UNTRUSTED if reached
+		// Nothing to decide: a session-trusted hash is an answer already given
 		const result = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
@@ -1307,35 +1249,19 @@ describe("deploy + verify integration", () => {
 		expect(result.remotePath).toBe(existingPath);
 	});
 
-	it("prompts with mismatch=true when pinned SHA differs from remote", async () => {
-		// Remote agent exists with new hash; stored pin is the old LOCAL_SHA
+	it("says the pin disagrees when the remote hash is not the pinned one", async () => {
 		const existingPath = "/usr/local/bin/lasterm-agent";
 		const client = makeAgentFoundClient(existingPath, REMOTE_SHA_DIFFERENT);
 
-		const onAgentPinned = vi.fn();
-		const promptBinaryVerify = vi.fn().mockResolvedValue("trust_permanent");
-
-		await deployAgentIfNeeded(
+		const error = await deployAgentIfNeeded(
 			client,
 			{ os: "linux", arch: "x64" },
-			makeOptions({
-				pinnedSha256: LOCAL_SHA, // old pin differs from REMOTE_SHA_DIFFERENT
-				promptBinaryVerify,
-				onAgentPinned,
-			}),
-		);
+			makeOptions({ pinnedSha256: LOCAL_SHA }),
+		).catch((e: unknown) => e);
 
-		expect(promptBinaryVerify).toHaveBeenCalledWith(
-			"host-1",
-			"myhost.example.com",
-			existingPath,
-			REMOTE_SHA_DIFFERENT,
-			"linux",
-			"x64",
-			true, // mismatch=true — pin differs from remote
-			LOCAL_SHA,
-		);
-		expect(onAgentPinned).toHaveBeenCalledWith("host-1", REMOTE_SHA_DIFFERENT);
+		expect(error).toBeInstanceOf(AgentBinaryDecisionNeeded);
+		expect((error as AgentBinaryDecisionNeeded).mismatch).toBe(true);
+		expect((error as AgentBinaryDecisionNeeded).pinnedSha256).toBe(LOCAL_SHA);
 	});
 
 	it("throws AGENT_NOT_AVAILABLE when no agent on remote and no local binary", async () => {

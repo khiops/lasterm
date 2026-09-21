@@ -47,15 +47,63 @@ export type BinaryVerifyPromptFn = (
 
 export type AgentBinaryFetcher = (options: FetchAgentBinaryOptions) => Promise<string>;
 
+/**
+ * A remote binary nobody here has approved, handed back for a decision.
+ *
+ * Thrown rather than asked about, because this happens over a live SSH
+ * connection: the caller closes it, asks, and comes again with the answer in
+ * `approvedSha256`. What it carries is what the person will be shown.
+ */
+export class AgentBinaryDecisionNeeded extends Error {
+	readonly hostId: string;
+	readonly hostname: string;
+	readonly remotePath: string;
+	readonly remoteSha256: string;
+	readonly os: HostOs;
+	readonly arch: HostArch;
+	readonly mismatch: boolean;
+	readonly pinnedSha256?: string;
+
+	constructor(facts: {
+		hostId: string;
+		hostname: string;
+		remotePath: string;
+		remoteSha256: string;
+		os: HostOs;
+		arch: HostArch;
+		mismatch: boolean;
+		pinnedSha256?: string;
+	}) {
+		super(
+			`The remote agent at ${facts.remotePath} (sha256: ${facts.remoteSha256}) needs a decision.`,
+		);
+		this.name = "AgentBinaryDecisionNeeded";
+		this.hostId = facts.hostId;
+		this.hostname = facts.hostname;
+		this.remotePath = facts.remotePath;
+		this.remoteSha256 = facts.remoteSha256;
+		this.os = facts.os;
+		this.arch = facts.arch;
+		this.mismatch = facts.mismatch;
+		if (facts.pinnedSha256 !== undefined) this.pinnedSha256 = facts.pinnedSha256;
+	}
+}
+
 export interface DeployOptions {
 	binaryCache: string;
 	hostname: string;
 	hostId: string;
 	pinnedSha256?: string | null;
 	sessionTrustedSha256?: string | null;
-	promptBinaryVerify?: BinaryVerifyPromptFn;
+	/**
+	 * The hash a person approved for this host, on the attempt before this one.
+	 *
+	 * Set when resuming after a decision: the binary found now must be the one
+	 * that was shown, or the question is asked again about what is actually
+	 * there.
+	 */
+	approvedSha256?: string | null;
 	onAgentPinned?: (hostId: string, sha256: string) => void;
-	onAgentTrustOnce?: (hostId: string, sha256: string) => void;
 	onAgentUpdated?: (hostId: string) => void;
 	fetchAgentBinary?: AgentBinaryFetcher;
 	detectSea?: () => boolean;
@@ -396,9 +444,8 @@ export async function deployAgentIfNeeded(
 		hostId,
 		pinnedSha256,
 		sessionTrustedSha256,
-		promptBinaryVerify,
+		approvedSha256,
 		onAgentPinned,
-		onAgentTrustOnce,
 		onAgentUpdated,
 	} = options;
 	const hubVersion = options.hubVersion ?? HUB_VERSION;
@@ -487,51 +534,35 @@ export async function deployAgentIfNeeded(
 			};
 		}
 
-		// Need to prompt
-		if (!promptBinaryVerify) {
-			throw new DeployError(
-				"AGENT_BINARY_UNTRUSTED",
-				`Remote agent at ${existingPath} (sha256: ${remoteSha}) cannot be verified — no verification prompt registered.`,
-			);
+		// The answer this very binary was already given, on the way here: a
+		// decision was asked for, the connection was closed while it was
+		// considered, and this is the resumed attempt. The comparison is against
+		// the hash that was *shown*: a remote binary that changed while the
+		// question was open was never the one anybody approved.
+		if (approvedSha256 && approvedSha256 === remoteSha) {
+			return {
+				deployed: false,
+				remoteMatchesHubVersionCache: false,
+				remotePath: existingPath,
+				os,
+				arch,
+			};
 		}
 
-		const mismatch = pinnedSha256 != null && pinnedSha256 !== remoteSha;
-		const action = await promptBinaryVerify(
+		// Nobody can be asked from in here: this runs over a live SSH connection
+		// to the remote machine, and a connection held open while a person thinks
+		// is the thing that must not happen (#444). What is known is handed back,
+		// the caller closes the connection, asks, and comes again with an answer.
+		throw new AgentBinaryDecisionNeeded({
 			hostId,
 			hostname,
-			existingPath,
-			remoteSha,
+			remotePath: existingPath,
+			remoteSha256: remoteSha,
 			os,
 			arch,
-			mismatch,
-			pinnedSha256 ?? undefined,
-		);
-
-		if (action === "trust_permanent") {
-			onAgentPinned?.(hostId, remoteSha);
-			return {
-				deployed: false,
-				remoteMatchesHubVersionCache: false,
-				remotePath: existingPath,
-				os,
-				arch,
-			};
-		}
-		if (action === "trust_once") {
-			onAgentTrustOnce?.(hostId, remoteSha);
-			return {
-				deployed: false,
-				remoteMatchesHubVersionCache: false,
-				remotePath: existingPath,
-				os,
-				arch,
-			};
-		}
-		// action === "reject"
-		throw new DeployError(
-			"AGENT_BINARY_REJECTED",
-			`User rejected remote agent binary at ${existingPath} (sha256: ${remoteSha}).`,
-		);
+			mismatch: pinnedSha256 != null && pinnedSha256 !== remoteSha,
+			...(pinnedSha256 != null ? { pinnedSha256 } : {}),
+		});
 	}
 
 	// --- Branch B: agent not found — fresh deploy ---

@@ -256,6 +256,10 @@ export class MetaDAL {
 		return this.channels.getChannelWithHost(channelId);
 	}
 
+	listChannelHosts(): Map<string, string> {
+		return this.channels.listChannelHosts();
+	}
+
 	listChannels(sessionId?: string): Channel[] {
 		return this.channels.listChannels(sessionId);
 	}

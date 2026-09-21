@@ -27,9 +27,15 @@ export function registerChannelRoutes(
 				channels = metaDal.listChannels();
 			}
 
+			// Every row says which host it is on, including the unfiltered listing:
+			// that listing is how a client names a tab whose channel belongs to a
+			// host it is not currently looking at.
+			const hostOf = host_id === undefined ? metaDal.listChannelHosts() : null;
+
 			return channels.map((ch) => {
 				const row = toSnakeCase(ch) as Record<string, unknown>;
 				row.display_title = sessionManager.resolveDisplayTitle(ch.id);
+				row.host_id = host_id ?? hostOf?.get(ch.id) ?? null;
 				return row;
 			});
 		},

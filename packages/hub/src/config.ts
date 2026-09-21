@@ -182,6 +182,7 @@ export const DEFAULT_TABS_CONFIG: TabsConfig = {
 	newTabPosition: "end",
 	confirmCloseAll: true,
 	confirmCloseOthers: true,
+	hostMarker: "dot",
 };
 
 export const DEFAULT_PANES_CONFIG: PanesConfig = {
@@ -273,6 +274,14 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		}
 		if (typeof raw.confirm_close_others === "boolean") {
 			config.tabs.confirmCloseOthers = raw.confirm_close_others;
+		}
+		if (
+			raw.host_marker === "dot" ||
+			raw.host_marker === "initials" ||
+			raw.host_marker === "underline" ||
+			raw.host_marker === "none"
+		) {
+			config.tabs.hostMarker = raw.host_marker;
 		}
 	}
 

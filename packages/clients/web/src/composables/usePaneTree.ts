@@ -120,10 +120,17 @@ export function collectTerminalChannelIds(node: PaneNode): string[] {
 export function resolveTabLabel(
 	channelId: string,
 	channels: ReadonlyArray<{ id: string; displayTitle?: string }>,
-	_tabs?: ReadonlyArray<unknown>,
+	/**
+	 * Names for channels the loaded host does not list. A tab is global and its
+	 * terminal may live on another host, where `channels` says nothing — and a
+	 * tab that answers "Terminal" for every one of them tells nobody anything.
+	 */
+	index?: ReadonlyMap<string, { displayTitle: string }>,
 ): string {
 	const channel = channels.find((c) => c.id === channelId);
-	return channel?.displayTitle ?? DEFAULT_CHANNEL_NAME;
+	if (channel !== undefined) return channel.displayTitle ?? DEFAULT_CHANNEL_NAME;
+	const indexed = index?.get(channelId)?.displayTitle;
+	return indexed !== undefined && indexed !== "" ? indexed : DEFAULT_CHANNEL_NAME;
 }
 
 // ---------------------------------------------------------------------------
@@ -516,7 +523,7 @@ export function usePaneTree(
 		const channelsStore = useChannelsStore();
 		const channelId = getActiveChannelId(tabId);
 		if (channelId === null) return DEFAULT_CHANNEL_NAME;
-		return resolveTabLabel(channelId, channelsStore.channels);
+		return resolveTabLabel(channelId, channelsStore.channels, channelsStore.channelIndex);
 	}
 
 	// ------------------------------------------------------------------

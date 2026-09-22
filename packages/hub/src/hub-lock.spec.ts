@@ -13,7 +13,12 @@ const tempDirs: string[] = [];
 // on Windows; under the full parallel suite it took longer than the 5 s
 // default, and a test aborted mid-wait left its hub holding the state
 // directory, so cleanup then failed with EPERM.
-const HUB_PROCESS_TIMEOUT_MS = 30_000;
+/**
+ * Spawning a hub and waiting for it to listen, with room for a loaded machine.
+ * The `scripts` project settled on the same budget for the same reason: this
+ * waits for readiness, it does not measure it.
+ */
+const HUB_PROCESS_TIMEOUT_MS = 60_000;
 const HUB_LISTEN_TIMEOUT_MS = 20_000;
 
 afterEach(() => {

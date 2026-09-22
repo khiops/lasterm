@@ -1,4 +1,5 @@
 import net from "node:net";
+import type { Duplex } from "node:stream";
 import { type AgentChannelStateMessage, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { AgentConnection } from "./agent-connection.js";
@@ -16,7 +17,12 @@ const CLOSE_TIMEOUT_MS = 1_000;
  * Factory method: LastermAgent.connectLocal(socketPath)
  */
 export class LastermAgent extends AgentConnection {
-	private socket: net.Socket;
+	/**
+	 * Whatever carries the frames. A local daemon gives a `net.Socket`; a remote
+	 * one gives an SSH channel to its socket. The protocol is the same on both,
+	 * and this class only ever reads, writes, and destroys.
+	 */
+	private socket: Duplex;
 	private sendQueue: SendQueue;
 	private connId: number;
 	private readonly hubLogger: HubLogger | undefined;
@@ -31,7 +37,7 @@ export class LastermAgent extends AgentConnection {
 	 */
 	private channelStatePromise: Promise<AgentChannelStateMessage[]>;
 
-	constructor(socket: net.Socket, hubLogger?: HubLogger) {
+	constructor(socket: Duplex, hubLogger?: HubLogger) {
 		super();
 		this.socket = socket;
 		this.hubLogger = hubLogger;
@@ -61,7 +67,7 @@ export class LastermAgent extends AgentConnection {
 			this.emit("close");
 		});
 
-		socket.on("error", (err) => {
+		socket.on("error", (err: Error) => {
 			this.logDebug("lasterm-agent: socket error", { message: err.message });
 			this.emit("error", err);
 		});
@@ -177,6 +183,42 @@ export class LastermAgent extends AgentConnection {
 	 * Resolves after HELLO is received (agent is ready).
 	 * Rejects on connection error or HELLO timeout (5s).
 	 */
+	/**
+	 * Drive an agent over a stream someone else opened — an SSH channel to a
+	 * remote daemon's socket, today.
+	 *
+	 * Resolves once HELLO arrives, on the same deadline as a local connection:
+	 * a daemon that has accepted the connection and says nothing is a daemon
+	 * this hub cannot use, however it was reached.
+	 */
+	static overStream(stream: Duplex, hubLogger?: HubLogger): Promise<LastermAgent> {
+		return new Promise((resolve, reject) => {
+			const agent = new LastermAgent(stream, hubLogger);
+			let settled = false;
+
+			const timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				agent.close();
+				reject(new Error(`HELLO timeout after ${HELLO_TIMEOUT_MS}ms`));
+			}, HELLO_TIMEOUT_MS);
+
+			agent.once("ready", () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve(agent);
+			});
+
+			agent.once("error", (err) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				reject(err);
+			});
+		});
+	}
+
 	static connectLocal(socketPath: string, hubLogger?: HubLogger): Promise<LastermAgent> {
 		return new Promise((resolve, reject) => {
 			const socket = net.connect(socketPath);

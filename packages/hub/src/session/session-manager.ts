@@ -235,7 +235,13 @@ export class SessionManager {
 			try {
 				const promptAuth = this.sshMgr.buildPromptAuth(firstClient, ac.signal, reconnectCtxId);
 				const deployOpts = this._buildDeployOpts(hostId, host);
-				const sshAgent = new SshAgent(host, promptAuth, deployOpts, ctx.agentConfig);
+				const sshAgent = new SshAgent(
+					host,
+					promptAuth,
+					deployOpts,
+					ctx.agentConfig,
+					ctx.configResolver?.sshConfig?.remoteDaemon === true,
+				);
 
 				const storedFp = ctx.metaDal.getHostFingerprint(hostId);
 				const sshHostname = host.sshHost?.includes("@")
@@ -1570,7 +1576,13 @@ export class SessionManager {
 		}
 
 		console.error(`[lasterm-ssh] creating SshAgent for host ${host.id}`);
-		const sshAgent = new SshAgent(host, promptAuth, deployOpts, this.ctx.agentConfig);
+		const sshAgent = new SshAgent(
+			host,
+			promptAuth,
+			deployOpts,
+			this.ctx.agentConfig,
+			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+		);
 
 		console.error(`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);
 		try {

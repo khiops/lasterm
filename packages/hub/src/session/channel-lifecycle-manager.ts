@@ -1129,16 +1129,23 @@ export class ChannelLifecycleManager {
 			if (channelState.hostId !== hostId) continue;
 
 			const session = this.ctx.sessions.get(hostId);
-			if (!session || channelState.sessionId !== session.id) continue;
+			if (!session) continue;
 
 			if (reportedIds.has(channelId)) {
+				// The agent is holding it, so it is alive whichever session it was
+				// opened under: a daemon that outlived the hub hands back terminals
+				// from a session this run did not start (#79). Adopting it here is
+				// what makes the session it now belongs to the one it is in.
+				channelState.sessionId = session.id;
 				if (channelState.status === "orphan") {
 					this.broadcaster.updateChannelStatus(channelId, session.id, "live");
 				}
-			} else {
-				if (channelState.status !== "dead") {
-					this.broadcaster.updateChannelStatus(channelId, session.id, "dead");
-				}
+			} else if (channelState.status !== "dead") {
+				// And the other way: the agent has no such terminal, so it is gone
+				// — again whichever session it came from. Skipping those left a
+				// channel nothing would ever judge, showing an empty pane with no
+				// overlay, no message, and nothing to do about it.
+				this.broadcaster.updateChannelStatus(channelId, channelState.sessionId, "dead");
 			}
 		}
 	}

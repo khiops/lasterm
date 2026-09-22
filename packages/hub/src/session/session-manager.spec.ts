@@ -583,6 +583,43 @@ describe("SessionManager", () => {
 		expect(received2.some((m) => m.type === "SPAWN_OK")).toBe(true);
 	});
 
+	it("sends no spool tail when the agent answers with a fresh screen", async () => {
+		const received: ProtocolMessage[] = [];
+		const client = makeClient("c1", received);
+		sm.addClient(client);
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+
+		// A channel with history behind it. The agent's own sequence starts at
+		// its own zero, which is not this numbering: asking for "everything
+		// after the agent's last seq" used to mean everything here (#457).
+		const spool = new SpoolDAL(dbManager.spool);
+		for (let seq = 1; seq <= 5; seq++) {
+			spool.insertChunk({
+				channelId: "local-ch-1",
+				seq,
+				kind: "output",
+				dataBlob: Buffer.from(`chunk-${seq}`),
+				uncompressedLen: 7,
+			});
+		}
+
+		const client2Received: ProtocolMessage[] = [];
+		const client2 = makeClient("c2", client2Received);
+		sm.addClient(client2);
+		await sm.handleAttach("c2", "local-ch-1");
+
+		const attachOk = client2Received.find((m) => m.type === "ATTACH_OK") as unknown as {
+			snapshot: unknown;
+			tail: unknown[];
+			cached: boolean;
+		};
+		expect(attachOk.cached).toBe(false);
+		// The screen the agent just rendered is the whole answer; what comes
+		// after it arrives as OUTPUT, in order, on the same connection.
+		expect(attachOk.snapshot).toBeTruthy();
+		expect(attachOk.tail).toEqual([]);
+	});
+
 	it("handleAttach adds a second client to an existing channel", async () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeClient("c1", received);

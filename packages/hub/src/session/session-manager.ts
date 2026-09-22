@@ -1333,13 +1333,20 @@ export class SessionManager {
 
 			this.lifecycle.storeSnapshot(channelId, agentResponse.snapshot, agentResponse.lastSeq);
 
-			const tailChunks = this.ctx.spoolDal.getChunksByChannel(channelId, {
-				kind: "output",
-				afterSeq: agentResponse.lastSeq,
-			});
-			// The same cap as the cached payload: one hub message stays under what
-			// the transport accepts, whichever path built it.
-			const tail = ChannelLifecycleManager.boundTail(tailChunks);
+			// No tail on this path, and none is missing.
+			//
+			// The agent renders this snapshot when it answers the ATTACH, so it is
+			// the screen as it stands; anything produced after it arrives as
+			// ordinary OUTPUT on the same connection, in order, and the pane
+			// writes it next. There is no gap between the two to fill.
+			//
+			// What used to fill it compared two different numbering spaces: the
+			// hub's spool sequence is its own counter (`OutputChunker`, resuming
+			// from the spool), while `lastSeq` is the agent's. They only ever
+			// matched by accident, and once a daemon adopted a channel and started
+			// its own count at zero, `afterSeq: 0` meant "every chunk ever" — 6 MB
+			// for a full-screen program, past what the transport accepts (#457).
+			const tail: Uint8Array[] = [];
 
 			const attachOk: UiAttachOkMessage = {
 				type: "ATTACH_OK",

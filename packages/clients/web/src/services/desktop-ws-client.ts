@@ -74,7 +74,11 @@ export class DesktopWsClient implements IWsClient {
 		this.nextInboundSequence = 1n;
 		if (previousRelayId !== null) {
 			this.pendingSends = this.pendingSends.filter((send) => send.relayId !== previousRelayId);
-			void invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
+			// Waited for, not fired off. The hub counts one client per connection
+			// and hands the write lock to the first one attached, so a replacement
+			// that authenticates while its predecessor is still up finds the lock
+			// held by itself, one connection ago, and cannot type (#465).
+			await invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
 		}
 		const stream = new Channel<ArrayBuffer | RelayEvent>((frame) => {
 			if (generation !== this.connectionGeneration) return;

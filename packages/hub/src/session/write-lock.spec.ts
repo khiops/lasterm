@@ -360,3 +360,56 @@ describe("WriteLockManager — shutdown", () => {
 		expect(mgr.getHolder("ch2")).toBeNull();
 	});
 });
+
+// ─── A freed lock finds the client that is still there ──────────────────────
+//
+// A lock arbitrates between people. With one client attached there is nobody
+// to arbitrate with, and leaving it free means a terminal that refuses what is
+// typed into it until someone finds the button (#465).
+
+describe("WriteLockManager — a lock nobody holds", () => {
+	it("goes to the one client left when the holder disconnects", () => {
+		const { mgr, lastBroadcast } = makeManager();
+		mgr.attach("ch1", "ghost");
+		mgr.attach("ch1", "on-screen");
+
+		mgr.onClientDisconnect("ghost");
+
+		expect(mgr.getHolder("ch1")).toBe("on-screen");
+		expect(lastBroadcast("ch1")).toEqual({
+			type: "WRITE_LOCK",
+			channelId: "ch1",
+			holder: "on-screen",
+		});
+	});
+
+	it("goes to the one client left when the holder detaches", () => {
+		const { mgr } = makeManager();
+		mgr.attach("ch1", "ghost");
+		mgr.attach("ch1", "on-screen");
+
+		mgr.detach("ch1", "ghost");
+
+		expect(mgr.getHolder("ch1")).toBe("on-screen");
+	});
+
+	it("stays free when several clients are left, rather than choosing for them", () => {
+		const { mgr } = makeManager();
+		mgr.attach("ch1", "holder");
+		mgr.attach("ch1", "watcher-1");
+		mgr.attach("ch1", "watcher-2");
+
+		mgr.onClientDisconnect("holder");
+
+		expect(mgr.getHolder("ch1")).toBeNull();
+	});
+
+	it("leaves a channel nobody is attached to alone", () => {
+		const { mgr } = makeManager();
+		mgr.attach("ch1", "only");
+
+		mgr.onClientDisconnect("only");
+
+		expect(mgr.getHolder("ch1")).toBeNull();
+	});
+});

@@ -216,10 +216,22 @@ async fn run_daemon_impl_with_manager(
     // Bind with retry (handles transient EADDRINUSE after cleanup)
     let mut listener = Some(bind_with_retry(&path).await?);
 
-    // Set socket permissions to 0600 (owner-only)
+    // What this process bound, so that whatever happens next removes this
+    // socket and not a replacement's (#116).
+    let bound_as = socket_identity(&path);
+
+    // Set socket permissions to 0600 (owner-only). Giving up here without
+    // taking the endpoint down would leave a path nobody serves and nobody
+    // cleans up — the rule that the listener's owner removes its endpoint has
+    // to hold for a setup that fails too, not only for a shutdown.
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        {
+            drop(listener.take());
+            remove_own_socket(&path, bound_as);
+            return Err(error);
+        }
     }
 
     tracing::info!("daemon listening on {:?}", path);
@@ -335,11 +347,7 @@ async fn run_daemon_impl_with_manager(
     // Pathname removal cannot prove this still refers to
     // the inode we bound if another process interfered with the socket path.
     drop(listener);
-    if let Err(error) = std::fs::remove_file(&path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%error, path = ?path, "failed to remove daemon socket after shutdown");
-        }
-    }
+    remove_own_socket(&path, bound_as);
     result
 }
 
@@ -897,6 +905,49 @@ async fn handle_connection_inner<S>(
 #[cfg(unix)]
 async fn someone_is_listening(path: &Path) -> bool {
     UnixStream::connect(path).await.is_ok()
+}
+
+/// What a socket file is, as the filesystem counts it.
+///
+/// A path is a name, and names get reused: the socket at a path after a
+/// replacement daemon started is not the one this process bound, however
+/// identical it looks. The pair `(device, inode)` is what tells them apart.
+#[cfg(unix)]
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Remove this daemon's socket, and nobody else's.
+///
+/// On the way out, the path may already carry a replacement's socket: a
+/// daemon that started while this one was still tearing terminals down. Taking
+/// the name from it would leave it running and unreachable, which is the same
+/// harm as taking it at startup (#116).
+#[cfg(unix)]
+fn remove_own_socket(path: &Path, bound_as: Option<(u64, u64)>) {
+    match (socket_identity(path), bound_as) {
+        (None, _) => {}
+        (Some(now), Some(bound)) if now == bound => {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%error, path = ?path, "failed to remove daemon socket after shutdown");
+                }
+            }
+        }
+        (Some(_), Some(_)) => {
+            tracing::info!(
+                path = ?path,
+                "the socket at this path is not the one this daemon bound; leaving it alone"
+            );
+        }
+        (Some(_), None) => {
+            tracing::warn!(
+                path = ?path,
+                "this daemon never recorded which socket it bound; leaving the path alone"
+            );
+        }
+    }
 }
 
 /// Take the socket, or refuse to take it from a daemon that is serving it.
@@ -1607,6 +1658,69 @@ mod tests {
             let _ = fs::remove_file(socket_path);
             let _ = tokio::fs::remove_dir_all(config_dir).await;
             let _ = tokio::fs::remove_dir_all(state_dir).await;
+        }
+
+        /// A daemon on its way out must not take the name from the socket that
+        /// replaced it while it was tearing its terminals down (#116). It is a
+        /// path, and paths get reused.
+        #[tokio::test]
+        async fn a_departing_daemon_leaves_a_replacement_socket_alone() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("inode-identity").await;
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let daemon = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                shutdown_rx,
+                None,
+                None,
+            ));
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            // Someone else's socket takes the name while this one is still up.
+            let path = Path::new(&socket_path);
+            let ours = socket_identity(path).expect("the daemon's own socket");
+            std::fs::remove_file(path).expect("take the name");
+            let replacement = UnixListener::bind(path).expect("bind a replacement");
+            let theirs = socket_identity(path).expect("the replacement's socket");
+            assert_ne!(ours, theirs, "the replacement must be a different socket");
+
+            let _ = shutdown_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(10), daemon).await;
+
+            assert_eq!(
+                socket_identity(path),
+                Some(theirs),
+                "the departing daemon removed the socket that had taken its place"
+            );
+            drop(replacement);
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+        }
+
+        /// And the ordinary case: its own socket goes with it, so the next
+        /// daemon does not have to clean up after this one.
+        #[tokio::test]
+        async fn a_departing_daemon_removes_its_own_socket() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("inode-own").await;
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let daemon = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                shutdown_rx,
+                None,
+                None,
+            ));
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            let _ = shutdown_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(10), daemon).await;
+
+            assert!(
+                !Path::new(&socket_path).exists(),
+                "a daemon should take its own socket with it"
+            );
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
         }
 
         /// The socket of a daemon that is serving belongs to it. Taking it

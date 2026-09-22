@@ -239,6 +239,69 @@ function makeHarness(): {
 }
 
 describe("quit-protected revival capabilities", () => {
+	describe("startup, for a host reached over SSH", () => {
+		function setup(opts: { remoteDaemon: boolean; os?: string }) {
+			const built = makeHarness();
+			const meta = built.ctx.metaDal as unknown as Record<string, unknown>;
+			meta.getHost = vi.fn(() => ({ id: HOST_ID, os: opts.os ?? "linux" }));
+			meta.listAliveChannelsWithHost = vi.fn(() => [
+				{
+					id: "chan-1",
+					sessionId: SESSION_ID,
+					shell: "bash",
+					args: [],
+					cols: 80,
+					rows: 24,
+					cwd: null,
+					directProcess: false,
+					dynamicTitle: null,
+					processTitle: null,
+					hostId: HOST_ID,
+					hostType: "ssh",
+				},
+			]);
+			meta.listSessions = vi.fn(() => [{ id: SESSION_ID, hostId: HOST_ID, status: "active" }]);
+			meta.markHostSessionDisconnected = vi.fn();
+			meta.markHostChannelsOrphan = vi.fn();
+			meta.updateChannelStatus = vi.fn();
+			(built.ctx as unknown as Record<string, unknown>).configResolver = {
+				sshConfig: { trustKnownHosts: false, remoteDaemon: opts.remoteDaemon },
+			};
+			(built.broadcaster as unknown as Record<string, unknown>).resolveDisplayTitle = vi.fn();
+			(built.ctx as unknown as Record<string, unknown>).commits = {
+				persistSession: vi.fn(),
+				adoptAgent: vi.fn(),
+			};
+			return built;
+		}
+
+		it("leaves terminals a remote daemon may still hold as orphan, and does not connect", async () => {
+			const { ctx, manager } = setup({ remoteDaemon: true });
+			await manager.startup();
+
+			const updateChannelStatus = ctx.metaDal.updateChannelStatus as unknown as {
+				mock: { calls: unknown[][] };
+			};
+			expect(updateChannelStatus.mock.calls.filter((c) => c[1] === "dead")).toHaveLength(0);
+			expect(ctx.channels.get("chan-1")?.status).toBe("orphan");
+		});
+
+		it("declares them dead when no daemon was left running", async () => {
+			const { ctx, manager } = setup({ remoteDaemon: false });
+			await manager.startup();
+
+			expect(ctx.metaDal.updateChannelStatus).toHaveBeenCalledWith("chan-1", "dead");
+			expect(ctx.channels.get("chan-1")?.status).toBe("dead");
+		});
+
+		it("declares them dead on a Windows remote, which has no socket to reach", async () => {
+			const { ctx, manager } = setup({ remoteDaemon: true, os: "windows" });
+			await manager.startup();
+
+			expect(ctx.metaDal.updateChannelStatus).toHaveBeenCalledWith("chan-1", "dead");
+		});
+	});
+
 	it("does not expose the three unfenced commit escapes", () => {
 		// The aliases above are compile-level assertions. Keep this test colocated
 		// with the manager so Vitest reports the regression alongside its source.

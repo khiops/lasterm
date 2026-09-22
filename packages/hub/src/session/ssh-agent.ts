@@ -14,6 +14,7 @@ import {
 } from "./agent-deployer.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
+import { attachRemoteDaemon } from "./remote-daemon.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 
@@ -258,6 +259,13 @@ export class SshAgent extends AgentConnection {
 	 * Populated by the hostVerifier closure during a connect attempt.
 	 * Accessible after start() resolves or rejects so callers can inspect mismatch state.
 	 */
+	/**
+	 * Whether this connection reached a daemon rather than running the agent
+	 * itself. A daemon may already hold terminals from before; an agent this
+	 * connection started never does.
+	 */
+	usedRemoteDaemon = false;
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -269,8 +277,27 @@ export class SshAgent extends AgentConnection {
 		private readonly promptAuth?: AuthPromptFn,
 		private readonly deployOptions?: SshAgentDeployOptions,
 		private readonly loggingConfig: AgentLoggingConfig = DEFAULT_AGENT_CONFIG,
+		/**
+		 * Whether to leave the remote agent running as a daemon and reach it
+		 * through its socket, so its terminals outlive this connection (#79).
+		 * Windows remotes ignore it: no SSH channel carries a named pipe.
+		 */
+		private readonly remoteDaemon: boolean = false,
 	) {
 		super();
+	}
+
+	/**
+	 * The binary to run as a daemon, or undefined to keep it on stdio.
+	 *
+	 * A daemon is only worth reaching where a socket can be reached: Windows
+	 * remotes listen on a named pipe, and no SSH channel carries one, so they
+	 * stay as they were — their terminals end with the connection.
+	 */
+	private daemonBinary(remotePath: string, os: HostOs | null): string | undefined {
+		if (!this.remoteDaemon) return undefined;
+		if ((os ?? this.host.os) === "windows") return undefined;
+		return remotePath;
 	}
 
 	/**
@@ -463,7 +490,7 @@ export class SshAgent extends AgentConnection {
 						return;
 					}
 					// Attach stream handler — called after deploy (or immediately if no deploy needed).
-					const runAgent = (agentPath: string): void => {
+					const runAgent = (agentPath: string, daemonPath?: string): void => {
 						// Start HELLO timeout NOW — deploy phase is complete, agent is being exec'd.
 						// Timeout is intentionally NOT started earlier so that TOFU binary
 						// verification prompts (up to 30s) don't race against this 5s timer.
@@ -472,47 +499,83 @@ export class SshAgent extends AgentConnection {
 							rejectOnce(new Error("Agent HELLO timeout"));
 						}, HELLO_TIMEOUT_MS);
 
-						// ssh2 Client — sends command over encrypted SSH channel to remote host
-						client.exec(agentPath, (err, stream) => {
-							if (err) {
-								clearTimeout(helloTimeout);
-								rejectOnce(err);
+						// Either the agent is this connection's child, and dies with it,
+						// or it is a daemon this connection merely reaches. Everything
+						// after the stream is the same both ways: the protocol does not
+						// know what carries it.
+						const openTransport = (
+							onStream: (stream: ClientChannel) => void,
+							onError: (err: Error) => void,
+						): void => {
+							if (daemonPath === undefined) {
+								client.exec(agentPath, (err, stream) => {
+									if (err) {
+										onError(err);
+										return;
+									}
+									onStream(stream);
+								});
 								return;
 							}
+							attachRemoteDaemon({
+								conn: client,
+								agentPath: daemonPath,
+								logLevel: this.loggingConfig.logLevel,
+								logFormat: this.loggingConfig.logFormat,
+							})
+								.then((attachment) => {
+									this.usedRemoteDaemon = true;
+									console.error(
+										`[lasterm-ssh] reached the remote daemon on ${attachment.paths.socket}` +
+											(attachment.started ? " (started it)" : " (already running)"),
+									);
+									onStream(attachment.stream as unknown as ClientChannel);
+								})
+								.catch((err: unknown) => {
+									onError(err instanceof Error ? err : new Error(String(err)));
+								});
+						};
 
-							this.channel = stream;
-							this.channelOpen = true;
+						openTransport(
+							(stream) => {
+								this.channel = stream;
+								this.channelOpen = true;
 
-							stream.on("data", (data: Buffer) => {
-								this.handleData(data);
-							});
+								stream.on("data", (data: Buffer) => {
+									this.handleData(data);
+								});
 
-							stream.on("close", () => {
+								stream.on("close", () => {
+									clearTimeout(helloTimeout);
+									this.sendQueue.clear();
+									this.channel = null;
+									this.channelOpen = false;
+									client.end();
+									// If the channel closed before the agent HELLO arrived, the remote
+									// command exited (e.g. binary missing / immediate failure). Reject so
+									// start() fails fast instead of hanging. rejectOnce is settled-once, so
+									// this is a no-op once HELLO has already resolved the normal path.
+									rejectOnce(new Error("Agent channel closed before HELLO"));
+								});
+
+								stream.on("error", (streamErr: Error) => {
+									this.emit("error", streamErr);
+								});
+
+								this.sendQueue.attach(stream);
+
+								// Wait for HELLO — emitted by AgentConnection.handleData once HELLO decoded
+								this.once("ready", (msg: HelloMessage) => {
+									console.error("[lasterm-ssh] agent HELLO received");
+									clearTimeout(helloTimeout);
+									resolveOnce(msg);
+								});
+							},
+							(err) => {
 								clearTimeout(helloTimeout);
-								this.sendQueue.clear();
-								this.channel = null;
-								this.channelOpen = false;
-								client.end();
-								// If the channel closed before the agent HELLO arrived, the remote
-								// command exited (e.g. binary missing / immediate failure). Reject so
-								// start() fails fast instead of hanging. rejectOnce is settled-once, so
-								// this is a no-op once HELLO has already resolved the normal path.
-								rejectOnce(new Error("Agent channel closed before HELLO"));
-							});
-
-							stream.on("error", (streamErr: Error) => {
-								this.emit("error", streamErr);
-							});
-
-							this.sendQueue.attach(stream);
-
-							// Wait for HELLO — emitted by AgentConnection.handleData once HELLO decoded
-							this.once("ready", (msg: HelloMessage) => {
-								console.error("[lasterm-ssh] agent HELLO received");
-								clearTimeout(helloTimeout);
-								resolveOnce(msg);
-							});
-						});
+								rejectOnce(err);
+							},
+						);
 					};
 
 					if (this.deployOptions) {
@@ -544,7 +607,10 @@ export class SshAgent extends AgentConnection {
 									`[lasterm-ssh] deploy result: remotePath=${result.remotePath} os=${result.os ?? "unknown"} arch=${result.arch ?? "unknown"}`,
 								);
 								console.error("[lasterm-ssh] exec lasterm-agent...");
-								runAgent(buildAgentCommandForDeployResult(result, this.loggingConfig));
+								runAgent(
+									buildAgentCommandForDeployResult(result, this.loggingConfig),
+									this.daemonBinary(result.remotePath, result.os),
+								);
 							})
 							.catch((deployErr: unknown) => {
 								// A binary nobody has approved: the question belongs to a
@@ -584,7 +650,10 @@ export class SshAgent extends AgentConnection {
 							});
 					} else {
 						console.error("[lasterm-ssh] exec lasterm-agent...");
-						runAgent(buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false));
+						runAgent(
+							buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false),
+							this.daemonBinary("lasterm-agent", this.host.os),
+						);
 					}
 				});
 

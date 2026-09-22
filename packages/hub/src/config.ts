@@ -522,6 +522,10 @@ export function extractSshConfig(parsed: TOML.JsonMap): Partial<SshConfig> {
 		result.trustKnownHosts = raw.trust_known_hosts;
 	}
 
+	if (typeof raw.remote_daemon === "boolean") {
+		result.remoteDaemon = raw.remote_daemon;
+	}
+
 	return result;
 }
 

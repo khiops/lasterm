@@ -423,13 +423,24 @@ export interface SshConfig {
 	 * taken elsewhere, and that is theirs to extend, once, knowingly.
 	 */
 	trustKnownHosts: boolean;
+	/**
+	 * Whether a remote agent is left running as a daemon, so its terminals
+	 * outlive the SSH connection that opened them (#79).
+	 *
+	 * Off until someone says otherwise: it leaves a process behind on the other
+	 * machine, and that is a thing to agree to rather than to discover. Windows
+	 * remotes ignore it — their daemon listens on a named pipe, which no SSH
+	 * channel carries.
+	 */
+	remoteDaemon: boolean;
 }
 
 export const DEFAULT_SSH_CONFIG: SshConfig = {
 	trustKnownHosts: false,
+	remoteDaemon: false,
 };
 
-export const SSH_CONFIG_KEYS = ["trustKnownHosts"] as const;
+export const SSH_CONFIG_KEYS = ["trustKnownHosts", "remoteDaemon"] as const;
 
 export const ELEVATION_CONFIG_KEYS = [
 	"methodLinux",

@@ -119,6 +119,64 @@ function createMockSshServer(
 	});
 }
 
+/**
+ * A mock SSH server that also answers `direct-streamlocal` — the channel type
+ * an `ssh -L` to a UNIX socket opens, and the one a remote daemon is reached
+ * through (#79).
+ *
+ * `onExec` sees every command; `socketAnswers` decides whether the socket is
+ * there. A test that wants the daemon "already running" says true from the
+ * start, and one that wants it started says false until the launch command
+ * has run.
+ */
+function createMockSshServerWithSocket(
+	onExec: (stream: NodeJS.ReadWriteStream, command: string) => void,
+	socketAnswers: () => boolean,
+	onSocket: (stream: NodeJS.ReadWriteStream, socketPath: string) => void,
+): Promise<{ server: SshServer; port: number }> {
+	return new Promise((resolve) => {
+		const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+			client.on("error", () => {});
+			client.on("authentication", (ctx) => {
+				ctx.accept();
+			});
+			client.on("ready", () => {
+				client.on("session", (accept) => {
+					const session = accept();
+					session.on("exec", (accept, _reject, info) => {
+						const stream = accept();
+						onExec(stream, info.command);
+					});
+				});
+				(
+					client as unknown as {
+						on: (
+							event: "openssh.streamlocal",
+							cb: (
+								accept: () => NodeJS.ReadWriteStream,
+								reject: () => void,
+								info: { socketPath: string },
+							) => void,
+						) => void;
+					}
+				).on("openssh.streamlocal", (accept, reject, info) => {
+					if (!socketAnswers()) {
+						reject();
+						return;
+					}
+					onSocket(accept(), info.socketPath);
+				});
+			});
+		});
+
+		server.on("error", () => {});
+		server.listen(0, "127.0.0.1", () => {
+			const addr = server.address() as { port: number };
+			resolve({ server, port: addr.port });
+		});
+	});
+}
+
 /** Build a minimal Host object for a mock SSH server on localhost. */
 
 /**
@@ -413,6 +471,101 @@ describe("SshAgent", () => {
 		},
 		TEST_TIMEOUT,
 	);
+
+	it("reaches a remote daemon through its socket, and execs no agent", async () => {
+		const commands: string[] = [];
+		let socketPath = "";
+		const { server, port } = await createMockSshServerWithSocket(
+			(stream, command) => {
+				commands.push(command);
+				if (command.includes("XDG_STATE_HOME")) {
+					stream.write("/home/pi/.local/state/lasterm");
+				}
+				(stream as unknown as { exit: (code: number) => void }).exit(0);
+				stream.end();
+			},
+			() => true, // the daemon is already there
+			(stream, path) => {
+				socketPath = path;
+				stream.write(makeHelloFrame());
+			},
+		);
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port);
+		const agent = new SshAgent(makeHost(port), undefined, undefined, undefined, true);
+		agents.push(agent);
+
+		const { hello } = await agent.start(fp);
+
+		expect(hello.type).toBe("HELLO");
+		expect(socketPath).toBe("/home/pi/.local/state/lasterm/agent.sock");
+		// The agent belongs to the remote machine now, not to this connection:
+		// nothing was exec'd to run it.
+		expect(commands.some((c) => c.includes("--stdio"))).toBe(false);
+		expect(commands.some((c) => c.includes("--daemon"))).toBe(false);
+	}, 15_000);
+
+	it("starts the daemon when the socket answers nothing, then reaches it", async () => {
+		const commands: string[] = [];
+		let launched = false;
+		const { server, port } = await createMockSshServerWithSocket(
+			(stream, command) => {
+				commands.push(command);
+				if (command.includes("XDG_STATE_HOME")) {
+					stream.write("/home/pi/.local/state/lasterm");
+				}
+				if (command.includes("--daemon")) launched = true;
+				(stream as unknown as { exit: (code: number) => void }).exit(0);
+				stream.end();
+			},
+			() => launched,
+			(stream) => {
+				stream.write(makeHelloFrame());
+			},
+		);
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port);
+		const agent = new SshAgent(makeHost(port), undefined, undefined, undefined, true);
+		agents.push(agent);
+
+		const { hello } = await agent.start(fp);
+
+		expect(hello.type).toBe("HELLO");
+		const launch = commands.find((c) => c.includes("--daemon"));
+		expect(launch).toBeDefined();
+		expect(launch).toContain("--socket /home/pi/.local/state/lasterm/agent.sock");
+	}, 15_000);
+
+	it("keeps a Windows remote on stdio: no SSH channel carries a named pipe", async () => {
+		const commands: string[] = [];
+		const { server, port } = await createMockSshServerWithSocket(
+			(stream, command) => {
+				commands.push(command);
+				stream.write(makeHelloFrame());
+			},
+			() => false,
+			() => {},
+		);
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port, { os: "windows" });
+		const agent = new SshAgent(
+			makeHost(port, { os: "windows" }),
+			undefined,
+			undefined,
+			undefined,
+			true,
+		);
+		agents.push(agent);
+
+		const { hello } = await agent.start(fp);
+
+		expect(hello.type).toBe("HELLO");
+		expect(commands.some((c) => c.includes("--stdio"))).toBe(true);
+		expect(commands.some((c) => c.includes("--daemon"))).toBe(false);
+	}, 15_000);
 
 	it(
 		"SPAWN → SPAWN_OK flows correctly through SSH",

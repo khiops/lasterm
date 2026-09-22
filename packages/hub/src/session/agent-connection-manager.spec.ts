@@ -313,6 +313,25 @@ describe("quit-protected revival capabilities", () => {
 		});
 	});
 
+	it("lets go of an agent that says another connection has taken it over", () => {
+		const { ctx, manager } = makeHarness();
+		const agent = new EventEmitter() as unknown as LastermAgent & EventEmitter;
+		(agent as unknown as { close: () => void }).close = vi.fn();
+		(ctx.agents as unknown as Map<string, unknown>).set(HOST_ID, agent);
+
+		manager.wireAgentEvents(HOST_ID, SESSION_ID, agent);
+		agent.emit("message", {
+			type: "ERROR",
+			code: "DISPLACED",
+			message: "another hub connection (#2) has taken over this agent",
+		});
+
+		// Nothing it sends from here on would be read, so it is not kept as the
+		// way to reach this host (#127).
+		expect(ctx.agents.has(HOST_ID)).toBe(false);
+		expect((agent as unknown as { close: () => void }).close).toHaveBeenCalled();
+	});
+
 	it("does not expose the three unfenced commit escapes", () => {
 		// The aliases above are compile-level assertions. Keep this test colocated
 		// with the manager so Vitest reports the regression alongside its source.

@@ -316,6 +316,30 @@ export class AgentConnectionManager {
 				}
 			}
 
+			// The agent serves one hub at a time and has just taken up with
+			// another one. Nothing this connection sends will be read from here
+			// on, so it is dropped rather than left writing into a socket that
+			// answers nothing — and the next attach opens a fresh one, which
+			// displaces in its turn (#127).
+			if (msg.type === "ERROR" && (msg as { code?: string }).code === "DISPLACED") {
+				this.ctx.hubLogger?.log("warn", "agent-connection-manager: displaced by another hub", {
+					hostId,
+					sessionId,
+					message: (msg as { message?: string }).message,
+				});
+				console.error(
+					`[lasterm] another connection has taken over the agent on ${hostId}: ${
+						(msg as { message?: string }).message ?? "no detail"
+					}`,
+				);
+				if (this.ctx.agents.get(hostId) === agent) {
+					this.ctx.agents.delete(hostId);
+					this.ctx.agentCapabilities.delete(hostId);
+				}
+				agent.close();
+				return;
+			}
+
 			// Dispatch pending attach responses (ATTACH_OK uses channelId, not requestId)
 			if (msg.type === "ATTACH_OK" || msg.type === "ERROR") {
 				const cid = (msg as { channelId?: string }).channelId;

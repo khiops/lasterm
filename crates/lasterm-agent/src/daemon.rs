@@ -1040,11 +1040,20 @@ async fn register_active(
 ) {
     let mut conn = active_conn.lock().await;
     if let Some(old) = conn.take() {
-        tracing::debug!(
+        tracing::info!(
             connection_id,
             displaced_connection_id = old.connection_id,
             "displacing previous hub connection"
         );
+        // Tell it before cutting it. A hub that is simply cancelled cannot tell
+        // "I am no longer the one driving this agent" from "these terminals
+        // stopped answering", and writes into a socket nothing reads (#127).
+        let notice = AgentToHub::Error {
+            code: crate::protocol::error_codes::DISPLACED.into(),
+            message: format!("another hub connection (#{connection_id}) has taken over this agent"),
+            channel_id: None,
+        };
+        let _ = send_encoded(&old.frame_tx, &notice);
         // notify_waiters wakes ALL listeners (writer task + read loop)
         old.cancel.notify_waiters();
     }
@@ -1264,21 +1273,31 @@ mod tests {
         let mut stream2 = UnixStream::connect(&path_str).await.unwrap();
         let _ = stream2.read(&mut buf).await.unwrap(); // drain initial frames
 
-        // Wait for displacement to propagate
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        // stream1 should eventually stop receiving data (writer task cancelled)
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            stream1.read(&mut buf),
-        )
-        .await;
-        match result {
-            Ok(Ok(0)) => {}     // clean EOF — expected
-            Ok(Err(_)) => {}    // IO error — also expected
-            Ok(Ok(_n)) => {}    // may receive buffered frames before EOF — acceptable
-            Err(_timeout) => {} // timeout also acceptable
+        // The one being displaced is told so before it is cut. Without that it
+        // cannot tell "I am no longer driving this agent" from "these terminals
+        // stopped answering", and writes into a socket nothing reads (#127).
+        //
+        // The frame is MessagePack, which writes strings literally, so looking
+        // for the code in the bytes is enough here and does not need a decoder.
+        let mut said_displaced = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), stream1.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    if buf[..n].windows(9).any(|w| w == b"DISPLACED") {
+                        said_displaced = true;
+                        break;
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_timeout) => break,
+            }
         }
+        assert!(
+            said_displaced,
+            "a displaced connection must be told before it is cut"
+        );
 
         drop(stream1);
         drop(stream2);

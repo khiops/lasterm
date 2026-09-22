@@ -184,6 +184,12 @@ pub mod error_codes {
     pub const INVALID_MESSAGE: &str = "INVALID_MESSAGE";
     pub const CHANNEL_NOT_FOUND: &str = "CHANNEL_NOT_FOUND";
     pub const CHANNEL_EXISTS: &str = "CHANNEL_EXISTS";
+    /// Another connection has taken over this daemon, and this one is ending.
+    ///
+    /// The daemon serves one hub at a time and the newest wins. Saying so is
+    /// what lets the hub being displaced tell "I am no longer the one driving
+    /// this agent" from "these terminals stopped answering" (#127).
+    pub const DISPLACED: &str = "DISPLACED";
 }
 
 #[cfg(test)]

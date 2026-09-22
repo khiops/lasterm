@@ -27,7 +27,7 @@ const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => boolean
 		confirmCloseAll: (v) => typeof v === "boolean",
 		confirmCloseOthers: (v) => typeof v === "boolean",
 		scope: (v) => v === "global" || v === "perHost",
-		hostMarker: (v) => v === "dot" || v === "initials" || v === "underline" || v === "none",
+		hostMarker: (v) => v === "dot" || v === "initials" || v === "edge" || v === "none",
 	},
 	panes: {
 		maxPanes: (v) => typeof v === "number" && Number.isInteger(v) && v >= 1,

@@ -733,34 +733,36 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 
 // ─── boundTail ───────────────────────────────────────────────────────────────
 //
-// The desktop transport refuses a hub message over 512 KiB, and a refused
-// message takes the whole connection down with every pending attach on it.
+// A terminal stream cannot be cut and handed over: a piece starting anywhere
+// but a boundary leaves the emulator in a state nobody chose. So what does not
+// fit is not sent at all, and the pane is told.
 
 describe("ChannelLifecycleManager — boundTail", () => {
 	const chunk = (size: number) => ({ dataBlob: Buffer.alloc(size, 1) });
 
-	it("keeps a small tail whole", () => {
-		const tail = ChannelLifecycleManager.boundTail([chunk(10), chunk(20)]);
+	it("sends a tail that fits, whole", () => {
+		const { tail, truncated } = ChannelLifecycleManager.boundTail([chunk(10), chunk(20)]);
 		expect(tail.map((t) => t.length)).toEqual([10, 20]);
+		expect(truncated).toBe(false);
 	});
 
-	it("keeps the newest chunks and drops the oldest", () => {
-		const tail = ChannelLifecycleManager.boundTail([
+	it("sends none of a tail that does not fit, and says so", () => {
+		const { tail, truncated } = ChannelLifecycleManager.boundTail([
 			chunk(120 * 1024),
 			chunk(100 * 1024),
-			chunk(20 * 1024),
 		]);
-		// The last two fit; the first would take it over the budget.
-		expect(tail.map((t) => t.length)).toEqual([100 * 1024, 20 * 1024]);
-	});
-
-	it("never exceeds the budget, whatever it is handed", () => {
-		const huge = Array.from({ length: 50 }, () => chunk(200 * 1024));
-		const total = ChannelLifecycleManager.boundTail(huge).reduce((n, t) => n + t.length, 0);
-		expect(total).toBeLessThanOrEqual(128 * 1024);
+		// Keeping the newest would start the pane mid-escape-sequence.
+		expect(tail).toEqual([]);
+		expect(truncated).toBe(true);
 	});
 
 	it("drops a single chunk that is over the budget on its own", () => {
-		expect(ChannelLifecycleManager.boundTail([chunk(2 * 1024 * 1024)])).toEqual([]);
+		const { tail, truncated } = ChannelLifecycleManager.boundTail([chunk(2 * 1024 * 1024)]);
+		expect(tail).toEqual([]);
+		expect(truncated).toBe(true);
+	});
+
+	it("says nothing was dropped when there was nothing to send", () => {
+		expect(ChannelLifecycleManager.boundTail([])).toEqual({ tail: [], truncated: false });
 	});
 });

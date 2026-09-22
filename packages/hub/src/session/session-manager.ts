@@ -1290,7 +1290,7 @@ export class SessionManager {
 		}
 
 		if (!agent?.connected) {
-			const { snapshot, tail } = this.lifecycle.buildAttachPayload(channelId);
+			const { snapshot, tail, truncated } = this.lifecycle.buildAttachPayload(channelId);
 			const attachOk: UiAttachOkMessage = {
 				type: "ATTACH_OK",
 				channelId,
@@ -1298,6 +1298,7 @@ export class SessionManager {
 				tail,
 				writeLockHolder: this.ctx.getWriteLockHolder?.(channelId) ?? null,
 				cached: true,
+				...(truncated && { truncated: true }),
 				...(dynamicTitle !== undefined && { dynamicTitle }),
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
@@ -1374,7 +1375,7 @@ export class SessionManager {
 				return false;
 			}
 
-			const { snapshot, tail } = this.lifecycle.buildAttachPayload(channelId);
+			const { snapshot, tail, truncated } = this.lifecycle.buildAttachPayload(channelId);
 			const attachOk: UiAttachOkMessage = {
 				type: "ATTACH_OK",
 				channelId,
@@ -1382,6 +1383,7 @@ export class SessionManager {
 				tail,
 				writeLockHolder: this.ctx.getWriteLockHolder?.(channelId) ?? null,
 				cached: true,
+				...(truncated && { truncated: true }),
 				...(dynamicTitle !== undefined && { dynamicTitle }),
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,

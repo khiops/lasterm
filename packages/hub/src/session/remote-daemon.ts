@@ -41,8 +41,7 @@ export interface RemoteDaemonPaths {
  * the rule the agent itself follows — deciding here instead would put the
  * socket somewhere the agent would not have put it.
  */
-// biome-ignore lint/suspicious/noTemplateCurlyInString: this is shell parameter
-// expansion, read by the remote's shell, not a JavaScript template.
+// biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion, read by the remote's shell, not a JavaScript template
 export const REMOTE_STATE_DIR_COMMAND = 'printf %s "${XDG_STATE_HOME:-$HOME/.local/state}/lasterm"';
 
 /** What a resolved state directory holds. */

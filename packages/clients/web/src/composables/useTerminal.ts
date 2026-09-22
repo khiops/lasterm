@@ -243,7 +243,7 @@ export function useTerminal(
 	async function reattachChannel(
 		id: string,
 		opts?: { preserveContent?: boolean },
-	): Promise<{ writeLockHolder: string | null; cached: boolean }> {
+	): Promise<{ writeLockHolder: string | null; cached: boolean; truncated: boolean }> {
 		// Clean up previous OUTPUT subscription
 		outputUnsubscribe?.();
 
@@ -264,6 +264,8 @@ export function useTerminal(
 			 * and what is typed into it goes nowhere.
 			 */
 			cached: boolean;
+			/** Output between the snapshot and now was dropped rather than cut. */
+			truncated: boolean;
 		}>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				unsubOk();
@@ -285,6 +287,7 @@ export function useTerminal(
 						dynamicTitle: uiMsg.dynamicTitle ?? null,
 						displayTitle: uiMsg.displayTitle ?? null,
 						cached: uiMsg.cached === true,
+						truncated: uiMsg.truncated === true,
 					});
 				}
 			});
@@ -356,7 +359,21 @@ export function useTerminal(
 			sendResize(terminal.value.cols, terminal.value.rows);
 		}
 
-		return { writeLockHolder: result.writeLockHolder, cached: result.cached };
+		if (result.truncated) {
+			// A terminal cannot be handed a piece of a stream, so it was not: the
+			// screen above is the last coherent one, and what followed is gone.
+			// Saying so beats a pane that looks current and is not.
+			const dim = "\u001b[2m";
+			const plain = "\u001b[0m";
+			terminal.value?.write(
+				`\r\n${dim}── output between this screen and now was dropped ──${plain}\r\n`,
+			);
+		}
+		return {
+			writeLockHolder: result.writeLockHolder,
+			cached: result.cached,
+			truncated: result.truncated,
+		};
 	}
 
 	/**

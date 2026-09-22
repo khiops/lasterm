@@ -871,26 +871,40 @@ export class ChannelLifecycleManager {
 	 */
 	private static readonly MAX_ATTACH_TAIL_BYTES = 128 * 1024;
 
-	/** Keep the last `MAX_ATTACH_TAIL_BYTES` of a tail, oldest chunks dropped. */
-	static boundTail(chunks: ReadonlyArray<{ dataBlob: Buffer }>): Uint8Array[] {
-		const kept: Uint8Array[] = [];
+	/**
+	 * The output after a snapshot, or nothing when there is too much of it.
+	 *
+	 * Cutting a terminal stream is not like cutting a log. Escape sequences set
+	 * attributes, move the cursor, enter and leave the alternate screen; a piece
+	 * starting anywhere but a boundary leaves the emulator in a state nobody
+	 * chose, and it renders something wrong without saying so.
+	 *
+	 * So when it does not fit, none of it is sent. The snapshot alone is a
+	 * coherent screen, older than the truth, and `truncated` is how the pane
+	 * gets to say that the rest is missing.
+	 */
+	static boundTail(chunks: ReadonlyArray<{ dataBlob: Buffer }>): {
+		tail: Uint8Array[];
+		truncated: boolean;
+	} {
 		let total = 0;
-		for (let i = chunks.length - 1; i >= 0; i--) {
-			const blob = chunks[i]?.dataBlob;
-			if (blob === undefined) continue;
-			if (total + blob.length > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) break;
-			kept.unshift(new Uint8Array(blob));
-			total += blob.length;
+		for (const chunk of chunks) {
+			total += chunk.dataBlob.length;
+			if (total > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) {
+				return { tail: [], truncated: true };
+			}
 		}
-		return kept;
+		return { tail: chunks.map((c) => new Uint8Array(c.dataBlob)), truncated: false };
 	}
 
 	buildAttachPayload(channelId: string): {
 		snapshot: UiAttachOkMessage["snapshot"];
 		tail: Uint8Array[];
+		truncated: boolean;
 	} {
 		let snapshot: UiAttachOkMessage["snapshot"] = null;
 		let tail: Uint8Array[] = [];
+		let truncated = false;
 
 		const snapshotChunk = this.ctx.spoolDal.getLatestSnapshot(channelId);
 		if (snapshotChunk) {
@@ -905,10 +919,12 @@ export class ChannelLifecycleManager {
 				kind: "output",
 				afterSeq: snapshotChunk.seq,
 			});
-			tail = ChannelLifecycleManager.boundTail(tailChunks);
+			const bounded = ChannelLifecycleManager.boundTail(tailChunks);
+			tail = bounded.tail;
+			truncated = bounded.truncated;
 		}
 
-		return { snapshot, tail };
+		return { snapshot, tail, truncated };
 	}
 
 	storeSnapshot(channelId: string, snapshot: unknown, agentLastSeq: number): string {
@@ -1030,7 +1046,7 @@ export class ChannelLifecycleManager {
 		};
 		this.broadcaster.broadcastToAllClients(channelStateMsg);
 
-		const { snapshot, tail } = this.buildAttachPayload(deadChannelId);
+		const { snapshot, tail, truncated } = this.buildAttachPayload(deadChannelId);
 
 		const attachOk: UiAttachOkMessage = {
 			type: "ATTACH_OK",
@@ -1039,6 +1055,7 @@ export class ChannelLifecycleManager {
 			tail,
 			writeLockHolder: this.ctx.getWriteLockHolder?.(deadChannelId) ?? null,
 			cached: false,
+			...(truncated && { truncated: true }),
 		};
 		client.send(attachOk);
 

@@ -281,6 +281,17 @@ export interface UiAttachOkMessage {
 	tail: Uint8Array[];
 	writeLockHolder: string | null;
 	cached: boolean;
+	/**
+	 * Output between this snapshot and now was dropped rather than sent.
+	 *
+	 * A terminal stream is stateful: escape sequences set attributes, move the
+	 * cursor, enter and leave the alternate screen. A piece of one cut anywhere
+	 * but a boundary leaves the emulator in a state nobody chose, and it shows
+	 * something wrong without ever saying so. When there is more than can be
+	 * sent, the snapshot goes alone — a screen that is coherent and old — and
+	 * this says the rest is missing so the pane can too.
+	 */
+	truncated?: boolean;
 	dynamicTitle?: string;
 	processTitle?: string;
 	displayTitle?: string;

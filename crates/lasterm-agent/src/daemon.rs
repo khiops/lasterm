@@ -180,8 +180,8 @@ async fn run_daemon_impl_with_manager(
     mut shutdown: ShutdownReceiver,
     pty_manager: Arc<Mutex<PtyManager>>,
     bound: Option<oneshot::Sender<()>>,
-    /// How long to stay up holding nothing, for nobody. `None` never exits,
-    /// which is what a daemon started beside its hub wants.
+    // How long to stay up holding nothing, for nobody. `None` never exits,
+    // which is what a daemon started beside its hub wants.
     idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
     let path = PathBuf::from(&socket_path);

@@ -654,8 +654,12 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 		channels: Array<{ id: string; sessionId: string; status: string; hostId?: string }>,
 	) {
 		const statusCalls: Array<{ channelId: string; sessionId: string; status: string }> = [];
+		const scheduler = { trackChannel: vi.fn(), untrackChannel: vi.fn() };
+		const chunker = { trackChannel: vi.fn(), untrackChannel: vi.fn() };
 		const ctx = {
 			...makeMinimalCtx(),
+			scheduler,
+			chunker,
 			channels: new Map(
 				channels.map((c) => [
 					c.id,
@@ -681,18 +685,29 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 			},
 		} as unknown as StateBroadcaster;
 
-		return { ctx, statusCalls, lifecycle: new ChannelLifecycleManager(ctx, broadcaster) };
+		return {
+			ctx,
+			statusCalls,
+			scheduler,
+			chunker,
+			lifecycle: new ChannelLifecycleManager(ctx, broadcaster),
+		};
 	}
 
 	it("kills a channel the agent does not report, even from an older session", () => {
-		const { ctx, statusCalls, lifecycle } = makeHarness([
+		const { ctx, statusCalls, scheduler, chunker, lifecycle } = makeHarness([
 			{ id: "ch-gone", sessionId: OLD_SESSION, status: "orphan" },
 		]);
 
 		lifecycle.reconcileChannelState(HOST, []);
 
 		expect(statusCalls).toEqual([{ channelId: "ch-gone", sessionId: OLD_SESSION, status: "dead" }]);
-		expect(ctx.channels.get("ch-gone")?.status).toBe("dead");
+		// And it is forgotten, not merely labelled: a channel left in the live map
+		// keeps its snapshot timer asking an agent that has never heard of it, and
+		// makes a SPAWN that names it to bring it back look like a double spawn.
+		expect(ctx.channels.has("ch-gone")).toBe(false);
+		expect(scheduler.untrackChannel).toHaveBeenCalledWith("ch-gone");
+		expect(chunker.untrackChannel).toHaveBeenCalledWith("ch-gone");
 	});
 
 	it("adopts a channel the agent is still holding into the session that found it", () => {
@@ -720,14 +735,31 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 		expect(statusCalls).toEqual([]);
 	});
 
-	it("says nothing about a channel that is already dead", () => {
-		const { statusCalls, lifecycle } = makeHarness([
+	it("says nothing about a channel that is already dead, but forgets it too", () => {
+		const { ctx, statusCalls, scheduler, lifecycle } = makeHarness([
 			{ id: "ch-dead", sessionId: OLD_SESSION, status: "dead" },
 		]);
 
 		lifecycle.reconcileChannelState(HOST, []);
 
 		expect(statusCalls).toEqual([]);
+		// The one already marked dead is the one an earlier judgement left behind,
+		// so it is the one most likely to still be on the snapshot timer.
+		expect(ctx.channels.has("ch-dead")).toBe(false);
+		expect(scheduler.untrackChannel).toHaveBeenCalledWith("ch-dead");
+	});
+
+	it("keeps holding the channel the agent does report", () => {
+		const { ctx, scheduler, lifecycle } = makeHarness([
+			{ id: "ch-kept", sessionId: OLD_SESSION, status: "orphan" },
+		]);
+
+		lifecycle.reconcileChannelState(HOST, [
+			{ type: "AGENT_CHANNEL_STATE", channelId: "ch-kept", alive: true } as never,
+		]);
+
+		expect(ctx.channels.has("ch-kept")).toBe(true);
+		expect(scheduler.untrackChannel).not.toHaveBeenCalled();
 	});
 });
 

@@ -58,7 +58,9 @@ describe("resolveWindowEffect", () => {
 		const linux: WindowEffectsPlatformInfo = { os: "linux", windowsBuild: null };
 
 		expect(resolveWindowEffect(displayedState("transparent", "auto"), win11)).toBe("mica");
-		expect(resolveWindowEffect(displayedState("transparent", "auto"), win10)).toBe("blur");
+		// Windows 10 is offered see-through and nothing else, so that is what
+		// `auto` means there.
+		expect(resolveWindowEffect(displayedState("transparent", "auto"), win10)).toBeNull();
 		expect(resolveWindowEffect(displayedState("transparent", "auto"), macos)).toBe(
 			"underWindowBackground",
 		);
@@ -70,6 +72,11 @@ describe("resolveWindowEffect", () => {
 		const win11: WindowEffectsPlatformInfo = { os: "windows", windowsBuild: 26_100 };
 
 		expect(resolveWindowEffect(displayedState("transparent", "mica"), win10)).toBeNull();
+		// A value left by an older version, on a Windows that cannot pick it
+		// back: see-through, not an effect nobody can unpick.
+		expect(resolveWindowEffect(displayedState("transparent", "blur"), win10)).toBeNull();
+		expect(resolveWindowEffect(displayedState("transparent", "acrylic"), win10)).toBeNull();
+		expect(resolveWindowEffect(displayedState("transparent", "blur"), win11)).toBeNull();
 		expect(resolveWindowEffect(displayedState("solid", "auto"), win11)).toBeNull();
 		expect(
 			resolveWindowEffect({ mode: "transparent", windowEffect: "shimmer" as WindowEffect }, win11),

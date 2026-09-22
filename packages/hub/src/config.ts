@@ -279,7 +279,7 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		if (
 			raw.host_marker === "dot" ||
 			raw.host_marker === "initials" ||
-			raw.host_marker === "underline" ||
+			raw.host_marker === "edge" ||
 			raw.host_marker === "none"
 		) {
 			config.tabs.hostMarker = raw.host_marker;

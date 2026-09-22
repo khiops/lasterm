@@ -225,7 +225,7 @@ export const settingsSchema: SettingDefinition[] = [
 		options: [
 			{ label: "Colour dot", value: "dot" },
 			{ label: "Host initials", value: "initials" },
-			{ label: "Coloured underline", value: "underline" },
+			{ label: "Coloured edge", value: "edge" },
 			{ label: "None", value: "none" },
 		],
 		description: "Shows which host a tab's terminal is on.",

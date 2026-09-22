@@ -92,10 +92,10 @@ export interface TabsConfig {
 	 * Tabs are global while terminals belong to hosts, so a tab bar with no
 	 * marker is a list of names that may come from anywhere. The styles differ
 	 * only in what they cost the eye: "dot" is a coloured bead, "initials"
-	 * names the host outright and takes the most room, "underline" tints the
-	 * tab's edge and adds nothing to its width, "none" says nothing.
+	 * names the host outright and takes the most room, "edge" runs the host's colour
+	 * along the top of the tab and adds nothing to its width, "none" says nothing.
 	 */
-	hostMarker?: "dot" | "initials" | "underline" | "none";
+	hostMarker?: "dot" | "initials" | "edge" | "none";
 }
 
 export interface PanesConfig {

@@ -69,9 +69,15 @@ export function resolveWindowEffect(
 	if (currentPlatformInfo.os === "linux") return null;
 
 	if (currentPlatformInfo.os === "windows") {
-		if (effect === "auto") return isWindows11(currentPlatformInfo) ? "mica" : "blur";
-		if (effect === "mica") return isWindows11(currentPlatformInfo) ? "mica" : null;
-		if (effect === "blur" || effect === "acrylic") return effect;
+		// What the picker offers is what the window gets. Windows 10 is offered
+		// nothing but see-through: Mica does not exist there, and Blur — the
+		// legacy accent — was dropped for dragging and resizing badly while
+		// looking like a material it is not (#62). Resolving `auto`, or a value
+		// left in a config from an older version, onto an effect no one can pick
+		// or unpick leaves someone with a window they cannot explain.
+		if (!isWindows11(currentPlatformInfo)) return null;
+		if (effect === "auto" || effect === "mica") return "mica";
+		if (effect === "acrylic") return "acrylic";
 		return null;
 	}
 

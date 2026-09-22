@@ -15,7 +15,7 @@
 			role="tab"
 			:aria-selected="idx === activeTabIndex"
 			:draggable="editingTabIndex !== idx"
-			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === lastVisibleIndex, 'tab--dragging': dragTabIndex === idx, 'tab--host-underline': hostMarkerStyle === 'underline' && hostMarkers.has(tab.id) }]"
+			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === lastVisibleIndex, 'tab--dragging': dragTabIndex === idx, 'tab--host-edge': hostMarkerStyle === 'edge' && hostMarkers.has(tab.id) }]"
 			:style="hostMarkers.get(tab.id) ? { '--tab-host-color': hostMarkers.get(tab.id)?.color } : undefined"
 			:title="hostMarkers.get(tab.id) ? `${getTabLabel(tab.id)} — on ${hostMarkers.get(tab.id)?.label}` : getTabLabel(tab.id)"
 			@click="emit('select-tab', idx)"
@@ -571,10 +571,12 @@ function onTabDragEnd(): void {
 	background: var(--tab-host-color, var(--nt-accent));
 }
 
-/* The underline costs no width at all: the tab keeps its size and takes the
-   host's colour along its bottom edge. */
-.tab--host-underline {
-	box-shadow: inset 0 -2px 0 0 var(--tab-host-color, var(--nt-accent));
+/* The host's colour costs no width at all: the tab keeps its size and takes
+   the colour along its top edge. The top, because the bottom is where the
+   active tab draws its own accent — two lines sharing one edge is two signals
+   nobody can tell apart. */
+.tab--host-edge {
+	box-shadow: inset 0 2px 0 0 var(--tab-host-color, var(--nt-accent));
 }
 
 .tab__activity-dot {

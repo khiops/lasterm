@@ -1280,9 +1280,14 @@ mod tests {
         // The frame is MessagePack, which writes strings literally, so looking
         // for the code in the bytes is enough here and does not need a decoder.
         let mut said_displaced = false;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(500), stream1.read(&mut buf)).await {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                stream1.read(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
                     if buf[..n].windows(9).any(|w| w == b"DISPLACED") {

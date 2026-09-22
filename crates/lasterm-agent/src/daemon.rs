@@ -197,8 +197,19 @@ async fn run_daemon_impl_with_manager(
         ));
     }
 
-    // Clean up stale socket file
+    // A socket file left by a daemon that died is cleaned up; one a daemon is
+    // still serving is not touched. Removing it would bind this process in its
+    // place and leave the first holding terminals nobody can reach (#454).
     if path.exists() {
+        if someone_is_listening(&path).await {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "another agent daemon is already listening on {}",
+                    path.display()
+                ),
+            ));
+        }
         std::fs::remove_file(&path)?;
     }
 
@@ -878,6 +889,24 @@ async fn handle_connection_inner<S>(
 
 // ─── Unix (UDS) implementation ────────────────────────────────────────────────
 
+/// Whether a daemon is answering on this socket.
+///
+/// A socket file that cannot be bound looks the same whether a daemon is
+/// serving it or whether it was left behind by one that died. Connecting is
+/// what tells them apart: a listener accepts, a leftover file refuses.
+#[cfg(unix)]
+async fn someone_is_listening(path: &Path) -> bool {
+    UnixStream::connect(path).await.is_ok()
+}
+
+/// Take the socket, or refuse to take it from a daemon that is serving it.
+///
+/// The bind is retried because a socket this process has just unlinked can
+/// still be refused for a moment. What is *not* retried is displacing a live
+/// daemon: unlinking its socket would bind this process in its place and leave
+/// it holding terminals nobody can reach any more (#454). The hub connects
+/// before it ever starts one, so reaching this state means something else did
+/// — and the answer is to say so rather than to take over.
 #[cfg(unix)]
 async fn bind_with_retry(path: &Path) -> std::io::Result<UnixListener> {
     let mut last_err = None;
@@ -885,12 +914,26 @@ async fn bind_with_retry(path: &Path) -> std::io::Result<UnixListener> {
         match UnixListener::bind(path) {
             Ok(listener) => return Ok(listener),
             Err(e) => {
+                if someone_is_listening(path).await {
+                    tracing::error!(
+                        "a daemon is already serving {:?}; refusing to take its socket",
+                        path
+                    );
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!(
+                            "another agent daemon is already listening on {}",
+                            path.display()
+                        ),
+                    ));
+                }
                 tracing::warn!("bind attempt {} failed: {}", attempt + 1, e);
                 last_err = Some(e);
                 if attempt < BIND_RETRY_MAX - 1 {
                     let delay = BIND_RETRY_DELAY_MS + (attempt as u64 * 100);
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                    // Try removing stale socket again
+                    // Nothing answered on it, so the file is what a dead daemon
+                    // left behind.
                     let _ = std::fs::remove_file(path);
                 }
             }
@@ -1564,6 +1607,87 @@ mod tests {
             let _ = fs::remove_file(socket_path);
             let _ = tokio::fs::remove_dir_all(config_dir).await;
             let _ = tokio::fs::remove_dir_all(state_dir).await;
+        }
+
+        /// The socket of a daemon that is serving belongs to it. Taking it
+        /// would bind this process in its place and leave the first holding
+        /// terminals nobody can reach (#454).
+        #[tokio::test]
+        async fn a_second_daemon_refuses_the_socket_of_one_that_is_serving() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("socket-taken").await;
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let first = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                shutdown_rx,
+                None,
+                None,
+            ));
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            let second = run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                no_shutdown_request(),
+                None,
+                None,
+            )
+            .await;
+
+            let error = second.expect_err("the second daemon must not take a served socket");
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse, "{error}");
+            assert!(
+                Path::new(&socket_path).exists(),
+                "the first daemon's socket must still be there"
+            );
+
+            let _ = shutdown_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(10), first).await;
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+        }
+
+        /// And the other way: a socket nobody answers on is what a daemon that
+        /// died left behind, and starting over means taking it.
+        #[tokio::test]
+        async fn a_daemon_takes_over_a_socket_nobody_answers_on() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("socket-stale").await;
+            // A file where the socket goes, with nothing behind it.
+            tokio::fs::write(&socket_path, b"")
+                .await
+                .expect("write a leftover file");
+
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let daemon = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                shutdown_rx,
+                None,
+                None,
+            ));
+            // The file was there from the start, so its existence proves
+            // nothing: wait until something answers on it.
+            let deadline = Instant::now() + FIXTURE_DEADLINE;
+            loop {
+                if someone_is_listening(Path::new(&socket_path)).await {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the daemon never took over the leftover socket"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let _ = shutdown_tx.send(true);
+            let ended = tokio::time::timeout(Duration::from_secs(10), daemon).await;
+            assert!(
+                ended.is_ok(),
+                "the daemon should have started on the stale path"
+            );
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
         }
 
         /// A daemon left on a machine the hub merely reaches should not outlive

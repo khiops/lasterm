@@ -856,6 +856,35 @@ export class ChannelLifecycleManager {
 
 	// ─── Spool helpers ────────────────────────────────────────────────────────
 
+	/**
+	 * What an ATTACH_OK may carry after its snapshot.
+	 *
+	 * The desktop transport caps one hub message at 512 KiB on purpose, so that
+	 * a webview which is slow to drain cannot be flooded. A tail built from the
+	 * spool ignored that: a channel with a long history produced a 6 MB message,
+	 * the socket refused it, and the whole connection went down — taking every
+	 * pane's attach with it, each stuck on "Connecting…" for ever.
+	 *
+	 * The newest chunks are the ones that continue the screen, so those are the
+	 * ones kept. Scrollback older than this is lost to the pane; a bounded tail
+	 * beats a dead connection.
+	 */
+	private static readonly MAX_ATTACH_TAIL_BYTES = 128 * 1024;
+
+	/** Keep the last `MAX_ATTACH_TAIL_BYTES` of a tail, oldest chunks dropped. */
+	static boundTail(chunks: ReadonlyArray<{ dataBlob: Buffer }>): Uint8Array[] {
+		const kept: Uint8Array[] = [];
+		let total = 0;
+		for (let i = chunks.length - 1; i >= 0; i--) {
+			const blob = chunks[i]?.dataBlob;
+			if (blob === undefined) continue;
+			if (total + blob.length > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) break;
+			kept.unshift(new Uint8Array(blob));
+			total += blob.length;
+		}
+		return kept;
+	}
+
 	buildAttachPayload(channelId: string): {
 		snapshot: UiAttachOkMessage["snapshot"];
 		tail: Uint8Array[];
@@ -876,7 +905,7 @@ export class ChannelLifecycleManager {
 				kind: "output",
 				afterSeq: snapshotChunk.seq,
 			});
-			tail = tailChunks.map((c) => new Uint8Array(c.dataBlob));
+			tail = ChannelLifecycleManager.boundTail(tailChunks);
 		}
 
 		return { snapshot, tail };

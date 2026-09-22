@@ -730,3 +730,37 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 		expect(statusCalls).toEqual([]);
 	});
 });
+
+// ─── boundTail ───────────────────────────────────────────────────────────────
+//
+// The desktop transport refuses a hub message over 512 KiB, and a refused
+// message takes the whole connection down with every pending attach on it.
+
+describe("ChannelLifecycleManager — boundTail", () => {
+	const chunk = (size: number) => ({ dataBlob: Buffer.alloc(size, 1) });
+
+	it("keeps a small tail whole", () => {
+		const tail = ChannelLifecycleManager.boundTail([chunk(10), chunk(20)]);
+		expect(tail.map((t) => t.length)).toEqual([10, 20]);
+	});
+
+	it("keeps the newest chunks and drops the oldest", () => {
+		const tail = ChannelLifecycleManager.boundTail([
+			chunk(120 * 1024),
+			chunk(100 * 1024),
+			chunk(20 * 1024),
+		]);
+		// The last two fit; the first would take it over the budget.
+		expect(tail.map((t) => t.length)).toEqual([100 * 1024, 20 * 1024]);
+	});
+
+	it("never exceeds the budget, whatever it is handed", () => {
+		const huge = Array.from({ length: 50 }, () => chunk(200 * 1024));
+		const total = ChannelLifecycleManager.boundTail(huge).reduce((n, t) => n + t.length, 0);
+		expect(total).toBeLessThanOrEqual(128 * 1024);
+	});
+
+	it("drops a single chunk that is over the budget on its own", () => {
+		expect(ChannelLifecycleManager.boundTail([chunk(2 * 1024 * 1024)])).toEqual([]);
+	});
+});

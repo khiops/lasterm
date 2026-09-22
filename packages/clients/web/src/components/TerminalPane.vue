@@ -494,9 +494,12 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			ready.value = true;
 			return;
 		}
-		// AGENT_NOT_AVAILABLE is handled by the AgentDeployFailed modal — the
-		// inline pane error would be redundant and confusing alongside the modal.
+		// AGENT_NOT_AVAILABLE is explained by the AgentDeployFailed modal, so the
+		// pane does not repeat why. It still has to stop saying "Connecting…":
+		// returning here left a pane waiting for ever on something that had
+		// already failed, with nothing on it to click and no keystroke accepted.
 		if (msg.startsWith('AGENT_NOT_AVAILABLE:')) {
+			error.value = 'This host could not be reached.';
 			return;
 		}
 		error.value = msg;

@@ -8,6 +8,32 @@ export function registerSessionRoutes(
 	metaDal: MetaDAL,
 	sessionManager: SessionManager,
 ): void {
+	/**
+	 * POST /api/hosts/:id/agent/replace — stop the agent serving this host, so
+	 * the next connection starts the one this hub carries.
+	 *
+	 * Everything that agent is holding ends with it: a PTY belongs to the
+	 * process that opened it, and no update carries one across (#456). That is
+	 * why this is a request and never something the hub decides by itself.
+	 */
+	server.post<{ Params: { id: string } }>(
+		"/api/hosts/:id/agent/replace",
+		async (request, reply) => {
+			const host = metaDal.getHost(request.params.id);
+			if (!host) {
+				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
+			}
+
+			const outcome = await sessionManager.replaceAgent(request.params.id);
+			if (!outcome.replaced) {
+				return reply
+					.code(409)
+					.send({ error: { code: "AGENT_NOT_REPLACED", message: outcome.message } });
+			}
+			return { replaced: true, message: outcome.message };
+		},
+	);
+
 	// GET /api/sessions?host_id=X
 	server.get<{ Querystring: { host_id?: string } }>("/api/sessions", async (request) => {
 		const sessions = metaDal.listSessions(request.query.host_id);

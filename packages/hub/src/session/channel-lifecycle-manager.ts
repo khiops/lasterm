@@ -351,9 +351,21 @@ export class ChannelLifecycleManager {
 	}
 
 	retireChannel(channelId: string, sessionId: string): void {
-		const ch = this.ctx.channels.get(channelId);
 		this.clearElevationForChannel(channelId);
 		this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
+		this.forgetChannel(channelId);
+	}
+
+	/**
+	 * Take a terminal out of everything that speaks to a running one: the clients
+	 * that hold it, the snapshot timer, the chunker, and the map of what this hub
+	 * believes is alive. Saying a channel is dead is not the same as forgetting
+	 * it, and one left in that map is read by the rest of the hub as a terminal
+	 * still running — its snapshot timer keeps asking an agent that has never
+	 * heard of it, and a SPAWN that names it to bring it back is refused.
+	 */
+	private forgetChannel(channelId: string): void {
+		const ch = this.ctx.channels.get(channelId);
 		if (ch) {
 			for (const clientId of ch.clients) {
 				this.ctx.clients.get(clientId)?.attachedChannels.delete(channelId);
@@ -843,12 +855,18 @@ export class ChannelLifecycleManager {
 			reconnectAc.abort();
 			this.ctx.reconnectAbortControllers.delete(hostId);
 		}
-		// Mark all channels for this session as dead
+		// Every channel of this host goes, whatever state it is in. A channel left
+		// in the live map is a terminal the hub believes is running: its snapshot
+		// timer keeps asking an agent that no longer knows it, every five seconds
+		// for as long as the hub lives, and a spawn that names it to bring it back
+		// is refused because "it is still running". One already marked dead is the
+		// one most likely to be in both traps, so it is the last thing to skip.
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
-			if (ch.hostId !== hostId || ch.status === "dead") continue;
-			this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
-			this.ctx.scheduler.untrackChannel(channelId);
-			this.ctx.chunker.untrackChannel(channelId);
+			if (ch.hostId !== hostId) continue;
+			if (ch.status !== "dead") {
+				this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
+			}
+			this.forgetChannel(channelId);
 		}
 		this.broadcaster.updateSessionStatus(hostId, sessionId, "closed");
 		this.ctx.sessions.delete(hostId);
@@ -1186,12 +1204,19 @@ export class ChannelLifecycleManager {
 				if (channelState.status === "orphan") {
 					this.broadcaster.updateChannelStatus(channelId, session.id, "live");
 				}
-			} else if (channelState.status !== "dead") {
+			} else {
 				// And the other way: the agent has no such terminal, so it is gone
 				// — again whichever session it came from. Skipping those left a
 				// channel nothing would ever judge, showing an empty pane with no
 				// overlay, no message, and nothing to do about it.
-				this.broadcaster.updateChannelStatus(channelId, channelState.sessionId, "dead");
+				// One already dead says nothing new, but it is forgotten all the
+				// same: it is the one most likely to have been left behind by an
+				// earlier judgement, and so the one still on the snapshot timer.
+				if (channelState.status !== "dead") {
+					this.broadcaster.updateChannelStatus(channelId, channelState.sessionId, "dead");
+				}
+				this.clearElevationForChannel(channelId);
+				this.forgetChannel(channelId);
 			}
 		}
 	}

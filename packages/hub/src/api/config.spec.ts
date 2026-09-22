@@ -53,9 +53,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	await server.close();
-	dbs.close();
-	rmSync(configDir, { recursive: true, force: true });
+	// Survives a setup that never finished: see config.spec.ts.
+	await server?.close();
+	dbs?.close();
+	if (configDir !== undefined) rmSync(configDir, { recursive: true, force: true });
 });
 
 // ─── PUT /api/config/ui — value type validation ───────────────────────────────

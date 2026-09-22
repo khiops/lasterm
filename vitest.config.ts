@@ -18,6 +18,16 @@ export default defineConfig({
 					environment: "node",
 					globalSetup: ["packages/hub/src/test-tls.setup.ts"],
 					setupFiles: ["packages/hub/src/platform-dirs.setup.ts"],
+					// These specs build a TLS server and two SQLite databases per
+					// test, and some spawn a hub process. Vitest's defaults — 5s for
+					// a test, 10s for a hook — are not assertions about how fast that
+					// is; nothing here measures duration. They are guards against a
+					// hang, and at those values a machine doing anything else fails
+					// tests that are perfectly correct, in files unrelated to what is
+					// being changed. A hook that dies mid-setup then takes its
+					// teardown with it, turning one timeout into a page of errors.
+					testTimeout: 30_000,
+					hookTimeout: 30_000,
 				},
 			},
 			{

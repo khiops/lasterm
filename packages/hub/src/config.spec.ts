@@ -522,8 +522,10 @@ describe("GET /api/config/defaults", () => {
 	});
 
 	afterEach(async () => {
-		await server.close();
-		dbs.close();
+		// A setup that timed out leaves these unset; a teardown that assumes
+		// otherwise turns one failure into a page of unrelated TypeErrors.
+		await server?.close();
+		dbs?.close();
 	});
 
 	it("returns DEFAULT_PROFILE", async () => {

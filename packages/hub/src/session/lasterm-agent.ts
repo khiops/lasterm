@@ -1,6 +1,6 @@
 import net from "node:net";
 import type { Duplex } from "node:stream";
-import { type AgentChannelStateMessage, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
+import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { AgentConnection } from "./agent-connection.js";
 import { SendQueue } from "./send-queue.js";
@@ -29,13 +29,6 @@ export class LastermAgent extends AgentConnection {
 	private socketClosed = false;
 	private closePromise: Promise<void> | null = null;
 	private static _connSeq = 0;
-
-	/**
-	 * Promise that resolves with collected AGENT_CHANNEL_STATE messages
-	 * once CHANNEL_STATE_END is received. Created eagerly in the constructor
-	 * so messages are never lost, regardless of when the caller awaits.
-	 */
-	private channelStatePromise: Promise<AgentChannelStateMessage[]>;
 
 	constructor(socket: Duplex, hubLogger?: HubLogger) {
 		super();
@@ -71,48 +64,6 @@ export class LastermAgent extends AgentConnection {
 			this.logDebug("lasterm-agent: socket error", { message: err.message });
 			this.emit("error", err);
 		});
-
-		// Eagerly collect channel-state messages into a promise so that
-		// callers of waitForChannelState() never miss messages that arrived
-		// between HELLO and the await.
-		this.channelStatePromise = new Promise<AgentChannelStateMessage[]>((resolve, reject) => {
-			const states: AgentChannelStateMessage[] = [];
-			let settled = false;
-
-			const cleanup = (): void => {
-				this.off("message", onMessage);
-				this.off("close", onClose);
-				this.off("error", onError);
-			};
-
-			const settle = (fn: () => void): void => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				fn();
-			};
-
-			const onMessage = (msg: ProtocolMessage): void => {
-				if (msg.type === "AGENT_CHANNEL_STATE") {
-					states.push(msg);
-				} else if (msg.type === "CHANNEL_STATE_END") {
-					settle(() => resolve(states));
-				}
-			};
-
-			const onClose = (): void => {
-				settle(() => reject(new Error("CHANNEL_STATE connection closed before CHANNEL_STATE_END")));
-			};
-
-			const onError = (err: Error): void => {
-				settle(() => reject(err));
-			};
-
-			this.on("message", onMessage);
-			this.once("close", onClose);
-			this.once("error", onError);
-		});
-		this.channelStatePromise.catch(() => {});
 	}
 
 	private logDebug(msg: string, extra?: Record<string, unknown>): void {
@@ -150,32 +101,6 @@ export class LastermAgent extends AgentConnection {
 	/** True when the underlying socket is still open. */
 	get connected(): boolean {
 		return !this.socket.destroyed;
-	}
-
-	/**
-	 * Wait for the agent to send channel state enumeration.
-	 *
-	 * After connecting, the daemon sends zero or more AGENT_CHANNEL_STATE
-	 * messages followed by a single CHANNEL_STATE_END sentinel. This method
-	 * returns the collected list.
-	 *
-	 * Safe to call after `connectLocal` resolves — messages that arrived
-	 * between HELLO and this call are buffered internally.
-	 *
-	 * @param timeoutMs - Maximum time to wait (default 5 000 ms).
-	 * @returns Array of channel state messages (empty when no channels exist).
-	 */
-	waitForChannelState(timeoutMs = 5_000): Promise<AgentChannelStateMessage[]> {
-		let timer: ReturnType<typeof setTimeout>;
-		const timeout = new Promise<never>((_resolve, reject) => {
-			timer = setTimeout(() => {
-				reject(new Error("CHANNEL_STATE timeout"));
-			}, timeoutMs);
-		});
-
-		return Promise.race([this.channelStatePromise, timeout]).finally(() => {
-			clearTimeout(timer);
-		});
 	}
 
 	/**

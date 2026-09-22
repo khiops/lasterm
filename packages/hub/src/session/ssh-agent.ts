@@ -259,6 +259,13 @@ export class SshAgent extends AgentConnection {
 	 * Populated by the hostVerifier closure during a connect attempt.
 	 * Accessible after start() resolves or rejects so callers can inspect mismatch state.
 	 */
+	/**
+	 * Whether this connection reached a daemon rather than running the agent
+	 * itself. A daemon may already hold terminals from before; an agent this
+	 * connection started never does.
+	 */
+	usedRemoteDaemon = false;
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -517,6 +524,7 @@ export class SshAgent extends AgentConnection {
 								logFormat: this.loggingConfig.logFormat,
 							})
 								.then((attachment) => {
+									this.usedRemoteDaemon = true;
 									console.error(
 										`[lasterm-ssh] reached the remote daemon on ${attachment.paths.socket}` +
 											(attachment.started ? " (started it)" : " (already running)"),

@@ -186,6 +186,18 @@ export class AgentConnectionManager {
 	// ─── Startup ──────────────────────────────────────────────────────────────
 
 	/**
+	 * Whether this host's terminals may have outlived the hub.
+	 *
+	 * Only where a daemon was left running: that is the switch, and Windows
+	 * remotes never qualify — their daemon listens on a named pipe, which no
+	 * SSH channel carries, so they were on stdio and died with the connection.
+	 */
+	private remoteDaemonKeepsChannels(hostId: string): boolean {
+		if (this.ctx.configResolver?.sshConfig?.remoteDaemon !== true) return false;
+		return this.ctx.metaDal.getHost(hostId)?.os !== "windows";
+	}
+
+	/**
 	 * On hub start, restore sessions that were alive before the previous shutdown.
 	 */
 	async startup(): Promise<void> {
@@ -249,11 +261,24 @@ export class AgentConnectionManager {
 				} catch {
 					await this.warmRestartLocal(hostId, session.id);
 				}
+			} else if (this.remoteDaemonKeepsChannels(hostId)) {
+				// A remote daemon outlives the SSH connection, so these terminals
+				// may still be running. They stay orphan — already the state set
+				// above — and the hub does not go and connect: reaching this host
+				// can need a password, and at startup there is nobody to ask.
+				// Selecting the host is what reconnects, and what adopts them.
+				this.ctx.hubLogger?.log(
+					"info",
+					"agent-connection-manager: leaving remote channels orphan",
+					{
+						hostId,
+						count: channels.length,
+					},
+				);
 			} else {
-				// SSH hosts in stdio mode: PTYs don't survive SSH disconnect.
-				// Mark channels dead — orphan state is unreachable without a remote daemon.
-				// TODO: when remote agent daemon over UDS/SSH tunnel is implemented,
-				// attempt reconnect here instead (like local daemon).
+				// SSH hosts on stdio: the agent was a child of the connection, and
+				// the connection is gone. The PTYs went with it — this is not the
+				// hub ending them, it is the hub finding them ended (#79).
 				for (const ch of channels) {
 					const chState = this.ctx.channels.get(ch.id);
 					if (chState) chState.status = "dead";

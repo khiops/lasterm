@@ -1588,6 +1588,23 @@ export class SessionManager {
 		try {
 			console.error("[lasterm-ssh] deploying agent...");
 			await sshAgent.start(storedFingerprint, sessionTrustedFp, signal, resolvedJump);
+			// A daemon answers with the terminals it kept while nobody was
+			// connected. An agent this connection started answers with nothing,
+			// and asking it would only wait out the deadline.
+			if (sshAgent.usedRemoteDaemon) {
+				try {
+					this.lifecycle.reconcileChannelState(hostId, await sshAgent.waitForChannelState());
+				} catch (stateErr) {
+					// The daemon is reachable but will not say what it holds. Most
+					// likely it wants a token: a remote that runs its own hub has an
+					// auth.json of its own, and this hub does not have that token.
+					console.error(
+						`[lasterm-ssh] the remote daemon did not report its terminals: ${
+							stateErr instanceof Error ? stateErr.message : String(stateErr)
+						}`,
+					);
+				}
+			}
 			// A jump that worked and had nothing pinned is pinned now: it was
 			// trusted on the strength of known_hosts, and that answer is recorded
 			// here so a later change of key is this hub's business too.

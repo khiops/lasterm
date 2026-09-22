@@ -365,6 +365,20 @@ export interface SessionStateMessage {
 	sessionId: string;
 	hostId: string;
 	status: SessionStatus;
+	/**
+	 * Set only when the agent answering here is not the one this hub carries.
+	 *
+	 * A hub deploys an agent matched to itself, so a difference means the one
+	 * running was started by an older hub and is still there — a remote daemon
+	 * holding terminals, most often (#79). Its terminals are worth more than a
+	 * version number, so nothing is done about it: it is said, and the person
+	 * decides (#456).
+	 *
+	 * The hub sends the comparison rather than its ingredients, because it is
+	 * the side that knows both and the client would otherwise need a second
+	 * request to learn the hub's own version.
+	 */
+	outdatedAgent?: { running: string; expected: string };
 }
 
 /** Hub → UI: channel lifecycle state change */
@@ -406,6 +420,8 @@ export interface StateSyncMessage {
 		sessionId: string;
 		hostId: string;
 		status: SessionStatus;
+		/** Set only on a mismatch. See SessionStateMessage. */
+		outdatedAgent?: { running: string; expected: string };
 	}>;
 	channels: Array<{
 		channelId: string;

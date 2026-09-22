@@ -386,6 +386,7 @@ export const useSessionStore = defineStore("session", () => {
 		wsClient.on("SESSION_STATE", (msg) => {
 			if (msg.type === "SESSION_STATE") {
 				hostsStore.updateSessionStatus(msg.hostId, msg.status);
+				hostsStore.rememberOutdatedAgent(msg.hostId, msg.outdatedAgent);
 			}
 		});
 	}
@@ -487,6 +488,7 @@ export const useSessionStore = defineStore("session", () => {
 				const sessionHostMap = new Map<string, string>();
 				for (const s of msg.sessions) {
 					hostsStore.updateSessionStatus(s.hostId, s.status);
+					hostsStore.rememberOutdatedAgent(s.hostId, s.outdatedAgent);
 					sessionHostMap.set(s.sessionId, s.hostId);
 				}
 				// Populate channelId → hostId map from STATE_SYNC data

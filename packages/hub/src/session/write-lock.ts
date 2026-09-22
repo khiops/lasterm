@@ -82,7 +82,30 @@ export class WriteLockManager {
 		if (holder === clientId) {
 			this.holders.delete(channelId);
 			this._broadcastLock(channelId, null);
+			this._grantToSoleAttachedClient(channelId);
 		}
+	}
+
+	/**
+	 * Hand a freed lock to the one client left attached, if there is exactly one.
+	 *
+	 * A lock exists to arbitrate between people, and with one client attached
+	 * there is nobody to arbitrate with: leaving it free means a terminal that
+	 * refuses what is typed into it until someone finds the button. That is
+	 * what a reconnection used to produce — the connection being replaced holds
+	 * the lock, goes, and the one on screen is left with nothing (#465).
+	 *
+	 * With several attached it stays free on purpose: taking it for one of them
+	 * would be choosing on their behalf.
+	 */
+	private _grantToSoleAttachedClient(channelId: string): void {
+		if (this.holders.has(channelId)) return;
+		const clients = this.attached.get(channelId);
+		if (clients === undefined || clients.size !== 1) return;
+		const [only] = clients;
+		if (only === undefined) return;
+		this.holders.set(channelId, only);
+		this._broadcastLock(channelId, only);
 	}
 
 	// ─── Tier 1 ─────────────────────────────────────────────────────────────
@@ -209,15 +232,22 @@ export class WriteLockManager {
 	 * across every channel they were attached to.
 	 */
 	onClientDisconnect(clientId: string): void {
+		const freed: string[] = [];
 		for (const [channelId, holder] of this.holders.entries()) {
 			if (holder === clientId) {
 				this.holders.delete(channelId);
 				this._broadcastLock(channelId, null);
+				freed.push(channelId);
 			}
 		}
 		// Clean up from attached sets
 		for (const clients of this.attached.values()) {
 			clients.delete(clientId);
+		}
+		// Only now is the departing client out of the attached sets, so "the one
+		// client left" means what it says.
+		for (const channelId of freed) {
+			this._grantToSoleAttachedClient(channelId);
 		}
 	}
 

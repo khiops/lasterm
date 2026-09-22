@@ -243,7 +243,7 @@ export function useTerminal(
 	async function reattachChannel(
 		id: string,
 		opts?: { preserveContent?: boolean },
-	): Promise<{ writeLockHolder: string | null }> {
+	): Promise<{ writeLockHolder: string | null; cached: boolean }> {
 		// Clean up previous OUTPUT subscription
 		outputUnsubscribe?.();
 
@@ -258,6 +258,12 @@ export function useTerminal(
 			writeLockHolder: string | null;
 			dynamicTitle: string | null;
 			displayTitle: string | null;
+			/**
+			 * The hub answered from what it remembers, with nothing attached to
+			 * the terminal itself. What is on screen is the last thing it showed,
+			 * and what is typed into it goes nowhere.
+			 */
+			cached: boolean;
 		}>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				unsubOk();
@@ -278,6 +284,7 @@ export function useTerminal(
 						writeLockHolder: uiMsg.writeLockHolder ?? null,
 						dynamicTitle: uiMsg.dynamicTitle ?? null,
 						displayTitle: uiMsg.displayTitle ?? null,
+						cached: uiMsg.cached === true,
 					});
 				}
 			});
@@ -349,7 +356,7 @@ export function useTerminal(
 			sendResize(terminal.value.cols, terminal.value.rows);
 		}
 
-		return { writeLockHolder: result.writeLockHolder };
+		return { writeLockHolder: result.writeLockHolder, cached: result.cached };
 	}
 
 	/**

@@ -3,6 +3,8 @@ import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 import {
 	attachRemoteDaemon,
+	hostKeepsDaemon,
+	IDLE_TIMEOUT_SECONDS,
 	quotePosix,
 	remoteDaemonLaunchCommand,
 	remoteDaemonPaths,
@@ -23,6 +25,26 @@ describe("remoteDaemonPaths", () => {
 
 	it("does not double a trailing slash", () => {
 		expect(remoteDaemonPaths("/var/lib/lasterm/").socket).toBe("/var/lib/lasterm/agent.sock");
+	});
+});
+
+describe("hostKeepsDaemon", () => {
+	it("follows the global setting when the host has no answer of its own", () => {
+		expect(hostKeepsDaemon({ os: "linux" }, true)).toBe(true);
+		expect(hostKeepsDaemon({ os: "linux" }, false)).toBe(false);
+	});
+
+	it("lets the host override the global setting, both ways", () => {
+		expect(hostKeepsDaemon({ os: "linux", sshRemoteDaemon: false }, true)).toBe(false);
+		expect(hostKeepsDaemon({ os: "linux", sshRemoteDaemon: true }, false)).toBe(true);
+	});
+
+	it("refuses Windows whatever anyone says: no SSH channel carries a named pipe", () => {
+		expect(hostKeepsDaemon({ os: "windows", sshRemoteDaemon: true }, true)).toBe(false);
+	});
+
+	it("says no for a host it does not know", () => {
+		expect(hostKeepsDaemon(undefined, true)).toBe(false);
 	});
 });
 
@@ -68,6 +90,20 @@ describe("remoteDaemonLaunchCommand", () => {
 		const cmd = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
 		expect(cmd).toContain(`mkdir -p ${paths.dir}`);
 		expect(cmd).toContain(`chmod 700 ${paths.dir}`);
+	});
+
+	it("asks the daemon to end itself when it holds nothing for nobody", () => {
+		const cmd = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
+		expect(cmd).toContain(`--idle-timeout ${IDLE_TIMEOUT_SECONDS}`);
+	});
+
+	it("takes a caller's idle timeout, floored at zero and whole", () => {
+		const cmd = remoteDaemonLaunchCommand({
+			agentPath: "/usr/bin/lasterm-agent",
+			paths,
+			idleTimeoutSeconds: -5,
+		});
+		expect(cmd).toContain("--idle-timeout 0");
 	});
 
 	it("quotes an agent path with a space", () => {

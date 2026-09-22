@@ -265,6 +265,20 @@
 							</div>
 
 							<div class="field">
+								<label class="field-label">Keep an agent running there</label>
+								<select v-model="form.sshRemoteDaemon" class="field-select">
+									<option value="">Follow the global setting</option>
+									<option value="yes">Yes — terminals survive the connection</option>
+									<option value="no">No — leave nothing behind</option>
+								</select>
+								<p class="field-hint auth-note">
+									An agent left running keeps this host's terminals alive when the
+									connection drops, and across a Lasterm restart. It is a process on
+									that machine, which ends by itself once it holds no terminals.
+								</p>
+							</div>
+
+							<div class="field">
 								<label class="field-label">Auth Method</label>
 								<select v-model="form.sshAuth" class="field-select">
 									<option value="key">SSH Key</option>

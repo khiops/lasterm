@@ -63,6 +63,7 @@ import {
 	HubQuittingError,
 	type QuitFence,
 } from "./quit-fence.js";
+import { hostKeepsDaemon } from "./remote-daemon.js";
 import { scopedEnv } from "./scoped-env.js";
 import * as Acq from "./session-acquisition.js";
 import type {
@@ -240,7 +241,7 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					ctx.agentConfig,
-					ctx.configResolver?.sshConfig?.remoteDaemon === true,
+					hostKeepsDaemon(host, ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 
 				const storedFp = ctx.metaDal.getHostFingerprint(hostId);
@@ -1243,7 +1244,7 @@ export class SessionManager {
 			this.broadcaster.updateChannelStatus(channelId, channel.sessionId, "live");
 		}
 
-		const agent = this.ctx.agents.get(channel.hostId);
+		let agent = this.ctx.agents.get(channel.hostId);
 
 		const dbChannelForTitle = this.ctx.metaDal.getChannel(channelId);
 		const dynamicTitle = dbChannelForTitle?.dynamicTitle;
@@ -1257,6 +1258,16 @@ export class SessionManager {
 		}
 
 		const displayTitle = this.broadcaster.resolveDisplayTitle(channelId);
+
+		// A terminal a remote daemon is still holding is worth reaching for
+		// before falling back to what the spool remembers. This is where the
+		// reconnection happens after a hub restart: at startup nobody is there
+		// to answer for a password, and here someone just asked for this
+		// terminal (#79).
+		if (!agent?.connected && channel.status !== "dead") {
+			await this.reconnectForAttach(channel.hostId);
+			agent = this.ctx.agents.get(channel.hostId);
+		}
 
 		if (!agent?.connected) {
 			const { snapshot, tail } = this.lifecycle.buildAttachPayload(channelId);
@@ -1495,6 +1506,48 @@ export class SessionManager {
 	 *   aborted (via closeSession/shutdown), the SSH connect is cancelled and
 	 *   the promise rejects — preventing revival of an explicitly closed session.
 	 */
+	/**
+	 * One reconnection per host, however many panes ask at once.
+	 *
+	 * Opening a window with five tabs on the same host attaches five times in
+	 * the same breath; each one finding no agent and dialling out would be five
+	 * SSH connections, and five password prompts.
+	 */
+	private reconnectForAttachInFlight = new Map<string, Promise<boolean>>();
+
+	private async reconnectForAttach(hostId: string): Promise<boolean> {
+		// Only where something may still be holding the terminal. On stdio the
+		// agent died with its connection, so dialling out would reach a machine
+		// nobody asked for — and ask for a password — to find nothing.
+		const keepsDaemon = hostKeepsDaemon(
+			this.ctx.metaDal.getHost(hostId),
+			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+		);
+		if (!keepsDaemon) return false;
+
+		const inFlight = this.reconnectForAttachInFlight.get(hostId);
+		if (inFlight !== undefined) return inFlight;
+		const reconnect = this.lifecycle.onReconnectAgent;
+		if (reconnect === undefined) return false;
+
+		const attempt = reconnect(hostId)
+			.catch((err: unknown) => {
+				console.error(
+					`[lasterm-ssh] reconnecting ${hostId} for an attach failed: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
+				return false;
+			})
+			.finally(() => {
+				if (this.reconnectForAttachInFlight.get(hostId) === attempt) {
+					this.reconnectForAttachInFlight.delete(hostId);
+				}
+			});
+		this.reconnectForAttachInFlight.set(hostId, attempt);
+		return attempt;
+	}
+
 	private async _connectSshAgent(
 		hostId: string,
 		host: import("@lasterm/shared").Host,
@@ -1581,7 +1634,7 @@ export class SessionManager {
 			promptAuth,
 			deployOpts,
 			this.ctx.agentConfig,
-			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+			hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 		);
 
 		console.error(`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);

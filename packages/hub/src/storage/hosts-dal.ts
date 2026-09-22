@@ -45,6 +45,7 @@ interface HostRow {
 	ssh_fingerprint: string | null;
 	ssh_proxy_host_id: string | null;
 	ssh_proxy_spec: string | null;
+	ssh_remote_daemon: number | null;
 	ssh_proxy_fingerprint: string | null;
 	created_at: string;
 	updated_at: string;
@@ -105,6 +106,7 @@ function rowToHost(row: HostRow): Host {
 	if (row.ssh_proxy_host_id != null) host.sshProxyHostId = row.ssh_proxy_host_id;
 	if (row.ssh_proxy_spec != null) host.sshProxySpec = row.ssh_proxy_spec;
 	if (row.ssh_proxy_fingerprint != null) host.sshProxyFingerprint = row.ssh_proxy_fingerprint;
+	if (row.ssh_remote_daemon != null) host.sshRemoteDaemon = row.ssh_remote_daemon === 1;
 	return host;
 }
 
@@ -137,7 +139,7 @@ export class HostsDAL {
 				icon_type, icon_value, color, profile_json, trust_remote_hints,
 				default_shell, default_cwd,
 				host_group, host_group_id, sort_order, ssh_config_host, ssh_user,
-				ssh_proxy_host_id, ssh_proxy_spec,
+				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon,
 				keep_alive_seconds, history_retention_days,
 				elevation_method, custom_command,
 				os, arch,
@@ -145,7 +147,7 @@ export class HostsDAL {
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?,
-				?, ?,
+				?, ?, ?,
 				?, ?, ?, ?, ?,
 				?, ?,
 				?, ?,
@@ -176,6 +178,7 @@ export class HostsDAL {
 				input.sshUser ?? null,
 				input.sshProxyHostId ?? null,
 				input.sshProxySpec ?? null,
+				input.sshRemoteDaemon == null ? null : input.sshRemoteDaemon ? 1 : 0,
 				input.keepAliveSeconds ?? 60,
 				input.historyRetentionDays ?? 30,
 				input.elevationMethod ?? null,
@@ -250,6 +253,7 @@ export class HostsDAL {
 			sshProxyHostId: "ssh_proxy_host_id",
 			sshProxySpec: "ssh_proxy_spec",
 			sshProxyFingerprint: "ssh_proxy_fingerprint",
+			sshRemoteDaemon: "ssh_remote_daemon",
 			keepAliveSeconds: "keep_alive_seconds",
 			historyRetentionDays: "history_retention_days",
 			elevationMethod: "elevation_method",
@@ -265,7 +269,13 @@ export class HostsDAL {
 			if (camel in input) {
 				setClauses.push(`${snake} = ?`);
 				const val = input[camel as keyof CreateHostInput];
-				values.push(val !== undefined ? val : null);
+				// SQLite binds no booleans: an answer about this host is 1 or 0,
+				// and "no answer" stays null so the global setting still speaks.
+				if (typeof val === "boolean") {
+					values.push(val ? 1 : 0);
+				} else {
+					values.push(val !== undefined ? val : null);
+				}
 			}
 		}
 

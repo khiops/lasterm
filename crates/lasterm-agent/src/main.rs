@@ -32,6 +32,13 @@ struct Cli {
     #[arg(long)]
     socket: Option<String>,
 
+    /// Seconds to stay up holding no terminals with no hub connected, before
+    /// exiting. 0 never exits, which is what a daemon started beside its hub
+    /// wants; a daemon left on a machine the hub merely reaches should not
+    /// outlive its purpose (daemon mode).
+    #[arg(long, default_value_t = 0)]
+    idle_timeout: u64,
+
     /// Per-channel output buffer size (daemon mode)
     #[arg(long)]
     buffer_per_channel: Option<usize>,
@@ -343,10 +350,15 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
         });
 
         let (endpoint_bound_tx, endpoint_bound_rx) = tokio::sync::oneshot::channel();
+        let idle_timeout = match cli.idle_timeout {
+            0 => None,
+            seconds => Some(std::time::Duration::from_secs(seconds)),
+        };
         let mut daemon_task = tokio::spawn(daemon::run_daemon(
             socket,
             shutdown_rx,
             Some(endpoint_bound_tx),
+            idle_timeout,
         ));
         if endpoint_bound_rx.await.is_err() {
             signal_task.abort();
@@ -680,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn daemon_that_cannot_start_has_a_failing_process_status() {
         let (_shutdown_tx, shutdown_rx) = daemon::shutdown_channel();
-        let result = daemon::run_daemon("x".repeat(101), shutdown_rx, None).await;
+        let result = daemon::run_daemon("x".repeat(101), shutdown_rx, None, None).await;
 
         assert!(
             result.is_err(),

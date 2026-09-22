@@ -210,18 +210,29 @@ export class StateBroadcaster {
 
 	// ─── Title management ───────────────────────────────────────────────────
 
+	/**
+	 * A rename is a fact about the record, not about a running terminal. The one
+	 * being renamed is often dead — a tab kept for later — and then nothing holds
+	 * it in memory and nobody is attached to it. Speaking only to its clients
+	 * told nobody: the hub stored the new name, answered 200, and the tab kept
+	 * the old one until the next reload.
+	 */
 	notifyChannelRenamed(channelId: string): void {
 		const channel = this.ctx.channels.get(channelId);
-		if (!channel) return;
+		const dbChannel = this.ctx.metaDal.getChannel(channelId);
+		if (!channel && !dbChannel) return;
 
-		const displayTitle = this.resolveDisplayTitle(channelId);
 		const msg = {
 			type: "TITLE_CHANGE" as const,
 			channelId,
-			title: channel.dynamicTitle ?? "",
-			displayTitle,
+			title: channel?.dynamicTitle ?? dbChannel?.dynamicTitle ?? "",
+			displayTitle: this.resolveDisplayTitle(channelId),
 		};
-		this.broadcastToChannel(channelId, msg);
+		if (channel && channel.clients.size > 0) {
+			this.broadcastToChannel(channelId, msg);
+		} else {
+			this.broadcastToAllClients(msg);
+		}
 	}
 
 	broadcastDisplayTitles(): void {
@@ -238,23 +249,28 @@ export class StateBroadcaster {
 	}
 
 	resolveDisplayTitle(channelId: string): string {
+		// A terminal that has ended keeps its name: the row outlives the process,
+		// and a tab still shows it. Only a channel this hub has never heard of has
+		// no name to resolve.
 		const state = this.ctx.channels.get(channelId);
-		if (!state) return DEFAULT_CHANNEL_NAME;
+		const dbChannel = this.ctx.metaDal.getChannel(channelId);
+		if (!state && !dbChannel) return DEFAULT_CHANNEL_NAME;
 
 		const titleConfig = this.ctx.configResolver?.uiConfig.title ?? {};
 		const source = titleConfig.source ?? "dynamic";
 		const staticTitle = titleConfig.staticTitle ?? "";
 
-		// Custom title (F2 rename) from DB — always wins
-		const dbChannel = this.ctx.metaDal.getChannel(channelId);
-		const customTitle = dbChannel?.title ?? null;
-
 		const resolved = resolveChannelDisplayName(
-			{ title: customTitle, dynamicTitle: state.dynamicTitle, processTitle: state.processTitle },
+			{
+				// Custom title (F2 rename) from DB — always wins
+				title: dbChannel?.title ?? null,
+				dynamicTitle: state?.dynamicTitle ?? dbChannel?.dynamicTitle ?? null,
+				processTitle: state?.processTitle ?? dbChannel?.processTitle ?? null,
+			},
 			source,
 			staticTitle,
 		);
-		state.displayTitle = resolved;
+		if (state) state.displayTitle = resolved;
 		return resolved;
 	}
 

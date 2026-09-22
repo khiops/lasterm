@@ -81,3 +81,67 @@ describe("StateBroadcaster — the agent serving a host", () => {
 		});
 	});
 });
+
+// ─── Renaming a terminal that has ended ──────────────────────────────────────
+//
+// The tab of a dead terminal is one people keep, and rename. The hub stored the
+// new name and answered 200, but announced it only to the channel's attached
+// clients — of which a dead terminal has none — so the tab kept the old name
+// until the next reload.
+
+function makeRenameBroadcaster(inMemory: boolean) {
+	const sent: ProtocolMessage[] = [];
+	const channels = new Map<string, unknown>();
+	if (inMemory) {
+		channels.set("ch-1", {
+			sessionId: SESSION,
+			hostId: HOST,
+			status: "dead",
+			clients: new Set<string>(),
+			dynamicTitle: "bash",
+			processTitle: null,
+		});
+	}
+
+	const ctx = {
+		agents: new Map(),
+		sessions: new Map([[HOST, { id: SESSION, hostId: HOST, status: "active" }]]),
+		channels,
+		clients: new Map([["c1", { id: "c1", send: (m: ProtocolMessage) => sent.push(m) }]]),
+		metaDal: {
+			updateSessionStatus: vi.fn(),
+			getChannel: vi.fn().mockReturnValue({
+				id: "ch-1",
+				title: "the name I gave it",
+				dynamicTitle: "bash",
+				processTitle: null,
+			}),
+		},
+		titleDebounceTimers: new Map(),
+		processTitleDebounceTimers: new Map(),
+		bellTimestamps: new Map(),
+		notificationTimestamps: new Map(),
+	} as unknown as SharedSessionContext;
+
+	return { sent, broadcaster: new StateBroadcaster(ctx) };
+}
+
+describe("StateBroadcaster — renaming a terminal that has ended", () => {
+	it("tells every client, since none is attached to a dead terminal", () => {
+		const { sent, broadcaster } = makeRenameBroadcaster(true);
+		broadcaster.notifyChannelRenamed("ch-1");
+
+		expect(sent).toContainEqual(
+			expect.objectContaining({ type: "TITLE_CHANGE", displayTitle: "the name I gave it" }),
+		);
+	});
+
+	it("names one the hub no longer holds in memory, from its row", () => {
+		const { sent, broadcaster } = makeRenameBroadcaster(false);
+		broadcaster.notifyChannelRenamed("ch-1");
+
+		expect(sent).toContainEqual(
+			expect.objectContaining({ type: "TITLE_CHANGE", displayTitle: "the name I gave it" }),
+		);
+	});
+});

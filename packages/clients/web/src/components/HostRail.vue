@@ -37,7 +37,8 @@
 					}}</span>
 					<span
 						class="status-dot"
-						:class="`status-dot--${hostsStore.getHostStatus(localHost.id)}`"
+						:class="[`status-dot--${hostsStore.getHostStatus(localHost.id)}`, { 'status-dot--older-agent': agentIsOlder(localHost.id) }]"
+						:title="agentIsOlder(localHost.id) ? olderAgentHint(localHost.id) : undefined"
 					></span>
 				</div>
 				<span
@@ -153,7 +154,8 @@
 							}}</span>
 							<span
 								class="status-dot"
-								:class="`status-dot--${hostsStore.getHostStatus(host.id)}`"
+								:class="[`status-dot--${hostsStore.getHostStatus(host.id)}`, { 'status-dot--older-agent': agentIsOlder(host.id) }]"
+								:title="agentIsOlder(host.id) ? olderAgentHint(host.id) : undefined"
 							></span>
 						</div>
 						<span
@@ -255,6 +257,25 @@ const hostsStore = useHostsStore();
 const notificationStore = useNotificationStore();
 const channelsStore = useChannelsStore();
 const { sections, localHost, toggleGroup, reorderGroups } = useHostGroups();
+
+/**
+ * Whether this host is served by an agent from before an update.
+ *
+ * A hub deploys an agent matched to itself, so a version that differs means
+ * the one answering was started by an older hub and is still there — a remote
+ * daemon holding terminals, most often. Nothing is done about it: those
+ * terminals are worth more than a version number (#456). The dot carries the
+ * mark, the hover says why, and the detail belongs in the host's settings.
+ */
+function agentIsOlder(hostId: string): boolean {
+	return hostsStore.getOutdatedAgent(hostId) !== null;
+}
+
+function olderAgentHint(hostId: string): string {
+	const outdated = hostsStore.getOutdatedAgent(hostId);
+	if (outdated === null) return "";
+	return `Served by agent ${outdated.running}; this hub carries ${outdated.expected}. Its terminals have to end before it can be replaced.`;
+}
 
 const dragHostId = ref<string | null>(null);
 let dragGroupId: string | null = null;
@@ -590,6 +611,11 @@ onMounted(() => {
 	height: 10px;
 	border-radius: 50%;
 	border: 2px solid var(--nt-tab-bar);
+}
+
+/* The same dot, marked — not a second thing to read beside it. */
+.status-dot--older-agent {
+	box-shadow: 0 0 0 2px var(--nt-badge-warning, #f9e2af);
 }
 
 .status-dot--live {

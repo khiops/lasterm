@@ -110,6 +110,34 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * Update the cached session status for a host.
 	 * Called by the session store whenever a SESSION_STATE message arrives.
 	 */
+	/**
+	 * Hosts served by an agent that is not the one this hub carries, as the hub
+	 * reports it: present means a disagreement, absent means none (#456).
+	 */
+	const _outdatedAgents = ref<Map<string, { running: string; expected: string }>>(new Map());
+
+	/** What disagrees on this host, or null when nothing does. */
+	function getOutdatedAgent(hostId: string): { running: string; expected: string } | null {
+		return _outdatedAgents.value.get(hostId) ?? null;
+	}
+
+	function rememberOutdatedAgent(
+		hostId: string,
+		outdated: { running: string; expected: string } | undefined,
+	): void {
+		const known = _outdatedAgents.value.get(hostId);
+		if (outdated === undefined) {
+			// The message says they agree now: an agent that was replaced.
+			if (known === undefined) return;
+			const next = new Map(_outdatedAgents.value);
+			next.delete(hostId);
+			_outdatedAgents.value = next;
+			return;
+		}
+		if (known?.running === outdated.running && known.expected === outdated.expected) return;
+		_outdatedAgents.value = new Map(_outdatedAgents.value).set(hostId, outdated);
+	}
+
 	function updateSessionStatus(hostId: string, status: SessionStatus): void {
 		_sessionStatuses.value.set(hostId, status);
 		// Trigger Vue reactivity on the Map by replacing the ref value
@@ -328,6 +356,8 @@ export const useHostsStore = defineStore("hosts", () => {
 		selectHost,
 		updateSessionStatus,
 		getHostStatus,
+		getOutdatedAgent,
+		rememberOutdatedAgent,
 		reorderHosts,
 		createHost,
 		updateHost,

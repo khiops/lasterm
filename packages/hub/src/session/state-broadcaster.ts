@@ -18,6 +18,7 @@ import type {
 	StateSyncMessage,
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, resolveChannelDisplayName } from "@lasterm/shared";
+import { HUB_VERSION } from "../build-version.js";
 import type { SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 
@@ -58,11 +59,31 @@ export class StateBroadcaster {
 
 	// ─── State snapshot ─────────────────────────────────────────────────────
 
+	/**
+	 * The disagreement between the agent serving this host and the one this hub
+	 * carries, or null when they agree or when nothing is connected.
+	 *
+	 * The hub answers this rather than handing over both versions: it is the
+	 * side that knows both, and a client would otherwise have to ask again to
+	 * learn the hub's own (#456).
+	 */
+	private outdatedAgentOn(hostId: string): { running: string; expected: string } | null {
+		const running = this.ctx.agents.get(hostId)?.helloMessage?.agentVersion;
+		if (running === undefined || running === HUB_VERSION) return null;
+		return { running, expected: HUB_VERSION };
+	}
+
 	getStateSnapshot(): StateSyncMessage {
 		const sessions: StateSyncMessage["sessions"] = [];
 		for (const [hostId, state] of this.ctx.sessions) {
 			if (state.status !== "closed") {
-				sessions.push({ sessionId: state.id, hostId, status: state.status });
+				const outdatedAgent = this.outdatedAgentOn(hostId);
+				sessions.push({
+					sessionId: state.id,
+					hostId,
+					status: state.status,
+					...(outdatedAgent !== null && { outdatedAgent }),
+				});
 			}
 		}
 		const channels: StateSyncMessage["channels"] = [];
@@ -92,11 +113,14 @@ export class StateBroadcaster {
 		}
 		this.ctx.metaDal.updateSessionStatus(sessionId, status);
 
+		const outdatedAgent = this.outdatedAgentOn(hostId);
+
 		const stateMsg: SessionStateMessage = {
 			type: "SESSION_STATE",
 			sessionId,
 			hostId,
 			status,
+			...(outdatedAgent !== null && { outdatedAgent }),
 		};
 		this.broadcastToAllClients(stateMsg);
 	}

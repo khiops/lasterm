@@ -126,6 +126,13 @@ export interface Host {
 	 * Unused when the jump is a host: that host pins its own.
 	 */
 	sshProxyFingerprint?: string | null;
+	/**
+	 * Whether this host may keep an agent running of its own (#79).
+	 *
+	 * Undefined defers to `[ssh] remote_daemon`. An answer given here wins,
+	 * because leaving a process behind is a decision about *this* machine.
+	 */
+	sshRemoteDaemon?: boolean | null;
 	/** SHA256 of the pinned remote agent binary (null = not yet verified). */
 	agentSha256?: string | null;
 	createdAt: string; // ISO 8601

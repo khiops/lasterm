@@ -637,3 +637,130 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 		expect(createdMsgs).toHaveLength(0);
 	});
 });
+
+// ─── reconcileChannelState ───────────────────────────────────────────────────
+//
+// What the agent says it is holding decides what is alive. A daemon that
+// outlived the hub hands back terminals opened under a session this run did
+// not start (#79), so the session a channel came from cannot be what decides
+// whether it is judged at all.
+
+describe("ChannelLifecycleManager — reconcileChannelState", () => {
+	const HOST = "host-1";
+	const CURRENT_SESSION = "session-now";
+	const OLD_SESSION = "session-before-the-restart";
+
+	function makeHarness(
+		channels: Array<{ id: string; sessionId: string; status: string; hostId?: string }>,
+	) {
+		const statusCalls: Array<{ channelId: string; sessionId: string; status: string }> = [];
+		const ctx = {
+			...makeMinimalCtx(),
+			channels: new Map(
+				channels.map((c) => [
+					c.id,
+					{
+						sessionId: c.sessionId,
+						hostId: c.hostId ?? HOST,
+						status: c.status,
+						clients: new Set<string>(),
+						shell: "bash",
+						cols: 80,
+						rows: 24,
+					},
+				]),
+			),
+			sessions: new Map([[HOST, { id: CURRENT_SESSION, hostId: HOST, status: "active" }]]),
+		} as unknown as SharedSessionContext;
+
+		const broadcaster = {
+			updateChannelStatus: (channelId: string, sessionId: string, status: string) => {
+				statusCalls.push({ channelId, sessionId, status });
+				const channel = ctx.channels.get(channelId);
+				if (channel) channel.status = status as typeof channel.status;
+			},
+		} as unknown as StateBroadcaster;
+
+		return { ctx, statusCalls, lifecycle: new ChannelLifecycleManager(ctx, broadcaster) };
+	}
+
+	it("kills a channel the agent does not report, even from an older session", () => {
+		const { ctx, statusCalls, lifecycle } = makeHarness([
+			{ id: "ch-gone", sessionId: OLD_SESSION, status: "orphan" },
+		]);
+
+		lifecycle.reconcileChannelState(HOST, []);
+
+		expect(statusCalls).toEqual([{ channelId: "ch-gone", sessionId: OLD_SESSION, status: "dead" }]);
+		expect(ctx.channels.get("ch-gone")?.status).toBe("dead");
+	});
+
+	it("adopts a channel the agent is still holding into the session that found it", () => {
+		const { ctx, statusCalls, lifecycle } = makeHarness([
+			{ id: "ch-kept", sessionId: OLD_SESSION, status: "orphan" },
+		]);
+
+		lifecycle.reconcileChannelState(HOST, [
+			{ type: "AGENT_CHANNEL_STATE", channelId: "ch-kept", alive: true } as never,
+		]);
+
+		expect(statusCalls).toEqual([
+			{ channelId: "ch-kept", sessionId: CURRENT_SESSION, status: "live" },
+		]);
+		expect(ctx.channels.get("ch-kept")?.sessionId).toBe(CURRENT_SESSION);
+	});
+
+	it("leaves another host's channels alone", () => {
+		const { statusCalls, lifecycle } = makeHarness([
+			{ id: "ch-elsewhere", sessionId: OLD_SESSION, status: "orphan", hostId: "host-2" },
+		]);
+
+		lifecycle.reconcileChannelState(HOST, []);
+
+		expect(statusCalls).toEqual([]);
+	});
+
+	it("says nothing about a channel that is already dead", () => {
+		const { statusCalls, lifecycle } = makeHarness([
+			{ id: "ch-dead", sessionId: OLD_SESSION, status: "dead" },
+		]);
+
+		lifecycle.reconcileChannelState(HOST, []);
+
+		expect(statusCalls).toEqual([]);
+	});
+});
+
+// ─── boundTail ───────────────────────────────────────────────────────────────
+//
+// The desktop transport refuses a hub message over 512 KiB, and a refused
+// message takes the whole connection down with every pending attach on it.
+
+describe("ChannelLifecycleManager — boundTail", () => {
+	const chunk = (size: number) => ({ dataBlob: Buffer.alloc(size, 1) });
+
+	it("keeps a small tail whole", () => {
+		const tail = ChannelLifecycleManager.boundTail([chunk(10), chunk(20)]);
+		expect(tail.map((t) => t.length)).toEqual([10, 20]);
+	});
+
+	it("keeps the newest chunks and drops the oldest", () => {
+		const tail = ChannelLifecycleManager.boundTail([
+			chunk(120 * 1024),
+			chunk(100 * 1024),
+			chunk(20 * 1024),
+		]);
+		// The last two fit; the first would take it over the budget.
+		expect(tail.map((t) => t.length)).toEqual([100 * 1024, 20 * 1024]);
+	});
+
+	it("never exceeds the budget, whatever it is handed", () => {
+		const huge = Array.from({ length: 50 }, () => chunk(200 * 1024));
+		const total = ChannelLifecycleManager.boundTail(huge).reduce((n, t) => n + t.length, 0);
+		expect(total).toBeLessThanOrEqual(128 * 1024);
+	});
+
+	it("drops a single chunk that is over the budget on its own", () => {
+		expect(ChannelLifecycleManager.boundTail([chunk(2 * 1024 * 1024)])).toEqual([]);
+	});
+});

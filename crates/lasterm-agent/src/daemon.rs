@@ -130,8 +130,17 @@ pub(crate) async fn run_daemon(
     socket_path: String,
     shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
+    idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
-    run_daemon_impl(socket_path, config_dir()?, state_dir()?, shutdown, bound).await
+    run_daemon_impl(
+        socket_path,
+        config_dir()?,
+        state_dir()?,
+        shutdown,
+        bound,
+        idle_timeout,
+    )
+    .await
 }
 
 /// Internal implementation — takes an explicit config_dir so tests can inject a temp dir
@@ -143,6 +152,7 @@ async fn run_daemon_impl(
     state_dir: PathBuf,
     shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
+    idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
     run_daemon_impl_with_manager(
         socket_path,
@@ -151,12 +161,17 @@ async fn run_daemon_impl(
         shutdown,
         Arc::new(Mutex::new(PtyManager::new())),
         bound,
+        idle_timeout,
     )
     .await
 }
 
 /// Internal test seam for exercising daemon teardown with a short confirmation
 /// bound, without changing the production shutdown deadline.
+/// How often an idle daemon asks itself whether it is still needed.
+#[cfg(unix)]
+const IDLE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(unix)]
 async fn run_daemon_impl_with_manager(
     socket_path: String,
@@ -165,6 +180,9 @@ async fn run_daemon_impl_with_manager(
     mut shutdown: ShutdownReceiver,
     pty_manager: Arc<Mutex<PtyManager>>,
     bound: Option<oneshot::Sender<()>>,
+    // How long to stay up holding nothing, for nobody. `None` never exits,
+    // which is what a daemon started beside its hub wants.
+    idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
     let path = PathBuf::from(&socket_path);
 
@@ -223,6 +241,18 @@ async fn run_daemon_impl_with_manager(
     // Output router: drains batched frames, forwards to active connection (or buffers)
     spawn_output_router(batched_rx, Arc::clone(&active_conn));
 
+    // A daemon nobody is using, and that holds nothing, should not outlive its
+    // purpose. Both conditions matter: a daemon with terminals waits however
+    // long it takes for someone to come back for them, and one with a hub
+    // connected is in use even while it holds nothing yet.
+    let mut idle_since: Option<std::time::Instant> = None;
+    // A short timeout is checked at its own pace, so a caller asking for a
+    // second does not wait ten.
+    let mut idle_check = tokio::time::interval(
+        idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY)),
+    );
+    idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     // Accept loop — spawn each connection handler so we can accept the next immediately.
     let result = loop {
         tokio::select! {
@@ -234,6 +264,26 @@ async fn run_daemon_impl_with_manager(
                 // cancellation paths while the manager is swept.
                 drop(listener.take());
                 break Ok(teardown_daemon_terminals(&pty_manager).await);
+            }
+            _ = idle_check.tick(), if idle_timeout.is_some() => {
+                let unused = active_conn.lock().await.is_none()
+                    && pty_manager.lock().await.channel_ids().is_empty();
+                if !unused {
+                    idle_since = None;
+                    continue;
+                }
+                let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+                let waited = since.elapsed();
+                if let Some(limit) = idle_timeout {
+                    if waited >= limit {
+                        tracing::info!(
+                            waited_secs = waited.as_secs(),
+                            "daemon idle with no terminals and no hub; exiting"
+                        );
+                        drop(listener.take());
+                        break Ok(teardown_daemon_terminals(&pty_manager).await);
+                    }
+                }
             }
             accepted = listener.as_ref().expect("listener remains live until shutdown").accept() => match accepted {
             Ok((stream, _addr)) => {
@@ -303,7 +353,15 @@ pub(crate) async fn run_daemon(
     socket_path: String,
     shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
+    idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
+    // A Windows daemon is only ever started beside its own hub: no SSH channel
+    // carries a named pipe, so nothing reaches one from another machine and
+    // none is ever left behind. Saying so beats honouring a timeout here that
+    // nothing would ever exercise.
+    if idle_timeout.is_some() {
+        tracing::warn!("--idle-timeout is ignored on Windows: a daemon here is never a remote one");
+    }
     run_daemon_impl(socket_path, shutdown, bound).await
 }
 
@@ -1047,6 +1105,7 @@ mod tests {
             state_dir.clone(),
             no_shutdown_request(),
             None,
+            None,
         ));
 
         // Wait for daemon to bind
@@ -1097,6 +1156,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
             None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1158,6 +1218,7 @@ mod tests {
             state_dir.clone(),
             no_shutdown_request(),
             None,
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1197,6 +1258,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
             None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1504,6 +1566,65 @@ mod tests {
             let _ = tokio::fs::remove_dir_all(state_dir).await;
         }
 
+        /// A daemon left on a machine the hub merely reaches should not outlive
+        /// its purpose: nothing to hold, nobody connected, so it goes.
+        #[tokio::test]
+        async fn an_idle_daemon_holding_nothing_exits_on_its_own() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("idle-exit").await;
+            let daemon = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                no_shutdown_request(),
+                None,
+                Some(Duration::from_millis(200)),
+            ));
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            let ended = tokio::time::timeout(Duration::from_secs(10), daemon).await;
+            assert!(
+                ended.is_ok(),
+                "a daemon with no terminals and no hub should have exited on its own"
+            );
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+        }
+
+        /// The other half, and the one that matters: a daemon holding a
+        /// terminal waits however long it takes for someone to come back for
+        /// it. An idle timeout that ended terminals would defeat the daemon.
+        #[tokio::test]
+        async fn a_daemon_holding_a_terminal_does_not_exit_when_nobody_is_connected() {
+            let (socket_path, config_dir, state_dir) = daemon_paths("idle-holds").await;
+            let (shutdown_tx, shutdown_rx) = shutdown_channel();
+            let daemon = tokio::spawn(run_daemon_impl(
+                socket_path.clone(),
+                config_dir.clone(),
+                state_dir.clone(),
+                shutdown_rx,
+                None,
+                Some(Duration::from_millis(200)),
+            ));
+            wait_for_socket(Path::new(&socket_path)).await;
+
+            let pid_path = pid_file("idle-holds");
+            let (stream, pid) =
+                spawn_sleeping_workload(&socket_path, "idle-holds-channel", &pid_path).await;
+            let cleanup = ProcessCleanup { pid, armed: true };
+            // Nobody is connected any more; the terminal is still there.
+            drop(stream);
+
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            assert!(
+                !daemon.is_finished(),
+                "a daemon still holding a terminal must wait, however long nobody comes"
+            );
+
+            let _ = shutdown_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(10), daemon).await;
+            drop(cleanup);
+            cleanup_paths(&socket_path, &config_dir, &state_dir).await;
+        }
+
         #[tokio::test]
         async fn shutdown_request_runs_destroy_all_for_daemon_owned_channels() {
             let (socket_path, config_dir, state_dir) = daemon_paths("destroy-all").await;
@@ -1513,6 +1634,7 @@ mod tests {
                 config_dir.clone(),
                 state_dir.clone(),
                 shutdown_rx,
+                None,
                 None,
             ));
             wait_for_socket(Path::new(&socket_path)).await;
@@ -1560,6 +1682,7 @@ mod tests {
                     state_dir.clone(),
                     shutdown_rx,
                     manager,
+                    None,
                     None,
                 )
                 .with_subscriber(dispatch),
@@ -1980,6 +2103,7 @@ mod tests {
             state_dir.clone(),
             no_shutdown_request(),
             None,
+            None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -2055,6 +2179,7 @@ mod tests {
             config_dir.clone(),
             state_dir.clone(),
             no_shutdown_request(),
+            None,
             None,
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -2145,8 +2270,12 @@ mod tests {
             ulid::Ulid::generate().to_string().to_lowercase()
         );
 
-        let daemon_handle =
-            tokio::spawn(run_daemon(pipe_name.clone(), no_shutdown_request(), None));
+        let daemon_handle = tokio::spawn(run_daemon(
+            pipe_name.clone(),
+            no_shutdown_request(),
+            None,
+            None,
+        ));
 
         // Wait for daemon to create the pipe
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

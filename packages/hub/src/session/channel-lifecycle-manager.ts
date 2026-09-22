@@ -856,6 +856,35 @@ export class ChannelLifecycleManager {
 
 	// ─── Spool helpers ────────────────────────────────────────────────────────
 
+	/**
+	 * What an ATTACH_OK may carry after its snapshot.
+	 *
+	 * The desktop transport caps one hub message at 512 KiB on purpose, so that
+	 * a webview which is slow to drain cannot be flooded. A tail built from the
+	 * spool ignored that: a channel with a long history produced a 6 MB message,
+	 * the socket refused it, and the whole connection went down — taking every
+	 * pane's attach with it, each stuck on "Connecting…" for ever.
+	 *
+	 * The newest chunks are the ones that continue the screen, so those are the
+	 * ones kept. Scrollback older than this is lost to the pane; a bounded tail
+	 * beats a dead connection.
+	 */
+	private static readonly MAX_ATTACH_TAIL_BYTES = 128 * 1024;
+
+	/** Keep the last `MAX_ATTACH_TAIL_BYTES` of a tail, oldest chunks dropped. */
+	static boundTail(chunks: ReadonlyArray<{ dataBlob: Buffer }>): Uint8Array[] {
+		const kept: Uint8Array[] = [];
+		let total = 0;
+		for (let i = chunks.length - 1; i >= 0; i--) {
+			const blob = chunks[i]?.dataBlob;
+			if (blob === undefined) continue;
+			if (total + blob.length > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) break;
+			kept.unshift(new Uint8Array(blob));
+			total += blob.length;
+		}
+		return kept;
+	}
+
 	buildAttachPayload(channelId: string): {
 		snapshot: UiAttachOkMessage["snapshot"];
 		tail: Uint8Array[];
@@ -876,7 +905,7 @@ export class ChannelLifecycleManager {
 				kind: "output",
 				afterSeq: snapshotChunk.seq,
 			});
-			tail = tailChunks.map((c) => new Uint8Array(c.dataBlob));
+			tail = ChannelLifecycleManager.boundTail(tailChunks);
 		}
 
 		return { snapshot, tail };
@@ -1129,16 +1158,23 @@ export class ChannelLifecycleManager {
 			if (channelState.hostId !== hostId) continue;
 
 			const session = this.ctx.sessions.get(hostId);
-			if (!session || channelState.sessionId !== session.id) continue;
+			if (!session) continue;
 
 			if (reportedIds.has(channelId)) {
+				// The agent is holding it, so it is alive whichever session it was
+				// opened under: a daemon that outlived the hub hands back terminals
+				// from a session this run did not start (#79). Adopting it here is
+				// what makes the session it now belongs to the one it is in.
+				channelState.sessionId = session.id;
 				if (channelState.status === "orphan") {
 					this.broadcaster.updateChannelStatus(channelId, session.id, "live");
 				}
-			} else {
-				if (channelState.status !== "dead") {
-					this.broadcaster.updateChannelStatus(channelId, session.id, "dead");
-				}
+			} else if (channelState.status !== "dead") {
+				// And the other way: the agent has no such terminal, so it is gone
+				// — again whichever session it came from. Skipping those left a
+				// channel nothing would ever judge, showing an empty pane with no
+				// overlay, no message, and nothing to do about it.
+				this.broadcaster.updateChannelStatus(channelId, channelState.sessionId, "dead");
 			}
 		}
 	}

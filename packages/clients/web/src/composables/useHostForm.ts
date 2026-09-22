@@ -35,6 +35,11 @@ export interface HostFormData {
 	sshKeyPath: string;
 	/** The host this one is reached through: "" none, an id, or an address. */
 	sshProxy: string;
+	/**
+	 * Whether this host may keep an agent of its own running, so its terminals
+	 * outlive the connection. "" follows the global setting.
+	 */
+	sshRemoteDaemon: "" | "yes" | "no";
 	iconType: "auto" | "emoji" | "image";
 	iconValue: string;
 	color: string;
@@ -64,6 +69,8 @@ export function useHostForm(editHost?: Host) {
 		sshAuth: editHost?.sshAuth ?? "key",
 		sshKeyPath: editHost?.sshKeyPath ?? "",
 		sshProxy: editHost?.sshProxyHostId ?? editHost?.sshProxySpec ?? "",
+		sshRemoteDaemon:
+			editHost?.sshRemoteDaemon == null ? "" : editHost.sshRemoteDaemon ? "yes" : "no",
 		iconType: editHost?.iconType ?? "auto",
 		iconValue: editHost?.iconValue ?? "",
 		color: editHost?.color ?? "",
@@ -267,6 +274,10 @@ export function useHostForm(editHost?: Host) {
 						form.value.sshProxy,
 						hostsStore.hosts.map((candidate) => candidate.id),
 					),
+					// null is not "no": it is no answer for this host, which leaves
+					// the global setting speaking for it.
+					ssh_remote_daemon:
+						form.value.sshRemoteDaemon === "" ? null : form.value.sshRemoteDaemon === "yes",
 				}),
 				icon_type: form.value.iconType,
 				...(form.value.iconValue && {

@@ -29,6 +29,7 @@ import { connectOrLaunch } from "./agent-launcher.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
+import { hostKeepsDaemon } from "./remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import { seedShellProfiles } from "./shell-profile-seed.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
@@ -193,8 +194,10 @@ export class AgentConnectionManager {
 	 * SSH channel carries, so they were on stdio and died with the connection.
 	 */
 	private remoteDaemonKeepsChannels(hostId: string): boolean {
-		if (this.ctx.configResolver?.sshConfig?.remoteDaemon !== true) return false;
-		return this.ctx.metaDal.getHost(hostId)?.os !== "windows";
+		return hostKeepsDaemon(
+			this.ctx.metaDal.getHost(hostId),
+			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+		);
 	}
 
 	/**

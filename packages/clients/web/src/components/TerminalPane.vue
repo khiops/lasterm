@@ -50,6 +50,12 @@
 			</div>
 		</div>
 
+		<!-- Not connected: what is shown is remembered, not live -->
+		<div v-if="isDetached && !isDead && !hasEnded && !isGone" class="detached-banner">
+			<span class="detached-text">Not connected. This is what this terminal last showed; typing here goes nowhere.</span>
+			<button class="detached-btn" @click="onReconnect">Reconnect</button>
+		</div>
+
 		<!-- Reconnecting overlay — shown when WS drops after terminal was initialized -->
 		<div v-if="ready && !sessionStore.connected" class="reconnecting-overlay">
 			<span class="reconnecting-text">Reconnecting<span class="reconnecting-dots" /></span>
@@ -334,6 +340,34 @@ const isDirectProcess = computed(() => {
 const isGone = ref(false);
 
 /**
+ * Ask again for the terminal itself.
+ *
+ * The hub tries the host when a pane attaches, so attaching again is the whole
+ * gesture: it either comes back with something live, or answers from memory
+ * again and the banner stays.
+ */
+async function onReconnect(): Promise<void> {
+	const chId = effectiveChannelId.value;
+	if (chId === null) return;
+	try {
+		isDetached.value = (await reattachChannel(chId, { preserveContent: true })).cached;
+	} catch {
+		// Still unreachable. The banner is already saying so.
+	}
+}
+
+/**
+ * The hub answered this pane from what it remembers, with nothing attached to
+ * the terminal itself.
+ *
+ * It happens when the host cannot be reached: a remote whose daemon is holding
+ * the terminal, but whose connection could not be reopened. What is on screen
+ * is the last thing the terminal showed, and what is typed into it goes
+ * nowhere — so the pane has to say so rather than look ordinary.
+ */
+const isDetached = ref(false);
+
+/**
  * The hub said this terminal has ended, whatever the channel list holds.
  *
  * `isDead` reads the list of the host in view, and that list is the current
@@ -411,7 +445,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				// (fired by WriteLockManager.attach on the hub side), not from
 				// the ATTACH_OK payload — avoids a microtask race where
 				// setInitialHolder would overwrite a more recent WRITE_LOCK.
-				await reattachChannel(props.channelId);
+				isDetached.value = (await reattachChannel(props.channelId)).cached;
 			}
 			ready.value = true;
 			applyProfile(resolvedProfile.value);
@@ -460,9 +494,12 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			ready.value = true;
 			return;
 		}
-		// AGENT_NOT_AVAILABLE is handled by the AgentDeployFailed modal — the
-		// inline pane error would be redundant and confusing alongside the modal.
+		// AGENT_NOT_AVAILABLE is explained by the AgentDeployFailed modal, so the
+		// pane does not repeat why. It still has to stop saying "Connecting…":
+		// returning here left a pane waiting for ever on something that had
+		// already failed, with nothing on it to click and no keystroke accepted.
 		if (msg.startsWith('AGENT_NOT_AVAILABLE:')) {
+			error.value = 'This host could not be reached.';
 			return;
 		}
 		error.value = msg;
@@ -574,6 +611,7 @@ async function onRestart(): Promise<void> {
 	const ok = await channelsStore.restartChannel(chId, props.hostId ?? undefined);
 	if (ok) {
 		const result = await reattachChannel(chId, { preserveContent: true });
+		isDetached.value = result.cached;
 		if (result.writeLockHolder) {
 			writeLockStore.handleWriteLock(chId, result.writeLockHolder);
 		}
@@ -1114,6 +1152,43 @@ function onDragEnd(): void {
 }
 
 /* Reconnecting overlay */
+.detached-banner {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	z-index: 6;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 10px;
+	background: var(--nt-badge-warning, #f9e2af);
+	color: #000;
+	font-size: 12px;
+}
+
+.detached-text {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.detached-btn {
+	flex-shrink: 0;
+	padding: 2px 10px;
+	border: 1px solid rgba(0, 0, 0, 0.35);
+	border-radius: 3px;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+}
+
+.detached-btn:hover {
+	background: rgba(0, 0, 0, 0.1);
+}
+
 .reconnecting-overlay {
 	position: absolute;
 	inset: 0;

@@ -3,6 +3,31 @@
 		<section class="agent-section agent-section--first">
 			<div class="section-heading">
 				<div>
+					<h3 class="section-title">Terminals that outlive the connection</h3>
+					<p class="section-note">
+						The default for hosts reached over SSH. Each host can answer for itself in
+						its own settings, and that answer wins.
+					</p>
+				</div>
+			</div>
+
+			<label class="daemon-row">
+				<input v-model="remoteDaemon" type="checkbox" :disabled="savingDaemon" />
+				<span>
+					Keep an agent running on remote hosts
+					<span class="daemon-note">
+						Their terminals then survive a dropped connection and a Lasterm restart. It
+						is a process left on the other machine, which ends by itself once it holds
+						no terminals. Windows hosts are unaffected.
+					</span>
+				</span>
+			</label>
+			<p v-if="daemonError" class="agent-warning">{{ daemonError }}</p>
+		</section>
+
+		<section class="agent-section">
+			<div class="section-heading">
+				<div>
 					<h3 class="section-title">Agents</h3>
 					<p class="section-note">Cached remote agent binaries for built targets.</p>
 				</div>
@@ -158,7 +183,10 @@ import {
 	type AgentTarget,
 	useAgentManagerStore,
 } from "../../../stores/agent-manager.js";
+import { useAuthStore } from "../../../stores/auth.js";
 import { useToastStore } from "../../../stores/toast.js";
+import { hubFetch } from "../../../utils/hub-fetch.js";
+import { hubBaseUrl } from "../../../utils/hub-url.js";
 
 const TARGET_ORDER: { os: HostOs; arch: HostArch }[] = [
 	{ os: "linux", arch: "x64" },
@@ -175,6 +203,60 @@ const props = defineProps<{
 
 const injectedDesktopVersion = inject<string | undefined>("desktopVersion", undefined);
 const store = useAgentManagerStore();
+
+// ─── Terminals that outlive the connection ──────────────────────────────────
+
+const remoteDaemon = ref(false);
+const savingDaemon = ref(false);
+const daemonError = ref<string | null>(null);
+/** Set while loading, so the watcher does not save what it just read. */
+let readingDaemon = true;
+
+async function sshConfigFetch(init?: RequestInit): Promise<Response> {
+	return hubFetch(`${hubBaseUrl()}/api/config/ssh`, {
+		...init,
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${useAuthStore().token ?? ""}`,
+			...(init?.headers ?? {}),
+		},
+	});
+}
+
+onMounted(async () => {
+	try {
+		const response = await sshConfigFetch();
+		if (response.ok) {
+			const config = (await response.json()) as { remoteDaemon?: boolean };
+			remoteDaemon.value = config.remoteDaemon === true;
+		}
+	} catch {
+		// Leaving the box as it reads, unchecked, says less than a wrong answer.
+	} finally {
+		readingDaemon = false;
+	}
+});
+
+watch(remoteDaemon, async (wanted) => {
+	if (readingDaemon) return;
+	savingDaemon.value = true;
+	daemonError.value = null;
+	try {
+		const response = await sshConfigFetch({
+			method: "PUT",
+			body: JSON.stringify({ remoteDaemon: wanted }),
+		});
+		if (!response.ok) throw new Error(`hub answered ${response.status}`);
+	} catch (error) {
+		// A checkbox that silently failed would be read as a decision made.
+		daemonError.value = `Could not save that: ${error instanceof Error ? error.message : String(error)}`;
+		readingDaemon = true;
+		remoteDaemon.value = !wanted;
+		readingDaemon = false;
+	} finally {
+		savingDaemon.value = false;
+	}
+});
 const toastStore = useToastStore();
 
 const showImport = ref(false);
@@ -523,6 +605,21 @@ function formatProgress(progress: AgentFetchJob | null): string {
 }
 
 .status-badge--bundled,
+.daemon-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	font-size: 13px;
+	cursor: pointer;
+}
+
+.daemon-note {
+	display: block;
+	margin-top: 4px;
+	color: var(--nt-text-secondary);
+	font-size: 12px;
+}
+
 .status-badge--cached {
 	color: var(--nt-green, #98c379);
 	background: rgba(152, 195, 121, 0.12);

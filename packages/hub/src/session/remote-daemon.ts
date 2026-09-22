@@ -26,6 +26,25 @@
 import type { Duplex } from "node:stream";
 import type { Client } from "ssh2";
 
+/**
+ * Whether this host may keep an agent of its own running.
+ *
+ * The host's own answer wins, because leaving a process behind is a decision
+ * about *that* machine: yes for a Raspberry Pi at home, no for a customer's
+ * server. No answer defers to the global setting.
+ *
+ * Windows never qualifies, whatever either says: its daemon listens on a named
+ * pipe and no SSH channel carries one, so there would be nothing to reach.
+ */
+export function hostKeepsDaemon(
+	host: { os?: string | null; sshRemoteDaemon?: boolean | null } | undefined,
+	globalDefault: boolean,
+): boolean {
+	if (host === undefined) return false;
+	if (host.os === "windows") return false;
+	return host.sshRemoteDaemon ?? globalDefault;
+}
+
 /** Where a remote daemon keeps its socket and its log, under one directory. */
 export interface RemoteDaemonPaths {
 	/** The directory holding both, `0700` so the socket is the owner's alone. */
@@ -61,7 +80,22 @@ export interface RemoteDaemonLaunch {
 	paths: RemoteDaemonPaths;
 	logLevel?: string;
 	logFormat?: string;
+	/** Seconds to stay up holding nothing, for nobody. See `IDLE_TIMEOUT_SECONDS`. */
+	idleTimeoutSeconds?: number;
 }
+
+/**
+ * How long a remote daemon stays up with no terminals and no hub connected.
+ *
+ * This process lives on someone else's machine, so it has to end by itself.
+ * Long enough that a hub restarting, or a person switching machines, finds it
+ * where they left it; short enough that a machine is not left carrying a
+ * daemon for a terminal that ended this morning.
+ *
+ * A daemon still holding a terminal never exits on this timer: that terminal
+ * is the whole reason the daemon exists.
+ */
+export const IDLE_TIMEOUT_SECONDS = 1_800;
 
 /**
  * The command that starts the daemon and lets go of it.
@@ -81,7 +115,10 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 	const level = quotePosix(launch.logLevel ?? "info");
 	const format = quotePosix(launch.logFormat ?? "jsonl");
 
-	const run = `${agent} --daemon --socket ${socket} --log-level ${level} --format ${format}`;
+	const idle = Math.max(0, Math.trunc(launch.idleTimeoutSeconds ?? IDLE_TIMEOUT_SECONDS));
+	const run =
+		`${agent} --daemon --socket ${socket} --log-level ${level} --format ${format}` +
+		` --idle-timeout ${idle}`;
 	const redirect = `< /dev/null >> ${log} 2>&1`;
 	return [
 		`mkdir -p ${dir}`,

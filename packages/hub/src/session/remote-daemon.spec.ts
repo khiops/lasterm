@@ -8,6 +8,7 @@ import {
 	quotePosix,
 	remoteDaemonLaunchCommand,
 	remoteDaemonPaths,
+	remoteDaemonStopCommand,
 } from "./remote-daemon.js";
 
 const conn = {} as Client;
@@ -109,6 +110,21 @@ describe("remoteDaemonLaunchCommand", () => {
 	it("quotes an agent path with a space", () => {
 		const cmd = remoteDaemonLaunchCommand({ agentPath: "/opt/my tools/lasterm-agent", paths });
 		expect(cmd).toContain("'/opt/my tools/lasterm-agent'");
+	});
+});
+
+describe("remoteDaemonStopCommand", () => {
+	const paths = remoteDaemonPaths("/home/pi/.local/state/lasterm");
+
+	it("asks the daemon to stop, on the socket the hub reached it on", () => {
+		const cmd = remoteDaemonStopCommand("/usr/bin/lasterm-agent", paths);
+		expect(cmd).toBe(`/usr/bin/lasterm-agent --stop --socket ${paths.socket}`);
+	});
+
+	it("quotes a path with a space", () => {
+		expect(remoteDaemonStopCommand("/opt/my tools/lasterm-agent", paths)).toContain(
+			"'/opt/my tools/lasterm-agent'",
+		);
 	});
 });
 

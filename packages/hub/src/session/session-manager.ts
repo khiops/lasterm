@@ -64,7 +64,12 @@ import {
 	HubQuittingError,
 	type QuitFence,
 } from "./quit-fence.js";
-import { hostKeepsDaemon } from "./remote-daemon.js";
+import {
+	hostKeepsDaemon,
+	REMOTE_STATE_DIR_COMMAND,
+	remoteDaemonPaths,
+	remoteDaemonStopCommand,
+} from "./remote-daemon.js";
 import { scopedEnv } from "./scoped-env.js";
 import * as Acq from "./session-acquisition.js";
 import type {
@@ -1555,6 +1560,65 @@ export class SessionManager {
 	 * never becomes ready and refuses input with nothing on screen to say so.
 	 */
 	private static readonly ATTACH_RECONNECT_BUDGET = 6_000;
+
+	/**
+	 * Replace the agent serving a host with the one this hub carries.
+	 *
+	 * There is no way to do this gently: a PTY belongs to the process that
+	 * opened it, so everything that daemon is holding ends here. That is the
+	 * price, it is written next to the button that asks for this, and it is the
+	 * reason nothing does it on its own (#456).
+	 *
+	 * The stop goes over the connection already open — opening another would
+	 * ask for a password again — and the agent is dropped afterwards, so the
+	 * next attach connects fresh and deploys the matching binary.
+	 */
+	async replaceAgent(hostId: string): Promise<{ replaced: boolean; message: string }> {
+		const agent = this.ctx.agents.get(hostId);
+		if (!(agent instanceof SshAgent) || !agent.connected) {
+			return { replaced: false, message: "This host has no agent connected to replace." };
+		}
+		if (!agent.usedRemoteDaemon) {
+			return {
+				replaced: false,
+				message:
+					"This host's agent runs with its connection, so it is already replaced whenever it reconnects.",
+			};
+		}
+
+		const remotePath = agent.remoteAgentPath;
+		if (remotePath === null) {
+			return { replaced: false, message: "This hub does not know where that agent is installed." };
+		}
+
+		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
+		const stateDir = resolved.stdout.trim();
+		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
+			return { replaced: false, message: "The host could not say where its agent's socket is." };
+		}
+
+		const stop = await agent.execOnHost(
+			remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
+		);
+		if (stop.exitCode !== 0) {
+			return {
+				replaced: false,
+				message: `The agent would not stop (exit ${stop.exitCode}). Nothing was changed.`,
+			};
+		}
+
+		// Its terminals ended with it. Letting go of the connection is what makes
+		// the next attach deploy and start the version this hub carries.
+		agent.close();
+		if (this.ctx.agents.get(hostId) === agent) {
+			this.ctx.agents.delete(hostId);
+			this.ctx.agentCapabilities.delete(hostId);
+		}
+		return {
+			replaced: true,
+			message: "The agent was stopped. The next terminal on this host starts the current one.",
+		};
+	}
 
 	/**
 	 * Take up what the daemon says it is still holding.

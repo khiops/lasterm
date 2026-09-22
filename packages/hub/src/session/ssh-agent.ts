@@ -266,6 +266,13 @@ export class SshAgent extends AgentConnection {
 	 */
 	usedRemoteDaemon = false;
 
+	/**
+	 * Where the agent this connection reached lives on the remote, once the
+	 * deploy has resolved it. Null when it was never resolved — an agent found
+	 * on PATH, or a connection that failed before the deploy.
+	 */
+	remoteAgentPath: string | null = null;
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -607,6 +614,7 @@ export class SshAgent extends AgentConnection {
 									`[lasterm-ssh] deploy result: remotePath=${result.remotePath} os=${result.os ?? "unknown"} arch=${result.arch ?? "unknown"}`,
 								);
 								console.error("[lasterm-ssh] exec lasterm-agent...");
+								this.remoteAgentPath = result.remotePath;
 								runAgent(
 									buildAgentCommandForDeployResult(result, this.loggingConfig),
 									this.daemonBinary(result.remotePath, result.os),
@@ -668,6 +676,20 @@ export class SshAgent extends AgentConnection {
 			throw new Error("SSH agent not connected");
 		}
 		this.sendQueue.send(Buffer.from(encodeFrame(msg)));
+	}
+
+	/**
+	 * Run a command on this host, over the connection already open.
+	 *
+	 * Reusing it matters: opening another would ask for a password again, for a
+	 * machine this hub is already talking to.
+	 */
+	async execOnHost(command: string): Promise<{ stdout: string; exitCode: number }> {
+		const client = this.client;
+		if (client === null) throw new Error("SSH agent not connected");
+		const { sshExec } = await import("./ssh-exec.js");
+		const { stdout, exitCode } = await sshExec(client, command);
+		return { stdout, exitCode };
 	}
 
 	/** Close the SSH channel and the underlying SSH connection. */

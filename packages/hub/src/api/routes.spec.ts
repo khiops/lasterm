@@ -407,6 +407,33 @@ describe("DELETE /api/hosts/:id", () => {
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
+describe("POST /api/hosts/:id/agent/replace", () => {
+	it("refuses a host it has never heard of", async () => {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts/01HZZZZZZZZZZZZZZZZZZZZZZZ/agent/replace",
+		});
+		expect(res.statusCode).toBe(404);
+	});
+
+	it("refuses a host with no agent to replace, and says why", async () => {
+		const hostsRes = await server.inject({ method: "GET", url: "/api/hosts" });
+		const hosts = hostsRes.json<Array<{ id: string }>>();
+		const localHost = hosts[0];
+
+		const res = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${localHost?.id ?? "x"}/agent/replace`,
+		});
+
+		// Nothing was replaced, and the answer says so rather than pretending.
+		expect(res.statusCode).toBe(409);
+		const body = res.json<{ error: { code: string; message: string } }>();
+		expect(body.error.code).toBe("AGENT_NOT_REPLACED");
+		expect(body.error.message.length).toBeGreaterThan(0);
+	});
+});
+
 describe("GET /api/sessions", () => {
 	it("returns an array (initially only sessions from ensureLocalHost flow)", async () => {
 		const res = await server.inject({ method: "GET", url: "/api/sessions" });

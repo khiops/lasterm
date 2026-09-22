@@ -67,7 +67,10 @@ describe("Vite development proxy", () => {
 		await expect(proxyHealth(vitePort)).resolves.toMatchObject({ status: "ok" });
 		await expect(proxyStatus(vitePort, "/public/not-present")).resolves.toBe(404);
 		await expect(openWebSocket(vitePort)).resolves.toBeUndefined();
-	}, 60_000);
+		// Comfortably past the fixture's own deadline, so that when something is
+		// really wrong the error says which fixture never came up rather than
+		// that the test ran out of time.
+	}, 90_000);
 });
 
 /**
@@ -160,8 +163,16 @@ async function waitForHttp(url: string): Promise<void> {
 	});
 }
 
+/**
+ * Poll until the fixture is up, with room for a machine doing something else.
+ *
+ * This spec starts a Vite dev server and a hub and waits for both to listen.
+ * The deadline guards against a hang; it does not measure how fast that is,
+ * and at twenty seconds it was the last thing in this suite still failing for
+ * being run on a busy machine.
+ */
 async function waitFor<T>(attempt: () => T | undefined | Promise<T | undefined>): Promise<T> {
-	const deadline = Date.now() + 20_000;
+	const deadline = Date.now() + 45_000;
 	for (;;) {
 		const result = await attempt();
 		if (result !== undefined) return result;

@@ -128,6 +128,18 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 }
 
 /**
+ * The command that asks a remote daemon to stop.
+ *
+ * The agent's own `--stop`, which asks rather than kills: it tears its
+ * terminals down in order and writes what it confirmed. Everything it was
+ * holding ends here — that is the price of replacing it, and the only honest
+ * way to pay it is to have said so first (#456).
+ */
+export function remoteDaemonStopCommand(agentPath: string, paths: RemoteDaemonPaths): string {
+	return `${quotePosix(agentPath)} --stop --socket ${quotePosix(paths.socket)}`;
+}
+
+/**
  * Open a stream to a socket on the remote.
  *
  * Rejects rather than throwing asynchronously: a socket nobody listens on is

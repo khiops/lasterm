@@ -757,7 +757,20 @@ async fn handle_connection_inner<S>(
         loop {
             tokio::select! {
                 _ = cancel_writer.notified() => {
-                    // Connection displaced — stop writing (drops write_half → sends EOF to client)
+                    // Displaced. What is already queued goes out first — the
+                    // notice saying why this connection is ending is enqueued
+                    // immediately before the cancellation, and a writer that
+                    // stopped here would drop the only thing that explains the
+                    // EOF the other end is about to read (#127).
+                    while let Ok(data) = frame_rx.try_recv() {
+                        if write_half.write_all(&data).await.is_err() {
+                            break;
+                        }
+                        if write_half.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    // Dropping write_half sends EOF to the client.
                     break;
                 }
                 frame = frame_rx.recv() => {

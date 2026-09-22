@@ -177,6 +177,25 @@ const emit = defineEmits<{
 
 const sessionStore = useSessionStore();
 const channelsStore = useChannelsStore();
+
+/**
+ * The host this pane speaks to is the one its terminal runs on, not the one the
+ * rail has selected. Tabs are global, so a pane whose terminal is on another
+ * host stays on screen while you look elsewhere — and every pane was handed the
+ * selected host, which gave it that host's profile and had Restart try to bring
+ * the terminal back on a machine it had never run on.
+ *
+ * A pane still owing its spawn has no channel yet: there the selected host is
+ * exactly right, since a new terminal opens on the host in view.
+ */
+const paneHostId = computed<string | undefined>(() => {
+	const channelId = props.channelId;
+	if (channelId !== null && channelId !== undefined) {
+		const known = channelsStore.channelHostMap.get(channelId);
+		if (known !== undefined) return known;
+	}
+	return props.hostId ?? undefined;
+});
 const writeLockStore = useWriteLockStore();
 const configStore = useConfigStore();
 const notificationStore = useNotificationStore();
@@ -195,8 +214,9 @@ const hostsStore = useHostsStore();
 
 // Resolve per-host theme override (SC-03) from host.profileJson
 const hostThemeName = (() => {
-	if (!props.hostId) return undefined;
-	const host = hostsStore.hosts.find((h) => h.id === props.hostId);
+	const paneHost = paneHostId.value;
+	if (!paneHost) return undefined;
+	const host = hostsStore.hosts.find((h) => h.id === paneHost);
 	if (!host?.profileJson) return undefined;
 	try {
 		const parsed = JSON.parse(host.profileJson) as { theme?: string };
@@ -207,7 +227,7 @@ const hostThemeName = (() => {
 })();
 
 const { profile: resolvedProfile } = useResolvedProfile(
-	computed(() => props.hostId ?? undefined),
+	computed(() => paneHostId.value),
 	computed(() => props.channelId ?? undefined),
 );
 
@@ -288,8 +308,9 @@ const { tabTitle: paneTitle } = useTabTitle(effectiveChannelId, toRef(channelsSt
 // ---------------------------------------------------------------------------
 
 const paneHost = computed(() => {
-	if (!props.hostId) return undefined;
-	return hostsStore.hosts.find((h) => h.id === props.hostId);
+	const hostId = paneHostId.value;
+	if (!hostId) return undefined;
+	return hostsStore.hosts.find((h) => h.id === hostId);
 });
 
 const { profile: visualProfile, bannerText, borderStyle, tintStyle } = useVisualProfile(paneHost);
@@ -608,7 +629,7 @@ async function onRestart(): Promise<void> {
 	// for, since that path carries the prompts a passphrase or a host key need.
 	// It used to open a stranger and delete the terminal being restarted, which
 	// is the opposite of what the button says.
-	const ok = await channelsStore.restartChannel(chId, props.hostId ?? undefined);
+	const ok = await channelsStore.restartChannel(chId, paneHostId.value);
 	if (ok) {
 		const result = await reattachChannel(chId, { preserveContent: true });
 		isDetached.value = result.cached;

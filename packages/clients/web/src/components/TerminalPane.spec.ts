@@ -82,3 +82,25 @@ describe("TerminalPane recovery", () => {
 		expect(watcher).toMatch(/if \(!ready\.value\) \{[\s\S]*?onRetry\(\)/);
 	});
 });
+
+describe("TerminalPane host", () => {
+	// Tabs are global: a pane whose terminal runs on another host stays on
+	// screen while the rail shows a different one. Every pane was handed the
+	// selected host, so it resolved the wrong host's profile, and Restart —
+	// which is a spawn naming the terminal to bring back — named a host that
+	// terminal had never run on, and the hub refused it.
+	it("reads its host from the channel, not from the rail", () => {
+		expect(SOURCE).toMatch(/channelsStore\.channelHostMap\.get\(channelId\)/);
+	});
+
+	it("leaves props.hostId to the pane that has no channel yet", () => {
+		// One use: the fallback inside paneHostId, for a pane still owing its
+		// spawn — there the host in view is the host to spawn on.
+		const uses = [...SOURCE.matchAll(/props\.hostId/g)];
+		expect(uses).toHaveLength(1);
+	});
+
+	it("restarts a terminal on the host it runs on", () => {
+		expect(SOURCE).toMatch(/restartChannel\(chId,\s*paneHostId\.value\)/);
+	});
+});

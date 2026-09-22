@@ -256,6 +256,15 @@ export class AgentConnectionManager {
 					displayTitle: DEFAULT_CHANNEL_NAME,
 				});
 				this.broadcaster.resolveDisplayTitle(ch.id);
+				// A terminal that outlived the hub still needs its screen kept: the
+				// scheduler is what asks the agent for one every few seconds, and
+				// the chunker is what bounds what the spool keeps. Registering the
+				// channel without them left a restored terminal never snapshotted
+				// again, its attach tail growing from the last snapshot before the
+				// restart — 6 MB for a full-screen program, which is more than the
+				// transport accepts (#457).
+				this.ctx.scheduler.trackChannel(ch.id);
+				this.ctx.chunker.trackChannel(ch.id);
 			}
 
 			if (hostType === "local") {

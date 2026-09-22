@@ -286,6 +286,17 @@ describe("quit-protected revival capabilities", () => {
 			expect(ctx.channels.get("chan-1")?.status).toBe("orphan");
 		});
 
+		it("keeps snapshotting a terminal that outlived the hub", async () => {
+			const { ctx, manager } = setup({ remoteDaemon: true });
+			await manager.startup();
+
+			// Without this the channel is restored and never snapshotted again:
+			// its attach tail then grows from the last snapshot before the
+			// restart, past what the transport accepts (#457).
+			expect(ctx.scheduler.trackChannel).toHaveBeenCalledWith("chan-1");
+			expect(ctx.chunker.trackChannel).toHaveBeenCalledWith("chan-1");
+		});
+
 		it("declares them dead when no daemon was left running", async () => {
 			const { ctx, manager } = setup({ remoteDaemon: false });
 			await manager.startup();

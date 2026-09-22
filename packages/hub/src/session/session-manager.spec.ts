@@ -436,6 +436,54 @@ describe("SessionManager", () => {
 		expect(client.attachedChannels.has("local-ch-1")).toBe(true);
 	});
 
+	// ─── Bringing a terminal back ────────────────────────────────────────────
+	//
+	// Restart is a spawn that names the terminal it is bringing back. The guard
+	// exists so that naming one cannot take over a terminal that is someone's or
+	// still running — and it read a dead entry left in the live map as exactly
+	// that, which made Restart impossible on the terminals that most need it.
+
+	it("brings back a terminal whose entry is still in the map but dead", async () => {
+		const received: ProtocolMessage[] = [];
+		const client = makeClient("c1", received);
+		sm.addClient(client);
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+
+		const channels = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+		const stale = channels.get("local-ch-1");
+		expect(stale).toBeDefined();
+		if (stale) stale.status = "dead";
+
+		received.length = 0;
+		const again = await sm.handleSpawn("c1", {
+			type: "SPAWN",
+			hostId: "local",
+			reuseChannelId: "local-ch-1",
+		});
+
+		expect(received.find((m) => m.type === "ERROR")).toBeUndefined();
+		expect(again).toBe("local-ch-1");
+	});
+
+	it("refuses to take over one that is running", async () => {
+		const received: ProtocolMessage[] = [];
+		const client = makeClient("c1", received);
+		sm.addClient(client);
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+
+		received.length = 0;
+		const again = await sm.handleSpawn("c1", {
+			type: "SPAWN",
+			hostId: "local",
+			reuseChannelId: "local-ch-1",
+		});
+
+		expect(again).toBeNull();
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "ERROR", code: "CHANNEL_NOT_REUSABLE" }),
+		);
+	});
+
 	it("N concurrent LOCAL SPAWNs share one daemon connection and one channel-state handshake", async () => {
 		const localHostId = await sm.ensureLocalHost();
 		vi.mocked(_connectOrLaunchForMock).mockClear();
@@ -1935,10 +1983,15 @@ describe("SessionManager", () => {
 			expect(sessionState).toBeDefined();
 			expect(sessionState?.status).toBe("active");
 
-			// Both channels should be in memory
+			// And neither channel is in memory: the daemon reported holding none,
+			// so those two terminals are gone. They stay in the database as dead —
+			// the sidebar still lists them — but the hub does not go on believing
+			// they run, which is what kept asking the agent for a snapshot of a
+			// channel it had never heard of, every five seconds, for the whole run.
 			const channelsMap = (sm as unknown as { channels: Map<string, unknown> }).channels;
-			expect(channelsMap.has("warm-ch-1")).toBe(true);
-			expect(channelsMap.has("warm-ch-2")).toBe(true);
+			expect(channelsMap.has("warm-ch-1")).toBe(false);
+			expect(channelsMap.has("warm-ch-2")).toBe(false);
+			expect(dal.getChannel("warm-ch-1")?.status).toBe("dead");
 
 			// Agent should have been spawned for this host
 			const agentsMap = (sm as unknown as { agents: Map<string, unknown> }).agents;

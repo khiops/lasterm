@@ -599,7 +599,11 @@ export class SessionManager {
 		let reuseChannelId: string | undefined;
 		if (msg.reuseChannelId !== undefined) {
 			const existing = this.ctx.metaDal.getChannelWithHost(msg.reuseChannelId);
-			const live = this.ctx.channels.get(msg.reuseChannelId);
+			// A dead entry still in the live map is not a terminal running: it is
+			// one the hub has not finished burying. Reading it as "still running"
+			// is what made Restart impossible on the very terminals that need it.
+			const tracked = this.ctx.channels.get(msg.reuseChannelId);
+			const live = tracked !== undefined && tracked.status !== "dead" ? tracked : undefined;
 			if (existing && existing.hostId === hostId && live === undefined) {
 				reuseChannelId = msg.reuseChannelId;
 			} else {

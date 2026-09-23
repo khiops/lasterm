@@ -69,6 +69,7 @@
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | For a browser on this machine, `lasterm pair` issues an 8-digit code valid for 60 seconds and usable once. No other device can pair yet (#193) |
+| Pairing code disclosure | Read `meta.db`, its WAL or a copy of it while a code is live, without reading the hub's memory | HIGH — the code is redeemed for a token | LOW | `meta.db` holds a keyed hash of the code, never the code, under a key that exists only in the hub's memory for one run (§ 2.3) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 | Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
 | Native addon substitution | Another account able to write a directory on the path to the addon cache leaves a library where the single executable extracts its native addons | HIGH — the library runs inside the hub, which holds the token and terminal authority | LOW | Every addon is authenticated against the SHA-256 of the copy embedded in the executable, read through the descriptor it is opened with. On Linux the cache is used only when every directory on its path is private to this account or root — otherwise the addons are extracted under `XDG_RUNTIME_DIR`, checked the same way, or the hub does not start — and the addon is loaded through that descriptor. On Windows neither holds: the chain is not examined and LoadLibrary resolves the name again — see § 4.5 |
@@ -103,7 +104,8 @@ opened. The primary token cannot be revoked: the request answers `409 PRIMARY_TO
 The desktop authenticates with it, so a revoked primary token locked the desktop out of its own hub,
 and a restart did not undo it (#515). It is retired by replacing `auth.json`, below. A revocation of
 the primary token that a version before this rule recorded is cleared at the next start, which
-records it as `token.reinstate` (§ 7.1).
+records it as `token.reinstate` (§ 7.1). Every request to revoke is recorded as `token.revoke`,
+refused or not (#522).
 
 **Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
 clients to re-authenticate. Replacing it today means stopping the hub, removing `auth.json`, and
@@ -161,6 +163,31 @@ Device A (has token):
 
 Remote-device pairing is not delivered (#193). The hub remains
 loopback-only; do not open a LAN port or direct another device to a hub URL.
+
+**How a code is stored.** `meta.db` holds an HMAC-SHA-256 of each code, never the code, and
+verification looks a code up by that value, as the token store does with a token's hash (#521). The
+key is 32 random bytes the hub draws when it starts and holds only in memory. It is never written to
+a file, and a restart discards it along with every code that run issued and nobody redeemed: those
+can no longer match anything, and the hub deletes them as it starts.
+
+The key is what makes the hash worth having. There are 10^8 codes, so an unkeyed SHA-256 of one is
+found again by hashing them all, in less time than the code lives: stored that way, the hash would
+be the code under another name. Keyed, the stored value gives a reader nothing to test a guess
+against.
+
+What this addresses is narrow, and this is all of it: someone who can read `meta.db` — the file, its
+WAL, a backup or a sync of the state directory — during the minute a code is live, but cannot read
+the hub's memory. Until #521, such a reader could redeem the code and receive a token. On a current
+Unix install only the owner reaches `meta.db`, through the state directory the hub creates 0700; the
+file's own mode is left to the umask, and a state directory an earlier version made is not inspected
+(§ 2.2, item 3). On Windows it relies on the profile's default ACL, as `auth.json` does (#200).
+
+It does nothing against a process running as the same user, which can read `auth.json`, whose token
+already opens everything a pairing would, or the hub's memory. It does not change what bounds a guess
+at the verification endpoint either: 8 digits, 60 seconds, one use, three codes at once and ten
+attempts a minute from an address (§ 6). And a code that has expired or been redeemed is worth
+nothing, so the one minute is all there is to protect. Migration 020 dropped the codes stored in
+plain text before this: one still live stopped working, and the rest were already worth nothing.
 
 ## 3. SSH Security
 
@@ -269,6 +296,7 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 | Data | Location | Protection (MVP) | Protection (P2) |
 |------|----------|-------------------|-----------------|
 | Auth token | auth.json | chmod 600 | OS keychain |
+| Pairing codes | meta.db | HMAC-SHA-256 under a key held in memory for one hub run, never the code (§ 2.3) | — |
 | SSH key paths | meta.db | chmod 600 on DB | SQLCipher |
 | Host configs | meta.db | chmod 600 | SQLCipher |
 | Terminal output | spool.db | chmod 600 | SQLCipher |
@@ -300,6 +328,7 @@ again, which is now roughly every two and a quarter years rather than every rest
 ### 4.3 In Memory
 
 - Auth token: kept in memory for comparison
+- Pairing-code key: 32 random bytes drawn at each hub start, never written; a restart discards it (§ 2.3)
 - SSH passwords: cleared after authentication (not stored)
 - Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
 - Terminal output (daemon agent): `OutputBuffer` ring buffer — per-channel cap (default 1 MB) + global cap (default 20 MB), oldest data evicted from largest channel
@@ -411,7 +440,7 @@ All incoming messages (from agent or UI) must be validated:
 | SSH port | 1-65535 |
 | Workspace name | 1-64 chars, alphanumeric + dash/underscore/space |
 | Config TOML | Parse-validated before saving |
-| Pairing code | Exactly 6 digits |
+| Pairing code | Exactly 8 digits |
 
 ### 5.3 SQL Injection Prevention
 
@@ -459,6 +488,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 | Write-lock force | `write_lock.force` | `channelId`, `byClientId`, `fromClientId` | A force takes the lock from another client. Forcing a free lock, or one already held, takes nothing and is not recorded |
 | Token rotated | `token.rotate` | `tokenId` (`primary`) | The hub starts with a token in `auth.json` other than the one it last recorded: the replacement of § 2.1, or a substitution nobody asked for |
 | Token reinstated | `token.reinstate` | `tokenId` (`primary`), `revokedAt` (when it had been revoked) | The hub starts, finds the primary token revoked, and clears the revocation (§ 2.1). Nothing in the hub revokes it any more: the revocation was left by a version before #515, which accepted `DELETE /api/auth/tokens/primary`, or by a hand edit of `meta.db` |
+| Token revocation | `token.revoke` | `tokenId` (the id the request named: `primary`, a pairing's ULID, `<withheld>` for anything else), `sourceIp`, `outcome` (`revoked`; `not_found`, no such token or already revoked; `not_revocable`, the primary token) | An authenticated `DELETE /api/auth/tokens/:id` is answered: 200, 404 or 409 (§ 2.1). It comes before the `auth.failure` (`token_no_longer_valid`) of each socket the revocation closes |
 
 Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INFO on a WebSocket
 acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,

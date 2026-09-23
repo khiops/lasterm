@@ -33,9 +33,11 @@ const TOKEN_STATUSES = [
 const SSH_AUTH_METHODS = ["agent", "key", "password"] as const satisfies readonly SshAuthMethod[];
 const SSH_DISCONNECT_REASONS = ["closed_by_hub", "connection_lost"] as const;
 const PERMISSIONS_CHECKS = ["passed", "not_checked_on_windows"] as const;
+const TOKEN_REVOCATION_OUTCOMES = ["revoked", "not_found", "not_revocable"] as const;
 
 export type SshDisconnectReason = (typeof SSH_DISCONNECT_REASONS)[number];
 export type PermissionsCheck = (typeof PERMISSIONS_CHECKS)[number];
+export type TokenRevocationOutcome = (typeof TOKEN_REVOCATION_OUTCOMES)[number];
 
 export type AuthSuccess =
 	| { via: "rest"; sourceIp: string; tokenId: string }
@@ -218,6 +220,25 @@ export class SecurityLog {
 		this.write("token.reinstate", "token reinstated", {
 			tokenId: tokenId(event.tokenId),
 			revokedAt: isoTime(event.revokedAt),
+		});
+	}
+
+	/**
+	 * A request to revoke a credential, whatever became of it: `revoked`;
+	 * `not_found`, no token has that id or it was already revoked; `not_revocable`,
+	 * the primary token, which is retired by replacing auth.json instead (#515).
+	 * `tokenId` is the id the request named, so one that is neither `primary` nor a
+	 * ULID is withheld, whatever the caller put there.
+	 */
+	tokenRevocation(event: {
+		tokenId: string;
+		sourceIp: string;
+		outcome: TokenRevocationOutcome;
+	}): void {
+		this.write("token.revoke", "token revocation", {
+			tokenId: tokenId(event.tokenId),
+			sourceIp: ip(event.sourceIp),
+			outcome: oneOf(event.outcome, TOKEN_REVOCATION_OUTCOMES),
 		});
 	}
 

@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { createHmac, randomBytes, randomInt } from "node:crypto";
 import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -25,10 +25,32 @@ interface VerifyBody {
 const VERIFY_WINDOW_MS = 60_000;
 const VERIFY_MAX = 10;
 
+// ─── Hashing ────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How a pairing code is stored: an HMAC-SHA-256 under a key drawn here and held
+ * only in memory, never the code (SECURITY.md § 2.3, #521).
+ *
+ * The key is what protects the stored value. There are 10^8 codes, so an
+ * unkeyed hash of one is found again by hashing them all, in less time than the
+ * code lives: it would be the code under another name. Without the key, a
+ * reader of meta.db, its WAL or a copy of it has nothing to test a guess
+ * against. The key goes with the hub run that drew it, and so does every code
+ * that run issued and nobody redeemed.
+ */
+export function pairingCodeHasher(): (code: string) => string {
+	const key = randomBytes(32);
+	return (code) => createHmac("sha256", key).update(code).digest("hex");
+}
+
 // ─── Route registration ─────────────────────────────────────────────────────────────────────────────
 
 export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptions): void {
 	const { authConfig, db, metaDal } = opts;
+	const hashCode = pairingCodeHasher();
+	// Codes an earlier run issued were hashed under a key that no longer exists:
+	// none can be redeemed, and left in place they would count as active.
+	metaDal.deleteUnredeemedPairingCodes();
 
 	// POST /api/pair — authenticated, generates a one-time pairing code
 	server.post("/api/pair", async (request: FastifyRequest, reply: FastifyReply) => {
@@ -48,7 +70,7 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			const code = randomInt(0, 100_000_000).toString().padStart(8, "0");
 			try {
-				metaDal.createPairingCode(id, code, now.toISOString(), expiresAt);
+				metaDal.createPairingCode(id, hashCode(code), now.toISOString(), expiresAt);
 				server.security.pairingCodeGenerated({
 					pairingId: id,
 					expiresAt,
@@ -103,7 +125,7 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 				});
 			}
 
-			const row = metaDal.getPairingCodeByCode(code);
+			const row = metaDal.getPairingCodeByHash(hashCode(code));
 
 			if (!row) {
 				server.security.authFailed({ via: "pair", sourceIp: clientIp, reason: "unknown_code" });

@@ -1029,17 +1029,20 @@ describe("MetaDAL — PairingCodes", () => {
 		dbs.close();
 	});
 
-	it("createPairingCode + getPairingCodeByCode round-trip", () => {
+	/** What the route stores in place of a code: the DAL is given a hash, never a code. */
+	const hash = (n: number) => n.toString(16).padStart(64, "0");
+
+	it("createPairingCode + getPairingCodeByHash round-trip", () => {
 		const id = "PAIR01AAAAAAAAAAAAAAAAAAAAAAAA";
 		const now = new Date().toISOString();
 		const exp = new Date(Date.now() + 60_000).toISOString();
 
-		dal.createPairingCode(id, "123456", now, exp);
+		dal.createPairingCode(id, hash(1), now, exp);
 
-		const row = dal.getPairingCodeByCode("123456");
+		const row = dal.getPairingCodeByHash(hash(1));
 		expect(row).toBeDefined();
 		expect(row?.id).toBe(id);
-		expect(row?.code).toBe("123456");
+		expect(row?.code_hash).toBe(hash(1));
 		expect(row?.created_at).toBe(now);
 		expect(row?.expires_at).toBe(exp);
 		expect(row?.used).toBe(0);
@@ -1047,20 +1050,20 @@ describe("MetaDAL — PairingCodes", () => {
 		expect(row?.used_by_ip).toBeNull();
 	});
 
-	it("getPairingCodeByCode returns undefined for unknown code", () => {
-		expect(dal.getPairingCodeByCode("999999")).toBeUndefined();
+	it("getPairingCodeByHash returns undefined for an unknown hash", () => {
+		expect(dal.getPairingCodeByHash(hash(9))).toBeUndefined();
 	});
 
 	it("markPairingCodeUsed updates used, used_at, used_by_ip", () => {
 		const id = "PAIR02AAAAAAAAAAAAAAAAAAAAAAAA";
 		const now = new Date().toISOString();
 		const exp = new Date(Date.now() + 60_000).toISOString();
-		dal.createPairingCode(id, "234567", now, exp);
+		dal.createPairingCode(id, hash(2), now, exp);
 
 		const usedAt = new Date().toISOString();
 		dal.markPairingCodeUsed(id, usedAt, "127.0.0.1");
 
-		const row = dal.getPairingCodeByCode("234567") as PairingCodeRow;
+		const row = dal.getPairingCodeByHash(hash(2)) as PairingCodeRow;
 		expect(row.used).toBe(1);
 		expect(row.used_at).toBe(usedAt);
 		expect(row.used_by_ip).toBe("127.0.0.1");
@@ -1072,14 +1075,14 @@ describe("MetaDAL — PairingCodes", () => {
 		const now = new Date().toISOString();
 
 		// Active (future expiry, not used)
-		dal.createPairingCode("PAIR03AAAAAAAAAAAAAAAAAAAAAAAA", "345678", now, future);
-		dal.createPairingCode("PAIR04AAAAAAAAAAAAAAAAAAAAAAAA", "456789", now, future);
+		dal.createPairingCode("PAIR03AAAAAAAAAAAAAAAAAAAAAAAA", hash(3), now, future);
+		dal.createPairingCode("PAIR04AAAAAAAAAAAAAAAAAAAAAAAA", hash(4), now, future);
 
 		// Expired (past expiry, not used) — should NOT count
-		dal.createPairingCode("PAIR05AAAAAAAAAAAAAAAAAAAAAAAA", "567890", now, past);
+		dal.createPairingCode("PAIR05AAAAAAAAAAAAAAAAAAAAAAAA", hash(5), now, past);
 
 		// Used (future expiry, used=1) — should NOT count
-		dal.createPairingCode("PAIR06AAAAAAAAAAAAAAAAAAAAAAAA", "678901", now, future);
+		dal.createPairingCode("PAIR06AAAAAAAAAAAAAAAAAAAAAAAA", hash(6), now, future);
 		dal.markPairingCodeUsed("PAIR06AAAAAAAAAAAAAAAAAAAAAAAA", now, "10.0.0.1");
 
 		expect(dal.countActivePairingCodes()).toBe(2);
@@ -1091,20 +1094,38 @@ describe("MetaDAL — PairingCodes", () => {
 		const now = new Date().toISOString();
 
 		// Active — should survive
-		dal.createPairingCode("PAIR07AAAAAAAAAAAAAAAAAAAAAAAA", "789012", now, future);
+		dal.createPairingCode("PAIR07AAAAAAAAAAAAAAAAAAAAAAAA", hash(7), now, future);
 
 		// Expired non-used — should be removed
-		dal.createPairingCode("PAIR08AAAAAAAAAAAAAAAAAAAAAAAA", "890123", now, past);
+		dal.createPairingCode("PAIR08AAAAAAAAAAAAAAAAAAAAAAAA", hash(8), now, past);
 
 		// Expired but used — NOT cleaned (used = 1, audit trail)
-		dal.createPairingCode("PAIR09AAAAAAAAAAAAAAAAAAAAAAAA", "901234", now, past);
+		dal.createPairingCode("PAIR09AAAAAAAAAAAAAAAAAAAAAAAA", hash(9), now, past);
 		dal.markPairingCodeUsed("PAIR09AAAAAAAAAAAAAAAAAAAAAAAA", now, "10.0.0.2");
 
 		dal.cleanExpiredPairingCodes();
 
-		expect(dal.getPairingCodeByCode("789012")).toBeDefined(); // active — survives
-		expect(dal.getPairingCodeByCode("890123")).toBeUndefined(); // expired — removed
-		expect(dal.getPairingCodeByCode("901234")).toBeDefined(); // used+expired — survives
+		expect(dal.getPairingCodeByHash(hash(7))).toBeDefined(); // active — survives
+		expect(dal.getPairingCodeByHash(hash(8))).toBeUndefined(); // expired — removed
+		expect(dal.getPairingCodeByHash(hash(9))).toBeDefined(); // used+expired — survives
+	});
+
+	it("deleteUnredeemedPairingCodes removes every code not redeemed, and keeps the redeemed", () => {
+		const future = new Date(Date.now() + 60_000).toISOString();
+		const past = new Date(Date.now() - 1000).toISOString();
+		const now = new Date().toISOString();
+
+		dal.createPairingCode("PAIR10AAAAAAAAAAAAAAAAAAAAAAAA", hash(10), now, future);
+		dal.createPairingCode("PAIR11AAAAAAAAAAAAAAAAAAAAAAAA", hash(11), now, past);
+		dal.createPairingCode("PAIR12AAAAAAAAAAAAAAAAAAAAAAAA", hash(12), now, future);
+		dal.markPairingCodeUsed("PAIR12AAAAAAAAAAAAAAAAAAAAAAAA", now, "10.0.0.3");
+
+		dal.deleteUnredeemedPairingCodes();
+
+		expect(dal.getPairingCodeByHash(hash(10))).toBeUndefined(); // live — removed
+		expect(dal.getPairingCodeByHash(hash(11))).toBeUndefined(); // expired — removed
+		expect(dal.getPairingCodeByHash(hash(12))).toBeDefined(); // redeemed — kept
+		expect(dal.countActivePairingCodes()).toBe(0);
 	});
 });
 

@@ -918,7 +918,7 @@ reads `started_at` from `runtime.json`, as `lasterm status` does.
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/auth/tokens` | ● | `{ tokens }`, each `{ id, label, created_at, expires_at, revoked_at, swept_at, last_used_at }`; never the hash |
-| DELETE | `/api/auth/tokens/:id` | ● | → `{ ok: true }`, or 404 `TOKEN_NOT_FOUND` if unknown or already revoked. Closes the WebSockets the token authenticated (`1008 AUTH_REVOKED`). `primary` answers 409 `PRIMARY_TOKEN_NOT_REVOCABLE` and closes nothing: it is retired by replacing `auth.json` (SECURITY.md § 2.1) |
+| DELETE | `/api/auth/tokens/:id` | ● | → `{ ok: true }`, or 404 `TOKEN_NOT_FOUND` if unknown or already revoked. Closes the WebSockets the token authenticated (`1008 AUTH_REVOKED`). `primary` answers 409 `PRIMARY_TOKEN_NOT_REVOCABLE` and closes nothing: it is retired by replacing `auth.json` (SECURITY.md § 2.1). Every answer is recorded as `token.revoke` (SECURITY.md § 7.1) |
 
 #### Logs
 
@@ -1144,9 +1144,11 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 
 ### Pairing Code Format
 
-- 6 numeric digits (`0-9`), leading zeros allowed (e.g., `007293`)
-- Generated via `crypto.randomInt(0, 1_000_000).toString().padStart(6, '0')`
+- 8 numeric digits (`0-9`), leading zeros allowed (e.g., `00729316`)
+- Generated via `crypto.randomInt(0, 100_000_000).toString().padStart(8, '0')`
 - Expires: ISO 8601 timestamp, 60 seconds from creation
+- Stored only as a keyed hash, under a key the hub holds for one run: a code issued before the
+  hub's last start is unknown to it (SECURITY.md § 2.3)
 
 ## 7. Version Negotiation
 

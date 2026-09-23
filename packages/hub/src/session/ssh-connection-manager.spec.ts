@@ -356,6 +356,62 @@ describe("SshConnectionManager — passphrase cache", () => {
 	});
 });
 
+describe("SshConnectionManager — reconnect reaches the daemon", () => {
+	// After a dropped link the reconnect built its agent without the host's
+	// daemon setting, so it ran on stdio and started every terminal again,
+	// while the daemon went on running the real ones where nothing reached them.
+	it("builds the reconnecting agent with the host's daemon setting", async () => {
+		const { SshAgent } = await import("./ssh-agent.js");
+		capturedSshAgentArgs = null as typeof capturedSshAgentArgs;
+		vi.mocked(SshAgent).mockClear();
+
+		const hostId = "host-daemon-reconnect";
+		const ctx = {
+			passphraseCache: new Map(),
+			sessions: new Map([[hostId, { id: "session-1", status: "reconnecting" }]]),
+			reconnectTimers: new Map(),
+			reconnectAbortControllers: new Map(),
+			metaDal: {
+				getHost: vi.fn().mockReturnValue({
+					id: hostId,
+					sshHost: "pi.example",
+					sshPort: 22,
+					sshAuth: "agent",
+					sshUser: "pi",
+					label: "pi",
+					os: "linux",
+					sshRemoteDaemon: true,
+				}),
+				getHostAgentSha256: vi.fn().mockReturnValue(null),
+				getHostFingerprint: vi.fn().mockReturnValue("SHA256:stored"),
+				updateHostOsArch: vi.fn(),
+				updateHostAgentSha256: vi.fn(),
+			},
+			trustedAgentSha256: new Map(),
+			trustedOnceFingerprints: new Map(),
+			agents: new Map(),
+			hubLogger: null,
+		} as unknown as SharedSessionContext;
+
+		const lifecycle = {
+			closeSession: vi.fn(),
+			reAttachChannels: vi.fn(),
+			adoptWhatTheDaemonHolds: vi.fn().mockResolvedValue(true),
+		};
+		const mgr = new SshConnectionManager(
+			ctx,
+			{ updateSessionStatus: vi.fn() } as never,
+			lifecycle as never,
+			{ wireAgentEvents: vi.fn() } as never,
+		);
+		mgr.scheduleReconnect(hostId, "session-1", 0, Date.now());
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+		expect(SshAgent).toHaveBeenCalled();
+		expect(capturedSshAgentArgs?.[4]).toBe(true);
+	});
+});
+
 describe("SshConnectionManager — reconnect cache-only promptAuth", () => {
 	it("scheduleReconnect passes a non-undefined promptAuth to SshAgent when cache is warm", async () => {
 		const { SshAgent } = await import("./ssh-agent.js");

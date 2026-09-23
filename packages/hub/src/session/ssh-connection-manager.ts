@@ -33,6 +33,7 @@ import {
 	respond as respondCtx,
 } from "./prompt-context.js";
 import { captureQuitFence } from "./quit-fence.js";
+import { hostKeepsDaemon } from "./remote-daemon.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import {
@@ -536,11 +537,16 @@ export class SshConnectionManager {
 					},
 				};
 
+				// A host that keeps a daemon is reached through it here too. Built
+				// without it, the reconnect after a dropped link ran a new agent on
+				// stdio, and the daemon's terminals — the ones #79 keeps alive for
+				// exactly this — were left running where nothing could reach them.
 				const sshAgent = new SshAgent(
 					host,
 					this.buildCacheOnlyPromptAuth(hostId),
 					deployOpts,
 					this.ctx.agentConfig,
+					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 				const storedFp = this.ctx.metaDal.getHostFingerprint(hostId);
 				const hostKey = `${sshHostname}:${host.sshPort ?? 22}`;
@@ -568,7 +574,11 @@ export class SshConnectionManager {
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
 				this.ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
 
-				this.lifecycle.reAttachChannels(hostId, sessionId, sshAgent);
+				// A daemon still holds its terminals: take them up as they are. Only
+				// an agent this connection started has nothing, and gets them again.
+				if (!(await this.lifecycle.adoptWhatTheDaemonHolds(hostId, sshAgent))) {
+					this.lifecycle.reAttachChannels(hostId, sessionId, sshAgent);
+				}
 			} catch {
 				// Clear the controller on failure (aborted or real error).
 				if (this.ctx.reconnectAbortControllers.get(hostId) === ac) {

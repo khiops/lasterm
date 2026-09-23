@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 import type { TlsConfig } from "@lasterm/shared";
 import {
 	detectSea,
-	extractAddonToDir,
 	getAddonCacheDir,
+	loadCachedAddon,
 	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
@@ -73,12 +73,15 @@ function loadSeaAddon(): TlsIdentityAddon {
 		getRawAsset: (name: string) => ArrayBuffer;
 		getAsset?: (name: string, encoding: BufferEncoding) => string;
 	};
-	const addonPath = extractAddonToDir(
+	// Loaded through the authenticated cache, never by a path handed back from
+	// it: the path is only a name, and a name can change between the check and
+	// the load.
+	const exports = loadCachedAddon(
 		SEA_ASSET_NAME,
 		getAddonCacheDir(readSeaVersion(sea)),
 		Buffer.from(sea.getRawAsset(SEA_ASSET_NAME)),
 	);
-	return dlopenAddon(addonPath);
+	return asTlsIdentityAddon(exports, SEA_ASSET_NAME);
 }
 
 function localAddonPath(): string {
@@ -93,12 +96,16 @@ function localAddonPath(): string {
 function dlopenAddon(addonPath: string): TlsIdentityAddon {
 	const mod = { exports: {} as Record<string, unknown> };
 	process.dlopen(mod, addonPath);
-	const addon = mod.exports as Partial<TlsIdentityAddon>;
+	return asTlsIdentityAddon(mod.exports, addonPath);
+}
+
+function asTlsIdentityAddon(exports: Record<string, unknown>, source: string): TlsIdentityAddon {
+	const addon = exports as Partial<TlsIdentityAddon>;
 	if (
 		typeof addon.generateTlsIdentity !== "function" &&
 		typeof addon.generate_tls_identity !== "function"
 	) {
-		throw new Error(`TLS identity addon at ${addonPath} does not export generate_tls_identity`);
+		throw new Error(`TLS identity addon at ${source} does not export generate_tls_identity`);
 	}
 	return addon as TlsIdentityAddon;
 }

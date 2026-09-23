@@ -5,8 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	detectSea,
-	extractAddonToDir,
 	getAddonCacheDir,
+	loadCachedAddon,
 	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
@@ -96,12 +96,15 @@ function loadSeaAddon(): HubLockAddon {
 		getRawAsset: (name: string) => ArrayBuffer;
 		getAsset?: (name: string, encoding: BufferEncoding) => string;
 	};
-	const addonPath = extractAddonToDir(
+	// Loaded through the authenticated cache, never by a path handed back from
+	// it: the path is only a name, and a name can change between the check and
+	// the load.
+	const exports = loadCachedAddon(
 		SEA_ASSET_NAME,
 		getAddonCacheDir(readSeaVersion(sea)),
 		Buffer.from(sea.getRawAsset(SEA_ASSET_NAME)),
 	);
-	return dlopenAddon(addonPath);
+	return asHubLockAddon(exports, SEA_ASSET_NAME);
 }
 
 function localAddonPath(): string {
@@ -116,9 +119,13 @@ function localAddonPath(): string {
 function dlopenAddon(addonPath: string): HubLockAddon {
 	const mod = { exports: {} as Record<string, unknown> };
 	process.dlopen(mod, addonPath);
-	const addon = mod.exports as Partial<HubLockAddon>;
+	return asHubLockAddon(mod.exports, addonPath);
+}
+
+function asHubLockAddon(exports: Record<string, unknown>, source: string): HubLockAddon {
+	const addon = exports as Partial<HubLockAddon>;
 	if (typeof addon.tryAcquire !== "function" || typeof addon.HubLock !== "function") {
-		throw new Error(`native addon ${addonPath} does not export HubLock and tryAcquire()`);
+		throw new Error(`native addon ${source} does not export HubLock and tryAcquire()`);
 	}
 	return addon as HubLockAddon;
 }

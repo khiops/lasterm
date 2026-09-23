@@ -51,7 +51,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					confirmCloseAll: true,
 					confirmCloseOthers: true,
 				},
-				panes: { maxPanes: 4, defaultSplitDirection: "horizontal" },
+				panes: { maxPanes: 4 },
 				channels: { defaultShell: "" },
 				startup: { autoOpenWelcome: true },
 				title: {
@@ -80,7 +80,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					confirmCloseAll: true,
 					confirmCloseOthers: true,
 				},
-				panes: { maxPanes: 4, defaultSplitDirection: "horizontal" },
+				panes: { maxPanes: 4 },
 				channels: { defaultShell: "" },
 				startup: { autoOpenWelcome: true },
 				title: {

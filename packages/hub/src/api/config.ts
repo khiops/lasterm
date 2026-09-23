@@ -31,7 +31,6 @@ const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => boolean
 	},
 	panes: {
 		maxPanes: (v) => typeof v === "number" && Number.isInteger(v) && v >= 1,
-		defaultSplitDirection: (v) => v === "horizontal" || v === "vertical",
 	},
 	channels: {
 		defaultShell: (v) => typeof v === "string",

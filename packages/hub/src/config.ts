@@ -188,7 +188,6 @@ export const DEFAULT_TABS_CONFIG: TabsConfig = {
 
 export const DEFAULT_PANES_CONFIG: PanesConfig = {
 	maxPanes: 4,
-	defaultSplitDirection: "horizontal",
 };
 
 export const DEFAULT_CHANNELS_CONFIG: ChannelsConfig = {
@@ -295,12 +294,6 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		const raw = panesSection as Record<string, unknown>;
 		if (typeof raw.max_panes === "number" && raw.max_panes >= 1) {
 			config.panes.maxPanes = raw.max_panes;
-		}
-		if (
-			typeof raw.default_split_direction === "string" &&
-			(raw.default_split_direction === "horizontal" || raw.default_split_direction === "vertical")
-		) {
-			config.panes.defaultSplitDirection = raw.default_split_direction;
 		}
 	}
 

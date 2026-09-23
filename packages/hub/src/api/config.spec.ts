@@ -133,24 +133,15 @@ describe("PUT /api/config/ui value validation", () => {
 		expect(body.error.code).toBe("INVALID_VALUE");
 	});
 
-	it("accepts valid defaultSplitDirection", async () => {
+	// Every split names its direction, so a default had nowhere to apply: the
+	// setting was offered, stored, and read by nothing. It is no longer taken.
+	it("no longer takes defaultSplitDirection", async () => {
 		const res = await server.inject({
 			method: "PUT",
 			url: "/api/config/ui",
 			payload: { panes: { defaultSplitDirection: "vertical" } },
 		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects invalid defaultSplitDirection", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { panes: { defaultSplitDirection: "diagonal" } },
-		});
 		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
 	});
 
 	it("accepts valid autoGroup value", async () => {

@@ -446,20 +446,32 @@ export function usePaneTree(
 	 * If the layout is null (no tabs), this is a no-op.
 	 * The active pane does NOT change on split.
 	 */
-	function splitPane(channelId: string, direction: "horizontal" | "vertical"): void {
+	/**
+	 * Split the pane holding `channelId`, the new half left vacant.
+	 *
+	 * Refused at `limit` panes — empty ones count, they take room too — and the
+	 * refusal is returned rather than kept: the caller is the one that can say
+	 * why nothing happened. The limit is the one set in Settings › Panes; the
+	 * constant here is only its default.
+	 */
+	function splitPane(
+		channelId: string,
+		direction: "horizontal" | "vertical",
+		limit: number = MAX_PANE_COUNT,
+	): "split" | "at-limit" | "not-found" {
 		const tab = activeTab.value;
-		if (tab === null) return;
+		if (tab === null) return "not-found";
 
 		const root = layouts.value[tab.id];
-		if (root === null || root === undefined) return;
+		if (root === null || root === undefined) return "not-found";
 
-		if (countLeaves(root) >= MAX_PANE_COUNT) return;
+		if (countLeaves(root) >= limit) return "at-limit";
 
 		const path = findChannelPath(root, channelId);
-		if (path === null) return;
+		if (path === null) return "not-found";
 
 		const existingNode = getNodeAtPath(root, path);
-		if (existingNode === null) return;
+		if (existingNode === null) return "not-found";
 
 		const splitNode: PaneNode = {
 			type: "split",
@@ -472,6 +484,7 @@ export function usePaneTree(
 		const newRoot = setNodeAtPath(root, path, splitNode);
 		layouts.value = { ...layouts.value, [tab.id]: newRoot };
 		// Active pane does not change on split
+		return "split";
 	}
 
 	/**

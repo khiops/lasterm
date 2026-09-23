@@ -798,3 +798,57 @@ describe("ChannelLifecycleManager — boundTail", () => {
 		expect(ChannelLifecycleManager.boundTail([])).toEqual({ tail: [], truncated: false });
 	});
 });
+
+// ─── Taking up what a daemon holds ───────────────────────────────────────────
+//
+// Every way of reaching an SSH host ends here, the automatic reconnect after a
+// dropped link included — which used to start every terminal again on a fresh
+// stdio agent while the daemon kept running the real ones out of reach.
+
+describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
+	function harness() {
+		const ctx = {
+			...makeMinimalCtx(),
+			scheduler: { trackChannel: vi.fn(), untrackChannel: vi.fn() },
+			chunker: { trackChannel: vi.fn(), untrackChannel: vi.fn() },
+			channels: new Map(),
+			sessions: new Map([["host-1", { id: "session-now", hostId: "host-1", status: "active" }]]),
+		} as unknown as SharedSessionContext;
+		const lifecycle = new ChannelLifecycleManager(ctx, {} as StateBroadcaster);
+		const reconcile = vi.spyOn(lifecycle, "reconcileChannelState").mockImplementation(() => {});
+		return { lifecycle, reconcile };
+	}
+
+	it("reconciles with what a daemon reports, and says it was one", async () => {
+		const { lifecycle, reconcile } = harness();
+		const states = [{ type: "AGENT_CHANNEL_STATE", channelId: "ch-1", alive: true }];
+		const agent = {
+			usedRemoteDaemon: true,
+			waitForChannelState: vi.fn().mockResolvedValue(states),
+		};
+
+		expect(await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never)).toBe(true);
+		expect(reconcile).toHaveBeenCalledWith("host-1", states);
+	});
+
+	it("does not ask an agent this connection started, which holds nothing", async () => {
+		const { lifecycle, reconcile } = harness();
+		const agent = { usedRemoteDaemon: false, waitForChannelState: vi.fn() };
+
+		expect(await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never)).toBe(false);
+		expect(agent.waitForChannelState).not.toHaveBeenCalled();
+		expect(reconcile).not.toHaveBeenCalled();
+	});
+
+	it("still counts as a daemon when it will not say what it holds", async () => {
+		const { lifecycle, reconcile } = harness();
+		const agent = {
+			usedRemoteDaemon: true,
+			waitForChannelState: vi.fn().mockRejectedValue(new Error("AUTH required")),
+		};
+
+		// Not starting its terminals again: the daemon may well be running them.
+		expect(await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never)).toBe(true);
+		expect(reconcile).not.toHaveBeenCalled();
+	});
+});

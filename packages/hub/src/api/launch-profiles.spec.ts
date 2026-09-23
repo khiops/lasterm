@@ -6,6 +6,7 @@ import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import { resolveHostOs } from "./host-profiles.js";
+import { type CreateLaunchProfileBody, validateCreateBody } from "./launch-profiles.js";
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -43,20 +44,23 @@ vi.mock("../session/ssh-agent.js", () => {
 let dbs: DatabaseManager;
 let server: FastifyInstance;
 
-beforeEach(async () => {
-	dbs = openTestDatabases();
-	server = await createServer({
-		tls: getTestTls(),
-		logger: false,
-		dbManager: dbs,
-		skipShellDiscovery: true,
+/** A whole hub server, for the describes that test a route through one. */
+function useHubServer(): void {
+	beforeEach(async () => {
+		dbs = openTestDatabases();
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
 	});
-});
 
-afterEach(async () => {
-	await server.close();
-	dbs.close();
-});
+	afterEach(async () => {
+		await server.close();
+		dbs.close();
+	});
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -79,6 +83,8 @@ async function createProfile(
 // ─── GET /api/launch-profiles ─────────────────────────────────────────────────
 
 describe("GET /api/launch-profiles", () => {
+	useHubServer();
+
 	it("returns empty array initially", async () => {
 		const res = await server.inject({ method: "GET", url: "/api/launch-profiles" });
 		expect(res.statusCode).toBe(200);
@@ -110,6 +116,8 @@ describe("GET /api/launch-profiles", () => {
 // ─── POST /api/launch-profiles ────────────────────────────────────────────────
 
 describe("POST /api/launch-profiles", () => {
+	useHubServer();
+
 	it("creates a profile with all required fields (SC-01)", async () => {
 		const res = await server.inject({
 			method: "POST",
@@ -178,84 +186,71 @@ describe("POST /api/launch-profiles", () => {
 		expect(res.statusCode).toBe(409);
 	});
 
-	it("returns 400 for empty shell (SC-04)", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "Bad", shell: "" },
-		});
+	// Each rule of validateCreateBody is unit-tested below; this proves the route
+	// consults it and answers with its message.
+	it("refuses a profile validateCreateBody rejects, with its message (SC-35)", async () => {
+		const payload = { name: "Injection", shell: "/bin/bash; rm -rf /" };
+		const res = await server.inject({ method: "POST", url: "/api/launch-profiles", payload });
 		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: validateCreateBody(payload) },
+		});
+	});
+});
+
+// ─── validateCreateBody — the rules POST /api/launch-profiles applies ─────────
+//
+// Asserted where they live, so a broken rule fails under its own name. The
+// shell rules themselves belong to validateShell, unit-tested in @lasterm/shared.
+
+describe("validateCreateBody", () => {
+	/** A body as a client sends it: JSON, which the interface does not police. */
+	function body(fields: Record<string, unknown>): CreateLaunchProfileBody {
+		return fields as unknown as CreateLaunchProfileBody;
+	}
+
+	it("accepts a name and a shell (SC-02)", () => {
+		expect(validateCreateBody(body({ name: "Min", shell: "/bin/bash" }))).toBeNull();
 	});
 
-	it("returns 400 for missing shell", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "NoShell" },
-		});
-		expect(res.statusCode).toBe(400);
+	it("accepts a plain executable path such as /usr/bin/env", () => {
+		expect(validateCreateBody(body({ name: "Parens", shell: "/usr/bin/env" }))).toBeNull();
 	});
 
-	it("returns 400 for shell with semicolons (SC-35)", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "Injection", shell: "/bin/bash; rm -rf /" },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { message: string } }>();
-		expect(body.error.message).toContain("executable path");
+	it("refuses a missing name", () => {
+		expect(validateCreateBody(body({ shell: "/bin/bash" }))).toBe("name is required");
 	});
 
-	it("returns 400 for shell with pipe metacharacter (SC-35)", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "Pipe", shell: "/bin/bash | cat" },
-		});
-		expect(res.statusCode).toBe(400);
+	it("refuses an empty shell (SC-04)", () => {
+		expect(validateCreateBody(body({ name: "Bad", shell: "" }))).toBe("shell must not be empty");
 	});
 
-	it("returns 400 for shell with & metacharacter (SC-35)", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "Amp", shell: "/bin/bash & evil" },
-		});
-		expect(res.statusCode).toBe(400);
+	it("refuses a missing shell, as an empty one", () => {
+		expect(validateCreateBody(body({ name: "NoShell" }))).toBe("shell must not be empty");
 	});
 
-	it("allows shell with parentheses (not a metachar)", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "Parens", shell: "/usr/bin/env" },
-		});
-		expect(res.statusCode).toBe(201);
+	it.each([
+		["a semicolon", "Injection", "/bin/bash; rm -rf /"],
+		["a pipe", "Pipe", "/bin/bash | cat"],
+		["an ampersand", "Amp", "/bin/bash & evil"],
+	])("refuses a shell with %s (SC-35)", (_what, name, shell) => {
+		expect(validateCreateBody(body({ name, shell }))).toBe(
+			"shell must be an executable path, not a command",
+		);
 	});
 
-	it("returns 400 for invalid color format", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { name: "BadColor", shell: "/bin/bash", color: "red" },
-		});
-		expect(res.statusCode).toBe(400);
-	});
-
-	it("returns 400 for missing name", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/launch-profiles",
-			payload: { shell: "/bin/bash" },
-		});
-		expect(res.statusCode).toBe(400);
+	it("refuses a color that is not #rrggbb", () => {
+		expect(validateCreateBody(body({ name: "BadColor", shell: "/bin/bash", color: "red" }))).toBe(
+			"color must be in hex format #rrggbb",
+		);
 	});
 });
 
 // ─── GET /api/launch-profiles/:id ─────────────────────────────────────────────
 
 describe("GET /api/launch-profiles/:id", () => {
+	useHubServer();
+
 	it("returns profile by ID", async () => {
 		const created = await createProfile({ name: "GetMe" });
 		const res = await server.inject({
@@ -292,6 +287,8 @@ describe("GET /api/launch-profiles/:id", () => {
 // ─── PUT /api/launch-profiles/:id ─────────────────────────────────────────────
 
 describe("PUT /api/launch-profiles/:id", () => {
+	useHubServer();
+
 	it("updates profile fields", async () => {
 		const created = await createProfile({ name: "UpdateMe" });
 		const res = await server.inject({
@@ -370,6 +367,8 @@ describe("PUT /api/launch-profiles/:id", () => {
 // ─── DELETE /api/launch-profiles/:id ──────────────────────────────────────────
 
 describe("DELETE /api/launch-profiles/:id", () => {
+	useHubServer();
+
 	it("deletes profile and returns 204", async () => {
 		// Need at least 2 profiles so the delete is not blocked as last profile
 		await createProfile({ name: "Keeper" });
@@ -410,6 +409,8 @@ describe("DELETE /api/launch-profiles/:id", () => {
 // ─── PUT /api/launch-profiles/order ───────────────────────────────────────────
 
 describe("PUT /api/launch-profiles/order", () => {
+	useHubServer();
+
 	it("reorders profiles and returns 204", async () => {
 		const a = await createProfile({ name: "A", sort_order: 0 });
 		const b = await createProfile({ name: "B", sort_order: 1 });
@@ -453,6 +454,8 @@ describe("PUT /api/launch-profiles/order", () => {
 // ─── GET /api/hosts/:id/profiles ──────────────────────────────────────────────
 
 describe("GET /api/hosts/:id/profiles", () => {
+	useHubServer();
+
 	it("returns 404 for unknown host", async () => {
 		const res = await server.inject({
 			method: "GET",
@@ -490,6 +493,8 @@ describe("GET /api/hosts/:id/profiles", () => {
 // ─── PUT/DELETE /api/hosts/:id/profiles/:profileId ────────────────────────────
 
 describe("PUT /api/hosts/:id/profiles/:profileId", () => {
+	useHubServer();
+
 	it("upserts a pin override and returns 204", async () => {
 		const hostsRes = await server.inject({ method: "GET", url: "/api/hosts" });
 		const hosts = hostsRes.json<Array<{ id: string; type: string }>>();
@@ -551,6 +556,8 @@ describe("PUT /api/hosts/:id/profiles/:profileId", () => {
 });
 
 describe("DELETE /api/hosts/:id/profiles/:profileId", () => {
+	useHubServer();
+
 	it("removes override and returns 204", async () => {
 		const hostsRes = await server.inject({ method: "GET", url: "/api/hosts" });
 		const hosts = hostsRes.json<Array<{ id: string; type: string }>>();
@@ -667,6 +674,8 @@ describe("resolveHostOs", () => {
 // ─── GET /api/hosts/:id/profiles — auto-OS resolution (F-004) ─────────────────
 
 describe("GET /api/hosts/:id/profiles — auto-OS resolution", () => {
+	useHubServer();
+
 	it("auto-resolves OS from local host when ?os= is not supplied", async () => {
 		const hostsRes = await server.inject({ method: "GET", url: "/api/hosts" });
 		const hosts = hostsRes.json<Array<{ id: string; type: string }>>();

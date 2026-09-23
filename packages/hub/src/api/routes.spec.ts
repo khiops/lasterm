@@ -4,6 +4,7 @@ import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
+import { validateCreateHost } from "./hosts.js";
 
 // ─── Mock ssh-config-parser (controls readSshConfig in tests) ────────────────
 
@@ -110,37 +111,15 @@ describe("POST /api/hosts", () => {
 		expect(body.trust_remote_hints).toBe("ask");
 	});
 
-	it("returns 400 when label is missing", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: { type: "local" },
-		});
+	// Each rule of validateCreateHost is unit-tested in hosts.spec.ts; this
+	// proves the route consults it and answers with its message.
+	it("refuses a host validateCreateHost rejects, with its message", async () => {
+		const payload = { type: "local", label: "color-bad", color: "notacolor" } as const;
+		const res = await server.inject({ method: "POST", url: "/api/hosts", payload });
 		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 when SSH host is missing ssh_host", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: { type: "ssh", label: "ssh-no-host" },
+		expect(res.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: validateCreateHost(payload) },
 		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 for invalid color format", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: { type: "local", label: "color-bad", color: "notacolor" },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
 	});
 
 	it("returns 409 when label already exists", async () => {
@@ -177,28 +156,6 @@ describe("POST /api/hosts", () => {
 		expect(body.arch).toBe("arm64");
 	});
 
-	it("returns 400 for invalid os value", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: { type: "local", label: "bad-os", os: "bsd" },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 for invalid arch value", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: { type: "local", label: "bad-arch", arch: "riscv" },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-
 	it("GET /api/hosts returns os/arch fields in snake_case", async () => {
 		await server.inject({
 			method: "POST",
@@ -219,6 +176,8 @@ describe("POST /api/hosts", () => {
 	});
 });
 
+// What validateIconImage accepts is unit-tested in hosts.spec.ts; these prove
+// both routes consult it.
 describe("host image icons (#208)", () => {
 	const PNG =
 		"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -269,20 +228,6 @@ describe("host image icons (#208)", () => {
 			payload: { icon_type: "emoji", icon_value: "🚀" },
 		});
 		expect(emoji.statusCode).toBe(200);
-	});
-
-	it("refuses an image icon larger than the bound", async () => {
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: {
-				type: "local",
-				label: "icon-big",
-				icon_type: "image",
-				icon_value: `data:image/png;base64,${"A".repeat(70_000)}`,
-			},
-		});
-		expect(res.statusCode).toBe(400);
 	});
 });
 

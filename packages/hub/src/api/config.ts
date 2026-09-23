@@ -20,7 +20,12 @@ interface ProfilePatchBody {
 
 const APPEARANCE_KEYS = ["theme", "autoSwitch", "opacity", "scrollbar"] as const;
 
-const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => boolean>> = {
+/**
+ * The values `PUT /api/config/ui` accepts, by section and key; a key without an
+ * entry is stored as given. Each rule is unit-tested in `config.spec.ts`, and
+ * the route keeps one test proving it consults this table.
+ */
+export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => boolean>> = {
 	tabs: {
 		closeButton: (v) => typeof v === "boolean",
 		newTabPosition: (v) => v === "end" || v === "afterActive",

@@ -179,6 +179,8 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 - E2E (remote): mock SSH server (never real SSH in CI)
 - PTY: exercised by the agent's Rust tests (`cargo test`), Linux and Windows
 - WS: mock for UI tests, real for E2E
+- A new validation rule gets a unit test on its table or validator, beside it, so a broken rule fails under its own name rather than a route's (#459).
+- The route keeps **one** test proving it consults that table: a refused value gets its 4xx and error shape, an accepted one is stored.
 
 ### Git
 

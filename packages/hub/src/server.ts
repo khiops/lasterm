@@ -23,7 +23,14 @@ import { registerThemeRoutes } from "./api/themes.js";
 import { registerTokenRoutes } from "./api/tokens.js";
 import { registerWallpaperRoutes } from "./api/wallpapers.js";
 import { getBootAssetToken, requestHasValidAssetToken } from "./asset-token.js";
-import { touchToken, upsertPrimaryToken, validateTokenRecord } from "./auth.js";
+import {
+	hashToken,
+	listTokens,
+	PRIMARY_TOKEN_ID,
+	touchToken,
+	upsertPrimaryToken,
+	validateTokenRecord,
+} from "./auth.js";
 import { BUILD_HASH, HUB_VERSION } from "./build-version.js";
 import { getConfigDir, getStateDir } from "./cli.js";
 import type { AuthConfig } from "./config.js";
@@ -37,6 +44,7 @@ import {
 } from "./config.js";
 import type { HubLogger } from "./logging/hub-logger.js";
 import type { LoggerRegistry } from "./logging/index.js";
+import { SecurityLog } from "./logging/security-log.js";
 import { registerSeaStaticServing } from "./sea-static-server.js";
 import { SessionManager } from "./session/session-manager.js";
 import { seedShellProfiles } from "./shell-discovery.js";
@@ -46,6 +54,16 @@ import { MetaDAL } from "./storage/meta.js";
 import { migrateLegacyShellDefaults } from "./storage/migrate-launch-profiles.js";
 import { ThemeManager } from "./theme-manager.js";
 import { registerWsRoutes } from "./ws/ws-handler.js";
+
+declare module "fastify" {
+	interface FastifyInstance {
+		/**
+		 * The security events of SECURITY.md § 7.1. Decorated by createServer, so
+		 * every route and hook records through the same log without being handed it.
+		 */
+		security: SecurityLog;
+	}
+}
 
 /**
  * Mutable set of exact CORS origins allowed by the server.
@@ -113,6 +131,12 @@ interface ServerBaseOptions {
 	corsOrigins?: string[]; // override CORS allowlist (bypasses config.toml, useful for tests)
 	skipShellDiscovery?: boolean; // disable auto-shell-seeding (useful for tests)
 	hubLogger?: HubLogger; // global hub log sink
+	/**
+	 * Where security events are recorded. startHub always passes one writing to
+	 * `logs/hub.jsonl`; a server built without one records them through Fastify's
+	 * own logger instead, so no way of constructing a server drops them.
+	 */
+	securityLog?: SecurityLog;
 	loggerRegistry?: LoggerRegistry; // per-channel log registry
 	logsDir?: string; // base logs directory (e.g. ~/.local/state/lasterm/logs)
 }
@@ -146,6 +170,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		logger: options.logger ?? true,
 		https: options.tls,
 	}) as unknown as FastifyInstance;
+	server.decorate(
+		"security",
+		options.securityLog ?? new SecurityLog((msg, fields) => server.log.info(fields, msg)),
+	);
 
 	// Helmet — sets security-related HTTP response headers
 	await server.register(fastifyHelmet, {
@@ -260,8 +288,20 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		// When a DB is available, seed the primary token record so all validation
 		// goes through the DB path (expiry + revocation checks).
 		if (db) {
+			// The recorded primary token differs from auth.json's only when that file
+			// was replaced between two runs: the manual rotation of SECURITY.md § 2.1,
+			// or a substitution nobody asked for, which is the case worth a record.
+			const previous = listTokens(db).find((record) => record.id === PRIMARY_TOKEN_ID);
 			upsertPrimaryToken(db, primaryToken);
+			if (previous && previous.tokenHash !== hashToken(primaryToken)) {
+				server.security.tokenRotated({ tokenId: PRIMARY_TOKEN_ID });
+			}
 		}
+
+		// Every REST request carries the bearer, so a record of each success would
+		// bury everything else in the log. The first one from each credential and
+		// address in a hub run is what says who used a token, and from where.
+		const restCredentialsSeen = new Set<string>();
 
 		server.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
 			// CORS preflight is handled by @fastify/cors — skip auth.
@@ -287,6 +327,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			const authHeader = request.headers.authorization;
 			if (!authHeader) {
 				server.log.warn({ url: pathname }, "auth: missing Authorization header");
+				server.security.authFailed({ via: "rest", sourceIp: request.ip, reason: "missing_header" });
 				return reply.code(401).send({
 					error: "AUTH_REQUIRED",
 					message: "Authorization header required",
@@ -296,6 +337,11 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			const [scheme, token] = authHeader.split(" ");
 			if (scheme !== "Bearer" || !token) {
 				server.log.warn({ url: pathname }, "auth: malformed Authorization header");
+				server.security.authFailed({
+					via: "rest",
+					sourceIp: request.ip,
+					reason: "malformed_header",
+				});
 				return reply.code(401).send({
 					error: "AUTH_REQUIRED",
 					message: "Authorization header must be: Bearer <token>",
@@ -307,6 +353,11 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 				const record = validateTokenRecord(db, token);
 				if (!record) {
 					server.log.warn({ url: pathname }, "auth: invalid, expired, or revoked token");
+					server.security.authFailed({
+						via: "rest",
+						sourceIp: request.ip,
+						reason: "invalid_token",
+					});
 					return reply.code(401).send({
 						error: "AUTH_INVALID",
 						message: "Invalid, expired, or revoked token",
@@ -319,10 +370,20 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 					server.log.warn({ err, tokenId: record.id }, "touchToken failed");
 				}
 				server.log.debug({ url: pathname, tokenId: record.id }, "auth: accepted");
+				const credentialAndAddress = `${record.id} ${request.ip}`;
+				if (!restCredentialsSeen.has(credentialAndAddress)) {
+					restCredentialsSeen.add(credentialAndAddress);
+					server.security.authSucceeded({ via: "rest", sourceIp: request.ip, tokenId: record.id });
+				}
 			} else {
 				// DB is required for token validation — fail closed to prevent
 				// skipping expiry/revocation checks.
 				server.log.warn({ url: pathname }, "auth: database unavailable");
+				server.security.authFailed({
+					via: "rest",
+					sourceIp: request.ip,
+					reason: "database_unavailable",
+				});
 				return reply.code(500).send({
 					error: "SERVER_ERROR",
 					message: "Database unavailable",
@@ -378,6 +439,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			options.hubLogger,
 			loggerRegistry,
 			options.logsDir,
+			server.security,
 		);
 		const activeSessionManager = sessionManager;
 		if (options?.authToken) {

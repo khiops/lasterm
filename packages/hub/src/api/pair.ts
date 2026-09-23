@@ -31,7 +31,7 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 	const { authConfig, db, metaDal } = opts;
 
 	// POST /api/pair — authenticated, generates a one-time pairing code
-	server.post("/api/pair", async (_request: FastifyRequest, reply: FastifyReply) => {
+	server.post("/api/pair", async (request: FastifyRequest, reply: FastifyReply) => {
 		const active = metaDal.countActivePairingCodes();
 		if (active >= 3) {
 			return reply.code(429).send({
@@ -49,6 +49,11 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 			const code = randomInt(0, 100_000_000).toString().padStart(8, "0");
 			try {
 				metaDal.createPairingCode(id, code, now.toISOString(), expiresAt);
+				server.security.pairingCodeGenerated({
+					pairingId: id,
+					expiresAt,
+					sourceIp: request.ip,
+				});
 				return reply.code(201).send({ code, expires_at: expiresAt });
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : "";
@@ -80,6 +85,7 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 
 			// DB-backed per-IP rate limit with exponential backoff after 5 attempts.
 			if (!metaDal.checkAndIncrementPairRate(clientIp, VERIFY_MAX, VERIFY_WINDOW_MS)) {
+				server.security.authFailed({ via: "pair", sourceIp: clientIp, reason: "rate_limited" });
 				return reply.code(429).send({
 					error: { code: "RATE_LIMIT", message: "Too many verification attempts" },
 				});
@@ -91,6 +97,7 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 			const { code } = request.body;
 
 			if (typeof code !== "string" || !/^\d{8}$/.test(code)) {
+				server.security.authFailed({ via: "pair", sourceIp: clientIp, reason: "invalid_format" });
 				return reply.code(400).send({
 					error: { code: "INVALID_FORMAT", message: "Code must be 8 digits" },
 				});
@@ -99,12 +106,14 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 			const row = metaDal.getPairingCodeByCode(code);
 
 			if (!row) {
+				server.security.authFailed({ via: "pair", sourceIp: clientIp, reason: "unknown_code" });
 				return reply.code(404).send({
 					error: { code: "CODE_NOT_FOUND", message: "Unknown pairing code" },
 				});
 			}
 
 			if (row.used !== 0) {
+				server.security.authFailed({ via: "pair", sourceIp: clientIp, reason: "code_used" });
 				return reply.code(409).send({
 					error: { code: "CODE_USED", message: "Code already redeemed" },
 				});
@@ -112,6 +121,7 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 
 			const now = new Date().toISOString();
 			if (row.expires_at < now) {
+				server.security.authFailed({ via: "pair", sourceIp: clientIp, reason: "code_expired" });
 				return reply.code(410).send({
 					error: { code: "CODE_EXPIRED", message: "Code has expired" },
 				});
@@ -126,10 +136,11 @@ export function registerPairRoutes(server: FastifyInstance, opts: PairRouteOptio
 					? new Date(Date.now() + authConfig.tokenTtlDays * 86_400_000).toISOString()
 					: null;
 
-			const { token } = createToken(db, {
+			const { id: tokenId, token } = createToken(db, {
 				label: `Paired from ${clientIp}`,
 				expiresAt: tokenExpiresAt,
 			});
+			server.security.pairingCodeVerified({ pairingId: row.id, tokenId, sourceIp: clientIp });
 
 			return reply.code(200).send({ token });
 		},

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,6 +13,7 @@ import {
 } from "./auth.js";
 import { getStateDir, loadRuntime } from "./cli.js";
 import { startHub } from "./hub-startup.js";
+import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -385,4 +386,71 @@ describe("startHub creates the configuration directory owner-only", () => {
 			}
 		},
 	);
+});
+
+// `lasterm start` — what the desktop runs, and the only command the single
+// executable serves — never passes `logging`, and a hub started that way used to
+// write no log file at all. The security events must reach one regardless, and
+// the diagnostics the other entry points ask for must stay where they were.
+describe("startHub records its security events whichever entry point started it", () => {
+	async function start(options: { logging?: boolean }) {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-security-${randomBytes(8).toString("hex")}`);
+		const createServer = vi.fn(async (_options: { securityLog?: unknown }) => ({}) as never);
+		await startHub(
+			{ port: 4100, ...options },
+			{
+				describePreviousInstallation: () => undefined,
+				getStateDir: () => stateDir,
+				getConfigDir: () => stateDir,
+				acquireHubLock: () => null as never,
+				initAuth: () => randomBytes(32).toString("hex"),
+				createOwnerToken: () => "owner-token",
+				resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+				openDatabases: () => dbs,
+				createServer,
+				startServer: async () => "https://127.0.0.1:4100",
+				addStartupCorsOrigins: () => 4100,
+				persistRuntime: () => undefined,
+				deleteRuntime: () => false,
+			},
+		);
+		dbs.close();
+		const logFile = join(stateDir, "logs", "hub.jsonl");
+		const entries = existsSync(logFile)
+			? readFileSync(logFile, "utf8")
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as Record<string, unknown>)
+			: [];
+		rmSync(stateDir, { recursive: true, force: true });
+		return { entries, createServer };
+	}
+
+	it("writes the hub start to logs/hub.jsonl without `logging`, and nothing else", async () => {
+		const { entries } = await start({});
+
+		expect(entries).toEqual([
+			expect.objectContaining({
+				lvl: "info",
+				msg: "security: hub start",
+				event: "hub.start",
+				bindAddress: "127.0.0.1",
+				port: 4100,
+				permissionsCheck: process.platform === "win32" ? "not_checked_on_windows" : "passed",
+			}),
+		]);
+	});
+
+	it("keeps the diagnostics for the entry points that ask for them", async () => {
+		const { entries } = await start({ logging: true });
+
+		expect(entries.map((entry) => entry.msg)).toEqual(["security: hub start", "hub started"]);
+	});
+
+	it("hands the same log to the server, so its routes record there too", async () => {
+		const { createServer } = await start({});
+
+		expect(createServer.mock.calls[0]?.[0].securityLog).toBeInstanceOf(SecurityLog);
+	});
 });

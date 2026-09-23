@@ -63,13 +63,15 @@ export async function registerWsRoutes(
 				client.send(msg as ProtocolMessage);
 			}
 		},
+		onForce: (force) => server.security.writeLockForced(force),
 	});
 
 	// Provide write-lock holder lookup so ATTACH_OK includes the current holder
 	sessionManager.setGetWriteLockHolder((channelId) => writeLockManager.getHolder(channelId));
 
-	server.get("/ws", { websocket: true }, (socket, _req) => {
+	server.get("/ws", { websocket: true }, (socket, req) => {
 		const clientId = generateId();
+		const sourceIp = req.ip;
 		let authenticated = !authToken; // skip auth gate when no token configured
 
 		const client: WsClient = {
@@ -90,6 +92,7 @@ export async function registerWsRoutes(
 			? setTimeout(() => {
 					if (!authenticated) {
 						server.log.warn({ clientId }, "WS connection closed: AUTH timeout");
+						server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "auth_timeout" });
 						socket.close(4001, "AUTH_TIMEOUT");
 					}
 				}, 10_000)
@@ -123,6 +126,7 @@ export async function registerWsRoutes(
 			if (!authenticated) {
 				if (msg.type !== "AUTH") {
 					server.log.warn({ clientId }, "ws-auth: first message must be AUTH");
+					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "not_auth_first" });
 					client.send({ type: "AUTH_FAIL", message: "First message must be AUTH" });
 					socket.close();
 					return;
@@ -130,23 +134,32 @@ export async function registerWsRoutes(
 
 				const authMsg = msg as AuthMessage;
 				let tokenAccepted = false;
+				let tokenId = "";
 				if (db) {
 					// DB-backed validation: checks expiry and revocation status
 					const record = validateTokenRecord(db, authMsg.token);
 					if (record) {
 						touchToken(db, record.id, ttlDays ?? 90);
 						tokenAccepted = true;
+						tokenId = record.id;
 					}
 				} else {
 					// DB is required for token validation — fail closed to prevent
 					// skipping expiry/revocation checks.
 					server.log.warn({ clientId }, "ws-auth: database unavailable");
+					server.security.authFailed({
+						via: "ws",
+						sourceIp,
+						clientId,
+						reason: "database_unavailable",
+					});
 					client.send({ type: "AUTH_FAIL", message: "Database unavailable" });
 					socket.close();
 					return;
 				}
 				if (!tokenAccepted) {
 					server.log.warn({ clientId }, "ws-auth: invalid, expired, or revoked token");
+					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "invalid_token" });
 					client.send({ type: "AUTH_FAIL", message: "Invalid token" });
 					socket.close();
 					return;
@@ -156,6 +169,7 @@ export async function registerWsRoutes(
 				clearTimeout(authTimeout ?? undefined);
 				sessionManager.addClient(client);
 				server.log.info({ clientId }, "ws-auth: accepted");
+				server.security.authSucceeded({ via: "ws", sourceIp, clientId, tokenId });
 				client.send({ type: "AUTH_OK", clientId });
 				client.send(sessionManager.getStateSnapshot());
 				return;

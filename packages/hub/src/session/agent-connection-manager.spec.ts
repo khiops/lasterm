@@ -3,10 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_AGENT_CONFIG, encodeFrame, PROTOCOL_VERSION } from "@lasterm/shared";
+import { DEFAULT_AGENT_CONFIG, encodeFrame, type Host, PROTOCOL_VERSION } from "@lasterm/shared";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
+import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { SpoolDAL } from "../storage/spool.js";
 import { AgentConnectionManager, AgentVersionMismatchError } from "./agent-connection-manager.js";
@@ -21,6 +22,7 @@ import type {
 } from "./session-context.js";
 import type { SessionManager } from "./session-manager.js";
 import type { SnapshotScheduler } from "./snapshot-scheduler.js";
+import { SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
 import { getTestSocketPath } from "./test-socket-path.js";
@@ -522,5 +524,74 @@ describe("AgentConnectionManager HELLO version check", () => {
 		expect(lifecycle.closeSession).not.toHaveBeenCalled();
 		expect(broadcaster.broadcastToAllClients).not.toHaveBeenCalled();
 		expect(ctx.agentCapabilities.get(HOST_ID)).toEqual(["multiplex", "resize", "snapshot"]);
+	});
+});
+
+describe("SSH connections are recorded in the security log", () => {
+	const SSH_HOST_ID = "01K5ZC0000000000000000H057";
+
+	function setup() {
+		const built = makeHarness();
+		const records: SecurityFields[] = [];
+		built.ctx.security = new SecurityLog((_msg, fields) => records.push(fields));
+		const host = {
+			id: SSH_HOST_ID,
+			type: "ssh",
+			label: "build box",
+			sshHost: "deploy@build.example",
+			sshAuth: "password",
+		} as unknown as Host;
+		(built.ctx.metaDal as unknown as Record<string, unknown>).getHost = vi.fn(() => host);
+		return { ...built, records, host };
+	}
+
+	it("records the connect when a session takes the connection up, with host and method", () => {
+		const { manager, records, host } = setup();
+		manager.wireAgentEvents(SSH_HOST_ID, SESSION_ID, new SshAgent(host));
+
+		expect(records).toEqual([
+			{
+				event: "ssh.connect",
+				hostId: SSH_HOST_ID,
+				hostLabel: "build box",
+				authMethod: "password",
+			},
+		]);
+	});
+
+	it("records a disconnect nobody here asked for as a lost connection", () => {
+		const { manager, records, host } = setup();
+		const agent = new SshAgent(host);
+		manager.wireAgentEvents(SSH_HOST_ID, SESSION_ID, agent);
+		agent.emit("close");
+
+		expect(records.at(-1)).toEqual({
+			event: "ssh.disconnect",
+			hostId: SSH_HOST_ID,
+			reason: "connection_lost",
+		});
+	});
+
+	it("records a disconnect the hub made as its own", async () => {
+		const { manager, records, host } = setup();
+		const agent = new SshAgent(host);
+		manager.wireAgentEvents(SSH_HOST_ID, SESSION_ID, agent);
+		await agent.close();
+		agent.emit("close");
+
+		expect(records.at(-1)).toEqual({
+			event: "ssh.disconnect",
+			hostId: SSH_HOST_ID,
+			reason: "closed_by_hub",
+		});
+	});
+
+	it("records nothing for a local agent", () => {
+		const { manager, records } = setup();
+		const agent = new EventEmitter() as unknown as LastermAgent;
+		manager.wireAgentEvents(SSH_HOST_ID, SESSION_ID, agent);
+		agent.emit("close");
+
+		expect(records).toEqual([]);
 	});
 });

@@ -743,6 +743,8 @@ The `[agent]` section configures the local daemon agent. These settings are defi
 
 The `[logging]` section is the single logging contract for both the hub and agent. The hub parses the section before initializing `HubLogger`, and passes the effective agent `level` and `format` through the same launch channel used for local daemon and remote stdio agents. For the hub, `format` governs only console/stderr rendering; the API-backing `logs/hub.jsonl` file is always JSONL when file output is enabled.
 
+Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, whatever `level` says. The rest of the hub's own log is written only by a hub started through `main.ts` (`pnpm dev`, and the daemon child outside the single executable); a hub started by `lasterm start`, which is what the desktop and the single executable run, writes the security events alone.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `level` | string | `"info"` | Hub and agent log level: trace, debug, info, warn, error |

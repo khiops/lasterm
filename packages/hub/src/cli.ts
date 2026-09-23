@@ -1193,10 +1193,22 @@ export async function cmdQuit(
 	// from the owner and loopback checks, 404 from a hub without the route, and
 	// 409, handled above. A 503 is the stopper's own result, after which the hub
 	// tears down, so it is observed below like a success.
+	const reason = typeof answer.body.message === "string" ? ` (${answer.body.message})` : "";
 	if (answer.status !== null && answer.status >= 400 && answer.status < 500) {
-		const reason = typeof answer.body.message === "string" ? ` (${answer.body.message})` : "";
 		throw new Error(
 			`Quit was refused with HTTP ${answer.status}${reason}; the hub did not begin to stop, so nothing was stopped`,
+		);
+	}
+	// The other 5xx also come before any teardown (#523). A 501 is a hub with no
+	// quit to run: no quit lifecycle, or no sessions and so no agent to stop. A
+	// 500 is a handler that threw, and /api/quit schedules the teardown in its
+	// last statement, after its answer is sent. Whatever threw, a lifecycle asked
+	// to quit before startup completed or a session layer that could not latch
+	// the quit, threw before that. Waiting would cost the whole bound and then
+	// report on a teardown nobody began.
+	if (answer.status !== null && answer.status >= 500 && answer.status !== 503) {
+		throw new Error(
+			`Quit failed with HTTP ${answer.status}${reason}; the hub did not begin to stop, so there is no teardown to wait for`,
 		);
 	}
 	if (answer.transportError !== undefined) {

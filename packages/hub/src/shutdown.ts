@@ -29,6 +29,11 @@ export interface QuitSessionController {
 
 export interface QuitResult {
 	readonly ok: boolean;
+	/**
+	 * This hub has no quit to run, so nothing was begun and no teardown follows.
+	 * /api/quit answers it with 501 rather than the stopper's 503 (#523).
+	 */
+	readonly unavailable?: true;
 	readonly message: string;
 	readonly stdout: string;
 	readonly stderr: string;
@@ -50,7 +55,13 @@ export function createQuitLifecycle(shutdownOptions: () => GracefulShutdownOptio
 	return {
 		onQuit: async (sessionManager) => {
 			if (!sessionManager) {
-				return { ok: false, message: "Quit is unavailable", stdout: "", stderr: "" };
+				return {
+					ok: false,
+					unavailable: true,
+					message: "Quit is unavailable",
+					stdout: "",
+					stderr: "",
+				};
 			}
 			coordinator ??= new QuitCoordinator(sessionManager, shutdownOptions());
 			return coordinator.beginQuit();

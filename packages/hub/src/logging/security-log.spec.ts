@@ -86,6 +86,25 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 		expect(records.every((record) => record.msg === "security: auth failure")).toBe(true);
 	});
 
+	it("auth failure: a WebSocket ended because its token stopped validating, and why", () => {
+		const { log, records } = collect();
+		log.authFailed({
+			via: "ws",
+			sourceIp: "127.0.0.1",
+			clientId: CLIENT,
+			reason: "token_no_longer_valid",
+			tokenStatus: "revoked",
+		});
+		expect(records[0]?.fields).toEqual({
+			event: "auth.failure",
+			via: "ws",
+			sourceIp: "127.0.0.1",
+			clientId: CLIENT,
+			reason: "token_no_longer_valid",
+			tokenStatus: "revoked",
+		});
+	});
+
 	it("auth failure: which way a refused token was invalid, and only for an invalid token", () => {
 		const { log, records } = collect();
 		log.authFailed({

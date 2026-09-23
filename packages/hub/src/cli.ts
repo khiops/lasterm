@@ -425,7 +425,14 @@ export async function requestHub(
 			url,
 			{
 				method,
-				headers: init.headers,
+				// The client closes the connection, never the hub. With `Connection:
+				// close`, its agent's default, the hub closes as soon as it has written
+				// the answer, and a network filter on the loopback path can then keep
+				// the last kilobytes: with Avast's Web Shield on Windows, a 900 KB
+				// answer stops about 15 KB short and never ends, whatever the server.
+				// Asked to keep the connection, the hub leaves it open, and the agent,
+				// which keeps no socket, closes it once the whole answer is in.
+				headers: { ...init.headers, Connection: "keep-alive" },
 				agent,
 				signal: init.signal,
 			},

@@ -57,6 +57,11 @@ export const HUB_TLS_HANDSHAKE_TIMEOUT_MS = 3_000;
  * Create the only TLS agent used for same-user hub requests. It withholds its
  * socket from HTTP until the completed, non-resumed TLS handshake has proved
  * possession of the runtime record's exact leaf SPKI.
+ *
+ * It keeps no socket alive, so Node asks the hub to close each connection
+ * unless the request says `Connection: keep-alive`. A request should say it:
+ * the agent then closes the connection once the answer is in, instead of the
+ * hub right after writing it, which can cost the answer its end (`requestHub`).
  */
 export function createHubTlsAgent(
 	runtime: HubTlsRuntime,

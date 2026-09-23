@@ -4191,26 +4191,33 @@ async fn relay_hub_ws_stream(
     >,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     id: u64,
-    mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    input: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut acknowledgement: tokio::sync::mpsc::Receiver<RelayFrameIdentity>,
     outstanding: Arc<Mutex<Option<RelayFrameIdentity>>>,
     mut close: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
-    let (mut writer, mut reader) = socket.split();
+    let (writer, mut reader) = socket.split();
+    // The two directions run apart. Delivering a hub frame waits for the
+    // webview's acknowledgement, up to 25 s, and while this loop waited it read
+    // nothing the webview sent: a page mounting eight terminals acknowledges
+    // slowly and sends an ATTACH and a RESIZE for each, the native input queue
+    // (two messages) overflowed, the relay was closed, and every pane's attach
+    // then timed out on "Connecting…". What the webview sends now goes out
+    // whatever the other direction is waiting for.
+    let (pongs, pong_queue) = tokio::sync::mpsc::unbounded_channel();
+    let (outbound_end, mut outbound_ended) = tokio::sync::oneshot::channel();
+    let outbound = tauri::async_runtime::spawn(async move {
+        let _ = outbound_end.send(relay_hub_ws_outbound(writer, input, pong_queue).await);
+    });
     let mut next_sequence = 1_u64;
     loop {
         tokio::select! {
             _ = close.recv() => break,
-            input = input.recv() => {
-                let Some(input) = input else { break };
-                if let Err(error) = write_hub_ws_message(
-                    &mut writer,
-                    tokio_tungstenite::tungstenite::Message::Binary(input.into()),
-                    "write",
-                ).await {
+            ended = &mut outbound_ended => {
+                if let Ok(Err(error)) = ended {
                     send_hub_ws_event(&channel, "transport_error", Some(error));
-                    break;
                 }
+                break;
             }
             received = reader.next() => match received {
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
@@ -4224,14 +4231,9 @@ async fn relay_hub_ws_stream(
                     }
                 }
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(payload))) => {
-                    if let Err(error) = write_hub_ws_message(
-                        &mut writer,
-                        tokio_tungstenite::tungstenite::Message::Pong(payload),
-                        "pong",
-                    ).await {
-                        send_hub_ws_event(&channel, "transport_error", Some(error));
-                        break;
-                    }
+                    // The writer belongs to the outbound task; a closed queue
+                    // means it has ended, and its end is reported above.
+                    let _ = pongs.send(payload);
                 }
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
                     send_hub_ws_event(&channel, "closed", None);
@@ -4246,6 +4248,46 @@ async fn relay_hub_ws_stream(
                     send_hub_ws_event(&channel, "transport_error", Some("pinned hub WebSocket ended without a close frame".to_string()));
                     break;
                 }
+            }
+        }
+    }
+    // The socket's write half goes with the task that owns it: dropping both
+    // halves is what closes the connection the hub sees.
+    outbound.abort();
+}
+
+/// What the webview sends to the hub, and the pongs the reading side owes.
+///
+/// Ends with an error when a write fails, and quietly when the webview's side
+/// of the queue is gone — which is the relay being taken down.
+async fn relay_hub_ws_outbound<S>(
+    mut writer: S,
+    mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut pongs: tokio::sync::mpsc::UnboundedReceiver<tokio_tungstenite::tungstenite::Bytes>,
+) -> Result<(), String>
+where
+    S: Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    loop {
+        tokio::select! {
+            message = input.recv() => {
+                let Some(message) = message else { return Ok(()) };
+                write_hub_ws_message(
+                    &mut writer,
+                    tokio_tungstenite::tungstenite::Message::Binary(message.into()),
+                    "write",
+                )
+                .await?;
+            }
+            payload = pongs.recv() => {
+                let Some(payload) = payload else { return Ok(()) };
+                write_hub_ws_message(
+                    &mut writer,
+                    tokio_tungstenite::tungstenite::Message::Pong(payload),
+                    "pong",
+                )
+                .await?;
             }
         }
     }
@@ -8469,6 +8511,75 @@ mod tests {
             tauri::async_runtime::block_on(task).unwrap(),
             HubWsRelayEnd::Closed
         ));
+    }
+
+    /// A page busy mounting its terminals acknowledges late, and sends an
+    /// ATTACH and a RESIZE for each meanwhile. The relay used to stop reading
+    /// what the page sent while it waited for that acknowledgement, the input
+    /// queue overflowed, and the relay was closed under every pending attach.
+    #[test]
+    fn what_the_webview_sends_reaches_the_hub_while_a_frame_awaits_its_acknowledgement() {
+        tauri::async_runtime::block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let hub = tauri::async_runtime::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                // One frame the webview will never acknowledge.
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Binary(vec![7; 16].into()))
+                    .await
+                    .unwrap();
+                let mut received = Vec::new();
+                while received.len() < 5 {
+                    match socket.next().await {
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
+                            received.push(bytes.to_vec());
+                        }
+                        Some(Ok(_)) => {}
+                        _ => break,
+                    }
+                }
+                received
+            });
+
+            let (client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .unwrap();
+            let (delivered_sender, delivered) = mpsc::channel();
+            let channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody> =
+                tauri::ipc::Channel::new(move |_| {
+                    let _ = delivered_sender.send(());
+                    Ok(())
+                });
+            let (input_sender, input) = tokio::sync::mpsc::channel(HUB_WS_INPUT_QUEUE_MESSAGES);
+            let (_ack_sender, acknowledgement) = tokio::sync::mpsc::channel(1);
+            let (_close_sender, close) = tokio::sync::mpsc::unbounded_channel();
+            let relay = tauri::async_runtime::spawn(relay_hub_ws_stream(
+                client,
+                channel,
+                41,
+                input,
+                acknowledgement,
+                Arc::new(Mutex::new(None)),
+                close,
+            ));
+
+            // The hub's frame is with the webview, unacknowledged.
+            delivered.recv_timeout(Duration::from_secs(2)).unwrap();
+            for n in 0..5_u8 {
+                tokio::time::timeout(Duration::from_secs(2), input_sender.send(vec![n]))
+                    .await
+                    .expect("the relay stopped taking what the webview sends")
+                    .unwrap();
+            }
+            let received = tokio::time::timeout(Duration::from_secs(2), hub)
+                .await
+                .expect("the hub never received what the webview sent")
+                .unwrap();
+            assert_eq!(received, (0..5_u8).map(|n| vec![n]).collect::<Vec<_>>());
+            relay.abort();
+        });
     }
 
     #[test]

@@ -86,12 +86,16 @@ async function type(text: string): Promise<void> {
 }
 
 /**
- * Type a command whose answer differs from its own text, so that seeing the
- * answer proves the shell ran it rather than echoed the keys: `$((6*7))`
- * comes back as 42.
+ * Type a command whose answer is not in its own text, so that seeing the
+ * answer proves the shell ran it rather than echoed the keys: the command
+ * holds `label` and `42` apart, only the shell joins them.
+ *
+ * No character is typed twice in a row. WebKitGTK's driver dropped one of each
+ * doubled shifted key — `$((6*7))` arrived as `$(6*7)` — where the app itself,
+ * fed the same keys one by one, received them all.
  */
 async function runAndExpect(label: string): Promise<void> {
-	await type(`echo ${label}-$((6*7))`);
+	await type(`printf %s-%s ${label} 42`);
 	await waitFor(
 		async () => (await paneText()).includes(`${label}-42`),
 		ANSWER_MS,

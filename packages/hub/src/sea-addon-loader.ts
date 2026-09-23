@@ -5,7 +5,7 @@
  * Hub-specific entry point: lists the addons embedded in the hub SEA binary
  * and calls initSeaAddons() once at startup.
  *
- * Shared helpers (detectSea, getAddonCacheDir, extractAddonToDir, dlopenAddon,
+ * Shared helpers (detectSea, getAddonCacheDir, openCachedAddon, loadCachedAddon,
  * loadNativeAddon) live in @lasterm/shared.
  *
  * Must be called via initSeaAddons() BEFORE any module that imports
@@ -25,9 +25,10 @@ import {
 export {
 	detectSea,
 	dlopenAddon,
-	extractAddonToDir,
 	getAddonCacheDir,
+	loadCachedAddon,
 	loadNativeAddon,
+	openCachedAddon,
 	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 

@@ -70,8 +70,10 @@ export interface HubStartupDependencies {
 	readonly createServer: typeof createServer;
 	readonly startServer: typeof startServer;
 	readonly addStartupCorsOrigins: typeof addStartupCorsOrigins;
-	readonly persistRuntime: typeof persistRuntime;
-	readonly deleteRuntime: typeof deleteRuntime;
+	// Declared with the directory required, where the defaults leave it optional:
+	// startup always says which directory it locked.
+	readonly persistRuntime: (runtime: RuntimeInfo, stateDir: string) => void;
+	readonly deleteRuntime: (runtime: RuntimeInfo, stateDir: string) => boolean;
 }
 
 const defaultDependencies: HubStartupDependencies = {
@@ -116,10 +118,15 @@ export async function startHub(
 	const previous = dependencies.describePreviousInstallation();
 	if (previous !== undefined) throw new PreviousInstallationError(previous);
 
-	const stateDir = dependencies.getStateDir();
+	// Resolved once and carried from here on: the lock, the databases, the TLS
+	// identity and the runtime record must all be in the directory locked, and a
+	// second lookup after the awaits below could land elsewhere — a relative path
+	// under another working directory, or an environment changed meanwhile —
+	// publishing this hub where it holds no lock.
+	const stateDir = path.resolve(dependencies.getStateDir());
 	dependencies.acquireHubLock(stateDir);
 
-	const configDir = dependencies.getConfigDir();
+	const configDir = path.resolve(dependencies.getConfigDir());
 	// Owner-only, and exactly: a umask of 002 would otherwise give 0775 and the
 	// validator below refuses that, while a umask carrying owner bits would give
 	// mode 000 and the validator would accept a directory the hub cannot use.
@@ -139,17 +146,15 @@ export async function startHub(
 	// serves — never did, so a shipped hub used to write no file at all and its
 	// security events would have gone nowhere. Turning the whole log on there would
 	// have changed far more than these events; this changes only them.
-	const hubLogsDir = path.join(stateDir, "logs");
+	const logsDir = path.join(stateDir, "logs");
 	const hubLogConfig = new ConfigResolver(null as never);
 	hubLogConfig.loadFromFile(configDir);
-	const hubLog = new HubLogger(hubLogsDir, hubLogConfig.logConfig);
+	const hubLog = new HubLogger(logsDir, hubLogConfig.logConfig);
 	const securityLog = new SecurityLog((msg, fields) => hubLog.logAlways("info", msg, fields));
 
 	let hubLogger: HubLogger | undefined;
 	let logConfig: ConfigResolver | undefined;
-	let logsDir: string | undefined;
 	if (options.logging) {
-		logsDir = hubLogsDir;
 		mkdirSync(path.join(logsDir, "channels"), { recursive: true });
 		logConfig = hubLogConfig;
 		hubLogger = hubLog;
@@ -175,7 +180,12 @@ export async function startHub(
 		dependencies.sweepNonPrimaryTokens(databases.meta);
 		const quit = createQuitLifecycle(() => {
 			if (!server || !runtime) throw new Error("hub shutdown requested before startup completed");
-			return { server, dbManager: databases, runtime, deleteRuntime: dependencies.deleteRuntime };
+			return {
+				server,
+				dbManager: databases,
+				runtime,
+				deleteRuntime: (published) => dependencies.deleteRuntime(published, stateDir),
+			};
 		});
 		server = await dependencies.createServer({
 			...(options.port !== undefined ? { port: options.port } : {}),
@@ -184,8 +194,10 @@ export async function startHub(
 			ownerToken,
 			dbManager: databases,
 			securityLog,
+			// Otherwise the server looks both up again for itself.
+			configDir,
+			logsDir,
 			...(hubLogger ? { hubLogger } : {}),
-			...(logsDir ? { logsDir } : {}),
 			onShutdown: () => quit.shutdown(),
 			onQuit: quit.onQuit,
 			onQuitDelivered: quit.onQuitDelivered,
@@ -202,7 +214,7 @@ export async function startHub(
 			ownerToken,
 			spki: tlsIdentity.spki,
 		};
-		dependencies.persistRuntime(runtime);
+		dependencies.persistRuntime(runtime, stateDir);
 		runtimePublished = true;
 
 		securityLog.hubStarted({
@@ -213,7 +225,7 @@ export async function startHub(
 			permissionsCheck: process.platform === "win32" ? "not_checked_on_windows" : "passed",
 		});
 		hubLogger?.log("info", "hub started", { port: actualPort, address, configDir });
-		if (logConfig && logsDir) {
+		if (logConfig) {
 			runLogGc(logsDir, logConfig.logConfig.maxAgeDays, new Set<string>()).catch((err) => {
 				hubLogger?.log("warn", "log GC failed", {
 					err: err instanceof Error ? err.message : String(err),
@@ -259,7 +271,7 @@ export async function startHub(
 		}
 		if (runtimePublished && runtime) {
 			try {
-				dependencies.deleteRuntime(runtime);
+				dependencies.deleteRuntime(runtime, stateDir);
 			} catch {
 				// Preserve the startup error; the lock still prevents a second hub.
 			}

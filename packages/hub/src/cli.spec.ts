@@ -1111,6 +1111,196 @@ describe("runtime state", () => {
 		expect(observed).toEqual(["waited"]);
 	});
 
+	const quitTarget = () => ({
+		kind: "present" as const,
+		runtime: runtimeRecord({ instanceId: "target" }),
+	});
+	const hubStillThere = "Hub teardown was not confirmed within 15000ms: runtime record remains";
+	const agentStopTimedOut = () =>
+		new Response(JSON.stringify({ ok: false, message: "Agent stop timed out after 5000ms" }), {
+			status: 503,
+		});
+
+	// Mutation: keep only the request's failure once the response is lost, and a
+	// hub that is still there fifteen seconds later is reported exactly like one
+	// that went — the case an updater must not proceed on.
+	it("reports a hub that did not go when the quit response never arrives", async () => {
+		const failure = await cmdQuit({
+			loadRuntime: quitTarget,
+			isPidAlive: () => true,
+			fetch: (async () => {
+				throw new Error("socket hang up");
+			}) as typeof fetch,
+			waitForHubQuit: async () => {
+				throw new Error(hubStillThere);
+			},
+			writeError: () => {},
+		}).catch((error: unknown) => error);
+
+		expect(failure).toBeInstanceOf(Error);
+		const message = (failure as Error).message;
+		expect(message).toContain("socket hang up");
+		expect(message).toContain("whether the local agent stopped is unknown");
+		expect(message).toContain(hubStillThere);
+	});
+
+	it("says the hub went when the quit response was lost but teardown was confirmed", async () => {
+		await expect(
+			cmdQuit({
+				loadRuntime: quitTarget,
+				isPidAlive: () => true,
+				fetch: (async () => {
+					throw new Error("socket hang up");
+				}) as typeof fetch,
+				waitForHubQuit: async () => {},
+				writeError: () => {},
+			}),
+		).rejects.toThrow(/whether the local agent stopped is unknown\. The hub was confirmed gone/);
+	});
+
+	// The forced retry commits the hub exactly as the first request would have, so
+	// losing its answer must lead to the same observation rather than an error
+	// that never looked.
+	it("observes teardown when the forced quit's response never arrives", async () => {
+		const observed: string[] = [];
+		let requests = 0;
+		await expect(
+			cmdQuit({
+				loadRuntime: quitTarget,
+				isPidAlive: () => true,
+				fetch: (async () => {
+					requests++;
+					if (requests === 1) return new Response(JSON.stringify({ others: 1 }), { status: 409 });
+					throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+				}) as typeof fetch,
+				isInteractive: () => true,
+				confirmQuit: async () => true,
+				waitForHubQuit: async (target) => {
+					observed.push(target.instanceId);
+				},
+				writeError: () => {},
+			}),
+		).rejects.toThrow(/due to timeout.*The hub was confirmed gone/);
+		expect(requests).toBe(2);
+		expect(observed).toEqual(["target"]);
+	});
+
+	// Mutation: throw the stopper's message and drop what the wait reported, and
+	// "the agent was not confirmed stopped" arrives without "and the hub did not
+	// go either" — the half that matters more to a caller about to replace files.
+	it.each([
+		["did not disappear", hubStillThere],
+		["was replaced", "Hub quit target exited, but runtime.json now belongs to a replacement hub"],
+	])("reports a hub that %s alongside a failed agent stop", async (_case, teardown) => {
+		const failure = await cmdQuit({
+			loadRuntime: quitTarget,
+			isPidAlive: () => true,
+			fetch: (async () => agentStopTimedOut()) as typeof fetch,
+			waitForHubQuit: async () => {
+				throw new Error(teardown);
+			},
+		}).catch((error: unknown) => error);
+
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toBe(`Agent stop timed out after 5000ms. ${teardown}`);
+	});
+
+	it("says the hub went when only the agent stop failed", async () => {
+		await expect(
+			cmdQuit({
+				loadRuntime: quitTarget,
+				isPidAlive: () => true,
+				fetch: (async () => agentStopTimedOut()) as typeof fetch,
+				waitForHubQuit: async () => {},
+			}),
+		).rejects.toThrow("Agent stop timed out after 5000ms. The hub was confirmed gone");
+	});
+
+	it("reports only the hub when the agent stopped but the hub did not go", async () => {
+		const output: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => output.push(line));
+		const failure = await cmdQuit({
+			loadRuntime: quitTarget,
+			isPidAlive: () => true,
+			fetch: (async () =>
+				new Response(
+					JSON.stringify({ ok: true, message: "Local agent stopped; hub is shutting down" }),
+				)) as typeof fetch,
+			waitForHubQuit: async () => {
+				throw new Error(hubStillThere);
+			},
+		})
+			.catch((error: unknown) => error)
+			.finally(() => log.mockRestore());
+
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toBe(hubStillThere);
+		expect(output).toEqual([]);
+	});
+
+	// Mutation: take the deadline from Date.now(), and a clock set forward during
+	// the wait ends it at once with a false timeout for a hub that was about to go.
+	it("waitForHubQuit is not cut short by a wall clock set forward", async () => {
+		const start = Date.now();
+		let clockMoved = false;
+		const clock = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => (clockMoved ? start + 60 * 60_000 : start));
+		let reads = 0;
+		try {
+			await waitForHubQuit(
+				{ pid: 123, instanceId: "target" },
+				{
+					loadRuntime: () => {
+						reads++;
+						clockMoved = true;
+						return reads === 1 ? quitTarget() : { kind: "absent" };
+					},
+					isPidAlive: () => false,
+					sleep: async () => {},
+				},
+			);
+		} finally {
+			clock.mockRestore();
+		}
+		expect(reads).toBeGreaterThan(1);
+	});
+
+	// Mutation: take the deadline from Date.now(), and a clock set back during the
+	// wait stretches it by as much — an hour of polling at 50 ms is some 72,000
+	// more reads before quit answers at all.
+	it("waitForHubQuit still ends on time when the wall clock is set back", async () => {
+		const start = Date.now();
+		let clockMoved = false;
+		const clock = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => (clockMoved ? start - 60 * 60_000 : start));
+		let reads = 0;
+		try {
+			await expect(
+				waitForHubQuit(
+					{ pid: 123, instanceId: "target" },
+					{
+						loadRuntime: () => {
+							reads++;
+							clockMoved = true;
+							// Stands in for the hour the set-back clock would add: a
+							// deadline that has already passed must not get this far.
+							if (reads > 100) throw new Error("still polling after the deadline passed");
+							return quitTarget();
+						},
+						isPidAlive: () => true,
+						sleep: async () => {},
+						timeoutMs: 0,
+					},
+				),
+			).rejects.toThrow("Hub teardown was not confirmed within 0ms: runtime record remains");
+		} finally {
+			clock.mockRestore();
+		}
+		expect(reads).toBe(1);
+	});
+
 	it("reports connected clients and refuses to override quit when non-interactive", async () => {
 		const errors: string[] = [];
 		const request = vi.fn(async () => new Response(JSON.stringify({ others: 2 }), { status: 409 }));

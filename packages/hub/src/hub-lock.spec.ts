@@ -190,10 +190,38 @@ describe.sequential("hub startup lock", () => {
 			LASTERM_PORT: String(port),
 		});
 		try {
-			await waitForPort(port, child);
+			// The record it replaces the unreadable one with names where it listens.
+			await waitForListening(stateDir, child);
 		} finally {
 			child.kill("SIGTERM");
 			await waitForExit(child);
+		}
+	});
+
+	// What made the test above fail once under the full suite, reproduced on
+	// purpose: the port asked for is taken before the hub binds it, so the hub
+	// listens on the next one. Polling the port asked for then waits out the
+	// deadline — or, as here where a listener holds it, reaches the wrong process
+	// and passes for the wrong reason.
+	it("is found where it listens when the port it asked for was taken", {
+		timeout: HUB_PROCESS_TIMEOUT_MS,
+	}, async () => {
+		const stateRoot = makeStateDir();
+		const stateDir = path.join(stateRoot, "lasterm");
+		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+		const squatter = await listen();
+		const taken = (squatter.address() as net.AddressInfo).port;
+		const child = spawnMain({
+			...hermeticRootsEnv(stateRoot),
+			LASTERM_PORT: String(taken),
+		});
+		try {
+			const port = await waitForListening(stateDir, child);
+			expect(port).not.toBe(taken);
+		} finally {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+			await new Promise<void>((resolve) => squatter.close(() => resolve()));
 		}
 	});
 
@@ -260,7 +288,8 @@ function spawnMain(extraEnv: NodeJS.ProcessEnv): ChildProcess {
 	return spawn(process.execPath, ["--import", "tsx", "packages/hub/src/main.ts"], {
 		cwd: path.resolve(import.meta.dirname, "../../.."),
 		env: { ...process.env, ...extraEnv },
-		stdio: ["ignore", "ignore", "pipe"],
+		// stdout too: it is where the hub says it moved to another port.
+		stdio: ["ignore", "pipe", "pipe"],
 	});
 }
 
@@ -271,33 +300,64 @@ async function unusedPort(): Promise<number> {
 	return port;
 }
 
-function waitForPort(port: number, child: ChildProcess): Promise<void> {
+/**
+ * Wait for the hub to listen where it says it does.
+ *
+ * The port a test asks for is only where the hub starts looking: one taken
+ * between `unusedPort()` closing it and the hub binding it — under the full
+ * parallel suite, any outgoing connection can be handed it — makes the hub move
+ * up to the next free one (zero_conf), and a test polling the port it asked for
+ * then waits out its deadline with nothing on stderr to say why. The runtime
+ * record is the hub's own statement of where it listens, written once it does.
+ */
+function waitForListening(stateDir: string, child: ChildProcess): Promise<number> {
 	return new Promise((resolve, reject) => {
-		let stderr = "";
+		let output = "";
 		let settled = false;
 		let timeout: NodeJS.Timeout | undefined;
-		const finish = (error?: Error): void => {
+		const finish = (error?: Error, port?: number): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeout);
 			child.off("exit", onExit);
 			if (error) reject(error);
-			else resolve();
+			else resolve(port as number);
 		};
-		const onExit = (code: number | null) => finish(new Error(`hub exited ${code}: ${stderr}`));
+		const tail = () => output.slice(-2_000);
+		const onExit = (code: number | null) => finish(new Error(`hub exited ${code}: ${tail()}`));
 		timeout = setTimeout(
-			() => finish(new Error(`hub did not listen: ${stderr}`)),
+			() => finish(new Error(`hub did not listen within ${HUB_LISTEN_TIMEOUT_MS} ms: ${tail()}`)),
 			HUB_LISTEN_TIMEOUT_MS,
 		);
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
-		});
+		const collect = (chunk: Buffer) => {
+			output += chunk.toString();
+		};
+		child.stdout?.on("data", collect);
+		child.stderr?.on("data", collect);
+		const publishedPort = (): number | undefined => {
+			try {
+				const record = JSON.parse(readFileSync(path.join(stateDir, "runtime.json"), "utf8")) as {
+					pid?: unknown;
+					port?: unknown;
+				};
+				return record.pid === child.pid && typeof record.port === "number"
+					? record.port
+					: undefined;
+			} catch {
+				return undefined;
+			}
+		};
 		const poll = () => {
 			if (settled) return;
+			const port = publishedPort();
+			if (port === undefined) {
+				setTimeout(poll, 20);
+				return;
+			}
 			const socket = net.connect(port, "127.0.0.1");
 			socket.once("connect", () => {
 				socket.destroy();
-				finish();
+				finish(undefined, port);
 			});
 			socket.once("error", () => {
 				if (!settled) setTimeout(poll, 20);

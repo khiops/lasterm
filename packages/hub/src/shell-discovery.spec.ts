@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,6 +9,7 @@ import {
 	parseCommandLine,
 	parseWindowsTerminalSettings,
 	probeWslDistributions,
+	seedShellProfiles,
 } from "./shell-discovery.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -30,11 +31,32 @@ vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:child_process")>();
 	return {
 		...actual,
-		execFileSync: vi.fn(() => {
-			throw new Error("not mocked");
-		}),
+		execFile: vi.fn(
+			(_file: string, _args: string[], _options: unknown, callback: ProbeCallback) => {
+				callback(new Error("not mocked"), "");
+			},
+		),
 	};
 });
+
+type ProbeCallback = (error: Error | null, stdout: string) => void;
+
+/** Answer every probe the discovery runs: what it prints, or the error it fails with. */
+async function answerProbes(
+	answer: (file: string, args: string[]) => string | Error,
+): Promise<void> {
+	const { execFile } = vi.mocked(await import("node:child_process"));
+	execFile.mockImplementation(((
+		file: string,
+		args: string[],
+		_options: unknown,
+		callback: ProbeCallback,
+	) => {
+		const result = answer(file, args);
+		if (result instanceof Error) callback(result, "");
+		else callback(null, result);
+	}) as unknown as typeof import("node:child_process").execFile);
+}
 
 const mockExistsSync = vi.mocked(existsSync);
 const mockReadFileSync = vi.mocked(readFileSync);
@@ -294,30 +316,25 @@ describe("findWindowsTerminalSettingsPath", () => {
 // ─── probeWslDistributions ────────────────────────────────────────────────────
 
 describe("probeWslDistributions", () => {
-	it("returns empty array when execFileSync throws", async () => {
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockImplementation(() => {
-			throw new Error("wsl not installed");
-		});
+	it("returns empty array when the probe fails", async () => {
+		await answerProbes(() => new Error("wsl not installed"));
 
-		const result = probeWslDistributions("C:\\Windows\\System32\\wsl.exe");
+		const result = await probeWslDistributions("C:\\Windows\\System32\\wsl.exe");
 		expect(result).toEqual([]);
 	});
 
 	it("parses UTF-16LE output and splits by newline", async () => {
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		// Simulate UTF-16LE output (as a regular string since execFileSync returns string)
-		execFileSync.mockReturnValue("Ubuntu\r\nDebian\r\n");
+		// Simulate UTF-16LE output (as a regular string: the probe asks for it decoded)
+		await answerProbes(() => "Ubuntu\r\nDebian\r\n");
 
-		const result = probeWslDistributions("C:\\Windows\\System32\\wsl.exe");
+		const result = await probeWslDistributions("C:\\Windows\\System32\\wsl.exe");
 		expect(result).toEqual(["Ubuntu", "Debian"]);
 	});
 
 	it("filters out empty lines from wsl output", async () => {
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockReturnValue("Ubuntu\r\n\r\nDebian\r\n");
+		await answerProbes(() => "Ubuntu\r\n\r\nDebian\r\n");
 
-		const result = probeWslDistributions("C:\\Windows\\System32\\wsl.exe");
+		const result = await probeWslDistributions("C:\\Windows\\System32\\wsl.exe");
 		expect(result).toEqual(["Ubuntu", "Debian"]);
 	});
 });
@@ -424,12 +441,9 @@ describe("discoverWindowsShells", () => {
 
 	it("always includes Command Prompt via COMSPEC", async () => {
 		mockExistsSync.mockReturnValue(false);
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockImplementation(() => {
-			throw new Error("not found");
-		});
+		await answerProbes(() => new Error("not found"));
 
-		const shells = discoverWindowsShells();
+		const shells = await discoverWindowsShells();
 		const cmd = shells.find((s) => s.label === "Command Prompt");
 		expect(cmd).toBeDefined();
 		expect(cmd?.shell).toBe("C:\\Windows\\System32\\cmd.exe");
@@ -438,12 +452,9 @@ describe("discoverWindowsShells", () => {
 	it("includes Windows PowerShell from System32 path when it exists", async () => {
 		const ps1Path = join("C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 		mockExistsSync.mockImplementation((p) => p === ps1Path);
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockImplementation(() => {
-			throw new Error("not found");
-		});
+		await answerProbes(() => new Error("not found"));
 
-		const shells = discoverWindowsShells();
+		const shells = await discoverWindowsShells();
 		const ps = shells.find((s) => s.label === "Windows PowerShell");
 		expect(ps).toBeDefined();
 		expect(ps?.shell).toBe(ps1Path);
@@ -452,12 +463,9 @@ describe("discoverWindowsShells", () => {
 	it("includes Git Bash when installed in Program Files", async () => {
 		const gitBashPath = join("C:\\Program Files", "Git", "bin", "bash.exe");
 		mockExistsSync.mockImplementation((p) => p === gitBashPath);
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockImplementation(() => {
-			throw new Error("not found");
-		});
+		await answerProbes(() => new Error("not found"));
 
-		const shells = discoverWindowsShells();
+		const shells = await discoverWindowsShells();
 		const bash = shells.find((s) => s.label === "Git Bash");
 		expect(bash).toBeDefined();
 		expect(bash?.args).toEqual(["--login", "-i"]);
@@ -466,10 +474,12 @@ describe("discoverWindowsShells", () => {
 	it("includes WSL distros when wsl.exe exists and returns distros", async () => {
 		const wslPath = join("C:\\Windows", "System32", "wsl.exe");
 		mockExistsSync.mockImplementation((p) => p === wslPath);
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockReturnValue("Ubuntu\r\nDebian\r\n");
+		// Only wsl.exe answers: where.exe finds nothing on PATH.
+		await answerProbes((file) =>
+			file.endsWith("wsl.exe") ? "Ubuntu\r\nDebian\r\n" : new Error("not found"),
+		);
 
-		const shells = discoverWindowsShells();
+		const shells = await discoverWindowsShells();
 		const ubuntu = shells.find((s) => s.label === "WSL: Ubuntu");
 		const debian = shells.find((s) => s.label === "WSL: Debian");
 		expect(ubuntu).toBeDefined();
@@ -479,14 +489,88 @@ describe("discoverWindowsShells", () => {
 
 	it("all discovered shells have supportedOs=windows", async () => {
 		mockExistsSync.mockReturnValue(false);
-		const { execFileSync } = vi.mocked(await import("node:child_process"));
-		execFileSync.mockImplementation(() => {
-			throw new Error("not found");
-		});
+		await answerProbes(() => new Error("not found"));
 
-		const shells = discoverWindowsShells();
+		const shells = await discoverWindowsShells();
 		for (const s of shells) {
 			expect(s.supportedOs).toBe("windows");
 		}
 	});
+});
+
+// ─── Probing without holding the hub ─────────────────────────────────────────
+//
+// Discovery ran `execFileSync` inside an `async` function, which is synchronous
+// up to its first `await`: a hub's first start stood still for as long as
+// `where.exe` and `wsl.exe` took — two seconds alone, twenty and more on a
+// loaded machine, long enough for a client, or a test, to give up on it.
+
+describe("shell discovery off the event loop", () => {
+	beforeEach(() => {
+		vi.stubEnv("SystemRoot", "C:Windows");
+		vi.stubEnv("COMSPEC", "C:WindowsSystem32cmd.exe");
+		mockExistsSync.mockReturnValue(false);
+	});
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.mocked(existsSync).mockRestore();
+	});
+
+	it("starts every probe at once and answers only when they have", async () => {
+		const pending: ProbeCallback[] = [];
+		const { execFile } = vi.mocked(await import("node:child_process"));
+		execFile.mockImplementation(((
+			_file: string,
+			_args: string[],
+			_options: unknown,
+			callback: ProbeCallback,
+		) => {
+			pending.push(callback);
+		}) as unknown as typeof import("node:child_process").execFile);
+
+		let done = false;
+		const discovery = discoverWindowsShells().then((shells) => {
+			done = true;
+			return shells;
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+
+		// pwsh, powershell and bash on PATH, and where wsl.exe is: together.
+		expect(pending).toHaveLength(4);
+		expect(done).toBe(false);
+
+		for (const callback of pending.splice(0)) callback(new Error("not found"), "");
+		const shells = await discovery;
+		expect(shells.map((shell) => shell.label)).toContain("Command Prompt");
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"seeds nothing when someone made a profile while it was probing",
+		async () => {
+			// The migrations read their SQL from disk, through the very functions
+			// earlier tests in this file answer for: give them the real ones back.
+			const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+			vi.mocked(readFileSync).mockImplementation(fs.readFileSync);
+			vi.mocked(readdirSync).mockImplementation(fs.readdirSync);
+			mockExistsSync.mockImplementation(fs.existsSync);
+			const dbs = openTestDatabases();
+			mockExistsSync.mockReturnValue(false);
+			try {
+				const dal = new MetaDAL(dbs.meta);
+				await answerProbes(() => {
+					// The hub serves while discovery runs: a profile can appear.
+					if (dal.countLaunchProfiles() === 0) dal.createLaunchProfile(makeProfile());
+					return new Error("not found");
+				});
+
+				const result = await seedShellProfiles(dal);
+
+				expect(result.profilesCreated).toBe(0);
+				expect(dal.countLaunchProfiles()).toBe(1);
+			} finally {
+				dbs.close();
+			}
+		},
+	);
 });

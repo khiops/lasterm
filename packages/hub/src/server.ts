@@ -399,17 +399,23 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		// seedShellProfiles is idempotent — safe to call on every startup.
 		// Skipped when skipShellDiscovery is set (e.g. in tests).
 		if (!options?.skipShellDiscovery) {
-			void seedShellProfiles(metaDal).then((result) => {
-				if (result.profilesCreated > 0) {
-					server.log.info(
-						{
-							profilesCreated: result.profilesCreated,
-							shells: result.profiles.map((p) => p.shell),
-						},
-						"auto-detected and created launch profiles for available shells",
-					);
-				}
-			});
+			void seedShellProfiles(metaDal)
+				.then((result) => {
+					if (result.profilesCreated > 0) {
+						server.log.info(
+							{
+								profilesCreated: result.profilesCreated,
+								shells: result.profiles.map((p) => p.shell),
+							},
+							"auto-detected and created launch profiles for available shells",
+						);
+					}
+				})
+				// The probes now outlast the moment they were started in: a hub
+				// stopped meanwhile has closed the database they write to.
+				.catch((err: unknown) => {
+					server.log.warn({ err }, "shell discovery did not complete");
+				});
 		}
 
 		await activeSessionManager.startup();

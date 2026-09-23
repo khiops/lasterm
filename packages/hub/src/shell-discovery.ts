@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { LaunchProfile } from "@lasterm/shared";
@@ -32,15 +32,25 @@ export interface ShellDiscoveryResult {
  *   4. Git Bash (bash.exe) — if Git for Windows is installed
  *   5. WSL distributions — one entry per distro via wsl.exe
  */
-export function discoverWindowsShells(): DiscoveredShell[] {
+export async function discoverWindowsShells(): Promise<DiscoveredShell[]> {
 	const shells: DiscoveredShell[] = [];
+
+	// Every probe is a process, and on a loaded machine each can take seconds:
+	// they run together, and off the event loop the hub is starting on.
+	const wslExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wsl.exe");
+	const [pwshFromPath, powershellFromPath, gitBashFromPath, wslPath] = await Promise.all([
+		resolveFromPath("pwsh.exe"),
+		resolveFromPath("powershell.exe"),
+		resolveFromPath("bash.exe"),
+		existsSync(wslExe) ? Promise.resolve(wslExe) : resolveFromPath("wsl.exe"),
+	]);
+	const wslDistros = wslPath ? await probeWslDistributions(wslPath) : [];
 
 	// PowerShell Core (pwsh.exe) — modern, cross-platform
 	const pwshPaths = [
 		join(process.env.ProgramFiles ?? "C:\\Program Files", "PowerShell", "7", "pwsh.exe"),
 		join(process.env.ProgramFiles ?? "C:\\Program Files", "PowerShell", "pwsh.exe"),
 	];
-	const pwshFromPath = resolveFromPath("pwsh.exe");
 	const pwsh = pwshFromPath ?? pwshPaths.find((p) => existsSync(p)) ?? null;
 	if (pwsh) {
 		shells.push({
@@ -59,7 +69,6 @@ export function discoverWindowsShells(): DiscoveredShell[] {
 		"v1.0",
 		"powershell.exe",
 	);
-	const powershellFromPath = resolveFromPath("powershell.exe");
 	const powershell = existsSync(powershellFixed) ? powershellFixed : (powershellFromPath ?? null);
 	if (powershell) {
 		shells.push({
@@ -87,7 +96,6 @@ export function discoverWindowsShells(): DiscoveredShell[] {
 		join("C:\\Program Files (x86)", "Git", "bin", "bash.exe"),
 		...(localAppData ? [join(localAppData, "Programs", "Git", "bin", "bash.exe")] : []),
 	];
-	const gitBashFromPath = resolveFromPath("bash.exe");
 	const gitBash = bashPaths.find((p) => existsSync(p)) ?? gitBashFromPath ?? null;
 	if (gitBash) {
 		shells.push({
@@ -100,10 +108,7 @@ export function discoverWindowsShells(): DiscoveredShell[] {
 	}
 
 	// WSL distributions — one profile per distro, using wsl.exe
-	const wslExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wsl.exe");
-	const wslPath = existsSync(wslExe) ? wslExe : (resolveFromPath("wsl.exe") ?? null);
 	if (wslPath) {
-		const wslDistros = probeWslDistributions(wslPath);
 		for (const distro of wslDistros) {
 			shells.push({
 				label: `WSL: ${distro}`,
@@ -196,7 +201,15 @@ export async function seedShellProfiles(metaDal: MetaDAL): Promise<ShellDiscover
 		return { profilesCreated: 0, profiles: [] };
 	}
 
-	const discovered = process.platform === "win32" ? discoverWindowsShells() : discoverUnixShells();
+	const discovered =
+		process.platform === "win32" ? await discoverWindowsShells() : discoverUnixShells();
+
+	// The probes took time, and the hub was serving meanwhile: a profile made in
+	// that window means someone has already chosen, and seeding now would
+	// surround their choice with a dozen they did not ask for.
+	if (metaDal.countLaunchProfiles() > 0) {
+		return { profilesCreated: 0, profiles: [] };
+	}
 
 	if (discovered.length === 0) {
 		return { profilesCreated: 0, profiles: [] };
@@ -381,36 +394,49 @@ export function importWindowsTerminalProfiles(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
+ * Run a probe and return what it printed, without holding the event loop.
+ *
+ * These ran through `execFileSync` inside an `async` function, which is still
+ * synchronous up to its first `await`: a hub's first start stood still for as
+ * long as `where.exe` and `wsl.exe` took — two seconds alone, over twenty on a
+ * loaded machine — and a client waiting for it to listen waited as long.
+ * `windowsHide` keeps each probe from flashing a console window over the app.
+ */
+function runProbe(
+	file: string,
+	args: string[],
+	options: { encoding: BufferEncoding; timeout: number },
+): Promise<string> {
+	return new Promise((resolve, reject) => {
+		execFile(file, args, { ...options, windowsHide: true }, (error, stdout) => {
+			if (error) reject(error);
+			else resolve(String(stdout));
+		});
+	});
+}
+
+/**
  * Resolve a bare executable name (e.g. "pwsh.exe") to an absolute path via
  * the OS path resolution mechanism.
  *
- * On Windows: uses `where.exe` (no shell involved — execFileSync with fixed args).
+ * On Windows: uses `where.exe` (no shell involved — execFile with fixed args).
  * On Unix: uses `which` (for testing on non-Windows hosts only).
  *
- * Returns null when the executable is not on PATH or the command fails.
+ * Resolves null when the executable is not on PATH or the command fails.
  */
-export function resolveFromPath(executable: string): string | null {
+export async function resolveFromPath(executable: string): Promise<string | null> {
 	try {
 		if (process.platform === "win32") {
 			// where.exe is always present in System32 — use absolute path to avoid PATH injection
 			const whereExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe");
-			const firstLine = (
-				execFileSync(whereExe, [executable], {
-					encoding: "utf8",
-					stdio: ["pipe", "pipe", "pipe"],
-					timeout: 3000,
-				})
-					.trim()
-					.split("\n")[0] ?? ""
-			).trim();
+			const output = await runProbe(whereExe, [executable], { encoding: "utf8", timeout: 3000 });
+			const firstLine = (output.trim().split("\n")[0] ?? "").trim();
 			return firstLine.length > 0 ? firstLine : null;
 		}
 		// Unix fallback — only used in tests / non-Windows environments
-		const result = execFileSync("which", [executable], {
-			encoding: "utf8",
-			stdio: ["pipe", "pipe", "pipe"],
-			timeout: 3000,
-		}).trim();
+		const result = (
+			await runProbe("which", [executable], { encoding: "utf8", timeout: 3000 })
+		).trim();
 		return result.length > 0 ? result : null;
 	} catch {
 		return null;
@@ -419,15 +445,14 @@ export function resolveFromPath(executable: string): string | null {
 
 /**
  * Run `wsl --list --quiet` and parse the distribution names.
- * Returns an empty array when WSL is not installed or returns no distros.
+ * Resolves an empty array when WSL is not installed or returns no distros.
  *
  * @param wslPath - absolute path to wsl.exe (never comes from user input)
  */
-export function probeWslDistributions(wslPath: string): string[] {
+export async function probeWslDistributions(wslPath: string): Promise<string[]> {
 	try {
-		const output = execFileSync(wslPath, ["--list", "--quiet"], {
+		const output = await runProbe(wslPath, ["--list", "--quiet"], {
 			encoding: "utf16le", // WSL outputs UTF-16LE
-			stdio: ["pipe", "pipe", "pipe"],
 			timeout: 5000,
 		});
 		return output

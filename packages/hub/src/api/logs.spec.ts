@@ -7,6 +7,7 @@ import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HubLogger } from "../logging/hub-logger.js";
 import { registerLogRoutes } from "./logs.js";
+import { parsePagination } from "./pagination.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,17 @@ function writeHubLog(logsDir: string, lines: object[]): void {
 	fs.mkdirSync(logsDir, { recursive: true });
 	const content = `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`;
 	fs.writeFileSync(path.join(logsDir, "hub.jsonl"), content);
+}
+
+/**
+ * The body a log route answers under 400 for `query`, as the shared parser
+ * words it. Its rules are unit-tested in pagination.spec.ts; each log route
+ * keeps one test proving it consults them.
+ */
+function refusalFor(query: { limit?: string; offset?: string }): unknown {
+	const page = parsePagination(query);
+	if (page.ok) throw new Error(`parsePagination accepts ${JSON.stringify(query)}`);
+	return { error: page.error };
 }
 
 function makeLogConfig(overrides: Partial<LogConfig> = {}): LogConfig {
@@ -205,15 +217,17 @@ describe("GET /api/logs/channels/:channelId", () => {
 		expect(body.error.code).toBe("INVALID_CHANNEL_ID");
 	});
 
-	it("returns 400 for invalid limit", async () => {
+	it("answers a query parsePagination refuses with 400 and its error", async () => {
 		writeChannelLog(logsDir, CHANNEL_ID, CHANNEL_ENTRIES);
-		const res = await app.inject({
-			method: "GET",
-			url: `/api/logs/channels/${CHANNEL_ID}?limit=9999`,
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
+		const url = `/api/logs/channels/${CHANNEL_ID}`;
+
+		const refused = await app.inject({ method: "GET", url: `${url}?limit=9999` });
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual(refusalFor({ limit: "9999" }));
+
+		const accepted = await app.inject({ method: "GET", url: `${url}?limit=1000&offset=1` });
+		expect(accepted.statusCode).toBe(200);
+		expect(accepted.json<{ entries: unknown[] }>().entries).toHaveLength(3);
 	});
 });
 
@@ -318,11 +332,16 @@ describe("GET /api/logs/hub", () => {
 		expect(body.entries[1]?.lvl).toBe("error");
 	});
 
-	it("returns 400 for invalid offset", async () => {
-		const res = await app.inject({ method: "GET", url: "/api/logs/hub?offset=-5" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
+	it("answers a query parsePagination refuses with 400 and its error", async () => {
+		writeHubLog(logsDir, HUB_ENTRIES);
+
+		const refused = await app.inject({ method: "GET", url: "/api/logs/hub?offset=-5" });
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual(refusalFor({ offset: "-5" }));
+
+		const accepted = await app.inject({ method: "GET", url: "/api/logs/hub?limit=1000&offset=1" });
+		expect(accepted.statusCode).toBe(200);
+		expect(accepted.json<{ entries: unknown[] }>().entries).toHaveLength(3);
 	});
 });
 

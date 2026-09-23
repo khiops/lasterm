@@ -230,10 +230,8 @@ mod tests {
 
         let server_key = KeyPair::generate().expect("generate server key pair");
         let pinned_key = KeyPair::generate().expect("generate originally trusted hub key pair");
-        let store_path = std::env::temp_dir().join(format!(
-            "lasterm-stored-pin-test-{}",
-            std::process::id()
-        ));
+        let store_path =
+            std::env::temp_dir().join(format!("lasterm-stored-pin-test-{}", std::process::id()));
         let store_path = store_path.join("desktop-state").join("known_hubs.json");
         let stored_pin = pinned_key.subject_public_key_info();
         let mut store = crate::HubPinStore::default();

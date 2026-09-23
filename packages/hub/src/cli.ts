@@ -1522,13 +1522,15 @@ export async function cmdStatus(
 	}
 	console.log(`  PID        : ${runtime.pid}`);
 	console.log(`  Port       : ${runtime.port}`);
+	// No uptime line. /api/health does not report one, being unauthenticated
+	// (PROTOCOL.md), and one derived from this start time would be elapsed time
+	// read off the wall clock, wrong by however far the clock has moved.
 	console.log(`  Started at : ${runtime.started_at}`);
 	if (probe.kind === "answered") {
 		const health = probe.health;
 		if (health && typeof health === "object" && health !== null) {
 			const h = health as Record<string, unknown>;
 			console.log(`  Status     : ${String(h.status ?? "?")}`);
-			console.log(`  Uptime     : ${Number(h.uptime ?? 0).toFixed(1)}s`);
 		}
 	} else {
 		console.log(`  Error      : ${probe.error}`);

@@ -1633,6 +1633,24 @@ describe("cmdStatus against the hub a runtime record names", () => {
 		});
 	});
 
+	// Mutation: print the health body's uptime again, and every answering hub
+	// reads "Uptime : 0.0s", since /api/health has never reported one.
+	it("prints no uptime, which the hub does not report", async () => {
+		const tls = getTestTlsMaterial();
+		const port = await listenHub(tls.pinned);
+
+		const { code, output } = await status(record(port, tls.pinned.spki), false);
+
+		expect(code).toBe(0);
+		expect(output).toEqual([
+			"Hub: running",
+			`  PID        : ${process.pid}`,
+			`  Port       : ${port}`,
+			"  Started at : 2026-08-03T00:00:00.000Z",
+			"  Status     : ok",
+		]);
+	});
+
 	it("refuses a peer holding another key, does not call it running, and exits 1", async () => {
 		const tls = getTestTlsMaterial();
 		const port = await listenHub(tls.other);

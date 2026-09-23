@@ -396,6 +396,16 @@ describe("config writes — CONFIG_CHANGED to every client", () => {
 		expect(announced).toEqual([]);
 	});
 
+	it("announces the appearance, the theme in use among it", async () => {
+		const res = await miniServer.inject({
+			method: "PUT",
+			url: "/api/config/appearance",
+			payload: { theme: "nord" },
+		});
+		expect(res.statusCode).toBe(200);
+		expect(announced).toEqual([{ type: "CONFIG_CHANGED", scope: "appearance" }]);
+	});
+
 	it("announces the global terminal profile", async () => {
 		const res = await miniServer.inject({
 			method: "PUT",

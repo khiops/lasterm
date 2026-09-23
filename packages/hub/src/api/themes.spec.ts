@@ -2,12 +2,14 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LastermTheme } from "@lasterm/shared";
-import type { FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
+import { ThemeManager } from "../theme-manager.js";
+import { registerThemeRoutes } from "./themes.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
 
@@ -241,3 +243,62 @@ describe("DELETE /api/themes/:name", () => {
 });
 
 // Appearance config routes have been moved to config.ts (PUT /api/config/appearance)
+
+// ─── Every client hears that the themes changed (#479) ───────────────────────
+//
+// A theme edited or removed in one window may be the theme another is showing.
+
+describe("theme writes — CONFIG_CHANGED", () => {
+	let mini: FastifyInstance;
+	let announced: unknown[];
+
+	beforeEach(async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lasterm-theme-announce-"));
+		const manager = new ThemeManager(dir);
+		await manager.init();
+		mini = Fastify({ logger: false });
+		announced = [];
+		registerThemeRoutes(mini, manager, (msg) => announced.push(msg));
+	});
+
+	afterEach(async () => {
+		await mini.close();
+	});
+
+	it("announces a theme created, changed, and removed", async () => {
+		expect(
+			(await mini.inject({ method: "POST", url: "/api/themes", payload: VALID_CUSTOM_THEME }))
+				.statusCode,
+		).toBe(201);
+		expect(
+			(
+				await mini.inject({
+					method: "PUT",
+					url: `/api/themes/${VALID_CUSTOM_THEME.name}`,
+					payload: VALID_CUSTOM_THEME,
+				})
+			).statusCode,
+		).toBe(200);
+		expect(
+			(await mini.inject({ method: "DELETE", url: `/api/themes/${VALID_CUSTOM_THEME.name}` }))
+				.statusCode,
+		).toBe(204);
+
+		expect(announced).toEqual([
+			{ type: "CONFIG_CHANGED", scope: "appearance" },
+			{ type: "CONFIG_CHANGED", scope: "appearance" },
+			{ type: "CONFIG_CHANGED", scope: "appearance" },
+		]);
+	});
+
+	it("announces nothing for a write it refused", async () => {
+		await mini.inject({
+			method: "POST",
+			url: "/api/themes",
+			payload: { name: "Not A Valid Name" },
+		});
+		await mini.inject({ method: "DELETE", url: "/api/themes/catppuccin-mocha" });
+
+		expect(announced).toEqual([]);
+	});
+});

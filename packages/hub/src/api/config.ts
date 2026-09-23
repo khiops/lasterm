@@ -217,6 +217,7 @@ export function registerConfigRoutes(
 			}
 		}
 
+		announce({ scope: "appearance" });
 		return { ok: true };
 	});
 

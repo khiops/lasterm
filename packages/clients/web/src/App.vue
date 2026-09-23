@@ -548,6 +548,10 @@ watch(
 		autoSwitch.darkThemeName.value = cfg.autoSwitch.darkTheme;
 		autoSwitch.lightThemeName.value = cfg.autoSwitch.lightTheme;
 		autoSwitch.enabled.value = cfg.autoSwitch.enabled;
+		// Switching it on applies its pick; staying on did not, so a dark or light
+		// theme changed in another window — or the colours of the one in use —
+		// waited for the OS to change its mind. A no-op when it is off.
+		autoSwitch.applyCurrentPreference();
 	},
 	{ immediate: true },
 );
@@ -876,20 +880,9 @@ onMounted(async () => {
 			// Load resolved profile + UI behaviour config now that auth is established
 			await configStore.loadProfile();
 			await configStore.loadUiConfig();
-			await themeStore.loadThemes();
-			await themeStore.loadAppearance();
 			// Auto-switch watcher fires here (immediate: true) — if enabled,
-			// it applies the OS-preferred theme. Otherwise fall back to saved theme.
-			if (!themeStore.appearance.autoSwitch.enabled) {
-				const savedThemeName = themeStore.appearance.theme;
-				const savedTheme = themeStore.availableThemes.find((t) => t.name === savedThemeName);
-				if (savedTheme) {
-					themeStore.currentTheme = savedTheme;
-					themeStore.applyTheme(savedTheme);
-				}
-			}
-			themeStore.applyOpacity(themeStore.appearance.opacity);
-			themeStore.applyScrollbar(themeStore.appearance.scrollbar);
+			// it applies the OS-preferred theme. Otherwise the saved theme.
+			await themeStore.reloadAppearance();
 			await hostsStore.fetchHosts();
 			await profilesStore.fetchProfiles();
 			// Apply channel/host theme override if an active channel exists
@@ -1389,19 +1382,8 @@ async function onAuthenticated(): Promise<void> {
 		await configStore.loadFonts();
 		await configStore.loadProfile();
 		await configStore.loadUiConfig();
-		await themeStore.loadThemes();
-		await themeStore.loadAppearance();
 		// Auto-switch watcher fires here — if enabled, OS preference wins.
-		if (!themeStore.appearance.autoSwitch.enabled) {
-			const savedThemeName = themeStore.appearance.theme;
-			const savedTheme = themeStore.availableThemes.find((t) => t.name === savedThemeName);
-			if (savedTheme) {
-				themeStore.currentTheme = savedTheme;
-				themeStore.applyTheme(savedTheme);
-			}
-		}
-		themeStore.applyOpacity(themeStore.appearance.opacity);
-		themeStore.applyScrollbar(themeStore.appearance.scrollbar);
+		await themeStore.reloadAppearance();
 		await hostsStore.fetchHosts();
 	} catch (err) {
 		console.error('[App] post-pairing init failed:', err);

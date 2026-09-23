@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn protected_path_plain_pathname_spellings_match_the_reviewed_allowlist() {
         // This reads source text rather than Rust's resolved AST. It catches plain
-        // pathname calls in these three files, but a call hidden by an alias or a
+        // pathname calls in these four files, but a call hidden by an alias or a
         // macro is invisible and still needs review.
         let allowed = [
             AllowedCall {
@@ -974,15 +974,27 @@ mod tests {
             },
             AllowedCall {
                 source: "desktop",
-                call: "let mut file = match std::fs::OpenOptions::new()",
-                expected_occurrences: 1,
-                why: "opens the non-protected hub diagnostic log",
-            },
-            AllowedCall {
-                source: "desktop",
                 call: "std::fs::create_dir_all(&log_dir)",
                 expected_occurrences: 1,
                 why: "creates the non-protected hub diagnostic-log directory",
+            },
+            AllowedCall {
+                source: "desktop-hub-log",
+                call: "use std::fs::{File, OpenOptions};",
+                expected_occurrences: 1,
+                why: "imports the opener of the non-protected hub diagnostic log",
+            },
+            AllowedCall {
+                source: "desktop-hub-log",
+                call: "let opened = OpenOptions::new()",
+                expected_occurrences: 1,
+                why: "opens the non-protected hub diagnostic log, hub.log",
+            },
+            AllowedCall {
+                source: "desktop-hub-log",
+                call: "std::fs::rename(&self.path, &self.previous)",
+                expected_occurrences: 1,
+                why: "moves the non-protected hub diagnostic log aside to hub.log.old",
             },
             AllowedCall {
                 source: "identity",
@@ -1078,6 +1090,10 @@ mod tests {
             (
                 "desktop",
                 root.join("packages/clients/desktop/src-tauri/src/lib.rs"),
+            ),
+            (
+                "desktop-hub-log",
+                root.join("packages/clients/desktop/src-tauri/src/hub_log.rs"),
             ),
             (
                 "identity",

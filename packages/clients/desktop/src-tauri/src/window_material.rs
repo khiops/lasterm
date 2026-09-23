@@ -28,7 +28,10 @@ pub const EFFECT_NONE: &str = "none";
 
 /// Whether an effect is one of the Windows materials DWM paints for a window.
 fn is_windows_material(effect: &str) -> bool {
-    matches!(effect, "mica" | "micaDark" | "micaLight" | "tabbed" | "acrylic")
+    matches!(
+        effect,
+        "mica" | "micaDark" | "micaLight" | "tabbed" | "acrylic"
+    )
 }
 
 /// The surface an effect needs on this platform.
@@ -69,7 +72,11 @@ mod tests {
     #[test]
     fn windows_materials_need_a_window_dwm_will_paint() {
         for effect in ["mica", "micaDark", "micaLight", "tabbed", "acrylic"] {
-            assert_eq!(surface_for(effect, true), WindowSurface::Material, "{effect}");
+            assert_eq!(
+                surface_for(effect, true),
+                WindowSurface::Material,
+                "{effect}"
+            );
         }
     }
 

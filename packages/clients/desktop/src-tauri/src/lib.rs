@@ -1286,15 +1286,17 @@ fn extend_frame_for_material<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>
     };
     // SAFETY: the handle belongs to a window this process owns and is alive for
     // the call; the margins live until it returns.
-    if let Err(error) =
-        unsafe { DwmExtendFrameIntoClientArea(HWND(handle.0 as *mut _), &margins) }
+    if let Err(error) = unsafe { DwmExtendFrameIntoClientArea(HWND(handle.0 as *mut _), &margins) }
     {
         eprintln!("[lasterm] WARN: cannot extend the window frame: {error}");
     }
 }
 
 #[cfg(not(windows))]
-fn extend_frame_for_material<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>, _material: bool) {
+fn extend_frame_for_material<R: tauri::Runtime>(
+    _window: &tauri::WebviewWindow<R>,
+    _material: bool,
+) {
 }
 
 /// The file remembering whether the theme in use is a dark one.
@@ -1354,7 +1356,10 @@ fn remember_window_tone(dark: bool) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::write(dir.join(WINDOW_TONE_FILE), if dark { "dark" } else { "light" });
+    // One line on purpose: the protected-path audit matches each filesystem
+    // call against its reviewed spelling line by line.
+    let tone = if dark { "dark" } else { "light" };
+    let _ = std::fs::write(dir.join(WINDOW_TONE_FILE), tone);
 }
 
 /// Take the tone of the theme the page is showing.
@@ -1453,7 +1458,10 @@ fn apply_window_effect<R: tauri::Runtime>(
 /// window is created, and rebuilding the window under a running app cost more
 /// than it bought — so the change lands at the next launch.
 #[tauri::command]
-fn apply_window_background(app: tauri::AppHandle, effect: String) -> Result<WindowBackgroundOutcome, String> {
+fn apply_window_background(
+    app: tauri::AppHandle,
+    effect: String,
+) -> Result<WindowBackgroundOutcome, String> {
     remember_window_background(&effect);
     if window_material::needs_restart(&remembered_at_launch(), &effect, cfg!(windows)) {
         return Ok(WindowBackgroundOutcome {
@@ -2747,7 +2755,9 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
             std::process::id(),
             PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         )))
-        .map_err(|error| format!("cannot allocate desktop hub pin-store temporary leaf: {error}"))?;
+        .map_err(|error| {
+            format!("cannot allocate desktop hub pin-store temporary leaf: {error}")
+        })?;
         match create_owner_only_file(&directory, &temporary, &bytes) {
             Ok(temporary_file) => {
                 drop(temporary_file);
@@ -2796,12 +2806,13 @@ fn write_hub_pin_store(path: &Path, store: &HubPinStore) -> Result<(), String> {
     for _ in 0..128 {
         let temporary = lasterm_protected_fs::LeafName::new(std::ffi::OsStr::new(&format!(
             ".{}.{}.{}.tmp",
-            leaf.as_os_str().to_str()
-                .unwrap_or("known_hubs"),
+            leaf.as_os_str().to_str().unwrap_or("known_hubs"),
             std::process::id(),
             PIN_STORE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         )))
-        .map_err(|error| format!("cannot allocate desktop hub pin-store temporary leaf: {error}"))?;
+        .map_err(|error| {
+            format!("cannot allocate desktop hub pin-store temporary leaf: {error}")
+        })?;
         match create_owner_only_file(&directory, &temporary, &bytes) {
             Ok(temporary_file) => {
                 drop(temporary_file);
@@ -2870,7 +2881,11 @@ fn prepare_hub_pin_store_dir(path: &Path) -> Result<lasterm_protected_fs::Direct
             path.display()
         )
     })?;
-    validate_windows_runtime_dir(path, &metadata, windows_metadata_is_reparse_point(&metadata))?;
+    validate_windows_runtime_dir(
+        path,
+        &metadata,
+        windows_metadata_is_reparse_point(&metadata),
+    )?;
     Ok(directory)
 }
 
@@ -3028,7 +3043,8 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
     })?;
     let (directory, leaf) = lasterm_protected_fs::open_parent(path)
         .map_err(|error| format!("refusing protected file parent: {error}"))?;
-    let parent_metadata = directory.metadata()
+    let parent_metadata = directory
+        .metadata()
         .map_err(|error| format!("refusing protected file parent: {error}"))?;
     validate_windows_runtime_dir(
         parent,
@@ -4862,7 +4878,7 @@ fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
 }
 
 fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
-        match action {
+    match action {
         QuitAction::AskNative { others } => present_native_quit_consent(app, others),
         QuitAction::SendForced { attempt_id } => {
             std::thread::spawn(move || {
@@ -5745,7 +5761,10 @@ mod tests {
     /// from a failure to read it, and so reported as "still alive" forever.
     #[test]
     fn a_process_that_has_exited_is_not_alive() {
-        assert!(is_pid_alive(std::process::id()), "this very process is alive");
+        assert!(
+            is_pid_alive(std::process::id()),
+            "this very process is alive"
+        );
 
         let program = if cfg!(windows) { "cmd" } else { "/bin/sh" };
         let args: &[&str] = if cfg!(windows) {
@@ -5762,7 +5781,6 @@ mod tests {
 
         assert!(!is_pid_alive(pid), "a process that has exited is gone");
     }
-
 
     fn test_upload(
         sender: mpsc::SyncSender<HubUploadFrame>,
@@ -6315,7 +6333,9 @@ mod tests {
             let mut paths = Vec::new();
             for _ in 0..count {
                 let (mut socket, _) = listener.accept().unwrap();
-                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 1024];
                 while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -6325,7 +6345,11 @@ mod tests {
                     }
                     request.extend_from_slice(&buffer[..read]);
                 }
-                let line = String::from_utf8_lossy(&request).lines().next().unwrap_or("").to_string();
+                let line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
                 socket.write_all(respond(&path).as_bytes()).unwrap();
                 let_the_client_close_first(&mut socket);
@@ -6428,7 +6452,9 @@ mod tests {
     fn unreachable_first_use_leaves_the_store_empty() {
         let directory = instance_test_dir("first-pin-unreachable");
         let store_path = directory.join("desktop-state").join(HUB_PIN_STORE_FILE);
-        let announced_spki = rcgen::KeyPair::generate().unwrap().subject_public_key_info();
+        let announced_spki = rcgen::KeyPair::generate()
+            .unwrap()
+            .subject_public_key_info();
 
         let error =
             establish_hub_connection_at(&store_path, unused_loopback_port(), &announced_spki)
@@ -6604,41 +6630,26 @@ mod tests {
 
         let private_config_dir = directory.join("private-config");
         std::fs::create_dir(&private_config_dir).unwrap();
-        std::fs::set_permissions(
-            &private_config_dir,
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        std::fs::set_permissions(&private_config_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
         let private_auth_path = private_config_dir.join("auth.json");
         std::fs::write(&private_auth_path, &auth_contents).unwrap();
-        std::fs::set_permissions(
-            &private_auth_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        assert_eq!(read_hub_auth_token_at(&private_config_dir), Some(token.clone()));
-        std::fs::set_permissions(
-            &private_auth_path,
-            std::fs::Permissions::from_mode(0o640),
-        )
-        .unwrap();
+        std::fs::set_permissions(&private_auth_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert_eq!(
+            read_hub_auth_token_at(&private_config_dir),
+            Some(token.clone())
+        );
+        std::fs::set_permissions(&private_auth_path, std::fs::Permissions::from_mode(0o640))
+            .unwrap();
         assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
-        std::fs::set_permissions(
-            &private_auth_path,
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
+        std::fs::set_permissions(&private_auth_path, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
         assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
-        std::fs::set_permissions(
-            &private_auth_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            &private_config_dir,
-            std::fs::Permissions::from_mode(0o770),
-        )
-        .unwrap();
+        std::fs::set_permissions(&private_auth_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        std::fs::set_permissions(&private_config_dir, std::fs::Permissions::from_mode(0o770))
+            .unwrap();
         assert_eq!(read_hub_auth_token_at(&private_config_dir), None);
     }
 
@@ -6684,7 +6695,8 @@ mod tests {
         std::fs::create_dir(&protected_dir).unwrap();
         std::fs::set_permissions(&protected_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let metadata = std::fs::metadata(&protected_dir).unwrap();
-        validate_runtime_dir(&protected_dir, &metadata).expect("0755 is not group- or other-writable");
+        validate_runtime_dir(&protected_dir, &metadata)
+            .expect("0755 is not group- or other-writable");
 
         std::fs::set_permissions(&protected_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
         let metadata = std::fs::metadata(&protected_dir).unwrap();
@@ -6730,8 +6742,7 @@ mod tests {
         let directory = instance_test_dir("windows-protected-file-reparse-point");
         let target = directory.join("target.json");
         let protected = directory.join("protected.json");
-        std::fs::write(&target, r#"{"port":4100,"spki":"AQID"}"#)
-            .expect("write reparse target");
+        std::fs::write(&target, r#"{"port":4100,"spki":"AQID"}"#).expect("write reparse target");
         symlink_file(&target, &protected).expect("create protected-file reparse point");
 
         let error = read_protected_file(&protected)
@@ -6800,11 +6811,10 @@ mod tests {
 
     #[test]
     fn invalid_app_data_reaches_the_hub_auth_token_caller() {
-        let result = read_hub_auth_token_from_config_dir(
-            windows_lasterm_config_dir_for_environment(Some(std::ffi::OsStr::new(
-                "relative-app-data",
-            ))),
-        );
+        let result =
+            read_hub_auth_token_from_config_dir(windows_lasterm_config_dir_for_environment(Some(
+                std::ffi::OsStr::new("relative-app-data"),
+            )));
 
         let error = result.expect_err("relative APPDATA must not become an absent token");
         assert!(error.contains("APPDATA"), "error: {error}");
@@ -8527,7 +8537,9 @@ mod tests {
                 let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
                 // One frame the webview will never acknowledge.
                 socket
-                    .send(tokio_tungstenite::tungstenite::Message::Binary(vec![7; 16].into()))
+                    .send(tokio_tungstenite::tungstenite::Message::Binary(
+                        vec![7; 16].into(),
+                    ))
                     .await
                     .unwrap();
                 let mut received = Vec::new();

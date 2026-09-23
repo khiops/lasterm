@@ -97,12 +97,17 @@ pnpm -F @lasterm/web dev  # Dev single package
 ### TypeScript test prerequisite
 
 The hub TypeScript specs load the `lasterm-hub-lock` and `lasterm-tls-identity`
-Rust addons. From a clean checkout, build them before a hub or root test run:
+Rust addons, and run the `lasterm-tls-test-material` generator, from the cargo target
+directory. Build them before a hub or root test run, and again after editing a crate:
 
 ```bash
-cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
+cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity --features lasterm-tls-identity/test-tls-material
 pnpm -F @lasterm/hub test # or: pnpm test
 ```
+
+Nothing in the TypeScript loop rebuilds them. The hub test setup compares each one
+with the sources cargo recorded for it, and refuses to run on a build that predates
+them or came from another checkout's different sources (#129).
 
 ### Production build & run (local, Linux native)
 

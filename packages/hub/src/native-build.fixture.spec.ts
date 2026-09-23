@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +8,7 @@ vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
 import { execFileSync } from "node:child_process";
 import { nativeBuildProblem } from "./native-build.fixture.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import setupTestTlsMaterial from "./test-tls.setup.js";
 
 const checkout = resolve(import.meta.dirname, "../../..");
@@ -59,14 +59,14 @@ const ARTIFACTS = [
 
 const tempDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	vi.unstubAllEnvs();
 	vi.mocked(execFileSync).mockReset();
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 });
 
 function tempDir(name = "lasterm-native-build-"): string {
-	const dir = mkdtempSync(join(tmpdir(), name));
+	const dir = makeTempDir(name);
 	tempDirs.push(dir);
 	return dir;
 }
@@ -138,6 +138,35 @@ describe("hub test setup", () => {
 			expect(execFileSync).not.toHaveBeenCalled();
 		},
 	);
+
+	it("looks under the checkout for a relative CARGO_TARGET_DIR, wherever the run works from", () => {
+		const relativeTarget = join("no-such-dir", "lasterm-native-build-spec");
+		vi.stubEnv("CARGO_TARGET_DIR", relativeTarget);
+		vi.stubEnv("LASTERM_HUB_LOCK_ADDON", undefined);
+		vi.stubEnv("LASTERM_TLS_IDENTITY_ADDON", undefined);
+		vi.stubEnv("LASTERM_TEST_TLS_DIRECTORY", process.env.LASTERM_TEST_TLS_DIRECTORY);
+		const elsewhere = tempDir();
+		// Mutation caught (#531): a relative value resolved by path.resolve
+		// alone lands under the working directory, not where cargo built.
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(elsewhere);
+		let refusal: unknown;
+		let teardown: (() => void) | undefined;
+		try {
+			teardown = setupTestTlsMaterial();
+		} catch (error) {
+			refusal = error;
+		} finally {
+			teardown?.();
+			cwd.mockRestore();
+		}
+
+		// Nothing is built there, so the setup gives up, naming where it looked.
+		expect(refusal).toBeInstanceOf(Error);
+		const message = (refusal as Error).message;
+		const generator = `lasterm-tls-test-material${executable}`;
+		expect(message).toContain(`missing at ${join(checkout, relativeTarget, "release", generator)}`);
+		expect(message).not.toContain(elsewhere);
+	});
 
 	it("runs the generator, and builds nothing, when the build is current", () => {
 		const target = useTarget();

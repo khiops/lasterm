@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { request as requestHttps } from "node:https";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tls from "node:tls";
 import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
@@ -18,6 +17,7 @@ import {
 } from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import { getTestTls } from "./test-tls.fixture.js";
 
 const TEST_TOKEN = "a".repeat(64);
@@ -80,7 +80,7 @@ describe("gracefulShutdown", () => {
 	it("deletes runtime and exits nonzero when server.close hangs", async () => {
 		const server = Fastify({ logger: false });
 		const dbs = openTestDatabases();
-		const dir = mkdtempSync(join(tmpdir(), "lasterm-shutdown-"));
+		const dir = makeTempDir("lasterm-shutdown-");
 		const runtimePath = join(dir, "runtime.json");
 		const exits: number[] = [];
 
@@ -106,7 +106,7 @@ describe("gracefulShutdown", () => {
 		expect(existsSync(runtimePath)).toBe(false);
 
 		dbs.close();
-		rmSync(dir, { recursive: true, force: true });
+		await removeTempDir(dir);
 	});
 
 	it("leaves a replacement runtime record during normal teardown", async () => {

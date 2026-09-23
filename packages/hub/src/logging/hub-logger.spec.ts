@@ -1,15 +1,11 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { LogConfig } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { HubLogger } from "./hub-logger.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function makeTmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-hub-logger-"));
-}
 
 function makeConfig(overrides: Partial<LogConfig> = {}): LogConfig {
 	return {
@@ -36,12 +32,12 @@ describe("HubLogger", () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = makeTmpDir();
+		tmpDir = makeTempDir("lasterm-hub-logger-");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeTempDir(tmpDir);
 	});
 
 	it("writes JSONL with ISO 8601 ts field", () => {

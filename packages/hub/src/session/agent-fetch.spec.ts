@@ -4,7 +4,6 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
@@ -12,10 +11,10 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { expectPosixMode } from "../file-mode.fixture.js";
+import { makeTempDir as newTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import {
 	AGENT_FETCH_IDLE_TIMEOUT_MS,
 	AGENT_FETCH_MAX_BYTES,
@@ -33,10 +32,10 @@ const LINUX_X64_TRIPLE = AGENT_TARGET_TRIPLES.linux.x64.triple;
 
 let tempDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	vi.restoreAllMocks();
 	vi.useRealTimers();
-	for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+	for (const dir of tempDirs) await removeTempDir(dir);
 	tempDirs = [];
 });
 
@@ -804,7 +803,7 @@ describe("fetchAgentBinary", () => {
 });
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-agent-fetch-"));
+	const dir = newTempDir("lasterm-agent-fetch-");
 	tempDirs.push(dir);
 	return dir;
 }

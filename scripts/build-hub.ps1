@@ -11,7 +11,14 @@ if (-not $env:LASTERM_BUILD_HASH) {
     $env:LASTERM_BUILD_HASH = (git -C $Root rev-parse --short=8 HEAD).Trim()
 }
 $env:LASTERM_SKIP_WEB ??= "false"
-$env:LASTERM_CARGO_TARGET_DIR ??= "$Root\target"
+# The target directory: LASTERM_CARGO_TARGET_DIR, else the CARGO_TARGET_DIR
+# plain cargo and the hub specs read, else the repository's own; empty counts as
+# unset. A relative one is relative to the repository, where cargo runs below
+# (#531). It stays in this script: written to $env:, it would outlive the script
+# in the session that ran it and hold a later build to this one's directory.
+$cargoTargetDir = if ($env:LASTERM_CARGO_TARGET_DIR) { $env:LASTERM_CARGO_TARGET_DIR }
+elseif ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR }
+else { "$Root\target" }
 
 # The hub embeds the Node running this build, so it is built on the platform it
 # targets; package-sea-hub refuses anything else (#148).
@@ -25,12 +32,12 @@ Set-Location $Root
 pnpm -F @lasterm/shared build
 if ($LASTEXITCODE -ne 0) { throw "shared build failed" }
 
-cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $env:LASTERM_CARGO_TARGET_DIR
+cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $cargoTargetDir
 if ($LASTEXITCODE -ne 0) { throw "native hub addons build failed" }
-$lockLibrary = Join-Path $env:LASTERM_CARGO_TARGET_DIR "$env:LASTERM_TARGET_TRIPLE\release\lasterm_hub_lock.dll"
+$lockLibrary = Join-Path $cargoTargetDir "$env:LASTERM_TARGET_TRIPLE\release\lasterm_hub_lock.dll"
 if (-not (Test-Path $lockLibrary)) { throw "Hub lock addon not found at $lockLibrary" }
 $env:LASTERM_HUB_LOCK_ADDON = $lockLibrary
-$tlsLibrary = Join-Path $env:LASTERM_CARGO_TARGET_DIR "$env:LASTERM_TARGET_TRIPLE\release\lasterm_tls_identity.dll"
+$tlsLibrary = Join-Path $cargoTargetDir "$env:LASTERM_TARGET_TRIPLE\release\lasterm_tls_identity.dll"
 if (-not (Test-Path $tlsLibrary)) { throw "TLS identity addon not found at $tlsLibrary" }
 $env:LASTERM_TLS_IDENTITY_ADDON = $tlsLibrary
 

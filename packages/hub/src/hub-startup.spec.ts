@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -17,6 +17,7 @@ import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
+import { removeTempDir } from "./temp-dir.fixture.js";
 
 const TEST_TLS_IDENTITY = {
 	tls: { cert: "certificate", key: "key" },
@@ -103,7 +104,7 @@ describe("startHub token restart sweep", () => {
 			expect(existsSync(join(getStateDir(), "runtime.json"))).toBe(false);
 		} finally {
 			dbs.close();
-			rmSync(stateRoot, { recursive: true, force: true });
+			await removeTempDir(stateRoot);
 			restoreStateRoot();
 		}
 	});
@@ -362,7 +363,7 @@ describe("startHub carries the directory it locked", () => {
 			restoreSecond?.();
 			restoreFirst();
 			dbs.close();
-			rmSync(root, { recursive: true, force: true });
+			await removeTempDir(root);
 		}
 	});
 
@@ -410,7 +411,7 @@ describe("startHub carries the directory it locked", () => {
 		} finally {
 			process.chdir(cwd);
 			dbs.close();
-			rmSync(absolute, { recursive: true, force: true });
+			await removeTempDir(absolute);
 		}
 	});
 });
@@ -489,7 +490,7 @@ describe("startHub bounds the unwind of a failed start", () => {
 			expect(order).toEqual(["server", "databases", "record"]);
 		} finally {
 			vi.useRealTimers();
-			rmSync(stateDir, { recursive: true, force: true });
+			await removeTempDir(stateDir);
 		}
 	});
 });
@@ -529,7 +530,7 @@ describe("startHub creates the configuration directory owner-only", () => {
 			} finally {
 				process.umask(previous);
 				dbs.close();
-				rmSync(root, { recursive: true, force: true });
+				await removeTempDir(root);
 			}
 		},
 	);
@@ -572,7 +573,7 @@ describe("startHub creates the configuration directory owner-only", () => {
 			} finally {
 				dbs.close();
 				chmodSync(configDir, 0o700);
-				rmSync(root, { recursive: true, force: true });
+				await removeTempDir(root);
 			}
 		},
 	);
@@ -613,7 +614,7 @@ describe("startHub records its security events whichever entry point started it"
 					.filter(Boolean)
 					.map((line) => JSON.parse(line) as Record<string, unknown>)
 			: [];
-		rmSync(stateDir, { recursive: true, force: true });
+		await removeTempDir(stateDir);
 		return { entries, createServer };
 	}
 
@@ -683,7 +684,7 @@ describe("startHub and the daemon's log (#525)", () => {
 			);
 		} finally {
 			dbs.close();
-			rmSync(stateDir, { recursive: true, force: true });
+			await removeTempDir(stateDir);
 		}
 		return { steps, logger };
 	}

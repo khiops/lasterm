@@ -14,7 +14,10 @@ esac
 
 LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
 LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
-LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-$ROOT/target}"
+# The target directory: LASTERM_CARGO_TARGET_DIR, else the CARGO_TARGET_DIR
+# plain cargo reads, else the repository's own. A relative one is relative to
+# the repository, where cargo runs below (#531).
+LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}}"
 
 echo "🔨 Building Rust agent (triple: $LASTERM_TARGET_TRIPLE)..."
 

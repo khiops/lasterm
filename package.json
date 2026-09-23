@@ -28,7 +28,7 @@
 		"test:run": "vitest run",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
-		"typecheck": "pnpm -r typecheck",
+		"typecheck": "pnpm -r typecheck && tsc -p scripts/tsconfig.json",
 		"build:sea-hub": "tsx scripts/build-sea-hub.ts",
 		"package:sea-hub": "tsx scripts/package-sea-hub.ts",
 		"build:desktop": "bash scripts/build-desktop.sh"

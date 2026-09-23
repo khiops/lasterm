@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +7,7 @@ import { createServer } from "./server.fixture.js";
 import { addCorsOrigins, addStartupCorsOrigins } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import { getTestTls } from "./test-tls.fixture.js";
 
 /** Known token used across auth tests */
@@ -347,11 +347,11 @@ describe("Hub Server — startup CORS origin injection", () => {
 		dbs?.close();
 		server = undefined;
 		dbs = undefined;
-		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+		for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 	});
 
 	it("adds the actual bound loopback port so agent mutations are not blocked by Origin guard", async () => {
-		const configDir = mkdtempSync(join(tmpdir(), "lasterm-startup-cors-config-"));
+		const configDir = makeTempDir("lasterm-startup-cors-config-");
 		tempDirs.push(configDir);
 		dbs = openTestDatabases();
 		server = await createServer({
@@ -447,7 +447,7 @@ describe("Hub Server — security headers", () => {
 	afterEach(async () => {
 		if (server) await server.close();
 		dbs?.close();
-		if (configDir) rmSync(configDir, { recursive: true, force: true });
+		if (configDir) await removeTempDir(configDir);
 		server = undefined;
 		dbs = undefined;
 		configDir = undefined;
@@ -458,10 +458,7 @@ describe("Hub Server — security headers", () => {
 		filename: string,
 		body: Buffer | string,
 	): Promise<string> {
-		configDir = join(
-			tmpdir(),
-			`lasterm-public-corp-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		configDir = makeTempDir("lasterm-public-corp-");
 		mkdirSync(join(configDir, kind), { recursive: true });
 		writeFileSync(join(configDir, kind, filename), body);
 		dbs = openTestDatabases();

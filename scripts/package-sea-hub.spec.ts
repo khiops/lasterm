@@ -14,19 +14,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Where cargo builds from this repository, resolved as cargo resolves
+// CARGO_TARGET_DIR (#531). A git worktree that shares one target directory has
+// no `target` of its own.
+import { cargoTargetDir } from "../packages/hub/src/cargo-target-dir.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
-
-/**
- * The directory cargo builds into from this repository: CARGO_TARGET_DIR when it
- * is set, absolute or relative to the repository, else `<repo>/target`. A git
- * worktree that shares one target directory has no `target` of its own.
- */
-function cargoTargetDir(): string {
-	const configured = process.env.CARGO_TARGET_DIR;
-	return configured ? resolve(ROOT, configured) : join(ROOT, "target");
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Test 1: locates better-sqlite3 .node addon
@@ -338,11 +332,12 @@ describe("sea-static-server unit tests", () => {
 	it("registerSeaStaticServing returns false when not in SEA mode", async () => {
 		const { registerSeaStaticServing } = await import("../packages/hub/src/sea-static-server.js");
 
-		// Create a minimal Fastify mock
+		// Create a minimal Fastify mock. Its type is the parameter's: fastify is
+		// the hub's dependency, and cannot be resolved from scripts/ (#531).
 		const mockApp = {
 			log: { warn: vi.fn(), info: vi.fn() },
 			get: vi.fn(),
-		} as unknown as import("fastify").FastifyInstance;
+		} as unknown as Parameters<typeof registerSeaStaticServing>[0];
 
 		const result = await registerSeaStaticServing(mockApp);
 		expect(result).toBe(false);

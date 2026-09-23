@@ -1,0 +1,12 @@
+{
+	"extends": "../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"types": ["node"]
+	},
+	// The root package's scripts and their specs, checked by `pnpm typecheck`
+	// the way an editor and a plain `tsc` see them: a module is resolved from
+	// here, with no path mapping standing in for a dependency the root package
+	// does not have (#531).
+	"include": ["**/*"]
+}

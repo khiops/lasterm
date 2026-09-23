@@ -1,7 +1,6 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type Host, PROTOCOL_VERSION } from "@lasterm/shared";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
@@ -10,6 +9,7 @@ import { HUB_VERSION } from "../build-version.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { SpoolDAL } from "../storage/spool.js";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { AgentConnectionManager, AgentVersionMismatchError } from "./agent-connection-manager.js";
 import { deployAgentIfNeeded } from "./agent-deployer.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
@@ -385,7 +385,7 @@ describe("AgentConnectionManager HELLO version check", () => {
 	let agent: LastermAgent | null = null;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(join(tmpdir(), "lasterm-agent-manager-test-"));
+		tmpDir = makeTempDir("lasterm-agent-manager-test-");
 		// A filesystem path cannot carry a local socket on Windows; Node listens
 		// on a named pipe there, which getTestSocketPath provides.
 		socketPath = getTestSocketPath();
@@ -401,7 +401,7 @@ describe("AgentConnectionManager HELLO version check", () => {
 			await closeServer(daemon.server);
 			daemon = null;
 		}
-		await rm(tmpDir, { recursive: true, force: true });
+		await removeTempDir(tmpDir);
 		vi.restoreAllMocks();
 	});
 
@@ -492,7 +492,7 @@ describe("AgentConnectionManager HELLO version check", () => {
 	});
 
 	it("does not inherit a stale deployed signal after an abandoned deploy attempt for the same host", async () => {
-		const abandonedCacheDir = await mkdtemp(join(tmpdir(), "lasterm-abandoned-deploy-"));
+		const abandonedCacheDir = makeTempDir("lasterm-abandoned-deploy-");
 		await writeFile(join(abandonedCacheDir, `lasterm-agent-linux-x64-${HUB_VERSION}`), "binary");
 		try {
 			const abandonedResult = await deployAgentIfNeeded(
@@ -506,7 +506,7 @@ describe("AgentConnectionManager HELLO version check", () => {
 			);
 			expect(abandonedResult.deployed).toBe(true);
 		} finally {
-			await rm(abandonedCacheDir, { recursive: true, force: true });
+			await removeTempDir(abandonedCacheDir);
 		}
 
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

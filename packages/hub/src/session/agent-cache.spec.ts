@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { expectPosixMode } from "../file-mode.fixture.js";
+import { makeTempDir as newTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import {
 	AGENT_TARGET_TRIPLES,
 	FetchError,
@@ -17,8 +17,8 @@ const LINUX_ARM64_TRIPLE = AGENT_TARGET_TRIPLES.linux.arm64.triple;
 
 let tempDirs: string[] = [];
 
-afterEach(() => {
-	for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+	for (const dir of tempDirs) await removeTempDir(dir);
 	tempDirs = [];
 });
 
@@ -113,7 +113,7 @@ describe("pruneAgentBinaryCache", () => {
 });
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-agent-cache-"));
+	const dir = newTempDir("lasterm-agent-cache-");
 	tempDirs.push(dir);
 	return dir;
 }

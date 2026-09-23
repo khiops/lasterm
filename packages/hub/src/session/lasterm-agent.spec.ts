@@ -1,9 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { encodeFrame, PROTOCOL_VERSION, type ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { getTestSocketPath } from "./test-socket-path.js";
 
@@ -104,7 +103,7 @@ describe("LastermAgent", () => {
 	let agent: LastermAgent | null = null;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-agent-test-"));
+		tmpDir = makeTempDir("lasterm-agent-test-");
 		socketPath = getTestSocketPath();
 	});
 
@@ -118,7 +117,7 @@ describe("LastermAgent", () => {
 			await closeServer(daemon.server);
 			daemon = null;
 		}
-		await rm(tmpDir, { recursive: true, force: true });
+		await removeTempDir(tmpDir);
 	});
 
 	describe("connectLocal", () => {

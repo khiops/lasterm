@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoTargetDir } from "./cargo-target-dir.js";
 import { nativeBuildProblem } from "./native-build.fixture.js";
 
 const TEST_TLS_DIRECTORY_ENV = "LASTERM_TEST_TLS_DIRECTORY";
@@ -105,8 +106,11 @@ function removeTestTlsDirectory(directory: string): void {
 
 function testMaterialGeneratorPath(): string {
 	const extension = platform() === "win32" ? ".exe" : "";
-	const targetDirectory = process.env.CARGO_TARGET_DIR ?? resolve(checkout, "target");
-	const generator = resolve(targetDirectory, "release", `lasterm-tls-test-material${extension}`);
+	const generator = join(
+		cargoTargetDir(process.env, checkout),
+		"release",
+		`lasterm-tls-test-material${extension}`,
+	);
 	if (!existsSync(generator)) {
 		try {
 			execFileSync(

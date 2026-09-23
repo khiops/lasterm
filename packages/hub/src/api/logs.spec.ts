@@ -1,19 +1,15 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { LogConfig } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HubLogger } from "../logging/hub-logger.js";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { registerLogRoutes } from "./logs.js";
 import { parsePagination } from "./pagination.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function makeTmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-logs-test-"));
-}
 
 function writeChannelLog(logsDir: string, channelId: string, lines: object[]): void {
 	const dir = path.join(logsDir, "channels");
@@ -76,7 +72,7 @@ let logsDir: string;
 let app: FastifyInstance;
 
 beforeEach(async () => {
-	tmpDir = makeTmpDir();
+	tmpDir = makeTempDir("lasterm-logs-test-");
 	logsDir = path.join(tmpDir, "logs");
 	app = Fastify({ logger: false });
 	await registerLogRoutes(app, logsDir);
@@ -85,7 +81,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	await app.close();
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	await removeTempDir(tmpDir);
 });
 
 // ─── GET /api/logs/channels/:channelId ────────────────────────────────────────

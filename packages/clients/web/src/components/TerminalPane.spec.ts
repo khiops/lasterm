@@ -110,7 +110,8 @@ describe("TerminalPane restart", () => {
 	// overlay still saying "Shell exited": the attach at page load had found it
 	// dead, and nothing unsaid that when Restart brought it back.
 	it("stops saying the terminal ended once it is brought back", () => {
-		const onRestart = /async function onRestart[\s\S]*?\n}\n/.exec(SOURCE)?.[0];
+		// A Windows checkout ends its lines with CRLF.
+		const onRestart = /async function onRestart[\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
 		expect(onRestart, "onRestart moved").toBeDefined();
 		expect(onRestart).toMatch(/if \(ok\) \{[\s\S]*?hasEnded\.value = false;/);
 		expect(SOURCE).toMatch(/status === 'live' \|\| status === 'born'\) hasEnded\.value = false/);

@@ -1,6 +1,7 @@
 import type { ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useConfigStore } from "./config.js";
 import { useSessionStore } from "./session.js";
 import { useToastStore } from "./toast.js";
 
@@ -293,5 +294,45 @@ describe("useSessionStore — connect() with the transport already back", () => 
 		await waiting;
 		expect(resolved).toBe(true);
 		expect(ws?.connectCalls).toBe(1);
+	});
+});
+
+// ─── Configuration written elsewhere (#479) ─────────────────────────────────
+
+describe("useSessionStore — CONFIG_CHANGED", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("re-reads the UI sections when another client changed them", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const configStore = useConfigStore();
+		const loadUiConfig = vi.spyOn(configStore, "loadUiConfig").mockResolvedValue();
+
+		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "ui" });
+
+		expect(loadUiConfig).toHaveBeenCalledOnce();
+	});
+
+	it("tells the panes of a host that its profile changed", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const configStore = useConfigStore();
+		const events: unknown[] = [];
+		configStore.onProfileChange((event) => events.push(event));
+
+		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "host", hostId: "host-pi" });
+
+		expect(events).toEqual([{ scope: "host", hostId: "host-pi" }]);
 	});
 });

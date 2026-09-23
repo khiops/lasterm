@@ -545,6 +545,22 @@ export interface AgentSyncedMessage {
 	message: string;
 }
 
+/**
+ * Hub → UI: configuration was written, by some client or by the API.
+ *
+ * Every client re-reads what it holds of that scope. The one that made the
+ * change already shows it, and re-reads the same value. Without this, a
+ * setting changed in one window stayed unseen in every other until a reload
+ * (#479).
+ */
+export interface ConfigChangedMessage {
+	type: "CONFIG_CHANGED";
+	/** `ui` for the behaviour sections; the others are terminal-profile layers. */
+	scope: "ui" | "global" | "host" | "channel";
+	hostId?: string;
+	channelId?: string;
+}
+
 /** Hub → UI: request a secret from the user during SSH connection */
 export interface AuthPromptMessage {
 	type: "AUTH_PROMPT";
@@ -726,6 +742,7 @@ export type HubToUiMessage =
 	| AgentFetchDoneMessage
 	| AgentFetchErrorMessage
 	| AgentSyncedMessage
+	| ConfigChangedMessage
 	| ErrorMessage;
 
 /** Master union of every distinct protocol message type */
@@ -787,4 +804,5 @@ export type ProtocolMessage =
 	| AgentFetchDoneMessage
 	| AgentFetchErrorMessage
 	| AgentSyncedMessage
+	| ConfigChangedMessage
 	| ErrorMessage;

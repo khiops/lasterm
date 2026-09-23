@@ -1,4 +1,4 @@
-import type { TerminalProfile } from "@lasterm/shared";
+import type { ConfigChangedMessage, TerminalProfile } from "@lasterm/shared";
 import {
 	DEFAULT_PROFILE,
 	ELEVATION_CONFIG_KEYS,
@@ -66,8 +66,16 @@ export function registerConfigRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
 	configResolver: ConfigResolver,
-	sessionManager?: { broadcastDisplayTitles(): void },
+	sessionManager?: {
+		broadcastDisplayTitles(): void;
+		broadcastToAllClients(msg: ConfigChangedMessage): void;
+	},
 ): void {
+	/** Tell every client a scope changed, so each re-reads it (#479). */
+	const announce = (change: Omit<ConfigChangedMessage, "type">): void => {
+		sessionManager?.broadcastToAllClients({ type: "CONFIG_CHANGED", ...change });
+	};
+
 	// GET /api/config/defaults — Layer 1 built-in defaults
 	server.get("/api/config/defaults", async () => {
 		return DEFAULT_PROFILE;
@@ -110,6 +118,7 @@ export function registerConfigRoutes(
 				await configResolver.saveGlobalTerminal(key, value);
 			}
 
+			announce({ scope: "global" });
 			return { ok: true };
 		},
 	);
@@ -171,6 +180,7 @@ export function registerConfigRoutes(
 				sessionManager.broadcastDisplayTitles();
 			}
 
+			announce({ scope: "ui" });
 			return { ok: true };
 		},
 	);
@@ -262,6 +272,7 @@ export function registerConfigRoutes(
 			}
 			metaDal.updateHostProfile(id, JSON.stringify(merged));
 
+			announce({ scope: "host", hostId: id });
 			return reply.code(200).send({ ok: true });
 		},
 	);
@@ -435,6 +446,7 @@ export function registerConfigRoutes(
 			}
 			metaDal.updateChannelProfile(id, JSON.stringify(merged));
 
+			announce({ scope: "channel", channelId: id });
 			return reply.code(200).send({ ok: true });
 		},
 	);

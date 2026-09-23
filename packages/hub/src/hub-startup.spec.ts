@@ -684,7 +684,7 @@ describe("startHub and the daemon's log (#525)", () => {
 			);
 		} finally {
 			dbs.close();
-			rmSync(stateDir, { recursive: true, force: true });
+			await removeTempDir(stateDir);
 		}
 		return { steps, logger };
 	}

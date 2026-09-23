@@ -111,8 +111,8 @@ export type RuntimeLoadResult =
 	| { kind: "unreadable"; error: unknown };
 
 /** Read absence is distinct from every failure to read or parse the record. */
-export function loadRuntime(): RuntimeLoadResult {
-	const p = join(getStateDir(), "runtime.json");
+export function loadRuntime(stateDir: string = getStateDir()): RuntimeLoadResult {
+	const p = join(stateDir, "runtime.json");
 	try {
 		return { kind: "present", runtime: JSON.parse(readFileSync(p, "utf-8")) as RuntimeInfo };
 	} catch (error) {
@@ -121,8 +121,13 @@ export function loadRuntime(): RuntimeLoadResult {
 	}
 }
 
-export function persistRuntime(info: RuntimeInfo): void {
-	const stateDir = ensureStateDir();
+/**
+ * Publish the record in `stateDir`. A starting hub passes the directory it
+ * locked, so the record lands beside that lock whatever the environment says by
+ * the time it is written.
+ */
+export function persistRuntime(info: RuntimeInfo, stateDir: string = getStateDir()): void {
+	createOwnerOnlyDirectory(stateDir);
 	const runtimePath = join(stateDir, "runtime.json");
 	const tempPath = createRuntimeTempPath(runtimePath);
 	let fd: number | null = openSync(tempPath, "wx", 0o600);
@@ -163,10 +168,13 @@ export function runtimeMatches(expected: RuntimeInfo, current: RuntimeInfo): boo
 	);
 }
 
-/** Remove the record only if a fresh read still identifies this runtime. */
-export function deleteRuntime(expected: RuntimeInfo): boolean {
-	const p = join(getStateDir(), "runtime.json");
-	const current = loadRuntime();
+/**
+ * Remove the record only if a fresh read still identifies this runtime. The
+ * directory is the one it was published in, as for `persistRuntime`.
+ */
+export function deleteRuntime(expected: RuntimeInfo, stateDir: string = getStateDir()): boolean {
+	const p = join(stateDir, "runtime.json");
+	const current = loadRuntime(stateDir);
 	if (current.kind !== "present" || !runtimeMatches(expected, current.runtime)) return false;
 	rmSync(p);
 	return true;

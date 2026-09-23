@@ -282,6 +282,7 @@ describe("PUT /api/config/ui — broadcastDisplayTitles integration", () => {
 			broadcastDisplayTitles: () => {
 				called.push(true);
 			},
+			broadcastToAllClients: () => {},
 		};
 
 		const metaDal = new MetaDAL(testDbs.meta);
@@ -305,6 +306,7 @@ describe("PUT /api/config/ui — broadcastDisplayTitles integration", () => {
 			broadcastDisplayTitles: () => {
 				called.push(true);
 			},
+			broadcastToAllClients: () => {},
 		};
 
 		const metaDal = new MetaDAL(testDbs.meta);
@@ -336,6 +338,83 @@ describe("PUT /api/config/ui — broadcastDisplayTitles integration", () => {
 		});
 
 		expect(res.statusCode).toBe(200);
+	});
+});
+
+// ─── CONFIG_CHANGED: every client hears of a write (#479) ────────────────────
+//
+// A setting changed in one window stayed unseen in every other until a reload:
+// only the title section was ever re-broadcast.
+
+describe("config writes — CONFIG_CHANGED to every client", () => {
+	let miniServer: FastifyInstance;
+	let testDbs: ReturnType<typeof openTestDatabases>;
+	let tempDir: string;
+	let announced: unknown[];
+	let metaDal: MetaDAL;
+
+	beforeEach(async () => {
+		tempDir = join(tmpdir(), `lasterm-cfgchg-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		testDbs = openTestDatabases();
+		miniServer = Fastify({ logger: false });
+		announced = [];
+		metaDal = new MetaDAL(testDbs.meta);
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(tempDir);
+		registerConfigRoutes(miniServer, metaDal, resolver, {
+			broadcastDisplayTitles: () => {},
+			broadcastToAllClients: (msg) => {
+				announced.push(msg);
+			},
+		});
+	});
+
+	afterEach(async () => {
+		await miniServer.close();
+		testDbs.close();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("announces a UI section written", async () => {
+		const res = await miniServer.inject({
+			method: "PUT",
+			url: "/api/config/ui",
+			payload: { tabs: { hostMarker: "initials" } },
+		});
+		expect(res.statusCode).toBe(200);
+		expect(announced).toEqual([{ type: "CONFIG_CHANGED", scope: "ui" }]);
+	});
+
+	it("announces nothing for a write it refused", async () => {
+		const res = await miniServer.inject({
+			method: "PUT",
+			url: "/api/config/ui",
+			payload: { tabs: { hostMarker: "sparkles" } },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(announced).toEqual([]);
+	});
+
+	it("announces the global terminal profile", async () => {
+		const res = await miniServer.inject({
+			method: "PUT",
+			url: "/api/config/global",
+			payload: { terminal: { fontSize: 15 } },
+		});
+		expect(res.statusCode).toBe(200);
+		expect(announced).toEqual([{ type: "CONFIG_CHANGED", scope: "global" }]);
+	});
+
+	it("announces a host's profile, naming the host", async () => {
+		const host = metaDal.createHost({ type: "ssh", label: "pi", sshHost: "pi@rpi" });
+		const res = await miniServer.inject({
+			method: "PATCH",
+			url: `/api/hosts/${host.id}/profile`,
+			payload: { profile: { fontSize: 13 } },
+		});
+		expect(res.statusCode).toBe(200);
+		expect(announced).toEqual([{ type: "CONFIG_CHANGED", scope: "host", hostId: host.id }]);
 	});
 });
 

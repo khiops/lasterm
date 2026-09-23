@@ -151,6 +151,7 @@ export const useSessionStore = defineStore("session", () => {
 		const notificationStore = useNotificationStore();
 		const configStore = useConfigStore();
 		_registerNotificationHandlers(notificationStore, configStore, channelsStore);
+		_registerConfigHandlers(configStore);
 
 		_registerStateSyncHandler(hostsStore, channelsStore);
 
@@ -292,6 +293,28 @@ export const useSessionStore = defineStore("session", () => {
 	/**
 	 * Wire up agent verification, sync, and deploy error handlers.
 	 */
+	/**
+	 * Configuration written elsewhere — another window, another device, the API.
+	 * Each scope is re-read the way it is read at startup; the profile scopes
+	 * also reach every pane resolving its profile, through the same event the
+	 * settings panel raises for a change made here.
+	 */
+	function _registerConfigHandlers(configStore: ReturnType<typeof useConfigStore>): void {
+		wsClient.on("CONFIG_CHANGED", (msg) => {
+			if (msg.type !== "CONFIG_CHANGED") return;
+			if (msg.scope === "ui") {
+				void configStore.loadUiConfig();
+				return;
+			}
+			if (msg.scope === "global") void configStore.loadProfile();
+			configStore.emitProfileChange({
+				scope: msg.scope,
+				...(msg.hostId !== undefined ? { hostId: msg.hostId } : {}),
+				...(msg.channelId !== undefined ? { channelId: msg.channelId } : {}),
+			});
+		});
+	}
+
 	function _registerAgentVerifyHandlers(
 		agentVerifyStore: ReturnType<typeof useAgentVerifyStore>,
 	): void {

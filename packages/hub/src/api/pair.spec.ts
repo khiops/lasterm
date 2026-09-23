@@ -324,10 +324,10 @@ describe("a pairing code does not outlive the hub run that issued it", () => {
 
 		await server.close();
 		server = await startHub(dbs);
-		// The restart deleted it; put it back, as a backup restored after the restart would.
+		// The restart deletes it; put it back, as a backup restored after the restart would.
 		dbs.meta
 			.prepare(
-				"INSERT INTO pairing_codes (id, code_hash, created_at, expires_at) VALUES (@id, @code_hash, @created_at, @expires_at)",
+				"INSERT OR REPLACE INTO pairing_codes (id, code_hash, created_at, expires_at) VALUES (@id, @code_hash, @created_at, @expires_at)",
 			)
 			.run(row);
 

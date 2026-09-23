@@ -275,6 +275,9 @@ catalogs:
     pinia:
       specifier: ^4.0.3
       version: 4.0.3
+    pino:
+      specifier: ^10.3.1
+      version: 10.3.1
     postject:
       specifier: 1.0.0-alpha.6
       version: 1.0.0-alpha.6
@@ -490,6 +493,9 @@ importers:
       file-type:
         specifier: 'catalog:'
         version: 22.1.1(supports-color@8.1.1)
+      pino:
+        specifier: 'catalog:'
+        version: 10.3.1
       ssh2:
         specifier: 'catalog:'
         version: 1.17.0

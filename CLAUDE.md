@@ -165,7 +165,7 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 - **Hot paths log at DEBUG, or not at all.** Nothing that runs per WebSocket frame, keystroke, output chunk or routine request may log at INFO or above. A line per keystroke records when and how fast someone types, even without the bytes.
 - **Never log user content, at any level.** That means input bytes, terminal output, clipboard, and secrets (tokens, pairing codes, passwords, passphrases, the asset token inside a URL). Name the type, size or id instead.
 - **Security events** go through `SecurityLog`, and they carry no secret either.
-- **Adding a hot path:** extend the keystroke spec in `packages/hub/src/security-events.spec.ts`, which fails if a burst of INPUT frames leaves anything at INFO or above.
+- **Adding a hot path:** extend the keystroke spec in `packages/hub/src/security-events.spec.ts`, which fails if a burst of INPUT frames leaves anything at INFO or above, or the routine-request spec beside it, which does the same for REST requests.
 
 ### Testing
 

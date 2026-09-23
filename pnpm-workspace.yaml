@@ -24,6 +24,7 @@ catalog:
   "@fastify/websocket": "^11.3.0"
   "@fastify/static": "^10.1.4"
   "@fastify/multipart": "^10.1.1"
+  pino: "^10.3.1"
   ssh2: "^1.17.0"
   "@iarna/toml": "^3.0.0"
   vue: "^3.5.43"

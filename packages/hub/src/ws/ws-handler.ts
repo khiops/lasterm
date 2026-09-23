@@ -22,7 +22,7 @@ import type { FastifyInstance } from "fastify";
 import {
 	type InvalidTokenReason,
 	reportTokenStore,
-	touchToken,
+	touchTokenBestEffort,
 	validateTokenHash,
 	validateTokenRecord,
 } from "../auth.js";
@@ -216,11 +216,7 @@ export async function registerWsRoutes(
 				const now = Date.now();
 				if (now - held.touchedAt >= SOCKET_TOKEN_TOUCH_INTERVAL_MS) {
 					held.touchedAt = now;
-					try {
-						touchToken(held.store, held.id, ttlDays ?? 90);
-					} catch (err) {
-						server.log.warn({ err, clientId }, "ws-auth: touchToken failed");
-					}
+					touchTokenBestEffort(held.store, held.id, ttlDays ?? 90, server.log);
 				}
 				return true;
 			}
@@ -311,11 +307,7 @@ export async function registerWsRoutes(
 				// Best effort, as on the REST path: the credential has been checked,
 				// and a store that cannot record its use must not throw out of the
 				// socket's message handler.
-				try {
-					touchToken(db, validation.record.id, ttlDays ?? 90);
-				} catch (err) {
-					server.log.warn({ err, clientId }, "ws-auth: touchToken failed");
-				}
+				touchTokenBestEffort(db, validation.record.id, ttlDays ?? 90, server.log);
 
 				authenticated = true;
 				credential = {

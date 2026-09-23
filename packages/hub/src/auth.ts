@@ -454,6 +454,45 @@ export function reportTokenStore(
 	}
 }
 
+/** Uses of a credential the store failed to record since it last recorded one, per database. */
+const tokenTouchFailures = new WeakMap<Database.Database, number>();
+
+/**
+ * Record a credential's use, best effort, and report a store that cannot once
+ * per outage. The credential has been checked by then, so failing to record its
+ * use is no reason to refuse it. But every request records one, and a store
+ * that can be read and not written — a full disk, a read-only file — fails them
+ * all: a line per request is what #512 found filling `hub.log`. The first
+ * failure is written; the next use recorded says how many were not.
+ *
+ * Counted per database, like an outage of the whole store, so the REST hook,
+ * the WebSocket and the agent routes report one between them.
+ */
+export function touchTokenBestEffort(
+	db: Database.Database,
+	id: string,
+	ttlDays: number,
+	log: TokenStoreLog,
+): void {
+	const failed = tokenTouchFailures.get(db) ?? 0;
+	try {
+		touchToken(db, id, ttlDays);
+	} catch (err) {
+		if (failed === 0) {
+			log.warn(
+				{ err, tokenId: id },
+				"auth: cannot record a token's use; later failures are counted, not logged",
+			);
+		}
+		tokenTouchFailures.set(db, failed + 1);
+		return;
+	}
+	if (failed > 0) {
+		tokenTouchFailures.delete(db);
+		log.warn({ failed }, "auth: recording token use again");
+	}
+}
+
 /**
  * Whether a token someone presented is the one expected, compared in constant
  * time with `crypto.timingSafeEqual` (CLAUDE.md). A plain `===` stops at the

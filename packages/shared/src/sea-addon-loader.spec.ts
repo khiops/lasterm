@@ -303,6 +303,107 @@ describe.skipIf(windows)("ensurePrivateCacheDir", () => {
 	});
 });
 
+describe.skipIf(windows)("the runtime-directory fallback", () => {
+	/**
+	 * A cache laid out as getAddonCacheDir lays it out, under a home of its
+	 * own, and a runtime directory beside it standing in for XDG_RUNTIME_DIR.
+	 */
+	function layout() {
+		const base = makeTempDir();
+		const cacheHome = join(base, "cache-home");
+		const lastermCache = join(cacheHome, "lasterm");
+		const runtime = join(base, "run");
+		mkdirSync(cacheHome, { mode: 0o700 });
+		mkdirSync(runtime, { mode: 0o700 });
+		const below = join("addons", "1.2.3", "linux-x64");
+		return {
+			base,
+			cacheHome,
+			lastermCache,
+			runtime,
+			cacheDir: join(lastermCache, below),
+			fallback: join(runtime, "lasterm", below),
+			options: { ownedFrom: lastermCache, runtimeDir: runtime },
+		};
+	}
+
+	it("extracts under the runtime directory when a directory outside lasterm's is loose, and says so once", () => {
+		const { cacheHome, lastermCache, cacheDir, fallback, options } = layout();
+		// What a umask of 002 leaves behind for a user with a private group.
+		chmodSync(cacheHome, 0o775);
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const asset = Buffer.from("the embedded addon");
+		const first = openCachedAddon("addon.node", cacheDir, asset, options);
+		closeSync(first.fd);
+		closeSync(openCachedAddon("addon.node", cacheDir, asset, options).fd);
+		expect(first.path).toBe(join(fallback, "addon.node"));
+		expect(readFileSync(first.path)).toEqual(asset);
+		expect(existsSync(lastermCache)).toBe(false);
+		expect(stderr).toHaveBeenCalledTimes(1);
+		const line = String(stderr.mock.calls[0]?.[0]);
+		expect(line).toContain(fallback);
+		expect(line).toContain(`${cacheHome} is writable by its group (mode 0775)`);
+		expect(line).toContain(`chmod go-w ${cacheHome}`);
+		expect(line).toContain("XDG_CACHE_HOME");
+	});
+
+	it("loads the addon from the runtime-directory fallback", () => {
+		const { cacheHome, cacheDir, fallback, options } = layout();
+		chmodSync(cacheHome, 0o775);
+		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const exports = loadNativeAddon("better_sqlite3.node", cacheDir, seaWith(realAddon()), options);
+		expect(typeof exports.Database).toBe("function");
+		expect(existsSync(join(fallback, "better_sqlite3.node"))).toBe(true);
+	});
+
+	// Root owns what a root test creates, and root is trusted.
+	it.skipIf(root)("refuses to start when the fallback is refused too, naming both places", () => {
+		const { cacheHome, runtime, cacheDir, fallback, options } = layout();
+		const someoneElse = (process.geteuid?.() ?? 0) + 1;
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const error = catchError(() =>
+			openCachedAddon("addon.node", cacheDir, Buffer.from("addon"), {
+				...options,
+				uid: someoneElse,
+			}),
+		);
+		expect(error).toBeInstanceOf(UnsafeAddonCacheError);
+		const message = (error as Error).message;
+		expect(message).toContain(cacheDir);
+		expect(message).toContain(fallback);
+		expect(existsSync(join(cacheHome, "lasterm"))).toBe(false);
+		expect(existsSync(join(runtime, "lasterm"))).toBe(false);
+		expect(stderr).not.toHaveBeenCalled();
+	});
+
+	it("refuses to start when there is no runtime directory, naming both", () => {
+		const { cacheHome, cacheDir, options } = layout();
+		chmodSync(cacheHome, 0o775);
+		const error = catchError(() =>
+			openCachedAddon("addon.node", cacheDir, Buffer.from("addon"), {
+				...options,
+				runtimeDir: null,
+			}),
+		);
+		expect(error).toBeInstanceOf(UnsafeAddonCacheError);
+		expect((error as Error).message).toContain(cacheDir);
+		expect((error as Error).message).toContain("XDG_RUNTIME_DIR is not set");
+	});
+
+	it("does not fall back from a refusal inside lasterm's own tree", () => {
+		const { lastermCache, runtime, cacheDir, options } = layout();
+		mkdirSync(lastermCache, { mode: 0o700 });
+		// Not a umask: nothing of lasterm's own is ever a file where a directory goes.
+		writeFileSync(join(lastermCache, "addons"), "");
+		const error = catchError(() =>
+			openCachedAddon("addon.node", cacheDir, Buffer.from("addon"), options),
+		);
+		expect(error).toBeInstanceOf(UnsafeAddonCacheError);
+		expect((error as UnsafeAddonCacheError).withinLastermTree).toBe(true);
+		expect(existsSync(join(runtime, "lasterm"))).toBe(false);
+	});
+});
+
 describe("abandoned temporaries", () => {
 	it("are removed even when the cached addon is already current", () => {
 		const cacheDir = makeTempDir();

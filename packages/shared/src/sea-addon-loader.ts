@@ -26,7 +26,9 @@
  *   match proves nothing (#128).
  * - On Linux (and any other POSIX system) the directory chain is examined
  *   before the cache is used, and a chain another account could change is
- *   refused. See ensurePrivateCacheDir.
+ *   not used: the addons go to a fallback under XDG_RUNTIME_DIR instead, and
+ *   the start fails only when that is unusable too. See ensurePrivateCacheDir
+ *   and privateAddonDir.
  * - On Linux the addon is loaded through that descriptor, so what dlopen maps
  *   is the file that was hashed. Windows cannot do that, and what it relies on
  *   instead is written out at loadVerifiedAddon.
@@ -112,15 +114,38 @@ export function readSeaVersion(sea: {
 export class UnsafeAddonCacheError extends Error {
 	readonly code = "LASTERM_ADDON_CACHE_UNSAFE";
 
+	/**
+	 * @param directory - The directory or link that was refused.
+	 * @param reason    - Why, as a predicate of `directory` ("is writable by its group …").
+	 * @param withinLastermTree - Whether it lies in lasterm's own directory,
+	 *   where a refusal means something other than a loose umask.
+	 * @param message   - Replaces the default message, for a refusal of two places.
+	 */
 	constructor(
 		readonly directory: string,
-		reason: string,
+		readonly reason: string,
+		readonly withinLastermTree = false,
+		message?: string,
 	) {
 		super(
-			`refusing the native addon cache: ${directory} ${reason}, so another account could replace the code this process loads. Every directory on the way to the cache must belong to this account or root and be writable by neither group nor others unless it is sticky: fix ${directory}, or set XDG_CACHE_HOME to a directory that meets this`,
+			message ??
+				`refusing the native addon cache: ${directory} ${reason}, so another account could replace the code this process loads. Every directory on the way to the cache must belong to this account or root and be writable by neither group nor others unless it is sticky: fix ${directory}, or set XDG_CACHE_HOME to a directory that meets this`,
 		);
 		this.name = "UnsafeAddonCacheError";
 	}
+}
+
+/** What tests substitute for the process's own environment. */
+export interface AddonCacheOptions {
+	/** lasterm's own cache root. Defaults to lastermDir("cache"). */
+	readonly ownedFrom?: string | undefined;
+	/**
+	 * The runtime directory the fallback goes under. Defaults to
+	 * XDG_RUNTIME_DIR when that is an absolute path; null means there is none.
+	 */
+	readonly runtimeDir?: string | null;
+	/** The account the directories must be private to. Defaults to the effective uid. */
+	readonly uid?: number;
 }
 
 /**
@@ -152,22 +177,24 @@ interface ExpectedAddon {
  * @param assetName  - The asset key used in the SEA config (e.g. "better_sqlite3.node").
  * @param cacheDir   - Target directory (created if absent, examined before use).
  * @param assetData  - Raw bytes of the addon, as embedded in the executable.
+ * @param options    - Substitutes for the environment, for tests.
  */
 export function openCachedAddon(
 	assetName: string,
 	cacheDir: string,
 	assetData: Buffer,
+	options: AddonCacheOptions = {},
 ): VerifiedAddonFile {
 	if (path.basename(assetName) !== assetName || assetName === "." || assetName === "..") {
 		throw new Error(`addon asset name ${JSON.stringify(assetName)} is not a single file name`);
 	}
-	const dir = path.resolve(cacheDir);
-	ensurePrivateCacheDir(dir, { ownedFrom: lastermCacheRoot() });
+	const dir = privateAddonDir(path.resolve(cacheDir), options);
+	const uid = options.uid ?? process.geteuid?.() ?? 0;
 	const destPath = path.join(dir, assetName);
 	const expected: ExpectedAddon = { size: assetData.length, sha256: sha256(assetData) };
 	removeAbandonedTemporaries(dir, assetName);
 
-	const cached = openIfAuthentic(destPath, expected);
+	const cached = openIfAuthentic(destPath, expected, uid);
 	if (cached !== undefined) return { path: destPath, fd: cached };
 
 	let renameError = publish(destPath, assetData);
@@ -181,7 +208,7 @@ export function openCachedAddon(
 	// writer may have already published the identical complete blob, so the
 	// destination is authenticated whether or not this rename succeeded. Only
 	// that exact result is accepted; there is never a fallback to a direct write.
-	const published = openIfAuthentic(destPath, expected);
+	const published = openIfAuthentic(destPath, expected, uid);
 	if (published !== undefined) return { path: destPath, fd: published };
 	if (renameError !== undefined) throw renameError;
 	throw new Error(
@@ -228,8 +255,9 @@ export function loadCachedAddon(
 	assetName: string,
 	cacheDir: string,
 	assetData: Buffer,
+	options: AddonCacheOptions = {},
 ): Record<string, unknown> {
-	return loadVerifiedAddon(openCachedAddon(assetName, cacheDir, assetData));
+	return loadVerifiedAddon(openCachedAddon(assetName, cacheDir, assetData, options));
 }
 
 /**
@@ -256,8 +284,111 @@ export function loadNativeAddon(
 	name: string,
 	cacheDir: string,
 	seaModule: { getRawAsset: (name: string) => ArrayBuffer },
+	options: AddonCacheOptions = {},
 ): Record<string, unknown> {
-	return loadCachedAddon(name, cacheDir, Buffer.from(seaModule.getRawAsset(name)));
+	return loadCachedAddon(name, cacheDir, Buffer.from(seaModule.getRawAsset(name)), options);
+}
+
+/**
+ * The directory the addons are extracted to: `cacheDir` when its chain is
+ * private, and otherwise the same path under XDG_RUNTIME_DIR.
+ *
+ * A directory refused outside lasterm's own tree is most often a loose umask
+ * rather than an attack: with a user-private group, Debian and Ubuntu run with
+ * 002, and a ~/.cache that pip, npm or mkdir -p creates there is 0775 although
+ * nobody else is in the group. Nothing here can tell those cases apart — group
+ * membership can come from NSS, LDAP or anything else — so the cache is not
+ * used, and the addons go to $XDG_RUNTIME_DIR/lasterm/<the same path below
+ * lasterm's cache root>, walked by the same rules. On systemd that directory
+ * is a tmpfs, 0700 and owned by the user, so the cost is one extraction per
+ * boot. One line on stderr says why and how to stop it.
+ *
+ * A refusal inside lasterm's own tree is not a umask, since loose directories
+ * of this account's there are tightened, and it is thrown as it is. So is one
+ * the fallback cannot answer: no runtime directory, or one refused too.
+ */
+function privateAddonDir(dir: string, options: AddonCacheOptions): string {
+	const uid = options.uid ?? process.geteuid?.() ?? 0;
+	const ownedFrom = "ownedFrom" in options ? options.ownedFrom : lastermCacheRoot();
+	let refusal: UnsafeAddonCacheError;
+	try {
+		ensurePrivateCacheDir(dir, { ownedFrom, uid });
+		return dir;
+	} catch (error) {
+		if (!(error instanceof UnsafeAddonCacheError) || error.withinLastermTree) throw error;
+		refusal = error;
+	}
+
+	// Only a directory of lasterm's cache has a counterpart under the runtime
+	// directory; any other is refused as it is.
+	const below = ownedFrom === undefined ? undefined : path.relative(path.resolve(ownedFrom), dir);
+	if (below === undefined || escapes(below)) throw refusal;
+	const runtimeDir = options.runtimeDir === undefined ? runtimeDirFromEnv() : options.runtimeDir;
+	if (runtimeDir === null) {
+		throw refusedTwice(
+			dir,
+			refusal,
+			"under XDG_RUNTIME_DIR",
+			"XDG_RUNTIME_DIR is not set to an absolute path",
+		);
+	}
+	const fallbackRoot = path.join(runtimeDir, "lasterm");
+	const fallback = path.join(fallbackRoot, below);
+	try {
+		ensurePrivateCacheDir(fallback, { ownedFrom: fallbackRoot, uid });
+	} catch (error) {
+		if (!(error instanceof UnsafeAddonCacheError)) throw error;
+		throw refusedTwice(dir, refusal, fallback, `${error.directory} ${error.reason}`);
+	}
+	warnOnce(
+		`[lasterm] loading native addons from ${fallback}, extracted again after each reboot, instead of the cache ${dir}: ${refusal.directory} ${refusal.reason}. To use the cache, ${remedy(refusal)}.`,
+	);
+	return fallback;
+}
+
+function refusedTwice(
+	dir: string,
+	refusal: UnsafeAddonCacheError,
+	fallback: string,
+	fallbackReason: string,
+): UnsafeAddonCacheError {
+	return new UnsafeAddonCacheError(
+		refusal.directory,
+		refusal.reason,
+		false,
+		`refusing both places for native addons, since another account could replace the code this process loads from either. The cache ${dir}: ${refusal.directory} ${refusal.reason}. The fallback ${fallback}: ${fallbackReason}. To start, ${remedy(refusal)}`,
+	);
+}
+
+function remedy(refusal: UnsafeAddonCacheError): string {
+	const tighten = refusal.reason.startsWith(WRITABLE_BY)
+		? `remove that write access (chmod go-w ${refusal.directory}) or `
+		: "";
+	return `${tighten}set XDG_CACHE_HOME to a directory where every component belongs to this account or root and is writable by neither group nor others unless sticky`;
+}
+
+function runtimeDirFromEnv(): string | null {
+	const value = process.env.XDG_RUNTIME_DIR;
+	return value !== undefined && path.isAbsolute(value) ? value : null;
+}
+
+function escapes(relative: string): boolean {
+	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+/**
+ * Write `line` to stderr once per process. The flag lives on globalThis because
+ * the single executable bundles this module twice — once in the better-sqlite3
+ * prelude and once in the hub — and both load from the same cache.
+ */
+function warnOnce(line: string): void {
+	const key = Symbol.for("lasterm.addonCache.warned");
+	const globals = globalThis as typeof globalThis & { [key: symbol]: Set<string> | undefined };
+	const warned = globals[key] ?? new Set<string>();
+	globals[key] = warned;
+	if (warned.has(line)) return;
+	warned.add(line);
+	process.stderr.write(`${line}\n`);
 }
 
 export interface PrivateCacheDirOptions {
@@ -284,7 +415,9 @@ export interface PrivateCacheDirOptions {
  * to cross: others may add entries there, but not replace ours. A symbolic
  * link is followed, its target walked the same way, so a home reached through
  * one (/home -> /var/home) is accepted when every directory involved is
- * private. A missing directory is created 0700.
+ * private. A missing directory is created 0700. A refusal says whether it
+ * fell inside lasterm's own tree; openCachedAddon falls back to the runtime
+ * directory for one that did not (see privateAddonDir).
  *
  * Checked top-down, the result stays true after the walk: another account
  * cannot change the entries of a directory it cannot write, nor the mode or
@@ -335,7 +468,7 @@ export function ensurePrivateCacheDir(dir: string, options: PrivateCacheDirOptio
 			stat = lstatSync(candidate);
 		}
 		if (stat.isSymbolicLink()) {
-			requireTrustedOwner(candidate, stat, uid, "symbolic link");
+			requireTrustedOwner(candidate, stat, uid, "symbolic link", next.owned);
 			links += 1;
 			if (links > 40) {
 				throw new UnsafeAddonCacheError(target, "resolves through more than 40 symbolic links");
@@ -353,9 +486,13 @@ export function ensurePrivateCacheDir(dir: string, options: PrivateCacheDirOptio
 	}
 }
 
+const WRITABLE_BY = "is writable by";
+
 function inspectDirectory(directory: string, stat: Stats, uid: number, owned: boolean): void {
-	if (!stat.isDirectory()) throw new UnsafeAddonCacheError(directory, "is not a directory");
-	requireTrustedOwner(directory, stat, uid, "directory");
+	if (!stat.isDirectory()) {
+		throw new UnsafeAddonCacheError(directory, "is not a directory", owned);
+	}
+	requireTrustedOwner(directory, stat, uid, "directory", owned);
 	if ((stat.mode & 0o022) === 0 || (stat.mode & S_ISVTX) !== 0) return;
 	if (owned && stat.uid === uid) {
 		chmodSync(directory, stat.mode & 0o7777 & ~0o022);
@@ -365,15 +502,23 @@ function inspectDirectory(directory: string, stat: Stats, uid: number, owned: bo
 	const who = (stat.mode & 0o002) !== 0 ? "others" : "its group";
 	throw new UnsafeAddonCacheError(
 		directory,
-		`is writable by ${who} (mode ${(stat.mode & 0o7777).toString(8).padStart(4, "0")}) and is not sticky`,
+		`${WRITABLE_BY} ${who} (mode ${(stat.mode & 0o7777).toString(8).padStart(4, "0")}) and is not sticky`,
+		owned,
 	);
 }
 
-function requireTrustedOwner(entry: string, stat: Stats, uid: number, kind: string): void {
+function requireTrustedOwner(
+	entry: string,
+	stat: Stats,
+	uid: number,
+	kind: string,
+	owned: boolean,
+): void {
 	if (stat.uid === uid || stat.uid === 0) return;
 	throw new UnsafeAddonCacheError(
 		entry,
 		`is a ${kind} owned by uid ${stat.uid}, which is neither this account nor root`,
+		owned,
 	);
 }
 
@@ -415,7 +560,11 @@ function lastermCacheRoot(): string | undefined {
  * Open `filePath` and return the descriptor when it holds exactly the expected
  * addon, judged on that descriptor; otherwise close it and return undefined.
  */
-function openIfAuthentic(filePath: string, expected: ExpectedAddon): number | undefined {
+function openIfAuthentic(
+	filePath: string,
+	expected: ExpectedAddon,
+	uid: number,
+): number | undefined {
 	let before: BigIntStats | undefined;
 	let fd: number;
 	try {
@@ -433,7 +582,9 @@ function openIfAuthentic(filePath: string, expected: ExpectedAddon): number | un
 	try {
 		const stat = fstatSync(fd, { bigint: true });
 		const sameEntry = before === undefined || (stat.dev === before.dev && stat.ino === before.ino);
-		if (sameEntry && isTrustedFile(stat, expected.size) && digestMatches(fd, expected)) return fd;
+		if (sameEntry && isTrustedFile(stat, expected.size, uid) && digestMatches(fd, expected)) {
+			return fd;
+		}
 	} catch {
 		// Unreadable is not authentic.
 	}
@@ -441,11 +592,10 @@ function openIfAuthentic(filePath: string, expected: ExpectedAddon): number | un
 	return undefined;
 }
 
-function isTrustedFile(stat: BigIntStats, size: number): boolean {
+function isTrustedFile(stat: BigIntStats, size: number, uid: number): boolean {
 	if (!stat.isFile() || stat.size !== BigInt(size)) return false;
 	if (process.platform === "win32") return true;
-	const uid = BigInt(process.geteuid?.() ?? 0);
-	return (stat.uid === uid || stat.uid === 0n) && (stat.mode & 0o022n) === 0n;
+	return (stat.uid === BigInt(uid) || stat.uid === 0n) && (stat.mode & 0o022n) === 0n;
 }
 
 function digestMatches(fd: number, expected: ExpectedAddon): boolean {

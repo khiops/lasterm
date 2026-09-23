@@ -1,14 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import {
 	detectSea,
 	getAddonCacheDir,
 	loadCachedAddon,
 	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
+import { cargoTargetDir } from "./cargo-target-dir.js";
 
 const LOCK_FILE_NAME = "hub.lock";
 const SEA_ASSET_NAME = "lasterm_hub_lock.node";
@@ -111,9 +111,7 @@ function localAddonPath(): string {
 	const extension = platform() === "win32" ? ".dll" : platform() === "darwin" ? ".dylib" : ".so";
 	const filename =
 		platform() === "win32" ? "lasterm_hub_lock.dll" : `liblasterm_hub_lock${extension}`;
-	const sourceDir = dirname(fileURLToPath(import.meta.url));
-	const targetDir = process.env.CARGO_TARGET_DIR ?? resolve(sourceDir, "../../../target");
-	return resolve(targetDir, "release", filename);
+	return join(cargoTargetDir(), "release", filename);
 }
 
 function dlopenAddon(addonPath: string): HubLockAddon {

@@ -16,7 +16,10 @@ LASTERM_TARGET_TRIPLE="${LASTERM_TARGET_TRIPLE:-$DETECTED_TRIPLE}"
 LASTERM_DIST_DIR="${LASTERM_DIST_DIR:-$ROOT/dist/sea}"
 LASTERM_BUILD_HASH="${LASTERM_BUILD_HASH:-$(git -C "$ROOT" rev-parse --short=8 HEAD)}"
 LASTERM_SKIP_WEB="${LASTERM_SKIP_WEB:-false}"
-LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-$ROOT/target}"
+# The target directory: LASTERM_CARGO_TARGET_DIR, else the CARGO_TARGET_DIR
+# plain cargo and the hub specs read, else the repository's own. A relative one
+# is relative to the repository, where cargo runs below (#531).
+LASTERM_CARGO_TARGET_DIR="${LASTERM_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}}"
 
 # The hub embeds the Node running this build, so it is built on the platform it
 # targets; package-sea-hub refuses anything else (#148).

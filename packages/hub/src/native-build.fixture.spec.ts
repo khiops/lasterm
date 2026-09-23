@@ -139,6 +139,35 @@ describe("hub test setup", () => {
 		},
 	);
 
+	it("looks under the checkout for a relative CARGO_TARGET_DIR, wherever the run works from", () => {
+		const relativeTarget = join("no-such-dir", "lasterm-native-build-spec");
+		vi.stubEnv("CARGO_TARGET_DIR", relativeTarget);
+		vi.stubEnv("LASTERM_HUB_LOCK_ADDON", undefined);
+		vi.stubEnv("LASTERM_TLS_IDENTITY_ADDON", undefined);
+		vi.stubEnv("LASTERM_TEST_TLS_DIRECTORY", process.env.LASTERM_TEST_TLS_DIRECTORY);
+		const elsewhere = tempDir();
+		// Mutation caught (#531): a relative value resolved by path.resolve
+		// alone lands under the working directory, not where cargo built.
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(elsewhere);
+		let refusal: unknown;
+		let teardown: (() => void) | undefined;
+		try {
+			teardown = setupTestTlsMaterial();
+		} catch (error) {
+			refusal = error;
+		} finally {
+			teardown?.();
+			cwd.mockRestore();
+		}
+
+		// Nothing is built there, so the setup gives up, naming where it looked.
+		expect(refusal).toBeInstanceOf(Error);
+		const message = (refusal as Error).message;
+		const generator = `lasterm-tls-test-material${executable}`;
+		expect(message).toContain(`missing at ${join(checkout, relativeTarget, "release", generator)}`);
+		expect(message).not.toContain(elsewhere);
+	});
+
 	it("runs the generator, and builds nothing, when the build is current", () => {
 		const target = useTarget();
 		const teardown = setupTestTlsMaterial();

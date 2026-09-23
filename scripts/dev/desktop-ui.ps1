@@ -46,14 +46,25 @@ function Stop-UiApp {
 if ($Stop) { Stop-UiApp; return }
 
 if ($Build) {
-	# Only the Tauri build reads CARGO_TARGET_DIR: the agent and the hub pass
-	# their own --target-dir and keep the repository's target\.
+	# Only the Tauri build goes to $BuildDir. The agent and the hub keep the
+	# directory they build in otherwise: their scripts take it from
+	# LASTERM_CARGO_TARGET_DIR before CARGO_TARGET_DIR (#531), so it is pinned
+	# there before CARGO_TARGET_DIR moves. Both are put back afterwards.
+	$saved = @{
+		CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR
+		LASTERM_CARGO_TARGET_DIR = $env:LASTERM_CARGO_TARGET_DIR
+	}
+	$env:LASTERM_CARGO_TARGET_DIR = if ($env:LASTERM_CARGO_TARGET_DIR) { $env:LASTERM_CARGO_TARGET_DIR }
+	elseif ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR }
+	else { Join-Path $Root "target" }
 	$env:CARGO_TARGET_DIR = $BuildDir
 	try {
 		& (Join-Path $Root "scripts\build-desktop.ps1") -NoBundle
 		if ($LASTEXITCODE -ne 0) { throw "build-desktop.ps1 failed" }
 	} finally {
-		Remove-Item Env:CARGO_TARGET_DIR
+		# Assigning $null removes the variable, as it was when unset.
+		$env:CARGO_TARGET_DIR = $saved.CARGO_TARGET_DIR
+		$env:LASTERM_CARGO_TARGET_DIR = $saved.LASTERM_CARGO_TARGET_DIR
 	}
 }
 

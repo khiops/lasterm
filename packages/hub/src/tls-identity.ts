@@ -2,8 +2,7 @@ import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { TlsConfig } from "@lasterm/shared";
 import {
 	detectSea,
@@ -11,6 +10,7 @@ import {
 	loadCachedAddon,
 	readSeaVersion,
 } from "@lasterm/shared/dist/sea-addon-loader.js";
+import { cargoTargetDir } from "./cargo-target-dir.js";
 
 const SEA_ASSET_NAME = "lasterm_tls_identity.node";
 
@@ -88,9 +88,7 @@ function localAddonPath(): string {
 	const extension = platform() === "win32" ? ".dll" : platform() === "darwin" ? ".dylib" : ".so";
 	const filename =
 		platform() === "win32" ? "lasterm_tls_identity.dll" : `liblasterm_tls_identity${extension}`;
-	const sourceDir = dirname(fileURLToPath(import.meta.url));
-	const targetDir = process.env.CARGO_TARGET_DIR ?? resolve(sourceDir, "../../../target");
-	return resolve(targetDir, "release", filename);
+	return join(cargoTargetDir(), "release", filename);
 }
 
 function dlopenAddon(addonPath: string): TlsIdentityAddon {

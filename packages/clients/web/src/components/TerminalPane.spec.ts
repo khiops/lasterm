@@ -122,3 +122,12 @@ describe("TerminalPane restart", () => {
 		expect(SOURCE).toContain(':disabled="restarting"');
 	});
 });
+
+describe("TerminalPane lock indicator", () => {
+	// A terminal on another host that has ended is in no list the pane can
+	// read, so `isDead` stays false: the indicator offered "No lock" under an
+	// overlay saying the shell had exited.
+	it("is hidden for a terminal that has ended, whichever way the pane learnt it", () => {
+		expect(SOURCE).toMatch(/:is-dead="isDead \|\| hasEnded \|\| isGone"/);
+	});
+});

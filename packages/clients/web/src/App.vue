@@ -680,7 +680,12 @@ const activeChannelId = computed(() => {
 	return layout.getActiveChannelId(tab.id);
 });
 /** Resolved title of the active tab's channel (no prefix, no truncation). */
-const { resolvedTitle: _resolvedTitle } = useTabTitle(activeChannelId, toRef(channelsStore, 'channels'));
+const { resolvedTitle: _resolvedTitle } = useTabTitle(
+	activeChannelId,
+	toRef(channelsStore, 'channels'),
+	undefined,
+	{ index: toRef(channelsStore, 'channelIndex') },
+);
 const activeTitle = computed(() => (activeChannelId.value === null ? '' : _resolvedTitle.value));
 
 /** Label of the host that owns the active tab's channel. */

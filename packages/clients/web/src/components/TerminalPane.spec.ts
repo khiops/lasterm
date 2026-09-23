@@ -104,3 +104,20 @@ describe("TerminalPane host", () => {
 		expect(SOURCE).toMatch(/restartChannel\(chId,\s*paneHostId\.value\)/);
 	});
 });
+
+describe("TerminalPane restart", () => {
+	// A Pi terminal came back — prompt on screen, write lock held — under an
+	// overlay still saying "Shell exited": the attach at page load had found it
+	// dead, and nothing unsaid that when Restart brought it back.
+	it("stops saying the terminal ended once it is brought back", () => {
+		const onRestart = /async function onRestart[\s\S]*?\n}\n/.exec(SOURCE)?.[0];
+		expect(onRestart, "onRestart moved").toBeDefined();
+		expect(onRestart).toMatch(/if \(ok\) \{[\s\S]*?hasEnded\.value = false;/);
+		expect(SOURCE).toMatch(/status === 'live' \|\| status === 'born'\) hasEnded\.value = false/);
+	});
+
+	it("shows why a restart failed, and that one is under way", () => {
+		expect(SOURCE).toContain("Could not restart it: {{ restartFailure }}");
+		expect(SOURCE).toContain(':disabled="restarting"');
+	});
+});

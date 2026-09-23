@@ -1386,3 +1386,74 @@ describe("useChannelsStore — killChannel", () => {
 		expect(store.channels.find((c) => c.id === "ch-kill")?.status).toBe("dead");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// restartChannel — saying why it failed
+// ---------------------------------------------------------------------------
+//
+// A Restart on a Raspberry Pi terminal failed in the hub with a reason, and the
+// store caught it and returned false: the button did nothing, visibly.
+
+describe("useChannelsStore — restartChannel failures", () => {
+	/** A hub that answers every SPAWN with this ERROR, or with SPAWN_OK. */
+	function hubAnswering(answer: { code: string; message: string } | "ok"): void {
+		const listeners = new Map<string, ((msg: unknown) => void)[]>();
+		const sessionStore = useSessionStore();
+		// @ts-expect-error — overwrite reactive wsClient for test
+		sessionStore.wsClient = {
+			on: vi.fn((type: string, cb: (msg: unknown) => void) => {
+				listeners.set(type, [...(listeners.get(type) ?? []), cb]);
+				return () => {
+					listeners.set(
+						type,
+						(listeners.get(type) ?? []).filter((c) => c !== cb),
+					);
+				};
+			}),
+			send: vi.fn(() => {
+				if (answer === "ok") {
+					for (const cb of listeners.get("SPAWN_OK") ?? []) {
+						cb({ type: "SPAWN_OK", channelId: "ch-dead" });
+					}
+				} else {
+					for (const cb of listeners.get("ERROR") ?? []) cb({ type: "ERROR", ...answer });
+				}
+			}),
+		};
+	}
+
+	beforeEach(() => {
+		localStorageMap.set("lasterm_token", "test-token");
+		mockFetch.mockImplementation(() =>
+			Promise.resolve({ ok: true, json: () => Promise.resolve([]) }),
+		);
+	});
+
+	it("keeps the hub's reason, without the code in front of it", async () => {
+		hubAnswering({
+			code: "SSH_CONNECT_FAILED",
+			message: "The remote agent daemon did not answer. It says: unexpected argument",
+		});
+		const store = useChannelsStore();
+
+		const ok = await store.restartChannel("ch-dead", "host-pi");
+
+		expect(ok).toBe(false);
+		expect(store.restartFailures.get("ch-dead")).toBe(
+			"The remote agent daemon did not answer. It says: unexpected argument",
+		);
+	});
+
+	it("forgets the reason once the terminal comes back", async () => {
+		const store = useChannelsStore();
+		hubAnswering({ code: "SSH_CONNECT_FAILED", message: "Agent HELLO timeout" });
+		await store.restartChannel("ch-dead", "host-pi");
+		expect(store.restartFailures.has("ch-dead")).toBe(true);
+
+		hubAnswering("ok");
+		const ok = await store.restartChannel("ch-dead", "host-pi");
+
+		expect(ok).toBe(true);
+		expect(store.restartFailures.has("ch-dead")).toBe(false);
+	});
+});

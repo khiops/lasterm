@@ -39,8 +39,13 @@
 		<!-- Exit overlay for all dead channels, and for one the hub has never heard of -->
 		<div v-if="isDead || hasEnded || isGone" class="exit-overlay">
 			<div class="exit-message">{{ isGone ? goneMessage : exitMessage }}</div>
+			<div v-if="restartFailure && !isGone" class="exit-reason">
+				Could not restart it: {{ restartFailure }}
+			</div>
 			<div class="exit-actions">
-				<button v-if="!isGone" class="exit-btn" @click="onRestart">Restart</button>
+				<button v-if="!isGone" class="exit-btn" :disabled="restarting" @click="onRestart">
+					{{ restarting ? 'Restarting…' : 'Restart' }}
+				</button>
 				<button
 					v-if="isDirectProcess && !isGone"
 					class="exit-btn"
@@ -399,6 +404,29 @@ const isDetached = ref(false);
 const hasEnded = ref(false);
 const goneMessage = 'This terminal no longer exists.';
 
+/**
+ * A terminal brought back — from this pane or from the sidebar — is not the
+ * one that ended. What the attach learnt when the page loaded stops being
+ * true, and left standing it kept "Shell exited" over a live shell with its
+ * prompt showing beneath.
+ */
+watch(
+	() => channelsStore.channels.find((c) => c.id === effectiveChannelId.value)?.status,
+	(status) => {
+		if (status === 'live' || status === 'born') hasEnded.value = false;
+	},
+);
+
+/** A restart is under way: over SSH it can take seconds, and a button that
+ * does nothing visible for that long gets pressed again. */
+const restarting = ref(false);
+
+/** Why the last attempt to bring this terminal back failed, if it did. */
+const restartFailure = computed(() => {
+	const chId = effectiveChannelId.value;
+	return chId === null ? undefined : channelsStore.restartFailures.get(chId);
+});
+
 const exitMessage = computed(() => {
 	const chId = effectiveChannelId.value;
 	if (!chId) return 'Exited';
@@ -629,8 +657,18 @@ async function onRestart(): Promise<void> {
 	// for, since that path carries the prompts a passphrase or a host key need.
 	// It used to open a stranger and delete the terminal being restarted, which
 	// is the opposite of what the button says.
-	const ok = await channelsStore.restartChannel(chId, paneHostId.value);
+	if (restarting.value) return;
+	restarting.value = true;
+	let ok: boolean;
+	try {
+		ok = await channelsStore.restartChannel(chId, paneHostId.value);
+	} finally {
+		restarting.value = false;
+	}
 	if (ok) {
+		// This pane may be over a terminal no list shows — one on another
+		// host — where the status watcher cannot see it come back.
+		hasEnded.value = false;
 		const result = await reattachChannel(chId, { preserveContent: true });
 		isDetached.value = result.cached;
 		if (result.writeLockHolder) {
@@ -1143,6 +1181,22 @@ function onDragEnd(): void {
 	color: var(--nt-text-secondary);
 	font-size: 14px;
 	font-weight: 500;
+}
+
+.exit-reason {
+	max-width: 36rem;
+	margin-bottom: 12px;
+	padding: 0 16px;
+	text-align: center;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--nt-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.exit-btn:disabled {
+	opacity: 0.6;
+	cursor: default;
 }
 
 .exit-actions {

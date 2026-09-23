@@ -89,6 +89,16 @@ const SPAWN_DEADLINE_MS = 10_000;
  */
 const SPAWN_PROMPTED_DEADLINE_MS = 300_000;
 
+/**
+ * A spawn's rejection, as a sentence for the pane. The hub's messages are
+ * written for people; the code in front of them (`SSH_CONNECT_FAILED: …`) is
+ * for logs.
+ */
+function restartFailureReason(err: unknown): string {
+	const message = err instanceof Error ? err.message : String(err);
+	return message.replace(/^[A-Z][A-Z0-9_]+: /, "");
+}
+
 export const useChannelsStore = defineStore("channels", () => {
 	const authStore = useAuthStore();
 
@@ -147,6 +157,23 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * host, where the live status lives.
 	 */
 	const channelIndex = ref<Map<string, { hostId: string; displayTitle: string }>>(new Map());
+	/**
+	 * Why the last attempt to bring a terminal back failed, by channel.
+	 *
+	 * Restart is started from the pane and from the sidebar, and it can fail far
+	 * from either — an SSH connection, a remote daemon that would not start. The
+	 * reason used to be caught and dropped: the button did nothing, visibly, and
+	 * the hub's explanation went nowhere. Kept here, the pane over that terminal
+	 * shows it, whichever gesture asked.
+	 */
+	const restartFailures = ref<Map<string, string>>(new Map());
+
+	function setRestartFailure(channelId: string, reason: string | null): void {
+		const next = new Map(restartFailures.value);
+		if (reason === null) next.delete(channelId);
+		else next.set(channelId, reason);
+		restartFailures.value = next;
+	}
 
 	/** Channels that belong to the currently loaded host. */
 	const activeHostId = ref<string | null>(null);
@@ -1131,6 +1158,7 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	async function restartChannel(channelId: string, hostIdHint?: string): Promise<boolean> {
 		if (authStore.token === null) return false;
+		setRestartFailure(channelId, null);
 
 		// A dead terminal has no session and no agent left — the hub it belonged
 		// to may be gone — so there is nothing for the hub to restart. Bringing it
@@ -1150,7 +1178,8 @@ export const useChannelsStore = defineStore("channels", () => {
 					...(channel?.args !== undefined && channel.args.length > 0 ? { args: channel.args } : {}),
 				});
 				return true;
-			} catch {
+			} catch (err) {
+				setRestartFailure(channelId, restartFailureReason(err));
 				return false;
 			}
 		}
@@ -1161,7 +1190,10 @@ export const useChannelsStore = defineStore("channels", () => {
 				Authorization: `Bearer ${authStore.token}`,
 			},
 		});
-		if (!res.ok) return false;
+		if (!res.ok) {
+			setRestartFailure(channelId, `The hub could not restart it (${res.status}).`);
+			return false;
+		}
 
 		// No optimistic update — the hub broadcasts CHANNEL_STATE: live
 		// via WS which arrives before or alongside the HTTP response.
@@ -1260,6 +1292,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		clearWelcomeChannel,
 		updateChannelConfig,
 		restartChannel,
+		restartFailures,
 		deleteChannel,
 		purgeDeadChannels,
 	};

@@ -1340,11 +1340,24 @@ export async function waitForHubQuit(
 }
 
 /**
- * Connection failures that mean "not yet" rather than "not this hub". A hub
- * that is starting or stopping refuses or drops a connection for a moment, and
- * asking again is the right move. A key that does not match, a peer that does
- * not complete TLS correctly, or a record naming no usable key will not change
- * by waiting, so everything outside this list is a refusal.
+ * Connection failures that mean "not yet" rather than "not this hub". While a
+ * hub stops, nothing listens on the recorded port for a moment, since it closes
+ * its listener before it withdraws its record. The same can happen while a hub
+ * starts after one that died, if the dead hub's record names a pid in use
+ * again. The connection is refused or dropped, and asking again is the right
+ * move. A key that does not match, a peer that does not complete TLS
+ * correctly, or a record naming no usable key will not change by waiting, so
+ * everything outside this list is a refusal.
+ *
+ * A TLS handshake that times out is not in this list (#523). `startHub` writes
+ * runtime.json only after its listener is bound, and a graceful shutdown
+ * removes the record only after closing that listener. So while the record
+ * names a live pid, the process behind the port has a listener that should
+ * complete TLS in milliseconds. If the port accepts the connection and TLS
+ * does not complete within its bound, the listener's event loop is not
+ * running: the process is stopped, suspended, wedged or starved, or something
+ * other than the hub holds the port. Such a hub is not starting. It is not
+ * answering, like a hub that proves its key and then stalls.
  */
 const TRANSIENT_HUB_CONNECTION_CODES: ReadonlySet<string> = new Set([
 	"ECONNREFUSED",
@@ -1352,7 +1365,6 @@ const TRANSIENT_HUB_CONNECTION_CODES: ReadonlySet<string> = new Set([
 	"ECONNABORTED",
 	"EPIPE",
 	"ETIMEDOUT",
-	HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
 ]);
 
 /** Why the hub named by runtime.json was not accepted. */
@@ -1361,8 +1373,16 @@ export type HubRefusal = "pin" | "tls" | "config";
 export type HubProbe =
 	| { readonly kind: "answered"; readonly health: unknown }
 	| { readonly kind: "not-ready"; readonly error: string }
-	/** Proved the recorded key, then gave no answer within the response bound. */
-	| { readonly kind: "not-answering"; readonly error: string }
+	/**
+	 * The recorded port took the connection, and then nothing answered in time:
+	 * no TLS within the handshake bound (`handshake`), or no answer within the
+	 * response bound from a peer that proved the recorded key (`answer`).
+	 */
+	| {
+			readonly kind: "not-answering";
+			readonly stage: "handshake" | "answer";
+			readonly error: string;
+	  }
 	| { readonly kind: "refused"; readonly refusal: HubRefusal; readonly error: string };
 
 /** Sort a failed hub request into "ask again", "did not answer" and a named refusal. */
@@ -1375,7 +1395,12 @@ export function classifyHubFailure(error: unknown): Exclude<HubProbe, { kind: "a
 	if (code === HUB_RUNTIME_UNUSABLE_CODE) {
 		return { kind: "refused", refusal: "config", error: message };
 	}
-	if (code === HUB_RESPONSE_TIMEOUT_CODE) return { kind: "not-answering", error: message };
+	if (code === HUB_TLS_HANDSHAKE_TIMEOUT_CODE) {
+		return { kind: "not-answering", stage: "handshake", error: message };
+	}
+	if (code === HUB_RESPONSE_TIMEOUT_CODE) {
+		return { kind: "not-answering", stage: "answer", error: message };
+	}
 	if (typeof code === "string" && TRANSIENT_HUB_CONNECTION_CODES.has(code)) {
 		return { kind: "not-ready", error: message };
 	}
@@ -1407,9 +1432,10 @@ const HUB_REFUSAL_LABELS: Record<HubRefusal, string> = {
 /**
  * Report the hub runtime.json names. The exit code is 1 when the hub was
  * refused, so a script cannot read a peer holding another key as a running
- * hub, and when it proved its key but did not answer, so a script cannot read
- * a wedged hub as a working one. A hub that is not accepting connections yet
- * exits 0 and says it may be retried.
+ * hub. It is also 1 when the recorded port took the connection and then
+ * nothing answered, either in the TLS handshake or after it, so a script cannot
+ * read a stopped or wedged hub as a working one or as one that is starting. A
+ * hub that is not accepting connections yet exits 0 and says it may be retried.
  */
 export async function cmdStatus(
 	args: ParsedArgs,
@@ -1474,10 +1500,12 @@ export async function cmdStatus(
 				);
 				break;
 			case "not-answering":
-				// The peer proved the recorded key, so this is the hub the record
-				// names; but a hub that takes a request and never answers it is not
-				// one a script can use, and whether it is running in any useful sense
-				// cannot be said. It may yet recover, so asking again is not futile.
+				// A hub that takes a connection and never answers it is not one a
+				// script can use, and whether it is running in any useful sense cannot
+				// be said. That holds whether its peer proved the recorded key and then
+				// stalled, or never finished TLS at all, which is also how a port held
+				// by something else looks. A stopped or wedged process may yet
+				// recover, so asking again is not futile.
 				console.log(
 					JSON.stringify({
 						running: "unknown",
@@ -1519,8 +1547,11 @@ export async function cmdStatus(
 			);
 			break;
 		case "not-answering":
+			// Only a peer that proved the recorded key is known to be the pid's.
 			console.log(
-				`Hub: not answering (pid ${runtime.pid} accepted the connection on port ${runtime.port}, then did not answer)`,
+				probe.stage === "answer"
+					? `Hub: not answering (pid ${runtime.pid} accepted the connection on port ${runtime.port}, then did not answer)`
+					: `Hub: not answering (pid ${runtime.pid} is alive and port ${runtime.port} took the connection, but TLS never completed)`,
 			);
 			break;
 		case "refused":

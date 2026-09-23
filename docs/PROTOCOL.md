@@ -361,6 +361,20 @@ On a fresh daemon start (no prior channels), the agent sends HELLO followed imme
 { type: "AUTH_FAIL", message: string }
 ```
 
+`AUTH_FAIL` is a verdict on the token: a client that receives it discards the token and pairs
+again. When the hub cannot read its token store it has no verdict, so it sends no `AUTH_FAIL` and
+closes the socket with code `1013` (Try Again Later), reason `AUTH_UNAVAILABLE`. The client keeps
+its token and reconnects.
+
+`AUTH_OK` is not the last check. The hub checks the token again before it acts on each later frame
+the client sends. If the token no longer validates because it was revoked, has expired or was swept
+by a restart, the hub drops the frame and closes the socket with `1008` (Policy Violation), reason
+`AUTH_REVOKED`. A client that reconnects then gets `AUTH_FAIL`. If the store cannot answer, the
+socket closes with `1013` as above. Revoking a token through `DELETE /api/auth/tokens/:id` closes
+the sockets it authenticated at once, without waiting for their next frame. Output the hub pushes is
+not re-checked, so an idle socket whose token merely expires keeps receiving it until the client
+sends a frame or disconnects.
+
 ### 4.2 ATTACH / ATTACH_OK / DETACH
 
 ```typescript
@@ -720,6 +734,11 @@ Client A (WRITER)           Hub                Client B (READER)
 Base: `http://localhost:4100/api`
 Auth: `Authorization: Bearer <token>` (except `/health`).
 
+A bearer that is missing or malformed answers `401 AUTH_REQUIRED`, and one that is unknown,
+revoked, swept or expired answers `401 AUTH_INVALID`. A bearer the hub cannot check because its
+token store cannot be read answers `503 AUTH_UNAVAILABLE`: the request is still refused, but the
+token was not judged, and the client should keep it and retry.
+
 ### Endpoints
 
 Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthenticated.
@@ -868,6 +887,13 @@ Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthent
 |--------|------|------|--------------|
 | POST | `/api/pair` | ● | — → `{ code, expires_at }` (201); max 3 active codes |
 | POST | `/api/pair/verify` | ○ | `{ code }` → `{ token }` |
+
+#### Auth Tokens
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| GET | `/api/auth/tokens` | ● | `{ tokens }`, each `{ id, label, created_at, expires_at, revoked_at, swept_at, last_used_at }`; never the hash |
+| DELETE | `/api/auth/tokens/:id` | ● | → `{ ok: true }`, or 404 `TOKEN_NOT_FOUND` if unknown or already revoked. Closes the WebSockets the token authenticated (`1008 AUTH_REVOKED`) |
 
 #### Static Assets (served by @fastify/static)
 
@@ -1059,7 +1085,7 @@ Errors: `CHECKSUM_MISMATCH`/`CHECKSUM_MISSING` (422), `INSECURE_CACHE_DIR`/`ALRE
 }
 ```
 
-All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED`, `AUTH_INVALID`). Mutation routes also enforce the Origin guard (`ORIGIN_FORBIDDEN`).
+All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED`, `AUTH_INVALID`, or `AUTH_UNAVAILABLE` with a 503 while the token store cannot be read). Mutation routes also enforce the Origin guard (`ORIGIN_FORBIDDEN`).
 
 **Error responses:**
 ```typescript

@@ -290,8 +290,11 @@ export function getTokenByValue(
 	db: Database.Database,
 	plaintextToken: string,
 ): AuthTokenRecord | null {
-	const hash = hashToken(plaintextToken);
-	const row = db.prepare("SELECT * FROM auth_tokens WHERE token_hash = ?").get(hash) as
+	return getTokenByHash(db, hashToken(plaintextToken));
+}
+
+function getTokenByHash(db: Database.Database, tokenHash: string): AuthTokenRecord | null {
+	const row = db.prepare("SELECT * FROM auth_tokens WHERE token_hash = ?").get(tokenHash) as
 		| Record<string, unknown>
 		| undefined;
 	return row ? rowToRecord(row) : null;
@@ -342,6 +345,20 @@ export function touchToken(db: Database.Database, id: string, ttlDays: number): 
 // ─── Token validation ─────────────────────────────────────────────────────────
 
 /**
+ * What the token store said about a credential. `unavailable` is an answer of
+ * its own rather than a refusal in disguise: a closed, corrupt or locked
+ * database still authorises nothing, but folding it into `invalid` told the
+ * client its credential was bad and told the operator nothing at all.
+ */
+export type TokenValidation =
+	| { readonly status: "valid"; readonly record: AuthTokenRecord }
+	| { readonly status: "invalid"; readonly reason: InvalidTokenReason }
+	| { readonly status: "unavailable"; readonly error: unknown };
+
+/** Why the store refused a credential: none has that value, or its row no longer allows it. */
+export type InvalidTokenReason = "unknown" | "revoked" | "swept" | "expired";
+
+/**
  * Validate a plaintext token against the DB.
  *
  * Checks:
@@ -349,24 +366,78 @@ export function touchToken(db: Database.Database, id: string, ttlDays: number): 
  * 2. Not operator-revoked or restart-swept
  * 3. Not expired (expires_at IS NULL OR expires_at > now)
  *
- * Returns the token record on success, or null on failure.
+ * Only a record that passes all three is `valid`. A store that cannot be read
+ * is `unavailable`, which every caller must still refuse.
  */
 export function validateTokenRecord(
 	db: Database.Database,
 	plaintextToken: string,
-): AuthTokenRecord | null {
+): TokenValidation {
+	return validateTokenHash(db, hashToken(plaintextToken));
+}
+
+/**
+ * The same checks, for a credential already known by its stored hash. An open
+ * WebSocket re-checks the token it authenticated with before acting on each
+ * frame, and keeps the hash to do so rather than the token itself.
+ */
+export function validateTokenHash(db: Database.Database, tokenHash: string): TokenValidation {
+	let record: AuthTokenRecord | null;
 	try {
-		const record = getTokenByValue(db, plaintextToken);
-		if (!record) return null;
-		if (record.revokedAt !== null || record.sweptAt !== null) return null;
+		record = getTokenByHash(db, tokenHash);
+	} catch (error) {
+		return { status: "unavailable", error };
+	}
+	if (!record) return { status: "invalid", reason: "unknown" };
+	if (record.revokedAt !== null) return { status: "invalid", reason: "revoked" };
+	if (record.sweptAt !== null) return { status: "invalid", reason: "swept" };
 
-		const now = new Date().toISOString();
-		if (record.expiresAt !== null && record.expiresAt <= now) return null;
+	const now = new Date().toISOString();
+	if (record.expiresAt !== null && record.expiresAt <= now) {
+		return { status: "invalid", reason: "expired" };
+	}
 
-		return record;
-	} catch {
-		// If the DB cannot establish validity, it cannot authorise a request.
-		return null;
+	return { status: "valid", record };
+}
+
+/** The two levels an outage report needs; Fastify's logger has both. */
+export interface TokenStoreLog {
+	error(details: object, message: string): void;
+	warn(details: object, message: string): void;
+}
+
+/** Credentials refused since the store last answered, per database. */
+const tokenStoreOutages = new WeakMap<Database.Database, number>();
+
+/**
+ * Report a token store that cannot answer once per outage, not once per
+ * request. A client retrying against a locked database would otherwise write
+ * the same error on every attempt, and the first one is the one worth reading.
+ * The next answer the store does give ends the outage and says how many
+ * credentials were refused meanwhile.
+ *
+ * The count belongs to the database rather than to a caller, so the REST hook,
+ * the WebSocket handshake and the agent routes report one outage between them.
+ */
+export function reportTokenStore(
+	db: Database.Database,
+	validation: TokenValidation,
+	log: TokenStoreLog,
+): void {
+	const refused = tokenStoreOutages.get(db) ?? 0;
+	if (validation.status === "unavailable") {
+		if (refused === 0) {
+			log.error(
+				{ err: validation.error },
+				"auth: token store unavailable; refusing credentials until it answers again",
+			);
+		}
+		tokenStoreOutages.set(db, refused + 1);
+		return;
+	}
+	if (refused > 0) {
+		tokenStoreOutages.delete(db);
+		log.warn({ refused }, "auth: token store answering again");
 	}
 }
 

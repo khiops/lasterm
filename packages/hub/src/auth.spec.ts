@@ -20,11 +20,13 @@ import {
 	initAuth,
 	listTokens,
 	PRIMARY_TOKEN_ID,
+	reportTokenStore,
 	revokeToken,
 	sweepNonPrimaryTokens,
 	TokenSweepError,
 	touchToken,
 	upsertPrimaryToken,
+	validateTokenHash,
 	validateTokenRecord,
 } from "./auth.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -352,48 +354,126 @@ describe("validateTokenRecord", () => {
 		const token = randomBytes(32).toString("hex");
 		upsertPrimaryToken(db, token);
 
-		const record = validateTokenRecord(db, token);
-		expect(record).not.toBeNull();
-		expect(record?.id).toBe(PRIMARY_TOKEN_ID);
+		const validation = validateTokenRecord(db, token);
+		expect(validation.status).toBe("valid");
+		expect(validation.status === "valid" && validation.record.id).toBe(PRIMARY_TOKEN_ID);
 	});
 
-	it("returns null for unknown token", () => {
+	it("calls an unknown token invalid", () => {
 		const db = makeDb();
-		expect(validateTokenRecord(db, "unknowntoken")).toBeNull();
+		expect(validateTokenRecord(db, "unknowntoken")).toEqual({
+			status: "invalid",
+			reason: "unknown",
+		});
 	});
 
-	it("returns null for revoked token", () => {
+	it("calls a revoked token invalid", () => {
 		const db = makeDb();
 		const { id, token } = createToken(db, { label: "test", expiresAt: null });
 		revokeToken(db, id);
-		expect(validateTokenRecord(db, token)).toBeNull();
+		expect(validateTokenRecord(db, token)).toEqual({ status: "invalid", reason: "revoked" });
 	});
 
-	it("returns null for expired token", () => {
+	it("calls an expired token invalid", () => {
 		const db = makeDb();
 		const pastExpiry = new Date(Date.now() - 1000).toISOString();
 		const { token } = createToken(db, { label: "test", expiresAt: pastExpiry });
-		expect(validateTokenRecord(db, token)).toBeNull();
+		expect(validateTokenRecord(db, token)).toEqual({ status: "invalid", reason: "expired" });
 	});
 
 	it("returns record for token expiring in the future", () => {
 		const db = makeDb();
 		const futureExpiry = new Date(Date.now() + 86_400_000).toISOString();
 		const { token } = createToken(db, { label: "test", expiresAt: futureExpiry });
-		expect(validateTokenRecord(db, token)).not.toBeNull();
+		expect(validateTokenRecord(db, token).status).toBe("valid");
 	});
 
 	it("returns record for token with null expiresAt (never expires)", () => {
 		const db = makeDb();
 		const { token } = createToken(db, { label: "test", expiresAt: null });
-		expect(validateTokenRecord(db, token)).not.toBeNull();
+		expect(validateTokenRecord(db, token).status).toBe("valid");
 	});
 
-	it("refuses when the database query throws", () => {
+	it("calls a store it cannot read unavailable, not the token invalid", () => {
 		const db = makeDb();
 		db.close();
 
-		expect(validateTokenRecord(db, "unreadable-database")).toBeNull();
+		// Still no record, so nothing is authorised; but the answer says the
+		// store failed rather than that the credential did.
+		const validation = validateTokenRecord(db, "unreadable-database");
+		expect(validation.status).toBe("unavailable");
+		expect(validation.status === "unavailable" && validation.error).toBeInstanceOf(Error);
+	});
+});
+
+describe("validateTokenHash", () => {
+	it("judges a stored hash as validateTokenRecord judges its token", () => {
+		const db = makeDb();
+		const { id, token } = createToken(db, { label: "browser", expiresAt: null });
+
+		const validation = validateTokenHash(db, hashToken(token));
+		expect(validation.status === "valid" && validation.record.id).toBe(id);
+
+		revokeToken(db, id);
+		expect(validateTokenHash(db, hashToken(token))).toEqual({
+			status: "invalid",
+			reason: "revoked",
+		});
+
+		db.close();
+		expect(validateTokenHash(db, hashToken(token)).status).toBe("unavailable");
+	});
+});
+
+describe("reportTokenStore", () => {
+	function makeLog() {
+		return { error: vi.fn(), warn: vi.fn() };
+	}
+
+	it("logs an outage once however many credentials it refuses, then its end", () => {
+		const db = makeDb();
+		const token = randomBytes(32).toString("hex");
+		upsertPrimaryToken(db, token);
+		const log = makeLog();
+		const failure = new Error("database is locked");
+
+		for (let request = 0; request < 3; request++) {
+			reportTokenStore(db, { status: "unavailable", error: failure }, log);
+		}
+		expect(log.error).toHaveBeenCalledTimes(1);
+		expect(log.error).toHaveBeenCalledWith(
+			{ err: failure },
+			expect.stringContaining("unavailable"),
+		);
+
+		reportTokenStore(db, validateTokenRecord(db, token), log);
+		expect(log.warn).toHaveBeenCalledTimes(1);
+		expect(log.warn).toHaveBeenCalledWith({ refused: 3 }, expect.stringContaining("answering"));
+
+		// A second outage is a new one, and is reported again.
+		reportTokenStore(db, { status: "unavailable", error: failure }, log);
+		expect(log.error).toHaveBeenCalledTimes(2);
+	});
+
+	it("says nothing while the store answers, whatever it answers", () => {
+		const db = makeDb();
+		const log = makeLog();
+
+		reportTokenStore(db, validateTokenRecord(db, "unknowntoken"), log);
+
+		expect(log.error).not.toHaveBeenCalled();
+		expect(log.warn).not.toHaveBeenCalled();
+	});
+
+	it("keeps one database's outage apart from another's", () => {
+		const unavailable = makeDb();
+		const healthy = makeDb();
+		const log = makeLog();
+
+		reportTokenStore(unavailable, { status: "unavailable", error: new Error("closed") }, log);
+		reportTokenStore(healthy, validateTokenRecord(healthy, "unknowntoken"), log);
+
+		expect(log.warn).not.toHaveBeenCalled();
 	});
 });
 
@@ -406,8 +486,9 @@ describe("sweepNonPrimaryTokens", () => {
 
 		sweepNonPrimaryTokens(db);
 
-		expect(validateTokenRecord(db, primaryToken)?.id).toBe(PRIMARY_TOKEN_ID);
-		expect(validateTokenRecord(db, pairing.token)).toBeNull();
+		const primary = validateTokenRecord(db, primaryToken);
+		expect(primary.status === "valid" && primary.record.id).toBe(PRIMARY_TOKEN_ID);
+		expect(validateTokenRecord(db, pairing.token)).toEqual({ status: "invalid", reason: "swept" });
 	});
 
 	it("sweeps every non-primary id, including an unrecognised future row", () => {
@@ -428,7 +509,7 @@ describe("sweepNonPrimaryTokens", () => {
 			.prepare("SELECT swept_at FROM auth_tokens WHERE id = ?")
 			.get("future-issuer-token") as { swept_at: string | null };
 		expect(row.swept_at).not.toBeNull();
-		expect(validateTokenRecord(db, futureToken)).toBeNull();
+		expect(validateTokenRecord(db, futureToken)).toEqual({ status: "invalid", reason: "swept" });
 	});
 
 	it("records the first restart sweep once instead of rewriting its audit timestamp", () => {

@@ -32,7 +32,13 @@ import {
 	readDaemonLogTail,
 	waitForDaemonReady,
 } from "./daemon-launch.js";
-import { createHubTlsAgent } from "./hub-transport.js";
+import {
+	createHubTlsAgent,
+	HUB_RUNTIME_UNUSABLE_CODE,
+	HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
+	HUB_TLS_PIN_MISMATCH_CODE,
+	HubRuntimeUnusableError,
+} from "./hub-transport.js";
 import { detectSea } from "./sea-addon-loader.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -105,8 +111,8 @@ export type RuntimeLoadResult =
 	| { kind: "unreadable"; error: unknown };
 
 /** Read absence is distinct from every failure to read or parse the record. */
-export function loadRuntime(): RuntimeLoadResult {
-	const p = join(getStateDir(), "runtime.json");
+export function loadRuntime(stateDir: string = getStateDir()): RuntimeLoadResult {
+	const p = join(stateDir, "runtime.json");
 	try {
 		return { kind: "present", runtime: JSON.parse(readFileSync(p, "utf-8")) as RuntimeInfo };
 	} catch (error) {
@@ -115,8 +121,13 @@ export function loadRuntime(): RuntimeLoadResult {
 	}
 }
 
-export function persistRuntime(info: RuntimeInfo): void {
-	const stateDir = ensureStateDir();
+/**
+ * Publish the record in `stateDir`. A starting hub passes the directory it
+ * locked, so the record lands beside that lock whatever the environment says by
+ * the time it is written.
+ */
+export function persistRuntime(info: RuntimeInfo, stateDir: string = getStateDir()): void {
+	createOwnerOnlyDirectory(stateDir);
 	const runtimePath = join(stateDir, "runtime.json");
 	const tempPath = createRuntimeTempPath(runtimePath);
 	let fd: number | null = openSync(tempPath, "wx", 0o600);
@@ -157,10 +168,13 @@ export function runtimeMatches(expected: RuntimeInfo, current: RuntimeInfo): boo
 	);
 }
 
-/** Remove the record only if a fresh read still identifies this runtime. */
-export function deleteRuntime(expected: RuntimeInfo): boolean {
-	const p = join(getStateDir(), "runtime.json");
-	const current = loadRuntime();
+/**
+ * Remove the record only if a fresh read still identifies this runtime. The
+ * directory is the one it was published in, as for `persistRuntime`.
+ */
+export function deleteRuntime(expected: RuntimeInfo, stateDir: string = getStateDir()): boolean {
+	const p = join(stateDir, "runtime.json");
+	const current = loadRuntime(stateDir);
 	if (current.kind !== "present" || !runtimeMatches(expected, current.runtime)) return false;
 	rmSync(p);
 	return true;
@@ -317,6 +331,11 @@ type HubRequestInit = {
 };
 
 function hubUrl(runtime: RuntimeInfo, path: string): URL {
+	// A port the record cannot mean is the record's fault, like a missing key.
+	// Left to the URL parser, it failed as though the connection had.
+	if (!Number.isInteger(runtime.port) || runtime.port < 1 || runtime.port > 65535) {
+		throw new HubRuntimeUnusableError("Hub runtime has no usable TCP port; refusing to connect");
+	}
 	return new URL(path, `https://127.0.0.1:${runtime.port}`);
 }
 
@@ -1206,15 +1225,89 @@ export async function waitForHubQuit(
 	}
 }
 
-export async function cmdStatus(args: ParsedArgs): Promise<void> {
-	const runtimeResult = loadRuntime();
+/**
+ * Connection failures that mean "not yet" rather than "not this hub". A hub
+ * that is starting or stopping refuses or drops a connection for a moment, and
+ * asking again is the right move. A key that does not match, a peer that does
+ * not complete TLS correctly, or a record naming no usable key will not change
+ * by waiting, so everything outside this list is a refusal.
+ */
+const TRANSIENT_HUB_CONNECTION_CODES: ReadonlySet<string> = new Set([
+	"ECONNREFUSED",
+	"ECONNRESET",
+	"ECONNABORTED",
+	"EPIPE",
+	"ETIMEDOUT",
+	HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
+]);
+
+/** Why the hub named by runtime.json was not accepted. */
+export type HubRefusal = "pin" | "tls" | "config";
+
+export type HubProbe =
+	| { readonly kind: "answered"; readonly health: unknown }
+	| { readonly kind: "not-ready"; readonly error: string }
+	| { readonly kind: "refused"; readonly refusal: HubRefusal; readonly error: string };
+
+/** Sort a failed hub request into "ask again" and a named refusal. */
+export function classifyHubFailure(error: unknown): Exclude<HubProbe, { kind: "answered" }> {
+	const message = error instanceof Error ? error.message : String(error);
+	const code =
+		typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+	if (code === HUB_TLS_PIN_MISMATCH_CODE)
+		return { kind: "refused", refusal: "pin", error: message };
+	if (code === HUB_RUNTIME_UNUSABLE_CODE) {
+		return { kind: "refused", refusal: "config", error: message };
+	}
+	if (typeof code === "string" && TRANSIENT_HUB_CONNECTION_CODES.has(code)) {
+		return { kind: "not-ready", error: message };
+	}
+	return { kind: "refused", refusal: "tls", error: message };
+}
+
+/** Ask the recorded hub for its health, and say which way it failed if it did. */
+export async function probeHub(
+	runtime: RuntimeInfo,
+	request: typeof requestHub = requestHub,
+): Promise<HubProbe> {
+	let response: Response;
+	try {
+		response = await request(runtime, "/api/health");
+	} catch (error) {
+		return classifyHubFailure(error);
+	}
+	// The peer proved the recorded key before the request was sent, so this is
+	// the hub the record names whatever its body turns out to hold.
+	return { kind: "answered", health: await response.json().catch(() => null) };
+}
+
+const HUB_REFUSAL_LABELS: Record<HubRefusal, string> = {
+	pin: "pin mismatch",
+	tls: "TLS failure",
+	config: "unusable runtime record",
+};
+
+/**
+ * Report the hub runtime.json names. The exit code is 1 when the hub was
+ * refused, so a script cannot read a peer holding another key as a running
+ * hub; a hub that is not answering yet exits 0 and says it may be retried.
+ */
+export async function cmdStatus(
+	args: ParsedArgs,
+	options: {
+		loadRuntime?: () => RuntimeLoadResult;
+		isPidAlive?: (pid: number) => boolean;
+		requestHub?: typeof requestHub;
+	} = {},
+): Promise<number> {
+	const runtimeResult = (options.loadRuntime ?? loadRuntime)();
 	if (runtimeResult.kind === "absent") {
 		if (args.json) {
 			console.log(JSON.stringify({ running: false }));
 		} else {
 			console.log("Hub: stopped (no runtime.json)");
 		}
-		return;
+		return 0;
 	}
 	if (runtimeResult.kind === "unreadable") {
 		const error = describeRuntimeReadFailure(runtimeResult.error);
@@ -1225,48 +1318,88 @@ export async function cmdStatus(args: ParsedArgs): Promise<void> {
 		} else {
 			console.log(`Hub: unknown (runtime.json cannot be read: ${error})`);
 		}
-		return;
+		return 0;
 	}
 	const { runtime } = runtimeResult;
 
-	const alive = isPidAlive(runtime.pid);
+	const alive = (options.isPidAlive ?? isPidAlive)(runtime.pid);
 	if (!alive) {
 		if (args.json) {
 			console.log(JSON.stringify({ running: false, stale: true, pid: runtime.pid }));
 		} else {
 			console.log(`Hub: stale (pid ${runtime.pid} no longer alive)`);
 		}
-		return;
+		return 0;
 	}
 
-	let health: unknown = null;
-	try {
-		health = await requestHub(runtime, "/api/health").then((r) => r.json());
-	} catch {
-		// Not reachable yet — not fatal
-	}
+	const probe = await probeHub(runtime, options.requestHub);
+	const record = { pid: runtime.pid, port: runtime.port, started_at: runtime.started_at };
 
 	if (args.json) {
-		console.log(
-			JSON.stringify({
-				running: true,
-				pid: runtime.pid,
-				port: runtime.port,
-				started_at: runtime.started_at,
-				health,
-			}),
-		);
-	} else {
-		console.log("Hub: running");
-		console.log(`  PID        : ${runtime.pid}`);
-		console.log(`  Port       : ${runtime.port}`);
-		console.log(`  Started at : ${runtime.started_at}`);
+		switch (probe.kind) {
+			case "answered":
+				console.log(
+					JSON.stringify({ running: true, ready: true, ...record, health: probe.health }),
+				);
+				break;
+			case "not-ready":
+				console.log(
+					JSON.stringify({
+						running: true,
+						ready: false,
+						retryable: true,
+						...record,
+						health: null,
+						error: probe.error,
+					}),
+				);
+				break;
+			case "refused":
+				// Whatever answered did not prove it is the hub the record names, so
+				// whether that hub runs cannot be said from here.
+				console.log(
+					JSON.stringify({
+						running: "unknown",
+						ready: false,
+						retryable: false,
+						refused: probe.refusal,
+						...record,
+						health: null,
+						error: probe.error,
+					}),
+				);
+				break;
+		}
+		return probe.kind === "refused" ? 1 : 0;
+	}
+
+	switch (probe.kind) {
+		case "answered":
+			console.log("Hub: running");
+			break;
+		case "not-ready":
+			console.log(
+				`Hub: not ready (pid ${runtime.pid} is alive; port ${runtime.port} is not answering yet, retry shortly)`,
+			);
+			break;
+		case "refused":
+			console.log(`Hub: refused (${HUB_REFUSAL_LABELS[probe.refusal]})`);
+			break;
+	}
+	console.log(`  PID        : ${runtime.pid}`);
+	console.log(`  Port       : ${runtime.port}`);
+	console.log(`  Started at : ${runtime.started_at}`);
+	if (probe.kind === "answered") {
+		const health = probe.health;
 		if (health && typeof health === "object" && health !== null) {
 			const h = health as Record<string, unknown>;
 			console.log(`  Status     : ${String(h.status ?? "?")}`);
 			console.log(`  Uptime     : ${Number(h.uptime ?? 0).toFixed(1)}s`);
 		}
+	} else {
+		console.log(`  Error      : ${probe.error}`);
 	}
+	return probe.kind === "refused" ? 1 : 0;
 }
 
 async function cmdHostAdd(args: ParsedArgs): Promise<void> {
@@ -1451,9 +1584,11 @@ export async function main(argv: string[]): Promise<void> {
 			case "quit":
 				await cmdQuit();
 				break;
-			case "status":
-				await cmdStatus(parsed);
+			case "status": {
+				const code = await cmdStatus(parsed);
+				if (code !== 0) process.exit(code);
 				break;
+			}
 			case "host-add":
 				await cmdHostAdd(parsed);
 				break;

@@ -55,11 +55,37 @@ pub fn try_acquire(path: String) -> napi::Result<Option<HubLock>> {
 mod tests {
     use super::KernelLock;
     use std::env;
-    use std::fs::{create_dir, write};
+    use std::fs::{create_dir, remove_dir_all, write};
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
     use std::thread::sleep;
     use std::time::{Duration, Instant};
+
+    /// A directory this run created, removed when the test ends, however it ends,
+    /// so that runs do not pile up in the system temp directory.
+    struct TestDir(PathBuf);
+
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            if let Err(error) = remove_dir_all(&self.0) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    eprintln!(
+                        "could not remove test directory {}: {error}",
+                        self.0.display()
+                    );
+                }
+            }
+        }
+    }
 
     /// A directory this run created, never one it found.
     ///
@@ -67,14 +93,14 @@ mod tests {
     /// marker could be adopted by a later one and let `wait_for` return before the
     /// new holder had acquired anything. Creation that fails on an existing name is
     /// what makes the directory this run's own.
-    fn test_dir(name: &str) -> PathBuf {
+    fn test_dir(name: &str) -> TestDir {
         let base = env::temp_dir();
         let pid = std::process::id();
         for attempt in 0..1024 {
             let dir = base.join(format!("lasterm-hub-lock-{name}-{pid}-{attempt}"));
             match create_dir(&dir) {
-                Ok(()) => return dir,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Ok(()) => return TestDir(dir),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(err) => panic!("could not create {}: {err}", dir.display()),
             }
         }
@@ -82,6 +108,18 @@ mod tests {
             "could not allocate a unique test directory under {}",
             base.display()
         )
+    }
+
+    /// The lock holder, killed when the test ends, however it ends. A failed
+    /// assertion would otherwise leave it looping with the lock held, and on
+    /// Windows its open lock file would keep the directory from being removed.
+    struct Holder(Child);
+
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 
     fn wait_for(path: &Path) {
@@ -116,7 +154,8 @@ mod tests {
     /// `lasterm-process-lock`, the one implementation both consumers now share.
     #[test]
     fn second_acquisition_is_refused_while_the_first_handle_lives() {
-        let path = test_dir("second-acquisition").join("hub.lock");
+        let dir = test_dir("second-acquisition");
+        let path = dir.join("hub.lock");
         let first = KernelLock::acquire(&path).unwrap().unwrap();
         assert!(KernelLock::acquire(&path).unwrap().is_none());
         drop(first);
@@ -155,11 +194,13 @@ mod tests {
         let dir = test_dir("process-death");
         let path = dir.join("hub.lock");
         let ready = dir.join("ready");
-        let mut holder = child("holder", &path, &ready);
+        // Declared after the directory, so it is dropped, and the holder killed,
+        // before the directory is removed.
+        let mut holder = Holder(child("holder", &path, &ready));
         wait_for(&ready);
         assert!(KernelLock::acquire(&path).unwrap().is_none());
-        holder.kill().unwrap();
-        holder.wait().unwrap();
+        holder.0.kill().unwrap();
+        holder.0.wait().unwrap();
         assert!(KernelLock::acquire(&path).unwrap().is_some());
     }
 

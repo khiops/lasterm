@@ -6,6 +6,11 @@ import { listTokens, revokeToken } from "../auth.js";
 
 export interface TokenRouteOptions {
 	db: Database.Database;
+	/**
+	 * Called once a token is revoked, to end what it already opened. Without it
+	 * a revoked token kept every WebSocket it had authenticated.
+	 */
+	onRevoked?: (tokenId: string) => void;
 }
 
 interface RevokeParams {
@@ -15,7 +20,7 @@ interface RevokeParams {
 // ─── Route registration ───────────────────────────────────────────────────────
 
 export function registerTokenRoutes(server: FastifyInstance, opts: TokenRouteOptions): void {
-	const { db } = opts;
+	const { db, onRevoked } = opts;
 
 	// GET /api/auth/tokens — list all tokens (auth required via global hook)
 	server.get("/api/auth/tokens", async (_request: FastifyRequest, reply: FastifyReply) => {
@@ -51,6 +56,7 @@ export function registerTokenRoutes(server: FastifyInstance, opts: TokenRouteOpt
 				});
 			}
 
+			onRevoked?.(id);
 			return reply.code(200).send({ ok: true });
 		},
 	);

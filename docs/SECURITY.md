@@ -88,7 +88,9 @@
 
 **Token validation:**
 - REST: `Authorization: Bearer <token>` header on every browser API request.
-- WSS: First message must be `AUTH { token }`. Connection closed if invalid.
+- WSS: First message must be `AUTH { token }`. Connection closed if invalid. The token is checked
+  again before each later frame is acted on, and the socket is closed once the token no longer
+  validates. Revoking a token closes the sockets it opened at once (PROTOCOL.md § 4.1).
 - Token comparison: constant-time (crypto.timingSafeEqual)
 
 **Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
@@ -395,7 +397,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 |-------|---------|--------|---------------|
 | Hub start | `hub.start` | `bindAddress`, `port`, `permissionsCheck` (`passed`; `not_checked_on_windows`, § 2.2) | The runtime record is published and the hub is serving |
 | Auth success | `auth.success` | `via` (`ws`, `rest`), `sourceIp`, `tokenId`, `clientId` (WebSocket) | Every accepted WebSocket AUTH. On REST, the first accepted request of each credential from each address in a hub run: every request carries the bearer, and recording each would bury the rest |
-| Auth failure | `auth.failure` | `via` (`ws`, `rest`, `pair`), `sourceIp`, `reason`, `clientId` (WebSocket) | REST: `missing_header`, `malformed_header`, `invalid_token`, `database_unavailable`. WebSocket: `auth_timeout`, `not_auth_first`, `invalid_token`, `database_unavailable`. Pairing verification: `rate_limited`, `invalid_format`, `unknown_code`, `code_used`, `code_expired`. `invalid_token` covers an unknown, expired, revoked or restart-swept token alike |
+| Auth failure | `auth.failure` | `via` (`ws`, `rest`, `pair`), `sourceIp`, `reason`, `clientId` (WebSocket), `tokenStatus` (with `invalid_token`) | REST: `missing_header`, `malformed_header`, `invalid_token`, `database_unavailable`. WebSocket: `auth_timeout`, `not_auth_first`, `invalid_token`, `database_unavailable`, `token_no_longer_valid`. Pairing verification: `rate_limited`, `invalid_format`, `unknown_code`, `code_used`, `code_expired`. `invalid_token` is refused the same way whatever its cause, and `tokenStatus` says which: `unknown` (no credential has that value), `revoked`, `swept` (by a restart) or `expired`. A revoked or swept token still being offered is a device that kept a credential it was meant to lose. `token_no_longer_valid` is a WebSocket the hub had accepted and then closed because its token stopped validating, on its next frame or at once when the token was revoked; `tokenStatus` says why, and `clientId` matches the `auth.success` that opened it. `database_unavailable` is a hub built with no token store at all; a store that exists but cannot be read is not an authentication failure (below) |
 | Pairing code generated | `pairing.generated` | `pairingId`, `expiresAt`, `sourceIp` of the request | `POST /api/pair` issues a code |
 | Pairing code verified | `pairing.verified` | `pairingId`, `tokenId` of the token issued, `sourceIp` | `POST /api/pair/verify` redeems a code |
 | SSH connect | `ssh.connect` | `hostId`, `hostLabel`, `authMethod` (`agent`, `key`, `password`) | A host session takes up an authenticated connection: its first connect and every reconnect. A Test connection is not recorded |
@@ -406,6 +408,14 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INFO on a WebSocket
 acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,
 not part of it.
+
+**A token store that cannot be read is not recorded here.** While `meta.db` is closed, corrupt or
+locked, every credential is refused (503 on REST, a `1013` close on the WebSocket) without being
+judged. Nobody failed to authenticate, and one `auth.failure` per refused request would read as a
+burst of failures from every client, the pattern a brute-force alert looks for. The outage goes to
+the diagnostic log instead, once: ERROR when the store first fails to answer, WARN when it answers
+again, with the number of credentials refused meanwhile. The same holds for an open WebSocket closed
+because the store stopped answering.
 
 ### 7.2 What is NOT logged
 

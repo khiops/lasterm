@@ -26,6 +26,25 @@ export class HubTlsPinMismatchError extends Error {
 	}
 }
 
+/** The runtime record does not say which hub to accept, so nothing was dialled. */
+export const HUB_RUNTIME_UNUSABLE_CODE = "ERR_HUB_RUNTIME_UNUSABLE";
+
+/**
+ * A refusal made before connecting: the record is what is wrong, not the peer,
+ * and no amount of waiting for the hub changes it.
+ */
+export class HubRuntimeUnusableError extends Error {
+	readonly code = HUB_RUNTIME_UNUSABLE_CODE;
+
+	constructor(message: string) {
+		super(message);
+		this.name = "HubRuntimeUnusableError";
+	}
+}
+
+/** A TCP peer accepted the connection but did not finish TLS in time. */
+export const HUB_TLS_HANDSHAKE_TIMEOUT_CODE = "ERR_HUB_TLS_HANDSHAKE_TIMEOUT";
+
 /**
  * Maximum time from starting a TLS connection until its peer has proved the
  * recorded key. Three seconds leaves substantial headroom for a local hub under
@@ -108,8 +127,11 @@ function makeHubTlsConnector(expectedSpki: Buffer, handshakeTimeoutMs: number) {
 		const socket = tls.connect(tlsOptions);
 		handshakeTimer = setTimeout(() => {
 			complete(
-				new Error(
-					`Hub TLS endpoint could not be reached: TLS handshake timed out after ${handshakeTimeoutMs}ms`,
+				Object.assign(
+					new Error(
+						`Hub TLS endpoint could not be reached: TLS handshake timed out after ${handshakeTimeoutMs}ms`,
+					),
+					{ code: HUB_TLS_HANDSHAKE_TIMEOUT_CODE },
 				),
 				socket,
 			);
@@ -164,7 +186,7 @@ export function verifyHubPeerSpki(
 
 function expectedHubSpki(runtime: HubTlsRuntime): Buffer {
 	if (typeof runtime.spki !== "string" || runtime.spki.length === 0) {
-		throw new Error("Hub runtime has no usable TLS SPKI; refusing to connect");
+		throw new HubRuntimeUnusableError("Hub runtime has no usable TLS SPKI; refusing to connect");
 	}
 	try {
 		const expectedSpki = Buffer.from(runtime.spki, "base64");
@@ -174,6 +196,6 @@ function expectedHubSpki(runtime: HubTlsRuntime): Buffer {
 		createPublicKey({ key: expectedSpki, format: "der", type: "spki" });
 		return expectedSpki;
 	} catch {
-		throw new Error("Hub runtime has no usable TLS SPKI; refusing to connect");
+		throw new HubRuntimeUnusableError("Hub runtime has no usable TLS SPKI; refusing to connect");
 	}
 }

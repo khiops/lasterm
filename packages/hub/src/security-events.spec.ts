@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { decodeMessage, encodeMessage, isValidUlid, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createToken, revokeToken } from "./auth.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { createServer } from "./server.fixture.js";
@@ -136,6 +137,25 @@ describe("REST authentication is recorded", () => {
 		expect(log.text()).not.toContain(PRIMARY_TOKEN);
 	});
 
+	it("says which way a refused token was invalid", async () => {
+		const revoked = createToken(dbs.meta, { label: "browser", expiresAt: null });
+		revokeToken(dbs.meta, revoked.id);
+		for (const token of [WRONG_TOKEN, revoked.token]) {
+			const res = await server.inject({
+				method: "GET",
+				url: "/api/hosts",
+				headers: { authorization: `Bearer ${token}` },
+			});
+			expect(res.statusCode).toBe(401);
+		}
+
+		expect(log.events("auth.failure")).toEqual([
+			expect.objectContaining({ via: "rest", reason: "invalid_token", tokenStatus: "unknown" }),
+			expect.objectContaining({ via: "rest", reason: "invalid_token", tokenStatus: "revoked" }),
+		]);
+		expect(log.text()).not.toContain(revoked.token);
+	});
+
 	it("records the first success of a credential from an address, not every request", async () => {
 		for (let i = 0; i < 3; i++) {
 			const res = await server.inject({
@@ -169,6 +189,7 @@ describe("WebSocket authentication is recorded", () => {
 			via: "ws",
 			sourceIp: "127.0.0.1",
 			reason: "invalid_token",
+			tokenStatus: "unknown",
 		});
 		expect(isValidUlid(failure?.clientId)).toBe(true);
 		expect(log.text()).not.toContain(WRONG_TOKEN);
@@ -269,5 +290,66 @@ describe("a replaced primary token is recorded", () => {
 		]);
 		expect(log.text()).not.toContain(WRONG_TOKEN);
 		expect(log.text()).not.toContain(PRIMARY_TOKEN);
+	});
+});
+
+// ─── Keystrokes ───────────────────────────────────────────────────────────────
+
+describe("keystrokes leave no trace in the logs", () => {
+	// Every keystroke is a frame. A line per frame at the default level, even one
+	// naming only the frame's type, records when and how fast the user types.
+	it("logs nothing at INFO or above for INPUT frames, and never their bytes", async () => {
+		const typed = "typed-secret-4242";
+		const channelId = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
+		const hubLogger = new HubLogger(log.dir, {
+			level: "info",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const hub = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			securityLog: log.securityLog,
+			hubLogger,
+		});
+		try {
+			const lines: string[] = [];
+			for (const level of ["fatal", "error", "warn", "info"] as const) {
+				vi.spyOn(hub.log, level).mockImplementation(((...args: unknown[]) => {
+					lines.push(`${level} ${JSON.stringify(args)}`);
+				}) as never);
+			}
+			const ws = await openSocket(hub);
+			const received: ProtocolMessage[] = [];
+			ws.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)));
+			});
+			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			const beforeTyping = lines.length;
+
+			// One frame per key, as typed, then the whole string at once, as pasted.
+			const frames = [...typed.split(""), typed];
+			for (const text of frames) {
+				ws.send(encodeMessage({ type: "INPUT", channelId, data: new TextEncoder().encode(text) }));
+			}
+			// Frames on a socket are handled in order, so the PONG shows every INPUT
+			// before it went through the dispatcher.
+			ws.send(encodeMessage({ type: "PING" }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			ws.terminate();
+
+			expect(lines.slice(beforeTyping)).toEqual([]);
+			expect(lines.join("\n")).not.toContain(typed);
+			expect(log.text()).not.toContain(typed);
+		} finally {
+			await hub.close();
+		}
 	});
 });

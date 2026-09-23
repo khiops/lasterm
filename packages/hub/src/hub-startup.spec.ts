@@ -12,7 +12,7 @@ import {
 	validateTokenRecord,
 } from "./auth.js";
 import { getStateDir, loadRuntime } from "./cli.js";
-import { startHub } from "./hub-startup.js";
+import { STARTUP_UNWIND_TIMEOUT_MS, startHub } from "./hub-startup.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { PreviousInstallationError } from "./previous-installation.js";
@@ -291,6 +291,85 @@ describe("startHub token restart sweep", () => {
 		).rejects.toMatchObject({ code: "AUTH_TOKEN_SWEEP_FAILED" });
 
 		expect(createServer).not.toHaveBeenCalled();
+	});
+});
+
+// Both entry points exit once startHub rejects, and that exit is what releases
+// the lock. A server whose close never settles must therefore not hold the unwind:
+// without a bound, the databases stay open, the error is never reported and the
+// process keeps the lock for as long as the close hangs.
+describe("startHub bounds the unwind of a failed start", () => {
+	it("closes the databases and rethrows when the server never finishes closing", async () => {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
+		const failure = new Error("injected failure after runtime publication");
+		const order: string[] = [];
+		const close = vi.fn(() => {
+			order.push("server");
+			return new Promise<never>(() => undefined);
+		});
+		const databases = {
+			...dbs,
+			close: () => {
+				order.push("databases");
+				dbs.close();
+			},
+		};
+		let settled = false;
+		let outcome: unknown;
+
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			void startHub(
+				{
+					port: 4100,
+					announce: () => {
+						throw failure;
+					},
+				},
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => stateDir,
+					getConfigDir: () => stateDir,
+					acquireHubLock: () => null as never,
+					initAuth: () => randomBytes(32).toString("hex"),
+					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+					openDatabases: () => databases,
+					createServer: async () => ({ close }) as never,
+					startServer: async () => "https://127.0.0.1:4100",
+					addStartupCorsOrigins: () => 4100,
+					persistRuntime: () => undefined,
+					deleteRuntime: () => {
+						order.push("record");
+						return true;
+					},
+				},
+			).then(
+				() => {
+					settled = true;
+				},
+				(error: unknown) => {
+					settled = true;
+					outcome = error;
+				},
+			);
+
+			// Within the bound the unwind still waits: nothing is closed underneath a
+			// server that may yet finish, and the record still names a live hub.
+			await vi.advanceTimersByTimeAsync(STARTUP_UNWIND_TIMEOUT_MS - 1);
+			expect(close).toHaveBeenCalledTimes(1);
+			expect(settled).toBe(false);
+			expect(order).toEqual(["server"]);
+
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settled).toBe(true);
+			expect(outcome).toBe(failure);
+			expect(order).toEqual(["server", "databases", "record"]);
+		} finally {
+			vi.useRealTimers();
+			rmSync(stateDir, { recursive: true, force: true });
+		}
 	});
 });
 

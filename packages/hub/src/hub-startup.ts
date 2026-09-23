@@ -49,6 +49,12 @@ export interface HubStartupOptions {
 type HubServer = Awaited<ReturnType<typeof createServer>>;
 type HubDatabases = ReturnType<typeof openDatabases>;
 
+/**
+ * How long a failed start waits for its server to close before unwinding past
+ * it: the budget a graceful shutdown gives its whole teardown.
+ */
+export const STARTUP_UNWIND_TIMEOUT_MS = 10_000;
+
 /** Injectable only to make the acquisition-to-cleanup boundary observable. */
 export interface HubStartupDependencies {
 	readonly getStateDir: typeof getStateDir;
@@ -235,11 +241,13 @@ export async function startHub(
 		// what tells the world this hub exists, so it must not be withdrawn while the
 		// socket and the databases are still live. Removing it first would make
 		// `status` report stopped with a hub still serving.
-		if (server) {
+		if (server && !(await closeWithinBound(server))) {
 			try {
-				await server.close();
+				hubLogger?.log("warn", "server did not close while unwinding a failed start", {
+					timeoutMs: STARTUP_UNWIND_TIMEOUT_MS,
+				});
 			} catch {
-				// Preserve the startup error; database cleanup still has to run.
+				// Preserve the startup error; the log line only explains the delay.
 			}
 		}
 		if (dbManager) {
@@ -267,5 +275,36 @@ function listenHost(address: string): string {
 	} catch {
 		// The security log withholds what is not an address; startup goes on.
 		return address;
+	}
+}
+
+/**
+ * Wait for the server to close, but not forever. Both entry points exit once
+ * `startHub` rejects, and that exit is what releases the lock. A close that never
+ * settles — an `onClose` hook waiting on something that will not come — would
+ * otherwise keep the process alive holding the databases and the lock, with the
+ * startup error never reported. Past the bound the unwind goes on regardless, as
+ * a graceful shutdown does past its own.
+ *
+ * Resolves true when the close finished, false when the bound ran out first.
+ */
+async function closeWithinBound(server: Pick<HubServer, "close">): Promise<boolean> {
+	let timer: NodeJS.Timeout | undefined;
+	const expired = new Promise<false>((resolve) => {
+		timer = setTimeout(() => resolve(false), STARTUP_UNWIND_TIMEOUT_MS);
+	});
+	// A failed close counts as finished: the startup error is the one worth
+	// reporting, and a rejection arriving after the bound must not surface as an
+	// unhandled one while the process exits.
+	const closed = Promise.resolve()
+		.then(() => server.close())
+		.then(
+			() => true as const,
+			() => true as const,
+		);
+	try {
+		return await Promise.race([closed, expired]);
+	} finally {
+		clearTimeout(timer);
 	}
 }

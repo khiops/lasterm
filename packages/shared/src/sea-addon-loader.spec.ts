@@ -7,6 +7,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -302,16 +303,60 @@ describe.skipIf(windows)("ensurePrivateCacheDir", () => {
 	});
 });
 
-describe("temporaries", () => {
-	it("removes a temporary left by a writer that is gone, and keeps a live writer's", () => {
+describe("abandoned temporaries", () => {
+	it("are removed even when the cached addon is already current", () => {
 		const cacheDir = makeTempDir();
+		const asset = Buffer.from("complete");
+		openAndClose("addon.node", cacheDir, asset);
+		// Windows judges by whether the file is held open, POSIX by whether the
+		// pid in its name is alive; this one fails both.
 		const orphan = join(cacheDir, "addon.node.2147483.0123456789abcdef.tmp");
-		const live = join(cacheDir, `addon.node.${process.pid}.fedcba9876543210.tmp`);
 		writeFileSync(orphan, "interrupted");
+		openAndClose("addon.node", cacheDir, asset);
+		expect(existsSync(orphan)).toBe(false);
+	});
+
+	it.skipIf(windows)("are kept while the process named in them is alive", () => {
+		const cacheDir = makeTempDir();
+		const live = join(cacheDir, `addon.node.${process.pid}.fedcba9876543210.tmp`);
 		writeFileSync(live, "in progress");
 		openAndClose("addon.node", cacheDir, Buffer.from("complete"));
-		expect(existsSync(orphan)).toBe(false);
 		expect(existsSync(live)).toBe(true);
+	});
+
+	it.runIf(windows)("are kept while a writer holds them open, whatever pid they name", () => {
+		const cacheDir = makeTempDir();
+		const live = join(cacheDir, "addon.node.2147483.fedcba9876543210.tmp");
+		const writer = openSync(live, "wx");
+		try {
+			openAndClose("addon.node", cacheDir, Buffer.from("complete"));
+			expect(existsSync(live)).toBe(true);
+		} finally {
+			closeSync(writer);
+		}
+	});
+
+	it.runIf(windows)("are removed when nothing holds them, though their pid was reused", () => {
+		const cacheDir = makeTempDir();
+		// This process is alive, but it is not writing this file: a pid Windows
+		// handed out again after the extraction that named it was killed.
+		const orphan = join(cacheDir, `addon.node.${process.pid}.0123456789abcdef.tmp`);
+		writeFileSync(orphan, "interrupted");
+		openAndClose("addon.node", cacheDir, Buffer.from("complete"));
+		expect(existsSync(orphan)).toBe(false);
+	});
+
+	it("leave alone files that are not this addon's temporaries", () => {
+		const cacheDir = makeTempDir();
+		const others = [
+			"addon.node.backup",
+			"addon.node.2147483.tmp",
+			"addon.node.2147483.0123456789ABCDEF.tmp",
+			"other.node.2147483.0123456789abcdef.tmp",
+		].map((name) => join(cacheDir, name));
+		for (const other of others) writeFileSync(other, "not ours");
+		openAndClose("addon.node", cacheDir, Buffer.from("complete"));
+		for (const other of others) expect(existsSync(other)).toBe(true);
 	});
 });
 

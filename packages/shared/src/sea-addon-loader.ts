@@ -50,6 +50,7 @@ import {
 	rmSync,
 	type Stats,
 	statSync,
+	unlinkSync,
 	writeSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -164,12 +165,18 @@ export function openCachedAddon(
 	ensurePrivateCacheDir(dir, { ownedFrom: lastermCacheRoot() });
 	const destPath = path.join(dir, assetName);
 	const expected: ExpectedAddon = { size: assetData.length, sha256: sha256(assetData) };
+	removeAbandonedTemporaries(dir, assetName);
 
 	const cached = openIfAuthentic(destPath, expected);
 	if (cached !== undefined) return { path: destPath, fd: cached };
 
-	removeOrphanedTemporaries(destPath);
-	const renameError = publish(destPath, assetData);
+	let renameError = publish(destPath, assetData);
+	if ((renameError as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+		// The temporary went before it could be renamed: a cleanup that could not
+		// see this process running took it (see removeAbandonedTemporaries).
+		// Writing it once more costs one extraction; failing would cost the start.
+		renameError = publish(destPath, assetData);
+	}
 	// On platforms where rename cannot replace an already-loaded file, a racing
 	// writer may have already published the identical complete blob, so the
 	// destination is authenticated whether or not this rename succeeded. Only
@@ -483,6 +490,9 @@ function publish(destPath: string, data: Buffer): unknown {
 		for (let offset = 0; offset < data.length; ) {
 			offset += writeSync(fd, data, offset, data.length - offset);
 		}
+		// The temporary stays open until it is renamed. On Windows an open
+		// handle is how a later start tells an extraction still in progress
+		// from one that was killed; see removeAbandonedTemporaries.
 		try {
 			renameSync(tempPath, destPath);
 			renamed = true;
@@ -504,25 +514,67 @@ function createAddonTempPath(destPath: string): string {
 	throw new Error(`Could not allocate a temporary addon path beside ${destPath}`);
 }
 
+const TEMPORARY_SUFFIX = /^([1-9][0-9]*)\.[0-9a-f]{16}\.tmp$/;
+
 /**
- * Remove temporaries an interrupted extraction left beside `destPath`. Each is
- * named after the process that wrote it, and only one whose writer is gone is
- * removed, so a concurrent extraction keeps its own (#128, from #130).
+ * Remove the temporaries an interrupted extraction left beside the addon.
+ * A process killed between writing and renaming leaves a complete binary, and
+ * nothing else ever looks at it again; repeated, that fills the volume. This
+ * runs on every load, including when the cached addon is already current, so
+ * a temporary is not stranded because the destination was published by
+ * someone else.
+ *
+ * A temporary another process is still writing is never removed. On Windows
+ * that is the one still open: its writer holds it from creation until the
+ * rename, and a killed process holds nothing, so an exclusive open succeeds
+ * only on an abandoned one — however its pid has been reused since. POSIX
+ * offers Node no such probe, so there the pid in the name decides: a leftover
+ * whose pid now belongs to a live process waits until that process ends, and a
+ * writer this process cannot see — in another pid namespace, or on another
+ * machine sharing the directory — looks abandoned. Its extraction then writes
+ * the file again rather than failing (see openCachedAddon).
  */
-function removeOrphanedTemporaries(destPath: string): void {
-	const prefix = `${path.basename(destPath)}.`;
+function removeAbandonedTemporaries(dir: string, assetName: string): void {
+	const prefix = `${assetName}.`;
 	let entries: string[];
 	try {
-		entries = readdirSync(path.dirname(destPath));
+		entries = readdirSync(dir);
 	} catch {
 		return;
 	}
 	for (const entry of entries) {
-		if (!entry.startsWith(prefix) || !entry.endsWith(".tmp")) continue;
-		const pid = Number(entry.slice(prefix.length).split(".")[0]);
-		if (!Number.isInteger(pid) || pid <= 0 || isRunning(pid)) continue;
-		rmSync(path.join(path.dirname(destPath), entry), { force: true });
+		if (!entry.startsWith(prefix)) continue;
+		const match = TEMPORARY_SUFFIX.exec(entry.slice(prefix.length));
+		if (match === null) continue;
+		const tempPath = path.join(dir, entry);
+		const inUse = process.platform === "win32" ? isHeldOpen(tempPath) : isRunning(Number(match[1]));
+		if (inUse) continue;
+		try {
+			unlinkSync(tempPath);
+		} catch {
+			// Gone already, or taken by another cleanup: either way not ours to report.
+		}
 	}
+}
+
+/**
+ * libuv's flag for an open that shares nothing (FILE_SHARE_* all clear), which
+ * Node passes through but does not name in fs.constants.
+ */
+const UV_FS_O_EXLOCK = 0x10000000;
+
+function isHeldOpen(file: string): boolean {
+	let fd: number;
+	try {
+		fd = openSync(file, constants.O_RDONLY | UV_FS_O_EXLOCK);
+	} catch (error) {
+		// EBUSY is a sharing violation: somebody holds it. Anything else except
+		// its disappearance is treated the same way, since the rule is never to
+		// remove what might be in use.
+		return (error as NodeJS.ErrnoException).code !== "ENOENT";
+	}
+	closeSync(fd);
+	return false;
 }
 
 function isRunning(pid: number): boolean {

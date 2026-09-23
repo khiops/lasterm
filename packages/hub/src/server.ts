@@ -508,7 +508,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			},
 		});
 
-		await registerWsRoutes(
+		const wsRoutes = await registerWsRoutes(
 			server,
 			activeSessionManager,
 			options.authToken,
@@ -542,7 +542,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 				metaDal,
 				...(options.hubLogger && { hubLogger: options.hubLogger }),
 			});
-			registerTokenRoutes(server, { db: options.dbManager.meta });
+			registerTokenRoutes(server, {
+				db: options.dbManager.meta,
+				onRevoked: (tokenId) => wsRoutes.closeSocketsForToken(tokenId),
+			});
 		}
 		await registerUserFonts(server, configDir);
 		await registerUserSounds(server, configDir);

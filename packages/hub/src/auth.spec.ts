@@ -26,6 +26,7 @@ import {
 	TokenSweepError,
 	touchToken,
 	upsertPrimaryToken,
+	validateTokenHash,
 	validateTokenRecord,
 } from "./auth.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -402,6 +403,25 @@ describe("validateTokenRecord", () => {
 		const validation = validateTokenRecord(db, "unreadable-database");
 		expect(validation.status).toBe("unavailable");
 		expect(validation.status === "unavailable" && validation.error).toBeInstanceOf(Error);
+	});
+});
+
+describe("validateTokenHash", () => {
+	it("judges a stored hash as validateTokenRecord judges its token", () => {
+		const db = makeDb();
+		const { id, token } = createToken(db, { label: "browser", expiresAt: null });
+
+		const validation = validateTokenHash(db, hashToken(token));
+		expect(validation.status === "valid" && validation.record.id).toBe(id);
+
+		revokeToken(db, id);
+		expect(validateTokenHash(db, hashToken(token))).toEqual({
+			status: "invalid",
+			reason: "revoked",
+		});
+
+		db.close();
+		expect(validateTokenHash(db, hashToken(token)).status).toBe("unavailable");
 	});
 });
 

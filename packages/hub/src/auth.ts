@@ -290,8 +290,11 @@ export function getTokenByValue(
 	db: Database.Database,
 	plaintextToken: string,
 ): AuthTokenRecord | null {
-	const hash = hashToken(plaintextToken);
-	const row = db.prepare("SELECT * FROM auth_tokens WHERE token_hash = ?").get(hash) as
+	return getTokenByHash(db, hashToken(plaintextToken));
+}
+
+function getTokenByHash(db: Database.Database, tokenHash: string): AuthTokenRecord | null {
+	const row = db.prepare("SELECT * FROM auth_tokens WHERE token_hash = ?").get(tokenHash) as
 		| Record<string, unknown>
 		| undefined;
 	return row ? rowToRecord(row) : null;
@@ -370,9 +373,18 @@ export function validateTokenRecord(
 	db: Database.Database,
 	plaintextToken: string,
 ): TokenValidation {
+	return validateTokenHash(db, hashToken(plaintextToken));
+}
+
+/**
+ * The same checks, for a credential already known by its stored hash. An open
+ * WebSocket re-checks the token it authenticated with before acting on each
+ * frame, and keeps the hash to do so rather than the token itself.
+ */
+export function validateTokenHash(db: Database.Database, tokenHash: string): TokenValidation {
 	let record: AuthTokenRecord | null;
 	try {
-		record = getTokenByValue(db, plaintextToken);
+		record = getTokenByHash(db, tokenHash);
 	} catch (error) {
 		return { status: "unavailable", error };
 	}

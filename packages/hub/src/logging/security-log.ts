@@ -15,6 +15,7 @@ const WS_AUTH_FAILURES = [
 	"not_auth_first",
 	"invalid_token",
 	"database_unavailable",
+	"token_no_longer_valid",
 ] as const;
 const PAIR_AUTH_FAILURES = [
 	"rate_limited",
@@ -127,6 +128,12 @@ export class SecurityLog {
 	 * swept token still being offered is a device that kept a credential it was
 	 * meant to lose; an unknown one is a guess or a typo. Both are refused the
 	 * same way, and only the record can tell them apart.
+	 *
+	 * `token_no_longer_valid` is a WebSocket the hub had accepted and has now
+	 * ended, because the token it authenticated with stopped validating: on its
+	 * next frame, or at once when the token was revoked. Its `tokenStatus` says
+	 * why, and its `clientId` names the connection an earlier `auth.success`
+	 * opened.
 	 */
 	authFailed(event: AuthFailure): void {
 		switch (event.via) {
@@ -242,9 +249,10 @@ function port(value: number): number | string {
 	return Number.isInteger(value) && value >= 0 && value <= 65_535 ? value : WITHHELD;
 }
 
-/** Only an `invalid_token` has a status to give; on any other reason it is not written. */
+/** Only a refused token has a status to give; beside any other reason it is not written. */
 function tokenStatus(reason: string, status: InvalidTokenReason | undefined): SecurityFields {
-	if (reason !== "invalid_token" || status === undefined) return {};
+	if (status === undefined) return {};
+	if (reason !== "invalid_token" && reason !== "token_no_longer_valid") return {};
 	return { tokenStatus: oneOf(status, TOKEN_STATUSES) };
 }
 

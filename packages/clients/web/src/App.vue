@@ -988,9 +988,11 @@ watch(
 			}
 		}
 
-		// Auto-open welcome tab if one exists and is alive
+		// Auto-open welcome tab if one exists and is alive — unless Settings ›
+		// Startup says not to: the toggle was offered and stored, and this opened
+		// the tab whatever it said.
 		const welcomeCh = channelsStore.channels.find((c) => c.isWelcome && c.status !== 'dead');
-		if (welcomeCh) {
+		if (welcomeCh && configStore.uiConfig.startup?.autoOpenWelcome !== false) {
 			layout.openTab(welcomeCh.id);
 		}
 

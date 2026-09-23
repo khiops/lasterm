@@ -4424,6 +4424,46 @@ fn relay_hub_ws_close(relay_id: String) {
     }
 }
 
+/// How long a document starting up waits for its predecessors' sockets to end.
+const STALE_WS_RELAYS_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Close every hub WebSocket relay still open, wait for them to end, and say
+/// how many there were.
+///
+/// A document calls this once, before its first connect, and anything open at
+/// that moment belongs to a document that is gone: a reload does not tell
+/// native its page has been replaced. Such a relay went on running — frames to
+/// a callback nobody held, its admission taken, its hub connection open — and
+/// the hub kept that ghost attached to every terminal. The new page, no longer
+/// the only client, was granted no write lock and its typing went nowhere; a
+/// few reloads also left native too few admissions for its requests.
+///
+/// Waiting matters for the same reason the in-page reconnect waits (#465): the
+/// hub hands a freed lock to the client left alone, so the ghost has to be gone
+/// before the new page authenticates.
+#[tauri::command]
+async fn relay_hub_ws_close_all() -> usize {
+    let stale: Vec<u64> = hub_ws_relays()
+        .lock()
+        .map(|relays| relays.keys().copied().collect())
+        .unwrap_or_default();
+    for id in &stale {
+        close_hub_ws_relay(*id);
+    }
+    let deadline = Instant::now() + STALE_WS_RELAYS_DEADLINE;
+    while Instant::now() < deadline {
+        let remaining = hub_ws_relays()
+            .lock()
+            .map(|relays| stale.iter().any(|id| relays.contains_key(id)))
+            .unwrap_or(false);
+        if !remaining {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stale.len()
+}
+
 fn close_hub_ws_relay(relay_id: u64) {
     let sender = hub_ws_relays()
         .lock()
@@ -5611,6 +5651,7 @@ pub fn run() {
             relay_hub_ws_send,
             relay_hub_ws_ack,
             relay_hub_ws_close,
+            relay_hub_ws_close_all,
             is_tray_available,
             get_close_behavior,
             set_close_behavior,

@@ -449,3 +449,42 @@ describe("DesktopWsClient", () => {
 		client.close();
 	});
 });
+
+// ─── A reloaded page ─────────────────────────────────────────────────────────
+//
+// A reload does not tell native its page is gone. The previous page's relay
+// stayed open, the hub kept that ghost attached to every terminal, and the new
+// page — never alone — was granted no write lock: typing went nowhere.
+
+describe("DesktopWsClient — a reloaded page", () => {
+	afterEach(() => {
+		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+		ipc.invoke.mockClear();
+	});
+
+	it("closes what a previous document left open, before its first connect and only then", async () => {
+		vi.resetModules();
+		const { createWsClient: createInFreshDocument } = await import("./ws-client.js");
+		ipc.invoke.mockImplementation((command: string) =>
+			command === "relay_hub_ws_connect" ? Promise.resolve(41) : Promise.resolve(),
+		);
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+		const commands = () => ipc.invoke.mock.calls.map(([command]) => command);
+
+		const client = createInFreshDocument();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		expect(commands()).toContain("relay_hub_ws_close_all");
+		expect(commands().indexOf("relay_hub_ws_close_all")).toBeLessThan(
+			commands().indexOf("relay_hub_ws_connect"),
+		);
+
+		// A reconnect within the same document replaces its own relay only.
+		await client.connect("ws://127.0.0.1:4100/ws");
+		expect(commands().filter((command) => command === "relay_hub_ws_close_all")).toHaveLength(1);
+		client.close();
+	});
+});

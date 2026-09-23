@@ -361,6 +361,11 @@ On a fresh daemon start (no prior channels), the agent sends HELLO followed imme
 { type: "AUTH_FAIL", message: string }
 ```
 
+`AUTH_FAIL` is a verdict on the token: a client that receives it discards the token and pairs
+again. When the hub cannot read its token store it has no verdict, so it sends no `AUTH_FAIL` and
+closes the socket with code `1013` (Try Again Later), reason `AUTH_UNAVAILABLE`. The client keeps
+its token and reconnects.
+
 ### 4.2 ATTACH / ATTACH_OK / DETACH
 
 ```typescript
@@ -720,6 +725,11 @@ Client A (WRITER)           Hub                Client B (READER)
 Base: `http://localhost:4100/api`
 Auth: `Authorization: Bearer <token>` (except `/health`).
 
+A bearer that is missing or malformed answers `401 AUTH_REQUIRED`, and one that is unknown,
+revoked, swept or expired answers `401 AUTH_INVALID`. A bearer the hub cannot check because its
+token store cannot be read answers `503 AUTH_UNAVAILABLE`: the request is still refused, but the
+token was not judged, and the client should keep it and retry.
+
 ### Endpoints
 
 Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthenticated.
@@ -1059,7 +1069,7 @@ Errors: `CHECKSUM_MISMATCH`/`CHECKSUM_MISSING` (422), `INSECURE_CACHE_DIR`/`ALRE
 }
 ```
 
-All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED`, `AUTH_INVALID`). Mutation routes also enforce the Origin guard (`ORIGIN_FORBIDDEN`).
+All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED`, `AUTH_INVALID`, or `AUTH_UNAVAILABLE` with a 503 while the token store cannot be read). Mutation routes also enforce the Origin guard (`ORIGIN_FORBIDDEN`).
 
 **Error responses:**
 ```typescript

@@ -137,7 +137,10 @@ describe("startHub token restart sweep", () => {
 				},
 				startServer: async () => {
 					steps.push("listen");
-					expect(validateTokenRecord(dbs.meta, pairing.token)).toBeNull();
+					expect(validateTokenRecord(dbs.meta, pairing.token)).toEqual({
+						status: "invalid",
+						reason: "swept",
+					});
 					return "http://127.0.0.1:4100";
 				},
 				addStartupCorsOrigins: () => 4100,

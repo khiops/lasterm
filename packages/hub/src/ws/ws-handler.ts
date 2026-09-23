@@ -19,7 +19,7 @@ import type {
 import { decodeMessage, encodeMessage, generateId } from "@lasterm/shared";
 import type { Database } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
-import { touchToken, validateTokenRecord } from "../auth.js";
+import { reportTokenStore, touchToken, validateTokenRecord } from "../auth.js";
 import type { SessionManager, WsClient } from "../session/session-manager.js";
 import { WriteLockManager } from "../session/write-lock.js";
 import {
@@ -40,6 +40,12 @@ import {
 	handleWriteRelease,
 	type WsHandlerContext,
 } from "./handlers/index.js";
+
+/**
+ * RFC 6455 "Try Again Later": the hub could not consult its token store, so it
+ * has no verdict on the credential and the client should keep it and retry.
+ */
+export const WS_CLOSE_TRY_AGAIN_LATER = 1013;
 
 export async function registerWsRoutes(
 	server: FastifyInstance,
@@ -133,17 +139,7 @@ export async function registerWsRoutes(
 				}
 
 				const authMsg = msg as AuthMessage;
-				let tokenAccepted = false;
-				let tokenId = "";
-				if (db) {
-					// DB-backed validation: checks expiry and revocation status
-					const record = validateTokenRecord(db, authMsg.token);
-					if (record) {
-						touchToken(db, record.id, ttlDays ?? 90);
-						tokenAccepted = true;
-						tokenId = record.id;
-					}
-				} else {
+				if (!db) {
 					// DB is required for token validation — fail closed to prevent
 					// skipping expiry/revocation checks.
 					server.log.warn({ clientId }, "ws-auth: database unavailable");
@@ -157,19 +153,47 @@ export async function registerWsRoutes(
 					socket.close();
 					return;
 				}
-				if (!tokenAccepted) {
-					server.log.warn({ clientId }, "ws-auth: invalid, expired, or revoked token");
+				// DB-backed validation: checks expiry and revocation status
+				const validation = validateTokenRecord(db, authMsg.token);
+				reportTokenStore(db, validation, server.log);
+				if (validation.status === "unavailable") {
+					// No AUTH_FAIL: a client treats that as a verdict on its token and
+					// asks to pair again. Closing with Try Again Later lets it keep the
+					// token and reconnect, which succeeds once the store answers. Nor
+					// is it an authentication failure in the security log: the token
+					// was not judged, and reportTokenStore records the outage once.
+					socket.close(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
+					return;
+				}
+				if (validation.status === "invalid") {
+					server.log.warn(
+						{ clientId, reason: validation.reason },
+						"ws-auth: invalid, expired, or revoked token",
+					);
 					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "invalid_token" });
 					client.send({ type: "AUTH_FAIL", message: "Invalid token" });
 					socket.close();
 					return;
+				}
+				// Best effort, as on the REST path: the credential has been checked,
+				// and a store that cannot record its use must not throw out of the
+				// socket's message handler.
+				try {
+					touchToken(db, validation.record.id, ttlDays ?? 90);
+				} catch (err) {
+					server.log.warn({ err, clientId }, "ws-auth: touchToken failed");
 				}
 
 				authenticated = true;
 				clearTimeout(authTimeout ?? undefined);
 				sessionManager.addClient(client);
 				server.log.info({ clientId }, "ws-auth: accepted");
-				server.security.authSucceeded({ via: "ws", sourceIp, clientId, tokenId });
+				server.security.authSucceeded({
+					via: "ws",
+					sourceIp,
+					clientId,
+					tokenId: validation.record.id,
+				});
 				client.send({ type: "AUTH_OK", clientId });
 				client.send(sessionManager.getStateSnapshot());
 				return;

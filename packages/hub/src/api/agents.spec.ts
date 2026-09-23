@@ -24,6 +24,7 @@ import { expectPosixMode } from "../file-mode.fixture.js";
 import { AGENT_FETCH_MAX_BYTES, AGENT_TARGET_TRIPLES } from "../session/agent-cache.js";
 import type { AgentFetchImpl } from "../session/agent-fetch.js";
 import type { AgentTargetArch, AgentTargetOs, HubPlatform } from "../session/agent-status.js";
+import { openTestDatabases } from "../storage/db.js";
 import { registerAgentRoutes } from "./agents.js";
 
 const TEST_TOKEN = "a".repeat(64);
@@ -83,6 +84,42 @@ describe("GET /api/agents/targets", () => {
 		expect(wrong.statusCode).toBe(401);
 		expect(wrong.json().error.code).toBe("AUTH_INVALID");
 		expect(statusReads).toBe(0);
+	});
+
+	it("answers 503 to a token the unreadable store cannot judge, and still accepts the primary", async () => {
+		const cacheDir = makeTempDir();
+		const dbs = openTestDatabases();
+		dbs.meta.close();
+		try {
+			server = Fastify({ logger: false });
+			registerAgentRoutes(server, {
+				authToken: TEST_TOKEN,
+				db: dbs.meta,
+				tokenTtlDays: 90,
+				getBinaryCacheDir: () => cacheDir,
+				hubVersion: HUB_VERSION,
+				hubPlatform: HUB_PLATFORM,
+				resolveAgentBinaryPath: () => BUNDLED_PATH,
+				versionReader: () => HUB_VERSION,
+			});
+
+			const paired = await server.inject({
+				method: "GET",
+				url: "/api/agents/targets",
+				headers: { authorization: `Bearer ${"b".repeat(64)}` },
+			});
+			const primary = await server.inject({
+				method: "GET",
+				url: "/api/agents/targets",
+				headers: { authorization: `Bearer ${TEST_TOKEN}` },
+			});
+
+			expect(paired.statusCode).toBe(503);
+			expect(paired.json().error.code).toBe("AUTH_UNAVAILABLE");
+			expect(primary.statusCode).toBe(200);
+		} finally {
+			dbs.close();
+		}
 	});
 
 	it("rejects all Bearer tokens when no route auth token is configured", async () => {

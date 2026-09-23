@@ -209,6 +209,18 @@ export class SecurityLog {
 		this.write("token.rotate", "token rotated", { tokenId: tokenId(event.tokenId) });
 	}
 
+	/**
+	 * A revocation the hub undid on its own: the primary token's, recorded by a
+	 * version that still allowed it (#515). `revokedAt` is when that revocation
+	 * was made, to set beside whatever else the log holds from that moment.
+	 */
+	tokenReinstated(event: { tokenId: string; revokedAt: string }): void {
+		this.write("token.reinstate", "token reinstated", {
+			tokenId: tokenId(event.tokenId),
+			revokedAt: isoTime(event.revokedAt),
+		});
+	}
+
 	private write(event: string, summary: string, fields: SecurityFields): void {
 		try {
 			this.sink(`security: ${summary}`, { event, ...fields });

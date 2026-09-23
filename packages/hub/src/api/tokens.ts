@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { listTokens, revokeToken } from "../auth.js";
+import { listTokens, PRIMARY_TOKEN_ID, revokeToken } from "../auth.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +45,19 @@ export function registerTokenRoutes(server: FastifyInstance, opts: TokenRouteOpt
 		"/api/auth/tokens/:id",
 		async (request: FastifyRequest<{ Params: RevokeParams }>, reply: FastifyReply) => {
 			const { id } = request.params;
+
+			// The primary token is auth.json's, and the desktop authenticates with it:
+			// revoking its row locked the desktop out of its own hub, and no restart
+			// undid it (#515). Replacing auth.json is how it is retired.
+			if (id === PRIMARY_TOKEN_ID) {
+				return reply.code(409).send({
+					error: {
+						code: "PRIMARY_TOKEN_NOT_REVOCABLE",
+						message:
+							"The primary token cannot be revoked: the desktop uses it to reach this hub. To retire it, stop the hub, delete auth.json and start the hub again, which issues a new one.",
+					},
+				});
+			}
 
 			const revoked = revokeToken(db, id);
 			if (!revoked) {

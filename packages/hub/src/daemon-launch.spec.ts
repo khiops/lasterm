@@ -2,7 +2,7 @@ import { closeSync, mkdtempSync, rmSync, statSync, writeFileSync, writeSync } fr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	buildDaemonSpawnPlan,
 	type ChildExitState,
@@ -43,6 +43,28 @@ describe("buildDaemonSpawnPlan", () => {
 });
 
 describe("waitForDaemonReady", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const daemonRuntime: DaemonRuntimeInfo = {
+		pid: 123,
+		port: 49152,
+		started_at: "2026-06-10T00:00:00.000Z",
+	};
+
+	/**
+	 * The wait reads the monotonic clock itself. This fakes that clock and hands
+	 * back a sleep that advances it, so a deadline passes on schedule without the
+	 * test waiting for it.
+	 */
+	function sleepOnFakeMonotonicClock(): (ms: number) => Promise<void> {
+		vi.useFakeTimers({ toFake: ["performance"] });
+		return async (ms) => {
+			vi.advanceTimersByTime(ms);
+		};
+	}
+
 	it("preserves the native lock contention exit status", async () => {
 		const result = await waitForDaemonReady({
 			childPid: 123,
@@ -51,7 +73,6 @@ describe("waitForDaemonReady", () => {
 			getChildExit: () => ({ exited: true, code: 73, signal: null }),
 			readLogTail: () => "LASTERM_HUB_ALREADY_RUNNING: another hub holds hub.lock",
 			killChild: () => {},
-			now: () => 0,
 			sleep: async () => {},
 		});
 		expect(result).toMatchObject({ ok: false, reason: "already-running" });
@@ -71,7 +92,6 @@ describe("waitForDaemonReady", () => {
 			getChildExit: () => ({ exited: true, code: 73, signal: null }),
 			readLogTail: () => "incumbent log line that must not be echoed",
 			killChild: () => {},
-			now: () => 0,
 			sleep: async () => {},
 		});
 		expect(result).toMatchObject({
@@ -91,14 +111,13 @@ describe("waitForDaemonReady", () => {
 			getChildExit: () => ({ exited: true, code: 73, signal: null }),
 			readLogTail: () => "",
 			killChild: () => {},
-			now: () => 0,
 			sleep: async () => {},
 		});
 		expect(result).toMatchObject({ reason: "already-running", message: "Hub already running" });
 	});
 
 	it("returns ready after an unreadable record when the free-lock child publishes its runtime", async () => {
-		let now = 0;
+		const sleep = sleepOnFakeMonotonicClock();
 		let loadCount = 0;
 		let killCount = 0;
 		const healthPorts: number[] = [];
@@ -125,10 +144,7 @@ describe("waitForDaemonReady", () => {
 			killChild: () => {
 				killCount += 1;
 			},
-			now: () => now,
-			sleep: async (ms) => {
-				now += ms;
-			},
+			sleep,
 			pollMs: 10,
 			deadlineMs: 50,
 		});
@@ -151,7 +167,6 @@ describe("waitForDaemonReady", () => {
 			killChild: () => {
 				killCount += 1;
 			},
-			now: () => 0,
 			sleep: async () => {},
 			pollMs: 10,
 			deadlineMs: 50,
@@ -168,21 +183,22 @@ describe("waitForDaemonReady", () => {
 	});
 
 	it("fails with timeout, terminates the child, and includes the log tail", async () => {
-		let now = 0;
+		const sleep = sleepOnFakeMonotonicClock();
 		let killCount = 0;
+		let reads = 0;
 		const result = await waitForDaemonReady({
 			childPid: 123,
-			loadRuntime: () => ({ kind: "absent" }),
+			loadRuntime: () => {
+				reads += 1;
+				return { kind: "absent" };
+			},
 			fetchHealth: async () => ({ status: "ok" }),
 			getChildExit: () => ({ exited: false }),
 			readLogTail: () => "timeout log",
 			killChild: () => {
 				killCount += 1;
 			},
-			now: () => now,
-			sleep: async (ms) => {
-				now += ms;
-			},
+			sleep,
 			pollMs: 10,
 			deadlineMs: 25,
 		});
@@ -194,12 +210,14 @@ describe("waitForDaemonReady", () => {
 			expect(result.message).toContain("terminated");
 			expect(result.message).toContain("timeout log");
 		}
+		// Polled at 0, 10 and 20 ms, then once more at the 25 ms deadline.
+		expect(reads).toBe(4);
 		// A reported failure must not leave the detached child running.
 		expect(killCount).toBe(1);
 	});
 
 	it("times out even when a health probe never settles", async () => {
-		let now = 0;
+		const sleep = sleepOnFakeMonotonicClock();
 		let killCount = 0;
 		const runtime: DaemonRuntimeInfo = {
 			pid: 123,
@@ -217,10 +235,7 @@ describe("waitForDaemonReady", () => {
 			killChild: () => {
 				killCount += 1;
 			},
-			now: () => now,
-			sleep: async (ms) => {
-				now += ms;
-			},
+			sleep,
 			pollMs: 10,
 			deadlineMs: 25,
 			healthTimeoutMs: 5,
@@ -230,6 +245,82 @@ describe("waitForDaemonReady", () => {
 		if (!result.ok) {
 			expect(result.reason).toBe("timeout");
 		}
+		expect(killCount).toBe(1);
+	});
+
+	// Mutation: take the deadline from Date.now(), as `start --daemon` did, and a
+	// clock set forward while the daemon starts ends the wait at once: a false
+	// timeout, and the daemon that was about to answer is killed for it.
+	it("is not cut short by a wall clock set forward", async () => {
+		const start = Date.now();
+		let clockMoved = false;
+		const clock = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => (clockMoved ? start + 60 * 60_000 : start));
+		let reads = 0;
+		let killCount = 0;
+		try {
+			const result = await waitForDaemonReady({
+				childPid: 123,
+				loadRuntime: () => {
+					reads += 1;
+					clockMoved = true;
+					return reads === 1
+						? { kind: "absent" as const }
+						: { kind: "present" as const, runtime: daemonRuntime };
+				},
+				fetchHealth: async () => ({ status: "ok" }),
+				getChildExit: () => ({ exited: false }),
+				readLogTail: () => "",
+				killChild: () => {
+					killCount += 1;
+				},
+				sleep: async () => {},
+			});
+			expect(result).toEqual({ ok: true, pid: 123, port: 49152 });
+		} finally {
+			clock.mockRestore();
+		}
+		expect(reads).toBe(2);
+		expect(killCount).toBe(0);
+	});
+
+	// Mutation: take the deadline from Date.now(), and a clock set back while the
+	// daemon starts stretches the wait by as much: an hour of polls before `start
+	// --daemon` reports a daemon that never came up.
+	it("still ends on time when the wall clock is set back", async () => {
+		const start = Date.now();
+		let clockMoved = false;
+		const clock = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => (clockMoved ? start - 60 * 60_000 : start));
+		let reads = 0;
+		let killCount = 0;
+		try {
+			const result = await waitForDaemonReady({
+				childPid: 123,
+				loadRuntime: () => {
+					reads += 1;
+					clockMoved = true;
+					// Stands in for the hour the set-back clock would add: a deadline
+					// that has already passed must not get this far.
+					if (reads > 100) throw new Error("still polling after the deadline passed");
+					return { kind: "absent" };
+				},
+				fetchHealth: async () => ({ status: "ok" }),
+				getChildExit: () => ({ exited: false }),
+				readLogTail: () => "",
+				killChild: () => {
+					killCount += 1;
+				},
+				sleep: async () => {},
+				deadlineMs: 0,
+			});
+			expect(result).toMatchObject({ ok: false, reason: "timeout" });
+		} finally {
+			clock.mockRestore();
+		}
+		expect(reads).toBe(1);
 		expect(killCount).toBe(1);
 	});
 
@@ -244,7 +335,6 @@ describe("waitForDaemonReady", () => {
 			getChildExit: () => childExit,
 			readLogTail: () => lines.join("\n"),
 			killChild: () => {},
-			now: () => 0,
 			sleep: async () => {},
 			pollMs: 10,
 			deadlineMs: 50,

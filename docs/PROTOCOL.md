@@ -747,7 +747,11 @@ Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthent
 
 | Method | Path | Auth | Response |
 |--------|------|------|----------|
-| GET | `/api/health` | ○ | `{ status, version, uptime }` |
+| GET | `/api/health` | ○ | `{ status, version, build }` |
+
+The route is unauthenticated, and the hub is planned to listen beyond loopback (#96, #193), so it
+reports no process details: no uptime, pid or start time. A local caller that wants the start time
+reads `started_at` from `runtime.json`, as `lasterm status` does.
 
 #### Hosts
 

@@ -204,6 +204,15 @@ function assertHubProcessIdentity(pid: number): void {
 	throw new Error(`Refusing to signal pid ${pid}: ${detail}`);
 }
 
+/**
+ * How a process's command line is asked for. On Windows that is Windows
+ * PowerShell starting and querying WMI: 2.5 s on an idle machine, 47 s on a
+ * loaded CI runner, and without a bound, for as long as WMI cares to take. A
+ * probe that has not answered is a command line that could not be read, which
+ * already refuses the signal: failing closed, sooner.
+ */
+const PROCESS_PROBE_OPTIONS = { encoding: "utf8", timeout: 10_000, windowsHide: true } as const;
+
 function readProcessCommandLine(pid: number): string | null {
 	if (process.platform === "linux") {
 		try {
@@ -220,13 +229,13 @@ function readProcessCommandLine(pid: number): string | null {
 			const command = execFileSync(
 				"powershell",
 				["-NoProfile", "-NonInteractive", "-Command", script],
-				{ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+				{ ...PROCESS_PROBE_OPTIONS, stdio: ["ignore", "pipe", "ignore"] },
 			).trim();
 			return command.length > 0 ? command : null;
 		}
 
 		const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
-			encoding: "utf8",
+			...PROCESS_PROBE_OPTIONS,
 			stdio: ["ignore", "pipe", "ignore"],
 		}).trim();
 		return command.length > 0 ? command : null;

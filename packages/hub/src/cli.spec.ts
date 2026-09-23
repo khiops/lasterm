@@ -13,11 +13,13 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createServer as createHttpsServer } from "node:https";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	classifyHubFailure,
 	cmdAgentFetch,
 	cmdAgentImport,
 	cmdAgentStatus,
@@ -33,10 +35,12 @@ import {
 	type ParsedArgs,
 	parseArgs,
 	persistRuntime,
+	type RuntimeInfo,
 	runtimeMatches,
 	waitForHubQuit,
 } from "./cli.js";
 import { expectPosixMode } from "./file-mode.fixture.js";
+import { HUB_TLS_HANDSHAKE_TIMEOUT_CODE } from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { describePreviousInstallation } from "./previous-installation.js";
 import {
@@ -45,6 +49,7 @@ import {
 	FetchError,
 } from "./session/agent-fetch.js";
 import { computeTargetStatus, type HubPlatform } from "./session/agent-status.js";
+import { getTestTlsMaterial } from "./test-tls.fixture.js";
 
 const TEST_VERSION = "0.4.1";
 const HUB_PLATFORM = { os: "linux", arch: "x64" } as const satisfies HubPlatform;
@@ -1474,6 +1479,162 @@ describe("runtime state", () => {
 			}
 			if (childDone !== undefined) await childDone;
 		}
+	});
+});
+
+describe("cmdStatus against the hub a runtime record names", () => {
+	let listeners: net.Server[] = [];
+
+	afterEach(async () => {
+		const closing = listeners;
+		listeners = [];
+		await Promise.all(
+			closing.map((listener) => new Promise<void>((resolve) => listener.close(() => resolve()))),
+		);
+	});
+
+	async function listen(listener: net.Server): Promise<number> {
+		listeners.push(listener);
+		await new Promise<void>((resolve, reject) => {
+			listener.once("error", reject);
+			listener.listen(0, "127.0.0.1", resolve);
+		});
+		const address = listener.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		return address.port;
+	}
+
+	/** A TLS peer holding `identity`, answering every request with the hub's health body. */
+	function listenHub(identity: { cert: string; key: string }): Promise<number> {
+		return listen(
+			createHttpsServer(identity, (_request, response) => {
+				response.setHeader("content-type", "application/json");
+				response.end(JSON.stringify({ status: "ok", version: "test", build: "test" }));
+			}),
+		);
+	}
+
+	async function status(
+		runtime: RuntimeInfo,
+		json = true,
+	): Promise<{ code: number; output: string[] }> {
+		const output: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		try {
+			const code = await cmdStatus(parsed(json ? ["status", "--json"] : ["status"]), {
+				loadRuntime: () => ({ kind: "present", runtime }),
+				isPidAlive: () => true,
+			});
+			return { code, output };
+		} finally {
+			log.mockRestore();
+		}
+	}
+
+	function record(port: number, spki: string | undefined): RuntimeInfo {
+		return {
+			pid: process.pid,
+			port,
+			started_at: "2026-08-03T00:00:00.000Z",
+			...(spki !== undefined ? { spki } : {}),
+		};
+	}
+
+	it("reports a hub that proves the recorded key as running, with its health", async () => {
+		const tls = getTestTlsMaterial();
+		const port = await listenHub(tls.pinned);
+
+		const { code, output } = await status(record(port, tls.pinned.spki));
+
+		expect(code).toBe(0);
+		expect(JSON.parse(output[0] ?? "")).toMatchObject({
+			running: true,
+			ready: true,
+			port,
+			health: { status: "ok" },
+		});
+	});
+
+	it("refuses a peer holding another key, does not call it running, and exits 1", async () => {
+		const tls = getTestTlsMaterial();
+		const port = await listenHub(tls.other);
+
+		const { code, output } = await status(record(port, tls.pinned.spki));
+
+		expect(code).toBe(1);
+		expect(JSON.parse(output[0] ?? "")).toMatchObject({
+			running: "unknown",
+			ready: false,
+			retryable: false,
+			refused: "pin",
+			health: null,
+		});
+
+		const text = await status(record(port, tls.pinned.spki), false);
+		expect(text.code).toBe(1);
+		expect(text.output[0]).toBe("Hub: refused (pin mismatch)");
+	});
+
+	it("calls a port that is not answering yet not ready, retryable, and exits 0", async () => {
+		const tls = getTestTlsMaterial();
+
+		const { code, output } = await status(record(await getUnusedPort(), tls.pinned.spki));
+
+		expect(code).toBe(0);
+		expect(JSON.parse(output[0] ?? "")).toMatchObject({
+			running: true,
+			ready: false,
+			retryable: true,
+			health: null,
+			error: expect.stringContaining("ECONNREFUSED"),
+		});
+	});
+
+	it("names a record without a usable key or port as a configuration refusal", async () => {
+		const tls = getTestTlsMaterial();
+		for (const runtime of [
+			record(await getUnusedPort(), undefined),
+			record(70_000, tls.pinned.spki),
+		]) {
+			const { code, output } = await status(runtime);
+			expect(code).toBe(1);
+			expect(JSON.parse(output[0] ?? "")).toMatchObject({ running: "unknown", refused: "config" });
+		}
+	});
+
+	it("names a peer that does not complete TLS correctly as a TLS refusal", async () => {
+		const tls = getTestTlsMaterial();
+		// A plain HTTP answer where a TLS server hello belongs.
+		const port = await listen(
+			net.createServer((socket) => {
+				socket.once("data", () => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+				socket.on("error", () => {});
+			}),
+		);
+
+		const { code, output } = await status(record(port, tls.pinned.spki));
+
+		expect(code).toBe(1);
+		expect(JSON.parse(output[0] ?? "")).toMatchObject({ running: "unknown", refused: "tls" });
+	});
+
+	it("keeps every recognised transient failure retryable and refuses anything else", () => {
+		for (const code of [
+			"ECONNREFUSED",
+			"ECONNRESET",
+			"ECONNABORTED",
+			"EPIPE",
+			"ETIMEDOUT",
+			HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
+		]) {
+			expect(classifyHubFailure(Object.assign(new Error(code), { code })).kind).toBe("not-ready");
+		}
+		expect(classifyHubFailure(new Error("no code at all"))).toMatchObject({
+			kind: "refused",
+			refusal: "tls",
+		});
 	});
 });
 

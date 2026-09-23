@@ -1,15 +1,11 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { LogConfig } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { ChannelLogger } from "./channel-logger.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function makeTmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-channel-logger-"));
-}
 
 function makeConfig(overrides: Partial<LogConfig> = {}): LogConfig {
 	return {
@@ -37,11 +33,11 @@ describe("ChannelLogger", () => {
 	const createdAt = new Date("2026-01-01T00:00:00.000Z");
 
 	beforeEach(() => {
-		tmpDir = makeTmpDir();
+		tmpDir = makeTempDir("lasterm-channel-logger-");
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeTempDir(tmpDir);
 	});
 
 	it("writes JSONL with correct fields (t, src, lvl, msg)", () => {

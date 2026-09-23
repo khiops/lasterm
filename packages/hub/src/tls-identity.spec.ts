@@ -1,17 +1,16 @@
-import { randomBytes, X509Certificate } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import type { Server as HttpsServer } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer as createNetServer, Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { createServer, startServer } from "./server.fixture.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
 import { resolveHubTlsIdentity } from "./tls-identity.js";
 
@@ -45,9 +44,8 @@ describe("generated hub TLS identity", () => {
 					),
 				);
 			},
-			() => {
-				if (stateRootToRemove !== undefined)
-					rmSync(stateRootToRemove, { recursive: true, force: true });
+			async () => {
+				if (stateRootToRemove !== undefined) await removeTempDir(stateRootToRemove);
 			},
 			() => stateRootToRestore?.(),
 		]);
@@ -84,7 +82,7 @@ describe("generated hub TLS identity", () => {
 	});
 
 	function prepareStateDir(): string {
-		stateRoot = join(tmpdir(), `lasterm-tls-${randomBytes(8).toString("hex")}`);
+		stateRoot = makeTempDir("lasterm-tls-");
 		restoreStateRoot = usePlatformDirs({ state: stateRoot });
 		const stateDir = getStateDir();
 		mkdirSync(stateDir, { recursive: true, mode: 0o700 });

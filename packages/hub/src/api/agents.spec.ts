@@ -2,14 +2,11 @@ import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
-	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import fastifyMultipart from "@fastify/multipart";
 import type {
@@ -25,6 +22,7 @@ import { AGENT_FETCH_MAX_BYTES, AGENT_TARGET_TRIPLES } from "../session/agent-ca
 import type { AgentFetchImpl } from "../session/agent-fetch.js";
 import type { AgentTargetArch, AgentTargetOs, HubPlatform } from "../session/agent-status.js";
 import { openTestDatabases } from "../storage/db.js";
+import { makeTempDir as newTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { registerAgentRoutes } from "./agents.js";
 
 const TEST_TOKEN = "a".repeat(64);
@@ -52,7 +50,7 @@ let tempDirs: string[] = [];
 afterEach(async () => {
 	if (server) await server.close();
 	server = null;
-	for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+	for (const dir of tempDirs) await removeTempDir(dir);
 	tempDirs = [];
 });
 
@@ -728,7 +726,7 @@ function targetStatus(
 }
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(tmpdir(), "lasterm-api-agents-"));
+	const dir = newTempDir("lasterm-api-agents-");
 	chmodSync(dir, 0o700);
 	tempDirs.push(dir);
 	return dir;

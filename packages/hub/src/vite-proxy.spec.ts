@@ -1,14 +1,14 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as http from "node:http";
 import { createServer as createNetServer } from "node:net";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { platformDirEnv } from "./platform-dirs.fixture.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(sourceDirectory, "../../..");
@@ -33,14 +33,14 @@ describe("Vite development proxy", () => {
 		if (stateRoot !== undefined) {
 			// On Windows a hub stopped by kill() is terminated outright, and its
 			// databases and log can stay locked for a moment after the exit event
-			// (EPERM seen on CI), so the removal retries rather than failing.
-			rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+			// (EPERM seen on CI), so the removal waits rather than failing.
+			await removeTempDir(stateRoot);
 			stateRoot = undefined;
 		}
 	});
 
 	it("uses the newly published hub port for HTTP and WebSocket requests after a hub restart", async () => {
-		stateRoot = mkdtempSync(join(tmpdir(), "lasterm-vite-proxy-"));
+		stateRoot = makeTempDir("lasterm-vite-proxy-");
 		const vitePort = await reservePort();
 		const firstHubPort = await reservePort();
 		const secondHubPort = await reservePort();

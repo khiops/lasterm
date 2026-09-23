@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { makeTempDir as newTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { AGENT_TARGET_TRIPLES } from "./agent-cache.js";
 import {
 	type AgentTargetArch,
@@ -27,8 +27,8 @@ const AGENT_TARGET_TABLE = AGENT_TARGET_TRIPLES as Record<
 
 let tempDirs: string[] = [];
 
-afterEach(() => {
-	for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+	for (const dir of tempDirs) await removeTempDir(dir);
 	tempDirs = [];
 });
 
@@ -195,7 +195,7 @@ function targetRow(
 }
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(path.join(tmpdir(), "lasterm-agent-status-"));
+	const dir = newTempDir("lasterm-agent-status-");
 	chmodSync(dir, 0o700);
 	tempDirs.push(dir);
 	return dir;

@@ -1,6 +1,3 @@
-import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +7,7 @@ import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { getTestTls } from "../test-tls.fixture.js";
 
 vi.mock("ssh2", () => ({
@@ -42,8 +40,7 @@ let configDir: string;
 /** A whole hub server, for the describes that test a route through one. */
 function useHubServer(): void {
 	beforeEach(async () => {
-		configDir = join(tmpdir(), `lasterm-config-spec-${Date.now()}-${Math.random()}`);
-		mkdirSync(configDir, { recursive: true });
+		configDir = makeTempDir("lasterm-config-spec-");
 		dbs = openTestDatabases();
 		server = await createServer({
 			tls: getTestTls(),
@@ -58,7 +55,7 @@ function useHubServer(): void {
 		// Survives a setup that never finished: see config.spec.ts.
 		await server?.close();
 		dbs?.close();
-		if (configDir !== undefined) rmSync(configDir, { recursive: true, force: true });
+		if (configDir !== undefined) await removeTempDir(configDir);
 	});
 }
 
@@ -153,8 +150,7 @@ describe("PUT /api/config/ui — broadcastDisplayTitles integration", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `lasterm-bdt-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = makeTempDir("lasterm-bdt-");
 		testDbs = openTestDatabases();
 		miniServer = Fastify({ logger: false });
 	});
@@ -162,7 +158,7 @@ describe("PUT /api/config/ui — broadcastDisplayTitles integration", () => {
 	afterEach(async () => {
 		await miniServer.close();
 		testDbs.close();
-		rmSync(tempDir, { recursive: true, force: true });
+		await removeTempDir(tempDir);
 	});
 
 	it("calls sessionManager.broadcastDisplayTitles() when title section is in body", async () => {
@@ -243,8 +239,7 @@ describe("config writes — CONFIG_CHANGED to every client", () => {
 	let metaDal: MetaDAL;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `lasterm-cfgchg-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = makeTempDir("lasterm-cfgchg-");
 		testDbs = openTestDatabases();
 		miniServer = Fastify({ logger: false });
 		announced = [];
@@ -262,7 +257,7 @@ describe("config writes — CONFIG_CHANGED to every client", () => {
 	afterEach(async () => {
 		await miniServer.close();
 		testDbs.close();
-		rmSync(tempDir, { recursive: true, force: true });
+		await removeTempDir(tempDir);
 	});
 
 	it("announces a UI section written", async () => {

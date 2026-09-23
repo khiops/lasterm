@@ -1,10 +1,10 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TestConnectMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import { attemptSshTest, SshConnectionManager } from "./ssh-connection-manager.js";
@@ -20,11 +20,11 @@ const { privateKey: CLIENT_KEY } = generateKeyPairSync("rsa", {
 	publicKeyEncoding: { type: "pkcs1", format: "pem" },
 	privateKeyEncoding: { type: "pkcs1", format: "pem" },
 });
-const KEY_DIR = mkdtempSync(join(tmpdir(), "lasterm-test-connect-"));
+const KEY_DIR = makeTempDir("lasterm-test-connect-");
 const CLIENT_KEY_PATH = join(KEY_DIR, "client.pem");
 writeFileSync(CLIENT_KEY_PATH, CLIENT_KEY, { mode: 0o600 });
 
-afterAll(() => rmSync(KEY_DIR, { recursive: true, force: true }));
+afterAll(() => removeTempDir(KEY_DIR));
 
 /**
  * An SSH server that accepts any client and counts authentication attempts.

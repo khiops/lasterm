@@ -1,10 +1,10 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { DeployOptions } from "./agent-deployer.js";
 import {
 	AgentBinaryDecisionNeeded,
@@ -102,12 +102,11 @@ function makeSftpClient(sftp: SFTPWrapper, sftpError?: Error): SshClient {
 let cacheDir: string;
 
 beforeEach(() => {
-	cacheDir = join(tmpdir(), `lasterm-deployer-test-${Date.now()}`);
-	mkdirSync(cacheDir, { recursive: true });
+	cacheDir = makeTempDir("lasterm-deployer-test-");
 });
 
-afterEach(() => {
-	rmSync(cacheDir, { recursive: true, force: true });
+afterEach(async () => {
+	await removeTempDir(cacheDir);
 });
 
 // ---------- Helpers for deploy tests ------------------------------------------

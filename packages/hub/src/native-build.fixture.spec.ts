@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +8,7 @@ vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
 import { execFileSync } from "node:child_process";
 import { nativeBuildProblem } from "./native-build.fixture.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import setupTestTlsMaterial from "./test-tls.setup.js";
 
 const checkout = resolve(import.meta.dirname, "../../..");
@@ -59,14 +59,14 @@ const ARTIFACTS = [
 
 const tempDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	vi.unstubAllEnvs();
 	vi.mocked(execFileSync).mockReset();
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 });
 
 function tempDir(name = "lasterm-native-build-"): string {
-	const dir = mkdtempSync(join(tmpdir(), name));
+	const dir = makeTempDir(name);
 	tempDirs.push(dir);
 	return dir;
 }

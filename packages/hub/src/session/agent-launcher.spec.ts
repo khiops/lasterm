@@ -1,7 +1,6 @@
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync, statSync, writeFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import {
 	type AgentConfig,
@@ -11,6 +10,7 @@ import {
 } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlatformDirs } from "../platform-dirs.fixture.js";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { LastermAgent } from "./lasterm-agent.js";
 import { HubQuittingError } from "./quit-fence.js";
 import { getTestSocketPath } from "./test-socket-path.js";
@@ -85,7 +85,7 @@ describe("connectOrLaunch", () => {
 	const config: AgentConfig = { ...DEFAULT_AGENT_CONFIG };
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-launcher-test-"));
+		tmpDir = makeTempDir("lasterm-launcher-test-");
 		restoreStateRoot = usePlatformDirs({ state: tmpDir });
 		socketPath = getTestSocketPath();
 
@@ -103,7 +103,7 @@ describe("connectOrLaunch", () => {
 			await closeServer(daemon.server);
 			daemon = null;
 		}
-		await rm(tmpDir, { recursive: true, force: true });
+		await removeTempDir(tmpDir);
 		restoreStateRoot();
 	});
 
@@ -320,7 +320,7 @@ describe("connectOrLaunch", () => {
 		"[socket parent dir] creates missing parent directory before spawning the agent",
 		async () => {
 			// Use a separate temp base so cleanup is independent of the outer tmpDir.
-			const isolatedBase = mkdtempSync(path.join(os.tmpdir(), "lasterm-sockdir-test-"));
+			const isolatedBase = makeTempDir("lasterm-sockdir-test-");
 			try {
 				// Point the socket at a two-level-deep path that does not exist yet.
 				// Neither `isolatedBase/missing/` nor `isolatedBase/missing/nested/` exists.
@@ -352,7 +352,7 @@ describe("connectOrLaunch", () => {
 				expect(existsSync(missingParent)).toBe(true);
 				expect(agent.connected).toBe(true);
 			} finally {
-				rmSync(isolatedBase, { recursive: true, force: true });
+				await removeTempDir(isolatedBase);
 			}
 		},
 		TEST_TIMEOUT,
@@ -367,7 +367,7 @@ describe("connectOrLaunch", () => {
 	it.skipIf(process.platform === "win32")(
 		"[socket parent dir] creates parent directory with owner-only mode 0o700",
 		async () => {
-			const isolatedBase = mkdtempSync(path.join(os.tmpdir(), "lasterm-sockmode-test-"));
+			const isolatedBase = makeTempDir("lasterm-sockmode-test-");
 			try {
 				const socketParent = path.join(isolatedBase, "sockdir");
 				const testSocketPath = path.join(socketParent, "agent.sock");
@@ -392,7 +392,7 @@ describe("connectOrLaunch", () => {
 				// st.mode & 0o777 masks off the file-type bits — only rwxrwxrwx remain.
 				expect(st.mode & 0o777).toBe(0o700);
 			} finally {
-				rmSync(isolatedBase, { recursive: true, force: true });
+				await removeTempDir(isolatedBase);
 			}
 		},
 		TEST_TIMEOUT,
@@ -447,11 +447,11 @@ describe("readBoundedLogTail", () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(path.join(os.tmpdir(), "lasterm-logtail-test-"));
+		tmpDir = makeTempDir("lasterm-logtail-test-");
 	});
 
 	afterEach(async () => {
-		await rm(tmpDir, { recursive: true, force: true });
+		await removeTempDir(tmpDir);
 	});
 
 	it("returns empty string for a missing log file (ENOENT)", () => {

@@ -1,11 +1,11 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HelloMessage, Host } from "@lasterm/shared";
 import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
 
 // ─── Mock agent-deployer.js for Fix B deploy-fallback tests ─────────────────
@@ -41,7 +41,7 @@ const { privateKey: CLIENT_PRIVATE_KEY_PEM } = generateKeyPairSync("rsa", {
 	publicKeyEncoding: { type: "pkcs1", format: "pem" },
 	privateKeyEncoding: { type: "pkcs1", format: "pem" },
 });
-const KEY_TMPDIR = mkdtempSync(join(tmpdir(), "lasterm-ssh-agent-test-"));
+const KEY_TMPDIR = makeTempDir("lasterm-ssh-agent-test-");
 const CLIENT_KEY_PATH = join(KEY_TMPDIR, "client.pem");
 writeFileSync(CLIENT_KEY_PATH, CLIENT_PRIVATE_KEY_PEM, { mode: 0o600 });
 
@@ -223,9 +223,9 @@ function makeHost(port: number, overrides: Partial<Host> = {}): Host {
 	};
 }
 
-afterAll(() => {
+afterAll(async () => {
 	// Remove the temp directory holding the generated client key.
-	rmSync(KEY_TMPDIR, { recursive: true, force: true });
+	await removeTempDir(KEY_TMPDIR);
 });
 
 describe("SshAgent", () => {

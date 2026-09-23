@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import {
 	type ReadAt,
 	readFontFaceInfo,
@@ -172,13 +172,13 @@ describe("readFontFaceInfo (#100)", () => {
 describe("scanSystemFonts (#100)", () => {
 	let root: string | undefined;
 
-	afterEach(() => {
-		if (root) rmSync(root, { recursive: true, force: true });
+	afterEach(async () => {
+		if (root) await removeTempDir(root);
 		root = undefined;
 	});
 
 	function fixture(): string {
-		root = mkdtempSync(join(tmpdir(), "lasterm-system-fonts-"));
+		root = makeTempDir("lasterm-system-fonts-");
 		mkdirSync(join(root, "machine", "truetype", "mono"), { recursive: true });
 		mkdirSync(join(root, "user"), { recursive: true });
 		writeFileSync(

@@ -1,14 +1,10 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { runLogGc } from "./log-gc.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function makeTmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-log-gc-"));
-}
 
 function makeChannelsDir(logsDir: string): string {
 	const dir = path.join(logsDir, "channels");
@@ -35,12 +31,12 @@ describe("runLogGc", () => {
 	let channelsDir: string;
 
 	beforeEach(() => {
-		tmpDir = makeTmpDir();
+		tmpDir = makeTempDir("lasterm-log-gc-");
 		channelsDir = makeChannelsDir(tmpDir);
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeTempDir(tmpDir);
 	});
 
 	it("deletes files older than maxAgeDays", async () => {

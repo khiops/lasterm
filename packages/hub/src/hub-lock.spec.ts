@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { loadCachedAddon } from "@lasterm/shared/dist/sea-addon-loader.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { acquireHubLock, getHubLockPath, HubLockInitializationError } from "./hub-lock.js";
 import { startHub } from "./hub-startup.js";
@@ -252,7 +253,40 @@ describe.sequential("hub startup lock", () => {
 			}),
 		).toThrow(HubLockInitializationError);
 	});
+
+	it("takes the lock with the addon loaded from the authenticated addon cache", () => {
+		// The single executable's path: the embedded bytes go through the cache
+		// and are loaded from there — on Linux through the descriptor they were
+		// verified on — rather than from the build output.
+		const cacheDir = mkdtempSync(path.join(os.tmpdir(), "lasterm-addon-cache-"));
+		try {
+			const exports = loadCachedAddon(
+				"lasterm_hub_lock.node",
+				path.join(cacheDir, "addons"),
+				readFileSync(builtHubLockAddon()),
+			);
+			const stateDir = path.join(makeStateDir(), "lasterm");
+			const lock = acquireHubLock(stateDir, { loadAddon: () => exports as never });
+			expect(lock.path).toBe(path.resolve(getHubLockPath(stateDir)));
+		} finally {
+			try {
+				rmSync(cacheDir, { recursive: true, force: true });
+			} catch {
+				// Windows keeps a loaded library until the process exits.
+			}
+		}
+	});
 });
+
+/** Where hub-lock.ts itself finds the addon outside the single executable. */
+function builtHubLockAddon(): string {
+	const override = process.env.LASTERM_HUB_LOCK_ADDON;
+	if (override && override.length > 0) return override;
+	const filename = process.platform === "win32" ? "lasterm_hub_lock.dll" : "liblasterm_hub_lock.so";
+	const targetDir =
+		process.env.CARGO_TARGET_DIR ?? path.resolve(import.meta.dirname, "../../../target");
+	return path.resolve(targetDir, "release", filename);
+}
 
 function makeStateDir(): string {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "lasterm-hub-lock-"));

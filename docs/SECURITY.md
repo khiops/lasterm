@@ -71,6 +71,7 @@
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | For a browser on this machine, `lasterm pair` issues an 8-digit code valid for 60 seconds and usable once. No other device can pair yet (#193) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 | Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
+| Native addon substitution | Another account able to write a directory on the path to the addon cache leaves a library where the single executable extracts its native addons | HIGH — the library runs inside the hub, which holds the token and terminal authority | LOW | Every addon is authenticated against the SHA-256 of the copy embedded in the executable, read through the descriptor it is opened with. On Linux the cache is refused unless every directory on its path is private to this account or root, and the addon is loaded through that descriptor. On Windows neither holds: the chain is not examined and LoadLibrary resolves the name again — see § 4.5 |
 
 ## 2. Authentication
 
@@ -327,6 +328,37 @@ A handle-based publication was built and removed. Windows offers no write-throug
 it, so it dropped a durability guarantee the pathname form carries, and withholding the
 delete-sharing it needs broke both failure cleanup and concurrent replacement. None of that would
 have been observable here: no test executes these paths on Windows.
+
+### 4.5 How a native addon is loaded
+
+The single executable embeds its native addons (better-sqlite3, the hub lock, the TLS identity) and
+extracts them to `addons/<version>/<platform>-<arch>` under the cache directory before loading
+them. What must hold is that only the embedded addon is executed from there. The actor is another
+account able to write a directory on that path; a process running as the same user already has
+everything a substituted addon would give it, and root is trusted.
+
+**Everywhere**, a file in the cache is loaded only when the descriptor opened on it reads the
+SHA-256 of the embedded copy. Anything else is replaced by a fresh extraction, written beside it and
+renamed into place, and the result is opened and checked the same way.
+
+**On Linux** the directory chain is examined from `/` down before the cache is used: every directory
+a name is looked up in must be owned by this account or root and writable by neither group nor
+others unless it is sticky, and every directory and link passed through must be owned by this
+account or root. Links are followed and their targets examined the same way. A directory that fails
+is refused and the hub does not start, except inside lasterm's own cache directory, where one this
+account owns is tightened instead. The cached file must be a regular file, reached without following
+a link, owned by this account or root and not writable by group or others. It is then loaded through
+`/proc/self/fd/N`, so what `dlopen` maps is the file that was hashed. A POSIX ACL granting write to
+another account shows in the group bits and is refused; ACLs the mode bits do not reflect are not
+read.
+
+**On Windows** neither the chain nor the file's ACL is examined: Node reports no owner and no DACL
+there, so the cache relies on the profile's default ACL, as `auth.json` does (#200). A cache
+redirected into a directory other accounts may write — as folders made at the root of a drive
+usually are — is not detected. `LoadLibrary` takes a name and resolves it again, so the check and
+the load cannot be made one operation. The verified handle is held across the load, and while it is
+open NTFS refuses to rename any directory above the file: what remains is a change to the cache
+directory's own entries or a write to the file, by whoever its ACL lets do that.
 
 ## 5. Input Validation
 

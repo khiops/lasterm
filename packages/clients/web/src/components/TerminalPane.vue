@@ -306,7 +306,12 @@ const {
 	},
 });
 
-const { tabTitle: paneTitle } = useTabTitle(effectiveChannelId, toRef(channelsStore, 'channels'), currentDynamicTitle);
+const { tabTitle: paneTitle } = useTabTitle(
+	effectiveChannelId,
+	toRef(channelsStore, 'channels'),
+	currentDynamicTitle,
+	{ index: toRef(channelsStore, 'channelIndex') },
+);
 
 // ---------------------------------------------------------------------------
 // Visual profile (UX-07)

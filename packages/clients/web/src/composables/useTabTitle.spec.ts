@@ -386,3 +386,38 @@ describe("useTabTitle", () => {
 		});
 	});
 });
+
+describe("useTabTitle — a terminal on another host", () => {
+	// Tabs and their panes are global. With another host selected, the channel
+	// list is that host's, and a pane over a terminal elsewhere said "Terminal"
+	// while its own tab, reading the index, named it.
+	it("names a channel the loaded host does not list from the index", () => {
+		const channelId = ref<string | null>("ch-elsewhere");
+		const channels = ref<Channel[]>([makeChannel({ id: "ch-here", displayTitle: "pwsh" })]);
+		const index = ref(new Map([["ch-elsewhere", { displayTitle: "bash" }]]));
+
+		const { tabTitle } = useTabTitle(channelId, channels, undefined, { index });
+
+		expect(tabTitle.value).toBe("bash");
+	});
+
+	it("prefers the loaded list, which carries live titles, over the index", () => {
+		const channelId = ref<string | null>("ch-1");
+		const channels = ref<Channel[]>([makeChannel({ id: "ch-1", displayTitle: "vim" })]);
+		const index = ref(new Map([["ch-1", { displayTitle: "bash" }]]));
+
+		const { tabTitle } = useTabTitle(channelId, channels, undefined, { index });
+
+		expect(tabTitle.value).toBe("vim");
+	});
+
+	it("still says Terminal for a channel nobody has named", () => {
+		const channelId = ref<string | null>("ch-unknown");
+		const channels = ref<Channel[]>([]);
+		const index = ref(new Map<string, { displayTitle: string }>());
+
+		const { tabTitle } = useTabTitle(channelId, channels, undefined, { index });
+
+		expect(tabTitle.value).toBe(DEFAULT_CHANNEL_NAME);
+	});
+});

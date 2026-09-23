@@ -258,11 +258,12 @@ interface HubResponse {
  * A request over the transport the CLI uses: TLS whose peer must prove the key
  * the hub announced. A hub serving with any other key is refused before HTTP.
  *
- * It asks for keep-alive, which that transport does not. With `Connection:
- * close`, the HTTPS server of Node 24.14 on Windows stalls about 15 KB before
- * the end of a large response, such as the web UI's 900 KB script, and curl
- * sees the same. That is Node's HTTP layer, not the executable. The socket is
- * still discarded after each request, since the agent keeps none alive.
+ * It asks for keep-alive, as requestHub does, so the hub never closes the
+ * connection with an answer still in flight. A network filter on the loopback
+ * path can hold back the end of a large one when it does: with Avast's Web
+ * Shield on Windows, the web UI's 900 KB script stops about 15 KB short, over
+ * any server, curl and Python included. The socket is still discarded after
+ * each request, since the agent keeps none alive.
  */
 function hubRequest(
 	hub: StartedHub,

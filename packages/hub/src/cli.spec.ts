@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
@@ -52,13 +52,14 @@ import {
 } from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { describePreviousInstallation } from "./previous-installation.js";
+import { createServer as createHubServer, startServer } from "./server.fixture.js";
 import {
 	AGENT_TARGET_TRIPLES,
 	type FetchAgentBinaryOptions,
 	FetchError,
 } from "./session/agent-fetch.js";
 import { computeTargetStatus, type HubPlatform } from "./session/agent-status.js";
-import { getTestTlsMaterial } from "./test-tls.fixture.js";
+import { getTestTls, getTestTlsMaterial } from "./test-tls.fixture.js";
 
 const TEST_VERSION = "0.4.1";
 const HUB_PLATFORM = { os: "linux", arch: "x64" } as const satisfies HubPlatform;
@@ -1958,6 +1959,77 @@ describe("a hub that proves its key and never answers", () => {
 			`Error: Hub accepted the connection but did not answer POST /api/pair within ${HUB_RESPONSE_TIMEOUT_MS}ms; whether it took effect is unknown`,
 		]);
 		expect(exits).toEqual([1]);
+	});
+});
+
+describe("a large answer through requestHub", () => {
+	/** About the size of the web UI's script, the largest file the hub serves. */
+	const LARGE_ANSWER_BYTES = 900_000;
+	let hub: Awaited<ReturnType<typeof createHubServer>> | undefined;
+
+	afterEach(async () => {
+		const closing = hub;
+		hub = undefined;
+		await closing?.close();
+	});
+
+	/**
+	 * A hub server with one route answering `body`. It records the `Connection`
+	 * header each request carried, and `closed` settles when the connection that
+	 * carried the first one has closed.
+	 */
+	async function listenLargeAnswerHub(body: Buffer) {
+		const server = await createHubServer({ tls: getTestTls(), logger: false });
+		hub = server;
+		const connectionHeaders: (string | undefined)[] = [];
+		server.get("/test/large", async (request, reply) => {
+			connectionHeaders.push(request.headers.connection);
+			return reply.type("application/octet-stream").send(body);
+		});
+		const closed = new Promise<void>((resolve) => {
+			server.server.once("connection", (socket) => socket.once("close", () => resolve()));
+		});
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: Number(new URL(await startServer(server)).port),
+			started_at: "2026-08-03T00:00:00.000Z",
+			spki: getTestTlsMaterial().server.spki,
+		};
+		return { runtime, connectionHeaders, closed };
+	}
+
+	async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+		let timer: NodeJS.Timeout | undefined;
+		const expired = new Promise<boolean>((resolve) => {
+			timer = setTimeout(() => resolve(false), ms);
+		});
+		try {
+			return await Promise.race([promise.then(() => true), expired]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	// Mutation: let requestHub send `Connection: close` again, its agent's
+	// default. The hub then closes the connection as soon as it has written the
+	// body, and where a network filter sits on the loopback path (Avast's Web
+	// Shield on Windows, measured) the last kilobytes never arrive: this request
+	// fails with ERR_HUB_RESPONSE_TIMEOUT. Without such a filter the body arrives,
+	// and the recorded header fails instead.
+	it("arrives whole: the hub keeps the connection open and the CLI closes it", async () => {
+		const body = randomBytes(LARGE_ANSWER_BYTES);
+		const { runtime, connectionHeaders, closed } = await listenLargeAnswerHub(body);
+
+		const response = await requestHub(runtime, "/test/large");
+		const received = Buffer.from(await response.arrayBuffer());
+
+		expect(response.status).toBe(200);
+		expect(received.length).toBe(LARGE_ANSWER_BYTES);
+		expect(received.equals(body)).toBe(true);
+		expect(connectionHeaders).toEqual(["keep-alive"]);
+		// The hub would keep an idle connection for 72 seconds. It goes now because
+		// the CLI keeps no socket once its answer is in.
+		expect(await settlesWithin(closed, 5_000)).toBe(true);
 	});
 });
 

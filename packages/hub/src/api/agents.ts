@@ -13,7 +13,7 @@ import {
 	type TokenStoreLog,
 	type TokenValidation,
 	tokensEqual,
-	touchToken,
+	touchTokenBestEffort,
 	validateTokenRecord,
 } from "../auth.js";
 import { HUB_VERSION } from "../build-version.js";
@@ -848,11 +848,7 @@ function checkAgentBearer(
 			if (deps.tokenTtlDays !== undefined) {
 				// Best effort, as on the global REST hook: the credential has been
 				// checked, and failing to record its use is not a reason to refuse it.
-				try {
-					touchToken(deps.db, validation.record.id, deps.tokenTtlDays);
-				} catch (err) {
-					log.warn({ err, tokenId: validation.record.id }, "touchToken failed");
-				}
+				touchTokenBestEffort(deps.db, validation.record.id, deps.tokenTtlDays, log);
 			}
 			return "valid";
 		}

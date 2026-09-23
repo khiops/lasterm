@@ -528,13 +528,12 @@ describe("GET /api/config/defaults", () => {
 		dbs?.close();
 	});
 
+	// The constant is served as it is: this proves the route serves it, and
+	// leaves what it holds to the specs of the code that reads it.
 	it("returns DEFAULT_PROFILE", async () => {
 		const res = await server.inject({ method: "GET", url: "/api/config/defaults" });
 		expect(res.statusCode).toBe(200);
-		const body = res.json<typeof DEFAULT_PROFILE>();
-		expect(body.fontFamily).toBe(DEFAULT_PROFILE.fontFamily);
-		expect(body.fontSize).toBe(DEFAULT_PROFILE.fontSize);
-		expect(body.scrollback).toBe(DEFAULT_PROFILE.scrollback);
+		expect(res.json()).toEqual(DEFAULT_PROFILE);
 	});
 });
 

@@ -97,12 +97,17 @@ pnpm -F @lasterm/web dev  # Dev single package
 ### TypeScript test prerequisite
 
 The hub TypeScript specs load the `lasterm-hub-lock` and `lasterm-tls-identity`
-Rust addons. From a clean checkout, build them before a hub or root test run:
+Rust addons, and run the `lasterm-tls-test-material` generator, from the cargo target
+directory. Build them before a hub or root test run, and again after editing a crate:
 
 ```bash
-cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity
+cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity --features lasterm-tls-identity/test-tls-material
 pnpm -F @lasterm/hub test # or: pnpm test
 ```
+
+Nothing in the TypeScript loop rebuilds them. The hub test setup compares each one
+with the sources cargo recorded for it, and refuses to run on a build that predates
+them or came from another checkout's different sources (#129).
 
 ### Production build & run (local, Linux native)
 
@@ -165,7 +170,7 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 - **Hot paths log at DEBUG, or not at all.** Nothing that runs per WebSocket frame, keystroke, output chunk or routine request may log at INFO or above. A line per keystroke records when and how fast someone types, even without the bytes.
 - **Never log user content, at any level.** That means input bytes, terminal output, clipboard, and secrets (tokens, pairing codes, passwords, passphrases, the asset token inside a URL). Name the type, size or id instead.
 - **Security events** go through `SecurityLog`, and they carry no secret either.
-- **Adding a hot path:** extend the keystroke spec in `packages/hub/src/security-events.spec.ts`, which fails if a burst of INPUT frames leaves anything at INFO or above.
+- **Adding a hot path:** extend the keystroke spec in `packages/hub/src/security-events.spec.ts`, which fails if a burst of INPUT frames leaves anything at INFO or above, or the routine-request spec beside it, which does the same for REST requests.
 
 ### Testing
 
@@ -174,6 +179,8 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 - E2E (remote): mock SSH server (never real SSH in CI)
 - PTY: exercised by the agent's Rust tests (`cargo test`), Linux and Windows
 - WS: mock for UI tests, real for E2E
+- A new validation rule gets a unit test on its table or validator, beside it, so a broken rule fails under its own name rather than a route's (#459).
+- The route keeps **one** test proving it consults that table: a refused value gets its 4xx and error shape, an accepted one is stored.
 
 ### Git
 

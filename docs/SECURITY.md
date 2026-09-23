@@ -462,7 +462,9 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 
 Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INFO on a WebSocket
 acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,
-not part of it.
+not part of it. A routine request leaves no line there at INFO, only a request the hub failed
+does (ERROR, or WARN for a 5xx a route chose), and the desktop moves `hub.log` to `hub.log.old` at
+10 MB, replacing the one before (#512).
 
 **A token store that cannot be read is not recorded here.** While `meta.db` is closed, corrupt or
 locked, every credential is refused (503 on REST, a `1013` close on the WebSocket) without being
@@ -470,7 +472,9 @@ judged. Nobody failed to authenticate, and one `auth.failure` per refused reques
 burst of failures from every client, the pattern a brute-force alert looks for. The outage goes to
 the diagnostic log instead, once: ERROR when the store first fails to answer, WARN when it answers
 again, with the number of credentials refused meanwhile. The same holds for an open WebSocket closed
-because the store stopped answering.
+because the store stopped answering. A store that can be read but not written accepts credentials
+and fails to record their use; that is a WARN once, and another when a use is recorded again, with
+the number that were not.
 
 ### 7.2 What is NOT logged
 
@@ -478,6 +482,14 @@ because the store stopped answering.
 - SSH passwords (never in logs)
 - Terminal output content (never in logs — goes to spool.db only)
 - Pairing codes (never in logs — only expiry time)
+- Asset tokens, and every other query value (#511)
+
+A request URL reaches a line only through the request serializer of
+`packages/hub/src/logging/request-log.ts`, which keeps its path and the names of its query
+parameters, and writes `[redacted]` for each value. Fastify also composes a few messages around the
+raw URL itself, so every line then passes a last filter that redacts `asset_token` wherever it
+appears. Request headers are never logged: the one error that carries them, Node's report of a
+request it could not parse, is logged without the raw bytes it holds.
 
 For the events of § 7.1 this holds by construction, in `packages/hub/src/logging/security-log.ts`.
 Each event is a method whose parameter names every field it can carry, and the record is built from

@@ -120,7 +120,9 @@ export async function registerWsRoutes(
 				return;
 			}
 
-			server.log.info({ msgType: msg.type }, "ws: received message");
+			// DEBUG, never INFO: every keystroke is a frame, so a line per frame at the
+			// default level records when, and how fast, the user types.
+			server.log.debug({ msgType: msg.type }, "ws: received message");
 
 			// AUTH handshake — must be the first message when auth is enabled
 			if (!authenticated) {

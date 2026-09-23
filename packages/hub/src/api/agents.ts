@@ -8,7 +8,13 @@ import type {
 import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { touchToken, validateTokenRecord } from "../auth.js";
+import {
+	reportTokenStore,
+	type TokenStoreLog,
+	type TokenValidation,
+	touchToken,
+	validateTokenRecord,
+} from "../auth.js";
 import { HUB_VERSION } from "../build-version.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -133,7 +139,7 @@ const AGENT_IMPORT_MAX_PAYLOAD_BYTES =
 const AGENT_IMPORT_ALLOWED_FIELDS = new Set(["os", "arch", "version", "attested", "force"]);
 
 export function registerAgentRoutes(server: FastifyInstance, deps: AgentRoutesDeps = {}): void {
-	const requireBearer = createAgentBearerAuthGuard(deps);
+	const requireBearer = createAgentBearerAuthGuard(deps, server.log);
 	const requireMutationOrigin = createAgentMutationOriginGuard(deps);
 	const jobsByTarget = new Map<string, AgentFetchJob>();
 	const queuedJobs: AgentFetchJob[] = [];
@@ -798,7 +804,7 @@ export function createAgentMutationOriginGuard(
 	};
 }
 
-function createAgentBearerAuthGuard(deps: AgentRoutesDeps): AgentPreHandler {
+function createAgentBearerAuthGuard(deps: AgentRoutesDeps, log: TokenStoreLog): AgentPreHandler {
 	return async (request: FastifyRequest, reply: FastifyReply) => {
 		const authHeader = request.headers.authorization;
 		if (!authHeader) {
@@ -810,20 +816,51 @@ function createAgentBearerAuthGuard(deps: AgentRoutesDeps): AgentPreHandler {
 			return sendError(reply, 401, "AUTH_REQUIRED", "Authorization header must be: Bearer <token>");
 		}
 
-		if (isValidAgentBearer(token, deps)) return;
+		const verdict = checkAgentBearer(token, deps, log);
+		if (verdict === "valid") return;
+		if (verdict === "unavailable") {
+			return sendError(
+				reply,
+				503,
+				"AUTH_UNAVAILABLE",
+				"The hub cannot check credentials right now",
+			);
+		}
 		return sendError(reply, 401, "AUTH_INVALID", "Invalid, expired, or revoked token");
 	};
 }
 
-function isValidAgentBearer(token: string, deps: AgentRoutesDeps): boolean {
+/**
+ * A token the store cannot judge is `unavailable` only if nothing else accepts
+ * it: the primary token still matches without the store, as it always has.
+ */
+function checkAgentBearer(
+	token: string,
+	deps: AgentRoutesDeps,
+	log: TokenStoreLog,
+): TokenValidation["status"] {
+	let storeUnavailable = false;
 	if (deps.db) {
-		const record = validateTokenRecord(deps.db, token);
-		if (record) {
-			if (deps.tokenTtlDays !== undefined) touchToken(deps.db, record.id, deps.tokenTtlDays);
-			return true;
+		const validation = validateTokenRecord(deps.db, token);
+		reportTokenStore(deps.db, validation, log);
+		if (validation.status === "valid") {
+			if (deps.tokenTtlDays !== undefined) {
+				// Best effort, as on the global REST hook: the credential has been
+				// checked, and failing to record its use is not a reason to refuse it.
+				try {
+					touchToken(deps.db, validation.record.id, deps.tokenTtlDays);
+				} catch (err) {
+					log.warn({ err, tokenId: validation.record.id }, "touchToken failed");
+				}
+			}
+			return "valid";
 		}
+		storeUnavailable = validation.status === "unavailable";
 	}
-	return deps.authToken !== undefined && deps.authToken !== null && token === deps.authToken;
+	if (deps.authToken !== undefined && deps.authToken !== null && token === deps.authToken) {
+		return "valid";
+	}
+	return storeUnavailable ? "unavailable" : "invalid";
 }
 
 function readAllowList(list: Iterable<string> | (() => Iterable<string>) | undefined): string[] {

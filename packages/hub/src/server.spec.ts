@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type SecurityFields, SecurityLog } from "./logging/security-log.js";
 import { addCorsOrigins, addStartupCorsOrigins, createServer } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -162,6 +163,51 @@ describe("Hub Server — Bearer auth", () => {
 			headers: { authorization: `Bearer ${TEST_TOKEN}` },
 		});
 		expect(response.statusCode).toBe(404);
+	});
+
+	it("answers 503 rather than 401 while the token store cannot be read, and logs it once", async () => {
+		const security: SecurityFields[] = [];
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			authToken: TEST_TOKEN,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			securityLog: new SecurityLog((_msg, fields) => security.push(fields)),
+		});
+		const errors = vi.spyOn(server.log, "error");
+		const warnings = vi.spyOn(server.log, "warn");
+		const prepare = dbs.meta.prepare.bind(dbs.meta);
+		const outage = vi.spyOn(dbs.meta, "prepare").mockImplementation(((sql: string) => {
+			if (sql.includes("FROM auth_tokens")) {
+				throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+			}
+			return prepare(sql);
+		}) as typeof dbs.meta.prepare);
+		const request = () =>
+			server.inject({
+				method: "GET",
+				url: "/api/unknown",
+				headers: { authorization: `Bearer ${TEST_TOKEN}` },
+			});
+
+		try {
+			const first = await request();
+			const second = await request();
+			for (const response of [first, second]) {
+				expect(response.statusCode).toBe(503);
+				expect(response.json().error).toBe("AUTH_UNAVAILABLE");
+			}
+			expect(errors).toHaveBeenCalledTimes(1);
+			// Nobody failed to authenticate: an outage is not a run of failures.
+			expect(security.filter((fields) => fields.event === "auth.failure")).toEqual([]);
+		} finally {
+			outage.mockRestore();
+		}
+
+		// The same token passes once the store answers, and the outage is closed.
+		expect((await request()).statusCode).toBe(404);
+		expect(warnings).toHaveBeenCalledWith({ refused: 2 }, expect.stringContaining("answering"));
 	});
 
 	it("no authToken configured → all routes accessible without auth", async () => {

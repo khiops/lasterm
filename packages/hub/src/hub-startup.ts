@@ -18,6 +18,7 @@ import { ConfigResolver, loadTlsConfig } from "./config.js";
 import { acquireHubLock } from "./hub-lock.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
+import { SecurityLog } from "./logging/security-log.js";
 import { openBrowser } from "./open-browser.js";
 import { shutdownWhenStdinCloses } from "./parent-stdin.js";
 import {
@@ -125,15 +126,27 @@ export async function startHub(
 	checkConfigDirectoryPermissions(configDir);
 	createOwnerOnlyDirectory(stateDir);
 
+	// Every hub writes `logs/hub.jsonl`, because the security events of SECURITY.md
+	// § 7.1 go there whichever entry point started it. What else the hub logs there
+	// stays with the entry points that ask for it: only `main.ts` passes `logging`,
+	// and `lasterm start` — the command the desktop runs and the single executable
+	// serves — never did, so a shipped hub used to write no file at all and its
+	// security events would have gone nowhere. Turning the whole log on there would
+	// have changed far more than these events; this changes only them.
+	const hubLogsDir = path.join(stateDir, "logs");
+	const hubLogConfig = new ConfigResolver(null as never);
+	hubLogConfig.loadFromFile(configDir);
+	const hubLog = new HubLogger(hubLogsDir, hubLogConfig.logConfig);
+	const securityLog = new SecurityLog((msg, fields) => hubLog.logAlways("info", msg, fields));
+
 	let hubLogger: HubLogger | undefined;
 	let logConfig: ConfigResolver | undefined;
 	let logsDir: string | undefined;
 	if (options.logging) {
-		logsDir = path.join(stateDir, "logs");
+		logsDir = hubLogsDir;
 		mkdirSync(path.join(logsDir, "channels"), { recursive: true });
-		logConfig = new ConfigResolver(null as never);
-		logConfig.loadFromFile(configDir);
-		hubLogger = new HubLogger(logsDir, logConfig.logConfig);
+		logConfig = hubLogConfig;
+		hubLogger = hubLog;
 	}
 
 	let dbManager: HubDatabases | undefined;
@@ -164,6 +177,7 @@ export async function startHub(
 			authToken,
 			ownerToken,
 			dbManager: databases,
+			securityLog,
 			...(hubLogger ? { hubLogger } : {}),
 			...(logsDir ? { logsDir } : {}),
 			onShutdown: () => quit.shutdown(),
@@ -185,6 +199,13 @@ export async function startHub(
 		dependencies.persistRuntime(runtime);
 		runtimePublished = true;
 
+		securityLog.hubStarted({
+			bindAddress: listenHost(address),
+			port: actualPort,
+			// A hub that got this far passed both permission checks above, or ran on
+			// Windows, where each returns before looking (SECURITY.md § 2.2).
+			permissionsCheck: process.platform === "win32" ? "not_checked_on_windows" : "passed",
+		});
 		hubLogger?.log("info", "hub started", { port: actualPort, address, configDir });
 		if (logConfig && logsDir) {
 			runLogGc(logsDir, logConfig.logConfig.maxAgeDays, new Set<string>()).catch((err) => {
@@ -236,5 +257,15 @@ export async function startHub(
 			}
 		}
 		throw error;
+	}
+}
+
+/** The host part of the URL Fastify reports it listens on, without IPv6 brackets. */
+function listenHost(address: string): string {
+	try {
+		return new URL(address).hostname.replace(/^\[(.*)\]$/, "$1");
+	} catch {
+		// The security log withholds what is not an address; startup goes on.
+		return address;
 	}
 }

@@ -34,6 +34,7 @@ import { DEFAULT_AGENT_CONFIG, generateId, validateCustomCommand } from "@laster
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { LoggerRegistry } from "../logging/index.js";
+import { discardingSecurityLog, type SecurityLog } from "../logging/security-log.js";
 import {
 	findKnownHostKeys,
 	judgeAgainstKnownHosts,
@@ -125,6 +126,7 @@ export class SessionManager {
 		hubLogger?: HubLogger,
 		loggerRegistry?: LoggerRegistry,
 		_logsDir?: string,
+		securityLog?: SecurityLog,
 	) {
 		const metaDal = new MetaDAL(dbManager.meta);
 		this.metaDal = metaDal;
@@ -191,6 +193,9 @@ export class SessionManager {
 			configResolver: configResolver ?? null,
 			loggerRegistry: loggerRegistry ?? null,
 			hubLogger: hubLogger ?? null,
+			// createServer always passes the hub's; only a manager built on its own,
+			// as tests do, records nothing.
+			security: securityLog ?? discardingSecurityLog(),
 			primaryToken: null,
 		};
 		this.ctx = ctx;

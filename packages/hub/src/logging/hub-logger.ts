@@ -27,7 +27,20 @@ export class HubLogger {
 
 	log(level: LogConfig["level"], msg: string, extra?: Record<string, unknown>): void {
 		if ((severityForLevel(level) ?? severityForLevel("info") ?? 2) < this.minSeverity) return;
+		this.write(level, msg, extra);
+	}
 
+	/**
+	 * Write whatever the configured level. The security events of SECURITY.md
+	 * § 7.1 come through here: `level` exists to quieten diagnostics, and a
+	 * setting chosen for that must not also silence the record of who
+	 * authenticated. Where the entry goes is still the configured `output`.
+	 */
+	logAlways(level: LogConfig["level"], msg: string, extra?: Record<string, unknown>): void {
+		this.write(level, msg, extra);
+	}
+
+	private write(level: LogConfig["level"], msg: string, extra?: Record<string, unknown>): void {
 		const entry: Record<string, unknown> = {
 			ts: new Date().toISOString(),
 			lvl: level,

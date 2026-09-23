@@ -392,8 +392,9 @@ jobs:
       # bootstrap failing is an exit code here rather than a surprise later.
       #
       # What it does NOT prove: it never calls startHub(), so the hub lock addon,
-      # the server, the databases and the port binding stay untested. Running the
-      # daemon in CI is #147's job. This step's scope is the bootstrap that broke.
+      # the server, the databases and the port binding stay untested here. The
+      # SEA specs step below starts the hub for those (#147). This step's scope is
+      # the bootstrap that broke.
       #
       # Exit status alone is not enough either: a bundle that never reaches its
       # entry point exits 0 having printed nothing, which is the same failure in
@@ -426,6 +427,17 @@ jobs:
           # node, not ConvertFrom-Json: its pipeline unwraps a single-element array,
           # so [{"hub_version":"x"}] would pass here and fail the check above.
           node -e 'const s=JSON.parse(require("node:fs").readFileSync("status.json","utf8")); if(s===null||typeof s!=="object"||Array.isArray(s)||typeof s.hub_version!=="string"||!/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s.hub_version)) throw new Error("status output carries no version-shaped hub_version: "+JSON.stringify(s.hub_version));'
+      # The hub itself, started the way the desktop starts it, in a throwaway
+      # profile: its lock and TLS identity addons, databases, listener, embedded
+      # UI, and a clean stop when its stdin closes (#147). The spec skips when no
+      # executable exists, and LASTERM_SEA_EXPECTED makes that a failure here,
+      # where one was just built. Every hub row runs it, for the same reason as
+      # the smoke: a skipped step is green.
+      - name: Run the built hub (SEA specs)
+        timeout-minutes: 5
+        env:
+          LASTERM_SEA_EXPECTED: "1"
+        run: pnpm exec vitest run --project scripts scripts/sea-hub-e2e.spec.ts
       # The executable only. dist/sea also holds lasterm-hub.cjs, the SEA input,
       # which is not a deliverable. Same tar rules as the agent above.
       - name: Pack hub

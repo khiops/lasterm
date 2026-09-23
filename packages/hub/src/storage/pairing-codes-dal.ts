@@ -4,19 +4,26 @@ import type { PairingCodeRow } from "./meta-types.js";
 
 // ─── PairingCodesDAL ─────────────────────────────────────────────────────────
 
+/**
+ * Pairing codes, known here only by their keyed hash: the code itself is never
+ * stored, and the key never reaches this table (SECURITY.md § 2.3, #521). The
+ * route computes the hash and hands it in.
+ */
 export class PairingCodesDAL {
 	constructor(private db: Database.Database) {}
 
 	// ─── Pairing Codes ───────────────────────────────────────────────────────
 
-	createPairingCode(id: string, code: string, createdAt: string, expiresAt: string): void {
+	createPairingCode(id: string, codeHash: string, createdAt: string, expiresAt: string): void {
 		this.db
-			.prepare("INSERT INTO pairing_codes (id, code, created_at, expires_at) VALUES (?, ?, ?, ?)")
-			.run(id, code, createdAt, expiresAt);
+			.prepare(
+				"INSERT INTO pairing_codes (id, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+			)
+			.run(id, codeHash, createdAt, expiresAt);
 	}
 
-	getPairingCodeByCode(code: string): PairingCodeRow | undefined {
-		return this.db.prepare("SELECT * FROM pairing_codes WHERE code = ?").get(code) as
+	getPairingCodeByHash(codeHash: string): PairingCodeRow | undefined {
+		return this.db.prepare("SELECT * FROM pairing_codes WHERE code_hash = ?").get(codeHash) as
 			| PairingCodeRow
 			| undefined;
 	}
@@ -38,5 +45,15 @@ export class PairingCodesDAL {
 	cleanExpiredPairingCodes(): void {
 		const now = new Date().toISOString();
 		this.db.prepare("DELETE FROM pairing_codes WHERE expires_at < ? AND used = 0").run(now);
+	}
+
+	/**
+	 * Every code not yet redeemed, expired or not. A hub that starts calls this:
+	 * the key that hashed those codes died with the run before, so none of them
+	 * can be redeemed any more, and left in place they would still count against
+	 * the three a hub allows at once.
+	 */
+	deleteUnredeemedPairingCodes(): void {
+		this.db.prepare("DELETE FROM pairing_codes WHERE used = 0").run();
 	}
 }

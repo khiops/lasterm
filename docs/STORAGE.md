@@ -156,16 +156,20 @@ CREATE TABLE cache_index (
 ```sql
 CREATE TABLE pairing_codes (
   id         TEXT PRIMARY KEY,                           -- ULID
-  code       TEXT NOT NULL UNIQUE,                       -- 6-digit string
+  code_hash  TEXT NOT NULL UNIQUE,                       -- HMAC-SHA-256 (hex) of the 8-digit code
   created_at TEXT NOT NULL,                              -- ISO 8601
   expires_at TEXT NOT NULL,                              -- ISO 8601 (60s from creation)
   used       INTEGER NOT NULL DEFAULT 0,                 -- boolean
   used_at    TEXT,                                       -- ISO 8601, set when redeemed
   used_by_ip TEXT                                        -- IP of the client that redeemed
 );
-
-CREATE INDEX idx_pairing_codes_code ON pairing_codes(code);
 ```
+
+The code itself is never stored. `code_hash` is keyed with 32 random bytes the hub draws at each
+start and holds only in memory (SECURITY.md § 2.3), and verification looks a code up by its hash
+under the running hub's key, through the index `UNIQUE` gives the column. A code an earlier run
+issued can never match again, so the hub deletes the unredeemed ones as it starts. Migration 020
+replaced the table that stored the code in plain text, and dropped its rows (#521).
 
 ### 3.8 Schema version
 

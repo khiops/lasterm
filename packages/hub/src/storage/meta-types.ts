@@ -68,7 +68,8 @@ export interface CreateChannelInput {
 
 export interface PairingCodeRow {
 	id: string;
-	code: string;
+	/** HMAC-SHA-256 (hex) of the code, under a key held in memory for one hub run. */
+	code_hash: string;
 	created_at: string;
 	expires_at: string;
 	used: number;

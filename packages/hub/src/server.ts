@@ -374,6 +374,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 						via: "rest",
 						sourceIp: request.ip,
 						reason: "invalid_token",
+						tokenStatus: validation.reason,
 					});
 					return reply.code(401).send({
 						error: "AUTH_INVALID",

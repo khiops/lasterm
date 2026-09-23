@@ -170,7 +170,13 @@ export async function registerWsRoutes(
 						{ clientId, reason: validation.reason },
 						"ws-auth: invalid, expired, or revoked token",
 					);
-					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "invalid_token" });
+					server.security.authFailed({
+						via: "ws",
+						sourceIp,
+						clientId,
+						reason: "invalid_token",
+						tokenStatus: validation.reason,
+					});
 					client.send({ type: "AUTH_FAIL", message: "Invalid token" });
 					socket.close();
 					return;

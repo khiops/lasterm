@@ -349,11 +349,11 @@ export function touchToken(db: Database.Database, id: string, ttlDays: number): 
  */
 export type TokenValidation =
 	| { readonly status: "valid"; readonly record: AuthTokenRecord }
-	| {
-			readonly status: "invalid";
-			readonly reason: "unknown" | "revoked" | "swept" | "expired";
-	  }
+	| { readonly status: "invalid"; readonly reason: InvalidTokenReason }
 	| { readonly status: "unavailable"; readonly error: unknown };
+
+/** Why the store refused a credential: none has that value, or its row no longer allows it. */
+export type InvalidTokenReason = "unknown" | "revoked" | "swept" | "expired";
 
 /**
  * Validate a plaintext token against the DB.

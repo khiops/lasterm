@@ -101,12 +101,17 @@ const defaultDependencies: HubStartupDependencies = {
  *
  * Not a security boundary, and the difference is worth being exact about. The
  * dependency table is injectable, so in-repository code can pass a probe that
- * says "no previous installation" and `createServer` remains exported; a caller
- * inside this process can therefore construct a hub without either check. That
- * costs nothing to concede: such a caller already runs at this process's
- * privilege and has cheaper ways to do anything the checks prevent. What the
- * checks buy is that no *shipped path* reaches a serving hub without them, and
- * that a new one added later inherits both by default rather than by memory.
+ * says "no previous installation" or a lock that takes nothing; a caller inside
+ * this process can therefore construct a hub without either check. That costs
+ * nothing to concede: such a caller already runs at this process's privilege
+ * and has cheaper ways to do anything the checks prevent. What the checks buy
+ * is that no *shipped path* reaches a serving hub without them, and that a new
+ * one added later inherits both by default rather than by memory.
+ *
+ * The server primitives are held to that by lint rather than by memory: outside
+ * the tests this is the only module that may import `server.ts`, and a spec
+ * builds its server through `server.fixture.ts` (biome.json,
+ * `noRestrictedImports`). A module that wants a listening hub is sent here.
  */
 export async function startHub(
 	options: HubStartupOptions,

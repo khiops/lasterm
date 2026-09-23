@@ -6,7 +6,7 @@ import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerConfigRoutes } from "../api/config.js";
 import { ConfigResolver } from "../config.js";
-import { createServer } from "../server.js";
+import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";

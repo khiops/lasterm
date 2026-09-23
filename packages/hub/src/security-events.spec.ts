@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createToken, revokeToken } from "./auth.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { SecurityLog } from "./logging/security-log.js";
-import { createServer } from "./server.js";
+import { createServer } from "./server.fixture.js";
 import { type DatabaseManager, openTestDatabases } from "./storage/db.js";
 import { getTestTls } from "./test-tls.fixture.js";
 

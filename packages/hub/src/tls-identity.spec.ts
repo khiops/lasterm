@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getStateDir, requestHub } from "./cli.js";
 import { HUB_TLS_PIN_MISMATCH_CODE } from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
-import { createServer, startServer } from "./server.js";
+import { createServer, startServer } from "./server.fixture.js";
 import { getTestTlsMaterial } from "./test-tls.fixture.js";
 import { resolveHubTlsIdentity } from "./tls-identity.js";
 

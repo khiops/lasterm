@@ -9,7 +9,7 @@ import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeInfo } from "./cli.js";
-import { createServer, startServer } from "./server.js";
+import { createServer, startServer } from "./server.fixture.js";
 import {
 	createQuitLifecycle,
 	gracefulShutdown,

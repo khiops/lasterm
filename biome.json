@@ -9,7 +9,24 @@
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"preset": "recommended"
+			"preset": "recommended",
+			"style": {
+				"noRestrictedImports": {
+					"level": "error",
+					"options": {
+						"patterns": [
+							{
+								"group": ["**/server.js", "**/server"],
+								"message": "A hub serves only through startHub, which takes the hub lock before it builds anything; only hub-startup.ts uses server.ts. A spec builds a hub through server.fixture.ts."
+							},
+							{
+								"group": ["**/*.fixture.js", "**/*.fixture"],
+								"message": "Fixtures are test-only: the production build leaves them out, and server.fixture.ts builds a hub without its lock."
+							}
+						]
+					}
+				}
+			}
 		}
 	},
 	"overrides": [
@@ -53,6 +70,57 @@
 				"rules": {
 					"style": {
 						"noRestrictedGlobals": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["**/*.spec.ts", "**/*.fixture.ts", "**/*.setup.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/server.js", "**/server"],
+										"importNamePattern": "(createServer|startServer)",
+										"message": "A spec builds a hub through server.fixture.ts, the one door that skips the hub lock."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["packages/hub/src/hub-startup.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/*.fixture.js", "**/*.fixture"],
+										"message": "Fixtures are test-only: the production build leaves them out."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["packages/hub/src/server.fixture.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": "off"
 					}
 				}
 			}

@@ -831,6 +831,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+    use std::process::Command;
 
     #[derive(Clone, Copy)]
     struct AllowedCall {
@@ -838,6 +839,92 @@ mod tests {
         call: &'static str,
         expected_occurrences: usize,
         why: &'static str,
+    }
+
+    /// The files the allowlist guards, by name and path in the checkout.
+    const GUARDED_SOURCES: [(&str, &str); 4] = [
+        ("desktop", "packages/clients/desktop/src-tauri/src/lib.rs"),
+        (
+            "desktop-hub-log",
+            "packages/clients/desktop/src-tauri/src/hub_log.rs",
+        ),
+        ("identity", "crates/lasterm-tls-identity/src/lib.rs"),
+        ("protected-fs", "crates/lasterm-protected-fs/src/lib.rs"),
+    ];
+
+    const ALLOWLIST_TEST: &str =
+        "tests::protected_path_plain_pathname_spellings_match_the_reviewed_allowlist";
+
+    /// The checkout whose sources the allowlist reads: the one cargo names when
+    /// it runs the test, never the one this binary was compiled in (#526).
+    /// Checkouts that share a target directory share this binary too, and cargo
+    /// runs one another checkout compiled when this crate's own sources have not
+    /// changed since; a path fixed at compile time then reads that checkout.
+    fn checkout_under_test() -> PathBuf {
+        let manifest = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).expect(
+            "CARGO_MANIFEST_DIR names the checkout under test: run this through cargo test, which sets it",
+        );
+        manifest
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("protected-fs lives directly under the workspace crates directory")
+            .to_path_buf()
+    }
+
+    /// Runs the allowlist test again, in a child process told that a copy of
+    /// the guarded sources is the checkout under test. The copy's desktop code
+    /// makes one pathname call the allowlist does not know, so the test fails
+    /// there, and names the copy. A path fixed at compile time would read this
+    /// checkout instead, and pass.
+    #[test]
+    fn protected_path_allowlist_reads_the_checkout_named_at_run_time() {
+        let checkout = checkout_under_test();
+        let copy =
+            std::env::temp_dir().join(format!("lasterm-protected-fs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&copy);
+        for (_, source) in GUARDED_SOURCES {
+            let to = copy.join(source);
+            fs::create_dir_all(to.parent().expect("a guarded source sits in a directory"))
+                .expect("create the copy's directories");
+            fs::copy(checkout.join(source), &to).expect("copy a guarded source");
+        }
+        let desktop = copy.join(GUARDED_SOURCES[0].1);
+        let text = fs::read_to_string(&desktop).expect("read the copied desktop source");
+        let tests = text
+            .rfind("\n#[cfg(test)]")
+            .expect("guarded source has a trailing test module");
+        let planted = format!(
+            "{}\nfn planted() {{ let _ = std::fs::read(\"planted\"); }}\n{}",
+            &text[..tests],
+            &text[tests..],
+        );
+        fs::write(&desktop, planted).expect("plant an unallowlisted call in the copy");
+
+        let run = Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", ALLOWLIST_TEST])
+            .env(
+                "CARGO_MANIFEST_DIR",
+                copy.join("crates/lasterm-protected-fs"),
+            )
+            .output()
+            .expect("run the allowlist test again");
+        let _ = fs::remove_dir_all(&copy);
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(
+            !run.status.success(),
+            "the allowlist test passed against a checkout holding an unallowlisted call:\n{report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "unallowlisted protected-path filesystem call in {}",
+                desktop.display()
+            )),
+            "the allowlist test did not read the checkout it was given:\n{report}"
+        );
     }
 
     #[test]
@@ -1081,29 +1168,8 @@ mod tests {
                 why: "Windows requested-directory creation has no public handle-relative primitive; the boundary comment states this limit",
             },
         ];
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("protected-fs lives directly under the workspace crates directory");
-        let sources = [
-            (
-                "desktop",
-                root.join("packages/clients/desktop/src-tauri/src/lib.rs"),
-            ),
-            (
-                "desktop-hub-log",
-                root.join("packages/clients/desktop/src-tauri/src/hub_log.rs"),
-            ),
-            (
-                "identity",
-                root.join("crates/lasterm-tls-identity/src/lib.rs"),
-            ),
-            (
-                "protected-fs",
-                root.join("crates/lasterm-protected-fs/src/lib.rs"),
-            ),
-        ];
+        let root = checkout_under_test();
+        let sources = GUARDED_SOURCES.map(|(name, source)| (name, root.join(source)));
         let patterns = [
             "fs::read",
             "fs::read_to_string",

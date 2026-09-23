@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import { isValidUlid, type SshAuthMethod } from "@lasterm/shared";
-import { PRIMARY_TOKEN_ID } from "../auth.js";
+import { type InvalidTokenReason, PRIMARY_TOKEN_ID } from "../auth.js";
 
 // ─── What an event may say ────────────────────────────────────────────────────
 
@@ -23,6 +23,12 @@ const PAIR_AUTH_FAILURES = [
 	"code_used",
 	"code_expired",
 ] as const;
+const TOKEN_STATUSES = [
+	"unknown",
+	"revoked",
+	"swept",
+	"expired",
+] as const satisfies readonly InvalidTokenReason[];
 const SSH_AUTH_METHODS = ["agent", "key", "password"] as const satisfies readonly SshAuthMethod[];
 const SSH_DISCONNECT_REASONS = ["closed_by_hub", "connection_lost"] as const;
 const PERMISSIONS_CHECKS = ["passed", "not_checked_on_windows"] as const;
@@ -35,12 +41,18 @@ export type AuthSuccess =
 	| { via: "ws"; sourceIp: string; tokenId: string; clientId: string };
 
 export type AuthFailure =
-	| { via: "rest"; sourceIp: string; reason: (typeof REST_AUTH_FAILURES)[number] }
+	| {
+			via: "rest";
+			sourceIp: string;
+			reason: (typeof REST_AUTH_FAILURES)[number];
+			tokenStatus?: InvalidTokenReason;
+	  }
 	| {
 			via: "ws";
 			sourceIp: string;
 			clientId: string;
 			reason: (typeof WS_AUTH_FAILURES)[number];
+			tokenStatus?: InvalidTokenReason;
 	  }
 	| { via: "pair"; sourceIp: string; reason: (typeof PAIR_AUTH_FAILURES)[number] };
 
@@ -110,6 +122,12 @@ export class SecurityLog {
 		}
 	}
 
+	/**
+	 * `tokenStatus` says which way an `invalid_token` was invalid. A revoked or
+	 * swept token still being offered is a device that kept a credential it was
+	 * meant to lose; an unknown one is a guess or a typo. Both are refused the
+	 * same way, and only the record can tell them apart.
+	 */
 	authFailed(event: AuthFailure): void {
 		switch (event.via) {
 			case "rest":
@@ -117,6 +135,7 @@ export class SecurityLog {
 					via: "rest",
 					sourceIp: ip(event.sourceIp),
 					reason: oneOf(event.reason, REST_AUTH_FAILURES),
+					...tokenStatus(event.reason, event.tokenStatus),
 				});
 				return;
 			case "ws":
@@ -125,6 +144,7 @@ export class SecurityLog {
 					sourceIp: ip(event.sourceIp),
 					clientId: ulid(event.clientId),
 					reason: oneOf(event.reason, WS_AUTH_FAILURES),
+					...tokenStatus(event.reason, event.tokenStatus),
 				});
 				return;
 			case "pair":
@@ -220,6 +240,12 @@ function isoTime(value: string): string {
 
 function port(value: number): number | string {
 	return Number.isInteger(value) && value >= 0 && value <= 65_535 ? value : WITHHELD;
+}
+
+/** Only an `invalid_token` has a status to give; on any other reason it is not written. */
+function tokenStatus(reason: string, status: InvalidTokenReason | undefined): SecurityFields {
+	if (reason !== "invalid_token" || status === undefined) return {};
+	return { tokenStatus: oneOf(status, TOKEN_STATUSES) };
 }
 
 function oneOf<T extends string>(value: T, allowed: readonly T[]): string {

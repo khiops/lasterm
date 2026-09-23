@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { decodeMessage, encodeMessage, isValidUlid, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createToken, revokeToken } from "./auth.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { createServer } from "./server.js";
@@ -136,6 +137,25 @@ describe("REST authentication is recorded", () => {
 		expect(log.text()).not.toContain(PRIMARY_TOKEN);
 	});
 
+	it("says which way a refused token was invalid", async () => {
+		const revoked = createToken(dbs.meta, { label: "browser", expiresAt: null });
+		revokeToken(dbs.meta, revoked.id);
+		for (const token of [WRONG_TOKEN, revoked.token]) {
+			const res = await server.inject({
+				method: "GET",
+				url: "/api/hosts",
+				headers: { authorization: `Bearer ${token}` },
+			});
+			expect(res.statusCode).toBe(401);
+		}
+
+		expect(log.events("auth.failure")).toEqual([
+			expect.objectContaining({ via: "rest", reason: "invalid_token", tokenStatus: "unknown" }),
+			expect.objectContaining({ via: "rest", reason: "invalid_token", tokenStatus: "revoked" }),
+		]);
+		expect(log.text()).not.toContain(revoked.token);
+	});
+
 	it("records the first success of a credential from an address, not every request", async () => {
 		for (let i = 0; i < 3; i++) {
 			const res = await server.inject({
@@ -169,6 +189,7 @@ describe("WebSocket authentication is recorded", () => {
 			via: "ws",
 			sourceIp: "127.0.0.1",
 			reason: "invalid_token",
+			tokenStatus: "unknown",
 		});
 		expect(isValidUlid(failure?.clientId)).toBe(true);
 		expect(log.text()).not.toContain(WRONG_TOKEN);

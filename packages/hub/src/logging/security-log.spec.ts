@@ -86,6 +86,61 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 		expect(records.every((record) => record.msg === "security: auth failure")).toBe(true);
 	});
 
+	it("auth failure: which way a refused token was invalid, and only for an invalid token", () => {
+		const { log, records } = collect();
+		log.authFailed({
+			via: "rest",
+			sourceIp: "127.0.0.1",
+			reason: "invalid_token",
+			tokenStatus: "revoked",
+		});
+		log.authFailed({
+			via: "ws",
+			sourceIp: "127.0.0.1",
+			clientId: CLIENT,
+			reason: "invalid_token",
+			tokenStatus: "swept",
+		});
+		// A status beside another reason says nothing that reason has not.
+		log.authFailed({
+			via: "rest",
+			sourceIp: "127.0.0.1",
+			reason: "missing_header",
+			tokenStatus: "expired",
+		});
+		log.authFailed({
+			via: "rest",
+			sourceIp: "127.0.0.1",
+			reason: "invalid_token",
+			tokenStatus: TOKEN as "unknown",
+		});
+		expect(records.map((record) => record.fields)).toEqual([
+			{
+				event: "auth.failure",
+				via: "rest",
+				sourceIp: "127.0.0.1",
+				reason: "invalid_token",
+				tokenStatus: "revoked",
+			},
+			{
+				event: "auth.failure",
+				via: "ws",
+				sourceIp: "127.0.0.1",
+				clientId: CLIENT,
+				reason: "invalid_token",
+				tokenStatus: "swept",
+			},
+			{ event: "auth.failure", via: "rest", sourceIp: "127.0.0.1", reason: "missing_header" },
+			{
+				event: "auth.failure",
+				via: "rest",
+				sourceIp: "127.0.0.1",
+				reason: "invalid_token",
+				tokenStatus: WITHHELD,
+			},
+		]);
+	});
+
 	it("pairing code generated: its record and expiry, never the code", () => {
 		const { log, records } = collect();
 		log.pairingCodeGenerated({

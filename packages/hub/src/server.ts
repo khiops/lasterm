@@ -27,6 +27,7 @@ import {
 	hashToken,
 	listTokens,
 	PRIMARY_TOKEN_ID,
+	reportTokenStore,
 	touchToken,
 	upsertPrimaryToken,
 	validateTokenRecord,
@@ -350,19 +351,37 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 
 			if (db) {
 				// DB-backed validation: checks expiry and revocation status
-				const record = validateTokenRecord(db, token);
-				if (!record) {
-					server.log.warn({ url: pathname }, "auth: invalid, expired, or revoked token");
+				const validation = validateTokenRecord(db, token);
+				reportTokenStore(db, validation, server.log);
+				if (validation.status === "unavailable") {
+					// Still a refusal, but not a verdict on the credential: a 401 here
+					// told a client holding a good token to discard it. The outage is
+					// logged once by reportTokenStore, not on every request it refuses,
+					// and not in the security log: nobody failed to authenticate, and a
+					// failure per refused request would read as an attack from every
+					// client at once.
+					return reply.code(503).send({
+						error: "AUTH_UNAVAILABLE",
+						message: "The hub cannot check credentials right now",
+					});
+				}
+				if (validation.status === "invalid") {
+					server.log.warn(
+						{ url: pathname, reason: validation.reason },
+						"auth: invalid, expired, or revoked token",
+					);
 					server.security.authFailed({
 						via: "rest",
 						sourceIp: request.ip,
 						reason: "invalid_token",
+						tokenStatus: validation.reason,
 					});
 					return reply.code(401).send({
 						error: "AUTH_INVALID",
 						message: "Invalid, expired, or revoked token",
 					});
 				}
+				const { record } = validation;
 				// Sliding-window expiry refresh + last_used_at update (best-effort, non-blocking)
 				try {
 					touchToken(db, record.id, ttlDays);

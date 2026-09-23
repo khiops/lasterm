@@ -116,13 +116,20 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 	const format = quotePosix(launch.logFormat ?? "jsonl");
 
 	const idle = Math.max(0, Math.trunc(launch.idleTimeoutSeconds ?? IDLE_TIMEOUT_SECONDS));
-	const run =
-		`${agent} --daemon --socket ${socket} --log-level ${level} --format ${format}` +
-		` --idle-timeout ${idle}`;
+	// The binary on the remote may be older than this hub: a build of main
+	// carries the version of the last release and deploys that release's agent,
+	// which rejects a flag added since and exits before it ever listens. Asking
+	// the binary first keeps the one option it can live without from costing
+	// the whole daemon.
+	const probeIdle =
+		`if ${agent} --help 2> /dev/null | grep -q -- '--idle-timeout'; ` +
+		`then idle='--idle-timeout ${idle}'; else idle=''; fi`;
+	const run = `${agent} --daemon --socket ${socket} --log-level ${level} --format ${format} $idle`;
 	const redirect = `< /dev/null >> ${log} 2>&1`;
 	return [
 		`mkdir -p ${dir}`,
 		`chmod 700 ${dir}`,
+		probeIdle,
 		`if command -v setsid > /dev/null 2>&1; then setsid ${run} ${redirect} & else nohup ${run} ${redirect} & fi`,
 	].join(" && ");
 }
@@ -226,7 +233,8 @@ export async function attachRemoteDaemon(
 	);
 	if (launch.exitCode !== 0) {
 		throw new Error(
-			`The remote agent daemon would not start (exit ${launch.exitCode}). Its log is at ${paths.log}.`,
+			`The remote agent daemon would not start (exit ${launch.exitCode}). Its log is at ${paths.log}.` +
+				(await logTail(exec, options.conn, paths.log)),
 		);
 	}
 
@@ -242,8 +250,29 @@ export async function attachRemoteDaemon(
 	}
 	throw new Error(
 		`The remote agent daemon did not answer on ${paths.socket} within ${READY_DEADLINE_MS}ms. ` +
-			`Its log is at ${paths.log}. Last error: ${String(lastError)}`,
+			`Its log is at ${paths.log}. Last error: ${String(lastError)}` +
+			(await logTail(exec, options.conn, paths.log)),
 	);
+}
+
+/**
+ * The end of the daemon's log, for a message that would otherwise only say
+ * where to look. A daemon that dies at launch says why there — an option it
+ * does not know, a socket it cannot bind — and that is what a person needs,
+ * not the path of a file on another machine.
+ */
+async function logTail(
+	exec: (client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>,
+	conn: Client,
+	log: string,
+): Promise<string> {
+	try {
+		const tail = await exec(conn, `tail -n 5 ${quotePosix(log)} 2> /dev/null`);
+		const text = tail.stdout.trim();
+		return text === "" ? "" : ` It says: ${text.replace(/\s*\n\s*/g, " / ")}`;
+	} catch {
+		return "";
+	}
 }
 
 /** The real exec, loaded lazily so this module stays testable without ssh2. */

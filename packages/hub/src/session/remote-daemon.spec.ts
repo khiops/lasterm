@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
@@ -215,5 +219,114 @@ describe("attachRemoteDaemon", () => {
 				sleep: async () => {},
 			}),
 		).rejects.toThrow(/did not answer/);
+	});
+});
+
+// ─── A binary older than the hub (the Pi, on 2026-09-23) ─────────────────────
+//
+// A build of main carries the last release's version and deploys that release's
+// agent. The daemon launch passed `--idle-timeout`, added since: the 0.11.0
+// agent on the Pi answered "unexpected argument", exited, and the hub waited
+// for a socket that never came, then said only "Agent HELLO timeout".
+
+describe("remoteDaemonLaunchCommand — an agent older than the hub", () => {
+	const paths = remoteDaemonPaths("/home/pi/.local/state/lasterm");
+
+	it("asks the binary whether it knows --idle-timeout before passing it", () => {
+		const cmd = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
+		expect(cmd).toContain("/usr/bin/lasterm-agent --help");
+		expect(cmd).toContain("grep -q -- '--idle-timeout'");
+		expect(cmd).toContain("--format jsonl $idle");
+	});
+});
+
+// The shell logic itself, run: a fake agent that records how it was started.
+describe.skipIf(process.platform === "win32")("remoteDaemonLaunchCommand in a shell", () => {
+	function launchWith(help: string): string[] {
+		const root = mkdtempSync(path.join(os.tmpdir(), "daemon-launch-"));
+		try {
+			const agent = path.join(root, "lasterm-agent");
+			const argv = path.join(root, "argv");
+			writeFileSync(
+				agent,
+				`#!/bin/sh
+if [ "$1" = "--help" ]; then printf '%s\n' '${help}'; exit 0; fi
+printf '%s\n' "$@" > '${argv}'
+`,
+			);
+			chmodSync(agent, 0o755);
+			const cmd = remoteDaemonLaunchCommand({ agentPath: agent, paths: remoteDaemonPaths(root) });
+			execFileSync("sh", ["-c", `${cmd}; wait`]);
+			for (let i = 0; i < 50; i++) {
+				try {
+					return readFileSync(argv, "utf8").trim().split("\n");
+				} catch {
+					execFileSync("sleep", ["0.1"]);
+				}
+			}
+			throw new Error("the fake agent was never started");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+
+	it("starts an agent that does not know the option without it", () => {
+		const argv = launchWith("Usage: lasterm-agent [OPTIONS]  --daemon  --socket <SOCKET>");
+		expect(argv).toContain("--daemon");
+		expect(argv).not.toContain("--idle-timeout");
+	});
+
+	it("passes it to an agent that does", () => {
+		const argv = launchWith("      --idle-timeout <SECONDS>");
+		expect(argv).toContain("--idle-timeout");
+		expect(argv).toContain(String(IDLE_TIMEOUT_SECONDS));
+	});
+});
+
+describe("attachRemoteDaemon — saying why", () => {
+	const dir = "/home/pi/.local/state/lasterm";
+
+	it("quotes the end of the daemon's log when it never answers", async () => {
+		let clock = 0;
+		await expect(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: async (_c, command) =>
+					command.startsWith("tail ")
+						? { stdout: "error: unexpected argument '--idle-timeout' found\n", exitCode: 0 }
+						: stateDirReply(dir),
+				open: async () => {
+					throw new Error("ECONNREFUSED");
+				},
+				now: () => {
+					clock += 1_000;
+					return clock;
+				},
+				sleep: async () => {},
+			}),
+		).rejects.toThrow(/It says: error: unexpected argument '--idle-timeout' found/);
+	});
+
+	it("still fails with the log path when the log cannot be read", async () => {
+		let clock = 0;
+		await expect(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: async (_c, command) => {
+					if (command.startsWith("tail ")) throw new Error("channel closed");
+					return stateDirReply(dir);
+				},
+				open: async () => {
+					throw new Error("ECONNREFUSED");
+				},
+				now: () => {
+					clock += 1_000;
+					return clock;
+				},
+				sleep: async () => {},
+			}),
+		).rejects.toThrow(`${dir}/agent-daemon.log`);
 	});
 });

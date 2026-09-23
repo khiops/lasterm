@@ -73,7 +73,6 @@ export interface WaitForDaemonReadyDeps {
 	// Invoked on the timeout path so a slow child cannot survive a reported
 	// failure: exit 1 must mean "no daemon is running".
 	killChild: () => void;
-	now: () => number;
 	sleep: (ms: number) => Promise<void>;
 	pollMs?: number;
 	deadlineMs?: number;
@@ -134,7 +133,12 @@ export function readDaemonLogTail(logPath: string, maxLines = DEFAULT_TAIL_LINES
 
 export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<DaemonReadyResult> {
 	const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
-	const deadlineAt = deps.now() + (deps.deadlineMs ?? DEFAULT_DEADLINE_MS);
+	// What is bounded is elapsed time, which only a monotonic clock measures. A
+	// deadline read from the wall clock moved with it: set forward during a
+	// start, it passed at once and killed a daemon that was about to answer; set
+	// back, it let the wait run on by as much. Nothing is injected here, so no
+	// caller can hand it the wall clock again (#513).
+	const deadlineAt = performance.now() + (deps.deadlineMs ?? DEFAULT_DEADLINE_MS);
 
 	while (true) {
 		const childExit = deps.getChildExit();
@@ -161,7 +165,7 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 			}
 		}
 
-		if (deps.now() >= deadlineAt) {
+		if (performance.now() >= deadlineAt) {
 			deps.killChild();
 			return {
 				ok: false,
@@ -173,7 +177,7 @@ export async function waitForDaemonReady(deps: WaitForDaemonReadyDeps): Promise<
 			};
 		}
 
-		await deps.sleep(Math.min(pollMs, Math.max(0, deadlineAt - deps.now())));
+		await deps.sleep(Math.min(pollMs, Math.max(0, deadlineAt - performance.now())));
 	}
 }
 

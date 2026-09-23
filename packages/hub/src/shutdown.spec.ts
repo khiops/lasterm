@@ -7,7 +7,7 @@ import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/sha
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeInfo } from "./cli.js";
+import { cmdQuit, type RuntimeInfo } from "./cli.js";
 import { createServer, startServer } from "./server.fixture.js";
 import {
 	createQuitLifecycle,
@@ -394,6 +394,134 @@ describe("POST /api/shutdown", () => {
 		expect(calls).toEqual(["stop-agent"]);
 		await tick();
 		expect(calls).toEqual(["stop-agent", "teardown"]);
+	});
+
+	// Mutation: answer a hub with no quit to run with 503 again, as the stopper's
+	// failure is answered, and the CLI and the desktop both spend their whole
+	// bound watching for a teardown that nothing began.
+	it("POST /api/quit answers 501 on a hub with no quit to run, and schedules no teardown", async () => {
+		const calls: string[] = [];
+		// The real lifecycle, on a server built without databases: there are no
+		// sessions, so there is no agent to stop.
+		const quit = createQuitLifecycle(() => {
+			throw new Error("a hub with no quit to run reached its teardown");
+		});
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			ownerToken: OWNER_TOKEN,
+			onQuit: (sessionManager) => {
+				calls.push("quit");
+				return quit.onQuit(sessionManager);
+			},
+			onQuitDelivered: () => {
+				calls.push("teardown");
+				return quit.onQuitDelivered();
+			},
+		});
+
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/quit",
+			headers: { "x-lasterm-owner": OWNER_TOKEN },
+		});
+
+		expect(response.statusCode).toBe(501);
+		expect(response.json()).toEqual({
+			ok: false,
+			error: "QUIT_UNAVAILABLE",
+			message: "Quit is unavailable",
+		});
+		await tick();
+		expect(calls).toEqual(["quit"]);
+	});
+
+	/** `cmdQuit` against this server, answered by the real /api/quit route. */
+	function quitFromTheCli(hub: FastifyInstance) {
+		const observed: string[] = [];
+		const failure = cmdQuit({
+			loadRuntime: () => ({
+				kind: "present",
+				runtime: runtimeRecord({ instanceId: "target", ownerToken: OWNER_TOKEN }),
+			}),
+			isPidAlive: () => true,
+			fetch: (async (input: string | URL, init?: RequestInit) => {
+				const url = new URL(String(input));
+				const answer = await hub.inject({
+					method: "POST",
+					url: `${url.pathname}${url.search}`,
+					headers: init?.headers as Record<string, string>,
+				});
+				return new Response(answer.body, {
+					status: answer.statusCode,
+					headers: { "content-type": String(answer.headers["content-type"] ?? "") },
+				});
+			}) as typeof fetch,
+			waitForHubQuit: async () => {
+				observed.push("waited");
+			},
+			writeError: (message) => observed.push(`error: ${message}`),
+		}).then(
+			() => new Error("quit reported success"),
+			(error: unknown) => error,
+		);
+		return { observed, failure };
+	}
+
+	// Mutation: wait after every 5xx again, as quit did after #519, and each of
+	// these costs fifteen seconds of watching for a teardown the hub never began.
+	it("the CLI does not wait for a teardown after a 501 from a hub with no quit to run", async () => {
+		const teardowns: string[] = [];
+		const quit = createQuitLifecycle(() => {
+			throw new Error("a hub with no quit to run reached its teardown");
+		});
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			ownerToken: OWNER_TOKEN,
+			onQuit: quit.onQuit,
+			onQuitDelivered: () => {
+				teardowns.push("teardown");
+			},
+		});
+
+		const { observed, failure } = quitFromTheCli(server);
+
+		expect(await failure).toMatchObject({
+			message:
+				"Quit failed with HTTP 501 (Quit is unavailable); the hub did not begin to stop, so there is no teardown to wait for",
+		});
+		expect(observed).toEqual([]);
+		expect(teardowns).toEqual([]);
+	});
+
+	it("the CLI does not wait for a teardown after a 500 from a quit handler that threw", async () => {
+		dbs = openTestDatabases();
+		const teardowns: string[] = [];
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			ownerToken: OWNER_TOKEN,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			// What the lifecycle does with a quit that arrives before startup completed.
+			onQuit: async () => {
+				throw new Error("hub shutdown requested before startup completed");
+			},
+			onQuitDelivered: () => {
+				teardowns.push("teardown");
+			},
+		});
+
+		const { observed, failure } = quitFromTheCli(server);
+
+		expect(await failure).toMatchObject({
+			message:
+				"Quit failed with HTTP 500 (hub shutdown requested before startup completed); the hub did not begin to stop, so there is no teardown to wait for",
+		});
+		await tick();
+		expect(observed).toEqual([]);
+		expect(teardowns).toEqual([]);
 	});
 
 	it("refuses quit around another connected client without latching teardown", async () => {

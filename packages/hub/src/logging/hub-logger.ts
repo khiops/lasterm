@@ -3,7 +3,12 @@ import * as path from "node:path";
 import type { LogConfig } from "@lasterm/shared";
 import { severityForLevel } from "./levels.js";
 
-const ROTATION_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+/**
+ * The size a hub log moves aside at. `hub.jsonl` rotates at it, the daemon's
+ * `hub-daemon.log` too, and the desktop's `hub.log` at the same 10 MB
+ * (`HUB_LOG_MAX_BYTES` in its `hub_log.rs`).
+ */
+export const LOG_ROTATION_MAX_BYTES = 10 * 1024 * 1024;
 
 // ─── HubLogger ────────────────────────────────────────────────────────────────
 
@@ -89,7 +94,7 @@ export class HubLogger {
 		if (!fs.existsSync(this.filePath)) return;
 		try {
 			const { size } = fs.statSync(this.filePath);
-			if (size >= ROTATION_MAX_BYTES) {
+			if (size >= LOG_ROTATION_MAX_BYTES) {
 				fs.renameSync(this.filePath, this.oldFilePath);
 			}
 		} catch {

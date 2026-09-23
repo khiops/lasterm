@@ -613,9 +613,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			sendLoopbackRequired(reply);
 			return;
 		}
-		if (!options?.onQuit) {
-			return reply.code(503).send({ ok: false, message: "Quit is unavailable" });
-		}
+		if (!options?.onQuit) return sendQuitUnavailable(reply);
 
 		const url = new URL(request.url, "http://localhost");
 		const force = url.searchParams.get("force") === "1";
@@ -636,6 +634,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		}
 
 		const result = await options.onQuit(sessionManager);
+		// Nothing was begun, so there is no teardown to hand over.
+		if (result.unavailable) return sendQuitUnavailable(reply);
 		reply.code(result.ok ? 200 : 503).send({
 			ok: result.ok,
 			message: result.ok ? "Local agent stopped; hub is shutting down" : result.message,
@@ -681,6 +681,18 @@ function sendOwnerTokenRequired(reply: FastifyReply): FastifyReply {
 		error: "OWNER_TOKEN_REQUIRED",
 		message: "Valid X-Lasterm-Owner header required",
 	});
+}
+
+/**
+ * A hub with no quit to run: no quit lifecycle, or no sessions and so no agent
+ * to stop. It answers 501, not 503. A 503 is the stopper's own failure, after
+ * which the hub tears down, and the CLI and the desktop both wait for that
+ * teardown. Nothing here begins one (#523).
+ */
+function sendQuitUnavailable(reply: FastifyReply): FastifyReply {
+	return reply
+		.code(501)
+		.send({ ok: false, error: "QUIT_UNAVAILABLE", message: "Quit is unavailable" });
 }
 
 function sendLoopbackRequired(reply: FastifyReply): FastifyReply {

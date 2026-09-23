@@ -345,6 +345,69 @@ describe("a primary token an earlier version revoked is reinstated, and recorded
 	});
 });
 
+// ─── Token revocation ─────────────────────────────────────────────────────────
+
+describe("a token revocation is recorded, refused or not", () => {
+	function revoke(id: string) {
+		return server.inject({
+			method: "DELETE",
+			url: `/api/auth/tokens/${id}`,
+			headers: { authorization: `Bearer ${PRIMARY_TOKEN}` },
+		});
+	}
+
+	it("records the credential asked for, from where, and what became of it, never a token", async () => {
+		const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });
+
+		expect((await revoke(paired.id)).statusCode).toBe(200);
+		expect((await revoke(paired.id)).statusCode).toBe(404);
+		expect((await revoke("primary")).statusCode).toBe(409);
+		// A token's value where its id belongs: not found, and not written down.
+		expect((await revoke(paired.token)).statusCode).toBe(404);
+
+		expect(log.events("token.revoke")).toEqual([
+			expect.objectContaining({
+				lvl: "info",
+				msg: "security: token revocation",
+				tokenId: paired.id,
+				sourceIp: "127.0.0.1",
+				outcome: "revoked",
+			}),
+			expect.objectContaining({ tokenId: paired.id, sourceIp: "127.0.0.1", outcome: "not_found" }),
+			expect.objectContaining({
+				tokenId: "primary",
+				sourceIp: "127.0.0.1",
+				outcome: "not_revocable",
+			}),
+			expect.objectContaining({
+				tokenId: "<withheld>",
+				sourceIp: "127.0.0.1",
+				outcome: "not_found",
+			}),
+		]);
+		expect(log.text()).not.toContain(paired.token);
+		expect(log.text()).not.toContain(PRIMARY_TOKEN);
+	});
+
+	it("records the revocation before the sockets it closes", async () => {
+		const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });
+		const ws = await openSocket(server);
+		const reply = nextMessage(ws);
+		ws.send(encodeMessage({ type: "AUTH", token: paired.token }));
+		expect((await reply).type).toBe("AUTH_OK");
+		const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
+
+		expect((await revoke(paired.id)).statusCode).toBe(200);
+		await closed;
+
+		const sequence = log
+			.events()
+			.filter((entry) => entry.event === "token.revoke" || entry.event === "auth.failure")
+			.map((entry) => `${entry.event} ${entry.outcome ?? entry.reason}`);
+		expect(sequence).toEqual(["token.revoke revoked", "auth.failure token_no_longer_valid"]);
+	});
+});
+
 // ─── Keystrokes ───────────────────────────────────────────────────────────────
 
 describe("keystrokes leave no trace in the logs", () => {

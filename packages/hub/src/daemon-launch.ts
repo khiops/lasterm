@@ -6,15 +6,25 @@ export interface DaemonSpawnPlan {
 	env: Record<string, string>;
 }
 
+/**
+ * Names the daemon's log for the child the launch spawns. The child writes to
+ * the descriptor the launch opened, and once it holds the hub lock it also
+ * keeps the file within its size limit (`logging/daemon-log.ts`, #525).
+ */
+export const DAEMON_LOG_ENV = "LASTERM_DAEMON_LOG";
+
 export interface BuildDaemonSpawnPlanOptions {
 	sea: boolean;
 	port?: number;
 	open?: boolean;
 	moduleUrl: string;
+	/** The file the launch opened for the child's output. */
+	logPath: string;
 }
 
 export function buildDaemonSpawnPlan(options: BuildDaemonSpawnPlanOptions): DaemonSpawnPlan {
 	const env: Record<string, string> = {
+		[DAEMON_LOG_ENV]: options.logPath,
 		...(options.port !== undefined ? { LASTERM_PORT: String(options.port) } : {}),
 		...(options.open ? { LASTERM_OPEN: "1" } : {}),
 	};
@@ -86,8 +96,8 @@ const DEFAULT_DEADLINE_MS = 5000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 2000;
 const DEFAULT_TAIL_LINES = 20;
 const DEFAULT_TAIL_CHARS = 8192;
-// The daemon log is append-only and never rotated; cap how much of it the
-// failure path reads so a long-lived log cannot exhaust memory.
+// The daemon log is appended to and only moved aside at 10 MB; cap how much of
+// it the failure path reads, which needs its last lines and nothing more.
 const MAX_TAIL_READ_BYTES = 64 * 1024;
 
 export function tailText(
@@ -105,7 +115,8 @@ export function tailText(
 
 // Keep daemon output owner-only without changing an incumbent's log before a
 // child has established authority. A losing launch may share this descriptor,
-// but it cannot erase the running hub's evidence.
+// but it cannot erase the running hub's evidence. Appending also lets every
+// descriptor on the file follow it when the hub empties it at its size limit.
 export function openDaemonLog(logPath: string): number {
 	const fd = openSync(logPath, "a", 0o600);
 	// The creation mode only applies to new files — clamp pre-existing ones too.

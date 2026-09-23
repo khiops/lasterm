@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	buildDaemonSpawnPlan,
 	type ChildExitState,
+	DAEMON_LOG_ENV,
 	type DaemonRuntimeInfo,
 	openDaemonLog,
 	readDaemonLogTail,
@@ -14,17 +15,22 @@ import {
 } from "./daemon-launch.js";
 
 describe("buildDaemonSpawnPlan", () => {
-	it("uses the SEA CLI entry without re-passing --daemon", () => {
+	const logPath = "/tmp/lasterm/state/hub-daemon.log";
+
+	// Mutation: leave the log's path out of the child's environment, and the
+	// daemon never takes its log over, so the file grows without bound again.
+	it("uses the SEA CLI entry without re-passing --daemon, and names its log", () => {
 		const plan = buildDaemonSpawnPlan({
 			sea: true,
 			port: 4321,
 			moduleUrl: pathToFileURL("/tmp/lasterm/dist/cli.js").href,
+			logPath,
 		});
 
 		expect(plan.args).toEqual(["start", "--port", "4321"]);
 		expect(plan.args).not.toContain("--daemon");
 		expect(plan.args).not.toContain("/tmp/lasterm/dist/main.js");
-		expect(plan.env).toEqual({ LASTERM_PORT: "4321" });
+		expect(plan.env).toEqual({ LASTERM_PORT: "4321", [DAEMON_LOG_ENV]: logPath });
 	});
 
 	it("uses the compiled main.js sibling in dev mode and preserves open env", () => {
@@ -33,12 +39,17 @@ describe("buildDaemonSpawnPlan", () => {
 			port: 4100,
 			open: true,
 			moduleUrl: pathToFileURL("/tmp/lasterm/dist/cli.js").href,
+			logPath,
 		});
 
 		// pathToFileURL resolves the POSIX-looking path against the current drive
 		// on Windows, so the expectation goes through the same resolution.
 		expect(plan.args).toEqual([resolve("/tmp/lasterm/dist/main.js")]);
-		expect(plan.env).toEqual({ LASTERM_PORT: "4100", LASTERM_OPEN: "1" });
+		expect(plan.env).toEqual({
+			LASTERM_PORT: "4100",
+			LASTERM_OPEN: "1",
+			[DAEMON_LOG_ENV]: logPath,
+		});
 	});
 });
 

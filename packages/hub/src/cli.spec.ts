@@ -47,7 +47,7 @@ import {
 import { expectPosixMode } from "./file-mode.fixture.js";
 import {
 	HUB_RUNTIME_UNUSABLE_CODE,
-	HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
+	HUB_TLS_HANDSHAKE_TIMEOUT_MS,
 	HUB_TLS_PIN_MISMATCH_CODE,
 } from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
@@ -1716,20 +1716,78 @@ describe("cmdStatus against the hub a runtime record names", () => {
 	});
 
 	it("keeps every recognised transient failure retryable and refuses anything else", () => {
-		for (const code of [
-			"ECONNREFUSED",
-			"ECONNRESET",
-			"ECONNABORTED",
-			"EPIPE",
-			"ETIMEDOUT",
-			HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
-		]) {
+		for (const code of ["ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "EPIPE", "ETIMEDOUT"]) {
 			expect(classifyHubFailure(Object.assign(new Error(code), { code })).kind).toBe("not-ready");
 		}
 		expect(classifyHubFailure(new Error("no code at all"))).toMatchObject({
 			kind: "refused",
 			refusal: "tls",
 		});
+	});
+
+	/**
+	 * Status against a port that takes every connection and says nothing, which
+	 * is what a stopped hub looks like from outside: the kernel still completes
+	 * the TCP handshake on its listener, and no process answers there. The
+	 * handshake bound runs on a fake clock, advanced once the connection is in.
+	 */
+	async function statusOfSilentPort(json: boolean) {
+		const tls = getTestTlsMaterial();
+		let accepted: () => void = () => {};
+		const connection = new Promise<void>((resolve) => {
+			accepted = resolve;
+		});
+		const port = await listen(
+			net.createServer((socket) => {
+				socket.on("error", () => {});
+				accepted();
+			}),
+		);
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const pending = status(record(port, tls.pinned.spki), json);
+			await connection;
+			vi.advanceTimersByTime(HUB_TLS_HANDSHAKE_TIMEOUT_MS);
+			return { port, ...(await pending) };
+		} finally {
+			vi.useRealTimers();
+		}
+	}
+
+	// Mutation: sort a handshake timeout with the transient failures again, as
+	// #506 did, and a hub whose process is stopped reads as one that is starting:
+	// "retry shortly", exit 0, for as long as it stays stopped.
+	it("calls a port that takes the connection but never completes TLS not answering, and exits 1", async () => {
+		const { port, code, output } = await statusOfSilentPort(true);
+
+		expect(code).toBe(1);
+		expect(output).toHaveLength(1);
+		expect(JSON.parse(output[0] ?? "")).toEqual({
+			running: "unknown",
+			ready: false,
+			retryable: true,
+			answering: false,
+			pid: process.pid,
+			port,
+			started_at: "2026-08-03T00:00:00.000Z",
+			health: null,
+			error: `Hub TLS endpoint could not be reached: TLS handshake timed out after ${HUB_TLS_HANDSHAKE_TIMEOUT_MS}ms`,
+		});
+	});
+
+	// Mutation: print the text of a hub that proved its key, and status says the
+	// pid took the connection when nothing on that port proved whose it was.
+	it("says in words that the port took the connection and TLS never completed", async () => {
+		const { port, code, output } = await statusOfSilentPort(false);
+
+		expect(code).toBe(1);
+		expect(output).toEqual([
+			`Hub: not answering (pid ${process.pid} is alive and port ${port} took the connection, but TLS never completed)`,
+			`  PID        : ${process.pid}`,
+			`  Port       : ${port}`,
+			"  Started at : 2026-08-03T00:00:00.000Z",
+			`  Error      : Hub TLS endpoint could not be reached: TLS handshake timed out after ${HUB_TLS_HANDSHAKE_TIMEOUT_MS}ms`,
+		]);
 	});
 });
 

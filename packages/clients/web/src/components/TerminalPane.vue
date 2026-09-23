@@ -8,7 +8,7 @@
 			@dragend="onDragEnd"
 		>
 			<span class="pane-title">{{ paneTitle }}</span>
-			<WriteLockIndicator :channel-id="effectiveChannelId" :is-dead="isDead" class="pane-lock" />
+			<WriteLockIndicator :channel-id="effectiveChannelId" :is-dead="isDead || hasEnded || isGone" class="pane-lock" />
 		</div>
 
 		<!-- Environment banner (UX-07) -->
@@ -406,6 +406,9 @@ const isDetached = ref(false);
  * still knows and the list no longer carries. Trusting only the list left such
  * a pane blank and inert — no message, no button, nothing to do.
  */
+// The lock indicator reads this too: a terminal on another host that has
+// ended is in no list, so `isDead` stays false there, and the pane offered "No
+// lock" over a shell that no longer exists while the overlay said it had exited.
 const hasEnded = ref(false);
 const goneMessage = 'This terminal no longer exists.';
 

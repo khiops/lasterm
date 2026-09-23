@@ -494,7 +494,9 @@ Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INF
 acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,
 not part of it. A routine request leaves no line there at INFO, only a request the hub failed
 does (ERROR, or WARN for a 5xx a route chose), and the desktop moves `hub.log` to `hub.log.old` at
-10 MB, replacing the one before (#512).
+10 MB, replacing the one before (#512). `lasterm start --daemon` keeps the same output in
+`hub-daemon.log` in the state directory, and the hub moves its content to `hub-daemon.log.old` at
+the same size (#525).
 
 **A token store that cannot be read is not recorded here.** While `meta.db` is closed, corrupt or
 locked, every credential is refused (503 on REST, a `1013` close on the WebSocket) without being

@@ -942,7 +942,12 @@ Note: no Node process opens a PTY. Hub spawns the agent binary locally
 - Structured JSON logs, one line per event
 - Trace IDs: `sid:<session-id>` and `cid:<channel-id>` prefixes
 - Log levels: trace, debug, info, warn, error
-- Health: `GET /api/health` → `{ status, uptime, sessions, channels, spool_size_bytes }`
+- Health: `GET /api/health` → `{ status, version, build }` (PROTOCOL.md § 6). The route needs no
+  authentication, and the hub is planned to listen beyond loopback (#96, #193), so it reports no
+  process details: no uptime, pid or start time, and no session, channel or spool figures. Anyone who
+  can reach the port could otherwise learn, for example, when the hub last restarted, as after an
+  update. If the hub reports that state at all, it belongs on an authenticated route, and none does
+  today. A local caller reads the start time from `runtime.json`, as `lasterm status` does (#519).
 
 ### 10.2 Error Handling
 

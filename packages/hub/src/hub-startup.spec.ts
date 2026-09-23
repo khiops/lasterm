@@ -644,3 +644,95 @@ describe("startHub records its security events whichever entry point started it"
 		expect(createServer.mock.calls[0]?.[0].securityLog).toBeInstanceOf(SecurityLog);
 	});
 });
+
+describe("startHub and the daemon's log (#525)", () => {
+	async function start(boundDaemonLog: () => boolean) {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-daemon-log-${randomBytes(8).toString("hex")}`);
+		const steps: string[] = [];
+		let logger: unknown;
+		try {
+			await startHub(
+				{ port: 4100 },
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => stateDir,
+					getConfigDir: () => stateDir,
+					acquireHubLock: () => {
+						steps.push("lock");
+						return null as never;
+					},
+					boundDaemonLog: () => {
+						steps.push("bound the log");
+						return boundDaemonLog();
+					},
+					initAuth: () => randomBytes(32).toString("hex"),
+					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+					openDatabases: () => dbs,
+					createServer: async (options) => {
+						steps.push("create server");
+						logger = options.logger;
+						return {} as never;
+					},
+					startServer: async () => "https://127.0.0.1:4100",
+					addStartupCorsOrigins: () => 4100,
+					persistRuntime: () => undefined,
+					deleteRuntime: () => false,
+				},
+			);
+		} finally {
+			dbs.close();
+			rmSync(stateDir, { recursive: true, force: true });
+		}
+		return { steps, logger };
+	}
+
+	// Mutation: bound the log before the lock, and a start that loses to a
+	// running hub moves that hub's log aside: the incumbent's evidence, which a
+	// losing start must never change (#133).
+	it("bounds the log only once it holds the lock", async () => {
+		const boundDaemonLog = vi.fn(() => true);
+
+		await expect(
+			startHub(
+				{ port: 4100 },
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => "/nonexistent/state",
+					acquireHubLock: () => {
+						throw Object.assign(new Error("Hub already running"), {
+							code: "LASTERM_HUB_ALREADY_RUNNING",
+						});
+					},
+					boundDaemonLog,
+				},
+			),
+		).rejects.toThrow("Hub already running");
+		expect(boundDaemonLog).not.toHaveBeenCalled();
+
+		const { steps } = await start(() => true);
+		expect(steps).toEqual(["lock", "bound the log", "create server"]);
+	});
+
+	// Mutation: leave Fastify's log on its default destination, and pino writes
+	// its lines to descriptor 1 itself, unchecked. Most of what a running hub
+	// prints is Fastify's log, so the file would pass its limit.
+	it("sends Fastify's log through standard output once the log is bounded", async () => {
+		const { logger } = await start(() => true);
+		const destination = (logger as { destination?: { write(line: string): void } } | undefined)
+			?.destination;
+		expect(destination).toBeDefined();
+
+		const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		try {
+			destination?.write('{"level":30,"msg":"a line from pino"}\n');
+			expect(write).toHaveBeenCalledWith('{"level":30,"msg":"a line from pino"}\n');
+		} finally {
+			write.mockRestore();
+		}
+
+		// A hub the launch did not start as a daemon keeps Fastify's own destination.
+		expect((await start(() => false)).logger).toBeUndefined();
+	});
+});

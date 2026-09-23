@@ -23,6 +23,13 @@ export interface TabTitleOptions {
 	 * whether liveDynamicTitle applies (source=dynamic only).
 	 */
 	titleConfig?: TitleConfig;
+	/**
+	 * Names of channels the loaded host does not list. A pane is global like its
+	 * tab, and its terminal may run on another host, where `channels` says
+	 * nothing: the tab already named it from this index while the pane above
+	 * the same terminal said "Terminal".
+	 */
+	index?: Ref<ReadonlyMap<string, { displayTitle: string }>>;
 }
 
 /**
@@ -95,7 +102,11 @@ export function useTabTitle(
 
 	const resolvedTitle = computed(() => {
 		const ch = channel.value;
-		if (ch === null) return DEFAULT_CHANNEL_NAME;
+		if (ch === null) {
+			const id = channelId.value;
+			const indexed = id === null ? undefined : options?.index?.value.get(id)?.displayTitle;
+			return indexed !== undefined && indexed !== "" ? indexed : DEFAULT_CHANNEL_NAME;
+		}
 
 		// liveDynamicTitle: optimistic override for the active terminal pane.
 		// Only applies when source=dynamic — other sources ignore it — and never

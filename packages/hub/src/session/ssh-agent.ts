@@ -19,6 +19,8 @@ import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 
 const HELLO_TIMEOUT_MS = 5_000;
+/** Reaching the agent at all: an exec, or a daemon launched and polled for. */
+const TRANSPORT_TIMEOUT_MS = 20_000;
 type AgentLoggingConfig = Pick<AgentConfig, "logLevel" | "logFormat">;
 
 /**
@@ -498,13 +500,25 @@ export class SshAgent extends AgentConnection {
 					}
 					// Attach stream handler — called after deploy (or immediately if no deploy needed).
 					const runAgent = (agentPath: string, daemonPath?: string): void => {
-						// Start HELLO timeout NOW — deploy phase is complete, agent is being exec'd.
-						// Timeout is intentionally NOT started earlier so that TOFU binary
-						// verification prompts (up to 30s) don't race against this 5s timer.
-						const helloTimeout = setTimeout(() => {
+						// The HELLO clock starts once there is a stream to say it on. Not
+						// earlier: TOFU binary verification prompts (up to 30s) must not
+						// race it, and neither may a daemon being launched, which has its
+						// own deadline and, past it, says why — the daemon's own words from
+						// its log. Started with the launch, this 5 s timer fired first and
+						// replaced that with "Agent HELLO timeout", which says nothing.
+						let helloTimeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+							// Still a bound on reaching the agent at all, well past the
+							// daemon's own deadline so that its diagnosis comes first.
 							this.cleanup();
-							rejectOnce(new Error("Agent HELLO timeout"));
-						}, HELLO_TIMEOUT_MS);
+							rejectOnce(new Error("The remote agent could not be reached"));
+						}, TRANSPORT_TIMEOUT_MS);
+						const startHelloClock = (): void => {
+							clearTimeout(helloTimeout);
+							helloTimeout = setTimeout(() => {
+								this.cleanup();
+								rejectOnce(new Error("Agent HELLO timeout"));
+							}, HELLO_TIMEOUT_MS);
+						};
 
 						// Either the agent is this connection's child, and dies with it,
 						// or it is a daemon this connection merely reaches. Everything
@@ -545,6 +559,7 @@ export class SshAgent extends AgentConnection {
 
 						openTransport(
 							(stream) => {
+								startHelloClock();
 								this.channel = stream;
 								this.channelOpen = true;
 

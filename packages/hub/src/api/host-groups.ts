@@ -1,10 +1,10 @@
 import type { HostGroup } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
+import { parsePagination } from "./pagination.js";
 
 const NAME_RE = /^[a-zA-Z0-9 _-]{1,32}$/;
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
-const DIGITS_RE = /^\d+$/;
 
 function hostGroupToResponse(g: HostGroup) {
 	return {
@@ -22,39 +22,14 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
 		"/api/host-groups",
 		async (request, reply) => {
-			const rawLimit = request.query.limit;
-			const rawOffset = request.query.offset;
+			const paging = parsePagination(request.query);
+			if (!paging.ok) return reply.code(400).send({ error: paging.error });
 
-			// A5: strict pagination — reject non-integer strings like "10abc"
-			if (rawLimit !== undefined && !DIGITS_RE.test(rawLimit)) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: "limit must be a positive integer" },
-				});
-			}
-			if (rawOffset !== undefined && !DIGITS_RE.test(rawOffset)) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: "offset must be a non-negative integer" },
-				});
-			}
-
-			const limit = rawLimit !== undefined ? Number.parseInt(rawLimit, 10) : undefined;
-			const offset = rawOffset !== undefined ? Number.parseInt(rawOffset, 10) : undefined;
-
-			if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: "limit must be between 1 and 1000" },
-				});
-			}
-			if (offset !== undefined && (!Number.isInteger(offset) || offset < 0)) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: "offset must be >= 0" },
-				});
-			}
-
+			const { limit, offset } = paging;
 			if (limit !== undefined) {
 				const total = metaDal.countHostGroupEntities();
-				const data = metaDal.listHostGroupEntities(limit, offset ?? 0).map(hostGroupToResponse);
-				return { data, total, limit, offset: offset ?? 0 };
+				const data = metaDal.listHostGroupEntities(limit, offset).map(hostGroupToResponse);
+				return { data, total, limit, offset };
 			}
 			return metaDal.listHostGroupEntities().map(hostGroupToResponse);
 		},

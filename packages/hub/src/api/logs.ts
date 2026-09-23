@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import type { FastifyInstance } from "fastify";
 import { severityForLevel } from "../logging/levels.js";
+import { parsePagination } from "./pagination.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -11,9 +12,12 @@ interface LogQueryParams {
 	from_t?: string; // min offset ms (channel) or ISO date (hub)
 	to_t?: string; // max offset ms (channel) or ISO date (hub)
 	search?: string; // case-insensitive substring match on msg
-	limit?: string; // max entries (default 100, max 1000)
+	limit?: string; // max entries (default LOG_PAGE_SIZE); range in pagination.ts
 	offset?: string; // skip first N entries
 }
+
+/** The page a log route serves when the query names no `limit`. */
+const LOG_PAGE_SIZE = 100;
 
 // ULID: 26 chars, alphanumeric (Crockford base32). Relaxed to [0-9A-Za-z] to
 // prevent path traversal while covering all valid ULIDs.
@@ -54,26 +58,6 @@ async function readJsonl(filePath: string): Promise<Record<string, unknown>[]> {
 		}
 	}
 	return entries;
-}
-
-/**
- * Parse and validate limit/offset query params.
- * Returns defaults (100/0) when params are absent.
- */
-function parsePagination(
-	rawLimit: string | undefined,
-	rawOffset: string | undefined,
-): { limit: number; offset: number; error?: string } {
-	const limit = rawLimit !== undefined ? Number.parseInt(rawLimit, 10) : 100;
-	const offset = rawOffset !== undefined ? Number.parseInt(rawOffset, 10) : 0;
-
-	if (!Number.isFinite(limit) || limit < 1 || limit > 1000) {
-		return { limit: 100, offset: 0, error: "limit must be between 1 and 1000" };
-	}
-	if (!Number.isFinite(offset) || offset < 0) {
-		return { limit: 100, offset: 0, error: "offset must be >= 0" };
-	}
-	return { limit, offset };
 }
 
 /**
@@ -171,14 +155,11 @@ export async function registerLogRoutes(app: FastifyInstance, logsDir: string): 
 				});
 			}
 
-			const { level, from_t, to_t, search, limit: rawLimit, offset: rawOffset } = request.query;
+			const { level, from_t, to_t, search } = request.query;
 
-			const { limit, offset, error: paginationError } = parsePagination(rawLimit, rawOffset);
-			if (paginationError) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: paginationError },
-				});
-			}
+			const paging = parsePagination(request.query);
+			if (!paging.ok) return reply.code(400).send({ error: paging.error });
+			const { limit = LOG_PAGE_SIZE, offset } = paging;
 
 			const filePath = path.join(logsDir, "channels", `${channelId}.jsonl`);
 			let entries = await readJsonl(filePath);
@@ -196,14 +177,11 @@ export async function registerLogRoutes(app: FastifyInstance, logsDir: string): 
 
 	// GET /api/logs/hub
 	app.get<{ Querystring: LogQueryParams }>("/api/logs/hub", async (request, reply) => {
-		const { level, from_t, to_t, search, limit: rawLimit, offset: rawOffset } = request.query;
+		const { level, from_t, to_t, search } = request.query;
 
-		const { limit, offset, error: paginationError } = parsePagination(rawLimit, rawOffset);
-		if (paginationError) {
-			return reply.code(400).send({
-				error: { code: "VALIDATION_ERROR", message: paginationError },
-			});
-		}
+		const paging = parsePagination(request.query);
+		if (!paging.ok) return reply.code(400).send({ error: paging.error });
+		const { limit = LOG_PAGE_SIZE, offset } = paging;
 
 		const filePath = path.join(logsDir, "hub.jsonl");
 		let entries = await readJsonl(filePath);

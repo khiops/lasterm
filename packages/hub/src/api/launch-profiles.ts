@@ -8,6 +8,7 @@ import {
 	parseWindowsTerminalSettings,
 } from "../shell-discovery.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { parsePagination } from "./pagination.js";
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
@@ -158,25 +159,15 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 	// GET /api/launch-profiles?limit=N&offset=M
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
 		"/api/launch-profiles",
-		async (request) => {
-			const rawLimit = request.query.limit;
-			const rawOffset = request.query.offset;
-			const limit = rawLimit !== undefined ? Number.parseInt(rawLimit, 10) : undefined;
-			const offset = rawOffset !== undefined ? Number.parseInt(rawOffset, 10) : undefined;
+		async (request, reply) => {
+			const paging = parsePagination(request.query);
+			if (!paging.ok) return reply.code(400).send({ error: paging.error });
 
-			if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) {
-				return {
-					error: { code: "VALIDATION_ERROR", message: "limit must be between 1 and 1000" },
-				};
-			}
-			if (offset !== undefined && (!Number.isInteger(offset) || offset < 0)) {
-				return { error: { code: "VALIDATION_ERROR", message: "offset must be >= 0" } };
-			}
-
+			const { limit, offset } = paging;
 			if (limit !== undefined) {
 				const total = metaDal.countLaunchProfiles();
-				const data = metaDal.listLaunchProfiles(limit, offset ?? 0).map(profileToWire);
-				return { data, total, limit, offset: offset ?? 0 };
+				const data = metaDal.listLaunchProfiles(limit, offset).map(profileToWire);
+				return { data, total, limit, offset };
 			}
 			return metaDal.listLaunchProfiles().map(profileToWire);
 		},

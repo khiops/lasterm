@@ -739,6 +739,27 @@ revoked, swept or expired answers `401 AUTH_INVALID`. A bearer the hub cannot ch
 token store cannot be read answers `503 AUTH_UNAVAILABLE`: the request is still refused, but the
 token was not judged, and the client should keep it and retry.
 
+### Pagination
+
+Five list routes page: `GET /api/hosts`, `/api/host-groups`, `/api/launch-profiles`,
+`/api/logs/hub` and `/api/logs/channels/:channelId`. All five read `limit` and `offset` through
+one parser (`packages/hub/src/api/pagination.ts`), so they accept and refuse the same values:
+
+| Parameter | Accepted | When absent |
+|-----------|----------|-------------|
+| `limit` | an integer from 1 to 1000 | The host, host-group and launch-profile lists answer the whole list as a plain array. The log routes serve 100 entries. |
+| `offset` | an integer from 0 to 9007199254740991 (2^53 − 1) | 0 |
+
+A value is decimal digits only. A sign, a decimal point, an exponent, whitespace, an empty value
+or a parameter given twice is refused. A refused value answers `400` with
+`{ error: { code: "VALIDATION_ERROR", message } }`, and the message names the parameter and its
+range.
+
+Given a `limit`, the three entity lists answer `{ data, total, limit, offset }`
+(`PaginatedResponse`). The log routes always answer `{ entries, total }`. An `offset` past the end
+gives an empty page, not an error. On the entity lists, an `offset` without a `limit` is checked,
+then has no effect.
+
 ### Endpoints
 
 Auth column: `●` = `Authorization: Bearer <token>` required, `○` = unauthenticated.
@@ -757,7 +778,7 @@ reads `started_at` from `runtime.json`, as `lasterm status` does.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/hosts` | ● | `Host[]` |
+| GET | `/api/hosts` | ● | `Host[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/hosts` | ● | CreateHost → `Host` (201) |
 | PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204 (alias: `/api/hosts/reorder`) |
 | GET | `/api/hosts/:id` | ● | `Host` |
@@ -810,7 +831,7 @@ reads `started_at` from `runtime.json`, as `lasterm status` does.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/host-groups` | ● | `HostGroup[]` |
+| GET | `/api/host-groups` | ● | `HostGroup[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/host-groups` | ● | CreateHostGroup → `HostGroup` (201) |
 | PUT | `/api/host-groups/order` | ● | `{ group_ids }` → 204 (alias: `/api/host-groups/reorder`) |
 | PUT | `/api/host-groups/:id` | ● | UpdateHostGroup → `HostGroup` |
@@ -820,7 +841,7 @@ reads `started_at` from `runtime.json`, as `lasterm status` does.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/launch-profiles` | ● | `LaunchProfile[]` |
+| GET | `/api/launch-profiles` | ● | `LaunchProfile[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/launch-profiles` | ● | CreateLaunchProfile → `LaunchProfile` (201) |
 | PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 (alias: `POST /api/launch-profiles/reorder`) |
 | GET | `/api/launch-profiles/:id` | ● | `LaunchProfile` |
@@ -898,6 +919,13 @@ reads `started_at` from `runtime.json`, as `lasterm status` does.
 |--------|------|------|--------------|
 | GET | `/api/auth/tokens` | ● | `{ tokens }`, each `{ id, label, created_at, expires_at, revoked_at, swept_at, last_used_at }`; never the hash |
 | DELETE | `/api/auth/tokens/:id` | ● | → `{ ok: true }`, or 404 `TOKEN_NOT_FOUND` if unknown or already revoked. Closes the WebSockets the token authenticated (`1008 AUTH_REVOKED`). `primary` answers 409 `PRIMARY_TOKEN_NOT_REVOCABLE` and closes nothing: it is retired by replacing `auth.json` (SECURITY.md § 2.1). Every answer is recorded as `token.revoke` (SECURITY.md § 7.1) |
+
+#### Logs
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| GET | `/api/logs/hub` | ● | `{ entries, total }` from `hub.jsonl`, in file order. Query: `level` (minimum), `from_t` and `to_t` (ISO 8601), `search` (in `msg`, any case), `limit`, `offset` (see Pagination) |
+| GET | `/api/logs/channels/:channelId` | ● | `{ entries, total }` for one channel, with the same query; `from_t` and `to_t` are milliseconds since the channel opened. An id that is not 26 alphanumerics answers 400 `INVALID_CHANNEL_ID` |
 
 #### Static Assets (served by @fastify/static)
 

@@ -896,7 +896,7 @@ mod tests {
             },
             AllowedCall {
                 source: "desktop",
-                call: "std::fs::write(dir.join(WINDOW_TONE_FILE), if dark",
+                call: "std::fs::write(dir.join(WINDOW_TONE_FILE), tone)",
                 expected_occurrences: 1,
                 why: "writes the non-protected window-tone preference",
             },

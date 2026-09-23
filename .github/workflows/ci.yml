@@ -89,6 +89,12 @@ jobs:
           foreach ($sidecar in @("lasterm-agent-x86_64-pc-windows-msvc.exe", "lasterm-hub-x86_64-pc-windows-msvc.exe")) {
             if (!(Test-Path $sidecar)) { [System.IO.File]::WriteAllBytes($sidecar, [byte[]]@()) }
           }
+      # Its own workspace too for rustfmt: the root `cargo fmt --check` never
+      # reached it, and 22 hand-formatted hunks had gathered by the time it was
+      # noticed (#471).
+      - name: Format
+        working-directory: packages/clients/desktop/src-tauri
+        run: cargo fmt --all -- --check
       - name: Clippy
         working-directory: packages/clients/desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings

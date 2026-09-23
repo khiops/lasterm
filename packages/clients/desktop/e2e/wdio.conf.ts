@@ -72,6 +72,8 @@ export const config = {
 	framework: "mocha",
 	mochaOpts: {
 		ui: "bdd",
-		timeout: 30_000,
+		// A bound for a hang, not a measure: the terminal specs wait for a first
+		// start and reload the page three times, each waiting for its own attach.
+		timeout: 180_000,
 	},
 };

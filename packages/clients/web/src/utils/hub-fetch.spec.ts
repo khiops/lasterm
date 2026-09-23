@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hubFetch, responseStream } from "./hub-fetch.js";
+import LIB_RS from "../../../desktop/src-tauri/src/lib.rs?raw";
+import {
+	hubFetch,
+	RELAY_SLOTS,
+	relaySlotUsage,
+	resetRelaySlotsForTests,
+	responseStream,
+} from "./hub-fetch.js";
 
 function responseFrame(
 	id: bigint,
@@ -19,6 +26,7 @@ function responseFrame(
 
 describe("hubFetch desktop transport", () => {
 	afterEach(() => {
+		resetRelaySlotsForTests();
 		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 		vi.useRealTimers();
 		vi.unstubAllGlobals();
@@ -577,5 +585,117 @@ describe("hubFetch desktop transport", () => {
 
 		expect(await response.text()).toBe("browser");
 		expect(browserFetch).toHaveBeenCalledWith("/api/health", undefined);
+	});
+});
+
+// ─── The renderer's share of native relays (#476) ─────────────────────────────
+//
+// Native admits a fixed number of relays and refuses the one past it. Every
+// pane resolving its profile as it mounts asked for a dozen at once — at each
+// startup with eight tabs, and at each host switch — and the refused ones left
+// their panes drawn with the default profile, with nothing on screen to say so.
+
+describe("hubFetch relay slots", () => {
+	afterEach(() => {
+		resetRelaySlotsForTests();
+		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+	});
+
+	/** A native side that answers every head at once and ends each response on demand. */
+	function nativeHoldingResponses() {
+		const callbacks = new Map<number, (message: { index: number; message: ArrayBuffer }) => void>();
+		const responses: Array<{ id: bigint; channelId: number }> = [];
+		let nextCallback = 1;
+		let nextResponse = 1n;
+		const invoke = vi.fn(
+			async (command: string, args?: { response?: { id: number } }): Promise<unknown> => {
+				if (command === "relay_hub_request") {
+					const id = nextResponse++;
+					responses.push({ id, channelId: args?.response?.id ?? -1 });
+					return { id: String(id), status: 200, statusText: "OK", headers: [] };
+				}
+				return undefined;
+			},
+		);
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: {
+				invoke,
+				transformCallback: (
+					callback: (message: { index: number; message: ArrayBuffer }) => void,
+				) => {
+					const id = nextCallback++;
+					callbacks.set(id, callback);
+					return id;
+				},
+			},
+		});
+		const requests = () => invoke.mock.calls.filter(([command]) => command === "relay_hub_request");
+		const end = (which: number) => {
+			const response = responses[which];
+			if (response === undefined) throw new Error(`no response #${which}`);
+			callbacks.get(response.channelId)?.({ index: 0, message: responseFrame(response.id, 1n, 1) });
+		};
+		return { invoke, requests, end };
+	}
+
+	it("makes a request past the bound wait for a place, not fail", async () => {
+		const native = nativeHoldingResponses();
+
+		const all = Array.from({ length: RELAY_SLOTS + 2 }, (_, i) =>
+			hubFetch(`https://127.0.0.1:4242/api/config/cascade?channel_id=${i}`),
+		);
+
+		await vi.waitFor(() => expect(native.requests()).toHaveLength(RELAY_SLOTS));
+		expect(relaySlotUsage()).toEqual({ inUse: RELAY_SLOTS, waiting: 2 });
+
+		// One response ends: its place goes to the first request waiting.
+		native.end(0);
+		await vi.waitFor(() => expect(native.requests()).toHaveLength(RELAY_SLOTS + 1));
+
+		native.end(1);
+		await vi.waitFor(() => expect(native.requests()).toHaveLength(RELAY_SLOTS + 2));
+		for (let i = 2; i < RELAY_SLOTS + 2; i++) native.end(i);
+
+		const responses = await Promise.all(all);
+		expect(responses.every((response) => response.status === 200)).toBe(true);
+		await vi.waitFor(() => expect(relaySlotUsage()).toEqual({ inUse: 0, waiting: 0 }));
+	});
+
+	it("holds a place until the response has ended, not until its head", async () => {
+		const native = nativeHoldingResponses();
+
+		const response = await hubFetch("https://127.0.0.1:4242/api/hosts");
+		expect(response.status).toBe(200);
+		// Native keeps the relay until the last frame is taken.
+		expect(relaySlotUsage().inUse).toBe(1);
+
+		native.end(0);
+		await vi.waitFor(() => expect(relaySlotUsage().inUse).toBe(0));
+	});
+
+	it("gives the place back when native refuses the command", async () => {
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: {
+				invoke: vi.fn(async () => {
+					throw new Error("too many active hub relays");
+				}),
+				transformCallback: () => 1,
+			},
+		});
+
+		await expect(hubFetch("https://127.0.0.1:4242/api/hosts")).rejects.toThrow(
+			"too many active hub relays",
+		);
+		expect(relaySlotUsage()).toEqual({ inUse: 0, waiting: 0 });
+	});
+
+	it("leaves native room for the hub socket and the one replacing it", () => {
+		const native = /const MAX_ACTIVE_HUB_RELAYS: usize = (\d+);/.exec(LIB_RS)?.[1];
+		expect(native, "the native bound moved or was renamed").toBeDefined();
+		// The WebSocket holds a relay for its whole life, and a reconnecting one
+		// can hold a second while the old one tears down.
+		expect(RELAY_SLOTS).toBeLessThanOrEqual(Number(native) - 2);
 	});
 });

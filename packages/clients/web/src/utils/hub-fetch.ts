@@ -24,6 +24,80 @@ const RELAY_ERROR_FRAME = 2;
 // that diagnosis with a generic browser-side timeout.
 const HUB_RELAY_WAIT_TIMEOUT_MS = 26_000;
 
+/**
+ * How many relays this renderer holds open at once.
+ *
+ * Native admits eight (`MAX_ACTIVE_HUB_RELAYS` in src-tauri/src/lib.rs) and
+ * refuses the ninth. The hub WebSocket holds one for as long as it lives, and a
+ * socket being replaced can hold a second while the old one tears down. What
+ * is left is what requests and uploads may use — and the app asks for more than
+ * that in one moment: every pane resolves its profile as it mounts, so eight
+ * tabs at startup or on a host switch meant a dozen relays at once, and those
+ * past the bound failed. The pane then drew with the default profile, and
+ * nothing on screen said why (#476).
+ *
+ * Refusing is right for native, which bounds threads and pipes. Work that merely
+ * arrived together should wait its turn instead, so the waiting happens here.
+ */
+export const RELAY_SLOTS = 6;
+
+type SlotRelease = () => void;
+let slotsInUse = 0;
+const slotWaiters: Array<() => void> = [];
+
+/**
+ * A place among the relays, released exactly once. A wait that outlasts the
+ * relay deadline means slots are held and never given back: that fails loudly
+ * rather than leaving every later request queued behind them for ever.
+ */
+function acquireRelaySlot(): Promise<SlotRelease> {
+	return new Promise<SlotRelease>((resolve, reject) => {
+		const grant = () => {
+			slotsInUse++;
+			let released = false;
+			resolve(() => {
+				if (released) return;
+				released = true;
+				slotsInUse--;
+				slotWaiters.shift()?.();
+			});
+		};
+		if (slotsInUse < RELAY_SLOTS) {
+			grant();
+			return;
+		}
+		const waiter = () => {
+			clearTimeout(timer);
+			grant();
+		};
+		const timer = setTimeout(() => {
+			const index = slotWaiters.indexOf(waiter);
+			if (index !== -1) slotWaiters.splice(index, 1);
+			reject(
+				new HubRelayTransportError(
+					`no hub relay freed within ${HUB_RELAY_WAIT_TIMEOUT_MS} ms; ${slotsInUse} are held`,
+				),
+			);
+		}, HUB_RELAY_WAIT_TIMEOUT_MS);
+		slotWaiters.push(waiter);
+	});
+}
+
+/** Relays this renderer holds right now, and requests waiting for one. */
+export function relaySlotUsage(): { inUse: number; waiting: number } {
+	return { inUse: slotsInUse, waiting: slotWaiters.length };
+}
+
+/**
+ * For tests only: a mocked native that answers a head without ever sending the
+ * frame that ends the response leaves its slot held, and the next test would
+ * start with fewer places than the renderer really has.
+ */
+export function resetRelaySlotsForTests(): void {
+	slotsInUse = 0;
+	slotWaiters.length = 0;
+}
+
 type RelayFrame = {
 	id: string;
 	sequence: bigint;
@@ -110,13 +184,17 @@ function relayEndpoint(url: string): URL {
 
 async function relayRequestToResponse(request: RelayRequest): Promise<Response> {
 	const { Channel, invoke } = await import("@tauri-apps/api/core");
-	const stream = responseStream(
-		new Channel<ArrayBuffer>((frame) => {
-			stream.receive(frame);
-		}),
-	);
-
+	let release: SlotRelease | undefined;
 	try {
+		release = await acquireRelaySlot();
+		// The slot is the response's until its stream ends: native keeps the
+		// relay until the last frame has been taken, not until the head returns.
+		const stream = responseStream(
+			new Channel<ArrayBuffer>((frame) => {
+				stream.receive(frame);
+			}),
+			release,
+		);
 		const head = await invoke<RelayHead>("relay_hub_request", {
 			request,
 			response: stream.channel,
@@ -127,6 +205,9 @@ async function relayRequestToResponse(request: RelayRequest): Promise<Response> 
 		stream.drain();
 		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
+		// A refused or failed command holds nothing natively, and a stream that
+		// failed has already given its slot back; releasing is idempotent.
+		release?.();
 		throw relayTransportError(error);
 	}
 }
@@ -138,8 +219,12 @@ async function relayUploadToResponse(
 	const { Channel, invoke } = await import("@tauri-apps/api/core");
 
 	let uploadId: string | null = null;
+	let release: SlotRelease | undefined;
 	try {
 		try {
+			// Native admits an upload against the same bound as a request, and
+			// holds it from start through the response its finish hands over.
+			release = await acquireRelaySlot();
 			uploadId = String(await invoke<string>("relay_hub_upload_start", { request }));
 		} catch (error) {
 			// Refused admission: no reader will ever take this body, so release its
@@ -156,6 +241,7 @@ async function relayUploadToResponse(
 			new Channel<ArrayBuffer>((frame) => {
 				stream.receive(frame);
 			}),
+			release,
 		);
 		const head = await invoke<RelayHead>("relay_hub_upload_finish", {
 			uploadId,
@@ -168,6 +254,8 @@ async function relayUploadToResponse(
 		stream.drain();
 		return relayResponse(request.method, head, stream.body);
 	} catch (error) {
+		// Whatever failed, nothing downstream will give this slot back.
+		release?.();
 		throw relayTransportError(error);
 	} finally {
 		if (uploadId !== null) {
@@ -249,7 +337,10 @@ function cancelUpload(
 	).catch((cancelError) => console.error(`hub relay cancellation failed: ${String(cancelError)}`));
 }
 
-export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => void) | null }): {
+export function responseStream(
+	channel: { onmessage: ((message: ArrayBuffer) => void) | null },
+	onSettled?: () => void,
+): {
 	channel: typeof channel;
 	body: ReadableStream<Uint8Array>;
 	receive: (frame: ArrayBuffer) => void;
@@ -265,6 +356,15 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 	let expectedSequence = 1n;
 	let failure: HubRelayTransportError | undefined;
 	let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+	let settled = false;
+
+	// The response is over for native once its last frame is acknowledged or
+	// the relay is cancelled; only then is its relay free for another request.
+	const settle = () => {
+		if (settled) return;
+		settled = true;
+		onSettled?.();
+	};
 
 	const clearInactivityTimer = () => {
 		if (inactivityTimer !== undefined) {
@@ -280,13 +380,20 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 	};
 
 	const cancelRelay = () => {
-		if (cancelAttempted || responseId === null) return;
+		if (cancelAttempted || responseId === null) {
+			// No relay identity yet: the command that would name one either failed,
+			// holding nothing natively, or has not returned, and its caller settles.
+			if (responseId === null) settle();
+			return;
+		}
 		cancelAttempted = true;
-		void import("@tauri-apps/api/core").then(({ invoke }) =>
-			invoke("relay_hub_response_cancel", { responseId }).catch((error) =>
-				console.error(`hub relay response cancellation failed: ${String(error)}`),
-			),
-		);
+		void import("@tauri-apps/api/core")
+			.then(({ invoke }) =>
+				invoke("relay_hub_response_cancel", { responseId }).catch((error) =>
+					console.error(`hub relay response cancellation failed: ${String(error)}`),
+				),
+			)
+			.finally(settle);
 	};
 	const fail = (message: string) => {
 		if (finished) return;
@@ -297,7 +404,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 		controller?.error(failure);
 	};
 
-	const acknowledge = (frame: RelayFrame) => {
+	const acknowledge = (frame: RelayFrame, last = false) => {
 		void import("@tauri-apps/api/core")
 			.then(({ invoke }) =>
 				invoke("relay_hub_response_ack", {
@@ -306,7 +413,10 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 					acknowledgementToken: frame.acknowledgementToken,
 				}),
 			)
-			.catch((error) => fail(`hub relay acknowledgement failed: ${String(error)}`));
+			.catch((error) => fail(`hub relay acknowledgement failed: ${String(error)}`))
+			.finally(() => {
+				if (last) settle();
+			});
 	};
 	const drain = () => {
 		if (controller === undefined || pending.length === 0 || finished) {
@@ -327,7 +437,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 			finished = true;
 			clearInactivityTimer();
 			controller.close();
-			acknowledge(frame);
+			acknowledge(frame, true);
 			return;
 		}
 		if (frame.kind === RELAY_ERROR_FRAME) {
@@ -335,7 +445,7 @@ export function responseStream(channel: { onmessage: ((message: ArrayBuffer) => 
 			clearInactivityTimer();
 			failure = new HubRelayTransportError(new TextDecoder().decode(frame.payload));
 			controller.error(failure);
-			acknowledge(frame);
+			acknowledge(frame, true);
 			return;
 		}
 		fail("hub relay sent an unknown response frame");

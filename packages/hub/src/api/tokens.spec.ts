@@ -154,6 +154,27 @@ describe("DELETE /api/auth/tokens/:id", () => {
 		expect(body.ok).toBe(true);
 	});
 
+	it("refuses to revoke the primary token, says how to retire it, and keeps it working", async () => {
+		const res = await server.inject({
+			method: "DELETE",
+			url: "/api/auth/tokens/primary",
+			headers: authHeader(),
+		});
+
+		expect(res.statusCode).toBe(409);
+		const body = res.json<{ error: { code: string; message: string } }>();
+		expect(body.error.code).toBe("PRIMARY_TOKEN_NOT_REVOCABLE");
+		expect(body.error.message).toContain("auth.json");
+		const row = dbs.meta.prepare("SELECT revoked_at FROM auth_tokens WHERE id = 'primary'").get();
+		expect(row).toEqual({ revoked_at: null });
+		const after = await server.inject({
+			method: "GET",
+			url: "/api/auth/tokens",
+			headers: authHeader(),
+		});
+		expect(after.statusCode).toBe(200);
+	});
+
 	it("returns 404 for unknown token ID", async () => {
 		const res = await server.inject({
 			method: "DELETE",

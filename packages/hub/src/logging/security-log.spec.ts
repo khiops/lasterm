@@ -25,7 +25,7 @@ function collect(): { log: SecurityLog; records: Array<{ msg: string; fields: Se
 	return { log: new SecurityLog((msg, fields) => records.push({ msg, fields })), records };
 }
 
-// ─── The nine events ──────────────────────────────────────────────────────────
+// ─── The events ───────────────────────────────────────────────────────────────
 
 describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", () => {
 	it("hub start: bind address, port and the permission check", () => {
@@ -229,6 +229,26 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 			msg: "security: token rotated",
 			fields: { event: "token.rotate", tokenId: "primary" },
 		});
+	});
+
+	it("token reinstated: which credential, and when it had been revoked", () => {
+		const { log, records } = collect();
+		log.tokenReinstated({ tokenId: "primary", revokedAt: "2026-09-20T08:15:00.000Z" });
+		log.tokenReinstated({ tokenId: TOKEN, revokedAt: TOKEN });
+		expect(records).toEqual([
+			{
+				msg: "security: token reinstated",
+				fields: {
+					event: "token.reinstate",
+					tokenId: "primary",
+					revokedAt: "2026-09-20T08:15:00.000Z",
+				},
+			},
+			{
+				msg: "security: token reinstated",
+				fields: { event: "token.reinstate", tokenId: WITHHELD, revokedAt: WITHHELD },
+			},
+		]);
 	});
 });
 

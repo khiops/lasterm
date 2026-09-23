@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerConfigRoutes } from "../api/config.js";
+import { registerConfigRoutes, UI_VALUE_VALIDATORS } from "../api/config.js";
 import { ConfigResolver } from "../config.js";
 import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
@@ -39,189 +39,87 @@ let dbs: DatabaseManager;
 let server: FastifyInstance;
 let configDir: string;
 
-beforeEach(async () => {
-	configDir = join(tmpdir(), `lasterm-config-spec-${Date.now()}-${Math.random()}`);
-	mkdirSync(configDir, { recursive: true });
-	dbs = openTestDatabases();
-	server = await createServer({
-		tls: getTestTls(),
-		logger: false,
-		dbManager: dbs,
-		skipShellDiscovery: true,
-		configDir,
+/** A whole hub server, for the describes that test a route through one. */
+function useHubServer(): void {
+	beforeEach(async () => {
+		configDir = join(tmpdir(), `lasterm-config-spec-${Date.now()}-${Math.random()}`);
+		mkdirSync(configDir, { recursive: true });
+		dbs = openTestDatabases();
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			configDir,
+		});
+	});
+
+	afterEach(async () => {
+		// Survives a setup that never finished: see config.spec.ts.
+		await server?.close();
+		dbs?.close();
+		if (configDir !== undefined) rmSync(configDir, { recursive: true, force: true });
+	});
+}
+
+// ─── UI_VALUE_VALIDATORS — the rules PUT /api/config/ui applies ───────────────
+//
+// A table of pure functions: each rule is asserted here, where it lives, so a
+// broken one fails under its own name. The route keeps one test, below, proving
+// it consults the table.
+
+describe("UI_VALUE_VALIDATORS", () => {
+	type Case = [section: string, key: string, verdict: "accepts" | "refuses", value: unknown];
+	const cases: Case[] = [
+		["tabs", "closeButton", "accepts", true],
+		["tabs", "closeButton", "refuses", "yes"],
+		["tabs", "newTabPosition", "accepts", "afterActive"],
+		["tabs", "newTabPosition", "refuses", "first"],
+		["panes", "maxPanes", "accepts", 4],
+		["panes", "maxPanes", "refuses", 0],
+		["panes", "maxPanes", "refuses", 2.5],
+		["channels", "autoGroup", "accepts", "first"],
+		["channels", "autoGroup", "refuses", "last"],
+		["search", "historySize", "accepts", 50],
+		["search", "historySize", "refuses", 101],
+		["search", "position", "accepts", "bottom-bar"],
+		["search", "position", "refuses", "top-left"],
+		["layout", "hostRailWidth", "accepts", 48],
+		["layout", "sidebarWidth", "accepts", 200],
+		["layout", "sidebarWidth", "refuses", -1],
+	];
+
+	it.each(cases)("%s.%s %s %j", (section, key, verdict, value) => {
+		const validator = UI_VALUE_VALIDATORS[section]?.[key];
+		expect(validator, `no validator for ${section}.${key}`).toBeTypeOf("function");
+		expect(validator?.(value)).toBe(verdict === "accepts");
 	});
 });
 
-afterEach(async () => {
-	// Survives a setup that never finished: see config.spec.ts.
-	await server?.close();
-	dbs?.close();
-	if (configDir !== undefined) rmSync(configDir, { recursive: true, force: true });
-});
-
-// ─── PUT /api/config/ui — value type validation ───────────────────────────────
+// ─── PUT /api/config/ui — consults UI_VALUE_VALIDATORS ────────────────────────
 
 describe("PUT /api/config/ui value validation", () => {
-	it("accepts valid boolean for closeButton", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { tabs: { closeButton: true } },
-		});
-		expect(res.statusCode).toBe(200);
-	});
+	useHubServer();
 
-	it("rejects non-boolean for closeButton", async () => {
-		const res = await server.inject({
+	it("refuses a value UI_VALUE_VALIDATORS rejects, and stores one it accepts", async () => {
+		const refused = await server.inject({
 			method: "PUT",
 			url: "/api/config/ui",
 			payload: { tabs: { closeButton: "yes" } },
 		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: { code: "INVALID_VALUE", message: 'Invalid value for "tabs.closeButton": "yes"' },
+		});
 
-	it("accepts valid newTabPosition value", async () => {
-		const res = await server.inject({
+		const accepted = await server.inject({
 			method: "PUT",
 			url: "/api/config/ui",
-			payload: { tabs: { newTabPosition: "afterActive" } },
+			payload: { tabs: { closeButton: false } },
 		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects invalid newTabPosition value", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { tabs: { newTabPosition: "first" } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
-
-	it("accepts valid maxPanes integer", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { panes: { maxPanes: 4 } },
-		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects maxPanes < 1", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { panes: { maxPanes: 0 } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
-
-	it("rejects non-integer maxPanes", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { panes: { maxPanes: 2.5 } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
-
-	// Every split names its direction, so a default had nowhere to apply: the
-	// setting was offered, stored, and read by nothing. It is no longer taken.
-	it("no longer takes defaultSplitDirection", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { panes: { defaultSplitDirection: "vertical" } },
-		});
-		expect(res.statusCode).toBe(400);
-	});
-
-	it("accepts valid autoGroup value", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { channels: { autoGroup: "first" } },
-		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects invalid autoGroup value", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { channels: { autoGroup: "last" } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
-
-	it("accepts valid historySize (0-100)", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { search: { historySize: 50 } },
-		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects historySize > 100", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { search: { historySize: 101 } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
-
-	it("accepts valid search position", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { search: { position: "bottom-bar" } },
-		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects invalid search position", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { search: { position: "top-left" } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
-	});
-
-	it("accepts valid layout widths", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { layout: { hostRailWidth: 48, sidebarWidth: 200 } },
-		});
-		expect(res.statusCode).toBe(200);
-	});
-
-	it("rejects negative layout width", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/config/ui",
-			payload: { layout: { sidebarWidth: -1 } },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("INVALID_VALUE");
+		expect(accepted.statusCode).toBe(200);
+		const read = await server.inject({ method: "GET", url: "/api/config/ui" });
+		expect(read.json<{ tabs: { closeButton: boolean } }>().tabs.closeButton).toBe(false);
 	});
 
 	it("still rejects unknown keys (existing behaviour)", async () => {
@@ -422,6 +320,8 @@ describe("config writes — CONFIG_CHANGED to every client", () => {
 // ─── GET /api/config/elevation ────────────────────────────────────────────────
 
 describe("GET /api/config/elevation", () => {
+	useHubServer();
+
 	it("returns elevation config with expected shape", async () => {
 		const res = await server.inject({
 			method: "GET",
@@ -441,6 +341,8 @@ describe("GET /api/config/elevation", () => {
 // ─── PUT /api/config/elevation ────────────────────────────────────────────────
 
 describe("PUT /api/config/elevation", () => {
+	useHubServer();
+
 	it("accepts valid methodLinux value", async () => {
 		const res = await server.inject({
 			method: "PUT",

@@ -15,7 +15,11 @@ const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 const ENV_MASK_RE = /password|secret|token|key|credential/i;
 const ENV_SENTINEL = "********";
 
-function validateCreateBody(body: CreateLaunchProfileBody): string | null {
+/**
+ * What POST /api/launch-profiles accepts. Each rule is unit-tested in
+ * `launch-profiles.spec.ts`, and the route keeps one test proving it consults this.
+ */
+export function validateCreateBody(body: CreateLaunchProfileBody): string | null {
 	if (!body.name || body.name.trim().length === 0) {
 		return "name is required";
 	}
@@ -116,7 +120,7 @@ function profileToWire(profile: LaunchProfile): unknown {
 
 // ─── Body interfaces ─────────────────────────────────────────────────────────
 
-interface CreateLaunchProfileBody {
+export interface CreateLaunchProfileBody {
 	name: string;
 	shell: string;
 	args?: string[];

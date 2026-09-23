@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deepMerge } from "./config.js";
+import { deepMerge, UI_SECTION_KEYS } from "./config.js";
 
 describe("deepMerge", () => {
 	it("scalar overwrite: later source wins", () => {
@@ -85,5 +85,15 @@ describe("deepMerge", () => {
 	it("new key from later source: merges keys not present in earlier sources", () => {
 		const result = deepMerge<Record<string, unknown>>({ a: 1 }, { b: 2 });
 		expect(result).toEqual({ a: 1, b: 2 });
+	});
+});
+
+// The keys PUT /api/config/ui takes, by section. The hub route keeps one test
+// proving it refuses a key that is not listed here.
+describe("UI_SECTION_KEYS", () => {
+	// Every split names its direction, so a default had nowhere to apply: the
+	// setting was offered, stored, and read by nothing. It is no longer taken.
+	it("no longer lists panes.defaultSplitDirection", () => {
+		expect(UI_SECTION_KEYS.panes).not.toContain("defaultSplitDirection");
 	});
 });

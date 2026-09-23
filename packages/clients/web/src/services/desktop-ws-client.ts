@@ -25,6 +25,16 @@ const MAX_PENDING_RELAY_BYTES = 1024 * 1024;
 const RELAY_FRAME_ENVELOPE_BYTES = 33;
 
 /**
+ * Whether this document has closed the sockets of the one it replaced.
+ *
+ * Module state on purpose: it lives and dies with the page. A reload leaves the
+ * previous page's WebSocket relay running in native — nothing tells native the
+ * page is gone — and the hub keeps that ghost attached to every terminal, so
+ * the new page is never alone, never granted the write lock, and cannot type.
+ */
+let predecessorsClosed = false;
+
+/**
  * Desktop implementation of IWsClient.
  *
  * The Rust shell owns the pinned WebSocket. A Channel is only a push transport,
@@ -79,6 +89,12 @@ export class DesktopWsClient implements IWsClient {
 			// that authenticates while its predecessor is still up finds the lock
 			// held by itself, one connection ago, and cannot type (#465).
 			await invoke("relay_hub_ws_close", { relayId: previousRelayId }).catch(() => undefined);
+		}
+		if (!predecessorsClosed) {
+			// Before the first connect of this document, nothing native holds can
+			// be ours: anything still open belongs to a page that was reloaded.
+			predecessorsClosed = true;
+			await invoke("relay_hub_ws_close_all").catch(() => undefined);
 		}
 		const stream = new Channel<ArrayBuffer | RelayEvent>((frame) => {
 			if (generation !== this.connectionGeneration) return;

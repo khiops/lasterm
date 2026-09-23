@@ -1186,6 +1186,39 @@ export class ChannelLifecycleManager {
 
 	// ─── Reconcile ────────────────────────────────────────────────────────────
 
+	/**
+	 * Take up what a daemon says it is still holding, and say whether the agent
+	 * was one.
+	 *
+	 * Every way of reaching a host over SSH ends here, because each can land on
+	 * a daemon holding terminals: the first connection of a run, the one a pane
+	 * asks for, and the automatic one after the link drops. The last was missed
+	 * — it ran the agent on stdio and started every terminal again, fresh,
+	 * under the ids of the ones the daemon was still running (#79).
+	 *
+	 * An agent this connection started answers with nothing, and asking it
+	 * would only wait out the deadline — so it is not asked.
+	 */
+	async adoptWhatTheDaemonHolds(
+		hostId: string,
+		agent: AgentConnection & { usedRemoteDaemon?: boolean },
+	): Promise<boolean> {
+		if (agent.usedRemoteDaemon !== true) return false;
+		try {
+			this.reconcileChannelState(hostId, await agent.waitForChannelState());
+		} catch (stateErr) {
+			// Reachable, and it will not say what it holds. Most likely it wants a
+			// token: a remote running its own hub has an auth.json of its own, and
+			// this hub does not have that token.
+			console.error(
+				`[lasterm-ssh] the remote daemon did not report its terminals: ${
+					stateErr instanceof Error ? stateErr.message : String(stateErr)
+				}`,
+			);
+		}
+		return true;
+	}
+
 	reconcileChannelState(hostId: string, states: AgentChannelStateMessage[]): void {
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
 

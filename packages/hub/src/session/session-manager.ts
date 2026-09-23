@@ -42,7 +42,6 @@ import {
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
-import type { AgentConnection } from "./agent-connection.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
@@ -287,7 +286,7 @@ export class SessionManager {
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
 				ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
-				await this.adoptWhatTheDaemonHolds(hostId, sshAgent);
+				await this.lifecycle.adoptWhatTheDaemonHolds(hostId, sshAgent);
 				return true;
 			} catch {
 				// Clear the controller on failure (identity-guarded so a newer concurrent
@@ -783,7 +782,7 @@ export class SessionManager {
 							// P2: set agent + commit atomically — agent becomes visible only when
 							// the acq is simultaneously deleted (no dual-authority window).
 							this.ctx.commits.adoptAgent(spawnFence, hostId, connectedAgent);
-							await this.adoptWhatTheDaemonHolds(hostId, connectedAgent);
+							await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
 							Acq.commit(this.ctx, connectingAcq, sessionState);
 							clearContext(this.ctx, connectingAcq.id);
 							agent = connectedAgent;
@@ -1624,33 +1623,6 @@ export class SessionManager {
 		};
 	}
 
-	/**
-	 * Take up what the daemon says it is still holding.
-	 *
-	 * Both ways of reaching a host over SSH end here, because both can land on
-	 * a daemon that outlived the hub: the first connection of a run, and the
-	 * reconnection a pane asks for. Putting this on one of them only left the
-	 * other adopting nothing, and channels nobody would ever judge (#79).
-	 *
-	 * An agent this connection started answers with nothing, and asking it
-	 * would only wait out the deadline — so it is not asked.
-	 */
-	private async adoptWhatTheDaemonHolds(hostId: string, agent: AgentConnection): Promise<void> {
-		if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) return;
-		try {
-			this.lifecycle.reconcileChannelState(hostId, await agent.waitForChannelState());
-		} catch (stateErr) {
-			// Reachable, and it will not say what it holds. Most likely it wants a
-			// token: a remote running its own hub has an auth.json of its own, and
-			// this hub does not have that token.
-			console.error(
-				`[lasterm-ssh] the remote daemon did not report its terminals: ${
-					stateErr instanceof Error ? stateErr.message : String(stateErr)
-				}`,
-			);
-		}
-	}
-
 	private async reconnectForAttach(hostId: string): Promise<boolean> {
 		// Only where something may still be holding the terminal. On stdio the
 		// agent died with its connection, so dialling out would reach a machine
@@ -1938,7 +1910,16 @@ export class SessionManager {
 				} else {
 					this.ctx.trustedOnceFingerprints.set(hostKey, retryFp);
 				}
-				const retryAgent = new SshAgent(host, promptAuth, deployOpts, this.ctx.agentConfig);
+				// The same agent as the first attempt, daemon included: built without
+				// it, a host reached for the first time — which is when a key is
+				// confirmed — ran on stdio whatever its setting said.
+				const retryAgent = new SshAgent(
+					host,
+					promptAuth,
+					deployOpts,
+					this.ctx.agentConfig,
+					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
+				);
 				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);
 				console.error(
 					`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label} (retry)`,

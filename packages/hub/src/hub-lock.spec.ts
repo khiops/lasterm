@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -21,6 +22,8 @@ const tempDirs: string[] = [];
  */
 const HUB_PROCESS_TIMEOUT_MS = 60_000;
 const HUB_LISTEN_TIMEOUT_MS = 20_000;
+/** Stopping a hub that has already exited has nothing left to wait for. */
+const STOP_GRACE_MS = 5_000;
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -226,6 +229,48 @@ describe.sequential("hub startup lock", () => {
 		}
 	});
 
+	// The two tests above stop their hub in a `finally`. A hub that dies before it
+	// listens has already exited when that `finally` runs, and waiting there for an
+	// exit that already happened held the test until its timeout: all it reported
+	// was the timeout, never the startup error `waitForListening` had named.
+	it("says why the hub exited when it dies before it listens", {
+		timeout: HUB_PROCESS_TIMEOUT_MS,
+	}, async () => {
+		const stateRoot = makeStateDir();
+		const child = spawnMain({
+			...hermeticRootsEnv(stateRoot),
+			// Refused at the lock, before it binds anything.
+			LASTERM_HUB_LOCK_ADDON: path.join(stateRoot, "missing-lasterm_hub_lock.node"),
+			LASTERM_PORT: "4100",
+		});
+		const exited = once(child, "exit");
+		const stopped = (async () => {
+			try {
+				await waitForListening(path.join(stateRoot, "lasterm"), child);
+			} finally {
+				child.kill("SIGTERM");
+				await waitForExit(child);
+			}
+		})();
+		let grace: NodeJS.Timeout | undefined;
+		const stillStopping = exited.then(
+			() =>
+				new Promise<never>((_, reject) => {
+					grace = setTimeout(
+						() => reject(new Error(`still stopping the hub ${STOP_GRACE_MS} ms after it exited`)),
+						STOP_GRACE_MS,
+					);
+				}),
+		);
+		try {
+			await expect(Promise.race([stopped, stillStopping])).rejects.toThrow(
+				/^hub exited 1: [\s\S]*LASTERM_HUB_LOCK_UNAVAILABLE/,
+			);
+		} finally {
+			clearTimeout(grace);
+		}
+	});
+
 	it("fails closed when the native addon cannot be loaded", {
 		timeout: HUB_PROCESS_TIMEOUT_MS,
 	}, async () => {
@@ -419,5 +464,7 @@ function hermeticRootsEnv(root: string): NodeJS.ProcessEnv {
 }
 
 function waitForExit(child: ChildProcess): Promise<void> {
+	// A child that has exited already emitted "exit", and will not again.
+	if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
 	return new Promise((resolve) => child.once("exit", () => resolve()));
 }

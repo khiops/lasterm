@@ -5,9 +5,10 @@
  *   - scripts/package-sea-hub.ts (manifest generation, addon location, content-type)
  *   - packages/hub/src/sea-static-server.ts (in-memory manifest loading and serving)
  *   - packages/hub/src/sea-agent-resolver.ts (agent binary resolution)
+ *
+ * The built executable itself is run by sea-hub-e2e.spec.ts.
  */
 
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +17,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
+
+/**
+ * The directory cargo builds into from this repository: CARGO_TARGET_DIR when it
+ * is set, absolute or relative to the repository, else `<repo>/target`. A git
+ * worktree that shares one target directory has no `target` of its own.
+ */
+function cargoTargetDir(): string {
+	const configured = process.env.CARGO_TARGET_DIR;
+	return configured ? resolve(ROOT, configured) : join(ROOT, "target");
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Test 1: locates better-sqlite3 .node addon
@@ -81,9 +92,12 @@ describe("loadHubLockAddon", () => {
 
 	it("refuses a loadable addon that is not the hub lock", async () => {
 		const { loadHubLockAddon } = await import("./package-sea-hub.js");
+		// Mutation caught: without the export check, any loadable addon passes.
+		// The addon is looked for where cargo put it. A fixed `<repo>/target` named
+		// a file that does not exist in a worktree sharing its target directory,
+		// and the case failed on the load error instead of reaching that check.
 		const tlsIdentity = join(
-			ROOT,
-			"target",
+			cargoTargetDir(),
 			"release",
 			process.platform === "win32"
 				? "lasterm_tls_identity.dll"
@@ -91,6 +105,11 @@ describe("loadHubLockAddon", () => {
 					? "liblasterm_tls_identity.dylib"
 					: "liblasterm_tls_identity.so",
 		);
+		// A missing prerequisite is named as such, not reported as the wrong error.
+		expect(
+			existsSync(tlsIdentity),
+			`${tlsIdentity} is not built: cargo build --release -p lasterm-tls-identity`,
+		).toBe(true);
 		expect(() => loadHubLockAddon(tlsIdentity)).toThrow("no HubLock/tryAcquire export");
 	});
 });
@@ -261,49 +280,7 @@ describe("resolveContentType", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 4: hub SEA binary build integration (slow, skippable)
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("hub SEA binary build integration", () => {
-	const SEA_BINARY = join(
-		ROOT,
-		"dist",
-		"sea",
-		process.platform === "win32" ? "lasterm-hub.exe" : "lasterm-hub",
-	);
-
-	it("binary exists after build (or build produces valid CJS at minimum)", {
-		timeout: 120_000,
-	}, () => {
-		const cjsBundle = join(ROOT, "dist", "sea", "lasterm-hub.cjs");
-
-		// The CJS bundle must exist (produced by build:sea-hub).
-		// The full SEA binary requires postject; we skip if not available.
-		if (!existsSync(cjsBundle)) {
-			console.log("[test] lasterm-hub.cjs not built yet — skipping SEA binary check");
-			return;
-		}
-
-		// Verify CJS bundle is readable and non-trivial
-		const content = readFileSync(cjsBundle, "utf8");
-		expect(content.length).toBeGreaterThan(1024);
-
-		// Check for SEA binary if postject already ran
-		if (existsSync(SEA_BINARY)) {
-			// Binary exists — verify it doesn't crash with --help or --version
-			const result = spawnSync(SEA_BINARY, ["--version"], {
-				stdio: "pipe",
-				timeout: 10_000,
-			});
-			// Either succeeds (exits 0) or exits with usage error (non-zero) but doesn't SIGSEGV
-			const didNotSegfault = result.signal !== "SIGSEGV" && result.signal !== "SIGABRT";
-			expect(didNotSegfault).toBe(true);
-		}
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 5: sea-static-server loads manifest and serves files
+// Test 4: sea-static-server loads manifest and serves files
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("sea-static-server unit tests", () => {
@@ -383,7 +360,7 @@ describe("sea-static-server unit tests", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 6: sea-agent-resolver finds agent binary next to hub binary
+// Test 5: sea-agent-resolver finds agent binary next to hub binary
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("sea-agent-resolver", () => {

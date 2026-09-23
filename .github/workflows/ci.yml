@@ -55,6 +55,13 @@ jobs:
         env:
           LASTERM_SKIP_WEB: "true"
           LASTERM_BUILD_HASH: ${{ github.sha }}
+      # The one pull-request job that builds the hub executable, so the one where
+      # the spec that runs it can (#147). The test job has no executable and skips
+      # it; here LASTERM_SEA_EXPECTED turns a missing executable into a failure.
+      - name: Run the built hub (SEA specs)
+        run: pnpm exec vitest run --project scripts scripts/sea-hub-e2e.spec.ts
+        env:
+          LASTERM_SEA_EXPECTED: "1"
       - name: Place desktop sidecars
         run: |
           cp dist/sea/lasterm-agent packages/clients/desktop/src-tauri/lasterm-agent-x86_64-unknown-linux-gnu

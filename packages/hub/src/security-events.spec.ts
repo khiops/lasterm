@@ -293,6 +293,56 @@ describe("a replaced primary token is recorded", () => {
 	});
 });
 
+// ─── A revoked primary token ──────────────────────────────────────────────────
+
+describe("a primary token an earlier version revoked is reinstated, and recorded", () => {
+	// What a hub before #515 left behind after DELETE /api/auth/tokens/primary.
+	const REVOKED_AT = "2026-09-20T08:15:00.000Z";
+	function revokePrimaryAsBefore515(): void {
+		dbs.meta.prepare("UPDATE auth_tokens SET revoked_at = ? WHERE id = 'primary'").run(REVOKED_AT);
+	}
+
+	async function listTokensWith(token: string) {
+		return server.inject({
+			method: "GET",
+			url: "/api/auth/tokens",
+			headers: { authorization: `Bearer ${token}` },
+		});
+	}
+
+	it("lets the desktop back into its own hub at the next start, and says so", async () => {
+		revokePrimaryAsBefore515();
+		expect((await listTokensWith(PRIMARY_TOKEN)).statusCode).toBe(401);
+
+		await server.close();
+		server = await startServer(dbs, log);
+
+		expect((await listTokensWith(PRIMARY_TOKEN)).statusCode).toBe(200);
+		// Once: the start after that finds nothing left to undo.
+		await server.close();
+		server = await startServer(dbs, log);
+		expect(log.events("token.reinstate")).toEqual([
+			expect.objectContaining({
+				msg: "security: token reinstated",
+				tokenId: "primary",
+				revokedAt: REVOKED_AT,
+			}),
+		]);
+		expect(log.text()).not.toContain(PRIMARY_TOKEN);
+	});
+
+	it("does not pass the revocation on to the token that replaced auth.json's", async () => {
+		revokePrimaryAsBefore515();
+
+		await server.close();
+		server = await startServer(dbs, log, WRONG_TOKEN);
+
+		expect((await listTokensWith(WRONG_TOKEN)).statusCode).toBe(200);
+		expect(log.events("token.rotate")).toHaveLength(1);
+		expect(log.events("token.reinstate")).toHaveLength(1);
+	});
+});
+
 // ─── Keystrokes ───────────────────────────────────────────────────────────────
 
 describe("keystrokes leave no trace in the logs", () => {

@@ -1,5 +1,6 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { FastifyRequest } from "fastify";
+import { tokensEqual } from "./auth.js";
 
 export const ASSET_TOKEN_QUERY_PARAM = "asset_token";
 
@@ -20,9 +21,7 @@ export function buildSignedPublicAssetUrl(kind: PublicAssetKind, filename: strin
 
 export function isValidAssetToken(candidate: string | null | undefined): boolean {
 	if (!candidate) return false;
-	const expected = Buffer.from(bootAssetToken);
-	const actual = Buffer.from(candidate);
-	return actual.length === expected.length && timingSafeEqual(actual, expected);
+	return tokensEqual(candidate, bootAssetToken);
 }
 
 export function requestHasValidAssetToken(request: FastifyRequest): boolean {

@@ -256,6 +256,20 @@ describe("WebSocket authentication against the token store", () => {
 			]);
 		});
 
+		it("keeps the primary token's sockets open when asked to revoke it, which it refuses", async () => {
+			const desktop = await connect(TEST_TOKEN);
+
+			const response = await server.inject({
+				method: "DELETE",
+				url: "/api/auth/tokens/primary",
+				headers: { authorization: `Bearer ${TEST_TOKEN}` },
+			});
+
+			expect(response.statusCode).toBe(409);
+			await ping(desktop.ws, desktop.observed);
+			expect(failures()).toEqual([]);
+		});
+
 		it("records the token's use at most once a minute while frames keep arriving", async () => {
 			// Only Date is faked. vi.waitFor still moves it on by its polling
 			// interval, so the times below are bounds rather than exact instants.

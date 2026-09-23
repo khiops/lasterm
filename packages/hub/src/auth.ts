@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
 	chmodSync,
 	closeSync,
@@ -230,6 +230,12 @@ function rowToRecord(row: Record<string, unknown>): AuthTokenRecord {
  * Ensure the primary token (from auth.json) exists in the auth_tokens table.
  * Called on hub startup after the DB is opened and migrations run.
  * The primary token has no expiry (null) so it behaves like the legacy token.
+ *
+ * The row follows auth.json, which is where the primary token is retired
+ * (SECURITY.md § 2.1), so it is never left revoked. `revokeToken` refuses it,
+ * and a revocation an earlier version recorded is cleared here (#515). Kept, it
+ * refused the desktop its own hub on every start, and replacing auth.json did
+ * not lift it: the new token took over the revoked row.
  */
 export function upsertPrimaryToken(db: Database.Database, plaintextToken: string): void {
 	const hash = hashToken(plaintextToken);
@@ -237,7 +243,7 @@ export function upsertPrimaryToken(db: Database.Database, plaintextToken: string
 	db.prepare(
 		`INSERT INTO auth_tokens (id, token_hash, label, created_at, expires_at, revoked_at, last_used_at)
 		 VALUES (?, ?, 'Primary', ?, NULL, NULL, NULL)
-		 ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash`,
+		 ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, revoked_at = NULL`,
 	).run(PRIMARY_TOKEN_ID, hash, now);
 }
 
@@ -314,12 +320,19 @@ export function listTokens(db: Database.Database): AuthTokenRecord[] {
 /**
  * Revoke a token by ID.
  * Returns true if a token was found and revoked, false if not found or already revoked.
+ *
+ * The primary token is never revoked, and gets false like an unknown id; the
+ * route says why before it asks (#515). The desktop authenticates with it, so a
+ * revoked primary row locked the desktop out of its own hub. It is retired by
+ * replacing auth.json instead (SECURITY.md § 2.1).
  */
 export function revokeToken(db: Database.Database, id: string): boolean {
 	const now = new Date().toISOString();
 	const result = db
-		.prepare("UPDATE auth_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-		.run(now, id);
+		.prepare(
+			"UPDATE auth_tokens SET revoked_at = ? WHERE id = ? AND id <> ? AND revoked_at IS NULL",
+		)
+		.run(now, id, PRIMARY_TOKEN_ID);
 	return result.changes > 0;
 }
 
@@ -442,9 +455,23 @@ export function reportTokenStore(
 }
 
 /**
- * Constant-time token comparison using crypto.timingSafeEqual.
- * Returns false immediately if lengths differ (avoids timingSafeEqual crash).
+ * Whether a token someone presented is the one expected, compared in constant
+ * time with `crypto.timingSafeEqual` (CLAUDE.md). A plain `===` stops at the
+ * first character that differs, so the time it takes tells a guesser how much
+ * of the token was right (#514).
  *
- * @deprecated Use validateTokenRecord for DB-backed validation with expiry/revocation.
- *   This function is kept for backward-compatibility with tests that don't use a DB.
+ * Every token the hub holds in memory is compared here: the primary token on
+ * the agent routes, the owner token of a shutdown or quit, the asset token of a
+ * public URL. A credential the store checks is looked up by its hash instead,
+ * which a guess cannot steer.
+ *
+ * Only a difference in length answers sooner, and each of those tokens has a
+ * length its format already makes public. The lengths compared are in bytes, not
+ * characters: `timingSafeEqual` throws on buffers of different sizes, and a
+ * multibyte guess of the right character count would make them differ.
  */
+export function tokensEqual(provided: string, expected: string): boolean {
+	const actual = Buffer.from(provided);
+	const wanted = Buffer.from(expected);
+	return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}

@@ -12,6 +12,7 @@ import {
 	reportTokenStore,
 	type TokenStoreLog,
 	type TokenValidation,
+	tokensEqual,
 	touchToken,
 	validateTokenRecord,
 } from "../auth.js";
@@ -857,7 +858,13 @@ function checkAgentBearer(
 		}
 		storeUnavailable = validation.status === "unavailable";
 	}
-	if (deps.authToken !== undefined && deps.authToken !== null && token === deps.authToken) {
+	// In constant time, like every token held in memory: a plain === answers
+	// sooner the earlier a guess goes wrong (#514).
+	if (
+		deps.authToken !== undefined &&
+		deps.authToken !== null &&
+		tokensEqual(token, deps.authToken)
+	) {
 		return "valid";
 	}
 	return storeUnavailable ? "unavailable" : "invalid";

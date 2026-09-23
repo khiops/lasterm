@@ -92,7 +92,18 @@
 - WSS: First message must be `AUTH { token }`. Connection closed if invalid. The token is checked
   again before each later frame is acted on, and the socket is closed once the token no longer
   validates. Revoking a token closes the sockets it opened at once (PROTOCOL.md § 4.1).
-- Token comparison: constant-time (crypto.timingSafeEqual)
+- Token comparison: constant-time (crypto.timingSafeEqual). A token the hub holds in memory — the
+  primary token on the agent routes, the owner token of a shutdown or quit, the asset token of a
+  public URL — is compared through `tokensEqual` in `auth.ts`. A credential the store checks is
+  looked up by its SHA-256 hash, which a guess cannot steer. A spec refuses a plain `===` against a
+  token anywhere in the hub's sources (#514).
+
+**Token revocation:** `DELETE /api/auth/tokens/:id` revokes a paired token, and closes the sockets it
+opened. The primary token cannot be revoked: the request answers `409 PRIMARY_TOKEN_NOT_REVOCABLE`.
+The desktop authenticates with it, so a revoked primary token locked the desktop out of its own hub,
+and a restart did not undo it (#515). It is retired by replacing `auth.json`, below. A revocation of
+the primary token that a version before this rule recorded is cleared at the next start, which
+records it as `token.reinstate` (§ 7.1).
 
 **Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
 clients to re-authenticate. Replacing it today means stopping the hub, removing `auth.json`, and
@@ -447,6 +458,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 | SSH disconnect | `ssh.disconnect` | `hostId`, `reason` (`closed_by_hub`; `connection_lost`, ended by the network, the server or the remote agent) | That connection ends |
 | Write-lock force | `write_lock.force` | `channelId`, `byClientId`, `fromClientId` | A force takes the lock from another client. Forcing a free lock, or one already held, takes nothing and is not recorded |
 | Token rotated | `token.rotate` | `tokenId` (`primary`) | The hub starts with a token in `auth.json` other than the one it last recorded: the replacement of § 2.1, or a substitution nobody asked for |
+| Token reinstated | `token.reinstate` | `tokenId` (`primary`), `revokedAt` (when it had been revoked) | The hub starts, finds the primary token revoked, and clears the revocation (§ 2.1). Nothing in the hub revokes it any more: the revocation was left by a version before #515, which accepted `DELETE /api/auth/tokens/primary`, or by a hand edit of `meta.db` |
 
 Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INFO on a WebSocket
 acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,

@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import type { Server as HttpsServer } from "node:https";
 import * as path from "node:path";
 import cors from "@fastify/cors";
@@ -28,6 +27,7 @@ import {
 	listTokens,
 	PRIMARY_TOKEN_ID,
 	reportTokenStore,
+	tokensEqual,
 	touchToken,
 	upsertPrimaryToken,
 	validateTokenRecord,
@@ -296,6 +296,15 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			upsertPrimaryToken(db, primaryToken);
 			if (previous && previous.tokenHash !== hashToken(primaryToken)) {
 				server.security.tokenRotated({ tokenId: PRIMARY_TOKEN_ID });
+			}
+			// Nothing revokes the primary row any more, so a revoked one was left by a
+			// version before #515 or a hand edit, and the upsert has just cleared it.
+			// Undoing a revocation is recorded, never silent.
+			if (previous?.revokedAt) {
+				server.security.tokenReinstated({
+					tokenId: PRIMARY_TOKEN_ID,
+					revokedAt: previous.revokedAt,
+				});
 			}
 		}
 
@@ -656,10 +665,7 @@ function hasValidShutdownOwnerToken(
 ): boolean {
 	const candidate = getHeaderValue(request.headers["x-lasterm-owner"]);
 	if (ownerToken === undefined || candidate === undefined) return false;
-
-	const expected = Buffer.from(ownerToken);
-	const actual = Buffer.from(candidate);
-	return actual.length === expected.length && timingSafeEqual(actual, expected);
+	return tokensEqual(candidate, ownerToken);
 }
 
 function sendOwnerTokenRequired(reply: FastifyReply): FastifyReply {

@@ -309,6 +309,29 @@ describe("upsertPrimaryToken", () => {
 			.get(PRIMARY_TOKEN_ID) as { token_hash: string };
 		expect(row.token_hash).toBe(hashToken(token2));
 	});
+
+	// A hub before #515 let DELETE /api/auth/tokens/primary through, and nothing
+	// undid it: every later start kept refusing the desktop.
+	it.each([
+		["the same token", false],
+		["a token that replaced auth.json's", true],
+	])("clears a revocation an earlier version recorded, for %s", (_case, replaced) => {
+		const db = makeDb();
+		const token = randomBytes(32).toString("hex");
+		upsertPrimaryToken(db, token);
+		db.prepare("UPDATE auth_tokens SET revoked_at = ? WHERE id = ?").run(
+			"2026-09-20T08:15:00.000Z",
+			PRIMARY_TOKEN_ID,
+		);
+		const next = replaced ? randomBytes(32).toString("hex") : token;
+
+		upsertPrimaryToken(db, next);
+
+		expect(validateTokenRecord(db, next)).toEqual({
+			status: "valid",
+			record: expect.objectContaining({ id: PRIMARY_TOKEN_ID, revokedAt: null }),
+		});
+	});
 });
 
 describe("createToken", () => {
@@ -605,6 +628,15 @@ describe("revokeToken", () => {
 	it("returns false for unknown ID", () => {
 		const db = makeDb();
 		expect(revokeToken(db, "nonexistent")).toBe(false);
+	});
+
+	it("never revokes the primary token, which the desktop authenticates with", () => {
+		const db = makeDb();
+		const token = randomBytes(32).toString("hex");
+		upsertPrimaryToken(db, token);
+
+		expect(revokeToken(db, PRIMARY_TOKEN_ID)).toBe(false);
+		expect(validateTokenRecord(db, token).status).toBe("valid");
 	});
 
 	it("sets revoked_at timestamp", () => {

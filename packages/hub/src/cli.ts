@@ -328,7 +328,53 @@ type HubRequestInit = {
 	headers?: Record<string, string>;
 	body?: string;
 	signal?: AbortSignal;
+	/** Replaces HUB_RESPONSE_TIMEOUT_MS for a request whose hub may take longer to answer. */
+	responseTimeoutMs?: number;
 };
+
+/**
+ * How long a hub that has proved the recorded key has to answer a request in
+ * full. The TLS handshake has its own bound; once it completed, nothing ended a
+ * request whose answer never came, so a hub with a wedged event loop or a stuck
+ * route kept `status` waiting forever (#516). Ten seconds is past SQLite's
+ * five-second busy timeout, so a route waiting on a lock still answers, with an
+ * error if need be, before the CLI gives up on it.
+ */
+export const HUB_RESPONSE_TIMEOUT_MS = 10_000;
+
+/** A hub proved the recorded key, then did not answer within its response bound. */
+export const HUB_RESPONSE_TIMEOUT_CODE = "ERR_HUB_RESPONSE_TIMEOUT";
+
+/** Failures that happened before any byte of their request was written. */
+const unsentHubRequests = new WeakSet<object>();
+
+/**
+ * Whether a failed `requestHub` call failed before its request was written: the
+ * record was unusable, or the connection was refused, never proved the recorded
+ * key, or never finished TLS. Such a request cannot have reached a hub, so
+ * nothing it asked for was done. A failure after that point proves nothing
+ * either way.
+ */
+export function isUnsentHubRequest(error: unknown): boolean {
+	return typeof error === "object" && error !== null && unsentHubRequests.has(error);
+}
+
+function unsent(error: unknown): Error {
+	const failure = error instanceof Error ? error : new Error(String(error));
+	unsentHubRequests.add(failure);
+	return failure;
+}
+
+function unansweredHubRequest(method: string, path: string, timeoutMs: number): Error {
+	// A request that changes something may have done so before the hub stalled.
+	const effect = method === "GET" || method === "HEAD" ? "" : "; whether it took effect is unknown";
+	return Object.assign(
+		new Error(
+			`Hub accepted the connection but did not answer ${method} ${path} within ${timeoutMs}ms${effect}`,
+		),
+		{ code: HUB_RESPONSE_TIMEOUT_CODE },
+	);
+}
 
 function hubUrl(runtime: RuntimeInfo, path: string): URL {
 	// A port the record cannot mean is the record's fault, like a missing key.
@@ -339,19 +385,46 @@ function hubUrl(runtime: RuntimeInfo, path: string): URL {
 	return new URL(path, `https://127.0.0.1:${runtime.port}`);
 }
 
-/** The sole local-hub transport. Credentials are added only after TLS pinning. */
+/**
+ * The sole local-hub transport. Credentials are added only after TLS pinning.
+ * Every request is bounded: the handshake by the connector, and the answer by
+ * `responseTimeoutMs`, counted from the moment the peer proved the recorded key.
+ */
 export async function requestHub(
 	runtime: RuntimeInfo,
 	path: string,
 	init: HubRequestInit = {},
 ): Promise<Response> {
-	const agent = createHubTlsAgent(runtime);
-	const url = hubUrl(runtime, path);
+	const method = init.method ?? "GET";
+	const responseTimeoutMs = init.responseTimeoutMs ?? HUB_RESPONSE_TIMEOUT_MS;
+	if (!Number.isSafeInteger(responseTimeoutMs) || responseTimeoutMs < 1) {
+		throw new Error("Hub response timeout must be a positive integer");
+	}
+	let agent: ReturnType<typeof createHubTlsAgent>;
+	let url: URL;
+	try {
+		agent = createHubTlsAgent(runtime);
+		url = hubUrl(runtime, path);
+	} catch (error) {
+		throw unsent(error);
+	}
 	return new Promise<Response>((resolve, reject) => {
+		// The connector hands the socket over only once the peer has proved the
+		// recorded key, and the request is written from then on. Before that,
+		// nothing has reached the hub; after it, the hub owes an answer.
+		let carried = false;
+		let settled = false;
+		let answerTimer: NodeJS.Timeout | undefined;
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(answerTimer);
+			reject(carried ? error : unsent(error));
+		};
 		const request = httpsRequest(
 			url,
 			{
-				method: init.method ?? "GET",
+				method,
 				headers: init.headers,
 				agent,
 				signal: init.signal,
@@ -359,13 +432,16 @@ export async function requestHub(
 			(response) => {
 				const chunks: Buffer[] = [];
 				response.on("data", (chunk: Buffer) => chunks.push(chunk));
-				response.on("error", reject);
+				response.on("error", fail);
 				response.on("end", () => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(answerTimer);
 					const status = response.statusCode ?? 500;
 					// Fetch requires a null body for these statuses and for HEAD,
 					// even when Node gave us an empty Buffer.
 					const responseBody =
-						init.method === "HEAD" || status === 204 || status === 205 || status === 304
+						method === "HEAD" || status === 204 || status === 205 || status === 304
 							? null
 							: Buffer.concat(chunks);
 					resolve(
@@ -377,7 +453,17 @@ export async function requestHub(
 				});
 			},
 		);
-		request.on("error", reject);
+		request.once("socket", () => {
+			carried = true;
+			// A whole answer is due, not merely a first byte: a hub that sends its
+			// headers and then stalls is no more an answer than one that sends nothing.
+			answerTimer = setTimeout(() => {
+				const error = unansweredHubRequest(method, path, responseTimeoutMs);
+				fail(error);
+				request.destroy(error);
+			}, responseTimeoutMs);
+		});
+		request.on("error", fail);
 		request.end(init.body);
 	});
 }
@@ -1050,6 +1136,9 @@ export async function cmdQuit(
 				method: "POST",
 				headers: { "X-Lasterm-Owner": runtime.ownerToken as string },
 				signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
+				// The answer comes after the stopper, which may take longer than an
+				// ordinary request; this keeps the bound quit already had.
+				responseTimeoutMs: HUB_QUIT_OBSERVE_TIMEOUT_MS,
 			};
 			const res = options.fetch
 				? await options.fetch(hubUrl(runtime, `/api/quit${query}`), init)
@@ -1083,6 +1172,25 @@ export async function cmdQuit(
 		if (answer.status === 409) {
 			throw new Error(answer.body.message ?? "Quit was refused again; nothing was stopped");
 		}
+	}
+	// Only a quit the hub may have begun is worth watching for. A request that
+	// was never written, or one the hub declined before acting on it, started no
+	// teardown: waiting for one would spend the whole bound and then report,
+	// truthfully but uselessly, that it was not confirmed (#513).
+	if (answer.transportError !== undefined && isUnsentHubRequest(answer.transportError)) {
+		throw new Error(
+			`Quit request was not sent (${describeError(answer.transportError)}); the hub did not receive it, so nothing was stopped`,
+		);
+	}
+	// Every 4xx the hub gives /api/quit comes before its stopper runs: 401 and 403
+	// from the owner and loopback checks, 404 from a hub without the route, and
+	// 409, handled above. A 503 is the stopper's own result, after which the hub
+	// tears down, so it is observed below like a success.
+	if (answer.status !== null && answer.status >= 400 && answer.status < 500) {
+		const reason = typeof answer.body.message === "string" ? ` (${answer.body.message})` : "";
+		throw new Error(
+			`Quit was refused with HTTP ${answer.status}${reason}; the hub did not begin to stop, so nothing was stopped`,
+		);
 	}
 	if (answer.transportError !== undefined) {
 		writeError(
@@ -1246,9 +1354,11 @@ export type HubRefusal = "pin" | "tls" | "config";
 export type HubProbe =
 	| { readonly kind: "answered"; readonly health: unknown }
 	| { readonly kind: "not-ready"; readonly error: string }
+	/** Proved the recorded key, then gave no answer within the response bound. */
+	| { readonly kind: "not-answering"; readonly error: string }
 	| { readonly kind: "refused"; readonly refusal: HubRefusal; readonly error: string };
 
-/** Sort a failed hub request into "ask again" and a named refusal. */
+/** Sort a failed hub request into "ask again", "did not answer" and a named refusal. */
 export function classifyHubFailure(error: unknown): Exclude<HubProbe, { kind: "answered" }> {
 	const message = error instanceof Error ? error.message : String(error);
 	const code =
@@ -1258,6 +1368,7 @@ export function classifyHubFailure(error: unknown): Exclude<HubProbe, { kind: "a
 	if (code === HUB_RUNTIME_UNUSABLE_CODE) {
 		return { kind: "refused", refusal: "config", error: message };
 	}
+	if (code === HUB_RESPONSE_TIMEOUT_CODE) return { kind: "not-answering", error: message };
 	if (typeof code === "string" && TRANSIENT_HUB_CONNECTION_CODES.has(code)) {
 		return { kind: "not-ready", error: message };
 	}
@@ -1289,7 +1400,9 @@ const HUB_REFUSAL_LABELS: Record<HubRefusal, string> = {
 /**
  * Report the hub runtime.json names. The exit code is 1 when the hub was
  * refused, so a script cannot read a peer holding another key as a running
- * hub; a hub that is not answering yet exits 0 and says it may be retried.
+ * hub, and when it proved its key but did not answer, so a script cannot read
+ * a wedged hub as a working one. A hub that is not accepting connections yet
+ * exits 0 and says it may be retried.
  */
 export async function cmdStatus(
 	args: ParsedArgs,
@@ -1353,6 +1466,23 @@ export async function cmdStatus(
 					}),
 				);
 				break;
+			case "not-answering":
+				// The peer proved the recorded key, so this is the hub the record
+				// names; but a hub that takes a request and never answers it is not
+				// one a script can use, and whether it is running in any useful sense
+				// cannot be said. It may yet recover, so asking again is not futile.
+				console.log(
+					JSON.stringify({
+						running: "unknown",
+						ready: false,
+						retryable: true,
+						answering: false,
+						...record,
+						health: null,
+						error: probe.error,
+					}),
+				);
+				break;
 			case "refused":
 				// Whatever answered did not prove it is the hub the record names, so
 				// whether that hub runs cannot be said from here.
@@ -1369,7 +1499,7 @@ export async function cmdStatus(
 				);
 				break;
 		}
-		return probe.kind === "refused" ? 1 : 0;
+		return statusExitCode(probe);
 	}
 
 	switch (probe.kind) {
@@ -1379,6 +1509,11 @@ export async function cmdStatus(
 		case "not-ready":
 			console.log(
 				`Hub: not ready (pid ${runtime.pid} is alive; port ${runtime.port} is not answering yet, retry shortly)`,
+			);
+			break;
+		case "not-answering":
+			console.log(
+				`Hub: not answering (pid ${runtime.pid} accepted the connection on port ${runtime.port}, then did not answer)`,
 			);
 			break;
 		case "refused":
@@ -1398,7 +1533,12 @@ export async function cmdStatus(
 	} else {
 		console.log(`  Error      : ${probe.error}`);
 	}
-	return probe.kind === "refused" ? 1 : 0;
+	return statusExitCode(probe);
+}
+
+/** A hub a script cannot use exits 1; one that is merely not up yet exits 0. */
+function statusExitCode(probe: HubProbe): number {
+	return probe.kind === "refused" || probe.kind === "not-answering" ? 1 : 0;
 }
 
 async function cmdHostAdd(args: ParsedArgs): Promise<void> {

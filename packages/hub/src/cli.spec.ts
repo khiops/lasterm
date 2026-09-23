@@ -13,7 +13,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { createServer as createHttpsServer } from "node:https";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -30,17 +30,26 @@ import {
 	ensureStateDir,
 	getConfigDir,
 	getStateDir,
+	HUB_RESPONSE_TIMEOUT_CODE,
+	HUB_RESPONSE_TIMEOUT_MS,
 	isPidAlive,
+	isUnsentHubRequest,
 	loadRuntime,
+	main,
 	type ParsedArgs,
 	parseArgs,
 	persistRuntime,
 	type RuntimeInfo,
+	requestHub,
 	runtimeMatches,
 	waitForHubQuit,
 } from "./cli.js";
 import { expectPosixMode } from "./file-mode.fixture.js";
-import { HUB_TLS_HANDSHAKE_TIMEOUT_CODE } from "./hub-transport.js";
+import {
+	HUB_RUNTIME_UNUSABLE_CODE,
+	HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
+	HUB_TLS_PIN_MISMATCH_CODE,
+} from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { describePreviousInstallation } from "./previous-installation.js";
 import {
@@ -1221,6 +1230,73 @@ describe("runtime state", () => {
 		).rejects.toThrow("Agent stop timed out after 5000ms. The hub was confirmed gone");
 	});
 
+	// Mutation: observe after every answer but a conflict, as quit did, and a hub
+	// that declined the quit before acting on it costs fifteen seconds of watching
+	// for a teardown nobody started, followed by a report about that teardown
+	// instead of the hub's refusal.
+	it.each([
+		[401, { error: "OWNER_TOKEN_REQUIRED", message: "Valid X-Lasterm-Owner header required" }],
+		[
+			403,
+			{ error: "LOOPBACK_REQUIRED", message: "Shutdown is only accepted from loopback clients" },
+		],
+		// What Fastify answers for a hub that has no quit route.
+		[404, { message: "Route POST:/api/quit not found", error: "Not Found", statusCode: 404 }],
+	])(
+		"does not wait for a teardown after the hub declines the quit with HTTP %i",
+		async (status, body) => {
+			const observed: string[] = [];
+			const errors: string[] = [];
+			const failure = await cmdQuit({
+				loadRuntime: quitTarget,
+				isPidAlive: () => true,
+				fetch: (async () => new Response(JSON.stringify(body), { status })) as typeof fetch,
+				waitForHubQuit: async () => {
+					observed.push("waited");
+				},
+				writeError: (message) => errors.push(message),
+			}).catch((error: unknown) => error);
+
+			expect(observed).toEqual([]);
+			expect(errors).toEqual([]);
+			expect(failure).toBeInstanceOf(Error);
+			expect((failure as Error).message).toBe(
+				`Quit was refused with HTTP ${status} (${body.message}); the hub did not begin to stop, so nothing was stopped`,
+			);
+		},
+	);
+
+	// Mutation: observe after a connection that was refused, as quit did, and it
+	// spends fifteen seconds watching a hub its request never reached, then says
+	// the hub was "confirmed gone" or "not confirmed" when it was never asked.
+	it("does not wait for a teardown when the quit never reached the hub", async () => {
+		const observed: string[] = [];
+		const errors: string[] = [];
+		const port = await getUnusedPort();
+		const failure = await cmdQuit({
+			loadRuntime: () => ({
+				kind: "present",
+				runtime: runtimeRecord({
+					instanceId: "target",
+					port,
+					spki: getTestTlsMaterial().pinned.spki,
+				}),
+			}),
+			isPidAlive: () => true,
+			waitForHubQuit: async () => {
+				observed.push("waited");
+			},
+			writeError: (message) => errors.push(message),
+		}).catch((error: unknown) => error);
+
+		expect(observed).toEqual([]);
+		expect(errors).toEqual([]);
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toMatch(
+			/^Quit request was not sent \(.*ECONNREFUSED.*\); the hub did not receive it, so nothing was stopped$/,
+		);
+	});
+
 	it("reports only the hub when the agent stopped but the hub did not go", async () => {
 		const output: string[] = [];
 		const log = vi.spyOn(console, "log").mockImplementation((line: string) => output.push(line));
@@ -1635,6 +1711,235 @@ describe("cmdStatus against the hub a runtime record names", () => {
 			kind: "refused",
 			refusal: "tls",
 		});
+	});
+});
+
+describe("a hub that proves its key and never answers", () => {
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		vi.useRealTimers();
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/**
+	 * A TLS peer holding the pinned key that takes every request and answers none,
+	 * or sends the headers and one byte of body when `headersOnly` is set.
+	 * `firstRequest` settles when a request has arrived: by then the client has
+	 * its pinned socket, so its answer bound is running.
+	 */
+	async function listenSilentHub(options: { headersOnly?: boolean } = {}) {
+		const tls = getTestTlsMaterial();
+		let requestArrived: () => void = () => {};
+		const firstRequest = new Promise<void>((resolve) => {
+			requestArrived = resolve;
+		});
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(_, response) => {
+				if (options.headersOnly) {
+					response.writeHead(200, { "content-type": "application/json" });
+					response.write("{");
+				}
+				requestArrived();
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-08-03T00:00:00.000Z",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, firstRequest };
+	}
+
+	/** Whether `promise` has settled once the I/O and microtasks already queued have run. */
+	async function settlesPromptly(promise: Promise<unknown>): Promise<boolean> {
+		let settled = false;
+		promise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		for (let turn = 0; turn < 20 && !settled; turn++) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+		return settled;
+	}
+
+	// Mutation: drop the answer bound, or its default, and `status` waits on this
+	// hub for as long as it stays up: it neither reports nor exits.
+	it("gives status the response bound, then calls the hub not answering and exits 1", async () => {
+		const hub = await listenSilentHub();
+		const output: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const pending = cmdStatus(parsed(["status", "--json"]), {
+				loadRuntime: () => ({ kind: "present", runtime: hub.runtime }),
+				isPidAlive: () => true,
+			});
+			await hub.firstRequest;
+			vi.advanceTimersByTime(HUB_RESPONSE_TIMEOUT_MS - 1);
+			expect(await settlesPromptly(pending)).toBe(false);
+			vi.advanceTimersByTime(1);
+			expect(await settlesPromptly(pending)).toBe(true);
+			expect(await pending).toBe(1);
+		} finally {
+			log.mockRestore();
+		}
+
+		expect(output).toHaveLength(1);
+		expect(JSON.parse(output[0] ?? "")).toMatchObject({
+			running: "unknown",
+			ready: false,
+			retryable: true,
+			answering: false,
+			port: hub.runtime.port,
+			health: null,
+			error: `Hub accepted the connection but did not answer GET /api/health within ${HUB_RESPONSE_TIMEOUT_MS}ms`,
+		});
+	});
+
+	// Mutation: sort a response timeout with the transient failures, and a wedged
+	// hub reads as one that is starting: "retry shortly", exit 0.
+	it("says in words that the hub took the connection and did not answer", async () => {
+		const hub = await listenSilentHub();
+		const output: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		let code: number;
+		try {
+			code = await cmdStatus(parsed(["status"]), {
+				loadRuntime: () => ({ kind: "present", runtime: hub.runtime }),
+				isPidAlive: () => true,
+				requestHub: (runtime, path, init) =>
+					requestHub(runtime, path, { ...init, responseTimeoutMs: 20 }),
+			});
+		} finally {
+			log.mockRestore();
+		}
+
+		expect(code).toBe(1);
+		expect(output).toEqual([
+			`Hub: not answering (pid ${process.pid} accepted the connection on port ${hub.runtime.port}, then did not answer)`,
+			`  PID        : ${process.pid}`,
+			`  Port       : ${hub.runtime.port}`,
+			"  Started at : 2026-08-03T00:00:00.000Z",
+			"  Error      : Hub accepted the connection but did not answer GET /api/health within 20ms",
+		]);
+	});
+
+	// Mutation: stop the bound once the headers arrive, and a hub that sends them
+	// and then stalls leaves its caller reading the body for ever.
+	it("bounds the whole answer, not only its first byte", { timeout: 5_000 }, async () => {
+		const hub = await listenSilentHub({ headersOnly: true });
+
+		const failure = await requestHub(hub.runtime, "/api/health", {
+			responseTimeoutMs: 20,
+		}).catch((error: unknown) => error);
+
+		expect(failure).toMatchObject({
+			code: HUB_RESPONSE_TIMEOUT_CODE,
+			message: "Hub accepted the connection but did not answer GET /api/health within 20ms",
+		});
+	});
+
+	// Mutation: mark every failure unsent, or none, and quit either walks away
+	// from a hub that took its request or watches one that never got it.
+	it("marks a request unsent only when it failed before it was written", async () => {
+		const tls = getTestTlsMaterial();
+		const at = (port: number, spki: string): RuntimeInfo => ({
+			pid: process.pid,
+			port,
+			started_at: "2026-08-03T00:00:00.000Z",
+			spki,
+		});
+		const post = (runtime: RuntimeInfo) =>
+			requestHub(runtime, "/api/quit", { method: "POST", responseTimeoutMs: 20 }).catch(
+				(error: unknown) => error,
+			);
+
+		const impostor = createHttpsServer({ cert: tls.other.cert, key: tls.other.key }, () => {});
+		servers.push(impostor);
+		await new Promise<void>((resolve) => impostor.listen(0, "127.0.0.1", resolve));
+		const impostorPort = (impostor.address() as net.AddressInfo).port;
+
+		const neverWritten = [
+			await post(at(await getUnusedPort(), tls.pinned.spki)),
+			await post(at(impostorPort, tls.pinned.spki)),
+			await post(at(await getUnusedPort(), "not a key")),
+		];
+		expect(neverWritten).toMatchObject([
+			{ code: "ECONNREFUSED" },
+			{ code: HUB_TLS_PIN_MISMATCH_CODE },
+			{ code: HUB_RUNTIME_UNUSABLE_CODE },
+		]);
+		for (const failure of neverWritten) expect(isUnsentHubRequest(failure)).toBe(true);
+
+		const hub = await listenSilentHub();
+		const unanswered = await post(hub.runtime);
+		expect(unanswered).toMatchObject({
+			code: HUB_RESPONSE_TIMEOUT_CODE,
+			message:
+				"Hub accepted the connection but did not answer POST /api/quit within 20ms; whether it took effect is unknown",
+		});
+		expect(isUnsentHubRequest(unanswered)).toBe(false);
+	});
+
+	// Mutation: leave the default off requestHub, and every command that goes
+	// through the hub's API (host, session, pair) waits on a silent hub for ever.
+	it("bounds the API commands too, and says a change may have been made", async () => {
+		const hub = await listenSilentHub();
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const errors: string[] = [];
+		const exits: unknown[] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(hub.runtime);
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const pending = main(["pair"]);
+			await hub.firstRequest;
+			vi.advanceTimersByTime(HUB_RESPONSE_TIMEOUT_MS);
+			expect(await settlesPromptly(pending)).toBe(true);
+		} finally {
+			error.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+
+		expect(errors).toEqual([
+			`Error: Hub accepted the connection but did not answer POST /api/pair within ${HUB_RESPONSE_TIMEOUT_MS}ms; whether it took effect is unknown`,
+		]);
+		expect(exits).toEqual([1]);
 	});
 });
 

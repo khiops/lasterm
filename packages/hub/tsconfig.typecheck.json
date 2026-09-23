@@ -2,12 +2,10 @@
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
 		"noEmit": true,
-		"types": ["node"],
-		"paths": {
-			"fastify": ["./node_modules/fastify/fastify.d.ts"]
-		}
+		"types": ["node"]
 	},
-	// Every spec is checked, so a new one is too (#214).
-	"include": ["src/**/*.spec.ts", "src/**/*.fixture.ts", "src/**/*.setup.ts", "../../scripts/**/*"],
+	// Every spec is checked, so a new one is too (#214). The repository's
+	// scripts have their own config, scripts/tsconfig.json (#531).
+	"include": ["src/**/*.spec.ts", "src/**/*.fixture.ts", "src/**/*.setup.ts"],
 	"exclude": ["node_modules", "dist"]
 }

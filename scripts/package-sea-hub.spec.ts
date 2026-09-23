@@ -338,11 +338,12 @@ describe("sea-static-server unit tests", () => {
 	it("registerSeaStaticServing returns false when not in SEA mode", async () => {
 		const { registerSeaStaticServing } = await import("../packages/hub/src/sea-static-server.js");
 
-		// Create a minimal Fastify mock
+		// Create a minimal Fastify mock. Its type is the parameter's: fastify is
+		// the hub's dependency, and cannot be resolved from scripts/ (#531).
 		const mockApp = {
 			log: { warn: vi.fn(), info: vi.fn() },
 			get: vi.fn(),
-		} as unknown as import("fastify").FastifyInstance;
+		} as unknown as Parameters<typeof registerSeaStaticServing>[0];
 
 		const result = await registerSeaStaticServing(mockApp);
 		expect(result).toBe(false);

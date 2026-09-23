@@ -555,8 +555,12 @@ export interface AgentSyncedMessage {
  */
 export interface ConfigChangedMessage {
 	type: "CONFIG_CHANGED";
-	/** `ui` for the behaviour sections; the others are terminal-profile layers. */
-	scope: "ui" | "global" | "host" | "channel";
+	/**
+	 * `ui` for the behaviour sections, `appearance` for the theme in use and its
+	 * colours; the others are terminal-profile layers, the window background
+	 * among them.
+	 */
+	scope: "ui" | "appearance" | "global" | "host" | "channel";
 	hostId?: string;
 	channelId?: string;
 }

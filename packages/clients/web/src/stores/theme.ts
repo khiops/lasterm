@@ -299,6 +299,30 @@ export const useThemeStore = defineStore("theme", () => {
 		window.dispatchEvent(new CustomEvent("nt:scrollbar-changed"));
 	}
 
+	/**
+	 * Read the themes and the appearance again, and show them: the saved theme
+	 * unless the auto-switch picks one, the opacities, the scrollbar.
+	 *
+	 * The steps a start takes, in one place: a start runs them, and so does a
+	 * change announced from another window, which then lands as a restart would
+	 * show it. Under the auto-switch the theme is left to it — it re-applies its
+	 * pick from the list just read, which is how a theme edited elsewhere shows
+	 * its new colours.
+	 */
+	async function reloadAppearance(): Promise<void> {
+		await loadThemes();
+		await loadAppearance();
+		if (!appearance.value.autoSwitch.enabled) {
+			const saved = availableThemes.value.find((t) => t.name === appearance.value.theme);
+			if (saved) {
+				currentTheme.value = saved;
+				applyTheme(saved);
+			}
+		}
+		applyOpacity(appearance.value.opacity);
+		applyScrollbar(appearance.value.scrollbar);
+	}
+
 	/** Update appearance setting and persist via API. */
 	async function updateAppearance(partial: Partial<AppearanceConfig>): Promise<void> {
 		// Apply optimistic update locally
@@ -341,6 +365,7 @@ export const useThemeStore = defineStore("theme", () => {
 		appearance,
 		loadThemes,
 		loadAppearance,
+		reloadAppearance,
 		applyTheme,
 		applyOpacity,
 		applyScrollbar,

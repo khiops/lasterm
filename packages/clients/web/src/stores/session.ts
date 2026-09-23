@@ -13,6 +13,7 @@ import { useConfigStore } from "./config.js";
 import { useHostVerifyStore } from "./host-verify.js";
 import { useHostsStore } from "./hosts.js";
 import { useNotificationStore } from "./notifications.js";
+import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
 import { useWriteLockStore } from "./writelock.js";
 
@@ -304,6 +305,10 @@ export const useSessionStore = defineStore("session", () => {
 			if (msg.type !== "CONFIG_CHANGED") return;
 			if (msg.scope === "ui") {
 				void configStore.loadUiConfig();
+				return;
+			}
+			if (msg.scope === "appearance") {
+				void useThemeStore().reloadAppearance();
 				return;
 			}
 			if (msg.scope === "global") void configStore.loadProfile();

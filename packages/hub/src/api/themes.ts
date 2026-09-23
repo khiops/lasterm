@@ -1,10 +1,19 @@
-import type { LastermTheme } from "@lasterm/shared";
+import type { ConfigChangedMessage, LastermTheme } from "@lasterm/shared";
 import { THEME_NAME_REGEX } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { ThemeManager } from "../theme-manager.js";
 import { ThemeError } from "../theme-manager.js";
 
-export function registerThemeRoutes(server: FastifyInstance, themeManager: ThemeManager): void {
+/**
+ * @param announce Tells every client the themes changed: a theme edited or
+ * removed in one window is the theme another may be showing.
+ */
+export function registerThemeRoutes(
+	server: FastifyInstance,
+	themeManager: ThemeManager,
+	announce?: (msg: ConfigChangedMessage) => void,
+): void {
+	const changed = (): void => announce?.({ type: "CONFIG_CHANGED", scope: "appearance" });
 	// ─── Theme CRUD ──────────────────────────────────────────────────────────
 
 	server.get("/api/themes", async () => {
@@ -52,6 +61,7 @@ export function registerThemeRoutes(server: FastifyInstance, themeManager: Theme
 
 		try {
 			await themeManager.save(body as unknown as LastermTheme);
+			changed();
 			return reply.code(201).send({ name });
 		} catch (err) {
 			if (err instanceof ThemeError) {
@@ -74,6 +84,7 @@ export function registerThemeRoutes(server: FastifyInstance, themeManager: Theme
 
 		try {
 			await themeManager.save({ ...body, name } as unknown as LastermTheme);
+			changed();
 			return reply.code(200).send({ name });
 		} catch (err) {
 			if (err instanceof ThemeError) {
@@ -90,6 +101,7 @@ export function registerThemeRoutes(server: FastifyInstance, themeManager: Theme
 
 		try {
 			await themeManager.delete(name);
+			changed();
 			return reply.code(204).send();
 		} catch (err) {
 			if (err instanceof ThemeError) {

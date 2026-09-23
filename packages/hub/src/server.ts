@@ -451,7 +451,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerSshKeyRoutes(server);
 		const themeManager = new ThemeManager(configDir);
 		await themeManager.init();
-		registerThemeRoutes(server, themeManager);
+		registerThemeRoutes(server, themeManager, (message) => {
+			activeSessionManager.broadcastToAllClients(message);
+		});
 		if (options.authToken) {
 			registerPairRoutes(server, {
 				authConfig: authConfig,

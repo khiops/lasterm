@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useConfigStore } from "./config.js";
 import { useSessionStore } from "./session.js";
+import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
 
 type Listener = (msg: ProtocolMessage) => void;
@@ -334,5 +335,30 @@ describe("useSessionStore — CONFIG_CHANGED", () => {
 		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "host", hostId: "host-pi" });
 
 		expect(events).toEqual([{ scope: "host", hostId: "host-pi" }]);
+	});
+});
+
+describe("useSessionStore — CONFIG_CHANGED for the appearance", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("re-reads and shows the appearance another client changed", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const reload = vi.spyOn(useThemeStore(), "reloadAppearance").mockResolvedValue();
+
+		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "appearance" });
+
+		expect(reload).toHaveBeenCalledOnce();
 	});
 });

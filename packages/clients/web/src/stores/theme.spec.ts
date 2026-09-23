@@ -477,3 +477,57 @@ describe("readableForeground", () => {
 		expect(readableForeground("#0366d6")).toBe("#ffffff");
 	});
 });
+
+// ─── reloadAppearance: what a start does, and a change made elsewhere ───────
+//
+// A theme chosen in another window stayed unseen here until a restart (#479).
+
+describe("useThemeStore — reloadAppearance", () => {
+	function hubAnswering(appearance: Record<string, unknown>) {
+		const fetchMock = vi.fn(async (url: string) => {
+			if (url.includes("/api/themes")) {
+				return { ok: true, json: async () => [catppuccinMocha, nordTheme] };
+			}
+			return { ok: true, json: async () => ({ appearance }) };
+		});
+		vi.stubGlobal("fetch", fetchMock);
+	}
+
+	const appearanceWith = (theme: string, autoSwitch: boolean) => ({
+		theme,
+		autoSwitch: {
+			enabled: autoSwitch,
+			darkTheme: "catppuccin-mocha",
+			lightTheme: "one-half-light",
+		},
+		opacity: { terminal: 100, sidebar: 100, hostRail: 100, tabBar: 100 },
+		scrollbar: { style: "thin", widthThin: 6, widthWide: 12 },
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("shows the theme saved elsewhere", async () => {
+		const store = useThemeStore();
+		store.initialize();
+		hubAnswering(appearanceWith("nord", false));
+
+		await store.reloadAppearance();
+
+		expect(store.currentTheme?.name).toBe("nord");
+		expect(store.appearance.theme).toBe("nord");
+	});
+
+	it("leaves the theme to the auto-switch when it is on", async () => {
+		const store = useThemeStore();
+		store.initialize();
+		const before = store.currentTheme?.name;
+		hubAnswering(appearanceWith("nord", true));
+
+		await store.reloadAppearance();
+
+		expect(store.currentTheme?.name).toBe(before);
+		expect(store.appearance.autoSwitch.enabled).toBe(true);
+	});
+});

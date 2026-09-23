@@ -235,6 +235,8 @@ export interface SharedSessionContext {
 	loggerRegistry: import("../logging/index.js").LoggerRegistry | null;
 	/** Structured logger for hub operations (injected by SessionManager constructor) */
 	hubLogger: import("../logging/hub-logger.js").HubLogger | null;
+	/** The security events of SECURITY.md § 7.1; SSH connects and disconnects are recorded here. */
+	security: import("../logging/security-log.js").SecurityLog;
 	/** Primary auth token for daemon agent authentication */
 	primaryToken: string | null;
 	/**

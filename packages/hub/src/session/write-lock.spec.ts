@@ -266,6 +266,38 @@ describe("WriteLockManager — force (Tier 3)", () => {
 	});
 });
 
+// A force is a security event only when it takes the lock from someone: that
+// is the client who lost the keyboard, and the person asking afterwards who did.
+describe("WriteLockManager — force is reported", () => {
+	function makeReportingManager() {
+		const forces: Array<{ channelId: string; byClientId: string; fromClientId: string }> = [];
+		const mgr = new WriteLockManager({
+			sendToClient: () => undefined,
+			broadcastToChannel: () => undefined,
+			onForce: (force) => forces.push(force),
+		});
+		return { mgr, forces };
+	}
+
+	it("names the channel, the client that forced and the client that held the lock", () => {
+		const { mgr, forces } = makeReportingManager();
+		mgr.attach("ch1", "client-A");
+		mgr.force("ch1", "client-B");
+
+		expect(forces).toEqual([
+			{ channelId: "ch1", byClientId: "client-B", fromClientId: "client-A" },
+		]);
+	});
+
+	it("says nothing when the lock was free or already the forcing client's", () => {
+		const { mgr, forces } = makeReportingManager();
+		mgr.force("ch1", "client-A");
+		mgr.force("ch1", "client-A");
+
+		expect(forces).toEqual([]);
+	});
+});
+
 describe("WriteLockManager — release", () => {
 	it("release clears lock and broadcasts WRITE_LOCK holder=null", () => {
 		const { mgr, lastBroadcast } = makeManager();

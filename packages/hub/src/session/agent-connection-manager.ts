@@ -32,6 +32,7 @@ import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import { seedShellProfiles } from "./shell-profile-seed.js";
+import { SshAgent } from "./ssh-agent.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
 
@@ -303,6 +304,7 @@ export class AgentConnectionManager {
 	// ─── Event wiring ─────────────────────────────────────────────────────────
 
 	wireAgentEvents(hostId: string, sessionId: string, agent: AgentConnection): void {
+		if (agent instanceof SshAgent) this.recordSshConnection(hostId, agent);
 		const deployedThisSession = agent.deployedThisSession;
 		const remoteMatchesHubVersionCache = agent.remoteMatchesHubVersionCache;
 		agent.on("message", (msg: ProtocolMessage) => {
@@ -488,6 +490,28 @@ export class AgentConnectionManager {
 					this.lifecycle.closeSession(hostId, session.id);
 				});
 			}
+		});
+	}
+
+	/**
+	 * Record the SSH connection a host session takes up, and its end. Every
+	 * connect and every reconnect passes through wireAgentEvents once it has
+	 * authenticated, which is what makes this the one place to say so. The end
+	 * is listened for here, before anything below can close the agent, so a
+	 * connection refused on its version still has both halves in the log.
+	 */
+	private recordSshConnection(hostId: string, agent: SshAgent): void {
+		const host = this.ctx.metaDal.getHost(hostId);
+		this.ctx.security.sshConnected({
+			hostId,
+			hostLabel: host?.label ?? "",
+			authMethod: host?.sshAuth ?? "key",
+		});
+		agent.once("close", () => {
+			this.ctx.security.sshDisconnected({
+				hostId,
+				reason: agent.closedByHub ? "closed_by_hub" : "connection_lost",
+			});
 		});
 	}
 

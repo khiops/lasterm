@@ -94,8 +94,8 @@
 
 **Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
 clients to re-authenticate. Replacing it today means stopping the hub, removing `auth.json`, and
-starting again, which invalidates every browser pairing. No issue tracks a token rotation; replacing
-the TLS key is part of **#193**.
+starting again, which invalidates every browser pairing. The next start records the replacement as
+`token.rotate` (§ 7.1). No issue tracks a token rotation; replacing the TLS key is part of **#193**.
 
 ### 2.2 Startup Security Check
 
@@ -417,21 +417,38 @@ All incoming messages (from agent or UI) must be validated:
 
 ## 7. Logging & Audit
 
-### 7.1 Security Events — what is logged today
+### 7.1 Security Events (always logged at INFO)
 
-This table says what the hub records now, not what it should: the missing events are #277.
+**Where.** Every hub writes these events to `logs/hub.jsonl` in its state directory —
+`%LOCALAPPDATA%\lasterm\logs\hub.jsonl` on Windows, `~/.local/state/lasterm/logs/hub.jsonl` on
+Linux — whichever entry point started it, `lasterm start` included, which is what the desktop runs.
+They are written whatever `[logging] level` says; `[logging] output` still chooses between that file
+and stderr (SPEC.md § 6.2). In a hub started by `lasterm start` they are the only entries in the file.
 
-| Event | Logged today |
-|-------|--------------|
-| Hub start | Printed on stdout at start: address, SPKI, build, configuration and state directories. Not through the logger |
-| Auth success | WebSocket AUTH accepted: INFO, with the client id |
-| Auth failure | WARN, with the reason: missing or invalid bearer on REST; on the WebSocket, AUTH timeout, first message not AUTH, invalid, expired or revoked token, database unavailable |
-| Pairing code generated | Not logged |
-| Pairing code verified | Not logged |
-| SSH connect | Only as unstructured stderr lines (`[lasterm-ssh] resolved user@host:port auth=…`, `SSH ready`) |
-| SSH disconnect | Not logged |
-| Write-lock force | Not logged |
-| Token rotated | Not applicable: there is no token rotation (§ 2.1) |
+The file rotates at 10 MB into `hub.jsonl.old`, so it holds the recent past rather than a history.
+Anything able to reach the port can produce failures faster than they are read and push older
+entries out. A store that keeps them is the audit log of § 9, which is a separate decision.
+
+**Shape.** One JSON line per event: `ts`, `lvl` (`info`), `msg` (`security: …`), `event`, then the
+fields below. `clientId` is the id a WebSocket connection receives in `AUTH_OK`, so the same value
+names that client in a later `write_lock.force`. `tokenId` is the credential's row: `primary` for
+`auth.json`'s token, or the id a pairing gave the token it issued.
+
+| Event | `event` | Fields | Recorded when |
+|-------|---------|--------|---------------|
+| Hub start | `hub.start` | `bindAddress`, `port`, `permissionsCheck` (`passed`; `not_checked_on_windows`, § 2.2) | The runtime record is published and the hub is serving |
+| Auth success | `auth.success` | `via` (`ws`, `rest`), `sourceIp`, `tokenId`, `clientId` (WebSocket) | Every accepted WebSocket AUTH. On REST, the first accepted request of each credential from each address in a hub run: every request carries the bearer, and recording each would bury the rest |
+| Auth failure | `auth.failure` | `via` (`ws`, `rest`, `pair`), `sourceIp`, `reason`, `clientId` (WebSocket) | REST: `missing_header`, `malformed_header`, `invalid_token`, `database_unavailable`. WebSocket: `auth_timeout`, `not_auth_first`, `invalid_token`, `database_unavailable`. Pairing verification: `rate_limited`, `invalid_format`, `unknown_code`, `code_used`, `code_expired`. `invalid_token` covers an unknown, expired, revoked or restart-swept token alike |
+| Pairing code generated | `pairing.generated` | `pairingId`, `expiresAt`, `sourceIp` of the request | `POST /api/pair` issues a code |
+| Pairing code verified | `pairing.verified` | `pairingId`, `tokenId` of the token issued, `sourceIp` | `POST /api/pair/verify` redeems a code |
+| SSH connect | `ssh.connect` | `hostId`, `hostLabel`, `authMethod` (`agent`, `key`, `password`) | A host session takes up an authenticated connection: its first connect and every reconnect. A Test connection is not recorded |
+| SSH disconnect | `ssh.disconnect` | `hostId`, `reason` (`closed_by_hub`; `connection_lost`, ended by the network, the server or the remote agent) | That connection ends |
+| Write-lock force | `write_lock.force` | `channelId`, `byClientId`, `fromClientId` | A force takes the lock from another client. Forcing a free lock, or one already held, takes nothing and is not recorded |
+| Token rotated | `token.rotate` | `tokenId` (`primary`) | The hub starts with a token in `auth.json` other than the one it last recorded: the replacement of § 2.1, or a substitution nobody asked for |
+
+Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INFO on a WebSocket
+acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,
+not part of it.
 
 ### 7.2 What is NOT logged
 
@@ -439,6 +456,14 @@ This table says what the hub records now, not what it should: the missing events
 - SSH passwords (never in logs)
 - Terminal output content (never in logs — goes to spool.db only)
 - Pairing codes (never in logs — only expiry time)
+
+For the events of § 7.1 this holds by construction, in `packages/hub/src/logging/security-log.ts`.
+Each event is a method whose parameter names every field it can carry, and the record is built from
+those names alone: the compiler refuses another field, and one passed on an object it did not see is
+never read. No field is free text except a host's label, which the person chose. Every other value
+must have the shape of what it names — a ULID, an IP address, an ISO 8601 time, a port, one of a
+closed list — or it is written as `<withheld>`; a token (64 hex characters) or a pairing code (8
+digits) has none of those shapes.
 
 ## 8. Security Recommendations for Users
 

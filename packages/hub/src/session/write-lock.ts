@@ -8,6 +8,8 @@ import type {
 export interface WriteLockManagerOpts {
 	sendToClient: (clientId: string, msg: unknown) => void;
 	broadcastToChannel: (channelId: string, msg: unknown) => void;
+	/** Told when a force takes the lock from another client: a security event (SECURITY.md § 7.1). */
+	onForce?: (force: { channelId: string; byClientId: string; fromClientId: string }) => void;
 }
 
 /**
@@ -29,10 +31,12 @@ export class WriteLockManager {
 
 	private sendToClient: (clientId: string, msg: unknown) => void;
 	private broadcastToChannel: (channelId: string, msg: unknown) => void;
+	private onForce: NonNullable<WriteLockManagerOpts["onForce"]>;
 
 	constructor(opts: WriteLockManagerOpts) {
 		this.sendToClient = opts.sendToClient;
 		this.broadcastToChannel = opts.broadcastToChannel;
+		this.onForce = opts.onForce ?? (() => undefined);
 	}
 
 	// ─── Lifecycle ──────────────────────────────────────────────────────────
@@ -182,6 +186,7 @@ export class WriteLockManager {
 				channelId,
 			};
 			this.sendToClient(current, revokedMsg);
+			this.onForce({ channelId, byClientId: clientId, fromClientId: current });
 		}
 
 		this.holders.set(channelId, clientId);

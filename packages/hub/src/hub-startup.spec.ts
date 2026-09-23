@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
@@ -12,7 +12,8 @@ import {
 	validateTokenRecord,
 } from "./auth.js";
 import { getStateDir, loadRuntime } from "./cli.js";
-import { startHub } from "./hub-startup.js";
+import { STARTUP_UNWIND_TIMEOUT_MS, startHub } from "./hub-startup.js";
+import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -293,6 +294,203 @@ describe("startHub token restart sweep", () => {
 	});
 });
 
+// The lock, the databases and the runtime record name one directory. A record
+// published wherever the resolver points after startup's asynchronous work would
+// advertise a hub in a directory whose lock it does not hold, and `stop` or the
+// launcher reading that directory would find a hub that is not there.
+describe("startHub carries the directory it locked", () => {
+	it("publishes and withdraws the record where it took the lock, whatever the environment says later", async () => {
+		const root = join(tmpdir(), `lasterm-carry-${randomBytes(8).toString("hex")}`);
+		const restoreFirst = usePlatformDirs({ state: join(root, "first") });
+		let restoreSecond: (() => void) | undefined;
+		const lockedDir = getStateDir();
+		const dbs = openTestDatabases();
+		const failure = new Error("injected failure after runtime publication");
+		const locked: string[] = [];
+		let publishedIn: string[] = [];
+		const serverOptions: { configDir?: string; logsDir?: string }[] = [];
+		const recordIn = (dir: string) => existsSync(join(dir, "runtime.json"));
+		try {
+			await expect(
+				startHub(
+					{
+						port: 4100,
+						announce: () => {
+							publishedIn = [lockedDir, getStateDir()].filter(recordIn);
+							throw failure;
+						},
+					},
+					{
+						describePreviousInstallation: () => undefined,
+						getConfigDir: () => join(root, "config"),
+						acquireHubLock: (dir) => {
+							locked.push(dir);
+							return null as never;
+						},
+						initAuth: () => randomBytes(32).toString("hex"),
+						createOwnerToken: () => "owner-token",
+						resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+						openDatabases: () => dbs,
+						createServer: async (options) => {
+							serverOptions.push(options);
+							// The environment moves while startup is awaiting.
+							restoreSecond = usePlatformDirs({ state: join(root, "second") });
+							return { close: async () => undefined } as never;
+						},
+						startServer: async () => "https://127.0.0.1:4100",
+						addStartupCorsOrigins: () => 4100,
+					},
+				),
+			).rejects.toThrow(failure);
+
+			expect(getStateDir()).not.toBe(lockedDir);
+			expect(locked).toEqual([lockedDir]);
+			expect(publishedIn).toEqual([lockedDir]);
+			// Withdrawn from the directory it was published in, on the way out.
+			expect(recordIn(lockedDir)).toBe(false);
+			// The server reads its configuration and logs from the same places.
+			expect(serverOptions).toEqual([
+				expect.objectContaining({
+					configDir: join(root, "config"),
+					logsDir: join(lockedDir, "logs"),
+				}),
+			]);
+		} finally {
+			restoreSecond?.();
+			restoreFirst();
+			dbs.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// A relative directory means whatever the working directory is at each use; the
+	// lock resolved it once already, and everything else has to mean the same place.
+	it("resolves a relative directory once, before anything uses it", async () => {
+		const dbs = openTestDatabases();
+		const name = `lasterm-relative-${randomBytes(8).toString("hex")}`;
+		const cwd = process.cwd();
+		const seen: string[] = [];
+		process.chdir(tmpdir());
+		const absolute = resolve(name);
+		try {
+			await startHub(
+				{ port: 4100 },
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => name,
+					getConfigDir: () => name,
+					acquireHubLock: (dir) => {
+						seen.push(dir);
+						return null as never;
+					},
+					initAuth: () => randomBytes(32).toString("hex"),
+					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: (dir) => {
+						seen.push(dir);
+						return TEST_TLS_IDENTITY;
+					},
+					openDatabases: (dir) => {
+						seen.push(dir);
+						return dbs;
+					},
+					createServer: async () => ({}) as never,
+					startServer: async () => "https://127.0.0.1:4100",
+					addStartupCorsOrigins: () => 4100,
+					persistRuntime: (_runtime, dir) => {
+						seen.push(dir);
+					},
+					deleteRuntime: () => false,
+				},
+			);
+
+			expect(seen).toEqual([absolute, absolute, absolute, absolute]);
+		} finally {
+			process.chdir(cwd);
+			dbs.close();
+			rmSync(absolute, { recursive: true, force: true });
+		}
+	});
+});
+
+// Both entry points exit once startHub rejects, and that exit is what releases
+// the lock. A server whose close never settles must therefore not hold the unwind:
+// without a bound, the databases stay open, the error is never reported and the
+// process keeps the lock for as long as the close hangs.
+describe("startHub bounds the unwind of a failed start", () => {
+	it("closes the databases and rethrows when the server never finishes closing", async () => {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
+		const failure = new Error("injected failure after runtime publication");
+		const order: string[] = [];
+		const close = vi.fn(() => {
+			order.push("server");
+			return new Promise<never>(() => undefined);
+		});
+		const databases = {
+			...dbs,
+			close: () => {
+				order.push("databases");
+				dbs.close();
+			},
+		};
+		let settled = false;
+		let outcome: unknown;
+
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			void startHub(
+				{
+					port: 4100,
+					announce: () => {
+						throw failure;
+					},
+				},
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => stateDir,
+					getConfigDir: () => stateDir,
+					acquireHubLock: () => null as never,
+					initAuth: () => randomBytes(32).toString("hex"),
+					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+					openDatabases: () => databases,
+					createServer: async () => ({ close }) as never,
+					startServer: async () => "https://127.0.0.1:4100",
+					addStartupCorsOrigins: () => 4100,
+					persistRuntime: () => undefined,
+					deleteRuntime: () => {
+						order.push("record");
+						return true;
+					},
+				},
+			).then(
+				() => {
+					settled = true;
+				},
+				(error: unknown) => {
+					settled = true;
+					outcome = error;
+				},
+			);
+
+			// Within the bound the unwind still waits: nothing is closed underneath a
+			// server that may yet finish, and the record still names a live hub.
+			await vi.advanceTimersByTimeAsync(STARTUP_UNWIND_TIMEOUT_MS - 1);
+			expect(close).toHaveBeenCalledTimes(1);
+			expect(settled).toBe(false);
+			expect(order).toEqual(["server"]);
+
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settled).toBe(true);
+			expect(outcome).toBe(failure);
+			expect(order).toEqual(["server", "databases", "record"]);
+		} finally {
+			vi.useRealTimers();
+			rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+});
+
 // initAuth refuses a group-writable configuration directory, and this is the call
 // that creates it. Without an explicit mode the umask decides: 002 yields 0775 and
 // a first launch fails before writing auth.json. The mode is the contract between
@@ -306,10 +504,6 @@ describe("startHub creates the configuration directory owner-only", () => {
 			const configDir = join(root, "config");
 			const stateDir = join(root, "state");
 			const previous = process.umask(0o002);
-			// startHub writes runtime.json through the module-level getStateDir,
-			// not the injected one, so this has to be set rather than inherited.
-			const originalStateRoot = process.env.XDG_STATE_HOME;
-			process.env.XDG_STATE_HOME = root;
 
 			try {
 				await startHub(
@@ -331,8 +525,6 @@ describe("startHub creates the configuration directory owner-only", () => {
 				expect(statSync(configDir).mode & 0o777).toBe(0o700);
 			} finally {
 				process.umask(previous);
-				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
-				else process.env.XDG_STATE_HOME = originalStateRoot;
 				dbs.close();
 				rmSync(root, { recursive: true, force: true });
 			}
@@ -348,8 +540,6 @@ describe("startHub creates the configuration directory owner-only", () => {
 			const stateDir = join(root, "state");
 			mkdirSync(configDir, { recursive: true, mode: 0o770 });
 			chmodSync(configDir, 0o770);
-			const originalStateRoot = process.env.XDG_STATE_HOME;
-			process.env.XDG_STATE_HOME = root;
 			const loadTlsConfig = vi.fn();
 			const initAuth = vi.fn();
 
@@ -377,12 +567,77 @@ describe("startHub creates the configuration directory owner-only", () => {
 				expect(loadTlsConfig).not.toHaveBeenCalled();
 				expect(initAuth).not.toHaveBeenCalled();
 			} finally {
-				if (originalStateRoot === undefined) delete process.env.XDG_STATE_HOME;
-				else process.env.XDG_STATE_HOME = originalStateRoot;
 				dbs.close();
 				chmodSync(configDir, 0o700);
 				rmSync(root, { recursive: true, force: true });
 			}
 		},
 	);
+});
+
+// `lasterm start` — what the desktop runs, and the only command the single
+// executable serves — never passes `logging`, and a hub started that way used to
+// write no log file at all. The security events must reach one regardless, and
+// the diagnostics the other entry points ask for must stay where they were.
+describe("startHub records its security events whichever entry point started it", () => {
+	async function start(options: { logging?: boolean }) {
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-security-${randomBytes(8).toString("hex")}`);
+		const createServer = vi.fn(async (_options: { securityLog?: unknown }) => ({}) as never);
+		await startHub(
+			{ port: 4100, ...options },
+			{
+				describePreviousInstallation: () => undefined,
+				getStateDir: () => stateDir,
+				getConfigDir: () => stateDir,
+				acquireHubLock: () => null as never,
+				initAuth: () => randomBytes(32).toString("hex"),
+				createOwnerToken: () => "owner-token",
+				resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+				openDatabases: () => dbs,
+				createServer,
+				startServer: async () => "https://127.0.0.1:4100",
+				addStartupCorsOrigins: () => 4100,
+				persistRuntime: () => undefined,
+				deleteRuntime: () => false,
+			},
+		);
+		dbs.close();
+		const logFile = join(stateDir, "logs", "hub.jsonl");
+		const entries = existsSync(logFile)
+			? readFileSync(logFile, "utf8")
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as Record<string, unknown>)
+			: [];
+		rmSync(stateDir, { recursive: true, force: true });
+		return { entries, createServer };
+	}
+
+	it("writes the hub start to logs/hub.jsonl without `logging`, and nothing else", async () => {
+		const { entries } = await start({});
+
+		expect(entries).toEqual([
+			expect.objectContaining({
+				lvl: "info",
+				msg: "security: hub start",
+				event: "hub.start",
+				bindAddress: "127.0.0.1",
+				port: 4100,
+				permissionsCheck: process.platform === "win32" ? "not_checked_on_windows" : "passed",
+			}),
+		]);
+	});
+
+	it("keeps the diagnostics for the entry points that ask for them", async () => {
+		const { entries } = await start({ logging: true });
+
+		expect(entries.map((entry) => entry.msg)).toEqual(["security: hub start", "hub started"]);
+	});
+
+	it("hands the same log to the server, so its routes record there too", async () => {
+		const { createServer } = await start({});
+
+		expect(createServer.mock.calls[0]?.[0].securityLog).toBeInstanceOf(SecurityLog);
+	});
 });

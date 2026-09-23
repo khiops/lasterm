@@ -275,6 +275,12 @@ export class SshAgent extends AgentConnection {
 	 */
 	remoteAgentPath: string | null = null;
 
+	/**
+	 * Whether this hub ended the connection, as against the network, the server or
+	 * the remote agent ending it under the hub. The security log says which.
+	 */
+	closedByHub = false;
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -709,6 +715,7 @@ export class SshAgent extends AgentConnection {
 
 	/** Close the SSH channel and the underlying SSH connection. */
 	async close(): Promise<void> {
+		this.closedByHub = true;
 		this.cleanup();
 	}
 

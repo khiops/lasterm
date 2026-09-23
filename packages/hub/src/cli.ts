@@ -105,8 +105,8 @@ export type RuntimeLoadResult =
 	| { kind: "unreadable"; error: unknown };
 
 /** Read absence is distinct from every failure to read or parse the record. */
-export function loadRuntime(): RuntimeLoadResult {
-	const p = join(getStateDir(), "runtime.json");
+export function loadRuntime(stateDir: string = getStateDir()): RuntimeLoadResult {
+	const p = join(stateDir, "runtime.json");
 	try {
 		return { kind: "present", runtime: JSON.parse(readFileSync(p, "utf-8")) as RuntimeInfo };
 	} catch (error) {
@@ -115,8 +115,13 @@ export function loadRuntime(): RuntimeLoadResult {
 	}
 }
 
-export function persistRuntime(info: RuntimeInfo): void {
-	const stateDir = ensureStateDir();
+/**
+ * Publish the record in `stateDir`. A starting hub passes the directory it
+ * locked, so the record lands beside that lock whatever the environment says by
+ * the time it is written.
+ */
+export function persistRuntime(info: RuntimeInfo, stateDir: string = getStateDir()): void {
+	createOwnerOnlyDirectory(stateDir);
 	const runtimePath = join(stateDir, "runtime.json");
 	const tempPath = createRuntimeTempPath(runtimePath);
 	let fd: number | null = openSync(tempPath, "wx", 0o600);
@@ -157,10 +162,13 @@ export function runtimeMatches(expected: RuntimeInfo, current: RuntimeInfo): boo
 	);
 }
 
-/** Remove the record only if a fresh read still identifies this runtime. */
-export function deleteRuntime(expected: RuntimeInfo): boolean {
-	const p = join(getStateDir(), "runtime.json");
-	const current = loadRuntime();
+/**
+ * Remove the record only if a fresh read still identifies this runtime. The
+ * directory is the one it was published in, as for `persistRuntime`.
+ */
+export function deleteRuntime(expected: RuntimeInfo, stateDir: string = getStateDir()): boolean {
+	const p = join(stateDir, "runtime.json");
+	const current = loadRuntime(stateDir);
 	if (current.kind !== "present" || !runtimeMatches(expected, current.runtime)) return false;
 	rmSync(p);
 	return true;
@@ -1066,31 +1074,37 @@ export async function cmdQuit(
 			throw new Error(answer.body.message ?? "Quit was refused again; nothing was stopped");
 		}
 	}
-	const response = { ok: answer.ok, status: answer.status };
-	const body = answer.body;
 	if (answer.transportError !== undefined) {
 		writeError(
-			`Quit request did not complete: ${answer.transportError instanceof Error ? answer.transportError.message : String(answer.transportError)}. Checking whether the hub stopped anyway.`,
+			`Quit request did not complete: ${describeError(answer.transportError)}. Checking whether the hub stopped anyway.`,
 		);
 	}
-	const failure = response.ok
-		? null
-		: new Error(
-				body.message ??
-					(response.status === null
-						? "Quit request did not complete"
-						: `Quit failed (HTTP ${response.status})`),
-			);
 	// The hub schedules teardown after every stopper result, including a 503, and
 	// including one whose answer never arrived. Observe that teardown before
 	// reporting anything to the caller.
-	try {
-		await wait(target);
-	} catch (err) {
-		if (!failure) throw err;
+	const teardownFailure = await wait(target).then(
+		() => null,
+		(error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+	);
+	if (answer.ok) {
+		if (teardownFailure) throw teardownFailure;
+		console.log(answer.body.message ?? "Local agent stopped; hub is shutting down");
+		return;
 	}
-	if (failure) throw failure;
-	console.log(body.message ?? "Local agent stopped; hub is shutting down");
+	// The answer speaks for the agent and the observation speaks for the hub, and
+	// neither implies the other: a hub whose stopper failed still tears down, and
+	// may still fail to disappear or be replaced while it does. A caller deciding
+	// whether files are safe to replace needs both, so the agent's failure must
+	// not be the only thing it hears.
+	const agentFailure =
+		answer.transportError !== undefined
+			? `Quit request did not complete (${describeError(answer.transportError)}), so whether the local agent stopped is unknown`
+			: (answer.body.message ?? `Quit failed (HTTP ${answer.status})`);
+	throw new Error(`${agentFailure}. ${teardownFailure?.message ?? "The hub was confirmed gone"}`);
+}
+
+function describeError(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 interface QuitResponseBody {
@@ -1148,7 +1162,11 @@ export async function waitForHubQuit(
 	const sleep =
 		options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 	const timeoutMs = options.timeoutMs ?? HUB_QUIT_OBSERVE_TIMEOUT_MS;
-	const deadline = Date.now() + timeoutMs;
+	// A bound read from the wall clock moves with it: set back during the wait,
+	// the wait grows by as much and the poll keeps going; set forward, the
+	// deadline passes at once and reports a hub that was never given its time.
+	// Elapsed time is what is being bounded, and only a monotonic clock measures it.
+	const deadline = performance.now() + timeoutMs;
 
 	for (;;) {
 		let current = readRuntime();
@@ -1185,7 +1203,7 @@ export async function waitForHubQuit(
 			}
 			if (current.kind === "absent") return;
 		}
-		if (Date.now() >= deadline) {
+		if (performance.now() >= deadline) {
 			const detail =
 				current.kind === "absent"
 					? "runtime record was removed but its PID remains live"

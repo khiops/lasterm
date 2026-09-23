@@ -361,12 +361,12 @@ export class MetaDAL {
 
 	// ─── Pairing Codes ───────────────────────────────────────────────────────
 
-	createPairingCode(id: string, code: string, createdAt: string, expiresAt: string): void {
-		this.pairingCodes.createPairingCode(id, code, createdAt, expiresAt);
+	createPairingCode(id: string, codeHash: string, createdAt: string, expiresAt: string): void {
+		this.pairingCodes.createPairingCode(id, codeHash, createdAt, expiresAt);
 	}
 
-	getPairingCodeByCode(code: string): PairingCodeRow | undefined {
-		return this.pairingCodes.getPairingCodeByCode(code);
+	getPairingCodeByHash(codeHash: string): PairingCodeRow | undefined {
+		return this.pairingCodes.getPairingCodeByHash(codeHash);
 	}
 
 	markPairingCodeUsed(id: string, usedAt: string, usedByIp: string): void {
@@ -379,6 +379,10 @@ export class MetaDAL {
 
 	cleanExpiredPairingCodes(): void {
 		this.pairingCodes.cleanExpiredPairingCodes();
+	}
+
+	deleteUnredeemedPairingCodes(): void {
+		this.pairingCodes.deleteUnredeemedPairingCodes();
 	}
 
 	// ─── Pair Rate Limits ────────────────────────────────────────────────────

@@ -67,11 +67,6 @@ export function hashToken(token: string): string {
 // ─── File permission check ────────────────────────────────────────────────────
 
 /**
- * Check file permissions on auth.json.
- * Skipped on Windows, where the file relies on the profile's default ACL: a DACL
- * check was judged not worth its cost (#200).
- */
-/**
  * Single-quote a path for a shell command a reader is meant to paste. Same form
  * as `quoteForShell` in the desktop e2e runner: a literal single quote is closed,
  * escaped and reopened. Without it a configuration directory containing a space
@@ -85,6 +80,11 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+/**
+ * Check file permissions on auth.json.
+ * Skipped on Windows, where the file relies on the profile's default ACL: a DACL
+ * check was judged not worth its cost (#200).
+ */
 export function checkPermissions(authFilePath: string): void {
 	if (process.platform === "win32") return;
 

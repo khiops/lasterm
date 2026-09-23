@@ -888,9 +888,9 @@ describe("extractUiConfig — panes section", () => {
 		expect(config.panes.maxPanes).toBe(DEFAULT_PANES_CONFIG.maxPanes);
 	});
 
-	it('parses default_split_direction = "vertical"', () => {
+	it("ignores a default_split_direction left in an older config", () => {
 		const config = extractUiConfig({ panes: { default_split_direction: "vertical" } });
-		expect(config.panes.defaultSplitDirection).toBe("vertical");
+		expect(config.panes).toEqual(DEFAULT_PANES_CONFIG);
 	});
 });
 
@@ -978,7 +978,6 @@ describe("ConfigResolver.uiConfig — tabs/panes", () => {
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
 		expect(resolver.uiConfig.panes.maxPanes).toBe(8);
-		expect(resolver.uiConfig.panes.defaultSplitDirection).toBe("vertical");
 	});
 });
 

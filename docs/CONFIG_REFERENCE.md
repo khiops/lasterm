@@ -59,8 +59,7 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| max_panes | number | `4` | Max split panes per tab |
-| default_split_direction | `"horizontal"` \| `"vertical"` | `"horizontal"` | Default split direction |
+| max_panes | number | `4` | Panes a tab may hold, empty ones included; a split past it is refused with a notice |
 
 ---
 

@@ -562,10 +562,32 @@ describe("splitPane", () => {
 		// Snapshot state at 4 panes
 		const before = layout.layouts.value[tabId];
 
-		// Attempt a 5th split — should be a no-op
-		layout.splitPane("ch-A", "vertical");
+		// Attempt a 5th split — refused, and says so to its caller
+		expect(layout.splitPane("ch-A", "vertical")).toBe("at-limit");
 
 		expect(layout.layouts.value[tabId]).toEqual(before);
+	});
+
+	// The limit came from a constant while Settings offered Max Panes, which
+	// changed nothing; the refusal was silent. The caller now passes the limit
+	// set, and learns when it was met.
+	it("splits up to the limit it is given, and says when it met it", () => {
+		openTabs("A");
+		expect(layout.splitPane("ch-A", "vertical", 2)).toBe("split");
+		expect(layout.splitPane("ch-A", "horizontal", 2)).toBe("at-limit");
+	});
+
+	it("refuses every split when the limit is one pane", () => {
+		openTabs("A");
+		expect(layout.splitPane("ch-A", "vertical", 1)).toBe("at-limit");
+	});
+
+	it("allows more than four when the limit is raised", () => {
+		openTabs("A");
+		for (let i = 0; i < 5; i++) {
+			expect(layout.splitPane("ch-A", "vertical", 6)).toBe("split");
+		}
+		expect(layout.splitPane("ch-A", "vertical", 6)).toBe("at-limit");
 	});
 });
 

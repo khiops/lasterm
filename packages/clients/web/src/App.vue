@@ -379,6 +379,7 @@ import {
 } from './composables/useLayout.js';
 import { DISPLAYED_CHANNELS_KEY, displayedChannelIds } from './composables/displayedChannels.js';
 import { MULTI_PANE_SEARCH_KEY, useMultiPaneSearch } from './composables/useMultiPaneSearch.js';
+import { MAX_PANE_COUNT } from './composables/usePaneTree.js';
 import { useResizable } from './composables/useResizable.js';
 import { useTabTitle } from './composables/useTabTitle.js';
 import {
@@ -1494,7 +1495,15 @@ async function onSetWelcome(channelId: string): Promise<void> {
  * or spawns a channel via the VacantPane picker.
  */
 function onSplit(existingChannelId: string, direction: 'horizontal' | 'vertical'): void {
-	layout.splitPane(existingChannelId, direction);
+	const limit = configStore.uiConfig.panes?.maxPanes ?? MAX_PANE_COUNT;
+	// Refused in silence, a split at the limit looked like a menu item that did
+	// nothing; and the limit it met was a constant, whatever Settings said.
+	if (layout.splitPane(existingChannelId, direction, limit) === 'at-limit') {
+		toastStore.show(
+			'info',
+			`A tab holds at most ${limit} ${limit === 1 ? 'pane' : 'panes'}. Close one, or raise Max Panes in Settings › Panes.`,
+		);
+	}
 }
 
 /**

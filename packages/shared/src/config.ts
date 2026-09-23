@@ -101,8 +101,6 @@ export interface TabsConfig {
 export interface PanesConfig {
 	/** Max panes per tab. Default: 4 */
 	maxPanes?: number;
-	/** Default split direction. Default: "horizontal" */
-	defaultSplitDirection?: "horizontal" | "vertical";
 }
 
 export interface ChannelsConfig {
@@ -363,7 +361,7 @@ export const TABS_CONFIG_KEYS = [
 	"scope",
 ] as const;
 
-export const PANES_CONFIG_KEYS = ["maxPanes", "defaultSplitDirection"] as const;
+export const PANES_CONFIG_KEYS = ["maxPanes"] as const;
 
 export const CHANNELS_CONFIG_KEYS = ["defaultShell", "defaultGroupName", "autoGroup"] as const;
 

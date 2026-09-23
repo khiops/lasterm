@@ -258,18 +258,6 @@ export const settingsSchema: SettingDefinition[] = [
 		min: 1,
 		max: 8,
 	},
-	{
-		key: "defaultSplitDirection",
-		label: "Default Split Direction",
-		type: "select",
-		category: "panes",
-		section: "panes",
-		scopes: ["global"],
-		options: [
-			{ label: "Horizontal", value: "horizontal" },
-			{ label: "Vertical", value: "vertical" },
-		],
-	},
 
 	// ─── Search category (global only, UI config) ──────────────────────
 	{

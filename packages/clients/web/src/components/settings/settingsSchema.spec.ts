@@ -195,3 +195,47 @@ describe("settingsSchema", () => {
 		});
 	});
 });
+
+// ─── Every setting offered is read by something ──────────────────────────────
+//
+// Three settings were offered, stored and read by nothing: Max Panes, Default
+// Split Direction and Auto-open Welcome Tab. Changing them changed nothing, and
+// nobody could tell from the panel. A setting's key must appear in code other
+// than the panel, the validators, the config parser and the tests.
+
+describe("settingsSchema — nothing offered in vain", () => {
+	// Every source that could act on a setting, as text. The web client, the
+	// hub, the shared package, and the desktop shell.
+	const sources = import.meta.glob(
+		[
+			"../../**/*.{ts,vue}",
+			"../../../../../hub/src/**/*.ts",
+			"../../../../../shared/src/**/*.ts",
+			"../../../../desktop/src-tauri/src/**/*.rs",
+			"!**/*.spec.ts",
+		],
+		{ query: "?raw", import: "default", eager: true },
+	) as Record<string, string>;
+
+	// Where a key is declared, validated, parsed or tested — not where it acts.
+	const notAReader =
+		/(settingsSchema\.ts|\/settings\/categories\/.*|hub\/src\/api\/config\.ts|hub\/src\/config\.ts|shared\/src\/config\.ts|shared\/src\/appearance\.ts)$/;
+	const code = Object.entries(sources)
+		.filter(([path]) => !notAReader.test(path))
+		.map(([, text]) => text)
+		.join("\n");
+
+	it("reads the sources it searches", () => {
+		expect(Object.keys(sources).length).toBeGreaterThan(100);
+	});
+
+	for (const setting of settingsSchema) {
+		const leaf = setting.key.split(".").at(-1) ?? setting.key;
+		it(`${setting.key} is read somewhere`, () => {
+			// A whole word, without escapes a formatter may rewrite: `source`
+			// must not be found inside `sources`.
+			const word = new RegExp(`(^|[^A-Za-z0-9_])${leaf}([^A-Za-z0-9_]|$)`);
+			expect(word.test(code)).toBe(true);
+		});
+	}
+});

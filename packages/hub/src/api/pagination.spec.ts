@@ -5,6 +5,7 @@ import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
+import { LIMIT_ERROR, OFFSET_ERROR, parsePagination } from "./pagination.js";
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -42,22 +43,124 @@ vi.mock("../session/ssh-agent.js", () => {
 let dbs: DatabaseManager;
 let server: FastifyInstance;
 
-beforeEach(async () => {
-	dbs = openTestDatabases();
-	server = await createServer({
-		tls: getTestTls(),
-		logger: false,
-		dbManager: dbs,
-		skipShellDiscovery: true,
+/** A whole hub server, for the describes that test a route through one. */
+function useHubServer(): void {
+	beforeEach(async () => {
+		dbs = openTestDatabases();
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
+	});
+
+	afterEach(async () => {
+		await server.close();
+		dbs.close();
+	});
+}
+
+// ─── parsePagination — the one reading of ?limit=&offset= ────────────────────
+//
+// Every rule asserted here, so a broken one fails under its own name. Each
+// route that pages keeps one test below proving it consults the parser; the
+// two log routes keep theirs in logs.spec.ts.
+
+describe("parsePagination", () => {
+	/** What the parser gives for a query whose values are refused. */
+	const refused = (message: string) => ({
+		ok: false,
+		error: { code: "VALIDATION_ERROR", message },
+	});
+
+	it("gives no limit and offset 0 when the query names neither", () => {
+		expect(parsePagination({})).toEqual({ ok: true, limit: undefined, offset: 0 });
+	});
+
+	it.each([
+		["1", 1],
+		["1000", 1000],
+		["0010", 10],
+	])("accepts limit=%s", (raw, limit) => {
+		expect(parsePagination({ limit: raw })).toEqual({ ok: true, limit, offset: 0 });
+	});
+
+	it.each([
+		["0", "below the range"],
+		["1001", "above the range"],
+		["99999999999999999999", "huge"],
+		["-1", "negative"],
+		["abc", "not a number"],
+		["10abc", "a number with trailing text"],
+		["1.5", "a float"],
+		["1e3", "an exponent"],
+		["+5", "a sign"],
+		[" 5", "whitespace"],
+		["", "empty"],
+	])("refuses limit=%j (%s)", (raw) => {
+		expect(parsePagination({ limit: raw })).toEqual(refused(LIMIT_ERROR));
+	});
+
+	it.each([
+		["0", 0],
+		["1", 1],
+		["9007199254740991", Number.MAX_SAFE_INTEGER],
+	])("accepts offset=%s", (raw, offset) => {
+		expect(parsePagination({ limit: "10", offset: raw })).toEqual({ ok: true, limit: 10, offset });
+	});
+
+	it.each([
+		["-1", "negative"],
+		["9007199254740992", "one past the largest exact integer"],
+		["99999999999999999999", "huge: SQLite cannot bind it"],
+		["abc", "not a number"],
+		["2xyz", "a number with trailing text"],
+		["1.5", "a float"],
+		["", "empty"],
+	])("refuses offset=%j (%s)", (raw) => {
+		expect(parsePagination({ limit: "10", offset: raw })).toEqual(refused(OFFSET_ERROR));
+	});
+
+	it("reads an offset given without a limit", () => {
+		expect(parsePagination({ offset: "3" })).toEqual({ ok: true, limit: undefined, offset: 3 });
+		expect(parsePagination({ offset: "-1" })).toEqual(refused(OFFSET_ERROR));
+	});
+
+	it("refuses a parameter given twice, which arrives as an array", () => {
+		expect(parsePagination({ limit: ["1", "2"] })).toEqual(refused(LIMIT_ERROR));
+		expect(parsePagination({ limit: "1", offset: ["0", "1"] })).toEqual(refused(OFFSET_ERROR));
+	});
+
+	it("names the limit when both are refused", () => {
+		expect(parsePagination({ limit: "0", offset: "-1" })).toEqual(refused(LIMIT_ERROR));
+	});
+
+	it("states the range it enforces", () => {
+		expect(LIMIT_ERROR).toBe("limit must be an integer from 1 to 1000");
+		expect(OFFSET_ERROR).toBe("offset must be an integer from 0 to 9007199254740991");
 	});
 });
 
-afterEach(async () => {
-	await server.close();
-	dbs.close();
-});
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * The one test each paging route keeps: a query the parser refuses gets 400
+ * and the parser's own error, not a copy of it, and one it accepts gets a page.
+ * Before #530, /api/hosts and /api/launch-profiles answered the refusal with 200.
+ */
+async function expectRouteConsultsParser(path: string): Promise<void> {
+	const refusedPage = parsePagination({ limit: "0" });
+	if (refusedPage.ok) throw new Error("parsePagination accepts limit=0");
+
+	const refused = await server.inject({ method: "GET", url: `${path}?limit=0` });
+	expect(refused.statusCode).toBe(400);
+	expect(refused.json()).toEqual({ error: refusedPage.error });
+
+	const accepted = await server.inject({ method: "GET", url: `${path}?limit=1000&offset=1` });
+	expect(accepted.statusCode).toBe(200);
+	expect(accepted.json()).toMatchObject({ limit: 1000, offset: 1 });
+}
 
 async function createHost(label: string): Promise<string> {
 	const res = await server.inject({
@@ -92,6 +195,8 @@ async function createLaunchProfile(name: string): Promise<string> {
 // ─── GET /api/hosts — pagination ─────────────────────────────────────────────
 
 describe("GET /api/hosts pagination", () => {
+	useHubServer();
+
 	it("returns plain array when no pagination params", async () => {
 		await createHost("host-a");
 		await createHost("host-b");
@@ -148,24 +253,16 @@ describe("GET /api/hosts pagination", () => {
 		expect(body.data).toHaveLength(0);
 	});
 
-	it("rejects invalid limit", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/hosts?limit=0" });
-		expect(res.statusCode).toBe(200);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("rejects negative offset", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/hosts?limit=10&offset=-1" });
-		expect(res.statusCode).toBe(200);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
+	it("answers a query parsePagination refuses with 400 and its error (#530)", async () => {
+		await expectRouteConsultsParser("/api/hosts");
 	});
 });
 
 // ─── GET /api/host-groups — pagination ───────────────────────────────────────
 
 describe("GET /api/host-groups pagination", () => {
+	useHubServer();
+
 	it("returns plain array when no pagination params", async () => {
 		await createHostGroup("grp-a");
 		const res = await server.inject({ method: "GET", url: "/api/host-groups" });
@@ -211,17 +308,16 @@ describe("GET /api/host-groups pagination", () => {
 		}
 	});
 
-	it("rejects invalid limit", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?limit=abc" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
+	it("answers a query parsePagination refuses with 400 and its error (#530)", async () => {
+		await expectRouteConsultsParser("/api/host-groups");
 	});
 });
 
 // ─── GET /api/launch-profiles — pagination ───────────────────────────────────
 
 describe("GET /api/launch-profiles pagination", () => {
+	useHubServer();
+
 	it("returns plain array when no pagination params", async () => {
 		await createLaunchProfile("lp-a");
 		const res = await server.inject({ method: "GET", url: "/api/launch-profiles" });
@@ -282,10 +378,7 @@ describe("GET /api/launch-profiles pagination", () => {
 		expect(body.total).toBe(1);
 	});
 
-	it("rejects limit > 1000", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/launch-profiles?limit=1001" });
-		expect(res.statusCode).toBe(200);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
+	it("answers a query parsePagination refuses with 400 and its error (#530)", async () => {
+		await expectRouteConsultsParser("/api/launch-profiles");
 	});
 });

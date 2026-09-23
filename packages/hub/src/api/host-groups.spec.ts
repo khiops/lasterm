@@ -163,40 +163,8 @@ describe("GET /api/host-groups", () => {
 		expect(body.data[0]?.name).toBe("Page-C");
 	});
 
-	it("returns 400 VALIDATION_ERROR for non-digit limit (10abc)", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?limit=10abc" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 VALIDATION_ERROR for non-digit offset (2xyz)", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?offset=2xyz" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 VALIDATION_ERROR for limit=0 (out of range)", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?limit=0" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 VALIDATION_ERROR for limit=2000 (out of range)", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?limit=2000" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 VALIDATION_ERROR for negative offset (-1)", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?limit=10&offset=-1" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
-	});
+	// The values it refuses are parsePagination's, unit-tested in
+	// pagination.spec.ts beside the one test proving this route consults it.
 });
 
 // ─── POST /api/host-groups ────────────────────────────────────────────────────
@@ -871,26 +839,5 @@ describe("PUT /api/host-groups/:id — color validation", () => {
 		expect(res.statusCode).toBe(400);
 		const body = res.json<{ error: { code: string } }>();
 		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-});
-
-// ─── GET — strict pagination (non-numeric limit/offset) ─────────────────────
-
-describe("GET /api/host-groups — strict pagination", () => {
-	it("returns 400 VALIDATION_ERROR for limit=10abc", async () => {
-		const res = await server.inject({ method: "GET", url: "/api/host-groups?limit=10abc" });
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
-	});
-
-	it("returns 400 VALIDATION_ERROR for offset=2xyz", async () => {
-		const res = await server.inject({
-			method: "GET",
-			url: "/api/host-groups?limit=10&offset=2xyz",
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error?: { code: string } }>();
-		expect(body.error?.code).toBe("VALIDATION_ERROR");
 	});
 });

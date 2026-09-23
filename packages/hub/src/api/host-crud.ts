@@ -3,28 +3,21 @@ import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import { validateCreateHost, validateIconImage, validateProfileJson } from "./hosts.js";
+import { parsePagination } from "./pagination.js";
 
 export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
 	// GET /api/hosts?limit=N&offset=M
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
 		"/api/hosts",
-		async (request) => {
-			const rawLimit = request.query.limit;
-			const rawOffset = request.query.offset;
-			const limit = rawLimit !== undefined ? Number.parseInt(rawLimit, 10) : undefined;
-			const offset = rawOffset !== undefined ? Number.parseInt(rawOffset, 10) : undefined;
+		async (request, reply) => {
+			const paging = parsePagination(request.query);
+			if (!paging.ok) return reply.code(400).send({ error: paging.error });
 
-			if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) {
-				return { error: { code: "VALIDATION_ERROR", message: "limit must be between 1 and 1000" } };
-			}
-			if (offset !== undefined && (!Number.isInteger(offset) || offset < 0)) {
-				return { error: { code: "VALIDATION_ERROR", message: "offset must be >= 0" } };
-			}
-
+			const { limit, offset } = paging;
 			if (limit !== undefined) {
 				const total = metaDal.countHosts();
-				const data = metaDal.listHosts(limit, offset ?? 0);
-				return { data: toSnakeCase(data), total, limit, offset: offset ?? 0 };
+				const data = metaDal.listHosts(limit, offset);
+				return { data: toSnakeCase(data), total, limit, offset };
 			}
 			return toSnakeCase(metaDal.listHosts());
 		},

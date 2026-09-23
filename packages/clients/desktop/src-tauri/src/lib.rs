@@ -1,5 +1,6 @@
 use lasterm_process_lock::ProcessLock;
 use window_material::WindowSurface;
+pub mod hub_log;
 pub mod tls_identity;
 pub mod window_material;
 use base64::Engine;
@@ -5273,30 +5274,16 @@ fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
     if let Err(error) = std::fs::create_dir_all(&log_dir) {
         eprintln!("[lasterm] cannot create {}: {error}", log_dir.display());
     }
-    let log_path = log_dir.join("hub.log");
+    // One writer for every launch in this process, bounded in size (#512).
+    let log = hub_log::for_this_process(&log_dir);
     let exit_notice = app.clone();
 
     tauri::async_runtime::spawn(async move {
         // A log this task cannot open must not stop it consuming events: the
         // outcome of startup is decided by what arrives here, and an unread
-        // channel would also leave a chatty child blocked on a full pipe.
-        let mut file = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(f) => Some(f),
-            Err(error) => {
-                eprintln!("[lasterm] cannot open {}: {error}", log_path.display());
-                None
-            }
-        };
-        let mut record = |line: String| match file.as_mut() {
-            Some(f) => {
-                let _ = writeln!(f, "{line}");
-            }
-            None => eprintln!("[lasterm] {line}"),
-        };
+        // channel would also leave a chatty child blocked on a full pipe. The
+        // writer sends a line it cannot write to standard error instead.
+        let record = |line: String| log.record(&line);
 
         use tauri_plugin_shell::process::CommandEvent;
         // Held back until nothing else is waiting to contradict it. Publishing a

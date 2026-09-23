@@ -40,6 +40,7 @@
 		"better-sqlite3": "catalog:",
 		"fastify": "catalog:",
 		"file-type": "catalog:",
+		"pino": "catalog:",
 		"ssh2": "catalog:"
 	},
 	"devDependencies": {

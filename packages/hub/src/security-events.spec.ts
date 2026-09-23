@@ -1,13 +1,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as tls from "node:tls";
 import { decodeMessage, encodeMessage, isValidUlid, type ProtocolMessage } from "@lasterm/shared";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, LogLevel } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getBootAssetToken } from "./asset-token.js";
 import { createToken, revokeToken } from "./auth.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { SecurityLog } from "./logging/security-log.js";
-import { createServer } from "./server.fixture.js";
+import { createServer, startServer as listen } from "./server.fixture.js";
 import { type DatabaseManager, openTestDatabases } from "./storage/db.js";
 import { getTestTls } from "./test-tls.fixture.js";
 
@@ -398,6 +400,237 @@ describe("keystrokes leave no trace in the logs", () => {
 			expect(lines.slice(beforeTyping)).toEqual([]);
 			expect(lines.join("\n")).not.toContain(typed);
 			expect(log.text()).not.toContain(typed);
+		} finally {
+			await hub.close();
+		}
+	});
+});
+
+// ─── Requests ─────────────────────────────────────────────────────────────────
+
+/** Pino's numeric levels, as they appear in each line. */
+const INFO = 30;
+const WARN = 40;
+const ERROR = 50;
+
+/**
+ * Fastify's own log as the desktop keeps it in `hub.log`: every line the
+ * server writes, read back as the text it wrote. The keystroke spec above spies
+ * on the server's logger, which a request's own child logger bypasses.
+ */
+class ServerLog {
+	private readonly written: string[] = [];
+	readonly destination = {
+		write: (line: string) => {
+			this.written.push(line);
+		},
+	};
+
+	/** Where the lines of what a spec does next will start. */
+	mark(): number {
+		return this.written.length;
+	}
+
+	text(from = 0): string {
+		return this.written.slice(from).join("");
+	}
+
+	entries(from = 0): Record<string, unknown>[] {
+		return this.written.slice(from).map((line) => JSON.parse(line) as Record<string, unknown>);
+	}
+
+	/** What a hub shipped at INFO would have written. */
+	shipped(from = 0): Record<string, unknown>[] {
+		return this.entries(from).filter((entry) => (entry.level as number) >= INFO);
+	}
+}
+
+async function serverLoggingTo(serverLog: ServerLog, level: LogLevel): Promise<FastifyInstance> {
+	const hub = await createServer({
+		tls: getTestTls(),
+		logger: { level, destination: serverLog.destination },
+		dbManager: dbs,
+		skipShellDiscovery: true,
+		authToken: PRIMARY_TOKEN,
+		authConfig: { tokenTtlDays: 90 },
+		securityLog: log.securityLog,
+	});
+	// Routes a spec can fail on purpose, outside /api/ so no bearer is asked.
+	hub.get("/spec/throws", async () => {
+		throw new Error("spec: handler failed");
+	});
+	hub.get("/spec/unavailable", async (_request, reply) =>
+		reply.code(503).send({ error: "SPEC_UNAVAILABLE" }),
+	);
+	// Two ways Fastify itself writes the raw URL into a message: a reply sent
+	// twice, and a handler that returns a value after sending one.
+	hub.get("/spec/sent-twice", (_request, reply) => {
+		reply.send({ ok: true });
+		reply.send({ ok: true });
+	});
+	hub.get("/spec/returns-after-send", async (_request, reply) => {
+		reply.send({ ok: true });
+		return { ok: true };
+	});
+	return hub;
+}
+
+const bearer = { authorization: `Bearer ${PRIMARY_TOKEN}` };
+
+describe("routine requests leave no line at the shipped level", () => {
+	// Fastify's own "incoming request" and "request completed" lines, two per
+	// request at INFO, were most of the desktop's hub.log (#512).
+	it("writes nothing at INFO or above for requests that succeed or miss", async () => {
+		const serverLog = new ServerLog();
+		const hub = await serverLoggingTo(serverLog, "info");
+		try {
+			await hub.ready();
+			// What the hub writes at INFO does reach this log: its start is there.
+			expect(serverLog.shipped()).toContainEqual(
+				expect.objectContaining({ msg: "serving user fonts from config dir" }),
+			);
+			const from = serverLog.mark();
+			const asset = `/public/fonts/missing.woff2?asset_token=${getBootAssetToken()}`;
+			for (let i = 0; i < 3; i++) {
+				expect((await hub.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+				const hosts = await hub.inject({ method: "GET", url: "/api/hosts", headers: bearer });
+				expect(hosts.statusCode).toBe(200);
+				expect((await hub.inject({ method: "GET", url: asset })).statusCode).toBe(404);
+				expect((await hub.inject({ method: "GET", url: "/nowhere" })).statusCode).toBe(404);
+			}
+
+			expect(serverLog.shipped(from)).toEqual([]);
+		} finally {
+			await hub.close();
+		}
+	});
+
+	it("still writes a request the hub failed, with its error when one was thrown", async () => {
+		const serverLog = new ServerLog();
+		const hub = await serverLoggingTo(serverLog, "info");
+		try {
+			await hub.ready();
+			const from = serverLog.mark();
+			expect((await hub.inject({ method: "GET", url: "/spec/throws" })).statusCode).toBe(500);
+			expect((await hub.inject({ method: "GET", url: "/spec/unavailable" })).statusCode).toBe(503);
+
+			expect(serverLog.shipped(from)).toEqual([
+				expect.objectContaining({
+					level: ERROR,
+					msg: "spec: handler failed",
+					req: expect.objectContaining({ method: "GET", url: "/spec/throws" }),
+					res: { statusCode: 500 },
+					err: expect.objectContaining({ message: "spec: handler failed" }),
+				}),
+				expect.objectContaining({
+					level: WARN,
+					msg: "request failed",
+					req: expect.objectContaining({ method: "GET", url: "/spec/unavailable" }),
+					res: { statusCode: 503 },
+				}),
+			]);
+		} finally {
+			await hub.close();
+		}
+	});
+
+	// Every request records its token's use. A store that can be read but not
+	// written refuses each record, and a warning each time was a line per request.
+	it("says once, not per request, that the store cannot record a token's use", async () => {
+		const serverLog = new ServerLog();
+		const hub = await serverLoggingTo(serverLog, "info");
+		try {
+			await hub.ready();
+			const from = serverLog.mark();
+			dbs.meta.pragma("query_only = ON");
+			for (let i = 0; i < 4; i++) {
+				const hosts = await hub.inject({ method: "GET", url: "/api/hosts", headers: bearer });
+				expect(hosts.statusCode).toBe(200);
+			}
+			dbs.meta.pragma("query_only = OFF");
+			expect(
+				(await hub.inject({ method: "GET", url: "/api/hosts", headers: bearer })).statusCode,
+			).toBe(200);
+
+			expect(serverLog.shipped(from)).toEqual([
+				expect.objectContaining({ level: WARN, tokenId: "primary" }),
+				expect.objectContaining({ level: WARN, failed: 4 }),
+			]);
+		} finally {
+			await hub.close();
+		}
+	});
+});
+
+describe("no logged request carries a secret, at any level", () => {
+	it("withholds the asset token, query values and request headers from every line", async () => {
+		const assetToken = getBootAssetToken();
+		const typedSearch = "typed-search-4242";
+		const serverLog = new ServerLog();
+		const hub = await serverLoggingTo(serverLog, "trace");
+		try {
+			const address = await listen(hub, {});
+			const withToken = `asset_token=${assetToken}`;
+			for (const url of [
+				`/public/fonts/missing.woff2?${withToken}`,
+				`/nowhere?${withToken}`,
+				`/spec/throws?${withToken}`,
+				`/spec/sent-twice?${withToken}`,
+				`/spec/returns-after-send?${withToken}`,
+			]) {
+				await hub.inject({ method: "GET", url });
+			}
+			await hub.inject({ method: "GET", url: `/api/hosts?q=${typedSearch}`, headers: bearer });
+
+			// A request the HTTP parser refuses: Node hands Fastify the error with
+			// the bytes it could not parse, which are the whole request.
+			const port = new URL(address).port;
+			await new Promise<void>((resolve) => {
+				const socket = tls.connect({
+					host: "127.0.0.1",
+					port: Number(port),
+					rejectUnauthorized: false,
+				});
+				socket.on("secureConnect", () => {
+					socket.write(
+						`GET /api/hosts?${withToken} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+							`Authorization: Bearer ${PRIMARY_TOKEN}\r\nnot a header\r\n\r\n`,
+					);
+				});
+				socket.on("data", () => undefined);
+				// The hub answers 400 and destroys the socket, which may arrive here
+				// as a reset: either way the request has been refused.
+				socket.on("error", () => undefined);
+				socket.on("close", () => resolve());
+			});
+			await vi.waitFor(() =>
+				expect(serverLog.entries().some((entry) => entry.msg === "client error")).toBe(true),
+			);
+
+			const text = serverLog.text();
+			expect(text).not.toContain(assetToken);
+			expect(text).not.toContain(typedSearch);
+			expect(text).not.toContain(PRIMARY_TOKEN);
+			const entries = serverLog.entries();
+			const clientError = entries.find((entry) => entry.msg === "client error");
+			expect(clientError?.err).not.toHaveProperty("rawPacket");
+			// What was withheld is said to be, where it was.
+			expect(entries).toContainEqual(
+				expect.objectContaining({
+					msg: "incoming request",
+					req: expect.objectContaining({
+						url: "/public/fonts/missing.woff2?asset_token=[redacted]",
+					}),
+				}),
+			);
+			expect(entries).toContainEqual(
+				expect.objectContaining({
+					req: expect.objectContaining({ url: "/api/hosts?q=[redacted]" }),
+				}),
+			);
+			// Fastify composed these around the raw URL; they are here, and redacted.
+			expect(text).toContain("/spec/sent-twice?asset_token=[redacted]");
+			expect(text).toContain("/spec/returns-after-send?asset_token=[redacted]");
 		} finally {
 			await hub.close();
 		}

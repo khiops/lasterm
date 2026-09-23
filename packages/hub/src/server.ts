@@ -28,7 +28,7 @@ import {
 	PRIMARY_TOKEN_ID,
 	reportTokenStore,
 	tokensEqual,
-	touchToken,
+	touchTokenBestEffort,
 	upsertPrimaryToken,
 	validateTokenRecord,
 } from "./auth.js";
@@ -45,6 +45,11 @@ import {
 } from "./config.js";
 import type { HubLogger } from "./logging/hub-logger.js";
 import type { LoggerRegistry } from "./logging/index.js";
+import {
+	HubLogController,
+	type ServerLogOptions,
+	serverLoggerOptions,
+} from "./logging/request-log.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { registerSeaStaticServing } from "./sea-static-server.js";
 import { SessionManager } from "./session/session-manager.js";
@@ -121,7 +126,12 @@ export function addStartupCorsOrigins(address: string, requestedPort?: number): 
 interface ServerBaseOptions {
 	host?: string; // default: "127.0.0.1"
 	port?: number; // absent: let the operating system assign an unused port
-	logger?: boolean; // default: true
+	/**
+	 * Fastify's own log. Default `true`: standard output from INFO, which the
+	 * desktop keeps as `hub.log`. A spec passes a level and a destination to read
+	 * back what a hub run writes there.
+	 */
+	logger?: boolean | ServerLogOptions;
 	dbManager?: DatabaseManager; // when provided, WS routes are registered
 	authToken?: string; // when provided, Bearer auth is enforced on all routes except /api/health
 	ownerToken?: string; // shutdown-only owner token from runtime.json
@@ -168,7 +178,9 @@ export interface StartServerOptions {
 
 export async function createServer(options: ServerOptions): Promise<FastifyInstance> {
 	const server = Fastify<HttpsServer>({
-		logger: options.logger ?? true,
+		logger: serverLoggerOptions(options.logger ?? true),
+		// Fastify's per-request lines, held to the levels CLAUDE.md allows (#512).
+		logController: new HubLogController(),
 		https: options.tls,
 	}) as unknown as FastifyInstance;
 	server.decorate(
@@ -392,11 +404,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 				}
 				const { record } = validation;
 				// Sliding-window expiry refresh + last_used_at update (best-effort, non-blocking)
-				try {
-					touchToken(db, record.id, ttlDays);
-				} catch (err) {
-					server.log.warn({ err, tokenId: record.id }, "touchToken failed");
-				}
+				touchTokenBestEffort(db, record.id, ttlDays, server.log);
 				server.log.debug({ url: pathname, tokenId: record.id }, "auth: accepted");
 				const credentialAndAddress = `${record.id} ${request.ip}`;
 				if (!restCredentialsSeen.has(credentialAndAddress)) {

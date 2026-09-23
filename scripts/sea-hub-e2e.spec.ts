@@ -1,399 +1,472 @@
 /**
  * sea-hub-e2e.spec.ts
  *
- * End-to-end tests that validate the lasterm-hub SEA binary works correctly.
+ * Runs the built hub executable, dist/sea/lasterm-hub (lasterm-hub.exe on
+ * Windows), and checks what "it works" means: a command exits 0 and prints the
+ * output it should, and a started hub serves, then stops cleanly (#147).
  *
- * Prerequisites:
- *   pnpm run package:sea-hub   (builds dist/sea/lasterm-hub)
+ * Where the executable was not built, every case here is skipped, under a name
+ * that says so. A job that builds it before running this file sets
+ * LASTERM_SEA_EXPECTED=1, and there a missing executable fails instead: a run
+ * meant to test the artefact must not pass because the artefact is absent.
  *
- * All tests skip gracefully when the binary has not been built yet.
+ * Every run of the executable gets fresh state, config and cache roots, so it
+ * never reads or writes the profile of whoever runs the suite, nor the
+ * runtime.json of a hub they have running. No case opens a terminal: the local
+ * agent's address is per user, not per profile (a named pipe on Windows), so a
+ * terminal would reach the user's own agent.
+ *
+ * Build the executable with scripts/build-hub.sh, or scripts/build-hub.ps1.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
-import {
-	accessSync,
-	existsSync,
-	constants as fsConstants,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	statSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import type { IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { homedir, tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createHubTlsAgent } from "../packages/hub/src/hub-transport.js";
+import { platformDirEnv } from "../packages/hub/src/platform-dirs.fixture.js";
+import { lastermDir } from "../packages/shared/src/platform-dirs.js";
 
-// ─── Paths ────────────────────────────────────────────────────────────────────
+// ─── The artefact ─────────────────────────────────────────────────────────────
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const ROOT = resolve(__dirname, "..");
-const SEA_DIR = join(ROOT, "dist", "sea");
-const SEA_BINARY = join(SEA_DIR, process.platform === "win32" ? "lasterm-hub.exe" : "lasterm-hub");
-const AGENT_BINARY = join(
-	SEA_DIR,
-	process.platform === "win32" ? "lasterm-agent.exe" : "lasterm-agent",
+const ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
+const SEA_BINARY = join(
+	ROOT,
+	"dist",
+	"sea",
+	process.platform === "win32" ? "lasterm-hub.exe" : "lasterm-hub",
+);
+const SEA_NAME = relative(ROOT, SEA_BINARY).replaceAll("\\", "/");
+
+/**
+ * Whether this run must have the executable. Only "1" says yes: any other value
+ * is refused rather than read as no, because a misspelt flag would otherwise
+ * turn the failure this exists for back into a skip.
+ */
+function seaExpected(): boolean {
+	const value = process.env.LASTERM_SEA_EXPECTED;
+	if (value === undefined || value === "") return false;
+	if (value === "1") return true;
+	throw new Error(`LASTERM_SEA_EXPECTED must be 1 or unset, not ${JSON.stringify(value)}`);
+}
+
+const EXPECTED = seaExpected();
+const PRESENT = existsSync(SEA_BINARY);
+
+/**
+ * Digits and dots, with an optional pre-release and build: version-shaped, and
+ * checked against nothing. Whether the version is the right one is release.yml's
+ * check against the tag; here the question is whether the executable reached its
+ * entry point and reported.
+ */
+const VERSION_SHAPE = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * What `lasterm start` prints once it serves: the line the desktop parses, then
+ * the two directories it uses.
+ */
+const ANNOUNCEMENT = new RegExp(
+	[
+		String.raw`^lasterm hub listening on https://127\.0\.0\.1:(\d+) \(spki: ([A-Za-z0-9+/]+={0,2})\) \(build: ([^\s)]+)\)\r?\n`,
+		String.raw`Config dir : (.+?)\r?\n`,
+		String.raw`State dir  : (.+?)\r?\n`,
+	].join(""),
+	"m",
 );
 
-// ─── Availability ─────────────────────────────────────────────────────────────
+/** From spawn to that line, including first-run addon extraction and key generation. */
+const READY_TIMEOUT_MS = 60_000;
+/** A graceful shutdown gives its teardown 10 s; this leaves room for the exit. */
+const STOP_TIMEOUT_MS = 20_000;
 
-/** True when the hub SEA binary has been built and is executable. */
-function isBinaryAvailable(): boolean {
-	if (!existsSync(SEA_BINARY)) return false;
+// ─── An isolated profile ──────────────────────────────────────────────────────
+
+interface Sandbox {
+	readonly root: string;
+	readonly env: NodeJS.ProcessEnv;
+	/** Where the executable must put its state, config and cache: `<root>/…/lasterm`. */
+	readonly stateDir: string;
+	readonly configDir: string;
+	readonly cacheDir: string;
+}
+
+function createSandbox(): Sandbox {
+	const root = mkdtempSync(join(tmpdir(), "lasterm-sea-e2e-"));
+	const overrides: Record<string, string> = {
+		...platformDirEnv({
+			state: join(root, "state"),
+			config: join(root, "config"),
+			cache: join(root, "cache"),
+		}),
+		NO_COLOR: "1",
+	};
+	// Names that must not come from the parent. Windows compares environment names
+	// without case, so an inherited `AppData` beside the `APPDATA` set here would
+	// give the child two answers; LASTERM_PORT and LASTERM_OPEN are meant for the
+	// user's own hub.
+	const withheld = new Set(
+		[...Object.keys(overrides), "LASTERM_PORT", "LASTERM_OPEN"].map((name) => name.toUpperCase()),
+	);
+	const env: NodeJS.ProcessEnv = {};
+	for (const [name, value] of Object.entries(process.env)) {
+		if (!withheld.has(name.toUpperCase())) env[name] = value;
+	}
+	Object.assign(env, overrides);
+	const context = { platform: process.platform, env, homedir };
+	return {
+		root,
+		env,
+		stateDir: lastermDir("state", context),
+		configDir: lastermDir("config", context),
+		cacheDir: lastermDir("cache", context),
+	};
+}
+
+function removeSandbox(sandbox: Sandbox): void {
 	try {
-		accessSync(SEA_BINARY, fsConstants.X_OK);
-		return true;
+		rmSync(sandbox.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 	} catch {
-		return false;
+		// Windows can hold a handle on a file of a process that just exited; a
+		// leftover directory in the system temp folder is not a test failure.
 	}
 }
 
-/** SEA E2E tests only run in CI (after build-sea produces a fresh binary).
- *  Locally the binary may be stale/incompatible — skip to avoid 7× 30s timeouts. */
-const RUN_SEA_TESTS = !!process.env.CI && isBinaryAvailable();
+// ─── A started hub ────────────────────────────────────────────────────────────
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+interface Exit {
+	readonly code: number | null;
+	readonly signal: NodeJS.Signals | null;
+}
 
-interface HubProcess {
-	proc: ChildProcess;
-	port: number;
-	stateDir: string;
-	configDir: string;
-	baseUrl: string;
+interface StartedHub {
+	readonly pid: number;
+	readonly port: number;
+	/** Base64 DER SubjectPublicKeyInfo the hub announced. */
+	readonly spki: string;
+	readonly build: string;
+	/** The directories it announced it uses. */
+	readonly configDir: string;
+	readonly stateDir: string;
+	output(): string;
+	/** Close its stdin, which `--exit-with-stdin` turns into a graceful shutdown. */
+	stop(): Promise<Exit>;
+	/** Whatever state it is in, make sure it is gone. */
 	kill(): Promise<void>;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Pick a random port in the ephemeral range to avoid conflicts. */
-function randomPort(): number {
-	return 49_000 + Math.floor(Math.random() * 16_000);
+/** Settle with `promise`, or fail after `ms` with the message `failure` gives then. */
+function withTimeout<T>(promise: Promise<T>, ms: number, failure: () => string): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	const expired = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error(`${failure()} (after ${ms} ms)`)), ms);
+	});
+	return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
 }
 
 /**
- * Poll a URL until it returns a 2xx status or the timeout expires.
- * Returns the response on success, throws on timeout.
+ * `lasterm start --exit-with-stdin`, as the desktop runs it: it serves on a port
+ * the OS assigns and announces it on stdout. Anything short of that
+ * announcement kills the process and rejects with what it printed.
  */
-async function pollUntilReady(
-	url: string,
-	timeoutMs = 30_000,
-	intervalMs = 300,
-): Promise<Response> {
-	const deadline = Date.now() + timeoutMs;
-	let lastErr: unknown;
-
-	while (Date.now() < deadline) {
-		try {
-			const res = await fetch(url, { signal: AbortSignal.timeout(2_000) });
-			if (res.ok) return res;
-		} catch (err) {
-			lastErr = err;
-		}
-		await new Promise((r) => setTimeout(r, intervalMs));
-	}
-
-	throw new Error(
-		`Hub at ${url} did not become ready within ${timeoutMs}ms. Last error: ${String(lastErr)}`,
-	);
-}
-
-/**
- * Spawn the lasterm-hub SEA binary in foreground mode on a random port,
- * wait for /api/health to respond, then return a handle.
- */
-async function startHub(extraEnv: Record<string, string> = {}): Promise<HubProcess> {
-	const port = randomPort();
-	const stateDir = mkdtempSync(join(tmpdir(), "lasterm-hub-state-"));
-	const configDir = mkdtempSync(join(tmpdir(), "lasterm-hub-config-"));
-
-	const env: NodeJS.ProcessEnv = {
-		...process.env,
-		XDG_STATE_HOME: stateDir,
-		XDG_CONFIG_HOME: configDir,
-		LASTERM_PORT: String(port),
-		// Disable browser opening during tests
-		LASTERM_OPEN: "0",
-		// Suppress any TTY-related output noise
-		NO_COLOR: "1",
-		...extraEnv,
-	};
-
-	const proc = spawn(SEA_BINARY, ["start"], {
-		env,
-		stdio: ["ignore", "pipe", "pipe"],
+async function startHub(sandbox: Sandbox): Promise<StartedHub> {
+	const proc = spawn(SEA_BINARY, ["start", "--exit-with-stdin"], {
+		env: sandbox.env,
+		stdio: ["pipe", "pipe", "pipe"],
+		windowsHide: true,
 	});
-
-	// Collect stderr for diagnostics — don't let it block
-	const stderrLines: string[] = [];
-	proc.stderr?.on("data", (chunk: Buffer) => {
-		stderrLines.push(chunk.toString());
+	let stdout = "";
+	let stderr = "";
+	proc.stdout.setEncoding("utf8");
+	proc.stderr.setEncoding("utf8");
+	proc.stdout.on("data", (chunk: string) => {
+		stdout += chunk;
 	});
-
-	const baseUrl = `http://127.0.0.1:${port}`;
-
-	// Wait for hub to be ready; kill on failure to avoid orphaned processes
-	try {
-		await pollUntilReady(`${baseUrl}/api/health`, 30_000);
-	} catch (err) {
-		proc.kill("SIGKILL");
-		throw new Error(
-			`Hub failed to start on port ${port}.\n` +
-				`stderr: ${stderrLines.join("")}\n` +
-				`original: ${String(err)}`,
+	proc.stderr.on("data", (chunk: string) => {
+		stderr += chunk;
+	});
+	const output = () => `stdout:\n${stdout}\nstderr:\n${stderr}`;
+	// "close", not "exit": it comes once stdout is drained, so an announcement
+	// printed just before an exit is not lost.
+	const closed = new Promise<Exit>((resolveExit) => {
+		proc.once("close", (code, signal) => resolveExit({ code, signal }));
+	});
+	const kill = async () => {
+		if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+		await withTimeout(closed, STOP_TIMEOUT_MS, () => "the hub did not exit when killed").catch(
+			() => undefined,
 		);
-	}
-
-	// Widen to EventEmitter-compatible type so .once/.on are available
-	const procEE = proc as unknown as import("node:events").EventEmitter & {
-		exitCode: number | null;
-		kill(signal?: string): boolean;
 	};
 
-	const kill = (): Promise<void> =>
-		new Promise((resolve) => {
-			if (procEE.exitCode !== null) {
-				resolve();
-				return;
-			}
-			procEE.once("exit", () => resolve());
-			procEE.kill("SIGTERM");
-			// Force-kill after 5 s if SIGTERM is ignored
-			setTimeout(() => {
-				if (procEE.exitCode === null) procEE.kill("SIGKILL");
-			}, 5_000);
+	const announcement = new Promise<RegExpExecArray>((resolveReady, rejectReady) => {
+		proc.stdout.on("data", () => {
+			const match = ANNOUNCEMENT.exec(stdout);
+			if (match) resolveReady(match);
 		});
+		proc.once("error", rejectReady);
+		void closed.then(({ code, signal }) =>
+			rejectReady(
+				new Error(`the hub exited (code ${code}, signal ${signal}) before serving\n${output()}`),
+			),
+		);
+	});
+	let announced: RegExpExecArray;
+	try {
+		announced = await withTimeout(
+			announcement,
+			READY_TIMEOUT_MS,
+			() => `the hub did not announce that it serves\n${output()}`,
+		);
+	} catch (error) {
+		await kill();
+		throw error;
+	}
+	const { pid } = proc;
+	if (pid === undefined) {
+		await kill();
+		throw new Error(`the hub reports no pid\n${output()}`);
+	}
 
-	return { proc, port, stateDir, configDir, baseUrl, kill };
-}
-
-/** Read the auth token from the config dir that the hub wrote at startup. */
-function readAuthToken(configDir: string): string {
-	// configDir is XDG_CONFIG_HOME; hub appends "lasterm/auth.json"
-	const authPath = join(configDir, "lasterm", "auth.json");
-	const raw = readFileSync(authPath, "utf-8");
-	const parsed = JSON.parse(raw) as { token: string };
-	return parsed.token;
-}
-
-/** Perform a pairing flow: POST /api/pair (authenticated) → POST /api/pair/verify → token. */
-async function pairHub(hub: HubProcess): Promise<string> {
-	const authToken = readAuthToken(hub.configDir);
-
-	// Generate a pairing code (requires auth)
-	const pairRes = await fetch(`${hub.baseUrl}/api/pair`, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${authToken}`,
-			"Content-Type": "application/json",
+	return {
+		pid,
+		port: Number(announced[1]),
+		spki: announced[2]!,
+		build: announced[3]!,
+		configDir: announced[4]!,
+		stateDir: announced[5]!,
+		output,
+		stop: async () => {
+			proc.stdin.end();
+			return withTimeout(closed, STOP_TIMEOUT_MS, () => `the hub did not stop\n${output()}`);
 		},
-		body: JSON.stringify({}),
-	});
-	expect(pairRes.status).toBe(201);
-	const pairBody = (await pairRes.json()) as { code: string };
-	expect(typeof pairBody.code).toBe("string");
-	expect(pairBody.code).toMatch(/^\d{6}$/);
+		kill,
+	};
+}
 
-	// Exchange the code for a token (unauthenticated)
-	const verifyRes = await fetch(`${hub.baseUrl}/api/pair/verify`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ code: pairBody.code }),
-	});
-	expect(verifyRes.status).toBe(200);
-	const verifyBody = (await verifyRes.json()) as { token: string };
-	expect(typeof verifyBody.token).toBe("string");
-	expect(verifyBody.token.length).toBeGreaterThan(0);
+interface HubResponse {
+	readonly status: number;
+	readonly headers: IncomingHttpHeaders;
+	readonly body: string;
+	/** Bytes received, before decoding. */
+	readonly length: number;
+}
 
-	return verifyBody.token;
+/**
+ * A request over the transport the CLI uses: TLS whose peer must prove the key
+ * the hub announced. A hub serving with any other key is refused before HTTP.
+ *
+ * It asks for keep-alive, as requestHub does, so the hub never closes the
+ * connection with an answer still in flight. A network filter on the loopback
+ * path can hold back the end of a large one when it does: with Avast's Web
+ * Shield on Windows, the web UI's 900 KB script stops about 15 KB short, over
+ * any server, curl and Python included. The socket is still discarded after
+ * each request, since the agent keeps none alive.
+ */
+function hubRequest(
+	hub: StartedHub,
+	path: string,
+	init: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<HubResponse> {
+	const agent = createHubTlsAgent({ port: hub.port, spki: hub.spki });
+	return new Promise<HubResponse>((resolveResponse, rejectResponse) => {
+		const request = httpsRequest(
+			new URL(path, `https://127.0.0.1:${hub.port}`),
+			{
+				method: init.method ?? "GET",
+				headers: { Connection: "keep-alive", ...init.headers },
+				agent,
+			},
+			(response) => {
+				const chunks: Buffer[] = [];
+				response.on("data", (chunk: Buffer) => chunks.push(chunk));
+				response.on("error", rejectResponse);
+				response.on("end", () => {
+					const bytes = Buffer.concat(chunks);
+					resolveResponse({
+						status: response.statusCode ?? 0,
+						headers: response.headers,
+						body: bytes.toString("utf8"),
+						length: bytes.length,
+					});
+				});
+			},
+		);
+		request.setTimeout(15_000, () => request.destroy(new Error(`${path} did not answer`)));
+		request.on("error", rejectResponse);
+		request.end(init.body);
+	});
+}
+
+function readPrimaryToken(sandbox: Sandbox): string {
+	const { token } = JSON.parse(readFileSync(join(sandbox.configDir, "auth.json"), "utf8")) as {
+		token?: unknown;
+	};
+	expect(token).toMatch(/^[0-9a-f]{64}$/);
+	return token as string;
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("lasterm-hub SEA binary E2E", { timeout: 120_000 }, () => {
-	let hub: HubProcess | null = null;
-
-	beforeEach(() => {
-		hub = null;
+describe("lasterm-hub executable", () => {
+	it.runIf(EXPECTED)(`${SEA_NAME} was built, as LASTERM_SEA_EXPECTED=1 says`, () => {
+		expect(
+			existsSync(SEA_BINARY),
+			`${SEA_BINARY} is missing: the job that set LASTERM_SEA_EXPECTED=1 did not build it`,
+		).toBe(true);
 	});
 
-	afterEach(async () => {
-		if (hub !== null) {
-			await hub.kill();
-			// Clean up temp dirs
-			rmSync(hub.stateDir, { recursive: true, force: true });
-			rmSync(hub.configDir, { recursive: true, force: true });
-			hub = null;
-		}
-	});
+	describe.skipIf(!PRESENT)(
+		PRESENT ? SEA_NAME : `${SEA_NAME} not built: skipped (LASTERM_SEA_EXPECTED=1 fails instead)`,
+		() => {
+			// Mutations caught: an SQLite bootstrap that fails, loudly (exit 1) or
+			// silently (nothing extracted); a bundle that never reaches its entry
+			// point (exit 0, nothing printed).
+			it("runs its SQLite bootstrap and reports its version (agent status --json)", () => {
+				const sandbox = createSandbox();
+				try {
+					const result = spawnSync(SEA_BINARY, ["agent", "status", "--json"], {
+						env: sandbox.env,
+						encoding: "utf8",
+						timeout: 60_000,
+						windowsHide: true,
+					});
+					const said = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+					expect(result.error, said).toBeUndefined();
+					expect(result.signal, said).toBeNull();
+					expect(result.status, said).toBe(0);
 
-	// ── Test 1: binary exists and is executable ───────────────────────────
-
-	it.skipIf(!RUN_SEA_TESTS)("binary exists and is executable", () => {
-		expect(existsSync(SEA_BINARY)).toBe(true);
-
-		// Must be executable
-		expect(() => accessSync(SEA_BINARY, fsConstants.X_OK)).not.toThrow();
-
-		// Must be > 10 MB (includes the Node.js runtime)
-		const stat = statSync(SEA_BINARY);
-		expect(stat.size).toBeGreaterThan(10 * 1024 * 1024);
-	});
-
-	// ── Test 2: hub starts and responds to /api/health ───────────────────
-
-	it.skipIf(!RUN_SEA_TESTS)(
-		"starts and responds to /api/health with status ok",
-		{ timeout: 60_000 },
-		async () => {
-			hub = await startHub();
-
-			const res = await fetch(`${hub.baseUrl}/api/health`);
-			expect(res.status).toBe(200);
-
-			const body = (await res.json()) as { status: string };
-			expect(body.status).toBe("ok");
-		},
-	);
-
-	// ── Test 3: hub serves web UI from SEA assets ────────────────────────
-
-	it.skipIf(!RUN_SEA_TESTS)(
-		"serves web UI index.html and JS assets from SEA embedded assets",
-		{ timeout: 60_000 },
-		async () => {
-			hub = await startHub();
-
-			// Root path must return HTML containing the Vue app mount point
-			const htmlRes = await fetch(`${hub.baseUrl}/`);
-			expect(htmlRes.status).toBe(200);
-
-			const contentType = htmlRes.headers.get("content-type") ?? "";
-			expect(contentType).toContain("text/html");
-
-			const html = await htmlRes.text();
-			expect(html).toContain('<div id="app">');
-
-			// Scan for a JS asset link in the HTML (Vite embeds them as /assets/...)
-			const jsMatch = html.match(/src="(\/assets\/[^"]+\.js)"/);
-			if (jsMatch?.[1]) {
-				const jsRes = await fetch(`${hub.baseUrl}${jsMatch[1]}`);
-				expect(jsRes.status).toBe(200);
-				const jsContentType = jsRes.headers.get("content-type") ?? "";
-				expect(jsContentType).toContain("javascript");
-			} else {
-				// If no JS asset found in the HTML, just verify that the /assets/ path
-				// exists by checking that a 404 is returned (not a 500 or crash)
-				const assetsRes = await fetch(`${hub.baseUrl}/assets/`);
-				// A 404 is fine — proves the server is alive and routing works
-				expect([200, 404]).toContain(assetsRes.status);
-			}
-		},
-	);
-
-	// ── Test 4: API requires authentication ──────────────────────────────
-
-	it.skipIf(!RUN_SEA_TESTS)(
-		"API routes require authentication — returns 401 without token",
-		{ timeout: 60_000 },
-		async () => {
-			hub = await startHub();
-
-			// Unauthenticated request to a protected endpoint must return 401
-			const res = await fetch(`${hub.baseUrl}/api/hosts`);
-			expect(res.status).toBe(401);
-		},
-	);
-
-	// ── Test 5: pairing flow works ────────────────────────────────────────
-
-	it.skipIf(!RUN_SEA_TESTS)(
-		"pairing flow: POST /api/pair → /api/pair/verify → authenticated /api/hosts",
-		{ timeout: 60_000 },
-		async () => {
-			hub = await startHub();
-
-			// Complete pairing to obtain an auth token
-			const token = await pairHub(hub);
-
-			// The token must work for authenticated requests
-			const hostsRes = await fetch(`${hub.baseUrl}/api/hosts`, {
-				headers: { Authorization: `Bearer ${token}` },
+					let status: unknown;
+					expect(() => {
+						status = JSON.parse(result.stdout);
+					}, `the output is not JSON\n${said}`).not.toThrow();
+					expect(status).toMatchObject({
+						hub_version: expect.stringMatching(VERSION_SHAPE),
+						targets: expect.any(Array),
+					});
+					// The bootstrap extracted the SQLite addon, and into the cache it was
+					// given rather than the user's. A bootstrap that failed without saying
+					// so still exits 0 here, since this command opens no database.
+					const addons = join(sandbox.cacheDir, "addons");
+					const extracted = existsSync(addons)
+						? readdirSync(addons, { recursive: true, encoding: "utf8" })
+						: [];
+					expect(
+						extracted.some((entry) => entry.endsWith("better_sqlite3.node")),
+						`better_sqlite3.node was not extracted under ${addons}`,
+					).toBe(true);
+				} finally {
+					removeSandbox(sandbox);
+				}
 			});
-			expect(hostsRes.status).toBe(200);
 
-			const hosts = (await hostsRes.json()) as unknown[];
-			expect(Array.isArray(hosts)).toBe(true);
-			expect(hosts).toHaveLength(0); // fresh DB, no hosts configured
-		},
-	);
+			// Mutations caught: all of the above, each failing the start itself, and
+			// an executable missing its hub lock or TLS identity addon, which only
+			// `start` loads, so `agent status` still passes without them.
+			describe("started with start --exit-with-stdin", () => {
+				let sandbox: Sandbox | undefined;
+				let hub: StartedHub | undefined;
 
-	// ── Test 6: hub + agent integration (optional) ───────────────────────
+				beforeAll(async () => {
+					sandbox = createSandbox();
+					hub = await startHub(sandbox);
+				}, READY_TIMEOUT_MS + 10_000);
 
-	it.skipIf(!RUN_SEA_TESTS || !existsSync(AGENT_BINARY))(
-		"agent binary is co-located with hub binary (resolver can find it)",
-		{ timeout: 60_000 },
-		async () => {
-			// Both binaries must be in the same dist/sea/ directory.
-			// The hub's sea-agent-resolver looks next to process.execPath first.
-			// In this test we verify the static co-location property — no spawning needed.
+				afterAll(async () => {
+					await hub?.kill();
+					if (sandbox) removeSandbox(sandbox);
+				}, STOP_TIMEOUT_MS + 10_000);
 
-			expect(existsSync(AGENT_BINARY)).toBe(true);
-			expect(() => accessSync(AGENT_BINARY, fsConstants.X_OK)).not.toThrow();
+				it("announces its listener and key, in the directories it was given", () => {
+					expect(hub!.port).toBeGreaterThan(0);
+					expect(hub!.port).toBeLessThan(65_536);
+					expect(hub!.configDir).toBe(sandbox!.configDir);
+					expect(hub!.stateDir).toBe(sandbox!.stateDir);
 
-			// Both must live in the same directory
-			const hubDir = join(SEA_BINARY, "..");
-			const agentDir = join(AGENT_BINARY, "..");
-			expect(resolve(agentDir)).toBe(resolve(hubDir));
+					const runtime = JSON.parse(
+						readFileSync(join(sandbox!.stateDir, "runtime.json"), "utf8"),
+					) as unknown;
+					expect(runtime).toMatchObject({ pid: hub!.pid, port: hub!.port, spki: hub!.spki });
+				});
 
-			// Start hub with PATH set to include dist/sea/ so the resolver finds agent
-			hub = await startHub({ PATH: `${SEA_DIR}:${process.env.PATH ?? ""}` });
+				it("answers /api/health over TLS pinned to the key it announced", async () => {
+					const health = await hubRequest(hub!, "/api/health");
+					expect(health.status, health.body).toBe(200);
+					expect(JSON.parse(health.body)).toMatchObject({
+						status: "ok",
+						version: expect.stringMatching(VERSION_SHAPE),
+						build: hub!.build,
+					});
+				});
 
-			// Hub must still be healthy even with agent binary available
-			const res = await fetch(`${hub.baseUrl}/api/health`);
-			expect(res.status).toBe(200);
+				it("refuses its API without a token, and serves it with the token it wrote", async () => {
+					const refused = await hubRequest(hub!, "/api/hosts");
+					expect(refused.status, refused.body).toBe(401);
 
-			const body = (await res.json()) as { status: string };
-			expect(body.status).toBe("ok");
-		},
-	);
+					const token = readPrimaryToken(sandbox!);
+					const hosts = await hubRequest(hub!, "/api/hosts", {
+						headers: { Authorization: `Bearer ${token}` },
+					});
+					expect(hosts.status, hosts.body).toBe(200);
+					expect(JSON.parse(hosts.body)).toEqual(expect.any(Array));
+				});
 
-	// ── Test 7: hub writes auth.json on first start ───────────────────────
+				it("pairs a client: a code from /api/pair buys a token its API accepts", async () => {
+					const token = readPrimaryToken(sandbox!);
+					const pair = await hubRequest(hub!, "/api/pair", {
+						method: "POST",
+						headers: { Authorization: `Bearer ${token}` },
+					});
+					expect(pair.status, pair.body).toBe(201);
+					const { code } = JSON.parse(pair.body) as { code?: unknown };
+					expect(code).toMatch(/^\d{8}$/);
 
-	it.skipIf(!RUN_SEA_TESTS)(
-		"writes auth.json with a hex token on first start",
-		{ timeout: 60_000 },
-		async () => {
-			hub = await startHub();
+					const verify = await hubRequest(hub!, "/api/pair/verify", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ code }),
+					});
+					expect(verify.status, verify.body).toBe(200);
+					const { token: paired } = JSON.parse(verify.body) as { token?: unknown };
+					expect(paired).toEqual(expect.any(String));
+					expect(paired).not.toBe(token);
 
-			const authPath = join(hub.configDir, "lasterm", "auth.json");
-			expect(existsSync(authPath)).toBe(true);
+					const hosts = await hubRequest(hub!, "/api/hosts", {
+						headers: { Authorization: `Bearer ${paired as string}` },
+					});
+					expect(hosts.status, hosts.body).toBe(200);
+				});
 
-			const raw = readFileSync(authPath, "utf-8");
-			const parsed = JSON.parse(raw) as { token?: unknown };
-			expect(typeof parsed.token).toBe("string");
+				it("serves the web UI embedded in it, and the script the page loads", async () => {
+					const page = await hubRequest(hub!, "/");
+					expect(page.status, page.body).toBe(200);
+					expect(page.headers["content-type"]).toContain("text/html");
+					expect(page.body).toContain('<div id="app">');
 
-			// Token must be a 64-char hex string (32 bytes × 2)
-			expect(parsed.token as string).toMatch(/^[0-9a-f]{64}$/);
-		},
-	);
+					const script = /<script[^>]*\ssrc="(\/assets\/[^"]+\.js)"/.exec(page.body)?.[1];
+					expect(script, `no /assets/*.js script in:\n${page.body}`).toBeDefined();
+					const js = await hubRequest(hub!, script!);
+					expect(js.status).toBe(200);
+					expect(js.headers["content-type"]).toContain("javascript");
+					expect(js.length).toBeGreaterThan(0);
+					expect(js.length).toBe(Number(js.headers["content-length"]));
+				});
 
-	// ── Test 8: hub creates databases on startup ──────────────────────────
+				it("keeps its databases in the state directory it was given", () => {
+					expect(existsSync(join(sandbox!.stateDir, "meta.db"))).toBe(true);
+					expect(existsSync(join(sandbox!.stateDir, "spool.db"))).toBe(true);
+				});
 
-	it.skipIf(!RUN_SEA_TESTS)(
-		"creates meta.db and spool.db in the state directory on startup",
-		{ timeout: 60_000 },
-		async () => {
-			hub = await startHub();
-
-			const metaDb = join(hub.stateDir, "lasterm", "meta.db");
-			const spoolDb = join(hub.stateDir, "lasterm", "spool.db");
-
-			expect(existsSync(metaDb)).toBe(true);
-			expect(existsSync(spoolDb)).toBe(true);
-
-			// Both must be non-trivial SQLite files (> 4 KB header)
-			expect(statSync(metaDb).size).toBeGreaterThan(4096);
-			expect(statSync(spoolDb).size).toBeGreaterThan(4096);
+				// Last: the cases above need it running. Mutation caught: a hub that
+				// ignores --exit-with-stdin, and would outlive a desktop that quit.
+				it("stops when its stdin closes: exit 0, and its runtime record withdrawn", async () => {
+					const exit = await hub!.stop();
+					expect(exit, hub!.output()).toEqual({ code: 0, signal: null });
+					expect(existsSync(join(sandbox!.stateDir, "runtime.json"))).toBe(false);
+				});
+			});
 		},
 	);
 });

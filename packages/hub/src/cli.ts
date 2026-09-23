@@ -884,7 +884,6 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 				killChild: () => {
 					child.kill("SIGTERM");
 				},
-				now: () => Date.now(),
 				sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 				healthTimeoutMs,
 			});

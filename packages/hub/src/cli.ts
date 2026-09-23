@@ -925,6 +925,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 			...(port !== undefined ? { port } : {}),
 			...(args.open ? { open: true } : {}),
 			moduleUrl: import.meta.url,
+			logPath,
 		});
 		let childExit: ChildExitState = { exited: false };
 		const child = spawn(process.execPath, plan.args, {

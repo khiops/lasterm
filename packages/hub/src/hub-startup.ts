@@ -16,6 +16,7 @@ import {
 } from "./cli.js";
 import { ConfigResolver, loadTlsConfig } from "./config.js";
 import { acquireHubLock } from "./hub-lock.js";
+import { boundDaemonLog } from "./logging/daemon-log.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { runLogGc } from "./logging/log-gc.js";
 import { SecurityLog } from "./logging/security-log.js";
@@ -55,12 +56,21 @@ type HubDatabases = ReturnType<typeof openDatabases>;
  */
 export const STARTUP_UNWIND_TIMEOUT_MS = 10_000;
 
+/** `process.stdout`, looked up on each line, so that the line is checked against the daemon log's limit. */
+const STANDARD_OUTPUT = {
+	write(line: string): void {
+		process.stdout.write(line);
+	},
+};
+
 /** Injectable only to make the acquisition-to-cleanup boundary observable. */
 export interface HubStartupDependencies {
 	readonly getStateDir: typeof getStateDir;
 	readonly getConfigDir: typeof getConfigDir;
 	readonly describePreviousInstallation: typeof describePreviousInstallation;
 	readonly acquireHubLock: typeof acquireHubLock;
+	/** Returns whether the process's output is now checked against the daemon log's limit. */
+	readonly boundDaemonLog: () => boolean;
 	readonly initAuth: typeof initAuth;
 	readonly createOwnerToken: typeof createOwnerToken;
 	readonly openDatabases: typeof openDatabases;
@@ -81,6 +91,7 @@ const defaultDependencies: HubStartupDependencies = {
 	getConfigDir,
 	describePreviousInstallation,
 	acquireHubLock,
+	boundDaemonLog: () => boundDaemonLog() !== undefined,
 	initAuth,
 	createOwnerToken,
 	openDatabases,
@@ -130,6 +141,10 @@ export async function startHub(
 	// publishing this hub where it holds no lock.
 	const stateDir = path.resolve(dependencies.getStateDir());
 	dependencies.acquireHubLock(stateDir);
+	// A daemon's log is the running hub's evidence: a start that loses the lock
+	// only appends to it (#133). The hub that holds the lock is the only one that
+	// moves it aside at its size limit (#525).
+	const daemonLogBounded = dependencies.boundDaemonLog();
 
 	const configDir = path.resolve(dependencies.getConfigDir());
 	// Owner-only, and exactly: a umask of 002 would otherwise give 0775 and the
@@ -194,6 +209,10 @@ export async function startHub(
 		});
 		server = await dependencies.createServer({
 			...(options.port !== undefined ? { port: options.port } : {}),
+			// Fastify's log writes to descriptor 1 itself unless given a stream,
+			// and those lines would then not be checked against the daemon log's
+			// limit.
+			...(daemonLogBounded ? { logger: { destination: STANDARD_OUTPUT } } : {}),
 			tls: tlsIdentity.tls,
 			authToken,
 			ownerToken,

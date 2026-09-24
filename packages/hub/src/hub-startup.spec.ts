@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import Database from "better-sqlite3";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createToken,
 	sweepNonPrimaryTokens,
@@ -17,7 +17,7 @@ import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
-import { removeTempDir } from "./temp-dir.fixture.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 
 const TEST_TLS_IDENTITY = {
 	tls: { cert: "certificate", key: "key" },
@@ -295,6 +295,88 @@ describe("startHub token restart sweep", () => {
 		).rejects.toMatchObject({ code: "AUTH_TOKEN_SWEEP_FAILED" });
 
 		expect(createServer).not.toHaveBeenCalled();
+	});
+});
+
+// The key that names this hub to its agent daemons lives in the directory it
+// locked, and has to reach the server that hands it to them (#127).
+describe("startHub carries the hub key", () => {
+	// A start that completes listens for SIGTERM and SIGINT on the process; the
+	// ones these starts add are taken away again, so the file stays under Node's
+	// listener warning.
+	const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+	let before = new Map<NodeJS.Signals, NodeJS.SignalsListener[]>();
+	beforeEach(() => {
+		before = new Map(signals.map((signal) => [signal, process.listeners(signal)]));
+	});
+	afterEach(() => {
+		for (const signal of signals) {
+			for (const listener of process.listeners(signal)) {
+				if (!before.get(signal)?.includes(listener)) process.off(signal, listener);
+			}
+		}
+	});
+
+	function startWith(stateDir: string, createServer: (options: { hubKey?: string }) => unknown) {
+		const dbs = openTestDatabases();
+		return startHub(
+			{ port: 4100, logging: true },
+			{
+				describePreviousInstallation: () => undefined,
+				getStateDir: () => stateDir,
+				getConfigDir: () => stateDir,
+				acquireHubLock: () => null as never,
+				initAuth: () => randomBytes(32).toString("hex"),
+				createOwnerToken: () => "owner-token",
+				resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+				openDatabases: () => dbs,
+				createServer: async (options) => createServer(options) as never,
+				startServer: async () => "https://127.0.0.1:4100",
+				addStartupCorsOrigins: () => 4100,
+				persistRuntime: () => undefined,
+				deleteRuntime: () => false,
+			},
+		).finally(() => dbs.close());
+	}
+
+	it("reads it from the directory it locked, hands it to the server, and keeps it across restarts", async () => {
+		const stateDir = makeTempDir("lasterm-startup-key-");
+		try {
+			const handed: (string | undefined)[] = [];
+			const createServer = (options: { hubKey?: string }) => {
+				handed.push(options.hubKey);
+				return {};
+			};
+
+			await startWith(stateDir, createServer);
+			await startWith(stateDir, createServer);
+
+			const stored = readFileSync(join(stateDir, "hub-key"), "utf8");
+			expect(stored).toMatch(/^[0-9a-f]{64}$/);
+			expect(handed).toEqual([stored, stored]);
+			// Written nowhere a log is kept.
+			const hubLog = readFileSync(join(stateDir, "logs", "hub.jsonl"), "utf8");
+			expect(hubLog).toContain("hub started");
+			expect(hubLog).not.toContain(stored);
+		} finally {
+			await removeTempDir(stateDir);
+		}
+	});
+
+	it("refuses to start on a malformed key, naming the file, before any server exists", async () => {
+		const stateDir = makeTempDir("lasterm-startup-key-");
+		try {
+			const keyPath = join(stateDir, "hub-key");
+			writeFileSync(keyPath, "garbage");
+			const createServer = vi.fn(() => ({}));
+
+			await expect(startWith(stateDir, createServer)).rejects.toThrow(keyPath);
+
+			expect(createServer).not.toHaveBeenCalled();
+			expect(readFileSync(keyPath, "utf8")).toBe("garbage");
+		} finally {
+			await removeTempDir(stateDir);
+		}
 	});
 });
 

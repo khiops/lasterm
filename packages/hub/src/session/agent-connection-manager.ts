@@ -22,11 +22,12 @@ import type {
 	ProtocolMessage,
 	SessionStatus,
 } from "@lasterm/shared";
-import { DEFAULT_CHANNEL_NAME, generateId, getSocketPath } from "@lasterm/shared";
+import { DEFAULT_CHANNEL_NAME, ErrorCode, generateId, getSocketPath } from "@lasterm/shared";
 import { HUB_VERSION } from "../build-version.js";
-import type { AgentConnection } from "./agent-connection.js";
+import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
 import { connectOrLaunch } from "./agent-launcher.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { daemonAuthFrame } from "./daemon-auth.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
@@ -318,27 +319,11 @@ export class AgentConnectionManager {
 				}
 			}
 
-			// The agent serves one hub at a time and has just taken up with
-			// another one. Nothing this connection sends will be read from here
-			// on, so it is dropped rather than left writing into a socket that
-			// answers nothing — and the next attach opens a fresh one, which
-			// displaces in its turn (#127).
-			if (msg.type === "ERROR" && (msg as { code?: string }).code === "DISPLACED") {
-				this.ctx.hubLogger?.log("warn", "agent-connection-manager: displaced by another hub", {
-					hostId,
-					sessionId,
-					message: (msg as { message?: string }).message,
-				});
-				console.error(
-					`[lasterm] another connection has taken over the agent on ${hostId}: ${
-						(msg as { message?: string }).message ?? "no detail"
-					}`,
-				);
-				if (this.ctx.agents.get(hostId) === agent) {
-					this.ctx.agents.delete(hostId);
-					this.ctx.agentCapabilities.delete(hostId);
-				}
-				agent.close();
+			// A newer connection has taken this one's place. Nothing this
+			// connection sends will be read from here on, so it is dropped rather
+			// than left writing into a socket that answers nothing (#127).
+			if (msg.type === "ERROR" && (msg as { code?: string }).code === ErrorCode.DISPLACED) {
+				this.dropDisplacedConnection(hostId, sessionId, agent, msg as ErrorMessage);
 				return;
 			}
 
@@ -494,6 +479,52 @@ export class AgentConnectionManager {
 	}
 
 	/**
+	 * Let go of a connection the daemon says a newer one has replaced.
+	 *
+	 * Either way this connection is finished: it is dropped, and no longer the
+	 * way to reach this host if it still was. What differs is what the message
+	 * means, and so how loudly it is said (#127).
+	 *
+	 * An agent with `hub-identity` serves several hubs, and replaces only a
+	 * connection of the same hub: this hub opened a newer one itself, which is
+	 * the one to use from now on. That is housekeeping, not news.
+	 *
+	 * An agent without it serves one hub at a time and has taken up with
+	 * someone else, possibly another hub: the terminals this connection drove
+	 * now answer elsewhere, and that is said where a person can find it.
+	 */
+	private dropDisplacedConnection(
+		hostId: string,
+		sessionId: string,
+		agent: AgentConnection,
+		msg: ErrorMessage,
+	): void {
+		if (hasHubIdentity(agent)) {
+			this.ctx.hubLogger?.log(
+				"debug",
+				"agent-connection-manager: replaced by a newer connection of this hub",
+				{ hostId, sessionId },
+			);
+		} else {
+			this.ctx.hubLogger?.log("warn", "agent-connection-manager: displaced by another hub", {
+				hostId,
+				sessionId,
+				message: msg.message,
+			});
+			console.error(
+				`[lasterm] another connection has taken over the agent on ${hostId}: ${
+					msg.message ?? "no detail"
+				}`,
+			);
+		}
+		if (this.ctx.agents.get(hostId) === agent) {
+			this.ctx.agents.delete(hostId);
+			this.ctx.agentCapabilities.delete(hostId);
+		}
+		agent.close();
+	}
+
+	/**
 	 * Record the SSH connection a host session takes up, and its end. Every
 	 * connect and every reconnect passes through wireAgentEvents once it has
 	 * authenticated, which is what makes this the one place to say so. The end
@@ -588,9 +619,13 @@ export class AgentConnectionManager {
 			// Send AUTH to daemon agent (required before CHANNEL_STATE handshake).
 			// The LastermAgent channel-state collector is installed in the constructor,
 			// so the CHANNEL_STATE listener is already armed before AUTH can trigger it.
-			if (this.ctx.primaryToken) {
-				agent.send({ type: "AUTH", token: this.ctx.primaryToken });
-			}
+			// It carries the hub key, which is what makes this hub's channels its
+			// own on a daemon that serves several (#127).
+			const auth = daemonAuthFrame(agent, {
+				token: this.ctx.primaryToken || null,
+				hubKey: this.ctx.hubKey,
+			});
+			if (auth !== null) agent.send(auth);
 
 			this.ctx.hubLogger?.log("debug", "agent-connection-manager: waiting for channel state", {
 				hostId,
@@ -601,7 +636,7 @@ export class AgentConnectionManager {
 				hostId,
 				count: states.length,
 			});
-			this.lifecycle.reconcileChannelState(hostId, states);
+			this.lifecycle.reconcileChannelState(hostId, states, agent);
 
 			assertQuitFence(this.ctx, quitEpoch);
 			this.ctx.commits.adoptAgent(quitEpoch, hostId, agent);

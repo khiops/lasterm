@@ -21,13 +21,11 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import type { IncomingHttpHeaders } from "node:http";
-import { request as httpsRequest } from "node:https";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createHubTlsAgent } from "../packages/hub/src/hub-transport.js";
+import { type RuntimeInfo, requestHub } from "../packages/hub/src/cli.js";
 import { platformDirEnv } from "../packages/hub/src/platform-dirs.fixture.js";
 import { lastermDir } from "../packages/shared/src/platform-dirs.js";
 
@@ -248,56 +246,34 @@ async function startHub(sandbox: Sandbox): Promise<StartedHub> {
 
 interface HubResponse {
 	readonly status: number;
-	readonly headers: IncomingHttpHeaders;
+	readonly headers: Headers;
 	readonly body: string;
 	/** Bytes received, before decoding. */
 	readonly length: number;
 }
 
 /**
- * A request over the transport the CLI uses: TLS whose peer must prove the key
- * the hub announced. A hub serving with any other key is refused before HTTP.
- *
- * It asks for keep-alive, as requestHub does, so the hub never closes the
- * connection with an answer still in flight. A network filter on the loopback
- * path can hold back the end of a large one when it does: with Avast's Web
- * Shield on Windows, the web UI's 900 KB script stops about 15 KB short, over
- * any server, curl and Python included. The socket is still discarded after
- * each request, since the agent keeps none alive.
+ * A request through `requestHub`, the CLI's own transport, to the hub the
+ * runtime record names: TLS whose peer must prove the recorded key, so a hub
+ * serving with any other key is refused before HTTP. What passes here is what
+ * the CLI gets, down to the whole of a large answer (#534).
  */
-function hubRequest(
+async function hubRequest(
 	hub: StartedHub,
 	path: string,
 	init: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<HubResponse> {
-	const agent = createHubTlsAgent({ port: hub.port, spki: hub.spki });
-	return new Promise<HubResponse>((resolveResponse, rejectResponse) => {
-		const request = httpsRequest(
-			new URL(path, `https://127.0.0.1:${hub.port}`),
-			{
-				method: init.method ?? "GET",
-				headers: { Connection: "keep-alive", ...init.headers },
-				agent,
-			},
-			(response) => {
-				const chunks: Buffer[] = [];
-				response.on("data", (chunk: Buffer) => chunks.push(chunk));
-				response.on("error", rejectResponse);
-				response.on("end", () => {
-					const bytes = Buffer.concat(chunks);
-					resolveResponse({
-						status: response.statusCode ?? 0,
-						headers: response.headers,
-						body: bytes.toString("utf8"),
-						length: bytes.length,
-					});
-				});
-			},
-		);
-		request.setTimeout(15_000, () => request.destroy(new Error(`${path} did not answer`)));
-		request.on("error", rejectResponse);
-		request.end(init.body);
-	});
+	const runtime = JSON.parse(
+		readFileSync(join(hub.stateDir, "runtime.json"), "utf8"),
+	) as RuntimeInfo;
+	const response = await requestHub(runtime, path, { ...init, responseTimeoutMs: 15_000 });
+	const bytes = Buffer.from(await response.arrayBuffer());
+	return {
+		status: response.status,
+		headers: response.headers,
+		body: bytes.toString("utf8"),
+		length: bytes.length,
+	};
 }
 
 function readPrimaryToken(sandbox: Sandbox): string {
@@ -442,16 +418,16 @@ describe("lasterm-hub executable", () => {
 				it("serves the web UI embedded in it, and the script the page loads", async () => {
 					const page = await hubRequest(hub!, "/");
 					expect(page.status, page.body).toBe(200);
-					expect(page.headers["content-type"]).toContain("text/html");
+					expect(page.headers.get("content-type")).toContain("text/html");
 					expect(page.body).toContain('<div id="app">');
 
 					const script = /<script[^>]*\ssrc="(\/assets\/[^"]+\.js)"/.exec(page.body)?.[1];
 					expect(script, `no /assets/*.js script in:\n${page.body}`).toBeDefined();
 					const js = await hubRequest(hub!, script!);
 					expect(js.status).toBe(200);
-					expect(js.headers["content-type"]).toContain("javascript");
+					expect(js.headers.get("content-type")).toContain("javascript");
 					expect(js.length).toBeGreaterThan(0);
-					expect(js.length).toBe(Number(js.headers["content-length"]));
+					expect(js.length).toBe(Number(js.headers.get("content-length")));
 				});
 
 				it("keeps its databases in the state directory it was given", () => {

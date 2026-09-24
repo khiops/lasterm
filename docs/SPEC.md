@@ -90,7 +90,7 @@ Universal PTY manager. Runs locally (child process) or remotely (via SSH). Same 
 - Channel multiplexing: N channels per agent process
 - Backpressure: pause PTY read when output buffer exceeds threshold
 - Daemon mode: standalone process listening on UDS, output buffering via `OutputBuffer` ring buffer
-- `DaemonServer` (`daemon.rs`): UDS listener, HELLO handshake, connection displacement (last-writer-wins)
+- `DaemonServer` (`daemon.rs`): UDS listener, HELLO and AUTH handshake, one connection per hub, channels kept apart by the hub that owns them (#127)
 - `OutputBuffer` (`batch.rs`): per-channel ring buffer with per-channel cap and global cap, evicts from largest channel
 - CLI: `lasterm-agent --daemon --socket <path> --buffer-per-channel <bytes> --buffer-global <bytes>`
 
@@ -111,12 +111,13 @@ hub: connectOrLaunch(socketPath, config, binaryPath)
   → If no daemon running: spawn detached "lasterm-agent --daemon --socket <path>"
   → Polls socket until ready (up to 5s)
   → Connects to UDS → Agent sends HELLO (with protocolVersion)
-  → On reconnect: Agent sends N x AGENT_CHANNEL_STATE + CHANNEL_STATE_END
+  → Hub sends AUTH { token, hub_key }: the key names the hub, the owner of what it spawns
+  → On reconnect: Agent sends N x AGENT_CHANNEL_STATE (this hub's channels) + CHANNEL_STATE_END
   → Hub reconciles channel state (adopt alive, mark dead)
   → Normal operation (same framed MessagePack protocol as stdio)
 ```
 
-The `DaemonServer` class manages UDS connections with last-writer-wins displacement: a new hub connection immediately replaces the previous one. Output is buffered by `OutputBuffer`, a per-channel ring buffer with configurable per-channel cap (`bufferPerChannel`, default 1 MB) and global cap (`bufferGlobal`, default 20 MB). When the global cap is reached, the largest channel's oldest data is evicted.
+The daemon serves several hubs at once, one connection each (#127). Every channel belongs to the hub whose connection spawned it, named by the `hub_key` of its AUTH; a hub that sends none is the owner `legacy`. A new connection displaces only the same hub's previous one, which is told `DISPLACED` and closed: that is how a connection a hub left half-open stops locking it out. Among `legacy` connections the last one wins, as every connection did before. A channel's output and events go to its owner's current connection, never to another hub's; while its owner has none, they wait in that owner's own queue (1000 frames, oldest dropped), which goes out as soon as the owner connects again, before anything it is answered. Another hub's channel answers every request as an unknown one does (PROTOCOL.md § 3.1b).
 
 **Process model (remote):**
 ```

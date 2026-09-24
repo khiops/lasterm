@@ -330,7 +330,10 @@ hubs: the last one wins.
 **Identities that were rejected.** The TLS key: rotating it (#193) would orphan every channel. The
 primary token: every hub reading the same `auth.json` shares it, and replacing it (§ 2.1) would orphan
 every channel too. The primary token also stays on this machine: a remote daemon's AUTH carries an
-empty token and the hub key only.
+empty token and the hub key only. A daemon without `auth.json` accepts it, having no token to check.
+A daemon that holds one refuses it, and so does a daemon that means to refuse everyone, its
+`auth.json` missing beside a `meta.db`, unreadable or malformed: its expected token matches nothing,
+not even an empty one. Before #127 no hub sent an empty token, and that marker matched one.
 
 ## 4. Data Protection
 

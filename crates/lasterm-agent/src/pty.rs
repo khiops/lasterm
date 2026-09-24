@@ -5,11 +5,22 @@ use std::time::Duration;
 use async_xpty::{CommandBuilder, ExitStatus, PtyProcess};
 use tokio::task::JoinHandle;
 
+use crate::owner::OwnerId;
+
 const CHANNEL_TEARDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct PtyChannelState {
     pub process: PtyProcess,
     pub seq: u64,
+    /// The hub whose connection spawned this channel. Set at SPAWN, never
+    /// changed: only a getter reads it (#127).
+    owner: OwnerId,
+}
+
+impl PtyChannelState {
+    pub(crate) fn owner(&self) -> &OwnerId {
+        &self.owner
+    }
 }
 
 pub struct PtyManager {
@@ -200,10 +211,14 @@ impl PtyManager {
         self.sweep_next_reader_lookup = true;
     }
 
-    /// Spawn a new PTY channel. Returns (channel_id, pid).
+    /// Spawn a new PTY channel for `owner`. Returns (channel_id, pid).
+    ///
+    /// A channel id is unique across the whole agent, whoever owns it: a
+    /// duplicate is refused even when another hub holds the first one.
     #[allow(clippy::too_many_arguments)]
-    pub async fn spawn(
+    pub(crate) async fn spawn(
         &mut self,
+        owner: OwnerId,
         channel_id: Option<String>,
         shell: &str,
         args: &[String],
@@ -247,9 +262,33 @@ impl PtyManager {
         let pid = process.pid();
         let kill_tree_scope = process.kill_tree_scope();
         tracing::debug!(channel_id = %id, ?kill_tree_scope, "PTY kill-tree scope");
-        self.channels
-            .insert(id.clone(), PtyChannelState { process, seq: 0 });
+        self.channels.insert(
+            id.clone(),
+            PtyChannelState {
+                process,
+                seq: 0,
+                owner,
+            },
+        );
         Ok((id, pid))
+    }
+
+    /// The channel, if `owner` holds it. Another hub's channel is as absent
+    /// as one that does not exist: its existence is never revealed (#127).
+    pub(crate) fn owned_by(&self, channel_id: &str, owner: &OwnerId) -> Option<&PtyChannelState> {
+        self.channels
+            .get(channel_id)
+            .filter(|channel| channel.owner() == owner)
+    }
+
+    /// How many channels hubs other than `owner` hold.
+    pub(crate) fn held_by_others(&self, owner: &OwnerId) -> u32 {
+        let others = self
+            .channels
+            .values()
+            .filter(|channel| channel.owner() != owner)
+            .count();
+        u32::try_from(others).unwrap_or(u32::MAX)
     }
 
     #[allow(dead_code)] // Used in tests
@@ -497,7 +536,16 @@ mod tests {
     async fn test_spawn_channel() {
         let mut mgr = PtyManager::new();
         let (id, pid) = mgr
-            .spawn(None, test_shell(), &[], None, None, 80, 24)
+            .spawn(
+                OwnerId::legacy(),
+                None,
+                test_shell(),
+                &[],
+                None,
+                None,
+                80,
+                24,
+            )
             .await
             .unwrap();
         assert!(!id.is_empty());
@@ -515,6 +563,7 @@ mod tests {
         let fixed_id = "test-channel-01".to_string();
         let (id, _) = mgr
             .spawn(
+                OwnerId::legacy(),
                 Some(fixed_id.clone()),
                 test_shell(),
                 &[],
@@ -529,6 +578,7 @@ mod tests {
 
         let err = mgr
             .spawn(
+                OwnerId::legacy(),
                 Some(fixed_id.clone()),
                 test_shell(),
                 &[],
@@ -554,6 +604,7 @@ mod tests {
 
         let error = manager
             .spawn(
+                OwnerId::legacy(),
                 Some("post-shutdown-spawn".to_owned()),
                 test_shell(),
                 &[],
@@ -575,12 +626,30 @@ mod tests {
     #[tokio::test]
     async fn test_destroy_all() {
         let mut mgr = PtyManager::new();
-        mgr.spawn(None, test_shell(), &[], None, None, 80, 24)
-            .await
-            .unwrap();
-        mgr.spawn(None, test_shell(), &[], None, None, 80, 24)
-            .await
-            .unwrap();
+        mgr.spawn(
+            OwnerId::legacy(),
+            None,
+            test_shell(),
+            &[],
+            None,
+            None,
+            80,
+            24,
+        )
+        .await
+        .unwrap();
+        mgr.spawn(
+            OwnerId::legacy(),
+            None,
+            test_shell(),
+            &[],
+            None,
+            None,
+            80,
+            24,
+        )
+        .await
+        .unwrap();
         assert_eq!(mgr.channel_ids().len(), 2);
         let summary = mgr.destroy_all().await;
         assert_eq!(summary.confirmed_shell_exits, 2);
@@ -594,6 +663,7 @@ mod tests {
         let channel_id = "signal-failure-shutdown".to_string();
         let (spawned_channel_id, pid) = manager
             .spawn(
+                OwnerId::legacy(),
                 Some(channel_id.clone()),
                 test_shell(),
                 // No args: an idle shell on a PTY blocks reading input, which is
@@ -848,7 +918,16 @@ mod tests {
                 ),
             ];
             let (channel_id, shell_pid) = manager
-                .spawn(Some(channel_id), "/bin/sh", &args, None, None, 80, 24)
+                .spawn(
+                    OwnerId::legacy(),
+                    Some(channel_id),
+                    "/bin/sh",
+                    &args,
+                    None,
+                    None,
+                    80,
+                    24,
+                )
                 .await
                 .expect("spawn background workload");
             let child_pid = wait_for_child_pid(&child_pid_file).await;
@@ -901,6 +980,7 @@ mod tests {
                 HubToAgent::Destroy {
                     channel_id: channel_id.clone(),
                 },
+                &OwnerId::legacy(),
                 Arc::clone(&manager),
                 frame_tx,
                 channel_events,
@@ -919,6 +999,7 @@ mod tests {
             let mut manager = PtyManager::new();
             let (channel_id, pid) = manager
                 .spawn(
+                    OwnerId::legacy(),
                     Some("unconfirmed-shutdown".to_string()),
                     "/bin/sh",
                     &["-c".to_string(), "sleep 30".to_string()],
@@ -958,6 +1039,7 @@ mod tests {
                 let mut guard = manager.lock().await;
                 let (_channel_id, pid) = guard
                     .spawn(
+                        OwnerId::legacy(),
                         Some(format!("many-teardown-{number}")),
                         "/bin/sh",
                         &["-c".to_string(), "sleep 30".to_string()],

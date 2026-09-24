@@ -79,14 +79,23 @@ pub enum AgentToHub {
         pid: u32,
         alive: bool,
     },
+    /// Ends the list of the connection owner's channels.
     #[serde(rename = "CHANNEL_STATE_END")]
-    ChannelStateEnd {},
+    ChannelStateEnd {
+        /// How many channels other hubs hold on this agent (#127). The hub may
+        /// show it; it must not act on those channels.
+        other_owner_channels: u32,
+    },
     #[serde(rename = "ERROR")]
     Error {
         code: String,
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
+        /// With `OTHER_HUBS_HOLD_CHANNELS` only: how many channels other hubs
+        /// hold. Absent from every other ERROR, which stays as it was on the wire.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        other_owner_channels: Option<u32>,
     },
     #[serde(rename = "LOG")]
     Log {
@@ -100,11 +109,16 @@ pub enum AgentToHub {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubToAgent {
-    /// AUTH handshake: client must send this as the first message when the agent
-    /// has a token configured in auth.json. If absent or mismatched the agent
-    /// closes the connection immediately.
+    /// AUTH handshake: the first message after HELLO. When the agent has a
+    /// token configured in auth.json, a missing or mismatched one closes the
+    /// connection. `hub_key` names the hub, and so the owner of every channel
+    /// the connection spawns (#127); without one the connection is `legacy`.
     #[serde(rename = "AUTH")]
-    Auth { token: String },
+    Auth {
+        token: String,
+        #[serde(default)]
+        hub_key: Option<String>,
+    },
     #[serde(rename = "SPAWN")]
     Spawn {
         request_id: String,
@@ -156,6 +170,13 @@ pub enum HubToAgent {
     Destroy { channel_id: String },
     #[serde(rename = "HEARTBEAT")]
     Heartbeat { ts: String },
+    /// Ask a daemon to stop (#127). Without `force`, it refuses while other
+    /// hubs hold channels on it; otherwise it takes the path SIGTERM takes.
+    #[serde(rename = "STOP")]
+    Stop {
+        #[serde(default)]
+        force: bool,
+    },
     #[serde(rename = "ERROR")]
     Error {
         code: String,
@@ -184,12 +205,18 @@ pub mod error_codes {
     pub const INVALID_MESSAGE: &str = "INVALID_MESSAGE";
     pub const CHANNEL_NOT_FOUND: &str = "CHANNEL_NOT_FOUND";
     pub const CHANNEL_EXISTS: &str = "CHANNEL_EXISTS";
-    /// Another connection has taken over this daemon, and this one is ending.
+    /// A newer connection of the same hub has replaced this one, which is
+    /// ending.
     ///
-    /// The daemon serves one hub at a time and the newest wins. Saying so is
-    /// what lets the hub being displaced tell "I am no longer the one driving
-    /// this agent" from "these terminals stopped answering" (#127).
+    /// The daemon serves several hubs at once, one connection each, and a
+    /// hub's newest connection replaces its previous one: a connection left
+    /// half-open must not lock that hub out. Saying so is what lets the
+    /// connection being replaced tell "I am no longer the one driving these
+    /// terminals" from "these terminals stopped answering" (#127).
     pub const DISPLACED: &str = "DISPLACED";
+    /// A STOP without `force` was refused: other hubs hold channels on this
+    /// agent, and stopping it would end them (#127).
+    pub const OTHER_HUBS_HOLD_CHANNELS: &str = "OTHER_HUBS_HOLD_CHANNELS";
 }
 
 #[cfg(test)]
@@ -244,5 +271,95 @@ mod tests {
         assert_eq!(decoded["channel_id"], "ch_02");
         assert_eq!(decoded["level"], "error");
         assert_eq!(decoded["msg"], "spawn failed: no such file");
+    }
+
+    fn hub_frame(value: serde_json::Value) -> HubToAgent {
+        let bytes = rmp_serde::to_vec_named(&value).expect("encode a hub frame");
+        rmp_serde::from_slice(&bytes).expect("decode a hub frame")
+    }
+
+    /// Today's hubs send AUTH without a key: it still decodes, as no key.
+    #[test]
+    fn auth_reads_a_hub_key_and_does_without_one() {
+        match hub_frame(serde_json::json!({ "type": "AUTH", "token": "t" })) {
+            HubToAgent::Auth { token, hub_key } => {
+                assert_eq!(token, "t");
+                assert_eq!(hub_key, None);
+            }
+            other => panic!("expected AUTH, got {other:?}"),
+        }
+        match hub_frame(serde_json::json!({ "type": "AUTH", "token": "", "hub_key": "k" })) {
+            HubToAgent::Auth { token, hub_key } => {
+                assert_eq!(token, "");
+                assert_eq!(hub_key.as_deref(), Some("k"));
+            }
+            other => panic!("expected AUTH, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_reads_its_force_flag() {
+        assert!(matches!(
+            hub_frame(serde_json::json!({ "type": "STOP", "force": true })),
+            HubToAgent::Stop { force: true }
+        ));
+        assert!(matches!(
+            hub_frame(serde_json::json!({ "type": "STOP", "force": false })),
+            HubToAgent::Stop { force: false }
+        ));
+    }
+
+    /// The count is a field the hub reads first, on the refusal only. Every
+    /// other ERROR is the bytes it was before the field existed.
+    #[test]
+    fn only_the_stop_refusal_carries_a_count_of_other_hubs_channels() {
+        let ordinary = rmp_serde::to_vec_named(&AgentToHub::Error {
+            code: error_codes::CHANNEL_NOT_FOUND.into(),
+            message: "channel ch-1 not found".into(),
+            channel_id: Some("ch-1".into()),
+            other_owner_channels: None,
+        })
+        .unwrap();
+        // The map an ERROR was before this field, key for key, in order.
+        let field = |key: &str, value: &str| {
+            (
+                rmpv::Value::String(key.into()),
+                rmpv::Value::String(value.into()),
+            )
+        };
+        let before = rmp_serde::to_vec_named(&rmpv::Value::Map(vec![
+            field("type", "ERROR"),
+            field("code", "CHANNEL_NOT_FOUND"),
+            field("message", "channel ch-1 not found"),
+            field("channel_id", "ch-1"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            ordinary, before,
+            "an ordinary ERROR must not change on the wire"
+        );
+
+        let refusal = rmp_serde::to_vec_named(&AgentToHub::Error {
+            code: error_codes::OTHER_HUBS_HOLD_CHANNELS.into(),
+            message: "2 terminals on this agent belong to other hubs".into(),
+            channel_id: None,
+            other_owner_channels: Some(2),
+        })
+        .unwrap();
+        let decoded: serde_json::Value = rmp_serde::from_slice(&refusal).unwrap();
+        assert_eq!(decoded["code"], "OTHER_HUBS_HOLD_CHANNELS");
+        assert_eq!(decoded["other_owner_channels"], 2);
+        assert!(decoded.get("channel_id").is_none());
+    }
+
+    #[test]
+    fn channel_state_end_counts_other_hubs_channels() {
+        let bytes = rmp_serde::to_vec_named(&AgentToHub::ChannelStateEnd {
+            other_owner_channels: 3,
+        })
+        .unwrap();
+        let decoded: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded["type"], "CHANNEL_STATE_END");
+        assert_eq!(decoded["other_owner_channels"], 3);
     }
 }

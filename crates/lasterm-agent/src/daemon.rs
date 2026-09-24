@@ -1,10 +1,12 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -14,36 +16,60 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::batch::{batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender};
 use crate::framing::{encode_frame, FrameReader};
 use crate::handler::{handle_message, FrameSender, SnapshotSenders};
+use crate::owner::{ct_eq, OwnerId};
 use crate::platform_dirs::{lasterm_dir, DirKind};
-use crate::protocol::AgentToHub;
+use crate::protocol::{error_codes, AgentToHub, HubToAgent};
 use crate::pty::{DestroyAllSummary, PtyManager};
 
 #[cfg(unix)]
 const BIND_RETRY_MAX: u32 = 3;
 #[cfg(unix)]
 const BIND_RETRY_DELAY_MS: u64 = 300;
+/// How many frames each hub's queue keeps while that hub has no connection.
 const MAX_FRAME_QUEUE: usize = 1000;
+/// How long a daemon with a token waits for AUTH before dropping a connection.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a daemon without a token waits for the frame after HELLO.
+///
+/// A hub from before #127 sends nothing to a daemon without a token: it waits
+/// for the channel state, and gives up after 5 s. Past this wait such a
+/// connection is taken for one of them, as `legacy`, with time to spare. A
+/// current hub sends AUTH as soon as it reads HELLO, one round trip, well
+/// within it.
+const LEGACY_FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
 static CONNECTION_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Receiver held by each daemon accept loop. `true` means it must stop
-/// accepting connections and tear down every terminal it owns.
-pub(crate) type ShutdownReceiver = watch::Receiver<bool>;
-
-/// Build the one-way shutdown request channel shared by the platform-specific
-/// accept loops. The signal task owns the sender; the loop owns teardown.
-pub(crate) fn shutdown_channel() -> (watch::Sender<bool>, ShutdownReceiver) {
-    watch::channel(false)
+/// The daemon's end of its shutdown channel. The accept loop waits on it, and
+/// a hub's STOP asks through it: a STOP takes the path a signal takes.
+#[derive(Clone)]
+pub(crate) struct ShutdownReceiver {
+    requested: watch::Receiver<bool>,
+    request: watch::Sender<bool>,
 }
 
-/// Wait until a shutdown has been requested. A dropped sender is not a
-/// shutdown request: it can happen in a test that intentionally has no signal
-/// task, and must not make a daemon stop by surprise.
-async fn shutdown_requested(shutdown: &mut ShutdownReceiver) {
-    loop {
-        if *shutdown.borrow_and_update() {
-            return;
-        }
-        if shutdown.changed().await.is_err() {
+/// Build the shutdown request channel shared by the platform-specific accept
+/// loops. The signal task holds the sender; the loop owns teardown.
+pub(crate) fn shutdown_channel() -> (watch::Sender<bool>, ShutdownReceiver) {
+    let (request, requested) = watch::channel(false);
+    (request.clone(), ShutdownReceiver { requested, request })
+}
+
+impl ShutdownReceiver {
+    /// Ask for the daemon to stop, as a signal does.
+    fn request(&self) {
+        self.request.send_replace(true);
+    }
+
+    /// Wait until a shutdown has been requested. A closed channel is not a
+    /// request: a daemon must not stop by surprise. (It holds a sender itself,
+    /// so its channel does not close while it runs.)
+    async fn requested(&mut self) {
+        if self
+            .requested
+            .wait_for(|requested| *requested)
+            .await
+            .is_err()
+        {
             std::future::pending::<()>().await;
         }
     }
@@ -94,14 +120,122 @@ pub(crate) fn teardown_exit_status(summary: &DestroyAllSummary) -> i32 {
     }
 }
 
-/// Tracks the active hub connection so it can be displaced by a new one.
+/// Tells a connection's reader and writer to end. Unlike a `Notify`, a
+/// cancellation sent while either is busy is not lost: it is a state.
+type Cancel = watch::Sender<bool>;
+
+/// Wait until a connection is cancelled, or nothing is left that could.
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    let _ = cancel.wait_for(|cancelled| *cancelled).await;
+}
+
+/// A hub's current connection, which a newer one of the same hub replaces.
 struct ActiveConnection {
     /// Daemon-local sequence id for diagnostics.
     connection_id: u64,
-    /// Notified when this connection should be terminated (displaced).
-    cancel: Arc<Notify>,
-    /// Channel to send encoded frames to the active connection's writer task.
+    /// Set when this connection should be terminated (displaced).
+    cancel: Cancel,
+    /// Channel to send encoded frames to the connection's writer task.
     frame_tx: FrameSender,
+}
+
+/// Where each hub's frames go: its current connection, or while it has none,
+/// its own queue. One hub's frames never reach another (#127).
+#[derive(Default)]
+struct HubRoutes {
+    connections: HashMap<OwnerId, ActiveConnection>,
+    queues: HashMap<OwnerId, VecDeque<Vec<u8>>>,
+}
+
+type Routes = Arc<Mutex<HubRoutes>>;
+
+impl HubRoutes {
+    /// Send a frame to `owner`'s connection, or keep it for the next one.
+    fn route(&mut self, owner: &OwnerId, frame: Vec<u8>) {
+        let frame = match self.connections.get(owner) {
+            Some(active) => match active.frame_tx.send(frame) {
+                Ok(()) => return,
+                // Its writer is gone while it is still registered: the hub
+                // went away and the read loop has not seen it yet.
+                Err(mpsc::error::SendError(frame)) => frame,
+            },
+            None => frame,
+        };
+        let queue = self.queues.entry(owner.clone()).or_default();
+        if queue.len() >= MAX_FRAME_QUEUE {
+            queue.pop_front();
+        }
+        queue.push_back(frame);
+    }
+}
+
+/// What every connection of one daemon shares.
+#[derive(Clone)]
+struct DaemonShared {
+    pty_manager: Arc<Mutex<PtyManager>>,
+    /// Per-channel command senders (snapshot/resize).
+    cmd_senders: SnapshotSenders,
+    /// The pipeline every channel reader writes to.
+    channel_events: ChannelEventSender,
+    routes: Routes,
+    /// `None` on a first run: no token, AUTH is not checked.
+    expected_token: Option<String>,
+    /// What a hub's STOP asks through.
+    shutdown: ShutdownReceiver,
+}
+
+impl DaemonShared {
+    /// Read the token, and start the pipeline that carries every channel's
+    /// output and events: reader tasks → batch loop → router → the connection
+    /// of the channel's owner, or that owner's queue.
+    async fn start(
+        config_dir: &str,
+        state_dir: &std::path::Path,
+        pty_manager: Arc<Mutex<PtyManager>>,
+        shutdown: ShutdownReceiver,
+    ) -> Self {
+        // Load auth token once at startup (None → first-run, skip auth)
+        let expected_token = read_auth_token_with_state_dir(config_dir, state_dir).await;
+        if expected_token.is_some() {
+            tracing::info!("auth token loaded — connections will be authenticated");
+        } else {
+            tracing::info!(
+                "no auth token found — connections accepted without authentication (first-run)"
+            );
+        }
+
+        let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+        let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
+        tokio::spawn(batch_loop(channel_events_rx, batched_tx));
+        let routes: Routes = Arc::new(Mutex::new(HubRoutes::default()));
+        spawn_output_router(batched_rx, Arc::clone(&routes));
+
+        Self {
+            pty_manager,
+            cmd_senders: Arc::new(Mutex::new(HashMap::new())),
+            channel_events,
+            routes,
+            expected_token,
+            shutdown,
+        }
+    }
+
+    /// Whether nobody uses this daemon: no hub connected, no terminal held.
+    #[cfg(unix)]
+    async fn unused(&self) -> bool {
+        self.routes.lock().await.connections.is_empty()
+            && self.pty_manager.lock().await.channel_ids().is_empty()
+    }
+}
+
+/// End every hub connection, once the terminals are torn down. What each
+/// already has queued goes out first; a hub reads the close that follows as
+/// the acknowledgement of its STOP.
+async fn disconnect_all(routes: &Routes) {
+    let mut routes = routes.lock().await;
+    for (_, active) in routes.connections.drain() {
+        active.cancel.send_replace(true);
+    }
 }
 
 fn next_connection_id() -> u64 {
@@ -122,9 +256,10 @@ fn state_dir() -> std::io::Result<std::path::PathBuf> {
 
 /// Run the agent in daemon mode.
 ///
-/// Listens on a Unix domain socket. Handles one connection at a time
-/// (the latest authenticated connection wins and displaces the previous one).
-/// PTY channels persist across hub reconnections.
+/// Listens on a Unix domain socket. Serves several hubs at once, one
+/// connection each: a hub's newest authenticated connection replaces its
+/// previous one, and never another hub's (#127). PTY channels persist across
+/// hub reconnections.
 #[cfg(unix)]
 pub(crate) async fn run_daemon(
     socket_path: String,
@@ -239,30 +374,13 @@ async fn run_daemon_impl_with_manager(
         let _ = bound.send(());
     }
 
-    // Load auth token once at startup (None → first-run, skip auth)
-    let expected_token = read_auth_token_with_state_dir(&config_dir, &state_dir).await;
-    if expected_token.is_some() {
-        tracing::info!("auth token loaded — connections will be authenticated");
-    } else {
-        tracing::info!(
-            "no auth token found — connections accepted without authentication (first-run)"
-        );
-    }
-
-    // Per-channel command senders (snapshot/resize) — shared across connections
-    let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
-
-    // Batch channels — single batch loop for the daemon lifetime
-    // Output and events flow: PTY reader tasks → batch_loop → output_router → active connection
-    let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
-    let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
-    tokio::spawn(batch_loop(channel_events_rx, batched_tx));
-
-    // Active connection state — shared between accept loop and output router
-    let active_conn: Arc<Mutex<Option<ActiveConnection>>> = Arc::new(Mutex::new(None));
-
-    // Output router: drains batched frames, forwards to active connection (or buffers)
-    spawn_output_router(batched_rx, Arc::clone(&active_conn));
+    let daemon = DaemonShared::start(
+        &config_dir,
+        &state_dir,
+        Arc::clone(&pty_manager),
+        shutdown.clone(),
+    )
+    .await;
 
     // A daemon nobody is using, and that holds nothing, should not outlive its
     // purpose. Both conditions matter: a daemon with terminals waits however
@@ -280,18 +398,18 @@ async fn run_daemon_impl_with_manager(
     let result = loop {
         tokio::select! {
             biased;
-            _ = shutdown_requested(&mut shutdown) => {
+            _ = shutdown.requested() => {
                 tracing::info!("daemon shutdown requested; tearing down terminals");
                 // Stop routing new work before teardown can block on a slow
                 // terminal. Existing connection handlers may finish their own
                 // cancellation paths while the manager is swept.
                 drop(listener.take());
-                break Ok(teardown_daemon_terminals(&pty_manager).await);
+                let summary = teardown_daemon_terminals(&pty_manager).await;
+                disconnect_all(&daemon.routes).await;
+                break Ok(summary);
             }
             _ = idle_check.tick(), if idle_timeout.is_some() => {
-                let unused = active_conn.lock().await.is_none()
-                    && pty_manager.lock().await.channel_ids().is_empty();
-                if !unused {
+                if !daemon.unused().await {
                     idle_since = None;
                     continue;
                 }
@@ -313,28 +431,10 @@ async fn run_daemon_impl_with_manager(
                 let connection_id = next_connection_id();
                 tracing::debug!(connection_id, "hub connection accepted");
 
-                // Create cancellation notifier for this connection
-                let cancel = Arc::new(Notify::new());
-
-                // Create per-connection frame channel
-                let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-
-                // The connection becomes the active hub, displacing the previous
-                // one, only once it has authenticated: see `register_active`.
-
-                // Spawn the connection handler — does NOT block the accept loop
-                tokio::spawn(handle_connection(
-                    stream,
-                    Arc::clone(&pty_manager),
-                    Arc::clone(&cmd_senders),
-                    channel_events.clone(),
-                    frame_tx,
-                    frame_rx,
-                    Arc::clone(&active_conn),
-                    cancel,
-                    expected_token.clone(),
-                    connection_id,
-                ));
+                // The connection becomes its hub's current one, replacing that
+                // hub's previous one, only once it has authenticated: see
+                // `register_active`. Spawned, so as not to block the accept loop.
+                tokio::spawn(handle_connection_inner(stream, daemon.clone(), connection_id));
             }
             Err(e) => {
                 tracing::error!("accept error: {}", e);
@@ -364,9 +464,10 @@ fn get_pipe_name() -> String {
 
 /// Run the agent in daemon mode (Windows named pipe).
 ///
-/// Listens on a Windows named pipe. Handles one connection at a time
-/// (the latest authenticated connection wins and displaces the previous one).
-/// PTY channels persist across hub reconnections.
+/// Listens on a Windows named pipe. Serves several hubs at once, one
+/// connection each: a hub's newest authenticated connection replaces its
+/// previous one, and never another hub's (#127). PTY channels persist across
+/// hub reconnections.
 #[cfg(windows)]
 pub(crate) async fn run_daemon(
     socket_path: String,
@@ -404,33 +505,16 @@ async fn run_daemon_impl(
 
     tracing::info!("daemon listening on {}", pipe_name);
 
-    // Load auth token once at startup (None → first-run, skip auth)
-    let expected_token = read_auth_token_with_state_dir(&config_dir, &state_dir).await;
-    if expected_token.is_some() {
-        tracing::info!("auth token loaded — connections will be authenticated");
-    } else {
-        tracing::info!(
-            "no auth token found — connections accepted without authentication (first-run)"
-        );
-    }
-
     // Shared PTY manager — channels survive hub disconnections
     let pty_manager = Arc::new(Mutex::new(PtyManager::new()));
 
-    // Per-channel command senders (snapshot/resize) — shared across connections
-    let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
-
-    // Batch channels — single batch loop for the daemon lifetime
-    // Output and events flow: PTY reader tasks → batch_loop → output_router → active connection
-    let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
-    let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
-    tokio::spawn(batch_loop(channel_events_rx, batched_tx));
-
-    // Active connection state — shared between accept loop and output router
-    let active_conn: Arc<Mutex<Option<ActiveConnection>>> = Arc::new(Mutex::new(None));
-
-    // Output router: drains batched frames, forwards to active connection (or buffers)
-    spawn_output_router(batched_rx, Arc::clone(&active_conn));
+    let daemon = DaemonShared::start(
+        &config_dir,
+        &state_dir,
+        Arc::clone(&pty_manager),
+        shutdown.clone(),
+    )
+    .await;
 
     // Named pipe accept loop using owner-only ACL (SDDL "D:(A;;GA;;;OW)"):
     //   1. Create first server instance with secure DACL
@@ -447,7 +531,7 @@ async fn run_daemon_impl(
         // Use match instead of ? to avoid crashing the daemon on transient OS errors
         let connected_result = tokio::select! {
             biased;
-            _ = shutdown_requested(&mut shutdown) => {
+            _ = shutdown.requested() => {
                 tracing::info!("daemon shutdown requested");
                 drop(server.take());
                 break Ok(());
@@ -471,26 +555,12 @@ async fn run_daemon_impl(
             std::mem::replace(server.as_mut().expect("pipe server remains live"), next)
         };
 
-        // Create cancellation notifier for this connection
-        let cancel = Arc::new(Notify::new());
-
-        // Create per-connection frame channel
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-
-        // The connection becomes the active hub, displacing the previous one,
-        // only once it has authenticated: see `register_active`.
-
-        // Spawn the connection handler — does NOT block the accept loop
+        // The connection becomes its hub's current one, replacing that hub's
+        // previous one, only once it has authenticated: see `register_active`.
+        // Spawned, so as not to block the accept loop.
         tokio::spawn(handle_connection_inner(
             connected,
-            Arc::clone(&pty_manager),
-            Arc::clone(&cmd_senders),
-            channel_events.clone(),
-            frame_tx,
-            frame_rx,
-            Arc::clone(&active_conn),
-            cancel,
-            expected_token.clone(),
+            daemon.clone(),
             connection_id,
         ));
     };
@@ -498,6 +568,7 @@ async fn run_daemon_impl(
     // Every loop exit, including a replacement pipe creation failure, sweeps
     // the manager before this daemon reports its result to the caller.
     let summary = teardown_daemon_terminals(&pty_manager).await;
+    disconnect_all(&daemon.routes).await;
     result?;
     Ok(summary)
 }
@@ -574,66 +645,97 @@ async fn read_auth_token_with_state_dir(
     }
 }
 
-/// Constant-time byte comparison — prevents timing attacks on token validation.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+/// Read from `reader` until at least one message is decoded. Every message
+/// decoded goes into `pending`, in order; a partial frame stays in `frames`.
+async fn read_messages<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    frames: &mut FrameReader,
+    pending: &mut VecDeque<HubToAgent>,
+) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 8192];
+    while pending.is_empty() {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "client disconnected before AUTH",
+            ));
+        }
+        let messages = frames
+            .push(&buf[..n])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        pending.extend(messages);
     }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    Ok(())
 }
 
-/// Read the first framed message from `reader` (5 s timeout).
-/// Expects `{ "type": "AUTH", "token": "<hex>" }`.
-/// Returns `Ok(true)` on match, `Ok(false)` on mismatch, `Err` on timeout/IO.
-/// Read the first framed message from `reader` (5 s timeout).
-/// Expects the first message to be `HubToAgent::Auth { token }`.
-/// Returns `Ok(true)` on match, `Ok(false)` on mismatch, `Err` on timeout/IO.
-async fn validate_auth<R: AsyncRead + Unpin>(
+/// Read the frame that follows HELLO and say whose connection this is.
+///
+/// - `Ok(Some(owner))`: accepted. With AUTH, the owner comes from its
+///   `hub_key`, or is `legacy` without one. What the hub sent after its AUTH
+///   stays in `pending`, to be processed once the connection is registered.
+/// - `Ok(None)`: refused. A token is configured, and the first frame is not
+///   AUTH or carries another token.
+/// - `Err`: the connection ended, or sent nothing in time while a token is
+///   configured.
+///
+/// Without a token (a first run, or a remote machine with no hub of its own),
+/// the frame is read all the same: it is where a hub names itself (#127). A
+/// first frame that is not AUTH comes from a hub from before #127, which is
+/// `legacy`, and that frame stays in `pending` to be processed normally; so
+/// does a connection that sends nothing within `LEGACY_FIRST_FRAME_WAIT`.
+///
+/// No key is logged, ever.
+async fn handshake<R: AsyncRead + Unpin>(
     reader: &mut R,
-    expected_token: &str,
-) -> std::io::Result<bool> {
-    use crate::protocol::HubToAgent;
-    use tokio::time::{timeout, Duration};
-
-    // 5-second deadline for the AUTH frame
-    let first_msg = timeout(Duration::from_secs(5), async {
-        let mut frame_reader = FrameReader::new();
-        let mut buf = vec![0u8; 4096];
-        loop {
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "client disconnected before AUTH",
-                ));
-            }
-            let msgs = frame_reader
-                .push(&buf[..n])
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            if let Some(msg) = msgs.into_iter().next() {
-                return Ok(msg);
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "AUTH frame not received within 5s",
-        )
-    })??;
-
-    // Match the decoded message — only HubToAgent::Auth passes
-    match first_msg {
-        HubToAgent::Auth { token } => Ok(ct_eq(expected_token.as_bytes(), token.as_bytes())),
-        _other => {
-            tracing::warn!("expected AUTH message as first frame, got a different message type");
-            Ok(false)
+    frames: &mut FrameReader,
+    pending: &mut VecDeque<HubToAgent>,
+    expected_token: Option<&str>,
+    legacy_wait: Duration,
+) -> std::io::Result<Option<OwnerId>> {
+    let wait = match expected_token {
+        Some(_) => AUTH_TIMEOUT,
+        None => legacy_wait,
+    };
+    match tokio::time::timeout(wait, read_messages(reader, frames, pending)).await {
+        Ok(read) => read?,
+        Err(_elapsed) => {
+            return match expected_token {
+                Some(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "AUTH frame not received within 5s",
+                )),
+                // A hub from before #127 talking to a daemon without a token
+                // sends nothing until it has the channel state.
+                None => Ok(Some(OwnerId::legacy())),
+            };
         }
     }
+
+    if !matches!(pending.front(), Some(HubToAgent::Auth { .. })) {
+        return Ok(match expected_token {
+            Some(_) => {
+                tracing::warn!(
+                    "expected AUTH message as first frame, got a different message type"
+                );
+                None
+            }
+            None => Some(OwnerId::legacy()),
+        });
+    }
+    let Some(HubToAgent::Auth { token, hub_key }) = pending.pop_front() else {
+        unreachable!("the first pending message was just seen to be AUTH");
+    };
+    if let Some(expected) = expected_token {
+        // An empty expected token marks an auth.json that is missing beside a
+        // meta.db, unreadable or malformed: nothing may pass, not even an
+        // empty token, which is what a hub sends to a daemon it holds no
+        // token for (#127).
+        if expected.is_empty() || !ct_eq(expected.as_bytes(), token.as_bytes()) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(OwnerId::from_auth(hub_key.as_deref())))
 }
 
 // ── Windows secure pipe ───────────────────────────────────────────────────────
@@ -735,35 +837,34 @@ fn create_secure_pipe(
     unsafe { NamedPipeServer::from_raw_handle(handle as _) }
 }
 
+/// Handle one hub connection:
+/// 1. spawn the writer task (drains the frame channel to the stream);
+/// 2. send HELLO, then read the frame after it: who the hub is (`handshake`);
+/// 3. register the connection as its hub's current one, send that hub's
+///    channel state;
+/// 4. read loop, until EOF, error, or a newer connection of the same hub.
+///
 /// Used by both the Unix UDS path and the Windows named-pipe path.
-#[allow(clippy::too_many_arguments)]
-async fn handle_connection_inner<S>(
-    stream: S,
-    pty_manager: Arc<Mutex<PtyManager>>,
-    cmd_senders: SnapshotSenders,
-    channel_events: ChannelEventSender,
-    frame_tx: FrameSender,
-    mut frame_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    active_conn: Arc<Mutex<Option<ActiveConnection>>>,
-    cancel: Arc<Notify>,
-    expected_token: Option<String>,
-    connection_id: u64,
-) where
+async fn handle_connection_inner<S>(stream: S, daemon: DaemonShared, connection_id: u64)
+where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (cancel, _) = watch::channel(false);
 
     // Spawn writer task — drains frame_rx to the write half
-    let cancel_writer = Arc::clone(&cancel);
+    let mut cancel_rx = cancel.subscribe();
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = cancel_writer.notified() => {
-                    // Displaced. What is already queued goes out first — the
-                    // notice saying why this connection is ending is enqueued
-                    // immediately before the cancellation, and a writer that
-                    // stopped here would drop the only thing that explains the
-                    // EOF the other end is about to read (#127).
+                _ = cancelled(&mut cancel_rx) => {
+                    // Displaced, or the daemon is stopping. What is already
+                    // queued goes out first — the notice saying why this
+                    // connection is ending is enqueued immediately before the
+                    // cancellation, and a writer that stopped here would drop
+                    // the only thing that explains the EOF the other end is
+                    // about to read (#127).
                     while let Ok(data) = frame_rx.try_recv() {
                         if write_half.write_all(&data).await.is_err() {
                             break;
@@ -794,120 +895,210 @@ async fn handle_connection_inner<S>(
     });
 
     // --- Step 1: Send HELLO first (hub needs to see the agent is alive before sending AUTH) ---
-    if send_encoded(&frame_tx, &crate::handler::build_hello()).is_err() {
-        clear_active_if_ours(&active_conn, &cancel).await;
+    if send_encoded(&frame_tx, &crate::handler::build_hello(true)).is_err() {
         return;
     }
     tracing::debug!(connection_id, "HELLO sent");
 
-    // --- Step 2: Validate AUTH if a token is configured ---
-    // If no token is configured (first-run), skip auth entirely.
-    if let Some(ref token) = expected_token {
-        match validate_auth(&mut read_half, token).await {
-            Ok(true) => {
-                tracing::debug!(connection_id, "auth handshake succeeded");
-            }
-            Ok(false) => {
-                tracing::warn!(
-                    connection_id,
-                    "auth handshake failed: token mismatch — dropping connection"
-                );
-                clear_active_if_ours(&active_conn, &cancel).await;
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(connection_id, error = %e, "auth handshake error — dropping connection");
-                clear_active_if_ours(&active_conn, &cancel).await;
-                return;
-            }
-        }
-    } else {
-        tracing::debug!(connection_id, "auth skipped because no token is configured");
-    }
-    register_active(&active_conn, connection_id, &cancel, &frame_tx).await;
-
-    // Send AGENT_CHANNEL_STATE for each existing channel
-    let mut channel_state_count = 0usize;
+    // --- Step 2: Who is this? AUTH, checked against the token if one is set ---
+    let mut frames = FrameReader::new();
+    let mut pending: VecDeque<HubToAgent> = VecDeque::new();
+    let owner = match handshake(
+        &mut read_half,
+        &mut frames,
+        &mut pending,
+        daemon.expected_token.as_deref(),
+        LEGACY_FIRST_FRAME_WAIT,
+    )
+    .await
     {
-        let mgr = pty_manager.lock().await;
-        for (id, ch) in &mgr.channels {
-            let msg = AgentToHub::AgentChannelState {
-                channel_id: id.clone(),
-                title: String::new(),
-                pid: ch.process.pid(),
-                alive: true,
-            };
-            if send_encoded(&frame_tx, &msg).is_err() {
-                clear_active_if_ours(&active_conn, &cancel).await;
-                return;
-            }
-            channel_state_count += 1;
+        Ok(Some(owner)) => owner,
+        Ok(None) => {
+            tracing::warn!(
+                connection_id,
+                "auth handshake failed: token mismatch — dropping connection"
+            );
+            return;
         }
-    }
-
-    // Send CHANNEL_STATE_END
+        Err(e) => {
+            tracing::warn!(connection_id, error = %e, "auth handshake error — dropping connection");
+            return;
+        }
+    };
     tracing::debug!(
         connection_id,
-        channel_state_count,
+        owner = owner.short(),
+        "auth handshake succeeded"
+    );
+    register_active(&daemon.routes, &owner, connection_id, &cancel, &frame_tx).await;
+
+    // --- Step 3: this hub's channels, and how many other hubs hold ---
+    let (states, other_owner_channels) = {
+        let mgr = daemon.pty_manager.lock().await;
+        let states: Vec<AgentToHub> = mgr
+            .channels
+            .iter()
+            .filter(|(_, channel)| channel.owner() == &owner)
+            .map(|(id, channel)| AgentToHub::AgentChannelState {
+                channel_id: id.clone(),
+                title: String::new(),
+                pid: channel.process.pid(),
+                alive: true,
+            })
+            .collect();
+        (states, mgr.held_by_others(&owner))
+    };
+    for state in &states {
+        if send_encoded(&frame_tx, state).is_err() {
+            clear_active_if_ours(&daemon.routes, &owner, &cancel).await;
+            return;
+        }
+    }
+    tracing::debug!(
+        connection_id,
+        channel_state_count = states.len(),
+        other_owner_channels,
         "about to send CHANNEL_STATE_END"
     );
-    if send_encoded(&frame_tx, &AgentToHub::ChannelStateEnd {}).is_err() {
+    if send_encoded(
+        &frame_tx,
+        &AgentToHub::ChannelStateEnd {
+            other_owner_channels,
+        },
+    )
+    .is_err()
+    {
         tracing::warn!(connection_id, "CHANNEL_STATE_END send failed (writer gone)");
-        clear_active_if_ours(&active_conn, &cancel).await;
+        clear_active_if_ours(&daemon.routes, &owner, &cancel).await;
         return;
     }
     tracing::debug!(connection_id, "CHANNEL_STATE_END sent");
 
-    // Read loop with displacement cancellation
-    let mut reader = FrameReader::new();
+    // --- Step 4: read loop with displacement cancellation. What the handshake
+    // read beyond AUTH, or a first frame that was not AUTH, goes first. ---
+    let mut cancel_rx = cancel.subscribe();
     let mut buf = vec![0u8; 8192];
-
-    loop {
+    'connection: loop {
+        while let Some(msg) = pending.pop_front() {
+            if let Err(e) = dispatch(msg, &daemon, &owner, &frame_tx, connection_id).await {
+                tracing::error!("message dispatch error: {}", e);
+                // What arrived with the message that failed is dropped with it.
+                pending.clear();
+            }
+        }
         tokio::select! {
-            _ = cancel.notified() => {
-                tracing::debug!(connection_id, "connection displaced by new hub");
-                break;
+            _ = cancelled(&mut cancel_rx) => {
+                tracing::debug!(connection_id, "connection displaced by a newer one of its hub");
+                break 'connection;
             }
             result = read_half.read(&mut buf) => {
                 match result {
                     Ok(0) => {
                         tracing::debug!(connection_id, "hub disconnected (EOF)");
-                        break;
+                        break 'connection;
                     }
-                    Ok(n) => {
-                        match reader.push(&buf[..n]) {
-                            Ok(messages) => {
-                                for msg in messages {
-                                    if let Err(e) = handle_message(
-                                        msg,
-                                        Arc::clone(&pty_manager),
-                                        frame_tx.clone(),
-                                        channel_events.clone(),
-                                        Arc::clone(&cmd_senders),
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!("message dispatch error: {}", e);
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("frame parse error: {}", e);
-                                break;
-                            }
+                    Ok(n) => match frames.push(&buf[..n]) {
+                        Ok(messages) => pending.extend(messages),
+                        Err(e) => {
+                            tracing::error!("frame parse error: {}", e);
+                            break 'connection;
                         }
-                    }
+                    },
                     Err(e) => {
                         tracing::error!("read error: {}", e);
-                        break;
+                        break 'connection;
                     }
                 }
             }
         }
     }
 
-    clear_active_if_ours(&active_conn, &cancel).await;
+    clear_active_if_ours(&daemon.routes, &owner, &cancel).await;
+}
+
+/// Act on one message from a registered connection. STOP is the daemon's to
+/// answer; everything else is shared with stdio.
+async fn dispatch(
+    msg: HubToAgent,
+    daemon: &DaemonShared,
+    owner: &OwnerId,
+    frame_tx: &FrameSender,
+    connection_id: u64,
+) -> std::io::Result<()> {
+    match msg {
+        HubToAgent::Stop { force } => {
+            handle_stop(daemon, owner, force, frame_tx, connection_id).await;
+            Ok(())
+        }
+        msg => {
+            handle_message(
+                msg,
+                owner,
+                Arc::clone(&daemon.pty_manager),
+                frame_tx.clone(),
+                daemon.channel_events.clone(),
+                Arc::clone(&daemon.cmd_senders),
+            )
+            .await
+        }
+    }
+}
+
+/// STOP from a hub (#127). Without `force`, the daemon refuses while other
+/// hubs hold channels, and nothing stops. Otherwise it asks for the shutdown a
+/// signal asks for; the connection closes once the terminals are torn down,
+/// which is the hub's acknowledgement.
+async fn handle_stop(
+    daemon: &DaemonShared,
+    owner: &OwnerId,
+    force: bool,
+    frame_tx: &FrameSender,
+    connection_id: u64,
+) {
+    let mut mgr = daemon.pty_manager.lock().await;
+    let others = mgr.held_by_others(owner);
+    if !force && others > 0 {
+        drop(mgr);
+        tracing::info!(
+            connection_id,
+            owner = owner.short(),
+            other_owner_channels = others,
+            "STOP refused: other hubs hold terminals on this agent"
+        );
+        let _ = send_encoded(frame_tx, &stop_refusal(others));
+        return;
+    }
+    // Refuse any new terminal from here, under the lock the count was taken
+    // under: none can start between the count and the teardown, and be ended
+    // by a STOP that was only allowed because it was not there yet.
+    mgr.begin_shutdown();
+    drop(mgr);
+    tracing::info!(
+        connection_id,
+        owner = owner.short(),
+        force,
+        other_owner_channels = others,
+        "STOP accepted: shutting the daemon down"
+    );
+    daemon.shutdown.request();
+}
+
+/// The refusal of a STOP without `force`. The count leads the message, and is
+/// also a field of its own, which the hub reads first.
+fn stop_refusal(others: u32) -> AgentToHub {
+    let held = if others == 1 {
+        "1 terminal on this agent belongs to another hub".to_string()
+    } else {
+        format!("{others} terminals on this agent belong to other hubs")
+    };
+    AgentToHub::Error {
+        code: error_codes::OTHER_HUBS_HOLD_CHANNELS.into(),
+        message: format!(
+            "{held}; stopping it would end them. Send STOP with force to stop it anyway"
+        ),
+        channel_id: None,
+        other_owner_channels: Some(others),
+    }
 }
 
 // ─── Unix (UDS) implementation ────────────────────────────────────────────────
@@ -1008,88 +1199,79 @@ async fn bind_with_retry(path: &Path) -> std::io::Result<UnixListener> {
     Err(last_err.unwrap())
 }
 
-/// Handle a single hub connection:
-/// 1. Spawn writer task (drains frame_rx → stream write half)
-/// 2. Send HELLO + AGENT_CHANNEL_STATE* + CHANNEL_STATE_END
-/// 3. Read loop with displacement cancellation
-#[allow(clippy::too_many_arguments)]
-#[cfg(unix)]
-async fn handle_connection(
-    stream: UnixStream,
-    pty_manager: Arc<Mutex<PtyManager>>,
-    cmd_senders: SnapshotSenders,
-    channel_events: ChannelEventSender,
-    frame_tx: FrameSender,
-    frame_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    active_conn: Arc<Mutex<Option<ActiveConnection>>>,
-    cancel: Arc<Notify>,
-    expected_token: Option<String>,
-    connection_id: u64,
-) {
-    handle_connection_inner(
-        stream,
-        pty_manager,
-        cmd_senders,
-        channel_events,
-        frame_tx,
-        frame_rx,
-        active_conn,
-        cancel,
-        expected_token,
-        connection_id,
-    )
-    .await
-}
-
-/// Make an authenticated connection the active hub, displacing the previous one.
+/// Make an authenticated connection its hub's current one, replacing that
+/// hub's previous connection, and no other hub's (#127).
 ///
 /// Only an authenticated peer gets here. Before this, a connection receives no
-/// terminal output (the output router writes to the active connection only)
-/// and cannot push the incumbent off: a peer that fails AUTH, such as a second
-/// hub holding another token, used to displace a working hub (#127).
+/// terminal output (the router writes to registered connections only) and
+/// cannot push anyone off: a peer that fails AUTH, such as a second hub
+/// holding another token, used to displace a working hub.
+///
+/// What the hub's terminals sent while it had no connection goes out now,
+/// before anything this connection is answered: a CHANNEL_EXIT queued while
+/// the hub was away must not arrive after the SPAWN_OK of the terminal that
+/// restarted under the same id. The queue used to drain only when the next
+/// item arrived, whenever that was.
 async fn register_active(
-    active_conn: &Arc<Mutex<Option<ActiveConnection>>>,
+    routes: &Routes,
+    owner: &OwnerId,
     connection_id: u64,
-    cancel: &Arc<Notify>,
+    cancel: &Cancel,
     frame_tx: &FrameSender,
 ) {
-    let mut conn = active_conn.lock().await;
-    if let Some(old) = conn.take() {
+    let mut routes = routes.lock().await;
+    if let Some(old) = routes.connections.remove(owner) {
         tracing::info!(
             connection_id,
             displaced_connection_id = old.connection_id,
-            "displacing previous hub connection"
+            owner = owner.short(),
+            "a newer connection of this hub replaces its previous one"
         );
         // Tell it before cutting it. A hub that is simply cancelled cannot tell
-        // "I am no longer the one driving this agent" from "these terminals
-        // stopped answering", and writes into a socket nothing reads (#127).
+        // "I am no longer the one driving these terminals" from "these
+        // terminals stopped answering", and writes into a socket nothing reads.
         let notice = AgentToHub::Error {
-            code: crate::protocol::error_codes::DISPLACED.into(),
-            message: format!("another hub connection (#{connection_id}) has taken over this agent"),
+            code: error_codes::DISPLACED.into(),
+            message: format!(
+                "a newer connection of this hub (#{connection_id}) has replaced this one"
+            ),
             channel_id: None,
+            other_owner_channels: None,
         };
         let _ = send_encoded(&old.frame_tx, &notice);
-        // notify_waiters wakes ALL listeners (writer task + read loop)
-        old.cancel.notify_waiters();
+        old.cancel.send_replace(true);
     }
-    *conn = Some(ActiveConnection {
-        connection_id,
-        cancel: Arc::clone(cancel),
-        frame_tx: frame_tx.clone(),
-    });
+    if let Some(queued) = routes.queues.remove(owner) {
+        tracing::debug!(
+            connection_id,
+            owner = owner.short(),
+            queued = queued.len(),
+            "sending what this hub's terminals said while it was away"
+        );
+        for frame in queued {
+            let _ = frame_tx.send(frame);
+        }
+    }
+    routes.connections.insert(
+        owner.clone(),
+        ActiveConnection {
+            connection_id,
+            cancel: cancel.clone(),
+            frame_tx: frame_tx.clone(),
+        },
+    );
 }
 
-/// Clear the active connection slot only if it belongs to this connection.
-/// Uses Arc pointer equality on the cancel token to avoid clearing a newer connection.
-async fn clear_active_if_ours(
-    active_conn: &Arc<Mutex<Option<ActiveConnection>>>,
-    our_cancel: &Arc<Notify>,
-) {
-    let mut conn = active_conn.lock().await;
-    if let Some(ref active) = *conn {
-        if Arc::ptr_eq(&active.cancel, our_cancel) {
-            *conn = None;
-        }
+/// Unregister this connection, if it is still its hub's current one. A newer
+/// connection of the same hub has its own cancel sender, and stays.
+async fn clear_active_if_ours(routes: &Routes, owner: &OwnerId, our_cancel: &Cancel) {
+    let mut routes = routes.lock().await;
+    if routes
+        .connections
+        .get(owner)
+        .is_some_and(|active| active.cancel.same_channel(our_cancel))
+    {
+        routes.connections.remove(owner);
     }
 }
 
@@ -1104,32 +1286,16 @@ fn send_encoded(tx: &FrameSender, msg: &AgentToHub) -> Result<(), mpsc::error::S
 /// Spawn the output router task.
 ///
 /// Drains what the batch loop hands on — every channel's output, and its exit,
-/// title, bell, notification and log frames — and forwards it to the connection
-/// active when it is sent, whichever connection spawned the channel (#549).
-/// Buffers up to MAX_FRAME_QUEUE frames when no hub is connected (ring buffer, drops oldest).
-fn spawn_output_router(
-    mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>,
-    active_conn: Arc<Mutex<Option<ActiveConnection>>>,
-) {
+/// title, bell, notification and log frames — and forwards each to the current
+/// connection of the hub that owns the channel, whichever connection spawned it
+/// (#549). While that hub has none, its own queue keeps up to MAX_FRAME_QUEUE
+/// frames, dropping the oldest; `register_active` sends them on (#127).
+fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, routes: Routes) {
     tokio::spawn(async move {
-        let mut pending: Vec<Vec<u8>> = Vec::new();
-
         while let Some(event) = batched_rx.recv().await {
+            let owner = event.owner().clone();
             if let Ok(frame) = event.into_frame() {
-                let conn = active_conn.lock().await;
-                if let Some(ref active) = *conn {
-                    // Flush pending buffer first (maintain ordering)
-                    for pf in pending.drain(..) {
-                        let _ = active.frame_tx.send(pf);
-                    }
-                    let _ = active.frame_tx.send(frame);
-                } else {
-                    // No active connection — buffer, drop oldest if full
-                    if pending.len() >= MAX_FRAME_QUEUE {
-                        pending.remove(0);
-                    }
-                    pending.push(frame);
-                }
+                routes.lock().await.route(&owner, frame);
             }
         }
     });
@@ -1275,13 +1441,23 @@ mod tests {
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
+        // A hub with no key, as today's: both connections are `legacy`, the
+        // same hub, so the second replaces the first.
+        let auth = crate::framing::encode_frame(&crate::protocol::HubToAgent::Auth {
+            token: String::new(),
+            hub_key: None,
+        })
+        .unwrap();
+
         // First client connects
         let mut stream1 = UnixStream::connect(&path_str).await.unwrap();
+        stream1.write_all(&auth).await.unwrap();
         let mut buf = vec![0u8; 4096];
         let _ = stream1.read(&mut buf).await.unwrap(); // drain initial frames
 
         // Second client connects — displaces first
         let mut stream2 = UnixStream::connect(&path_str).await.unwrap();
+        stream2.write_all(&auth).await.unwrap();
         let _ = stream2.read(&mut buf).await.unwrap(); // drain initial frames
 
         // The one being displaced is told so before it is cut. Without that it
@@ -1393,6 +1569,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let mut stream = UnixStream::connect(&path_str).await.unwrap();
+        // AUTH, as a hub sends it after HELLO, even to a daemon without a token.
+        let auth = crate::framing::encode_frame(&crate::protocol::HubToAgent::Auth {
+            token: String::new(),
+            hub_key: None,
+        })
+        .unwrap();
+        stream.write_all(&auth).await.unwrap();
         let mut buf = vec![0u8; 65536];
         let mut accumulated: Vec<u8> = Vec::new();
         let mut found_hello = false;
@@ -2075,186 +2258,325 @@ mod tests {
         let _client = client_task.await.expect("client task must succeed");
     }
 
-    // ── Auth helper unit tests (cross-platform) ──────────────────────────────
-
-    /// ct_eq returns true for identical byte slices.
-    #[test]
-    fn test_ct_eq_match() {
-        assert!(ct_eq(b"deadbeef", b"deadbeef"));
-    }
-
-    /// ct_eq returns false for different byte slices of equal length.
-    #[test]
-    fn test_ct_eq_mismatch() {
-        assert!(!ct_eq(b"deadbeef", b"deadbee0"));
-    }
-
-    /// ct_eq returns false for slices of different lengths.
-    #[test]
-    fn test_ct_eq_length_mismatch() {
-        assert!(!ct_eq(b"short", b"longer"));
-    }
+    // ── Handshake and registration (cross-platform, in memory) ──────────────
 
     const HUB_TOKEN: &str = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
 
-    /// An active hub connection, and a waiter that records whether it was displaced.
-    fn incumbent_hub() -> (Arc<Mutex<Option<ActiveConnection>>>, Arc<Notify>) {
-        let cancel = Arc::new(Notify::new());
-        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let active = Arc::new(Mutex::new(Some(ActiveConnection {
-            connection_id: 7,
-            cancel: Arc::clone(&cancel),
-            frame_tx,
-        })));
-        (active, cancel)
+    /// A daemon's shared state with no listener, for connections over
+    /// in-memory streams.
+    fn in_memory_daemon(expected_token: Option<&str>) -> DaemonShared {
+        let (channel_events, _nobody_reads) = mpsc::unbounded_channel::<ChannelEvent>();
+        DaemonShared {
+            pty_manager: Arc::new(Mutex::new(PtyManager::new())),
+            cmd_senders: Arc::new(Mutex::new(HashMap::new())),
+            channel_events,
+            routes: Arc::new(Mutex::new(HubRoutes::default())),
+            expected_token: expected_token.map(str::to_owned),
+            shutdown: shutdown_channel().1,
+        }
     }
 
-    /// Run the connection handshake over an in-memory stream, sending `token`.
-    /// Returns the client end, which keeps the connection open while held.
-    async fn connect_with_token(
-        active_conn: &Arc<Mutex<Option<ActiveConnection>>>,
-        token: &str,
-    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
-        use crate::framing::encode_frame;
-        use crate::protocol::HubToAgent;
+    /// A connection of `owner` registered earlier, as the daemon keeps it:
+    /// what cancels it, and what it would write to its hub.
+    struct Incumbent {
+        cancelled: watch::Receiver<bool>,
+        frames: mpsc::UnboundedReceiver<Vec<u8>>,
+    }
 
+    async fn incumbent(daemon: &DaemonShared, owner: &OwnerId, connection_id: u64) -> Incumbent {
+        let (cancel, cancelled) = watch::channel(false);
+        let (frame_tx, frames) = mpsc::unbounded_channel::<Vec<u8>>();
+        register_active(&daemon.routes, owner, connection_id, &cancel, &frame_tx).await;
+        Incumbent { cancelled, frames }
+    }
+
+    /// Run a connection over an in-memory stream, sending `first` after HELLO.
+    /// The client end keeps the connection open while held.
+    async fn connect_in_memory(
+        daemon: &DaemonShared,
+        first: &HubToAgent,
+        connection_id: u64,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
-        let auth = encode_frame(&HubToAgent::Auth {
-            token: token.to_string(),
-        })
-        .expect("encode AUTH");
         let handler = tokio::spawn(handle_connection_inner(
             server,
-            Arc::new(Mutex::new(PtyManager::new())),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            channel_events,
-            frame_tx,
-            frame_rx,
-            Arc::clone(active_conn),
-            Arc::new(Notify::new()),
-            Some(HUB_TOKEN.to_string()),
-            42,
+            daemon.clone(),
+            connection_id,
         ));
-        client.write_all(&auth).await.expect("send AUTH");
+        client
+            .write_all(&encode_frame(first).expect("encode the first frame"))
+            .await
+            .expect("send the first frame");
         (client, handler)
+    }
+
+    fn auth(token: &str, hub_key: Option<&str>) -> HubToAgent {
+        HubToAgent::Auth {
+            token: token.to_string(),
+            hub_key: hub_key.map(str::to_owned),
+        }
+    }
+
+    async fn current_connection(daemon: &DaemonShared, owner: &OwnerId) -> Option<u64> {
+        daemon
+            .routes
+            .lock()
+            .await
+            .connections
+            .get(owner)
+            .map(|active| active.connection_id)
+    }
+
+    /// Wait until `owner` has a current connection with this id.
+    async fn registered(daemon: &DaemonShared, owner: &OwnerId, connection_id: u64) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while current_connection(daemon, owner).await != Some(connection_id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the connection registers");
     }
 
     /// A peer that fails AUTH neither displaces the active hub nor becomes it (#127).
     #[tokio::test]
     async fn failed_auth_leaves_the_active_hub_in_place() {
-        let (active_conn, incumbent_cancel) = incumbent_hub();
-        let displaced = incumbent_cancel.notified();
-        tokio::pin!(displaced);
-        displaced.as_mut().enable();
+        let daemon = in_memory_daemon(Some(HUB_TOKEN));
+        let legacy = OwnerId::legacy();
+        let incumbent = incumbent(&daemon, &legacy, 7).await;
 
-        let (_client, handler) = connect_with_token(
-            &active_conn,
+        let wrong = auth(
             "000000def456abc123def456abc123def456abc123def456abc123def456abc1",
-        )
-        .await;
-        tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+            None,
+        );
+        let (_client, handler) = connect_in_memory(&daemon, &wrong, 42).await;
+        tokio::time::timeout(Duration::from_secs(5), handler)
             .await
             .expect("a refused peer's handler ends")
             .expect("handler does not panic");
 
         // Mutation caught: registering at accept time made this peer the
         // active connection and cancelled the incumbent before AUTH was read.
-        assert_eq!(
-            active_conn.lock().await.as_ref().map(|c| c.connection_id),
-            Some(7)
-        );
+        assert_eq!(current_connection(&daemon, &legacy).await, Some(7));
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), displaced)
-                .await
-                .is_err(),
+            !*incumbent.cancelled.borrow(),
             "the incumbent hub must not be displaced by a peer that failed AUTH"
         );
     }
 
-    /// An authenticated hub takes over from the previous one.
+    /// An authenticated connection of the same hub takes over from the
+    /// previous one, and tells it so. Without a key, every hub is the same
+    /// one: `legacy`, which keeps today's last-wins rule.
     #[tokio::test]
     async fn authenticated_hub_displaces_the_previous_one() {
-        let (active_conn, incumbent_cancel) = incumbent_hub();
-        let displaced = incumbent_cancel.notified();
-        tokio::pin!(displaced);
-        displaced.as_mut().enable();
+        let daemon = in_memory_daemon(Some(HUB_TOKEN));
+        let legacy = OwnerId::legacy();
+        let mut incumbent = incumbent(&daemon, &legacy, 7).await;
 
-        let (client, handler) = connect_with_token(&active_conn, HUB_TOKEN).await;
-        tokio::time::timeout(std::time::Duration::from_secs(5), displaced)
-            .await
-            .expect("the previous hub is displaced once the new one authenticates");
-        assert_eq!(
-            active_conn.lock().await.as_ref().map(|c| c.connection_id),
-            Some(42)
+        let (client, handler) = connect_in_memory(&daemon, &auth(HUB_TOKEN, None), 42).await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            incumbent.cancelled.wait_for(|cancelled| *cancelled),
+        )
+        .await
+        .expect("the previous connection is displaced once the new one authenticates")
+        .expect("the daemon keeps the connection's cancel sender");
+        assert_eq!(current_connection(&daemon, &legacy).await, Some(42));
+        let notice = incumbent
+            .frames
+            .try_recv()
+            .expect("told why before being cut");
+        assert!(notice.windows(9).any(|w| w == b"DISPLACED"));
+
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(5), handler).await;
+    }
+
+    /// A hub's connection replaces its own previous one only: another hub,
+    /// connected all along, keeps its connection (#127).
+    #[tokio::test]
+    async fn a_hub_never_displaces_another_hubs_connection() {
+        let daemon = in_memory_daemon(Some(HUB_TOKEN));
+        let first = OwnerId::from_hub_key("first-hub-key");
+        let second = OwnerId::from_hub_key("second-hub-key");
+        let mut incumbent = incumbent(&daemon, &first, 7).await;
+
+        let (client, handler) =
+            connect_in_memory(&daemon, &auth(HUB_TOKEN, Some("second-hub-key")), 42).await;
+        registered(&daemon, &second, 42).await;
+
+        assert_eq!(current_connection(&daemon, &first).await, Some(7));
+        assert!(!*incumbent.cancelled.borrow(), "the other hub was cut");
+        assert!(
+            incumbent.frames.try_recv().is_err(),
+            "the other hub was sent something"
         );
 
         drop(client);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), handler).await;
     }
 
-    /// validate_auth accepts a correctly framed AUTH message with the right token.
-    #[tokio::test]
-    async fn test_validate_auth_correct_token() {
-        use crate::framing::encode_frame;
-        use crate::protocol::HubToAgent;
-
-        let token = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
-        let msg = HubToAgent::Auth {
-            token: token.to_string(),
-        };
-        let frame = encode_frame(&msg).expect("encode must succeed");
-
-        let mut cursor = std::io::Cursor::new(frame);
-        let result = validate_auth(&mut cursor, token).await;
-        assert!(result.is_ok(), "validate_auth must not error: {:?}", result);
-        assert!(result.unwrap(), "correct token must return true");
+    async fn handshake_over(
+        bytes: Vec<u8>,
+        expected_token: Option<&str>,
+    ) -> (std::io::Result<Option<OwnerId>>, VecDeque<HubToAgent>) {
+        let mut stream = std::io::Cursor::new(bytes);
+        let mut frames = FrameReader::new();
+        let mut pending = VecDeque::new();
+        let result = handshake(
+            &mut stream,
+            &mut frames,
+            &mut pending,
+            expected_token,
+            LEGACY_FIRST_FRAME_WAIT,
+        )
+        .await;
+        (result, pending)
     }
 
-    /// validate_auth rejects a wrong token.
-    #[tokio::test]
-    async fn test_validate_auth_wrong_token() {
-        use crate::framing::encode_frame;
-        use crate::protocol::HubToAgent;
-
-        let real_token = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
-        let wrong_token = "000000def456abc123def456abc123def456abc123def456abc123def456abc1";
-        let msg = HubToAgent::Auth {
-            token: wrong_token.to_string(),
-        };
-        let frame = encode_frame(&msg).expect("encode must succeed");
-
-        let mut cursor = std::io::Cursor::new(frame);
-        let result = validate_auth(&mut cursor, real_token).await;
-        assert!(result.is_ok(), "validate_auth must not error on mismatch");
-        assert!(!result.unwrap(), "wrong token must return false");
+    fn frame(msg: &HubToAgent) -> Vec<u8> {
+        encode_frame(msg).expect("encode a hub frame")
     }
 
-    /// validate_auth returns an error when the stream is empty (no AUTH frame sent).
-    #[tokio::test]
-    async fn test_validate_auth_empty_stream() {
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-        let result = validate_auth(&mut cursor, "anytoken").await;
-        assert!(result.is_err(), "empty stream must return an error");
+    fn heartbeat(ts: &str) -> HubToAgent {
+        HubToAgent::Heartbeat { ts: ts.to_string() }
     }
 
-    /// validate_auth rejects a frame whose type is not AUTH.
+    /// The right token is accepted, and the key names the owner.
     #[tokio::test]
-    async fn test_validate_auth_wrong_message_type() {
-        use crate::framing::encode_frame;
-        use crate::protocol::HubToAgent;
+    async fn handshake_accepts_the_right_token_and_takes_the_owner_from_the_key() {
+        let (result, _) =
+            handshake_over(frame(&auth(HUB_TOKEN, Some("hub-key"))), Some(HUB_TOKEN)).await;
+        assert_eq!(
+            result.expect("no IO error"),
+            Some(OwnerId::from_hub_key("hub-key"))
+        );
 
-        // Send a HEARTBEAT (any non-AUTH message)
-        let msg = HubToAgent::Heartbeat {
-            ts: "2026-01-01T00:00:00Z".to_string(),
-        };
-        let frame = encode_frame(&msg).expect("encode must succeed");
+        let (result, _) = handshake_over(frame(&auth(HUB_TOKEN, None)), Some(HUB_TOKEN)).await;
+        assert_eq!(result.expect("no IO error"), Some(OwnerId::legacy()));
+    }
 
-        let mut cursor = std::io::Cursor::new(frame);
-        let result = validate_auth(&mut cursor, "anytoken").await;
-        assert!(result.is_ok());
-        assert!(!result.unwrap(), "non-AUTH message type must return false");
+    #[tokio::test]
+    async fn handshake_refuses_a_wrong_token() {
+        let wrong = "000000def456abc123def456abc123def456abc123def456abc123def456abc1";
+        let (result, _) =
+            handshake_over(frame(&auth(wrong, Some("hub-key"))), Some(HUB_TOKEN)).await;
+        assert_eq!(result.expect("a mismatch is not an IO error"), None);
+    }
+
+    /// An empty stream is an error, token or not.
+    #[tokio::test]
+    async fn handshake_fails_on_an_empty_stream() {
+        assert!(handshake_over(Vec::new(), Some("anytoken"))
+            .await
+            .0
+            .is_err());
+        assert!(handshake_over(Vec::new(), None).await.0.is_err());
+    }
+
+    /// With a token configured, the first frame must be AUTH.
+    #[tokio::test]
+    async fn handshake_refuses_another_first_frame_when_a_token_is_set() {
+        let (result, _) = handshake_over(frame(&heartbeat("t")), Some("anytoken")).await;
+        assert_eq!(result.expect("not an IO error"), None);
+    }
+
+    /// An auth.json that is missing beside a meta.db, unreadable or malformed
+    /// leaves an empty expected token, which nothing may match. A hub sends an
+    /// empty token to a daemon it holds no token for (#127): that used to
+    /// match it, and open a daemon that meant to refuse everyone.
+    #[tokio::test]
+    async fn a_daemon_that_refuses_everyone_refuses_an_empty_token() {
+        let (result, _) = handshake_over(frame(&auth("", Some("hub-key"))), Some("")).await;
+        assert_eq!(result.expect("not an IO error"), None);
+    }
+
+    /// Without a token, AUTH is read all the same, for the key it carries.
+    /// A hub sends an empty token to a daemon it holds none for.
+    #[tokio::test]
+    async fn without_a_token_the_owner_still_comes_from_the_key() {
+        let (result, _) = handshake_over(frame(&auth("", Some("hub-key"))), None).await;
+        assert_eq!(
+            result.expect("no IO error"),
+            Some(OwnerId::from_hub_key("hub-key"))
+        );
+    }
+
+    /// A hub from before #127 talking to a daemon without a token may start
+    /// with any request: it is `legacy`, and nothing it sent is lost, what
+    /// came in the same read included.
+    #[tokio::test]
+    async fn without_a_token_another_first_frame_is_legacy_and_kept() {
+        let mut bytes = frame(&heartbeat("first"));
+        bytes.extend(frame(&heartbeat("second")));
+        let (result, pending) = handshake_over(bytes, None).await;
+        assert_eq!(result.expect("no IO error"), Some(OwnerId::legacy()));
+        let kept: Vec<&str> = pending
+            .iter()
+            .map(|msg| match msg {
+                HubToAgent::Heartbeat { ts } => ts.as_str(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kept, ["first", "second"]);
+    }
+
+    /// What a hub sends right behind its AUTH is not lost either.
+    #[tokio::test]
+    async fn a_request_sent_with_auth_is_kept_for_the_connection() {
+        let mut bytes = frame(&auth(HUB_TOKEN, Some("hub-key")));
+        bytes.extend(frame(&heartbeat("right-behind")));
+        let (result, pending) = handshake_over(bytes, Some(HUB_TOKEN)).await;
+        assert!(result.expect("no IO error").is_some());
+        assert!(matches!(
+            pending.front(),
+            Some(HubToAgent::Heartbeat { ts }) if ts == "right-behind"
+        ));
+    }
+
+    /// A hub from before #127 sends nothing to a daemon without a token: it
+    /// waits for the channel state, for 5 s. Taking it for `legacy` after a
+    /// shorter wait is what lets it still connect.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_token_a_silent_hub_is_legacy_after_a_wait() {
+        let (_client, mut server) = tokio::io::duplex(1024);
+        let mut frames = FrameReader::new();
+        let mut pending = VecDeque::new();
+        let started = tokio::time::Instant::now();
+        let result = handshake(
+            &mut server,
+            &mut frames,
+            &mut pending,
+            None,
+            LEGACY_FIRST_FRAME_WAIT,
+        )
+        .await;
+        assert_eq!(result.expect("no IO error"), Some(OwnerId::legacy()));
+        assert_eq!(started.elapsed(), LEGACY_FIRST_FRAME_WAIT);
+        assert!(
+            LEGACY_FIRST_FRAME_WAIT < Duration::from_secs(5),
+            "an old hub gives up on the channel state after 5 s"
+        );
+    }
+
+    /// With a token, silence ends the connection, as it always did.
+    #[tokio::test(start_paused = true)]
+    async fn with_a_token_a_silent_peer_is_dropped() {
+        let (_client, mut server) = tokio::io::duplex(1024);
+        let mut frames = FrameReader::new();
+        let mut pending = VecDeque::new();
+        let result = handshake(
+            &mut server,
+            &mut frames,
+            &mut pending,
+            Some(HUB_TOKEN),
+            LEGACY_FIRST_FRAME_WAIT,
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("a silent peer is dropped").kind(),
+            std::io::ErrorKind::TimedOut
+        );
     }
 
     /// read_auth_token returns None for a non-existent file.
@@ -2397,6 +2719,7 @@ mod tests {
         // Step 2: Send AUTH with wrong token
         let wrong = HubToAgent::Auth {
             token: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            hub_key: None,
         };
         let frame = encode_frame(&wrong).unwrap();
         stream.write_all(&frame).await.unwrap();
@@ -2474,6 +2797,7 @@ mod tests {
         // Step 2: Send correct AUTH
         let auth_msg = HubToAgent::Auth {
             token: token.to_string(),
+            hub_key: None,
         };
         let frame = encode_frame(&auth_msg).unwrap();
         stream.write_all(&frame).await.unwrap();
@@ -2531,7 +2855,10 @@ mod tests {
         let _client = client_task.await.expect("client task must succeed");
     }
 
-    /// Verify run_daemon (Windows) starts and sends a valid HELLO frame over a named pipe.
+    /// Verify the Windows daemon starts and sends a valid HELLO frame over a named pipe.
+    ///
+    /// Its configuration and state come from temp dirs: `run_daemon` would
+    /// read the user's `%APPDATA%\lasterm`.
     #[cfg(windows)]
     #[tokio::test]
     async fn test_named_pipe_daemon_hello() {
@@ -2542,16 +2869,23 @@ mod tests {
             r"\\.\pipe\lasterm-test-hello-{}",
             ulid::Ulid::generate().to_string().to_lowercase()
         );
+        let config_dir = temp_dir("lasterm-test-config-hello").await;
+        let state_dir = temp_dir("lasterm-test-state-hello").await;
 
-        let daemon_handle = tokio::spawn(run_daemon(
+        let (bound_tx, bound_rx) = oneshot::channel();
+        let daemon_handle = tokio::spawn(run_daemon_impl(
             pipe_name.clone(),
+            config_dir.to_string_lossy().into_owned(),
+            state_dir.clone(),
             no_shutdown_request(),
-            None,
-            None,
+            Some(bound_tx),
         ));
 
         // Wait for daemon to create the pipe
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), bound_rx)
+            .await
+            .expect("the daemon creates its pipe in time")
+            .expect("the daemon reports its pipe");
 
         let mut client = ClientOptions::new()
             .open(&pipe_name)
@@ -2655,16 +2989,36 @@ mod tests {
                 }
             }
 
-            /// Connect as a hub does, and read up to CHANNEL_STATE_END. A
-            /// connection becomes the daemon's active one before the channels
-            /// are enumerated, so past this point it is the one routed to.
+            /// Connect as a hub without a key does, and read up to
+            /// CHANNEL_STATE_END. A connection becomes its hub's current one
+            /// before the channels are enumerated, so past this point it is
+            /// the one routed to.
             async fn connect(&self) -> Hub {
-                let mut hub = Hub {
+                self.connect_as(None).await.0
+            }
+
+            /// Connect as the hub `hub_key` names (or a hub without one),
+            /// sending AUTH after HELLO as a hub does. Returns the connection
+            /// and every frame read up to CHANNEL_STATE_END, that one included.
+            async fn connect_as(&self, hub_key: Option<&str>) -> (Hub, Vec<rmpv::Value>) {
+                let mut hub = self.open_silently().await;
+                // This daemon has no token: a hub sends an empty one (#127).
+                hub.send(&HubToAgent::Auth {
+                    token: String::new(),
+                    hub_key: hub_key.map(str::to_owned),
+                })
+                .await;
+                let state = hub.read_until("CHANNEL_STATE_END").await;
+                (hub, state)
+            }
+
+            /// Connect and send nothing, as a hub from before #127 does to a
+            /// daemon without a token.
+            async fn open_silently(&self) -> Hub {
+                Hub {
                     stream: self.open().await,
                     received: Vec::new(),
-                };
-                hub.read_until("CHANNEL_STATE_END").await;
-                hub
+                }
             }
 
             #[cfg(unix)]
@@ -2702,6 +3056,19 @@ mod tests {
                 let _ = tokio::fs::remove_dir_all(&self.config_dir).await;
                 let _ = tokio::fs::remove_dir_all(&self.state_dir).await;
             }
+
+            /// Wait for a daemon that was asked to stop by a hub, and clean up.
+            async fn finished(self) -> std::io::Result<DestroyAllSummary> {
+                let result = tokio::time::timeout(DEADLINE, self.task)
+                    .await
+                    .expect("the daemon stops in time")
+                    .expect("the daemon task does not panic");
+                #[cfg(unix)]
+                let _ = std::fs::remove_file(&self.endpoint);
+                let _ = tokio::fs::remove_dir_all(&self.config_dir).await;
+                let _ = tokio::fs::remove_dir_all(&self.state_dir).await;
+                result
+            }
         }
 
         /// The hub's end of a connection to the daemon.
@@ -2719,29 +3086,63 @@ mod tests {
                     .expect("write to the daemon");
             }
 
-            /// The next frame from the daemon. Cancelling it loses nothing: a
-            /// partial frame stays in `received`.
-            async fn next_frame(&mut self) -> rmpv::Value {
+            /// The next frame's payload, as the daemon wrote it, or `None` once
+            /// the daemon has closed this connection. Cancelling it loses
+            /// nothing: a partial frame stays in `received`.
+            async fn next_payload(&mut self) -> Option<Vec<u8>> {
                 loop {
                     if self.received.len() >= 4 {
                         let len = u32::from_le_bytes(self.received[..4].try_into().unwrap());
                         let end = 4 + len as usize;
                         if self.received.len() >= end {
-                            let frame = rmp_serde::from_slice(&self.received[4..end])
-                                .expect("decode a daemon frame");
+                            let payload = self.received[4..end].to_vec();
                             self.received.drain(..end);
-                            return frame;
+                            return Some(payload);
                         }
                     }
                     let mut buf = vec![0u8; 8192];
-                    let n = self
-                        .stream
-                        .read(&mut buf)
-                        .await
-                        .expect("read from the daemon");
-                    assert!(n > 0, "the daemon closed this connection");
+                    // A connection the daemon closed may also read as reset.
+                    let n = self.stream.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return None;
+                    }
                     self.received.extend_from_slice(&buf[..n]);
                 }
+            }
+
+            /// The next frame from the daemon. Cancelling it loses nothing.
+            async fn next_frame(&mut self) -> rmpv::Value {
+                let payload = self
+                    .next_payload()
+                    .await
+                    .expect("the daemon closed this connection");
+                rmp_serde::from_slice(&payload).expect("decode a daemon frame")
+            }
+
+            /// Every frame until the daemon closes this connection.
+            async fn frames_until_closed(&mut self) -> Vec<rmpv::Value> {
+                let mut frames = Vec::new();
+                loop {
+                    match tokio::time::timeout(DEADLINE, self.next_payload()).await {
+                        Ok(Some(payload)) => frames.push(
+                            rmp_serde::from_slice(&payload).expect("decode a daemon frame"),
+                        ),
+                        Ok(None) => return frames,
+                        Err(_) => panic!(
+                            "the daemon did not close this connection within {DEADLINE:?}; received {:?}",
+                            frames.iter().map(frame_type).collect::<Vec<_>>()
+                        ),
+                    }
+                }
+            }
+
+            /// Whatever arrives until nothing has for `quiet`.
+            async fn frames_until_quiet(&mut self, quiet: Duration) -> Vec<rmpv::Value> {
+                let mut frames = Vec::new();
+                while let Some(frame) = self.frame_within(quiet).await {
+                    frames.push(frame);
+                }
+                frames
             }
 
             async fn frame_within(&mut self, limit: Duration) -> Option<rmpv::Value> {
@@ -2923,6 +3324,556 @@ mod tests {
             }
 
             daemon.stop().await;
+        }
+
+        /// Several hubs on one daemon (#127): each has its own terminals, its
+        /// own connection and its own queue, and learns nothing of another's.
+        mod owner_tests {
+            use super::*;
+
+            const KEY_A: &str = "hub-a-key";
+            const KEY_B: &str = "hub-b-key";
+
+            /// SPAWN an interactive shell, which waits for what it is typed.
+            fn interactive(channel_id: &str) -> HubToAgent {
+                let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+                HubToAgent::Spawn {
+                    request_id: format!("request-{channel_id}"),
+                    channel_id: Some(channel_id.to_string()),
+                    shell: Some(shell.to_string()),
+                    args: None,
+                    cwd: None,
+                    env: None,
+                    cols: 80,
+                    rows: 24,
+                    direct_process: None,
+                    elevated: None,
+                    elevation_secret: None,
+                    elevation_method: None,
+                    custom_command: None,
+                }
+            }
+
+            async fn spawned(hub: &mut Hub, spawn: HubToAgent) -> Vec<rmpv::Value> {
+                let HubToAgent::Spawn {
+                    channel_id: Some(channel_id),
+                    ..
+                } = &spawn
+                else {
+                    panic!("a SPAWN with a channel id");
+                };
+                let channel_id = channel_id.clone();
+                hub.send(&spawn).await;
+                hub.read_through(|frame| is_about(frame, "SPAWN_OK", &channel_id))
+                    .await
+            }
+
+            /// A line that makes a shell print `text`, which the line itself
+            /// does not contain: the terminal echoes what is typed.
+            fn prints(text: &str) -> Vec<u8> {
+                let (head, tail) = text.split_at(text.len() / 2);
+                if cfg!(windows) {
+                    format!("echo {head}^{tail}\r").into_bytes()
+                } else {
+                    format!("echo \"{head}\"\"{tail}\"\n").into_bytes()
+                }
+            }
+
+            fn input(channel_id: &str, data: Vec<u8>) -> HubToAgent {
+                HubToAgent::Input {
+                    channel_id: channel_id.to_string(),
+                    data,
+                }
+            }
+
+            /// Have the channel print `text`, and read until it has.
+            async fn print(hub: &mut Hub, channel_id: &str, text: &str) -> Vec<rmpv::Value> {
+                hub.send(&input(channel_id, prints(text))).await;
+                let mut frames = Vec::new();
+                while !output_of(&frames, channel_id).contains(text) {
+                    let Some(frame) = hub.frame_within(DEADLINE).await else {
+                        panic!(
+                            "{channel_id} did not print {text:?} within {DEADLINE:?}; it printed {:?}",
+                            output_of(&frames, channel_id)
+                        );
+                    };
+                    frames.push(frame);
+                }
+                frames
+            }
+
+            fn mentions(frames: &[rmpv::Value], channel_id: &str) -> Vec<String> {
+                frames
+                    .iter()
+                    .filter(|frame| frame["channel_id"].as_str() == Some(channel_id))
+                    .map(|frame| frame_type(frame).to_string())
+                    .collect()
+            }
+
+            fn errors(frames: &[rmpv::Value]) -> Vec<String> {
+                frames
+                    .iter()
+                    .filter(|frame| frame_type(frame) == "ERROR")
+                    .map(|frame| frame["code"].as_str().unwrap_or("").to_string())
+                    .collect()
+            }
+
+            /// The channels a connection was told it holds, sorted, and the
+            /// count CHANNEL_STATE_END gave of other hubs' channels.
+            fn state(frames: &[rmpv::Value]) -> (Vec<String>, u64) {
+                let mut own: Vec<String> = frames
+                    .iter()
+                    .filter(|frame| frame_type(frame) == "AGENT_CHANNEL_STATE")
+                    .map(|frame| frame["channel_id"].as_str().unwrap_or("").to_string())
+                    .collect();
+                own.sort();
+                let end = frames
+                    .iter()
+                    .find(|frame| frame_type(frame) == "CHANNEL_STATE_END")
+                    .expect("the state ends with CHANNEL_STATE_END");
+                let others = end["other_owner_channels"]
+                    .as_u64()
+                    .expect("CHANNEL_STATE_END counts other hubs' channels");
+                (own, others)
+            }
+
+            /// Each hub gets its own terminals' output and state, and nothing
+            /// of another hub's. All output used to go to whichever hub had
+            /// connected last, and the state listed every channel.
+            #[tokio::test]
+            async fn each_hub_gets_its_own_terminals_and_nothing_of_another_hubs() {
+                let daemon = TestDaemon::start("own").await;
+                let (mut a, mut seen_by_a) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut b, mut seen_by_b) = daemon.connect_as(Some(KEY_B)).await;
+
+                seen_by_a.extend(spawned(&mut a, interactive("own-ch-a")).await);
+                seen_by_b.extend(spawned(&mut b, interactive("own-ch-b")).await);
+                seen_by_a.extend(print(&mut a, "own-ch-a", "printed-for-a").await);
+                seen_by_b.extend(print(&mut b, "own-ch-b", "printed-for-b").await);
+                // Anything sent to the wrong hub would have arrived by now.
+                seen_by_a.extend(a.frames_until_quiet(Duration::from_millis(300)).await);
+                seen_by_b.extend(b.frames_until_quiet(Duration::from_millis(300)).await);
+
+                assert_eq!(mentions(&seen_by_a, "own-ch-b"), Vec::<String>::new());
+                assert_eq!(mentions(&seen_by_b, "own-ch-a"), Vec::<String>::new());
+
+                // Coming back, each hub is told of its own terminal only.
+                let (_a2, a2_state) = daemon.connect_as(Some(KEY_A)).await;
+                assert_eq!(state(&a2_state), (vec!["own-ch-a".to_string()], 1));
+                let (_b2, b2_state) = daemon.connect_as(Some(KEY_B)).await;
+                assert_eq!(state(&b2_state), (vec!["own-ch-b".to_string()], 1));
+
+                daemon.stop().await;
+            }
+
+            /// A hub that goes away costs another hub nothing: it keeps
+            /// typing and reading, with nothing lost, and the terminal of the
+            /// hub that left keeps running for it.
+            #[tokio::test]
+            async fn a_hub_that_leaves_costs_another_hub_nothing() {
+                let daemon = TestDaemon::start("leaves").await;
+                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                spawned(&mut a, interactive("leaves-ch-a")).await;
+                spawned(&mut b, interactive("leaves-ch-b")).await;
+
+                let mut seen_by_b = print(&mut b, "leaves-ch-b", "before-a-left").await;
+                drop(a);
+                seen_by_b.extend(print(&mut b, "leaves-ch-b", "after-a-left").await);
+                seen_by_b.extend(print(&mut b, "leaves-ch-b", "and-again").await);
+
+                let printed = output_of(&seen_by_b, "leaves-ch-b");
+                let at = |text: &str| {
+                    printed
+                        .find(text)
+                        .unwrap_or_else(|| panic!("{text:?} is missing from {printed:?}"))
+                };
+                assert!(at("before-a-left") < at("after-a-left"));
+                assert!(at("after-a-left") < at("and-again"));
+                let seqs: Vec<u64> = seen_by_b
+                    .iter()
+                    .filter(|frame| is_about(frame, "OUTPUT", "leaves-ch-b"))
+                    .filter_map(|frame| frame["seq"].as_u64())
+                    .collect();
+                assert!(
+                    seqs.windows(2).all(|pair| pair[0] < pair[1]),
+                    "OUTPUT seqs must only grow: {seqs:?}"
+                );
+
+                let (mut a2, a2_state) = daemon.connect_as(Some(KEY_A)).await;
+                assert_eq!(state(&a2_state).0, vec!["leaves-ch-a".to_string()]);
+                print(&mut a2, "leaves-ch-a", "still-running").await;
+
+                daemon.stop().await;
+            }
+
+            /// A hub that comes back gets its terminal, and what it printed
+            /// while the hub was away; the other hub, there all along, gets
+            /// none of it.
+            #[tokio::test]
+            async fn a_hub_that_comes_back_gets_what_its_terminal_printed_meanwhile() {
+                let daemon = TestDaemon::start("back").await;
+                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut b, mut seen_by_b) = daemon.connect_as(Some(KEY_B)).await;
+                // Waits for a line, prints a second later, then waits again.
+                let command = if cfg!(windows) {
+                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& set /p done="
+                } else {
+                    r#"read line; sleep 1; echo "printed-while-""away"; read done"#
+                };
+                spawned(&mut a, spawn("back-ch-a", command)).await;
+                let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
+                a.send(&input("back-ch-a", go.to_vec())).await;
+                drop(a);
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+
+                let (mut a2, mut seen_by_a2) = daemon.connect_as(Some(KEY_A)).await;
+                assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
+                a2.send(&HubToAgent::Attach {
+                    channel_id: "back-ch-a".to_string(),
+                })
+                .await;
+                seen_by_a2.extend(
+                    a2.read_through(|frame| is_about(frame, "ATTACH_OK", "back-ch-a"))
+                        .await,
+                );
+                let snapshot = seen_by_a2
+                    .last()
+                    .and_then(|attached| attached["snapshot"]["serialized"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                assert!(
+                    output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away")
+                        || snapshot.contains("printed-while-away"),
+                    "what the terminal printed while its hub was away is lost"
+                );
+
+                seen_by_b.extend(b.frames_until_quiet(Duration::from_millis(300)).await);
+                assert_eq!(mentions(&seen_by_b, "back-ch-a"), Vec::<String>::new());
+
+                daemon.stop().await;
+            }
+
+            /// A connection a hub left half-open, a ghost, is replaced by that
+            /// hub's next one, and told so before it is cut. Another hub is
+            /// left alone.
+            #[tokio::test]
+            async fn a_ghost_connection_is_replaced_by_its_own_hub_only() {
+                let daemon = TestDaemon::start("ghost").await;
+                let (mut ghost, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut b, mut seen_by_b) = daemon.connect_as(Some(KEY_B)).await;
+                spawned(&mut ghost, interactive("ghost-ch-a")).await;
+                seen_by_b.extend(spawned(&mut b, interactive("ghost-ch-b")).await);
+
+                let (mut a2, a2_state) = daemon.connect_as(Some(KEY_A)).await;
+                assert_eq!(state(&a2_state).0, vec!["ghost-ch-a".to_string()]);
+
+                let ghost_saw = ghost.frames_until_closed().await;
+                assert!(
+                    errors(&ghost_saw).contains(&"DISPLACED".to_string()),
+                    "the ghost must be told why it is cut; it received {:?}",
+                    ghost_saw.iter().map(frame_type).collect::<Vec<_>>()
+                );
+
+                print(&mut a2, "ghost-ch-a", "to-the-new-one").await;
+                seen_by_b.extend(print(&mut b, "ghost-ch-b", "b-untouched").await);
+                assert_eq!(errors(&seen_by_b), Vec::<String>::new());
+                assert_eq!(mentions(&seen_by_b, "ghost-ch-a"), Vec::<String>::new());
+
+                daemon.stop().await;
+            }
+
+            /// Every payload up to HEARTBEAT_ACK, which fences the answer to
+            /// `msg`: what the daemon wrote, byte for byte.
+            async fn answer(hub: &mut Hub, msg: &HubToAgent) -> Vec<Vec<u8>> {
+                hub.send(msg).await;
+                hub.send(&HubToAgent::Heartbeat {
+                    ts: "fence".to_string(),
+                })
+                .await;
+                let mut payloads = Vec::new();
+                loop {
+                    let payload = tokio::time::timeout(DEADLINE, hub.next_payload())
+                        .await
+                        .expect("an answer in time")
+                        .expect("the connection stays open");
+                    let frame: rmpv::Value =
+                        rmp_serde::from_slice(&payload).expect("decode a daemon frame");
+                    payloads.push(payload);
+                    if frame_type(&frame) == "HEARTBEAT_ACK" {
+                        return payloads;
+                    }
+                }
+            }
+
+            /// Another hub's terminal is answered exactly as one that does
+            /// not exist, whatever is asked of it, and nothing reaches it:
+            /// neither what is typed, nor a resize, nor a DESTROY.
+            #[tokio::test]
+            async fn another_hubs_terminal_is_answered_as_one_that_does_not_exist() {
+                // Ids of one length: the answers differ by the id alone.
+                const HELD: &str = "isolated-ch-a";
+                const NONE: &str = "isolated-ch-x";
+                let daemon = TestDaemon::start("isolation").await;
+                let (mut a, mut seen_by_a) = daemon.connect_as(Some(KEY_A)).await;
+                seen_by_a.extend(spawned(&mut a, interactive(HELD)).await);
+                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+
+                type Request = fn(&str) -> HubToAgent;
+                let requests: [(&str, Request); 5] = [
+                    ("INPUT", |id| input(id, prints("typed-by-b"))),
+                    ("RESIZE", |id| HubToAgent::Resize {
+                        channel_id: id.to_string(),
+                        cols: 100,
+                        rows: 40,
+                    }),
+                    ("ATTACH", |id| HubToAgent::Attach {
+                        channel_id: id.to_string(),
+                    }),
+                    ("SNAPSHOT_REQ", |id| HubToAgent::SnapshotReq {
+                        channel_id: id.to_string(),
+                    }),
+                    ("DESTROY", |id| HubToAgent::Destroy {
+                        channel_id: id.to_string(),
+                    }),
+                ];
+                for (name, request) in requests {
+                    let held = answer(&mut b, &request(HELD)).await;
+                    let none: Vec<Vec<u8>> = answer(&mut b, &request(NONE))
+                        .await
+                        .into_iter()
+                        .map(|payload| replace(&payload, NONE.as_bytes(), HELD.as_bytes()))
+                        .collect();
+                    assert_eq!(
+                        held, none,
+                        "{name} on another hub's terminal must read as on one that does not exist"
+                    );
+                    let kinds: Vec<String> = held
+                        .iter()
+                        .map(|payload| {
+                            let frame: rmpv::Value = rmp_serde::from_slice(payload).unwrap();
+                            match frame_type(&frame) {
+                                "ERROR" => {
+                                    format!("ERROR {}", frame["code"].as_str().unwrap_or(""))
+                                }
+                                other => other.to_string(),
+                            }
+                        })
+                        .collect();
+                    let expected: &[&str] = match name {
+                        "DESTROY" | "SNAPSHOT_REQ" => &["HEARTBEAT_ACK"],
+                        _ => &["ERROR CHANNEL_NOT_FOUND", "HEARTBEAT_ACK"],
+                    };
+                    assert_eq!(kinds, expected, "{name}");
+                }
+
+                // The terminal is as its hub left it: its size, its input,
+                // its life.
+                a.send(&HubToAgent::SnapshotReq {
+                    channel_id: HELD.to_string(),
+                })
+                .await;
+                let frames = a
+                    .read_through(|frame| is_about(frame, "SNAPSHOT_RES", HELD))
+                    .await;
+                let size = &frames.last().unwrap()["snapshot"];
+                assert_eq!(
+                    (size["cols"].as_u64(), size["rows"].as_u64()),
+                    (Some(80), Some(24))
+                );
+                seen_by_a.extend(frames);
+                seen_by_a.extend(print(&mut a, HELD, "still-its-own").await);
+                assert!(
+                    !output_of(&seen_by_a, HELD).contains("typed-by-b"),
+                    "what another hub typed reached the terminal"
+                );
+                assert!(!mentions(&seen_by_a, HELD).contains(&"CHANNEL_EXIT".to_string()));
+
+                daemon.stop().await;
+            }
+
+            fn replace(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+                assert_eq!(from.len(), to.len());
+                let mut out = bytes.to_vec();
+                let mut at = 0;
+                while at + from.len() <= out.len() {
+                    if &out[at..at + from.len()] == from {
+                        out[at..at + from.len()].copy_from_slice(to);
+                        at += from.len();
+                    } else {
+                        at += 1;
+                    }
+                }
+                out
+            }
+
+            /// What a hub's terminals said while it was away reaches it as it
+            /// connects, before anything it is answered. A shell that ended
+            /// meanwhile, then restarted under the same id, used to have its
+            /// exit arrive after the SPAWN_OK of its replacement, when the
+            /// replacement first printed: the hub took the new terminal for
+            /// dead.
+            #[tokio::test]
+            async fn an_exit_while_its_hub_was_away_reaches_it_before_any_reply() {
+                let daemon = TestDaemon::start("flush").await;
+                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                // Waits for a line, then ends a second later: its hub is gone.
+                let command = if cfg!(windows) {
+                    "set /p line=& ping -n 2 127.0.0.1 >nul & exit 5"
+                } else {
+                    "read line; sleep 1; exit 5"
+                };
+                spawned(&mut a, spawn("flush-restarted", command)).await;
+                let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
+                a.send(&input("flush-restarted", go.to_vec())).await;
+                drop(a);
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                let (mut a2, mut seen) = daemon.connect_as(Some(KEY_A)).await;
+                seen.extend(spawned(&mut a2, interactive("flush-restarted")).await);
+                let exit = seen
+                    .iter()
+                    .position(|frame| is_about(frame, "CHANNEL_EXIT", "flush-restarted"))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the exit must come before the SPAWN_OK; received {:?}",
+                            seen.iter().map(frame_type).collect::<Vec<_>>()
+                        )
+                    });
+                assert_eq!(seen[exit]["exit_code"].as_i64(), Some(5));
+                let later = a2.frames_until_quiet(Duration::from_millis(500)).await;
+                assert!(
+                    !mentions(&later, "flush-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            fn stop(force: bool) -> HubToAgent {
+                HubToAgent::Stop { force }
+            }
+
+            /// STOP without force leaves another hub's terminals alone, and
+            /// says how many there are. With force, the daemon stops.
+            #[tokio::test]
+            async fn stop_is_refused_while_another_hub_holds_terminals_unless_forced() {
+                let daemon = TestDaemon::start("stop-refused").await;
+                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                spawned(&mut b, interactive("stop-ch-b")).await;
+
+                a.send(&stop(false)).await;
+                let frames = a.read_until("ERROR").await;
+                let refusal = frames.last().unwrap();
+                assert_eq!(refusal["code"].as_str(), Some("OTHER_HUBS_HOLD_CHANNELS"));
+                assert_eq!(refusal["other_owner_channels"].as_u64(), Some(1));
+                let message = refusal["message"].as_str().unwrap_or("");
+                assert!(message.starts_with("1 "), "{message:?}");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                assert!(
+                    !daemon.task.is_finished(),
+                    "a refused STOP stopped the daemon"
+                );
+                print(&mut b, "stop-ch-b", "still-here").await;
+
+                a.send(&stop(true)).await;
+                // Closing the connection is the acknowledgement.
+                a.frames_until_closed().await;
+                let summary = daemon.finished().await.expect("a clean stop");
+                assert_eq!(summary.confirmed_shell_exits, 1);
+            }
+
+            /// STOP from the hub that holds every terminal stops the daemon,
+            /// on the path a signal takes: terminals torn down, connection
+            /// closed.
+            #[tokio::test]
+            async fn stop_ends_a_daemon_whose_terminals_are_all_its_callers() {
+                let daemon = TestDaemon::start("stop-own").await;
+                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                spawned(&mut a, interactive("stop-ch-a")).await;
+
+                a.send(&stop(false)).await;
+                let frames = a.frames_until_closed().await;
+                assert_eq!(errors(&frames), Vec::<String>::new());
+                let summary = daemon.finished().await.expect("a clean stop");
+                assert_eq!(summary.confirmed_shell_exits, 1);
+            }
+
+            /// Connections without a key are one hub, `legacy`, which keeps
+            /// today's rule among its own: the last one wins. A hub with a
+            /// key is not part of it.
+            #[tokio::test]
+            async fn legacy_connections_replace_each_other_and_no_one_else() {
+                let daemon = TestDaemon::start("legacy").await;
+                let (mut keyed, mut seen_by_keyed) = daemon.connect_as(Some(KEY_A)).await;
+                seen_by_keyed.extend(spawned(&mut keyed, interactive("legacy-keyed")).await);
+                let (mut first, _) = daemon.connect_as(None).await;
+                spawned(&mut first, interactive("legacy-held")).await;
+
+                let (mut second, second_state) = daemon.connect_as(None).await;
+                assert_eq!(state(&second_state), (vec!["legacy-held".to_string()], 1));
+                let first_saw = first.frames_until_closed().await;
+                assert!(errors(&first_saw).contains(&"DISPLACED".to_string()));
+                print(&mut second, "legacy-held", "legacy-last-wins").await;
+
+                seen_by_keyed.extend(print(&mut keyed, "legacy-keyed", "keyed-untouched").await);
+                assert_eq!(errors(&seen_by_keyed), Vec::<String>::new());
+                assert_eq!(
+                    mentions(&seen_by_keyed, "legacy-held"),
+                    Vec::<String>::new()
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A hub from before #127 sends nothing to a daemon without a
+            /// token: it waits for the channel state, and gives up after 5 s.
+            /// It gets that state in time, as `legacy`.
+            #[tokio::test]
+            async fn a_hub_that_sends_nothing_first_is_legacy_and_gets_its_state_in_time() {
+                let daemon = TestDaemon::start("silent").await;
+                let (mut first, _) = daemon.connect_as(None).await;
+                spawned(&mut first, interactive("silent-held")).await;
+
+                let started = std::time::Instant::now();
+                let mut silent = daemon.open_silently().await;
+                let frames = silent.read_until("CHANNEL_STATE_END").await;
+                assert!(
+                    started.elapsed() < Duration::from_secs(4),
+                    "an old hub gives up after 5 s; the state took {:?}",
+                    started.elapsed()
+                );
+                assert_eq!(state(&frames), (vec!["silent-held".to_string()], 0));
+                print(&mut silent, "silent-held", "old-hub-types").await;
+
+                daemon.stop().await;
+            }
+
+            /// CHANNEL_STATE_END counts the channels every other hub holds.
+            #[tokio::test]
+            async fn channel_state_end_counts_the_channels_other_hubs_hold() {
+                let daemon = TestDaemon::start("count").await;
+                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                spawned(&mut a, interactive("count-a-1")).await;
+                spawned(&mut a, interactive("count-a-2")).await;
+                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                spawned(&mut b, interactive("count-b-1")).await;
+
+                let (_a2, a_state) = daemon.connect_as(Some(KEY_A)).await;
+                assert_eq!(
+                    state(&a_state),
+                    (vec!["count-a-1".to_string(), "count-a-2".to_string()], 1)
+                );
+                let (_b2, b_state) = daemon.connect_as(Some(KEY_B)).await;
+                assert_eq!(state(&b_state), (vec!["count-b-1".to_string()], 2));
+                let (_c, c_state) = daemon.connect_as(Some("hub-c-key")).await;
+                assert_eq!(state(&c_state), (Vec::<String>::new(), 3));
+                let (_legacy, legacy_state) = daemon.connect_as(None).await;
+                assert_eq!(state(&legacy_state), (Vec::<String>::new(), 3));
+
+                daemon.stop().await;
+            }
         }
     }
 }

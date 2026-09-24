@@ -8,6 +8,7 @@ mod handler;
 mod headless;
 mod identity;
 mod logging;
+mod owner;
 mod platform_dirs;
 mod process;
 mod protocol;
@@ -176,6 +177,14 @@ where
     }
 }
 
+/// Wait until a hub's STOP has asked the daemon to stop (#127). The signal task
+/// holds a sender of that channel, so it stays open while this waits.
+async fn stop_requested_by_hub(requests: &mut tokio::sync::watch::Receiver<bool>) {
+    if requests.wait_for(|requested| *requested).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 fn daemon_process_exit_status(result: &std::io::Result<pty::DestroyAllSummary>) -> i32 {
     match result {
         Ok(summary) => daemon::teardown_exit_status(summary),
@@ -267,6 +276,10 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
 
         let (shutdown_tx, shutdown_rx) = daemon::shutdown_channel();
         let cleanup_shutdown_tx = shutdown_tx.clone();
+        // A hub's STOP asks through the same channel. The signal task watches
+        // it, so that a STOP takes the path a signal takes: recorded as a
+        // requested stop, and bounded by the same deadline (#127).
+        let mut hub_stop = shutdown_tx.subscribe();
         let stop_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         #[cfg(unix)]
@@ -289,18 +302,22 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
         let mut signal_task = tokio::spawn(async move {
             #[cfg(unix)]
             {
-                let Some(first_signal) = wait_for_available_signal(
-                    Some(sigterm.recv()),
-                    sigint.as_mut().map(|signal| signal.recv()),
-                )
-                .await
-                else {
-                    tracing::error!("no Unix termination handlers installed; daemon cannot receive a shutdown signal");
-                    std::future::pending::<()>().await;
-                    unreachable!("a daemon without signal handlers must remain parked");
+                let first_signal = tokio::select! {
+                    signal = wait_for_available_signal(
+                        Some(sigterm.recv()),
+                        sigint.as_mut().map(|signal| signal.recv()),
+                    ) => match signal {
+                        Some(signal) => signal.name(),
+                        None => {
+                            tracing::error!("no Unix termination handlers installed; only a hub's STOP can stop this daemon");
+                            stop_requested_by_hub(&mut hub_stop).await;
+                            "STOP"
+                        }
+                    },
+                    _ = stop_requested_by_hub(&mut hub_stop) => "STOP",
                 };
                 tracing::info!(
-                    signal = first_signal.name(),
+                    signal = first_signal,
                     "shutdown signal received, requesting daemon shutdown"
                 );
                 let deadline = tokio::time::sleep(DAEMON_GRACEFUL_SHUTDOWN_DEADLINE);
@@ -326,11 +343,21 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
             }
             #[cfg(not(unix))]
             {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    tracing::error!(%error, "Ctrl+C handler unavailable; daemon shutdown signal task cannot continue");
-                    std::future::pending::<()>().await;
-                }
-                tracing::info!("Ctrl+C received, requesting daemon shutdown");
+                let first_signal = tokio::select! {
+                    result = tokio::signal::ctrl_c() => match result {
+                        Ok(()) => "Ctrl+C",
+                        Err(error) => {
+                            tracing::error!(%error, "Ctrl+C handler unavailable; only a hub's STOP can stop this daemon");
+                            stop_requested_by_hub(&mut hub_stop).await;
+                            "STOP"
+                        }
+                    },
+                    _ = stop_requested_by_hub(&mut hub_stop) => "STOP",
+                };
+                tracing::info!(
+                    signal = first_signal,
+                    "shutdown signal received, requesting daemon shutdown"
+                );
                 let deadline = tokio::time::sleep(DAEMON_GRACEFUL_SHUTDOWN_DEADLINE);
                 tokio::pin!(deadline);
                 signal_stop_requested.store(true, std::sync::atomic::Ordering::SeqCst);

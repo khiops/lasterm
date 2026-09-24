@@ -415,6 +415,7 @@ export const useSessionStore = defineStore("session", () => {
 			if (msg.type === "SESSION_STATE") {
 				hostsStore.updateSessionStatus(msg.hostId, msg.status);
 				hostsStore.rememberOutdatedAgent(msg.hostId, msg.outdatedAgent);
+				hostsStore.rememberOtherOwnerChannels(msg.hostId, msg.otherOwnerChannels);
 			}
 		});
 	}
@@ -517,6 +518,7 @@ export const useSessionStore = defineStore("session", () => {
 				for (const s of msg.sessions) {
 					hostsStore.updateSessionStatus(s.hostId, s.status);
 					hostsStore.rememberOutdatedAgent(s.hostId, s.outdatedAgent);
+					hostsStore.rememberOtherOwnerChannels(s.hostId, s.otherOwnerChannels);
 					sessionHostMap.set(s.sessionId, s.hostId);
 				}
 				// Populate channelId → hostId map from STATE_SYNC data

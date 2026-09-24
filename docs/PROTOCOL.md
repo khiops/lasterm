@@ -78,8 +78,12 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
   one connection per hub, and a new connection replaces only the same hub's previous one (§ 3.1b).
   An agent without it serves one hub at a time, and the newest authenticated connection replaces the
   previous one (last-writer-wins). The replaced connection gets `ERROR { code: "DISPLACED" }`, then EOF
-- Agent buffers output while no hub is connected (`OutputBuffer` ring buffer); with `hub-identity`,
-  each hub's output is kept for that hub only
+- A terminal's output and events (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, BELL, NOTIFICATION,
+  LOG) go to the hub connected when they are sent, whichever connection spawned the terminal (#549);
+  with `hub-identity`, to the current connection of the hub that owns the terminal (§ 3.1b).
+  Replies (SPAWN_OK, ATTACH_OK, SNAPSHOT_RES, ERROR) go to the connection that asked.
+- Agent queues output and events while no hub is connected (up to 1000 frames, oldest dropped);
+  with `hub-identity`, each hub has its own queue, flushed only to that hub's next connection
 - On reconnect: agent sends HELLO, reads the hub's AUTH, then enumerates channel state (see section 3.16)
 
 ### 2.2 Hub ↔ UI (WebSocket)
@@ -248,7 +252,9 @@ Re-attach to existing channel (after reconnect).
 }
 ```
 
-**Batching:** Buffer 16ms or 4KB, whichever comes first, then flush.
+**Batching:** Buffer 16ms or 4KB, whichever comes first, then flush. Any other frame about a
+channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, BELL, NOTIFICATION, LOG) first flushes that
+channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT.
 
 ### 3.6 RESIZE (Hub → Agent)
 

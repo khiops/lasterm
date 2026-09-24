@@ -772,33 +772,11 @@ async fn test_full_lifecycle() {
     assert_eq!(spawn_ok["type"].as_str(), Some("SPAWN_OK"));
     let ch_id = spawn_ok["channel_id"].as_str().unwrap().to_string();
 
-    // Drain frames until OUTPUT with "lifecycle_test" and CHANNEL_EXIT are seen.
-    // IMPORTANT: OUTPUT goes through the 16ms batch loop; CHANNEL_EXIT goes
-    // directly via frame_tx. They race — so we must NOT stop reading the moment
-    // we see CHANNEL_EXIT. Instead we keep reading for a short grace period after
-    // exit so any buffered OUTPUT frames can arrive.
+    // Read up to CHANNEL_EXIT. It takes the batch loop with the channel's
+    // output, behind it, so everything the command printed has arrived by then.
     let mut saw_output = false;
-    let mut saw_exit = false;
-    // After CHANNEL_EXIT, allow up to 500 ms for any buffered OUTPUT to arrive.
-    let mut exit_grace_deadline: Option<tokio::time::Instant> = None;
-
     loop {
-        // Use a short per-frame timeout; tighten it after we've seen exit.
-        let per_frame_ms = if exit_grace_deadline.is_some() {
-            500
-        } else {
-            2000
-        };
-        let frame = match tokio::time::timeout(
-            Duration::from_millis(per_frame_ms),
-            read_frame(&mut stdout),
-        )
-        .await
-        {
-            Ok(f) => f,
-            Err(_) => break, // silence — stop draining
-        };
-
+        let frame = read_frame_timeout(&mut stdout, 5).await;
         match frame["type"].as_str() {
             Some("OUTPUT") => {
                 if let rmpv::Value::Binary(data) = &frame["data"] {
@@ -813,30 +791,98 @@ async fn test_full_lifecycle() {
                     Some(ch_id.as_str()),
                     "CHANNEL_EXIT channel_id must match the spawned channel"
                 );
-                saw_exit = true;
-                // Keep reading briefly in case buffered OUTPUT hasn't arrived yet.
-                exit_grace_deadline =
-                    Some(tokio::time::Instant::now() + Duration::from_millis(500));
-            }
-            _ => {} // TITLE_CHANGE, PROCESS_TITLE, BELL — benign, ignore
-        }
-
-        // Stop once we have both, or once the grace period after exit expires.
-        if saw_output && saw_exit {
-            break;
-        }
-        if let Some(deadline) = exit_grace_deadline {
-            if tokio::time::Instant::now() >= deadline {
                 break;
             }
+            _ => {} // TITLE_CHANGE, PROCESS_TITLE, BELL — benign, ignore
         }
     }
 
     assert!(
         saw_output,
-        "expected OUTPUT frame containing 'lifecycle_test'"
+        "expected OUTPUT frame containing 'lifecycle_test' before CHANNEL_EXIT"
     );
-    assert!(saw_exit, "expected CHANNEL_EXIT frame");
+
+    agent.kill().await.ok();
+}
+
+/// A channel's last output reaches the hub before its exit (#549). OUTPUT waits
+/// up to 16 ms in the batch loop, and CHANNEL_EXIT used to go around it: a
+/// shell that printed and ended could be reported gone before its last output
+/// arrived. Ten rounds, since that race was lost in only some of them.
+#[tokio::test]
+async fn a_channel_delivers_all_its_output_before_its_exit() {
+    let mut agent = spawn_agent().await;
+    let mut stdout = agent.stdout.take().unwrap();
+    let mut stdin = agent.stdin.take().unwrap();
+    let _hello = read_frame_timeout(&mut stdout, 5).await;
+
+    let output_of = |frame: &rmpv::Value, channel_id: &str| -> Option<Vec<u8>> {
+        match (
+            frame["type"].as_str(),
+            frame["channel_id"].as_str(),
+            &frame["data"],
+        ) {
+            (Some("OUTPUT"), Some(id), rmpv::Value::Binary(data)) if id == channel_id => {
+                Some(data.clone())
+            }
+            _ => None,
+        }
+    };
+    let mut ended: Vec<String> = Vec::new();
+
+    for round in 0..10 {
+        let channel_id = format!("prints-then-ends-{round}");
+        let marker = format!("ordering-marker-{round}");
+        let spawn_msg = msgmap(vec![
+            ("type", sv("SPAWN")),
+            ("request_id", sv(&format!("req-{channel_id}"))),
+            ("channel_id", sv(&channel_id)),
+            ("shell", sv(test_shell().0)),
+            (
+                "args",
+                rmpv::Value::Array(vec![sv(test_shell().1), sv(&format!("echo {marker}"))]),
+            ),
+            ("cols", iv(80)),
+            ("rows", iv(24)),
+        ]);
+        write_frame(&mut stdin, &spawn_msg).await;
+
+        let mut printed = Vec::new();
+        loop {
+            let frame = read_frame_timeout(&mut stdout, 10).await;
+            for earlier in &ended {
+                assert!(
+                    output_of(&frame, earlier).is_none(),
+                    "OUTPUT for {earlier} arrived after its CHANNEL_EXIT"
+                );
+            }
+            if let Some(data) = output_of(&frame, &channel_id) {
+                printed.extend_from_slice(&data);
+            }
+            if frame["type"].as_str() == Some("CHANNEL_EXIT")
+                && frame["channel_id"].as_str() == Some(channel_id.as_str())
+            {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&printed).contains(&marker),
+            "CHANNEL_EXIT for {channel_id} arrived before its output {marker:?}"
+        );
+        ended.push(channel_id);
+    }
+
+    // Well past one batch interval: output still held back would come now.
+    while let Ok(frame) =
+        tokio::time::timeout(Duration::from_millis(300), read_frame(&mut stdout)).await
+    {
+        for earlier in &ended {
+            assert!(
+                output_of(&frame, earlier).is_none(),
+                "OUTPUT for {earlier} arrived after its CHANNEL_EXIT"
+            );
+        }
+    }
 
     agent.kill().await.ok();
 }

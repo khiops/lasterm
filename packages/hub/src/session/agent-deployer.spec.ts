@@ -67,34 +67,130 @@ function makeMockClient(
 
 // ---------- Mock SFTP helpers -------------------------------------------------
 
+/** A file on the mock remote: what was written there, and its mode. */
+interface RemoteFile {
+	content: string;
+	mode: number;
+}
+
 interface MockSftpOptions {
 	mkdirError?: Error;
+	/** Fails the upload after part of the file was written, as a dropped transfer does. */
 	fastPutError?: Error;
 	chmodError?: Error;
+	/** Whether the server offers `posix-rename@openssh.com`. It does unless this is false. */
+	posixRename?: boolean;
+	/** Fails `posix-rename@openssh.com` on the server's side. */
+	renameError?: Error;
+	/** The remote files by path, which every call below acts on. */
+	files?: Map<string, RemoteFile>;
+	/**
+	 * Paths a running process executes from. Linux refuses to open them for
+	 * writing (ETXTBSY), and SFTP reports that only as "Failure" (#555).
+	 */
+	busy?: ReadonlySet<string>;
+}
+
+/** rename(2) on the mock remote: the source takes the target's place, whatever was there. */
+function moveRemoteFile(files: Map<string, RemoteFile>, from: string, to: string): boolean {
+	const file = files.get(from);
+	if (file === undefined) return false;
+	files.delete(from);
+	files.set(to, file);
+	return true;
 }
 
 function makeMockSftp(opts: MockSftpOptions = {}): SFTPWrapper {
+	const files = opts.files ?? new Map<string, RemoteFile>();
 	return {
 		mkdir: vi.fn((_path: string, cb: (err: Error | undefined) => void) => {
 			cb(opts.mkdirError);
 		}),
-		fastPut: vi.fn((_local: string, _remote: string, cb: (err: Error | undefined) => void) => {
-			cb(opts.fastPutError);
+		fastPut: vi.fn((local: string, remote: string, cb: (err: Error | undefined) => void) => {
+			if (opts.busy?.has(remote)) {
+				cb(new Error("Failure"));
+				return;
+			}
+			if (opts.fastPutError) {
+				files.set(remote, { content: `part of ${local}`, mode: 0o644 });
+				cb(opts.fastPutError);
+				return;
+			}
+			files.set(remote, { content: local, mode: 0o644 });
+			cb(undefined);
 		}),
-		chmod: vi.fn((_path: string, _mode: number, cb: (err: Error | undefined) => void) => {
-			cb(opts.chmodError);
+		chmod: vi.fn((path: string, mode: number, cb: (err: Error | undefined) => void) => {
+			if (opts.chmodError) {
+				cb(opts.chmodError);
+				return;
+			}
+			const file = files.get(path);
+			if (file) file.mode = mode;
+			cb(undefined);
+		}),
+		// ssh2 throws before sending anything when the server lacks the extension.
+		ext_openssh_rename: vi.fn((from: string, to: string, cb: (err: Error | undefined) => void) => {
+			if (opts.posixRename === false) {
+				throw new Error("Server does not support this extended request");
+			}
+			if (opts.renameError) {
+				cb(opts.renameError);
+				return;
+			}
+			cb(moveRemoteFile(files, from, to) ? undefined : new Error("No such file"));
+		}),
+		unlink: vi.fn((path: string, cb: (err: Error | undefined) => void) => {
+			cb(files.delete(path) ? undefined : new Error("No such file"));
 		}),
 		end: vi.fn(),
 	} as unknown as SFTPWrapper;
 }
 
-function makeSftpClient(sftp: SFTPWrapper, sftpError?: Error): SshClient {
+/**
+ * A client that only opens SFTP. Its exec answers through `onExec`, and fails
+ * whatever `onExec` does not answer rather than hanging until a timeout.
+ */
+function makeSftpClient(
+	sftp: SFTPWrapper,
+	sftpError?: Error,
+	onExec?: (command: string) => ExecResult,
+): SshClient {
 	return {
-		exec: vi.fn(),
+		exec: vi.fn((command: string, cb: SshExecCallback) => {
+			const result = onExec?.(command) ?? { stdout: "", stderr: "", exitCode: 1 };
+			const stream = new MockSshStream();
+			cb(undefined, stream);
+			setImmediate(() => {
+				if (result.stderr) stream.stderr.emit("data", Buffer.from(result.stderr));
+				stream.emit("close", result.exitCode);
+			});
+		}),
 		sftp: vi.fn((cb: (err: Error | undefined, sftp: SFTPWrapper) => void) => {
 			cb(sftpError, sftp);
 		}),
 	} as unknown as SshClient;
+}
+
+/** The remote's shell running the deployer's `mv` fallback on the mock remote's files. */
+function shellMoving(
+	files: Map<string, RemoteFile>,
+	exitCode = 0,
+): (command: string) => ExecResult {
+	return (command) => {
+		const mv = /^test ! -d (\S+) && mv -f -- (\S+) (\S+)$/.exec(command);
+		if (mv === null || exitCode !== 0) {
+			return { stdout: "", stderr: "mv: cannot move", exitCode: exitCode || 1 };
+		}
+		moveRemoteFile(files, mv[2] ?? "", mv[3] ?? "");
+		return { stdout: "", stderr: "", exitCode: 0 };
+	};
+}
+
+/** The path the (single) upload went to, as the mock SFTP saw it. */
+function uploadedTo(sftp: SFTPWrapper): string {
+	const call = vi.mocked(sftp.fastPut).mock.calls[0];
+	if (call === undefined) throw new Error("nothing was uploaded");
+	return call[1];
 }
 
 // ---------- Test fixture: binary cache ----------------------------------------
@@ -338,42 +434,137 @@ describe("detectRemoteOsArch", () => {
 // ---------- uploadAgentBinary -------------------------------------------------
 
 describe("uploadAgentBinary", () => {
-	it("calls mkdir, fastPut, and chmod in order", async () => {
+	const target = "/remote/.local/bin/lasterm-agent";
+
+	/** A remote with an agent already at the target, as an upgrade finds it. */
+	function remoteWithOldAgent(): Map<string, RemoteFile> {
+		return new Map([[target, { content: "old agent", mode: 0o755 }]]);
+	}
+
+	// A daemon may be running from the target, and Linux will not open a running
+	// executable for writing (#555). The upload goes beside it, and only a whole,
+	// executable file ever takes the target's name.
+	it("uploads beside the target, makes it executable, then renames it over the target", async () => {
+		const files = remoteWithOldAgent();
+		const sftp = makeMockSftp({ files });
+		const client = makeSftpClient(sftp);
+
+		await uploadAgentBinary(client, "/local/binary", target, "linux");
+
+		expect(sftp.mkdir).toHaveBeenCalledWith("/remote/.local/bin", expect.any(Function));
+		const temp = uploadedTo(sftp);
+		expect(temp).toMatch(/^\/remote\/\.local\/bin\/\.lasterm-agent\.[0-9a-f]{16}\.partial$/);
+		expect(sftp.chmod).toHaveBeenCalledWith(temp, 0o755, expect.any(Function));
+		expect(sftp.ext_openssh_rename).toHaveBeenCalledWith(temp, target, expect.any(Function));
+		const [put] = vi.mocked(sftp.fastPut).mock.invocationCallOrder;
+		const [chmod] = vi.mocked(sftp.chmod).mock.invocationCallOrder;
+		const [rename] = vi.mocked(sftp.ext_openssh_rename).mock.invocationCallOrder;
+		expect(put).toBeLessThan(chmod ?? 0);
+		expect(chmod).toBeLessThan(rename ?? 0);
+		// The target is the upload, executable, and nothing is left beside it.
+		expect([...files]).toEqual([[target, { content: "/local/binary", mode: 0o755 }]]);
+		expect(sftp.end).toHaveBeenCalled();
+	});
+
+	it("names a different temporary on every upload", async () => {
 		const sftp = makeMockSftp();
 		const client = makeSftpClient(sftp);
 
-		await uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/lasterm-agent");
+		await uploadAgentBinary(client, "/local/binary", target, "linux");
+		await uploadAgentBinary(client, "/local/binary", target, "linux");
 
-		expect(sftp.mkdir).toHaveBeenCalledWith("/remote/.local/bin", expect.any(Function));
-		expect(sftp.fastPut).toHaveBeenCalledWith(
-			"/local/binary",
-			"/remote/.local/bin/lasterm-agent",
-			expect.any(Function),
-		);
-		expect(sftp.chmod).toHaveBeenCalledWith(
-			"/remote/.local/bin/lasterm-agent",
-			0o755,
-			expect.any(Function),
-		);
+		const [first, second] = vi.mocked(sftp.fastPut).mock.calls.map((call) => call[1]);
+		expect(first).not.toBe(second);
 	});
 
-	it("calls sftp.end() even when fastPut fails", async () => {
-		const sftp = makeMockSftp({ fastPutError: new Error("disk full") });
+	it("renames with posix-rename@openssh.com when the server offers it, and runs nothing", async () => {
+		const sftp = makeMockSftp({ files: remoteWithOldAgent() });
 		const client = makeSftpClient(sftp);
 
-		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/lasterm-agent"),
-		).rejects.toThrow("disk full");
+		await uploadAgentBinary(client, "/local/binary", target, "linux");
 
-		expect(sftp.end).toHaveBeenCalled();
+		expect(sftp.ext_openssh_rename).toHaveBeenCalledTimes(1);
+		expect(client.exec).not.toHaveBeenCalled();
 	});
+
+	it("falls back to mv -f over exec when the server lacks the extension", async () => {
+		const files = remoteWithOldAgent();
+		const sftp = makeMockSftp({ files, posixRename: false });
+		const client = makeSftpClient(sftp, undefined, shellMoving(files));
+
+		await uploadAgentBinary(client, "/local/binary", target, "linux");
+
+		const temp = uploadedTo(sftp);
+		expect(client.exec).toHaveBeenCalledWith(
+			`test ! -d ${target} && mv -f -- ${temp} ${target}`,
+			expect.any(Function),
+		);
+		expect([...files]).toEqual([[target, { content: "/local/binary", mode: 0o755 }]]);
+	});
+
+	it("quotes both paths for the remote shell in the mv fallback", async () => {
+		const awkward = "/home/o'brien/my bin/lasterm-agent";
+		const sftp = makeMockSftp({ posixRename: false });
+		const commands: string[] = [];
+		const client = makeSftpClient(sftp, undefined, (command) => {
+			commands.push(command);
+			return { stdout: "", stderr: "", exitCode: 0 };
+		});
+
+		await uploadAgentBinary(client, "/local/binary", awkward, "linux");
+
+		const quoted = (path: string): string => `'${path.replace(/'/g, "'\\''")}'`;
+		const temp = uploadedTo(sftp);
+		expect(temp.startsWith("/home/o'brien/my bin/.lasterm-agent.")).toBe(true);
+		expect(commands).toEqual([
+			`test ! -d ${quoted(awkward)} && mv -f -- ${quoted(temp)} ${quoted(awkward)}`,
+		]);
+	});
+
+	// Whatever step fails, the temporary goes and the target stays exactly what
+	// it was: a running daemon's binary is never left half-written or replaced
+	// by a file that cannot run.
+	it.each([
+		{
+			step: "the upload",
+			sftpOptions: { fastPutError: new Error("disk full") },
+			said: "disk full",
+		},
+		{ step: "the chmod", sftpOptions: { chmodError: new Error("EPERM") }, said: "EPERM" },
+		{
+			step: "posix-rename",
+			sftpOptions: { renameError: new Error("Permission denied") },
+			said: "Permission denied",
+		},
+		{
+			step: "the mv fallback",
+			sftpOptions: { posixRename: false },
+			mvExitCode: 1,
+			said: "exit 1: mv: cannot move",
+		},
+	])(
+		"a failure in $step removes the temporary and leaves the target untouched",
+		async ({ sftpOptions, mvExitCode, said }) => {
+			const files = remoteWithOldAgent();
+			const sftp = makeMockSftp({ files, ...sftpOptions });
+			const client = makeSftpClient(sftp, undefined, shellMoving(files, mvExitCode));
+
+			await expect(uploadAgentBinary(client, "/local/binary", target, "linux")).rejects.toThrow(
+				said,
+			);
+
+			expect(sftp.unlink).toHaveBeenCalledWith(uploadedTo(sftp), expect.any(Function));
+			expect([...files]).toEqual([[target, { content: "old agent", mode: 0o755 }]]);
+			expect(sftp.end).toHaveBeenCalled();
+		},
+	);
 
 	it("rejects when sftp channel open fails", async () => {
 		const sftp = makeMockSftp();
 		const client = makeSftpClient(sftp, new Error("SFTP not available"));
 
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/lasterm-agent"),
+			uploadAgentBinary(client, "/local/binary", "/remote/lasterm-agent", "linux"),
 		).rejects.toThrow("SFTP not available");
 	});
 
@@ -382,7 +573,7 @@ describe("uploadAgentBinary", () => {
 		const client = makeSftpClient(sftp);
 
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/lasterm-agent"),
+			uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/lasterm-agent", "linux"),
 		).resolves.toBeUndefined();
 	});
 
@@ -394,9 +585,43 @@ describe("uploadAgentBinary", () => {
 			client,
 			"C:\\local\\lasterm-agent.exe",
 			"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
+			"windows",
 		);
 
 		expect(sftp.mkdir).toHaveBeenCalledWith("%LOCALAPPDATA%\\lasterm", expect.any(Function));
+	});
+
+	// A Windows agent runs on stdio and exits with its connection, so nothing
+	// runs from the file; and Windows would refuse to rename over a running
+	// executable anyway. It is written in place, as it always was.
+	it("writes a Windows agent in place, with no temporary and no rename", async () => {
+		const windowsTarget = "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe";
+		const files = new Map([[windowsTarget, { content: "old agent", mode: 0o644 }]]);
+		const sftp = makeMockSftp({ files });
+		const client = makeSftpClient(sftp);
+
+		await uploadAgentBinary(client, "C:\\local\\lasterm-agent.exe", windowsTarget, "windows");
+
+		expect(vi.mocked(sftp.fastPut).mock.calls).toEqual([
+			["C:\\local\\lasterm-agent.exe", windowsTarget, expect.any(Function)],
+		]);
+		expect(sftp.chmod).toHaveBeenCalledWith(windowsTarget, 0o755, expect.any(Function));
+		expect(sftp.ext_openssh_rename).not.toHaveBeenCalled();
+		expect(client.exec).not.toHaveBeenCalled();
+		expect([...files]).toEqual([
+			[windowsTarget, { content: "C:\\local\\lasterm-agent.exe", mode: 0o755 }],
+		]);
+	});
+
+	it("calls sftp.end() even when a Windows upload fails", async () => {
+		const sftp = makeMockSftp({ fastPutError: new Error("disk full") });
+		const client = makeSftpClient(sftp);
+
+		await expect(
+			uploadAgentBinary(client, "C:\\local\\agent.exe", "C:\\lasterm\\agent.exe", "windows"),
+		).rejects.toThrow("disk full");
+
+		expect(sftp.end).toHaveBeenCalled();
 	});
 });
 
@@ -517,6 +742,48 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect(sftp.fastPut).toHaveBeenCalled();
 	});
 
+	// #555: the remote daemon runs from existingPath, and Linux will not open a
+	// running executable for writing. Written in place, the upgrade failed with
+	// SFTP's "Failure" and the host could not be reached at all.
+	it("3b. replaces the binary a running daemon executes from (ETXTBSY)", async () => {
+		const localBinaryPath = writeCachedAgentBinary("linux", "x64", "local-binary");
+		const localSha = getLocalSha256(localBinaryPath);
+		if (!localSha) throw new Error("getLocalSha256 returned null");
+
+		const files = new Map([[existingPath, { content: "running 0.11.0", mode: 0o755 }]]);
+		const sftp = makeMockSftp({ files, busy: new Set([existingPath]) });
+		const sftpImpl = (cb: (err: Error | undefined, sftp: SFTPWrapper) => void): void => {
+			cb(undefined, sftp);
+		};
+		const client = makeMockClient(
+			{
+				"which lasterm-agent": { stdout: `${existingPath}\n`, stderr: "", exitCode: 0 },
+				[`sha256sum '${existingPath}'`]: {
+					stdout: `${REMOTE_SHA_DIFFERENT}  ${existingPath}\n`,
+					stderr: "",
+					exitCode: 0,
+				},
+			},
+			sftpImpl,
+		);
+
+		const onAgentUpdated = vi.fn();
+		const onAgentPinned = vi.fn();
+		const result = await deployAgentIfNeeded(
+			client,
+			{ os: "linux", arch: "x64" },
+			makeOptions({ onAgentUpdated, onAgentPinned }),
+		);
+
+		expect(result.deployed).toBe(true);
+		expect(result.remotePath).toBe(existingPath);
+		// The trusted local copy now sits at the path, whole and executable; the
+		// running daemon keeps the inode it started from.
+		expect([...files]).toEqual([[existingPath, { content: localBinaryPath, mode: 0o755 }]]);
+		expect(onAgentUpdated).toHaveBeenCalledWith("host-1");
+		expect(onAgentPinned).toHaveBeenCalledWith("host-1", localSha);
+	});
+
 	// Nobody can be asked from in here: this runs over a live SSH connection, and
 	// a connection held open while a person thinks is what #444 is about. What is
 	// known is handed back, and the caller closes, asks, and comes again.
@@ -615,7 +882,8 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		const binaryName = agentCacheName("linux", "x64");
 		writeCachedAgentBinary("linux", "x64");
 
-		const sftp = makeMockSftp();
+		const files = new Map<string, RemoteFile>();
+		const sftp = makeMockSftp({ files });
 		const client = makeAgentNotFoundClient(sftp);
 
 		const result = await deployAgentIfNeeded(client, { os: "linux", arch: "x64" }, makeOptions());
@@ -625,16 +893,17 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect(result.remotePath).toBe("/home/user/.local/bin/lasterm-agent");
 		expect(result.os).toBe("linux");
 		expect(result.arch).toBe("x64");
-		expect(sftp.fastPut).toHaveBeenCalledWith(
-			join(cacheDir, binaryName),
-			"/home/user/.local/bin/lasterm-agent",
-			expect.any(Function),
-		);
+		// A fresh deploy goes the same way as a replacement: beside, then renamed.
+		expect(uploadedTo(sftp)).toMatch(/^\/home\/user\/\.local\/bin\/\.lasterm-agent\..+\.partial$/);
+		expect([...files]).toEqual([
+			["/home/user/.local/bin/lasterm-agent", { content: join(cacheDir, binaryName), mode: 0o755 }],
+		]);
 	});
 
 	it("fetches a versioned binary on SEA cache miss, then deploys it", async () => {
 		const binaryName = agentCacheName("linux", "x64", TEST_HUB_VERSION);
-		const sftp = makeMockSftp();
+		const files = new Map<string, RemoteFile>();
+		const sftp = makeMockSftp({ files });
 		const client = makeAgentNotFoundClient(sftp);
 		const fetcher = vi.fn(async (options: FetchAgentBinaryOptions): Promise<string> => {
 			const fetchedPath = join(options.cacheDir, binaryName);
@@ -660,11 +929,9 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		});
 		expect(result.deployed).toBe(true);
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(sftp.fastPut).toHaveBeenCalledWith(
-			join(cacheDir, binaryName),
-			"/home/user/.local/bin/lasterm-agent",
-			expect.any(Function),
-		);
+		expect([...files]).toEqual([
+			["/home/user/.local/bin/lasterm-agent", { content: join(cacheDir, binaryName), mode: 0o755 }],
+		]);
 	});
 
 	it("does not fetch on source runs and keeps the existing not-available error", async () => {

@@ -147,6 +147,7 @@ export class AgentConnectionManager {
 		helloMsg: HelloMessage,
 		deployedThisSession: boolean,
 		remoteMatchesHubVersionCache: boolean,
+		reachedRunningDaemon: boolean,
 	): AgentVersionMismatchError | null {
 		this.ctx.hubLogger?.log("debug", "agent-connection-manager: HELLO received", {
 			hostId,
@@ -154,7 +155,12 @@ export class AgentConnectionManager {
 			capabilities: helloMsg.capabilities,
 			availableShells: helloMsg.availableShells,
 		});
-		if (deployedThisSession || remoteMatchesHubVersionCache) {
+		// After a deploy, a version that disagrees means the binary is not the
+		// one this hub meant to put there: stop. Not when the agent answering is
+		// a daemon that was already running: it was started from the binary that
+		// was there before, and it is the outdated agent the host reports and
+		// offers to replace (#456, #555).
+		if ((deployedThisSession || remoteMatchesHubVersionCache) && !reachedRunningDaemon) {
 			const mismatch = this.abortAgentVersionMismatch(hostId, sessionId, agent, helloMsg);
 			if (mismatch) return mismatch;
 		} else {
@@ -308,6 +314,7 @@ export class AgentConnectionManager {
 		if (agent instanceof SshAgent) this.recordSshConnection(hostId, agent);
 		const deployedThisSession = agent.deployedThisSession;
 		const remoteMatchesHubVersionCache = agent.remoteMatchesHubVersionCache;
+		const reachedRunningDaemon = agent.reachedRunningDaemon;
 		agent.on("message", (msg: ProtocolMessage) => {
 			// Dispatch pending request responses
 			const rid = (msg as { requestId?: string }).requestId;
@@ -348,6 +355,7 @@ export class AgentConnectionManager {
 					helloMsg,
 					deployedThisSession,
 					remoteMatchesHubVersionCache,
+					reachedRunningDaemon,
 				);
 			} else if (msg.type === "OUTPUT") {
 				const outputMsg = msg as OutputMessage;
@@ -426,6 +434,7 @@ export class AgentConnectionManager {
 				helloMsg,
 				deployedThisSession,
 				remoteMatchesHubVersionCache,
+				reachedRunningDaemon,
 			);
 			if (mismatch) throw mismatch;
 		}

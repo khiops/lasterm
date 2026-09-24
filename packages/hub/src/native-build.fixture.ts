@@ -15,48 +15,181 @@
  * overwrite each other's artifacts, and the last build may have come from
  * another one.
  *
- * What this cannot see is a dep-info file that names this checkout for an
- * artifact another one built. Those checkouts also share cargo's record of which
- * crates are fresh, one per crate for all of them, and it goes by modification
- * time. Once another checkout has built newer artifacts, a `cargo build` here
- * (the one `pnpm -F @lasterm/hub test` runs first included) can compile nothing,
- * rewrite the dep-info files to name this checkout's sources, and leave the other
- * checkout's artifacts in place, which then pass. So the rebuild a refusal names
- * cleans the crates first.
+ * Which one cargo does not say. Those checkouts share its record of which crates
+ * are fresh, one per crate for all of them, and it goes by modification time:
+ * once another checkout has built newer artifacts, a `cargo build` here compiles
+ * nothing, rewrites the dep-info files to name this checkout's sources, and
+ * leaves the other checkout's artifacts in place (#544). So only one build is
+ * trusted, `pnpm build:test-tls-material` (`buildTestNatives` in
+ * scripts/build-test-tls-material.ts). It cleans the crates unless the last
+ * build is known to match this checkout, then records which checkout built, and
+ * the modification time of every file cargo keeps for these crates. A build that
+ * compiles anything changes one of those files; one that compiles nothing leaves
+ * them all, so the record still names the checkout the artifacts came from.
+ * Anything the record does not cover is refused.
  *
  * Only the files cargo lists are compared. A manifest change that alters the
  * build (a dependency, a feature) is not seen.
  */
-import { readFileSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { platform } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+
+/** The one build whose artifacts the hub specs accept. */
+export const NATIVE_BUILD_SCRIPT = "pnpm build:test-tls-material";
+/**
+ * Every workspace crate the artifacts are built from: the two packages and
+ * their path dependencies. Cargo rebuilds only a crate it finds stale, so one
+ * left out of a clean can keep another checkout's build.
+ *
+ * The dependencies come first, and cargo cleans in this order. On Windows a
+ * clean fails on an addon a running process has loaded, and stops there after
+ * removing the dep-info files; with the dependencies already gone, whatever
+ * builds next still recompiles all four (seen 2026-09-24). The other order left
+ * another checkout's dependencies for the next build to link.
+ */
+export const NATIVE_CRATES = [
+	"lasterm-protected-fs",
+	"lasterm-process-lock",
+	"lasterm-tls-identity",
+	"lasterm-hub-lock",
+];
+/** Cargo's arguments to build the artifacts. */
+export const NATIVE_BUILD_ARGS = [
+	"build",
+	"--release",
+	"-p",
+	"lasterm-hub-lock",
+	"-p",
+	"lasterm-tls-identity",
+	"--features",
+	"lasterm-tls-identity/test-tls-material",
+];
+/** Cargo's arguments to remove them and everything they are built from. */
+export const NATIVE_CLEAN_ARGS = [
+	"clean",
+	"--release",
+	...NATIVE_CRATES.flatMap((crate) => ["-p", crate]),
+];
+/** The record `recordNativeBuild` keeps in the `release` folder. */
+const RECORD = "lasterm-test-natives.json";
+
+/** A native artifact the hub specs load or run, and the package that builds it. */
+export interface NativeArtifact {
+	artifact: string;
+	crate: string;
+	/** The variable that names an addon to load instead of this one, if any. */
+	override?: string;
+}
+
+/** The artifacts the hub specs take from the target directory's `release` folder. */
+export function nativeArtifacts(release: string): NativeArtifact[] {
+	const library = (name: string) =>
+		platform() === "win32"
+			? `${name}.dll`
+			: platform() === "darwin"
+				? `lib${name}.dylib`
+				: `lib${name}.so`;
+	const executable = platform() === "win32" ? ".exe" : "";
+	return [
+		{
+			artifact: join(release, library("lasterm_hub_lock")),
+			crate: "lasterm-hub-lock",
+			override: "LASTERM_HUB_LOCK_ADDON",
+		},
+		{
+			artifact: join(release, library("lasterm_tls_identity")),
+			crate: "lasterm-tls-identity",
+			override: "LASTERM_TLS_IDENTITY_ADDON",
+		},
+		{
+			artifact: join(release, `lasterm-tls-test-material${executable}`),
+			crate: "lasterm-tls-identity",
+		},
+	];
+}
+
+/** Records that `checkout` built what `release` now holds of these crates. */
+export function recordNativeBuild(release: string, checkout: string): void {
+	const record = { checkout: resolve(checkout), files: buildState(release) };
+	mkdirSync(release, { recursive: true });
+	writeFileSync(join(release, RECORD), `${JSON.stringify(record, null, "\t")}\n`);
+}
+
+/** Drops the record, before something changes what it covers. */
+export function forgetNativeBuild(release: string): void {
+	rmSync(join(release, RECORD), { force: true });
+}
+
+/**
+ * The checkout the record in `release` names, or why there is no record that
+ * still holds: none was kept, or cargo has since changed a file it covers.
+ */
+export function recordedNativeBuild(release: string): { checkout: string } | { problem: string } {
+	let record: unknown;
+	try {
+		record = JSON.parse(readFileSync(join(release, RECORD), "utf8"));
+	} catch {
+		return { problem: `no build by \`${NATIVE_BUILD_SCRIPT}\` is recorded there` };
+	}
+	if (!isRecord(record)) return { problem: `${RECORD} there is not a record it wrote` };
+	const now = buildState(release);
+	for (const file of new Set([...Object.keys(record.files), ...Object.keys(now)])) {
+		if (record.files[file] !== now[file]) {
+			return { problem: `${file} there changed after \`${NATIVE_BUILD_SCRIPT}\` recorded it` };
+		}
+	}
+	return { checkout: record.checkout };
+}
+
+/**
+ * Why the artifacts in `release` are not what cargo would build from `checkout`
+ * now, one line each; none when they are. Only a build the record covers
+ * counts, and the checkout it names is the one they were built from.
+ */
+export function nativeBuildProblems(
+	release: string,
+	checkout: string,
+	artifacts: readonly NativeArtifact[] = nativeArtifacts(release),
+): string[] {
+	const recorded = recordedNativeBuild(release);
+	if ("problem" in recorded) return [`${release}: ${recorded.problem}`];
+	return artifacts.flatMap(({ artifact, crate }) => {
+		const problem = nativeBuildProblem(artifact, crate, checkout, recorded.checkout);
+		return problem === undefined ? [] : [`${artifact}: ${problem}`];
+	});
+}
 
 /**
  * Why `artifact` is not what cargo would build from `checkout` now, or
- * `undefined` when it is. `crate` is the package that builds it; its directory
- * locates the checkout the artifact was built from.
+ * `undefined` when it is. `crate` is the package that builds it. `builtIn` is
+ * the checkout it was built from; by default, the one its dep-info file names.
  */
 export function nativeBuildProblem(
 	artifact: string,
 	crate: string,
 	checkout: string,
+	builtIn?: string,
 ): string | undefined {
 	const built = modified(artifact);
 	if (built === undefined) return "it is missing";
-	const depInfo = join(dirname(artifact), `${parse(artifact).name}.d`);
+	const depInfo = depInfoOf(artifact);
 	let sources: string[];
 	try {
 		sources = parseDepInfo(readFileSync(depInfo, "utf8"));
 	} catch {
 		return `there is no ${basename(depInfo)} beside it to say what it was built from`;
 	}
-	const root = buildRoot(sources, crate);
-	if (root === undefined) return `${basename(depInfo)} names no file of crates/${crate}`;
+	const named = buildRoot(sources, crate);
+	if (named === undefined) return `${basename(depInfo)} names no file of crates/${crate}`;
+	const root = builtIn ?? named;
 	const where = samePath(root, checkout) ? "" : ` in ${root}`;
-	for (const source of sources) {
-		const path = relative(root, source);
+	for (const listed of sources) {
+		const path = relative(named, listed);
 		if (path.startsWith("..") || isAbsolute(path)) {
-			return `it was built from ${source}, outside the checkout at ${root}`;
+			return `it was built from ${listed}, outside the checkout at ${named}`;
 		}
+		const source = join(root, path);
 		const shown = path.split(sep).join("/");
 		const changed = modified(source);
 		if (changed === undefined) return `${shown}${where}, which it was built from, no longer exists`;
@@ -88,6 +221,49 @@ export function parseDepInfo(text: string): string[] {
 		.map((entry) => resolve(entry.replaceAll("\\ ", " ")));
 }
 
+/** Whether `a` and `b` name one directory, as this platform compares paths. */
+export function samePath(a: string, b: string): boolean {
+	const [left, right] = [resolve(a), resolve(b)];
+	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/**
+ * The modification time of each file cargo keeps for these crates in
+ * `release`: the artifacts, and the fingerprint of every unit that builds them
+ * or what they link. The dep-info files are left out, since a build that
+ * compiles nothing still rewrites them.
+ */
+function buildState(release: string): Record<string, string> {
+	const state: Record<string, string> = {};
+	const note = (path: string) => {
+		const time = modified(path);
+		if (time !== undefined) state[relative(release, path).split(sep).join("/")] = String(time);
+	};
+	for (const { artifact } of nativeArtifacts(release)) note(artifact);
+	const fingerprints = join(release, ".fingerprint");
+	const unit = new RegExp(`^(${NATIVE_CRATES.join("|")})-[0-9a-f]{16}$`);
+	for (const dir of listOrEmpty(fingerprints).filter((name) => unit.test(name))) {
+		for (const file of listOrEmpty(join(fingerprints, dir))) note(join(fingerprints, dir, file));
+	}
+	return state;
+}
+
+function isRecord(value: unknown): value is { checkout: string; files: Record<string, string> } {
+	if (typeof value !== "object" || value === null) return false;
+	const { checkout, files } = value as { checkout?: unknown; files?: unknown };
+	return (
+		typeof checkout === "string" &&
+		typeof files === "object" &&
+		files !== null &&
+		Object.values(files).every((time) => typeof time === "string")
+	);
+}
+
+/** The dep-info file cargo writes beside `artifact`. */
+function depInfoOf(artifact: string): string {
+	return join(dirname(artifact), `${parse(artifact).name}.d`);
+}
+
 /** The checkout directory that holds `crates/<crate>` in the listed sources. */
 function buildRoot(sources: readonly string[], crate: string): string | undefined {
 	const marker = `/crates/${crate}/`;
@@ -99,9 +275,12 @@ function buildRoot(sources: readonly string[], crate: string): string | undefine
 	return undefined;
 }
 
-function samePath(a: string, b: string): boolean {
-	const [left, right] = [resolve(a), resolve(b)];
-	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+function listOrEmpty(dir: string): string[] {
+	try {
+		return readdirSync(dir);
+	} catch {
+		return [];
+	}
 }
 
 function modified(path: string): bigint | undefined {

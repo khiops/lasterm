@@ -98,26 +98,24 @@ pnpm -F @lasterm/web dev  # Dev single package
 
 The hub TypeScript specs load the `lasterm-hub-lock` and `lasterm-tls-identity`
 Rust addons, and run the `lasterm-tls-test-material` generator, from the cargo target
-directory. Build them before a hub or root test run, and again after editing a crate:
+directory. Build them before a root test run, and again after editing a crate, with
+the same `CARGO_TARGET_DIR` as the tests (`pnpm -F @lasterm/hub test` builds them
+itself):
 
 ```bash
-cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity --features lasterm-tls-identity/test-tls-material
-pnpm -F @lasterm/hub test # or: pnpm test
+pnpm build:test-tls-material
+pnpm test
 ```
 
-Nothing in the TypeScript loop rebuilds them. The hub test setup compares each one
-with the sources cargo recorded for it, and refuses to run on a build that predates
-them or came from another checkout's different sources (#129).
-
+That is the only build the hub test setup accepts; a plain `cargo build` is refused.
 Worktrees that share one `CARGO_TARGET_DIR` also share cargo's record of which
-crates are fresh, and it goes by modification time. After another worktree has
-built, the build above (which `pnpm -F @lasterm/hub test` also runs first) can
-compile nothing and only relabel that worktree's artifacts as this checkout's, and
-the setup then accepts them. To rebuild from this checkout, clean the crates first:
-
-```bash
-cargo clean --release -p lasterm-hub-lock -p lasterm-tls-identity -p lasterm-process-lock -p lasterm-protected-fs
-```
+crates are fresh, and it goes by modification time: after another worktree has
+built, a `cargo build` here can compile nothing and only relabel that worktree's
+artifacts as this checkout's (#544). So the script cleans the four crates first
+unless the build it recorded last is intact and matches this checkout, and records
+which checkout built. The setup compares each artifact with the sources of the
+checkout the record names, and refuses a build that predates them, differs from
+this checkout's (#129), or that the record does not cover.
 
 ### Production build & run (local, Linux native)
 

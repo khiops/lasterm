@@ -141,6 +141,8 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(agent.sent.at(-1)).toEqual({ type: "STOP", force: true });
 		expect(heldWhenClosed).toBe(false);
 		expect(sm.agents.has(hostId)).toBe(false);
+		// Asked for, so the security log's disconnect is this hub's, not a lost link.
+		expect(agent.closedByHub).toBe(true);
 		// The protocol answered for itself: the out-of-band stop was not needed.
 		expect(agent.execOnHost).not.toHaveBeenCalled();
 	});

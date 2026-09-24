@@ -1633,8 +1633,12 @@ export class SessionManager {
 			const stop = await requestDaemonStop(agent, {
 				force: options.force === true,
 				// Let go first: a stop that was asked for is not a dropped link to
-				// dial again, which is what the close handling would otherwise read.
-				onStopped: () => this.releaseAgent(hostId, agent),
+				// dial again, which is what the close handling would otherwise read,
+				// and the security log records the disconnect as this hub's doing.
+				onStopped: () => {
+					agent.closedByHub = true;
+					this.releaseAgent(hostId, agent);
+				},
 			});
 			switch (stop.kind) {
 				case "stopped":

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
 import { execFileSync } from "node:child_process";
-import { nativeBuildProblem, recordNativeBuild } from "./native-build.fixture.js";
+import { NATIVE_MANIFESTS, nativeBuildProblem, recordNativeBuild } from "./native-build.fixture.js";
 import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import setupTestTlsMaterial from "./test-tls.setup.js";
 
@@ -89,11 +89,12 @@ function writeSource(path: string, contents: string, modified = LONG_AGO): void 
 	utimesSync(path, modified, modified);
 }
 
-/** Another checkout holding this one's sources, except `edited`, which differs. */
+/** Another checkout holding this one's sources and manifests, except `edited`, which differs. */
 function otherCheckout(edited?: string): string {
 	const other = tempDir();
-	for (const source of new Set(ARTIFACTS.flatMap(({ sources }) => sources))) {
-		writeSource(join(other, source), readFileSync(join(checkout, source), "utf8"));
+	const sources = new Set(ARTIFACTS.flatMap(({ sources }) => sources));
+	for (const file of [...sources, ...NATIVE_MANIFESTS]) {
+		writeSource(join(other, file), readFileSync(join(checkout, file), "utf8"));
 	}
 	if (edited !== undefined) writeSource(join(other, edited), "// their edit\n");
 	return other;
@@ -186,6 +187,18 @@ describe("hub test setup", () => {
 
 		expect(refusal()).toContain(
 			`${join(target, "release", library("lasterm_tls_identity"))}: it was built from ${theirs}, whose crates/lasterm-protected-fs/src/lib.rs differs from this checkout's`,
+		);
+	});
+
+	// The dep-info files list no manifest, and the same sources built with
+	// another one make other artifacts (seen 2026-09-24: an opt-level override
+	// in Cargo.toml, a dependency pinned back in Cargo.lock).
+	it.each(NATIVE_MANIFESTS)("refuses a build made with another %s", (manifest) => {
+		const theirs = otherCheckout(manifest);
+		const target = useTarget({ listed: checkout, recorded: theirs });
+
+		expect(refusal()).toContain(
+			`${join(target, "release")}: it was built in ${theirs} with a ${manifest} that differs from this checkout's`,
 		);
 	});
 

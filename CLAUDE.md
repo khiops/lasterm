@@ -113,9 +113,12 @@ crates are fresh, and it goes by modification time: after another worktree has
 built, a `cargo build` here can compile nothing and only relabel that worktree's
 artifacts as this checkout's (#544). So the script cleans the four crates first
 unless the build it recorded last is intact and matches this checkout, and records
-which checkout built. The setup compares each artifact with the sources of the
-checkout the record names, and refuses a build that predates them, differs from
-this checkout's (#129), or that the record does not cover.
+which checkout built, with a digest of the manifests, `Cargo.lock` and
+`rust-toolchain.toml` it built with. It records nothing when another build wrote
+into these crates while it ran. The setup compares each artifact with the sources
+of the checkout the record names, and refuses a build that predates them, differs
+from this checkout's (#129), was made with other manifests, or that the record
+does not cover.
 
 ### Production build & run (local, Linux native)
 

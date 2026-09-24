@@ -9,13 +9,15 @@
  * built, a plain build here can compile nothing and pass that checkout's
  * artifacts off as this one's (#544). Not on every run: a clean costs a
  * rebuild, and on Windows it fails while a hub test run elsewhere has an addon
- * loaded. Arguments are passed on to `cargo build` (CI adds `--locked`).
+ * loaded. Nothing is recorded when another build wrote into these crates while
+ * this one ran. Arguments are passed on to `cargo build` (CI adds `--locked`).
  */
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cargoTargetDir } from "../packages/hub/src/cargo-target-dir.js";
 import {
+	fileClock,
 	forgetNativeBuild,
 	NATIVE_BUILD_ARGS,
 	NATIVE_CLEAN_ARGS,
@@ -24,6 +26,7 @@ import {
 	recordedNativeBuild,
 	recordNativeBuild,
 	samePath,
+	writtenOutside,
 } from "../packages/hub/src/native-build.fixture.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -40,7 +43,7 @@ export function buildTestNatives(
 	cargo: (args: readonly string[]) => number,
 	extra: readonly string[] = [],
 ): number {
-	const recorded = recordedNativeBuild(release);
+	const recorded = recordedNativeBuild(release, checkout);
 	const ours = !("problem" in recorded) && samePath(recorded.checkout, checkout);
 	const problem = ours ? undefined : nativeBuildProblems(release, checkout)[0];
 	if (problem !== undefined) {
@@ -56,11 +59,21 @@ export function buildTestNatives(
 			return cleaned;
 		}
 	}
+	const start = fileClock(release);
 	const built = cargo([...NATIVE_BUILD_ARGS, ...extra]);
+	const end = fileClock(release);
+	const intruder = writtenOutside(release, problem === undefined ? undefined : start, end);
+	if (intruder !== undefined) {
+		forgetNativeBuild(release);
+		console.error(
+			`Another build wrote ${intruder} in ${release} while this one ran, so what it left is not recorded as this checkout's. Run this again.`,
+		);
+		return built === 0 ? 1 : built;
+	}
 	// Whatever cargo compiled just now came from this checkout, and the rest
 	// was already this checkout's, the same as it, or cleaned away. So once the
 	// build has changed anything, finished or not, the record names this one.
-	if ("problem" in recordedNativeBuild(release)) recordNativeBuild(release, checkout);
+	if ("problem" in recordedNativeBuild(release, checkout)) recordNativeBuild(release, checkout);
 	return built;
 }
 

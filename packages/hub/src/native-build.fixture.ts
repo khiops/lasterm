@@ -28,9 +28,13 @@
  * them all, so the record still names the checkout the artifacts came from.
  * Anything the record does not cover is refused.
  *
- * Only the files cargo lists are compared. A manifest change that alters the
- * build (a dependency, a feature) is not seen.
+ * The dep-info files list no manifest, so the record also keeps a digest of each
+ * file in `NATIVE_MANIFESTS` as the build found it. The same `.rs` files built
+ * with another `Cargo.toml` or `Cargo.lock` make other artifacts, and were
+ * accepted before (seen 2026-09-24: an opt-level override, a dependency pinned
+ * back in the lock).
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { platform } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
@@ -71,8 +75,21 @@ export const NATIVE_CLEAN_ARGS = [
 	"--release",
 	...NATIVE_CRATES.flatMap((crate) => ["-p", crate]),
 ];
+/**
+ * What else decides the artifacts, beyond the sources the dep-info files list:
+ * the manifests, the lock file, and the compiler. A checkout's differ from the
+ * ones the recorded build used, or they changed since, and it is refused.
+ */
+export const NATIVE_MANIFESTS = [
+	"Cargo.toml",
+	"Cargo.lock",
+	"rust-toolchain.toml",
+	...NATIVE_CRATES.map((crate) => `crates/${crate}/Cargo.toml`),
+];
 /** The record `recordNativeBuild` keeps in the `release` folder. */
 const RECORD = "lasterm-test-natives.json";
+/** The file `fileClock` writes to read the time. */
+const CLOCK = "lasterm-test-natives.clock";
 
 /** A native artifact the hub specs load or run, and the package that builds it. */
 export interface NativeArtifact {
@@ -109,11 +126,45 @@ export function nativeArtifacts(release: string): NativeArtifact[] {
 	];
 }
 
-/** Records that `checkout` built what `release` now holds of these crates. */
+/** Records that `checkout`, with its manifests, built what `release` now holds of these crates. */
 export function recordNativeBuild(release: string, checkout: string): void {
-	const record = { checkout: resolve(checkout), files: buildState(release) };
+	const record = {
+		checkout: resolve(checkout),
+		manifests: manifestDigests(checkout),
+		files: buildState(release),
+	};
 	mkdirSync(release, { recursive: true });
 	writeFileSync(join(release, RECORD), `${JSON.stringify(record, null, "\t")}\n`);
+}
+
+/**
+ * The time a file written in `release` now is stamped with, to compare with
+ * the files cargo writes there. `Date.now()` will not do: read just after a
+ * write, it was up to 1.5 ms behind that file's stamp (measured 2026-09-24).
+ */
+export function fileClock(release: string): bigint {
+	mkdirSync(release, { recursive: true });
+	const probe = join(release, CLOCK);
+	writeFileSync(probe, "");
+	return statSync(probe, { bigint: true }).mtimeNs;
+}
+
+/**
+ * A file cargo keeps for these crates in `release` that was written before
+ * `after`, or after `before`, when there is one. A build that follows a clean
+ * writes every one of them itself: a file older than it came from another build
+ * that ran in between. None may be newer than the end of the build either.
+ */
+export function writtenOutside(
+	release: string,
+	after: bigint | undefined,
+	before: bigint,
+): string | undefined {
+	for (const [file, time] of Object.entries(buildState(release))) {
+		const written = BigInt(time);
+		if ((after !== undefined && written < after) || written > before) return file;
+	}
+	return undefined;
 }
 
 /** Drops the record, before something changes what it covers. */
@@ -123,9 +174,13 @@ export function forgetNativeBuild(release: string): void {
 
 /**
  * The checkout the record in `release` names, or why there is no record that
- * still holds: none was kept, or cargo has since changed a file it covers.
+ * holds for `checkout`: none was kept, cargo has since changed a file it covers,
+ * or `checkout`'s manifests are not the ones the build used.
  */
-export function recordedNativeBuild(release: string): { checkout: string } | { problem: string } {
+export function recordedNativeBuild(
+	release: string,
+	checkout: string,
+): { checkout: string } | { problem: string } {
 	let record: unknown;
 	try {
 		record = JSON.parse(readFileSync(join(release, RECORD), "utf8"));
@@ -137,6 +192,14 @@ export function recordedNativeBuild(release: string): { checkout: string } | { p
 	for (const file of new Set([...Object.keys(record.files), ...Object.keys(now)])) {
 		if (record.files[file] !== now[file]) {
 			return { problem: `${file} there changed after \`${NATIVE_BUILD_SCRIPT}\` recorded it` };
+		}
+	}
+	const ours = manifestDigests(checkout);
+	for (const manifest of NATIVE_MANIFESTS) {
+		if (record.manifests[manifest] !== ours[manifest]) {
+			return {
+				problem: `it was built in ${record.checkout} with a ${manifest} that differs from this checkout's`,
+			};
 		}
 	}
 	return { checkout: record.checkout };
@@ -152,7 +215,7 @@ export function nativeBuildProblems(
 	checkout: string,
 	artifacts: readonly NativeArtifact[] = nativeArtifacts(release),
 ): string[] {
-	const recorded = recordedNativeBuild(release);
+	const recorded = recordedNativeBuild(release, checkout);
 	if ("problem" in recorded) return [`${release}: ${recorded.problem}`];
 	return artifacts.flatMap(({ artifact, crate }) => {
 		const problem = nativeBuildProblem(artifact, crate, checkout, recorded.checkout);
@@ -248,11 +311,29 @@ function buildState(release: string): Record<string, string> {
 	return state;
 }
 
-function isRecord(value: unknown): value is { checkout: string; files: Record<string, string> } {
+/** The SHA-256 of each of `checkout`'s `NATIVE_MANIFESTS`, null for one it lacks. */
+function manifestDigests(checkout: string): Record<string, string | null> {
+	const digests: Record<string, string | null> = {};
+	for (const manifest of NATIVE_MANIFESTS) {
+		const contents = readOrUndefined(join(checkout, manifest));
+		digests[manifest] =
+			contents === undefined ? null : createHash("sha256").update(contents).digest("hex");
+	}
+	return digests;
+}
+
+function isRecord(value: unknown): value is {
+	checkout: string;
+	manifests: Record<string, string | null>;
+	files: Record<string, string>;
+} {
 	if (typeof value !== "object" || value === null) return false;
-	const { checkout, files } = value as { checkout?: unknown; files?: unknown };
+	const { checkout, manifests, files } = value as Record<string, unknown>;
 	return (
 		typeof checkout === "string" &&
+		typeof manifests === "object" &&
+		manifests !== null &&
+		Object.values(manifests).every((digest) => digest === null || typeof digest === "string") &&
 		typeof files === "object" &&
 		files !== null &&
 		Object.values(files).every((time) => typeof time === "string")

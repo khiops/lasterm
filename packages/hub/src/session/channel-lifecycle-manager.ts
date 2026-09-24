@@ -1260,7 +1260,16 @@ export class ChannelLifecycleManager {
 				// from a session this run did not start (#79). Adopting it here is
 				// what makes the session it now belongs to the one it is in.
 				channelState.sessionId = session.id;
-				if (channelState.status === "orphan") {
+				// A pane attached while the host was out of reach was answered
+				// from the spool, and says it is not connected. The channel was
+				// already live, so nothing changed, and nothing told that pane the
+				// terminal could now be reached: it stayed on "Not connected"
+				// until pressed again. Its clients are told, as a stdio reconnect
+				// already tells them in reAttachChannels (#556).
+				if (
+					channelState.status === "orphan" ||
+					(channelState.status === "live" && channelState.clients.size > 0)
+				) {
 					this.broadcaster.updateChannelStatus(channelId, session.id, "live");
 				}
 			} else {

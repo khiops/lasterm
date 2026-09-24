@@ -109,6 +109,16 @@ Nothing in the TypeScript loop rebuilds them. The hub test setup compares each o
 with the sources cargo recorded for it, and refuses to run on a build that predates
 them or came from another checkout's different sources (#129).
 
+Worktrees that share one `CARGO_TARGET_DIR` also share cargo's record of which
+crates are fresh, and it goes by modification time. After another worktree has
+built, the build above (which `pnpm -F @lasterm/hub test` also runs first) can
+compile nothing and only relabel that worktree's artifacts as this checkout's, and
+the setup then accepts them. To rebuild from this checkout, clean the crates first:
+
+```bash
+cargo clean --release -p lasterm-hub-lock -p lasterm-tls-identity -p lasterm-process-lock -p lasterm-protected-fs
+```
+
 ### Production build & run (local, Linux native)
 
 macOS is not a supported target: nothing builds or tests it (#224). On Windows, use

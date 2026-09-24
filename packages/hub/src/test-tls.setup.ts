@@ -14,6 +14,18 @@ import { nativeBuildProblem } from "./native-build.fixture.js";
 const TEST_TLS_DIRECTORY_ENV = "LASTERM_TEST_TLS_DIRECTORY";
 const NATIVE_BUILD_COMMAND =
 	"cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity --features lasterm-tls-identity/test-tls-material";
+/**
+ * Every workspace crate those artifacts are built from: the two packages and
+ * their path dependencies. Cargo rebuilds only a crate it finds stale, so one
+ * left out can keep another checkout's build.
+ */
+const NATIVE_CRATES = [
+	"lasterm-hub-lock",
+	"lasterm-tls-identity",
+	"lasterm-process-lock",
+	"lasterm-protected-fs",
+];
+const NATIVE_CLEAN_COMMAND = `cargo clean --release ${NATIVE_CRATES.map((crate) => `-p ${crate}`).join(" ")}`;
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const checkout = resolve(sourceDirectory, "../../..");
 
@@ -57,7 +69,9 @@ function refuseStaleNativeBuild(release: string): void {
 		[
 			"stale native build: the hub specs would run against Rust code that was not built from this checkout's crates.",
 			...problems,
-			"Rebuild it, with the same CARGO_TARGET_DIR, and run the tests again:",
+			"Rebuild it from this checkout, with the same CARGO_TARGET_DIR, and run the tests again.",
+			"Clean first: once another checkout has built, a build alone can compile nothing and only relabel that checkout's artifacts as this one's.",
+			`  ${NATIVE_CLEAN_COMMAND}`,
 			`  ${NATIVE_BUILD_COMMAND}`,
 		].join("\n"),
 	);

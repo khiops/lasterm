@@ -4,7 +4,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::batch::{batch_loop, BatchedOutput, OutputEvent};
+use crate::batch::{
+    batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender, EventFrame, OutputEvent,
+};
 use crate::expand::expand_vars;
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
@@ -100,25 +102,19 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
     // 5. Per-channel command senders (for snapshot requests and resize forwarding)
     let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
 
-    // 6. Batch channels
-    let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputEvent>();
-    let (batched_tx, mut batched_rx) = mpsc::unbounded_channel::<BatchedOutput>();
+    // 6. Batch channels: every channel's output and events, in one pipeline
+    let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+    let (batched_tx, mut batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
 
     // 7. Spawn batch loop
-    tokio::spawn(batch_loop(output_rx, batched_tx));
+    tokio::spawn(batch_loop(channel_events_rx, batched_tx));
 
-    // 8. Spawn batched output writer
+    // 8. Spawn the writer for what leaves the batch loop, in that order
     {
         let ftx = frame_tx.clone();
         tokio::spawn(async move {
-            while let Some(b) = batched_rx.recv().await {
-                let msg = AgentToHub::Output {
-                    channel_id: b.channel_id,
-                    seq: b.seq,
-                    ts: iso_now(),
-                    data: b.data,
-                };
-                if let Ok(frame) = encode_frame(&msg) {
+            while let Some(event) = batched_rx.recv().await {
+                if let Ok(frame) = event.into_frame() {
                     let _ = ftx.send(frame);
                 }
             }
@@ -142,7 +138,7 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
                 msg,
                 Arc::clone(&pty_manager),
                 frame_tx.clone(),
-                output_tx.clone(),
+                channel_events.clone(),
                 Arc::clone(&cmd_senders),
             )
             .await?;
@@ -199,7 +195,7 @@ pub(crate) async fn handle_message(
     msg: crate::protocol::HubToAgent,
     pty_manager: Arc<Mutex<PtyManager>>,
     frame_tx: FrameSender,
-    output_tx: mpsc::UnboundedSender<OutputEvent>,
+    channel_events: ChannelEventSender,
     cmd_senders: SnapshotSenders,
 ) -> std::io::Result<()> {
     use crate::protocol::HubToAgent;
@@ -273,7 +269,7 @@ pub(crate) async fn handle_message(
                 custom_command,
                 pty_manager,
                 frame_tx,
-                output_tx,
+                channel_events,
                 cmd_senders,
             )
             .await?;
@@ -521,7 +517,7 @@ async fn handle_spawn(
     custom_command: Option<String>,
     pty_manager: Arc<Mutex<PtyManager>>,
     frame_tx: FrameSender,
-    output_tx: mpsc::UnboundedSender<OutputEvent>,
+    channel_events: ChannelEventSender,
     cmd_senders: SnapshotSenders,
 ) -> std::io::Result<()> {
     tracing::info!(
@@ -674,12 +670,11 @@ async fn handle_spawn(
                 //
                 // The reader task is a separate tokio::spawn that immediately
                 // reads the PTY.  On a multi-core scheduler, work-stealing can
-                // run the reader task before this function resumes, causing it
-                // to enqueue LOG("PTY closed") and CHANNEL_EXIT into the shared
-                // FIFO frame channel *before* SPAWN_OK is enqueued here.
-                // PROTOCOL.md requires SPAWN_OK to be the first agent→hub frame
-                // for any spawn, so enqueue it now, while we still hold the
-                // logical ordering advantage, then start the reader.
+                // run the reader task before this function resumes, and a shell
+                // that exits at once has LOG("PTY closed") and CHANNEL_EXIT to
+                // send. PROTOCOL.md requires SPAWN_OK to be the first agent→hub
+                // frame for any spawn, so enqueue it now: the reader's frames
+                // reach this connection only through the batch loop, after it.
                 //
                 // We clone ch_id so that both the SpawnOk frame and the reader
                 // task receive their own owned copy; the original ch_id is moved
@@ -707,8 +702,7 @@ async fn handle_spawn(
                     mirror,
                     cmd_rx,
                     cmd_tx,
-                    output_tx,
-                    frame_tx.clone(),
+                    channel_events,
                     Arc::clone(&pty_manager),
                     Arc::clone(&cmd_senders),
                 );
@@ -767,8 +761,7 @@ fn spawn_reader_task(
     mirror: HeadlessMirror,
     mut cmd_rx: mpsc::UnboundedReceiver<ChannelCommand>,
     own_cmd_tx: mpsc::UnboundedSender<ChannelCommand>,
-    output_tx: mpsc::UnboundedSender<OutputEvent>,
-    frame_tx: FrameSender,
+    channel_events: ChannelEventSender,
     pty_manager: Arc<Mutex<PtyManager>>,
     cmd_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ChannelCommand>>>>,
 ) {
@@ -817,9 +810,7 @@ fn spawn_reader_task(
                                 level: "debug".to_string(),
                                 msg: "PTY closed".to_string(),
                             };
-                            if let Ok(frame) = encode_frame(&log_msg) {
-                                let _ = frame_tx.send(frame);
-                            }
+                            send_channel_event(&channel_events, &channel_id, &log_msg);
                             break;
                         }
                         Ok(n) => {
@@ -842,11 +833,11 @@ fn spawn_reader_task(
                             mirror.process(&data);
 
                             // Send to batch loop for OUTPUT frames
-                            let _ = output_tx.send(OutputEvent {
+                            let _ = channel_events.send(ChannelEvent::Output(OutputEvent {
                                 channel_id: channel_id.clone(),
                                 seq,
                                 data,
-                            });
+                            }));
 
                             // Emit title change if detected
                             if let Some(title) = mirror.take_title_change() {
@@ -855,9 +846,7 @@ fn spawn_reader_task(
                                     title,
                                     display_title: None,
                                 };
-                                if let Ok(frame) = encode_frame(&msg) {
-                                    let _ = frame_tx.send(frame);
-                                }
+                                send_channel_event(&channel_events, &channel_id, &msg);
                             }
 
                             // Emit bell if detected
@@ -865,9 +854,7 @@ fn spawn_reader_task(
                                 let msg = AgentToHub::Bell {
                                     channel_id: channel_id.clone(),
                                 };
-                                if let Ok(frame) = encode_frame(&msg) {
-                                    let _ = frame_tx.send(frame);
-                                }
+                                send_channel_event(&channel_events, &channel_id, &msg);
                             }
 
                             // Emit notification if detected
@@ -876,9 +863,7 @@ fn spawn_reader_task(
                                     channel_id: channel_id.clone(),
                                     message,
                                 };
-                                if let Ok(frame) = encode_frame(&msg) {
-                                    let _ = frame_tx.send(frame);
-                                }
+                                send_channel_event(&channel_events, &channel_id, &msg);
                             }
                         }
                     }
@@ -908,9 +893,7 @@ fn spawn_reader_task(
                         title,
                         display_title: None,
                     };
-                    if let Ok(frame) = encode_frame(&msg) {
-                        let _ = frame_tx.send(frame);
-                    }
+                    send_channel_event(&channel_events, &channel_id, &msg);
                 }
             }
         }
@@ -951,14 +934,24 @@ fn spawn_reader_task(
         );
 
         let msg = AgentToHub::ChannelExit {
-            channel_id,
+            channel_id: channel_id.clone(),
             exit_code,
             signal,
         };
-        if let Ok(frame) = encode_frame(&msg) {
-            let _ = frame_tx.send(frame);
-        }
+        send_channel_event(&channel_events, &channel_id, &msg);
     });
+}
+
+/// Send a frame about a channel down the pipeline its output takes, not to the
+/// connection that spawned it. It reaches the hub connected when it is sent,
+/// after the output the channel sent before it (#549).
+fn send_channel_event(channel_events: &ChannelEventSender, channel_id: &str, msg: &AgentToHub) {
+    if let Ok(frame) = encode_frame(msg) {
+        let _ = channel_events.send(ChannelEvent::Frame(EventFrame {
+            channel_id: channel_id.to_owned(),
+            frame,
+        }));
+    }
 }
 
 /// Map an io::Error from spawn to a protocol error code.
@@ -1162,7 +1155,7 @@ mod tests {
         spawn_channel(&manager, channel_id).await;
         manager.lock().await.fail_next_teardown_signal();
         let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
-        let (output_tx, _output_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
         let senders = Arc::new(Mutex::new(HashMap::new()));
 
         handle_message(
@@ -1171,7 +1164,7 @@ mod tests {
             },
             Arc::clone(&manager),
             frame_tx.clone(),
-            output_tx.clone(),
+            channel_events.clone(),
             Arc::clone(&senders),
         )
         .await
@@ -1215,7 +1208,7 @@ mod tests {
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         manager.lock().await.sweep_next_reader_lookup();
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (output_tx, _output_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
         let senders = Arc::new(Mutex::new(HashMap::new()));
 
         handle_spawn(
@@ -1233,7 +1226,7 @@ mod tests {
             None,
             manager,
             frame_tx,
-            output_tx,
+            channel_events,
             senders,
         )
         .await

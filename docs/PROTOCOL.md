@@ -75,7 +75,10 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
 - Hub connects to the UDS via `connectOrLaunch(socketPath, config, binaryPath)`
 - Same length-prefixed MessagePack framing as stdio
 - Connection displacement: new hub connection immediately replaces the previous one (last-writer-wins)
-- Agent buffers output while no hub is connected (`OutputBuffer` ring buffer)
+- A terminal's output and events (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, BELL, NOTIFICATION,
+  LOG) go to the hub connected when they are sent, whichever connection spawned the terminal (#549).
+  Replies (SPAWN_OK, ATTACH_OK, SNAPSHOT_RES, ERROR) go to the connection that asked.
+- Agent queues output and events while no hub is connected (up to 1000 frames, oldest dropped)
 - On reconnect: agent sends HELLO, then enumerates channel state (see section 3.12)
 
 ### 2.2 Hub ↔ UI (WebSocket)
@@ -201,7 +204,9 @@ Re-attach to existing channel (after reconnect).
 }
 ```
 
-**Batching:** Buffer 16ms or 4KB, whichever comes first, then flush.
+**Batching:** Buffer 16ms or 4KB, whichever comes first, then flush. Any other frame about a
+channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, BELL, NOTIFICATION, LOG) first flushes that
+channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT.
 
 ### 3.6 RESIZE (Hub → Agent)
 

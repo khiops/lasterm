@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::batch::{batch_loop, BatchedOutput, OutputEvent};
+use crate::batch::{batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender};
 use crate::framing::{encode_frame, FrameReader};
-use crate::handler::{handle_message, iso_now, FrameSender, SnapshotSenders};
+use crate::handler::{handle_message, FrameSender, SnapshotSenders};
 use crate::platform_dirs::{lasterm_dir, DirKind};
 use crate::protocol::AgentToHub;
 use crate::pty::{DestroyAllSummary, PtyManager};
@@ -253,10 +253,10 @@ async fn run_daemon_impl_with_manager(
     let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Batch channels — single batch loop for the daemon lifetime
-    // Output flows: PTY reader tasks → batch_loop → output_router → active connection
-    let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputEvent>();
-    let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedOutput>();
-    tokio::spawn(batch_loop(output_rx, batched_tx));
+    // Output and events flow: PTY reader tasks → batch_loop → output_router → active connection
+    let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+    let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
+    tokio::spawn(batch_loop(channel_events_rx, batched_tx));
 
     // Active connection state — shared between accept loop and output router
     let active_conn: Arc<Mutex<Option<ActiveConnection>>> = Arc::new(Mutex::new(None));
@@ -327,7 +327,7 @@ async fn run_daemon_impl_with_manager(
                     stream,
                     Arc::clone(&pty_manager),
                     Arc::clone(&cmd_senders),
-                    output_tx.clone(),
+                    channel_events.clone(),
                     frame_tx,
                     frame_rx,
                     Arc::clone(&active_conn),
@@ -381,12 +381,17 @@ pub(crate) async fn run_daemon(
     if idle_timeout.is_some() {
         tracing::warn!("--idle-timeout is ignored on Windows: a daemon here is never a remote one");
     }
-    run_daemon_impl(socket_path, shutdown, bound).await
+    // auth.json lives in the hub's configuration directory, %APPDATA%\lasterm.
+    run_daemon_impl(socket_path, config_dir()?, state_dir()?, shutdown, bound).await
 }
 
+/// Internal implementation — takes explicit directories, as on Unix, so tests
+/// can run a daemon without reading the user's profile.
 #[cfg(windows)]
 async fn run_daemon_impl(
     socket_path: String,
+    config_dir: String,
+    state_dir: std::path::PathBuf,
     mut shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
@@ -399,11 +404,8 @@ async fn run_daemon_impl(
 
     tracing::info!("daemon listening on {}", pipe_name);
 
-    // auth.json lives in the hub's configuration directory, %APPDATA%\lasterm.
-    let config_dir = config_dir()?;
-
     // Load auth token once at startup (None → first-run, skip auth)
-    let expected_token = read_auth_token_with_state_dir(&config_dir, &state_dir()?).await;
+    let expected_token = read_auth_token_with_state_dir(&config_dir, &state_dir).await;
     if expected_token.is_some() {
         tracing::info!("auth token loaded — connections will be authenticated");
     } else {
@@ -419,10 +421,10 @@ async fn run_daemon_impl(
     let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Batch channels — single batch loop for the daemon lifetime
-    // Output flows: PTY reader tasks → batch_loop → output_router → active connection
-    let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputEvent>();
-    let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedOutput>();
-    tokio::spawn(batch_loop(output_rx, batched_tx));
+    // Output and events flow: PTY reader tasks → batch_loop → output_router → active connection
+    let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+    let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
+    tokio::spawn(batch_loop(channel_events_rx, batched_tx));
 
     // Active connection state — shared between accept loop and output router
     let active_conn: Arc<Mutex<Option<ActiveConnection>>> = Arc::new(Mutex::new(None));
@@ -483,7 +485,7 @@ async fn run_daemon_impl(
             connected,
             Arc::clone(&pty_manager),
             Arc::clone(&cmd_senders),
-            output_tx.clone(),
+            channel_events.clone(),
             frame_tx,
             frame_rx,
             Arc::clone(&active_conn),
@@ -739,7 +741,7 @@ async fn handle_connection_inner<S>(
     stream: S,
     pty_manager: Arc<Mutex<PtyManager>>,
     cmd_senders: SnapshotSenders,
-    output_tx: mpsc::UnboundedSender<OutputEvent>,
+    channel_events: ChannelEventSender,
     frame_tx: FrameSender,
     mut frame_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     active_conn: Arc<Mutex<Option<ActiveConnection>>>,
@@ -880,7 +882,7 @@ async fn handle_connection_inner<S>(
                                         msg,
                                         Arc::clone(&pty_manager),
                                         frame_tx.clone(),
-                                        output_tx.clone(),
+                                        channel_events.clone(),
                                         Arc::clone(&cmd_senders),
                                     )
                                     .await
@@ -1016,7 +1018,7 @@ async fn handle_connection(
     stream: UnixStream,
     pty_manager: Arc<Mutex<PtyManager>>,
     cmd_senders: SnapshotSenders,
-    output_tx: mpsc::UnboundedSender<OutputEvent>,
+    channel_events: ChannelEventSender,
     frame_tx: FrameSender,
     frame_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     active_conn: Arc<Mutex<Option<ActiveConnection>>>,
@@ -1028,7 +1030,7 @@ async fn handle_connection(
         stream,
         pty_manager,
         cmd_senders,
-        output_tx,
+        channel_events,
         frame_tx,
         frame_rx,
         active_conn,
@@ -1101,23 +1103,19 @@ fn send_encoded(tx: &FrameSender, msg: &AgentToHub) -> Result<(), mpsc::error::S
 
 /// Spawn the output router task.
 ///
-/// Drains batched PTY output frames and forwards them to the active connection.
+/// Drains what the batch loop hands on — every channel's output, and its exit,
+/// title, bell, notification and log frames — and forwards it to the connection
+/// active when it is sent, whichever connection spawned the channel (#549).
 /// Buffers up to MAX_FRAME_QUEUE frames when no hub is connected (ring buffer, drops oldest).
 fn spawn_output_router(
-    mut batched_rx: mpsc::UnboundedReceiver<BatchedOutput>,
+    mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>,
     active_conn: Arc<Mutex<Option<ActiveConnection>>>,
 ) {
     tokio::spawn(async move {
         let mut pending: Vec<Vec<u8>> = Vec::new();
 
-        while let Some(b) = batched_rx.recv().await {
-            let msg = AgentToHub::Output {
-                channel_id: b.channel_id,
-                seq: b.seq,
-                ts: iso_now(),
-                data: b.data,
-            };
-            if let Ok(frame) = encode_frame(&msg) {
+        while let Some(event) = batched_rx.recv().await {
+            if let Ok(frame) = event.into_frame() {
                 let conn = active_conn.lock().await;
                 if let Some(ref active) = *conn {
                     // Flush pending buffer first (maintain ordering)
@@ -2122,7 +2120,7 @@ mod tests {
 
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (output_tx, _output_rx) = mpsc::unbounded_channel::<OutputEvent>();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
         let auth = encode_frame(&HubToAgent::Auth {
             token: token.to_string(),
         })
@@ -2131,7 +2129,7 @@ mod tests {
             server,
             Arc::new(Mutex::new(PtyManager::new())),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
-            output_tx,
+            channel_events,
             frame_tx,
             frame_rx,
             Arc::clone(active_conn),
@@ -2572,5 +2570,359 @@ mod tests {
 
         drop(client);
         daemon_handle.abort();
+    }
+
+    /// What a terminal has to say reaches the hub connected when it says it,
+    /// not the connection that spawned it (#549), and its output reaches that
+    /// hub before its exit.
+    ///
+    /// Every daemon here listens on a socket or pipe of its own and reads its
+    /// configuration and state from temp dirs: never the user's agent, never
+    /// the user's profile.
+    mod channel_event_routing_tests {
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use super::*;
+        use crate::framing::encode_frame;
+        use crate::protocol::HubToAgent;
+
+        const DEADLINE: Duration = Duration::from_secs(10);
+
+        #[cfg(unix)]
+        type HubStream = UnixStream;
+        #[cfg(windows)]
+        type HubStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+        struct TestDaemon {
+            endpoint: String,
+            config_dir: PathBuf,
+            state_dir: PathBuf,
+            shutdown: watch::Sender<bool>,
+            task: tokio::task::JoinHandle<std::io::Result<DestroyAllSummary>>,
+        }
+
+        impl TestDaemon {
+            async fn start(label: &str) -> Self {
+                let config_dir = temp_dir(&format!("lasterm-routing-config-{label}")).await;
+                let state_dir = temp_dir(&format!("lasterm-routing-state-{label}")).await;
+                let config = config_dir.to_string_lossy().into_owned();
+                let (shutdown, shutdown_rx) = shutdown_channel();
+                let (bound_tx, bound_rx) = oneshot::channel();
+                #[cfg(unix)]
+                let (endpoint, daemon) = {
+                    let endpoint = temp_path(&format!("lasterm-routing-{label}"))
+                        .to_string_lossy()
+                        .into_owned();
+                    let daemon = run_daemon_impl(
+                        endpoint.clone(),
+                        config,
+                        state_dir.clone(),
+                        shutdown_rx,
+                        Some(bound_tx),
+                        None,
+                    );
+                    (endpoint, daemon)
+                };
+                #[cfg(windows)]
+                let (endpoint, daemon) = {
+                    let endpoint = format!(
+                        r"\\.\pipe\lasterm-test-routing-{label}-{}",
+                        ulid::Ulid::generate().to_string().to_lowercase()
+                    );
+                    let daemon = run_daemon_impl(
+                        endpoint.clone(),
+                        config,
+                        state_dir.clone(),
+                        shutdown_rx,
+                        Some(bound_tx),
+                    );
+                    (endpoint, daemon)
+                };
+                let task = tokio::spawn(daemon);
+                tokio::time::timeout(DEADLINE, bound_rx)
+                    .await
+                    .expect("the daemon binds in time")
+                    .expect("the daemon reports its bind");
+                Self {
+                    endpoint,
+                    config_dir,
+                    state_dir,
+                    shutdown,
+                    task,
+                }
+            }
+
+            /// Connect as a hub does, and read up to CHANNEL_STATE_END. A
+            /// connection becomes the daemon's active one before the channels
+            /// are enumerated, so past this point it is the one routed to.
+            async fn connect(&self) -> Hub {
+                let mut hub = Hub {
+                    stream: self.open().await,
+                    received: Vec::new(),
+                };
+                hub.read_until("CHANNEL_STATE_END").await;
+                hub
+            }
+
+            #[cfg(unix)]
+            async fn open(&self) -> HubStream {
+                UnixStream::connect(&self.endpoint)
+                    .await
+                    .expect("connect to the test daemon")
+            }
+
+            #[cfg(windows)]
+            async fn open(&self) -> HubStream {
+                use tokio::net::windows::named_pipe::ClientOptions;
+                // The next pipe instance is created once the previous one has
+                // a client, so a connection right after another can find none.
+                let deadline = std::time::Instant::now() + DEADLINE;
+                loop {
+                    match ClientOptions::new().open(&self.endpoint) {
+                        Ok(client) => return client,
+                        Err(error) => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "connect to the test daemon: {error}"
+                            );
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
+                }
+            }
+
+            async fn stop(self) {
+                let _ = self.shutdown.send(true);
+                let _ = tokio::time::timeout(DEADLINE, self.task).await;
+                #[cfg(unix)]
+                let _ = std::fs::remove_file(&self.endpoint);
+                let _ = tokio::fs::remove_dir_all(&self.config_dir).await;
+                let _ = tokio::fs::remove_dir_all(&self.state_dir).await;
+            }
+        }
+
+        /// The hub's end of a connection to the daemon.
+        struct Hub {
+            stream: HubStream,
+            received: Vec<u8>,
+        }
+
+        impl Hub {
+            async fn send(&mut self, msg: &HubToAgent) {
+                let frame = encode_frame(msg).expect("encode a hub frame");
+                self.stream
+                    .write_all(&frame)
+                    .await
+                    .expect("write to the daemon");
+            }
+
+            /// The next frame from the daemon. Cancelling it loses nothing: a
+            /// partial frame stays in `received`.
+            async fn next_frame(&mut self) -> rmpv::Value {
+                loop {
+                    if self.received.len() >= 4 {
+                        let len = u32::from_le_bytes(self.received[..4].try_into().unwrap());
+                        let end = 4 + len as usize;
+                        if self.received.len() >= end {
+                            let frame = rmp_serde::from_slice(&self.received[4..end])
+                                .expect("decode a daemon frame");
+                            self.received.drain(..end);
+                            return frame;
+                        }
+                    }
+                    let mut buf = vec![0u8; 8192];
+                    let n = self
+                        .stream
+                        .read(&mut buf)
+                        .await
+                        .expect("read from the daemon");
+                    assert!(n > 0, "the daemon closed this connection");
+                    self.received.extend_from_slice(&buf[..n]);
+                }
+            }
+
+            async fn frame_within(&mut self, limit: Duration) -> Option<rmpv::Value> {
+                tokio::time::timeout(limit, self.next_frame()).await.ok()
+            }
+
+            /// Read up to the first frame `last` accepts, and return every
+            /// frame read, that one included.
+            async fn read_through(
+                &mut self,
+                last: impl Fn(&rmpv::Value) -> bool,
+            ) -> Vec<rmpv::Value> {
+                let mut frames = Vec::new();
+                loop {
+                    let Some(frame) = self.frame_within(DEADLINE).await else {
+                        panic!(
+                            "the frame awaited did not come within {DEADLINE:?}; received {:?}",
+                            frames.iter().map(frame_type).collect::<Vec<_>>()
+                        );
+                    };
+                    let done = last(&frame);
+                    frames.push(frame);
+                    if done {
+                        return frames;
+                    }
+                }
+            }
+
+            async fn read_until(&mut self, kind: &str) -> Vec<rmpv::Value> {
+                self.read_through(|frame| frame_type(frame) == kind).await
+            }
+        }
+
+        fn frame_type(frame: &rmpv::Value) -> &str {
+            frame["type"].as_str().unwrap_or("")
+        }
+
+        fn is_about(frame: &rmpv::Value, kind: &str, channel_id: &str) -> bool {
+            frame_type(frame) == kind && frame["channel_id"].as_str() == Some(channel_id)
+        }
+
+        /// What the channel printed, as these frames carried it.
+        fn output_of(frames: &[rmpv::Value], channel_id: &str) -> String {
+            let mut printed = Vec::new();
+            for frame in frames.iter().filter(|f| is_about(f, "OUTPUT", channel_id)) {
+                if let rmpv::Value::Binary(data) = &frame["data"] {
+                    printed.extend_from_slice(data);
+                }
+            }
+            String::from_utf8_lossy(&printed).into_owned()
+        }
+
+        /// SPAWN a shell running `command`, then ending.
+        fn spawn(channel_id: &str, command: &str) -> HubToAgent {
+            let (shell, run) = if cfg!(windows) {
+                ("cmd.exe", "/C")
+            } else {
+                ("/bin/sh", "-c")
+            };
+            HubToAgent::Spawn {
+                request_id: format!("request-{channel_id}"),
+                channel_id: Some(channel_id.to_string()),
+                shell: Some(shell.to_string()),
+                args: Some(vec![run.to_string(), command.to_string()]),
+                cwd: None,
+                env: None,
+                cols: 80,
+                rows: 24,
+                direct_process: None,
+                elevated: None,
+                elevation_secret: None,
+                elevation_method: None,
+                custom_command: None,
+            }
+        }
+
+        /// The terminal outlives the connection that spawned it, and so must
+        /// what it has to say. Its title and its exit used to go to that
+        /// connection alone: after a reconnect, a shell that ended left its
+        /// pane live on a dead terminal (#549).
+        #[tokio::test]
+        async fn a_terminal_reports_to_the_hub_connected_now_not_the_one_that_spawned_it() {
+            let daemon = TestDaemon::start("reconnect").await;
+            let channel_id = "outlives-its-spawner";
+            // Waits for a line, then sets its title, rings, and exits with 7.
+            // cmd.exe keeps a space before `&` as part of the title.
+            let command = if cfg!(windows) {
+                "set /p line=& title routed-title& exit 7"
+            } else {
+                r"read line; printf '\033]0;routed-title\007\a'; exit 7"
+            };
+
+            let mut spawner = daemon.connect().await;
+            spawner.send(&spawn(channel_id, command)).await;
+            spawner.read_until("SPAWN_OK").await;
+            drop(spawner);
+
+            let mut hub = daemon.connect().await;
+            hub.send(&HubToAgent::Attach {
+                channel_id: channel_id.to_string(),
+            })
+            .await;
+            hub.read_until("ATTACH_OK").await;
+            let line: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
+            hub.send(&HubToAgent::Input {
+                channel_id: channel_id.to_string(),
+                data: line.to_vec(),
+            })
+            .await;
+
+            let frames = hub
+                .read_through(|frame| is_about(frame, "CHANNEL_EXIT", channel_id))
+                .await;
+            let exit = frames.last().expect("CHANNEL_EXIT was read");
+            assert_eq!(exit["exit_code"].as_i64(), Some(7), "{exit:?}");
+            let titles: Vec<&str> = frames
+                .iter()
+                .filter(|frame| is_about(frame, "TITLE_CHANGE", channel_id))
+                .filter_map(|frame| frame["title"].as_str())
+                .collect();
+            // An elevated cmd.exe, as on CI runners, prefixes "Administrator:  ".
+            assert!(
+                titles.iter().any(|title| title.ends_with("routed-title")),
+                "the title set after the reconnect must reach the hub connected now; titles {titles:?}"
+            );
+            if cfg!(unix) {
+                assert!(
+                    frames.iter().any(|frame| is_about(frame, "BELL", channel_id)),
+                    "the bell rung after the reconnect must reach the hub connected now; received {:?}",
+                    frames.iter().map(frame_type).collect::<Vec<_>>()
+                );
+            }
+
+            daemon.stop().await;
+        }
+
+        /// A channel's last output reaches the hub before its exit. OUTPUT
+        /// waits up to 16 ms in the batch loop, and CHANNEL_EXIT used to go
+        /// around it: a shell that printed and ended could be reported gone
+        /// before its last output arrived. Ten rounds, since that race was
+        /// lost in only some of them.
+        #[tokio::test]
+        async fn a_channel_delivers_all_its_output_before_its_exit() {
+            let daemon = TestDaemon::start("ordering").await;
+            let mut hub = daemon.connect().await;
+            let mut ended: Vec<String> = Vec::new();
+
+            for round in 0..10 {
+                let channel_id = format!("prints-then-ends-{round}");
+                let marker = format!("ordering-marker-{round}");
+                hub.send(&spawn(&channel_id, &format!("echo {marker}")))
+                    .await;
+                let frames = hub
+                    .read_through(|frame| is_about(frame, "CHANNEL_EXIT", &channel_id))
+                    .await;
+                for earlier in &ended {
+                    assert!(
+                        !frames
+                            .iter()
+                            .any(|frame| is_about(frame, "OUTPUT", earlier)),
+                        "OUTPUT for {earlier} arrived after its CHANNEL_EXIT"
+                    );
+                }
+                assert!(
+                    output_of(&frames, &channel_id).contains(&marker),
+                    "CHANNEL_EXIT for {channel_id} arrived before its output {marker:?}"
+                );
+                ended.push(channel_id);
+            }
+
+            // Well past one batch interval: output still held back would come now.
+            while let Some(frame) = hub.frame_within(Duration::from_millis(300)).await {
+                for earlier in &ended {
+                    assert!(
+                        !is_about(&frame, "OUTPUT", earlier),
+                        "OUTPUT for {earlier} arrived after its CHANNEL_EXIT"
+                    );
+                }
+            }
+
+            daemon.stop().await;
+        }
     }
 }

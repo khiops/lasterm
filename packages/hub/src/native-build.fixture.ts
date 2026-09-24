@@ -10,10 +10,19 @@
  * Beside every artifact it places in the target directory, cargo writes a
  * dep-info file, `<name>.d`, naming each local source file the artifact was built
  * from. The artifact is current when none of those files changed after it was
- * written, which is the comparison cargo makes to decide a rebuild, so a
- * `cargo build` is what clears a failure. They must also match this checkout's
- * files: checkouts that share one target directory overwrite each other's
- * artifacts, and the last build may have come from another one.
+ * written, which is the comparison cargo makes to decide a rebuild. They must
+ * also match this checkout's files: checkouts that share one target directory
+ * overwrite each other's artifacts, and the last build may have come from
+ * another one.
+ *
+ * What this cannot see is a dep-info file that names this checkout for an
+ * artifact another one built. Those checkouts also share cargo's record of which
+ * crates are fresh, one per crate for all of them, and it goes by modification
+ * time. Once another checkout has built newer artifacts, a `cargo build` here
+ * (the one `pnpm -F @lasterm/hub test` runs first included) can compile nothing,
+ * rewrite the dep-info files to name this checkout's sources, and leave the other
+ * checkout's artifacts in place, which then pass. So the rebuild a refusal names
+ * cleans the crates first.
  *
  * Only the files cargo lists are compared. A manifest change that alters the
  * build (a dependency, a feature) is not seen.

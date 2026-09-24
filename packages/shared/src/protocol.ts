@@ -158,6 +158,12 @@ export interface ErrorMessage {
 	message: string;
 	channelId?: string;
 	hostId?: string;
+	/**
+	 * Agent → Hub, on `OTHER_HUBS_HOLD_CHANNELS` only: how many channels other
+	 * hubs hold on the daemon that refused a STOP (#127). Absent on every other
+	 * ERROR.
+	 */
+	otherOwnerChannels?: number;
 }
 
 /** Agent → Hub (daemon mode): metadata for each alive channel on hub connect/reconnect */

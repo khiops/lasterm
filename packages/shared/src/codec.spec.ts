@@ -345,6 +345,22 @@ describe("hub identity on the wire (#127)", () => {
 		expect(toCamelCase(wire)).toEqual({ type: "CHANNEL_STATE_END", otherOwnerChannels: 3 });
 	});
 
+	it("reads other_owner_channels from a STOP refusal", () => {
+		const wire = {
+			type: "ERROR",
+			code: "OTHER_HUBS_HOLD_CHANNELS",
+			message: "other hubs hold channels here",
+			other_owner_channels: 2,
+		};
+
+		expect(toCamelCase(wire)).toEqual({
+			type: "ERROR",
+			code: "OTHER_HUBS_HOLD_CHANNELS",
+			message: "other hubs hold channels here",
+			otherOwnerChannels: 2,
+		});
+	});
+
 	it("reads a CHANNEL_STATE_END without it, as an agent before #127 sends it", () => {
 		expect(toCamelCase({ type: "CHANNEL_STATE_END" })).toEqual({ type: "CHANNEL_STATE_END" });
 	});

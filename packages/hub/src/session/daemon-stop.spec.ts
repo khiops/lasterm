@@ -54,7 +54,43 @@ describe("requestDaemonStop (#127)", () => {
 		expect(events).toEqual(["let go", "close handling"]);
 	});
 
-	it("reports a refusal with the count its message states", async () => {
+	it("reports a refusal with the count the agent gives as a field", async () => {
+		const daemon = new FakeDaemonConnection();
+		daemon.otherOwnerChannels = 9;
+		// Decoded from the wire's other_owner_channels. The message states another
+		// number, and the connection's count is older: the field is what counts.
+		daemon.answer({
+			type: "ERROR",
+			code: "OTHER_HUBS_HOLD_CHANNELS",
+			message: "refused at 12:00 by 1 daemon",
+			otherOwnerChannels: 5,
+		});
+
+		expect(await requestDaemonStop(asAgent(daemon), { force: false })).toEqual({
+			kind: "refused",
+			message: "refused at 12:00 by 1 daemon",
+			otherOwnerChannels: 5,
+		});
+	});
+
+	it("reads the message when the field is not a count", async () => {
+		for (const field of [-1, 2.5, "5", null]) {
+			const daemon = new FakeDaemonConnection();
+			daemon.answer({
+				type: "ERROR",
+				code: "OTHER_HUBS_HOLD_CHANNELS",
+				message: "3 channels belong to other hubs",
+				otherOwnerChannels: field,
+			});
+
+			expect(await requestDaemonStop(asAgent(daemon), { force: false })).toMatchObject({
+				kind: "refused",
+				otherOwnerChannels: 3,
+			});
+		}
+	});
+
+	it("reports a refusal with the count its message states, from an agent that sends no field", async () => {
 		const daemon = new FakeDaemonConnection();
 		daemon.answer({
 			type: "ERROR",

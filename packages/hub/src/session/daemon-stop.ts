@@ -74,7 +74,7 @@ export function requestDaemonStop(
 				finish({
 					kind: "refused",
 					message,
-					otherOwnerChannels: countInRefusal(message, agent),
+					otherOwnerChannels: countInRefusal(error, message, agent),
 				});
 				return;
 			}
@@ -104,16 +104,30 @@ export function requestDaemonStop(
 }
 
 /**
- * How many channels other hubs hold, from a refusal. The contract carries the
- * count in the message's words, so it is read from there: the first whole
- * number in it. Failing that, the count the daemon gave when this connection
- * opened, which may be older but is the daemon's own.
+ * How many channels other hubs hold, from a refusal, in order of trust:
+ *
+ * 1. the refusal's own `other_owner_channels`, which the agent sends for
+ *    exactly this;
+ * 2. the first whole number in its message, for an agent that states the
+ *    count only in words;
+ * 3. the count the daemon gave when this connection opened, which may be
+ *    older but is the daemon's own.
  */
-function countInRefusal(message: string, agent: AgentConnection): number | null {
+function countInRefusal(
+	error: ErrorMessage,
+	message: string,
+	agent: AgentConnection,
+): number | null {
+	if (isCount(error.otherOwnerChannels)) return error.otherOwnerChannels;
 	const stated = /\d+/.exec(message)?.[0];
 	if (stated !== undefined) {
 		const count = Number(stated);
-		if (Number.isSafeInteger(count)) return count;
+		if (isCount(count)) return count;
 	}
 	return agent.otherOwnerChannels ?? null;
+}
+
+/** A count the hub can show: a whole number, not negative. */
+function isCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }

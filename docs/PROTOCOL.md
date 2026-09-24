@@ -307,7 +307,8 @@ Interval: 15s. 3 consecutive misses (45s) → agent unresponsive.
   type: "ERROR",
   code: string,
   message: string,
-  channel_id?: string
+  channel_id?: string,
+  other_owner_channels?: number   // OTHER_HUBS_HOLD_CHANNELS only (§ 3.17)
 }
 ```
 
@@ -415,13 +416,24 @@ On a fresh daemon start (no prior channels), the agent sends HELLO followed imme
 ```
 
 Asks the daemon at the other end of the hub's own connection to stop (#127). Without `force`, a
-daemon that other owners still hold channels on refuses with
-`ERROR { code: "OTHER_HUBS_HOLD_CHANNELS", message }`, whose message states how many, and stops
-nothing. Otherwise it shuts down as on SIGTERM, ending every channel it holds; it sends nothing
-first, and the connection ending is the answer. A stdio agent ignores STOP or answers an error.
+daemon that other owners still hold channels on refuses, and stops nothing:
 
-The hub sends it only to an agent that advertises `hub-identity`, and reads the count from the
-refusal's message: the first whole number in it, else the `other_owner_channels` of the
+```typescript
+{
+  type: "ERROR",
+  code: "OTHER_HUBS_HOLD_CHANNELS",
+  message: string,               // states the count in words too
+  other_owner_channels: number   // how many channels other owners hold
+}
+```
+
+`other_owner_channels` is absent on every other ERROR. Otherwise the daemon shuts down as on
+SIGTERM, ending every channel it holds; it sends nothing first, and the connection ending is the
+answer. A stdio agent ignores STOP or answers an error.
+
+The hub sends it only to an agent that advertises `hub-identity`. It takes the count from the
+refusal's `other_owner_channels` when that is a whole number of zero or more; failing that, from
+the first whole number in the message; failing that, from the `other_owner_channels` of the
 connection's CHANNEL_STATE_END. To any other agent, and when no protocol connection can carry the
 STOP, the hub runs the agent's own `--stop` instead: the forced, out-of-band path, which knows
 nothing of owners. See `POST /api/hosts/:id/agent/replace` (§ 6).
@@ -1230,7 +1242,7 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
 | `VERSION_MISMATCH` | Hub | Agent protocol version too new |
 | `DISPLACED` | Agent | A newer connection took this one's place, and this one ends. With `hub-identity`, only ever a newer connection of the same hub (§ 3.1b) |
-| `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; the message states how many (§ 3.17) |
+| `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; `other_owner_channels` carries how many, and the message says it too (§ 3.17) |
 
 ### Pairing Code Format
 

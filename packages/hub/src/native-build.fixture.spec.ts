@@ -7,13 +7,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
 import { execFileSync } from "node:child_process";
-import { nativeBuildProblem } from "./native-build.fixture.js";
+import { nativeBuildProblem, recordNativeBuild } from "./native-build.fixture.js";
 import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import setupTestTlsMaterial from "./test-tls.setup.js";
 
 const checkout = resolve(import.meta.dirname, "../../..");
-const BUILD_COMMAND =
-	"cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity --features lasterm-tls-identity/test-tls-material";
+const BUILD_SCRIPT = "pnpm build:test-tls-material";
 /** Before any checkout's files were written, and after all of them. */
 const LONG_AGO = new Date("2001-01-01T00:00:00Z");
 const FAR_AHEAD = new Date("2100-01-01T00:00:00Z");
@@ -90,17 +89,40 @@ function writeSource(path: string, contents: string, modified = LONG_AGO): void 
 	utimesSync(path, modified, modified);
 }
 
+/** Another checkout holding this one's sources, except `edited`, which differs. */
+function otherCheckout(edited?: string): string {
+	const other = tempDir();
+	for (const source of new Set(ARTIFACTS.flatMap(({ sources }) => sources))) {
+		writeSource(join(other, source), readFileSync(join(checkout, source), "utf8"));
+	}
+	if (edited !== undefined) writeSource(join(other, edited), "// their edit\n");
+	return other;
+}
+
 describe("hub test setup", () => {
-	/** A target directory holding the artifacts built in `builtIn`; `stale` was built before its sources. */
-	function useTarget(stale?: string, builtIn = checkout): string {
+	/**
+	 * A target directory holding the artifacts, dep-info files naming `listed`,
+	 * and the pre-test build's record naming `recorded` unless it is null;
+	 * `stale` was built before its sources.
+	 */
+	function useTarget({
+		stale,
+		listed = checkout,
+		recorded = listed,
+	}: {
+		stale?: string;
+		listed?: string;
+		recorded?: string | null;
+	} = {}): string {
 		const target = tempDir();
 		for (const { file, sources } of ARTIFACTS) {
 			writeArtifact(
 				join(target, "release", file),
-				sources.map((source) => join(builtIn, source)),
+				sources.map((source) => join(listed, source)),
 				file === stale ? LONG_AGO : FAR_AHEAD,
 			);
 		}
+		if (recorded !== null) recordNativeBuild(join(target, "release"), recorded);
 		vi.stubEnv("CARGO_TARGET_DIR", target);
 		vi.stubEnv("LASTERM_HUB_LOCK_ADDON", undefined);
 		vi.stubEnv("LASTERM_TLS_IDENTITY_ADDON", undefined);
@@ -109,71 +131,90 @@ describe("hub test setup", () => {
 		return target;
 	}
 
-	it.each(ARTIFACTS)(
-		"refuses a stale $name, and says what changed and how to rebuild it",
-		({ file, sources }) => {
-			const target = useTarget(file);
-			let refusal: unknown;
-			let teardown: (() => void) | undefined;
-			try {
-				teardown = setupTestTlsMaterial();
-			} catch (error) {
-				refusal = error;
-			} finally {
-				teardown?.();
-			}
-
-			expect(refusal).toBeInstanceOf(Error);
-			const message = (refusal as Error).message;
-			expect(message).toContain("stale native build");
-			expect(message).toContain(
-				`${join(target, "release", file)}: ${sources[0]} changed after it was built`,
-			);
-			expect(message).toContain(BUILD_COMMAND);
-			// Only the stale artifact is named.
-			for (const other of ARTIFACTS.filter((artifact) => artifact.file !== file)) {
-				expect(message).not.toContain(join(target, "release", other.file));
-			}
-			// Neither the stale generator nor a build ran.
-			expect(execFileSync).not.toHaveBeenCalled();
-		},
-	);
-
-	// Checkouts sharing a target directory share cargo's record of what is fresh,
-	// and it goes by modification time. After another worktree had built, the
-	// `cargo build` this used to name compiled nothing here: it only rewrote the
-	// dep-info files to name this checkout's sources, and left that worktree's
-	// artifacts in place, which this check then accepted (seen 2026-09-24).
-	it("refuses another checkout's different build, and names a rebuild that cleans every crate first", () => {
-		const theirs = tempDir();
-		for (const source of new Set(ARTIFACTS.flatMap(({ sources }) => sources))) {
-			writeSource(join(theirs, source), readFileSync(join(checkout, source), "utf8"));
-		}
-		writeSource(join(theirs, "crates/lasterm-protected-fs/src/lib.rs"), "// their edit\n");
-		const target = useTarget(undefined, theirs);
-		let refusal: unknown;
+	/** Why the setup refuses to run, having run nothing. */
+	function refusal(): string {
+		let refused: unknown;
 		let teardown: (() => void) | undefined;
 		try {
 			teardown = setupTestTlsMaterial();
 		} catch (error) {
-			refusal = error;
+			refused = error;
 		} finally {
 			teardown?.();
 		}
+		expect(refused).toBeInstanceOf(Error);
+		// Neither the generator nor a build ran.
+		expect(execFileSync).not.toHaveBeenCalled();
+		return (refused as Error).message;
+	}
 
-		expect(refusal).toBeInstanceOf(Error);
-		const message = (refusal as Error).message;
-		expect(message).toContain(
+	it.each(ARTIFACTS)(
+		"refuses a stale $name, and says what changed and how to rebuild it",
+		({ file, sources }) => {
+			const target = useTarget({ stale: file });
+			const message = refusal();
+
+			expect(message).toContain("stale native build");
+			expect(message).toContain(
+				`${join(target, "release", file)}: ${sources[0]} changed after it was built`,
+			);
+			expect(message).toContain(`Build it with \`${BUILD_SCRIPT}\``);
+			// Only the stale artifact is named.
+			for (const other of ARTIFACTS.filter((artifact) => artifact.file !== file)) {
+				expect(message).not.toContain(join(target, "release", other.file));
+			}
+		},
+	);
+
+	it("refuses another checkout's different build", () => {
+		const theirs = otherCheckout("crates/lasterm-protected-fs/src/lib.rs");
+		const target = useTarget({ listed: theirs });
+
+		expect(refusal()).toContain(
 			`${join(target, "release", library("lasterm_tls_identity"))}: it was built from ${theirs}, whose crates/lasterm-protected-fs/src/lib.rs differs from this checkout's`,
 		);
-		const lines = message.split("\n").map((line) => line.trim());
-		const clean = lines.findIndex((line) => line.startsWith("cargo clean --release -p "));
-		expect(clean).toBeGreaterThanOrEqual(0);
-		expect(lines.indexOf(BUILD_COMMAND)).toBeGreaterThan(clean);
-		// Every crate an artifact is built from: one left fresh can still be the other checkout's.
-		const crates = new Set(ARTIFACTS.flatMap(({ sources }) => sources.map((s) => s.split("/")[1])));
-		expect(lines[clean]?.split(" -p ").slice(1).sort()).toEqual([...crates].sort());
-		expect(execFileSync).not.toHaveBeenCalled();
+	});
+
+	// Checkouts sharing a target directory share cargo's record of what is fresh,
+	// and it goes by modification time. After another worktree had built, a
+	// `cargo build` here compiled nothing: it only rewrote the dep-info files to
+	// name this checkout's sources and left that worktree's artifacts in place,
+	// which this check accepted (#544).
+	it("refuses another checkout's build after a cargo build here relabeled it", () => {
+		const theirs = otherCheckout("crates/lasterm-protected-fs/src/lib.rs");
+		const target = useTarget({ listed: checkout, recorded: theirs });
+
+		expect(refusal()).toContain(
+			`${join(target, "release", library("lasterm_tls_identity"))}: it was built from ${theirs}, whose crates/lasterm-protected-fs/src/lib.rs differs from this checkout's`,
+		);
+	});
+
+	it("refuses a build the pre-test build did not record, and names that build", () => {
+		const target = useTarget({ recorded: null });
+		const message = refusal();
+
+		expect(message).toContain(
+			`${join(target, "release")}: no build by \`${BUILD_SCRIPT}\` is recorded there`,
+		);
+		expect(message).toContain(`Build it with \`${BUILD_SCRIPT}\``);
+	});
+
+	it("refuses a build cargo changed after it was recorded", () => {
+		const target = useTarget();
+		const addon = join(target, "release", library("lasterm_hub_lock"));
+		const later = new Date(FAR_AHEAD.getTime() + 1000);
+		utimesSync(addon, later, later);
+
+		expect(refusal()).toContain(
+			`${library("lasterm_hub_lock")} there changed after \`${BUILD_SCRIPT}\` recorded it`,
+		);
+	});
+
+	it("accepts another checkout's build of the same sources", () => {
+		useTarget({ listed: checkout, recorded: otherCheckout() });
+		setupTestTlsMaterial()();
+
+		expect(execFileSync).toHaveBeenCalledTimes(1);
 	});
 
 	it("looks under the checkout for a relative CARGO_TARGET_DIR, wherever the run works from", () => {
@@ -186,22 +227,18 @@ describe("hub test setup", () => {
 		// Mutation caught (#531): a relative value resolved by path.resolve
 		// alone lands under the working directory, not where cargo built.
 		const cwd = vi.spyOn(process, "cwd").mockReturnValue(elsewhere);
-		let refusal: unknown;
-		let teardown: (() => void) | undefined;
+		let message: string;
 		try {
-			teardown = setupTestTlsMaterial();
-		} catch (error) {
-			refusal = error;
+			message = refusal();
 		} finally {
-			teardown?.();
 			cwd.mockRestore();
 		}
 
-		// Nothing is built there, so the setup gives up, naming where it looked.
-		expect(refusal).toBeInstanceOf(Error);
-		const message = (refusal as Error).message;
+		// Nothing is built there, so the setup gives up, naming where it looked
+		// and the build to run.
 		const generator = `lasterm-tls-test-material${executable}`;
 		expect(message).toContain(`missing at ${join(checkout, relativeTarget, "release", generator)}`);
+		expect(message).toContain(BUILD_SCRIPT);
 		expect(message).not.toContain(elsewhere);
 	});
 
@@ -274,6 +311,15 @@ describe("nativeBuildProblem", () => {
 		const theirs = makeCheckout();
 		writeSource(join(theirs, SOURCES[0]!), "// their edit\n");
 		expect(nativeBuildProblem(buildFrom(theirs), CRATE, ours)).toBe(
+			`it was built from ${theirs}, whose crates/lasterm-hub-lock/src/lib.rs differs from this checkout's`,
+		);
+	});
+
+	it("compares the checkout it is told the artifact came from, not the one its dep-info names", () => {
+		const ours = makeCheckout();
+		const theirs = makeCheckout();
+		writeSource(join(theirs, SOURCES[0]!), "// their edit\n");
+		expect(nativeBuildProblem(buildFrom(ours), CRATE, ours, theirs)).toBe(
 			`it was built from ${theirs}, whose crates/lasterm-hub-lock/src/lib.rs differs from this checkout's`,
 		);
 	});

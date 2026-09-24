@@ -271,7 +271,7 @@ jobs:
       - run: rustup toolchain install
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
-      - run: cargo build --locked --release -p lasterm-hub-lock -p lasterm-tls-identity
+      - run: pnpm build:test-tls-material --locked
       - run: pnpm test:run
 
   build-agent:

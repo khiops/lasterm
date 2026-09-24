@@ -1,59 +1,67 @@
 /**
  * Builds what the hub specs load and run from the cargo target directory: the
  * two native addons and the TLS test material generator. `pnpm -F @lasterm/hub
- * test` runs it first.
+ * test` runs it first. It is the one build the hub test setup accepts; see
+ * packages/hub/src/native-build.fixture.ts for why a plain `cargo build` is not.
  *
- * Checkouts that share a target directory share cargo's record of which crates
- * are fresh, and it goes by modification time. After another checkout has
- * built, a plain `cargo build` here can compile nothing, only rewrite the
- * dep-info files to name this checkout's sources, and so pass that checkout's
- * artifacts off as this one's (#544). When a dep-info file names another
- * checkout, the crates are therefore cleaned first. Not on every run: that
- * costs a rebuild, and on Windows it fails while a hub test run elsewhere has an
- * addon loaded.
+ * The crates are cleaned first unless the build recorded in the target
+ * directory is still there and matches this checkout: after another checkout
+ * built, a plain build here can compile nothing and pass that checkout's
+ * artifacts off as this one's (#544). Not on every run: a clean costs a
+ * rebuild, and on Windows it fails while a hub test run elsewhere has an addon
+ * loaded. Arguments are passed on to `cargo build` (CI adds `--locked`).
  */
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cargoTargetDir } from "../packages/hub/src/cargo-target-dir.js";
 import {
-	builtInAnotherCheckout,
+	forgetNativeBuild,
 	NATIVE_BUILD_ARGS,
 	NATIVE_CLEAN_ARGS,
 	NATIVE_CRATES,
-	nativeArtifacts,
+	nativeBuildProblems,
+	recordedNativeBuild,
+	recordNativeBuild,
+	samePath,
 } from "../packages/hub/src/native-build.fixture.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const rustupUrl = "https://rustup.rs/";
 
 /**
- * Builds the artifacts in `release` from `checkout`, cleaning their crates
- * first when the last build came from another checkout. `cargo` runs cargo
- * with the arguments given and returns its exit status, which this returns
- * when it is not 0.
+ * Builds the artifacts in `release` from `checkout`, and records it. `cargo`
+ * runs cargo with the arguments given and returns its exit status, which this
+ * returns; `extra` goes to `cargo build`.
  */
 export function buildTestNatives(
 	checkout: string,
 	release: string,
 	cargo: (args: readonly string[]) => number,
+	extra: readonly string[] = [],
 ): number {
-	const other = nativeArtifacts(release)
-		.map(({ artifact, crate }) => builtInAnotherCheckout(artifact, crate, checkout))
-		.find((root) => root !== undefined);
-	if (other !== undefined) {
+	const recorded = recordedNativeBuild(release);
+	const ours = !("problem" in recorded) && samePath(recorded.checkout, checkout);
+	const problem = ours ? undefined : nativeBuildProblems(release, checkout)[0];
+	if (problem !== undefined) {
 		console.log(
-			`The native test build in ${release} was last made from ${other}. Cleaning ${NATIVE_CRATES.join(", ")} first, so this build cannot pass it off as this checkout's.`,
+			`Cleaning ${NATIVE_CRATES.join(", ")} before the build, since what the target directory holds is not known to match this checkout:\n  ${problem}`,
 		);
+		forgetNativeBuild(release);
 		const cleaned = cargo(NATIVE_CLEAN_ARGS);
 		if (cleaned !== 0) {
 			console.error(
-				`cargo clean failed. On Windows it cannot remove an addon that a running process has loaded, such as a hub test run in ${other}: let it finish, then run this again.`,
+				"cargo clean failed. On Windows it cannot remove an addon that a running process has loaded, such as a hub test run in another checkout: let it finish, then run this again.",
 			);
 			return cleaned;
 		}
 	}
-	return cargo(NATIVE_BUILD_ARGS);
+	const built = cargo([...NATIVE_BUILD_ARGS, ...extra]);
+	// Whatever cargo compiled just now came from this checkout, and the rest
+	// was already this checkout's, the same as it, or cleaned away. So once the
+	// build has changed anything, finished or not, the record names this one.
+	if ("problem" in recordedNativeBuild(release)) recordNativeBuild(release, checkout);
+	return built;
 }
 
 function main(): void {
@@ -74,6 +82,7 @@ function main(): void {
 			if (result.error !== undefined) throw result.error;
 			return result.status ?? 1;
 		},
+		process.argv.slice(2),
 	);
 	if (status !== 0) process.exit(status);
 }

@@ -172,6 +172,38 @@ export interface AgentChannelStateMessage {
 /** Agent → Hub (daemon mode): sentinel marking end of AGENT_CHANNEL_STATE enumeration */
 export interface ChannelStateEndMessage {
 	type: "CHANNEL_STATE_END";
+	/**
+	 * How many channels other hubs hold on this daemon, from an agent that
+	 * advertises `hub-identity`. Informational: those channels are not this
+	 * hub's to act on, and the agent does not even say which they are (#127).
+	 */
+	otherOwnerChannels?: number;
+}
+
+/**
+ * Hub → Agent (daemon mode): the first frame after HELLO.
+ *
+ * `token` is checked against the daemon's `auth.json` when it has one.
+ * `hubKey` names the hub, so the daemon can give each hub its own channels;
+ * it is this hub's secret and is never logged on either side (#127). An agent
+ * without the `hub-identity` capability ignores it.
+ */
+export interface AgentAuthMessage {
+	type: "AUTH";
+	token: string;
+	hubKey?: string;
+}
+
+/**
+ * Hub → Agent (daemon mode, `hub-identity`): stop the daemon.
+ *
+ * Without `force`, a daemon still holding channels of other hubs refuses with
+ * `ERROR { code: OTHER_HUBS_HOLD_CHANNELS }` and stops nothing. Otherwise it
+ * shuts down as it does on SIGTERM, which ends every channel it holds.
+ */
+export interface AgentStopMessage {
+	type: "STOP";
+	force: boolean;
 }
 
 /** Agent → Hub: terminal title changed (OSC 0/2) */
@@ -366,6 +398,12 @@ export interface SessionStateMessage {
 	hostId: string;
 	status: SessionStatus;
 	/**
+	 * Set only when the agent serving this host holds channels of other hubs,
+	 * as its `CHANNEL_STATE_END` last said. Informational: this hub neither
+	 * sees nor touches them, but replacing that agent would end them (#127).
+	 */
+	otherOwnerChannels?: number;
+	/**
 	 * Set only when the agent answering here is not the one this hub carries.
 	 *
 	 * A hub deploys an agent matched to itself, so a difference means the one
@@ -422,6 +460,8 @@ export interface StateSyncMessage {
 		status: SessionStatus;
 		/** Set only on a mismatch. See SessionStateMessage. */
 		outdatedAgent?: { running: string; expected: string };
+		/** Set only when other hubs hold channels there. See SessionStateMessage. */
+		otherOwnerChannels?: number;
 	}>;
 	channels: Array<{
 		channelId: string;
@@ -686,6 +726,8 @@ export type AgentMessage =
 
 /** All messages that the Hub sends to the Agent */
 export type HubToAgentMessage =
+	| AgentAuthMessage
+	| AgentStopMessage
 	| AgentSpawnMessage
 	| InputMessage
 	| ResizeMessage
@@ -766,6 +808,8 @@ export type ProtocolMessage =
 	| DestroyMessage
 	| HeartbeatMessage
 	| HeartbeatAckMessage
+	| AgentAuthMessage
+	| AgentStopMessage
 	| AuthMessage
 	| AuthOkMessage
 	| AuthFailMessage

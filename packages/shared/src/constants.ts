@@ -83,6 +83,17 @@ export const ErrorCode = {
 	CHANNEL_LIMIT: "CHANNEL_LIMIT",
 	INVALID_MESSAGE: "INVALID_MESSAGE",
 	VERSION_MISMATCH: "VERSION_MISMATCH",
+	/** Agent: a newer connection took this one's place; with `hub-identity`, one of this same hub. */
+	DISPLACED: "DISPLACED",
+	/** Agent: a STOP without `force`, refused while other hubs hold channels there (#127). */
+	OTHER_HUBS_HOLD_CHANNELS: "OTHER_HUBS_HOLD_CHANNELS",
 } as const;
+
+/**
+ * HELLO capability: the daemon serves several hubs at once, each owning its
+ * own channels, told apart by the `hubKey` of their AUTH (#127). Its absence
+ * means an agent that serves one hub at a time, the last to connect.
+ */
+export const HUB_IDENTITY_CAPABILITY = "hub-identity";
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];

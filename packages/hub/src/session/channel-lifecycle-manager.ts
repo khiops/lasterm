@@ -20,7 +20,8 @@ import type {
 	UiSpawnOkMessage,
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@lasterm/shared";
-import type { AgentConnection } from "./agent-connection.js";
+import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
+import { daemonAuthFrame } from "./daemon-auth.js";
 import {
 	clearContext,
 	clearElevationContextsForChannel,
@@ -1205,7 +1206,17 @@ export class ChannelLifecycleManager {
 	): Promise<boolean> {
 		if (agent.usedRemoteDaemon !== true) return false;
 		try {
-			this.reconcileChannelState(hostId, await agent.waitForChannelState());
+			// A daemon that serves several hubs waits for this before it says
+			// what it holds, since what it says depends on who is asking (#127).
+			// It never gets this hub's token: see daemonAuthFrame.
+			const auth = daemonAuthFrame(agent, { token: null, hubKey: this.ctx.hubKey });
+			if (auth !== null) agent.send(auth);
+			this.reconcileChannelState(hostId, await agent.waitForChannelState(), agent);
+			// The session was announced active before the daemon had said what
+			// other hubs hold there; say it now that it has.
+			if (agent.otherOwnerChannels !== undefined && this.ctx.agents.get(hostId) === agent) {
+				this.broadcaster.announceSessionState(hostId);
+			}
 		} catch (stateErr) {
 			// Reachable, and it will not say what it holds. Most likely it wants a
 			// token: a remote running its own hub has an auth.json of its own, and
@@ -1219,7 +1230,22 @@ export class ChannelLifecycleManager {
 		return true;
 	}
 
-	reconcileChannelState(hostId: string, states: AgentChannelStateMessage[]): void {
+	/**
+	 * Judge this host's channels against what the daemon reports holding.
+	 *
+	 * `agent` is the connection that reported them. When it has `hub-identity`,
+	 * everything it listed belongs to this hub (#127), so one this hub does not
+	 * know is its own orphan and is destroyed. Without that capability the
+	 * list may hold other hubs' channels, and anything unknown is left alone.
+	 */
+	reconcileChannelState(
+		hostId: string,
+		states: AgentChannelStateMessage[],
+		agent?: AgentConnection,
+	): void {
+		if (agent !== undefined && hasHubIdentity(agent)) {
+			this.destroyOrphans(hostId, states, agent);
+		}
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
 
 		for (const [channelId, channelState] of this.ctx.channels) {
@@ -1252,6 +1278,45 @@ export class ChannelLifecycleManager {
 				this.forgetChannel(channelId);
 			}
 		}
+	}
+
+	/**
+	 * Destroy what a daemon holds for this hub that this hub does not know.
+	 *
+	 * Only an agent with `hub-identity` reaches here, and it reports only this
+	 * hub's channels, so nothing else will ever claim one this hub does not
+	 * know: a SPAWN whose answer was lost, a terminal closed while the daemon
+	 * was out of reach. Left alone, each keeps a shell running that nothing
+	 * can see, until the daemon itself stops.
+	 *
+	 * Known means tracked here, whatever host it is filed under — two host
+	 * entries can reach one daemon — or recorded as not yet dead. A terminal
+	 * this hub has declared dead is its to end.
+	 */
+	private destroyOrphans(
+		hostId: string,
+		states: AgentChannelStateMessage[],
+		agent: AgentConnection,
+	): void {
+		const orphans = states
+			.map((state) => state.channelId)
+			.filter((channelId) => {
+				if (this.ctx.channels.has(channelId)) return false;
+				const recorded = this.ctx.metaDal.getChannel(channelId);
+				return recorded === undefined || recorded.status === "dead";
+			});
+		if (orphans.length === 0) return;
+		for (const channelId of orphans) {
+			agent.send({ type: "DESTROY", channelId } satisfies DestroyMessage);
+		}
+		this.ctx.hubLogger?.log("info", "channel-lifecycle: destroyed orphan terminals", {
+			hostId,
+			count: orphans.length,
+		});
+		this.ctx.hubLogger?.log("debug", "channel-lifecycle: orphan terminals destroyed", {
+			hostId,
+			channelIds: orphans,
+		});
 	}
 
 	// ─── Private elevation helpers ────────────────────────────────────────────

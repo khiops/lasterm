@@ -15,6 +15,7 @@ import {
 	type RuntimeInfo,
 } from "./cli.js";
 import { ConfigResolver, loadTlsConfig } from "./config.js";
+import { loadHubKey } from "./hub-key.js";
 import { acquireHubLock } from "./hub-lock.js";
 import { boundDaemonLog } from "./logging/daemon-log.js";
 import { HubLogger } from "./logging/hub-logger.js";
@@ -72,6 +73,7 @@ export interface HubStartupDependencies {
 	/** Returns whether the process's output is now checked against the daemon log's limit. */
 	readonly boundDaemonLog: () => boolean;
 	readonly initAuth: typeof initAuth;
+	readonly loadHubKey: typeof loadHubKey;
 	readonly createOwnerToken: typeof createOwnerToken;
 	readonly openDatabases: typeof openDatabases;
 	readonly sweepNonPrimaryTokens: typeof sweepNonPrimaryTokens;
@@ -93,6 +95,7 @@ const defaultDependencies: HubStartupDependencies = {
 	acquireHubLock,
 	boundDaemonLog: () => boundDaemonLog() !== undefined,
 	initAuth,
+	loadHubKey,
 	createOwnerToken,
 	openDatabases,
 	sweepNonPrimaryTokens,
@@ -192,6 +195,9 @@ export async function startHub(
 			dependencies.loadTlsConfig(configDir),
 		);
 		const authToken = dependencies.initAuth(configDir);
+		// From the directory just locked: the key names this hub to its agent
+		// daemons, so it belongs to the state this lock guards (#127).
+		const hubKey = dependencies.loadHubKey(stateDir);
 		const ownerToken = dependencies.createOwnerToken();
 		const databases = dependencies.openDatabases(stateDir);
 		dbManager = databases;
@@ -215,6 +221,7 @@ export async function startHub(
 			...(daemonLogBounded ? { logger: { destination: STANDARD_OUTPUT } } : {}),
 			tls: tlsIdentity.tls,
 			authToken,
+			hubKey,
 			ownerToken,
 			dbManager: databases,
 			securityLog,

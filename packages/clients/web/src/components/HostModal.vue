@@ -276,6 +276,11 @@
 									connection drops, and across a Lasterm restart. It is a process on
 									that machine, which ends by itself once it holds no terminals.
 								</p>
+								<p v-if="otherOwnerChannels" class="field-hint auth-note">
+									Other Lasterm hubs also use this host's agent, and hold
+									{{ otherOwnerChannels }} terminal{{ otherOwnerChannels === 1 ? "" : "s" }}
+									there. This one leaves them alone.
+								</p>
 								<div v-if="outdatedAgent" class="outdated-agent">
 									<p class="outdated-agent__text">
 										This host is served by agent {{ outdatedAgent.running }}; this
@@ -601,6 +606,7 @@ import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
 import { useAuthStore } from "../stores/auth.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
+import { type ReplaceAgentResponse, replaceAgentWithConsent } from "../utils/replace-agent.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
 import { iconImageFromFile, isDisplayableIconImage } from "../utils/host-icon.js";
 import { describeTestPlatform } from "../utils/test-connect-platform.js";
@@ -633,9 +639,19 @@ const replacingAgent = ref(false);
 const replaceMessage = ref<string | null>(null);
 
 /**
+ * How many terminals other Lasterm hubs hold on the agent serving this host,
+ * when there are any (#127). They are not this hub's, and replacing the agent
+ * would end them too.
+ */
+const otherOwnerChannels = computed(() =>
+	props.editHost === null ? null : hostsStore.getOtherOwnerChannels(props.editHost.id),
+);
+
+/**
  * Stop the agent serving this host, so the next connection starts the current
  * one. Everything it is holding ends with it, which is why this is only ever a
- * button someone presses.
+ * button someone presses — and why ending terminals other hubs opened there
+ * takes a second yes.
  */
 async function onReplaceAgent(): Promise<void> {
 	const host = props.editHost;
@@ -643,20 +659,24 @@ async function onReplaceAgent(): Promise<void> {
 	replacingAgent.value = true;
 	replaceMessage.value = null;
 	try {
-		const response = await hubFetch(`${hubBaseUrl()}/api/hosts/${host.id}/agent/replace`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${useAuthStore().token ?? ""}`,
+		replaceMessage.value = await replaceAgentWithConsent({
+			post: async (force) => {
+				const response = await hubFetch(`${hubBaseUrl()}/api/hosts/${host.id}/agent/replace`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${useAuthStore().token ?? ""}`,
+					},
+					body: JSON.stringify({ force }),
+				});
+				return {
+					ok: response.ok,
+					status: response.status,
+					body: (await response.json()) as ReplaceAgentResponse["body"],
+				};
 			},
+			confirm: (question) => window.confirm(question),
 		});
-		const body = (await response.json()) as {
-			message?: string;
-			error?: { message?: string };
-		};
-		replaceMessage.value = response.ok
-			? (body.message ?? "The agent was stopped.")
-			: (body.error?.message ?? `The hub answered ${response.status}.`);
 	} catch (error) {
 		replaceMessage.value = `Could not reach the hub: ${error instanceof Error ? error.message : String(error)}`;
 	} finally {

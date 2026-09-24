@@ -323,3 +323,53 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decoded).toEqual(msg);
 	});
 });
+
+// The fields #127 adds to the hub <-> agent protocol. The agent reads the wire
+// names with serde, so a camelCase key reaching it would be a field it ignores:
+// a hub key it never sees, and a hub it files under the legacy owner.
+describe("hub identity on the wire (#127)", () => {
+	it("sends the hub key of an agent AUTH as hub_key", () => {
+		const msg: ProtocolMessage = { type: "AUTH", token: "a".repeat(64), hubKey: "b".repeat(64) };
+
+		expect(toSnakeCase(msg)).toEqual({
+			type: "AUTH",
+			token: "a".repeat(64),
+			hub_key: "b".repeat(64),
+		});
+		expect(decodeMessage(encodeMessage(msg))).toEqual(msg);
+	});
+
+	it("reads other_owner_channels from a CHANNEL_STATE_END", () => {
+		const wire = { type: "CHANNEL_STATE_END", other_owner_channels: 3 };
+
+		expect(toCamelCase(wire)).toEqual({ type: "CHANNEL_STATE_END", otherOwnerChannels: 3 });
+	});
+
+	it("reads other_owner_channels from a STOP refusal", () => {
+		const wire = {
+			type: "ERROR",
+			code: "OTHER_HUBS_HOLD_CHANNELS",
+			message: "other hubs hold channels here",
+			other_owner_channels: 2,
+		};
+
+		expect(toCamelCase(wire)).toEqual({
+			type: "ERROR",
+			code: "OTHER_HUBS_HOLD_CHANNELS",
+			message: "other hubs hold channels here",
+			otherOwnerChannels: 2,
+		});
+	});
+
+	it("reads a CHANNEL_STATE_END without it, as an agent before #127 sends it", () => {
+		expect(toCamelCase({ type: "CHANNEL_STATE_END" })).toEqual({ type: "CHANNEL_STATE_END" });
+	});
+
+	it("round-trips a STOP with its force flag", () => {
+		for (const force of [false, true]) {
+			const msg: ProtocolMessage = { type: "STOP", force };
+			expect(toSnakeCase(msg)).toEqual({ type: "STOP", force });
+			expect(decodeMessage(encodeMessage(msg))).toEqual(msg);
+		}
+	});
+});

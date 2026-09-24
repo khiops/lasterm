@@ -240,6 +240,12 @@ export interface SharedSessionContext {
 	/** Primary auth token for daemon agent authentication */
 	primaryToken: string | null;
 	/**
+	 * This hub's key, from `hub-key` in its state directory: sent in the AUTH of
+	 * every daemon connection so the daemon gives this hub its own channels
+	 * (#127). Null for a manager built without one, as tests do. Never logged.
+	 */
+	hubKey: string | null;
+	/**
 	 * Session-acquisition state machine (P1/P2/P3 redesign — invariants 1–9).
 	 * Replaces the old acquiringSessions + sessionWaiters pair.
 	 *

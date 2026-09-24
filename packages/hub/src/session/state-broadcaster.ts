@@ -73,16 +73,37 @@ export class StateBroadcaster {
 		return { running, expected: HUB_VERSION };
 	}
 
+	/**
+	 * How many channels other hubs hold on the agent serving this host, when
+	 * there are any, as its last CHANNEL_STATE_END said (#127). Informational:
+	 * this hub never acts on them, but replacing that agent would end them.
+	 */
+	private otherOwnerChannelsOn(hostId: string): number | null {
+		const count = this.ctx.agents.get(hostId)?.otherOwnerChannels;
+		return count !== undefined && count > 0 ? count : null;
+	}
+
+	/** What a SESSION_STATE or a STATE_SYNC entry says about the agent serving a host. */
+	private agentStatusOn(
+		hostId: string,
+	): Pick<SessionStateMessage, "outdatedAgent" | "otherOwnerChannels"> {
+		const outdatedAgent = this.outdatedAgentOn(hostId);
+		const otherOwnerChannels = this.otherOwnerChannelsOn(hostId);
+		return {
+			...(outdatedAgent !== null && { outdatedAgent }),
+			...(otherOwnerChannels !== null && { otherOwnerChannels }),
+		};
+	}
+
 	getStateSnapshot(): StateSyncMessage {
 		const sessions: StateSyncMessage["sessions"] = [];
 		for (const [hostId, state] of this.ctx.sessions) {
 			if (state.status !== "closed") {
-				const outdatedAgent = this.outdatedAgentOn(hostId);
 				sessions.push({
 					sessionId: state.id,
 					hostId,
 					status: state.status,
-					...(outdatedAgent !== null && { outdatedAgent }),
+					...this.agentStatusOn(hostId),
 				});
 			}
 		}
@@ -113,16 +134,30 @@ export class StateBroadcaster {
 		}
 		this.ctx.metaDal.updateSessionStatus(sessionId, status);
 
-		const outdatedAgent = this.outdatedAgentOn(hostId);
-
 		const stateMsg: SessionStateMessage = {
 			type: "SESSION_STATE",
 			sessionId,
 			hostId,
 			status,
-			...(outdatedAgent !== null && { outdatedAgent }),
+			...this.agentStatusOn(hostId),
 		};
 		this.broadcastToAllClients(stateMsg);
+	}
+
+	/**
+	 * Say again what this host's session is, when what is known about its agent
+	 * has changed and its status has not: nothing is written, only broadcast.
+	 */
+	announceSessionState(hostId: string): void {
+		const state = this.ctx.sessions.get(hostId);
+		if (state === undefined) return;
+		this.broadcastToAllClients({
+			type: "SESSION_STATE",
+			sessionId: state.id,
+			hostId,
+			status: state.status,
+			...this.agentStatusOn(hostId),
+		} satisfies SessionStateMessage);
 	}
 
 	updateChannelStatus(

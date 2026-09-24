@@ -138,6 +138,26 @@ export const useHostsStore = defineStore("hosts", () => {
 		_outdatedAgents.value = new Map(_outdatedAgents.value).set(hostId, outdated);
 	}
 
+	/**
+	 * Terminals other Lasterm hubs hold on the agent serving a host, as the hub
+	 * reports it: present when there are some, absent when there are none (#127).
+	 */
+	const _otherOwnerChannels = ref<Map<string, number>>(new Map());
+
+	/** How many terminals other hubs hold on this host's agent, or null when none. */
+	function getOtherOwnerChannels(hostId: string): number | null {
+		return _otherOwnerChannels.value.get(hostId) ?? null;
+	}
+
+	function rememberOtherOwnerChannels(hostId: string, count: number | undefined): void {
+		const known = _otherOwnerChannels.value.get(hostId);
+		if (count === known) return;
+		const next = new Map(_otherOwnerChannels.value);
+		if (count === undefined) next.delete(hostId);
+		else next.set(hostId, count);
+		_otherOwnerChannels.value = next;
+	}
+
 	function updateSessionStatus(hostId: string, status: SessionStatus): void {
 		_sessionStatuses.value.set(hostId, status);
 		// Trigger Vue reactivity on the Map by replacing the ref value
@@ -358,6 +378,8 @@ export const useHostsStore = defineStore("hosts", () => {
 		getHostStatus,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
+		getOtherOwnerChannels,
+		rememberOtherOwnerChannels,
 		reorderHosts,
 		createHost,
 		updateHost,

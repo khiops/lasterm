@@ -134,6 +134,12 @@ interface ServerBaseOptions {
 	logger?: boolean | ServerLogOptions;
 	dbManager?: DatabaseManager; // when provided, WS routes are registered
 	authToken?: string; // when provided, Bearer auth is enforced on all routes except /api/health
+	/**
+	 * This hub's key, sent to every agent daemon in its AUTH so the daemon can
+	 * give this hub its own channels (#127). startHub always passes it; a server
+	 * built without one is a legacy hub to the daemon. Never logged.
+	 */
+	hubKey?: string;
 	ownerToken?: string; // shutdown-only owner token from runtime.json
 	onShutdown?: () => Promise<void> | void; // called after POST /api/shutdown has replied
 	/** Called by owner-token POST /api/quit while its response remains open. */
@@ -480,6 +486,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		const activeSessionManager = sessionManager;
 		if (options?.authToken) {
 			activeSessionManager.setPrimaryToken(options.authToken);
+		}
+		if (options?.hubKey) {
+			activeSessionManager.setHubKey(options.hubKey);
 		}
 		const metaDal = new MetaDAL(options.dbManager.meta);
 		metaDal.migrateHostGroupData();

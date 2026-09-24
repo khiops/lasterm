@@ -30,7 +30,12 @@ import type {
 	UiAttachOkMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
-import { DEFAULT_AGENT_CONFIG, generateId, validateCustomCommand } from "@lasterm/shared";
+import {
+	DEFAULT_AGENT_CONFIG,
+	ErrorCode,
+	generateId,
+	validateCustomCommand,
+} from "@lasterm/shared";
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { LoggerRegistry } from "../logging/index.js";
@@ -43,10 +48,12 @@ import {
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
+import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { requestDaemonStop } from "./daemon-stop.js";
 import { OutputChunker } from "./output-chunker.js";
 import {
 	clearContext,
@@ -93,6 +100,21 @@ export interface WsClient {
 
 const ATTACH_TIMEOUT_MS = 5_000;
 const AGENT_CLOSE_TIMEOUT_MS = 2_000;
+
+/** What came of asking to replace the agent serving a host. */
+export type ReplaceAgentOutcome =
+	| { readonly replaced: true; readonly message: string }
+	| {
+			readonly replaced: false;
+			readonly message: string;
+			/**
+			 * Set when the agent refused because other hubs hold channels there
+			 * (#127): asking again with `force` ends them too.
+			 */
+			readonly code?: typeof ErrorCode.OTHER_HUBS_HOLD_CHANNELS;
+			/** How many, when the agent said. */
+			readonly otherOwnerChannels?: number;
+	  };
 
 function isAgentChannelNotFoundError(err: unknown, channelId: string): err is ErrorMessage {
 	if (typeof err !== "object" || err === null) return false;
@@ -197,6 +219,7 @@ export class SessionManager {
 			// as tests do, records nothing.
 			security: securityLog ?? discardingSecurityLog(),
 			primaryToken: null,
+			hubKey: null,
 		};
 		this.ctx = ctx;
 
@@ -393,6 +416,10 @@ export class SessionManager {
 
 	setPrimaryToken(token: string): void {
 		this.ctx.primaryToken = token;
+	}
+
+	setHubKey(key: string): void {
+		this.ctx.hubKey = key;
 	}
 
 	getMetaDal(): SessionMetaDAL {
@@ -1580,8 +1607,16 @@ export class SessionManager {
 	 * The stop goes over the connection already open — opening another would
 	 * ask for a password again — and the agent is dropped afterwards, so the
 	 * next attach connects fresh and deploys the matching binary.
+	 *
+	 * An agent that serves several hubs (#127) is asked over the protocol, and
+	 * refuses while other hubs hold terminals there unless `force` says to end
+	 * those too. One that does not is stopped with its own `--stop`, as before,
+	 * which knows nothing of other hubs; so is any agent the STOP cannot reach.
 	 */
-	async replaceAgent(hostId: string): Promise<{ replaced: boolean; message: string }> {
+	async replaceAgent(
+		hostId: string,
+		options: { readonly force?: boolean } = {},
+	): Promise<ReplaceAgentOutcome> {
 		const agent = this.ctx.agents.get(hostId);
 		if (!(agent instanceof SshAgent) || !agent.connected) {
 			return { replaced: false, message: "This host has no agent connected to replace." };
@@ -1592,6 +1627,51 @@ export class SessionManager {
 				message:
 					"This host's agent runs with its connection, so it is already replaced whenever it reconnects.",
 			};
+		}
+
+		if (hasHubIdentity(agent)) {
+			const stop = await requestDaemonStop(agent, {
+				force: options.force === true,
+				// Let go first: a stop that was asked for is not a dropped link to
+				// dial again, which is what the close handling would otherwise read,
+				// and the security log records the disconnect as this hub's doing.
+				onStopped: () => {
+					agent.closedByHub = true;
+					this.releaseAgent(hostId, agent);
+				},
+			});
+			switch (stop.kind) {
+				case "stopped":
+					return {
+						replaced: true,
+						message:
+							"The agent was stopped. The next terminal on this host starts the current one.",
+					};
+				case "refused":
+					return {
+						replaced: false,
+						code: ErrorCode.OTHER_HUBS_HOLD_CHANNELS,
+						message: stop.message,
+						...(stop.otherOwnerChannels !== null && {
+							otherOwnerChannels: stop.otherOwnerChannels,
+						}),
+					};
+				case "error":
+					return {
+						replaced: false,
+						message: `The agent would not stop (${stop.code}: ${stop.message}). Nothing was changed.`,
+					};
+				case "timeout":
+					return {
+						replaced: false,
+						message:
+							"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
+					};
+				case "unsent":
+					// No connection to say it on: the out-of-band stop below still
+					// has the SSH connection, which is what it runs over.
+					break;
+			}
 		}
 
 		const remotePath = agent.remoteAgentPath;
@@ -1618,14 +1698,19 @@ export class SessionManager {
 		// Its terminals ended with it. Letting go of the connection is what makes
 		// the next attach deploy and start the version this hub carries.
 		agent.close();
-		if (this.ctx.agents.get(hostId) === agent) {
-			this.ctx.agents.delete(hostId);
-			this.ctx.agentCapabilities.delete(hostId);
-		}
+		this.releaseAgent(hostId, agent);
 		return {
 			replaced: true,
 			message: "The agent was stopped. The next terminal on this host starts the current one.",
 		};
+	}
+
+	/** Stop reaching this host through `agent`, if it still is the way to. */
+	private releaseAgent(hostId: string, agent: AgentConnection): void {
+		if (this.ctx.agents.get(hostId) === agent) {
+			this.ctx.agents.delete(hostId);
+			this.ctx.agentCapabilities.delete(hostId);
+		}
 	}
 
 	private async reconnectForAttach(hostId: string): Promise<boolean> {

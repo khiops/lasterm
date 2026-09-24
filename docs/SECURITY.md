@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-05
+> Last updated: 2026-09-24
 
 ## 1. Threat Model
 
@@ -281,13 +281,56 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 - No authentication on the UDS itself — OS filesystem permissions serve as the trust boundary (same model as Docker socket, ssh-agent socket)
 
 **Connection model:**
-- Last-writer-wins displacement: a new hub connection immediately replaces the previous one
-- No multi-client support — the daemon serves exactly one hub at a time
+- An agent with the `hub-identity` capability serves several hubs at once, and every channel has
+  exactly one owner, the hub that spawned it. A new connection replaces only the same hub's previous
+  one (§ 3.6, PROTOCOL.md § 3.1b)
+- An agent without it serves one hub at a time: the newest authenticated connection displaces the
+  previous one, which is told so with `DISPLACED`
 - Stale socket detection: `probeSocket()` distinguishes ECONNREFUSED (stale, safe to unlink) from EACCES (another user's socket, must not touch)
 
 **Future hardening (deferred):**
 - Linux: `SO_PEERCRED` peer UID verification (verify connecting process runs as the same user)
 - Windows: named pipe ACL hardening (restrict access to current user SID)
+
+### 3.6 Hub identity on a shared daemon (#127)
+
+One daemon can be reached by several hubs of the same account: a test instance beside the real
+one, each with its own state directory and lock, or two machines reaching one remote host. Before
+#127 whichever connected last saw every channel, and received the output queued while nobody was
+connected. Channels belong to a hub, since they live in its `meta.db`, so the daemon now keeps them
+apart by who spawned them.
+
+**The key.** Each hub has a key: 32 random bytes as 64 lowercase hex characters, created once in its
+state directory as `hub-key` and read on every start after that. It is created mode 0600, written
+whole before it takes its name; on Windows it relies on the profile's default ACL, as `auth.json`
+does (#200). The hub sends it in the AUTH of every daemon connection, local and remote (PROTOCOL.md
+§ 3.1b). The daemon keeps only its SHA-256, the owner id, and compares owner ids in constant time;
+its logs may show the owner id's first 8 hex characters. The hub never logs the key, and an error
+about the file names the file without quoting it.
+
+A `hub-key` that holds anything but a key stops the hub from starting, naming the file. It is not
+replaced: a new key is a new owner, and every channel the old one owns on every daemon becomes a
+stranger's, out of this hub's reach, with nothing to say why. Deleting the file is how a hub takes a
+new identity on purpose, at that price: the old key's channels stay on their daemons, counted among
+"other hubs" there, until those daemons stop.
+
+**What it protects.** Misrouting, and another legitimate hub on the same account. A hub sees, drives
+and receives the output of its own channels only: another owner's channel answers exactly as an
+unknown one does, its output is queued for its owner alone, and a stop that would end it has to be
+forced (PROTOCOL.md § 3.17).
+
+**What it does not protect.** It is not a signature, and it is not a boundary against the account
+itself. Whoever reaches the socket already is that OS user, and could read `hub-key` from the state
+directory, or replace the agent binary. A remote host that is compromised learns the key of every hub
+that reaches it, which lets it claim those hubs' channels on daemons it can already reach, and
+nothing more; the same key sent to several remote hosts also lets them recognise the same hub. A hub
+that presents no key is the owner `legacy`, which keeps the behaviour from before #127 among such
+hubs: the last one wins.
+
+**Identities that were rejected.** The TLS key: rotating it (#193) would orphan every channel. The
+primary token: every hub reading the same `auth.json` shares it, and replacing it (§ 2.1) would orphan
+every channel too. The primary token also stays on this machine: a remote daemon's AUTH carries an
+empty token and the hub key only.
 
 ## 4. Data Protection
 
@@ -296,6 +339,7 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 | Data | Location | Protection (MVP) | Protection (P2) |
 |------|----------|-------------------|-----------------|
 | Auth token | auth.json | chmod 600 | OS keychain |
+| Hub key | `hub-key` in the state dir | chmod 600; on Windows the profile's default ACL (§ 3.6) | — |
 | Pairing codes | meta.db | HMAC-SHA-256 under a key held in memory for one hub run, never the code (§ 2.3) | — |
 | SSH key paths | meta.db | chmod 600 on DB | SQLCipher |
 | Host configs | meta.db | chmod 600 | SQLCipher |
@@ -328,6 +372,7 @@ again, which is now roughly every two and a quarter years rather than every rest
 ### 4.3 In Memory
 
 - Auth token: kept in memory for comparison
+- Hub key: read once at start and kept for the run, to put in each daemon connection's AUTH (§ 3.6)
 - Pairing-code key: 32 random bytes drawn at each hub start, never written; a restart discards it (§ 2.3)
 - SSH passwords: cleared after authentication (not stored)
 - Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
@@ -511,6 +556,7 @@ the number that were not.
 ### 7.2 What is NOT logged
 
 - Auth tokens (never in logs)
+- The hub key (never in logs, nor quoted by an error about its file; § 3.6)
 - SSH passwords (never in logs)
 - Terminal output content (never in logs — goes to spool.db only)
 - Pairing codes (never in logs — only expiry time)

@@ -334,6 +334,66 @@ describe("quit-protected revival capabilities", () => {
 		expect((agent as unknown as { close: () => void }).close).toHaveBeenCalled();
 	});
 
+	describe("what DISPLACED means depends on the agent (#127)", () => {
+		function displacedAgentSaying(capabilities: string[]) {
+			const built = makeHarness();
+			const log = vi.fn();
+			(built.ctx as unknown as { hubLogger: unknown }).hubLogger = { log };
+			const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+			const agent = Object.assign(new EventEmitter(), {
+				close: vi.fn(),
+				helloMessage: {
+					type: "HELLO",
+					version: PROTOCOL_VERSION,
+					agentVersion: HUB_VERSION,
+					capabilities,
+				},
+			});
+			(built.ctx.agents as unknown as Map<string, unknown>).set(HOST_ID, agent);
+			built.manager.wireAgentEvents(HOST_ID, SESSION_ID, agent as never);
+			agent.emit("message", {
+				type: "ERROR",
+				code: "DISPLACED",
+				message: "a newer connection has taken over",
+			});
+			const loudLines = log.mock.calls.filter(([level]) =>
+				["info", "warn", "error"].includes(level as string),
+			);
+			return { ...built, agent, consoleError, loudLines };
+		}
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it("with hub-identity, drops the stale connection quietly: this hub replaced it itself", () => {
+			const { ctx, broadcaster, agent, consoleError, loudLines } = displacedAgentSaying([
+				"multiplex",
+				"hub-identity",
+			]);
+
+			expect(ctx.agents.has(HOST_ID)).toBe(false);
+			expect(agent.close).toHaveBeenCalled();
+			// Housekeeping: a debug line, nothing on the console, nothing to a client.
+			expect(loudLines).toEqual([]);
+			expect(consoleError).not.toHaveBeenCalled();
+			expect(broadcaster.broadcastToAllClients).not.toHaveBeenCalled();
+		});
+
+		it("without it, says another connection took the agent over, as before", () => {
+			const { ctx, agent, consoleError, loudLines } = displacedAgentSaying(["multiplex"]);
+
+			expect(ctx.agents.has(HOST_ID)).toBe(false);
+			expect(agent.close).toHaveBeenCalled();
+			expect(loudLines).toEqual([
+				["warn", "agent-connection-manager: displaced by another hub", expect.anything()],
+			]);
+			expect(consoleError).toHaveBeenCalledWith(
+				expect.stringContaining("another connection has taken over the agent"),
+			);
+		});
+	});
+
 	it("does not expose the three unfenced commit escapes", () => {
 		// The aliases above are compile-level assertions. Keep this test colocated
 		// with the manager so Vitest reports the regression alongside its source.

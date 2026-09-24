@@ -83,7 +83,10 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
   with `hub-identity`, to the current connection of the hub that owns the terminal (§ 3.1b).
   Replies (SPAWN_OK, ATTACH_OK, SNAPSHOT_RES, ERROR) go to the connection that asked.
 - Agent queues output and events while no hub is connected (up to 1000 frames, oldest dropped);
-  with `hub-identity`, each hub has its own queue, flushed only to that hub's next connection
+  with `hub-identity`, each hub has its own queue, flushed only to that hub's next connection, as
+  soon as it has authenticated: before its channel state and before any reply. A CHANNEL_EXIT
+  queued while the hub was away therefore never follows the SPAWN_OK of a terminal restarted under
+  the same id
 - On reconnect: agent sends HELLO, reads the hub's AUTH, then enumerates channel state (see section 3.16)
 
 ### 2.2 Hub ↔ UI (WebSocket)
@@ -157,7 +160,16 @@ connections: the last one wins.
 
 An agent with `hub-identity` reads the first frame after HELLO even when it has no `auth.json`: an
 AUTH sets the owner from `hub_key`; any other frame from a hub that sends none makes the connection
-`legacy`, and is processed normally. The existing AUTH timeout applies.
+`legacy`, and is processed normally, once the channel state is sent. What the hub sends right behind
+its AUTH is kept and processed after the state too. How long the agent waits for that first frame:
+
+| Daemon | Nothing arrives in time |
+|--------|-------------------------|
+| With a token | 5 s, then the connection is closed, as before #127 |
+| Without a token | 2 s, then the connection is `legacy` and gets its channel state. A hub from before #127 sends nothing to such a daemon and waits 5 s for the state; this is what still serves it |
+
+A daemon whose `auth.json` is missing beside a `meta.db`, unreadable or malformed refuses every
+AUTH, one with an empty token included. An empty `hub_key` counts as none.
 
 **What the owner decides.** SPAWN makes the connection's owner the channel's owner, for good. INPUT,
 RESIZE, DESTROY, ATTACH and SNAPSHOT_REQ on a channel another owner holds behave exactly as for an
@@ -386,7 +398,8 @@ Sent by the agent to the hub immediately after HELLO when reconnecting to a daem
 ```
 
 **With `hub-identity`** the list holds only the channels of the connection's owner (§ 3.1b), sent
-once the daemon has read the AUTH. Every channel in it is therefore this hub's, and one the hub does
+once the daemon has read the AUTH. What the owner's terminals sent while it had no connection comes
+before it (§ 2.1b), so a hub may get OUTPUT or CHANNEL_EXIT before CHANNEL_STATE_END. Every channel in it is therefore this hub's, and one the hub does
 not know — neither tracked nor recorded as alive, such as a SPAWN whose answer was lost — is its own
 orphan: the hub sends it DESTROY, and logs how many once, at INFO. `other_owner_channels` counts the
 channels of other owners. It is informational: the hub shows it with the host's session state
@@ -433,9 +446,15 @@ daemon that other owners still hold channels on refuses, and stops nothing:
 }
 ```
 
-`other_owner_channels` is absent on every other ERROR. Otherwise the daemon shuts down as on
-SIGTERM, ending every channel it holds; it sends nothing first, and the connection ending is the
-answer. A stdio agent ignores STOP or answers an error.
+`other_owner_channels` is absent on every other ERROR. The message starts with the count, e.g.
+`2 terminals on this agent belong to other hubs; …`.
+
+Otherwise the daemon shuts down as on SIGTERM, ending every channel it holds, and is recorded as a
+stop that was asked for, under the same deadline. It sends nothing first. From the STOP on it
+refuses any new SPAWN, so no terminal can start between the count and the teardown; once the
+terminals are torn down it closes every hub connection, what each had queued going out first. The
+connection ending is the answer. A stdio agent answers `ERROR { code: "INVALID_MESSAGE" }` and keeps
+running: it ends when its input closes.
 
 The hub sends it only to an agent that advertises `hub-identity`. It takes the count from the
 refusal's `other_owner_channels` when that is a whole number of zero or more; failing that, from
@@ -1244,7 +1263,7 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `PERMISSION_DENIED` | Agent | Cannot spawn PTY (user/cgroup restriction) |
 | `PTY_SPAWN_FAILED` | Agent | node-pty.spawn() threw (generic) |
 | `CHANNEL_LIMIT` | Agent | Max channels reached (default 50 per agent) |
-| `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT for unknown channel_id; with `hub-identity`, also for a channel another hub owns, which is never told apart from an unknown one |
+| `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT/RESIZE for unknown channel_id (DESTROY and SNAPSHOT_REQ answer nothing); with `hub-identity`, also for a channel another hub owns, which is never told apart from an unknown one, byte for byte |
 | `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
 | `VERSION_MISMATCH` | Hub | Agent protocol version too new |
 | `DISPLACED` | Agent | A newer connection took this one's place, and this one ends. With `hub-identity`, only ever a newer connection of the same hub (§ 3.1b) |

@@ -118,7 +118,7 @@ function Start-Agent {
     } else { Join-Path $Root "target" }
     $agentBin = Join-Path $targetDir "release\lasterm-agent.exe"
     $proc = Start-Process -FilePath $agentBin `
-        -ArgumentList "--daemon", "--socket", $PipePath, "--buffer-per-channel", "1048576", "--buffer-global", "20971520" `
+        -ArgumentList "--daemon", "--socket", $PipePath `
         -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$LogDir\agent-stdout.log" `
         -RedirectStandardError "$LogDir\agent-stderr.log"

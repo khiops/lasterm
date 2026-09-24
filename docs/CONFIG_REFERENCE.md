@@ -181,9 +181,8 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | socket_path | string | auto-detect | UDS / named pipe path for daemon IPC |
-| buffer_per_channel | number \| string | `"1MB"` | Per-channel output buffer size (supports `KB`, `MB`, `GB`) |
-| buffer_global | number \| string | `"20MB"` | Global output buffer limit across all channels |
-| log_level | `"trace"` \| `"debug"` \| `"info"` \| `"warn"` \| `"error"` | `"info"` | Agent daemon log level |
+
+The agent's log level and format come from `[logging]` (SPEC.md § 6.2); a `log_level` under `[agent]` is not read. Neither are `buffer_per_channel` and `buffer_global`: no Rust agent ever applied them (SPEC.md § 3.2). A file that still sets them loads as before.
 
 ---
 
@@ -235,10 +234,6 @@ style = "thin"
 
 [gc]
 dead_retention_hours = 48
-
-[agent]
-buffer_per_channel = "2MB"
-log_level = "info"
 ```
 
 ---
@@ -249,4 +244,3 @@ log_level = "info"
 - Layers 3–4 (host/channel profiles) only support `[terminal]` keys. UI sections such as `[tabs]`, `[search]`, `[appearance]`, and `[gc]` are global-only.
 - Setting a key to `null` in a profile JSON removes that key, causing resolution to fall back to the previous layer.
 - The `[terminal].wallpaper` value is a filename, not a path. Files must be placed in `$XDG_CONFIG_HOME/lasterm/` (or the platform equivalent) and served by the hub.
-- `buffer_per_channel` and `buffer_global` accept plain integers (bytes) or strings with a unit suffix: `"512KB"`, `"2MB"`, `"1GB"`.

@@ -379,7 +379,7 @@ again, which is now roughly every two and a quarter years rather than every rest
 - Pairing-code key: 32 random bytes drawn at each hub start, never written; a restart discards it (§ 2.3)
 - SSH passwords: cleared after authentication (not stored)
 - Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
-- Terminal output (daemon agent): `OutputBuffer` ring buffer — per-channel cap (default 1 MB) + global cap (default 20 MB), oldest data evicted from largest channel
+- Terminal output (daemon agent): while a hub has no connection, up to 1000 frames per hub, about 8 MiB at most, oldest dropped (SPEC.md § 3.2). While a hub is connected, nothing bounds what waits for it to read (#553)
 - Snapshots: kept in cache, limited by GC policy
 
 ### 4.4 How a protected file is reached

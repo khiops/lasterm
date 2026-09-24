@@ -216,10 +216,9 @@ describe("connectOrLaunch", () => {
 				expect(cliArgs).toContain("--daemon");
 				expect(cliArgs).toContain("--socket");
 				expect(cliArgs).toContain(socketPath);
-				expect(cliArgs).toContain("--buffer-per-channel");
-				expect(cliArgs).toContain(String(config.bufferPerChannel));
-				expect(cliArgs).toContain("--buffer-global");
-				expect(cliArgs).toContain(String(config.bufferGlobal));
+				// The agent ignores these; it only accepts them for older hubs.
+				expect(cliArgs).not.toContain("--buffer-per-channel");
+				expect(cliArgs).not.toContain("--buffer-global");
 				expect(cliArgs).toContain("--log-level");
 				expect(cliArgs).toContain(config.logLevel);
 				expect(cliArgs).toContain("--format");

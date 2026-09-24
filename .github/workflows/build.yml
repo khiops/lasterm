@@ -246,6 +246,11 @@ jobs:
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec biome check . --error-on-warnings
+      # Vitest strips types without checking them and Biome does not check them
+      # either, so without this a PR that fails tsc goes green (#541). The hub
+      # and the web client resolve @lasterm/shared through its build output.
+      - run: pnpm -F @lasterm/shared build
+      - run: pnpm typecheck
 
   test:
     # Windows too: the Windows hub is the one a release ships, and a break that

@@ -52,7 +52,13 @@ function Stop-Hub {
 
 # ── Stop agent daemon (named pipe) ───────────────────────────────────────────
 function Stop-Agent {
-    $agentBin = "$Root\target\release\lasterm-agent.exe"
+    # Where dev-start built it: CARGO_TARGET_DIR when set, relative to the
+    # repository as cargo reads it from there, else target\ (#541).
+    $targetDir = if ($env:CARGO_TARGET_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR }
+        else { Join-Path $Root $env:CARGO_TARGET_DIR }
+    } else { Join-Path $Root "target" }
+    $agentBin = Join-Path $targetDir "release\lasterm-agent.exe"
     Remove-Item $AgentPidFile -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path $agentBin)) {
         Write-Host "No agent binary at $agentBin; nothing to stop with." -ForegroundColor DarkGray

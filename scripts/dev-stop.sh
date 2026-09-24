@@ -6,9 +6,16 @@ set -euo pipefail
 TARGET="${1:-all}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Where cargo builds the agent: CARGO_TARGET_DIR when set, relative to the
+# repository as cargo reads it from there, else target/ (#541).
+case "${CARGO_TARGET_DIR:-}" in
+	"") TARGET_DIR="$ROOT/target" ;;
+	/* | [A-Za-z]:*) TARGET_DIR="$CARGO_TARGET_DIR" ;;
+	*) TARGET_DIR="$ROOT/$CARGO_TARGET_DIR" ;;
+esac
 LOG_DIR="/tmp/lasterm-dev"
 PID_FILE="$LOG_DIR/dev.pid"
-AGENT_BIN="$ROOT/target/release/lasterm-agent"
+AGENT_BIN="$TARGET_DIR/release/lasterm-agent"
 
 # ── Helper: say who holds a port, without touching it ────────────────────────
 # A port is not an identity: whatever still listens after the recorded group is

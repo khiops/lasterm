@@ -110,7 +110,13 @@ function Start-Agent {
         exit 1
     }
 
-    $agentBin = "$Root\target\release\lasterm-agent.exe"
+    # Where cargo just built it: CARGO_TARGET_DIR when set, relative to the
+    # repository as cargo reads it from there, else target\ (#541).
+    $targetDir = if ($env:CARGO_TARGET_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR }
+        else { Join-Path $Root $env:CARGO_TARGET_DIR }
+    } else { Join-Path $Root "target" }
+    $agentBin = Join-Path $targetDir "release\lasterm-agent.exe"
     $proc = Start-Process -FilePath $agentBin `
         -ArgumentList "--daemon", "--socket", $PipePath, "--buffer-per-channel", "1048576", "--buffer-global", "20971520" `
         -WindowStyle Hidden -PassThru `

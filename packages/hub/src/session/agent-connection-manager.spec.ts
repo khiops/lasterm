@@ -106,6 +106,14 @@ function makeMockSftp(): SFTPWrapper {
 		chmod: vi.fn((_path: string, _mode: number, cb: (err: Error | undefined) => void) => {
 			cb(undefined);
 		}),
+		ext_openssh_rename: vi.fn(
+			(_from: string, _to: string, cb: (err: Error | undefined) => void) => {
+				cb(undefined);
+			},
+		),
+		unlink: vi.fn((_path: string, cb: (err: Error | undefined) => void) => {
+			cb(undefined);
+		}),
 		end: vi.fn(),
 	} as unknown as SFTPWrapper;
 }
@@ -518,6 +526,33 @@ describe("AgentConnectionManager HELLO version check", () => {
 		expect(warn).not.toHaveBeenCalled();
 		expect(ctx.agentCapabilities.has(HOST_ID)).toBe(false);
 		expect(connected.connected).toBe(false);
+	});
+
+	// #555: the deploy put this hub's binary beside a daemon still running the
+	// old one, and the connection reached that daemon. It predates the deploy,
+	// so its version says nothing about what was deployed: it is the outdated
+	// agent the host reports and offers to replace (#456), not a failed deploy.
+	it.each([
+		["deployed this binary", { deployedThisSession: true }],
+		["found this binary already deployed", { remoteMatchesHubVersionCache: true }],
+	])("keeps an older daemon that was already running when the connection %s", async (_, flags) => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const connected = await connectAgent("0.1.0");
+		Object.assign(connected, flags);
+		connected.reachedRunningDaemon = true;
+		const { ctx, broadcaster, lifecycle, manager } = makeHarness();
+		(ctx.agents as Map<string, unknown>).set(HOST_ID, connected);
+
+		expect(() => {
+			manager.wireAgentEvents(HOST_ID, SESSION_ID, connected);
+		}).not.toThrow();
+
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("Agent version mismatch"));
+		expect(lifecycle.closeSession).not.toHaveBeenCalled();
+		expect(broadcaster.broadcastToAllClients).not.toHaveBeenCalled();
+		expect(ctx.agents.get(HOST_ID)).toBe(connected);
+		expect(connected.connected).toBe(true);
+		expect(ctx.agentCapabilities.get(HOST_ID)).toEqual(["multiplex", "resize", "snapshot"]);
 	});
 
 	it("aborts with AGENT_VERSION_MISMATCH when a non-deployed remote agent matches the hub-version cache", async () => {

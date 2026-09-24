@@ -336,6 +336,7 @@ export class SshAgent extends AgentConnection {
 	): Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }> {
 		this.deployedThisSession = false;
 		this.remoteMatchesHubVersionCache = false;
+		this.reachedRunningDaemon = false;
 		if (!this.host.sshHost) {
 			throw new Error("Host has no sshHost configured");
 		}
@@ -552,6 +553,7 @@ export class SshAgent extends AgentConnection {
 							})
 								.then((attachment) => {
 									this.usedRemoteDaemon = true;
+									this.reachedRunningDaemon = !attachment.started;
 									console.error(
 										`[lasterm-ssh] reached the remote daemon on ${attachment.paths.socket}` +
 											(attachment.started ? " (started it)" : " (already running)"),

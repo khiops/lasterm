@@ -44,6 +44,14 @@ export abstract class AgentConnection extends EventEmitter {
 	remoteMatchesHubVersionCache = false;
 
 	/**
+	 * True when the agent answering is a remote daemon that was already running
+	 * when this connection reached it. It was started earlier, from whatever
+	 * binary was on disk then: what this connection deployed or checked is
+	 * what the next daemon runs, not this one (#555).
+	 */
+	reachedRunningDaemon = false;
+
+	/**
 	 * What the agent said it already holds, collected as it arrives.
 	 *
 	 * A stdio agent is always new and reports nothing; a daemon — local, or

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostArch, HostOs } from "@lasterm/shared";
@@ -16,6 +16,7 @@ import {
 } from "./agent-fetch.js";
 import type { OsDetectResult } from "./os-detect.js";
 import { parseUnameOutput, parseWindowsArchOutput } from "./os-detect.js";
+import { quotePosix } from "./remote-daemon.js";
 import { sshExec } from "./ssh-exec.js";
 
 export type { OsDetectResult };
@@ -348,15 +349,88 @@ function sftpChmod(sftp: SFTPWrapper, remotePath: string, mode: number): Promise
 	});
 }
 
+/** Remove a remote file via SFTP, whatever happens: this only ever cleans up after a failure. */
+function sftpUnlinkQuietly(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+	return new Promise((resolve) => {
+		try {
+			sftp.unlink(remotePath, () => resolve());
+		} catch {
+			resolve();
+		}
+	});
+}
+
+/**
+ * Rename `from` over `to` with OpenSSH's `posix-rename@openssh.com`, which is
+ * rename(2): atomic, and it replaces a target that exists. The plain SFTP
+ * rename is no use here, since it refuses a target that exists.
+ *
+ * Resolves false when the server does not offer the extension, which ssh2
+ * says by throwing before it sends anything.
+ */
+function sftpPosixRename(sftp: SFTPWrapper, from: string, to: string): Promise<boolean> {
+	return new Promise((resolve, reject) => {
+		try {
+			sftp.ext_openssh_rename(from, to, (err) => {
+				if (err) reject(err);
+				else resolve(true);
+			});
+		} catch {
+			resolve(false);
+		}
+	});
+}
+
+/**
+ * The same rename, run by the remote's shell, for a server without the
+ * extension. `mv` within one directory is rename(2) too. A directory at the
+ * target is refused rather than moved into.
+ */
+async function execRename(client: SshClient, from: string, to: string): Promise<void> {
+	const target = quotePosix(to);
+	const { stderr, exitCode } = await sshExec(
+		client,
+		`test ! -d ${target} && mv -f -- ${quotePosix(from)} ${target}`,
+	);
+	if (exitCode !== 0) {
+		const said = stderr.trim();
+		throw new Error(`exit ${exitCode}${said === "" ? "" : `: ${said}`}`);
+	}
+}
+
+/**
+ * A name for the upload beside `remotePath`: same directory, so the rename
+ * stays on one filesystem, and hidden and unique, so nothing takes it for the
+ * agent and two uploads never share one.
+ */
+function uploadTempPath(remotePath: string): string {
+	const cut = remotePath.lastIndexOf("/");
+	const dir = remotePath.slice(0, cut + 1);
+	const name = remotePath.slice(cut + 1);
+	return `${dir}.${name}.${randomBytes(8).toString("hex")}.partial`;
+}
+
 /**
  * Upload the agent binary to the remote host via SFTP.
- * Ensures the parent directory exists, uploads with fastPut (streaming),
- * then chmod 755 the binary.
+ *
+ * On a POSIX remote the binary is written beside the target under a
+ * temporary name, made executable, and only then renamed over it (#555). A
+ * remote daemon may be running from the target: Linux refuses to open a
+ * running executable for writing (ETXTBSY, which SFTP only calls "Failure"),
+ * while a rename leaves the running process its own inode and gives the next
+ * launch the new file. The target is only ever replaced by a whole, executable
+ * file; on any failure the temporary is removed and the target is as it was.
+ *
+ * A Windows remote is written in place, as before. Its agent runs on stdio and
+ * exits with its connection, so nothing is running from the file, and the
+ * rename would not help anyway: Windows refuses to replace a running
+ * executable, and the `mv` fallback is a POSIX shell's.
  */
 export async function uploadAgentBinary(
 	client: SshClient,
 	localPath: string,
 	remotePath: string,
+	os: HostOs,
 ): Promise<void> {
 	const sftp = await openSftp(client);
 	try {
@@ -370,11 +444,29 @@ export async function uploadAgentBinary(
 			await sftpMkdir(sftp, parentDir);
 		}
 
-		// Upload binary using fastPut (streaming — handles large binaries ~120 MB)
-		await sftpFastPut(sftp, localPath, remotePath);
+		if (os === "windows") {
+			// Upload binary using fastPut (streaming — handles large binaries ~120 MB)
+			await sftpFastPut(sftp, localPath, remotePath);
+			// Make executable (chmod 755) — no-op on Windows but harmless
+			await sftpChmod(sftp, remotePath, 0o755);
+			return;
+		}
 
-		// Make executable (chmod 755) — no-op on Windows but harmless
-		await sftpChmod(sftp, remotePath, 0o755);
+		const temp = uploadTempPath(remotePath);
+		let step = `upload the agent to ${temp}`;
+		try {
+			await sftpFastPut(sftp, localPath, temp);
+			step = `make ${temp} executable`;
+			await sftpChmod(sftp, temp, 0o755);
+			step = `move the agent into place at ${remotePath}`;
+			if (!(await sftpPosixRename(sftp, temp, remotePath))) {
+				await execRename(client, temp, remotePath);
+			}
+		} catch (err) {
+			await sftpUnlinkQuietly(sftp, temp);
+			const message = err instanceof Error ? err.message : String(err);
+			throw new Error(`Could not ${step}: ${message}`, { cause: err });
+		}
 	} finally {
 		sftp.end();
 	}
@@ -486,8 +578,11 @@ export async function deployAgentIfNeeded(
 					arch,
 				};
 			}
-			// Mismatch (or remoteSha unavailable) — re-upload from trusted local copy
-			await uploadAgentBinary(client, localBinary, existingPath);
+			// Mismatch (or remoteSha unavailable) — re-upload from trusted local copy.
+			// A daemon may be running from existingPath; the upload goes beside it
+			// and is renamed over it, so the daemon keeps running the old version
+			// until someone replaces it (#456, #555).
+			await uploadAgentBinary(client, localBinary, existingPath, os);
 			onAgentUpdated?.(hostId);
 			// Refresh the pin to the newly uploaded binary's hash so the next
 			// reconnect without local cache doesn't trigger another mismatch prompt.
@@ -592,7 +687,7 @@ export async function deployAgentIfNeeded(
 	const remotePath = await resolveRemotePath(client, os);
 
 	// 5. Upload via SFTP (fastPut handles large binaries efficiently)
-	await uploadAgentBinary(client, localBinary, remotePath);
+	await uploadAgentBinary(client, localBinary, remotePath, os);
 
 	return { deployed: true, remoteMatchesHubVersionCache: false, remotePath, os, arch };
 }

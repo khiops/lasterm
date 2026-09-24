@@ -10,6 +10,7 @@ use crate::batch::{
 use crate::expand::expand_vars;
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
+use crate::owner::OwnerId;
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
 use crate::pty::{
     log_teardown_outcome, spawn_teardown_confirmation, DestroyAllSummary, PtyManager,
@@ -94,7 +95,7 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
     }
 
     // 3. Send HELLO
-    send_frame(&frame_tx, &build_hello())?;
+    send_frame(&frame_tx, &build_hello(false))?;
 
     // 4. Shared state
     let pty_manager = Arc::new(Mutex::new(PtyManager::new()));
@@ -121,7 +122,9 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
         });
     }
 
-    // 9. stdin read loop
+    // 9. stdin read loop. Its one connection owns every channel: stdio has a
+    // single hub, which needs no key to be told apart from others.
+    let owner = OwnerId::legacy();
     let mut stdin = tokio::io::stdin();
     let mut reader = FrameReader::new();
     let mut buf = vec![0u8; 8192];
@@ -136,6 +139,7 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
         for msg in messages {
             handle_message(
                 msg,
+                &owner,
                 Arc::clone(&pty_manager),
                 frame_tx.clone(),
                 channel_events.clone(),
@@ -174,25 +178,63 @@ pub(crate) fn stdio_exit_status(summary: &DestroyAllSummary) -> i32 {
 }
 
 /// Build the HELLO message sent to the hub at connection start.
-pub(crate) fn build_hello() -> AgentToHub {
+///
+/// A daemon also says `hub-identity`: it reads the AUTH that follows HELLO
+/// even without a token, keeps each hub's channels to that hub, and
+/// understands STOP (#127). Stdio has one hub and nothing to tell apart.
+pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
+    let mut capabilities: Vec<String> = vec![
+        "multiplex".into(),
+        "resize".into(),
+        "snapshot".into(),
+        "launch-profiles".into(),
+    ];
+    if daemon {
+        capabilities.push("hub-identity".into());
+    }
     AgentToHub::Hello {
         version: 1,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        capabilities: vec![
-            "multiplex".into(),
-            "resize".into(),
-            "snapshot".into(),
-            "launch-profiles".into(),
-        ],
+        capabilities,
         available_shells: Some(shell::detect_available_shells()),
         default_shell: Some(shell::get_default_shell()),
     }
 }
 
+/// The ERROR a request about a channel gets when the caller cannot see it: it
+/// does not exist, or another hub holds it (#127). Both read the same, byte
+/// for byte, so that a hub cannot learn what another one runs.
+fn channel_not_found(channel_id: String) -> AgentToHub {
+    AgentToHub::Error {
+        code: error_codes::CHANNEL_NOT_FOUND.into(),
+        message: format!("channel {} not found", channel_id),
+        channel_id: Some(channel_id),
+        other_owner_channels: None,
+    }
+}
+
+/// Whether `owner` may see this channel: it is registered, and it holds it.
+async fn visible_to(
+    pty_manager: &Arc<Mutex<PtyManager>>,
+    channel_id: &str,
+    owner: &OwnerId,
+) -> bool {
+    pty_manager
+        .lock()
+        .await
+        .owned_by(channel_id, owner)
+        .is_some()
+}
+
 /// Dispatch a single message from the hub.
-/// Dispatch a single message from the hub.
+///
+/// `owner` is the hub the message came from. A channel is visible only to the
+/// hub that spawned it: INPUT, RESIZE, DESTROY, ATTACH and SNAPSHOT_REQ about
+/// another hub's channel are answered as for one that does not exist. In stdio
+/// mode the single connection is `legacy` and owns everything it spawns.
 pub(crate) async fn handle_message(
     msg: crate::protocol::HubToAgent,
+    owner: &OwnerId,
     pty_manager: Arc<Mutex<PtyManager>>,
     frame_tx: FrameSender,
     channel_events: ChannelEventSender,
@@ -230,9 +272,10 @@ pub(crate) async fn handle_message(
             format!("ATTACH ch={}", &channel_id[..8.min(channel_id.len())])
         }
         HubToAgent::Auth { .. } => "AUTH".to_string(),
+        HubToAgent::Stop { force } => format!("STOP force={force}"),
         HubToAgent::Error { code, .. } => format!("ERROR {}", code),
     };
-    tracing::debug!(msg = %summary, "hub message received");
+    tracing::debug!(msg = %summary, owner = owner.short(), "hub message received");
 
     match msg {
         HubToAgent::Heartbeat { ts } => {
@@ -267,6 +310,7 @@ pub(crate) async fn handle_message(
                 elevation_secret,
                 elevation_method,
                 custom_command,
+                owner.clone(),
                 pty_manager,
                 frame_tx,
                 channel_events,
@@ -279,21 +323,13 @@ pub(crate) async fn handle_message(
             // Get writer before dropping lock to avoid holding across await
             let writer_opt = {
                 let mgr = pty_manager.lock().await;
-                mgr.channels
-                    .get(&channel_id)
+                mgr.owned_by(&channel_id, owner)
                     .map(|channel| channel.process.writer())
             };
             if let Some(mut writer) = writer_opt {
                 writer.write_all(&data).await?;
             } else {
-                send_frame(
-                    &frame_tx,
-                    &AgentToHub::Error {
-                        code: error_codes::CHANNEL_NOT_FOUND.into(),
-                        message: format!("channel {} not found", channel_id),
-                        channel_id: Some(channel_id),
-                    },
-                )?;
+                send_frame(&frame_tx, &channel_not_found(channel_id))?;
             }
         }
 
@@ -304,31 +340,27 @@ pub(crate) async fn handle_message(
         } => {
             // Resize the PTY process
             let size = PtySize { cols, rows };
-            {
+            let resized = {
                 let mgr = pty_manager.lock().await;
-                match mgr.channels.get(&channel_id) {
+                match mgr.owned_by(&channel_id, owner) {
                     Some(channel) => {
                         let _ = channel.process.resize(size).await;
+                        true
                     }
-                    None => {
-                        send_frame(
-                            &frame_tx,
-                            &AgentToHub::Error {
-                                code: error_codes::CHANNEL_NOT_FOUND.into(),
-                                message: format!("channel {} not found", channel_id),
-                                channel_id: Some(channel_id.clone()),
-                            },
-                        )?;
-                    }
+                    None => false,
                 }
-            }
-            // Also notify the mirror in the reader task
-            let tx_opt = {
-                let senders = cmd_senders.lock().await;
-                senders.get(&channel_id).cloned()
             };
-            if let Some(tx) = tx_opt {
-                let _ = tx.send(ChannelCommand::Resize(cols, rows));
+            if resized {
+                // Also notify the mirror in the reader task
+                let tx_opt = {
+                    let senders = cmd_senders.lock().await;
+                    senders.get(&channel_id).cloned()
+                };
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(ChannelCommand::Resize(cols, rows));
+                }
+            } else {
+                send_frame(&frame_tx, &channel_not_found(channel_id))?;
             }
         }
 
@@ -336,7 +368,7 @@ pub(crate) async fn handle_message(
             tracing::debug!("DESTROY received for channel {}", channel_id);
             let confirmation = {
                 let mut mgr = pty_manager.lock().await;
-                match mgr.channels.contains_key(&channel_id) {
+                match mgr.owned_by(&channel_id, owner).is_some() {
                     true => match mgr.start_teardown(&channel_id) {
                         Ok(TeardownStart::Signalled { pid }) => {
                             let process = mgr
@@ -366,13 +398,16 @@ pub(crate) async fn handle_message(
             if let Some(confirmation) = confirmation {
                 spawn_teardown_confirmation(confirmation, "DESTROY");
             }
-            // Idempotent: no error if channel doesn't exist
+            // Idempotent: no error if channel doesn't exist, or is another
+            // hub's, which is the same thing to this caller.
         }
 
         HubToAgent::SnapshotReq { channel_id } => {
-            let tx_opt = {
+            let tx_opt = if visible_to(&pty_manager, &channel_id, owner).await {
                 let senders = cmd_senders.lock().await;
                 senders.get(&channel_id).cloned()
+            } else {
+                None
             };
             if let Some(tx) = tx_opt {
                 let (reply_tx, reply_rx) = oneshot::channel::<SnapshotInfo>();
@@ -413,9 +448,11 @@ pub(crate) async fn handle_message(
         }
 
         HubToAgent::Attach { channel_id } => {
-            let tx_opt = {
+            let tx_opt = if visible_to(&pty_manager, &channel_id, owner).await {
                 let senders = cmd_senders.lock().await;
                 senders.get(&channel_id).cloned()
+            } else {
+                None
             };
             if let Some(tx) = tx_opt {
                 let (reply_tx, reply_rx) = oneshot::channel::<SnapshotInfo>();
@@ -454,19 +491,13 @@ pub(crate) async fn handle_message(
                             code: error_codes::CHANNEL_NOT_FOUND.into(),
                             message: format!("channel {} not found or dead", channel_id),
                             channel_id: Some(channel_id),
+                            other_owner_channels: None,
                         },
                     )?;
                 }
             } else {
                 tracing::warn!("ATTACH for unknown channel: {}", channel_id);
-                send_frame(
-                    &frame_tx,
-                    &AgentToHub::Error {
-                        code: error_codes::CHANNEL_NOT_FOUND.into(),
-                        message: format!("channel {} not found", channel_id),
-                        channel_id: Some(channel_id),
-                    },
-                )?;
+                send_frame(&frame_tx, &channel_not_found(channel_id))?;
             }
         }
 
@@ -475,6 +506,20 @@ pub(crate) async fn handle_message(
             // before the message loop starts. If it arrives here the hub sent it
             // out-of-order — ignore it silently (the connection was already accepted).
             tracing::warn!("received AUTH message outside of handshake — ignoring");
+        }
+
+        HubToAgent::Stop { .. } => {
+            // A daemon answers STOP before it gets here. Stdio has nothing to
+            // stop: it ends with its input.
+            send_frame(
+                &frame_tx,
+                &AgentToHub::Error {
+                    code: error_codes::INVALID_MESSAGE.into(),
+                    message: "STOP applies to an agent daemon; this agent runs on stdio and ends when its input closes".into(),
+                    channel_id: None,
+                    other_owner_channels: None,
+                },
+            )?;
         }
 
         HubToAgent::Error {
@@ -490,6 +535,7 @@ pub(crate) async fn handle_message(
                         code,
                         message,
                         channel_id,
+                        other_owner_channels: None,
                     },
                 )?;
             } else {
@@ -515,6 +561,7 @@ async fn handle_spawn(
     elevation_secret: Option<String>,
     elevation_method: Option<String>,
     custom_command: Option<String>,
+    owner: OwnerId,
     pty_manager: Arc<Mutex<PtyManager>>,
     frame_tx: FrameSender,
     channel_events: ChannelEventSender,
@@ -522,6 +569,7 @@ async fn handle_spawn(
 ) -> std::io::Result<()> {
     tracing::info!(
         request_id = %request_id,
+        owner = owner.short(),
         shell = ?shell,
         cwd = ?cwd,
         cols = cols,
@@ -636,6 +684,7 @@ async fn handle_spawn(
     let spawn_result = {
         let mut mgr = pty_manager.lock().await;
         mgr.spawn(
+            owner.clone(),
             channel_id,
             &effective_program,
             &effective_args,
@@ -696,6 +745,7 @@ async fn handle_spawn(
                 );
 
                 spawn_reader_task(
+                    owner,
                     ch_id,
                     pty_pid,
                     pty_reader,
@@ -755,6 +805,7 @@ async fn handle_spawn(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_reader_task(
+    owner: OwnerId,
     channel_id: String,
     pty_pid: u32,
     mut pty_reader: async_xpty::PtyReader,
@@ -810,7 +861,7 @@ fn spawn_reader_task(
                                 level: "debug".to_string(),
                                 msg: "PTY closed".to_string(),
                             };
-                            send_channel_event(&channel_events, &channel_id, &log_msg);
+                            send_channel_event(&channel_events, &owner, &channel_id, &log_msg);
                             break;
                         }
                         Ok(n) => {
@@ -834,6 +885,7 @@ fn spawn_reader_task(
 
                             // Send to batch loop for OUTPUT frames
                             let _ = channel_events.send(ChannelEvent::Output(OutputEvent {
+                                owner: owner.clone(),
                                 channel_id: channel_id.clone(),
                                 seq,
                                 data,
@@ -846,7 +898,7 @@ fn spawn_reader_task(
                                     title,
                                     display_title: None,
                                 };
-                                send_channel_event(&channel_events, &channel_id, &msg);
+                                send_channel_event(&channel_events, &owner, &channel_id, &msg);
                             }
 
                             // Emit bell if detected
@@ -854,7 +906,7 @@ fn spawn_reader_task(
                                 let msg = AgentToHub::Bell {
                                     channel_id: channel_id.clone(),
                                 };
-                                send_channel_event(&channel_events, &channel_id, &msg);
+                                send_channel_event(&channel_events, &owner, &channel_id, &msg);
                             }
 
                             // Emit notification if detected
@@ -863,7 +915,7 @@ fn spawn_reader_task(
                                     channel_id: channel_id.clone(),
                                     message,
                                 };
-                                send_channel_event(&channel_events, &channel_id, &msg);
+                                send_channel_event(&channel_events, &owner, &channel_id, &msg);
                             }
                         }
                     }
@@ -893,7 +945,7 @@ fn spawn_reader_task(
                         title,
                         display_title: None,
                     };
-                    send_channel_event(&channel_events, &channel_id, &msg);
+                    send_channel_event(&channel_events, &owner, &channel_id, &msg);
                 }
             }
         }
@@ -938,18 +990,25 @@ fn spawn_reader_task(
             exit_code,
             signal,
         };
-        send_channel_event(&channel_events, &channel_id, &msg);
+        send_channel_event(&channel_events, &owner, &channel_id, &msg);
     });
 }
 
 /// Send a frame about a channel down the pipeline its output takes, not to the
-/// connection that spawned it. It reaches the hub connected when it is sent,
-/// after the output the channel sent before it (#549).
-fn send_channel_event(channel_events: &ChannelEventSender, channel_id: &str, msg: &AgentToHub) {
+/// connection that spawned it. It reaches the connection its owner has when it
+/// is sent, after the output the channel sent before it (#549, #127).
+fn send_channel_event(
+    channel_events: &ChannelEventSender,
+    owner: &OwnerId,
+    channel_id: &str,
+    msg: &AgentToHub,
+) {
     if let Ok(frame) = encode_frame(msg) {
         let _ = channel_events.send(ChannelEvent::Frame(EventFrame {
+            owner: owner.clone(),
             channel_id: channel_id.to_owned(),
             frame,
+            ends_channel: matches!(msg, AgentToHub::ChannelExit { .. }),
         }));
     }
 }
@@ -1052,6 +1111,7 @@ mod restart_identity_tests {
             .lock()
             .await
             .spawn(
+                OwnerId::legacy(),
                 Some(channel_id.to_owned()),
                 test_shell(),
                 &[],
@@ -1125,6 +1185,47 @@ mod restart_identity_tests {
 }
 
 #[cfg(test)]
+mod stdio_tests {
+    use super::*;
+
+    /// Stdio has nothing to stop but itself, and that is its input's to
+    /// decide: STOP is answered with an error, and nothing ends.
+    #[tokio::test]
+    async fn stdio_answers_stop_with_an_error() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+
+        handle_message(
+            crate::protocol::HubToAgent::Stop { force: true },
+            &OwnerId::legacy(),
+            manager,
+            frame_tx,
+            channel_events,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await
+        .expect("STOP is answered");
+
+        let frame = frame_rx.try_recv().expect("an answer");
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        assert_eq!(answer["type"], "ERROR");
+        assert_eq!(answer["code"], "INVALID_MESSAGE");
+    }
+
+    /// Only a daemon says it tells hubs apart.
+    #[test]
+    fn only_a_daemon_says_hub_identity() {
+        let capabilities = |daemon| match build_hello(daemon) {
+            AgentToHub::Hello { capabilities, .. } => capabilities,
+            _ => unreachable!("build_hello builds HELLO"),
+        };
+        assert!(capabilities(true).contains(&"hub-identity".to_string()));
+        assert!(!capabilities(false).contains(&"hub-identity".to_string()));
+    }
+}
+
+#[cfg(test)]
 #[cfg(target_os = "linux")]
 mod tests {
     use super::*;
@@ -1135,6 +1236,7 @@ mod tests {
             .lock()
             .await
             .spawn(
+                OwnerId::legacy(),
                 Some(channel_id.to_owned()),
                 "/bin/sh",
                 &["-c".to_owned(), "sleep 30".to_owned()],
@@ -1162,6 +1264,7 @@ mod tests {
             crate::protocol::HubToAgent::Destroy {
                 channel_id: channel_id.to_owned(),
             },
+            &OwnerId::legacy(),
             Arc::clone(&manager),
             frame_tx.clone(),
             channel_events.clone(),
@@ -1224,6 +1327,7 @@ mod tests {
             None,
             None,
             None,
+            OwnerId::legacy(),
             manager,
             frame_tx,
             channel_events,

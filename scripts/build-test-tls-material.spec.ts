@@ -1,11 +1,12 @@
 /**
  * The build `pnpm -F @lasterm/hub test` runs before the hub specs, the one they
- * accept. Cargo is a recorder here: nothing is built or cleaned.
+ * accept. Cargo is a stand-in here: nothing is built or cleaned.
  */
-import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	NATIVE_MANIFESTS,
 	nativeArtifacts,
 	recordedNativeBuild,
 	recordNativeBuild,
@@ -84,38 +85,52 @@ function release({
 	return folder;
 }
 
-/** Another checkout holding this one's sources, `protected-fs` changed if `edited`. */
-function otherCheckout({ edited = false } = {}): string {
+/**
+ * Another checkout holding this one's sources and manifests, except `edited`,
+ * which differs.
+ */
+function otherCheckout(edited?: string): string {
 	const other = join(tempDir(), "other checkout");
-	for (const crate of ["lasterm-protected-fs", "lasterm-hub-lock", "lasterm-tls-identity"]) {
-		const source = `crates/${crate}/src/lib.rs`;
-		const path = join(other, source);
+	const sources = ["lasterm-protected-fs", "lasterm-hub-lock", "lasterm-tls-identity"].map(
+		(crate) => `crates/${crate}/src/lib.rs`,
+	);
+	for (const file of [...sources, ...NATIVE_MANIFESTS]) {
+		const path = join(other, file);
 		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(
-			path,
-			edited && source === PROTECTED_FS ? "// their edit\n" : readFileSync(join(ROOT, source)),
-		);
+		writeFileSync(path, file === edited ? "# their edit\n" : readFileSync(join(ROOT, file)));
 		utimesSync(path, LONG_AGO, LONG_AGO);
 	}
 	return other;
 }
 
-/** As a build that compiles something leaves the folder: an artifact rewritten. */
+/** As a build that compiles something leaves the folder: an artifact written anew. */
 function compile(folder: string): void {
-	const { artifact } = nativeArtifacts(folder)[0]!;
-	const later = new Date(Date.now() + 60_000);
-	utimesSync(artifact, later, later);
+	writeFileSync(nativeArtifacts(folder)[0]!.artifact, "compiled again");
+}
+
+/**
+ * Cargo, as far as these specs need it: a clean removes the artifacts, and a
+ * build writes those that are missing.
+ */
+function cargoIn(folder: string): (args: readonly string[]) => number {
+	return (args) => {
+		for (const { artifact } of nativeArtifacts(folder)) {
+			if (args[0] === "clean") rmSync(artifact, { force: true });
+			if (args[0] === "build") {
+				try {
+					writeFileSync(artifact, "built", { flag: "wx" });
+				} catch {}
+			}
+		}
+		return 0;
+	};
 }
 
 /**
  * Runs the build against `folder`, and returns what cargo was asked to do. `run`
  * stands for cargo: it gets the arguments, and returns the exit status.
  */
-function build(
-	folder: string,
-	run: (args: readonly string[]) => number = () => 0,
-	extra?: string[],
-) {
+function build(folder: string, run = cargoIn(folder), extra?: string[]) {
 	const calls: string[][] = [];
 	const exit = buildTestNatives(
 		ROOT,
@@ -130,7 +145,7 @@ function build(
 }
 
 function recordedCheckout(folder: string): string | undefined {
-	const recorded = recordedNativeBuild(folder);
+	const recorded = recordedNativeBuild(folder, ROOT);
 	return "checkout" in recorded ? recorded.checkout : undefined;
 }
 
@@ -156,7 +171,7 @@ describe("the hub's pre-test native build", () => {
 	});
 
 	it("cleans first when another checkout with different sources built, and says so", () => {
-		const other = otherCheckout({ edited: true });
+		const other = otherCheckout(PROTECTED_FS);
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		expect(build(release({ listed: other }))).toEqual({ calls: [CLEAN, BUILD], exit: 0 });
@@ -168,11 +183,23 @@ describe("the hub's pre-test native build", () => {
 	// plain build here compiled nothing and only rewrote the dep-info files to
 	// name this checkout, so the setup accepted that worktree's artifacts (#544).
 	it("cleans first when the record names another checkout, whatever the dep-info files say", () => {
-		const other = otherCheckout({ edited: true });
+		const other = otherCheckout(PROTECTED_FS);
 		vi.spyOn(console, "log").mockImplementation(() => {});
 
 		const folder = release({ listed: ROOT, recorded: other });
 		expect(build(folder)).toEqual({ calls: [CLEAN, BUILD], exit: 0 });
+	});
+
+	// The same sources built with another lock file make other artifacts (seen
+	// 2026-09-24 with a dependency pinned back).
+	it("cleans first when the recorded build used another Cargo.lock, and says so", () => {
+		const other = otherCheckout("Cargo.lock");
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		expect(build(release({ recorded: other }))).toEqual({ calls: [CLEAN, BUILD], exit: 0 });
+		expect(log.mock.calls.flat().join("\n")).toContain(
+			`it was built in ${other} with a Cargo.lock that differs from this checkout's`,
+		);
 	});
 
 	it("cleans first when cargo changed the build after it was recorded", () => {
@@ -208,8 +235,50 @@ describe("the hub's pre-test native build", () => {
 		expect(recordedCheckout(folder)).toBe(ROOT);
 	});
 
+	// Seen 2026-09-24: another worktree's plain cargo build, waiting on cargo's
+	// lock during the clean, took it before this build did and compiled all four
+	// crates; this build then had nothing to do, and recorded that worktree's
+	// artifacts as this checkout's.
+	it("records nothing when another build slipped in between the clean and the build", () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const folder = release({ recorded: null });
+		const cargo = cargoIn(folder);
+		const seconds = new Date(Date.now() - 3000);
+
+		const result = build(folder, (args) => {
+			const status = cargo(args);
+			if (args[0] === "clean") {
+				cargo(["build"]);
+				for (const { artifact } of nativeArtifacts(folder)) utimesSync(artifact, seconds, seconds);
+			}
+			return status;
+		});
+
+		expect(result).toEqual({ calls: [CLEAN, BUILD], exit: 1 });
+		expect(error.mock.calls.flat().join("\n")).toContain("Another build wrote");
+		expect(recordedCheckout(folder)).toBeUndefined();
+	});
+
+	it("records nothing when another build wrote after this one's cargo finished", () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const folder = release();
+		const later = new Date(Date.now() + 60_000);
+
+		const result = build(folder, () => {
+			const { artifact } = nativeArtifacts(folder)[0]!;
+			utimesSync(artifact, later, later);
+			return 0;
+		});
+
+		expect(result).toEqual({ calls: [BUILD], exit: 1 });
+		expect(error.mock.calls.flat().join("\n")).toContain("Another build wrote");
+		expect(recordedCheckout(folder)).toBeUndefined();
+	});
+
 	it("passes its arguments on to cargo build", () => {
-		expect(build(release(), undefined, ["--locked"]).calls).toEqual([[...BUILD, "--locked"]]);
+		const folder = release();
+		expect(build(folder, undefined, ["--locked"]).calls).toEqual([[...BUILD, "--locked"]]);
 	});
 
 	it.runIf(process.platform === "win32")(

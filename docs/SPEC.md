@@ -252,6 +252,12 @@ The hub does **not** bundle agents for platforms other than its own. When deploy
 `SHA256SUMS-<version>.txt`, placed in a hardened (0700, owned, non-symlink) cache — then uploads it to the
 remote host over SFTP. Pre-population is available via `lasterm-hub agent fetch <os-arch>|--all`.
 
+On a POSIX host the upload goes to a hidden temporary file beside the target, is made executable, and only
+then is renamed over the target (`posix-rename@openssh.com`, or `mv -f` where the server lacks it). A remote
+daemon still running the old binary keeps it, and the host reports that daemon as outdated until someone
+replaces it (#456, #555). A Windows host is written in place: its agent runs on stdio and exits with its
+connection.
+
 Two properties follow:
 - **The remote host never needs outbound internet** — the *hub* fetches on its behalf, and the binary
   travels hub → remote over the existing SSH/SFTP channel. Deploying to a remote host is inherently online

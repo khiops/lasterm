@@ -472,6 +472,26 @@ describe("SshAgent", () => {
 		TEST_TIMEOUT,
 	);
 
+	it(
+		"resets reachedRunningDaemon at the start of a new connection attempt",
+		async () => {
+			const { server, port } = await createMockSshServer((stream) => {
+				stream.write(makeHelloFrame());
+			});
+			servers.push(server);
+
+			const fp = await getServerFingerprint(port);
+			const agent = new SshAgent(makeHost(port));
+			agent.reachedRunningDaemon = true;
+			agents.push(agent);
+
+			await agent.start(fp);
+
+			expect(agent.reachedRunningDaemon).toBe(false);
+		},
+		TEST_TIMEOUT,
+	);
+
 	it("reaches a remote daemon through its socket, and execs no agent", async () => {
 		const commands: string[] = [];
 		let socketPath = "";
@@ -504,6 +524,9 @@ describe("SshAgent", () => {
 		// nothing was exec'd to run it.
 		expect(commands.some((c) => c.includes("--stdio"))).toBe(false);
 		expect(commands.some((c) => c.includes("--daemon"))).toBe(false);
+		// It was running before this connection, from whatever binary was on
+		// disk then: a deploy on this connection is not what answers (#555).
+		expect(agent.reachedRunningDaemon).toBe(true);
 	}, 15_000);
 
 	it("starts the daemon when the socket answers nothing, then reaches it", async () => {
@@ -536,6 +559,8 @@ describe("SshAgent", () => {
 		const launch = commands.find((c) => c.includes("--daemon"));
 		expect(launch).toBeDefined();
 		expect(launch).toContain("--socket /home/pi/.local/state/lasterm/agent.sock");
+		// This connection started it, from the binary on disk now.
+		expect(agent.reachedRunningDaemon).toBe(false);
 	}, 15_000);
 
 	it("keeps a Windows remote on stdio: no SSH channel carries a named pipe", async () => {

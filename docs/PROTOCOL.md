@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-03-18
+> Last updated: 2026-09-24
 
 ## 1. Framing
 
@@ -74,9 +74,13 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
 - Agent runs as a standalone daemon: `lasterm-agent --daemon --socket <path>`
 - Hub connects to the UDS via `connectOrLaunch(socketPath, config, binaryPath)`
 - Same length-prefixed MessagePack framing as stdio
-- Connection displacement: new hub connection immediately replaces the previous one (last-writer-wins)
-- Agent buffers output while no hub is connected (`OutputBuffer` ring buffer)
-- On reconnect: agent sends HELLO, then enumerates channel state (see section 3.12)
+- Connection displacement: an agent with the `hub-identity` capability serves several hubs at once,
+  one connection per hub, and a new connection replaces only the same hub's previous one (§ 3.1b).
+  An agent without it serves one hub at a time, and the newest authenticated connection replaces the
+  previous one (last-writer-wins). The replaced connection gets `ERROR { code: "DISPLACED" }`, then EOF
+- Agent buffers output while no hub is connected (`OutputBuffer` ring buffer); with `hub-identity`,
+  each hub's output is kept for that hub only
+- On reconnect: agent sends HELLO, reads the hub's AUTH, then enumerates channel state (see section 3.16)
 
 ### 2.2 Hub ↔ UI (WebSocket)
 
@@ -114,7 +118,50 @@ First message, sent immediately on start.
 }
 ```
 
-**Capability handling:** Hub checks `capabilities` array. If `"snapshot"` is missing, hub will not send SNAPSHOT_REQ (relies on local cache only). If `"resize"` is missing, hub skips RESIZE messages. All capabilities are optional — hub degrades gracefully. `"multiplex"` means agent supports multiple channels per process.
+**Capability handling:** Hub checks `capabilities` array. If `"snapshot"` is missing, hub will not send SNAPSHOT_REQ (relies on local cache only). If `"resize"` is missing, hub skips RESIZE messages. All capabilities are optional — hub degrades gracefully. `"multiplex"` means agent supports multiple channels per process. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels (§ 3.1b); the hub reads it from the HELLO of each connection, never from an earlier one.
+
+### 3.1b AUTH (Hub → Agent, daemon mode)
+
+The first frame the hub sends on a daemon connection, after HELLO.
+
+```typescript
+{
+  type: "AUTH",
+  token: string,      // checked against the daemon's auth.json, when it has one
+  hub_key?: string    // names the hub; 64 lowercase hex characters (#127)
+}
+```
+
+**Token.** The local daemon reads the same `auth.json` as the hub and gets the primary token. A
+remote daemon gets an empty token: the hub's token opens the hub, and a machine it merely reaches over
+SSH is never given it.
+
+**Hub key.** Each hub has a key, created once in its state directory as `hub-key` (SPEC.md § 7,
+SECURITY.md § 3.6). An agent with `hub-identity` takes the lowercase hex SHA-256 of the key's string
+as the connection's **owner**, keeps only that, and compares it in constant time. A connection that
+presents no key belongs to the owner `legacy`, which keeps the behaviour from before #127 among such
+connections: the last one wins.
+
+**When the hub sends it:**
+
+| Daemon | HELLO has `hub-identity` | AUTH sent |
+|--------|--------------------------|-----------|
+| Local | either | `{ token: <primary token>, hub_key }`, as soon as HELLO is in. An agent without `hub-identity` ignores `hub_key` |
+| Remote (over SSH) | yes | `{ token: "", hub_key }`, before the hub waits for the channel state |
+| Remote (over SSH) | no | nothing, as before |
+| stdio | — | nothing: a stdio agent is a child of one connection |
+
+An agent with `hub-identity` reads the first frame after HELLO even when it has no `auth.json`: an
+AUTH sets the owner from `hub_key`; any other frame from a hub that sends none makes the connection
+`legacy`, and is processed normally. The existing AUTH timeout applies.
+
+**What the owner decides.** SPAWN makes the connection's owner the channel's owner, for good. INPUT,
+RESIZE, DESTROY, ATTACH and SNAPSHOT_REQ on a channel another owner holds behave exactly as for an
+unknown channel. Everything a channel emits goes to its owner's current connection, or to that
+owner's own bounded queue while it has none. `AGENT_CHANNEL_STATE` lists only the owner's channels
+(§ 3.16). A new connection replaces only its own owner's previous one, which gets `DISPLACED`: to a
+hub, `DISPLACED` from an agent with `hub-identity` means a newer connection of its own took over,
+and the stale one is dropped quietly.
 
 ### 3.2 SPAWN / SPAWN_OK / SPAWN_ERR
 
@@ -326,27 +373,58 @@ Sent by the agent to the hub immediately after HELLO when reconnecting to a daem
 
 // Agent → Hub (signals end of enumeration)
 {
-  type: "CHANNEL_STATE_END"
+  type: "CHANNEL_STATE_END",
+  other_owner_channels?: number   // hub-identity: channels other hubs hold on this daemon
 }
 ```
+
+**With `hub-identity`** the list holds only the channels of the connection's owner (§ 3.1b), sent
+once the daemon has read the AUTH. Every channel in it is therefore this hub's, and one the hub does
+not know — neither tracked nor recorded as alive, such as a SPAWN whose answer was lost — is its own
+orphan: the hub sends it DESTROY, and logs how many once, at INFO. `other_owner_channels` counts the
+channels of other owners. It is informational: the hub shows it with the host's session state
+(§ 4.7) and never acts on those channels, which it cannot name anyway.
+
+**Without it** the list may hold other hubs' channels, so the hub leaves every channel it does not
+know alone.
 
 **Reconnect handshake flow (daemon mode):**
 ```
 Hub connects to daemon UDS
   │
   Agent → Hub: HELLO { protocol_version, capabilities, ... }
+  Hub → Agent: AUTH { token, hub_key }   (§ 3.1b)
   Agent → Hub: AGENT_CHANNEL_STATE { channel_id: "ch-1", title: "bash", pid: 4521, alive: true }
   Agent → Hub: AGENT_CHANNEL_STATE { channel_id: "ch-2", title: "vim", pid: 0, alive: false }
   Agent → Hub: CHANNEL_STATE_END
   │
   Hub: reconcileChannelState()
     ├─ ch-1 (alive) → adopt into session, re-attach, resume OUTPUT
-    └─ ch-2 (dead) → mark dead in DB, notify UI CHANNEL_STATE { status: "dead" }
+    ├─ ch-2 (dead) → mark dead in DB, notify UI CHANNEL_STATE { status: "dead" }
+    └─ one the hub does not know → DESTROY, with hub-identity only; left alone otherwise
   │
   Normal operation (SPAWN, INPUT, OUTPUT, etc.)
 ```
 
 On a fresh daemon start (no prior channels), the agent sends HELLO followed immediately by CHANNEL_STATE_END (zero AGENT_CHANNEL_STATE messages).
+
+### 3.17 STOP (Hub → Agent, daemon mode, `hub-identity`)
+
+```typescript
+{ type: "STOP", force: boolean }
+```
+
+Asks the daemon at the other end of the hub's own connection to stop (#127). Without `force`, a
+daemon that other owners still hold channels on refuses with
+`ERROR { code: "OTHER_HUBS_HOLD_CHANNELS", message }`, whose message states how many, and stops
+nothing. Otherwise it shuts down as on SIGTERM, ending every channel it holds; it sends nothing
+first, and the connection ending is the answer. A stdio agent ignores STOP or answers an error.
+
+The hub sends it only to an agent that advertises `hub-identity`, and reads the count from the
+refusal's message: the first whole number in it, else the `other_owner_channels` of the
+connection's CHANNEL_STATE_END. To any other agent, and when no protocol connection can carry the
+STOP, the hub runs the agent's own `--stop` instead: the forced, out-of-band path, which knows
+nothing of owners. See `POST /api/hosts/:id/agent/replace` (§ 6).
 
 ## 4. Message Types — Hub ↔ UI (WS)
 
@@ -449,7 +527,9 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   sessions: Array<{
     session_id: string,
     host_id: string,
-    status: "starting" | "active" | "detached" | "disconnected" | "closed"
+    status: "starting" | "active" | "detached" | "disconnected" | "closed",
+    outdated_agent?: { running: string, expected: string },  // as in SESSION_STATE
+    other_owner_channels?: number                             // as in SESSION_STATE
   }>,
   channels: Array<{
     channel_id: string,
@@ -468,7 +548,13 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   type: "SESSION_STATE",
   session_id: string,
   host_id: string,
-  status: "starting" | "active" | "detached" | "disconnected" | "closed"
+  status: "starting" | "active" | "detached" | "disconnected" | "closed",
+  // Only when the agent serving the host is not the version this hub carries (#456).
+  outdated_agent?: { running: string, expected: string },
+  // Only when other hubs hold channels on that agent, as its CHANNEL_STATE_END said
+  // (§ 3.16, #127). Informational: replacing the agent would end them too. Sent
+  // again with the same status once the count is known.
+  other_owner_channels?: number
 }
 
 {
@@ -707,6 +793,7 @@ Hub                        Agent
 Hub                        Agent (daemon, has channels)
  │── connect to UDS ───────►│
  │◄── HELLO ─────────────────│
+ │── AUTH {token, hub_key} ─►│ (§ 3.1b)
  │◄── AGENT_CHANNEL_STATE ───│ (ch-1, alive)
  │◄── AGENT_CHANNEL_STATE ───│ (ch-2, alive)
  │◄── AGENT_CHANNEL_STATE ───│ (ch-3, dead)
@@ -787,6 +874,7 @@ reads `started_at` from `runtime.json`, as `lasterm status` does.
 | POST | `/api/hosts/:id/duplicate` | ● | → `Host` (201) |
 | PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → 200 |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
+| POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). An agent with `hub-identity` gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. Any other agent, or one the STOP cannot reach, is stopped with its own `--stop`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type, sort_order? }` → 204 |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
@@ -1138,9 +1226,11 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `PERMISSION_DENIED` | Agent | Cannot spawn PTY (user/cgroup restriction) |
 | `PTY_SPAWN_FAILED` | Agent | node-pty.spawn() threw (generic) |
 | `CHANNEL_LIMIT` | Agent | Max channels reached (default 50 per agent) |
-| `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT for unknown channel_id |
+| `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT for unknown channel_id; with `hub-identity`, also for a channel another hub owns, which is never told apart from an unknown one |
 | `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
 | `VERSION_MISMATCH` | Hub | Agent protocol version too new |
+| `DISPLACED` | Agent | A newer connection took this one's place, and this one ends. With `hub-identity`, only ever a newer connection of the same hub (§ 3.1b) |
+| `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; the message states how many (§ 3.17) |
 
 ### Pairing Code Format
 

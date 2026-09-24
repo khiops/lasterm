@@ -780,6 +780,12 @@ Data dir:
 
 State dir:
 ├── runtime.json             # { port, pid, started_at, spki } — written on start, deleted on shutdown
+├── hub-key                  # 0600 — 64 lowercase hex characters naming this hub to its agent
+                             #        daemons, which keep its channels apart from other hubs' (#127).
+                             #        Created on first start and never replaced: a malformed one stops
+                             #        the hub, naming the file. Deleting it gives the hub a new identity
+                             #        and leaves its terminals on every daemon out of its reach
+                             #        (SECURITY.md § 3.6)
 ├── hub-tls-cert.pem         # 0600 — a copy of whatever certificate is in effect, an operator's
                              #        included. Nothing decides anything from it
 ├── hub-tls-generated-cert.pem # 0600 — the leaf this hub generated over its own key, reused across

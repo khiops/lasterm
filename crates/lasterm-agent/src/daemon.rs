@@ -2862,8 +2862,9 @@ mod tests {
                 .filter(|frame| is_about(frame, "TITLE_CHANGE", channel_id))
                 .filter_map(|frame| frame["title"].as_str())
                 .collect();
+            // An elevated cmd.exe, as on CI runners, prefixes "Administrator:  ".
             assert!(
-                titles.contains(&"routed-title"),
+                titles.iter().any(|title| title.ends_with("routed-title")),
                 "the title set after the reconnect must reach the hub connected now; titles {titles:?}"
             );
             if cfg!(unix) {

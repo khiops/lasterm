@@ -75,7 +75,12 @@
 			}
 		},
 		{
-			"includes": ["**/*.spec.ts", "**/*.fixture.ts", "**/*.setup.ts"],
+			"includes": [
+				"**/*.spec.ts",
+				"**/*.fixture.ts",
+				"**/*.setup.ts",
+				"scripts/build-test-tls-material.ts"
+			],
 			"linter": {
 				"rules": {
 					"style": {

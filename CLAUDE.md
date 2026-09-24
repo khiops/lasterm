@@ -111,12 +111,14 @@ them or came from another checkout's different sources (#129).
 
 Worktrees that share one `CARGO_TARGET_DIR` also share cargo's record of which
 crates are fresh, and it goes by modification time. After another worktree has
-built, the build above (which `pnpm -F @lasterm/hub test` also runs first) can
-compile nothing and only relabel that worktree's artifacts as this checkout's, and
-the setup then accepts them. To rebuild from this checkout, clean the crates first:
+built, the build above can compile nothing and only relabel that worktree's
+artifacts as this checkout's, and the setup then accepts them.
+`pnpm build:test-tls-material`, which `pnpm -F @lasterm/hub test` runs first, cleans
+the crates before it builds when a dep-info file names another checkout. By hand,
+clean them first:
 
 ```bash
-cargo clean --release -p lasterm-hub-lock -p lasterm-tls-identity -p lasterm-process-lock -p lasterm-protected-fs
+cargo clean --release -p lasterm-protected-fs -p lasterm-process-lock -p lasterm-tls-identity -p lasterm-hub-lock
 ```
 
 ### Production build & run (local, Linux native)

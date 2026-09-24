@@ -9,23 +9,17 @@ import { platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cargoTargetDir } from "./cargo-target-dir.js";
-import { nativeBuildProblem } from "./native-build.fixture.js";
+import {
+	NATIVE_BUILD_ARGS,
+	NATIVE_CLEAN_ARGS,
+	type NativeArtifact,
+	nativeArtifacts,
+	nativeBuildProblem,
+} from "./native-build.fixture.js";
 
 const TEST_TLS_DIRECTORY_ENV = "LASTERM_TEST_TLS_DIRECTORY";
-const NATIVE_BUILD_COMMAND =
-	"cargo build --release -p lasterm-hub-lock -p lasterm-tls-identity --features lasterm-tls-identity/test-tls-material";
-/**
- * Every workspace crate those artifacts are built from: the two packages and
- * their path dependencies. Cargo rebuilds only a crate it finds stale, so one
- * left out can keep another checkout's build.
- */
-const NATIVE_CRATES = [
-	"lasterm-hub-lock",
-	"lasterm-tls-identity",
-	"lasterm-process-lock",
-	"lasterm-protected-fs",
-];
-const NATIVE_CLEAN_COMMAND = `cargo clean --release ${NATIVE_CRATES.map((crate) => `-p ${crate}`).join(" ")}`;
+const NATIVE_BUILD_COMMAND = `cargo ${NATIVE_BUILD_ARGS.join(" ")}`;
+const NATIVE_CLEAN_COMMAND = `cargo ${NATIVE_CLEAN_ARGS.join(" ")}`;
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const checkout = resolve(sourceDirectory, "../../..");
 
@@ -60,7 +54,7 @@ export default function setupTestTlsMaterial(): () => void {
  */
 function refuseStaleNativeBuild(release: string): void {
 	const problems: string[] = [];
-	for (const { artifact, crate } of nativeArtifacts(release)) {
+	for (const { artifact, crate } of loadedArtifacts(release)) {
 		const problem = nativeBuildProblem(artifact, crate, checkout);
 		if (problem !== undefined) problems.push(`  ${artifact}: ${problem}`);
 	}
@@ -82,32 +76,10 @@ function refuseStaleNativeBuild(release: string): void {
  * override variable is loaded from wherever that names instead, and is left to
  * whoever set it.
  */
-function nativeArtifacts(release: string): { artifact: string; crate: string }[] {
-	const library = (name: string) =>
-		platform() === "win32"
-			? `${name}.dll`
-			: platform() === "darwin"
-				? `lib${name}.dylib`
-				: `lib${name}.so`;
-	const executable = platform() === "win32" ? ".exe" : "";
-	const artifacts: { artifact: string; crate: string }[] = [];
-	if (!process.env.LASTERM_HUB_LOCK_ADDON) {
-		artifacts.push({
-			artifact: join(release, library("lasterm_hub_lock")),
-			crate: "lasterm-hub-lock",
-		});
-	}
-	if (!process.env.LASTERM_TLS_IDENTITY_ADDON) {
-		artifacts.push({
-			artifact: join(release, library("lasterm_tls_identity")),
-			crate: "lasterm-tls-identity",
-		});
-	}
-	artifacts.push({
-		artifact: join(release, `lasterm-tls-test-material${executable}`),
-		crate: "lasterm-tls-identity",
-	});
-	return artifacts;
+function loadedArtifacts(release: string): NativeArtifact[] {
+	return nativeArtifacts(release).filter(
+		({ override }) => override === undefined || !process.env[override],
+	);
 }
 
 function removeTestTlsDirectory(directory: string): void {
@@ -127,20 +99,7 @@ function testMaterialGeneratorPath(): string {
 	);
 	if (!existsSync(generator)) {
 		try {
-			execFileSync(
-				"cargo",
-				[
-					"build",
-					"--release",
-					"-p",
-					"lasterm-hub-lock",
-					"-p",
-					"lasterm-tls-identity",
-					"--features",
-					"lasterm-tls-identity/test-tls-material",
-				],
-				{ stdio: "pipe" },
-			);
+			execFileSync("cargo", NATIVE_BUILD_ARGS, { stdio: "pipe" });
 		} catch (error) {
 			throw new Error(`could not build hub TLS test material generator: ${String(error)}`);
 		}

@@ -123,6 +123,40 @@ describe("TerminalPane restart", () => {
 	});
 });
 
+describe("TerminalPane after a Reconnect (#556)", () => {
+	// One decision for the banner and the overlay, so the pane cannot say "Not
+	// connected" over a terminal it knows has ended.
+	it("covers its terminal with what paneCover decides", () => {
+		expect(SOURCE).toMatch(/v-if="cover === 'not-connected'" class="detached-banner"/);
+		expect(SOURCE).toMatch(/v-if="cover === 'exited' \|\| cover === 'gone'" class="exit-overlay"/);
+		expect(SOURCE).toMatch(/status: channelsStore\.statusOf\(effectiveChannelId\.value\)/);
+	});
+
+	// The list holds the host in view; the hub's reports cover every other one.
+	it("hears its terminal end whichever host is in view", () => {
+		expect(SOURCE).toMatch(
+			/const isDead = computed\(\(\) => channelsStore\.statusOf\(effectiveChannelId\.value\) === 'dead'\)/,
+		);
+	});
+
+	it("takes the hub's answer to a Reconnect: ended, or gone", () => {
+		// A Windows checkout ends its lines with CRLF.
+		const onReconnect = /async function onReconnect[\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
+		expect(onReconnect, "onReconnect moved").toBeDefined();
+		expect(onReconnect).toMatch(/code === 'CHANNEL_DEAD'\) hasEnded\.value = true/);
+		expect(onReconnect).toMatch(/code === 'CHANNEL_NOT_FOUND'\) isGone\.value = true/);
+	});
+
+	it("attaches again when the hub says a terminal it shows as not connected is live", () => {
+		const watcher =
+			/channelsStore\.reportOf\(effectiveChannelId\.value\),[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
+		expect(watcher, "the live-report watcher moved").toContain(
+			"report?.status !== 'live' || !isDetached.value",
+		);
+		expect(watcher).toContain("onReconnect()");
+	});
+});
+
 describe("TerminalPane lock indicator", () => {
 	// A terminal on another host that has ended is in no list the pane can
 	// read, so `isDead` stays false: the indicator offered "No lock" under an

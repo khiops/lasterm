@@ -37,8 +37,8 @@
 		<div v-if="tintStyle" class="tint-overlay" :style="tintStyle" />
 
 		<!-- Exit overlay for all dead channels, and for one the hub has never heard of -->
-		<div v-if="isDead || hasEnded || isGone" class="exit-overlay">
-			<div class="exit-message">{{ isGone ? goneMessage : exitMessage }}</div>
+		<div v-if="cover === 'exited' || cover === 'gone'" class="exit-overlay">
+			<div class="exit-message">{{ cover === 'gone' ? goneMessage : exitMessage }}</div>
 			<div v-if="restartFailure && !isGone" class="exit-reason">
 				Could not restart it: {{ restartFailure }}
 			</div>
@@ -56,7 +56,7 @@
 		</div>
 
 		<!-- Not connected: what is shown is remembered, not live -->
-		<div v-if="isDetached && !isDead && !hasEnded && !isGone" class="detached-banner">
+		<div v-if="cover === 'not-connected'" class="detached-banner">
 			<span class="detached-text">Not connected. This is what this terminal last showed; typing here goes nowhere.</span>
 			<button class="detached-btn" @click="onReconnect">Reconnect</button>
 		</div>
@@ -136,6 +136,7 @@ import { useHostsStore } from '../stores/hosts.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
+import { paneCover } from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import SearchOverlay from './SearchOverlay.vue';
@@ -346,12 +347,9 @@ watch(
 // Dead-channel awareness
 // ---------------------------------------------------------------------------
 
-const isDead = computed(() => {
-	const chId = effectiveChannelId.value;
-	if (!chId) return false;
-	const channel = channelsStore.channels.find((c) => c.id === chId);
-	return channel?.status === 'dead';
-});
+// Whatever host is in view: the list only carries that host's channels, and
+// a pane over another host's terminal must hear it end too (#556).
+const isDead = computed(() => channelsStore.statusOf(effectiveChannelId.value) === 'dead');
 
 const isDirectProcess = computed(() => {
 	const chId = effectiveChannelId.value;
@@ -370,20 +368,32 @@ const isDirectProcess = computed(() => {
  */
 const isGone = ref(false);
 
+/** A Reconnect or a Restart is already asking for this terminal. */
+let reattaching = false;
+
 /**
  * Ask again for the terminal itself.
  *
  * The hub tries the host when a pane attaches, so attaching again is the whole
- * gesture: it either comes back with something live, or answers from memory
- * again and the banner stays.
+ * gesture: it either comes back with something live, answers from memory again
+ * and the banner stays, or reaches the host and finds the terminal gone.
  */
 async function onReconnect(): Promise<void> {
 	const chId = effectiveChannelId.value;
-	if (chId === null) return;
+	if (chId === null || reattaching) return;
+	reattaching = true;
 	try {
 		isDetached.value = (await reattachChannel(chId, { preserveContent: true })).cached;
-	} catch {
-		// Still unreachable. The banner is already saying so.
+	} catch (err) {
+		// Reaching the host and not finding the terminal there is an answer, not
+		// a failure to connect: dropping it left the pane saying "Not connected"
+		// over a terminal that had ended (#556).
+		const code = (err as { code?: string } | null)?.code;
+		if (code === 'CHANNEL_DEAD') hasEnded.value = true;
+		else if (code === 'CHANNEL_NOT_FOUND') isGone.value = true;
+		// Anything else: still unreachable. The banner is already saying so.
+	} finally {
+		reattaching = false;
 	}
 }
 
@@ -401,14 +411,16 @@ const isDetached = ref(false);
 /**
  * The hub said this terminal has ended, whatever the channel list holds.
  *
- * `isDead` reads the list of the host in view, and that list is the current
- * session's: a tab left over from before a restart names a terminal the hub
- * still knows and the list no longer carries. Trusting only the list left such
- * a pane blank and inert — no message, no button, nothing to do.
+ * `isDead` reads the list of the host in view, or what the hub has reported
+ * since the page loaded, and the list is the current session's: a tab left
+ * over from before a restart names a terminal the hub still knows, the list no
+ * longer carries, and nothing has reported on. Trusting only those left such a
+ * pane blank and inert — no message, no button, nothing to do.
  */
 // The lock indicator reads this too: a terminal on another host that has
-// ended is in no list, so `isDead` stays false there, and the pane offered "No
-// lock" over a shell that no longer exists while the overlay said it had exited.
+// ended is in no list, and may have had no report, so `isDead` can stay false
+// there, and the pane offered "No lock" over a shell that no longer exists
+// while the overlay said it had exited.
 const hasEnded = ref(false);
 const goneMessage = 'This terminal no longer exists.';
 
@@ -419,7 +431,7 @@ const goneMessage = 'This terminal no longer exists.';
  * prompt showing beneath.
  */
 watch(
-	() => channelsStore.channels.find((c) => c.id === effectiveChannelId.value)?.status,
+	() => channelsStore.statusOf(effectiveChannelId.value),
 	(status) => {
 		if (status === 'live' || status === 'born') hasEnded.value = false;
 	},
@@ -428,6 +440,31 @@ watch(
 /** A restart is under way: over SSH it can take seconds, and a button that
  * does nothing visible for that long gets pressed again. */
 const restarting = ref(false);
+
+/**
+ * The hub says this terminal is live while the pane still says it is not
+ * connected: the host was reached after the attach had stopped waiting for
+ * it. A Reconnect slower than the attach did that, and left the pane on its
+ * banner over a terminal it could now reach. It asks again, as Reconnect
+ * would (#556). A restart attaches by itself.
+ */
+watch(
+	() => channelsStore.reportOf(effectiveChannelId.value),
+	(report) => {
+		if (report?.status !== 'live' || !isDetached.value || restarting.value) return;
+		void onReconnect();
+	},
+);
+
+/** What the pane lays over its terminal, if anything. */
+const cover = computed(() =>
+	paneCover({
+		status: channelsStore.statusOf(effectiveChannelId.value),
+		ended: hasEnded.value,
+		gone: isGone.value,
+		detached: isDetached.value,
+	}),
+);
 
 /** Why the last attempt to bring this terminal back failed, if it did. */
 const restartFailure = computed(() => {
@@ -440,7 +477,7 @@ const exitMessage = computed(() => {
 	if (!chId) return 'Exited';
 	const channel = channelsStore.channels.find((c) => c.id === chId);
 	const label = channel?.directProcess ? 'Process' : 'Shell';
-	const code = channel?.exitCode;
+	const code = channel?.exitCode ?? channelsStore.reportOf(chId)?.exitCode;
 	if (code !== undefined && code !== null) {
 		return `${label} exited (code ${code})`;
 	}
@@ -675,9 +712,15 @@ async function onRestart(): Promise<void> {
 	}
 	if (ok) {
 		// This pane may be over a terminal no list shows — one on another
-		// host — where the status watcher cannot see it come back.
+		// host — where the status watcher may not have heard it come back yet.
 		hasEnded.value = false;
-		const result = await reattachChannel(chId, { preserveContent: true });
+		reattaching = true;
+		let result: Awaited<ReturnType<typeof reattachChannel>>;
+		try {
+			result = await reattachChannel(chId, { preserveContent: true });
+		} finally {
+			reattaching = false;
+		}
 		isDetached.value = result.cached;
 		if (result.writeLockHolder) {
 			writeLockStore.handleWriteLock(chId, result.writeLockHolder);

@@ -419,7 +419,9 @@ Hub connects to daemon UDS
   Agent → Hub: CHANNEL_STATE_END
   │
   Hub: reconcileChannelState()
-    ├─ ch-1 (alive) → adopt into session, re-attach, resume OUTPUT
+    ├─ ch-1 (alive) → adopt into session, re-attach, resume OUTPUT; notify UI
+    │                 CHANNEL_STATE { status: "live" } if it was orphan, or if a client is
+    │                 attached (it may have been answered from the spool, § 4.7)
     ├─ ch-2 (dead) → mark dead in DB, notify UI CHANNEL_STATE { status: "dead" }
     └─ one the hub does not know → DESTROY, with hub-identity only; left alone otherwise
   │
@@ -594,6 +596,9 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   other_owner_channels?: number
 }
 
+// A status can be said again without having changed: once a host is reached
+// again, the clients attached to a terminal it still runs hear "live", since
+// their last ATTACH_OK may have been `cached` (#556).
 {
   type: "CHANNEL_STATE",
   channel_id: string,

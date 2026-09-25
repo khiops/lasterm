@@ -370,23 +370,56 @@ describe("a token revocation is recorded, refused or not", () => {
 				lvl: "info",
 				msg: "security: token revocation",
 				tokenId: paired.id,
+				byTokenId: "primary",
 				sourceIp: "127.0.0.1",
 				outcome: "revoked",
 			}),
-			expect.objectContaining({ tokenId: paired.id, sourceIp: "127.0.0.1", outcome: "not_found" }),
+			expect.objectContaining({
+				tokenId: paired.id,
+				byTokenId: "primary",
+				sourceIp: "127.0.0.1",
+				outcome: "not_found",
+			}),
 			expect.objectContaining({
 				tokenId: "primary",
+				byTokenId: "primary",
 				sourceIp: "127.0.0.1",
 				outcome: "not_revocable",
 			}),
 			expect.objectContaining({
 				tokenId: "<withheld>",
+				byTokenId: "primary",
 				sourceIp: "127.0.0.1",
 				outcome: "not_found",
 			}),
 		]);
 		expect(log.text()).not.toContain(paired.token);
 		expect(log.text()).not.toContain(PRIMARY_TOKEN);
+	});
+
+	// Every local client connects from 127.0.0.1, so the address says nothing about
+	// which of them asked; the credential it authenticated with does (#537).
+	it("records which credential asked, by its id and never its value", async () => {
+		const asker = createToken(dbs.meta, { label: "browser", expiresAt: null });
+		const target = createToken(dbs.meta, { label: "another browser", expiresAt: null });
+
+		const response = await server.inject({
+			method: "DELETE",
+			url: `/api/auth/tokens/${target.id}`,
+			headers: { authorization: `Bearer ${asker.token}` },
+		});
+
+		expect(response.statusCode).toBe(200);
+		expect(log.events("token.revoke")).toEqual([
+			expect.objectContaining({
+				tokenId: target.id,
+				byTokenId: asker.id,
+				sourceIp: "127.0.0.1",
+				outcome: "revoked",
+			}),
+		]);
+		expect(log.text()).not.toContain(asker.token);
+		expect(log.text()).not.toContain(target.token);
 	});
 
 	it("records the revocation before the sockets it closes", async () => {

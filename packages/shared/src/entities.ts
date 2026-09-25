@@ -207,13 +207,6 @@ export interface CacheIndex {
 	lastSeenAt: string;
 }
 
-export interface PairingCode {
-	code: string;
-	token: string;
-	expiresAt: string;
-	used: boolean;
-}
-
 export interface SshConfigEntry {
 	name: string;
 	hostname: string | null;

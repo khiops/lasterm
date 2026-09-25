@@ -23,6 +23,7 @@ import { registerTokenRoutes } from "./api/tokens.js";
 import { registerWallpaperRoutes } from "./api/wallpapers.js";
 import { getBootAssetToken, requestHasValidAssetToken } from "./asset-token.js";
 import {
+	type AuthTokenRecord,
 	hashToken,
 	listTokens,
 	PRIMARY_TOKEN_ID,
@@ -69,6 +70,17 @@ declare module "fastify" {
 		 * every route and hook records through the same log without being handed it.
 		 */
 		security: SecurityLog;
+	}
+
+	interface FastifyRequest {
+		/**
+		 * The credential this request authenticated with: its row, as the REST auth
+		 * hook validated it, never the token. A route reads it to say who asked, as
+		 * `token.revoke` does (#537). Null wherever that hook lets a request through
+		 * unauthenticated — health, pairing verification, static files, the
+		 * WebSocket upgrade — and on a server built without auth.
+		 */
+		authTokenRecord: AuthTokenRecord | null;
 	}
 }
 
@@ -194,6 +206,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		"security",
 		options.securityLog ?? new SecurityLog((msg, fields) => server.log.info(fields, msg)),
 	);
+	server.decorateRequest("authTokenRecord", null);
 
 	// Helmet — sets security-related HTTP response headers
 	await server.register(fastifyHelmet, {
@@ -410,6 +423,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 					});
 				}
 				const { record } = validation;
+				request.authTokenRecord = record;
 				// Sliding-window expiry refresh + last_used_at update (best-effort, non-blocking)
 				touchTokenBestEffort(db, record.id, ttlDays, server.log);
 				server.log.debug({ url: pathname, tokenId: record.id }, "auth: accepted");
@@ -567,7 +581,6 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 				authConfig: authConfig,
 				db: options.dbManager.meta,
 				metaDal,
-				...(options.hubLogger && { hubLogger: options.hubLogger }),
 			});
 			registerTokenRoutes(server, {
 				db: options.dbManager.meta,

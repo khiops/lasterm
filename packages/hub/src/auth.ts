@@ -76,7 +76,7 @@ export function hashToken(token: string): string {
  * `-` as an option, which a relative `XDG_CONFIG_HOME` of `-R` produces. Every
  * command built from this ends its options with `--` first.
  */
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 

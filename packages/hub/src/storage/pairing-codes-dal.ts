@@ -42,16 +42,18 @@ export class PairingCodesDAL {
 		return row.n;
 	}
 
-	cleanExpiredPairingCodes(): void {
-		const now = new Date().toISOString();
-		this.db.prepare("DELETE FROM pairing_codes WHERE expires_at < ? AND used = 0").run(now);
-	}
-
 	/**
 	 * Every code not yet redeemed, expired or not. A hub that starts calls this:
 	 * the key that hashed those codes died with the run before, so none of them
 	 * can be redeemed any more, and left in place they would still count against
 	 * the three a hub allows at once.
+	 *
+	 * Nothing deletes a code while its run lasts, and that is deliberate (#537).
+	 * An expired code no longer counts as active, and its row is what lets a late
+	 * attempt answer 410 and be recorded as `code_expired` rather than as an
+	 * unknown code. Its hash is worth nothing once the code has expired, and the
+	 * rows a run can leave are bounded by issuance: an authenticated request, and
+	 * three codes live at once.
 	 */
 	deleteUnredeemedPairingCodes(): void {
 		this.db.prepare("DELETE FROM pairing_codes WHERE used = 0").run();

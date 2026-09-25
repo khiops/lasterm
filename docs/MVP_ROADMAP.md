@@ -163,7 +163,7 @@ $ curl -X POST localhost:4100/api/hosts \
 **Exit criteria (milestone):**
 - Unauthenticated WS/REST requests rejected (401)
 - auth.json auto-generated, hard fail if world-readable
-- Device B pairs via 6-digit code → gets token → sees same hosts/channels
+- Device B pairs via 8-digit code → gets token → sees same hosts/channels
 - Two browsers attached to same channel → one writes, one reads
 - Write-lock transfer (request/approve and force) works
 - Lock state correct after writer disconnects

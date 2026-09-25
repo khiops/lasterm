@@ -29,6 +29,7 @@ import {
 } from "./previous-installation.js";
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
 import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
+import { forgetStartEnvironment } from "./start-port.js";
 import { ensurePrivateStateDirectory } from "./state-dir.js";
 import { openDatabases } from "./storage/db.js";
 import { resolveHubTlsIdentity } from "./tls-identity.js";
@@ -133,6 +134,10 @@ export async function startHub(
 	overrides: Partial<HubStartupDependencies> = {},
 ): Promise<void> {
 	const dependencies = { ...defaultDependencies, ...overrides };
+	// The entry point has read the port and the browser flag into `options` by
+	// now. Left in the environment, they would reach the agent this hub spawns,
+	// and every shell after it (#540).
+	forgetStartEnvironment(process.env);
 	// Before a directory is created, a port is bound or the lock is taken. The two
 	// generations share no lock, so this is the only thing standing between them.
 	const previous = dependencies.describePreviousInstallation();

@@ -36,7 +36,6 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 	},
 	panes: {
 		maxPanes: (v) => typeof v === "number" && Number.isInteger(v) && v >= 1,
-		whenEnded: (v) => v === "ask" || v === "restart" || v === "close",
 		keepEnded: (v) => typeof v === "boolean",
 	},
 	channels: {

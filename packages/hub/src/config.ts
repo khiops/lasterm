@@ -188,7 +188,6 @@ export const DEFAULT_TABS_CONFIG: TabsConfig = {
 
 export const DEFAULT_PANES_CONFIG: PanesConfig = {
 	maxPanes: 4,
-	whenEnded: "ask",
 	keepEnded: false,
 };
 
@@ -296,9 +295,6 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		const raw = panesSection as Record<string, unknown>;
 		if (typeof raw.max_panes === "number" && raw.max_panes >= 1) {
 			config.panes.maxPanes = raw.max_panes;
-		}
-		if (raw.when_ended === "ask" || raw.when_ended === "restart" || raw.when_ended === "close") {
-			config.panes.whenEnded = raw.when_ended;
 		}
 		if (typeof raw.keep_ended === "boolean") {
 			config.panes.keepEnded = raw.keep_ended;

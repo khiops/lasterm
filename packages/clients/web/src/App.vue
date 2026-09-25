@@ -1552,9 +1552,8 @@ function onClosePane(channelId: string, ended?: { keep: boolean }): void {
 	// A live terminal keeps running when its pane goes — it can be put back in
 	// one from the sidebar. A dead one has nothing to come back to, and closing
 	// it while leaving it listed is what made "Close" feel like it did nothing:
-	// it is deleted, unless it is to be kept. The overlay offers that choice
-	// beside its Close; anywhere else the setting makes it. Nothing is asked
-	// (#574).
+	// it is deleted, unless "Keep ended terminals in the sidebar" says to keep
+	// it. Nothing is asked (#574).
 	const hasEnded = ended !== undefined || channelsStore.statusOf(channelId) === 'dead';
 	layout.closePane(channelId);
 	if (!hasEnded) return;

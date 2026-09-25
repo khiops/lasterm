@@ -76,13 +76,23 @@
 					<button v-else class="exit-btn" @click="onOverlayAction('close')">Close</button>
 				</div>
 				<div v-if="!isGone" class="exit-options">
-					<label class="exit-option" :for="`${exitId}-keep`">
-						<input :id="`${exitId}-keep`" v-model="keepChoice" type="checkbox" />
-						Keep in the sidebar
+					<label class="exit-option" :for="`${exitId}-host`">
+						<input
+							:id="`${exitId}-host`"
+							type="checkbox"
+							:checked="alwaysScope === 'host'"
+							@change="onAlwaysChange('host', $event)"
+						/>
+						Always do this for this host
 					</label>
-					<label class="exit-option" :for="`${exitId}-always`">
-						<input :id="`${exitId}-always`" v-model="alwaysChoice" type="checkbox" />
-						Always do this
+					<label class="exit-option" :for="`${exitId}-global`">
+						<input
+							:id="`${exitId}-global`"
+							type="checkbox"
+							:checked="alwaysScope === 'global'"
+							@change="onAlwaysChange('global', $event)"
+						/>
+						Always do this globally
 					</label>
 				</div>
 			</div>
@@ -169,7 +179,9 @@ import { useHostsStore } from '../stores/hosts.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
+import { useToastStore } from '../stores/toast.js';
 import {
+	type AlwaysScope,
 	createEndWatch,
 	type EndSeen,
 	endedPrefs,
@@ -178,6 +190,7 @@ import {
 	type OverlayAction,
 	overlayChoice,
 	reactToEnd,
+	toggleAlways,
 } from '../utils/exit-action.js';
 import { type AttachFacts, factsFromAttachOk, factsFromRefusal, paneCover } from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
@@ -431,8 +444,11 @@ let attachedLive = false;
 // When the terminal ends (#574)
 // ---------------------------------------------------------------------------
 
-/** "When a terminal ends" and "Keep ended terminals in the sidebar", from Settings. */
-const prefs = computed(() => endedPrefs(configStore.uiConfig.panes));
+/**
+ * "When a terminal ends", as this terminal's settings resolve it (globally, for
+ * its host, or for it), and "Keep ended terminals in the sidebar", from Settings.
+ */
+const prefs = computed(() => endedPrefs(configStore.uiConfig.panes, resolvedProfile.value));
 
 /**
  * Whether an end was seen as it happened, or found afterwards: only the first
@@ -935,23 +951,36 @@ function closeEnded(keep: boolean): void {
 	if (chId !== null) emit('close-pane', chId, { keep });
 }
 
-/** The overlay's options: "Keep in the sidebar" and "Always do this". */
+/**
+ * The overlay's option: "Always do this for this host", or "globally". One
+ * box or the other: checking one clears the other.
+ */
 const exitId = useId();
-const keepChoice = ref(false);
-const alwaysChoice = ref(false);
+const alwaysScope = ref<AlwaysScope | null>(null);
 const paneRoot = ref<HTMLElement | null>(null);
 const exitCard = ref<HTMLElement | null>(null);
 
+function onAlwaysChange(scope: AlwaysScope, event: Event): void {
+	alwaysScope.value = toggleAlways(alwaysScope.value, scope, (event.target as HTMLInputElement).checked);
+}
+
 /**
- * Restart or Close, clicked on the overlay: done at once, with the options
- * beside it, and remembered as the setting when "Always do this" says so.
+ * Restart or Close, clicked on the overlay: done at once, and remembered as
+ * the setting, for this host or globally, when "Always do this" says so.
+ * Whether Close deletes the terminal is the "Keep" setting's to say.
  */
 function onOverlayAction(action: OverlayAction): void {
-	const { act, remember } = overlayChoice(action, {
-		keep: keepChoice.value,
-		always: alwaysChoice.value,
-	});
-	if (remember !== null) void configStore.saveUiSettings('panes', remember);
+	const { act, remember } = overlayChoice(action, alwaysScope.value, prefs.value.keepEnded);
+	if (remember !== null) {
+		void configStore
+			.saveWhenEnded(remember.whenEnded, remember.scope, {
+				hostId: paneHostId.value ?? null,
+				channelId: effectiveChannelId.value,
+			})
+			.then((saved) => {
+				if (!saved) useToastStore().show('error', 'Could not save "Always do this".');
+			});
+	}
 	if (act.kind === 'restart') void onRestart();
 	else closeEnded(act.keep);
 }
@@ -975,13 +1004,12 @@ function focusOverlay(): void {
 	}
 }
 
-// Each time the overlay comes up its options start from the setting.
+// Each time the overlay comes up, "Always do this" starts unchecked.
 watch(
 	() => cover.value === 'exited' || cover.value === 'gone',
 	(shown) => {
 		if (!shown) return;
-		keepChoice.value = prefs.value.keepEnded;
-		alwaysChoice.value = false;
+		alwaysScope.value = null;
 		void nextTick(focusOverlay);
 	},
 	{ immediate: true },

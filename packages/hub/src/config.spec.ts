@@ -204,6 +204,25 @@ describe("ConfigResolver.resolve", () => {
 		expect(result.fontFamily).toBe('"Consolas", "Liberation Mono", "Courier New", monospace'); // layer 1 default still present
 	});
 
+	// "When a terminal ends" (#574) cascades like the font: asked by default,
+	// set in config.toml for every host, and set again for one host.
+	it("cascades when_ended: default, config.toml, then a host", () => {
+		expect(new ConfigResolver(metaDal).resolve().whenEnded).toBe("ask");
+
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}-ended`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "config.toml"), '[terminal]\nwhen_ended = "close"\n');
+		const host = metaDal.createHost({ type: "local", label: "test-host-ended" });
+		const other = metaDal.createHost({ type: "local", label: "test-host-ended-other" });
+		metaDal.updateHostProfile(host.id, JSON.stringify({ whenEnded: "restart" }));
+
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(dir);
+		expect(resolver.resolve().whenEnded).toBe("close");
+		expect(resolver.resolve(other.id).whenEnded).toBe("close");
+		expect(resolver.resolve(host.id).whenEnded).toBe("restart");
+	});
+
 	// Every other field replaces the layer under it. Environment variables must
 	// not: a host that sets a proxy would erase the editor set globally.
 	it("merges environment variables key by key down the layers", () => {
@@ -646,6 +665,37 @@ describe("PATCH /api/hosts/:id/profile", () => {
 		expect(body.terminal.resolved.cursorStyle).toBe("bar");
 	});
 
+	// "Always do this for this host" on an ended terminal's overlay (#574)
+	// writes here, and "globally" takes it off again: null drops the override.
+	it("sets and clears a host's when_ended", async () => {
+		const createRes = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "local", label: "host-ended-test" },
+		});
+		const { id } = createRes.json<{ id: string }>();
+		const resolved = async (): Promise<unknown> =>
+			(await server.inject({ method: "GET", url: `/api/config/cascade?host_id=${id}` })).json<{
+				terminal: { resolved: { whenEnded: unknown } };
+			}>().terminal.resolved.whenEnded;
+
+		const set = await server.inject({
+			method: "PATCH",
+			url: `/api/hosts/${id}/profile`,
+			payload: { profile: { whenEnded: "restart" } },
+		});
+		expect(set.statusCode).toBe(200);
+		expect(await resolved()).toBe("restart");
+
+		const clear = await server.inject({
+			method: "PATCH",
+			url: `/api/hosts/${id}/profile`,
+			payload: { profile: { whenEnded: null } },
+		});
+		expect(clear.statusCode).toBe(200);
+		expect(await resolved()).toBe("ask");
+	});
+
 	it("returns 400 when profile field is missing from body", async () => {
 		const createRes = await server.inject({
 			method: "POST",
@@ -892,22 +942,25 @@ describe("extractUiConfig — panes section", () => {
 		expect(config.panes).toEqual(DEFAULT_PANES_CONFIG);
 	});
 
-	// What a pane does when its terminal ends (#574): asked, unless told.
-	it("asks, and deletes on close, until told otherwise", () => {
-		expect(DEFAULT_PANES_CONFIG.whenEnded).toBe("ask");
+	// Closing an ended terminal deletes it until told to keep it (#574).
+	it("deletes on close until told otherwise", () => {
 		expect(DEFAULT_PANES_CONFIG.keepEnded).toBe(false);
 	});
 
-	it("parses when_ended and keep_ended", () => {
-		const config = extractUiConfig({ panes: { when_ended: "restart", keep_ended: true } });
-		expect(config.panes.whenEnded).toBe("restart");
+	it("parses keep_ended", () => {
+		const config = extractUiConfig({ panes: { keep_ended: true } });
 		expect(config.panes.keepEnded).toBe(true);
 	});
 
-	it("ignores a when_ended or keep_ended it cannot act on", () => {
-		const config = extractUiConfig({ panes: { when_ended: "delete", keep_ended: "yes" } });
-		expect(config.panes.whenEnded).toBe(DEFAULT_PANES_CONFIG.whenEnded);
+	it("ignores a keep_ended it cannot act on", () => {
+		const config = extractUiConfig({ panes: { keep_ended: "yes" } });
 		expect(config.panes.keepEnded).toBe(DEFAULT_PANES_CONFIG.keepEnded);
+	});
+
+	// "When a terminal ends" is a terminal setting, cascaded: it is not read here.
+	it("does not read when_ended from [panes]", () => {
+		const config = extractUiConfig({ panes: { when_ended: "restart" } });
+		expect(config.panes).toEqual(DEFAULT_PANES_CONFIG);
 	});
 });
 

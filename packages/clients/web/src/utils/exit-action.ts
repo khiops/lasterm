@@ -1,4 +1,4 @@
-import type { PanesConfig } from "@lasterm/shared";
+import type { PanesConfig, TerminalProfile } from "@lasterm/shared";
 
 /**
  * What happens when a terminal ends (#574): the choice Settings › Terminal
@@ -24,9 +24,20 @@ export interface EndedPrefs {
  */
 export const AUTO_RESTART_MIN_RUN_MS = 5_000;
 
-/** The choice the UI config holds, with its defaults: ask, and delete on close. */
-export function endedPrefs(panes: PanesConfig | undefined): EndedPrefs {
-	const whenEnded = panes?.whenEnded;
+/**
+ * The choice as a terminal reads it, with its defaults: ask, and delete on
+ * close.
+ *
+ * "When a terminal ends" is a terminal setting, cascaded like its font: set
+ * globally, for a host, or for the terminal itself, and the nearest wins. It
+ * comes from the terminal's resolved profile. "Keep" is global, in the UI
+ * config. Without a profile, as where only closing matters, it reads "ask".
+ */
+export function endedPrefs(
+	panes: PanesConfig | undefined,
+	profile?: Pick<TerminalProfile, "whenEnded">,
+): EndedPrefs {
+	const whenEnded = profile?.whenEnded;
 	return {
 		whenEnded: whenEnded === "restart" || whenEnded === "close" ? whenEnded : "ask",
 		keepEnded: panes?.keepEnded === true,
@@ -171,36 +182,48 @@ export function heldBackMessage(reason: HeldBack): string {
 
 // ─── The overlay's buttons ───────────────────────────────────────────────────
 
-export interface OverlayOptions {
-	/** "Keep in the sidebar" */
-	keep: boolean;
-	/** "Always do this" */
-	always: boolean;
+/**
+ * Where "Always do this" writes the action: "for this host", or "globally".
+ * One or the other, never both.
+ */
+export type AlwaysScope = "host" | "global";
+
+/**
+ * The two "Always do this" boxes after one of them was clicked: checking one
+ * clears the other, unchecking it leaves neither.
+ */
+export function toggleAlways(
+	current: AlwaysScope | null,
+	clicked: AlwaysScope,
+	checked: boolean,
+): AlwaysScope | null {
+	if (checked) return clicked;
+	return current === clicked ? null : current;
 }
 
 export type OverlayAction = "restart" | "close";
 
+/** What "Always do this" writes, and where. */
+export interface RememberedEnd {
+	scope: AlwaysScope;
+	whenEnded: Exclude<WhenEnded, "ask">;
+}
+
 /**
  * What a click on the overlay does, and what "Always do this" writes.
  *
- * Close acts at once with the options beside it: there is no second question.
- * "Always do this" remembers the action clicked, and with Close the keep choice
- * too; with Restart that checkbox had nothing to say, so it is not written.
+ * Close acts at once: there is no second question. Whether it deletes the
+ * terminal is the "Keep" setting's to say, not the overlay's. "Always do this"
+ * remembers the action clicked, for this host or globally.
  */
 export function overlayChoice(
 	action: OverlayAction,
-	options: OverlayOptions,
-): { act: Exclude<EndReaction, { kind: "overlay" }>; remember: Partial<PanesConfig> | null } {
+	always: AlwaysScope | null,
+	keepEnded: boolean,
+): { act: Exclude<EndReaction, { kind: "overlay" }>; remember: RememberedEnd | null } {
 	const act: Exclude<EndReaction, { kind: "overlay" }> =
-		action === "restart" ? { kind: "restart" } : { kind: "close", keep: options.keep };
-	if (!options.always) return { act, remember: null };
-	return {
-		act,
-		remember:
-			action === "restart"
-				? { whenEnded: "restart" }
-				: { whenEnded: "close", keepEnded: options.keep },
-	};
+		action === "restart" ? { kind: "restart" } : { kind: "close", keep: keepEnded };
+	return { act, remember: always === null ? null : { scope: always, whenEnded: action } };
 }
 
 // ─── Closing ended terminals ─────────────────────────────────────────────────

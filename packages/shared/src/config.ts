@@ -102,17 +102,8 @@ export interface PanesConfig {
 	/** Max panes per tab. Default: 4 */
 	maxPanes?: number;
 	/**
-	 * What a pane does when the terminal in it ends. Default: "ask"
-	 *
-	 * "ask" lays Restart and Close over it. "restart" brings it back, but never
-	 * one that ended within seconds of starting, nor one found already ended on
-	 * a reload or an attach: that is an end nobody saw happen. "close" closes
-	 * its pane, deleting the terminal or keeping it as `keepEnded` says.
-	 */
-	whenEnded?: "ask" | "restart" | "close";
-	/**
-	 * Closing a terminal that has ended leaves it listed in the sidebar instead
-	 * of deleting it. Default: false
+	 * Closing a terminal that has ended leaves it listed in the sidebar, to
+	 * restart later, instead of deleting it. Its output is not kept. Default: false
 	 */
 	keepEnded?: boolean;
 }
@@ -272,6 +263,7 @@ export const DEFAULT_PROFILE: TerminalProfile = {
 	windowEffect: "none",
 	envMode: "inherit",
 	env: {},
+	whenEnded: "ask",
 };
 
 // ─── UI behavioral config (combined) ─────────────────────────────────────────
@@ -349,6 +341,7 @@ export const TERMINAL_PROFILE_KEYS = [
 	"windowEffect",
 	"envMode",
 	"env",
+	"whenEnded",
 ] as const;
 
 export const MAX_WALLPAPER_BLUR = 20;
@@ -375,7 +368,7 @@ export const TABS_CONFIG_KEYS = [
 	"scope",
 ] as const;
 
-export const PANES_CONFIG_KEYS = ["maxPanes", "whenEnded", "keepEnded"] as const;
+export const PANES_CONFIG_KEYS = ["maxPanes", "keepEnded"] as const;
 
 export const CHANNELS_CONFIG_KEYS = ["defaultShell", "defaultGroupName", "autoGroup"] as const;
 

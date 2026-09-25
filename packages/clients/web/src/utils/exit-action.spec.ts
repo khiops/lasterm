@@ -1,4 +1,4 @@
-import type { PanesConfig } from "@lasterm/shared";
+import type { TerminalProfile } from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
 	AUTO_RESTART_MIN_RUN_MS,
@@ -12,6 +12,7 @@ import {
 	migrateLegacyDeadTabChoice,
 	overlayChoice,
 	reactToEnd,
+	toggleAlways,
 } from "./exit-action.js";
 
 const ask: EndedPrefs = { whenEnded: "ask", keepEnded: false };
@@ -31,19 +32,23 @@ const liveEnd: EndFacts = {
 describe("endedPrefs", () => {
 	it("asks, and deletes on close, when nothing is set", () => {
 		expect(endedPrefs(undefined)).toEqual({ whenEnded: "ask", keepEnded: false });
-		expect(endedPrefs({ maxPanes: 4 })).toEqual({ whenEnded: "ask", keepEnded: false });
+		expect(endedPrefs({ maxPanes: 4 }, {})).toEqual({ whenEnded: "ask", keepEnded: false });
 	});
 
-	it("reads what Settings wrote", () => {
-		expect(endedPrefs({ whenEnded: "restart", keepEnded: true })).toEqual({
+	// "When a terminal ends" from the terminal's resolved profile, "Keep" from
+	// the UI config.
+	it("reads what Settings wrote, each from where it lives", () => {
+		expect(endedPrefs({ keepEnded: true }, { whenEnded: "restart" })).toEqual({
 			whenEnded: "restart",
 			keepEnded: true,
 		});
-		expect(endedPrefs({ whenEnded: "close" }).whenEnded).toBe("close");
+		expect(endedPrefs(undefined, { whenEnded: "close" }).whenEnded).toBe("close");
 	});
 
 	it("asks when the value is not one it knows", () => {
-		expect(endedPrefs({ whenEnded: "delete" } as unknown as PanesConfig).whenEnded).toBe("ask");
+		expect(
+			endedPrefs(undefined, { whenEnded: "delete" } as unknown as TerminalProfile).whenEnded,
+		).toBe("ask");
 	});
 });
 
@@ -230,38 +235,41 @@ describe("nothing restarts on its own on a reload or an attach", () => {
 // ─── The overlay ─────────────────────────────────────────────────────────────
 
 describe("overlayChoice: the overlay's buttons", () => {
-	// No second dialog: Close carries its options and acts at once.
-	it("Close acts at once with the keep option beside it", () => {
-		expect(overlayChoice("close", { keep: false, always: false })).toEqual({
+	// No second dialog: Close acts at once, and the "Keep" setting says
+	// whether the terminal stays listed.
+	it("Close acts at once, keeping the terminal as the setting says", () => {
+		expect(overlayChoice("close", null, false)).toEqual({
 			act: { kind: "close", keep: false },
 			remember: null,
 		});
-		expect(overlayChoice("close", { keep: true, always: false }).act).toEqual({
-			kind: "close",
-			keep: true,
-		});
+		expect(overlayChoice("close", null, true).act).toEqual({ kind: "close", keep: true });
 	});
 
-	it('"Always do this" writes Close with the keep choice as the setting', () => {
-		expect(overlayChoice("close", { keep: true, always: true }).remember).toEqual({
-			whenEnded: "close",
-			keepEnded: true,
-		});
-		expect(overlayChoice("close", { keep: false, always: true }).remember).toEqual({
-			whenEnded: "close",
-			keepEnded: false,
-		});
-	});
-
-	it('"Always do this" writes Restart as the setting, leaving keep alone', () => {
-		expect(overlayChoice("restart", { keep: true, always: true })).toEqual({
+	it("Restart restarts, whatever the keep setting", () => {
+		expect(overlayChoice("restart", null, true)).toEqual({
 			act: { kind: "restart" },
-			remember: { whenEnded: "restart" },
+			remember: null,
 		});
 	});
 
-	it('writes nothing without "Always do this"', () => {
-		expect(overlayChoice("restart", { keep: true, always: false }).remember).toBeNull();
+	// "For this host" and "globally" are one choice: never both.
+	it('checks one "Always do this" box at a time', () => {
+		expect(toggleAlways(null, "host", true)).toBe("host");
+		expect(toggleAlways("host", "global", true)).toBe("global");
+		expect(toggleAlways("global", "host", true)).toBe("host");
+		expect(toggleAlways("host", "host", false)).toBeNull();
+		expect(toggleAlways("global", "host", false)).toBe("global");
+	});
+
+	it('"Always do this" writes the action clicked, for this host or globally', () => {
+		expect(overlayChoice("restart", "host", false).remember).toEqual({
+			scope: "host",
+			whenEnded: "restart",
+		});
+		expect(overlayChoice("close", "global", true)).toEqual({
+			act: { kind: "close", keep: true },
+			remember: { scope: "global", whenEnded: "close" },
+		});
 	});
 });
 

@@ -264,9 +264,6 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 		expect(onEnded).toContain("if (reaction.kind === 'restart') void onRestart();");
 		expect(onEnded).toContain("else closeEnded(reaction.keep);");
 		expect(SOURCE).toContain(
-			"const prefs = computed(() => endedPrefs(configStore.uiConfig.panes));",
-		);
-		expect(SOURCE).toContain(
 			'<p v-if="heldBack !== null && !isGone" class="exit-reason">{{ heldBackText }}</p>',
 		);
 	});
@@ -278,43 +275,51 @@ describe("TerminalPane overlay (#574)", () => {
 			SOURCE.replace(/\r\n/g, "\n"),
 		)?.[0] ?? "";
 
-	// No second dialog: Close carries its options, and the pane says which.
-	it("closes at once, with the keep option beside it", () => {
+	// No second dialog, and no keep option on it: Close acts at once, and the
+	// "Keep" setting says whether the terminal stays listed.
+	it("closes at once, as the keep setting says", () => {
 		expect(overlay, "the overlay moved").not.toBe("");
 		expect(overlay).toContain(`@click="onOverlayAction('close')"`);
 		expect(overlay).toContain(`@click="onOverlayAction('restart')"`);
+		expect(overlay).not.toContain("Keep");
 		const onAction = body(/function onOverlayAction\(/);
-		expect(onAction).toContain("keep: keepChoice.value");
+		expect(onAction).toContain("overlayChoice(action, alwaysScope.value, prefs.value.keepEnded);");
 		expect(onAction).toContain("else closeEnded(act.keep);");
 		expect(body(/function closeEnded\(/)).toContain("emit('close-pane', chId, { keep });");
 	});
 
-	it('writes the setting when "Always do this" is ticked', () => {
-		const onAction = body(/function onOverlayAction\(/);
-		expect(onAction).toContain("overlayChoice(action,");
-		expect(onAction).toContain("always: alwaysChoice.value");
-		expect(onAction).toContain(
-			"if (remember !== null) void configStore.saveUiSettings('panes', remember);",
+	// "When a terminal ends" is read where Settings cascades it: globally, for
+	// the host, for the terminal.
+	it("reads the setting from the terminal's resolved profile", () => {
+		expect(SOURCE).toContain(
+			"const prefs = computed(() => endedPrefs(configStore.uiConfig.panes, resolvedProfile.value));",
 		);
+	});
+
+	it('writes the setting where "Always do this" says, for this terminal', () => {
+		const onAction = body(/function onOverlayAction\(/);
+		expect(onAction).toContain(
+			".saveWhenEnded(remember.whenEnded, remember.scope, {\n\t\t\t\thostId: paneHostId.value ?? null,\n\t\t\t\tchannelId: effectiveChannelId.value,",
+		);
+		expect(body(/function onAlwaysChange\(/)).toContain("toggleAlways(alwaysScope.value, scope,");
 	});
 
 	// Labels tied to their inputs, so a click on the words and a screen reader
 	// both reach the checkbox.
 	it("labels each checkbox", () => {
-		for (const [suffix, words, model] of [
-			["keep", "Keep in the sidebar", "keepChoice"],
-			["always", "Always do this", "alwaysChoice"],
+		for (const [scope, words] of [
+			["host", "Always do this for this host"],
+			["global", "Always do this globally"],
 		] as const) {
 			const label = new RegExp(
-				`<label class="exit-option" :for="\`\\$\\{exitId\\}-${suffix}\`">\\s*<input :id="\`\\$\\{exitId\\}-${suffix}\`" v-model="${model}" type="checkbox" />\\s*${words}\\s*</label>`,
+				`<label class="exit-option" :for="\`\\$\\{exitId\\}-${scope}\`">\\s*<input\\s*:id="\`\\$\\{exitId\\}-${scope}\`"\\s*type="checkbox"\\s*:checked="alwaysScope === '${scope}'"\\s*@change="onAlwaysChange\\('${scope}', \\$event\\)"\\s*/>\\s*${words}\\s*</label>`,
 			);
 			expect(overlay).toMatch(label);
 		}
 	});
 
-	it("starts its options from the setting, and gives the keyboard to its card", () => {
-		expect(SOURCE).toContain("keepChoice.value = prefs.value.keepEnded;");
-		expect(SOURCE).toContain("alwaysChoice.value = false;");
+	it('starts with "Always do this" unchecked, and gives the keyboard to its card', () => {
+		expect(SOURCE).toContain("alwaysScope.value = null;");
 		expect(SOURCE).toContain("void nextTick(focusOverlay);");
 		expect(overlay).toMatch(/ref="exitCard"\s*class="exit-card"\s*role="group"\s*tabindex="-1"/);
 		expect(SOURCE).toContain("exitCard.value?.focus();");

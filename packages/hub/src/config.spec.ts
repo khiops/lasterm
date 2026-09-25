@@ -891,6 +891,24 @@ describe("extractUiConfig — panes section", () => {
 		const config = extractUiConfig({ panes: { default_split_direction: "vertical" } });
 		expect(config.panes).toEqual(DEFAULT_PANES_CONFIG);
 	});
+
+	// What a pane does when its terminal ends (#574): asked, unless told.
+	it("asks, and deletes on close, until told otherwise", () => {
+		expect(DEFAULT_PANES_CONFIG.whenEnded).toBe("ask");
+		expect(DEFAULT_PANES_CONFIG.keepEnded).toBe(false);
+	});
+
+	it("parses when_ended and keep_ended", () => {
+		const config = extractUiConfig({ panes: { when_ended: "restart", keep_ended: true } });
+		expect(config.panes.whenEnded).toBe("restart");
+		expect(config.panes.keepEnded).toBe(true);
+	});
+
+	it("ignores a when_ended or keep_ended it cannot act on", () => {
+		const config = extractUiConfig({ panes: { when_ended: "delete", keep_ended: "yes" } });
+		expect(config.panes.whenEnded).toBe(DEFAULT_PANES_CONFIG.whenEnded);
+		expect(config.panes.keepEnded).toBe(DEFAULT_PANES_CONFIG.keepEnded);
+	});
 });
 
 describe("extractUiConfig — channels section", () => {

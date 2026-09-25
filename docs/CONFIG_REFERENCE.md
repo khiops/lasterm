@@ -55,11 +55,13 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 
 ---
 
-### [panes] — Pane Splitting
+### [panes] — Panes
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | max_panes | number | `4` | Panes a tab may hold, empty ones included; a split past it is refused with a notice |
+| when_ended | `"ask"` \| `"restart"` \| `"close"` | `"ask"` | What a pane does when the terminal in it ends. `ask` shows Restart and Close over it. `restart` brings it back, except one that ended within 5 seconds of starting, one that runs a command, one whose write lock another window holds, and one found already ended on a reload or an attach: those show the overlay, saying why. `close` closes its pane. Settings › Terminal, and "Always do this" on the overlay, write it |
+| keep_ended | boolean | `false` | Closing a terminal that has ended — its pane, or a tab holding it — leaves it listed in the sidebar instead of deleting it with its scrollback |
 
 ---
 

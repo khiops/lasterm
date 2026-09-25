@@ -49,7 +49,6 @@ import {
 	readlinkSync,
 	readSync,
 	renameSync,
-	rmSync,
 	type Stats,
 	statSync,
 	unlinkSync,
@@ -557,14 +556,43 @@ function lastermCacheRoot(): string | undefined {
 }
 
 /**
+ * How many times openIfAuthentic looks at an entry that was replaced between
+ * its lstat and its open, which only Windows does. A concurrent extraction
+ * replaces the entry when it publishes, so each attempt past the first needs
+ * one more process publishing inside the window between two system calls.
+ */
+const REPLACED_ENTRY_ATTEMPTS = 8;
+
+/** What openAuthenticOnce returns when the entry it opened is not the one it inspected. */
+const REPLACED: unique symbol = Symbol("replaced");
+
+/**
  * Open `filePath` and return the descriptor when it holds exactly the expected
- * addon, judged on that descriptor; otherwise close it and return undefined.
+ * addon, judged on that descriptor; otherwise return undefined.
+ *
+ * On Windows the entry is inspected before it is opened, and a concurrent
+ * extraction replaces it in between whenever it renames its own copy into
+ * place (#563). That copy was written from the same embedded bytes, and it is
+ * checked like any other, so the name is looked at again rather than the load
+ * failing.
  */
 function openIfAuthentic(
 	filePath: string,
 	expected: ExpectedAddon,
 	uid: number,
 ): number | undefined {
+	for (let attempt = 1; ; attempt++) {
+		const opened = openAuthenticOnce(filePath, expected, uid);
+		if (opened !== REPLACED) return opened;
+		if (attempt === REPLACED_ENTRY_ATTEMPTS) return undefined;
+	}
+}
+
+function openAuthenticOnce(
+	filePath: string,
+	expected: ExpectedAddon,
+	uid: number,
+): number | typeof REPLACED | undefined {
 	let before: BigIntStats | undefined;
 	let fd: number;
 	try {
@@ -579,17 +607,18 @@ function openIfAuthentic(
 	} catch {
 		return undefined;
 	}
+	let replaced = false;
 	try {
 		const stat = fstatSync(fd, { bigint: true });
-		const sameEntry = before === undefined || (stat.dev === before.dev && stat.ino === before.ino);
-		if (sameEntry && isTrustedFile(stat, expected.size, uid) && digestMatches(fd, expected)) {
+		replaced = before !== undefined && (stat.dev !== before.dev || stat.ino !== before.ino);
+		if (!replaced && isTrustedFile(stat, expected.size, uid) && digestMatches(fd, expected)) {
 			return fd;
 		}
 	} catch {
 		// Unreadable is not authentic.
 	}
 	closeSync(fd);
-	return undefined;
+	return replaced ? REPLACED : undefined;
 }
 
 function isTrustedFile(stat: BigIntStats, size: number, uid: number): boolean {
@@ -640,8 +669,8 @@ function publish(destPath: string, data: Buffer): unknown {
 		for (let offset = 0; offset < data.length; ) {
 			offset += writeSync(fd, data, offset, data.length - offset);
 		}
-		// The temporary stays open until it is renamed. On Windows an open
-		// handle is how a later start tells an extraction still in progress
+		// The temporary stays open until it is renamed or removed. On Windows an
+		// open handle is how a later start tells an extraction still in progress
 		// from one that was killed; see removeAbandonedTemporaries.
 		try {
 			renameSync(tempPath, destPath);
@@ -651,8 +680,21 @@ function publish(destPath: string, data: Buffer): unknown {
 			return error;
 		}
 	} finally {
+		// Removed before its handle is closed: once closed, another start's
+		// cleanup can hold it with the exclusive open it probes with, and the
+		// removal would then fail with EPERM and replace the rename error the
+		// caller weighs. A removal that fails anyway leaves a leftover for the
+		// next cleanup, which is no reason to fail this load.
+		if (!renamed) removeIfPresent(tempPath);
 		closeSync(fd);
-		if (!renamed) rmSync(tempPath, { force: true });
+	}
+}
+
+function removeIfPresent(file: string): void {
+	try {
+		unlinkSync(file);
+	} catch {
+		// Gone already, or left for the next cleanup; see publish.
 	}
 }
 

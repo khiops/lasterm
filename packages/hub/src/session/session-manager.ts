@@ -570,17 +570,22 @@ export class SessionManager {
 			onAgentPinned: (hid, sha256) => {
 				this.ctx.metaDal.updateHostAgentSha256(hid, sha256);
 			},
-			onAgentUpdated: (hid) => {
+			onAgentUpdated: (hid, { besideRunningDaemon }) => {
 				this.ctx.hubLogger?.log(
 					"info",
 					"session-manager: remote agent re-uploaded after SHA256 mismatch",
-					{ hostId: hid, hostname: sshHostname },
+					{ hostId: hid, hostname: sshHostname, besideRunningDaemon },
 				);
 				this.broadcaster.broadcastToAllClients({
 					type: "AGENT_SYNCED",
 					hostId: hid,
 					hostname: sshHostname,
-					message: `Agent on ${sshHostname} updated to the current version`,
+					// Beside a daemon that was already running, the new agent is on
+					// disk and the old one still answers: the host shows it outdated,
+					// and offers to replace it (#456, #559).
+					message: besideRunningDaemon
+						? `New agent installed on ${sshHostname}; replace the running one to use it`
+						: `Agent on ${sshHostname} updated to the current version`,
 				} satisfies AgentSyncedMessage);
 			},
 		};
@@ -1264,13 +1269,22 @@ export class SessionManager {
 		}
 
 		const channel = this.ctx.channels.get(channelId);
-		if (!channel) {
-			const dbChannel = this.ctx.metaDal.getChannel(channelId);
-			if (dbChannel?.status === "dead") {
-				const respawned = await this.lifecycle.respawnDeadChannel(channelId, client, clientId);
-				if (respawned) return true;
-			}
-			const code = dbChannel?.status === "dead" ? "CHANNEL_DEAD" : "CHANNEL_NOT_FOUND";
+		// A terminal that has ended is answered as ended: whether this hub still
+		// holds it in memory or only in meta.db, and whether its host is
+		// connected or not. Bringing it back is Restart, and Restart is the
+		// user's to press (#559).
+		//
+		// An ATTACH used to bring it back by itself when its host was connected,
+		// and to answer "Not connected" from the spool when it was not. The pane
+		// that sent it did not know the terminal had ended — one over another
+		// host's terminal after a reload, or one attaching again after its socket
+		// came back — so a reload restarted terminals nobody had asked for, and a
+		// pane mounted after a CHANNEL_EXIT offered to reconnect to a shell that
+		// no longer existed.
+		if (channel === undefined || channel.status === "dead") {
+			const dead =
+				channel !== undefined || this.ctx.metaDal.getChannel(channelId)?.status === "dead";
+			const code = dead ? "CHANNEL_DEAD" : "CHANNEL_NOT_FOUND";
 			const errorMsg: ErrorMessage = {
 				type: "ERROR",
 				code,
@@ -1315,7 +1329,7 @@ export class SessionManager {
 		// reconnection happens after a hub restart: at startup nobody is there
 		// to answer for a password, and here someone just asked for this
 		// terminal (#79).
-		if (!agent?.connected && channel.status !== "dead") {
+		if (!agent?.connected) {
 			// Reaching the host takes an SSH connection, and the client gives an
 			// attach ten seconds before it gives up — a pane that never hears back
 			// stays on "Connecting…" for ever, never becomes ready, and swallows

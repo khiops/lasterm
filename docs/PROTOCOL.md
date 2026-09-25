@@ -512,6 +512,15 @@ sends a frame or disconnects.
 { type: "DETACH", channel_id: string }
 ```
 
+An ATTACH on a terminal that has ended is answered `ERROR { code: "CHANNEL_DEAD", channel_id }`,
+whether the hub still holds it in memory or only in meta.db, and whether its host is connected or
+not. One the hub has no record of is answered `CHANNEL_NOT_FOUND`. An ATTACH never starts a
+terminal: bringing an ended one back is a SPAWN that names it, which is the user's Restart (#559).
+
+The answer is what a pane shows, and a pane attaches again whenever its socket is replaced: an
+ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,
+and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
+
 ### 4.3 INPUT / OUTPUT / RESIZE
 
 Same as agent messages (section 3.4–3.6).
@@ -596,9 +605,11 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   other_owner_channels?: number
 }
 
+// Hub → every client, attached to the channel or not: each one holds every
+// channel in its state, as STATE_SYNC gives it (#559).
 // A status can be said again without having changed: once a host is reached
-// again, the clients attached to a terminal it still runs hear "live", since
-// their last ATTACH_OK may have been `cached` (#556).
+// again, a terminal it still runs that has clients attached is said to be
+// "live", since their last ATTACH_OK may have been `cached` (#556).
 {
   type: "CHANNEL_STATE",
   channel_id: string,
@@ -767,6 +778,7 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 | `AUTH_REQUIRED` | No AUTH sent yet |
 | `AUTH_INVALID` | Bad token |
 | `CHANNEL_NOT_FOUND` | Unknown channel ID |
+| `CHANNEL_DEAD` | ATTACH on a terminal that has ended (§ 4.2) |
 | `NOT_ATTACHED` | Op requires ATTACH first |
 | `WRITE_LOCK_HELD` | INPUT rejected, not the writer |
 | `HOST_NOT_FOUND` | Unknown host ID |

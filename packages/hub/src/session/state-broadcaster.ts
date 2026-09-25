@@ -179,13 +179,14 @@ export class StateBroadcaster {
 			status,
 			...(exitCode !== undefined && { exitCode }),
 		};
-		// Broadcast to attached clients first; fall back to all clients for orphan/dead
-		// when the channel has no more clients (they just detached).
-		if (ch && ch.clients.size > 0) {
-			this.broadcastToChannel(channelId, stateMsg);
-		} else {
-			this.broadcastToAllClients(stateMsg);
-		}
+		// Every client, as STATE_SYNC and CHANNEL_CREATED go: each of them holds
+		// every channel in its state, and a window can show a terminal without
+		// being attached to it — a pane still opening, one that was refused, one
+		// in a window whose socket was replaced. Told only when attached, such a
+		// window never heard its terminal end, and kept offering to reconnect to
+		// it (#559). A status changes a handful of times in a channel's life, so
+		// this is a few messages, not a stream.
+		this.broadcastToAllClients(stateMsg);
 	}
 
 	// ─── Client attach/detach ────────────────────────────────────────────────

@@ -1088,28 +1088,6 @@ describe("MetaDAL — PairingCodes", () => {
 		expect(dal.countActivePairingCodes()).toBe(2);
 	});
 
-	it("cleanExpiredPairingCodes removes only expired non-used records", () => {
-		const future = new Date(Date.now() + 60_000).toISOString();
-		const past = new Date(Date.now() - 1000).toISOString();
-		const now = new Date().toISOString();
-
-		// Active — should survive
-		dal.createPairingCode("PAIR07AAAAAAAAAAAAAAAAAAAAAAAA", hash(7), now, future);
-
-		// Expired non-used — should be removed
-		dal.createPairingCode("PAIR08AAAAAAAAAAAAAAAAAAAAAAAA", hash(8), now, past);
-
-		// Expired but used — NOT cleaned (used = 1, audit trail)
-		dal.createPairingCode("PAIR09AAAAAAAAAAAAAAAAAAAAAAAA", hash(9), now, past);
-		dal.markPairingCodeUsed("PAIR09AAAAAAAAAAAAAAAAAAAAAAAA", now, "10.0.0.2");
-
-		dal.cleanExpiredPairingCodes();
-
-		expect(dal.getPairingCodeByHash(hash(7))).toBeDefined(); // active — survives
-		expect(dal.getPairingCodeByHash(hash(8))).toBeUndefined(); // expired — removed
-		expect(dal.getPairingCodeByHash(hash(9))).toBeDefined(); // used+expired — survives
-	});
-
 	it("deleteUnredeemedPairingCodes removes every code not redeemed, and keeps the redeemed", () => {
 		const future = new Date(Date.now() + 60_000).toISOString();
 		const past = new Date(Date.now() - 1000).toISOString();

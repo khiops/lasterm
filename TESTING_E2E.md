@@ -787,14 +787,14 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 
 ### 97. Pairing code preserves current session (regression: b037c40)
 
-- Command palette → "Generate Pairing Code" → modal appears with 6-digit code
+- Command palette → "Generate Pairing Code" → modal appears with 8-digit code
 - Current session NOT interrupted (auth token preserved)
 - Code expires after 60s (countdown bar visible)
 - Copy button works, code can be used on another browser
 
 ### 98. Post-pairing config initialization (regression: b037c40)
 
-- Pair new browser with 6-digit code → theme, fonts, hosts loaded before layout shows
+- Pair new browser with 8-digit code → theme, fonts, hosts loaded before layout shows
 - PairingScreen stays visible during config loading (no flash of default theme)
 - After init complete → layout appears with correct theme
 

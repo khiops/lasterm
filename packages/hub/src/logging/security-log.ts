@@ -228,15 +228,19 @@ export class SecurityLog {
 	 * `not_found`, no token has that id or it was already revoked; `not_revocable`,
 	 * the primary token, which is retired by replacing auth.json instead (#515).
 	 * `tokenId` is the id the request named, so one that is neither `primary` nor a
-	 * ULID is withheld, whatever the caller put there.
+	 * ULID is withheld, whatever the caller put there. `byTokenId` is the
+	 * credential that asked, as the auth hook validated it: every local client
+	 * connects from 127.0.0.1, so the address alone does not tell them apart (#537).
 	 */
 	tokenRevocation(event: {
 		tokenId: string;
+		byTokenId: string;
 		sourceIp: string;
 		outcome: TokenRevocationOutcome;
 	}): void {
 		this.write("token.revoke", "token revocation", {
 			tokenId: tokenId(event.tokenId),
+			byTokenId: tokenId(event.byTokenId),
 			sourceIp: ip(event.sourceIp),
 			outcome: oneOf(event.outcome, TOKEN_REVOCATION_OUTCOMES),
 		});

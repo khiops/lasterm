@@ -251,17 +251,33 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 		]);
 	});
 
-	it("token revocation: which credential, from where, and what became of the request", () => {
+	it("token revocation: which credential, which one asked, from where, and what became of the request", () => {
 		const { log, records } = collect();
-		log.tokenRevocation({ tokenId: PAIRED_TOKEN_ID, sourceIp: "127.0.0.1", outcome: "revoked" });
-		log.tokenRevocation({ tokenId: PAIRED_TOKEN_ID, sourceIp: "::1", outcome: "not_found" });
-		log.tokenRevocation({ tokenId: "primary", sourceIp: "127.0.0.1", outcome: "not_revocable" });
+		log.tokenRevocation({
+			tokenId: PAIRED_TOKEN_ID,
+			byTokenId: "primary",
+			sourceIp: "127.0.0.1",
+			outcome: "revoked",
+		});
+		log.tokenRevocation({
+			tokenId: PAIRED_TOKEN_ID,
+			byTokenId: PAIRED_TOKEN_ID,
+			sourceIp: "::1",
+			outcome: "not_found",
+		});
+		log.tokenRevocation({
+			tokenId: "primary",
+			byTokenId: PAIRED_TOKEN_ID,
+			sourceIp: "127.0.0.1",
+			outcome: "not_revocable",
+		});
 		expect(records).toEqual([
 			{
 				msg: "security: token revocation",
 				fields: {
 					event: "token.revoke",
 					tokenId: PAIRED_TOKEN_ID,
+					byTokenId: "primary",
 					sourceIp: "127.0.0.1",
 					outcome: "revoked",
 				},
@@ -271,6 +287,7 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 				fields: {
 					event: "token.revoke",
 					tokenId: PAIRED_TOKEN_ID,
+					byTokenId: PAIRED_TOKEN_ID,
 					sourceIp: "::1",
 					outcome: "not_found",
 				},
@@ -280,6 +297,7 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 				fields: {
 					event: "token.revoke",
 					tokenId: "primary",
+					byTokenId: PAIRED_TOKEN_ID,
 					sourceIp: "127.0.0.1",
 					outcome: "not_revocable",
 				},
@@ -287,18 +305,38 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 		]);
 	});
 
-	it("token revocation: an id the request made up is withheld, and so is any outcome off the list", () => {
+	it("token revocation: an id that is not a credential's is withheld, and so is any outcome off the list", () => {
 		const { log, records } = collect();
 		// The id comes from the URL, so it is whatever the caller wrote there.
-		log.tokenRevocation({ tokenId: TOKEN, sourceIp: "127.0.0.1", outcome: "not_found" });
+		log.tokenRevocation({
+			tokenId: TOKEN,
+			byTokenId: "primary",
+			sourceIp: "127.0.0.1",
+			outcome: "not_found",
+		});
+		// The requester's id comes from the auth hook, and a token passed where it
+		// belongs is withheld all the same.
 		log.tokenRevocation({
 			tokenId: PAIRED_TOKEN_ID,
+			byTokenId: TOKEN,
 			sourceIp: PAIRING_CODE,
 			outcome: TOKEN as "revoked",
 		});
 		expect(records.map((record) => record.fields)).toEqual([
-			{ event: "token.revoke", tokenId: WITHHELD, sourceIp: "127.0.0.1", outcome: "not_found" },
-			{ event: "token.revoke", tokenId: PAIRED_TOKEN_ID, sourceIp: WITHHELD, outcome: WITHHELD },
+			{
+				event: "token.revoke",
+				tokenId: WITHHELD,
+				byTokenId: "primary",
+				sourceIp: "127.0.0.1",
+				outcome: "not_found",
+			},
+			{
+				event: "token.revoke",
+				tokenId: PAIRED_TOKEN_ID,
+				byTokenId: WITHHELD,
+				sourceIp: WITHHELD,
+				outcome: WITHHELD,
+			},
 		]);
 		expect(JSON.stringify(records)).not.toContain(TOKEN);
 		expect(JSON.stringify(records)).not.toContain(PAIRING_CODE);
@@ -334,13 +372,19 @@ describe("SecurityLog — what § 7.2 excludes cannot be written", () => {
 		log.authFailed({ via: "rest", sourceIp: "127.0.0.1", reason: "bad token 3f3f" });
 		log.tokenRevocation({
 			tokenId: PAIRED_TOKEN_ID,
+			byTokenId: "primary",
 			sourceIp: "127.0.0.1",
 			outcome: "revoked",
 			// @ts-expect-error — a revocation names the credential by its id, never by its value.
 			token: TOKEN,
 		});
-		// @ts-expect-error — and its outcome is one of a closed list too.
-		log.tokenRevocation({ tokenId: PAIRED_TOKEN_ID, sourceIp: "127.0.0.1", outcome: "denied" });
+		log.tokenRevocation({
+			tokenId: PAIRED_TOKEN_ID,
+			byTokenId: "primary",
+			sourceIp: "127.0.0.1",
+			// @ts-expect-error — and its outcome is one of a closed list too.
+			outcome: "denied",
+		});
 	});
 
 	it("drops a field smuggled in on an object the compiler did not see", () => {

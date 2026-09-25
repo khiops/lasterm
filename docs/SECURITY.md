@@ -105,7 +105,7 @@ The desktop authenticates with it, so a revoked primary token locked the desktop
 and a restart did not undo it (#515). It is retired by replacing `auth.json`, below. A revocation of
 the primary token that a version before this rule recorded is cleared at the next start, which
 records it as `token.reinstate` (§ 7.1). Every request to revoke is recorded as `token.revoke`,
-refused or not (#522).
+refused or not, naming the credential that asked (#522, #537).
 
 **Token rotation:** there is none. No command replaces the token, and no broadcast tells connected
 clients to re-authenticate. Replacing it today means stopping the hub, removing `auth.json`, and
@@ -550,7 +550,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 | Write-lock force | `write_lock.force` | `channelId`, `byClientId`, `fromClientId` | A force takes the lock from another client. Forcing a free lock, or one already held, takes nothing and is not recorded |
 | Token rotated | `token.rotate` | `tokenId` (`primary`) | The hub starts with a token in `auth.json` other than the one it last recorded: the replacement of § 2.1, or a substitution nobody asked for |
 | Token reinstated | `token.reinstate` | `tokenId` (`primary`), `revokedAt` (when it had been revoked) | The hub starts, finds the primary token revoked, and clears the revocation (§ 2.1). Nothing in the hub revokes it any more: the revocation was left by a version before #515, which accepted `DELETE /api/auth/tokens/primary`, or by a hand edit of `meta.db` |
-| Token revocation | `token.revoke` | `tokenId` (the id the request named: `primary`, a pairing's ULID, `<withheld>` for anything else), `sourceIp`, `outcome` (`revoked`; `not_found`, no such token or already revoked; `not_revocable`, the primary token) | An authenticated `DELETE /api/auth/tokens/:id` is answered: 200, 404 or 409 (§ 2.1). It comes before the `auth.failure` (`token_no_longer_valid`) of each socket the revocation closes |
+| Token revocation | `token.revoke` | `tokenId` (the id the request named: `primary`, a pairing's ULID, `<withheld>` for anything else), `byTokenId` (the credential the request authenticated with, as the REST auth hook validated it: `primary` or a pairing's ULID, held to the same shapes; never the token. Every local client connects from 127.0.0.1, so `sourceIp` alone does not tell them apart), `sourceIp`, `outcome` (`revoked`; `not_found`, no such token or already revoked; `not_revocable`, the primary token) | An authenticated `DELETE /api/auth/tokens/:id` is answered: 200, 404 or 409 (§ 2.1). It comes before the `auth.failure` (`token_no_longer_valid`) of each socket the revocation closes |
 
 Fastify's request log keeps its own auth lines on stdout (WARN on a failure, INFO on a WebSocket
 acceptance), which the desktop captures into `hub.log`. They are diagnostics beside this record,

@@ -29,6 +29,7 @@ import {
 } from "./previous-installation.js";
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
 import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
+import { ensurePrivateStateDirectory } from "./state-dir.js";
 import { openDatabases } from "./storage/db.js";
 import { resolveHubTlsIdentity } from "./tls-identity.js";
 
@@ -144,6 +145,12 @@ export async function startHub(
 	// publishing this hub where it holds no lock.
 	const stateDir = path.resolve(dependencies.getStateDir());
 	dependencies.acquireHubLock(stateDir);
+	// Created owner-only, and judged, once the lock is held — a start that loses
+	// to a running hub changes nothing there (#133) — and before anything else is
+	// written into it: a log, the TLS key or a database (SECURITY.md § 2.2, item
+	// 3). One an earlier version made is tightened; another account's is refused.
+	createOwnerOnlyDirectory(stateDir);
+	ensurePrivateStateDirectory(stateDir);
 	// A daemon's log is the running hub's evidence: a start that loses the lock
 	// only appends to it (#133). The hub that holds the lock is the only one that
 	// moves it aside at its size limit (#525).
@@ -160,7 +167,6 @@ export async function startHub(
 	// attacker-chosen TLS paths from a directory the later check would refuse.
 	// initAuth keeps its own call for direct callers and to shorten the window.
 	checkConfigDirectoryPermissions(configDir);
-	createOwnerOnlyDirectory(stateDir);
 
 	// Every hub writes `logs/hub.jsonl`, because the security events of SECURITY.md
 	// § 7.1 go there whichever entry point started it. What else the hub logs there
@@ -251,7 +257,7 @@ export async function startHub(
 		securityLog.hubStarted({
 			bindAddress: listenHost(address),
 			port: actualPort,
-			// A hub that got this far passed both permission checks above, or ran on
+			// A hub that got this far passed the permission checks above, or ran on
 			// Windows, where each returns before looking (SECURITY.md § 2.2).
 			permissionsCheck: process.platform === "win32" ? "not_checked_on_windows" : "passed",
 		});

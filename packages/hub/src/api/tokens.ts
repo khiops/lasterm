@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { listTokens, PRIMARY_TOKEN_ID, revokeToken } from "../auth.js";
-import type { TokenRevocationOutcome } from "../logging/security-log.js";
+import { type TokenRevocationOutcome, WITHHELD } from "../logging/security-log.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,7 +50,16 @@ export function registerTokenRoutes(server: FastifyInstance, opts: TokenRouteOpt
 		async (request: FastifyRequest<{ Params: RevokeParams }>, reply: FastifyReply) => {
 			const { id } = request.params;
 			const record = (outcome: TokenRevocationOutcome) =>
-				server.security.tokenRevocation({ tokenId: id, sourceIp: request.ip, outcome });
+				server.security.tokenRevocation({
+					tokenId: id,
+					// The credential that asked, attached by the auth hook, which guards
+					// every /api/ route: its id, never the token. The log withholds
+					// anything that is not a credential id, so an absent one would be
+					// written `<withheld>`, never guessed.
+					byTokenId: request.authTokenRecord?.id ?? WITHHELD,
+					sourceIp: request.ip,
+					outcome,
+				});
 
 			// The primary token is auth.json's, and the desktop authenticates with it:
 			// revoking its row locked the desktop out of its own hub, and no restart

@@ -661,6 +661,72 @@ describe("startHub creates the configuration directory owner-only", () => {
 	);
 });
 
+// A state directory an earlier version made under a loose umask, or one made by
+// hand, holds the databases, the TLS key and the hub key. The hub creates its own
+// 0700, but only judged an existing one's mode by way of the TLS key writer, which
+// refuses group write and nothing else: 0755 went unnoticed (#536).
+describe("startHub holds the state directory to 0700", () => {
+	// Mutations: check it before the lock, and a start that loses to a running hub
+	// changes that hub's directory (#133); check it later, or not at all, and the
+	// daemon's log, the TLS key and the databases land in a directory still 0755.
+	it.runIf(process.platform !== "win32")(
+		"tightens an existing loose one once it holds the lock, before anything is written there",
+		async () => {
+			const dbs = openTestDatabases();
+			const root = join(tmpdir(), `lasterm-state-mode-${randomBytes(8).toString("hex")}`);
+			const stateDir = join(root, "state");
+			mkdirSync(stateDir, { recursive: true });
+			chmodSync(stateDir, 0o755);
+			const modeWhen: Record<string, string> = {};
+			const modeOf = () => (statSync(stateDir).mode & 0o777).toString(8);
+
+			try {
+				await startHub(
+					{ port: 4100 },
+					{
+						describePreviousInstallation: () => undefined,
+						getStateDir: () => stateDir,
+						getConfigDir: () => join(root, "config"),
+						acquireHubLock: () => {
+							modeWhen.lock = modeOf();
+							return null as never;
+						},
+						boundDaemonLog: () => {
+							modeWhen.daemonLog = modeOf();
+							return false;
+						},
+						initAuth: () => randomBytes(32).toString("hex"),
+						createOwnerToken: () => "owner-token",
+						resolveHubTlsIdentity: () => {
+							modeWhen.tlsKey = modeOf();
+							return TEST_TLS_IDENTITY;
+						},
+						openDatabases: () => {
+							modeWhen.databases = modeOf();
+							return dbs;
+						},
+						createServer: async () => ({}) as never,
+						startServer: async () => "https://127.0.0.1:4100",
+						addStartupCorsOrigins: () => 4100,
+						persistRuntime: () => undefined,
+						deleteRuntime: () => false,
+					},
+				);
+
+				expect(modeWhen).toEqual({
+					lock: "755",
+					daemonLog: "700",
+					tlsKey: "700",
+					databases: "700",
+				});
+			} finally {
+				dbs.close();
+				await removeTempDir(root);
+			}
+		},
+	);
+});
+
 // `lasterm start` — what the desktop runs, and the only command the single
 // executable serves — never passes `logging`, and a hub started that way used to
 // write no log file at all. The security events must reach one regardless, and

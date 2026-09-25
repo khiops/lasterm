@@ -6147,3 +6147,187 @@ describe("SessionManager — Fix C3: closeSession clears reconnect PromptContext
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
 	});
 });
+
+// ─── #556: Reconnect in a pane, after a hub restart ──────────────────────────
+//
+// The previous run left terminals it believed alive in meta.db, and nothing
+// else knows them: this run starts with empty memory and restores them from
+// there. A pane asks for its terminal again (Reconnect is an ATTACH), and the
+// hub reaches the host. What the client is then told has to be enough for
+// every pane of that host to stop saying "Not connected", the panes nobody
+// clicked included: the exit overlay where the terminal ended, an attach where
+// it is still running.
+
+describe("SessionManager — Reconnect in a pane, after a restart (#556)", () => {
+	let sm: SessionManager;
+	let dbManager: ReturnType<typeof openTestDatabases>;
+
+	beforeEach(() => {
+		localSpawnCount = 0;
+		sshSpawnCount = 0;
+		mockSshAgentInstance = null;
+		nextSshStartError = null;
+		dbManager = openTestDatabases();
+		vi.mocked(_SshAgentForMock).mockClear();
+	});
+
+	afterEach(async () => {
+		await sm.shutdown();
+		dbManager.close();
+	});
+
+	/** What the previous run left: a host that keeps a daemon, and its terminals. */
+	function seedPreviousRun(): { hostId: string; channelIds: string[] } {
+		const dal = new MetaDAL(dbManager.meta);
+		const host = dal.createHost({
+			type: "ssh",
+			label: "pi",
+			sshHost: "user@pi.test",
+			sshAuth: "agent",
+			sshRemoteDaemon: true,
+			os: "linux",
+		});
+		const sessionId = "01K556SESSION0000000000000";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		const channelIds = [
+			"01K556CHAN0000000000000001",
+			"01K556CHAN0000000000000002",
+			"01K556CHAN0000000000000003",
+			"01K556CHAN0000000000000004",
+		];
+		for (const id of channelIds) {
+			dal.createChannel({ id, sessionId, status: "live", shell: "bash" });
+		}
+		return { hostId: host.id, channelIds };
+	}
+
+	/**
+	 * The daemon the next connection reaches, holding `holds`. Reaching it takes
+	 * until `reached` settles, when given.
+	 */
+	function nextDaemon(holds: string[], reached?: Promise<void>): void {
+		// biome-ignore lint/complexity/useArrowFunction: vitest needs a constructable function for new-ed mocks
+		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (host: { id: string }) {
+			const agent = new MockSshAgent(host);
+			if (reached !== undefined) agent.start = vi.fn(() => reached);
+			Object.assign(agent, {
+				usedRemoteDaemon: true,
+				waitForChannelState: vi.fn().mockResolvedValue(
+					holds.map((channelId) => ({
+						type: "AGENT_CHANNEL_STATE",
+						channelId,
+						title: "bash",
+						pid: 4242,
+						alive: true,
+					})),
+				),
+			});
+			const attach = agent.send;
+			agent.send = vi.fn((msg: ProtocolMessage) => {
+				const { channelId } = msg as unknown as { channelId: string };
+				if (msg.type !== "ATTACH" || holds.includes(channelId)) {
+					attach(msg);
+					return;
+				}
+				setImmediate(() => {
+					agent._emit("message", {
+						type: "ERROR",
+						code: "CHANNEL_NOT_FOUND",
+						message: `channel ${channelId} not found`,
+						channelId,
+					});
+				});
+			});
+			mockSshAgentInstance = agent;
+			return agent as never;
+		});
+	}
+
+	// The hub restarted, then the host's daemon was stopped and its terminals
+	// ended with it. The hub starts a new one, which holds nothing.
+	it("tells the client that every terminal of a replaced daemon has ended", async () => {
+		const { hostId, channelIds } = seedPreviousRun();
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-pane", received));
+		nextDaemon([]);
+
+		// Reconnect, in the pane showing the first of them.
+		const clicked = channelIds[0] ?? "";
+		await sm.handleAttach("c-pane", clicked);
+
+		// The session came back...
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", hostId, status: "active" }),
+		);
+		// ...and each terminal it had is said to have ended, the three panes
+		// nobody clicked included.
+		for (const channelId of channelIds) {
+			expect(received, `nothing said ${channelId} ended`).toContainEqual(
+				expect.objectContaining({ type: "CHANNEL_STATE", channelId, status: "dead" }),
+			);
+		}
+		// The Reconnect itself is answered with the same news, not from memory.
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId: clicked }),
+		);
+		expect(received).not.toContainEqual(
+			expect.objectContaining({ type: "ATTACH_OK", channelId: clicked }),
+		);
+		// And the database agrees, which is what a reload reads.
+		const dal = new MetaDAL(dbManager.meta);
+		for (const channelId of channelIds) {
+			expect(dal.getChannel(channelId)?.status).toBe("dead");
+		}
+	});
+
+	// The daemon outlived the hub and still runs them, but reaching the host
+	// takes longer than an attach waits: the pane is answered from the spool and
+	// says it is not connected. The connection lands afterwards.
+	it("tells a pane answered from memory that its terminal can be reached, once it can", async () => {
+		const { channelIds } = seedPreviousRun();
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-pane", received));
+		let reachHost = (): void => {};
+		nextDaemon(
+			channelIds,
+			new Promise<void>((resolve) => {
+				reachHost = resolve;
+			}),
+		);
+
+		const clicked = channelIds[0] ?? "";
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const attaching = sm.handleAttach("c-pane", clicked);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await attaching;
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "ATTACH_OK", channelId: clicked, cached: true }),
+		);
+
+		received.length = 0;
+		reachHost();
+		await vi.waitFor(() => {
+			expect(received).toContainEqual(expect.objectContaining({ type: "SESSION_STATE" }));
+		});
+		await flushImmediate();
+
+		// Nothing about it changed: it was live, and live it stays. Only this
+		// says the pane can now reach it.
+		expect(received).toContainEqual(
+			expect.objectContaining({ type: "CHANNEL_STATE", channelId: clicked, status: "live" }),
+		);
+		expect(received).not.toContainEqual(
+			expect.objectContaining({ type: "CHANNEL_STATE", status: "dead" }),
+		);
+	});
+});

@@ -344,7 +344,10 @@ export function useTerminal(
 		// Set channelId — same ID always (respawn reuses the same channel ID)
 		channelId = id;
 
-		// Subscribe to live OUTPUT
+		// Subscribe to live OUTPUT. Another attach may have subscribed while this
+		// one waited — a pane can be asked for its terminal again by the hub's
+		// news as well as by a click — and keeping both wrote every chunk twice.
+		outputUnsubscribe?.();
 		outputUnsubscribe = wsClient.on("OUTPUT", (msg) => {
 			if (msg.type === "OUTPUT" && msg.channelId === channelId && terminal.value) {
 				const data =

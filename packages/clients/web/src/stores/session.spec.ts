@@ -1,6 +1,8 @@
-import type { ProtocolMessage } from "@lasterm/shared";
+import type { Channel, ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { paneCover } from "../utils/pane-cover.js";
+import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
 import { useSessionStore } from "./session.js";
 import { useThemeStore } from "./theme.js";
@@ -360,5 +362,111 @@ describe("useSessionStore — CONFIG_CHANGED for the appearance", () => {
 		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "appearance" });
 
 		expect(reload).toHaveBeenCalledOnce();
+	});
+});
+
+// ─── Reconnect, in a pane of a host not in view (#556) ──────────────────────
+//
+// Tabs are global, the channel list is the host in view's. A pane fronting a
+// terminal on another host was answered from memory after a hub restart and
+// said "Not connected". Its Reconnect brought the host back with the terminal
+// gone, and the hub said so; the pane never heard it, and kept the banner
+// until the page was reloaded.
+
+describe("useSessionStore — a pane over another host's terminal, after Reconnect (#556)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const PI_CHANNEL = "ch-on-the-pi";
+	const LOCAL_CHANNEL: Channel = {
+		id: "ch-local",
+		sessionId: "s-local",
+		shell: "pwsh",
+		cols: 80,
+		rows: 24,
+		status: "live",
+		createdAt: "2026-09-25T00:00:00Z",
+		updatedAt: "2026-09-25T00:00:00Z",
+	};
+
+	/**
+	 * The page as it loads after a hub restart: the rail shows the local host,
+	 * and a tab shows a terminal on the Pi that the hub restored from meta.db.
+	 */
+	async function pageLoaded() {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const channels = useChannelsStore();
+		channels.activeHostId = "host-local";
+		channels.channels = [LOCAL_CHANNEL];
+		const ws = wsHarness.instances[0];
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [
+				{ sessionId: "s-local", hostId: "host-local", status: "active" },
+				{ sessionId: "s-pi", hostId: "host-pi", status: "disconnected" },
+			],
+			channels: [
+				{ channelId: LOCAL_CHANNEL.id, sessionId: "s-local", status: "live" },
+				{ channelId: PI_CHANNEL, sessionId: "s-pi", status: "orphan" },
+			],
+		});
+		return { ws, channels };
+	}
+
+	/** The Pi pane, whose attach was answered from what the hub remembers. */
+	function piPane(channels: ReturnType<typeof useChannelsStore>) {
+		return paneCover({
+			status: channels.statusOf(PI_CHANNEL),
+			ended: false,
+			gone: false,
+			detached: true,
+		});
+	}
+
+	it("replaces Not connected with the exit overlay once the hub says the terminal ended", async () => {
+		const { ws, channels } = await pageLoaded();
+		expect(piPane(channels)).toBe("not-connected");
+
+		// Reconnect: the hub reaches the Pi, whose new daemon holds nothing.
+		ws?.emit({ type: "SESSION_STATE", sessionId: "s-pi", hostId: "host-pi", status: "active" });
+		ws?.emit({ type: "CHANNEL_STATE", channelId: PI_CHANNEL, sessionId: "s-pi", status: "dead" });
+
+		expect(piPane(channels)).toBe("exited");
+		// The sidebar still lists the host in view, and only it.
+		expect(channels.channels.map((c) => c.id)).toEqual([LOCAL_CHANNEL.id]);
+	});
+
+	// The pane attaches again when the hub says its terminal is live, and that
+	// is said of a terminal that already was: each report has to be news.
+	it("hands the pane every report that its terminal is live, the same one twice included", async () => {
+		const { ws, channels } = await pageLoaded();
+		const live = {
+			type: "CHANNEL_STATE",
+			channelId: PI_CHANNEL,
+			sessionId: "s-pi",
+			status: "live",
+		} as const;
+
+		ws?.emit(live);
+		const first = channels.reportOf(PI_CHANNEL);
+		ws?.emit(live);
+		const second = channels.reportOf(PI_CHANNEL);
+
+		expect(first?.status).toBe("live");
+		expect(second?.status).toBe("live");
+		expect(second).not.toBe(first);
+		// Live is no ending: the banner stays until the attach answers.
+		expect(piPane(channels)).toBe("not-connected");
 	});
 });

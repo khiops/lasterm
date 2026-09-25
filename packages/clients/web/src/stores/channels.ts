@@ -122,6 +122,20 @@ export const useChannelsStore = defineStore("channels", () => {
 	);
 
 	/**
+	 * What the hub last said about each channel, whichever host is in view.
+	 *
+	 * `channels` holds the host in view, and a CHANNEL_STATE for any other went
+	 * to `pendingStatuses`, which only a fetch of that host's list ever reads.
+	 * Tabs are global, though, so a pane can front a terminal on a host nobody
+	 * is looking at: when a Reconnect brought that host back with the terminal
+	 * gone, the pane never heard it and kept saying "Not connected" (#556).
+	 *
+	 * Each report is a new object, so a pane can react to the hub saying a
+	 * terminal is live even when it already was.
+	 */
+	const reports = ref<Map<string, { status: Channel["status"]; exitCode?: number }>>(new Map());
+
+	/**
 	 * Monotonically increasing fetch generation counter.
 	 * Incremented at the START of each fetchChannels call so that
 	 * a stale fetch resolving late can detect it has been superseded.
@@ -467,6 +481,10 @@ export const useChannelsStore = defineStore("channels", () => {
 		status: Channel["status"],
 		exitCode?: number,
 	): void {
+		reports.value = new Map(reports.value).set(channelId, {
+			status,
+			...(exitCode !== undefined && { exitCode }),
+		});
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) {
 			// Channel not loaded yet — buffer for later application
@@ -483,6 +501,23 @@ export const useChannelsStore = defineStore("channels", () => {
 		const next = [...channels.value];
 		next[idx] = updated;
 		channels.value = next;
+	}
+
+	/** The hub's last report on a channel, whichever host it is on. */
+	function reportOf(
+		channelId: string | null,
+	): { status: Channel["status"]; exitCode?: number } | undefined {
+		return channelId === null ? undefined : reports.value.get(channelId);
+	}
+
+	/**
+	 * A channel's status as this client knows it: the list of the host in view
+	 * where it is listed, what the hub last reported otherwise.
+	 */
+	function statusOf(channelId: string | null): Channel["status"] | undefined {
+		if (channelId === null) return undefined;
+		const listed = channels.value.find((c) => c.id === channelId);
+		return listed?.status ?? reports.value.get(channelId)?.status;
 	}
 
 	/**
@@ -1268,6 +1303,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		selectChannel,
 		markUnread,
 		updateChannelStatus,
+		reportOf,
+		statusOf,
 		setDynamicTitle,
 		setDisplayTitle,
 		updateProcessTitle,

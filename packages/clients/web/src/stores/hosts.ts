@@ -1,6 +1,6 @@
 import { type Host, type HostGroup, type SessionStatus, toCamelCase } from "@lasterm/shared";
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
@@ -29,12 +29,38 @@ function sessionStatusToHostStatus(status: SessionStatus | undefined): HostStatu
 	}
 }
 
+/**
+ * This tab's selected host, kept for the tab alone (#561). Since #560 a hidden
+ * tab reloads by itself after a hub upgrade, and without this it came back on
+ * the first host rather than the one it was showing. It is per tab, so a new tab
+ * still opens on the first host.
+ */
+export const SELECTED_HOST_KEY = "lasterm:selected-host";
+
+function readSelectedHost(): string | null {
+	try {
+		return window.sessionStorage.getItem(SELECTED_HOST_KEY);
+	} catch {
+		return null;
+	}
+}
+
+function writeSelectedHost(hostId: string | null): void {
+	try {
+		if (hostId === null) window.sessionStorage.removeItem(SELECTED_HOST_KEY);
+		else window.sessionStorage.setItem(SELECTED_HOST_KEY, hostId);
+	} catch {
+		// Storage refused: a reload lands on the first host, as it always did.
+	}
+}
+
 export const useHostsStore = defineStore("hosts", () => {
 	const authStore = useAuthStore();
 
 	const hosts = ref<Host[]>([]);
 	const hostGroups = ref<HostGroup[]>([]);
 	const selectedHostId = ref<string | null>(null);
+	watch(selectedHostId, writeSelectedHost, { flush: "sync" });
 	const loading = ref(false);
 	const error = ref<string | null>(null);
 
@@ -87,9 +113,13 @@ export const useHostsStore = defineStore("hosts", () => {
 			}
 			const data = toCamelCase(await res.json()) as Host[];
 			hosts.value = data;
-			// Auto-select the first host if nothing is selected yet
+			// Nothing selected yet: the host this tab showed before it reloaded, if
+			// the hub still has it, else the first one.
 			if (selectedHostId.value === null && data.length > 0) {
-				selectedHostId.value = data[0]?.id ?? null;
+				const remembered = readSelectedHost();
+				selectedHostId.value = data.some((h) => h.id === remembered)
+					? remembered
+					: (data[0]?.id ?? null);
 			}
 			// Populate groups on first load
 			if (hostGroups.value.length === 0) {

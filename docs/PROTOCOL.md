@@ -915,6 +915,66 @@ The route is unauthenticated, and the hub is planned to listen beyond loopback (
 reports no process details: no uptime, pid or start time. A local caller that wants the start time
 reads `started_at` from `runtime.json`, as `lasterm status` does.
 
+#### Ending the hub
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| POST | `/api/shutdown` | owner | Stops the hub alone. The local agent keeps its terminals for the next hub. `lasterm stop` |
+| POST | `/api/quit` | owner | Stops the local agent first, and its terminals end, then the hub. The desktop's **Quit completely**, `lasterm quit` |
+
+Only the hub's owner may end it (#142, SPEC.md § 3.3): both routes take the owner token and a
+loopback connection. The bearer token is neither needed nor enough, so a paired client can drive
+the hub but never end it.
+
+- `X-Lasterm-Owner` (required): `ownerToken` from `runtime.json`, which the hub draws anew at each
+  start and compares in constant time. Only a process of the hub's OS user, on its machine, can
+  read that file.
+- `X-Lasterm-Client-Id` (optional; `X-Lasterm-Client` is read when it is absent): the `client_id`
+  the caller's own WebSocket received in `AUTH_OK` (§ 4.1), so that the caller is not counted among
+  the other clients. The desktop sends it. `lasterm stop` and `lasterm quit` have no WebSocket and
+  send none, so every connected client counts.
+- `?force=1`: end the hub even while other clients are connected. Any other value is not a force.
+
+Answers, in the order the hub checks:
+
+| Status | Body | When |
+|--------|------|------|
+| 401 | `{ error: "OWNER_TOKEN_REQUIRED", message }` | `X-Lasterm-Owner` is missing or is not this hub's. Checked first, so a request that also comes from off loopback gets this one |
+| 403 | `{ error: "LOOPBACK_REQUIRED", message }` | The connection does not come from `127.0.0.0/8`, `::1` or `::ffff:127.0.0.1` |
+| 501 | `{ ok: false, error: "QUIT_UNAVAILABLE", message: "Quit is unavailable" }` | `/api/quit` only: this hub has no quit to run, no quit lifecycle or no session layer and so no agent to stop (#538). Nothing was begun, and no teardown follows |
+| 409 | `/api/shutdown`: `{ others }`. `/api/quit`: `{ others, message }` | `others` WebSocket clients besides the caller are connected, and the request has no `?force=1`. Nothing was stopped. Once a quit has begun, `/api/quit` skips this check: a second request joins that quit and gets its answer |
+| 200 | `/api/shutdown`: `{ ok: true }`. `/api/quit`: `{ ok: true, message, override?, stdout?, stderr? }` | `/api/shutdown`: always, past the checks above. `/api/quit`: the local agent confirmed it stopped |
+| 503 | `/api/quit`: `{ ok: false, message, override?, stdout?, stderr? }` | The stopper did not confirm that the local agent stopped; `message` says why. The hub tears down all the same |
+| 500 | Fastify's error | `/api/quit` threw before it scheduled any teardown, for instance on a quit asked before startup finished |
+
+After a 200, `/api/shutdown` closes the hub's listener and its connections to agents, closes its
+databases, withdraws `runtime.json` and exits 0. The local agent daemon keeps running, and its
+terminals with it: the next hub takes them back (§ 5.4). A shutdown that arrives during a quit
+joins that quit instead of running a teardown of its own.
+
+`/api/quit` first latches the hub, so that no session starts or reconnects from then on. It then
+runs the local agent's own stopper, `lasterm-agent --stop` for the agent's socket, bounded at
+12 s. The stopper checks the daemon's identity record before stopping it, and the daemon's
+terminals end with their process trees. Only then does the hub answer, 200 or 503. `stdout` and
+`stderr` carry the stopper's output, its last 8 KiB each, when it printed any. `override: true`
+records that the request carried `?force=1`, not that a person confirmed anything. Once the answer
+is sent, the hub tears down as `/api/shutdown` does, and exits 0 after a 200 and 1 after a 503.
+The local agent can serve more than one local hub of the same OS user (#127), and the terminals
+of every hub it serves end. With the agent and the hub gone, nothing holds their executables open any
+more, which is what an update needs.
+
+What the callers do with the answers:
+
+- `lasterm stop`: on a 409, prints the count and exits 1. `--force` sends `?force=1`.
+- `lasterm quit`: on a 409, asks on a terminal for `quit` to be typed and sends the request again
+  with `?force=1`, and refuses when there is no terminal to ask on. After a 200, a 503 or an answer
+  that never came, it waits up to 15 s for this hub, by its `instanceId`, to withdraw
+  `runtime.json` and exit. A second 409, any other 4xx, a 501 or a 500 began nothing, and it says
+  so without waiting.
+- The desktop's **Quit completely**: on a 409, asks in a native dialog before sending the request
+  again with `?force=1`. After a 200, a 503 or an answer that never came, it waits for the hub to
+  go, as `lasterm quit` does.
+
 #### Hosts
 
 | Method | Path | Auth | Body / Notes |

@@ -32,6 +32,7 @@ import {
 	getStateDir,
 	HUB_RESPONSE_TIMEOUT_CODE,
 	HUB_RESPONSE_TIMEOUT_MS,
+	identifyRecordedProcess,
 	isPidAlive,
 	isUnsentHubRequest,
 	loadRuntime,
@@ -39,6 +40,7 @@ import {
 	type ParsedArgs,
 	parseArgs,
 	persistRuntime,
+	type RecordedProcess,
 	type RuntimeInfo,
 	requestHub,
 	runtimeMatches,
@@ -1559,6 +1561,46 @@ describe("runtime state", () => {
 	});
 });
 
+describe("identifyRecordedProcess", () => {
+	const OTHER_PID = 2 ** 22 + 7;
+	const holding = (command: string | null) => identifyRecordedProcess(OTHER_PID, () => command);
+
+	// Mutation: drop any one of the names, and a hub started that way reads as
+	// another program while it stops: status calls it gone.
+	it("takes every way a hub is started for a hub", () => {
+		for (const command of [
+			'"C:\\Program Files\\Lasterm\\lasterm-hub.exe" start --exit-with-stdin',
+			"/usr/local/bin/lasterm-hub start --port 4100",
+			"node /home/me/.local/share/pnpm/lasterm/bin/lasterm.js start",
+			// The daemon child, from a checkout whose path does not say lasterm.
+			"/usr/bin/node /srv/checkout/packages/hub/dist/main.js",
+			"C:\\nodejs\\node.exe --import tsx C:\\work\\checkout\\packages\\hub\\src\\main.ts",
+		]) {
+			expect(holding(command), command).toBe("hub");
+		}
+	});
+
+	it("takes a command line naming nothing of Lasterm for another program", () => {
+		expect(holding("C:\\Windows\\System32\\svchost.exe -k netsvcs -p")).toBe("other");
+		expect(holding("/usr/lib/firefox/firefox -contentproc")).toBe("other");
+	});
+
+	// Mutation: read an unreadable command line as another program's, and a hub
+	// running elevated, whose command line a user's WMI query cannot read, is
+	// called gone.
+	it("cannot tell from a command line it could not read", () => {
+		expect(holding(null)).toBe("unknown");
+	});
+
+	// Mutation: probe this pid like any other, and a dead hub's pid that this
+	// very command took reads as a hub: `lasterm status` names Lasterm itself.
+	it("knows its own pid is not a hub without asking", () => {
+		const read = vi.fn(() => "node bin/lasterm.js status");
+		expect(identifyRecordedProcess(process.pid, read)).toBe("other");
+		expect(read).not.toHaveBeenCalled();
+	});
+});
+
 describe("cmdStatus against the hub a runtime record names", () => {
 	let listeners: net.Server[] = [];
 
@@ -1591,9 +1633,14 @@ describe("cmdStatus against the hub a runtime record names", () => {
 		);
 	}
 
+	/**
+	 * Status of `runtime`, whose pid is alive. `identifyProcess` says what holds
+	 * that pid; by default a hub, since the record names this test process.
+	 */
 	async function status(
 		runtime: RuntimeInfo,
 		json = true,
+		identifyProcess: (pid: number) => RecordedProcess = () => "hub",
 	): Promise<{ code: number; output: string[] }> {
 		const output: string[] = [];
 		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
@@ -1603,6 +1650,7 @@ describe("cmdStatus against the hub a runtime record names", () => {
 			const code = await cmdStatus(parsed(json ? ["status", "--json"] : ["status"]), {
 				loadRuntime: () => ({ kind: "present", runtime }),
 				isPidAlive: () => true,
+				identifyProcess,
 			});
 			return { code, output };
 		} finally {
@@ -1685,6 +1733,62 @@ describe("cmdStatus against the hub a runtime record names", () => {
 			health: null,
 			error: expect.stringContaining("ECONNREFUSED"),
 		});
+	});
+
+	// Mutation: drop the question of what holds the pid, and a hub that died and
+	// left its pid to another program reads as a hub starting: running, "retry
+	// shortly", exit 0, for as long as that program runs.
+	it("calls a record stale when another program holds its pid and its port refuses, and exits 0", async () => {
+		const tls = getTestTlsMaterial();
+		const port = await getUnusedPort();
+
+		const json = await status(record(port, tls.pinned.spki), true, () => "other");
+		expect(json.code).toBe(0);
+		expect(json.output).toHaveLength(1);
+		expect(JSON.parse(json.output[0] ?? "")).toEqual({
+			running: false,
+			stale: true,
+			pid: process.pid,
+			pid_reused: true,
+		});
+
+		const text = await status(record(port, tls.pinned.spki), false, () => "other");
+		expect(text.code).toBe(0);
+		expect(text.output).toEqual([
+			`Hub: stale (pid ${process.pid} now belongs to another program; port ${port} is not answering)`,
+		]);
+	});
+
+	// Mutation: take a pid whose command line cannot be read for another
+	// program's, and a hub that is stopping, or runs elevated on Windows, is
+	// called gone while its process is still there.
+	it("keeps a refusing port not ready while its pid may be a hub, or cannot be told apart", async () => {
+		const tls = getTestTlsMaterial();
+		const port = await getUnusedPort();
+		for (const held of ["hub", "unknown"] as const) {
+			const { code, output } = await status(record(port, tls.pinned.spki), true, () => held);
+			expect(code).toBe(0);
+			expect(JSON.parse(output[0] ?? "")).toMatchObject({ running: true, ready: false });
+		}
+	});
+
+	// On Windows the question costs a PowerShell start and a WMI query, about
+	// 2.5 s. Mutation: ask it before probing the port, and every status pays that,
+	// a running hub's included.
+	it("asks what holds the pid only when the recorded port refuses", async () => {
+		const tls = getTestTlsMaterial();
+		const identify = vi.fn((_pid: number): RecordedProcess => "hub");
+
+		expect(
+			(await status(record(await listenHub(tls.pinned), tls.pinned.spki), true, identify)).code,
+		).toBe(0);
+		expect(
+			(await status(record(await listenHub(tls.other), tls.pinned.spki), true, identify)).code,
+		).toBe(1);
+		expect(identify).not.toHaveBeenCalled();
+
+		await status(record(await getUnusedPort(), tls.pinned.spki), true, identify);
+		expect(identify).toHaveBeenCalledExactlyOnceWith(process.pid);
 	});
 
 	it("names a record without a usable key or port as a configuration refusal", async () => {

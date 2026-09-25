@@ -58,7 +58,9 @@ describe("openCachedAddon", () => {
 		const destination = join(cacheDir, assetName);
 		let observed = 0;
 		let complete = false;
-		const exits = Promise.all(workers.map(waitForExit)).finally(() => {
+		// Settled, not all: every extractor that fails is reported, and none of
+		// the failures is left unhandled while the loop below runs.
+		const exits = Promise.allSettled(workers.map(waitForExit)).finally(() => {
 			complete = true;
 		});
 
@@ -70,7 +72,10 @@ describe("openCachedAddon", () => {
 			}
 			await new Promise((resolve) => setTimeout(resolve, 1));
 		}
-		await exits;
+		const failures = (await exits).flatMap((exit) =>
+			exit.status === "rejected" ? [String(exit.reason)] : [],
+		);
+		expect(failures).toEqual([]);
 		expect(observed).toBeGreaterThan(0);
 		expect(readFileSync(destination)).toEqual(data);
 	}, 20_000);
@@ -530,20 +535,32 @@ function extractInChild(cacheDir: string, assetName: string, size: number): Chil
 		`closeSync(openCachedAddon(${JSON.stringify(assetName)}, ${JSON.stringify(cacheDir)}, Buffer.alloc(${size}, 0xa5)).fd);`,
 	].join("\n");
 	return spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", program], {
-		stdio: "ignore",
+		stdio: ["ignore", "ignore", "pipe"],
 	});
 }
 
+/**
+ * Resolves when `child` exits 0. Otherwise rejects with its exit code or
+ * signal and everything it wrote to stderr, which is the only trace of why an
+ * extractor failed.
+ */
 function waitForExit(child: ChildProcess): Promise<void> {
+	const stderr: Buffer[] = [];
+	child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 	return new Promise((resolve, reject) => {
-		if (child.exitCode !== null) {
-			if (child.exitCode === 0) resolve();
-			else reject(new Error(`extractor exited ${child.exitCode}`));
-			return;
-		}
-		child.once("exit", (code) => {
-			if (code === 0) resolve();
-			else reject(new Error(`extractor exited ${code}`));
+		child.once("error", reject);
+		// "close" rather than "exit": it comes after stderr has been read to its end.
+		child.once("close", (code, signal) => {
+			if (code === 0) {
+				resolve();
+				return;
+			}
+			const output = Buffer.concat(stderr).toString("utf8").trim();
+			reject(
+				new Error(
+					`extractor pid ${child.pid} exited ${code ?? `on signal ${signal}`}; its stderr:\n${output.length > 0 ? output : "(empty)"}`,
+				),
+			);
 		});
 	});
 }

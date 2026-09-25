@@ -234,6 +234,22 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 - Reactive: WS messages update store → Vue reactivity updates UI
 - Persistent: workspace layout saved to hub via REST on change
 
+**Client and hub versions (browser):** the hub is the source of truth for the UI it
+serves (#132). A tab loaded before a hub upgrade keeps running the old JavaScript
+while its WebSocket reconnects to the new hub, so on every connection the client
+compares its build (`VITE_BUILD_HASH`) with the hub's (`build` in `GET /api/health`),
+and takes a chunk that fails to load (`vite:preloadError`) for the same news. A hidden
+tab reloads at once; a visible one shows a banner, "Lasterm was updated on the hub",
+and reloads when the user presses Reload or hides the tab. The reload is an ordinary
+one: panes reattach and restore from the hub. A tab records in `sessionStorage` the
+build it reloaded from, and a page that comes back still running that build (a cached
+`index.html`) shows the banner instead of reloading again. A `dev` build on either
+side never triggers, nor does the Vite dev server. The desktop does none of this: its
+UI is bundled with the app, so a reload would load the same one, and a desktop driving
+a remote hub will negotiate a protocol version instead (#132, #193). All of it lives in
+`composables/useHubUpdate.ts`, which the installable PWA (#561) extends with its
+service worker's update lifecycle.
+
 ### 3.5 Agent Binary Distribution
 
 The agent binary reaches the machine it runs on through two distinct, deliberate paths.

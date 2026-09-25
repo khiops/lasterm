@@ -16,6 +16,7 @@ import {
 	getLocalSha256,
 	getRemoteSha256,
 	readRemoteSystem,
+	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
@@ -71,6 +72,8 @@ function makeMockClient(
 interface RemoteFile {
 	content: string;
 	mode: number;
+	/** Minutes since it was last written, by the remote's clock. Unset: just now. */
+	ageMinutes?: number;
 }
 
 interface MockSftpOptions {
@@ -182,6 +185,55 @@ function shellMoving(
 			return { stdout: "", stderr: "mv: cannot move", exitCode: exitCode || 1 };
 		}
 		moveRemoteFile(files, mv[2] ?? "", mv[3] ?? "");
+		return { stdout: "", stderr: "", exitCode: 0 };
+	};
+}
+
+/** Undo `quotePosix`: what the remote's shell hands the command. */
+function unquotePosix(word: string): string {
+	if (!word.startsWith("'")) return word;
+	return word.slice(1, -1).replace(/'\\''/g, "'");
+}
+
+/** A `find -name` glob as a regular expression: `\x`, `[...]`, `*` and `?`. */
+function globToRegExp(glob: string): RegExp {
+	let source = "";
+	for (let i = 0; i < glob.length; i++) {
+		const c = glob[i] ?? "";
+		if (c === "\\") {
+			i++;
+			source += (glob[i] ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		} else if (c === "[") {
+			const end = glob.indexOf("]", i + 1);
+			source += glob.slice(i, end + 1);
+			i = end;
+		} else if (c === "*") source += ".*";
+		else if (c === "?") source += ".";
+		else source += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	}
+	return new RegExp(`^${source}$`);
+}
+
+/**
+ * The remote's `find` sweeping stale uploads off the mock remote's files: in
+ * that directory only, the names the glob matches, older than `-mmin` says.
+ * Anything else is answered as a failure.
+ */
+function shellSweeping(files: Map<string, RemoteFile>): (command: string) => ExecResult {
+	return (command) => {
+		const word = "('(?:[^']|'\\\\'')*'|\\S+)";
+		const find = new RegExp(
+			`^find ${word} -maxdepth 1 -type f -name ${word} -mmin \\+(\\d+) -exec rm -f -- \\{\\} \\\\;$`,
+		).exec(command);
+		if (find === null) return { stdout: "", stderr: "not a sweep", exitCode: 1 };
+		const dir = unquotePosix(find[1] ?? "");
+		const name = globToRegExp(unquotePosix(find[2] ?? ""));
+		const minutes = Number(find[3]);
+		for (const [path, file] of [...files]) {
+			const cut = path.lastIndexOf("/");
+			if (path.slice(0, cut) !== dir || !name.test(path.slice(cut + 1))) continue;
+			if ((file.ageMinutes ?? 0) > minutes) files.delete(path);
+		}
 		return { stdout: "", stderr: "", exitCode: 0 };
 	};
 }
@@ -477,14 +529,18 @@ describe("uploadAgentBinary", () => {
 		expect(first).not.toBe(second);
 	});
 
-	it("renames with posix-rename@openssh.com when the server offers it, and runs nothing", async () => {
+	it("renames with posix-rename@openssh.com when the server offers it, and runs no mv", async () => {
 		const sftp = makeMockSftp({ files: remoteWithOldAgent() });
-		const client = makeSftpClient(sftp);
+		const commands: string[] = [];
+		const client = makeSftpClient(sftp, undefined, (command) => {
+			commands.push(command);
+			return { stdout: "", stderr: "", exitCode: 0 };
+		});
 
 		await uploadAgentBinary(client, "/local/binary", target, "linux");
 
 		expect(sftp.ext_openssh_rename).toHaveBeenCalledTimes(1);
-		expect(client.exec).not.toHaveBeenCalled();
+		expect(commands.filter((command) => command.includes("mv "))).toEqual([]);
 	});
 
 	it("falls back to mv -f over exec when the server lacks the extension", async () => {
@@ -516,9 +572,67 @@ describe("uploadAgentBinary", () => {
 		const quoted = (path: string): string => `'${path.replace(/'/g, "'\\''")}'`;
 		const temp = uploadedTo(sftp);
 		expect(temp.startsWith("/home/o'brien/my bin/.lasterm-agent.")).toBe(true);
-		expect(commands).toEqual([
+		expect(commands.filter((command) => command.includes("mv "))).toEqual([
 			`test ! -d ${quoted(awkward)} && mv -f -- ${quoted(temp)} ${quoted(awkward)}`,
 		]);
+	});
+
+	// A crash mid-upload leaves its temporary beside the agent. The next upload
+	// to that directory removes it, and only it: another hub may be uploading
+	// there right now (#127), so a temporary is only removed once it is old
+	// enough that nobody can still be writing it, by the remote's clock (#559).
+	it("removes what a crashed upload left an hour ago, and nothing else", async () => {
+		const stale = "/remote/.local/bin/.lasterm-agent.0123456789abcdef.partial";
+		const beingWritten = "/remote/.local/bin/.lasterm-agent.fedcba9876543210.partial";
+		const lookalikes = [
+			"/remote/.local/bin/.lasterm-agent.not-an-upload.partial",
+			"/remote/.local/bin/.other-agent.0123456789abcdef.partial",
+			"/remote/.local/bin/lasterm-agent.0123456789abcdef.partial",
+			"/remote/.local/bin/nested/.lasterm-agent.0123456789abcdef.partial",
+			"/remote/.lasterm-agent.0123456789abcdef.partial",
+		];
+		const files = remoteWithOldAgent();
+		files.set(stale, {
+			content: "half an agent",
+			mode: 0o644,
+			ageMinutes: STALE_UPLOAD_MINUTES + 1,
+		});
+		files.set(beingWritten, {
+			content: "another hub's upload",
+			mode: 0o644,
+			ageMinutes: STALE_UPLOAD_MINUTES - 1,
+		});
+		for (const path of lookalikes) {
+			files.set(path, { content: "not ours", mode: 0o644, ageMinutes: 24 * 60 });
+		}
+		const sftp = makeMockSftp({ files });
+		const client = makeSftpClient(sftp, undefined, shellSweeping(files));
+
+		await uploadAgentBinary(client, "/local/binary", target, "linux");
+
+		expect(files.has(stale)).toBe(false);
+		expect(files.get(beingWritten)?.content).toBe("another hub's upload");
+		for (const path of lookalikes) {
+			expect(files.has(path), `${path} was removed`).toBe(true);
+		}
+		expect(files.get(target)).toEqual({ content: "/local/binary", mode: 0o755 });
+	});
+
+	it("asks the remote's own clock, with both the directory and the name quoted", async () => {
+		const awkward = "/home/o'brien/my bin/lasterm-agent";
+		const commands: string[] = [];
+		const client = makeSftpClient(makeMockSftp(), undefined, (command) => {
+			commands.push(command);
+			return { stdout: "", stderr: "", exitCode: 0 };
+		});
+
+		await uploadAgentBinary(client, "/local/binary", awkward, "linux");
+
+		const hex = "[0-9a-f]".repeat(16);
+		expect(commands).toContain(
+			`find '/home/o'\\''brien/my bin' -maxdepth 1 -type f -name '.lasterm-agent.${hex}.partial' ` +
+				`-mmin +${STALE_UPLOAD_MINUTES} -exec rm -f -- {} \\;`,
+		);
 	});
 
 	// Whatever step fails, the temporary goes and the target stays exactly what

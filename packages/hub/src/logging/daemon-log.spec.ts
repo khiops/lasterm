@@ -1,18 +1,21 @@
 import {
 	closeSync,
 	existsSync,
+	fstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	renameSync,
 	rmdirSync,
 	rmSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 	writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DAEMON_LOG_ENV, openDaemonLog } from "../daemon-launch.js";
 import {
 	boundDaemonLog,
@@ -28,13 +31,26 @@ const LIMIT = 256;
 
 let dirs: string[] = [];
 let descriptors: number[] = [];
+let bounds: DaemonLogBound[] = [];
 
 afterEach(() => {
+	for (const bound of bounds) bound.close();
 	for (const fd of descriptors) closeSync(fd);
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+	bounds = [];
 	descriptors = [];
 	dirs = [];
 });
+
+/** A bound on `file`, whose lines go through the launch's descriptor. */
+function boundOn(
+	file: { path: string; launchFd: number },
+	report: (message: string) => void = () => {},
+): DaemonLogBound {
+	const bound = new DaemonLogBound(file.path, report, LIMIT, file.launchFd);
+	bounds.push(bound);
+	return bound;
+}
 
 /**
  * `hub-daemon.log` in a directory of its own, and the descriptor a daemon
@@ -91,7 +107,7 @@ describe("DaemonLogBound", () => {
 	// because that descriptor holds it open.
 	it("moves what the file holds aside when a line would take it past the limit, again and again", () => {
 		const file = daemonLogFile();
-		const bound = new DaemonLogBound(file.path, () => {}, LIMIT);
+		const bound = boundOn(file);
 		const written = 40;
 		for (let n = 0; n < written; n++) {
 			bound.beforeLine(line(n).length);
@@ -111,7 +127,7 @@ describe("DaemonLogBound", () => {
 		const inherited = "x".repeat(4 * LIMIT);
 		writeFileSync(file.path, inherited);
 
-		new DaemonLogBound(file.path, () => {}, LIMIT).beforeLine(line(0).length);
+		boundOn(file).beforeLine(line(0).length);
 		writeSync(file.launchFd, line(0));
 
 		expect(read(file.path)).toBe(line(0));
@@ -127,7 +143,7 @@ describe("DaemonLogBound", () => {
 		// A directory where the previous file goes: no copy can replace it.
 		mkdirSync(file.previous);
 		const reports: string[] = [];
-		const bound = new DaemonLogBound(file.path, (message) => reports.push(message), LIMIT);
+		const bound = boundOn(file, (message) => reports.push(message));
 		const held = 20;
 		for (let n = 0; n < held; n++) {
 			bound.beforeLine(line(n).length);
@@ -146,28 +162,33 @@ describe("DaemonLogBound", () => {
 	});
 });
 
-describe("checkBeforeEachLine", () => {
-	/** A stream writing to the launch's descriptor, as the daemon's standard output does. */
-	function launchStream(fd: number): OutputStream & { calls: unknown[][] } {
-		const calls: unknown[][] = [];
-		return {
-			calls,
-			write: ((...args: unknown[]) => {
-				calls.push(args);
-				const chunk = args[0];
-				if (typeof chunk === "string") writeSync(fd, chunk);
-				else writeSync(fd, chunk as Uint8Array);
-				return true;
-			}) as OutputStream["write"],
-		};
-	}
+/** A stream writing to the launch's descriptor, as the daemon's standard output does. */
+function launchStream(fd: number): OutputStream & { calls: unknown[][] } {
+	const calls: unknown[][] = [];
+	return {
+		calls,
+		write: ((...args: unknown[]) => {
+			calls.push(args);
+			const chunk = args[0];
+			if (typeof chunk === "string") writeSync(fd, chunk);
+			else writeSync(fd, chunk as Uint8Array);
+			return true;
+		}) as OutputStream["write"],
+	};
+}
 
+/** How many bytes the file behind `fd` holds, whether or not a name still leads to it. */
+function sizeBehind(fd: number): number {
+	return fstatSync(fd).size;
+}
+
+describe("checkBeforeEachLine", () => {
 	// Mutation: stop checking, and whatever console.log and pino write grows the
 	// file without bound.
 	it("checks the limit before each line the stream writes, and writes every line where it went", () => {
 		const file = daemonLogFile();
 		const stream = launchStream(file.launchFd);
-		checkBeforeEachLine(new DaemonLogBound(file.path, () => {}, LIMIT), [stream]);
+		checkBeforeEachLine(boundOn(file), [stream]);
 		const done = () => {};
 		const written = 40;
 		for (let n = 0; n < written; n++) {
@@ -181,6 +202,84 @@ describe("checkBeforeEachLine", () => {
 		// The stream's own write still carries each line, with its callback.
 		expect(stream.calls).toHaveLength(written);
 		expect(stream.calls[0]).toEqual([line(0), done, undefined]);
+	});
+});
+
+describe("a daemon log that loses its name while the hub runs (#540)", () => {
+	// Mutation: leave a missing path alone, as before, and every line goes on to
+	// the deleted file: a file nobody can open, grown without bound.
+	it("writes to the path again once the file was deleted, within the limit", async () => {
+		const file = daemonLogFile();
+		const stream = launchStream(file.launchFd);
+		checkBeforeEachLine(boundOn(file), [stream]);
+		const before = 3;
+		for (let n = 0; n < before; n++) stream.write(line(n));
+
+		unlinkSync(file.path);
+		const deleted = sizeBehind(file.launchFd);
+		expect(deleted).toBe(before * line(0).length);
+		const done = vi.fn();
+		const written = before + 40;
+		for (let n = before; n < written; n++) {
+			if (n % 2 === 0) stream.write(line(n), done);
+			else stream.write(Buffer.from(line(n)));
+		}
+
+		// The deleted file took nothing more; the lines are at the path again.
+		expect(sizeBehind(file.launchFd)).toBe(deleted);
+		expect(size(file.path)).toBeGreaterThan(0);
+		expect(size(file.path)).toBeLessThanOrEqual(LIMIT);
+		expect(size(file.previous)).toBeLessThanOrEqual(LIMIT);
+		expectKeptTail(file.path, written);
+		// Each callback is still called, once the line is written.
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(done).toHaveBeenCalledTimes(20);
+		expect(done).toHaveBeenCalledWith(null);
+	});
+
+	// Mutation: notice only a path with nothing at it, and after a move the lines
+	// go on to the moved file, however large it grows, while the file now at the
+	// path goes unchecked.
+	it("appends to the file that took the name when the one it wrote was moved away", () => {
+		const file = daemonLogFile();
+		const stream = launchStream(file.launchFd);
+		checkBeforeEachLine(boundOn(file), [stream]);
+		stream.write(line(0));
+
+		const moved = `${file.path}.moved`;
+		renameSync(file.path, moved);
+		writeFileSync(file.path, "a start that lost the lock\n");
+		stream.write(line(1));
+		stream.write(line(2));
+
+		expect(read(moved)).toBe(line(0));
+		expect(read(file.path)).toBe(`a start that lost the lock\n${line(1)}${line(2)}`);
+	});
+
+	// Mutation: say it through the stream's own descriptor, as before, and after
+	// a deletion the report lands in the deleted file, where nobody reads it.
+	it("says what went wrong in the file the lines now go to", () => {
+		const file = daemonLogFile();
+		const stdout = launchStream(file.launchFd);
+		const stderr = launchStream(file.launchFd);
+		const bound = boundDaemonLog(
+			{ [DAEMON_LOG_ENV]: file.path },
+			{ stdout, stderr, maxBytes: LIMIT, descriptor: file.launchFd },
+		);
+		if (bound) bounds.push(bound);
+		stdout.write(line(0));
+		unlinkSync(file.path);
+		const deleted = sizeBehind(file.launchFd);
+		// Nothing can replace the previous file, so the new one cannot move aside.
+		mkdirSync(file.previous);
+
+		const written = 20;
+		for (let n = 1; n <= written; n++) stdout.write(line(n));
+
+		expect(sizeBehind(file.launchFd)).toBe(deleted);
+		const lines = read(file.path).split("\n");
+		expect(lines.filter((text) => text.startsWith("[lasterm] cannot copy"))).toHaveLength(1);
+		expect(lines.filter((text) => text.startsWith("line "))).toHaveLength(written);
 	});
 });
 
@@ -210,7 +309,9 @@ describe("bounding the daemon log", () => {
 			stdout: stdout as unknown as OutputStream,
 			stderr: stderr as unknown as OutputStream,
 			maxBytes: LIMIT,
+			descriptor: file.launchFd,
 		});
+		if (bound) bounds.push(bound);
 
 		expect(bound?.path).toBe(file.path);
 		expect(env).toEqual({});

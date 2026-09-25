@@ -377,10 +377,6 @@ export class MetaDAL {
 		return this.pairingCodes.countActivePairingCodes();
 	}
 
-	cleanExpiredPairingCodes(): void {
-		this.pairingCodes.cleanExpiredPairingCodes();
-	}
-
 	deleteUnredeemedPairingCodes(): void {
 		this.pairingCodes.deleteUnredeemedPairingCodes();
 	}

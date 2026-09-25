@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import {
 	validateTokenRecord,
 } from "./auth.js";
 import { getStateDir, loadRuntime } from "./cli.js";
+import { buildDaemonSpawnPlan, DAEMON_LOG_ENV } from "./daemon-launch.js";
 import { STARTUP_UNWIND_TIMEOUT_MS, startHub } from "./hub-startup.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
@@ -24,6 +26,22 @@ const TEST_TLS_IDENTITY = {
 	certificate: "certificate",
 	spki: "test-spki",
 };
+
+// A start that completes listens for SIGTERM and SIGINT on the process; the
+// ones each test's starts add are taken away again, so the file stays under
+// Node's listener warning.
+const SIGNALS: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+let signalListeners = new Map<NodeJS.Signals, NodeJS.SignalsListener[]>();
+beforeEach(() => {
+	signalListeners = new Map(SIGNALS.map((signal) => [signal, process.listeners(signal)]));
+});
+afterEach(() => {
+	for (const signal of SIGNALS) {
+		for (const listener of process.listeners(signal)) {
+			if (!signalListeners.get(signal)?.includes(listener)) process.off(signal, listener);
+		}
+	}
+});
 
 // The refusal has to belong to the operation that constructs a hub, not to the
 // `start` command handler: the daemon child re-enters through the CLI, `pnpm dev`
@@ -301,22 +319,6 @@ describe("startHub token restart sweep", () => {
 // The key that names this hub to its agent daemons lives in the directory it
 // locked, and has to reach the server that hands it to them (#127).
 describe("startHub carries the hub key", () => {
-	// A start that completes listens for SIGTERM and SIGINT on the process; the
-	// ones these starts add are taken away again, so the file stays under Node's
-	// listener warning.
-	const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
-	let before = new Map<NodeJS.Signals, NodeJS.SignalsListener[]>();
-	beforeEach(() => {
-		before = new Map(signals.map((signal) => [signal, process.listeners(signal)]));
-	});
-	afterEach(() => {
-		for (const signal of signals) {
-			for (const listener of process.listeners(signal)) {
-				if (!before.get(signal)?.includes(listener)) process.off(signal, listener);
-			}
-		}
-	});
-
 	function startWith(stateDir: string, createServer: (options: { hubKey?: string }) => unknown) {
 		const dbs = openTestDatabases();
 		return startHub(
@@ -661,6 +663,72 @@ describe("startHub creates the configuration directory owner-only", () => {
 	);
 });
 
+// A state directory an earlier version made under a loose umask, or one made by
+// hand, holds the databases, the TLS key and the hub key. The hub creates its own
+// 0700, but only judged an existing one's mode by way of the TLS key writer, which
+// refuses group write and nothing else: 0755 went unnoticed (#536).
+describe("startHub holds the state directory to 0700", () => {
+	// Mutations: check it before the lock, and a start that loses to a running hub
+	// changes that hub's directory (#133); check it later, or not at all, and the
+	// daemon's log, the TLS key and the databases land in a directory still 0755.
+	it.runIf(process.platform !== "win32")(
+		"tightens an existing loose one once it holds the lock, before anything is written there",
+		async () => {
+			const dbs = openTestDatabases();
+			const root = join(tmpdir(), `lasterm-state-mode-${randomBytes(8).toString("hex")}`);
+			const stateDir = join(root, "state");
+			mkdirSync(stateDir, { recursive: true });
+			chmodSync(stateDir, 0o755);
+			const modeWhen: Record<string, string> = {};
+			const modeOf = () => (statSync(stateDir).mode & 0o777).toString(8);
+
+			try {
+				await startHub(
+					{ port: 4100 },
+					{
+						describePreviousInstallation: () => undefined,
+						getStateDir: () => stateDir,
+						getConfigDir: () => join(root, "config"),
+						acquireHubLock: () => {
+							modeWhen.lock = modeOf();
+							return null as never;
+						},
+						boundDaemonLog: () => {
+							modeWhen.daemonLog = modeOf();
+							return false;
+						},
+						initAuth: () => randomBytes(32).toString("hex"),
+						createOwnerToken: () => "owner-token",
+						resolveHubTlsIdentity: () => {
+							modeWhen.tlsKey = modeOf();
+							return TEST_TLS_IDENTITY;
+						},
+						openDatabases: () => {
+							modeWhen.databases = modeOf();
+							return dbs;
+						},
+						createServer: async () => ({}) as never,
+						startServer: async () => "https://127.0.0.1:4100",
+						addStartupCorsOrigins: () => 4100,
+						persistRuntime: () => undefined,
+						deleteRuntime: () => false,
+					},
+				);
+
+				expect(modeWhen).toEqual({
+					lock: "755",
+					daemonLog: "700",
+					tlsKey: "700",
+					databases: "700",
+				});
+			} finally {
+				dbs.close();
+				await removeTempDir(root);
+			}
+		},
+	);
+});
+
 // `lasterm start` — what the desktop runs, and the only command the single
 // executable serves — never passes `logging`, and a hub started that way used to
 // write no log file at all. The security events must reach one regardless, and
@@ -817,5 +885,90 @@ describe("startHub and the daemon's log (#525)", () => {
 
 		// A hub the launch did not start as a daemon keeps Fastify's own destination.
 		expect((await start(() => false)).logger).toBeUndefined();
+	});
+});
+
+describe("startHub and what its launch set in the environment (#540)", () => {
+	/**
+	 * Which of `names` a child spawned as the agent launcher spawns the agent
+	 * sees, with their values. The launcher passes no `env`, so the agent gets
+	 * this process's environment, and the agent passes its own on to every shell.
+	 */
+	async function seenBySpawnedChild(names: readonly string[]): Promise<Record<string, string>> {
+		const child = spawn(
+			process.execPath,
+			[
+				"-e",
+				"const seen = {}; for (const name of process.argv.slice(1)) if (process.env[name] !== undefined) seen[name] = process.env[name]; process.stdout.write(JSON.stringify(seen));",
+				...names,
+			],
+			{ stdio: ["ignore", "pipe", "inherit"], windowsHide: true },
+		);
+		let output = "";
+		child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+			output += chunk;
+		});
+		const code = await new Promise<number | null>((resolve, reject) => {
+			child.once("error", reject);
+			child.once("close", resolve);
+		});
+		expect(code).toBe(0);
+		return JSON.parse(output) as Record<string, string>;
+	}
+
+	// Mutation: leave the variables in the environment, and the agent this hub
+	// spawns inherits them, then every shell it starts: a `lasterm start` typed in
+	// a terminal opens a browser, and aims at the port of the hub already serving.
+	it("spawns its agent without the variables its launch set for it", async () => {
+		const launch = buildDaemonSpawnPlan({
+			sea: false,
+			port: 4100,
+			open: true,
+			moduleUrl: import.meta.url,
+			logPath: join(tmpdir(), "hub-daemon.log"),
+		}).env;
+		// The log's variable is taken once the lock is held, and has its own spec.
+		const forHub = Object.fromEntries(
+			Object.entries(launch).filter(([name]) => name !== DAEMON_LOG_ENV),
+		);
+		const names = Object.keys(forHub);
+		expect([...names].sort()).toEqual(["LASTERM_OPEN", "LASTERM_PORT"]);
+		const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+		const dbs = openTestDatabases();
+		const stateDir = join(tmpdir(), `lasterm-start-env-${randomBytes(8).toString("hex")}`);
+		Object.assign(process.env, forHub);
+		try {
+			// Before the hub starts, a child sees what the launch set.
+			expect(await seenBySpawnedChild(names)).toEqual(forHub);
+
+			await startHub(
+				{ port: 4100 },
+				{
+					describePreviousInstallation: () => undefined,
+					getStateDir: () => stateDir,
+					getConfigDir: () => stateDir,
+					acquireHubLock: () => null as never,
+					boundDaemonLog: () => false,
+					initAuth: () => randomBytes(32).toString("hex"),
+					createOwnerToken: () => "owner-token",
+					resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+					openDatabases: () => dbs,
+					createServer: async () => ({}) as never,
+					startServer: async () => "https://127.0.0.1:4100",
+					addStartupCorsOrigins: () => 4100,
+					persistRuntime: () => undefined,
+					deleteRuntime: () => false,
+				},
+			);
+
+			expect(await seenBySpawnedChild(names)).toEqual({});
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			dbs.close();
+			await removeTempDir(stateDir);
+		}
 	});
 });

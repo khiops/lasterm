@@ -347,8 +347,10 @@ remote host over SFTP. Pre-population is available via `lasterm-hub agent fetch 
 On a POSIX host the upload goes to a hidden temporary file beside the target, is made executable, and only
 then is renamed over the target (`posix-rename@openssh.com`, or `mv -f` where the server lacks it). A remote
 daemon still running the old binary keeps it, and the host reports that daemon as outdated until someone
-replaces it (#456, #555). A Windows host is written in place: its agent runs on stdio and exits with its
-connection.
+replaces it (#456, #555); the notice then says the new agent is installed and waits for that. A
+temporary a crash left behind is removed by a later upload to the same directory once the remote's own
+clock says it is an hour old: another hub may be uploading there, and its file is always younger (#127,
+#559). A Windows host is written in place: its agent runs on stdio and exits with its connection.
 
 Two properties follow:
 - **The remote host never needs outbound internet** — the *hub* fetches on its behalf, and the binary

@@ -218,8 +218,14 @@ export interface SshAgentDeployOptions {
 	approvedSha256?: string | null;
 	/** Called when user chose trust_permanent — persist SHA256 to DB. */
 	onAgentPinned?: (hostId: string, sha256: string) => void;
-	/** Called when remote agent was re-uploaded (SHA256 mismatch with local cache). */
-	onAgentUpdated?: (hostId: string) => void;
+	/**
+	 * Called when the remote agent was re-uploaded (SHA256 mismatch with local
+	 * cache), once this connection knows what it reached. `besideRunningDaemon`
+	 * says a daemon was already running from the file the upload replaced: it
+	 * still runs the old agent, and the new one is used once it is replaced
+	 * (#555, #559).
+	 */
+	onAgentUpdated?: (hostId: string, installed: { besideRunningDaemon: boolean }) => void;
 }
 
 /**
@@ -241,7 +247,6 @@ function toDeployOptions(
 			: {}),
 		...(opts.approvedSha256 != null ? { approvedSha256: opts.approvedSha256 } : {}),
 		...(opts.onAgentPinned !== undefined ? { onAgentPinned: opts.onAgentPinned } : {}),
-		...(opts.onAgentUpdated !== undefined ? { onAgentUpdated: opts.onAgentUpdated } : {}),
 	};
 }
 
@@ -505,6 +510,20 @@ export class SshAgent extends AgentConnection {
 						rejectOnce(Object.assign(new Error("SSH connect aborted"), { name: "AbortError" }));
 						return;
 					}
+					// The deploy replaced the agent on disk. What that means is only
+					// known once this connection has reached an agent: a daemon that was
+					// already running still runs the one the upload replaced, and saying
+					// "updated to the current version" then contradicted the host's
+					// "outdated agent" ring beside it (#559). So it is said here, once,
+					// with what was reached, and said all the same if nothing was.
+					let replacedAgent = false;
+					const announceReplacedAgent = (): void => {
+						if (!replacedAgent) return;
+						replacedAgent = false;
+						this.deployOptions?.onAgentUpdated?.(this.host.id, {
+							besideRunningDaemon: this.reachedRunningDaemon,
+						});
+					};
 					// Attach stream handler — called after deploy (or immediately if no deploy needed).
 					const runAgent = (agentPath: string, daemonPath?: string): void => {
 						// The HELLO clock starts once there is a stream to say it on. Not
@@ -567,6 +586,7 @@ export class SshAgent extends AgentConnection {
 
 						openTransport(
 							(stream) => {
+								announceReplacedAgent();
 								startHelloClock();
 								this.channel = stream;
 								this.channelOpen = true;
@@ -602,6 +622,7 @@ export class SshAgent extends AgentConnection {
 								});
 							},
 							(err) => {
+								announceReplacedAgent();
 								clearTimeout(helloTimeout);
 								rejectOnce(err);
 							},
@@ -613,11 +634,12 @@ export class SshAgent extends AgentConnection {
 						// (the user may have installed it manually in a non-standard path).
 						// DeployError (user-initiated rejection) propagates; infrastructure failures fall back.
 						console.error("[lasterm-ssh] deploy phase starting");
-						deployAgentIfNeeded(
-							client,
-							this.host,
-							toDeployOptions(this.deployOptions, this.host, hostname),
-						)
+						deployAgentIfNeeded(client, this.host, {
+							...toDeployOptions(this.deployOptions, this.host, hostname),
+							onAgentUpdated: () => {
+								replacedAgent = true;
+							},
+						})
 							.then((result) => {
 								this.deployedThisSession = result.deployed;
 								this.remoteMatchesHubVersionCache = result.remoteMatchesHubVersionCache;
@@ -627,6 +649,7 @@ export class SshAgent extends AgentConnection {
 								}
 								// Check abort after the deploy await — deploy can take tens of seconds.
 								if (signal?.aborted) {
+									announceReplacedAgent();
 									this.cleanup();
 									rejectOnce(
 										Object.assign(new Error("SSH connect aborted"), { name: "AbortError" }),
@@ -644,6 +667,7 @@ export class SshAgent extends AgentConnection {
 								);
 							})
 							.catch((deployErr: unknown) => {
+								announceReplacedAgent();
 								// A binary nobody has approved: the question belongs to a
 								// person, and nothing of ours stays open on the remote
 								// machine while it is being answered. The caller asks and

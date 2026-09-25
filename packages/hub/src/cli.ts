@@ -273,6 +273,40 @@ function summarizeCommand(command: string): string {
 	return command.length > 160 ? `${command.slice(0, 157)}...` : command;
 }
 
+/**
+ * What holds a recorded pid now: a process that may be a hub, one that cannot
+ * be, or one whose command line could not be read (another user's process on
+ * Windows, or a probe past its bound).
+ */
+export type RecordedProcess = "hub" | "other" | "unknown";
+
+/**
+ * Tell a hub from a program that took its pid after it died (#540). This is the
+ * probe `stop` runs before it signals a recorded pid, with the verdict the other
+ * way round. `stop` signals only a command line that looks like a hub's, since a
+ * wrong yes would kill another program. Here a wrong no would call a hub that is
+ * stopping gone, so only a command line naming nothing of Lasterm counts as
+ * another program. That also admits the entry points the stop check does not
+ * know: `bin/lasterm.js start` and the daemon child `packages/hub/dist/main.js`.
+ * `pnpm dev` runs `tsx src/main.ts`, named only by tsx's path under the checkout,
+ * so it counts when that path says lasterm.
+ *
+ * On Windows the probe starts Windows PowerShell and queries WMI: about 2.5 s on
+ * a developer machine, and up to its 10 s bound under load. `status` only runs it
+ * when the recorded port refuses, the one answer it can change.
+ */
+export function identifyRecordedProcess(
+	pid: number,
+	readCommandLine: (pid: number) => string | null = readProcessCommandLine,
+): RecordedProcess {
+	// The pid a dead hub left can be this very command's.
+	if (pid === process.pid) return "other";
+	const command = readCommandLine(pid);
+	if (command === null) return "unknown";
+	const normalized = command.toLowerCase().replaceAll("\\", "/");
+	return normalized.includes("lasterm") || normalized.includes("packages/hub/") ? "hub" : "other";
+}
+
 // ─── Auth helpers ──────────────────────────────────────────────────────────────
 
 function loadAuthToken(): string | null {
@@ -1449,6 +1483,8 @@ const HUB_REFUSAL_LABELS: Record<HubRefusal, string> = {
  * nothing answered, either in the TLS handshake or after it, so a script cannot
  * read a stopped or wedged hub as a working one or as one that is starting. A
  * hub that is not accepting connections yet exits 0 and says it may be retried.
+ * A record whose pid another program now holds, with nothing answering on its
+ * port, is stale, as one whose pid is gone: not running, exit 0.
  */
 export async function cmdStatus(
 	args: ParsedArgs,
@@ -1456,6 +1492,7 @@ export async function cmdStatus(
 		loadRuntime?: () => RuntimeLoadResult;
 		isPidAlive?: (pid: number) => boolean;
 		requestHub?: typeof requestHub;
+		identifyProcess?: (pid: number) => RecordedProcess;
 	} = {},
 ): Promise<number> {
 	const runtimeResult = (options.loadRuntime ?? loadRuntime)();
@@ -1491,6 +1528,25 @@ export async function cmdStatus(
 	}
 
 	const probe = await probeHub(runtime, options.requestHub);
+	// A port that refuses is a hub stopping, whose listener closes before its
+	// record goes, or a hub that died and whose pid another program took (#540).
+	// Only the process holding the pid tells the two apart. Any other answer came
+	// from something on the port, and does not depend on it.
+	if (
+		probe.kind === "not-ready" &&
+		(options.identifyProcess ?? identifyRecordedProcess)(runtime.pid) === "other"
+	) {
+		if (args.json) {
+			console.log(
+				JSON.stringify({ running: false, stale: true, pid: runtime.pid, pid_reused: true }),
+			);
+		} else {
+			console.log(
+				`Hub: stale (pid ${runtime.pid} now belongs to another program; port ${runtime.port} is not answering)`,
+			);
+		}
+		return 0;
+	}
 	const record = { pid: runtime.pid, port: runtime.port, started_at: runtime.started_at };
 
 	if (args.json) {

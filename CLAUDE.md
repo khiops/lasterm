@@ -226,9 +226,13 @@ Agent (local or remote, same binary):
 **"Local" is relative to the hub, never to the client.** The hub a client drives
 may not be the hub it launched. A gesture that ends things — quit, stop — acts on
 the hub the client *owns*, i.e. launched; never on one it merely connected to,
-whose terminals belong to other people. That rule is not yet enforced anywhere
-(#142) and today only holds because the code happens to target the local runtime
-record.
+whose terminals belong to other people (#142). The hub enforces it: `/api/quit`
+and `/api/shutdown` require a loopback connection **and** the owner token from
+`runtime.json`, which only a process of the hub's own OS user on its machine can
+read. A paired client, browser or remote, cannot end the hub. The desktop's hub
+also ends with the desktop (`--exit-with-stdin`, #188). When a client can drive a
+hub it did not launch (#193), its close gesture for that hub is **Disconnect**;
+Quit stays for the hub it owns.
 
 The hub binds `127.0.0.1` today. That is a stopgap, not the design: pairing
 exists because clients are meant to reach a hub across the network, and #96
@@ -251,6 +255,12 @@ start cannot replace the binaries.
 On Unix the promise is only the shell's **process group**, so a `setsid` escapee
 survives (#113); Windows is strictly stronger, and that asymmetry is chosen. The
 identity-validated stop is what turns "asked it to go" into "confirmed it went".
+
+The local agent can serve more than one local hub (#127): any hub of the same OS
+user that reads the same `auth.json`, in practice a development hub beside the
+desktop's. Quit completely stops that agent all the same, so the other hub's local
+terminals end too. This is accepted for that case (#142); a hub-by-hub quit would
+need the agent to outlive a quit that also has to free its binaries for an update.
 
 ## Entity Model
 

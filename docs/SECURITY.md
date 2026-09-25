@@ -349,6 +349,7 @@ not even an empty one. Before #127 no hub sent an empty token, and that marker m
 | Terminal output | spool.db | chmod 600 | SQLCipher |
 | Snapshots | spool.db | chmod 600 | SQLCipher |
 | Config prefs | config.toml | Standard file perms | — |
+| Web UI files (PWA) | The browser's Cache Storage for the hub's origin | Only the build's hashed static files: the service worker never caches `/api/*`, `/ws`, `/public/*`, `index.html`, or any request carrying credentials (SPEC.md § 3.4) | — |
 
 ### 4.2 In Transit
 

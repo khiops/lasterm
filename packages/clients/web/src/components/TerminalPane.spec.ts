@@ -143,17 +143,58 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		// A Windows checkout ends its lines with CRLF.
 		const onReconnect = /async function onReconnect[\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
 		expect(onReconnect, "onReconnect moved").toBeDefined();
-		expect(onReconnect).toMatch(/code === 'CHANNEL_DEAD'\) hasEnded\.value = true/);
-		expect(onReconnect).toMatch(/code === 'CHANNEL_NOT_FOUND'\) isGone\.value = true/);
+		expect(onReconnect).toContain("await attachAndCover(chId, { preserveContent: true })");
+		// What a refusal means is factsFromRefusal's to say (pane-cover.spec.ts).
+		expect(attachAndCover()).toMatch(
+			/const facts = factsFromRefusal\([\s\S]*?\);\s*if \(facts === null\) throw err;\s*takeAnswer\(facts\);/,
+		);
 	});
 
-	it("attaches again when the hub says a terminal it shows as not connected is live", () => {
+	// Over its banner (#556), and over a terminal that ended and was brought
+	// back from the sidebar or another window, or that it never attached to
+	// because it knew it had ended (#559).
+	it("attaches again when the hub says a terminal it is not attached to is live", () => {
 		const watcher =
 			/channelsStore\.reportOf\(effectiveChannelId\.value\),[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
 		expect(watcher, "the live-report watcher moved").toContain(
-			"report?.status !== 'live' || !isDetached.value",
+			"report?.status !== 'live' || attachedLive",
 		);
+		expect(watcher).toContain("if (report?.status === 'dead') attachedLive = false;");
 		expect(watcher).toContain("onReconnect()");
+	});
+});
+
+/** The one function every attach goes through. */
+function attachAndCover(): string {
+	// A Windows checkout ends its lines with CRLF.
+	const body = /async function attachAndCover\([\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
+	if (body === undefined) throw new Error("attachAndCover moved");
+	return body;
+}
+
+describe("TerminalPane covers its terminal with what the hub answers now (#559)", () => {
+	// Every attach reads the answer the same way. The one after the socket came
+	// back read nothing, and the pane kept the banner, or dropped none, whatever
+	// the hub had said.
+	it("sends every attach through attachAndCover", () => {
+		const calls = [...SOURCE.matchAll(/reattachChannel\(/g)];
+		expect(calls, "an attach bypasses attachAndCover").toHaveLength(1);
+		expect(attachAndCover()).toContain("result = await reattachChannel(chId, opts);");
+
+		const reconnectWatcher = /sessionStore\.reconnectCount,[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
+		expect(reconnectWatcher).toContain("await attachAndCover(effectiveChannelId.value);");
+		expect(SOURCE).toContain("await attachAndCover(props.channelId);");
+		expect(SOURCE).toContain("await attachAndCover(newId);");
+		expect(SOURCE).toMatch(/result = await attachAndCover\(chId, \{ preserveContent: true \}\);/);
+	});
+
+	// An answer replaces all the pane knew, not only the part it speaks of.
+	it("takes each answer whole", () => {
+		expect(attachAndCover()).toContain("takeAnswer(factsFromAttachOk(result.cached));");
+		const takeAnswer = /function takeAnswer\([\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0] ?? "";
+		expect(takeAnswer, "takeAnswer moved").toContain("hasEnded.value = facts.ended;");
+		expect(takeAnswer).toContain("isGone.value = facts.gone;");
+		expect(takeAnswer).toContain("isDetached.value = facts.detached;");
 	});
 });
 

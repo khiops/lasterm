@@ -594,6 +594,24 @@ export const useChannelsStore = defineStore("channels", () => {
 		// to mark unknown channels as dead.
 		lastSyncIds.value = new Set(syncChannels.map((s) => s.channelId));
 
+		// What the hub says now about every channel it lists, whichever host is
+		// in view. A STATE_SYNC follows every new socket, and a report kept from
+		// before it can be out of date: a terminal brought back from another
+		// window while this one was away stayed "dead" here, and a pane over
+		// another host's terminal kept the exit overlay over a live shell
+		// (#559). A status the report already has is left as it is: a new report
+		// is news to a pane, and this is not.
+		let nextReports: Map<string, { status: Channel["status"]; exitCode?: number }> | null = null;
+		for (const sc of syncChannels) {
+			if (reports.value.get(sc.channelId)?.status === sc.status) continue;
+			nextReports ??= new Map(reports.value);
+			nextReports.set(sc.channelId, {
+				status: sc.status,
+				...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
+			});
+		}
+		if (nextReports !== null) reports.value = nextReports;
+
 		if (channels.value.length === 0) {
 			// Channels not loaded yet — buffer all
 			const next = new Map(pendingStatuses.value);

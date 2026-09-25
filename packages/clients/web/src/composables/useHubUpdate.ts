@@ -23,22 +23,24 @@
  * reload would load the same one (#132, #193); nor for a `dev` build on either
  * side.
  *
- * The installable PWA (#561) extends this rather than adding a second path:
+ * The installable PWA (#561) extends this rather than adding a second path, and
+ * `pwa/service-worker.ts` holds its side of it:
  * - a waiting service worker is one more "an update is available":
  *   `signalUpdate()`;
  * - "apply the update" is the `reload` given to `createHubUpdate`, which every
  *   reload here goes through, the banner's and the unattended one alike: that is
  *   where the waiting worker is activated before the page reloads;
- * - `check()` is where a mismatch asks the registration to `update()` first.
+ * - `check()` is where a mismatch asks the registration to `update()` first,
+ *   through `updateWorker`.
+ * The app's watcher, `useHubUpdate()`, is built with both.
  */
 
 import { type Ref, readonly, ref, type WatchSource, watch } from "vue";
+import { useServiceWorker } from "../pwa/service-worker.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
+import { DEV_BUILD, pageBuild, sameBuild } from "../utils/page-build.js";
 import { isTauriRuntime } from "../utils/tauri-runtime.js";
-
-/** The build of a side that was built with nothing to identify it. */
-const DEV_BUILD = "dev";
 
 /**
  * This tab's record of the build it last reloaded from. A page that finds its
@@ -54,6 +56,11 @@ export interface HubUpdateOptions {
 	fetchHubBuild?: () => Promise<string | null>;
 	/** Leave this page for the hub's current UI. Defaults to `location.reload()`. */
 	reload?: () => void;
+	/**
+	 * Ask for the hub's newer service worker, before a mismatch is signalled, so
+	 * the reload that follows can activate it (#561). Defaults to nothing.
+	 */
+	updateWorker?: () => Promise<void>;
 }
 
 export interface HubUpdate {
@@ -69,16 +76,6 @@ export interface HubUpdate {
 	start(connected: WatchSource<boolean>): () => void;
 }
 
-/**
- * The Vite dev server replaces modules in place and reloads the page itself. Its
- * hash is the checkout's, which a hub run from the same checkout can disagree with
- * after a commit, without anything having been upgraded.
- */
-function pageBuild(): string {
-	if (import.meta.env.DEV) return DEV_BUILD;
-	return import.meta.env.VITE_BUILD_HASH ?? DEV_BUILD;
-}
-
 async function fetchHubBuild(): Promise<string | null> {
 	try {
 		const res = await hubFetch(`${hubBaseUrl()}/api/health`);
@@ -90,14 +87,6 @@ async function fetchHubBuild(): Promise<string | null> {
 		// connection asks again.
 		return null;
 	}
-}
-
-/**
- * Both builds are a commit hash cut to 7 characters, but a build made without
- * `LASTERM_BUILD_HASH` takes `git rev-parse --short` as it comes, which can be longer.
- */
-function sameBuild(a: string, b: string): boolean {
-	return a.slice(0, 7) === b.slice(0, 7);
 }
 
 function readReloadedFrom(): string | null {
@@ -129,6 +118,7 @@ export function createHubUpdate(options: HubUpdateOptions = {}): HubUpdate {
 	const clientBuild = options.clientBuild ?? pageBuild();
 	const readHubBuild = options.fetchHubBuild ?? fetchHubBuild;
 	const reload = options.reload ?? (() => window.location.reload());
+	const updateWorker = options.updateWorker ?? (async () => {});
 	const bannerVisible = ref(false);
 
 	function inert(): boolean {
@@ -168,6 +158,8 @@ export function createHubUpdate(options: HubUpdateOptions = {}): HubUpdate {
 			return;
 		}
 		console.info(`[hub-update] the hub serves build ${hubBuild}; this page runs ${clientBuild}`);
+		// The hub's worker is fetched first, so it is waiting when the update is applied.
+		await updateWorker();
 		signalUpdate();
 	}
 
@@ -212,8 +204,15 @@ export function createHubUpdate(options: HubUpdateOptions = {}): HubUpdate {
 
 let appHubUpdate: HubUpdate | null = null;
 
-/** The app's one watcher, shared by the banner and anything else that learns of an update. */
+/**
+ * The app's one watcher, shared by the banner and anything else that learns of an
+ * update. Its reloads go through the service worker, which activates a waiting
+ * worker first, and its mismatches ask that worker's registration for an update.
+ */
 export function useHubUpdate(): HubUpdate {
-	appHubUpdate ??= createHubUpdate();
+	appHubUpdate ??= createHubUpdate({
+		reload: () => useServiceWorker().reload(),
+		updateWorker: () => useServiceWorker().update(),
+	});
 	return appHubUpdate;
 }

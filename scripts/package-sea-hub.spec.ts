@@ -251,6 +251,7 @@ describe("resolveContentType", () => {
 			["image.webp", "image/webp"],
 			["favicon.ico", "image/x-icon"],
 			["data.json", "application/json"],
+			["manifest.webmanifest", "application/manifest+json"],
 			["readme.txt", "text/plain"],
 			["bundle.js.map", "application/json"],
 		];

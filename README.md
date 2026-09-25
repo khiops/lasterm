@@ -44,6 +44,11 @@ Open the `https://127.0.0.1:<port>` address printed at startup. The default is a
 OS-assigned free port; pass `--port <port>` when a stable port is required. The
 hub uses the operator's configured certificate or generates one on first start.
 
+The web UI is an installable PWA where the browser trusts the hub's certificate
+without an exception, which takes a certificate you configure from a CA your browser
+trusts, and a fixed port. With the generated certificate the browser runs it as an
+ordinary tab. [SPEC.md § 3.4](docs/SPEC.md) lists which setups are installable.
+
 There is no `npx lasterm`, and there will not be one under that name: the unscoped
 `lasterm` on npm belongs to an unrelated project. The hub ships as a single
 executable that embeds its own Node, so npm would add a runtime requirement it

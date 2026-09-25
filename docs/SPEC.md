@@ -149,7 +149,7 @@ Local daemon, single process, binds to 127.0.0.1.
 **HTTPS Server (single port, OS-assigned by default, configurable):**
 - REST API: CRUD for hosts, sessions, channels, workspaces, config
 - WebSocket upgrade on `/ws` path
-- Static file serving for UI (production build)
+- Static file serving for UI (production build). A file missing under `/assets/` is a 404, never the SPA's `index.html`; cache headers in § 3.4, "Installable PWA"
 - Health endpoint (`GET /api/health`)
 - Port resolution: CLI flag or `LASTERM_PORT` supplies an explicit override; otherwise the OS assigns a free port and the hub writes it to `runtime.json`.
 - The certificate is the operator's configured pair, or one this hub generates for itself. In the generated case both the **key** and the leaf over it are created once and kept, in `hub-tls-key.pem` and `hub-tls-generated-cert.pem`; a restart serves the same bytes. A new leaf is signed only when the stored one cannot serve — absent, unreadable, for another key, expired or within seven days of it, dated in the future after a clock moved back, or failing the profile a generated leaf must have. That is decided at startup and not re-evaluated while the hub runs, so a hub up longer than its leaf's remaining validity serves an expired certificate until restarted (#193). Clients pin the recorded SPKI, which is the key's, so a reissue costs them nothing; a browser that accepted the certificate is asked again only when one happens.
@@ -241,14 +241,84 @@ compares its build (`VITE_BUILD_HASH`) with the hub's (`build` in `GET /api/heal
 and takes a chunk that fails to load (`vite:preloadError`) for the same news. A hidden
 tab reloads at once; a visible one shows a banner, "Lasterm was updated on the hub",
 and reloads when the user presses Reload or hides the tab. The reload is an ordinary
-one: panes reattach and restore from the hub. A tab records in `sessionStorage` the
-build it reloaded from, and a page that comes back still running that build (a cached
-`index.html`) shows the banner instead of reloading again. A `dev` build on either
+one: panes reattach and restore from the hub, and the tab comes back on the host it
+was showing, which it keeps in `sessionStorage` (per tab, so a new tab still opens on
+the first host). A tab also records there the build it reloaded from, and a page that
+comes back still running that build (a cached `index.html`) shows the banner instead
+of reloading again. A `dev` build on either
 side never triggers, nor does the Vite dev server. The desktop does none of this: its
 UI is bundled with the app, so a reload would load the same one, and a desktop driving
 a remote hub will negotiate a protocol version instead (#132, #193). All of it lives in
 `composables/useHubUpdate.ts`, which the installable PWA (#561) extends with its
-service worker's update lifecycle.
+service worker's update lifecycle, below.
+
+**Installable PWA (#561).** The hub serves a web app manifest, `/manifest.webmanifest`
+(name, icons, `display: standalone`, `start_url` and `scope` at `/`, colours from the
+default theme's tokens), and a service worker, `/sw.js`, whose scope is `/`: exactly
+what the hub serves. The worker holds very little, since the hub decides which UI a
+page runs (`pwa/worker-routing.ts`):
+- **Navigations** go to the network first, every time, and nothing caches `index.html`,
+  so an older page is never served while the hub answers. When the hub does not answer,
+  the page is a small "hub unreachable" one the worker builds itself, which reloads once
+  `/api/health` answers.
+- **`/assets/*`** is cache-first, in a cache named after the build. Only a 200 whose
+  content type matches the file's extension is kept, and a worker that takes over drops
+  the caches of other builds.
+- **Everything else** reaches the network untouched: `/api/*`, `/ws`, the asset-token
+  files under `/public/*`, any request carrying credentials, and the root files (the
+  worker, the manifest, the icons), which HTTP caching handles.
+
+The hub keeps its side of that: hashed assets are served `immutable` for a year;
+`index.html`, the worker and the manifest `no-cache`; other files for an hour. A file
+missing under `/assets/` is a 404, never the SPA's `index.html`, which a cache would
+otherwise hold under a script's name. Both the SEA's embedded files and a `static/`
+directory on disk are served that way (`web-ui-files.ts`).
+
+Updates take the path above, in one place (`pwa/service-worker.ts`):
+- a worker that installs while an older one controls the page calls `signalUpdate()`.
+  One of the build the page already runs, loaded from the network before the worker,
+  just takes over: there is nothing to reload;
+- applying the update, from the banner or a hidden tab, asks the waiting worker to
+  `skipWaiting`, waits for `controllerchange`, then reloads;
+- a build mismatch found on a connection asks the registration to `update()` first, so
+  the reload finds the new worker there.
+
+Every reload still goes through the watcher, so its loop guard holds with the worker in
+the path. The worker is hand-written, with no dependency, and `vite.config.ts` builds it
+after the app as a separate classic script with the build baked in, so each build's
+worker is an update. A precaching plugin such as vite-plugin-pwa would add Workbox for
+the opposite default: serving a cached `index.html`.
+
+It registers only in a browser, never under the desktop runtime, whose UI is bundled;
+never under the Vite dev server; and only in a secure context. A browser that refuses
+it is logged once at debug, and the app works as it does without one.
+
+**Which setups are installable.** A browser reaches the hub at `https://127.0.0.1:<port>`,
+the address the hub prints (and `--open` opens), and pairs with `lasterm pair`
+(SECURITY.md § 2.3). What decides is whether the browser trusts the hub's certificate
+without an exception:
+
+| Setup | Service worker | Installable |
+|-------|----------------|-------------|
+| The hub's generated certificate (the default), reached through the browser's certificate exception | Refused: Chromium browsers register no worker on a page with a certificate error ("An SSL certificate error occurred when fetching the script"), and other browsers may refuse too | No. No offline page and no worker; updates still reach the tab through the watcher above. Whether a browser offers to install from the manifest alone is its own decision |
+| An operator certificate (`[server]` `tls_certificate` and `tls_key` in `config.toml`) from a CA the browser trusts, whose SAN covers `127.0.0.1` | Registered | Yes |
+| The desktop app | Never registered | Not applicable: it is the installed app |
+| The Vite dev server | Never registered | No |
+
+The generated certificate is a self-signed leaf for the IP address `127.0.0.1` alone,
+with `CA:FALSE`. Nothing makes a browser trust it, and Lasterm installs nothing into a
+trust store: trusting it, or supplying a certificate from a CA of one's own, is the
+operator's decision. `localhost` is not in it, so the address to use is `127.0.0.1`.
+
+An installed app, its worker and its storage (the paired token, the layout) belong to
+one origin, and the port is part of it. The hub takes a new OS-assigned port at each
+start unless one is given, so an installed app needs a fixed one: `--port` or
+`LASTERM_PORT`.
+
+A worker registered while the certificate was trusted keeps answering navigations if
+it stops being trusted: the page then says the hub is unreachable, and links to
+`/api/health`, which the worker leaves to the browser, so the browser's own certificate
+error shows. Clearing the site's data in the browser removes the worker.
 
 ### 3.5 Agent Binary Distribution
 

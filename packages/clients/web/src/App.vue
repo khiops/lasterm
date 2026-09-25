@@ -395,6 +395,7 @@ import {
 	type WindowBackgroundRestartDetail,
 } from './composables/useWindowEffects.js';
 import { useWindowTitle } from './composables/useWindowTitle.js';
+import { useServiceWorker } from './pwa/service-worker.js';
 import { useAuthStore } from './stores/auth.js';
 import { useChannelsStore } from './stores/channels.js';
 import { useConfigStore } from './stores/config.js';
@@ -414,7 +415,11 @@ const configStore = useConfigStore();
 const toastStore = useToastStore();
 
 // A browser tab that outlived a hub upgrade finds out on its next connection (#560).
-const stopHubUpdate = useHubUpdate().start(() => sessionStore.connected);
+const hubUpdate = useHubUpdate();
+const stopHubUpdate = hubUpdate.start(() => sessionStore.connected);
+// The installable PWA's worker, where the browser allows one; its next version
+// is announced through the same watcher (#561).
+void useServiceWorker().register(hubUpdate.signalUpdate);
 
 // ─── Resizable panels ────────────────────────────────────────────────────────
 

@@ -143,10 +143,11 @@ runs everywhere.
      directory. The TLS key writer already refused it; this refusal comes first and
      names the fix: have that account hand the directory over, or set XDG_STATE_HOME
      to a directory this account owns
-   - If this account owns it and group or others have any permission on it: tightened
-     to 0700, the owner's bits left as they are, as the addon cache is (§ 4.5). That is
-     a directory an earlier version made under a loose umask, or one made by hand. If
-     the mode does not change — a filesystem that ignores chmod: HARD FAIL
+   - If this account owns it and group or others have any permission on it: tightened,
+     every group and other permission removed and the owner's left as they are, as the
+     addon cache is (§ 4.5). That is a directory an earlier version made under a loose
+     umask, or one made by hand. If the mode does not change — a filesystem that
+     ignores chmod: HARD FAIL
    - Expected: 0700 (drwx------), owned by the user running the hub. The hub creates it
      0700 wherever it first makes it (#352)
    - One lstat, in `state-dir.ts`, with the same limit as item 1: an ancestor able to

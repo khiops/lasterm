@@ -95,6 +95,8 @@ const CONTENT_TYPES: Record<string, string> = {
 	".webp": "image/webp",
 	".ico": "image/x-icon",
 	".json": "application/json",
+	// The PWA's manifest (#561), which a browser reads by this type.
+	".webmanifest": "application/manifest+json",
 	".txt": "text/plain",
 	".map": "application/json",
 };

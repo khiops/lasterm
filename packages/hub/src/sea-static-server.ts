@@ -11,7 +11,8 @@
  *   - Detects SEA mode via node:sea.isSea()
  *   - Loads the manifest from the SEA asset blob
  *   - Registers a Fastify route that serves the files from memory
- *   - Implements SPA fallback: non-API paths not matching a file → index.html
+ *   - Implements SPA fallback: non-API paths not matching a file → index.html,
+ *     except under /assets/, where a missing file is a 404 (#561)
  *
  * In normal Node.js mode (no SEA) this module is a complete no-op.
  * The caller should call registerSeaStaticServing() and check the return value:
@@ -20,7 +21,8 @@
  */
 
 import { createRequire } from "node:module";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
+import { type EmbeddedFile, registerEmbeddedWebUi } from "./web-ui-files.js";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -103,8 +105,8 @@ function loadStaticManifest(): StaticManifest | null {
  * Keys are normalised URL paths (leading slash, forward slashes).
  * The Buffer for each file is decoded once and cached.
  */
-function buildFileMap(manifest: StaticManifest): Map<string, { buf: Buffer; contentType: string }> {
-	const map = new Map<string, { buf: Buffer; contentType: string }>();
+function buildFileMap(manifest: StaticManifest): Map<string, EmbeddedFile> {
+	const map = new Map<string, EmbeddedFile>();
 
 	for (const [relativePath, entry] of Object.entries(manifest)) {
 		// Normalise: remove leading slash if present, then prepend /
@@ -123,10 +125,11 @@ function buildFileMap(manifest: StaticManifest): Map<string, { buf: Buffer; cont
 /**
  * Register in-memory static file serving on `app` using the embedded SEA manifest.
  *
- * Route behaviour:
+ * Route behaviour is `registerEmbeddedWebUi`'s (`web-ui-files.ts`):
  * - Exact match to `/`          → serve `index.html`
  * - Exact match to known file   → serve that file with correct content-type
- * - `/api/*` or `/ws*`          → pass through (no 404 from static handler)
+ * - `/api/*` or `/ws*`          → 404 (no dedicated route matched)
+ * - Missing file under /assets/ → 404, never index.html (#561)
  * - Anything else (SPA routes)  → serve `index.html` for client-side routing
  *
  * @returns true if SEA serving was set up, false if not in SEA mode or manifest is absent.
@@ -145,61 +148,13 @@ export async function registerSeaStaticServing(app: FastifyInstance): Promise<bo
 	}
 
 	const fileMap = buildFileMap(manifest);
-	const indexEntry = fileMap.get("/index.html");
 
 	app.log.info(
 		{ files: fileMap.size },
 		"[sea-static-server] serving web UI from SEA embedded manifest",
 	);
 
-	// Catch-all route for all non-API, non-WS requests.
-	// Must be registered AFTER API routes so it doesn't shadow them.
-	app.get("/*", async (request: FastifyRequest, reply: FastifyReply) => {
-		const pathname = new URL(request.url, "http://localhost").pathname;
-
-		// Pass through API and WebSocket paths — they have dedicated routes.
-		if (pathname.startsWith("/api/") || pathname === "/api") {
-			// Let Fastify continue to the next route handler.
-			// Since this is a 404 case (no /api/* route matched), return 404.
-			return reply.code(404).send({ error: "NOT_FOUND", message: "No such API route" });
-		}
-		if (pathname === "/ws" || pathname.startsWith("/ws/")) {
-			return reply.code(404).send({ error: "NOT_FOUND", message: "WebSocket endpoint" });
-		}
-
-		// Exact file match
-		const fileKey = pathname === "/" ? "/index.html" : pathname;
-		const file = fileMap.get(fileKey);
-		if (file) {
-			// Cache policy:
-			// - Vite-hashed assets (/assets/index-abc123.js): immutable, 1 year — the
-			//   hash changes on every build, so the URL is the cache key.
-			// - HTML entry (index.html): no-cache (must revalidate every load) so a new
-			//   build's fresh asset hashes are picked up immediately. Caching index.html
-			//   pins the browser to stale asset references until the cache expires.
-			// - Other non-hashed files (favicon, manifest): short cache.
-			const cacheControl = pathname.startsWith("/assets/")
-				? "public, max-age=31536000, immutable"
-				: fileKey.endsWith(".html")
-					? "no-cache"
-					: "public, max-age=3600";
-			return reply
-				.header("Content-Type", file.contentType)
-				.header("Cache-Control", cacheControl)
-				.send(file.buf);
-		}
-
-		// SPA fallback → index.html
-		if (indexEntry) {
-			return reply
-				.header("Content-Type", "text/html")
-				.header("Cache-Control", "no-cache")
-				.send(indexEntry.buf);
-		}
-
-		// No index.html available — this shouldn't happen if the manifest is valid.
-		return reply.code(404).send({ error: "NOT_FOUND", message: "index.html not in SEA manifest" });
-	});
+	registerEmbeddedWebUi(app, fileMap);
 
 	return true;
 }

@@ -59,6 +59,7 @@ import type { DatabaseManager } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
 import { migrateLegacyShellDefaults } from "./storage/migrate-launch-profiles.js";
 import { ThemeManager } from "./theme-manager.js";
+import { registerWebUiDirectory } from "./web-ui-files.js";
 import { registerWsRoutes } from "./ws/ws-handler.js";
 
 declare module "fastify" {
@@ -846,15 +847,8 @@ async function registerStaticIfExists(server: FastifyInstance): Promise<void> {
 		return;
 	}
 
-	// Lazy import so @fastify/static is not loaded when the dir is absent
-	const fastifyStatic = (await import("@fastify/static")).default;
-	await server.register(fastifyStatic, {
-		root: staticDir,
-		prefix: "/",
-		// SPA fallback: serve index.html for any path not matching a real file
-		// so that Vue Router client-side routes work after a hard refresh.
-		wildcard: false,
-	});
+	// Only the files found there are served: a missing asset is a 404 (#561).
+	await registerWebUiDirectory(server, staticDir);
 
 	server.log.info({ staticDir }, "serving web UI from static dir");
 }

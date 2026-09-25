@@ -406,6 +406,7 @@ import { useThemeStore } from './stores/theme.js';
 import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
+import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
 
@@ -741,6 +742,23 @@ const confirmDialog = ref({
 });
 
 /**
+ * "Delete this dead terminal?" is no longer asked: closing an ended terminal
+ * follows "Keep ended terminals in the sidebar" (#574). This browser's old
+ * "don't ask again" becomes that setting, once, after the UI config is read.
+ */
+async function migrateDeadTabChoice(): Promise<void> {
+	try {
+		await migrateLegacyDeadTabChoice(
+			localStorage,
+			endedPrefs(configStore.uiConfig.panes),
+			(values) => configStore.saveUiSettings('panes', values),
+		);
+	} catch (err) {
+		console.warn('[App] could not carry over the old dead-terminal choice:', err);
+	}
+}
+
+/**
  * Check if a confirmation should be skipped based on localStorage preferences.
  */
 function shouldSkipConfirm(action: string): boolean {
@@ -894,6 +912,7 @@ onMounted(async () => {
 			// Load resolved profile + UI behaviour config now that auth is established
 			await configStore.loadProfile();
 			await configStore.loadUiConfig();
+			void migrateDeadTabChoice();
 			// Auto-switch watcher fires here (immediate: true) — if enabled,
 			// it applies the OS-preferred theme. Otherwise the saved theme.
 			await themeStore.reloadAppearance();
@@ -1307,7 +1326,9 @@ async function onPurgeDead(): Promise<void> {
  * thing, and the tab can be opened again from the sidebar. A dead one has
  * nothing left to come back to, and leaving it listed is how a sidebar fills
  * with terminals nobody will ever look at again — so closing its tab deletes
- * it, and its scrollback goes too, which is worth asking about once.
+ * it, and its scrollback goes too, unless Settings › Terminal says to keep
+ * ended terminals in the sidebar. That setting is the answer; nothing is asked
+ * here any more (#574).
  */
 function onCloseTab(index: number): void {
 	const tab = layout.tabs.value[index];
@@ -1315,29 +1336,11 @@ function onCloseTab(index: number): void {
 	const deadIds =
 		root === null || root === undefined
 			? []
-			: collectTerminalChannelIds(root).filter(
-					(id) => channelsStore.channels.find((c) => c.id === id)?.status === 'dead',
-				);
+			: collectTerminalChannelIds(root).filter((id) => channelsStore.statusOf(id) === 'dead');
 
-	const closeAndDelete = () => {
-		layout.closeTab(index);
-		for (const id of deadIds) void channelsStore.deleteChannel(id);
-	};
-
-	if (deadIds.length === 0 || shouldSkipConfirm('ConfirmCloseDeadTab')) {
-		closeAndDelete();
-		return;
-	}
-	confirmDialog.value = {
-		visible: true,
-		title: deadIds.length === 1 ? 'Delete this dead terminal?' : `Delete ${deadIds.length} dead terminals?`,
-		message:
-			'The tab is closing on a terminal that has already ended. Deleting it takes its scrollback with it; keeping it leaves it listed in the sidebar.',
-		confirmLabel: 'Close and delete',
-		action: closeAndDelete,
-		actionKey: 'ConfirmCloseDeadTab',
-		showRemember: true,
-	};
+	layout.closeTab(index);
+	const keep = endedPrefs(configStore.uiConfig.panes).keepEnded;
+	for (const id of endedToDelete(deadIds, keep)) void channelsStore.deleteChannel(id);
 }
 
 /**
@@ -1399,6 +1402,7 @@ async function onAuthenticated(): Promise<void> {
 		await configStore.loadFonts();
 		await configStore.loadProfile();
 		await configStore.loadUiConfig();
+		void migrateDeadTabChoice();
 		// Auto-switch watcher fires here — if enabled, OS preference wins.
 		await themeStore.reloadAppearance();
 		await hostsStore.fetchHosts();
@@ -1540,35 +1544,22 @@ function onChannelSpawned(tempId: string, realId: string): void {
  * Close a single pane: collapse the split and give space to the sibling.
  * If the pane is the root (no split parent), it becomes a vacant slot (INV-04).
  * INV-03: closing never kills the terminal — channel keeps running.
+ *
+ * `ended` comes from a pane that knows its terminal has ended — its overlay,
+ * or the setting acting for it — and says whether to keep it listed.
  */
-function onClosePane(channelId: string): void {
-	const channel = channelsStore.channels.find((c) => c.id === channelId);
+function onClosePane(channelId: string, ended?: { keep: boolean }): void {
 	// A live terminal keeps running when its pane goes — it can be put back in
 	// one from the sidebar. A dead one has nothing to come back to, and closing
-	// it while leaving it listed is what makes "Close" feel like it did nothing.
-	if (channel?.status !== 'dead') {
-		layout.closePane(channelId);
-		return;
-	}
-
-	const closeAndDelete = () => {
-		layout.closePane(channelId);
-		void channelsStore.deleteChannel(channelId);
-	};
-	if (shouldSkipConfirm('ConfirmCloseDeadTab')) {
-		closeAndDelete();
-		return;
-	}
-	confirmDialog.value = {
-		visible: true,
-		title: 'Delete this dead terminal?',
-		message:
-			'It has already ended. Closing it here deletes it, which takes its scrollback; keeping it leaves it listed in the sidebar.',
-		confirmLabel: 'Close and delete',
-		action: closeAndDelete,
-		actionKey: 'ConfirmCloseDeadTab',
-		showRemember: true,
-	};
+	// it while leaving it listed is what made "Close" feel like it did nothing:
+	// it is deleted, unless it is to be kept. The overlay offers that choice
+	// beside its Close; anywhere else the setting makes it. Nothing is asked
+	// (#574).
+	const hasEnded = ended !== undefined || channelsStore.statusOf(channelId) === 'dead';
+	layout.closePane(channelId);
+	if (!hasEnded) return;
+	const keep = ended?.keep ?? endedPrefs(configStore.uiConfig.panes).keepEnded;
+	for (const id of endedToDelete([channelId], keep)) void channelsStore.deleteChannel(id);
 }
 
 /**

@@ -216,6 +216,37 @@ export const useConfigStore = defineStore("config", () => {
 	}
 
 	/**
+	 * Write settings of one UI section to the hub, and take them here at once.
+	 *
+	 * For a choice made outside Settings — "Always do this" over an ended
+	 * terminal (#574). The hub announces the change, so every other window
+	 * reads it again; this one does not wait for that to act on it. A write the
+	 * hub refused is undone by reading back what it holds.
+	 */
+	async function saveUiSettings(section: "panes", values: Partial<PanesConfig>): Promise<boolean> {
+		uiConfig.value = {
+			...uiConfig.value,
+			[section]: { ...uiConfig.value[section], ...values },
+		};
+		try {
+			const authStore = useAuthStore();
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/ui`, {
+				method: "PUT",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${authStore.token}`,
+				},
+				body: JSON.stringify({ [section]: values }),
+			});
+			if (resp.ok) return true;
+		} catch (err) {
+			console.warn("[config] failed to save UI settings:", err);
+		}
+		await loadUiConfig();
+		return false;
+	}
+
+	/**
 	 * List the fonts installed where the hub runs (#100). A browser also gets
 	 * their @font-face rules, since it may be on another machine. The desktop
 	 * shell only ever drives its own local hub, so those fonts are installed
@@ -252,6 +283,7 @@ export const useConfigStore = defineStore("config", () => {
 		loadSystemFonts,
 		loadProfile,
 		loadUiConfig,
+		saveUiSettings,
 		onProfileChange,
 		emitProfileChange,
 	};

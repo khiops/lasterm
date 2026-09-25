@@ -13,11 +13,7 @@
  */
 
 /** The key a confirmation is remembered under, without its prefix. */
-export type ConfirmationKey =
-	| "ConfirmKill"
-	| "ConfirmCloseAll"
-	| "ConfirmCloseOthers"
-	| "ConfirmCloseDeadTab";
+export type ConfirmationKey = "ConfirmKill" | "ConfirmCloseAll" | "ConfirmCloseOthers";
 
 export interface ConfirmationDescriptor {
 	key: ConfirmationKey;
@@ -32,12 +28,6 @@ export const CONFIRMATIONS: ConfirmationDescriptor[] = [
 		key: "ConfirmKill",
 		label: "Killing a terminal",
 		description: "Its shell and everything started in it are terminated, which nothing undoes.",
-	},
-	{
-		key: "ConfirmCloseDeadTab",
-		label: "Closing a dead terminal",
-		description:
-			"Closing its tab or its pane deletes the terminal, and its scrollback goes with it.",
 	},
 	{
 		key: "ConfirmCloseAll",

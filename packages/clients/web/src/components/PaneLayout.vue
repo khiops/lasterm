@@ -17,7 +17,7 @@
 					:has-multiple-panes="props.hasMultiplePanes ?? false"
 					@split-right="(chId: string) => emit('split', chId, 'vertical')"
 					@split-down="(chId: string) => emit('split', chId, 'horizontal')"
-					@close-pane="(chId: string) => emit('close-pane', chId)"
+					@close-pane="(chId: string, ended?: { keep: boolean }) => emit('close-pane', chId, ended)"
 					@detach-pane="(chId: string) => emit('detach-pane', chId)"
 					@channel-spawned="(tempId: string, realId: string) => emit('channel-spawned', tempId, realId)"
 					@configure-command="(chId: string) => emit('configure-command', chId)"
@@ -86,7 +86,7 @@
 				:has-multiple-panes="props.hasMultiplePanes"
 				:style="firstStyle"
 				@split="(chId: string, dir: 'horizontal' | 'vertical') => emit('split', chId, dir)"
-				@close-pane="(chId: string) => emit('close-pane', chId)"
+				@close-pane="(chId: string, ended?: { keep: boolean }) => emit('close-pane', chId, ended)"
 				@detach-pane="(chId: string) => emit('detach-pane', chId)"
 				@update-ratio="(path: NodePath, ratio: number) => emit('update-ratio', path, ratio)"
 				@channel-spawned="(tempId: string, realId: string) => emit('channel-spawned', tempId, realId)"
@@ -118,7 +118,7 @@
 				:has-multiple-panes="props.hasMultiplePanes"
 				:style="secondStyle"
 				@split="(chId: string, dir: 'horizontal' | 'vertical') => emit('split', chId, dir)"
-				@close-pane="(chId: string) => emit('close-pane', chId)"
+				@close-pane="(chId: string, ended?: { keep: boolean }) => emit('close-pane', chId, ended)"
 				@detach-pane="(chId: string) => emit('detach-pane', chId)"
 				@update-ratio="(path: NodePath, ratio: number) => emit('update-ratio', path, ratio)"
 				@channel-spawned="(tempId: string, realId: string) => emit('channel-spawned', tempId, realId)"
@@ -165,7 +165,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
 	(e: "split", channelId: string, direction: "horizontal" | "vertical"): void;
-	(e: "close-pane", channelId: string): void;
+	(e: "close-pane", channelId: string, ended?: { keep: boolean }): void;
 	(e: "detach-pane", channelId: string): void;
 	(e: "update-ratio", nodePath: NodePath, ratio: number): void;
 	(e: "channel-spawned", tempId: string, realId: string): void;

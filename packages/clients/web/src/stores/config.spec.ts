@@ -1,8 +1,10 @@
 import type { FontFamily } from "@lasterm/shared";
+import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	domPublicAssetUrl: vi.fn<(path: string) => Promise<string>>(),
+	hubFetch: vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(),
 }));
 
 vi.mock("../utils/hub-url.js", () => ({
@@ -10,7 +12,9 @@ vi.mock("../utils/hub-url.js", () => ({
 	hubBaseUrl: () => "",
 }));
 
-import { injectFontFaces } from "./config.js";
+vi.mock("../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
+
+import { injectFontFaces, useConfigStore } from "./config.js";
 
 const oldFace: FontFamily[] = [
 	{
@@ -66,5 +70,49 @@ describe("injectFontFaces", () => {
 			expect.stringContaining("failed to resolve custom font Replacement Font"),
 			expect.any(Error),
 		);
+	});
+});
+
+// "Always do this" on an ended terminal's overlay writes the setting (#574).
+describe("saveUiSettings", () => {
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		mocks.hubFetch.mockReset();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("writes the values to the UI config, and takes them at once", async () => {
+		mocks.hubFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+		const store = useConfigStore();
+		store.uiConfig = { onChannelDead: "readonly", panes: { maxPanes: 4 } };
+
+		const saving = store.saveUiSettings("panes", { whenEnded: "close", keepEnded: true });
+		// Acted on before the hub answers.
+		expect(store.uiConfig.panes).toEqual({ maxPanes: 4, whenEnded: "close", keepEnded: true });
+		await expect(saving).resolves.toBe(true);
+
+		expect(mocks.hubFetch).toHaveBeenCalledTimes(1);
+		const [url, init] = mocks.hubFetch.mock.calls[0] ?? [];
+		expect(url).toBe("/api/config/ui");
+		expect(init?.method).toBe("PUT");
+		expect(JSON.parse(String(init?.body))).toEqual({
+			panes: { whenEnded: "close", keepEnded: true },
+		});
+	});
+
+	it("reads back what the hub holds when it refuses the write", async () => {
+		mocks.hubFetch.mockResolvedValueOnce(new Response("{}", { status: 400 })).mockResolvedValueOnce(
+			new Response(JSON.stringify({ onChannelDead: "readonly", panes: { whenEnded: "ask" } }), {
+				status: 200,
+			}),
+		);
+		const store = useConfigStore();
+
+		await expect(store.saveUiSettings("panes", { whenEnded: "restart" })).resolves.toBe(false);
+		expect(store.uiConfig.panes?.whenEnded).toBe("ask");
 	});
 });

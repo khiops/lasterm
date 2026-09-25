@@ -80,6 +80,9 @@
 	/* Text levels */
 	/* alias → tracks --nt-fg (set by applyTheme at runtime) */
 	--nt-text: var(--nt-fg);
+	/* --nt-fg where it reads at 4.5:1 on --nt-bg, and the least change of it
+	   that does where it does not (set by applyTheme at runtime) */
+	--nt-text-strong: var(--nt-fg);
 	/* Muted text levels derive from the active theme's fg/bg (both theme-driven)
 	   so they stay legible in BOTH light and dark mode — blending fg toward bg
 	   keeps contrast against the current background regardless of theme. */

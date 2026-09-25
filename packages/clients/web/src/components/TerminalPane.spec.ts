@@ -1,4 +1,7 @@
+import { BUNDLED_THEMES } from "@lasterm/shared";
+import { createPinia, setActivePinia } from "pinia";
 import { describe, expect, it } from "vitest";
+import { contrastRatio, hexToRgb, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
 import SOURCE from "./TerminalPane.vue?raw";
 
 /** The z-index a rule declares, read from the component's own style block. */
@@ -114,7 +117,9 @@ describe("TerminalPane restart", () => {
 		const onRestart = /async function onRestart[\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
 		expect(onRestart, "onRestart moved").toBeDefined();
 		expect(onRestart).toMatch(/if \(ok\) \{[\s\S]*?hasEnded\.value = false;/);
-		expect(SOURCE).toMatch(/status === 'live' \|\| status === 'born'\) hasEnded\.value = false/);
+		expect(SOURCE).toMatch(
+			/status === 'live' \|\| status === 'born'\) \{\s*hasEnded\.value = false;/,
+		);
 	});
 
 	it("shows why a restart failed, and that one is under way", () => {
@@ -146,7 +151,7 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(onReconnect).toContain("await attachAndCover(chId, { preserveContent: true })");
 		// What a refusal means is factsFromRefusal's to say (pane-cover.spec.ts).
 		expect(attachAndCover()).toMatch(
-			/const facts = factsFromRefusal\([\s\S]*?\);\s*if \(facts === null\) throw err;\s*takeAnswer\(facts\);/,
+			/const facts = factsFromRefusal\([\s\S]*?\);\s*if \(facts === null\) throw err;\s*takeAnswer\(chId, facts\);/,
 		);
 	});
 
@@ -159,7 +164,7 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(watcher, "the live-report watcher moved").toContain(
 			"report?.status !== 'live' || attachedLive",
 		);
-		expect(watcher).toContain("if (report?.status === 'dead') attachedLive = false;");
+		expect(watcher).toMatch(/if \(report\?\.status === 'dead'\) \{\s*attachedLive = false;/);
 		expect(watcher).toContain("onReconnect()");
 	});
 });
@@ -190,7 +195,7 @@ describe("TerminalPane covers its terminal with what the hub answers now (#559)"
 
 	// An answer replaces all the pane knew, not only the part it speaks of.
 	it("takes each answer whole", () => {
-		expect(attachAndCover()).toContain("takeAnswer(factsFromAttachOk(result.cached));");
+		expect(attachAndCover()).toContain("takeAnswer(chId, factsFromAttachOk(result.cached));");
 		const takeAnswer = /function takeAnswer\([\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0] ?? "";
 		expect(takeAnswer, "takeAnswer moved").toContain("hasEnded.value = facts.ended;");
 		expect(takeAnswer).toContain("isGone.value = facts.gone;");
@@ -205,4 +210,216 @@ describe("TerminalPane lock indicator", () => {
 	it("is hidden for a terminal that has ended, whichever way the pane learnt it", () => {
 		expect(SOURCE).toMatch(/:is-dead="isDead \|\| hasEnded \|\| isGone"/);
 	});
+});
+
+// ─── When the terminal ends (#574) ───────────────────────────────────────────
+//
+// What the setting does is decided in exit-action.ts and tested there. These
+// check that the pane tells it what it sees, and does what it answers.
+
+/** A function's body, from its declaration to its closing brace at column 0. */
+function body(signature: RegExp): string {
+	const found = new RegExp(`${signature.source}[\\s\\S]*?\\r?\\n}\\r?\\n`).exec(SOURCE)?.[0];
+	if (found === undefined) throw new Error(`${signature.source} moved`);
+	return found;
+}
+
+describe("TerminalPane when its terminal ends (#574)", () => {
+	// Only a report heard while attached to it running, on a socket that stayed
+	// up, is an end seen live; every other way of learning it is found.
+	it("tells the end watch what it sees", () => {
+		const reportWatcher =
+			/channelsStore\.reportOf\(effectiveChannelId\.value\),[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
+		expect(reportWatcher).toContain("onTerminalEnded(endWatch.ended(chId))");
+
+		const takeAnswer = body(/function takeAnswer\(/);
+		expect(takeAnswer).toMatch(/if \(attachedLive\) \{\s*endWatch\.attached\(chId\);/);
+		expect(takeAnswer).toMatch(
+			/else if \(facts\.ended\) \{[\s\S]*?onTerminalEnded\(endWatch\.ended\(chId\)\);/,
+		);
+		expect(takeAnswer).toMatch(/else \{\s*endWatch\.lost\(\);/);
+
+		// Before any report on the next socket can be read.
+		expect(SOURCE).toMatch(
+			/\(\) => sessionStore\.connected,\s*\(connected\) => \{\s*if \(!connected\) endWatch\.lost\(\);\s*\},\s*\{ flush: 'sync' \}/,
+		);
+	});
+
+	it("counts from the start of a terminal it spawned or restarted", () => {
+		expect(SOURCE).toMatch(
+			/attachChannel\(realId\);[\s\S]{0,120}endWatch\.starting\(realId\);\s*endWatch\.attached\(realId\);/,
+		);
+		const onRestart = body(/async function onRestart\(/);
+		expect(onRestart.indexOf("endWatch.starting(chId);")).toBeGreaterThan(-1);
+		expect(onRestart.indexOf("endWatch.starting(chId);")).toBeLessThan(
+			onRestart.indexOf("channelsStore.restartChannel("),
+		);
+	});
+
+	it("does what the setting answers", () => {
+		const onEnded = body(/function onTerminalEnded\(/);
+		expect(onEnded).toContain("reactToEnd(prefs.value,");
+		expect(onEnded).toContain("directProcess: isDirectProcess.value");
+		expect(onEnded).toContain("writer: isWriter.value");
+		expect(onEnded).toContain("if (reaction.kind === 'restart') void onRestart();");
+		expect(onEnded).toContain("else closeEnded(reaction.keep);");
+		expect(SOURCE).toContain(
+			"const prefs = computed(() => endedPrefs(configStore.uiConfig.panes));",
+		);
+		expect(SOURCE).toContain(
+			'<p v-if="heldBack !== null && !isGone" class="exit-reason">{{ heldBackText }}</p>',
+		);
+	});
+});
+
+describe("TerminalPane overlay (#574)", () => {
+	const overlay =
+		/<div v-if="cover === 'exited' \|\| cover === 'gone'" class="exit-overlay">[\s\S]*?\n\t\t<\/div>\n/.exec(
+			SOURCE.replace(/\r\n/g, "\n"),
+		)?.[0] ?? "";
+
+	// No second dialog: Close carries its options, and the pane says which.
+	it("closes at once, with the keep option beside it", () => {
+		expect(overlay, "the overlay moved").not.toBe("");
+		expect(overlay).toContain(`@click="onOverlayAction('close')"`);
+		expect(overlay).toContain(`@click="onOverlayAction('restart')"`);
+		const onAction = body(/function onOverlayAction\(/);
+		expect(onAction).toContain("keep: keepChoice.value");
+		expect(onAction).toContain("else closeEnded(act.keep);");
+		expect(body(/function closeEnded\(/)).toContain("emit('close-pane', chId, { keep });");
+	});
+
+	it('writes the setting when "Always do this" is ticked', () => {
+		const onAction = body(/function onOverlayAction\(/);
+		expect(onAction).toContain("overlayChoice(action,");
+		expect(onAction).toContain("always: alwaysChoice.value");
+		expect(onAction).toContain(
+			"if (remember !== null) void configStore.saveUiSettings('panes', remember);",
+		);
+	});
+
+	// Labels tied to their inputs, so a click on the words and a screen reader
+	// both reach the checkbox.
+	it("labels each checkbox", () => {
+		for (const [suffix, words, model] of [
+			["keep", "Keep in the sidebar", "keepChoice"],
+			["always", "Always do this", "alwaysChoice"],
+		] as const) {
+			const label = new RegExp(
+				`<label class="exit-option" :for="\`\\$\\{exitId\\}-${suffix}\`">\\s*<input :id="\`\\$\\{exitId\\}-${suffix}\`" v-model="${model}" type="checkbox" />\\s*${words}\\s*</label>`,
+			);
+			expect(overlay).toMatch(label);
+		}
+	});
+
+	it("starts its options from the setting, and gives the keyboard to its first button", () => {
+		expect(SOURCE).toContain("keepChoice.value = prefs.value.keepEnded;");
+		expect(SOURCE).toContain("alwaysChoice.value = false;");
+		expect(SOURCE).toContain("void nextTick(focusOverlay);");
+		expect(overlay).toMatch(/ref="exitPrimary"\s*class="exit-btn exit-btn--primary"/);
+	});
+});
+
+// ─── The card reads on any background ────────────────────────────────────────
+//
+// The card is drawn in the theme's own tokens, so its contrast is the theme's
+// to guarantee. Checked here for every bundled theme, light and dark, against
+// WCAG AA for text (4.5:1), with the colours the component's own rules name.
+
+describe("TerminalPane overlay card contrast (#574)", () => {
+	const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
+
+	/** The declarations of the rule for exactly `selector`. */
+	function declarations(selector: string): Map<string, string> {
+		const escaped = selector.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+		const rule = new RegExp(`\\n${escaped}\\s*\\{([^}]*)\\}`).exec(style);
+		if (!rule?.[1]) throw new Error(`no rule for ${selector}`);
+		const out = new Map<string, string>();
+		for (const line of rule[1].split(";")) {
+			const [prop, ...value] = line.split(":");
+			if (prop && value.length > 0) out.set(prop.trim(), value.join(":").trim());
+		}
+		return out;
+	}
+
+	/** The colour an expression the rules use stands for, once a theme is applied. */
+	function resolve(expr: string): [number, number, number] | null {
+		const root = document.documentElement.style;
+		if (expr === "transparent") return null;
+		const v = /^var\((--nt-[\w-]+)\)$/.exec(expr);
+		if (v?.[1]) {
+			const hex = root.getPropertyValue(v[1]).trim();
+			if (!/^#[0-9a-fA-F]{6}$/.test(hex)) throw new Error(`${v[1]} is ${hex}, not a solid colour`);
+			return hexToRgb(hex).split(", ").map(Number) as [number, number, number];
+		}
+		const triple = /^rgb\(var\((--nt-[\w-]+-rgb)\)\)$/.exec(expr);
+		if (triple?.[1]) {
+			return root.getPropertyValue(triple[1]).split(",").map(Number) as [number, number, number];
+		}
+		throw new Error(`cannot check the contrast of ${expr}`);
+	}
+
+	/**
+	 * Each piece of text on the card, as the rules that style it from the card
+	 * down: the last colour named wins, and the nearest ground that is not
+	 * transparent is what it is read on.
+	 */
+	const texts: Record<string, string[]> = {
+		message: [".exit-card", ".exit-message"],
+		reason: [".exit-card", ".exit-reason"],
+		checkbox: [".exit-card", ".exit-option"],
+		button: [".exit-card", ".exit-btn"],
+		Restart: [".exit-card", ".exit-btn", ".exit-btn--primary"],
+	};
+
+	function pair(rules: string[]): { text: string; ground: string } {
+		const decls = rules.map(declarations);
+		const text = decls
+			.map((d) => d.get("color"))
+			.filter((c) => c !== undefined)
+			.at(-1);
+		const ground = decls
+			.map((d) => d.get("background"))
+			.filter((b) => b !== undefined && b !== "transparent")
+			.at(-1);
+		if (text === undefined || ground === undefined) throw new Error(`${rules.join(" ")}: no pair`);
+		return { text, ground };
+	}
+
+	it("draws the card on an opaque ground of the theme's, under a shadow", () => {
+		const card = declarations(".exit-card");
+		expect(card.get("background")).toBe("rgb(var(--nt-bg-rgb))");
+		expect(card.get("color")).toBe("var(--nt-text-strong)");
+		expect(card.get("border")).toBe("1px solid var(--nt-border)");
+		expect(card.get("box-shadow")).toBe("var(--nt-shadow)");
+		// The scrim behind stays neutral.
+		expect(declarations(".exit-overlay").get("background")).toBe("var(--nt-overlay)");
+	});
+
+	// A hover that tinted a button's ground would take its text below the
+	// contrast checked here.
+	it("keeps the colours when a button is hovered", () => {
+		const hovers = [...style.matchAll(/\n(\.exit-[^{\n]*:hover[^{\n]*)\{([^}]*)\}/g)];
+		expect(hovers.length).toBeGreaterThan(0);
+		for (const [, selector, block] of hovers) {
+			expect(block, selector).not.toMatch(/(^|[\s;])(color|background|opacity)\s*:/);
+		}
+	});
+
+	for (const [name, theme] of Object.entries(BUNDLED_THEMES)) {
+		it(`reads at 4.5:1 or better in ${name}`, () => {
+			setActivePinia(createPinia());
+			useThemeStore().applyTheme(theme);
+			for (const [what, rules] of Object.entries(texts)) {
+				const { text, ground } = pair(rules);
+				const fg = resolve(text);
+				const bg = resolve(ground);
+				if (fg === null || bg === null) throw new Error(`${what}: transparent`);
+				const ratio = contrastRatio(fg, bg);
+				expect(ratio, `${what} (${text} on ${ground}): ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(
+					TEXT_CONTRAST_AA,
+				);
+			}
+		});
+	}
 });

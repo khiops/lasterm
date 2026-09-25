@@ -8,6 +8,10 @@
 				answered once with "don't ask again"; this is where it comes back. The answers
 				are kept in this browser, on this machine.
 			</p>
+			<p class="confirmations-help">
+				Closing a terminal that has ended is not asked about: Settings › Terminal says
+				whether it is deleted or kept in the sidebar.
+			</p>
 
 			<label v-for="entry in CONFIRMATIONS" :key="entry.key" class="confirmation-row">
 				<input

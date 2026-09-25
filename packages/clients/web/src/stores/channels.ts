@@ -170,7 +170,9 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * It is a fallback, not a source of truth: `channels` wins for the active
 	 * host, where the live status lives.
 	 */
-	const channelIndex = ref<Map<string, { hostId: string; displayTitle: string }>>(new Map());
+	const channelIndex = ref<
+		Map<string, { hostId: string; displayTitle: string; directProcess?: true }>
+	>(new Map());
 	/**
 	 * Why the last attempt to bring a terminal back failed, by channel.
 	 *
@@ -283,14 +285,25 @@ export const useChannelsStore = defineStore("channels", () => {
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
 
-			const nextIndex = new Map<string, { hostId: string; displayTitle: string }>();
+			const nextIndex = new Map<
+				string,
+				{ hostId: string; displayTitle: string; directProcess?: true }
+			>();
 			const nextHostMap = new Map(channelHostMap.value);
 			for (const row of rows) {
 				const id = row.id;
 				const rowHostId = row.host_id;
 				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
 				const title = typeof row.display_title === "string" ? row.display_title : "";
-				nextIndex.set(id, { hostId: rowHostId, displayTitle: title });
+				// Whether it runs a command, for a pane over it while another host
+				// is in view: its overlay offers Configure, and it is not restarted
+				// on its own (#574).
+				const directProcess = row.direct_process === 1 || row.direct_process === true;
+				nextIndex.set(id, {
+					hostId: rowHostId,
+					displayTitle: title,
+					...(directProcess && { directProcess: true as const }),
+				});
 				nextHostMap.set(id, rowHostId);
 			}
 			channelIndex.value = nextIndex;
@@ -416,7 +429,11 @@ export const useChannelsStore = defineStore("channels", () => {
 			const nextIndex = new Map(channelIndex.value);
 			for (const ch of merged) {
 				nextHostMap.set(ch.id, hostId);
-				nextIndex.set(ch.id, { hostId, displayTitle: ch.displayTitle ?? "" });
+				nextIndex.set(ch.id, {
+					hostId,
+					displayTitle: ch.displayTitle ?? "",
+					...(ch.directProcess === true && { directProcess: true as const }),
+				});
 			}
 			channelHostMap.value = nextHostMap;
 			channelIndex.value = nextIndex;

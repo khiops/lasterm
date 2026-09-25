@@ -129,6 +129,33 @@ export const settingsSchema: SettingDefinition[] = [
 		description: "Show notification badge on tab when terminal receives BEL",
 	},
 
+	// ─── Terminal category — when a terminal ends (global only, #574) ───
+	{
+		key: "whenEnded",
+		label: "When a terminal ends",
+		type: "select",
+		category: "terminal",
+		section: "panes",
+		scopes: ["global"],
+		options: [
+			{ label: "Ask", value: "ask" },
+			{ label: "Restart", value: "restart" },
+			{ label: "Close", value: "close" },
+		],
+		description:
+			"Ask shows Restart and Close over it. Restart brings it back, unless it ended within 5 seconds of starting or runs a command. Close closes its pane.",
+	},
+	{
+		key: "keepEnded",
+		label: "Keep ended terminals in the sidebar",
+		type: "toggle",
+		category: "terminal",
+		section: "panes",
+		scopes: ["global"],
+		description:
+			"Closing a terminal that has ended leaves it listed, to restart later, instead of deleting it and its scrollback.",
+	},
+
 	// ─── Terminal category — title settings (global only) ──────────────
 	{
 		key: "source",

@@ -21,7 +21,7 @@ export interface PrivateStateDirectoryOptions {
  *   directory can replace anything in it, the TLS key and the databases
  *   included, and lasterm does not change another account's directory. The TLS
  *   key writer already refused such a directory; this refuses it first, before
- *   the lock, a log or a database is opened there, and says why.
+ *   a log, the TLS key or a database is opened there, and says why.
  * - Not a directory, a symbolic link included: the hub stops. The TLS key
  *   writer opens every component without following links, so a linked state
  *   directory never worked.

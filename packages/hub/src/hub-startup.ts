@@ -144,12 +144,13 @@ export async function startHub(
 	// under another working directory, or an environment changed meanwhile —
 	// publishing this hub where it holds no lock.
 	const stateDir = path.resolve(dependencies.getStateDir());
-	// Created owner-only, and judged, before anything is written into it: the
-	// lock, a log, the TLS key or a database (SECURITY.md § 2.2, item 3). One an
-	// earlier version made is tightened; another account's is refused.
+	dependencies.acquireHubLock(stateDir);
+	// Created owner-only, and judged, once the lock is held — a start that loses
+	// to a running hub changes nothing there (#133) — and before anything else is
+	// written into it: a log, the TLS key or a database (SECURITY.md § 2.2, item
+	// 3). One an earlier version made is tightened; another account's is refused.
 	createOwnerOnlyDirectory(stateDir);
 	ensurePrivateStateDirectory(stateDir);
-	dependencies.acquireHubLock(stateDir);
 	// A daemon's log is the running hub's evidence: a start that loses the lock
 	// only appends to it (#133). The hub that holds the lock is the only one that
 	// moves it aside at its size limit (#525).

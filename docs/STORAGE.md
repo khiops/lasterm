@@ -54,9 +54,9 @@ PRAGMA wal_autocheckpoint = 2000;    -- Less frequent checkpoints (more batching
 - A database file another account owns, or one that is not a regular file, stops the hub,
   naming it.
 
-The state directory holding them is 0700, checked at every start before anything is opened in
-it: tightened when this account owns it, refused when another account does (SECURITY.md § 2.2,
-item 3).
+The state directory holding them is 0700, checked at every start as soon as the hub holds its
+lock, before a log or a database is opened in it: tightened when this account owns it, refused
+when another account does (SECURITY.md § 2.2, item 3).
 
 On Windows no mode is set or checked. The files, like the state directory, rely on the
 profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).

@@ -666,8 +666,11 @@ describe("startHub creates the configuration directory owner-only", () => {
 // 0700, but only judged an existing one's mode by way of the TLS key writer, which
 // refuses group write and nothing else: 0755 went unnoticed (#536).
 describe("startHub holds the state directory to 0700", () => {
+	// Mutations: check it before the lock, and a start that loses to a running hub
+	// changes that hub's directory (#133); check it later, or not at all, and the
+	// daemon's log, the TLS key and the databases land in a directory still 0755.
 	it.runIf(process.platform !== "win32")(
-		"tightens an existing loose one before taking the lock or opening a database in it",
+		"tightens an existing loose one once it holds the lock, before anything is written there",
 		async () => {
 			const dbs = openTestDatabases();
 			const root = join(tmpdir(), `lasterm-state-mode-${randomBytes(8).toString("hex")}`);
@@ -688,9 +691,16 @@ describe("startHub holds the state directory to 0700", () => {
 							modeWhen.lock = modeOf();
 							return null as never;
 						},
+						boundDaemonLog: () => {
+							modeWhen.daemonLog = modeOf();
+							return false;
+						},
 						initAuth: () => randomBytes(32).toString("hex"),
 						createOwnerToken: () => "owner-token",
-						resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+						resolveHubTlsIdentity: () => {
+							modeWhen.tlsKey = modeOf();
+							return TEST_TLS_IDENTITY;
+						},
 						openDatabases: () => {
 							modeWhen.databases = modeOf();
 							return dbs;
@@ -703,7 +713,12 @@ describe("startHub holds the state directory to 0700", () => {
 					},
 				);
 
-				expect(modeWhen).toEqual({ lock: "700", databases: "700" });
+				expect(modeWhen).toEqual({
+					lock: "755",
+					daemonLog: "700",
+					tlsKey: "700",
+					databases: "700",
+				});
 			} finally {
 				dbs.close();
 				await removeTempDir(root);

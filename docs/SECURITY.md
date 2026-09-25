@@ -134,8 +134,9 @@ runs everywhere.
    - If not a regular file, including a symlink: HARD FAIL
    - Expected: 0600 (-rw-------)
 
-3. Check the state directory holding meta.db, spool.db, the TLS key and hub-key, first of
-   all: before the hub lock is taken, and before a log or a database is opened in it (#536)
+3. Check the state directory holding meta.db, spool.db, the TLS key and hub-key, as soon as
+   the hub lock is held, before a log, the TLS key or a database is opened in it (#536). A
+   start that loses to a running hub changes nothing there (#133)
    - If not a directory, including a symlink: HARD FAIL. The TLS key writer never
      accepted a linked one either
    - If owned by another account, root included: HARD FAIL. Whoever owns the directory

@@ -19,6 +19,9 @@
 		<!-- Global in-app toast notifications (SSH errors, spawn failures, etc.) -->
 		<ToastContainer />
 
+		<!-- The hub serves a newer UI than this tab runs (#560) -->
+		<HubUpdateBanner />
+
 		<!-- Command Palette — Teleport to body, triggered by Ctrl+P / Cmd+P -->
 		<CommandPalette />
 
@@ -343,6 +346,7 @@ import BatchImportModal from './components/BatchImportModal.vue';
 import ChannelSidebar from './components/ChannelSidebar.vue';
 import CloseModal from './components/CloseModal.vue';
 import HubExitedModal from './components/HubExitedModal.vue';
+import HubUpdateBanner from './components/HubUpdateBanner.vue';
 import CommandPalette from './components/CommandPalette.vue';
 import ConfigureCommandDialog from './components/ConfigureCommandDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
@@ -369,6 +373,7 @@ import {
 } from './composables/useActiveWallpaper.js';
 import { useAutoSwitch } from './composables/useAutoSwitch.js';
 import { useCommandPalette } from './composables/useCommandPalette.js';
+import { useHubUpdate } from './composables/useHubUpdate.js';
 import type { DropZone } from './composables/useLayout.js';
 import {
 	collectTerminalChannelIds,
@@ -407,6 +412,9 @@ const authStore = useAuthStore();
 const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const toastStore = useToastStore();
+
+// A browser tab that outlived a hub upgrade finds out on its next connection (#560).
+const stopHubUpdate = useHubUpdate().start(() => sessionStore.connected);
 
 // ─── Resizable panels ────────────────────────────────────────────────────────
 
@@ -903,6 +911,7 @@ onUnmounted(() => {
 	desktopCloseUnlisten?.();
 	hubExitUnlisten?.();
 	desktopCloseExpiryUnlisten?.();
+	stopHubUpdate();
 });
 
 async function onCloseModalSelect(decision: { action: 'quit' | 'tray'; remember: boolean }): Promise<void> {

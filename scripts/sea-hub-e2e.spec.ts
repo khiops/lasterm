@@ -430,6 +430,28 @@ describe("lasterm-hub executable", () => {
 					expect(js.length).toBe(Number(js.headers.get("content-length")));
 				});
 
+				it("serves the PWA's manifest and worker, and a 404 for an asset its build lacks (#561)", async () => {
+					const manifest = await hubRequest(hub!, "/manifest.webmanifest");
+					expect(manifest.status, manifest.body).toBe(200);
+					expect(manifest.headers.get("content-type")).toContain("application/manifest+json");
+					expect(manifest.headers.get("cache-control")).toBe("no-cache");
+					expect(JSON.parse(manifest.body)).toMatchObject({
+						display: "standalone",
+						start_url: "/",
+						scope: "/",
+					});
+
+					const worker = await hubRequest(hub!, "/sw.js");
+					expect(worker.status, worker.body).toBe(200);
+					expect(worker.headers.get("content-type")).toContain("javascript");
+					expect(worker.headers.get("cache-control")).toBe("no-cache");
+
+					// An older page's chunk: never the SPA page, which a cache would keep.
+					const missing = await hubRequest(hub!, "/assets/index-00000000.js");
+					expect(missing.status).toBe(404);
+					expect(missing.headers.get("content-type") ?? "").not.toContain("text/html");
+				});
+
 				it("keeps its databases in the state directory it was given", () => {
 					expect(existsSync(join(sandbox!.stateDir, "meta.db"))).toBe(true);
 					expect(existsSync(join(sandbox!.stateDir, "spool.db"))).toBe(true);

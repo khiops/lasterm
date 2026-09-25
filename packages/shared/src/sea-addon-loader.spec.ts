@@ -2,12 +2,14 @@ import { type ChildProcess, spawn } from "node:child_process";
 import {
 	chmodSync,
 	closeSync,
+	constants,
 	existsSync,
 	fstatSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -29,14 +31,33 @@ import {
 	UnsafeAddonCacheError,
 } from "./sea-addon-loader.js";
 
+// Pass-throughs, so that a test can act at a precise point of an extraction:
+// what another process would do there, done here, deterministically.
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		closeSync: vi.fn(actual.closeSync),
+		lstatSync: vi.fn(actual.lstatSync),
+		renameSync: vi.fn(actual.renameSync),
+	};
+});
+const realFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+
 const windows = process.platform === "win32";
 const linux = process.platform === "linux";
 const root = !windows && process.geteuid?.() === 0;
+
+/** libuv's share-nothing open, as removeAbandonedTemporaries probes a temporary. */
+const UV_FS_O_EXLOCK = 0x10000000;
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.mocked(closeSync).mockReset();
+	vi.mocked(lstatSync).mockReset();
+	vi.mocked(renameSync).mockReset();
 	for (const dir of tempDirs.splice(0)) {
 		try {
 			rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
@@ -52,15 +73,21 @@ describe("openCachedAddon", () => {
 		const cacheDir = makeTempDir();
 		const assetName = "concurrent.node";
 		const data = Buffer.alloc(1024 * 1024, 0xa5);
-		const workers = Array.from({ length: 2 }, () =>
+		const workers = Array.from({ length: 3 }, () =>
 			extractInChild(cacheDir, assetName, data.length),
 		);
 		const destination = join(cacheDir, assetName);
 		let observed = 0;
 		let complete = false;
-		const exits = Promise.all(workers.map(waitForExit)).finally(() => {
+		// Settled, not all: every extractor that fails is reported, and none of
+		// the failures is left unhandled while the loop below runs.
+		const exits = Promise.allSettled(workers.map(waitForExit)).finally(() => {
 			complete = true;
 		});
+		// Released together once all are loaded, so that their extractions
+		// overlap however long each process takes to start (#563).
+		await Promise.all(workers.map(waitUntilReady));
+		for (const worker of workers) worker.stdin?.end("go\n");
 
 		while (!complete) {
 			if (existsSync(destination)) {
@@ -70,10 +97,111 @@ describe("openCachedAddon", () => {
 			}
 			await new Promise((resolve) => setTimeout(resolve, 1));
 		}
-		await exits;
+		const failures = (await exits).flatMap((exit) =>
+			exit.status === "rejected" ? [String(exit.reason)] : [],
+		);
+		expect(failures).toEqual([]);
 		expect(observed).toBeGreaterThan(0);
 		expect(readFileSync(destination)).toEqual(data);
-	}, 20_000);
+		// A guard against a hang, not a duration: a busy runner is slow to start
+		// three processes.
+	}, 60_000);
+
+	it.runIf(windows)(
+		"looks again when another extraction replaces the addon while it is being checked",
+		() => {
+			const cacheDir = makeTempDir();
+			const asset = Buffer.from("the embedded addon");
+			const destination = join(cacheDir, "addon.node");
+			let replaced = 0;
+			vi.mocked(lstatSync).mockImplementation((entry, options) => {
+				const stat = realFs.lstatSync(entry, options);
+				// Between the look at the entry and the open, another process
+				// renames its own copy into place, as each of several extractions
+				// started together does. Mutation caught: that failed the load.
+				if (entry === destination && replaced < 3) {
+					const other = join(cacheDir, `other-extraction-${replaced}`);
+					realFs.writeFileSync(other, asset);
+					realFs.renameSync(other, destination);
+					replaced += 1;
+				}
+				return stat;
+			});
+			const file = openCachedAddon("addon.node", cacheDir, asset);
+			try {
+				expect(replaced).toBe(3);
+				expect(fstatSync(file.fd, { bigint: true }).ino).toBe(
+					statSync(destination, { bigint: true }).ino,
+				);
+				expect(readFileSync(file.path)).toEqual(asset);
+			} finally {
+				closeSync(file.fd);
+			}
+		},
+	);
+
+	it.runIf(windows)("gives up on an addon that is replaced every time it is looked at", () => {
+		const cacheDir = makeTempDir();
+		const asset = Buffer.from("the embedded addon");
+		const destination = join(cacheDir, "addon.node");
+		let replaced = 0;
+		vi.mocked(lstatSync).mockImplementation((entry, options) => {
+			const stat = realFs.lstatSync(entry, options);
+			if (entry === destination) {
+				const other = join(cacheDir, `other-extraction-${replaced}`);
+				realFs.writeFileSync(other, asset);
+				realFs.renameSync(other, destination);
+				replaced += 1;
+			}
+			return stat;
+		});
+		expect(() => openCachedAddon("addon.node", cacheDir, asset)).toThrow(
+			"something else is writing to the addon cache",
+		);
+		expect(replaced).toBeGreaterThan(1);
+	});
+
+	it.runIf(windows)(
+		"removes a temporary it could not rename before another start's cleanup can take hold of it",
+		() => {
+			const cacheDir = makeTempDir();
+			const asset = Buffer.from("the embedded addon");
+			const destination = join(cacheDir, "addon.node");
+			const held: number[] = [];
+			let temporary = "";
+			vi.mocked(renameSync).mockImplementationOnce((from, to) => {
+				// Another extraction has just published and is still checking what it
+				// published, so Windows refuses to rename over it.
+				const other = join(cacheDir, "other-extraction");
+				realFs.writeFileSync(other, asset);
+				realFs.renameSync(other, destination);
+				held.push(realFs.openSync(destination, "r"));
+				temporary = String(from);
+				realFs.renameSync(from, to);
+			});
+			vi.mocked(closeSync).mockImplementationOnce((fd) => {
+				realFs.closeSync(fd);
+				// The moment the writer lets go of its temporary, a third start's
+				// cleanup takes the exclusive open it probes with, as it does for a
+				// temporary nobody holds. Mutation caught: the writer's own removal
+				// then failed with EPERM, and so did the load.
+				try {
+					held.push(realFs.openSync(temporary, constants.O_RDONLY | UV_FS_O_EXLOCK));
+				} catch {
+					// Already removed: nothing for the cleanup to take.
+				}
+			});
+			try {
+				const file = openCachedAddon("addon.node", cacheDir, asset);
+				closeSync(file.fd);
+				expect(temporary).not.toBe("");
+				expect(readFileSync(destination)).toEqual(asset);
+				expect(readdirSync(cacheDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+			} finally {
+				for (const fd of held) realFs.closeSync(fd);
+			}
+		},
+	);
 
 	it("publishes the embedded bytes and opens them", () => {
 		const cacheDir = makeTempDir();
@@ -522,28 +650,65 @@ function catchError(action: () => void): unknown {
 	throw new Error("expected an error");
 }
 
+/**
+ * A process that loads the loader, says "ready" on stdout, and extracts the
+ * addon when a line arrives on its stdin.
+ */
 function extractInChild(cacheDir: string, assetName: string, size: number): ChildProcess {
 	const moduleUrl = new URL("./sea-addon-loader.ts", import.meta.url).href;
 	const program = [
 		`import { closeSync } from "node:fs";`,
 		`import { openCachedAddon } from ${JSON.stringify(moduleUrl)};`,
-		`closeSync(openCachedAddon(${JSON.stringify(assetName)}, ${JSON.stringify(cacheDir)}, Buffer.alloc(${size}, 0xa5)).fd);`,
+		`const data = Buffer.alloc(${size}, 0xa5);`,
+		`process.stdin.once("data", () => {`,
+		`	closeSync(openCachedAddon(${JSON.stringify(assetName)}, ${JSON.stringify(cacheDir)}, data).fd);`,
+		`});`,
+		`process.stdout.write("ready\\n");`,
 	].join("\n");
-	return spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", program], {
-		stdio: "ignore",
+	const child = spawn(
+		process.execPath,
+		["--import", "tsx", "--input-type=module", "--eval", program],
+		{ stdio: ["pipe", "pipe", "pipe"] },
+	);
+	// A child that already failed has closed its stdin; its exit says why.
+	child.stdin?.on("error", () => {});
+	return child;
+}
+
+/** Resolves once `child` is ready to extract, or has exited (see waitForExit). */
+function waitUntilReady(child: ChildProcess): Promise<void> {
+	return new Promise((resolve) => {
+		let output = "";
+		child.stdout?.on("data", (chunk: Buffer) => {
+			output += chunk.toString("utf8");
+			if (output.includes("ready")) resolve();
+		});
+		child.once("close", () => resolve());
 	});
 }
 
+/**
+ * Resolves when `child` exits 0. Otherwise rejects with its exit code or
+ * signal and everything it wrote to stderr, which is the only trace of why an
+ * extractor failed.
+ */
 function waitForExit(child: ChildProcess): Promise<void> {
+	const stderr: Buffer[] = [];
+	child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 	return new Promise((resolve, reject) => {
-		if (child.exitCode !== null) {
-			if (child.exitCode === 0) resolve();
-			else reject(new Error(`extractor exited ${child.exitCode}`));
-			return;
-		}
-		child.once("exit", (code) => {
-			if (code === 0) resolve();
-			else reject(new Error(`extractor exited ${code}`));
+		child.once("error", reject);
+		// "close" rather than "exit": it comes after stderr has been read to its end.
+		child.once("close", (code, signal) => {
+			if (code === 0) {
+				resolve();
+				return;
+			}
+			const output = Buffer.concat(stderr).toString("utf8").trim();
+			reject(
+				new Error(
+					`extractor pid ${child.pid} exited ${code ?? `on signal ${signal}`}; its stderr:\n${output.length > 0 ? output : "(empty)"}`,
+				),
+			);
 		});
 	});
 }

@@ -198,6 +198,12 @@ Local daemon, single process, binds to 127.0.0.1.
 - `lasterm pair` — generate pairing code for multi-device
 - `lasterm decode` — decode MessagePack frames from stdin (debug tool)
 
+**Who may end a hub (#142).** A client that ends things (quit, stop) acts on the hub it **owns**, the one it launched, and never on a hub it only connected to, whose terminals belong to other people.
+- **Enforced by the hub:** `/api/quit` and `/api/shutdown` require a loopback connection and the owner token from `runtime.json`. Only a process of the hub's OS user, on the hub's machine, can read that file: the desktop that launched the hub, or `lasterm quit` / `lasterm stop`.
+- **Paired clients** (a browser, or a remote client) authenticate with a token that can drive the hub but never end it.
+- **The desktop's hub** also ends with the desktop, through `--exit-with-stdin` (#188).
+- **Once a client can drive a hub it did not launch (#193):** its close gesture for that hub is **Disconnect**, which ends nothing on the hub. **Quit** stays for the hub it owns, and the close dialog names which of the two applies.
+
 ### 3.4 Web Client (`@lasterm/web`)
 
 Vue 3 SPA built with Vite. Served by hub in production, dev server in development.

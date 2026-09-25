@@ -312,11 +312,19 @@ describe("TerminalPane overlay (#574)", () => {
 		}
 	});
 
-	it("starts its options from the setting, and gives the keyboard to its first button", () => {
+	it("starts its options from the setting, and gives the keyboard to its card", () => {
 		expect(SOURCE).toContain("keepChoice.value = prefs.value.keepEnded;");
 		expect(SOURCE).toContain("alwaysChoice.value = false;");
 		expect(SOURCE).toContain("void nextTick(focusOverlay);");
-		expect(overlay).toMatch(/ref="exitPrimary"\s*class="exit-btn exit-btn--primary"/);
+		expect(overlay).toMatch(/ref="exitCard"\s*class="exit-card"\s*role="group"\s*tabindex="-1"/);
+		expect(SOURCE).toContain("exitCard.value?.focus();");
+	});
+
+	// The Enter typed after `exit`, or pressed twice, lands on whatever holds the
+	// keyboard when the overlay comes up: a button there would restart the shell.
+	it("gives no button the keyboard", () => {
+		expect(overlay).not.toMatch(/<button[^>]*\bref=/);
+		expect(SOURCE).not.toContain("exitPrimary");
 	});
 });
 

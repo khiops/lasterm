@@ -40,7 +40,13 @@
 		     The card carries its own opaque ground, so what is behind it — the
 		     terminal's content, a wallpaper — never decides whether it reads. -->
 		<div v-if="cover === 'exited' || cover === 'gone'" class="exit-overlay">
-			<div class="exit-card" role="group" :aria-labelledby="`${exitId}-message`">
+			<div
+				ref="exitCard"
+				class="exit-card"
+				role="group"
+				tabindex="-1"
+				:aria-labelledby="`${exitId}-message`"
+			>
 				<p :id="`${exitId}-message`" class="exit-message">
 					{{ cover === 'gone' ? goneMessage : exitMessage }}
 				</p>
@@ -51,7 +57,6 @@
 				<div class="exit-actions">
 					<button
 						v-if="!isGone"
-						ref="exitPrimary"
 						class="exit-btn exit-btn--primary"
 						:disabled="restarting"
 						@click="onOverlayAction('restart')"
@@ -65,7 +70,6 @@
 					>Configure</button>
 					<button
 						v-if="isGone"
-						ref="exitPrimary"
 						class="exit-btn"
 						@click="onClosePaneFromOverlay"
 					>Close</button>
@@ -936,7 +940,7 @@ const exitId = useId();
 const keepChoice = ref(false);
 const alwaysChoice = ref(false);
 const paneRoot = ref<HTMLElement | null>(null);
-const exitPrimary = ref<HTMLButtonElement | null>(null);
+const exitCard = ref<HTMLElement | null>(null);
 
 /**
  * Restart or Close, clicked on the overlay: done at once, with the options
@@ -958,12 +962,16 @@ function onOverlayAction(action: OverlayAction): void {
  * The terminal takes Tab for itself, so from there the overlay's buttons
  * could only be reached with a mouse. Focus held anywhere else — another pane,
  * a dialog, Settings — is left where it is.
+ *
+ * The card takes it, not Restart: the keys typed as the shell ended — the
+ * Enter after `exit`, one pressed twice — would otherwise restart it. Tab
+ * reaches the buttons from there.
  */
 function focusOverlay(): void {
 	const active = document.activeElement;
 	const idle = active === null || active === document.body;
 	if ((idle && isActiveTab.value) || (active !== null && paneRoot.value?.contains(active) === true)) {
-		exitPrimary.value?.focus();
+		exitCard.value?.focus();
 	}
 }
 
@@ -1221,8 +1229,8 @@ watch(terminal, (term) => {
 watch(
 	[isActiveTab, terminal],
 	([active, term]) => {
-		// Over a terminal that has ended, the keyboard goes to the overlay's buttons.
-		if (active && term) void nextTick(() => (exitPrimary.value ?? term).focus());
+		// Over a terminal that has ended, the keyboard goes to the overlay's card.
+		if (active && term) void nextTick(() => (exitCard.value ?? term).focus());
 	},
 	{ immediate: true },
 );
@@ -1479,6 +1487,11 @@ function onDragEnd(): void {
 	border: 1px solid var(--nt-border);
 	box-shadow: var(--nt-shadow);
 	text-align: center;
+}
+
+/* The card holds the keyboard only so that nothing on it acts on a stray key. */
+.exit-card:focus {
+	outline: none;
 }
 
 .exit-message {

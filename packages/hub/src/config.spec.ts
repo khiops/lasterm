@@ -2417,7 +2417,6 @@ describe("extractAgentConfig", () => {
 	it("resolves agent log level and format from [logging]", () => {
 		const result = extractAgentConfig({
 			agent: {
-				buffer_per_channel: "2MB",
 				log_level: "error",
 			},
 			logging: {
@@ -2426,7 +2425,6 @@ describe("extractAgentConfig", () => {
 			},
 		});
 
-		expect(result.bufferPerChannel).toBe(2 * 1024 * 1024);
 		expect(result.logLevel).toBe("debug");
 		expect(result.logFormat).toBe("text");
 	});

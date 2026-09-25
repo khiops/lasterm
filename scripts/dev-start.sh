@@ -104,7 +104,6 @@ start_agent() {
 	echo "Starting agent daemon…"
 	local AGENT_BIN="$TARGET_DIR/release/lasterm-agent"
 	setsid "$AGENT_BIN" --daemon --socket "$AGENT_SOCK" \
-		--buffer-per-channel 1048576 --buffer-global 20971520 \
 		> "$LOG_DIR/agent.log" 2>&1 &
 
 	# Wait for socket to appear

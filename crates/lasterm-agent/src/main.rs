@@ -40,12 +40,14 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     idle_timeout: u64,
 
-    /// Per-channel output buffer size (daemon mode)
-    #[arg(long)]
+    /// Accepted and ignored: no Rust agent ever applied it. A hub from before
+    /// it stopped passing it still does, and a daemon that rejected it would
+    /// exit before listening (#484). SPEC.md § 3.2.
+    #[arg(long, hide = true)]
     buffer_per_channel: Option<usize>,
 
-    /// Global output buffer size (daemon mode)
-    #[arg(long)]
+    /// Accepted and ignored, as `--buffer-per-channel` is.
+    #[arg(long, hide = true)]
     buffer_global: Option<usize>,
 
     /// Stop the process described by the matching local daemon record. This does not prove that process still owns the endpoint. Unix requests graceful shutdown; Windows terminates it, so no exit record is written. This does not check for a hub; a live hub may relaunch it.
@@ -666,6 +668,36 @@ mod tests {
 
         assert_eq!(config.level, LogLevel::Debug);
         assert_eq!(config.format, LogFormat::Text);
+    }
+
+    /// The launch of a hub from before it stopped passing the buffer flags.
+    /// Rejecting them would make that hub's daemon exit before it listens.
+    #[test]
+    fn a_daemon_accepts_the_buffer_flags_an_older_hub_passes() {
+        let cli = Cli::try_parse_from([
+            "lasterm-agent",
+            "--daemon",
+            "--socket",
+            "agent.sock",
+            "--buffer-per-channel",
+            "1048576",
+            "--buffer-global",
+            "20971520",
+            "--log-level",
+            "info",
+            "--format",
+            "jsonl",
+        ]);
+
+        assert!(cli.is_ok_and(|cli| cli.daemon));
+    }
+
+    #[test]
+    fn help_does_not_offer_the_ignored_buffer_flags() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(!help.contains("--buffer-"), "{help}");
     }
 
     #[tokio::test(start_paused = true)]

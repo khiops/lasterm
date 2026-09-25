@@ -80,42 +80,35 @@ TypeScript library used by hub, agent, and UI.
 
 ### 3.2 Agent (`crates/lasterm-agent`)
 
-Universal PTY manager. Runs locally (child process) or remotely (via SSH). Same binary, same protocol.
+Universal PTY manager. Runs locally (a detached daemon) or remotely (via SSH). Same binary, same protocol.
 
 **Responsibilities:**
-- Protocol handshake (HELLO with version, capabilities, visual_hints)
+- Protocol handshake: HELLO with the protocol version, the agent's version, its capabilities, and the shells it found with its default one. It sends no visual hints.
 - PTY lifecycle: spawn, resize, destroy (via `async-xpty`)
-- Screen model: a `vt100` parser per channel in `headless.rs` — maintains accurate screen state
-- Snapshot: serialize() on demand or periodic (3s idle, 5s forced)
+- Screen model: a `vt100` parser per channel in `headless.rs`, keeping 1000 lines of scrollback
+- Snapshot: the visible screen, serialized when the hub asks, on ATTACH or SNAPSHOT_REQ. The hub decides when to ask: 3 s after a channel's last output, every 5 s, and when its last client detaches (`snapshot-scheduler.ts`).
 - Channel multiplexing: N channels per agent process
-- Backpressure: pause PTY read when output buffer exceeds threshold
-- Daemon mode: standalone process listening on UDS, output buffering via `OutputBuffer` ring buffer
-- `DaemonServer` (`daemon.rs`): UDS listener, HELLO and AUTH handshake, one connection per hub, channels kept apart by the hub that owns them (#127)
-- `OutputBuffer` (`batch.rs`): per-channel ring buffer with per-channel cap and global cap, evicts from largest channel
-- CLI: `lasterm-agent --daemon --socket <path> --buffer-per-channel <bytes> --buffer-global <bytes>`
+- Output batching (`batch_loop` in `batch.rs`): a channel's reader reads its PTY 4 KiB at a time. Output collects per channel and goes out every 16 ms, or as soon as a channel holds 4 KiB, so one OUTPUT frame carries under 8 KiB. An event about a channel (exit, title, bell, notification, log) first flushes that channel's output, then goes out itself (#549).
+- No backpressure: nothing pauses a PTY read. Frames for a connected hub wait in an unbounded queue in front of its connection, so a hub that stops reading without disconnecting lets the agent's memory grow (#553).
+- Daemon mode (`run_daemon` in `daemon.rs`): a standalone process listening on a Unix socket, or a named pipe on Windows. HELLO and AUTH handshake, one connection per hub, channels kept apart by the hub that owns them (#127).
+- Output while a hub is away: `HubRoutes` (`daemon.rs`) keeps up to 1000 frames per hub (`MAX_FRAME_QUEUE`), dropping the oldest, shared by all that hub's channels: about 8 MiB at most. The screen comes back through the snapshot of the next ATTACH; what was dropped is output the hub's spool never receives. Details below.
+- CLI: `lasterm-agent --stdio` (the default), `lasterm-agent --daemon [--socket <path>] [--idle-timeout <seconds>]`, and `lasterm-agent --stop [--socket <path>]`; all take `--log-level` and `--format` (§ 6.2).
+- `--buffer-per-channel <bytes>` and `--buffer-global <bytes>` are accepted and ignored. No Rust agent has ever read them: they sized the Node agent's `OutputBuffer`, removed with that agent. The hub no longer passes them, but hubs from before still do, and they can meet a newer agent: a development hub runs whatever `target/release` holds, and a single executable with no agent beside it runs the first one on `PATH`. A daemon that rejected the flags would exit before it listens (#484), and the hub would open no local terminal. So the agent keeps accepting them, hidden from `--help`.
 
-**Process model (local — stdio, legacy):**
-```
-hub: child_process.spawn("lasterm-agent", ["--stdio"])
-  → Agent starts, writes HELLO to stdout
-  → Hub reads HELLO, sends SPAWN commands
-  → Each SPAWN creates a PTY + a vt100 screen model
-  → OUTPUT flows: PTY → vt100 model (for state) → framed stdout → Hub
-  → INPUT flows: Hub → framed stdin → Agent → PTY
-```
-
-**Process model (local — daemon, preferred):**
+**Process model (local — daemon):**
 ```
 hub: connectOrLaunch(socketPath, config, binaryPath)
-  → Probes UDS socket via probeSocket()
-  → If no daemon running: spawn detached "lasterm-agent --daemon --socket <path>"
-  → Polls socket until ready (up to 5s)
-  → Connects to UDS → Agent sends HELLO (with protocolVersion)
+  → Connects to the socket; if that fails:
+  → spawn detached "lasterm-agent --daemon --socket <path> --log-level <level> --format <format>"
+  → Retries the connection every 100 ms, up to 5 s
+  → Agent sends HELLO (with protocolVersion)
   → Hub sends AUTH { token, hub_key }: the key names the hub, the owner of what it spawns
   → On reconnect: Agent sends N x AGENT_CHANNEL_STATE (this hub's channels) + CHANNEL_STATE_END
   → Hub reconciles channel state (adopt alive, mark dead)
   → Normal operation (same framed MessagePack protocol as stdio)
 ```
+
+The hub no longer runs a local agent on stdio. A local session always goes through the daemon; when none can be reached, the SPAWN fails.
 
 The daemon serves several hubs at once, one connection each (#127). Every channel belongs to the hub whose connection spawned it, named by the `hub_key` of its AUTH; a hub that sends none is the owner `legacy`. A new connection displaces only the same hub's previous one, which is told `DISPLACED` and closed: that is how a connection a hub left half-open stops locking it out. Among `legacy` connections the last one wins, as every connection did before. A channel's output and events go to its owner's current connection, never to another hub's; while its owner has none, they wait in that owner's own queue (1000 frames, oldest dropped), which goes out as soon as the owner connects again, before anything it is answered. Another hub's channel answers every request as an unknown one does (PROTOCOL.md § 3.1b).
 
@@ -129,6 +122,8 @@ hub: ssh2.exec("lasterm-agent --stdio")
   → INPUT flows: Hub → SSH → framed stdin → Agent → PTY
 ```
 
+A host that keeps a daemon (`[ssh] remote_daemon`, or the host's own choice) runs `lasterm-agent --daemon` instead, and the hub reaches its socket through a `direct-streamlocal` SSH channel, so its terminals outlive the SSH connection (#79). Windows remotes stay on stdio: no SSH channel carries a named pipe (`remote-daemon.ts`).
+
 The protocol is identical in all modes. Only the transport differs (stdio pipe, UDS, or SSH channel).
 
 **Screen model:** the `vt100` crate parses the PTY stream into a screen the agent can
@@ -141,7 +136,7 @@ shim is needed at all.
 - The hub fetches the agent from GitHub Releases, version-matched to itself, and deploys
   it over SFTP; see §3.5. No npm package is involved, and nothing needs Node on the
   remote host — the agent is a static Rust binary.
-- The hub runs `lasterm-agent --stdio` over SSH once the binary is in place.
+- The hub runs `lasterm-agent --stdio` over SSH once the binary is in place, or `--daemon` for a host that keeps one.
 - If no build exists for the remote's OS and architecture, the fetch fails with a named
   target rather than deploying something that cannot run.
 
@@ -743,8 +738,8 @@ The `[agent]` section configures the local daemon agent. These settings are defi
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `socket_path` | string | Platform-dependent (see SECURITY.md) | UDS/named pipe path for daemon communication |
-| `buffer_per_channel` | number | 1048576 (1 MB) | Max output buffer per channel (bytes) |
-| `buffer_global` | number | 20971520 (20 MB) | Max total output buffer across all channels (bytes) |
+
+`buffer_per_channel` and `buffer_global` are no longer read: no Rust agent ever applied them (§ 3.2). A config.toml that still sets them loads as before.
 
 ### 6.2 Logging Config (`[logging]` section in config.toml)
 

@@ -1,0 +1,15 @@
+{
+	"id": "/",
+	"name": "Lasterm",
+	"short_name": "Lasterm",
+	"description": "Terminal sessions that survive disconnects, served by your Lasterm hub.",
+	"start_url": "/",
+	"scope": "/",
+	"display": "standalone",
+	"theme_color": "#181825",
+	"background_color": "#1e1e2e",
+	"icons": [
+		{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+		{ "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+	]
+}

@@ -411,6 +411,46 @@ function uploadTempPath(remotePath: string): string {
 }
 
 /**
+ * How old, in minutes and by the remote's clock, an upload left beside the
+ * agent must be before a later upload removes it.
+ *
+ * An upload in progress writes to its file continuously, so it is always
+ * younger than this; one this old was abandoned, by a hub or a connection that
+ * died during it.
+ */
+export const STALE_UPLOAD_MINUTES = 60;
+
+/**
+ * Remove what a crash mid-upload left beside the agent (#559).
+ *
+ * Only in the target's own directory, only the names `uploadTempPath` gives,
+ * and only files older than `STALE_UPLOAD_MINUTES`: another hub may be
+ * uploading into the same directory right now (#127), and its file is fresh.
+ * The age is the remote's own judgement (`find -mmin`), so a hub whose clock
+ * disagrees with the remote's cannot misjudge it.
+ *
+ * Best-effort: a remote that cannot run this keeps its leftovers, and the
+ * upload goes ahead all the same.
+ */
+async function sweepStaleUploads(client: SshClient, remotePath: string): Promise<void> {
+	const cut = remotePath.lastIndexOf("/");
+	const dir = cut === -1 ? "." : remotePath.slice(0, cut) || "/";
+	// `find -name` reads its pattern as a glob, so the name is escaped for it,
+	// and the random part is matched as the sixteen hex digits it always is.
+	const name = remotePath.slice(cut + 1).replace(/[[\]*?\\]/g, "\\$&");
+	const pattern = `.${name}.${"[0-9a-f]".repeat(16)}.partial`;
+	try {
+		await sshExec(
+			client,
+			`find ${quotePosix(dir)} -maxdepth 1 -type f -name ${quotePosix(pattern)} ` +
+				`-mmin +${STALE_UPLOAD_MINUTES} -exec rm -f -- {} \\;`,
+		);
+	} catch {
+		// Left for the next upload to try again.
+	}
+}
+
+/**
  * Upload the agent binary to the remote host via SFTP.
  *
  * On a POSIX remote the binary is written beside the target under a
@@ -420,6 +460,8 @@ function uploadTempPath(remotePath: string): string {
  * while a rename leaves the running process its own inode and gives the next
  * launch the new file. The target is only ever replaced by a whole, executable
  * file; on any failure the temporary is removed and the target is as it was.
+ * A temporary a crash left behind is removed by a later upload, once it is old
+ * enough that nobody can still be writing it (`sweepStaleUploads`).
  *
  * A Windows remote is written in place, as before. Its agent runs on stdio and
  * exits with its connection, so nothing is running from the file, and the
@@ -452,6 +494,7 @@ export async function uploadAgentBinary(
 			return;
 		}
 
+		await sweepStaleUploads(client, remotePath);
 		const temp = uploadTempPath(remotePath);
 		let step = `upload the agent to ${temp}`;
 		try {

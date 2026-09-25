@@ -28,3 +28,32 @@ export function paneCover(facts: PaneFacts): PaneCover {
 	if (facts.detached) return "not-connected";
 	return null;
 }
+
+/** What the hub's answer to one ATTACH says: everything a pane knows but the status. */
+export type AttachFacts = Omit<PaneFacts, "status">;
+
+/**
+ * What a pane knows once the hub has answered its ATTACH with an ATTACH_OK:
+ * from the terminal itself, or from what the hub remembers (`cached`).
+ *
+ * Every answer sets all three facts, so none outlives the answer that replaced
+ * it. A pane whose socket came back used to keep what the attach before it had
+ * said: the banner over a terminal it could reach again, or no banner over one
+ * the hub could now only remember (#559).
+ */
+export function factsFromAttachOk(cached: boolean): AttachFacts {
+	return { ended: false, gone: false, detached: cached };
+}
+
+/**
+ * What a pane knows once the hub has refused its ATTACH with `code`: that the
+ * terminal ended, or that the hub has no record of it.
+ *
+ * `null` for any other failure — a timeout, a socket gone. That is not the hub
+ * saying anything about the terminal, and the pane keeps what it knew.
+ */
+export function factsFromRefusal(code: string | undefined): AttachFacts | null {
+	if (code === "CHANNEL_DEAD") return { ended: true, gone: false, detached: false };
+	if (code === "CHANNEL_NOT_FOUND") return { ended: false, gone: true, detached: false };
+	return null;
+}

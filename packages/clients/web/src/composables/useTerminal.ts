@@ -237,8 +237,9 @@ export function useTerminal(
 	 * Re-attach to an existing channel: send ATTACH, wait for ATTACH_OK,
 	 * restore snapshot + replay tail, then subscribe to live OUTPUT.
 	 *
-	 * Dead channels are respawned by the hub under the same channel ID, so
-	 * the caller always uses the original ID after this returns.
+	 * A terminal that has ended is refused with CHANNEL_DEAD, and one the hub
+	 * has no record of with CHANNEL_NOT_FOUND: an ATTACH never starts one
+	 * again (#559). Restart brings it back under the same channel ID.
 	 */
 	async function reattachChannel(
 		id: string,
@@ -341,7 +342,7 @@ export function useTerminal(
 			useChannelsStore().setDisplayTitle(id, result.displayTitle);
 		}
 
-		// Set channelId — same ID always (respawn reuses the same channel ID)
+		// Set channelId — same ID always (a restart reuses the same channel ID)
 		channelId = id;
 
 		// Subscribe to live OUTPUT. Another attach may have subscribed while this

@@ -1,7 +1,7 @@
 import type { Channel, ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { paneCover } from "../utils/pane-cover.js";
+import { factsFromAttachOk, factsFromRefusal, paneCover } from "../utils/pane-cover.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
 import { useSessionStore } from "./session.js";
@@ -468,5 +468,43 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 		expect(second).not.toBe(first);
 		// Live is no ending: the banner stays until the attach answers.
 		expect(piPane(channels)).toBe("not-connected");
+	});
+
+	// A STATE_SYNC follows every new socket, and the pane attaches again. What
+	// both say is what holds now, not what this window heard before (#559).
+	it("takes what the STATE_SYNC of a new socket says over a report from before it", async () => {
+		const { ws, channels } = await pageLoaded();
+		// The Pi terminal ends while this window watches, and the pane is told.
+		ws?.emit({ type: "CHANNEL_STATE", channelId: PI_CHANNEL, sessionId: "s-pi", status: "dead" });
+		const ended = factsFromRefusal("CHANNEL_DEAD");
+		if (ended === null) throw new Error("expected an answer");
+		expect(paneCover({ status: channels.statusOf(PI_CHANNEL), ...ended })).toBe("exited");
+
+		// The socket drops. Meanwhile the terminal is restarted from another
+		// window, and this one misses the news. The socket comes back.
+		const sync: ProtocolMessage = {
+			type: "STATE_SYNC",
+			sessions: [
+				{ sessionId: "s-local", hostId: "host-local", status: "active" },
+				{ sessionId: "s-pi-2", hostId: "host-pi", status: "active" },
+			],
+			channels: [
+				{ channelId: LOCAL_CHANNEL.id, sessionId: "s-local", status: "live" },
+				{ channelId: PI_CHANNEL, sessionId: "s-pi-2", status: "live" },
+			],
+		};
+		ws?.emit(sync);
+
+		// The pane attaches again, and reaches the terminal: nothing covers it.
+		expect(channels.statusOf(PI_CHANNEL)).toBe("live");
+		expect(
+			paneCover({ status: channels.statusOf(PI_CHANNEL), ...factsFromAttachOk(false) }),
+		).toBeNull();
+		// Said again, the same status is no news for the pane to act on.
+		const report = channels.reportOf(PI_CHANNEL);
+		ws?.emit(sync);
+		expect(channels.reportOf(PI_CHANNEL)).toBe(report);
+		// And the sidebar still lists the host in view, and only it.
+		expect(channels.channels.map((c) => c.id)).toEqual([LOCAL_CHANNEL.id]);
 	});
 });

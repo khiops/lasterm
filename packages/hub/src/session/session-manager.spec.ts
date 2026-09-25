@@ -147,10 +147,11 @@ afterEach(() => {
 let mockSshAgentInstance: MockSshAgent | null = null;
 /** Set to an Error before a test to make the next new SshAgent's start() reject once. */
 let nextSshStartError: Error | null = null;
-let nextSshStartCallsAgentUpdated = false;
+/** Set before a test to have the next start() report an agent re-uploaded, and beside what. */
+let nextSshStartCallsAgentUpdated: false | { besideRunningDaemon: boolean } = false;
 
 interface MockSshAgentDeployOptions {
-	onAgentUpdated?: (hostId: string) => void;
+	onAgentUpdated?: (hostId: string, installed: { besideRunningDaemon: boolean }) => void;
 }
 
 class MockSshAgent {
@@ -159,9 +160,10 @@ class MockSshAgent {
 
 	lastKeyVerification = { capturedFingerprint: "SHA256:mockfp", mismatch: false };
 	start = vi.fn(async () => {
-		if (nextSshStartCallsAgentUpdated) {
+		const installed = nextSshStartCallsAgentUpdated;
+		if (installed !== false) {
 			nextSshStartCallsAgentUpdated = false;
-			this.deployOptions?.onAgentUpdated?.(this.host.id);
+			this.deployOptions?.onAgentUpdated?.(this.host.id, installed);
 		}
 	});
 	send = vi.fn((msg: ProtocolMessage) => {
@@ -1162,7 +1164,7 @@ describe("SessionManager", () => {
 			sshKeyPath: "/nonexistent/key",
 		});
 
-		nextSshStartCallsAgentUpdated = true;
+		nextSshStartCallsAgentUpdated = { besideRunningDaemon: false };
 		const received: ProtocolMessage[] = [];
 		const client = makeClient("c-sync", received);
 		sm.addClient(client);
@@ -1187,6 +1189,35 @@ describe("SessionManager", () => {
 			hostname: "localhost",
 			message: "Agent on localhost updated to the current version",
 		});
+	});
+
+	// The upload went beside a daemon that was already running: the new agent
+	// is on disk, the old one still answers, and the host shows it outdated with
+	// a way to replace it. "Updated to the current version" beside that ring said
+	// the opposite (#559).
+	it("SSH host: an agent re-uploaded beside a running daemon is said to be installed, not in use", async () => {
+		const dal = new MetaDAL(dbManager.meta);
+		const host = dal.createHost({
+			type: "ssh",
+			label: "test-ssh-sync-daemon",
+			sshHost: "user@localhost",
+			sshAuth: "key",
+			sshKeyPath: "/nonexistent/key",
+		});
+
+		nextSshStartCallsAgentUpdated = { besideRunningDaemon: true };
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-sync-daemon", received));
+
+		await sm.handleSpawn("c-sync-daemon", { type: "SPAWN", hostId: host.id });
+
+		const synced = received.filter((m) => m.type === "AGENT_SYNCED");
+		expect(synced).toEqual([
+			expect.objectContaining({
+				hostId: host.id,
+				message: "New agent installed on localhost; replace the running one to use it",
+			}),
+		]);
 	});
 
 	it("SSH host: session reused on second SPAWN", async () => {
@@ -1605,25 +1636,26 @@ describe("SessionManager", () => {
 		expect(errMsg.code).toBe("CHANNEL_DEAD");
 	});
 
-	// ─── Dead channel respawn ─────────────────────────────────────
+	// ─── A dead channel stays dead until Restart ─────────────────────────────
 
-	it("handleAttach on dead channel respawns when agent is active", async () => {
-		// First, spawn a normal channel to establish local host + session + agent
+	// An ATTACH is a pane asking to see its terminal, not to have it started
+	// again. It used to start it again whenever its session was active and its
+	// agent connected, so a reload restarted every ended terminal whose pane
+	// did not already know it had ended (#559). Restart is the user's gesture.
+	it("handleAttach on a dead channel answers CHANNEL_DEAD with its agent connected, and starts nothing", async () => {
+		// A local host with an active session and a connected agent.
 		const received1: ProtocolMessage[] = [];
 		const c1 = makeClient("c1", received1);
 		sm.addClient(c1);
 		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
 
-		// Create a dead channel in DB (as if it died before)
+		// A terminal of that session that has ended.
 		const { MetaDAL } = await import("../storage/meta.js");
 		const dal = new MetaDAL(dbManager.meta);
-		const hosts = dal.listHosts();
-		const localHost = hosts.find((h) => h.type === "local");
+		const localHost = dal.listHosts().find((h) => h.type === "local");
 		if (!localHost) throw new Error("expected local host");
-		const sessions = dal.listSessions(localHost.id);
-		const session = sessions.find((s) => s.status !== "closed");
+		const session = dal.listSessions(localHost.id).find((s) => s.status !== "closed");
 		if (!session) throw new Error("expected non-closed session");
-
 		const deadId = "DEADRESPAWN01AAAAAAAAAAAAAAAA";
 		dal.createChannel({
 			id: deadId,
@@ -1632,20 +1664,27 @@ describe("SessionManager", () => {
 			shell: "/bin/zsh",
 			cwd: "/tmp",
 		});
+		const agent = mockLocalAgents[0];
+		if (agent === undefined) throw new Error("expected the local agent");
+		agent.send.mockClear();
+		received1.length = 0;
 
-		// Now ATTACH to the dead channel — should respawn
+		// A reloaded window's pane asks for it.
 		const received2: ProtocolMessage[] = [];
-		const c2 = makeClient("c2", received2);
-		sm.addClient(c2);
-
+		sm.addClient(makeClient("c2", received2));
 		await sm.handleAttach("c2", deadId);
-		// MockLocalAgent responds async via setImmediate
-		await new Promise((r) => setImmediate(r));
+		await flushImmediate();
 
-		const attachOk = received2.find((m) => m.type === "ATTACH_OK");
-		expect(attachOk).toBeTruthy();
-		const ok = attachOk as unknown as { channelId: string };
-		expect(ok.channelId).toBe(deadId); // same channel ID reused
+		expect(received2).toEqual([
+			expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId: deadId }),
+		]);
+		// Nothing was asked of the agent, and nobody heard it come back.
+		expect(agent.send).not.toHaveBeenCalled();
+		expect(received1).not.toContainEqual(
+			expect.objectContaining({ type: "CHANNEL_STATE", channelId: deadId }),
+		);
+		expect(dal.getChannel(deadId)?.status).toBe("dead");
+		expect((sm as unknown as { channels: Map<string, unknown> }).channels.has(deadId)).toBe(false);
 	});
 
 	it("handleAttach on dead channel returns CHANNEL_DEAD when no active session", async () => {
@@ -1666,48 +1705,6 @@ describe("SessionManager", () => {
 		const errMsg = received[0] as unknown as { type: string; code: string };
 		expect(errMsg.type).toBe("ERROR");
 		expect(errMsg.code).toBe("CHANNEL_DEAD");
-	});
-
-	it("respawned channel is tracked in memory", async () => {
-		const received1: ProtocolMessage[] = [];
-		const c1 = makeClient("c1", received1);
-		sm.addClient(c1);
-		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
-
-		const { MetaDAL } = await import("../storage/meta.js");
-		const dal = new MetaDAL(dbManager.meta);
-		const hosts = dal.listHosts();
-		const localHost = hosts.find((h) => h.type === "local");
-		if (!localHost) throw new Error("expected local host");
-		const sessions = dal.listSessions(localHost.id);
-		const session = sessions.find((s) => s.status !== "closed");
-		if (!session) throw new Error("expected non-closed session");
-
-		const deadId = "DEADTRACK01AAAAAAAAAAAAAAAAAA";
-		dal.createChannel({
-			id: deadId,
-			sessionId: session.id,
-			status: "dead",
-			shell: "/bin/bash",
-			cwd: "/home",
-		});
-
-		const received2: ProtocolMessage[] = [];
-		const c2 = makeClient("c2", received2);
-		sm.addClient(c2);
-		await sm.handleAttach("c2", deadId);
-		await new Promise((r) => setImmediate(r));
-
-		const attachOk = received2.find((m) => m.type === "ATTACH_OK") as unknown as {
-			channelId: string;
-		};
-		expect(attachOk).toBeTruthy();
-
-		// The dead channel should be updated to live status (same ID reused)
-		expect(attachOk.channelId).toBe(deadId);
-		const ch = dal.getChannel(deadId);
-		expect(ch).toBeDefined();
-		expect(ch?.status).toBe("live");
 	});
 
 	// A restart is the same terminal asked for a second time, and the only
@@ -1785,41 +1782,6 @@ describe("SessionManager", () => {
 		expect(snapshotReqs).not.toContainEqual(
 			expect.objectContaining({ type: "SNAPSHOT_REQ", channelId: oldChannelId }),
 		);
-	});
-
-	it("respawn broadcasts CHANNEL_STATE for the new channel", async () => {
-		const received1: ProtocolMessage[] = [];
-		const c1 = makeClient("c1", received1);
-		sm.addClient(c1);
-		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
-
-		const { MetaDAL } = await import("../storage/meta.js");
-		const dal = new MetaDAL(dbManager.meta);
-		const hosts = dal.listHosts();
-		const localHost = hosts.find((h) => h.type === "local");
-		if (!localHost) throw new Error("expected local host");
-		const sessions = dal.listSessions(localHost.id);
-		const session = sessions.find((s) => s.status !== "closed");
-		if (!session) throw new Error("expected non-closed session");
-
-		const deadId = "DEADBCAST01AAAAAAAAAAAAAAAAAA";
-		dal.createChannel({ id: deadId, sessionId: session.id, status: "dead", shell: "/bin/sh" });
-
-		// Clear c1's received to only see messages from the respawn
-		received1.length = 0;
-
-		const received2: ProtocolMessage[] = [];
-		const c2 = makeClient("c2", received2);
-		sm.addClient(c2);
-		await sm.handleAttach("c2", deadId);
-		await new Promise((r) => setImmediate(r));
-
-		// c1 (bystander) should receive CHANNEL_STATE broadcast for the same channel ID
-		const stateMsg = received1.find((m) => m.type === "CHANNEL_STATE");
-		expect(stateMsg).toBeTruthy();
-		const state = stateMsg as unknown as { channelId: string; status: string };
-		expect(state.channelId).toBe(deadId);
-		expect(state.status).toBe("live");
 	});
 
 	// ─── startup() sweep ─────────────────────────────────────────────────────
@@ -6329,5 +6291,144 @@ describe("SessionManager — Reconnect in a pane, after a restart (#556)", () =>
 		expect(received).not.toContainEqual(
 			expect.objectContaining({ type: "CHANNEL_STATE", status: "dead" }),
 		);
+	});
+
+	// ─── #559: what a reload, a later pane and another window are told ───────
+	//
+	// A terminal that has ended shows the exit overlay with Restart, and only
+	// Restart brings it back. A pane that attaches to it is told it ended,
+	// whichever host is in view, whether the hub holds it in memory or only in
+	// meta.db, and whether its host is connected or not. And every window
+	// hears it end, attached or not.
+	describe("and what a reload, a later pane or another window hears (#559)", () => {
+		/** An SSH host whose agent runs on stdio and dies with its connection. */
+		function seedStdioHost(): { channelId: string } {
+			const dal = new MetaDAL(dbManager.meta);
+			const host = dal.createHost({
+				type: "ssh",
+				label: "stdio-box",
+				sshHost: "user@stdio.test",
+				sshAuth: "agent",
+				sshRemoteDaemon: false,
+				os: "linux",
+			});
+			const sessionId = "01K559SESSION0000000000000";
+			dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			const channelId = "01K559CHAN0000000000000001";
+			dal.createChannel({ id: channelId, sessionId, status: "live", shell: "bash" });
+			return { channelId };
+		}
+
+		// Reconnect found every terminal of the Pi ended (#556), with the session
+		// active and a new daemon connected. Then the page reloads. The Pi is not
+		// the host in view, so its panes do not know their terminals ended, and
+		// each one attaches. That ATTACH used to start the terminal again.
+		it("a reload's panes are told the terminals Reconnect found ended, and none starts again", async () => {
+			const { channelIds } = seedPreviousRun();
+			sm = new SessionManager(dbManager);
+			await sm.startup();
+			sm.addClient(makeClient("c-pane", []));
+			nextDaemon([]);
+			await sm.handleAttach("c-pane", channelIds[0] ?? "");
+			const daemon = mockSshAgentInstance;
+			if (daemon === null) throw new Error("expected the new daemon's connection");
+			daemon.send.mockClear();
+
+			const reloaded: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-reloaded", reloaded));
+			for (const channelId of channelIds.slice(1)) {
+				await sm.handleAttach("c-reloaded", channelId);
+			}
+			await flushImmediate();
+
+			expect(reloaded).toEqual(
+				channelIds
+					.slice(1)
+					.map((channelId) =>
+						expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId }),
+					),
+			);
+			expect(daemon.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "SPAWN" }));
+			const dal = new MetaDAL(dbManager.meta);
+			for (const channelId of channelIds) {
+				expect(dal.getChannel(channelId)?.status).toBe("dead");
+			}
+		});
+
+		// Startup finds a stdio remote's terminals ended with the connection
+		// that carried them, and holds them as dead. Nobody reconnects that host
+		// until asked, so a pane mounted now finds no agent. It was answered from
+		// the spool, and said "Not connected" over a shell that no longer exists.
+		it("a pane is told a stdio remote's terminal ended at the restart, not that it is not connected", async () => {
+			const { channelId } = seedStdioHost();
+			sm = new SessionManager(dbManager);
+			await sm.startup();
+
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-pane", received));
+			await sm.handleAttach("c-pane", channelId);
+
+			expect(received).toEqual([
+				expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId }),
+			]);
+			// Nothing was dialled to ask a host about a terminal known to be gone.
+			expect(vi.mocked(_SshAgentForMock)).not.toHaveBeenCalled();
+		});
+
+		// A window's socket drops. While it is away its terminal exits and then
+		// the host's connection drops too, so the hub holds the terminal as dead
+		// with no agent to ask. The socket comes back and the pane attaches
+		// again: it has to hear that the terminal ended, not get the last screen
+		// from the spool and a "Not connected" banner.
+		it("a pane whose socket came back is told its terminal ended while it was away", async () => {
+			const dal = new MetaDAL(dbManager.meta);
+			const host = dal.createHost({
+				type: "ssh",
+				label: "exit-while-away",
+				sshHost: "user@away.test",
+				sshAuth: "agent",
+				sshRemoteDaemon: false,
+				os: "linux",
+			});
+			sm = new SessionManager(dbManager);
+			sm.addClient(makeClient("c-window", []));
+			const channelId = await sm.handleSpawn("c-window", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("expected a channel");
+			const agent = mockSshAgentInstance;
+			if (agent === null) throw new Error("expected the host's connection");
+
+			sm.removeClient("c-window");
+			agent._emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+			agent.simulateClose();
+
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-window-again", received));
+			await sm.handleAttach("c-window-again", channelId);
+
+			expect(received).toEqual([
+				expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId }),
+			]);
+		});
+
+		// Two windows on one hub, the second not attached to the terminal: a
+		// pane still opening, or one showing another tab. It holds the channel in
+		// its state all the same, and never heard it end.
+		it("a window not attached to a terminal hears it end", async () => {
+			sm = new SessionManager(dbManager);
+			sm.addClient(makeClient("c-attached", []));
+			const channelId = await sm.handleSpawn("c-attached", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a channel");
+			const other: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-other-window", other));
+
+			const agent = mockLocalAgents.at(-1) as unknown as {
+				emit: (event: string, msg: unknown) => void;
+			};
+			agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 3 });
+
+			expect(other).toContainEqual(
+				expect.objectContaining({ type: "CHANNEL_STATE", channelId, status: "dead", exitCode: 3 }),
+			);
+		});
 	});
 });

@@ -563,6 +563,77 @@ describe("SshAgent", () => {
 		expect(agent.reachedRunningDaemon).toBe(false);
 	}, 15_000);
 
+	// A re-upload is announced once the connection knows what it reached. Beside
+	// a daemon that was already running, the new agent is only on disk: the old
+	// one still answers, and the host says it is outdated (#559).
+	describe("announces a re-uploaded agent with what the connection reached", () => {
+		const remotePath = "/home/pi/.local/bin/lasterm-agent";
+
+		/** The deploy replaces the agent on disk, as a hash mismatch has it do. */
+		async function nextDeployReplacesTheAgent(): Promise<void> {
+			const { deployAgentIfNeeded } = await import("./agent-deployer.js");
+			vi.mocked(deployAgentIfNeeded).mockImplementationOnce(async (_client, _host, options) => {
+				options.onAgentUpdated?.(options.hostId);
+				return {
+					deployed: true,
+					remoteMatchesHubVersionCache: false,
+					remotePath,
+					os: "linux",
+					arch: "arm64",
+				};
+			});
+		}
+
+		async function reachDaemon(alreadyRunning: boolean): Promise<ReturnType<typeof vi.fn>> {
+			await nextDeployReplacesTheAgent();
+			let launched = alreadyRunning;
+			const { server, port } = await createMockSshServerWithSocket(
+				(stream, command) => {
+					if (command.includes("XDG_STATE_HOME")) {
+						stream.write("/home/pi/.local/state/lasterm");
+					}
+					if (command.includes("--daemon")) launched = true;
+					(stream as unknown as { exit: (code: number) => void }).exit(0);
+					stream.end();
+				},
+				() => launched,
+				(stream) => {
+					stream.write(makeHelloFrame());
+				},
+			);
+			servers.push(server);
+
+			const fp = await getServerFingerprint(port);
+			const onAgentUpdated = vi.fn();
+			const agent = new SshAgent(
+				makeHost(port),
+				undefined,
+				{ binaryCache: "/tmp/fake-cache", onAgentUpdated },
+				undefined,
+				true,
+			);
+			agents.push(agent);
+			await agent.start(fp);
+			return onAgentUpdated;
+		}
+
+		it("beside a daemon that was already running", async () => {
+			const onAgentUpdated = await reachDaemon(true);
+
+			expect(onAgentUpdated.mock.calls).toEqual([
+				["01HZ000000000000000000001", { besideRunningDaemon: true }],
+			]);
+		}, 15_000);
+
+		it("to a daemon this connection started from it", async () => {
+			const onAgentUpdated = await reachDaemon(false);
+
+			expect(onAgentUpdated.mock.calls).toEqual([
+				["01HZ000000000000000000001", { besideRunningDaemon: false }],
+			]);
+		}, 15_000);
+	});
+
 	it("keeps a Windows remote on stdio: no SSH channel carries a named pipe", async () => {
 		const commands: string[] = [];
 		const { server, port } = await createMockSshServerWithSocket(

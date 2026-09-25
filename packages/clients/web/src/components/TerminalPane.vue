@@ -136,7 +136,7 @@ import { useHostsStore } from '../stores/hosts.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
-import { paneCover } from '../utils/pane-cover.js';
+import { type AttachFacts, factsFromAttachOk, factsFromRefusal, paneCover } from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import SearchOverlay from './SearchOverlay.vue';
@@ -372,6 +372,58 @@ const isGone = ref(false);
 let reattaching = false;
 
 /**
+ * The last attach reached the terminal itself, and nothing since says it ended.
+ *
+ * Only such a pane has nothing to gain from attaching again when the hub says
+ * its terminal is live. Every other one does: one on its banner, one over a
+ * terminal that has ended and was brought back from elsewhere, one that never
+ * attached because it knew its terminal had ended.
+ */
+let attachedLive = false;
+
+type AttachResult = Awaited<ReturnType<typeof reattachChannel>>;
+
+/** Take what the hub answered to an attach, and only that. */
+function takeAnswer(facts: AttachFacts): void {
+	hasEnded.value = facts.ended;
+	isGone.value = facts.gone;
+	isDetached.value = facts.detached;
+	attachedLive = !facts.ended && !facts.gone && !facts.detached;
+}
+
+/**
+ * Attach to the terminal, and let the hub's answer decide what covers it.
+ *
+ * Every attach goes through here: the pane opening, Reconnect, Restart, a new
+ * channel id, the socket coming back. Each used to read the answer its own
+ * way, and the one after the socket came back did not read it at all, so the
+ * pane kept or dropped its banner whatever the hub said (#559).
+ *
+ * Resolves with the ATTACH_OK, or null when the hub answered that the terminal
+ * has ended or that it has no record of it. Anything else is thrown: it says
+ * nothing about the terminal.
+ */
+async function attachAndCover(
+	chId: string,
+	opts?: { preserveContent?: boolean },
+): Promise<AttachResult | null> {
+	let result: AttachResult;
+	try {
+		result = await reattachChannel(chId, opts);
+	} catch (err) {
+		// Reaching the host and not finding the terminal there is an answer, not
+		// a failure to connect: dropping it left the pane saying "Not connected"
+		// over a terminal that had ended (#556).
+		const facts = factsFromRefusal((err as { code?: string } | null)?.code);
+		if (facts === null) throw err;
+		takeAnswer(facts);
+		return null;
+	}
+	takeAnswer(factsFromAttachOk(result.cached));
+	return result;
+}
+
+/**
  * Ask again for the terminal itself.
  *
  * The hub tries the host when a pane attaches, so attaching again is the whole
@@ -383,15 +435,9 @@ async function onReconnect(): Promise<void> {
 	if (chId === null || reattaching) return;
 	reattaching = true;
 	try {
-		isDetached.value = (await reattachChannel(chId, { preserveContent: true })).cached;
-	} catch (err) {
-		// Reaching the host and not finding the terminal there is an answer, not
-		// a failure to connect: dropping it left the pane saying "Not connected"
-		// over a terminal that had ended (#556).
-		const code = (err as { code?: string } | null)?.code;
-		if (code === 'CHANNEL_DEAD') hasEnded.value = true;
-		else if (code === 'CHANNEL_NOT_FOUND') isGone.value = true;
-		// Anything else: still unreachable. The banner is already saying so.
+		await attachAndCover(chId, { preserveContent: true });
+	} catch {
+		// Still unreachable. The banner is already saying so.
 	} finally {
 		reattaching = false;
 	}
@@ -442,16 +488,21 @@ watch(
 const restarting = ref(false);
 
 /**
- * The hub says this terminal is live while the pane still says it is not
- * connected: the host was reached after the attach had stopped waiting for
- * it. A Reconnect slower than the attach did that, and left the pane on its
- * banner over a terminal it could now reach. It asks again, as Reconnect
- * would (#556). A restart attaches by itself.
+ * The hub says this terminal is live while the pane is not attached to it.
+ *
+ * On its banner, the host was reached after the attach had stopped waiting
+ * for it: a Reconnect slower than the attach left the pane saying "Not
+ * connected" over a terminal it could now reach (#556). Over the exit
+ * overlay, or never attached because it knew its terminal had ended, the
+ * terminal was brought back from the sidebar or from another window, and the
+ * pane went blank over it with nothing attached (#559). Either way it asks
+ * again, as Reconnect would. A restart from this pane attaches by itself.
  */
 watch(
 	() => channelsStore.reportOf(effectiveChannelId.value),
 	(report) => {
-		if (report?.status !== 'live' || !isDetached.value || restarting.value) return;
+		if (report?.status === 'dead') attachedLive = false;
+		if (report?.status !== 'live' || attachedLive || !ready.value || restarting.value) return;
 		void onReconnect();
 	},
 );
@@ -521,15 +572,16 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				// attachChannel would otherwise send (prevents SIGWINCH)
 				suppressNextResize(cols, rows);
 				attachChannel(realId);
+				attachedLive = true;
 				// And now that there is a channel to tell: a font arriving while
 				// it was being created refits the terminal, and that fit had
 				// nobody to send its size to.
 				syncChannelSize();
 				emit('channel-spawned', props.channelId, realId);
 			} else {
-				// Dead channels must not send ATTACH — the hub rejects with
-				// CHANNEL_DEAD and the error state would obscure the dead
-				// overlay. Mark ready so the overlay renders immediately.
+				// A terminal already known to have ended is not asked for: the
+				// hub would answer CHANNEL_DEAD, which is what the overlay says.
+				// Mark ready so the overlay renders immediately.
 				if (isDead.value) {
 					ready.value = true;
 					return;
@@ -539,7 +591,10 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				// (fired by WriteLockManager.attach on the hub side), not from
 				// the ATTACH_OK payload — avoids a microtask race where
 				// setInitialHolder would overwrite a more recent WRITE_LOCK.
-				isDetached.value = (await reattachChannel(props.channelId)).cached;
+				// A terminal that has ended, whichever host it is on, is
+				// answered as ended: the pane shows the exit overlay with
+				// Restart, and nothing restarts it on its own (#559).
+				await attachAndCover(props.channelId);
 			}
 			ready.value = true;
 			applyProfile(resolvedProfile.value);
@@ -639,7 +694,7 @@ watch(
 			if (newId === internalChannelId.value) return;
 			try {
 				error.value = null;
-				await reattachChannel(newId);
+				await attachAndCover(newId);
 			} catch (err) {
 				error.value = err instanceof Error ? err.message : String(err);
 			}
@@ -650,7 +705,9 @@ watch(
 // Re-attach terminal channels after hub reconnect (session persistence).
 // When the hub restarts, WS auto-reconnects and session store increments
 // reconnectCount. Each pane then re-attaches its channel to restore the
-// snapshot from spool.db + connect to the new PTY output stream.
+// snapshot from spool.db + connect to the new PTY output stream. What the
+// hub answers now decides the cover, whatever the pane showed before: the
+// terminal may have ended, come back, or become unreachable meanwhile (#559).
 watch(
 	() => sessionStore.reconnectCount,
 	async () => {
@@ -666,7 +723,7 @@ watch(
 		if (effectiveChannelId.value) {
 			try {
 				error.value = null;
-				await reattachChannel(effectiveChannelId.value);
+				await attachAndCover(effectiveChannelId.value);
 			} catch (err) {
 				error.value = err instanceof Error ? err.message : String(err);
 			}
@@ -715,13 +772,14 @@ async function onRestart(): Promise<void> {
 		// host — where the status watcher may not have heard it come back yet.
 		hasEnded.value = false;
 		reattaching = true;
-		let result: Awaited<ReturnType<typeof reattachChannel>>;
+		let result: AttachResult | null;
 		try {
-			result = await reattachChannel(chId, { preserveContent: true });
+			result = await attachAndCover(chId, { preserveContent: true });
 		} finally {
 			reattaching = false;
 		}
-		isDetached.value = result.cached;
+		// Ended again at once, or gone: the answer is already what covers it.
+		if (result === null) return;
 		if (result.writeLockHolder) {
 			writeLockStore.handleWriteLock(chId, result.writeLockHolder);
 		}

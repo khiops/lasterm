@@ -299,8 +299,11 @@ describe("TerminalPane overlay (#574)", () => {
 	it('writes the setting where "Always do this" says, for this terminal', () => {
 		const onAction = body(/function onOverlayAction\(/);
 		expect(onAction).toContain(
-			".saveWhenEnded(remember.whenEnded, remember.scope, {\n\t\t\t\thostId: paneHostId.value ?? null,\n\t\t\t\tchannelId: effectiveChannelId.value,",
+			".saveWhenEnded(remember.whenEnded, remember.scope, {",
 		);
+		// A Windows checkout ends its lines with CRLF: each line on its own.
+		expect(onAction).toContain("hostId: paneHostId.value ?? null,");
+		expect(onAction).toContain("channelId: effectiveChannelId.value,");
 		expect(body(/function onAlwaysChange\(/)).toContain("toggleAlways(alwaysScope.value, scope,");
 	});
 

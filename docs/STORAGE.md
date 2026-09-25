@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-03-02
+> Last updated: 2026-09-25
 
 ## 1. Overview
 
@@ -10,10 +10,10 @@ Two SQLite databases, both in WAL mode:
 
 | Database | Path | Purpose | Size profile |
 |----------|------|---------|-------------|
-| **meta.db** | `$LASTERM_DATA_DIR/meta.db` | Config + relational data | Small (KB–MB) |
-| **spool.db** | `$LASTERM_DATA_DIR/spool.db` | Output chunks + snapshots | Large (MB–GB) |
+| **meta.db** | `<state dir>/meta.db` | Config + relational data | Small (KB–MB) |
+| **spool.db** | `<state dir>/spool.db` | Output chunks + snapshots | Large (MB–GB) |
 
-Platform paths for `$LASTERM_DATA_DIR`: see SPEC.md § 7 (Linux: `~/.local/share/lasterm/`, Windows: `%LOCALAPPDATA%\lasterm\`).
+Both live in the hub's state directory, the one it locks: on Linux `$XDG_STATE_HOME/lasterm/` (by default `~/.local/state/lasterm/`), on Windows `%LOCALAPPDATA%\lasterm\`.
 
 **Why 2 databases:**
 - VACUUM spool without blocking meta reads
@@ -41,7 +41,25 @@ PRAGMA auto_vacuum = INCREMENTAL;    -- Free pages without full VACUUM
 PRAGMA wal_autocheckpoint = 2000;    -- Less frequent checkpoints (more batching)
 ```
 
-**File permissions:** Both DB files and WAL/SHM files: `chmod 600` (owner read/write only).
+**File permissions:** on Unix, `meta.db`, `spool.db` and their `-wal` and `-shm` files are 0600
+(owner read/write only), held to that each time the hub opens them (#536):
+
+- A database file that does not exist yet is created 0600 before SQLite opens it. Left to
+  SQLite, it would get 0644 under the usual umask of 022.
+- An existing database file is set to 0600, and so is a `-wal` or `-shm` file an earlier run
+  left behind: a database an earlier version created, or one copied in, has whatever mode the
+  umask gave it.
+- The `-wal` and `-shm` files SQLite creates from then on take the database file's mode, which
+  SQLite copies to them on Unix. A spec reads all six modes back after a first write.
+- A database file another account owns, or one that is not a regular file, stops the hub,
+  naming it.
+
+The state directory holding them is 0700, checked at every start before anything is opened in
+it: tightened when this account owns it, refused when another account does (SECURITY.md § 2.2,
+item 3).
+
+On Windows no mode is set or checked. The files, like the state directory, rely on the
+profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 
 ## 3. Schema — meta.db
 

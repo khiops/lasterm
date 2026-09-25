@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-24
+> Last updated: 2026-09-25
 
 ## 1. Threat Model
 
@@ -64,7 +64,7 @@
 | Unauthorized hub access | Local process connects to WSS/HTTPS | HIGH — terminal access | MEDIUM | TLS SPKI pinning plus a browser token on every authenticated browser request/connection |
 | Token theft | Read auth.json | HIGH — full access | LOW on a current install, where the hub creates auth.json 0600 and its directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one whose permissions were widened by hand | chmod 600, and on Unix the hub refuses to start when the file is group- or world-readable or writable. Windows is not checked: both checks return before doing anything there, and the file relies on the profile's default ACL; a DACL check was judged not worth its cost (#200) |
 | Token planting | Write the configuration directory as another account, before the hub's first start | HIGH — the attacker chooses the credential the hub then honours, which is terminal access | LOW on a current install, where the hub creates the directory 0700 whatever the umask; higher on a directory an earlier version created under a umask of 002, or one widened by hand | The hub adopts an existing token at first start rather than refusing it, so this is takeover and not denial of service. On Unix both the desktop and the hub now refuse a directory group or other can write, before reading a token from it and before writing one into it, and the hub also refuses a directory it does not own. On Windows the protection is the single leaf handle and the profile's own ACL, since the reader inspects neither ownership nor a DACL, and the hub's check returns immediately there, which relies on the profile's default ACL (#200) |
-| Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | chmod 600 on all DB files |
+| Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | On Unix, 0600 on every database file and its WAL files, and a 0700 state directory, both held to that at every start (§ 2.2, item 3; STORAGE.md § 2). On Windows, the profile's default ACL (#200) |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
 | DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
@@ -134,12 +134,24 @@ runs everywhere.
    - If not a regular file, including a symlink: HARD FAIL
    - Expected: 0600 (-rw-------)
 
-3. Check data directory permissions — NOT IMPLEMENTED
-   - Nothing inspects the state directory holding meta.db and spool.db. The hub's
-     only permission checks are the two above, both in `auth.ts`
-   - Expected once it exists: 0700 (drwx------)
-   - The hub creates that directory 0700 wherever it first makes it (#352), but does not
-     inspect one that already exists
+3. Check the state directory holding meta.db, spool.db, the TLS key and hub-key, first of
+   all: before the hub lock is taken, and before a log or a database is opened in it (#536)
+   - If not a directory, including a symlink: HARD FAIL. The TLS key writer never
+     accepted a linked one either
+   - If owned by another account, root included: HARD FAIL. Whoever owns the directory
+     can replace anything in it, and lasterm does not change another account's
+     directory. The TLS key writer already refused it; this refusal comes first and
+     names the fix: have that account hand the directory over, or set XDG_STATE_HOME
+     to a directory this account owns
+   - If this account owns it and group or others have any permission on it: tightened
+     to 0700, the owner's bits left as they are, as the addon cache is (§ 4.5). That is
+     a directory an earlier version made under a loose umask, or one made by hand. If
+     the mode does not change — a filesystem that ignores chmod: HARD FAIL
+   - Expected: 0700 (drwx------), owned by the user running the hub. The hub creates it
+     0700 wherever it first makes it (#352)
+   - One lstat, in `state-dir.ts`, with the same limit as item 1: an ancestor able to
+     rename the directory defeats it
+   - The database files inside are held to 0600 whenever they are opened (STORAGE.md § 2)
 
 4. Verify auth.json contains valid token (64 lowercase hex characters, as the hub generates)
    - If missing: generate one
@@ -177,10 +189,11 @@ against.
 
 What this addresses is narrow, and this is all of it: someone who can read `meta.db` — the file, its
 WAL, a backup or a sync of the state directory — during the minute a code is live, but cannot read
-the hub's memory. Until #521, such a reader could redeem the code and receive a token. On a current
-Unix install only the owner reaches `meta.db`, through the state directory the hub creates 0700; the
-file's own mode is left to the umask, and a state directory an earlier version made is not inspected
-(§ 2.2, item 3). On Windows it relies on the profile's default ACL, as `auth.json` does (#200).
+the hub's memory. Until #521, such a reader could redeem the code and receive a token. On Unix only
+the owner reaches `meta.db`: the file and its WAL files are 0600 and the state directory 0700, both
+held to that at every start (§ 2.2, item 3; STORAGE.md § 2). A copy taken out of that directory keeps
+0600, but a backup tool may not. On Windows it relies on the profile's default ACL, as `auth.json`
+does (#200).
 
 It does nothing against a process running as the same user, which can read `auth.json`, whose token
 already opens everything a pairing would, or the hub's memory. It does not change what bounds a guess

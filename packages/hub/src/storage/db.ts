@@ -1,4 +1,12 @@
-import { readdirSync, readFileSync } from "node:fs";
+import {
+	closeSync,
+	constants,
+	fchmodSync,
+	fstatSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
@@ -6,6 +14,76 @@ import Database from "better-sqlite3";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const MIGRATIONS_DIR = join(__dirname, "migrations");
+
+/** The files SQLite keeps beside a database in WAL mode. */
+const WAL_FILE_SUFFIXES = ["-wal", "-shm"] as const;
+
+/**
+ * Make a database and the files SQLite keeps beside it owner-only (0600), before
+ * SQLite opens it (STORAGE.md § 2, #536). `meta.db` holds token hashes and host
+ * definitions, `spool.db` terminal output.
+ *
+ * The database file is created 0600 when it does not exist yet: left to SQLite,
+ * it would get 0644 under the usual umask of 022. An existing one is set to 0600,
+ * and so is a `-wal` or `-shm` file an earlier run left behind: a database an
+ * earlier version created, or one copied in, has whatever mode the umask gave it.
+ * The `-wal` and `-shm` files SQLite creates from then on take the database's
+ * mode, which SQLite copies to them on Unix.
+ *
+ * A file another account owns, or one that is not a regular file, stops the hub:
+ * lasterm does not change another account's file, and SQLite could not keep a
+ * FIFO or a directory anyway.
+ *
+ * Windows is not touched. chmod there only toggles the read-only attribute, and
+ * the files rely on the profile's default ACL, as auth.json does (#200).
+ */
+export function restrictDatabaseFiles(
+	databasePath: string,
+	options: { readonly uid?: number } = {},
+): void {
+	if (process.platform === "win32") return;
+	// The account the files must belong to. Defaults to the effective uid; tests substitute it.
+	const uid = options.uid ?? process.geteuid?.();
+	restrictToOwner(databasePath, uid, { create: true });
+	for (const suffix of WAL_FILE_SUFFIXES) {
+		restrictToOwner(`${databasePath}${suffix}`, uid, { create: false });
+	}
+}
+
+/**
+ * Set `file` to 0600 through a descriptor, so the mode lands on the file that
+ * was inspected. A link is followed, as SQLite follows it. O_NONBLOCK keeps a
+ * FIFO in its place from blocking the open until the check refuses it.
+ */
+function restrictToOwner(
+	file: string,
+	uid: number | undefined,
+	{ create }: { create: boolean },
+): void {
+	const flags = constants.O_RDONLY | constants.O_NONBLOCK | (create ? constants.O_CREAT : 0);
+	let fd: number;
+	try {
+		fd = openSync(file, flags, 0o600);
+	} catch (error) {
+		if (!create && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile()) {
+			throw new Error(`SECURITY: database file at ${file} is not a regular file`);
+		}
+		if (uid !== undefined && stat.uid !== uid) {
+			throw new Error(
+				`SECURITY: database file at ${file} is owned by uid ${stat.uid}, not by this account (uid ${uid})`,
+			);
+		}
+		// Exactly 0600, whatever the umask removed from a file just created.
+		if ((stat.mode & 0o7777) !== 0o600) fchmodSync(fd, 0o600);
+	} finally {
+		closeSync(fd);
+	}
+}
 
 export interface DatabaseManager {
 	meta: Database.Database;
@@ -94,11 +172,17 @@ function runMigrations(db: Database.Database, migrationsDir: string): void {
 }
 
 export function openDatabases(dataDir: string): DatabaseManager {
-	const metaDb = new Database(join(dataDir, "meta.db"));
+	const metaPath = join(dataDir, "meta.db");
+	const spoolPath = join(dataDir, "spool.db");
+	// Both before either opens, so a refusal leaves no connection behind.
+	restrictDatabaseFiles(metaPath);
+	restrictDatabaseFiles(spoolPath);
+
+	const metaDb = new Database(metaPath);
 	applyCommonPragmas(metaDb);
 	metaDb.pragma("wal_autocheckpoint = 1000");
 
-	const spoolDb = new Database(join(dataDir, "spool.db"));
+	const spoolDb = new Database(spoolPath);
 	applySpoolPragmas(spoolDb);
 	applyCommonPragmas(spoolDb);
 	spoolDb.pragma("wal_autocheckpoint = 2000");

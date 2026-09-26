@@ -209,6 +209,19 @@ export class AgentConnectionManager {
 	}
 
 	/**
+	 * Whether a terminal of this host that ends now was ended by this hub on
+	 * purpose (#580): the hub is quitting, which stops the local agent and all
+	 * it runs, or it is stopping this host's agent to replace it.
+	 *
+	 * A quit marks every end it hears, a remote's too: nothing may start again
+	 * while the hub quits, and a pane closing on it could delete a terminal the
+	 * next launch should still list.
+	 */
+	private endingOnPurpose(hostId: string): boolean {
+		return this.ctx.quitState === "QUITTING" || this.ctx.stoppingAgents.has(hostId);
+	}
+
+	/**
 	 * On hub start, restore sessions that were alive before the previous shutdown.
 	 */
 	async startup(): Promise<void> {
@@ -375,6 +388,7 @@ export class AgentConnectionManager {
 						channel.sessionId,
 						"dead",
 						exitMsg.exitCode,
+						this.endingOnPurpose(hostId) ? "destroyed" : undefined,
 					);
 				}
 				this.ctx.scheduler.untrackChannel(exitMsg.channelId);

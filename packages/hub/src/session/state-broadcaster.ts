@@ -12,6 +12,7 @@ import type {
 	AgentProcessTitleMessage,
 	AgentTitleChangeMessage,
 	ChannelCreatedMessage,
+	ChannelEndReason,
 	ChannelStateMessage,
 	ProtocolMessage,
 	SessionStateMessage,
@@ -165,6 +166,7 @@ export class StateBroadcaster {
 		sessionId: string,
 		status: import("@lasterm/shared").ChannelStatus,
 		exitCode?: number,
+		endReason?: ChannelEndReason,
 	): void {
 		const ch = this.ctx.channels.get(channelId);
 		if (ch) {
@@ -178,6 +180,9 @@ export class StateBroadcaster {
 			sessionId,
 			status,
 			...(exitCode !== undefined && { exitCode }),
+			// Said with the end only, and not stored: an end found later is never
+			// acted on, so only the report heard as it happens needs it (#580).
+			...(status === "dead" && endReason !== undefined && { endReason }),
 		};
 		// Every client, as STATE_SYNC and CHANNEL_CREATED go: each of them holds
 		// every channel in its state, and a window can show a terminal without

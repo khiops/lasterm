@@ -6690,6 +6690,20 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		]);
 	});
 
+	// Or the agent goes before a terminal's own end was heard: the session
+	// closes, as the quit refuses to reconnect, and ends it with the rest.
+	it("a quit says so of the terminals it ends by stopping their agent", async () => {
+		const { channelId, heard } = await liveTerminal();
+
+		sm.beginQuit();
+		mockLocalAgents.at(-1)?.simulateDisconnect();
+		await flushImmediate();
+
+		expect(endsOf(heard, channelId)).toEqual([
+			expect.objectContaining({ status: "dead", endReason: "destroyed" }),
+		]);
+	});
+
 	// A deleted terminal is no longer the hub's to bring back: a pane that
 	// restarts it by its id is refused, where a dead one still listed is not.
 	it("refuses to bring back a terminal that was deleted", async () => {

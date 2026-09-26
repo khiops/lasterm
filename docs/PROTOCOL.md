@@ -683,7 +683,8 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
 //   - DELETE /api/sessions/:id, for every terminal of that session;
 //   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
 //     sends while the hub stops it;
-//   - quit (POST /api/quit), for each CHANNEL_EXIT heard once the hub is quitting.
+//   - quit (POST /api/quit), for every "dead" the hub reports once it is quitting:
+//     the local agent's CHANNEL_EXITs, and the session closing when it goes.
 // A client never restarts or closes a terminal on such an end, whatever "When a
 // terminal ends" says: someone meant it to end. It shows that it ended, and why.
 

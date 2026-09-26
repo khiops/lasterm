@@ -44,6 +44,16 @@ export interface TerminalProfile {
 	 * stored.
 	 */
 	env?: Record<string, string>;
+	/**
+	 * What a pane does when this terminal ends (#574). Default: "ask"
+	 *
+	 * "ask" lays Restart and Close over it. "restart" brings it back, but never
+	 * one that ended within seconds of starting, nor one found already ended on
+	 * a reload or an attach: that is an end nobody saw happen. "close" closes
+	 * its pane, deleting the terminal or keeping it as the UI config's
+	 * `panes.keepEnded` says.
+	 */
+	whenEnded?: "ask" | "restart" | "close";
 	[key: string]: unknown;
 }
 

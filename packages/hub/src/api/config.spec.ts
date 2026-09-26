@@ -75,6 +75,8 @@ describe("UI_VALUE_VALIDATORS", () => {
 		["panes", "maxPanes", "accepts", 4],
 		["panes", "maxPanes", "refuses", 0],
 		["panes", "maxPanes", "refuses", 2.5],
+		["panes", "keepEnded", "accepts", true],
+		["panes", "keepEnded", "refuses", "yes"],
 		["channels", "autoGroup", "accepts", "first"],
 		["channels", "autoGroup", "refuses", "last"],
 		["search", "historySize", "accepts", 50],

@@ -847,6 +847,27 @@ describe("closePane", () => {
 		const after = getLayoutForChannel("ch-A");
 		expect(after).toEqual(before);
 	});
+
+	// A terminal can end in a tab nobody is looking at, and "When a terminal
+	// ends: Close" closes its pane there (#574). Only the tab in view was
+	// searched, so that close did nothing.
+	it("closes a pane in a tab that is not the one in view", () => {
+		const [tabA] = openTabs("A");
+		layout.splitPane("ch-A", "vertical");
+		const afterSplit = getLayoutForChannel("ch-A");
+		if (afterSplit?.type !== "split" || afterSplit.second.type !== "vacant") {
+			throw new Error("expected a split with a vacant second pane");
+		}
+		layout.fillVacant(afterSplit.second.id, "ch-B");
+		openTabs("C");
+		expect(layout.activeTab.value?.id).not.toBe(tabA);
+
+		layout.closePane("ch-B");
+
+		const root = tabA ? layout.layouts.value[tabA] : undefined;
+		expect(root?.type).toBe("terminal");
+		if (root?.type === "terminal") expect(root.channelId).toBe("ch-A");
+	});
 });
 
 // ── fillVacant ────────────────────────────────────────────────────────────

@@ -149,6 +149,12 @@ export const useThemeStore = defineStore("theme", () => {
 		// dark background (brightWhite muted text is invisible on a light theme's light bg).
 		root.setProperty("--nt-accent-fg", readableForeground(theme.ui.accent));
 		root.setProperty("--nt-danger-fg", readableForeground(badgeDanger));
+		// The theme's text, as readable as text has to be on the theme's own
+		// background: most themes' pair already is, Solarized Light's is 4.1:1.
+		root.setProperty(
+			"--nt-text-strong",
+			readableText(theme.colors.foreground, theme.colors.background),
+		);
 
 		// RGB components for rgba() usage
 		root.setProperty("--nt-accent-rgb", hexToRgb(theme.ui.accent));
@@ -403,6 +409,67 @@ export function readableForeground(hex: string): "#000000" | "#ffffff" {
 	const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
 
 	return luminance > 0.179 ? "#000000" : "#ffffff";
+}
+
+// ── Helper: contrast between two solid colours (WCAG 2) ────────────────
+
+function relativeLuminance(rgb: readonly [number, number, number]): number {
+	const linear = (value: number) => {
+		const s = value / 255;
+		return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+	};
+	return 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2]);
+}
+
+function parseHex(hex: string): [number, number, number] | null {
+	const normalized = hex.trim();
+	if (!/^#[0-9a-fA-F]{6}/.test(normalized)) return null;
+	return [
+		Number.parseInt(normalized.slice(1, 3), 16),
+		Number.parseInt(normalized.slice(3, 5), 16),
+		Number.parseInt(normalized.slice(5, 7), 16),
+	];
+}
+
+/** The WCAG contrast ratio of two solid colours, from 1 to 21. */
+export function contrastRatio(
+	a: readonly [number, number, number],
+	b: readonly [number, number, number],
+): number {
+	const [light, dark] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x) as [
+		number,
+		number,
+	];
+	return (light + 0.05) / (dark + 0.05);
+}
+
+/** WCAG AA for body text. */
+export const TEXT_CONTRAST_AA = 4.5;
+
+/**
+ * `foreground` if it reads on `background` at `min` or better; otherwise the
+ * least change that does: moved toward black on a light background, toward
+ * white on a dark one, keeping its hue as far as that allows.
+ */
+export function readableText(
+	foreground: string,
+	background: string,
+	min = TEXT_CONTRAST_AA,
+): string {
+	const fg = parseHex(foreground);
+	const bg = parseHex(background);
+	if (fg === null || bg === null) return foreground;
+	if (contrastRatio(fg, bg) >= min) return foreground;
+	const target = relativeLuminance(bg) > relativeLuminance(fg) ? 0 : 255;
+	const toHex = (c: [number, number, number]) =>
+		`#${c.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+	let candidate = fg;
+	for (let step = 1; step <= 100; step++) {
+		const t = step / 100;
+		candidate = fg.map((v) => Math.round(v + (target - v) * t)) as [number, number, number];
+		if (contrastRatio(candidate, bg) >= min) break;
+	}
+	return toHex(candidate);
 }
 
 // ── Helper: "#89b4fa" + alpha -> "rgba(137, 180, 250, 0.85)" ──────────────

@@ -2,7 +2,14 @@ import type { LastermTheme } from "@lasterm/shared";
 import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { hexToRgb, readableForeground, useThemeStore } from "./theme.js";
+import {
+	contrastRatio,
+	hexToRgb,
+	readableForeground,
+	readableText,
+	TEXT_CONTRAST_AA,
+	useThemeStore,
+} from "./theme.js";
 
 const catppuccinMocha = BUNDLED_THEMES["catppuccin-mocha"] as LastermTheme;
 const nordTheme = BUNDLED_THEMES.nord as LastermTheme;
@@ -475,6 +482,47 @@ describe("readableForeground", () => {
 
 	it("uses white text on dark colors", () => {
 		expect(readableForeground("#0366d6")).toBe("#ffffff");
+	});
+});
+
+// `--nt-text-strong`: the theme's text, readable on the theme's ground (#574).
+describe("readableText", () => {
+	const rgb = (hex: string) => hexToRgb(hex).split(", ").map(Number) as [number, number, number];
+
+	it("keeps a theme's foreground that already reads at 4.5:1", () => {
+		for (const theme of Object.values(BUNDLED_THEMES)) {
+			const { foreground, background } = theme.colors;
+			if (contrastRatio(rgb(foreground), rgb(background)) >= TEXT_CONTRAST_AA) {
+				expect(readableText(foreground, background), theme.name).toBe(foreground);
+			}
+		}
+	});
+
+	// Solarized Light's own pair, base00 on base3, is 4.1:1.
+	it("moves one that does not just far enough, darker on a light ground", () => {
+		const solarized = BUNDLED_THEMES["solarized-light"] as LastermTheme;
+		const { foreground, background } = solarized.colors;
+		expect(contrastRatio(rgb(foreground), rgb(background))).toBeLessThan(TEXT_CONTRAST_AA);
+		const fixed = readableText(foreground, background);
+		expect(contrastRatio(rgb(fixed), rgb(background))).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
+		expect(contrastRatio(rgb(fixed), rgb(background))).toBeLessThan(5);
+		expect(rgb(fixed).every((v, i) => v <= (rgb(foreground)[i] ?? 0))).toBe(true);
+	});
+
+	it("lightens on a dark ground", () => {
+		const fixed = readableText("#444444", "#222222");
+		expect(contrastRatio(rgb(fixed), rgb("#222222"))).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
+		expect(rgb(fixed)[0]).toBeGreaterThan(0x44);
+	});
+
+	it("is set with the theme", () => {
+		const store = useThemeStore();
+		const solarized = BUNDLED_THEMES["solarized-light"] as LastermTheme;
+		store.applyTheme(solarized);
+		expect(setPropertyMock).toHaveBeenCalledWith(
+			"--nt-text-strong",
+			readableText(solarized.colors.foreground, solarized.colors.background),
+		);
 	});
 });
 

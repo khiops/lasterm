@@ -691,10 +691,15 @@ export function usePaneTree(
 	 * If the closed pane was the active pane, activePaneId is set to the sibling's
 	 * first leaf paneId.
 	 * The channel/PTY keeps running (INV-03: closing never kills the terminal).
+	 *
+	 * The pane is looked for in the tab in view first, then in every other:
+	 * a terminal can end in a tab nobody is looking at, and "When a terminal
+	 * ends: Close" closes it there (#574).
 	 */
 	function closePane(channelId: string): void {
-		const tab = activeTab.value;
-		if (tab === null) return;
+		const tabId = findTabForChannel(channelId);
+		if (tabId === null) return;
+		const tab = { id: tabId };
 
 		const root = layouts.value[tab.id];
 		if (root === null || root === undefined) return;

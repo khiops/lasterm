@@ -1,5 +1,5 @@
 <template>
-	<div class="terminal-pane" :style="borderStyle" @contextmenu.prevent="showContextMenu">
+	<div ref="paneRoot" class="terminal-pane" :style="borderStyle" @contextmenu.prevent="showContextMenu">
 		<!-- Pane header — always rendered so fitAddon.fit() calculates correct rows -->
 		<div
 			class="pane-header"
@@ -24,7 +24,7 @@
 				<span>{{ error }}</span>
 				<div class="terminal-error__actions">
 					<button class="exit-btn" @click="onRetry">Retry</button>
-					<button class="exit-btn exit-btn--danger" @click="onClosePaneFromOverlay">Close</button>
+					<button class="exit-btn" @click="onClosePaneFromOverlay">Close</button>
 				</div>
 			</div>
 		</div>
@@ -36,22 +36,73 @@
 		<!-- Background tint overlay (UX-07) -->
 		<div v-if="tintStyle" class="tint-overlay" :style="tintStyle" />
 
-		<!-- Exit overlay for all dead channels, and for one the hub has never heard of -->
+		<!-- Exit overlay for all dead channels, and for one the hub has never heard of.
+		     The card carries its own opaque ground, so what is behind it — the
+		     terminal's content, a wallpaper — never decides whether it reads. -->
 		<div v-if="cover === 'exited' || cover === 'gone'" class="exit-overlay">
-			<div class="exit-message">{{ cover === 'gone' ? goneMessage : exitMessage }}</div>
-			<div v-if="restartFailure && !isGone" class="exit-reason">
-				Could not restart it: {{ restartFailure }}
-			</div>
-			<div class="exit-actions">
-				<button v-if="!isGone" class="exit-btn" :disabled="restarting" @click="onRestart">
-					{{ restarting ? 'Restarting…' : 'Restart' }}
-				</button>
-				<button
-					v-if="isDirectProcess && !isGone"
-					class="exit-btn"
-					@click="onConfigure"
-				>Configure</button>
-				<button class="exit-btn exit-btn--danger" @click="onClosePaneFromOverlay">Close</button>
+			<div
+				ref="exitCard"
+				class="exit-card"
+				role="group"
+				tabindex="-1"
+				:aria-labelledby="`${exitId}-message`"
+			>
+				<p :id="`${exitId}-message`" class="exit-message">
+					{{ cover === 'gone' ? goneMessage : exitMessage }}
+				</p>
+				<p v-if="heldBack !== null && !isGone" class="exit-reason">{{ heldBackText }}</p>
+				<p v-if="restartFailure && !isGone" class="exit-reason">
+					Could not restart it: {{ restartFailure }}
+				</p>
+				<div class="exit-actions">
+					<button
+						v-if="!isGone"
+						class="exit-btn exit-btn--primary"
+						:disabled="restarting"
+						@click="onOverlayAction('restart')"
+					>
+						{{ restarting ? 'Restarting…' : 'Restart' }}
+					</button>
+					<button
+						v-if="isDirectProcess && !isGone"
+						class="exit-btn"
+						@click="onConfigure"
+					>Configure</button>
+					<button
+						v-if="isGone"
+						class="exit-btn"
+						@click="onClosePaneFromOverlay"
+					>Close</button>
+					<button v-else class="exit-btn" @click="onOverlayAction('close')">Close</button>
+				</div>
+				<div v-if="!isGone" class="exit-options">
+					<label class="exit-option" :for="`${exitId}-always`">
+						<input :id="`${exitId}-always`" v-model="alwaysOn" type="checkbox" />
+						Always do this
+					</label>
+					<div
+						class="exit-scope"
+						:class="{ 'exit-scope--off': !alwaysOn }"
+						role="radiogroup"
+						aria-label="Where to always do this"
+					>
+						<label
+							v-for="where in ALWAYS_SCOPES"
+							:key="where.value"
+							class="exit-scope-option"
+							:class="{ 'exit-scope-option--on': alwaysWhere === where.value }"
+						>
+							<input
+								v-model="alwaysWhere"
+								type="radio"
+								:name="`${exitId}-scope`"
+								:value="where.value"
+								@change="alwaysOn = true"
+							/>
+							{{ where.label }}
+						</label>
+					</div>
+				</div>
 			</div>
 		</div>
 
@@ -117,7 +168,7 @@
 
 <script setup lang="ts">
 import { DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, toRef, watch } from 'vue';
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, toRef, useId, watch } from 'vue';
 import { useActivityTracker } from '../composables/useActivityTracker.js';
 import { playBellSound } from '../composables/useBellSound.js';
 import type { SearchScope } from '../composables/useMultiPaneSearch.js';
@@ -136,6 +187,20 @@ import { useHostsStore } from '../stores/hosts.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
+import { useToastStore } from '../stores/toast.js';
+import {
+	type AlwaysScope,
+	ALWAYS_SCOPES,
+	createEndWatch,
+	type EndSeen,
+	endedPrefs,
+	type HeldBack,
+	heldBackMessage,
+	type OverlayAction,
+	overlayChoice,
+	reactToEnd,
+	alwaysScopeOf,
+} from '../utils/exit-action.js';
 import { type AttachFacts, factsFromAttachOk, factsFromRefusal, paneCover } from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
@@ -169,7 +234,8 @@ const emit = defineEmits<{
 	(e: 'split-right', channelId: string): void;
 	(e: 'split-down', channelId: string): void;
 	(e: 'detach-pane', channelId: string): void;
-	(e: 'close-pane', channelId: string): void;
+	/** `ended` when closing a terminal known to have ended: whether to keep it listed. */
+	(e: 'close-pane', channelId: string, ended?: { keep: boolean }): void;
 	(e: 'channel-spawned', tempId: string, realId: string): void;
 	(e: 'configure-command', channelId: string): void;
 	(e: 'search-all-panes', query: string): void;
@@ -355,7 +421,9 @@ const isDirectProcess = computed(() => {
 	const chId = effectiveChannelId.value;
 	if (!chId) return false;
 	const channel = channelsStore.channels.find((c) => c.id === chId);
-	return channel?.directProcess === true;
+	// A terminal on a host not in view is in the index only.
+	if (channel === undefined) return channelsStore.channelIndex.get(chId)?.directProcess === true;
+	return channel.directProcess === true;
 });
 
 /**
@@ -381,14 +449,75 @@ let reattaching = false;
  */
 let attachedLive = false;
 
+// ---------------------------------------------------------------------------
+// When the terminal ends (#574)
+// ---------------------------------------------------------------------------
+
+/**
+ * "When a terminal ends", as this terminal's settings resolve it (globally, for
+ * its host, or for it), and "Keep ended terminals in the sidebar", from Settings.
+ */
+const prefs = computed(() => endedPrefs(configStore.uiConfig.panes, resolvedProfile.value));
+
+/**
+ * Whether an end was seen as it happened, or found afterwards: only the first
+ * is acted on. See `reactToEnd`.
+ */
+const endWatch = createEndWatch(() => performance.now());
+
+// What the pane hears after its socket went is not live, whatever it says.
+// Synchronous, so that no report arriving on the next socket is read first.
+watch(
+	() => sessionStore.connected,
+	(connected) => {
+		if (!connected) endWatch.lost();
+	},
+	{ flush: 'sync' },
+);
+
+/** Why the setting's restart did not happen, shown on the overlay. */
+const heldBack = ref<HeldBack | null>(null);
+const heldBackText = computed(() => (heldBack.value === null ? '' : heldBackMessage(heldBack.value)));
+// A reason is about one terminal: a pane handed another one drops it.
+watch(effectiveChannelId, () => {
+	heldBack.value = null;
+});
+
+/** Do what the setting says about an end, or show the overlay and why. */
+function onTerminalEnded(end: EndSeen): void {
+	const reaction = reactToEnd(prefs.value, {
+		...end,
+		directProcess: isDirectProcess.value,
+		writer: isWriter.value,
+	});
+	if (reaction.kind === 'overlay') {
+		// An end found later keeps the reason the one seen gave, which is still true.
+		if (reaction.heldBack !== undefined) heldBack.value = reaction.heldBack;
+		else if (end.seen === 'live') heldBack.value = null;
+		return;
+	}
+	heldBack.value = null;
+	if (reaction.kind === 'restart') void onRestart();
+	else closeEnded(reaction.keep);
+}
+
 type AttachResult = Awaited<ReturnType<typeof reattachChannel>>;
 
-/** Take what the hub answered to an attach, and only that. */
-function takeAnswer(facts: AttachFacts): void {
+/** Take what the hub answered to an attach about `chId`, and only that. */
+function takeAnswer(chId: string, facts: AttachFacts): void {
 	hasEnded.value = facts.ended;
 	isGone.value = facts.gone;
 	isDetached.value = facts.detached;
 	attachedLive = !facts.ended && !facts.gone && !facts.detached;
+	if (attachedLive) {
+		endWatch.attached(chId);
+		heldBack.value = null;
+	} else if (facts.ended) {
+		// Refused because it has ended: found, not seen happening.
+		onTerminalEnded(endWatch.ended(chId));
+	} else {
+		endWatch.lost();
+	}
 }
 
 /**
@@ -416,10 +545,10 @@ async function attachAndCover(
 		// over a terminal that had ended (#556).
 		const facts = factsFromRefusal((err as { code?: string } | null)?.code);
 		if (facts === null) throw err;
-		takeAnswer(facts);
+		takeAnswer(chId, facts);
 		return null;
 	}
-	takeAnswer(factsFromAttachOk(result.cached));
+	takeAnswer(chId, factsFromAttachOk(result.cached));
 	return result;
 }
 
@@ -479,7 +608,10 @@ const goneMessage = 'This terminal no longer exists.';
 watch(
 	() => channelsStore.statusOf(effectiveChannelId.value),
 	(status) => {
-		if (status === 'live' || status === 'born') hasEnded.value = false;
+		if (status === 'live' || status === 'born') {
+			hasEnded.value = false;
+			heldBack.value = null;
+		}
 	},
 );
 
@@ -500,9 +632,18 @@ const restarting = ref(false);
  */
 watch(
 	() => channelsStore.reportOf(effectiveChannelId.value),
-	(report) => {
-		if (report?.status === 'dead') attachedLive = false;
+	(report, previous) => {
+		const chId = effectiveChannelId.value;
+		if (report?.status === 'dead') {
+			attachedLive = false;
+			// The hub saying it ended: live if this pane was watching it run on
+			// this socket, found otherwise (#574). A report repeating it is not news.
+			if (chId !== null && previous?.status !== 'dead') onTerminalEnded(endWatch.ended(chId));
+		}
 		if (report?.status !== 'live' || attachedLive || !ready.value || restarting.value) return;
+		// Brought back from elsewhere while this pane was over it ended: a start
+		// seen, which the attach below counts from.
+		if (chId !== null && previous?.status === 'dead') endWatch.starting(chId);
 		void onReconnect();
 	},
 );
@@ -527,7 +668,7 @@ const exitMessage = computed(() => {
 	const chId = effectiveChannelId.value;
 	if (!chId) return 'Exited';
 	const channel = channelsStore.channels.find((c) => c.id === chId);
-	const label = channel?.directProcess ? 'Process' : 'Shell';
+	const label = isDirectProcess.value ? 'Process' : 'Shell';
 	const code = channel?.exitCode ?? channelsStore.reportOf(chId)?.exitCode;
 	if (code !== undefined && code !== null) {
 		return `${label} exited (code ${code})`;
@@ -573,6 +714,9 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				suppressNextResize(cols, rows);
 				attachChannel(realId);
 				attachedLive = true;
+				// Watched from its very start.
+				endWatch.starting(realId);
+				endWatch.attached(realId);
 				// And now that there is a channel to tell: a font arriving while
 				// it was being created refits the terminal, and that fit had
 				// nobody to send its size to.
@@ -761,12 +905,17 @@ async function onRestart(): Promise<void> {
 	// is the opposite of what the button says.
 	if (restarting.value) return;
 	restarting.value = true;
+	// The attach that follows counts from this start: an end within seconds of
+	// it is one the setting does not restart again (#574).
+	endWatch.starting(chId);
+	heldBack.value = null;
 	let ok: boolean;
 	try {
 		ok = await channelsStore.restartChannel(chId, paneHostId.value);
 	} finally {
 		restarting.value = false;
 	}
+	if (!ok) endWatch.lost();
 	if (ok) {
 		// This pane may be over a terminal no list shows — one on another
 		// host — where the status watcher may not have heard it come back yet.
@@ -804,6 +953,79 @@ function onClosePaneFromOverlay(): void {
 		emit('close-pane', chId);
 	}
 }
+
+/** Close the pane of a terminal that has ended, deleting it unless it is kept. */
+function closeEnded(keep: boolean): void {
+	const chId = effectiveChannelId.value;
+	if (chId !== null) emit('close-pane', chId, { keep });
+}
+
+/**
+ * The overlay's option: "Always do this", and where — this host, the
+ * default, or everywhere. Picking where also checks the box: it only means
+ * something then.
+ */
+const exitId = useId();
+const alwaysOn = ref(false);
+const alwaysWhere = ref<AlwaysScope>('host');
+const paneRoot = ref<HTMLElement | null>(null);
+const exitCard = ref<HTMLElement | null>(null);
+
+/**
+ * Restart or Close, clicked on the overlay: done at once, and remembered as
+ * the setting, for this host or everywhere, when "Always do this" says so.
+ * Whether Close deletes the terminal is the "Keep" setting's to say.
+ */
+function onOverlayAction(action: OverlayAction): void {
+	const { act, remember } = overlayChoice(
+		action,
+		alwaysScopeOf(alwaysOn.value, alwaysWhere.value),
+		prefs.value.keepEnded,
+	);
+	if (remember !== null) {
+		void configStore
+			.saveWhenEnded(remember.whenEnded, remember.scope, {
+				hostId: paneHostId.value ?? null,
+				channelId: effectiveChannelId.value,
+			})
+			.then((saved) => {
+				if (!saved) useToastStore().show('error', 'Could not save "Always do this".');
+			});
+	}
+	if (act.kind === 'restart') void onRestart();
+	else closeEnded(act.keep);
+}
+
+/**
+ * Give the overlay the keyboard, when the keyboard was on this pane.
+ *
+ * The terminal takes Tab for itself, so from there the overlay's buttons
+ * could only be reached with a mouse. Focus held anywhere else — another pane,
+ * a dialog, Settings — is left where it is.
+ *
+ * The card takes it, not Restart: the keys typed as the shell ended — the
+ * Enter after `exit`, one pressed twice — would otherwise restart it. Tab
+ * reaches the buttons from there.
+ */
+function focusOverlay(): void {
+	const active = document.activeElement;
+	const idle = active === null || active === document.body;
+	if ((idle && isActiveTab.value) || (active !== null && paneRoot.value?.contains(active) === true)) {
+		exitCard.value?.focus();
+	}
+}
+
+// Each time the overlay comes up, "Always do this" starts unchecked, on this host.
+watch(
+	() => cover.value === 'exited' || cover.value === 'gone',
+	(shown) => {
+		if (!shown) return;
+		alwaysOn.value = false;
+		alwaysWhere.value = 'host';
+		void nextTick(focusOverlay);
+	},
+	{ immediate: true },
+);
 
 // ---------------------------------------------------------------------------
 // Context menu
@@ -1047,7 +1269,8 @@ watch(terminal, (term) => {
 watch(
 	[isActiveTab, terminal],
 	([active, term]) => {
-		if (active && term) void nextTick(() => term.focus());
+		// Over a terminal that has ended, the keyboard goes to the overlay's card.
+		if (active && term) void nextTick(() => (exitCard.value ?? term).focus());
 	},
 	{ immediate: true },
 );
@@ -1272,35 +1495,96 @@ function onDragEnd(): void {
 	margin: 4px 0;
 }
 
-/* Exit overlay for direct process */
+/* Exit overlay: a neutral scrim over whatever the pane shows, and on it a card
+   of the theme's own opaque ground. The card's text and its ground are a pair
+   the theme guarantees (`--nt-text-strong` is made to read at 4.5:1 on
+   `--nt-bg`), so what lies behind — the terminal's content, a wallpaper, a
+   translucent terminal — never decides whether it reads. Every colour a rule
+   below gives its text is checked against its ground, in every bundled theme,
+   by TerminalPane.spec.ts. */
 .exit-overlay {
 	position: absolute;
 	inset: 0;
 	display: flex;
-	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 16px;
-	background: rgba(0, 0, 0, 0.55);
+	padding: 16px;
+	background: var(--nt-overlay);
 	backdrop-filter: blur(2px);
 	z-index: 10;
 }
 
+.exit-card {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+	max-width: min(36rem, 100%);
+	padding: 16px 20px;
+	border-radius: 8px;
+	background: rgb(var(--nt-bg-rgb));
+	color: var(--nt-text-strong);
+	border: 1px solid var(--nt-border);
+	box-shadow: var(--nt-shadow);
+	text-align: center;
+}
+
+/* The card holds the keyboard only so that nothing on it acts on a stray key. */
+.exit-card:focus {
+	outline: none;
+}
+
 .exit-message {
-	color: var(--nt-text-secondary);
+	margin: 0;
 	font-size: 14px;
-	font-weight: 500;
+	font-weight: 600;
 }
 
 .exit-reason {
-	max-width: 36rem;
-	margin-bottom: 12px;
-	padding: 0 16px;
-	text-align: center;
+	margin: 0;
 	font-size: 12px;
 	line-height: 1.4;
-	color: var(--nt-text-muted);
 	overflow-wrap: anywhere;
+}
+
+.exit-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 8px;
+}
+
+/* The same buttons as before, in colours that read on the card: outlined on
+   its ground, and Restart filled with the accent as the action to take. */
+.exit-btn {
+	padding: 6px 14px;
+	font-size: 12px;
+	font-family: inherit;
+	font-weight: 500;
+	background: transparent;
+	color: var(--nt-text-strong);
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+	cursor: pointer;
+	transition: border-color 0.12s;
+}
+
+.exit-btn--primary {
+	background: var(--nt-accent);
+	color: var(--nt-accent-fg);
+	border-color: var(--nt-accent);
+}
+
+/* Hover marks the edge and leaves the colours alone: a tinted ground would
+   take the text below the contrast it was chosen for. */
+.exit-btn:hover:not(:disabled) {
+	border-color: var(--nt-text-strong);
+}
+
+.exit-btn:focus-visible,
+.exit-option input:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
 }
 
 .exit-btn:disabled {
@@ -1308,31 +1592,73 @@ function onDragEnd(): void {
 	cursor: default;
 }
 
-.exit-actions {
+.exit-options {
 	display: flex;
-	gap: 8px;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 6px 16px;
 }
 
-.exit-btn {
-	padding: 6px 14px;
+.exit-option {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
 	font-size: 12px;
-	font-family: inherit;
-	font-weight: 500;
-	background: var(--nt-tab-hover);
-	color: var(--nt-fg);
-	border: none;
-	border-radius: 4px;
 	cursor: pointer;
-	transition: background 0.12s, opacity 0.12s;
 }
 
-.exit-btn:hover {
-	opacity: 0.85;
-	background: var(--nt-border);
+.exit-option input {
+	margin: 0;
+	accent-color: var(--nt-accent);
+	cursor: pointer;
 }
 
-.exit-btn--danger {
-	color: var(--nt-badge);
+/* Where "Always do this" applies: two segments, the chosen one filled with
+   the accent like Restart. Dimmed while the box is unchecked, but still
+   there to click: picking one checks the box. */
+.exit-scope {
+	display: inline-flex;
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+	overflow: hidden;
+	transition: opacity 0.12s;
+}
+
+.exit-scope--off {
+	opacity: 0.55;
+}
+
+.exit-scope-option {
+	position: relative;
+	padding: 2px 10px;
+	font-size: 12px;
+	background: transparent;
+	color: var(--nt-text-strong);
+	cursor: pointer;
+}
+
+.exit-scope-option + .exit-scope-option {
+	border-left: 1px solid var(--nt-border);
+}
+
+.exit-scope-option--on {
+	background: var(--nt-accent);
+	color: var(--nt-accent-fg);
+}
+
+/* The radio itself is not drawn; the segment is. It stays in the page for the
+   keyboard and screen readers. */
+.exit-scope-option input {
+	position: absolute;
+	inset: 0;
+	margin: 0;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.exit-scope-option:has(input:focus-visible) {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 
 /* Reconnecting overlay */

@@ -216,6 +216,100 @@ export const useConfigStore = defineStore("config", () => {
 	}
 
 	/**
+	 * Write settings of one UI section to the hub, and take them here at once.
+	 *
+	 * For a choice made outside Settings — the old "don't ask again" about
+	 * deleting an ended terminal, carried over (#574). The hub announces the
+	 * change, so every other window reads it again; this one does not wait for
+	 * that to act on it. A write the hub refused is undone by reading back what
+	 * it holds.
+	 */
+	async function saveUiSettings(section: "panes", values: Partial<PanesConfig>): Promise<boolean> {
+		uiConfig.value = {
+			...uiConfig.value,
+			[section]: { ...uiConfig.value[section], ...values },
+		};
+		try {
+			const authStore = useAuthStore();
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/ui`, {
+				method: "PUT",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${authStore.token}`,
+				},
+				body: JSON.stringify({ [section]: values }),
+			});
+			if (resp.ok) return true;
+		} catch (err) {
+			console.warn("[config] failed to save UI settings:", err);
+		}
+		await loadUiConfig();
+		return false;
+	}
+
+	/**
+	 * Write "When a terminal ends" where "Always do this" said (#574): for the
+	 * terminal's host, or globally.
+	 *
+	 * The choice then holds over the terminal it was made on: the overrides
+	 * nearer to it — the terminal's own, and with "globally" its host's — are
+	 * dropped, or it would not apply where it was just made. Other hosts keep
+	 * theirs, as Settings shows. The hub announces each write, so every window
+	 * reads its terminals' settings again; this one is told at once.
+	 */
+	async function saveWhenEnded(
+		whenEnded: "restart" | "close",
+		scope: "host" | "global",
+		where: { hostId: string | null; channelId: string | null },
+	): Promise<boolean> {
+		const authStore = useAuthStore();
+		const send = async (method: "PUT" | "PATCH", path: string, body: unknown): Promise<boolean> => {
+			const resp = await hubFetch(`${hubBaseUrl()}${path}`, {
+				method,
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${authStore.token}`,
+				},
+				body: JSON.stringify(body),
+			});
+			return resp.ok;
+		};
+		const hostPath =
+			where.hostId === null ? null : `/api/hosts/${encodeURIComponent(where.hostId)}/profile`;
+		const channelPath =
+			where.channelId === null
+				? null
+				: `/api/channels/${encodeURIComponent(where.channelId)}/profile`;
+		if (scope === "host" && hostPath === null) return false;
+
+		let ok: boolean;
+		try {
+			if (scope === "global") {
+				ok = await send("PUT", "/api/config/global", { terminal: { whenEnded } });
+				if (ok && hostPath !== null) {
+					ok = await send("PATCH", hostPath, { profile: { whenEnded: null } });
+				}
+			} else {
+				ok = await send("PATCH", hostPath as string, { profile: { whenEnded } });
+			}
+			if (ok && channelPath !== null) {
+				ok = await send("PATCH", channelPath, { profile: { whenEnded: null } });
+			}
+		} catch (err) {
+			console.warn("[config] failed to save when a terminal ends:", err);
+			ok = false;
+		}
+
+		emitProfileChange({
+			scope,
+			...(where.hostId !== null && { hostId: where.hostId }),
+			...(where.channelId !== null && { channelId: where.channelId }),
+		});
+		if (scope === "global") await loadProfile();
+		return ok;
+	}
+
+	/**
 	 * List the fonts installed where the hub runs (#100). A browser also gets
 	 * their @font-face rules, since it may be on another machine. The desktop
 	 * shell only ever drives its own local hub, so those fonts are installed
@@ -252,6 +346,8 @@ export const useConfigStore = defineStore("config", () => {
 		loadSystemFonts,
 		loadProfile,
 		loadUiConfig,
+		saveUiSettings,
+		saveWhenEnded,
 		onProfileChange,
 		emitProfileChange,
 	};

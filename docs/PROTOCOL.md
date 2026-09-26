@@ -125,7 +125,7 @@ First message, sent immediately on start.
 }
 ```
 
-**Capability handling:** Hub checks `capabilities` array. If `"snapshot"` is missing, hub will not send SNAPSHOT_REQ (relies on local cache only). If `"resize"` is missing, hub skips RESIZE messages. All capabilities are optional — hub degrades gracefully. `"multiplex"` means agent supports multiple channels per process. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels (§ 3.1b); the hub reads it from the HELLO of each connection, never from an earlier one.
+**Capability handling:** Hub checks `capabilities` array. If `"snapshot"` is missing, hub will not send SNAPSHOT_REQ (relies on local cache only). If `"resize"` is missing, hub skips RESIZE messages. All capabilities are optional — hub degrades gracefully. `"multiplex"` means agent supports multiple channels per process. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels (§ 3.1b); the hub reads it from the HELLO of each connection, never from an earlier one. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18); an agent without it ignores those fields and hands its own environment to every PTY, and the hub asks it nothing.
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -189,9 +189,12 @@ and the stale one is dropped quietly.
   channel_id?: string,  // hub-provided ID for warm restart; if omitted, agent generates one
   shell: string,        // "/bin/bash"
   cwd: string,
-  env: Record<string, string>,
+  env: Record<string, string>,  // set after env_unset: the scopes', the launch profile's, the request's
   cols: number,         // terminal columns; defaults to 80
-  rows: number          // terminal rows; defaults to 24
+  rows: number,         // terminal rows; defaults to 24
+  env_mode?: "inherit" | "minimal",  // what the environment starts from; absent or unknown = inherit
+  env_unset?: string[], // removed before env is applied: what a scope set to null
+  login_shell?: boolean // start the shell as a login shell (Unix agents, known shells)
 }
 
 // Agent → Hub (success)
@@ -218,6 +221,36 @@ ending shell must speak for its own pid alone — one that waited on whatever th
 id held wedged the agent for good (#432). No CHANNEL_EXIT is sent for a
 workload whose id has already been taken over: the hub asked for it to end and
 has the SPAWN_OK that says what replaced it.
+
+**The environment a terminal starts with (`env-modes`, #576).** The agent builds it whole and
+starts the PTY from a cleared environment, in this order:
+
+1. The base. `inherit`: the agent's own environment. `minimal`: only these, taken from the agent's
+   environment, never invented — Unix: `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `LANG`,
+   `LANGUAGE`, `LC_*`, `TZ`, `TMPDIR`, `XDG_RUNTIME_DIR`; Windows: `SystemRoot`, `SystemDrive`,
+   `windir`, `ComSpec`, `PATHEXT`, `Path`, `USERPROFILE`, `USERNAME`, `USERDOMAIN`, `HOMEDRIVE`,
+   `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `ProgramData`, `ALLUSERSPROFILE`,
+   `PUBLIC`, `ProgramFiles*`, `ProgramW6432`, `CommonProgramFiles*`, `CommonProgramW6432`,
+   `PROCESSOR_*`, `NUMBER_OF_PROCESSORS`, `OS`, `COMPUTERNAME`, `PSModulePath`.
+2. The inherited `NO_COLOR` is dropped.
+3. The identity is set, over whatever was inherited: `TERM=xterm-256color` (Unix agents only;
+   ConPTY translates on Windows), `COLORTERM=truecolor`, `TERM_PROGRAM=lasterm`,
+   `TERM_PROGRAM_VERSION=<agent version>`.
+4. `env_unset`, then `env`: a profile can remove or change any of the above.
+5. What elevation needs, last.
+
+On Windows names compare without case: `Path` and `PATH` are one variable, which keeps the casing
+it first had. A name that is empty or holds `=` or NUL, and a value holding NUL, are skipped.
+
+`login_shell` asks for a login shell. A Unix agent then adds `-l` when `args` is empty and the
+shell is one known to take it (`bash`, `zsh`, `ksh`, `mksh`, `fish`, `sh`, `dash`, `ash`, by file
+name); arguments the request names are passed as they are. A Windows agent ignores it. The hub asks
+for one only on an SSH host, for the shell the host's agent reported as its default (or none named),
+with no arguments, as a shell rather than a direct process: `ssh host` gives a login shell, and a
+remote terminal takes its place. Local terminals are unchanged.
+
+The agent logs the mode, `login_shell` and the counts of `env` and `env_unset`, never a name or a
+value.
 
 ### 3.3 ATTACH / ATTACH_OK
 
@@ -464,6 +497,28 @@ the first whole number in the message; failing that, from the `other_owner_chann
 connection's CHANNEL_STATE_END. To any other agent, and when no protocol connection can carry the
 STOP, the hub runs the agent's own `--stop` instead: the forced, out-of-band path, which knows
 nothing of owners. See `POST /api/hosts/:id/agent/replace` (§ 6).
+
+### 3.18 ENV_QUERY / ENV (`env-modes`)
+
+```typescript
+// Hub → Agent
+{ type: "ENV_QUERY", request_id: string, mode: "inherit" | "minimal" }
+
+// Agent → Hub
+{
+  type: "ENV",
+  request_id: string,
+  env: Record<string, string>,  // names kept as the agent has them
+  os: string                    // "linux", "windows", "darwin"…: how the names compare
+}
+```
+
+The variables a terminal would start with in `mode`, before any profile changes them: steps 1 to 3
+of the environment a SPAWN builds (§ 3.2). Agent-wide, not scoped to the connection's owner
+(§ 3.1b): it is what any hub could read by typing `env` in a terminal it opens there, and it is
+asked over that hub's own authenticated connection. Stdio and daemon agents both answer it. The
+values can be secrets: neither side stores or logs them, at any level. The hub sends it only to an
+agent that advertises `env-modes`, for `GET /api/hosts/:id/agent-environment` (§ 6).
 
 ## 4. Message Types — Hub ↔ UI (WS)
 
@@ -989,6 +1044,7 @@ What the callers do with the answers:
 | PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → 200 |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
 | POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). An agent with `hub-identity` gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. Any other agent, or one the STOP cannot reach, is stopped with its own `--stop`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host |
+| GET | `/api/hosts/:id/agent-environment` | ● | `?mode=inherit\|minimal` (default `inherit`) → `{ mode, os, env }`: the variables a terminal on this host would start with in that mode, before any profile changes them, asked live of the agent over ENV_QUERY (§ 3.18) and answered with `Cache-Control: no-store` (#576). Never stored, never logged, names included. 409 `HOST_NOT_CONNECTED` when no agent of this host is connected to this hub, 409 `AGENT_TOO_OLD` when it lacks `env-modes`, 504 `AGENT_TIMEOUT` after 5 s without an answer, 400 `VALIDATION_ERROR` for another mode, 404 for an unknown host |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type, sort_order? }` → 204 |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
@@ -1058,15 +1114,15 @@ What the callers do with the answers:
 | GET | `/api/config/ui` | ● | UI behavioral config |
 | GET | `/api/config/resolved` | ● | Merged config (query: `?host_id=X&channel_id=Y&session_id=Z`) |
 | GET | `/api/config/cascade` | ● | Full 4-layer cascade (query: `?host_id=X&channel_id=Y`) |
-| PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }` |
+| PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }`. A `null` inside `terminal.env` is a removal, written `false` in `config.toml` (which has no null) and read back as `null` |
 | PUT | `/api/config/ui` | ● | `{ <section>: { <key>: value } }` → `{ ok }` |
 | PUT | `/api/config/appearance` | ● | `{ theme?, autoSwitch?, ... }` → `{ ok }` |
 | GET | `/api/config/elevation` | ● | Current elevation config |
 | PUT | `/api/config/elevation` | ● | `{ methodLinux?, methodDarwin?, ... }` → `{ ok }` |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
-| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` — merge into host Layer 3 profile |
+| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576) |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |
-| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` — merge into channel Layer 4 profile |
+| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` — merge into channel Layer 4 profile, as for a host |
 
 #### Fonts
 

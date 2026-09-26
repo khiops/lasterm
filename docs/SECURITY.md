@@ -397,6 +397,11 @@ again, which is now roughly every two and a quarter years rather than every rest
 - Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
 - Terminal output (daemon agent): while a hub has no connection, up to 1000 frames per hub, about 8 MiB at most, oldest dropped (SPEC.md § 3.2). While a hub is connected, nothing bounds what waits for it to read (#553)
 - Snapshots: kept in cache, limited by GC policy
+- A host's environment (#576): asked of its agent over the hub's authenticated connection
+  (`ENV_QUERY`, PROTOCOL.md § 3.18) when the settings page shows it, handed to that request's
+  answer with `Cache-Control: no-store`, and dropped. The hub never stores it; the page holds it for
+  as long as it is on screen. It is what the same authenticated owner could read by typing `env` in
+  a terminal on that host. Only the changes a person types are stored, in the profile.
 
 ### 4.4 How a protected file is reached
 
@@ -580,6 +585,8 @@ the number that were not.
 - Terminal output content (never in logs — goes to spool.db only)
 - Pairing codes (never in logs — only expiry time)
 - Asset tokens, and every other query value (#511)
+- Environment variables, names and values, at any level, in the hub and in the agent (#576): the
+  agent logs the mode and how many variables a SPAWN sets or removes, never which
 
 A request URL reaches a line only through the request serializer of
 `packages/hub/src/logging/request-log.ts`, which keeps its path and the names of its query

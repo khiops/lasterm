@@ -879,8 +879,10 @@ mod tests {
     #[test]
     fn protected_path_allowlist_reads_the_checkout_named_at_run_time() {
         let checkout = checkout_under_test();
-        let copy =
-            std::env::temp_dir().join(format!("lasterm-protected-fs-{}", std::process::id()));
+        let copy = std::env::temp_dir().join(format!(
+            "lasterm-protected-fs-allowlist-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&copy);
         for (_, source) in GUARDED_SOURCES {
             let to = copy.join(source);
@@ -1373,8 +1375,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn descriptor_walk_refuses_unsafe_components_and_keeps_absence_distinct() {
-        let root =
-            std::env::temp_dir().join(format!("lasterm-protected-fs-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "lasterm-protected-fs-descriptor-walk-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("safe/nested")).unwrap();
         let clean = root.join("safe/nested/leaf");

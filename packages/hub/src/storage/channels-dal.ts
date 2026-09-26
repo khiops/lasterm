@@ -31,19 +31,29 @@ interface ChannelRow {
 	updated_at: string;
 }
 
+/**
+ * What the `shell` column holds for a terminal with no shell of its own (#583).
+ *
+ * The column is NOT NULL, so none is the empty string, as `args` holds `[]`
+ * for no arguments. It used to be "/bin/sh", made up here and sent to the host
+ * on every restart: a shell nobody chose, and none at all on Windows. Read
+ * back, it is no shell, and the SPAWN names none, as for a new terminal.
+ */
+const NO_SHELL = "";
+
 // ─── Row mapper ──────────────────────────────────────────────────────────────
 
 function rowToChannel(row: ChannelRow): Channel {
 	const ch: Channel = {
 		id: row.id,
 		sessionId: row.session_id,
-		shell: row.shell,
 		cols: row.cols,
 		rows: row.rows,
 		status: row.status as ChannelStatus,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
+	if (row.shell !== NO_SHELL) ch.shell = row.shell;
 	if (row.group_id != null) ch.groupId = row.group_id;
 	if (row.title != null) ch.title = row.title;
 	if (row.cwd != null) ch.cwd = row.cwd;
@@ -89,7 +99,7 @@ export class ChannelsDAL {
 			.run(
 				input.id,
 				input.sessionId,
-				input.shell ?? "/bin/sh",
+				input.shell ?? NO_SHELL,
 				input.args ? JSON.stringify(input.args) : "[]",
 				input.cwd ?? null,
 				input.title ?? null,
@@ -248,7 +258,8 @@ export class ChannelsDAL {
 		}
 		if (config.shell !== undefined) {
 			sets.push("shell = @shell");
-			params.shell = config.shell ?? "/bin/sh";
+			// null takes the terminal's own shell away: it starts its agent's default.
+			params.shell = config.shell ?? NO_SHELL;
 		}
 		if (config.args !== undefined) {
 			sets.push("args = @args");
@@ -361,7 +372,7 @@ export class ChannelsDAL {
 	listAliveChannelsWithHost(): Array<{
 		id: string;
 		sessionId: string;
-		shell: string;
+		shell: string | null;
 		args: string[];
 		cwd: string | null;
 		cols: number;
@@ -408,7 +419,7 @@ export class ChannelsDAL {
 			return {
 				id: r.id,
 				sessionId: r.session_id,
-				shell: r.shell,
+				shell: r.shell === NO_SHELL ? null : r.shell,
 				args,
 				cwd: r.cwd,
 				cols: r.cols,

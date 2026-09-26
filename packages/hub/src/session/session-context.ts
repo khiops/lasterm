@@ -157,7 +157,8 @@ export interface ChannelState {
 	status: ChannelStatus;
 	/** clientId set — empty when orphan */
 	clients: Set<string>;
-	shell: string;
+	/** Absent when the terminal has none of its own: its agent's default (#583). */
+	shell?: string;
 	args?: string[];
 	cwd?: string;
 	cols: number;

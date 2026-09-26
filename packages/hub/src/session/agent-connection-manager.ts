@@ -250,7 +250,7 @@ export class AgentConnectionManager {
 					hostId,
 					status: "orphan",
 					clients: new Set(),
-					shell: ch.shell,
+					...(ch.shell !== null && { shell: ch.shell }),
 					...(ch.args.length > 0 && { args: ch.args }),
 					cols: ch.cols,
 					rows: ch.rows,

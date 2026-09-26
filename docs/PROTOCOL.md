@@ -187,7 +187,8 @@ and the stale one is dropped quietly.
   type: "SPAWN",
   request_id: string,
   channel_id?: string,  // hub-provided ID for warm restart; if omitted, agent generates one
-  shell: string,        // "/bin/bash"
+  shell?: string,       // "/bin/bash"; only a shell the terminal has of its own, on a restart too (#583);
+                        // absent: the agent's user's default shell (SHELL on Unix, COMSPEC on Windows)
   cwd?: string,         // only a directory the terminal has of its own, on a restart too (#581);
                         // absent: the agent's user's home (HOME on Unix, USERPROFILE on Windows),
                         // or where the agent runs when that is not a directory
@@ -698,7 +699,7 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   host_id: string,
   channel_id: string,
   session_id: string,
-  shell: string,
+  shell?: string,       // absent: none of its own, its agent's default (#583)
   args?: string[],
   cwd?: string,
   cols: number,

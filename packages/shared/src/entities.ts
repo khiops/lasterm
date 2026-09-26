@@ -186,7 +186,12 @@ export interface Channel {
 	sessionId: string;
 	groupId?: string;
 	title?: string;
-	shell: string;
+	/**
+	 * Absent when the terminal has no shell of its own: none was named and no
+	 * launch profile gave one. Its agent then starts its user's default shell,
+	 * on a restart as on the first start (#583).
+	 */
+	shell?: string;
 	args?: string[];
 	cwd?: string;
 	envJson?: string; // JSON string

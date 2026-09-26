@@ -267,7 +267,9 @@ export class ChannelLifecycleManager {
 						hostId,
 						status: "live",
 						clients: new Set([clientId]),
-						shell: resolvedShell ?? process.env.SHELL ?? "/bin/sh",
+						// None when none was resolved: the SPAWN named none either, and
+						// a respawn must not name the hub's own SHELL (#583).
+						...(resolvedShell !== undefined && { shell: resolvedShell }),
 						...(resolvedArgs.length > 0 && { args: resolvedArgs }),
 						...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
 						cols,
@@ -305,7 +307,7 @@ export class ChannelLifecycleManager {
 						hostId,
 						channelId,
 						sessionId: session.id,
-						shell: resolvedShell ?? process.env.SHELL ?? "/bin/sh",
+						...(resolvedShell !== undefined && { shell: resolvedShell }),
 						...(resolvedArgs.length > 0 && { args: resolvedArgs }),
 						...(resolvedCwd !== undefined && { cwd: resolvedCwd }),
 						cols,
@@ -443,7 +445,11 @@ export class ChannelLifecycleManager {
 		agent = this.ctx.agents.get(hostId);
 		if (!agent?.connected) return false;
 
-		const shell = channel.shell ?? process.env.SHELL ?? "/bin/sh";
+		// A terminal with no shell of its own is sent none, as a new one is: its
+		// agent starts its user's default shell. It was sent "/bin/sh", which the
+		// database made up for it, or else the hub's own SHELL, a shell on the
+		// hub's machine (#583).
+		const shell = channel.shell;
 		const args = channel.args ?? [];
 		// A terminal with no directory of its own is sent none, as a new one is:
 		// the agent starts it in the home of the user it runs as. The hub's own
@@ -475,7 +481,7 @@ export class ChannelLifecycleManager {
 				type: "SPAWN",
 				requestId: generateId(),
 				channelId,
-				shell,
+				...(shell !== undefined && { shell }),
 				...(args.length > 0 && { args }),
 				...(cwd !== undefined && { cwd }),
 				...this.restartEnv(channelId, hostId),
@@ -652,7 +658,7 @@ export class ChannelLifecycleManager {
 			type: "SPAWN",
 			requestId,
 			channelId,
-			shell,
+			...(shell !== undefined && { shell }),
 			...(args.length > 0 && { args }),
 			...(cwd !== undefined && { cwd }),
 			...this.restartEnv(channelId, hostId),
@@ -691,7 +697,7 @@ export class ChannelLifecycleManager {
 		hostId: string,
 		sessionEntry: { id: string; status: string },
 		ch: ChannelState | undefined,
-		shell: string,
+		shell: string | undefined,
 		args: string[],
 		cwd: string | undefined,
 		cols: number,
@@ -774,7 +780,7 @@ export class ChannelLifecycleManager {
 		hostId: string,
 		sessionEntry: { id: string; status: string },
 		ch: ChannelState | undefined,
-		shell: string,
+		shell: string | undefined,
 		args: string[],
 		cwd: string | undefined,
 		cols: number,
@@ -799,7 +805,7 @@ export class ChannelLifecycleManager {
 					id: channelId,
 					sessionId: sessionEntry.id,
 					status: "born",
-					shell,
+					...(shell !== undefined && { shell }),
 					...(args.length > 0 && { args }),
 					...(cwd !== undefined && { cwd }),
 					cols,
@@ -823,7 +829,7 @@ export class ChannelLifecycleManager {
 			hostId,
 			status: "live",
 			clients,
-			shell,
+			...(shell !== undefined && { shell }),
 			...(args.length > 0 && { args }),
 			...(cwd !== undefined && { cwd }),
 			cols,
@@ -844,7 +850,7 @@ export class ChannelLifecycleManager {
 				hostId,
 				channelId,
 				sessionId: sessionEntry.id,
-				shell,
+				...(shell !== undefined && { shell }),
 				...(args.length > 0 && { args }),
 				...(cwd !== undefined && { cwd }),
 				cols,
@@ -1062,10 +1068,10 @@ export class ChannelLifecycleManager {
 					type: "SPAWN",
 					requestId,
 					channelId,
-					shell: ch.shell,
+					// Neither a shell nor a directory when it has none of its own: the
+					// agent's defaults, as for a new terminal and a restart (#581, #583).
+					...(ch.shell !== undefined && { shell: ch.shell }),
 					...(ch.args !== undefined && ch.args.length > 0 && { args: ch.args }),
-					// None when it has none of its own: the agent's default, as for a
-					// new terminal and a restart (#581).
 					...(ch.cwd !== undefined && { cwd: ch.cwd }),
 					...this.restartEnv(channelId, hostId),
 					cols: ch.cols,

@@ -493,7 +493,8 @@ export interface ChannelCreatedMessage {
 	hostId: string;
 	channelId: string;
 	sessionId: string;
-	shell: string;
+	/** Absent for a terminal with no shell of its own: its agent's default (#583). */
+	shell?: string;
 	args?: string[];
 	cwd?: string;
 	cols: number;

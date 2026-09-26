@@ -29,6 +29,10 @@
 		"./dist/platform-dirs.js": {
 			"import": "./dist/platform-dirs.js",
 			"types": "./dist/platform-dirs.d.ts"
+		},
+		"./dist/replace-file.js": {
+			"import": "./dist/replace-file.js",
+			"types": "./dist/replace-file.d.ts"
 		}
 	},
 	"scripts": {

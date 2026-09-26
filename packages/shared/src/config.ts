@@ -301,6 +301,20 @@ export interface UiConfig {
 	layout: LayoutConfig;
 }
 
+// ─── Agent environment endpoint response ─────────────────────────────────────
+
+/**
+ * `GET /api/hosts/:id/agent-environment?mode=` (#576): the variables a terminal
+ * on that host would start with in `mode`, before the profile changes
+ * anything, as the agent there reports them. Fetched live, never stored.
+ */
+export interface AgentEnvironmentResponse {
+	mode: "minimal" | "inherit";
+	/** The OS the agent runs on; on "windows", names compare without case. */
+	os: string;
+	env: Record<string, string>;
+}
+
 // ─── Cascade endpoint response ────────────────────────────────────────────────
 
 export interface CascadeResponse {

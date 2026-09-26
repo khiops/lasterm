@@ -31,19 +31,25 @@ export interface TerminalProfile {
 	wallpaperDim?: number;
 	backgroundMode?: BackgroundMode;
 	windowEffect?: WindowEffect;
-	/** Controls how process.env is merged into PTY environment. Default: 'inherit'. */
+	/**
+	 * What a terminal's environment starts from, applied by the agent on the
+	 * host (#576): `inherit`, the agent's own environment; `minimal`, only the
+	 * variables programs need to run, taken from it. Default: 'inherit'.
+	 */
 	envMode?: "minimal" | "inherit";
 	/**
-	 * Variables the terminals of this scope are spawned with, merged key by key
-	 * down the cascade: a host adds to what the global scope set, a channel to
-	 * both. `null` on a key drops what an outer scope put there.
+	 * The changes this scope makes to the environment its terminals start
+	 * with, merged key by key down the cascade: a host adds to what the global
+	 * scope set, a channel to both. A value sets the variable; `null` removes
+	 * it — whether an outer scope set it or the agent would have passed it on.
+	 * Only the changes are stored, never the environment they produce.
 	 *
 	 * Applied after `envMode`, and overridden by a launch profile's own `env`
 	 * and by the spawn request. Read by whoever can read the hub's database, so
 	 * it is no place for secrets — the same reason SSH passwords are never
-	 * stored.
+	 * stored. In `config.toml`, which has no null, a removal is written `false`.
 	 */
-	env?: Record<string, string>;
+	env?: Record<string, string | null>;
 	/**
 	 * What a pane does when this terminal ends (#574). Default: "ask"
 	 *

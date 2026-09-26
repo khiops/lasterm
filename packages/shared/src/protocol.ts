@@ -39,6 +39,12 @@ export interface HelloMessage {
 	defaultShell?: string;
 }
 
+/**
+ * What a terminal's environment starts from (#576): the agent's own
+ * environment, or only the variables programs need to run, taken from it.
+ */
+export type EnvMode = "minimal" | "inherit";
+
 /** Hub → Agent: spawn a new PTY channel */
 export interface AgentSpawnMessage {
 	type: "SPAWN";
@@ -47,6 +53,7 @@ export interface AgentSpawnMessage {
 	shell?: string;
 	args?: string[];
 	cwd?: string;
+	/** Set after `envUnset`: the scopes', the launch profile's and the request's. */
 	env?: Record<string, string>;
 	cols: number;
 	rows: number;
@@ -55,7 +62,33 @@ export interface AgentSpawnMessage {
 	elevationSecret?: string;
 	elevationMethod?: string;
 	customCommand?: string;
-	envMode?: "minimal" | "inherit";
+	envMode?: EnvMode;
+	/** Removed from the base before `env` is applied: what a profile set to `null`. */
+	envUnset?: string[];
+	/** A login shell: a Unix agent adds `-l` for a shell known to take it. */
+	loginShell?: boolean;
+}
+
+/**
+ * Hub → Agent (`env-modes`): the variables a terminal would start with in
+ * `mode`, before the profile changes anything.
+ */
+export interface AgentEnvQueryMessage {
+	type: "ENV_QUERY";
+	requestId: string;
+	mode: EnvMode;
+}
+
+/**
+ * Agent → Hub: the answer to ENV_QUERY. The values can be secrets: never
+ * logged, never stored.
+ */
+export interface AgentEnvMessage {
+	type: "ENV";
+	requestId: string;
+	env: Record<string, string>;
+	/** The OS the agent runs on: "linux", "windows", "darwin"… */
+	os: string;
 }
 
 /** Agent → Hub: PTY spawned successfully */
@@ -728,6 +761,7 @@ export type AgentMessage =
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| AgentLogMessage
+	| AgentEnvMessage
 	| ErrorMessage;
 
 /** All messages that the Hub sends to the Agent */
@@ -735,6 +769,7 @@ export type HubToAgentMessage =
 	| AgentAuthMessage
 	| AgentStopMessage
 	| AgentSpawnMessage
+	| AgentEnvQueryMessage
 	| InputMessage
 	| ResizeMessage
 	| SnapshotReqMessage
@@ -816,6 +851,8 @@ export type ProtocolMessage =
 	| HeartbeatAckMessage
 	| AgentAuthMessage
 	| AgentStopMessage
+	| AgentEnvQueryMessage
+	| AgentEnvMessage
 	| AuthMessage
 	| AuthOkMessage
 	| AuthFailMessage

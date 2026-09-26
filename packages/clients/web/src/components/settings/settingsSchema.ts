@@ -143,7 +143,7 @@ export const settingsSchema: SettingDefinition[] = [
 			{ label: "Close", value: "close" },
 		],
 		description:
-			'Ask shows Restart and Close over it. Restart brings it back, unless it ended within 5 seconds of starting or runs a command. Close closes its pane. "Always do this" on that overlay sets it for the host, or globally.',
+			'Ask shows Restart and Close over it. Restart brings it back, unless it ended within 5 seconds of starting or runs a command. Close closes its pane. "Always do this" on that overlay sets it for the host, or everywhere.',
 	},
 	{
 		key: "keepEnded",

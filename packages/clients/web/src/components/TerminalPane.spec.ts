@@ -283,7 +283,8 @@ describe("TerminalPane overlay (#574)", () => {
 		expect(overlay).toContain(`@click="onOverlayAction('restart')"`);
 		expect(overlay).not.toContain("Keep");
 		const onAction = body(/function onOverlayAction\(/);
-		expect(onAction).toContain("overlayChoice(action, alwaysScope.value, prefs.value.keepEnded);");
+		expect(onAction).toContain("alwaysScopeOf(alwaysOn.value, alwaysWhere.value),");
+		expect(onAction).toContain("prefs.value.keepEnded,");
 		expect(onAction).toContain("else closeEnded(act.keep);");
 		expect(body(/function closeEnded\(/)).toContain("emit('close-pane', chId, { keep });");
 	});
@@ -302,25 +303,32 @@ describe("TerminalPane overlay (#574)", () => {
 		// A Windows checkout ends its lines with CRLF: each line on its own.
 		expect(onAction).toContain("hostId: paneHostId.value ?? null,");
 		expect(onAction).toContain("channelId: effectiveChannelId.value,");
-		expect(body(/function onAlwaysChange\(/)).toContain("toggleAlways(alwaysScope.value, scope,");
 	});
 
-	// Labels tied to their inputs, so a click on the words and a screen reader
-	// both reach the checkbox.
-	it("labels each checkbox", () => {
-		for (const [scope, words] of [
-			["host", "Always do this for this host"],
-			["global", "Always do this globally"],
-		] as const) {
-			const label = new RegExp(
-				`<label class="exit-option" :for="\`\\$\\{exitId\\}-${scope}\`">\\s*<input\\s*:id="\`\\$\\{exitId\\}-${scope}\`"\\s*type="checkbox"\\s*:checked="alwaysScope === '${scope}'"\\s*@change="onAlwaysChange\\('${scope}', \\$event\\)"\\s*/>\\s*${words}\\s*</label>`,
-			);
-			expect(overlay).toMatch(label);
-		}
+	// One checkbox, labelled by its words, so a click on them and a screen
+	// reader both reach it.
+	it('offers one "Always do this" box', () => {
+		expect(overlay).toMatch(
+			/<label class="exit-option" :for="`\$\{exitId\}-always`">\s*<input :id="`\$\{exitId\}-always`" v-model="alwaysOn" type="checkbox" \/>\s*Always do this\s*<\/label>/,
+		);
+		expect(overlay.match(/type="checkbox"/g)).toHaveLength(1);
 	});
 
-	it('starts with "Always do this" unchecked, and gives the keyboard to its card', () => {
-		expect(SOURCE).toContain("alwaysScope.value = null;");
+	// Where it applies is one choice among radios, grouped and named, so that
+	// only one can be chosen and a screen reader says what they are for.
+	// Picking one checks the box: it means nothing otherwise.
+	it("offers where beside it, as one choice, and picking one checks the box", () => {
+		expect(overlay).toMatch(/role="radiogroup"\s*aria-label="Where to always do this"/);
+		expect(overlay).toMatch(
+			/<input\s*v-model="alwaysWhere"\s*type="radio"\s*:name="`\$\{exitId\}-scope`"\s*:value="where\.value"\s*@change="alwaysOn = true"\s*\/>/,
+		);
+		expect(overlay).toContain('v-for="where in ALWAYS_SCOPES"');
+		expect(overlay).toContain(":class=\"{ 'exit-scope--off': !alwaysOn }\"");
+	});
+
+	it('starts with "Always do this" unchecked, on this host, and gives the keyboard to its card', () => {
+		expect(SOURCE).toContain("alwaysOn.value = false;");
+		expect(SOURCE).toContain("alwaysWhere.value = 'host';");
 		expect(SOURCE).toContain("void nextTick(focusOverlay);");
 		expect(overlay).toMatch(/ref="exitCard"\s*class="exit-card"\s*role="group"\s*tabindex="-1"/);
 		expect(SOURCE).toContain("exitCard.value?.focus();");
@@ -382,6 +390,8 @@ describe("TerminalPane overlay card contrast (#574)", () => {
 		message: [".exit-card", ".exit-message"],
 		reason: [".exit-card", ".exit-reason"],
 		checkbox: [".exit-card", ".exit-option"],
+		"where, not chosen": [".exit-card", ".exit-scope-option"],
+		"where, chosen": [".exit-card", ".exit-scope-option", ".exit-scope-option--on"],
 		button: [".exit-card", ".exit-btn"],
 		Restart: [".exit-card", ".exit-btn", ".exit-btn--primary"],
 	};

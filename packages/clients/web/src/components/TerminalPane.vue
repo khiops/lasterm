@@ -76,24 +76,32 @@
 					<button v-else class="exit-btn" @click="onOverlayAction('close')">Close</button>
 				</div>
 				<div v-if="!isGone" class="exit-options">
-					<label class="exit-option" :for="`${exitId}-host`">
-						<input
-							:id="`${exitId}-host`"
-							type="checkbox"
-							:checked="alwaysScope === 'host'"
-							@change="onAlwaysChange('host', $event)"
-						/>
-						Always do this for this host
+					<label class="exit-option" :for="`${exitId}-always`">
+						<input :id="`${exitId}-always`" v-model="alwaysOn" type="checkbox" />
+						Always do this
 					</label>
-					<label class="exit-option" :for="`${exitId}-global`">
-						<input
-							:id="`${exitId}-global`"
-							type="checkbox"
-							:checked="alwaysScope === 'global'"
-							@change="onAlwaysChange('global', $event)"
-						/>
-						Always do this globally
-					</label>
+					<div
+						class="exit-scope"
+						:class="{ 'exit-scope--off': !alwaysOn }"
+						role="radiogroup"
+						aria-label="Where to always do this"
+					>
+						<label
+							v-for="where in ALWAYS_SCOPES"
+							:key="where.value"
+							class="exit-scope-option"
+							:class="{ 'exit-scope-option--on': alwaysWhere === where.value }"
+						>
+							<input
+								v-model="alwaysWhere"
+								type="radio"
+								:name="`${exitId}-scope`"
+								:value="where.value"
+								@change="alwaysOn = true"
+							/>
+							{{ where.label }}
+						</label>
+					</div>
 				</div>
 			</div>
 		</div>
@@ -182,6 +190,7 @@ import { useWriteLockStore } from '../stores/writelock.js';
 import { useToastStore } from '../stores/toast.js';
 import {
 	type AlwaysScope,
+	ALWAYS_SCOPES,
 	createEndWatch,
 	type EndSeen,
 	endedPrefs,
@@ -190,7 +199,7 @@ import {
 	type OverlayAction,
 	overlayChoice,
 	reactToEnd,
-	toggleAlways,
+	alwaysScopeOf,
 } from '../utils/exit-action.js';
 import { type AttachFacts, factsFromAttachOk, factsFromRefusal, paneCover } from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
@@ -952,25 +961,27 @@ function closeEnded(keep: boolean): void {
 }
 
 /**
- * The overlay's option: "Always do this for this host", or "globally". One
- * box or the other: checking one clears the other.
+ * The overlay's option: "Always do this", and where — this host, the
+ * default, or everywhere. Picking where also checks the box: it only means
+ * something then.
  */
 const exitId = useId();
-const alwaysScope = ref<AlwaysScope | null>(null);
+const alwaysOn = ref(false);
+const alwaysWhere = ref<AlwaysScope>('host');
 const paneRoot = ref<HTMLElement | null>(null);
 const exitCard = ref<HTMLElement | null>(null);
 
-function onAlwaysChange(scope: AlwaysScope, event: Event): void {
-	alwaysScope.value = toggleAlways(alwaysScope.value, scope, (event.target as HTMLInputElement).checked);
-}
-
 /**
  * Restart or Close, clicked on the overlay: done at once, and remembered as
- * the setting, for this host or globally, when "Always do this" says so.
+ * the setting, for this host or everywhere, when "Always do this" says so.
  * Whether Close deletes the terminal is the "Keep" setting's to say.
  */
 function onOverlayAction(action: OverlayAction): void {
-	const { act, remember } = overlayChoice(action, alwaysScope.value, prefs.value.keepEnded);
+	const { act, remember } = overlayChoice(
+		action,
+		alwaysScopeOf(alwaysOn.value, alwaysWhere.value),
+		prefs.value.keepEnded,
+	);
 	if (remember !== null) {
 		void configStore
 			.saveWhenEnded(remember.whenEnded, remember.scope, {
@@ -1004,12 +1015,13 @@ function focusOverlay(): void {
 	}
 }
 
-// Each time the overlay comes up, "Always do this" starts unchecked.
+// Each time the overlay comes up, "Always do this" starts unchecked, on this host.
 watch(
 	() => cover.value === 'exited' || cover.value === 'gone',
 	(shown) => {
 		if (!shown) return;
-		alwaysScope.value = null;
+		alwaysOn.value = false;
+		alwaysWhere.value = 'host';
 		void nextTick(focusOverlay);
 	},
 	{ immediate: true },
@@ -1599,6 +1611,54 @@ function onDragEnd(): void {
 	margin: 0;
 	accent-color: var(--nt-accent);
 	cursor: pointer;
+}
+
+/* Where "Always do this" applies: two segments, the chosen one filled with
+   the accent like Restart. Dimmed while the box is unchecked, but still
+   there to click: picking one checks the box. */
+.exit-scope {
+	display: inline-flex;
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+	overflow: hidden;
+	transition: opacity 0.12s;
+}
+
+.exit-scope--off {
+	opacity: 0.55;
+}
+
+.exit-scope-option {
+	position: relative;
+	padding: 2px 10px;
+	font-size: 12px;
+	background: transparent;
+	color: var(--nt-text-strong);
+	cursor: pointer;
+}
+
+.exit-scope-option + .exit-scope-option {
+	border-left: 1px solid var(--nt-border);
+}
+
+.exit-scope-option--on {
+	background: var(--nt-accent);
+	color: var(--nt-accent-fg);
+}
+
+/* The radio itself is not drawn; the segment is. It stays in the page for the
+   keyboard and screen readers. */
+.exit-scope-option input {
+	position: absolute;
+	inset: 0;
+	margin: 0;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.exit-scope-option:has(input:focus-visible) {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 
 /* Reconnecting overlay */

@@ -183,22 +183,23 @@ export function heldBackMessage(reason: HeldBack): string {
 // ─── The overlay's buttons ───────────────────────────────────────────────────
 
 /**
- * Where "Always do this" writes the action: "for this host", or "globally".
+ * Where "Always do this" writes the action: for this host, or everywhere.
  * One or the other, never both.
  */
 export type AlwaysScope = "host" | "global";
 
 /**
- * The two "Always do this" boxes after one of them was clicked: checking one
- * clears the other, unchecking it leaves neither.
+ * The choice beside "Always do this", in the order shown: this host first,
+ * the narrower one, which is also what it starts on.
  */
-export function toggleAlways(
-	current: AlwaysScope | null,
-	clicked: AlwaysScope,
-	checked: boolean,
-): AlwaysScope | null {
-	if (checked) return clicked;
-	return current === clicked ? null : current;
+export const ALWAYS_SCOPES: readonly { value: AlwaysScope; label: string }[] = [
+	{ value: "host", label: "this host" },
+	{ value: "global", label: "everywhere" },
+];
+
+/** Where to remember the action, if anywhere: nowhere while the box is unchecked. */
+export function alwaysScopeOf(on: boolean, where: AlwaysScope): AlwaysScope | null {
+	return on ? where : null;
 }
 
 export type OverlayAction = "restart" | "close";

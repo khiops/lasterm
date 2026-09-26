@@ -1,7 +1,9 @@
 import type { TerminalProfile } from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
+	ALWAYS_SCOPES,
 	AUTO_RESTART_MIN_RUN_MS,
+	alwaysScopeOf,
 	createEndWatch,
 	type EndedPrefs,
 	type EndFacts,
@@ -12,7 +14,6 @@ import {
 	migrateLegacyDeadTabChoice,
 	overlayChoice,
 	reactToEnd,
-	toggleAlways,
 } from "./exit-action.js";
 
 const ask: EndedPrefs = { whenEnded: "ask", keepEnded: false };
@@ -252,13 +253,16 @@ describe("overlayChoice: the overlay's buttons", () => {
 		});
 	});
 
-	// "For this host" and "globally" are one choice: never both.
-	it('checks one "Always do this" box at a time', () => {
-		expect(toggleAlways(null, "host", true)).toBe("host");
-		expect(toggleAlways("host", "global", true)).toBe("global");
-		expect(toggleAlways("global", "host", true)).toBe("host");
-		expect(toggleAlways("host", "host", false)).toBeNull();
-		expect(toggleAlways("global", "host", false)).toBe("global");
+	// One box, and where beside it: "this host" or "everywhere", never both.
+	it('remembers nowhere until "Always do this" is checked', () => {
+		expect(alwaysScopeOf(false, "host")).toBeNull();
+		expect(alwaysScopeOf(false, "global")).toBeNull();
+		expect(alwaysScopeOf(true, "host")).toBe("host");
+		expect(alwaysScopeOf(true, "global")).toBe("global");
+	});
+
+	it("offers this host first, then everywhere", () => {
+		expect(ALWAYS_SCOPES.map((s) => s.value)).toEqual(["host", "global"]);
 	});
 
 	it('"Always do this" writes the action clicked, for this host or globally', () => {

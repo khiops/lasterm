@@ -298,9 +298,7 @@ describe("TerminalPane overlay (#574)", () => {
 
 	it('writes the setting where "Always do this" says, for this terminal', () => {
 		const onAction = body(/function onOverlayAction\(/);
-		expect(onAction).toContain(
-			".saveWhenEnded(remember.whenEnded, remember.scope, {",
-		);
+		expect(onAction).toContain(".saveWhenEnded(remember.whenEnded, remember.scope, {");
 		// A Windows checkout ends its lines with CRLF: each line on its own.
 		expect(onAction).toContain("hostId: paneHostId.value ?? null,");
 		expect(onAction).toContain("channelId: effectiveChannelId.value,");

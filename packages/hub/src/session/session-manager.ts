@@ -17,9 +17,12 @@ import type {
 	AgentAttachMessage,
 	AgentAttachOkMessage,
 	AgentConfig,
+	AgentEnvMessage,
+	AgentEnvQueryMessage,
 	AgentSpawnMessage,
 	AgentSyncedMessage,
 	ElevationMethod,
+	EnvMode,
 	ErrorMessage,
 	Host,
 	InputMessage,
@@ -32,6 +35,7 @@ import type {
 } from "@lasterm/shared";
 import {
 	DEFAULT_AGENT_CONFIG,
+	ENV_MODES_CAPABILITY,
 	ErrorCode,
 	generateId,
 	validateCustomCommand,
@@ -77,7 +81,6 @@ import {
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
 } from "./remote-daemon.js";
-import { scopedEnv } from "./scoped-env.js";
 import * as Acq from "./session-acquisition.js";
 import type {
 	Lease,
@@ -86,6 +89,13 @@ import type {
 	SharedSessionContext,
 } from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
+import {
+	envNamesIgnoreCase,
+	resolveEnvironmentChanges,
+	spawnEnvironmentFields,
+	spawnEnvMode,
+	wantsLoginShell,
+} from "./spawn-environment.js";
 import { SpoolGarbageCollector } from "./spool-gc.js";
 import type { SshAgentDeployOptions } from "./ssh-agent.js";
 import { parseSshHost, SshAgent } from "./ssh-agent.js";
@@ -100,6 +110,18 @@ export interface WsClient {
 
 const ATTACH_TIMEOUT_MS = 5_000;
 const AGENT_CLOSE_TIMEOUT_MS = 2_000;
+/** How long an agent has to say what its environment is (#576). */
+const ENV_QUERY_TIMEOUT_MS = 5_000;
+
+/** What came of asking a host's agent for its environment (#576). */
+export type AgentEnvironmentOutcome =
+	| { readonly kind: "ok"; readonly env: Record<string, string>; readonly os: string }
+	/** No agent of this host is connected to this hub. */
+	| { readonly kind: "not-connected" }
+	/** The agent does not advertise `env-modes`. */
+	| { readonly kind: "too-old" }
+	/** The agent did not answer in time. */
+	| { readonly kind: "timeout" };
 
 /** What came of asking to replace the agent serving a host. */
 export type ReplaceAgentOutcome =
@@ -1031,14 +1053,22 @@ export class SessionManager {
 					}
 				}
 
+				// A terminal brought back has scope settings of its own: its channel
+				// profile is read with its host's, as a restart reads them.
 				const terminalProfile = this.ctx.configResolver
-					? this.ctx.configResolver.resolve(hostId)
+					? this.ctx.configResolver.resolve(hostId, reuseChannelId)
 					: null;
-				const resolvedEnvMode = terminalProfile?.envMode ?? "inherit";
-				// What the scope sets is the ground the rest stands on: a launch
+				// What the scopes change is the ground the rest stands on: a launch
 				// profile speaks for the terminal it launches, and the request for
-				// this one terminal, so each overrides what came before it.
-				resolvedEnv = { ...scopedEnv(terminalProfile), ...resolvedEnv };
+				// this one terminal, so each overrides what came before it. A scope's
+				// null reaches the agent as a removal (#576).
+				const environment = resolveEnvironmentChanges(
+					[
+						...(this.ctx.configResolver?.environmentLayers(hostId, reuseChannelId) ?? []),
+						resolvedEnv,
+					],
+					envNamesIgnoreCase(host),
+				);
 
 				const baseSpawnMsg: AgentSpawnMessage = {
 					type: "SPAWN",
@@ -1047,11 +1077,14 @@ export class SessionManager {
 					...(resolvedShell !== undefined ? { shell: resolvedShell } : {}),
 					...(resolvedArgs.length > 0 && { args: resolvedArgs }),
 					...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
-					env: resolvedEnv,
 					cols,
 					rows,
 					...(resolvedDirectProcess && { directProcess: true }),
-					envMode: resolvedEnvMode,
+					...spawnEnvironmentFields(
+						environment,
+						spawnEnvMode(terminalProfile?.envMode),
+						wantsLoginShell(host, resolvedShell, resolvedArgs, resolvedDirectProcess),
+					),
 				};
 
 				// ── Elevated spawn ────────────────────────────────────────────────────
@@ -1609,6 +1642,56 @@ export class SessionManager {
 	 * never becomes ready and refuses input with nothing on screen to say so.
 	 */
 	private static readonly ATTACH_RECONNECT_BUDGET = 6_000;
+
+	/**
+	 * Ask a host's agent which variables a terminal would start with in `mode`,
+	 * before the profile changes anything (#576).
+	 *
+	 * Over this hub's own connection, which the agent has authenticated: the
+	 * answer is what the owner could read by typing `env` in a terminal there.
+	 * It can hold secrets, so it is handed to the caller and nothing else — not
+	 * stored, and not logged at any level.
+	 */
+	async queryAgentEnvironment(
+		hostId: string,
+		mode: EnvMode,
+		timeoutMs = ENV_QUERY_TIMEOUT_MS,
+	): Promise<AgentEnvironmentOutcome> {
+		const agent = this.ctx.agents.get(hostId);
+		if (!agent?.connected) return { kind: "not-connected" };
+		if (agent.helloMessage?.capabilities?.includes(ENV_MODES_CAPABILITY) !== true) {
+			return { kind: "too-old" };
+		}
+		const requestId = generateId();
+		return new Promise<AgentEnvironmentOutcome>((resolve) => {
+			let settled = false;
+			const finish = (outcome: AgentEnvironmentOutcome): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				agent.off("message", onMessage);
+				agent.off("close", onClose);
+				resolve(outcome);
+			};
+			const onMessage = (incoming: ProtocolMessage): void => {
+				if (incoming.type !== "ENV" || incoming.requestId !== requestId) return;
+				const answer = incoming as AgentEnvMessage;
+				const env: Record<string, string> = {};
+				if (answer.env !== null && typeof answer.env === "object") {
+					for (const [name, value] of Object.entries(answer.env)) {
+						if (typeof value === "string") env[name] = value;
+					}
+				}
+				finish({ kind: "ok", env, os: typeof answer.os === "string" ? answer.os : "" });
+			};
+			const onClose = (): void => finish({ kind: "not-connected" });
+
+			const timer = setTimeout(() => finish({ kind: "timeout" }), timeoutMs);
+			agent.on("message", onMessage);
+			agent.on("close", onClose);
+			agent.send({ type: "ENV_QUERY", requestId, mode } satisfies AgentEnvQueryMessage);
+		});
+	}
 
 	/**
 	 * Replace the agent serving a host with the one this hub carries.

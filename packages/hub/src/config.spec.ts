@@ -24,6 +24,8 @@ import {
 	DEFAULT_TABS_CONFIG,
 	DEFAULT_TITLE_CONFIG,
 	DEFAULT_UI_CONFIG,
+	envFromToml,
+	envToToml,
 	extractAgentConfig,
 	extractAppearanceConfig,
 	extractElevationConfig,
@@ -1670,6 +1672,72 @@ describe("ConfigResolver.saveGlobalKey", () => {
 			fontSize: 22,
 			cursorStyle: "bar",
 		});
+	});
+
+	// TOML has no null, and toml-edit drops one silently: a removal typed at
+	// global scope would vanish on the way to the file (#576).
+	it("keeps a global env removal through the file, written false there", async () => {
+		const dir = join(tmpdir(), `lasterm-save-env-${Date.now()}`);
+		mkdirSync(dir, { recursive: true });
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(dir);
+
+		await resolver.saveGlobalTerminal("env", { NO_COLOR: null, EDITOR: "hx" });
+
+		const content = readFileSync(join(dir, "config.toml"), "utf8");
+		expect(content).toContain("NO_COLOR = false");
+		const reread = new ConfigResolver(metaDal);
+		reread.loadFromFile(dir);
+		expect(reread.getGlobalTerminalOverrides().env).toEqual({ NO_COLOR: null, EDITOR: "hx" });
+		expect(reread.environmentLayers()).toEqual([{ NO_COLOR: null, EDITOR: "hx" }]);
+	});
+});
+
+describe("[terminal] env in config.toml", () => {
+	it("reads false as a removal and a string as a value", () => {
+		expect(envFromToml({ NO_COLOR: false, EDITOR: "hx", PORT: 4100 })).toEqual({
+			NO_COLOR: null,
+			EDITOR: "hx",
+			PORT: 4100,
+		});
+	});
+
+	it("writes a removal false, and leaves the rest as it is", () => {
+		expect(envToToml({ NO_COLOR: null, EDITOR: "hx" })).toEqual({ NO_COLOR: false, EDITOR: "hx" });
+		expect(envToToml(null)).toBeNull();
+	});
+});
+
+describe("ConfigResolver.environmentLayers", () => {
+	let dbs: DatabaseManager;
+	let metaDal: MetaDAL;
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		metaDal = new MetaDAL(dbs.meta);
+	});
+
+	afterEach(() => {
+		dbs.close();
+	});
+
+	// The resolved profile drops a null as it merges; a removal must reach
+	// the spawn all the same, so the layers are read raw.
+	it("gives each scope's changes, removals included, outermost first", () => {
+		const hostId = metaDal.createHost({ type: "ssh", label: "pi", sshHost: "pi@pi.local" }).id;
+		metaDal.updateHostProfile(hostId, JSON.stringify({ env: { PAGER: null, LANG: "C" } }));
+		const resolver = new ConfigResolver(metaDal);
+
+		expect(resolver.environmentLayers(hostId)).toEqual([undefined, { PAGER: null, LANG: "C" }]);
+		expect(resolver.resolve(hostId).env).toEqual({ LANG: "C" });
+	});
+
+	it("skips a profile that is not JSON", () => {
+		const hostId = metaDal.createHost({ type: "ssh", label: "pi", sshHost: "pi@pi.local" }).id;
+		metaDal.updateHostProfile(hostId, "{not json");
+		const resolver = new ConfigResolver(metaDal);
+
+		expect(resolver.environmentLayers(hostId)).toEqual([undefined, undefined]);
 	});
 });
 

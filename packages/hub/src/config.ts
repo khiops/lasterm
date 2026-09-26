@@ -751,6 +751,33 @@ export function loadAuthConfig(configDir: string): AuthConfig {
 	}
 }
 
+// ─── [terminal] env, as TOML holds it ────────────────────────────────────────
+
+/**
+ * `[terminal] env` as the cascade reads it. TOML has no null, so a removal is
+ * written `false` there (#576) and read back as the `null` a profile uses;
+ * a string is a value. Anything else is left for the cascade to skip, as it
+ * skips what a profile holds that is not a variable.
+ */
+export function envFromToml(value: unknown): unknown {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+	const env: Record<string, unknown> = {};
+	for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
+		env[name] = entry === false ? null : entry;
+	}
+	return env;
+}
+
+/** A scope's env as `config.toml` can hold it: each `null` written `false`. */
+export function envToToml(value: unknown): unknown {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+	const env: Record<string, unknown> = {};
+	for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
+		env[name] = entry === null ? false : entry;
+	}
+	return env;
+}
+
 // ─── ConfigResolver ──────────────────────────────────────────────────────────
 
 export class ConfigResolver {
@@ -835,6 +862,8 @@ export class ConfigResolver {
 			for (const [key, val] of Object.entries(terminalSection as Record<string, unknown>)) {
 				if (key === "theme_overrides" && val !== null && typeof val === "object") {
 					flat.themeOverrides = val as Record<string, string>;
+				} else if (key === "env") {
+					flat.env = envFromToml(val);
 				} else {
 					flat[snakeToCamel(key)] = val;
 				}
@@ -1003,7 +1032,28 @@ export class ConfigResolver {
 		if (!(TERMINAL_PROFILE_KEYS as readonly string[]).includes(key)) {
 			throw new Error(`Unknown terminal key: ${key}`);
 		}
-		await this.saveGlobalKey("terminal", key, value);
+		await this.saveGlobalKey("terminal", key, key === "env" ? envToToml(value) : value);
+	}
+
+	/**
+	 * The environment changes each scope makes, outermost first: global, then
+	 * the host's, then the channel's. Raw, with their removals: the cascade's
+	 * resolved profile drops a `null` as it merges, and a removal has to reach
+	 * the agent (#576).
+	 */
+	environmentLayers(hostId?: string, channelId?: string): unknown[] {
+		const layers: unknown[] = [this.fileConfig?.env];
+		const profileEnv = (raw: string | null): unknown => {
+			if (!raw) return undefined;
+			try {
+				return (JSON.parse(raw) as Partial<TerminalProfile>).env;
+			} catch {
+				return undefined;
+			}
+		};
+		if (hostId) layers.push(profileEnv(this.metaDal.getHostProfile(hostId)));
+		if (channelId) layers.push(profileEnv(this.metaDal.getChannelProfile(channelId)));
+		return layers;
 	}
 
 	/** Write a UI config key to config.toml (validates section against whitelist). */

@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::batch::{
     batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender, EventFrame, OutputEvent,
 };
+use crate::environment::{self, EnvMode, Platform};
 use crate::expand::expand_vars;
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
@@ -188,6 +189,9 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
         "resize".into(),
         "snapshot".into(),
         "launch-profiles".into(),
+        // Reads SPAWN's env_mode, env_unset and login_shell, and answers
+        // ENV_QUERY (#576).
+        "env-modes".into(),
     ];
     if daemon {
         capabilities.push("hub-identity".into());
@@ -272,6 +276,7 @@ pub(crate) async fn handle_message(
             format!("ATTACH ch={}", &channel_id[..8.min(channel_id.len())])
         }
         HubToAgent::Auth { .. } => "AUTH".to_string(),
+        HubToAgent::EnvQuery { mode, .. } => format!("ENV_QUERY mode={mode:?}"),
         HubToAgent::Stop { force } => format!("STOP force={force}"),
         HubToAgent::Error { code, .. } => format!("ERROR {}", code),
     };
@@ -295,6 +300,9 @@ pub(crate) async fn handle_message(
             elevation_secret,
             elevation_method,
             custom_command,
+            env_mode,
+            env_unset,
+            login_shell,
             ..
         } => {
             handle_spawn(
@@ -303,7 +311,12 @@ pub(crate) async fn handle_message(
                 shell,
                 args.unwrap_or_default(),
                 cwd,
-                env,
+                SpawnEnvironment {
+                    mode: EnvMode::parse(env_mode.as_deref()),
+                    unset: env_unset.unwrap_or_default(),
+                    env,
+                    login_shell: login_shell.unwrap_or(false),
+                },
                 cols,
                 rows,
                 elevated,
@@ -317,6 +330,25 @@ pub(crate) async fn handle_message(
                 cmd_senders,
             )
             .await?;
+        }
+
+        HubToAgent::EnvQuery { request_id, mode } => {
+            // Agent-wide: every hub may ask, over its own authenticated
+            // connection, what it could equally read by typing `env`.
+            let env = environment::base(
+                environment::inherited_from_process(),
+                EnvMode::parse(mode.as_deref()),
+                Platform::current(),
+            )
+            .into_map();
+            send_frame(
+                &frame_tx,
+                &AgentToHub::Env {
+                    request_id,
+                    env,
+                    os: environment::os_name().to_owned(),
+                },
+            )?;
         }
 
         HubToAgent::Input { channel_id, data } => {
@@ -547,6 +579,41 @@ pub(crate) async fn handle_message(
     Ok(())
 }
 
+/// What a SPAWN says about the environment its terminal starts with (#576).
+pub(crate) struct SpawnEnvironment {
+    /// What the environment starts from.
+    pub mode: EnvMode,
+    /// Variables removed from that start: what a profile set to `null`.
+    pub unset: Vec<String>,
+    /// Variables set after the removals: the scopes', the launch profile's
+    /// and the request's, merged by the hub.
+    pub env: Option<HashMap<String, String>>,
+    /// Whether the hub asks for a login shell.
+    pub login_shell: bool,
+}
+
+/// The whole environment a terminal starts with: the base for the mode, the
+/// removals, the request's values, then elevation's.
+fn spawn_environment<I>(
+    inherited: I,
+    platform: Platform,
+    mode: EnvMode,
+    unset: &[String],
+    env: Option<&HashMap<String, String>>,
+    elevation_env: &HashMap<String, String>,
+) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut environment = environment::base(inherited, mode, platform);
+    environment.apply_unset(unset);
+    if let Some(env) = env {
+        environment.apply(env);
+    }
+    environment.apply(elevation_env);
+    environment.into_pairs()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_spawn(
     request_id: String,
@@ -554,7 +621,7 @@ async fn handle_spawn(
     shell: Option<String>,
     args: Vec<String>,
     cwd: Option<String>,
-    env: Option<std::collections::HashMap<String, String>>,
+    spawn_env: SpawnEnvironment,
     cols: u16,
     rows: u16,
     elevated: Option<bool>,
@@ -567,6 +634,13 @@ async fn handle_spawn(
     channel_events: ChannelEventSender,
     cmd_senders: SnapshotSenders,
 ) -> std::io::Result<()> {
+    let SpawnEnvironment {
+        mode: env_mode,
+        unset: env_unset,
+        env,
+        login_shell,
+    } = spawn_env;
+    // Counts and the mode only: names and values can be secrets.
     tracing::info!(
         request_id = %request_id,
         owner = owner.short(),
@@ -576,10 +650,14 @@ async fn handle_spawn(
         rows = rows,
         elevated = ?elevated,
         env_count = env.as_ref().map(|e| e.len()).unwrap_or(0),
+        env_unset_count = env_unset.len(),
+        env_mode = ?env_mode,
+        login_shell,
         "SPAWN received"
     );
 
     let resolved_shell = shell.unwrap_or_else(shell::get_default_shell);
+    let args = shell::login_shell_args(Platform::current(), &resolved_shell, args, login_shell);
 
     // Expand vars in args, cwd, env values (NOT shell)
     let expanded_args: Vec<String> = args.iter().map(|a| expand_vars(a, env.as_ref())).collect();
@@ -669,14 +747,16 @@ async fn handle_spawn(
         )
     };
 
-    // Merge extra_env (elevation env) into expanded_env
-    let merged_env: Option<std::collections::HashMap<String, String>> = if extra_env.is_empty() {
-        expanded_env
-    } else {
-        let mut merged = expanded_env.unwrap_or_default();
-        merged.extend(extra_env);
-        Some(merged)
-    };
+    // The whole environment, elevation's variables last: the PTY starts from
+    // this and nothing else.
+    let environment = spawn_environment(
+        environment::inherited_from_process(),
+        Platform::current(),
+        env_mode,
+        &env_unset,
+        expanded_env.as_ref(),
+        &extra_env,
+    );
 
     // Suppress unused warning — cleanup_path lifetime is managed by schedule_cleanup
     let _ = cleanup_path;
@@ -689,7 +769,7 @@ async fn handle_spawn(
             &effective_program,
             &effective_args,
             expanded_cwd.as_deref(),
-            merged_env.as_ref(),
+            Some(&environment),
             cols,
             rows,
         )
@@ -1223,6 +1303,242 @@ mod stdio_tests {
         assert!(capabilities(true).contains(&"hub-identity".to_string()));
         assert!(!capabilities(false).contains(&"hub-identity".to_string()));
     }
+
+    /// Both kinds of agent build the environment themselves and answer
+    /// ENV_QUERY, and say so: the hub asks nothing of an agent that does not.
+    #[test]
+    fn every_agent_says_env_modes() {
+        for daemon in [true, false] {
+            match build_hello(daemon) {
+                AgentToHub::Hello { capabilities, .. } => {
+                    assert!(capabilities.contains(&"env-modes".to_string()), "{daemon}");
+                }
+                _ => unreachable!("build_hello builds HELLO"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn env_query_answers_with_the_base_for_that_mode_and_the_identity() {
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+
+        handle_message(
+            crate::protocol::HubToAgent::EnvQuery {
+                request_id: "env-1".into(),
+                mode: Some("minimal".into()),
+            },
+            &OwnerId::legacy(),
+            Arc::new(Mutex::new(PtyManager::new())),
+            frame_tx,
+            channel_events,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await
+        .expect("ENV_QUERY is answered");
+
+        let frame = frame_rx.try_recv().expect("an answer");
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        assert_eq!(answer["type"], "ENV");
+        assert_eq!(answer["request_id"], "env-1");
+        assert_eq!(answer["os"], environment::os_name());
+        let env = answer["env"].as_object().expect("a map of variables");
+        assert_eq!(env["TERM_PROGRAM"], "lasterm");
+        assert_eq!(env["COLORTERM"], "truecolor");
+        // Minimal: everything there is on its list, or is the identity.
+        let identity: Vec<&str> = environment::identity(Platform::current())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for name in env.keys() {
+            assert!(
+                identity.contains(&name.as_str())
+                    || environment::kept_by_minimal(Platform::current(), name),
+                "{name} is not a minimal variable"
+            );
+        }
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        vars(pairs).into_iter().collect()
+    }
+
+    fn value<'a>(environment: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        environment
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Base, identity, removals, the request's values, elevation's: each step
+    /// speaks after the one before it.
+    #[test]
+    fn a_spawn_environment_is_built_in_order() {
+        let environment = spawn_environment(
+            vars(&[
+                ("HOME", "/home/pi"),
+                ("EDITOR", "vi"),
+                ("NO_COLOR", "1"),
+                ("TERM", "dumb"),
+                ("SSH_AUTH_SOCK", "/tmp/a"),
+            ]),
+            Platform::Unix,
+            EnvMode::Inherit,
+            &["SSH_AUTH_SOCK".into(), "COLORTERM".into()],
+            Some(&map(&[("EDITOR", "hx"), ("ASKPASS", "request")])),
+            &map(&[("ASKPASS", "elevation")]),
+        );
+
+        assert_eq!(value(&environment, "HOME"), Some("/home/pi"));
+        assert_eq!(value(&environment, "NO_COLOR"), None);
+        assert_eq!(value(&environment, "TERM"), Some("xterm-256color"));
+        assert_eq!(value(&environment, "SSH_AUTH_SOCK"), None);
+        assert_eq!(value(&environment, "COLORTERM"), None);
+        assert_eq!(value(&environment, "EDITOR"), Some("hx"));
+        assert_eq!(value(&environment, "ASKPASS"), Some("elevation"));
+    }
+
+    #[test]
+    fn a_minimal_spawn_keeps_what_the_request_adds() {
+        let environment = spawn_environment(
+            vars(&[("HOME", "/home/pi"), ("EDITOR", "vi")]),
+            Platform::Unix,
+            EnvMode::Minimal,
+            &[],
+            Some(&map(&[("PAGER", "less")])),
+            &HashMap::new(),
+        );
+
+        assert_eq!(value(&environment, "HOME"), Some("/home/pi"));
+        assert_eq!(value(&environment, "EDITOR"), None);
+        assert_eq!(value(&environment, "PAGER"), Some("less"));
+    }
+
+    #[test]
+    fn a_windows_spawn_merges_names_without_case() {
+        let environment = spawn_environment(
+            vars(&[("Path", r"C:\Windows"), ("TEMP", r"C:\Temp")]),
+            Platform::Windows,
+            EnvMode::Inherit,
+            &["temp".into()],
+            Some(&map(&[("PATH", r"C:\Tools;C:\Windows")])),
+            &HashMap::new(),
+        );
+
+        assert_eq!(value(&environment, "Path"), Some(r"C:\Tools;C:\Windows"));
+        assert_eq!(
+            value(&environment, "PATH"),
+            None,
+            "one variable, as named first"
+        );
+        assert_eq!(value(&environment, "TEMP"), None);
+    }
+
+    /// A command that writes what the shell sees of two variables to `out`.
+    fn print_two_variables(out: &std::path::Path) -> (String, Vec<String>) {
+        let out = out.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            (
+                "cmd.exe".into(),
+                vec![
+                    "/C".into(),
+                    "echo".into(),
+                    "%LASTERM_ENV_E2E%/%USERPROFILE%".into(),
+                    ">".into(),
+                    out,
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    format!("printf '%s/%s' \"$LASTERM_ENV_E2E\" \"${{HOME-unset}}\" > '{out}'"),
+                ],
+            )
+        }
+    }
+
+    /// The whole chain, from SPAWN to the shell: what the request removes is
+    /// not there, even though the agent has it. It would be, were the PTY
+    /// spawned from the agent's environment rather than a cleared one.
+    #[tokio::test]
+    async fn a_spawned_shell_sees_the_built_environment_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("lasterm-env-e2e-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("seen.txt");
+        let (shell, args) = print_two_variables(&out);
+        let removed = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        assert!(
+            std::env::var_os(removed).is_some(),
+            "the agent has {removed}, so only a cleared spawn can lack it"
+        );
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+
+        handle_spawn(
+            "env-e2e".into(),
+            Some("env-e2e".into()),
+            Some(shell),
+            args,
+            None,
+            SpawnEnvironment {
+                mode: EnvMode::Inherit,
+                unset: vec![removed.into()],
+                env: Some(map(&[("LASTERM_ENV_E2E", "given")])),
+                login_shell: false,
+            },
+            80,
+            24,
+            None,
+            None,
+            None,
+            None,
+            OwnerId::legacy(),
+            Arc::clone(&manager),
+            frame_tx,
+            channel_events,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await
+        .expect("SPAWN is answered");
+        let frame = frame_rx.recv().await.expect("an answer");
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        assert_eq!(answer["type"], "SPAWN_OK", "{answer}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let seen = loop {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                if !text.trim().is_empty() {
+                    break text;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell wrote nothing"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        if let Some(process) = manager.lock().await.remove("env-e2e") {
+            let _ = process.kill_tree();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let expected = if cfg!(windows) {
+            "given/%USERPROFILE%"
+        } else {
+            "given/unset"
+        };
+        assert_eq!(seen.trim(), expected);
+    }
 }
 
 #[cfg(test)]
@@ -1320,7 +1636,12 @@ mod tests {
             Some("/bin/true".into()),
             Vec::new(),
             None,
-            None,
+            SpawnEnvironment {
+                mode: EnvMode::Inherit,
+                unset: Vec::new(),
+                env: None,
+                login_shell: false,
+            },
             80,
             24,
             Some(false),

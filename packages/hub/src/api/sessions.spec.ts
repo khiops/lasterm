@@ -26,8 +26,18 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 		/** How many terminals other hubs hold on this daemon. */
 		othersHold = 0;
 		readonly sent: ProtocolMessage[] = [];
+		/** What this agent answers ENV_QUERY with, by mode; nothing when unset. */
+		environments: Record<string, Record<string, string>> | undefined;
 		send = vi.fn((msg: ProtocolMessage) => {
 			this.sent.push(msg);
+			if (msg.type === "ENV_QUERY") {
+				const env = this.environments?.[msg.mode];
+				if (env === undefined) return;
+				setImmediate(() =>
+					this.emit("message", { type: "ENV", requestId: msg.requestId, env, os: "linux" }),
+				);
+				return;
+			}
 			if (msg.type !== "STOP") return;
 			if (!msg.force && this.othersHold > 0) {
 				setImmediate(() =>
@@ -59,6 +69,7 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 
 type FakeSshAgent = SshAgent & {
 	othersHold: number;
+	environments: Record<string, Record<string, string>> | undefined;
 	sent: ProtocolMessage[];
 	send: ReturnType<typeof vi.fn>;
 	execOnHost: ReturnType<typeof vi.fn>;
@@ -195,6 +206,111 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(res.statusCode).toBe(400);
 		expect(res.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
 		expect(agent.sent).toEqual([]);
+	});
+});
+
+describe("GET /api/hosts/:id/agent-environment (#576)", () => {
+	function environment(mode?: string) {
+		return server.inject({
+			method: "GET",
+			url: `/api/hosts/${hostId}/agent-environment${mode === undefined ? "" : `?mode=${mode}`}`,
+		});
+	}
+
+	it("asks the agent, for the mode requested, and answers with what it says", async () => {
+		const agent = connectedAgent(["multiplex", "env-modes"]);
+		agent.environments = {
+			inherit: { HOME: "/home/pi", EDITOR: "vi", TERM: "xterm-256color" },
+			minimal: { HOME: "/home/pi", TERM: "xterm-256color" },
+		};
+
+		const res = await environment("minimal");
+
+		expect(res.statusCode).toBe(200);
+		expect(res.json()).toEqual({
+			mode: "minimal",
+			os: "linux",
+			env: { HOME: "/home/pi", TERM: "xterm-256color" },
+		});
+		expect(res.headers["cache-control"]).toBe("no-store");
+		expect(agent.sent).toEqual([
+			expect.objectContaining({
+				type: "ENV_QUERY",
+				mode: "minimal",
+				requestId: expect.any(String),
+			}),
+		]);
+	});
+
+	it("answers 409 HOST_NOT_CONNECTED when no agent of this host is connected", async () => {
+		const res = await environment("inherit");
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toMatchObject({ error: { code: "HOST_NOT_CONNECTED" } });
+	});
+
+	it("answers 409 AGENT_TOO_OLD for an agent without env-modes, and asks it nothing", async () => {
+		const agent = connectedAgent(["multiplex", "hub-identity"]);
+
+		const res = await environment("inherit");
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toMatchObject({ error: { code: "AGENT_TOO_OLD" } });
+		expect(agent.sent).toEqual([]);
+	});
+
+	it("refuses a mode it does not know, and asks the agent nothing", async () => {
+		const agent = connectedAgent(["env-modes"]);
+
+		const res = await environment("clean");
+
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+		expect(agent.sent).toEqual([]);
+	});
+
+	it("answers 404 for a host it does not know", async () => {
+		const res = await server.inject({
+			method: "GET",
+			url: "/api/hosts/01HZZZZZZZZZZZZZZZZZZZZZZZ/agent-environment?mode=inherit",
+		});
+
+		expect(res.statusCode).toBe(404);
+	});
+});
+
+describe("SessionManager.queryAgentEnvironment", () => {
+	it("gives up on an agent that does not answer", async () => {
+		connectedAgent(["env-modes"]);
+
+		expect(await sm.queryAgentEnvironment(hostId, "inherit", 20)).toEqual({ kind: "timeout" });
+	});
+
+	it("says not connected when the connection ends before the answer", async () => {
+		const agent = connectedAgent(["env-modes"]);
+		const asked = sm.queryAgentEnvironment(hostId, "inherit", 5_000);
+
+		agent.emit("close");
+
+		expect(await asked).toEqual({ kind: "not-connected" });
+	});
+
+	// Another request's answer is not this one's.
+	it("reads only the answer to its own request", async () => {
+		const agent = connectedAgent(["env-modes"]);
+		const asked = sm.queryAgentEnvironment(hostId, "inherit", 5_000);
+		const query = agent.sent.find((msg) => msg.type === "ENV_QUERY");
+		if (query?.type !== "ENV_QUERY") throw new Error("expected an ENV_QUERY");
+
+		agent.emit("message", { type: "ENV", requestId: "someone-else", env: { A: "1" }, os: "linux" });
+		agent.emit("message", {
+			type: "ENV",
+			requestId: query.requestId,
+			env: { B: "2", N: 3 },
+			os: "linux",
+		});
+
+		expect(await asked).toEqual({ kind: "ok", env: { B: "2" }, os: "linux" });
 	});
 });
 

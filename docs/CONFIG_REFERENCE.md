@@ -19,7 +19,7 @@ Settings are resolved through four layers. Each layer deep-merges on top of the 
 | 3.5 | Agent visual hints (from HELLO message, ephemeral) | Per session |
 | 4 | Per-channel profile (`channels.profile_json` in meta.db, set via API) | Per channel |
 
-Merge rules: objects merge recursively, scalars overwrite, `null` removes a key (falls back to previous layer), arrays replace entirely.
+Merge rules: objects merge recursively, scalars overwrite, `null` removes a key (falls back to previous layer), arrays replace entirely. `[terminal] env` is the exception: a `null` there is a removal that reaches the terminal (see below).
 
 Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, theme, cursor, wallpaper, etc.). UI sections (`[tabs]`, `[search]`, `[appearance]`, etc.) are global-only and are ignored in per-host/per-channel profiles.
 
@@ -41,6 +41,8 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | wallpaper | string | `""` | Wallpaper filename (jpg/jpeg/png/webp/gif/avif, max 10 MB) |
 | wallpaper_blur | number (0–20) | `0` | Wallpaper blur in pixels |
 | wallpaper_dim | number (0–100) | `0` | Wallpaper dim percentage |
+| env_mode | `"inherit"` \| `"minimal"` | `"inherit"` | What a terminal's environment starts from, applied by the agent on the terminal's host: `inherit`, the environment that agent runs with; `minimal`, only what programs need to run (`HOME`, `USER`, `PATH`, `LANG`, `LC_*`… on Unix; `SystemRoot`, `Path`, `USERPROFILE`, `TEMP`… on Windows — the full lists are in PROTOCOL.md § 3.2), taken from it, never invented. Either way the inherited `NO_COLOR` is dropped and the terminal says what it is: `TERM=xterm-256color` (Unix), `COLORTERM=truecolor`, `TERM_PROGRAM=lasterm`, `TERM_PROGRAM_VERSION`. `env` can remove or change any of them |
+| env | table of name → string or `false` | `{}` | Changes to that start, for every terminal: a string sets the variable, `false` removes it (TOML has no null; host and terminal profiles write `null`). A host's `env` changes what this one sets, a terminal's both, and the same name set closer wins, either way. Only the changes are stored, never the environment they produce: a variable that appears on the host later still reaches new terminals unless it is removed. A launch profile's own `env`, then the spawn request's, are applied over these. Names compare without case on Windows hosts. Stored in the clear: no place for secrets. Reaches new and restarted terminals, never running ones. Example: `env = { EDITOR = "hx", PAGER = false }` |
 | when_ended | `"ask"` \| `"restart"` \| `"close"` | `"ask"` | What a pane does when the terminal in it ends. `ask` shows Restart and Close over it. `restart` brings it back, except one that ended within 5 seconds of starting, one that runs a command, one whose write lock another window holds, and one found already ended on a reload or an attach: those show the overlay, saying why. `close` closes its pane, deleting the terminal unless `[panes] keep_ended` keeps it. Set for every host here, or for one host or one terminal in Settings › Terminal. "Always do this" on the overlay, for this host or everywhere, writes it too, and drop the overrides nearer to that terminal so that it holds there |
 
 ---
@@ -199,6 +201,8 @@ font_size = 13
 theme = "catppuccin-mocha"
 cursor_style = "bar"
 scrollback = 10000
+env_mode = "inherit"
+env = { EDITOR = "hx", PAGER = false }   # false removes the variable
 
 [tabs]
 new_tab_position = "afterActive"
@@ -244,5 +248,5 @@ dead_retention_hours = 48
 
 - All keys use `snake_case` in TOML. TypeScript interfaces use `camelCase`. Conversion between the two happens automatically at codec boundaries.
 - Layers 3–4 (host/channel profiles) only support `[terminal]` keys. UI sections such as `[tabs]`, `[search]`, `[appearance]`, and `[gc]` are global-only.
-- Setting a key to `null` in a profile JSON removes that key, causing resolution to fall back to the previous layer.
+- Setting a key to `null` in a profile JSON removes that key, causing resolution to fall back to the previous layer. Inside `env` it goes further: `null` on a variable removes the variable from the terminal's environment, whether an outer layer set it or the agent would have passed it on (`false` in `config.toml`).
 - The `[terminal].wallpaper` value is a filename, not a path. Files must be placed in `$XDG_CONFIG_HOME/lasterm/` (or the platform equivalent) and served by the hub.

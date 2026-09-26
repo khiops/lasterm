@@ -1852,6 +1852,9 @@ mod tests {
                 elevation_secret: None,
                 elevation_method: None,
                 custom_command: None,
+                env_mode: None,
+                env_unset: None,
+                login_shell: None,
             };
             stream
                 .write_all(&encode_frame(&spawn).expect("encode SPAWN"))
@@ -3216,6 +3219,9 @@ mod tests {
                 elevation_secret: None,
                 elevation_method: None,
                 custom_command: None,
+                env_mode: None,
+                env_unset: None,
+                login_shell: None,
             }
         }
 
@@ -3351,6 +3357,9 @@ mod tests {
                     elevation_secret: None,
                     elevation_method: None,
                     custom_command: None,
+                    env_mode: None,
+                    env_unset: None,
+                    login_shell: None,
                 }
             }
 

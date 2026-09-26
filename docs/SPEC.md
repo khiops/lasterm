@@ -680,8 +680,8 @@ User clicks [+ channel] on local host
   │  Proceed to SPAWN
   │
   └─ Yes (ACTIVE) → reuse agent connection (daemon UDS or stdio)
-     Hub → Agent: SPAWN { shell, cwd, env, cols, rows }
-     Agent: spawn PTY, create the vt100 screen model
+     Hub → Agent: SPAWN { shell, cwd, env, env_unset, env_mode, cols, rows }
+     Agent: build the environment (§ 6), spawn PTY, create the vt100 screen model
      Agent → Hub: SPAWN_OK { channelId: "ch-new" }
      Hub: create Channel record (meta.db), status: BORN → LIVE
      Hub → UI: channel available, auto-ATTACH
@@ -705,8 +705,8 @@ User clicks [+ channel] on remote host
   │     UI: error notification
   │
   └─ Yes (ACTIVE) → reuse SSH connection
-     Hub → Agent: SPAWN { shell, cwd, env, cols, rows }
-     Agent: spawn PTY, create the vt100 screen model
+     Hub → Agent: SPAWN { shell, cwd, env, env_unset, env_mode, login_shell, cols, rows }
+     Agent: build the environment (§ 6), spawn PTY, create the vt100 screen model
      Agent → Hub: SPAWN_OK { channelId: "ch-new" }
      Hub: create Channel record (meta.db), status: BORN → LIVE
      Hub → UI: channel available, auto-ATTACH
@@ -810,8 +810,19 @@ The environment a terminal is spawned with cascades through the same layers, and
 
 | TOML key | Profile key | Values | Default | Notes |
 |----------|-------------|--------|---------|-------|
-| `env_mode` | `envMode` | `inherit`, `minimal` | `inherit` | Whether the PTY starts from the environment the hub runs in, or a minimal one. |
-| `env` | `env` | map of name → value | `{}` | Merged key by key down the layers: a host adds to what the global scope set, a channel to both, and the same name set closer wins. `null` on a key drops what an outer scope put there. Applied after `envMode`, and overridden by a launch profile's own `env` and then by the spawn request. Stored in the clear in `meta.db`, like every other profile value: not a place for secrets. Reaches the terminals spawned after it, never the ones already running. |
+| `env_mode` | `envMode` | `inherit`, `minimal` | `inherit` | What the PTY's environment starts from, applied by the agent on the host (#576): `inherit`, the agent's own environment; `minimal`, only what programs need to run (`HOME`, `PATH`, the locale…), taken from it and never invented. The lists are in PROTOCOL.md § 3.2. Either way the agent then drops the inherited `NO_COLOR` and sets the terminal's identity: `TERM=xterm-256color` on Unix, `COLORTERM=truecolor`, `TERM_PROGRAM=lasterm`, `TERM_PROGRAM_VERSION`. An agent without `env-modes` ignores the mode. |
+| `env` | `env` | map of name → value or `null` | `{}` | This scope's **changes** to that start, never a snapshot of the result. A value sets the variable; `null` removes it, whether an outer scope set it or the agent would have passed it on (`false` in `config.toml`, which has no null). Merged key by key down the layers: a host changes what the global scope set, a channel both, and the same name set closer wins, either way. The hub resolves the layers into values and removals and sends them in SPAWN as `env` and `env_unset`; a launch profile's own `env`, then the spawn request's, are applied over them. On a Windows host names compare without case. Stored in the clear in `meta.db` and `config.toml`, like every other profile value: not a place for secrets. Reaches the terminals spawned after it and the ones restarted, never the ones already running. |
+
+Settings › Environment shows, at host and terminal scope, the variables the host's agent would
+start a terminal with in the chosen mode, asked live (`GET /api/hosts/:id/agent-environment`,
+PROTOCOL.md § 3.18) and never stored: each can be removed or changed, others added, and the mode
+reads "Inherited (customized)" or "Minimal (customized)" when the scope changes anything. At global
+scope there is no single agent to ask; the changes are edited by name.
+
+A terminal on an SSH host that runs the host's default shell, with no arguments, as a shell rather
+than a direct process, starts as a **login shell**: `ssh host` gives one, and it reads
+`~/.profile`, so `PATH` is right whatever the remote agent was started with. The hub asks for it
+(`login_shell`), a Unix agent adds `-l` for a shell known to take it. Local terminals are unchanged.
 
 Native effect resolution:
 

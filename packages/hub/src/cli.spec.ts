@@ -1491,6 +1491,57 @@ describe("runtime state", () => {
 		},
 	);
 
+	// #588. On Windows a rename over a file another process has open fails with
+	// EPERM, even when that process only reads it, and something reading the
+	// record while a hub starts is ordinary: the desktop looking for its hub's
+	// port, `lasterm status`, another client. The hub then failed to start.
+	// Without the retry, about one publish in four fails here.
+	it.runIf(process.platform === "win32")(
+		"publishes the record while another process keeps reading it",
+		async () => {
+			const stateDir = path.join(makeTempDir(), "lasterm");
+			persistRuntime(runtimeRecord({ port: 1000 }), stateDir);
+			const runtimePath = path.join(stateDir, "runtime.json");
+			const readingPath = path.join(stateDir, "reading");
+			const stopPath = path.join(stateDir, "stop-reading");
+			const reader = spawn(
+				process.execPath,
+				["-e", READ_UNTIL_STOPPED, runtimePath, readingPath, stopPath],
+				{ stdio: ["ignore", "pipe", "inherit"] },
+			);
+			let readerOutput = "";
+			reader.stdout?.on("data", (chunk: Buffer) => {
+				readerOutput += chunk.toString("utf8");
+			});
+			const readerDone = waitForExit(reader);
+			const failures: string[] = [];
+			const publishes = 200;
+			try {
+				await waitUntil(() => existsSync(readingPath), 10_000);
+				for (let i = 1; i <= publishes; i++) {
+					try {
+						persistRuntime(runtimeRecord({ port: 1000 + i }), stateDir);
+					} catch (error) {
+						failures.push((error as NodeJS.ErrnoException).code ?? String(error));
+					}
+				}
+			} finally {
+				writeFileSync(stopPath, "");
+				await readerDone;
+			}
+
+			expect(failures).toEqual([]);
+			// It saw the first record and the last, and more in between: it was
+			// reading while the records were published, not only before and after.
+			const [reads, versions] = readerOutput.trim().split(" ").map(Number);
+			expect(reads).toBeGreaterThan(publishes);
+			expect(versions).toBeGreaterThan(2);
+			const runtime = loadRuntime(stateDir);
+			expect(runtime.kind === "present" ? runtime.runtime.port : undefined).toBe(1000 + publishes);
+			expect(readdirSync(stateDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+		},
+	);
+
 	it("cmdStop fails closed on owner-token shutdown errors without signaling the pid", async () => {
 		const { root, restore } = useTempStateRoot();
 		let child: ReturnType<typeof spawn> | undefined;
@@ -2258,6 +2309,30 @@ function isChildAlive(child: ReturnType<typeof spawn>): boolean {
 		return true;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * A reader for `node -e`: reads the file named by its first argument as fast as
+ * it can, creates the second once it has read it, and stops when the third
+ * appears (or after 30 s, should the test that started it be gone). It prints
+ * how many reads it made and how many versions of the file it saw. One line, so
+ * nothing between here and node can cut it at a newline.
+ */
+const READ_UNTIL_STOPPED =
+	'const fs = require("node:fs"); const [target, reading, stop] = process.argv.slice(1); ' +
+	"const deadline = Date.now() + 30000; let last = fs.readFileSync(target, 'utf8'); " +
+	"let reads = 1; let versions = 1; fs.writeFileSync(reading, ''); " +
+	"for (let i = 1; ; i++) { try { const text = fs.readFileSync(target, 'utf8'); reads++; " +
+	"if (text !== last) { versions++; last = text; } } catch {} " +
+	"if (i % 64 === 0 && (fs.existsSync(stop) || Date.now() > deadline)) break; } " +
+	"process.stdout.write(reads + ' ' + versions + '\\n');";
+
+async function waitUntil(condition: () => boolean, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error(`condition not met within ${timeoutMs} ms`);
+		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 }
 

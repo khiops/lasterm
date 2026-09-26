@@ -5,11 +5,11 @@ import {
 	lstatSync,
 	openSync,
 	readFileSync,
-	renameSync,
 	writeFileSync,
 	writeSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import {
 	AGENT_FETCH_IDLE_TIMEOUT_MS,
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
@@ -705,7 +705,7 @@ function writeManifestCache(manifestPath: string, text: string): void {
 	const tempPath = `${manifestPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
 	try {
 		writeFileSync(tempPath, text, { flag: "wx", mode: 0o600 });
-		renameSync(tempPath, manifestPath);
+		replaceFileSync(tempPath, manifestPath);
 	} catch (error) {
 		removeFileIfPresent(tempPath);
 		if (isErrno(error, "EEXIST")) return;

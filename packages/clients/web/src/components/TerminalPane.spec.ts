@@ -259,14 +259,15 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 
 	it("does what the setting answers", () => {
 		const onEnded = body(/function onTerminalEnded\(/);
-		expect(onEnded).toContain("reactToEnd(prefs.value,");
+		expect(onEnded).toContain("reactToEnd(prefs.value, facts)");
 		expect(onEnded).toContain("directProcess: isDirectProcess.value");
 		expect(onEnded).toContain("writer: isWriter.value");
 		// A terminal stopped from elsewhere is never restarted or closed (#580).
 		expect(onEnded).toMatch(
 			/function onTerminalEnded\(end: EndSeen, endReason\?: ChannelEndReason\)/,
 		);
-		expect(onEnded).toMatch(/writer: isWriter\.value,\s*endReason,\s*\}\);/);
+		expect(onEnded).toMatch(/const facts: EndFacts = \{\s*\.\.\.end,/);
+		expect(onEnded).toMatch(/writer: isWriter\.value,\s*endReason,\s*\};/);
 		expect(onEnded).toContain("if (reaction.kind === 'restart') void onRestart();");
 		expect(onEnded).toContain("else closeEnded(reaction.keep);");
 		expect(SOURCE).toContain(
@@ -345,6 +346,67 @@ describe("TerminalPane overlay (#574)", () => {
 	it("gives no button the keyboard", () => {
 		expect(overlay).not.toMatch(/<button[^>]*\bref=/);
 		expect(SOURCE).not.toContain("exitPrimary");
+	});
+});
+
+// ─── "Always do this" answers the overlays already waiting (#586) ────────────
+//
+// What a waiting overlay does is answerWaiting's to say (exit-action.spec.ts),
+// and how it waits useWaitingAnswer's (useWaitingAnswer.spec.ts). These check
+// that the pane feeds them what it knows, and acts as its buttons do.
+
+describe("TerminalPane follows a choice made on another overlay (#586)", () => {
+	it("keeps what about an end holds it back, whatever the setting was", () => {
+		const onEnded = body(/function onTerminalEnded\(/);
+		expect(onEnded).toContain("const held = endHold(facts);");
+		// As the overlay's reason: an end found later keeps what the one seen said.
+		expect(onEnded).toContain("if (held !== null || end.seen === 'live') hold.value = held;");
+		// Before the setting may restart or close the pane.
+		expect(onEnded.indexOf("endHold(facts)")).toBeLessThan(onEnded.indexOf("reactToEnd("));
+	});
+
+	it("forgets it with its overlay, or when handed another terminal", () => {
+		expect(SOURCE).toMatch(
+			/watch\(effectiveChannelId, \(\) => \{\s*heldBack\.value = null;\s*hold\.value = null;\s*\}\);/,
+		);
+		expect(SOURCE).toMatch(
+			/watch\(cover, \(now\) => \{\s*if \(now !== 'exited'\) hold\.value = null;\s*\}\);/,
+		);
+	});
+
+	// Every pane of the tab shown, not only the selected one.
+	it("is on screen when its tab is the one shown", () => {
+		expect(SOURCE).toContain("const channelsOnScreen = inject(CHANNELS_ON_SCREEN_KEY, null);");
+		expect(SOURCE).toContain(
+			"return channelsOnScreen === null ? isActiveTab.value : channelsOnScreen.value.has(chId);",
+		);
+	});
+
+	it("tells useWaitingAnswer what it knows", () => {
+		const call = /useWaitingAnswer\(\{[\s\S]*?\}\);/.exec(SOURCE)?.[0] ?? "";
+		expect(call, "the call moved").not.toBe("");
+		// Only an ended terminal's overlay, not one gone, nor one restarting.
+		expect(call).toContain(
+			"waiting: computed(() => cover.value === 'exited' && !restarting.value),",
+		);
+		expect(call).toContain("channelId: effectiveChannelId,");
+		expect(call).toContain("hostId: paneHostId,");
+		expect(call).toMatch(/\bhold,/);
+		expect(call).toContain("directProcess: isDirectProcess,");
+		// The setting as its terminal resolves it, read again after each write.
+		expect(call).toContain("whenEnded: computed(() => prefs.value.whenEnded),");
+		expect(call).toMatch(/\binView,/);
+		expect(call).toContain("act: followChoice,");
+	});
+
+	// Restart as the overlay's Restart; Close as its Close, which the keep
+	// setting says whether to delete. Nothing written: the other overlay did.
+	it("acts as the overlay's buttons do", () => {
+		const follow = body(/function followChoice\(/);
+		expect(follow).toContain("overlayChoice(action, null, prefs.value.keepEnded);");
+		expect(follow).toContain("if (act.kind === 'restart') void onRestart();");
+		expect(follow).toContain("else closeEnded(act.keep);");
+		expect(follow).not.toContain("saveWhenEnded");
 	});
 });
 

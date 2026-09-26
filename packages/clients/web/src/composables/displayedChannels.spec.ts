@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayedChannelIds, pickableChannels } from "./displayedChannels.js";
+import { channelsOnScreen, displayedChannelIds, pickableChannels } from "./displayedChannels.js";
 import type { PaneNode } from "./usePaneTree.js";
 
 const terminal = (channelId: string): PaneNode => ({ type: "terminal", channelId }) as PaneNode;
@@ -15,6 +15,26 @@ describe("displayedChannelIds", () => {
 			"tab-3": null,
 		});
 		expect([...ids].sort()).toEqual(["a", "b"]);
+	});
+});
+
+// Where an overlay follows "Always do this" clicked on another one (#586).
+describe("channelsOnScreen", () => {
+	const layouts = {
+		"tab-1": split(terminal("a"), split(vacant("v1"), terminal("b"))),
+		"tab-2": terminal("c"),
+		"tab-3": null,
+	};
+
+	it("is every pane of the tab shown, and none of the others", () => {
+		expect([...channelsOnScreen(layouts, "tab-1")].sort()).toEqual(["a", "b"]);
+		expect([...channelsOnScreen(layouts, "tab-2")]).toEqual(["c"]);
+	});
+
+	it("is nothing without a tab shown, or with an empty one", () => {
+		expect(channelsOnScreen(layouts, null).size).toBe(0);
+		expect(channelsOnScreen(layouts, "tab-3").size).toBe(0);
+		expect(channelsOnScreen(layouts, "closed").size).toBe(0);
 	});
 });
 

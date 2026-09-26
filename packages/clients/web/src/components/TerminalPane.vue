@@ -171,6 +171,7 @@ import { type ChannelEndReason, DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, toRef, useId, watch } from 'vue';
 import { useActivityTracker } from '../composables/useActivityTracker.js';
 import { playBellSound } from '../composables/useBellSound.js';
+import { CHANNELS_ON_SCREEN_KEY } from '../composables/displayedChannels.js';
 import type { SearchScope } from '../composables/useMultiPaneSearch.js';
 import { MULTI_PANE_SEARCH_KEY } from '../composables/useMultiPaneSearch.js';
 import { useResolvedProfile } from '../composables/useResolvedProfile.js';
@@ -181,6 +182,7 @@ import { useSearchShortcuts } from '../composables/useSearchShortcuts.js';
 import { useTabTitle } from '../composables/useTabTitle.js';
 import { useTerminal } from '../composables/useTerminal.js';
 import { useVisualProfile } from '../composables/useVisualProfile.js';
+import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
 import { useChannelsStore } from '../stores/channels.js';
 import { useConfigStore } from '../stores/config.js';
 import { useHostsStore } from '../stores/hosts.js';
@@ -192,8 +194,11 @@ import {
 	type AlwaysScope,
 	ALWAYS_SCOPES,
 	createEndWatch,
+	type EndFacts,
+	type EndHold,
 	type EndSeen,
 	endedPrefs,
+	endHold,
 	type HeldBack,
 	heldBackMessage,
 	type OverlayAction,
@@ -478,9 +483,18 @@ watch(
 /** Why the setting's restart did not happen, shown on the overlay. */
 const heldBack = ref<HeldBack | null>(null);
 const heldBackText = computed(() => (heldBack.value === null ? '' : heldBackMessage(heldBack.value)));
+
+/**
+ * What about the end shown keeps this overlay asking, whatever "Always do
+ * this" answers on another one (#586). Not shown: the setting may have been
+ * "ask", and the overlay has nothing to explain then.
+ */
+const hold = ref<EndHold | null>(null);
+
 // A reason is about one terminal: a pane handed another one drops it.
 watch(effectiveChannelId, () => {
 	heldBack.value = null;
+	hold.value = null;
 });
 
 /**
@@ -490,12 +504,16 @@ watch(effectiveChannelId, () => {
  * terminal itself: stopped from elsewhere, nothing here undoes it (#580).
  */
 function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
-	const reaction = reactToEnd(prefs.value, {
+	const facts: EndFacts = {
 		...end,
 		directProcess: isDirectProcess.value,
 		writer: isWriter.value,
 		endReason,
-	});
+	};
+	// An end found later keeps what the one seen said, as the reason below does.
+	const held = endHold(facts);
+	if (held !== null || end.seen === 'live') hold.value = held;
+	const reaction = reactToEnd(prefs.value, facts);
 	if (reaction.kind === 'overlay') {
 		// An end found later keeps the reason the one seen gave, which is still true.
 		if (reaction.heldBack !== undefined) heldBack.value = reaction.heldBack;
@@ -1035,6 +1053,51 @@ watch(
 	},
 	{ immediate: true },
 );
+
+// ---------------------------------------------------------------------------
+// "Always do this" clicked on another overlay (#586)
+// ---------------------------------------------------------------------------
+
+/** The panes of the tab shown, told by the layout. */
+const channelsOnScreen = inject(CHANNELS_ON_SCREEN_KEY, null);
+
+/**
+ * This pane is on screen: its tab is the one shown, whether or not it is the
+ * pane selected in it. Without the layout to ask, only the selected one is.
+ */
+const inView = computed(() => {
+	const chId = effectiveChannelId.value;
+	if (chId === null) return false;
+	return channelsOnScreen === null ? isActiveTab.value : channelsOnScreen.value.has(chId);
+});
+
+// What held an end back goes with its overlay.
+watch(cover, (now) => {
+	if (now !== 'exited') hold.value = null;
+});
+
+/**
+ * Do what the overlay's button for `action` does, for a choice made on
+ * another overlay: nothing to remember, that one already did.
+ */
+function followChoice(action: OverlayAction): void {
+	const { act } = overlayChoice(action, null, prefs.value.keepEnded);
+	if (act.kind === 'restart') void onRestart();
+	else closeEnded(act.keep);
+}
+
+// An overlay already waiting when "Always do this" is clicked on another one
+// in its scope does the same, once, when it is on screen: see `answerWaiting`.
+useWaitingAnswer({
+	waiting: computed(() => cover.value === 'exited' && !restarting.value),
+	channelId: effectiveChannelId,
+	hostId: paneHostId,
+	hold,
+	directProcess: isDirectProcess,
+	whenEnded: computed(() => prefs.value.whenEnded),
+	inView,
+	act: followChoice,
+});
 
 // ---------------------------------------------------------------------------
 // Context menu

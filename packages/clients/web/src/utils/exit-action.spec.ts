@@ -2,18 +2,22 @@ import type { TerminalProfile } from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
 	ALWAYS_SCOPES,
+	type AlwaysChoice,
 	AUTO_RESTART_MIN_RUN_MS,
 	alwaysScopeOf,
+	answerWaiting,
 	createEndWatch,
 	type EndedPrefs,
 	type EndFacts,
 	endedPrefs,
 	endedToDelete,
+	endHold,
 	heldBackMessage,
 	LEGACY_DEAD_TAB_KEY,
 	migrateLegacyDeadTabChoice,
 	overlayChoice,
 	reactToEnd,
+	type WaitingOverlay,
 } from "./exit-action.js";
 
 const ask: EndedPrefs = { whenEnded: "ask", keepEnded: false };
@@ -336,6 +340,148 @@ describe("overlayChoice: the overlay's buttons", () => {
 			act: { kind: "close", keep: true },
 			remember: { scope: "global", whenEnded: "close" },
 		});
+	});
+});
+
+// ─── The overlays already waiting (#586) ─────────────────────────────────────
+
+// "Always do this" on one overlay acted only on terminals that ended
+// afterwards: when several ended at once, each had to be answered by hand.
+describe("endHold: what an end holds back from a choice made elsewhere", () => {
+	it("nothing, for a shell that ran long enough in the window holding it", () => {
+		expect(endHold(liveEnd)).toBeNull();
+	});
+
+	// The loop guard: a shell failing at launch would restart for ever.
+	it("one that ended within 5 seconds of starting, or of the pane reaching it", () => {
+		expect(endHold({ ...liveEnd, watchedMs: AUTO_RESTART_MIN_RUN_MS - 1 })).toBe("just-started");
+		expect(endHold({ ...liveEnd, watchedMs: null })).toBe("just-started");
+		expect(endHold({ ...liveEnd, fromStart: false, watchedMs: 1_000 })).toBe("just-attached");
+		expect(endHold({ ...liveEnd, watchedMs: AUTO_RESTART_MIN_RUN_MS })).toBeNull();
+	});
+
+	// Whatever the setting was when it ended: "ask" says nothing of it.
+	it("one whose write lock this window does not hold", () => {
+		expect(endHold({ ...liveEnd, writer: false })).toBe("not-writer");
+	});
+
+	// Never watched: the choice was just made, explicitly.
+	it("nothing, for an end found at a reload or an attach", () => {
+		expect(
+			endHold({ ...liveEnd, seen: "found", watchedMs: null, fromStart: false, writer: false }),
+		).toBeNull();
+	});
+
+	it("a restart from here that ended before the pane could reach it", () => {
+		expect(endHold({ ...liveEnd, seen: "found", watchedMs: null, fromStart: true })).toBe(
+			"just-started",
+		);
+	});
+
+	// It did not fail: someone stopped it (#580).
+	it("nothing, for a terminal stopped from elsewhere", () => {
+		const destroyed: EndFacts = { ...liveEnd, endReason: "destroyed" };
+		expect(endHold(destroyed)).toBeNull();
+		expect(endHold({ ...destroyed, watchedMs: 1_000, writer: false })).toBeNull();
+		expect(endHold({ ...destroyed, seen: "found", watchedMs: null })).toBeNull();
+	});
+
+	// The command is the terminal's, not the end's: answerWaiting reads it.
+	it("leaves the command to answerWaiting", () => {
+		expect(endHold({ ...liveEnd, directProcess: true })).toBeNull();
+	});
+});
+
+describe("answerWaiting: an overlay already waiting, and a choice made on another", () => {
+	const restartHere: AlwaysChoice = {
+		action: "restart",
+		scope: "host",
+		hostId: "h1",
+		channelId: "clicked",
+		at: 1_000,
+	};
+	/** An overlay of the same host, on screen, whose setting now says restart. */
+	const waiting: WaitingOverlay = {
+		channelId: "other",
+		hostId: "h1",
+		hold: null,
+		directProcess: false,
+		whenEnded: "restart",
+		inView: true,
+		wasInView: false,
+	};
+
+	it("follows it on screen when its setting now says the same", () => {
+		expect(answerWaiting(restartHere, waiting)).toBe("act");
+		expect(
+			answerWaiting({ ...restartHere, action: "close" }, { ...waiting, whenEnded: "close" }),
+		).toBe("act");
+	});
+
+	// Never in the background: nothing happens that nobody sees.
+	it("waits until it is on screen", () => {
+		expect(answerWaiting(restartHere, { ...waiting, inView: false })).toBe("wait");
+	});
+
+	// The setting is read again after the write, which takes a moment.
+	it("waits on screen while its setting does not say so yet", () => {
+		expect(answerWaiting(restartHere, { ...waiting, whenEnded: "ask" })).toBe("wait");
+		expect(answerWaiting(restartHere, { ...waiting, whenEnded: "close" })).toBe("wait");
+	});
+
+	// An override of its own that says otherwise: it had its turn on screen.
+	it("keeps asking once it left the screen without its setting agreeing", () => {
+		expect(
+			answerWaiting(restartHere, { ...waiting, whenEnded: "ask", inView: false, wasInView: true }),
+		).toBe("ask");
+		// Back on screen, agreeing at last: it still acts, the moment it is seen.
+		expect(answerWaiting(restartHere, { ...waiting, wasInView: true })).toBe("act");
+	});
+
+	it('"this host" reaches the overlays of that host only', () => {
+		expect(answerWaiting(restartHere, { ...waiting, hostId: "h2" })).toBe("ask");
+		expect(answerWaiting(restartHere, { ...waiting, hostId: null })).toBe("ask");
+		expect(answerWaiting({ ...restartHere, hostId: null }, { ...waiting, hostId: null })).toBe(
+			"ask",
+		);
+	});
+
+	it('"everywhere" reaches the overlays of every host', () => {
+		const everywhere: AlwaysChoice = { ...restartHere, scope: "global" };
+		expect(answerWaiting(everywhere, { ...waiting, hostId: "h2" })).toBe("act");
+		expect(answerWaiting(everywhere, { ...waiting, hostId: null })).toBe("act");
+	});
+
+	// The terminal clicked answered for itself.
+	it("leaves the terminal it was clicked on alone", () => {
+		expect(answerWaiting(restartHere, { ...waiting, channelId: "clicked" })).toBe("ask");
+		expect(answerWaiting(restartHere, { ...waiting, channelId: null })).toBe("ask");
+	});
+
+	it("keeps asking over an end held back for a safety reason", () => {
+		for (const hold of ["just-started", "just-attached", "not-writer"] as const) {
+			expect(answerWaiting(restartHere, { ...waiting, hold }), hold).toBe("ask");
+			expect(answerWaiting({ ...restartHere, action: "close" }, { ...waiting, hold }), hold).toBe(
+				"ask",
+			);
+		}
+	});
+
+	// It would run the command again.
+	it("keeps asking over a terminal that runs a command", () => {
+		expect(answerWaiting(restartHere, { ...waiting, directProcess: true })).toBe("ask");
+		expect(
+			answerWaiting({ ...restartHere, scope: "global" }, { ...waiting, directProcess: true }),
+		).toBe("ask");
+	});
+
+	// Found at a reload, or stopped from elsewhere (#580): nothing held back.
+	it("follows it over an end nothing holds back, however it was learnt", () => {
+		const found: EndFacts = { ...liveEnd, seen: "found", watchedMs: null, fromStart: false };
+		const stopped: EndFacts = { ...liveEnd, endReason: "destroyed", writer: false };
+		for (const end of [found, stopped]) {
+			expect(answerWaiting(restartHere, { ...waiting, hold: endHold(end) })).toBe("act");
+		}
 	});
 });
 

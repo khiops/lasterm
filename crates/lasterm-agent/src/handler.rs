@@ -614,6 +614,21 @@ where
     environment.into_pairs()
 }
 
+/// The directory a terminal starts in: the one the SPAWN names, its `${VAR}`s
+/// expanded, or else `default` — the home of the user the agent runs as
+/// ([`shell::agent_default_cwd`]). The hub names none for a terminal that has
+/// none of its own, a restart included (#581).
+fn spawn_cwd(
+    requested: Option<String>,
+    env: Option<&HashMap<String, String>>,
+    default: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match requested {
+        Some(dir) => Some(expand_vars(&dir, env)),
+        None => default(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_spawn(
     request_id: String,
@@ -661,7 +676,7 @@ async fn handle_spawn(
 
     // Expand vars in args, cwd, env values (NOT shell)
     let expanded_args: Vec<String> = args.iter().map(|a| expand_vars(a, env.as_ref())).collect();
-    let expanded_cwd: Option<String> = cwd.map(|d| expand_vars(&d, env.as_ref()));
+    let expanded_cwd = spawn_cwd(cwd, env.as_ref(), shell::agent_default_cwd);
     let expanded_env: Option<std::collections::HashMap<String, String>> = env.map(|e| {
         e.into_iter()
             .map(|(k, v)| (k, expand_vars(&v, None)))
@@ -1403,6 +1418,27 @@ mod stdio_tests {
         assert_eq!(value(&environment, "COLORTERM"), None);
         assert_eq!(value(&environment, "EDITOR"), Some("hx"));
         assert_eq!(value(&environment, "ASKPASS"), Some("elevation"));
+    }
+
+    #[test]
+    fn a_spawn_naming_a_directory_starts_there() {
+        let env = map(&[("PROJECT", "/srv/app")]);
+        assert_eq!(
+            spawn_cwd(Some("${PROJECT}/web".into()), Some(&env), || panic!(
+                "the default is not asked for"
+            )),
+            Some("/srv/app/web".to_string())
+        );
+    }
+
+    // What the hub sends for a terminal with no directory of its own (#581).
+    #[test]
+    fn a_spawn_naming_none_starts_in_the_default() {
+        assert_eq!(
+            spawn_cwd(None, None, || Some("/home/pi".into())),
+            Some("/home/pi".to_string())
+        );
+        assert_eq!(spawn_cwd(None, None, || None), None);
     }
 
     #[test]

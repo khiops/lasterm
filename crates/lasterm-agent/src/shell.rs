@@ -24,6 +24,36 @@ pub fn get_default_shell() -> String {
     }
 }
 
+/// Where a terminal starts when its SPAWN names no directory (#581): the home
+/// of the user the agent runs as, which is where `ssh host` starts a shell.
+///
+/// The hub sends no directory for a terminal that has none of its own, on a
+/// restart as on the first start: only the agent knows its host's home.
+/// `HOME` on Unix, `USERPROFILE` on Windows, as `var` reads them from the
+/// agent's own environment. `None` when the variable is unset, empty, or not
+/// a directory (`is_dir`): the PTY is then started without one, as before —
+/// in the agent's own current directory on Unix.
+pub fn default_cwd(
+    platform: crate::environment::Platform,
+    var: impl Fn(&str) -> Option<String>,
+    is_dir: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let name = match platform {
+        crate::environment::Platform::Unix => "HOME",
+        crate::environment::Platform::Windows => "USERPROFILE",
+    };
+    var(name).filter(|home| !home.is_empty() && is_dir(home))
+}
+
+/// [`default_cwd`] for this agent: its platform, its environment, its disks.
+pub fn agent_default_cwd() -> Option<String> {
+    default_cwd(
+        crate::environment::Platform::current(),
+        |name| std::env::var(name).ok(),
+        |path| std::path::Path::new(path).is_dir(),
+    )
+}
+
 /// The shells known to start as login shells when given `-l` (#576).
 pub const LOGIN_SHELLS: &[&str] = &["bash", "zsh", "ksh", "mksh", "fish", "sh", "dash", "ash"];
 
@@ -211,6 +241,66 @@ mod tests {
             true
         )
         .is_empty());
+    }
+
+    // ─── The directory a terminal starts in without one (#581) ──────────────
+
+    fn vars<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    fn any_dir(_: &str) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_unix_agent_starts_a_terminal_in_home() {
+        let env = [("HOME", "/home/pi"), ("USERPROFILE", r"C:\Users\pi")];
+        assert_eq!(
+            default_cwd(Platform::Unix, vars(&env), any_dir),
+            Some("/home/pi".to_string())
+        );
+    }
+
+    #[test]
+    fn a_windows_agent_starts_a_terminal_in_the_user_profile() {
+        let env = [("HOME", "/home/pi"), ("USERPROFILE", r"C:\Users\pi")];
+        assert_eq!(
+            default_cwd(Platform::Windows, vars(&env), any_dir),
+            Some(r"C:\Users\pi".to_string())
+        );
+    }
+
+    // Without one the PTY starts where it did before this default existed.
+    #[test]
+    fn no_home_names_no_directory() {
+        assert_eq!(default_cwd(Platform::Unix, vars(&[]), any_dir), None);
+        assert_eq!(
+            default_cwd(Platform::Windows, vars(&[("HOME", "/home/pi")]), any_dir),
+            None,
+            "a Windows agent does not read HOME"
+        );
+        assert_eq!(
+            default_cwd(Platform::Unix, vars(&[("HOME", "")]), any_dir),
+            None
+        );
+    }
+
+    #[test]
+    fn a_home_that_is_not_a_directory_names_none() {
+        let env = [("HOME", "/nonexistent")];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let is_dir = |path: &str| {
+            asked.borrow_mut().push(path.to_string());
+            false
+        };
+        assert_eq!(default_cwd(Platform::Unix, vars(&env), is_dir), None);
+        assert_eq!(*asked.borrow(), vec!["/nonexistent".to_string()]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import type { PanesConfig, TerminalProfile } from "@lasterm/shared";
+import type { ChannelEndReason, PanesConfig, TerminalProfile } from "@lasterm/shared";
 
 /**
  * What happens when a terminal ends (#574): the choice Settings › Terminal
@@ -114,8 +114,19 @@ export function createEndWatch(now: () => number): EndWatch {
 
 // ─── What the pane does about it ─────────────────────────────────────────────
 
-/** Why a pane set to restart showed its overlay instead. */
-export type HeldBack = "just-started" | "just-attached" | "runs-a-command" | "not-writer";
+/**
+ * Why a pane showed its overlay rather than do what its setting says: why one
+ * set to restart did not, or, for a terminal stopped from elsewhere, that it
+ * was, and so what was not done (#580).
+ */
+export type HeldBack =
+	| "just-started"
+	| "just-attached"
+	| "runs-a-command"
+	| "not-writer"
+	| "stopped-not-restarted"
+	| "stopped-not-closed"
+	| "stopped";
 
 export type EndReaction =
 	| { kind: "overlay"; heldBack?: HeldBack }
@@ -127,13 +138,20 @@ export interface EndFacts extends EndSeen {
 	directProcess: boolean;
 	/** This window holds its write lock. */
 	writer: boolean;
+	/** Why the hub says it ended, when the hub ended it itself (#580). */
+	endReason?: ChannelEndReason | undefined;
 }
 
 /**
  * What a pane does when its terminal ends.
  *
- * Only an end seen live is acted on. Restart holds back, with the overlay and
- * the reason, from:
+ * An end the hub caused on purpose (its report says `destroyed`: killed,
+ * its session closed, its agent replaced, the hub quitting) is never acted
+ * on, whatever the setting: someone meant it, and restarting it would undo
+ * that, where closing the pane would hide it (#580). The overlay says so.
+ *
+ * Otherwise only an end seen live is acted on. Restart holds back, with the
+ * overlay and the reason, from:
  * - a terminal that ended within `AUTO_RESTART_MIN_RUN_MS` of starting, or of
  *   the pane reaching it when its start was not seen: a shell that fails at
  *   launch would otherwise restart for ever;
@@ -143,6 +161,9 @@ export interface EndFacts extends EndSeen {
  *   over it would restart it, and two restarts of one terminal race at the hub.
  */
 export function reactToEnd(prefs: EndedPrefs, end: EndFacts): EndReaction {
+	if (end.endReason === "destroyed") {
+		return { kind: "overlay", heldBack: stoppedElsewhere(prefs.whenEnded) };
+	}
 	if (end.seen === "found") {
 		// A restart from here that ended before the pane could attach to it ended
 		// right after starting: worth saying, when the setting would restart.
@@ -166,7 +187,19 @@ export function reactToEnd(prefs: EndedPrefs, end: EndFacts): EndReaction {
 	}
 }
 
-/** The overlay's short explanation for a restart held back. */
+/** What the overlay says of a terminal stopped from elsewhere: what the setting would have done. */
+function stoppedElsewhere(whenEnded: WhenEnded): HeldBack {
+	switch (whenEnded) {
+		case "restart":
+			return "stopped-not-restarted";
+		case "close":
+			return "stopped-not-closed";
+		case "ask":
+			return "stopped";
+	}
+}
+
+/** The overlay's short explanation for why it shows. */
 export function heldBackMessage(reason: HeldBack): string {
 	switch (reason) {
 		case "just-started":
@@ -177,6 +210,12 @@ export function heldBackMessage(reason: HeldBack): string {
 			return "It runs a command rather than a shell, so it isn't restarted automatically.";
 		case "not-writer":
 			return "This window doesn't hold its write lock, so it wasn't restarted from here.";
+		case "stopped-not-restarted":
+			return "It was stopped from elsewhere, so it wasn't restarted.";
+		case "stopped-not-closed":
+			return "It was stopped from elsewhere, so its pane wasn't closed.";
+		case "stopped":
+			return "It was stopped from elsewhere.";
 	}
 }
 

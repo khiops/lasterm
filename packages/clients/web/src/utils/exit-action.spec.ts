@@ -124,9 +124,71 @@ describe("reactToEnd: what the setting does with an end seen live", () => {
 			"just-attached",
 			"runs-a-command",
 			"not-writer",
+			"stopped-not-restarted",
+			"stopped-not-closed",
+			"stopped",
 		] as const) {
 			expect(heldBackMessage(reason)).toMatch(/\S/);
 		}
+	});
+});
+
+// ─── Stopped from elsewhere (#580) ───────────────────────────────────────────
+
+// A terminal killed from another window, or by the REST API, ended while a
+// pane set to restart was watching it: the pane brought it back, with the id
+// it had, and nothing on screen said it had ever gone.
+describe("reactToEnd: a terminal the hub ended on purpose", () => {
+	const destroyed: EndFacts = { ...liveEnd, endReason: "destroyed" };
+
+	it("Restart leaves it ended, and says it was stopped from elsewhere", () => {
+		expect(reactToEnd(restart, destroyed)).toEqual({
+			kind: "overlay",
+			heldBack: "stopped-not-restarted",
+		});
+		expect(heldBackMessage("stopped-not-restarted")).toBe(
+			"It was stopped from elsewhere, so it wasn't restarted.",
+		);
+	});
+
+	it("Close leaves its pane open over it, and says why", () => {
+		for (const prefs of [closeAndDelete, closeAndKeep]) {
+			expect(reactToEnd(prefs, destroyed)).toEqual({
+				kind: "overlay",
+				heldBack: "stopped-not-closed",
+			});
+		}
+		expect(heldBackMessage("stopped-not-closed")).toBe(
+			"It was stopped from elsewhere, so its pane wasn't closed.",
+		);
+	});
+
+	it("Ask shows the overlay, saying it was stopped from elsewhere", () => {
+		expect(reactToEnd(ask, destroyed)).toEqual({ kind: "overlay", heldBack: "stopped" });
+		expect(heldBackMessage("stopped")).toBe("It was stopped from elsewhere.");
+	});
+
+	// Found or seen, however long it ran: it was meant to end.
+	it("does nothing on its own whatever else is true of the end", () => {
+		const ends: EndFacts[] = [
+			destroyed,
+			{ ...destroyed, seen: "found", watchedMs: null, fromStart: true },
+			{ ...destroyed, watchedMs: 1_000 },
+			{ ...destroyed, directProcess: true, writer: false },
+		];
+		for (const end of ends) {
+			for (const prefs of [ask, restart, closeAndDelete, closeAndKeep]) {
+				expect(reactToEnd(prefs, end).kind).toBe("overlay");
+			}
+		}
+	});
+
+	it("an end with no reason, a shell that exited, is still acted on", () => {
+		expect(reactToEnd(restart, { ...liveEnd, endReason: undefined })).toEqual({ kind: "restart" });
+		expect(reactToEnd(closeAndKeep, { ...liveEnd, endReason: undefined })).toEqual({
+			kind: "close",
+			keep: true,
+		});
 	});
 });
 

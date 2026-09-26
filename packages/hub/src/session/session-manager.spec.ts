@@ -1748,6 +1748,93 @@ describe("SessionManager", () => {
 		expect(spawns[1]?.env).toEqual({ FROM_SCOPE: "yes" });
 	});
 
+	// ─── A terminal with no directory of its own (#581) ──────────────────────
+	//
+	// A new one is sent none, and its agent starts it in the home of the user
+	// it runs as. Starting it again sent the hub's own HOME, a directory on the
+	// hub's machine — or "/" from a Windows hub, which has none. Every path
+	// that starts a terminal again sends what the terminal has, and only that.
+
+	describe("a terminal with no directory of its own (#581)", () => {
+		let dal: MetaDAL;
+
+		function spawnsTo(send: Mock | undefined): AgentSpawnMessage[] {
+			return (send?.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN");
+		}
+
+		// One without a directory and one with, on a remote host.
+		async function twoTerminals(): Promise<{ hostId: string; bare: string; placed: string }> {
+			const host = dal.createHost({
+				type: "ssh",
+				label: "pi-cwd",
+				sshHost: "pi@pi.local",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			const bare = await sm.handleSpawn("c-cwd", { type: "SPAWN", hostId: host.id });
+			const placed = await sm.handleSpawn("c-cwd", {
+				type: "SPAWN",
+				hostId: host.id,
+				cwd: "/srv/app",
+			});
+			if (bare === null || placed === null) throw new Error("expected two channels");
+			return { hostId: host.id, bare, placed };
+		}
+
+		beforeEach(() => {
+			dal = new MetaDAL(dbManager.meta);
+			sm.addClient(makeClient("c-cwd", []));
+			// The hub's own home: what must never reach the host.
+			vi.stubEnv("HOME", "/home/hub-user");
+			vi.stubEnv("USERPROFILE", "C:\\Users\\hub-user");
+		});
+
+		afterEach(() => {
+			vi.unstubAllEnvs();
+		});
+
+		it("is restarted without one, and one with a directory keeps it", async () => {
+			const { bare, placed } = await twoTerminals();
+
+			expect(await sm.restartChannel(bare)).toBe(true);
+			expect(await sm.restartChannel(placed)).toBe(true);
+
+			const [newBare, newPlaced, restartedBare, restartedPlaced] = spawnsTo(
+				mockSshAgentInstance?.send,
+			);
+			expect(newBare).not.toHaveProperty("cwd");
+			expect(newPlaced?.cwd).toBe("/srv/app");
+			expect(restartedBare?.channelId).toBe(bare);
+			expect(restartedBare).not.toHaveProperty("cwd");
+			expect(restartedPlaced?.channelId).toBe(placed);
+			expect(restartedPlaced?.cwd).toBe("/srv/app");
+		});
+
+		// What an agent that lost them gets: a remote one reached again, or a
+		// local one started after a crash. A restart before it used to leave the
+		// hub's home in what the hub remembers of the terminal.
+		it("is started again on a new agent without one, a restarted one too", async () => {
+			const { hostId, bare, placed } = await twoTerminals();
+			expect(await sm.restartChannel(bare)).toBe(true);
+			const agent = mockSshAgentInstance;
+			const before = spawnsTo(agent?.send).length;
+
+			await sm._spawnChannelsForHost(
+				hostId,
+				agent,
+				() => {},
+				() => {},
+			);
+
+			const again = spawnsTo(agent?.send).slice(before);
+			expect(again.map((spawn) => spawn.channelId).sort()).toEqual([bare, placed].sort());
+			expect(again.find((spawn) => spawn.channelId === bare)).not.toHaveProperty("cwd");
+			expect(again.find((spawn) => spawn.channelId === placed)?.cwd).toBe("/srv/app");
+		});
+	});
+
 	// ─── The environment a SPAWN carries (#576) ──────────────────────────────
 	//
 	// Against a real ConfigResolver, reading a real config.toml and the host and

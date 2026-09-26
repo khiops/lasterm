@@ -6,11 +6,11 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	renameSync,
 	rmSync,
 	statSync,
 } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 
 export type FetchErrorCode =
 	| "BAD_VERSION"
@@ -177,7 +177,7 @@ export function verifyAndPlace(
 	if (!opts.force) assertCanPlaceWithoutForce(finalPath);
 
 	chmodSync(tempBinaryPath, 0o755);
-	renameSync(tempBinaryPath, finalPath);
+	replaceFileSync(tempBinaryPath, finalPath);
 	return finalPath;
 }
 

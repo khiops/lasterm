@@ -14,7 +14,6 @@ import {
 	fchmodSync,
 	openSync,
 	readFileSync,
-	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -23,6 +22,7 @@ import { request as httpsRequest } from "node:https";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
+import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import { createOwnerOnlyDirectory } from "./auth.js";
 import {
 	buildDaemonSpawnPlan,
@@ -137,7 +137,7 @@ export function persistRuntime(info: RuntimeInfo, stateDir: string = getStateDir
 		fchmodSync(fd, 0o600);
 		closeSync(fd);
 		fd = null;
-		renameSync(tempPath, runtimePath);
+		replaceFileSync(tempPath, runtimePath);
 		renamed = true;
 	} finally {
 		if (fd !== null) closeSync(fd);

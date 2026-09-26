@@ -48,7 +48,6 @@ import {
 	readdirSync,
 	readlinkSync,
 	readSync,
-	renameSync,
 	type Stats,
 	statSync,
 	unlinkSync,
@@ -57,6 +56,7 @@ import {
 import { createRequire } from "node:module";
 import path from "node:path";
 import { lastermDir } from "./platform-dirs.js";
+import { replaceFileSync } from "./replace-file.js";
 
 // O_NOFOLLOW refuses a link at the leaf; O_NONBLOCK keeps a FIFO planted there
 // from blocking the open. Neither exists on Windows, where the leaf is
@@ -672,8 +672,11 @@ function publish(destPath: string, data: Buffer): unknown {
 		// The temporary stays open until it is renamed or removed. On Windows an
 		// open handle is how a later start tells an extraction still in progress
 		// from one that was killed; see removeAbandonedTemporaries.
+		// replaceFileSync waits out another start reading the destination for a
+		// moment (#588). One that has loaded it holds it for good, and its error
+		// comes back after that short bound, to be weighed as before.
 		try {
-			renameSync(tempPath, destPath);
+			replaceFileSync(tempPath, destPath);
 			renamed = true;
 			return undefined;
 		} catch (error) {

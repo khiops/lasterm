@@ -10,7 +10,7 @@
  * Also parses the [gc] section for spool garbage collector configuration.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import TOML from "@iarna/toml";
 import type {
@@ -48,6 +48,7 @@ import {
 	UI_CONFIG_SECTIONS,
 	validateCustomCommand,
 } from "@lasterm/shared";
+import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import { edit, initSync } from "@rainbowatcher/toml-edit-js";
 import type { MetaDAL } from "./storage/meta.js";
 
@@ -1021,7 +1022,7 @@ export class ConfigResolver {
 		// Atomic write: write to temp, then rename
 		const tmpPath = `${configPath}.tmp`;
 		writeFileSync(tmpPath, tomlString, "utf8");
-		renameSync(tmpPath, configPath);
+		replaceFileSync(tmpPath, configPath);
 
 		// Reload to update in-memory state
 		this.loadFromFile(this._configDir);

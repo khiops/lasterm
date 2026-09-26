@@ -17,3 +17,4 @@ export * from "./validation.js";
 export * from "./var-expansion.js";
 // sea-addon-loader: Node-only (uses createRequire), not re-exported from barrel.
 // Import directly: import { ... } from '@lasterm/shared/dist/sea-addon-loader.js'
+// replace-file: Node-only (uses node:fs), likewise: '@lasterm/shared/dist/replace-file.js'

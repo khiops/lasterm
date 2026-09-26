@@ -6,11 +6,11 @@ import {
 	fsyncSync,
 	openSync,
 	readFileSync,
-	renameSync,
 	rmSync,
 	writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 
 /** The file in the state directory that holds this hub's key. */
 export const HUB_KEY_FILE = "hub-key";
@@ -56,7 +56,7 @@ export function loadHubKey(stateDir: string): string {
 	}
 	closeSync(fd);
 	try {
-		renameSync(tempPath, keyPath);
+		replaceFileSync(tempPath, keyPath);
 	} catch (error) {
 		rmSync(tempPath, { force: true });
 		throw error;

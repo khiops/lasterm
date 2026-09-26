@@ -332,7 +332,8 @@ export class MetaDAL {
 	listAliveChannelsWithHost(): Array<{
 		id: string;
 		sessionId: string;
-		shell: string;
+		/** null for a terminal with no shell of its own (#583). */
+		shell: string | null;
 		args: string[];
 		cwd: string | null;
 		cols: number;

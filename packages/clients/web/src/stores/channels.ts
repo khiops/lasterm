@@ -28,13 +28,14 @@ function apiRowToChannel(row: Record<string, unknown>): Channel {
 	const ch: Channel = {
 		id: row.id as string,
 		sessionId: row.session_id as string,
-		shell: row.shell as string,
 		cols: row.cols as number,
 		rows: row.rows as number,
 		status: row.status as Channel["status"],
 		createdAt: row.created_at as string,
 		updatedAt: row.updated_at as string,
 	};
+	// None for a terminal with no shell of its own: its agent's default (#583).
+	if (row.shell != null) ch.shell = row.shell as string;
 	if (row.group_id != null) ch.groupId = row.group_id as string;
 	if (row.title != null) ch.title = row.title as string;
 	if (row.cwd != null) ch.cwd = row.cwd as string;
@@ -764,7 +765,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		const channel: Channel = {
 			id: msg.channelId,
 			sessionId: msg.sessionId,
-			shell: msg.shell,
+			...(msg.shell !== undefined && { shell: msg.shell }),
 			cols: msg.cols,
 			rows: msg.rows,
 			status: msg.status,

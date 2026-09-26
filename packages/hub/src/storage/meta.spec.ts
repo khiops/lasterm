@@ -491,14 +491,26 @@ describe("MetaDAL — Channels CRUD", () => {
 		expect(ch?.rows).toBe(24);
 	});
 
-	it("createChannel uses defaults for shell and cwd", () => {
+	// Nothing is made up for a terminal that has neither: a restart sends what
+	// is read back here, and its agent picks its own defaults (#581, #583).
+	it("createChannel without a shell or a directory reads back with neither", () => {
 		const id = "CHN002AAAAAAAAAAAAAAAAAAAAAA";
 		dal.createChannel({ id, sessionId, status: "born" });
 
 		const ch = dal.getChannel(id);
 		expect(ch).toBeDefined();
-		expect(ch?.shell).toBe("/bin/sh");
+		expect(ch).not.toHaveProperty("shell");
 		expect(ch?.cwd).toBeUndefined();
+		expect(dal.getChannelWithHost(id)?.channel).not.toHaveProperty("shell");
+	});
+
+	it("updateChannelConfig with a null shell leaves the terminal none of its own (#583)", () => {
+		const id = "CHN00SAAAAAAAAAAAAAAAAAAAAAA";
+		dal.createChannel({ id, sessionId, status: "born", shell: "/bin/zsh" });
+
+		dal.updateChannelConfig(id, { shell: null });
+
+		expect(dal.getChannel(id)).not.toHaveProperty("shell");
 	});
 
 	it("getChannel returns undefined for non-existent id", () => {
@@ -888,6 +900,18 @@ describe("MetaDAL — listAliveChannelsWithHost", () => {
 
 		expect(dal.listAliveChannelsWithHost()).toEqual([
 			expect.objectContaining({ dynamicTitle: "pwsh in project", processTitle: "pwsh.exe" }),
+		]);
+	});
+
+	// What the hub restores at start, and later starts again on a new agent.
+	it("says a terminal with no shell of its own has none (#583)", () => {
+		const host = dal.createHost({ type: "local", label: "no-shell-host" });
+		const sessionId = "NOSHELLSESS01AAAAAAAAAAAAAAAAA";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		dal.createChannel({ id: "NOSHELLCH01AAAAAAAAAAAAAAAAAAA", sessionId, status: "live" });
+
+		expect(dal.listAliveChannelsWithHost()).toEqual([
+			expect.objectContaining({ id: "NOSHELLCH01AAAAAAAAAAAAAAAAAAA", shell: null, cwd: null }),
 		]);
 	});
 });

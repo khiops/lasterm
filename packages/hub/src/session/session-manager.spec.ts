@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type {
 	AgentSpawnMessage,
 	AuthPromptMessage,
+	ChannelCreatedMessage,
 	ProtocolMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
@@ -1832,6 +1833,115 @@ describe("SessionManager", () => {
 			expect(again.map((spawn) => spawn.channelId).sort()).toEqual([bare, placed].sort());
 			expect(again.find((spawn) => spawn.channelId === bare)).not.toHaveProperty("cwd");
 			expect(again.find((spawn) => spawn.channelId === placed)?.cwd).toBe("/srv/app");
+		});
+	});
+
+	// ─── A terminal with no shell of its own (#583) ──────────────────────────
+	//
+	// A new one names no shell when neither the request nor a launch profile
+	// does, and its agent starts its user's default. Starting it again named one
+	// all the same: "/bin/sh", which the database made up for it, or the hub's
+	// own SHELL, a shell on the hub's machine. Every path that starts a terminal
+	// again names the shell the terminal has, and only that.
+
+	describe("a terminal with no shell of its own (#583)", () => {
+		let dal: MetaDAL;
+		let received: ProtocolMessage[];
+
+		function spawnsTo(send: Mock | undefined): AgentSpawnMessage[] {
+			return (send?.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN");
+		}
+
+		// One without a shell and one with, on a remote host with no launch profile.
+		async function twoTerminals(): Promise<{ hostId: string; bare: string; zsh: string }> {
+			const host = dal.createHost({
+				type: "ssh",
+				label: "pi-shell",
+				sshHost: "pi@pi.local",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			const bare = await sm.handleSpawn("c-shell", { type: "SPAWN", hostId: host.id });
+			const zsh = await sm.handleSpawn("c-shell", {
+				type: "SPAWN",
+				hostId: host.id,
+				shell: "/usr/bin/zsh",
+			});
+			if (bare === null || zsh === null) throw new Error("expected two channels");
+			return { hostId: host.id, bare, zsh };
+		}
+
+		beforeEach(() => {
+			dal = new MetaDAL(dbManager.meta);
+			received = [];
+			sm.addClient(makeClient("c-shell", received));
+			// The hub's own shell: what must never reach the host.
+			vi.stubEnv("SHELL", "/usr/bin/hub-shell");
+		});
+
+		afterEach(() => {
+			vi.unstubAllEnvs();
+		});
+
+		it("is restarted without one, and one with a shell keeps it", async () => {
+			const { bare, zsh } = await twoTerminals();
+
+			expect(await sm.restartChannel(bare)).toBe(true);
+			expect(await sm.restartChannel(zsh)).toBe(true);
+
+			const [newBare, newZsh, restartedBare, restartedZsh] = spawnsTo(mockSshAgentInstance?.send);
+			expect(newBare).not.toHaveProperty("shell");
+			expect(newZsh?.shell).toBe("/usr/bin/zsh");
+			expect(restartedBare?.channelId).toBe(bare);
+			expect(restartedBare).not.toHaveProperty("shell");
+			expect(restartedZsh?.channelId).toBe(zsh);
+			expect(restartedZsh?.shell).toBe("/usr/bin/zsh");
+			// The host's default shell logs in, on a restart as the first time:
+			// the made-up "/bin/sh" was not the default, and lost it.
+			expect(newBare?.loginShell).toBe(true);
+			expect(restartedBare?.loginShell).toBe(true);
+		});
+
+		// What an agent that lost them gets: a remote one reached again, or a
+		// local one started after a crash.
+		it("is started again on a new agent without one, before a restart and after", async () => {
+			const { hostId, bare, zsh } = await twoTerminals();
+			const agent = mockSshAgentInstance;
+			const startedAgain = async (): Promise<AgentSpawnMessage[]> => {
+				const before = spawnsTo(agent?.send).length;
+				await sm._spawnChannelsForHost(
+					hostId,
+					agent,
+					() => {},
+					() => {},
+				);
+				return spawnsTo(agent?.send).slice(before);
+			};
+
+			const asNew = await startedAgain();
+			expect(await sm.restartChannel(bare)).toBe(true);
+			const asRestarted = await startedAgain();
+
+			for (const again of [asNew, asRestarted]) {
+				expect(again.map((spawn) => spawn.channelId).sort()).toEqual([bare, zsh].sort());
+				expect(again.find((spawn) => spawn.channelId === bare)).not.toHaveProperty("shell");
+				expect(again.find((spawn) => spawn.channelId === zsh)?.shell).toBe("/usr/bin/zsh");
+			}
+		});
+
+		// A client keeps what it is told: bringing the terminal back from its
+		// list would name the hub's shell to the host.
+		it("is announced to the clients without one", async () => {
+			const { bare, zsh } = await twoTerminals();
+
+			const created = received.filter(
+				(message): message is ChannelCreatedMessage => message.type === "CHANNEL_CREATED",
+			);
+			expect(created.map((message) => message.channelId)).toEqual([bare, zsh]);
+			expect(created.find((message) => message.channelId === bare)).not.toHaveProperty("shell");
+			expect(created.find((message) => message.channelId === zsh)?.shell).toBe("/usr/bin/zsh");
 		});
 	});
 

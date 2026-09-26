@@ -188,7 +188,9 @@ and the stale one is dropped quietly.
   request_id: string,
   channel_id?: string,  // hub-provided ID for warm restart; if omitted, agent generates one
   shell: string,        // "/bin/bash"
-  cwd: string,
+  cwd?: string,         // only a directory the terminal has of its own, on a restart too (#581);
+                        // absent: the agent's user's home (HOME on Unix, USERPROFILE on Windows),
+                        // or where the agent runs when that is not a directory
   env: Record<string, string>,  // set after env_unset: the scopes', the launch profile's, the request's
   cols: number,         // terminal columns; defaults to 80
   rows: number,         // terminal rows; defaults to 24
@@ -590,7 +592,7 @@ Hub broadcasts RESIZE to other attached clients.
   type: "SPAWN",
   host_id: string,
   shell?: string,     // default: host.default_shell ?? system default (/bin/bash or pwsh)
-  cwd?: string,       // default: host.default_cwd ?? user home dir
+  cwd?: string,       // default: none sent; the agent starts the shell in its user's home (§ 3.2)
   env?: Record<string, string>,  // merged with system env (max 100 entries)
   group_id?: string   // optional channel group to place new channel in
 }

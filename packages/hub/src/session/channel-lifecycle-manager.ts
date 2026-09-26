@@ -445,7 +445,11 @@ export class ChannelLifecycleManager {
 
 		const shell = channel.shell ?? process.env.SHELL ?? "/bin/sh";
 		const args = channel.args ?? [];
-		const cwd = channel.cwd ?? process.env.HOME ?? "/";
+		// A terminal with no directory of its own is sent none, as a new one is:
+		// the agent starts it in the home of the user it runs as. The hub's own
+		// HOME names a directory on the hub's machine, and a Windows hub has
+		// none, which sent every restarted remote terminal to "/" (#581).
+		const cwd = channel.cwd;
 		const cols = channel.cols;
 		const rows = channel.rows;
 
@@ -473,7 +477,7 @@ export class ChannelLifecycleManager {
 				channelId,
 				shell,
 				...(args.length > 0 && { args }),
-				cwd,
+				...(cwd !== undefined && { cwd }),
 				...this.restartEnv(channelId, hostId),
 				cols,
 				rows,
@@ -650,7 +654,7 @@ export class ChannelLifecycleManager {
 			channelId,
 			shell,
 			...(args.length > 0 && { args }),
-			cwd,
+			...(cwd !== undefined && { cwd }),
 			...this.restartEnv(channelId, hostId),
 			cols,
 			rows,
@@ -689,7 +693,7 @@ export class ChannelLifecycleManager {
 		ch: ChannelState | undefined,
 		shell: string,
 		args: string[],
-		cwd: string,
+		cwd: string | undefined,
 		cols: number,
 		rows: number,
 		directProcess?: boolean,
@@ -772,7 +776,7 @@ export class ChannelLifecycleManager {
 		ch: ChannelState | undefined,
 		shell: string,
 		args: string[],
-		cwd: string,
+		cwd: string | undefined,
 		cols: number,
 		rows: number,
 		directProcess?: boolean,
@@ -797,7 +801,7 @@ export class ChannelLifecycleManager {
 					status: "born",
 					shell,
 					...(args.length > 0 && { args }),
-					cwd,
+					...(cwd !== undefined && { cwd }),
 					cols,
 					rows,
 					...(sourceChannel.title !== undefined && { title: sourceChannel.title }),
@@ -821,7 +825,7 @@ export class ChannelLifecycleManager {
 			clients,
 			shell,
 			...(args.length > 0 && { args }),
-			cwd,
+			...(cwd !== undefined && { cwd }),
 			cols,
 			rows,
 			...(directProcess && { directProcess: true }),
@@ -842,7 +846,7 @@ export class ChannelLifecycleManager {
 				sessionId: sessionEntry.id,
 				shell,
 				...(args.length > 0 && { args }),
-				cwd,
+				...(cwd !== undefined && { cwd }),
 				cols,
 				rows,
 				status: "live",
@@ -1060,7 +1064,9 @@ export class ChannelLifecycleManager {
 					channelId,
 					shell: ch.shell,
 					...(ch.args !== undefined && ch.args.length > 0 && { args: ch.args }),
-					cwd: ch.cwd ?? process.env.HOME ?? process.env.USERPROFILE ?? "/",
+					// None when it has none of its own: the agent's default, as for a
+					// new terminal and a restart (#581).
+					...(ch.cwd !== undefined && { cwd: ch.cwd }),
 					...this.restartEnv(channelId, hostId),
 					cols: ch.cols,
 					rows: ch.rows,

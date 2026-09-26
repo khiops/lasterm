@@ -200,6 +200,11 @@ export interface SharedSessionContext {
 	reconnectAbortControllers: Map<string, AbortController>;
 	/** Crash-loop tracking for local agent restarts: hostId → { count, windowStart } */
 	restartTracking: Map<string, { count: number; windowStart: number }>;
+	/**
+	 * Hosts whose agent this hub is stopping on purpose, to replace it. Their
+	 * terminals that end meanwhile were ended by the hub (#580).
+	 */
+	stoppingAgents: Set<string>;
 	/** requestId → callback for pending agent responses */
 	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
 	/** '${hostname}:${port}' → fingerprint trusted for this session only (trust_once, not persisted) */

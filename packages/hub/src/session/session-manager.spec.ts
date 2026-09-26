@@ -6687,3 +6687,135 @@ describe("SessionManager — Reconnect in a pane, after a restart (#556)", () =>
 		});
 	});
 });
+
+// ─── An end the hub caused says so (#580) ────────────────────────────────────
+//
+// With "When a terminal ends = Restart", a pane that sees its terminal end
+// brings it back. A terminal killed from another window came back that way:
+// the report of its end said nothing of why, and a kill looked like a shell
+// that exited. Every path by which the hub ends a live terminal on purpose
+// says so in that report; an end the terminal chose does not.
+describe("SessionManager — an end the hub caused says so (#580)", () => {
+	let sm: SessionManager;
+	let dbManager: ReturnType<typeof openTestDatabases>;
+
+	beforeEach(() => {
+		localSpawnCount = 0;
+		mockLocalAgents.length = 0;
+		dbManager = openTestDatabases();
+		sm = new SessionManager(dbManager);
+	});
+
+	afterEach(async () => {
+		await sm.shutdown();
+		dbManager.close();
+	});
+
+	/** A local terminal a pane is attached to, and another window that hears of it. */
+	async function liveTerminal() {
+		sm.addClient(makeClient("c-pane", []));
+		const channelId = await sm.handleSpawn("c-pane", { type: "SPAWN", hostId: "local" });
+		if (channelId === null) throw new Error("expected a channel");
+		const heard: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-other-window", heard));
+		const agent = mockLocalAgents.at(-1) as unknown as {
+			emit: (event: string, msg: unknown) => void;
+		};
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const sessionId = ctx.channels.get(channelId)?.sessionId;
+		if (sessionId === undefined) throw new Error("expected a session");
+		return { channelId, sessionId, heard, agent };
+	}
+
+	function endsOf(heard: ProtocolMessage[], channelId: string): ProtocolMessage[] {
+		return heard.filter(
+			(m) => m.type === "CHANNEL_STATE" && m.channelId === channelId && m.status === "dead",
+		);
+	}
+
+	it("a kill (DELETE /api/channels/:id) says the hub destroyed it, and says it once", async () => {
+		const { channelId, sessionId, heard, agent } = await liveTerminal();
+
+		expect(sm.destroyChannel(channelId)).toBe(true);
+		// The agent reports the shell going after the DESTROY: not a second end.
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 1 });
+
+		expect(endsOf(heard, channelId)).toEqual([
+			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "destroyed" },
+		]);
+	});
+
+	it("a shell that exits says nothing of the kind", async () => {
+		const { channelId, sessionId, heard, agent } = await liveTerminal();
+
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+
+		expect(endsOf(heard, channelId)).toEqual([
+			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", exitCode: 0 },
+		]);
+	});
+
+	it("closing its session (DELETE /api/sessions/:id) says so of each of its terminals", async () => {
+		const { channelId, sessionId, heard } = await liveTerminal();
+
+		await sm.closeSession(sessionId);
+
+		expect(endsOf(heard, channelId)).toEqual([
+			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "destroyed" },
+		]);
+	});
+
+	// Quit stops the local agent, whose terminals then report their ends.
+	it("a quit says so of every end it hears", async () => {
+		const { channelId, heard, agent } = await liveTerminal();
+
+		sm.beginQuit();
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+
+		expect(endsOf(heard, channelId)).toEqual([
+			expect.objectContaining({ status: "dead", exitCode: 0, endReason: "destroyed" }),
+		]);
+	});
+
+	// Or the agent goes before a terminal's own end was heard: the session
+	// closes, as the quit refuses to reconnect, and ends it with the rest.
+	it("a quit says so of the terminals it ends by stopping their agent", async () => {
+		const { channelId, heard } = await liveTerminal();
+
+		sm.beginQuit();
+		mockLocalAgents.at(-1)?.simulateDisconnect();
+		await flushImmediate();
+
+		expect(endsOf(heard, channelId)).toEqual([
+			expect.objectContaining({ status: "dead", endReason: "destroyed" }),
+		]);
+	});
+
+	// A deleted terminal is no longer the hub's to bring back: a pane that
+	// restarts it by its id is refused, where a dead one still listed is not.
+	it("refuses to bring back a terminal that was deleted", async () => {
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-restart", received));
+		const channelId = await sm.handleSpawn("c-restart", { type: "SPAWN", hostId: "local" });
+		if (channelId === null) throw new Error("expected a channel");
+		sm.destroyChannel(channelId);
+		// DELETE on a dead one purges it.
+		new MetaDAL(dbManager.meta).deleteChannel(channelId);
+
+		received.length = 0;
+		const again = await sm.handleSpawn("c-restart", {
+			type: "SPAWN",
+			hostId: "local",
+			reuseChannelId: channelId,
+		});
+
+		expect(again).toBeNull();
+		expect(received).toContainEqual(
+			expect.objectContaining({
+				type: "ERROR",
+				code: "CHANNEL_NOT_REUSABLE",
+				message: "Cannot bring that terminal back: it is not a terminal this hub knows.",
+			}),
+		);
+	});
+});

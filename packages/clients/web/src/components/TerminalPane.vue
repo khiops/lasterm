@@ -167,7 +167,7 @@
 </template>
 
 <script setup lang="ts">
-import { DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
+import { type ChannelEndReason, DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, toRef, useId, watch } from 'vue';
 import { useActivityTracker } from '../composables/useActivityTracker.js';
 import { playBellSound } from '../composables/useBellSound.js';
@@ -483,12 +483,18 @@ watch(effectiveChannelId, () => {
 	heldBack.value = null;
 });
 
-/** Do what the setting says about an end, or show the overlay and why. */
-function onTerminalEnded(end: EndSeen): void {
+/**
+ * Do what the setting says about an end, or show the overlay and why.
+ *
+ * `endReason` is what the hub's report said of it, when the hub ended the
+ * terminal itself: stopped from elsewhere, nothing here undoes it (#580).
+ */
+function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
 	const reaction = reactToEnd(prefs.value, {
 		...end,
 		directProcess: isDirectProcess.value,
 		writer: isWriter.value,
+		endReason,
 	});
 	if (reaction.kind === 'overlay') {
 		// An end found later keeps the reason the one seen gave, which is still true.
@@ -637,8 +643,11 @@ watch(
 		if (report?.status === 'dead') {
 			attachedLive = false;
 			// The hub saying it ended: live if this pane was watching it run on
-			// this socket, found otherwise (#574). A report repeating it is not news.
-			if (chId !== null && previous?.status !== 'dead') onTerminalEnded(endWatch.ended(chId));
+			// this socket, found otherwise (#574), and whether the hub ended it
+			// itself (#580). A report repeating it is not news.
+			if (chId !== null && previous?.status !== 'dead') {
+				onTerminalEnded(endWatch.ended(chId), report.endReason);
+			}
 		}
 		if (report?.status !== 'live' || attachedLive || !ready.value || restarting.value) return;
 		// Brought back from elsewhere while this pane was over it ended: a start

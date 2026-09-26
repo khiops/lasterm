@@ -230,7 +230,8 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 	it("tells the end watch what it sees", () => {
 		const reportWatcher =
 			/channelsStore\.reportOf\(effectiveChannelId\.value\),[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(reportWatcher).toContain("onTerminalEnded(endWatch.ended(chId))");
+		// With what the report says of why it ended (#580).
+		expect(reportWatcher).toContain("onTerminalEnded(endWatch.ended(chId), report.endReason);");
 
 		const takeAnswer = body(/function takeAnswer\(/);
 		expect(takeAnswer).toMatch(/if \(attachedLive\) \{\s*endWatch\.attached\(chId\);/);
@@ -261,6 +262,11 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 		expect(onEnded).toContain("reactToEnd(prefs.value,");
 		expect(onEnded).toContain("directProcess: isDirectProcess.value");
 		expect(onEnded).toContain("writer: isWriter.value");
+		// A terminal stopped from elsewhere is never restarted or closed (#580).
+		expect(onEnded).toMatch(
+			/function onTerminalEnded\(end: EndSeen, endReason\?: ChannelEndReason\)/,
+		);
+		expect(onEnded).toMatch(/writer: isWriter\.value,\s*endReason,\s*\}\);/);
 		expect(onEnded).toContain("if (reaction.kind === 'restart') void onRestart();");
 		expect(onEnded).toContain("else closeEnded(reaction.keep);");
 		expect(SOURCE).toContain(

@@ -6,6 +6,7 @@ import {
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
 } from "../session/remote-daemon.js";
+import type { SessionState, SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
 import { SshAgent } from "../session/ssh-agent.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
@@ -25,6 +26,8 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 		otherOwnerChannels: number | undefined;
 		/** How many terminals other hubs hold on this daemon. */
 		othersHold = 0;
+		/** The terminals whose end it reports as it stops, before its connection ends. */
+		exitsOnStop: string[] = [];
 		readonly sent: ProtocolMessage[] = [];
 		/** What this agent answers ENV_QUERY with, by mode; nothing when unset. */
 		environments: Record<string, Record<string, string>> | undefined;
@@ -49,8 +52,11 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 				);
 				return;
 			}
-			// A daemon that stops says nothing: its connection ends.
+			// A daemon that stops says nothing: its terminals end, then its connection.
 			setImmediate(() => {
+				for (const channelId of this.exitsOnStop) {
+					this.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+				}
 				this.connected = false;
 				this.emit("close");
 			});
@@ -69,6 +75,7 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 
 type FakeSshAgent = SshAgent & {
 	othersHold: number;
+	exitsOnStop: string[];
 	environments: Record<string, Record<string, string>> | undefined;
 	sent: ProtocolMessage[];
 	send: ReturnType<typeof vi.fn>;
@@ -120,6 +127,78 @@ function replace(payload?: unknown) {
 		...(payload !== undefined && { payload: payload as object }),
 	});
 }
+
+/**
+ * A terminal running on `agent`, which the manager hears as it hears a
+ * connection it opened, and a window that holds it in its state.
+ */
+function liveTerminalOn(agent: FakeSshAgent): { channelId: string; heard: ProtocolMessage[] } {
+	const sessionId = "01K580SESSION0000000000000";
+	const channelId = "01K580CHAN0000000000000001";
+	const metaDal = new MetaDAL(dbs.meta);
+	metaDal.createSession({ id: sessionId, hostId, status: "active" });
+	metaDal.createChannel({ id: channelId, sessionId, status: "live", shell: "bash" });
+	const internals = sm as unknown as {
+		ctx: SharedSessionContext;
+		agentMgr: { wireAgentEvents(hostId: string, sessionId: string, agent: unknown): void };
+	};
+	(internals.ctx.sessions as unknown as Map<string, SessionState>).set(hostId, {
+		id: sessionId,
+		hostId,
+		status: "active",
+	});
+	internals.ctx.channels.set(channelId, {
+		sessionId,
+		hostId,
+		status: "live",
+		clients: new Set(),
+		shell: "bash",
+		cols: 80,
+		rows: 24,
+		dynamicTitle: null,
+		processTitle: null,
+		displayTitle: "bash",
+	});
+	internals.agentMgr.wireAgentEvents(hostId, sessionId, agent);
+	const heard: ProtocolMessage[] = [];
+	sm.addClient({ id: "c-window", send: (msg) => heard.push(msg), attachedChannels: new Set() });
+	return { channelId, heard };
+}
+
+function endsOf(heard: ProtocolMessage[], channelId: string): ProtocolMessage[] {
+	return heard.filter(
+		(m) => m.type === "CHANNEL_STATE" && m.channelId === channelId && m.status === "dead",
+	);
+}
+
+// Replacing the agent ends its terminals, and on purpose: a pane set to
+// restart them must not bring them back on the new one (#580).
+describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it (#580)", () => {
+	it("says of each terminal that ends as the agent stops that the hub ended it", async () => {
+		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		const { channelId, heard } = liveTerminalOn(agent);
+		agent.exitsOnStop = [channelId];
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expect(endsOf(heard, channelId)).toEqual([
+			expect.objectContaining({ exitCode: 0, endReason: "destroyed" }),
+		]);
+	});
+
+	it("says nothing of the kind of a terminal that ends after a refused replace", async () => {
+		const agent = connectedAgent(["multiplex", "hub-identity"], 2);
+		const { channelId, heard } = liveTerminalOn(agent);
+
+		expect((await replace()).statusCode).toBe(409);
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+
+		const ends = endsOf(heard, channelId);
+		expect(ends).toHaveLength(1);
+		expect(ends[0]).not.toHaveProperty("endReason");
+	});
+});
 
 describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)", () => {
 	it("answers 409 with the count, and a forced retry sends STOP { force: true }", async () => {

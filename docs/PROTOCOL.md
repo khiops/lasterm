@@ -672,8 +672,23 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   channel_id: string,
   session_id: string,
   status: "born" | "live" | "orphan" | "dead",
-  exit_code?: number
+  exit_code?: number,
+  // Only with "dead", when the hub ended the terminal itself (#580). Absent when
+  // its shell or command exited, or when the hub found it gone. Not stored: a
+  // later STATE_SYNC or channel list does not carry it.
+  end_reason?: "destroyed"
 }
+
+// end_reason "destroyed" is set by every hub path that ends a live terminal on
+// purpose:
+//   - DELETE /api/channels/:id on a live channel (the UI's Kill);
+//   - DELETE /api/sessions/:id, for every terminal of that session;
+//   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
+//     sends while the hub stops it;
+//   - quit (POST /api/quit), for every "dead" the hub reports once it is quitting:
+//     the local agent's CHANNEL_EXITs, and the session closing when it goes.
+// A client never restarts or closes a terminal on such an end, whatever "When a
+// terminal ends" says: someone meant it to end. It shows that it ended, and why.
 
 // Hub → ALL connected clients: a new channel was created by any client.
 // Observers use this to add the channel to their list without a fetchChannels.

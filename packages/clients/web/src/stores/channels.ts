@@ -1,4 +1,9 @@
-import type { Channel, ChannelCreatedMessage, ChannelGroup } from "@lasterm/shared";
+import type {
+	Channel,
+	ChannelCreatedMessage,
+	ChannelEndReason,
+	ChannelGroup,
+} from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
@@ -99,6 +104,16 @@ function restartFailureReason(err: unknown): string {
 	return message.replace(/^[A-Z][A-Z0-9_]+: /, "");
 }
 
+/**
+ * What the hub last said about a channel: its status and, once it has ended,
+ * its exit code and whether the hub ended it itself (#580).
+ */
+export interface ChannelReport {
+	status: Channel["status"];
+	exitCode?: number;
+	endReason?: ChannelEndReason;
+}
+
 export const useChannelsStore = defineStore("channels", () => {
 	const authStore = useAuthStore();
 
@@ -133,7 +148,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Each report is a new object, so a pane can react to the hub saying a
 	 * terminal is live even when it already was.
 	 */
-	const reports = ref<Map<string, { status: Channel["status"]; exitCode?: number }>>(new Map());
+	const reports = ref<Map<string, ChannelReport>>(new Map());
 
 	/**
 	 * Monotonically increasing fetch generation counter.
@@ -497,10 +512,12 @@ export const useChannelsStore = defineStore("channels", () => {
 		channelId: string,
 		status: Channel["status"],
 		exitCode?: number,
+		endReason?: ChannelEndReason,
 	): void {
 		reports.value = new Map(reports.value).set(channelId, {
 			status,
 			...(exitCode !== undefined && { exitCode }),
+			...(endReason !== undefined && { endReason }),
 		});
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) {
@@ -521,9 +538,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	}
 
 	/** The hub's last report on a channel, whichever host it is on. */
-	function reportOf(
-		channelId: string | null,
-	): { status: Channel["status"]; exitCode?: number } | undefined {
+	function reportOf(channelId: string | null): ChannelReport | undefined {
 		return channelId === null ? undefined : reports.value.get(channelId);
 	}
 

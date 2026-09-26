@@ -11,6 +11,7 @@ import type {
 	AuthPromptMessage,
 	Channel,
 	ChannelCreatedMessage,
+	ChannelEndReason,
 	ChannelStateMessage,
 	DestroyMessage,
 	ElevationMethod,
@@ -353,6 +354,10 @@ export class ChannelLifecycleManager {
 	 * Destroy a single channel: send DESTROY to the agent, mark dead in DB,
 	 * untrack from scheduler/chunker, and remove from in-memory map.
 	 * Returns true if the channel was found and destroyed.
+	 *
+	 * The end is said to be the hub's doing, so that no pane over it brings it
+	 * back or closes on it (#580). The agent's CHANNEL_EXIT that follows finds
+	 * the channel forgotten and is not reported again.
 	 */
 	destroyChannel(channelId: string): boolean {
 		const ch = this.ctx.channels.get(channelId);
@@ -364,7 +369,7 @@ export class ChannelLifecycleManager {
 			agent.send({ type: "DESTROY", channelId } as DestroyMessage);
 		}
 
-		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead");
+		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "destroyed");
 
 		this.ctx.scheduler.untrackChannel(channelId);
 		this.ctx.chunker.untrackChannel(channelId);
@@ -866,7 +871,14 @@ export class ChannelLifecycleManager {
 
 	// ─── Session close ────────────────────────────────────────────────────────
 
-	closeSession(hostId: string, sessionId: string): void {
+	/**
+	 * End a host's session and every terminal in it.
+	 *
+	 * `endReason` is for a caller closing it on purpose: its terminals' ends
+	 * then say so (#580). Without one, the session is closing under the hub (its
+	 * agent went, its connection failed), and those ends are the host's.
+	 */
+	closeSession(hostId: string, sessionId: string, endReason?: ChannelEndReason): void {
 		this.clearElevationForSession(sessionId);
 
 		// Cancel any pending reconnect timer for this host
@@ -891,7 +903,7 @@ export class ChannelLifecycleManager {
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;
 			if (ch.status !== "dead") {
-				this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
+				this.broadcaster.updateChannelStatus(channelId, sessionId, "dead", undefined, endReason);
 			}
 			this.forgetChannel(channelId);
 		}

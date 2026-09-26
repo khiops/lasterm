@@ -458,6 +458,15 @@ export interface SessionStateMessage {
 	outdatedAgent?: { running: string; expected: string };
 }
 
+/**
+ * Why a terminal ended, when the hub ended it itself (#580).
+ *
+ * `destroyed`: the hub ended it on purpose. Someone killed it, closed its
+ * session, replaced its agent or quit the hub. A shell that exited, or a
+ * terminal the hub found gone, carries no reason.
+ */
+export type ChannelEndReason = "destroyed";
+
 /** Hub → UI: channel lifecycle state change */
 export interface ChannelStateMessage {
 	type: "CHANNEL_STATE";
@@ -465,6 +474,11 @@ export interface ChannelStateMessage {
 	sessionId: string;
 	status: ChannelStatus;
 	exitCode?: number;
+	/**
+	 * Only on a `dead` report, when the hub ended the terminal itself. A pane
+	 * never restarts or closes on such an end: someone meant it (#580).
+	 */
+	endReason?: ChannelEndReason;
 }
 
 /**

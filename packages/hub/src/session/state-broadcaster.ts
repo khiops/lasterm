@@ -12,6 +12,7 @@ import type {
 	AgentProcessTitleMessage,
 	AgentTitleChangeMessage,
 	ChannelCreatedMessage,
+	ChannelEndReason,
 	ChannelStateMessage,
 	ProtocolMessage,
 	SessionStateMessage,
@@ -160,11 +161,21 @@ export class StateBroadcaster {
 		} satisfies SessionStateMessage);
 	}
 
+	/**
+	 * Record a channel's status and tell every client.
+	 *
+	 * `endReason` goes with a `dead` the hub caused on purpose (#580). Every end
+	 * heard while the hub quits is one: the quit stops the local agent, and
+	 * with it the terminals, whichever way their end reaches here. Nothing may
+	 * start again meanwhile, and a pane closing on one could delete a terminal
+	 * the next launch should still list.
+	 */
 	updateChannelStatus(
 		channelId: string,
 		sessionId: string,
 		status: import("@lasterm/shared").ChannelStatus,
 		exitCode?: number,
+		endReason?: ChannelEndReason,
 	): void {
 		const ch = this.ctx.channels.get(channelId);
 		if (ch) {
@@ -172,12 +183,16 @@ export class StateBroadcaster {
 		}
 		this.ctx.metaDal.updateChannelStatus(channelId, status, exitCode);
 
+		const reason = endReason ?? (this.ctx.quitState === "QUITTING" ? "destroyed" : undefined);
 		const stateMsg: ChannelStateMessage = {
 			type: "CHANNEL_STATE",
 			channelId,
 			sessionId,
 			status,
 			...(exitCode !== undefined && { exitCode }),
+			// Said with the end only, and not stored: an end found later is never
+			// acted on, so only the report heard as it happens needs it.
+			...(status === "dead" && reason !== undefined && { endReason: reason }),
 		};
 		// Every client, as STATE_SYNC and CHANNEL_CREATED go: each of them holds
 		// every channel in its state, and a window can show a terminal without

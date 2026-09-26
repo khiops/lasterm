@@ -655,6 +655,8 @@ export class SessionManager {
 		// very host qualifies: anything else would have this spawn take over a
 		// terminal that is someone's, or one that is still running.
 		let reuseChannelId: string | undefined;
+		// The directory the terminal being brought back has of its own, if any.
+		let reusedCwd: string | undefined;
 		if (msg.reuseChannelId !== undefined) {
 			const existing = this.ctx.metaDal.getChannelWithHost(msg.reuseChannelId);
 			// A dead entry still in the live map is not a terminal running: it is
@@ -664,6 +666,7 @@ export class SessionManager {
 			const live = tracked !== undefined && tracked.status !== "dead" ? tracked : undefined;
 			if (existing && existing.hostId === hostId && live === undefined) {
 				reuseChannelId = msg.reuseChannelId;
+				reusedCwd = existing.channel.cwd;
 			} else {
 				// Spawning a stranger instead would put a terminal on screen that
 				// nobody asked for, beside the one that was meant to come back.
@@ -993,7 +996,13 @@ export class SessionManager {
 				// ── Launch profile resolution ─────────────────────────────────────────
 				let resolvedShell = msg.shell ?? undefined;
 				let resolvedArgs = msg.args ?? [];
-				let resolvedCwd = msg.cwd ?? undefined;
+				// The directory, in this order: the request's; the launch profile's,
+				// when the request names one (below), as for a new terminal; for a
+				// terminal brought back, the one it has of its own, as a restart
+				// sends it (#583), since the web brings one back with its shell and
+				// arguments only; else none, and its agent starts it in its user's
+				// home (#581).
+				let resolvedCwd = msg.cwd ?? reusedCwd;
 				let resolvedEnv: Record<string, string> = msg.env ?? {};
 				let resolvedDirectProcess = msg.directProcess ?? false;
 				let resolvedElevated = msg.elevated ?? false;

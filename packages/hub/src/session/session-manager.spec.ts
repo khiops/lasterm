@@ -1834,6 +1834,57 @@ describe("SessionManager", () => {
 			expect(again.find((spawn) => spawn.channelId === bare)).not.toHaveProperty("cwd");
 			expect(again.find((spawn) => spawn.channelId === placed)?.cwd).toBe("/srv/app");
 		});
+
+		// A dead terminal is brought back by a SPAWN that names it, and the web
+		// sends that SPAWN with the terminal's shell and arguments only. The hub
+		// sent no directory at all, so one that had its own came back in the
+		// default one (#583).
+		it("is brought back from the dead without one, and one with a directory in it (#583)", async () => {
+			const { hostId, bare, placed } = await twoTerminals();
+			const channels = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+			const bury = (channelId: string): void => {
+				const entry = channels.get(channelId);
+				if (entry) entry.status = "dead";
+				dal.updateChannelStatus(channelId, "dead");
+			};
+			const bringBack = (
+				channelId: string,
+				asked: Partial<UiSpawnMessage> = {},
+			): Promise<string | null> =>
+				sm.handleSpawn("c-cwd", { type: "SPAWN", hostId, reuseChannelId: channelId, ...asked });
+			bury(bare);
+			bury(placed);
+			const before = spawnsTo(mockSshAgentInstance?.send).length;
+
+			expect(await bringBack(bare)).toBe(bare);
+			expect(await bringBack(placed)).toBe(placed);
+			// A directory the request names comes first, and a launch profile it
+			// names gives its own, as for a new terminal.
+			bury(placed);
+			expect(await bringBack(placed, { cwd: "/srv/other" })).toBe(placed);
+			const profile = dal.createLaunchProfile({
+				name: "In /opt/tools",
+				shell: "/bin/bash",
+				cwd: "/opt/tools",
+				mode: "shell",
+				elevated: false,
+				supportedOs: "any",
+				iconType: "auto",
+				sortOrder: 0,
+			});
+			bury(placed);
+			expect(await bringBack(placed, { launchProfileId: profile.id })).toBe(placed);
+
+			const [backBare, backPlaced, asked, profiled] = spawnsTo(mockSshAgentInstance?.send).slice(
+				before,
+			);
+			expect(backBare?.channelId).toBe(bare);
+			expect(backBare).not.toHaveProperty("cwd");
+			expect(backPlaced?.channelId).toBe(placed);
+			expect(backPlaced?.cwd).toBe("/srv/app");
+			expect(asked?.cwd).toBe("/srv/other");
+			expect(profiled?.cwd).toBe("/opt/tools");
+		});
 	});
 
 	// ─── A terminal with no shell of its own (#583) ──────────────────────────

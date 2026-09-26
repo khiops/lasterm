@@ -2,6 +2,7 @@ mod batch;
 mod color_veto;
 mod daemon;
 mod elevation;
+mod environment;
 mod expand;
 mod framing;
 mod handler;

@@ -103,9 +103,23 @@ pub enum AgentToHub {
         level: String,
         msg: String,
     },
+    /// The answer to ENV_QUERY (`env-modes`, #576): the variables a terminal
+    /// would start with in that mode, before the profile changes anything.
+    /// The values can be secrets: this frame is never logged, on either side.
+    #[serde(rename = "ENV")]
+    Env {
+        request_id: String,
+        env: std::collections::HashMap<String, String>,
+        /// The OS the agent runs on, so a reader knows how its names compare.
+        os: String,
+    },
 }
 
 /// All messages sent FROM the hub TO the agent.
+///
+/// SPAWN is by far the largest variant. A message is decoded, dispatched and
+/// dropped one at a time, never stored in bulk, so boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubToAgent {
@@ -149,6 +163,26 @@ pub enum HubToAgent {
         elevation_method: Option<String>,
         #[serde(default)]
         custom_command: Option<String>,
+        /// `inherit` (the default) or `minimal`: what the environment starts
+        /// from (#576). Hubs from before it do not send it.
+        #[serde(default)]
+        env_mode: Option<String>,
+        /// Variables to remove from that start, before `env` is applied: what
+        /// a profile set to `null`.
+        #[serde(default)]
+        env_unset: Option<Vec<String>>,
+        /// Start the shell as a login shell. A Unix agent adds `-l` for a shell
+        /// known to take it, when `args` is empty; Windows ignores it.
+        #[serde(default)]
+        login_shell: Option<bool>,
+    },
+    /// Ask for the variables a terminal would start with in `mode`
+    /// (`env-modes`, #576). Answered with ENV.
+    #[serde(rename = "ENV_QUERY")]
+    EnvQuery {
+        request_id: String,
+        #[serde(default)]
+        mode: Option<String>,
     },
     #[serde(rename = "INPUT")]
     Input {
@@ -350,6 +384,67 @@ mod tests {
         assert_eq!(decoded["code"], "OTHER_HUBS_HOLD_CHANNELS");
         assert_eq!(decoded["other_owner_channels"], 2);
         assert!(decoded.get("channel_id").is_none());
+    }
+
+    #[test]
+    fn spawn_reads_the_environment_fields_and_does_without_them() {
+        match hub_frame(serde_json::json!({
+            "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24,
+            "env_mode": "minimal", "env_unset": ["NO_COLOR", "PAGER"], "login_shell": true,
+        })) {
+            HubToAgent::Spawn {
+                env_mode,
+                env_unset,
+                login_shell,
+                ..
+            } => {
+                assert_eq!(env_mode.as_deref(), Some("minimal"));
+                assert_eq!(env_unset, Some(vec!["NO_COLOR".into(), "PAGER".into()]));
+                assert_eq!(login_shell, Some(true));
+            }
+            other => panic!("expected SPAWN, got {other:?}"),
+        }
+        // A hub from before #576 sends none of them.
+        match hub_frame(
+            serde_json::json!({ "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24 }),
+        ) {
+            HubToAgent::Spawn {
+                env_mode,
+                env_unset,
+                login_shell,
+                ..
+            } => {
+                assert_eq!(env_mode, None);
+                assert_eq!(env_unset, None);
+                assert_eq!(login_shell, None);
+            }
+            other => panic!("expected SPAWN, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_query_and_env_speak_snake_case_and_keep_names_as_they_are() {
+        match hub_frame(
+            serde_json::json!({ "type": "ENV_QUERY", "request_id": "q1", "mode": "inherit" }),
+        ) {
+            HubToAgent::EnvQuery { request_id, mode } => {
+                assert_eq!(request_id, "q1");
+                assert_eq!(mode.as_deref(), Some("inherit"));
+            }
+            other => panic!("expected ENV_QUERY, got {other:?}"),
+        }
+
+        let bytes = rmp_serde::to_vec_named(&AgentToHub::Env {
+            request_id: "q1".into(),
+            env: [("LC_ALL".to_string(), "C".to_string())].into(),
+            os: "linux".into(),
+        })
+        .unwrap();
+        let decoded: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded["type"], "ENV");
+        assert_eq!(decoded["request_id"], "q1");
+        assert_eq!(decoded["env"]["LC_ALL"], "C");
+        assert_eq!(decoded["os"], "linux");
     }
 
     #[test]

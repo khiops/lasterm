@@ -215,6 +215,9 @@ impl PtyManager {
     ///
     /// A channel id is unique across the whole agent, whoever owns it: a
     /// duplicate is refused even when another hub holds the first one.
+    ///
+    /// `environment` is the whole environment the workload starts with, from a
+    /// cleared one (#576); `None` hands it the agent's own.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn(
         &mut self,
@@ -223,7 +226,7 @@ impl PtyManager {
         shell: &str,
         args: &[String],
         cwd: Option<&str>,
-        env: Option<&HashMap<String, String>>,
+        environment: Option<&[(String, String)]>,
         cols: u16,
         rows: u16,
     ) -> std::io::Result<(String, u32)> {
@@ -251,9 +254,10 @@ impl PtyManager {
         if let Some(d) = cwd {
             cmd = cmd.current_dir(d);
         }
-        if let Some(e) = env {
-            for (k, v) in e {
-                cmd = cmd.env(k, v);
+        if let Some(environment) = environment {
+            cmd = cmd.env_clear();
+            for (name, value) in environment {
+                cmd = cmd.env(name, value);
             }
         }
         cmd = cmd.size(cols, rows);

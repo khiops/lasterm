@@ -24,6 +24,34 @@ pub fn get_default_shell() -> String {
     }
 }
 
+/// The shells known to start as login shells when given `-l` (#576).
+pub const LOGIN_SHELLS: &[&str] = &["bash", "zsh", "ksh", "mksh", "fish", "sh", "dash", "ash"];
+
+/// The arguments a shell starts with, once the hub has said whether it wants
+/// a login shell.
+///
+/// `ssh host` gives a login shell, and a remote terminal takes its place: the
+/// hub asks for one there, so `~/.profile` is read and `PATH` is right
+/// whatever the agent was started with. Only a Unix agent acts on it, only for
+/// a shell known to take `-l`, and only when the request named no arguments of
+/// its own: those say what the shell is to do, and are passed as they are.
+pub fn login_shell_args(
+    platform: crate::environment::Platform,
+    shell: &str,
+    args: Vec<String>,
+    login_shell: bool,
+) -> Vec<String> {
+    if !login_shell || platform != crate::environment::Platform::Unix || !args.is_empty() {
+        return args;
+    }
+    let name = shell.rsplit('/').next().unwrap_or(shell);
+    if LOGIN_SHELLS.contains(&name) {
+        vec!["-l".to_owned()]
+    } else {
+        args
+    }
+}
+
 #[cfg(unix)]
 fn detect_unix_shells() -> Vec<String> {
     use std::path::Path;
@@ -122,6 +150,67 @@ mod tests {
     fn test_default_shell_not_empty() {
         let shell = get_default_shell();
         assert!(!shell.is_empty());
+    }
+
+    use crate::environment::Platform;
+
+    #[test]
+    fn a_known_shell_asked_to_log_in_gets_dash_l() {
+        for shell in [
+            "/bin/bash",
+            "/usr/bin/zsh",
+            "/bin/sh",
+            "/usr/bin/fish",
+            "dash",
+        ] {
+            assert_eq!(
+                login_shell_args(Platform::Unix, shell, Vec::new(), true),
+                vec!["-l".to_string()],
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_shell_is_started_as_asked() {
+        for shell in [
+            "/usr/bin/nu",
+            "/usr/bin/xonsh",
+            "/usr/bin/python3",
+            "/bin/bashful",
+        ] {
+            assert!(
+                login_shell_args(Platform::Unix, shell, Vec::new(), true).is_empty(),
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_arguments_are_left_as_they_are() {
+        let args = vec!["-c".to_string(), "htop".to_string()];
+        assert_eq!(
+            login_shell_args(Platform::Unix, "/bin/bash", args.clone(), true),
+            args
+        );
+    }
+
+    #[test]
+    fn nothing_is_added_unless_the_hub_asks() {
+        assert!(login_shell_args(Platform::Unix, "/bin/bash", Vec::new(), false).is_empty());
+    }
+
+    // ConPTY shells have no login flavour to ask for.
+    #[test]
+    fn a_windows_agent_ignores_the_request() {
+        assert!(login_shell_args(Platform::Windows, "sh", Vec::new(), true).is_empty());
+        assert!(login_shell_args(
+            Platform::Windows,
+            r"C:\Windows\System32\cmd.exe",
+            Vec::new(),
+            true
+        )
+        .is_empty());
     }
 
     #[test]

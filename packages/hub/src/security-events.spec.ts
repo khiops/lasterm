@@ -11,16 +11,45 @@ import { HubLogger } from "./logging/hub-logger.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { createServer, startServer as listen } from "./server.fixture.js";
 import { type DatabaseManager, openTestDatabases } from "./storage/db.js";
+import { MetaDAL } from "./storage/meta.js";
 import { getTestTls } from "./test-tls.fixture.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
+
+/** What the mocked agent says its environment is, when asked (#576). */
+const agentEnvironment = vi.hoisted(() => ({ env: {} as Record<string, string> }));
 
 vi.mock("./session/ssh-agent.js", () => {
 	const { EventEmitter } = require("node:events");
 	class MockSshAgent extends EventEmitter {
 		connected = true;
+		helloMessage = {
+			type: "HELLO",
+			version: 1,
+			agentVersion: "0.0.0",
+			capabilities: ["env-modes"],
+		};
 		start = vi.fn().mockResolvedValue(undefined);
-		send = vi.fn();
+		send = vi.fn((msg: { type: string; requestId?: string }) => {
+			if (msg.type === "SPAWN") {
+				setImmediate(() =>
+					this.emit("message", {
+						type: "SPAWN_OK",
+						requestId: msg.requestId,
+						channelId: "01HZZZZZZZZZZZZZZZZZZZZZZY",
+					}),
+				);
+			} else if (msg.type === "ENV_QUERY") {
+				setImmediate(() =>
+					this.emit("message", {
+						type: "ENV",
+						requestId: msg.requestId,
+						env: agentEnvironment.env,
+						os: "linux",
+					}),
+				);
+			}
+		});
 		close = vi.fn(() => {
 			this.connected = false;
 			this.emit("close");
@@ -587,12 +616,22 @@ describe("routine requests leave no line at the shipped level", () => {
 			);
 			const from = serverLog.mark();
 			const asset = `/public/fonts/missing.woff2?asset_token=${getBootAssetToken()}`;
+			const hostId = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@pi.local",
+			}).id;
+			// The settings page asks for a host's environment each time it shows
+			// one (#576); a host with no agent connected answers 409.
+			const environment = `/api/hosts/${hostId}/agent-environment?mode=inherit`;
 			for (let i = 0; i < 3; i++) {
 				expect((await hub.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
 				const hosts = await hub.inject({ method: "GET", url: "/api/hosts", headers: bearer });
 				expect(hosts.statusCode).toBe(200);
 				expect((await hub.inject({ method: "GET", url: asset })).statusCode).toBe(404);
 				expect((await hub.inject({ method: "GET", url: "/nowhere" })).statusCode).toBe(404);
+				const unreached = await hub.inject({ method: "GET", url: environment, headers: bearer });
+				expect(unreached.statusCode).toBe(409);
 			}
 
 			expect(serverLog.shipped(from)).toEqual([]);
@@ -654,6 +693,71 @@ describe("routine requests leave no line at the shipped level", () => {
 			]);
 		} finally {
 			await hub.close();
+		}
+	});
+});
+
+describe("a host's environment leaves no trace in the logs (#576)", () => {
+	// Tokens in an environment are common. The hub hands the variables to the
+	// settings page and to nothing else: not its log, not the server's, at any
+	// level — names included, since a name alone can say what a machine holds.
+	it("logs neither the names nor the values an agent reports, at any level", async () => {
+		const name = "LASTERM_SPEC_SECRET_NAME_4242";
+		const value = "spec-secret-value-4242";
+		agentEnvironment.env = { [name]: value, HOME: "/home/pi" };
+		const serverLog = new ServerLog();
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const hub = await createServer({
+			tls: getTestTls(),
+			logger: { level: "trace", destination: serverLog.destination },
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			securityLog: log.securityLog,
+			hubLogger,
+		});
+		let ws: InjectedSocket | undefined;
+		try {
+			const hostId = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@pi.local",
+			}).id;
+			// A terminal on the host is what connects its agent.
+			ws = await openSocket(hub);
+			const received: ProtocolMessage[] = [];
+			ws.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)));
+			});
+			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			ws.send(encodeMessage({ type: "SPAWN", hostId, cols: 80, rows: 24 } as ProtocolMessage));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "SPAWN_OK")).toBe(true));
+			const from = serverLog.mark();
+
+			const res = await hub.inject({
+				method: "GET",
+				url: `/api/hosts/${hostId}/agent-environment?mode=inherit`,
+				headers: bearer,
+			});
+
+			expect(res.statusCode).toBe(200);
+			expect(res.json().env[name]).toBe(value);
+			expect(serverLog.shipped(from)).toEqual([]);
+			const text = `${serverLog.text()}\n${log.text()}`;
+			expect(text).not.toContain(name);
+			expect(text).not.toContain(value);
+		} finally {
+			ws?.terminate();
+			await hub.close();
+			agentEnvironment.env = {};
 		}
 	});
 });

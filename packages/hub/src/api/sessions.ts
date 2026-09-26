@@ -1,4 +1,4 @@
-import { ErrorCode, toSnakeCase } from "@lasterm/shared";
+import { type AgentEnvironmentResponse, ErrorCode, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -24,8 +24,63 @@ export function readReplaceAgentBody(
 export function registerSessionRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "replaceAgent" | "closeSession">,
+	sessionManager: Pick<SessionManager, "replaceAgent" | "closeSession" | "queryAgentEnvironment">,
 ): void {
+	/**
+	 * GET /api/hosts/:id/agent-environment?mode=inherit|minimal — the variables
+	 * a terminal on this host would start with in that mode, before the
+	 * profile changes anything, as the agent there says (#576).
+	 *
+	 * Asked live and never kept: the values can be secrets, readable here by
+	 * the same authenticated owner who could type `env` in a terminal on that
+	 * host. Neither they nor their names are logged, at any level.
+	 */
+	server.get<{ Params: { id: string }; Querystring: { mode?: string } }>(
+		"/api/hosts/:id/agent-environment",
+		async (request, reply) => {
+			const host = metaDal.getHost(request.params.id);
+			if (!host) {
+				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
+			}
+			const mode = request.query.mode ?? "inherit";
+			if (mode !== "inherit" && mode !== "minimal") {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: "mode must be inherit or minimal." },
+				});
+			}
+
+			const outcome = await sessionManager.queryAgentEnvironment(host.id, mode);
+			switch (outcome.kind) {
+				case "ok":
+					return reply
+						.header("Cache-Control", "no-store")
+						.send({ mode, os: outcome.os, env: outcome.env } satisfies AgentEnvironmentResponse);
+				case "not-connected":
+					return reply.code(409).send({
+						error: {
+							code: ErrorCode.HOST_NOT_CONNECTED,
+							message: "This host is not connected. Open a terminal on it to see its variables.",
+						},
+					});
+				case "too-old":
+					return reply.code(409).send({
+						error: {
+							code: ErrorCode.AGENT_TOO_OLD,
+							message:
+								"The agent on this host is too old to report its environment. Replace it with the one this hub carries.",
+						},
+					});
+				case "timeout":
+					return reply.code(504).send({
+						error: {
+							code: ErrorCode.AGENT_TIMEOUT,
+							message: "The agent on this host did not answer in time.",
+						},
+					});
+			}
+		},
+	);
+
 	/**
 	 * POST /api/hosts/:id/agent/replace — stop the agent serving this host, so
 	 * the next connection starts the one this hub carries.

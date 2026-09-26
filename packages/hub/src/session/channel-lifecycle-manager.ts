@@ -36,13 +36,20 @@ import {
 	isQuitFenceCurrent,
 	type QuitFence,
 } from "./quit-fence.js";
-import { scopedEnv } from "./scoped-env.js";
 import type {
 	ChannelState,
 	ElevationPromptOwner,
 	SharedSessionContext,
 } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
+import {
+	envNamesIgnoreCase,
+	resolveEnvironmentChanges,
+	type SpawnEnvironmentFields,
+	spawnEnvironmentFields,
+	spawnEnvMode,
+	wantsLoginShell,
+} from "./spawn-environment.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
 
 const SPAWN_TIMEOUT_MS = 10_000;
@@ -95,14 +102,29 @@ export class ChannelLifecycleManager {
 	 *
 	 * What the spawn request carried is not remembered: it spoke for that one
 	 * spawn, not for the terminal.
+	 *
+	 * It is the whole of what a SPAWN says about the environment (#576): the
+	 * scopes' removals, the mode, and whether the shell logs in, decided as for
+	 * a new terminal from what the channel was started with.
 	 */
-	private restartEnv(channelId: string, hostId: string): Record<string, string> {
+	private restartEnv(channelId: string, hostId: string): SpawnEnvironmentFields {
 		const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
 		const channel = this.ctx.metaDal.getChannel(channelId);
+		const host = this.ctx.metaDal.getHost(hostId);
 		const launchProfile = channel?.launchProfileId
 			? this.ctx.metaDal.getLaunchProfile(channel.launchProfileId)
 			: undefined;
-		return { ...scopedEnv(profile), ...(launchProfile?.env ?? {}) };
+		const environment = resolveEnvironmentChanges(
+			[
+				...(this.ctx.configResolver?.environmentLayers(hostId, channelId) ?? []),
+				launchProfile?.env,
+			],
+			host !== undefined && envNamesIgnoreCase(host),
+		);
+		const loginShell =
+			host !== undefined &&
+			wantsLoginShell(host, channel?.shell, channel?.args, channel?.directProcess);
+		return spawnEnvironmentFields(environment, spawnEnvMode(profile?.envMode), loginShell);
 	}
 
 	/** The only primitive allowed to emit a SPAWN frame. */
@@ -447,7 +469,7 @@ export class ChannelLifecycleManager {
 				shell,
 				...(args.length > 0 && { args }),
 				cwd,
-				env: this.restartEnv(channelId, hostId),
+				...this.restartEnv(channelId, hostId),
 				cols,
 				rows,
 				elevated: true,
@@ -624,7 +646,7 @@ export class ChannelLifecycleManager {
 			shell,
 			...(args.length > 0 && { args }),
 			cwd,
-			env: this.restartEnv(channelId, hostId),
+			...this.restartEnv(channelId, hostId),
 			cols,
 			rows,
 		};
@@ -1027,7 +1049,7 @@ export class ChannelLifecycleManager {
 					shell: ch.shell,
 					...(ch.args !== undefined && ch.args.length > 0 && { args: ch.args }),
 					cwd: ch.cwd ?? process.env.HOME ?? process.env.USERPROFILE ?? "/",
-					env: this.restartEnv(channelId, hostId),
+					...this.restartEnv(channelId, hostId),
 					cols: ch.cols,
 					rows: ch.rows,
 				},

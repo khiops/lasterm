@@ -1,9 +1,17 @@
-import type { AuthPromptMessage, ProtocolMessage } from "@lasterm/shared";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type {
+	AgentSpawnMessage,
+	AuthPromptMessage,
+	ProtocolMessage,
+	UiSpawnMessage,
+} from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { ConfigResolver } from "../config.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
 import {
@@ -963,10 +971,8 @@ describe("SessionManager", () => {
 		const dal = new MetaDAL(dbManager.meta);
 		const scoped = new SessionManager(dbManager, undefined, undefined, {
 			uiConfig: { title: { source: "dynamic", staticTitle: "" } },
-			resolve: () => ({
-				envMode: "inherit",
-				env: { FROM_SCOPE: "yes", SHARED: "scope" },
-			}),
+			resolve: () => ({ envMode: "inherit" }),
+			environmentLayers: () => [{ FROM_SCOPE: "yes", SHARED: "scope" }],
 			resolveElevationMethod: () => "sudo",
 		} as unknown as ConfigResolver);
 		const received: ProtocolMessage[] = [];
@@ -1714,7 +1720,8 @@ describe("SessionManager", () => {
 		const dal = new MetaDAL(dbManager.meta);
 		const scoped = new SessionManager(dbManager, undefined, undefined, {
 			uiConfig: { title: { source: "dynamic", staticTitle: "" } },
-			resolve: () => ({ envMode: "inherit", env: { FROM_SCOPE: "yes" } }),
+			resolve: () => ({ envMode: "inherit" }),
+			environmentLayers: () => [{ FROM_SCOPE: "yes" }],
 			resolveElevationMethod: () => "sudo",
 		} as unknown as ConfigResolver);
 		scoped.addClient(makeClient("c-restart-env", []));
@@ -1739,6 +1746,166 @@ describe("SessionManager", () => {
 			.filter((message) => message.type === "SPAWN");
 		expect(spawns).toHaveLength(2);
 		expect(spawns[1]?.env).toEqual({ FROM_SCOPE: "yes" });
+	});
+
+	// ─── The environment a SPAWN carries (#576) ──────────────────────────────
+	//
+	// Against a real ConfigResolver, reading a real config.toml and the host and
+	// channel profiles in meta.db: the cascade is what is under test.
+
+	describe("the environment a SPAWN carries (#576)", () => {
+		let configDir: string;
+		let scoped: SessionManager;
+		let dal: MetaDAL;
+
+		async function hubWithConfig(toml: string): Promise<void> {
+			const { ConfigResolver } = await import("../config.js");
+			dal = new MetaDAL(dbManager.meta);
+			const resolver = new ConfigResolver(dal);
+			writeFileSync(join(configDir, "config.toml"), toml);
+			resolver.loadFromFile(configDir);
+			scoped = new SessionManager(dbManager, undefined, undefined, resolver);
+			scoped.addClient(makeClient("c-env", []));
+		}
+
+		function sshHost(label: string, defaultShell?: string): string {
+			const host = dal.createHost({
+				type: "ssh",
+				label,
+				sshHost: "pi@pi.local",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			if (defaultShell !== undefined) {
+				dal.updateHostDiscoveredShells(host.id, [defaultShell, "/usr/bin/zsh"], defaultShell);
+			}
+			return host.id;
+		}
+
+		function spawnsTo(send: Mock | undefined): AgentSpawnMessage[] {
+			return (send?.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN");
+		}
+
+		beforeEach(() => {
+			configDir = makeTempDir("lasterm-spawn-env-");
+		});
+
+		afterEach(async () => {
+			await scoped?.shutdown();
+			await removeTempDir(configDir);
+		});
+
+		it("resolves global, host and channel into values and removals, a restart included", async () => {
+			// config.toml has no null: a removal is written false there.
+			await hubWithConfig(
+				'[terminal]\nenv = { PAGER = "less", NO_COLOR = false, EDITOR = "vi" }\n',
+			);
+			const hostId = sshHost("pi-env");
+			dal.updateHostProfile(
+				hostId,
+				JSON.stringify({ env: { EDITOR: null, SSH_AUTH_SOCK: null, LANG: "C.UTF-8" } }),
+			);
+
+			const channelId = await scoped.handleSpawn("c-env", { type: "SPAWN", hostId });
+			if (channelId === null) throw new Error("expected a channel");
+			dal.updateChannelProfile(
+				channelId,
+				JSON.stringify({ env: { SSH_AUTH_SOCK: "/tmp/agent.sock", PAGER: null } }),
+			);
+			expect(await scoped.restartChannel(channelId)).toBe(true);
+
+			const [first, restart] = spawnsTo(mockSshAgentInstance?.send);
+			expect(first?.env).toEqual({ PAGER: "less", LANG: "C.UTF-8" });
+			expect([...(first?.envUnset ?? [])].sort()).toEqual(["EDITOR", "NO_COLOR", "SSH_AUTH_SOCK"]);
+			// The channel restores what its host removed, and removes what the
+			// global scope set.
+			expect(restart?.env).toEqual({ LANG: "C.UTF-8", SSH_AUTH_SOCK: "/tmp/agent.sock" });
+			expect([...(restart?.envUnset ?? [])].sort()).toEqual(["EDITOR", "NO_COLOR", "PAGER"]);
+		});
+
+		it("sends the mode the scopes resolve, on a restart too", async () => {
+			await hubWithConfig("[terminal]\n");
+			const hostId = sshHost("pi-mode");
+
+			const channelId = await scoped.handleSpawn("c-env", { type: "SPAWN", hostId });
+			if (channelId === null) throw new Error("expected a channel");
+			dal.updateChannelProfile(channelId, JSON.stringify({ envMode: "minimal" }));
+			expect(await scoped.restartChannel(channelId)).toBe(true);
+
+			const [first, restart] = spawnsTo(mockSshAgentInstance?.send);
+			expect(first?.envMode).toBe("inherit");
+			expect(first).not.toHaveProperty("envUnset");
+			expect(restart?.envMode).toBe("minimal");
+		});
+
+		// The resolver used to be asked for the host alone at spawn, so a
+		// terminal brought back lost what its own scope set.
+		it("brings a dead terminal back with its own scope's environment", async () => {
+			await hubWithConfig("[terminal]\n");
+			const hostId = sshHost("pi-reuse");
+			const channelId = await scoped.handleSpawn("c-env", { type: "SPAWN", hostId });
+			if (channelId === null) throw new Error("expected a channel");
+			const channels = (scoped as unknown as { channels: Map<string, { status: string }> })
+				.channels;
+			const stale = channels.get(channelId);
+			if (stale) stale.status = "dead";
+			dal.updateChannelProfile(
+				channelId,
+				JSON.stringify({ envMode: "minimal", env: { FROM_CHANNEL: "yes", PAGER: null } }),
+			);
+
+			expect(
+				await scoped.handleSpawn("c-env", {
+					type: "SPAWN",
+					hostId,
+					reuseChannelId: channelId,
+				}),
+			).toBe(channelId);
+
+			const back = spawnsTo(mockSshAgentInstance?.send).at(-1);
+			expect(back?.channelId).toBe(channelId);
+			expect(back?.envMode).toBe("minimal");
+			expect(back?.env).toEqual({ FROM_CHANNEL: "yes" });
+			expect(back?.envUnset).toEqual(["PAGER"]);
+		});
+
+		it("asks for a login shell for an SSH host's default shell, run as a shell with no arguments", async () => {
+			await hubWithConfig("[terminal]\n");
+			const hostId = sshHost("pi-login", "/bin/bash");
+
+			const asked = async (
+				msg: Partial<UiSpawnMessage>,
+			): Promise<AgentSpawnMessage | undefined> => {
+				await scoped.handleSpawn("c-env", { type: "SPAWN", hostId, ...msg });
+				return spawnsTo(mockSshAgentInstance?.send).at(-1);
+			};
+
+			expect((await asked({}))?.loginShell, "the agent's default").toBe(true);
+			expect((await asked({ shell: "/bin/bash" }))?.loginShell, "named").toBe(true);
+			expect(await asked({ shell: "/usr/bin/zsh" }), "another shell").not.toHaveProperty(
+				"loginShell",
+			);
+			expect(
+				await asked({ shell: "/bin/bash", args: ["-c", "htop"] }),
+				"arguments",
+			).not.toHaveProperty("loginShell");
+			expect(
+				await asked({ shell: "/bin/bash", directProcess: true }),
+				"a direct process",
+			).not.toHaveProperty("loginShell");
+		});
+
+		it("leaves a local terminal as it was", async () => {
+			await hubWithConfig("[terminal]\n");
+
+			await scoped.handleSpawn("c-env", { type: "SPAWN", hostId: "local" });
+
+			const spawn = spawnsTo(mockLocalAgents.at(-1)?.send as Mock | undefined).at(-1);
+			expect(spawn?.type).toBe("SPAWN");
+			expect(spawn).not.toHaveProperty("loginShell");
+		});
 	});
 
 	it("restartChannel uses the channel id returned by SPAWN_OK for attach and snapshots", async () => {
@@ -2678,6 +2845,7 @@ function makeMockConfigResolver(
 			title: { source, staticTitle },
 		},
 		resolve: () => ({ envMode: "inherit" }),
+		environmentLayers: () => [],
 		resolveElevationMethod: () => "sudo",
 	} as unknown as ConfigResolver;
 }

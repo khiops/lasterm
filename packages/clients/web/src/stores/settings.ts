@@ -193,11 +193,15 @@ export const useSettingsStore = defineStore("settings", () => {
 		const next = JSON.parse(JSON.stringify(cascade.value)) as CascadeResponse;
 
 		if (section === "terminal") {
+			// A host or terminal with no profile yet has no layer in the cascade:
+			// the first value set there starts one, or the page would not show it.
 			if (scope === "global") {
 				setNestedValue(next.terminal.global as Record<string, unknown>, key, value);
-			} else if (scope === "host" && next.terminal.host) {
+			} else if (scope === "host") {
+				next.terminal.host ??= {};
 				setNestedValue(next.terminal.host as Record<string, unknown>, key, value);
-			} else if (scope === "channel" && next.terminal.channel) {
+			} else if (scope === "channel") {
+				next.terminal.channel ??= {};
 				setNestedValue(next.terminal.channel as Record<string, unknown>, key, value);
 			}
 			// Update resolved

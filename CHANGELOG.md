@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.13.0](https://github.com/khiops/lasterm/compare/v0.12.0...v0.13.0) (2026-09-26)
+
+
+### Features
+
+* **agent:** a daemon serves several hubs, each with its own terminals ([#552](https://github.com/khiops/lasterm/issues/552)) ([549eab6](https://github.com/khiops/lasterm/commit/549eab6e780478d63a7361ff5934bee1f7044a5e))
+* an ended terminal's overlay reads on any background, and closes without a second question ([#574](https://github.com/khiops/lasterm/issues/574)) ([#575](https://github.com/khiops/lasterm/issues/575)) ([5fc17c7](https://github.com/khiops/lasterm/commit/5fc17c7b14d932d5012effa9c3e41f435856ffe4))
+* **hub:** hub identity on a daemon that serves several hubs ([#127](https://github.com/khiops/lasterm/issues/127), hub side) ([#551](https://github.com/khiops/lasterm/issues/551)) ([91b279b](https://github.com/khiops/lasterm/commit/91b279bf1bcca4441831bf19a8289dba4006ed43))
+* the terminal's environment — identity, remote login shells, and a real Inherited/Minimal the agent applies, shown and editable ([#576](https://github.com/khiops/lasterm/issues/576)) ([#577](https://github.com/khiops/lasterm/issues/577)) ([33bf668](https://github.com/khiops/lasterm/commit/33bf668952375fe98d3c8305bc782b0dbbbfd24c))
+* **web:** a browser tab that outlived a hub upgrade reloads onto the hub's UI ([#562](https://github.com/khiops/lasterm/issues/562)) ([7c209ff](https://github.com/khiops/lasterm/commit/7c209ff3b6b45ca1812dfca54ed036cac1ec15e7)), closes [#560](https://github.com/khiops/lasterm/issues/560)
+* **web:** the web UI is an installable PWA that never gets stuck on an old version ([#564](https://github.com/khiops/lasterm/issues/564)) ([5c90856](https://github.com/khiops/lasterm/commit/5c9085678a2e5b6563969dd2414e083f64ee4d0c))
+
+
+### Bug Fixes
+
+* a restarted terminal with no directory of its own opens in the host user's home, not the hub's ([#581](https://github.com/khiops/lasterm/issues/581)) ([#582](https://github.com/khiops/lasterm/issues/582)) ([292c18e](https://github.com/khiops/lasterm/commit/292c18e3231ee5b2aa1e26725958ac855fbc6faf))
+* a restarted terminal with no shell of its own gets its agent's default, and a revived one keeps its directory ([#583](https://github.com/khiops/lasterm/issues/583)) ([#585](https://github.com/khiops/lasterm/issues/585)) ([a8fbc3e](https://github.com/khiops/lasterm/commit/a8fbc3ed971d530efafd88f50a08d781166ca5c0))
+* a terminal stopped from elsewhere is not brought back by a pane set to restart ([#580](https://github.com/khiops/lasterm/issues/580)) ([#584](https://github.com/khiops/lasterm/issues/584)) ([8a64e54](https://github.com/khiops/lasterm/commit/8a64e544db5f24d34f61daeb085705b514cfd0cc))
+* **agent:** a terminal's events reach the hub connected now, after its output ([#550](https://github.com/khiops/lasterm/issues/550)) ([fcf0469](https://github.com/khiops/lasterm/commit/fcf0469b183e851bdb0bf08fa1d43ed02e988fd7))
+* **agent:** the buffer flags are documented as ignored, and the hub stops passing them ([#554](https://github.com/khiops/lasterm/issues/554)) ([0f6f6ee](https://github.com/khiops/lasterm/commit/0f6f6eed891291ff49504575fe3d64d196af02e3))
+* **hub:** owner-only databases and state directory, and token.revoke names who asked ([#567](https://github.com/khiops/lasterm/issues/567)) ([a5208e1](https://github.com/khiops/lasterm/commit/a5208e1b4b61a0666ecfae72ec996c6506dd8206))
+* **hub:** status and a reused pid, the daemon's environment, quit routes documented, a deleted daemon log ([#540](https://github.com/khiops/lasterm/issues/540)) ([#568](https://github.com/khiops/lasterm/issues/568)) ([a22eb47](https://github.com/khiops/lasterm/commit/a22eb4780387921ee70ea3afc07cd3d7dfacd5ab))
+* **hub:** the hub specs accept only the native build their script recorded ([#545](https://github.com/khiops/lasterm/issues/545)) ([ddc5051](https://github.com/khiops/lasterm/commit/ddc5051f7c0577dc8668015994dc03cf05030c06))
+* **hub:** the native test record covers the manifests, and skips a build another one wrote into ([#546](https://github.com/khiops/lasterm/issues/546)) ([8758eaa](https://github.com/khiops/lasterm/commit/8758eaa3086e3c156f34916d8cfa8eac6663bc56))
+* **hub:** the rebuild a stale native build names cleans its crates first ([#544](https://github.com/khiops/lasterm/issues/544)) ([fc24882](https://github.com/khiops/lasterm/commit/fc2488235a304e13d25f95c443d6c64f6342fd16))
+* **hub:** upload the agent beside a running daemon, then rename it over ([#555](https://github.com/khiops/lasterm/issues/555)) ([#557](https://github.com/khiops/lasterm/issues/557)) ([75f9a2e](https://github.com/khiops/lasterm/commit/75f9a2e063c755f8318b0b02a61bb4af81d8a3e2))
+* nothing restarts on its own, and a pane shows what the hub answers now ([#559](https://github.com/khiops/lasterm/issues/559)) ([#569](https://github.com/khiops/lasterm/issues/569)) ([fac3bd7](https://github.com/khiops/lasterm/commit/fac3bd7c41c44277f8317eac12a60ed1905309c8))
+* **shared:** processes extracting the same addon at once all load it on Windows ([#572](https://github.com/khiops/lasterm/issues/572)) ([d738912](https://github.com/khiops/lasterm/commit/d7389124ebb00d43022cad74b20ac760f5523540))
+* **web:** after Reconnect, a pane of another host shows its terminal ended ([#556](https://github.com/khiops/lasterm/issues/556)) ([#558](https://github.com/khiops/lasterm/issues/558)) ([e39a170](https://github.com/khiops/lasterm/commit/e39a170d4d0eff3dfdc34086211b7ee5476d28d3))
+
+
+### Tests
+
+* **root:** give each protected-fs test its own temporary directory ([#578](https://github.com/khiops/lasterm/issues/578)) ([#579](https://github.com/khiops/lasterm/issues/579)) ([bba13f9](https://github.com/khiops/lasterm/commit/bba13f99dbd105d9a42d4971fe97e9b9b368fd2f))
+* **root:** the SEA specs reach the hub through requestHub, the CLI's own transport ([#542](https://github.com/khiops/lasterm/issues/542)) ([ad06c9b](https://github.com/khiops/lasterm/commit/ad06c9b5cc663f9ea81a08cc3f4469b49893b3fb))
+
+
+### Documentation
+
+* **root:** who may end a hub, and what Quit does to a shared local agent ([#566](https://github.com/khiops/lasterm/issues/566)) ([152aba3](https://github.com/khiops/lasterm/commit/152aba30c5df70e7ae4d7ca65c390951b202dcf7))
+
+
+### CI/CD
+
+* **root:** the Lint job typechecks, so a PR that fails tsc no longer goes green ([#548](https://github.com/khiops/lasterm/issues/548)) ([4c30c21](https://github.com/khiops/lasterm/commit/4c30c2150e05a9b9e4123181aa9a607fa4317dfe)), closes [#541](https://github.com/khiops/lasterm/issues/541)
+
 ## [0.12.0](https://github.com/khiops/lasterm/compare/v0.11.0...v0.12.0) (2026-09-23)
 
 

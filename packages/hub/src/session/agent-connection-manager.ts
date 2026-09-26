@@ -375,6 +375,10 @@ export class AgentConnectionManager {
 						channel.sessionId,
 						"dead",
 						exitMsg.exitCode,
+						// The hub is stopping this host's agent to replace it: its
+						// terminals end on purpose (#580). The broadcaster marks
+						// every end heard during a quit itself.
+						this.ctx.stoppingAgents.has(hostId) ? "destroyed" : undefined,
 					);
 				}
 				this.ctx.scheduler.untrackChannel(exitMsg.channelId);

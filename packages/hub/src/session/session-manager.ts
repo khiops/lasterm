@@ -211,6 +211,7 @@ export class SessionManager {
 			reconnectTimers: new Map(),
 			reconnectAbortControllers: new Map(),
 			restartTracking: new Map(),
+			stoppingAgents: new Set(),
 			pendingRequests: new Map(),
 			trustedOnceFingerprints: new Map(),
 			trustedAgentSha256: new Map(),
@@ -557,7 +558,9 @@ export class SessionManager {
 		clearContext(this.ctx, reconnectContextId(sessionId), clearSend);
 		clearElevationContextsForSession(this.ctx, sessionId, clearSend);
 
-		this.lifecycle.closeSession(hostId, sessionId);
+		// Asked for (DELETE /api/sessions/:id): its terminals end on purpose, and
+		// a pane over one must not bring it back (#580).
+		this.lifecycle.closeSession(hostId, sessionId, "destroyed");
 	}
 
 	// ─── WS message handlers ──────────────────────────────────────────────────
@@ -1735,6 +1738,22 @@ export class SessionManager {
 			};
 		}
 
+		// Its terminals end with it, on purpose: a pane over one must not bring
+		// it back (#580).
+		this.ctx.stoppingAgents.add(hostId);
+		try {
+			return await this.stopAgentToReplace(hostId, agent, options);
+		} finally {
+			this.ctx.stoppingAgents.delete(hostId);
+		}
+	}
+
+	/** Stop the daemon `agent` reaches, and let go of the connection once it has. */
+	private async stopAgentToReplace(
+		hostId: string,
+		agent: SshAgent,
+		options: { readonly force?: boolean },
+	): Promise<ReplaceAgentOutcome> {
 		if (hasHubIdentity(agent)) {
 			const stop = await requestDaemonStop(agent, {
 				force: options.force === true,

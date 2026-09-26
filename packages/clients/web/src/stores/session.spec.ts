@@ -470,6 +470,30 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 		expect(piPane(channels)).toBe("not-connected");
 	});
 
+	// The pane must not bring back a terminal that was stopped from elsewhere,
+	// and only the report says it was (#580).
+	it("hands the pane why the hub ended a terminal, when the hub ended it", async () => {
+		const { ws, channels } = await pageLoaded();
+
+		ws?.emit({
+			type: "CHANNEL_STATE",
+			channelId: PI_CHANNEL,
+			sessionId: "s-pi",
+			status: "dead",
+			endReason: "destroyed",
+		});
+		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", endReason: "destroyed" });
+
+		ws?.emit({
+			type: "CHANNEL_STATE",
+			channelId: PI_CHANNEL,
+			sessionId: "s-pi",
+			status: "dead",
+			exitCode: 0,
+		});
+		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", exitCode: 0 });
+	});
+
 	// A STATE_SYNC follows every new socket, and the pane attaches again. What
 	// both say is what holds now, not what this window heard before (#559).
 	it("takes what the STATE_SYNC of a new socket says over a report from before it", async () => {

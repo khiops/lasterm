@@ -13,6 +13,7 @@ import {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import type { AlwaysChoice } from "../utils/exit-action.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { domPublicAssetUrl, hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
 import { systemFontFaceRules } from "../utils/system-fonts.js";
@@ -132,6 +133,25 @@ export const useConfigStore = defineStore("config", () => {
 	function emitProfileChange(event: ProfileChangeEvent): void {
 		for (const listener of profileChangeListeners) {
 			listener(event);
+		}
+	}
+
+	// ─── "Always do this", told to this window's panes (#586) ─────────────
+	const alwaysChoiceListeners = new Set<(choice: AlwaysChoice) => void>();
+
+	/** Hear each "Always do this" clicked in this window, once it is written. */
+	function onAlwaysChoice(listener: (choice: AlwaysChoice) => void): () => void {
+		alwaysChoiceListeners.add(listener);
+		return () => alwaysChoiceListeners.delete(listener);
+	}
+
+	/**
+	 * Tell this window's panes about an "Always do this". Only them: nothing is
+	 * kept, and nothing goes to the hub, so no other window hears it.
+	 */
+	function announceAlwaysChoice(choice: AlwaysChoice): void {
+		for (const listener of alwaysChoiceListeners) {
+			listener(choice);
 		}
 	}
 
@@ -256,12 +276,18 @@ export const useConfigStore = defineStore("config", () => {
 	 * dropped, or it would not apply where it was just made. Other hosts keep
 	 * theirs, as Settings shows. The hub announces each write, so every window
 	 * reads its terminals' settings again; this one is told at once.
+	 *
+	 * Once written, the choice is also told to the other panes of this window,
+	 * so that the overlays already waiting in its scope can follow it (#586).
+	 * A write the hub refused tells them nothing.
 	 */
 	async function saveWhenEnded(
 		whenEnded: "restart" | "close",
 		scope: "host" | "global",
 		where: { hostId: string | null; channelId: string | null },
 	): Promise<boolean> {
+		// The click, which orders it among the choices made in this window.
+		const at = performance.now();
 		const authStore = useAuthStore();
 		const send = async (method: "PUT" | "PATCH", path: string, body: unknown): Promise<boolean> => {
 			const resp = await hubFetch(`${hubBaseUrl()}${path}`, {
@@ -306,6 +332,15 @@ export const useConfigStore = defineStore("config", () => {
 			...(where.channelId !== null && { channelId: where.channelId }),
 		});
 		if (scope === "global") await loadProfile();
+		if (ok) {
+			announceAlwaysChoice({
+				action: whenEnded,
+				scope,
+				hostId: where.hostId,
+				channelId: where.channelId,
+				at,
+			});
+		}
 		return ok;
 	}
 
@@ -350,5 +385,7 @@ export const useConfigStore = defineStore("config", () => {
 		saveWhenEnded,
 		onProfileChange,
 		emitProfileChange,
+		onAlwaysChoice,
+		announceAlwaysChoice,
 	};
 });

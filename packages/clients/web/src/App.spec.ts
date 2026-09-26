@@ -64,3 +64,15 @@ describe("the old answer becomes the setting", () => {
 		);
 	});
 });
+
+// "Always do this" on one overlay reaches the overlays already waiting only
+// on screen (#586): every pane of the tab shown, not only the one selected.
+describe("the panes on screen", () => {
+	it("are those of the tab shown, told to every pane", () => {
+		expect(SOURCE.replace(/\s+/g, " ")).toContain(
+			"provide( CHANNELS_ON_SCREEN_KEY, computed(() => channelsOnScreen(layout.layouts.value, layout.activeTab.value?.id ?? null)), );",
+		);
+		// The tab shown is the active one: the others are kept, hidden.
+		expect(SOURCE).toContain('v-show="idx === layout.activeTabIndex.value"');
+	});
+});

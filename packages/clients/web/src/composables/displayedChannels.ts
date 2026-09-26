@@ -21,6 +21,24 @@ export function displayedChannelIds(
 }
 
 /**
+ * The channels on screen: those of the tab shown, every pane of it and not
+ * only the one selected. The other tabs are kept, hidden, behind it.
+ *
+ * An overlay follows "Always do this" clicked on another one only there
+ * (#586): nothing happens in a tab nobody is looking at.
+ */
+export const CHANNELS_ON_SCREEN_KEY: InjectionKey<ComputedRef<ReadonlySet<string>>> =
+	Symbol("channels-on-screen");
+
+export function channelsOnScreen(
+	layouts: Readonly<Record<string, PaneNode | null | undefined>>,
+	shownTabId: string | null,
+): Set<string> {
+	const root = shownTabId === null ? null : layouts[shownTabId];
+	return new Set(root ? collectTerminalChannelIds(root) : []);
+}
+
+/**
  * The channels a vacant pane of `hostId` can take: alive, of that host, and
  * detached — shown in no pane (UX-01 EFF-03).
  */

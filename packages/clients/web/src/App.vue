@@ -382,7 +382,12 @@ import {
 	purgeOrphanedTabs,
 	useLayout,
 } from './composables/useLayout.js';
-import { DISPLAYED_CHANNELS_KEY, displayedChannelIds } from './composables/displayedChannels.js';
+import {
+	CHANNELS_ON_SCREEN_KEY,
+	channelsOnScreen,
+	DISPLAYED_CHANNELS_KEY,
+	displayedChannelIds,
+} from './composables/displayedChannels.js';
 import { MULTI_PANE_SEARCH_KEY, useMultiPaneSearch } from './composables/useMultiPaneSearch.js';
 import { MAX_PANE_COUNT } from './composables/usePaneTree.js';
 import { useResizable } from './composables/useResizable.js';
@@ -524,6 +529,10 @@ provide(MULTI_PANE_SEARCH_KEY, multiPaneSearch);
 provide(
 	DISPLAYED_CHANNELS_KEY,
 	computed(() => displayedChannelIds(layout.layouts.value)),
+);
+provide(
+	CHANNELS_ON_SCREEN_KEY,
+	computed(() => channelsOnScreen(layout.layouts.value, layout.activeTab.value?.id ?? null)),
 );
 const commandPalette = useCommandPalette();
 const profilesStore = useProfilesStore();

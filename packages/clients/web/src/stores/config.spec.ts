@@ -1,6 +1,7 @@
 import type { FontFamily } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AlwaysChoice } from "../utils/exit-action.js";
 
 const mocks = vi.hoisted(() => ({
 	domPublicAssetUrl: vi.fn<(path: string) => Promise<string>>(),
@@ -187,5 +188,63 @@ describe("saveWhenEnded", () => {
 			store.saveWhenEnded("restart", "host", { hostId: null, channelId: "c1" }),
 		).resolves.toBe(false);
 		expect(mocks.hubFetch).not.toHaveBeenCalled();
+	});
+});
+
+// The overlays already waiting in this window follow "Always do this" clicked
+// on another one (#586). They hear it from here, once it is written: nothing
+// is kept, and nothing goes to the hub, so no other window hears it.
+describe("saveWhenEnded tells this window's panes", () => {
+	const ok = (): Promise<Response> => Promise.resolve(new Response("{}", { status: 200 }));
+
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		mocks.hubFetch.mockReset();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("the choice, once written: what, where, on which terminal, and when it was clicked", async () => {
+		mocks.hubFetch.mockImplementation(ok);
+		vi.spyOn(performance, "now").mockReturnValue(1234);
+		const store = useConfigStore();
+		const heard: AlwaysChoice[] = [];
+		store.onAlwaysChoice((choice) => heard.push(choice));
+
+		const saving = store.saveWhenEnded("restart", "host", { hostId: "h1", channelId: "c1" });
+		// Not before the hub has it.
+		expect(heard).toEqual([]);
+		await saving;
+		expect(heard).toEqual([
+			{ action: "restart", scope: "host", hostId: "h1", channelId: "c1", at: 1234 },
+		]);
+
+		await store.saveWhenEnded("close", "global", { hostId: "h2", channelId: "c2" });
+		expect(heard[1]).toMatchObject({ action: "close", scope: "global", hostId: "h2" });
+	});
+
+	it("nothing when the hub refuses the write", async () => {
+		mocks.hubFetch.mockImplementation(() => Promise.resolve(new Response("{}", { status: 400 })));
+		const store = useConfigStore();
+		const heard = vi.fn();
+		store.onAlwaysChoice(heard);
+
+		await store.saveWhenEnded("restart", "host", { hostId: "h1", channelId: "c1" });
+		await store.saveWhenEnded("restart", "host", { hostId: null, channelId: "c1" });
+		expect(heard).not.toHaveBeenCalled();
+	});
+
+	it("a pane that stopped listening hears nothing more", async () => {
+		mocks.hubFetch.mockImplementation(ok);
+		const store = useConfigStore();
+		const heard = vi.fn();
+		const stop = store.onAlwaysChoice(heard);
+		stop();
+
+		await store.saveWhenEnded("restart", "host", { hostId: "h1", channelId: "c1" });
+		expect(heard).not.toHaveBeenCalled();
 	});
 });

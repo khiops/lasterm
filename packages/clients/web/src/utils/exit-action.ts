@@ -266,6 +266,101 @@ export function overlayChoice(
 	return { act, remember: always === null ? null : { scope: always, whenEnded: action } };
 }
 
+// ─── The overlays already waiting (#586) ─────────────────────────────────────
+
+/**
+ * "Always do this", clicked on one overlay, as the other panes of this window
+ * hear it once it is written.
+ *
+ * Nothing of it is stored or sent: a reload, another window, or an overlay that
+ * comes up afterwards never hears it.
+ */
+export interface AlwaysChoice {
+	action: OverlayAction;
+	scope: AlwaysScope;
+	/** The host of the terminal it was clicked on. */
+	hostId: string | null;
+	/** The terminal it was clicked on, which answered for itself. */
+	channelId: string | null;
+	/** When it was clicked (`performance.now()`): of two choices, the later one holds. */
+	at: number;
+}
+
+/**
+ * What about an end keeps its overlay asking, whatever was chosen on another
+ * one: the reasons the setting's restart holds back for, save the command,
+ * which is the terminal's and not the end's (see `answerWaiting`).
+ */
+export type EndHold = Extract<HeldBack, "just-started" | "just-attached" | "not-writer">;
+
+/**
+ * What an end holds back from a choice made on another overlay.
+ *
+ * The same guards as the setting's restart (`reactToEnd`), read whatever the
+ * setting was when it ended, since the choice is made afterwards:
+ * - it ended within `AUTO_RESTART_MIN_RUN_MS` of starting, or of the pane
+ *   reaching it: a shell failing at launch;
+ * - another window holds its write lock, or nobody does.
+ *
+ * Nothing else is held back. An end found at a reload or an attach was never
+ * watched, and one stopped from elsewhere (#580) did not fail: the choice was
+ * just made explicitly, so both follow it. A restart from here that ended
+ * before the pane could reach it still ended right after starting.
+ */
+export function endHold(end: EndFacts): EndHold | null {
+	if (end.endReason === "destroyed") return null;
+	if (end.seen === "found") return end.fromStart ? "just-started" : null;
+	if (end.watchedMs === null || end.watchedMs < AUTO_RESTART_MIN_RUN_MS) {
+		return end.fromStart ? "just-started" : "just-attached";
+	}
+	return end.writer ? null : "not-writer";
+}
+
+/** An overlay showing, over a terminal that ended, when a choice reaches it. */
+export interface WaitingOverlay {
+	channelId: string | null;
+	hostId: string | null;
+	/** What its end holds back, from `endHold`. */
+	hold: EndHold | null;
+	/** Its terminal runs a command rather than a shell. */
+	directProcess: boolean;
+	/** "When a terminal ends", as its terminal's settings resolve it now. */
+	whenEnded: WhenEnded;
+	/** It is on screen: its tab is the one shown. */
+	inView: boolean;
+	/** It has been on screen since the choice reached it. */
+	wasInView: boolean;
+}
+
+/** Do the action chosen, wait to, or leave the overlay asking. */
+export type WaitingAnswer = "act" | "wait" | "ask";
+
+/**
+ * What an overlay already waiting does with "Always do this", clicked on
+ * another one.
+ *
+ * It follows the choice when it is in its scope — its host, or every host —
+ * and nothing holds it back: not its end (`endHold`), nor a terminal that runs
+ * a command, which the choice would run again.
+ *
+ * It acts when it comes into view, never in the background, so that nothing
+ * happens that nobody sees: at once when it is already on screen, as beside
+ * the one clicked, or when its tab is shown. It acts only when its terminal's
+ * setting now says the same, as the setting decides: an override of its own
+ * that says otherwise keeps it asking. The setting is read again after the
+ * write, so on screen it waits for that; once it has been on screen without
+ * the setting agreeing, it keeps asking.
+ */
+export function answerWaiting(choice: AlwaysChoice, overlay: WaitingOverlay): WaitingAnswer {
+	if (overlay.channelId === null || overlay.channelId === choice.channelId) return "ask";
+	if (choice.scope === "host" && (overlay.hostId === null || overlay.hostId !== choice.hostId)) {
+		return "ask";
+	}
+	if (overlay.directProcess || overlay.hold !== null) return "ask";
+	if (!overlay.inView) return overlay.wasInView ? "ask" : "wait";
+	return overlay.whenEnded === choice.action ? "act" : "wait";
+}
+
 // ─── Closing ended terminals ─────────────────────────────────────────────────
 
 /**

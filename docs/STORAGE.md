@@ -128,7 +128,7 @@ CREATE TABLE channels (
   session_id  TEXT NOT NULL REFERENCES sessions(id),
   group_id    TEXT REFERENCES channel_groups(id) ON DELETE SET NULL,
   title       TEXT,                                      -- user-editable display name
-  shell       TEXT NOT NULL,
+  shell       TEXT NOT NULL,                             -- '' when none of its own: the agent's default (#583)
   cwd         TEXT,
   env_json    TEXT,                                      -- JSON: Record<string,string>, max 100 entries, nullable
   cols        INTEGER NOT NULL DEFAULT 80,

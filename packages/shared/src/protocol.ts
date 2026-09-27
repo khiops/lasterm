@@ -461,11 +461,24 @@ export interface SessionStateMessage {
 /**
  * Why a terminal ended, when the hub ended it itself (#580).
  *
- * `destroyed`: the hub ended it on purpose. Someone killed it, closed its
- * session, replaced its agent or quit the hub. A shell that exited, or a
- * terminal the hub found gone, carries no reason.
+ * - `killed`: someone stopped that terminal, or its session, on purpose: a
+ *   kill (`DELETE /api/channels/:id`), a session closed
+ *   (`DELETE /api/sessions/:id`). Never undone by "When a terminal ends",
+ *   whether the pane saw the end or found it later.
+ * - `stopped`: it ended with its agent or its hub, as a whole was stopped: the
+ *   agent replaced, the hub quitting. Nobody aimed at that terminal. A pane
+ *   that sees it happen leaves it be, rather than race the replacement or the
+ *   quit; one that finds it later follows the setting, as for a shell that
+ *   exited (#592).
+ *
+ * A shell that exited, or a terminal the hub found gone, carries no reason.
+ *
+ * The hub stores it with the end (`channels.end_reason`) and clears it when
+ * the terminal runs again, so that it reaches a pane that finds the end
+ * later: in the channel list (`end_reason`), and for `killed` in STATE_SYNC
+ * (#592).
  */
-export type ChannelEndReason = "destroyed";
+export type ChannelEndReason = "killed" | "stopped";
 
 /** Hub → UI: channel lifecycle state change */
 export interface ChannelStateMessage {
@@ -476,7 +489,9 @@ export interface ChannelStateMessage {
 	exitCode?: number;
 	/**
 	 * Only on a `dead` report, when the hub ended the terminal itself. A pane
-	 * never restarts or closes on such an end: someone meant it (#580).
+	 * never restarts or closes on such an end as it happens (#580). The hub
+	 * stores it, so a pane that finds the end later knows it too, and keeps
+	 * asking over a `killed` one (#592).
 	 */
 	endReason?: ChannelEndReason;
 }
@@ -517,12 +532,20 @@ export interface StateSyncMessage {
 		/** Set only when other hubs hold channels there. See SessionStateMessage. */
 		otherOwnerChannels?: number;
 	}>;
+	/**
+	 * Every channel the hub holds that has not ended, and every one killed on
+	 * purpose that it still lists (`dead`, with `endReason: "killed"`): a
+	 * window that connects learns how those ended, and none of its panes brings
+	 * one back (#592). Any other channel absent from here has ended.
+	 */
 	channels: Array<{
 		channelId: string;
 		sessionId: string;
 		status: ChannelStatus;
 		exitCode?: number;
 		displayTitle?: string;
+		/** Only on a `dead` entry: `killed` (#580, #592). */
+		endReason?: ChannelEndReason;
 	}>;
 }
 

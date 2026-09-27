@@ -183,8 +183,14 @@ describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it 
 
 		expect(res.statusCode).toBe(200);
 		expect(endsOf(heard, channelId)).toEqual([
-			expect.objectContaining({ exitCode: 0, endReason: "destroyed" }),
+			expect.objectContaining({ exitCode: 0, endReason: "stopped" }),
 		]);
+		// Stopped, not killed: nobody aimed at that terminal. Stored with the
+		// end, a pane that finds it ended later follows its setting (#592).
+		expect(new MetaDAL(dbs.meta).getChannel(channelId)).toMatchObject({
+			status: "dead",
+			endReason: "stopped",
+		});
 	});
 
 	it("says nothing of the kind of a terminal that ends after a refused replace", async () => {
@@ -197,6 +203,7 @@ describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it 
 		const ends = endsOf(heard, channelId);
 		expect(ends).toHaveLength(1);
 		expect(ends[0]).not.toHaveProperty("endReason");
+		expect(new MetaDAL(dbs.meta).getChannel(channelId)).not.toHaveProperty("endReason");
 	});
 });
 

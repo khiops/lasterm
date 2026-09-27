@@ -56,7 +56,15 @@ function apiRowToChannel(row: Record<string, unknown>): Channel {
 	if (row.dynamic_title != null) ch.dynamicTitle = row.dynamic_title as string;
 	if (row.process_title != null) ch.processTitle = row.process_title as string;
 	if (row.display_title != null) ch.displayTitle = row.display_title as string;
+	// A dead terminal the hub ended itself: no pane brings back one killed (#592).
+	const endReason = endReasonOfRow(row);
+	if (endReason !== undefined) ch.endReason = endReason;
 	return ch;
+}
+
+/** Why a listed terminal ended, when the hub says it ended it itself (#592). */
+function endReasonOfRow(row: Record<string, unknown>): ChannelEndReason | undefined {
+	return row.end_reason === "killed" || row.end_reason === "stopped" ? row.end_reason : undefined;
 }
 
 /** Convert a snake_case group row from the API to a camelCase ChannelGroup. */
@@ -112,6 +120,15 @@ function restartFailureReason(err: unknown): string {
 export interface ChannelReport {
 	status: Channel["status"];
 	exitCode?: number;
+	endReason?: ChannelEndReason;
+}
+
+/** What the index keeps of a channel whichever host is in view. */
+export interface ChannelIndexEntry {
+	hostId: string;
+	displayTitle: string;
+	directProcess?: true;
+	/** It ended, and the hub ended it itself: killed, or stopped with its agent or hub (#592). */
 	endReason?: ChannelEndReason;
 }
 
@@ -186,9 +203,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * It is a fallback, not a source of truth: `channels` wins for the active
 	 * host, where the live status lives.
 	 */
-	const channelIndex = ref<
-		Map<string, { hostId: string; displayTitle: string; directProcess?: true }>
-	>(new Map());
+	const channelIndex = ref<Map<string, ChannelIndexEntry>>(new Map());
 	/**
 	 * Why the last attempt to bring a terminal back failed, by channel.
 	 *
@@ -301,10 +316,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
 
-			const nextIndex = new Map<
-				string,
-				{ hostId: string; displayTitle: string; directProcess?: true }
-			>();
+			const nextIndex = new Map<string, ChannelIndexEntry>();
 			const nextHostMap = new Map(channelHostMap.value);
 			for (const row of rows) {
 				const id = row.id;
@@ -315,10 +327,14 @@ export const useChannelsStore = defineStore("channels", () => {
 				// is in view: its overlay offers Configure, and it is not restarted
 				// on its own (#574).
 				const directProcess = row.direct_process === 1 || row.direct_process === true;
+				// And, for one that ended, whether the hub ended it itself: a kill,
+				// found by a pane, keeps asking (#592).
+				const endReason = row.status === "dead" ? endReasonOfRow(row) : undefined;
 				nextIndex.set(id, {
 					hostId: rowHostId,
 					displayTitle: title,
 					...(directProcess && { directProcess: true as const }),
+					...(endReason !== undefined && { endReason }),
 				});
 				nextHostMap.set(id, rowHostId);
 			}
@@ -449,6 +465,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					hostId,
 					displayTitle: ch.displayTitle ?? "",
 					...(ch.directProcess === true && { directProcess: true as const }),
+					...(ch.status === "dead" && ch.endReason !== undefined && { endReason: ch.endReason }),
 				});
 			}
 			channelHostMap.value = nextHostMap;
@@ -530,17 +547,39 @@ export const useChannelsStore = defineStore("channels", () => {
 		}
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
-		const updated = { ...existing };
+		// Why it ended goes with this end only: a terminal running again, or one
+		// that ended by itself, has none (#592).
+		const { endReason: _before, ...updated } = existing;
 		updated.status = status;
 		if (exitCode !== undefined) updated.exitCode = exitCode;
 		const next = [...channels.value];
-		next[idx] = updated;
+		next[idx] = status === "dead" && endReason !== undefined ? { ...updated, endReason } : updated;
 		channels.value = next;
 	}
 
 	/** The hub's last report on a channel, whichever host it is on. */
 	function reportOf(channelId: string | null): ChannelReport | undefined {
 		return channelId === null ? undefined : reports.value.get(channelId);
+	}
+
+	/**
+	 * Whether the hub ended this terminal itself (#580), as far as this window
+	 * has heard: `killed`, `stopped`, or nothing for a terminal that ended by
+	 * itself or has not ended.
+	 *
+	 * A pane that finds its terminal ended reads it here, rather than on a
+	 * report it may never have heard (#592). The hub's last report wins: every
+	 * socket starts with a STATE_SYNC that names the terminals killed, and one
+	 * that runs again or ends again is reported. Without one, the list of the
+	 * host in view says, then the index, whichever host it is on.
+	 */
+	function endReasonOf(channelId: string | null): ChannelEndReason | undefined {
+		if (channelId === null) return undefined;
+		const report = reports.value.get(channelId);
+		if (report !== undefined) return report.status === "dead" ? report.endReason : undefined;
+		const listed = channels.value.find((c) => c.id === channelId);
+		if (listed !== undefined) return listed.status === "dead" ? listed.endReason : undefined;
+		return channelIndex.value.get(channelId)?.endReason;
 	}
 
 	/**
@@ -621,6 +660,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			sessionId: string;
 			status: Channel["status"];
 			exitCode?: number;
+			endReason?: ChannelEndReason;
 		}>,
 	): void {
 		// Remember which channels the hub knows about — used after fetchChannels
@@ -634,13 +674,19 @@ export const useChannelsStore = defineStore("channels", () => {
 		// another host's terminal kept the exit overlay over a live shell
 		// (#559). A status the report already has is left as it is: a new report
 		// is news to a pane, and this is not.
-		let nextReports: Map<string, { status: Channel["status"]; exitCode?: number }> | null = null;
+		//
+		// It also names the terminals killed, dead: a pane that finds one of them
+		// ended reads why here, having heard no report of it (#592). That is news
+		// too when the report had it dead for no reason.
+		let nextReports: Map<string, ChannelReport> | null = null;
 		for (const sc of syncChannels) {
-			if (reports.value.get(sc.channelId)?.status === sc.status) continue;
+			const known = reports.value.get(sc.channelId);
+			if (known?.status === sc.status && known.endReason === sc.endReason) continue;
 			nextReports ??= new Map(reports.value);
 			nextReports.set(sc.channelId, {
 				status: sc.status,
 				...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
+				...(sc.status === "dead" && sc.endReason !== undefined && { endReason: sc.endReason }),
 			});
 		}
 		if (nextReports !== null) reports.value = nextReports;
@@ -664,12 +710,14 @@ export const useChannelsStore = defineStore("channels", () => {
 		let changed = false;
 		const updated = channels.value.map((ch) => {
 			const sc = syncChannels.find((s) => s.channelId === ch.id);
-			if (sc && ch.status !== sc.status) {
+			if (sc && (ch.status !== sc.status || ch.endReason !== sc.endReason)) {
 				changed = true;
+				const { endReason: _before, ...rest } = ch;
 				return {
-					...ch,
+					...rest,
 					status: sc.status,
 					...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
+					...(sc.status === "dead" && sc.endReason !== undefined && { endReason: sc.endReason }),
 				};
 			}
 			if (!sc && ch.status !== "dead") {
@@ -761,8 +809,10 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (knownIndex !== -1) {
 			const known = channels.value[knownIndex];
 			if (known !== undefined) {
+				// Its end, and why it came, are over (#592).
+				const { endReason: _ended, ...rest } = known;
 				const revived: Channel = {
-					...known,
+					...rest,
 					sessionId: msg.sessionId,
 					status: msg.status,
 					cols: msg.cols,
@@ -1355,6 +1405,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		markUnread,
 		updateChannelStatus,
 		reportOf,
+		endReasonOf,
 		statusOf,
 		setDynamicTitle,
 		setDisplayTitle,

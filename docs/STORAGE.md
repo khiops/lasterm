@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-25
+> Last updated: 2026-09-27
 
 ## 1. Overview
 
@@ -136,6 +136,7 @@ CREATE TABLE channels (
   status      TEXT NOT NULL DEFAULT 'born'
               CHECK(status IN ('born', 'live', 'orphan', 'dead')),
   exit_code   INTEGER,                                   -- set when DEAD
+  end_reason  TEXT,                                      -- 'killed' | 'stopped' when the hub ended it; NULL otherwise (#592)
   profile_json TEXT,                                     -- JSON: layer 4 overrides
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
@@ -145,6 +146,24 @@ CREATE INDEX idx_channels_session ON channels(session_id);
 CREATE INDEX idx_channels_status  ON channels(status);
 CREATE INDEX idx_channels_group   ON channels(group_id);
 ```
+
+`end_reason` says why a dead terminal ended, when the hub ended it itself (#580):
+
+- `'killed'`: that terminal, or its session, was stopped on purpose: a kill (`DELETE
+  /api/channels/:id` on a live one) or its session closed (`DELETE /api/sessions/:id`). A pane
+  that finds such a terminal ended, at a reload or the next launch, keeps asking rather than
+  follow "When a terminal ends".
+- `'stopped'`: it ended with its agent, replaced, or with the hub, quitting. Nobody aimed at
+  it, and found later it follows the setting as a terminal that exited by itself does (#592).
+
+It is written with the `dead` status by the one statement that records a channel's status, and
+cleared there by any other status, and when a terminal is brought back under its own id: an end
+has a reason only until the terminal runs again. A `dead` told again without one keeps the
+reason already there; one given replaces it. It is NULL for a terminal that ended by itself or
+that the hub found gone, and for every terminal that had ended before migration 021 added the
+column: why those ended was never recorded. A value the hub does not know is read as none. The
+channel list carries it as `end_reason`, and STATE_SYNC names every dead channel `'killed'`
+(PROTOCOL.md § 4.6).
 
 ### 3.5 workspaces
 

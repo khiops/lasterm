@@ -1,5 +1,6 @@
 import type {
 	Channel,
+	ChannelEndReason,
 	ChannelGroup,
 	ChannelStatus,
 	Host,
@@ -264,8 +265,18 @@ export class MetaDAL {
 		return this.channels.listChannels(sessionId);
 	}
 
-	updateChannelStatus(id: string, status: ChannelStatus, exitCode?: number): void {
-		this.channels.updateChannelStatus(id, status, exitCode);
+	/** `endReason` with `dead` only, when the hub ended it itself (#592). */
+	updateChannelStatus(
+		id: string,
+		status: ChannelStatus,
+		exitCode?: number,
+		endReason?: ChannelEndReason,
+	): void {
+		this.channels.updateChannelStatus(id, status, exitCode, endReason);
+	}
+
+	listKilledChannels(): ReturnType<ChannelsDAL["listKilledChannels"]> {
+		return this.channels.listKilledChannels();
 	}
 
 	reviveChannel(id: string, sessionId: string, cols: number, rows: number): boolean {

@@ -212,6 +212,7 @@ export class SessionManager {
 			reconnectAbortControllers: new Map(),
 			restartTracking: new Map(),
 			stoppingAgents: new Set(),
+			startingChannels: new Set(),
 			pendingRequests: new Map(),
 			trustedOnceFingerprints: new Map(),
 			trustedAgentSha256: new Map(),
@@ -517,7 +518,16 @@ export class SessionManager {
 
 	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean> {
 		if (this.isQuitting()) return false;
-		return this.lifecycle.restartChannel(channelId, requestingClientId);
+		// A SPAWN, or another restart, is already starting it: a second start of
+		// one terminal is what two windows following the setting would race to
+		// (#592). Claimed for the length of this one, as a SPAWN claims it.
+		if (this.ctx.startingChannels.has(channelId)) return false;
+		this.ctx.startingChannels.add(channelId);
+		try {
+			return await this.lifecycle.restartChannel(channelId, requestingClientId);
+		} finally {
+			this.ctx.startingChannels.delete(channelId);
+		}
 	}
 
 	async closeSession(sessionId: string): Promise<void> {
@@ -558,9 +568,9 @@ export class SessionManager {
 		clearContext(this.ctx, reconnectContextId(sessionId), clearSend);
 		clearElevationContextsForSession(this.ctx, sessionId, clearSend);
 
-		// Asked for (DELETE /api/sessions/:id): its terminals end on purpose, and
-		// a pane over one must not bring it back (#580).
-		this.lifecycle.closeSession(hostId, sessionId, "destroyed");
+		// Asked for (DELETE /api/sessions/:id): its terminals are killed, and a
+		// pane over one must not bring it back, now or later (#580, #592).
+		this.lifecycle.closeSession(hostId, sessionId, "killed");
 	}
 
 	// ─── WS message handlers ──────────────────────────────────────────────────
@@ -667,7 +677,11 @@ export class SessionManager {
 			// is what made Restart impossible on the very terminals that need it.
 			const tracked = this.ctx.channels.get(msg.reuseChannelId);
 			const live = tracked !== undefined && tracked.status !== "dead" ? tracked : undefined;
-			if (existing && existing.hostId === hostId && live === undefined) {
+			// Another SPAWN is already bringing it back, and is not live yet: two
+			// windows following "When a terminal ends" over the same terminal, or
+			// a Restart pressed twice (#592).
+			const starting = this.ctx.startingChannels.has(msg.reuseChannelId);
+			if (existing && existing.hostId === hostId && live === undefined && !starting) {
 				reuseChannelId = msg.reuseChannelId;
 				reusedCwd = existing.channel.cwd;
 			} else {
@@ -677,7 +691,9 @@ export class SessionManager {
 					? "it is not a terminal this hub knows"
 					: existing.hostId !== hostId
 						? "it belongs to another host"
-						: "it is still running";
+						: live !== undefined
+							? "it is still running"
+							: "it is already starting";
 				this.ctx.hubLogger?.log("warn", "handleSpawn: refusing to reuse that channel", {
 					channelId: msg.reuseChannelId,
 					reason,
@@ -690,6 +706,42 @@ export class SessionManager {
 				return null;
 			}
 		}
+		if (reuseChannelId === undefined) {
+			return this.spawnOnHost(clientId, client, msg, hostId, spawnFence, undefined, undefined);
+		}
+		// Claimed with no await since the check above, so that a second SPAWN
+		// naming it finds it taken. It stays claimed until this one has its
+		// answer: by then the terminal is live in `channels`, which refuses the
+		// next one in its turn, or it did not start and may be asked for again.
+		this.ctx.startingChannels.add(reuseChannelId);
+		try {
+			return await this.spawnOnHost(
+				clientId,
+				client,
+				msg,
+				hostId,
+				spawnFence,
+				reuseChannelId,
+				reusedCwd,
+			);
+		} finally {
+			this.ctx.startingChannels.delete(reuseChannelId);
+		}
+	}
+
+	/**
+	 * The rest of a SPAWN, once its host is known and the terminal it brings
+	 * back, if any, is claimed: reach the host, then start the terminal there.
+	 */
+	private async spawnOnHost(
+		clientId: string,
+		client: WsClient,
+		msg: UiSpawnMessage,
+		hostId: string,
+		spawnFence: QuitFence,
+		reuseChannelId: string | undefined,
+		reusedCwd: string | undefined,
+	): Promise<string | null> {
 		this.ctx.hubLogger?.log("debug", "handleSpawn: resolvedHostId", { hostId });
 		const host = this.ctx.metaDal.getHost(hostId);
 		if (!host) {
@@ -1738,8 +1790,9 @@ export class SessionManager {
 			};
 		}
 
-		// Its terminals end with it, on purpose: a pane over one must not bring
-		// it back (#580).
+		// Its terminals end with it, "stopped": a pane that sees one end leaves
+		// it be rather than race the replacement (#580); one that finds it ended
+		// later follows its setting, since nobody aimed at that terminal (#592).
 		this.ctx.stoppingAgents.add(hostId);
 		try {
 			return await this.stopAgentToReplace(hostId, agent, options);

@@ -2,6 +2,7 @@
 // These represent the domain model; DB types are defined in hub/storage
 
 import type { BellSound } from "./config.js";
+import type { ChannelEndReason } from "./protocol.js";
 
 export type BackgroundMode = "image" | "solid" | "transparent";
 export type WindowEffect =
@@ -209,6 +210,13 @@ export interface Channel {
 	launchProfileId?: string;
 	elevated?: boolean;
 	elevationMethod?: string;
+	/**
+	 * Only on a dead channel the hub ended itself: `killed` (it, or its
+	 * session, stopped on purpose) or `stopped` (with its agent replaced, or
+	 * the hub quitting) (#580). Stored, so that a pane finding it ended later
+	 * never brings back one that was killed (#592).
+	 */
+	endReason?: ChannelEndReason;
 	createdAt: string;
 	updatedAt: string;
 }

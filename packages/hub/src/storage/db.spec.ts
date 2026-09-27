@@ -1,5 +1,14 @@
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -52,12 +61,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 20 after migration", () => {
+	it("meta.db: schema_version is 21 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(20);
+		expect(row.v).toBe(21);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -97,7 +106,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 20)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 21)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -112,8 +121,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(20);
-		expect(v2).toBe(20);
+		expect(v1).toBe(21);
+		expect(v2).toBe(21);
 	});
 
 	it("close() does not throw", () => {
@@ -207,5 +216,93 @@ describe.skipIf(process.platform === "win32")("openDatabases: owner-only files (
 			`owned by uid ${uid}, not by this account (uid ${uid + 1})`,
 		);
 		expect(modeOf("meta.db")).toEqual(["meta.db", "644"]);
+	});
+});
+
+// ─── Migration 021: why a terminal ended (#592) ──────────────────────────────
+
+const META_MIGRATIONS = fileURLToPath(new URL("./migrations/meta", import.meta.url));
+
+/** Apply the meta migrations up to `version`, as the runner does: a hub of that schema. */
+function migrateMetaTo(db: Database.Database, version: number): void {
+	const files = readdirSync(META_MIGRATIONS)
+		.filter((file) => /^\d{3}-.*\.sql$/.test(file))
+		.sort();
+	for (const file of files) {
+		const num = Number.parseInt(file.slice(0, 3), 10);
+		if (num > version) break;
+		db.transaction(() => {
+			db.exec(readFileSync(join(META_MIGRATIONS, file), "utf-8"));
+			const { v } = db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as {
+				v: number | null;
+			};
+			if ((v ?? 0) < num) {
+				db.prepare(
+					"INSERT INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
+				).run(num);
+			}
+		})();
+	}
+}
+
+describe("an upgrade from a hub that did not store why a terminal ended", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-end-reason-");
+	});
+
+	afterEach(async () => {
+		dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	it("adds end_reason, with nothing recorded for the terminals that had already ended", () => {
+		// meta.db as a hub before #592 left it: schema 20, one terminal dead, one live.
+		const before = new Database(join(dir, "meta.db"));
+		migrateMetaTo(before, 20);
+		const now = new Date().toISOString();
+		before
+			.prepare(
+				"INSERT INTO hosts (id, type, label, created_at, updated_at) VALUES ('H1', 'local', 'here', ?, ?)",
+			)
+			.run(now, now);
+		before
+			.prepare(
+				"INSERT INTO sessions (id, host_id, status, created_at, updated_at) VALUES ('S1', 'H1', 'closed', ?, ?)",
+			)
+			.run(now, now);
+		const insert = before.prepare(
+			"INSERT INTO channels (id, session_id, shell, status, created_at, updated_at) VALUES (?, 'S1', '', ?, ?, ?)",
+		);
+		insert.run("C-DEAD", "dead", now, now);
+		insert.run("C-LIVE", "live", now, now);
+		const columnsBefore = before.prepare("PRAGMA table_info(channels)").all() as Array<{
+			name: string;
+		}>;
+		expect(columnsBefore.map((column) => column.name)).not.toContain("end_reason");
+		before.close();
+
+		dbs = openDatabases(dir);
+
+		const columns = dbs.meta.prepare("PRAGMA table_info(channels)").all() as Array<{
+			name: string;
+			type: string;
+			notnull: number;
+		}>;
+		expect(columns.find((column) => column.name === "end_reason")).toMatchObject({
+			type: "TEXT",
+			notnull: 0,
+		});
+		expect(dbs.meta.prepare("SELECT id, end_reason FROM channels ORDER BY id").all()).toEqual([
+			{ id: "C-DEAD", end_reason: null },
+			{ id: "C-LIVE", end_reason: null },
+		]);
+		const version = dbs.meta.prepare("SELECT MAX(version) AS v FROM schema_version").get() as {
+			v: number;
+		};
+		expect(version.v).toBe(21);
 	});
 });

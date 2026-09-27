@@ -26,7 +26,7 @@ function makeBroadcaster(agentVersion: string | undefined) {
 		sessions: new Map([[HOST, { id: SESSION, hostId: HOST, status: "active" }]]),
 		channels: new Map(),
 		clients: new Map([["c1", { id: "c1", send: (m: ProtocolMessage) => sent.push(m) }]]),
-		metaDal: { updateSessionStatus: vi.fn() },
+		metaDal: { updateSessionStatus: vi.fn(), listKilledChannels: () => [] },
 		titleDebounceTimers: new Map(),
 		processTitleDebounceTimers: new Map(),
 		bellTimestamps: new Map(),

@@ -267,7 +267,11 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 			/function onTerminalEnded\(end: EndSeen, endReason\?: ChannelEndReason\)/,
 		);
 		expect(onEnded).toMatch(/const facts: EndFacts = \{\s*\.\.\.end,/);
-		expect(onEnded).toMatch(/writer: isWriter\.value,\s*endReason,\s*\};/);
+		// The report's reason, else what the hub said of it in the list or at
+		// connect: an end found heard no report (#592).
+		expect(onEnded).toMatch(
+			/writer: isWriter\.value,\s*endReason: endReason \?\? channelsStore\.endReasonOf\(effectiveChannelId\.value\),\s*\};/,
+		);
 		expect(onEnded).toContain("if (reaction.kind === 'restart') void onRestart();");
 		expect(onEnded).toContain("else closeEnded(reaction.keep);");
 		expect(SOURCE).toContain(
@@ -407,6 +411,64 @@ describe("TerminalPane follows a choice made on another overlay (#586)", () => {
 		expect(follow).toContain("if (act.kind === 'restart') void onRestart();");
 		expect(follow).toContain("else closeEnded(act.keep);");
 		expect(follow).not.toContain("saveWhenEnded");
+	});
+});
+
+// ─── An end found follows the setting once seen (#592) ──────────────────────
+//
+// What it does is answerFoundEnd's to say (exit-action.spec.ts), and how it
+// waits useWaitingAnswer's (useWaitingAnswer.spec.ts). These check that the
+// pane hands it every end it finds, once, with what decides it.
+
+describe("TerminalPane follows the setting over an end it found (#592)", () => {
+	// Every way a pane finds its terminal ended goes through onTerminalEnded:
+	// the report watcher and takeAnswer, checked above, and a terminal the list
+	// already says has ended, which the pane does not ask for.
+	it("hands the setting an end it found, only the first word of it", () => {
+		const onEnded = body(/function onTerminalEnded\(/);
+		expect(onEnded).toContain(
+			"if (end.seen === 'found' && end.again !== true) waitingAnswer.endFound(facts.endReason);",
+		);
+		// Over the overlay only, which it shows first.
+		const overlayBranch =
+			/if \(reaction\.kind === 'overlay'\) \{[\s\S]*?return;/.exec(onEnded)?.[0] ?? "";
+		expect(overlayBranch).toContain("waitingAnswer.endFound(facts.endReason);");
+
+		const open = body(/async function openChannel\(/);
+		expect(open).toMatch(
+			/if \(isDead\.value\) \{\s*ready\.value = true;\s*onTerminalEnded\(endWatch\.ended\(props\.channelId\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
+		);
+	});
+
+	// The restart the setting makes there runs under this pane: it takes the
+	// profile and the bell a pane that attached takes, rather than return first.
+	it("gives a pane over a terminal known to have ended its profile and its bell", () => {
+		const open = body(/async function openChannel\(/);
+		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
+		expect(deadBranch, "the branch moved").not.toBe("");
+		expect(deadBranch).not.toContain("return");
+		const afterAttach = open.slice(open.indexOf("await attachAndCover(props.channelId);"));
+		expect(afterAttach).toMatch(
+			/applyProfile\(resolvedProfile\.value\);[\s\S]*?terminal\.value\?\.onBell\(/,
+		);
+	});
+
+	it("tells it why the hub ended the terminal, whether its setting was read, and whether its window has the focus", () => {
+		const call = /const waitingAnswer = useWaitingAnswer\(\{[\s\S]*?\}\);/.exec(SOURCE)?.[0] ?? "";
+		expect(call, "the call moved").not.toBe("");
+		expect(call).toContain(
+			"endReason: computed(() => channelsStore.endReasonOf(effectiveChannelId.value)),",
+		);
+		// Read for this terminal, on the host the client knows it runs on.
+		expect(call).toMatch(
+			/settingKnown: computed\(\(\) =>\s*settingReadFor\(\s*resolvedFor\.value,\s*effectiveChannelId\.value,[\s\S]*?channelsStore\.channelHostMap\.get\(effectiveChannelId\.value\),\s*\),\s*\),/,
+		);
+		expect(call).toContain("focused: useWindowFocus(),");
+		expect(call).toContain("act: followChoice,");
+		expect(SOURCE).toMatch(
+			/const \{ profile: resolvedProfile, resolvedFor \} = useResolvedProfile\(/,
+		);
+		expect(SOURCE).toContain("import { useWindowFocus } from '../composables/useWindowFocus.js';");
 	});
 });
 

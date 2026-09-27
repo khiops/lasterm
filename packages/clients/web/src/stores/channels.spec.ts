@@ -855,9 +855,42 @@ describe("useChannelsStore — spawnChannel waiting on a person", () => {
 			const rejected = vi.fn();
 			void spawn.catch(rejected);
 
-			await vi.advanceTimersByTimeAsync(10_001);
+			await vi.advanceTimersByTimeAsync(15_001);
 
 			expect(rejected).toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// The hub gives its agent ten seconds, then says why it heard nothing: that
+	// the host went away meanwhile, which a pane waits out (#605). A client
+	// that gave up at ten seconds too never heard it.
+	it("waits past the hub's own ten seconds for its answer", async () => {
+		vi.useFakeTimers();
+		try {
+			const sessionStore = useSessionStore();
+			const ws = silentWsClient();
+			// @ts-expect-error — overwrite reactive wsClient for test
+			sessionStore.wsClient = { on: ws.on, send: ws.send };
+			const store = useChannelsStore();
+
+			const spawn = store.spawnChannel("host-pi", { select: false, reuseChannelId: "pi-shell" });
+			const settled = vi.fn();
+			void spawn.then(settled, settled);
+
+			await vi.advanceTimersByTimeAsync(10_500);
+			expect(settled).not.toHaveBeenCalled();
+
+			ws.emit({
+				type: "ERROR",
+				code: "HOST_UNREACHABLE",
+				message: "raspberrypi cannot be reached right now.",
+				hostId: "host-pi",
+				hostStatus: "disconnected",
+				channelId: "pi-shell",
+			});
+			await expect(spawn).rejects.toMatchObject({ code: "HOST_UNREACHABLE", hostId: "host-pi" });
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1553,7 +1586,9 @@ describe("useChannelsStore — killChannel", () => {
 
 describe("useChannelsStore — restartChannel failures", () => {
 	/** A hub that answers every SPAWN with this ERROR, or with SPAWN_OK. */
-	function hubAnswering(answer: { code: string; message: string } | "ok"): void {
+	function hubAnswering(
+		answer: { code: string; message: string; [field: string]: unknown } | "ok",
+	): void {
 		const listeners = new Map<string, ((msg: unknown) => void)[]>();
 		const sessionStore = useSessionStore();
 		// @ts-expect-error — overwrite reactive wsClient for test
@@ -1596,9 +1631,9 @@ describe("useChannelsStore — restartChannel failures", () => {
 		const ok = await store.restartChannel("ch-dead", "host-pi");
 
 		expect(ok).toBe(false);
-		expect(store.restartFailures.get("ch-dead")).toBe(
-			"The remote agent daemon did not answer. It says: unexpected argument",
-		);
+		expect(store.restartFailures.get("ch-dead")).toEqual({
+			reason: "The remote agent daemon did not answer. It says: unexpected argument",
+		});
 	});
 
 	it("forgets the reason once the terminal comes back", async () => {
@@ -1612,6 +1647,164 @@ describe("useChannelsStore — restartChannel failures", () => {
 
 		expect(ok).toBe(true);
 		expect(store.restartFailures.has("ch-dead")).toBe(false);
+	});
+
+	// The terminal did not fail: its host is away, which its pane waits out
+	// (#605). The status the hub gives with it is the freshest word on that host.
+	it("keeps that the host is away, and what the hub says of its session", async () => {
+		const hosts = useHostsStore();
+		hosts.updateSessionStatus("host-pi", "active");
+		hubAnswering({
+			code: "HOST_UNREACHABLE",
+			message: "raspberrypi cannot be reached right now.",
+			hostId: "host-pi",
+			hostStatus: "disconnected",
+			channelId: "ch-dead",
+		});
+		const store = useChannelsStore();
+
+		expect(await store.restartChannel("ch-dead", "host-pi")).toBe(false);
+
+		expect(store.restartFailures.get("ch-dead")).toEqual({
+			reason: "raspberrypi cannot be reached right now.",
+			hostAway: { hostId: "host-pi" },
+		});
+		expect(hosts.isHostConnected("host-pi")).toBe(false);
+	});
+
+	// A live terminal restarts over REST, which says the same with its status code.
+	it("reads the restart route's refusal the same way", async () => {
+		const hosts = useHostsStore();
+		const store = useChannelsStore();
+		store.channels = [
+			{
+				id: "ch-live",
+				sessionId: "sess-1",
+				hostId: "host-pi",
+				groupId: null,
+				title: null,
+				icon: null,
+				shell: "/bin/bash",
+				cols: 80,
+				rows: 24,
+				status: "live",
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+			} as never,
+		];
+		mockFetch.mockResolvedValueOnce({
+			ok: false,
+			status: 503,
+			json: () =>
+				Promise.resolve({
+					error: {
+						code: "HOST_UNREACHABLE",
+						message: "raspberrypi cannot be reached right now.",
+						host_id: "host-pi",
+						host_status: "disconnected",
+					},
+				}),
+		});
+
+		expect(await store.restartChannel("ch-live")).toBe(false);
+
+		expect(store.restartFailures.get("ch-live")).toEqual({
+			reason: "raspberrypi cannot be reached right now.",
+			hostAway: { hostId: "host-pi" },
+		});
+		expect(hosts.isHostConnected("host-pi")).toBe(false);
+
+		// Any other refusal says only that the hub could not.
+		mockFetch.mockResolvedValueOnce({
+			ok: false,
+			status: 503,
+			json: () => Promise.resolve({ error: { code: "RESTART_FAILED", message: "Unable" } }),
+		});
+		expect(await store.restartChannel("ch-live")).toBe(false);
+		expect(store.restartFailures.get("ch-live")).toEqual({
+			reason: "The hub could not restart it (503).",
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// spawnChannel — several terminals brought back at once (#605)
+// ---------------------------------------------------------------------------
+//
+// When a host comes back, every pane waiting on it brings its terminal back
+// at once. The socket carries their answers in any order, and each spawn took
+// the first to come for its own.
+
+describe("useChannelsStore — several terminals brought back at once (#605)", () => {
+	function socket(): { emit: (msg: Record<string, unknown>) => void } {
+		const listeners = new Map<string, ((msg: unknown) => void)[]>();
+		const sessionStore = useSessionStore();
+		// @ts-expect-error — overwrite reactive wsClient for test
+		sessionStore.wsClient = {
+			on: vi.fn((type: string, cb: (msg: unknown) => void) => {
+				listeners.set(type, [...(listeners.get(type) ?? []), cb]);
+				return () => {
+					listeners.set(
+						type,
+						(listeners.get(type) ?? []).filter((c) => c !== cb),
+					);
+				};
+			}),
+			send: vi.fn(),
+		};
+		return {
+			emit: (msg) => {
+				for (const cb of listeners.get(msg.type as string) ?? []) cb(msg);
+			},
+		};
+	}
+
+	beforeEach(() => {
+		localStorageMap.set("lasterm_token", "test-token");
+		mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+	});
+
+	it("takes only its own terminal's answer", async () => {
+		const hub = socket();
+		const store = useChannelsStore();
+		const a = store.spawnChannel("host-pi", { select: false, reuseChannelId: "pi-a" });
+		const b = store.spawnChannel("host-pi", { select: false, reuseChannelId: "pi-b" });
+		const settledA = vi.fn();
+		void a.then(settledA, settledA);
+
+		hub.emit({ type: "SPAWN_OK", channelId: "pi-b", hostId: "host-pi" });
+		await expect(b).resolves.toBe("pi-b");
+		await Promise.resolve();
+		expect(settledA).not.toHaveBeenCalled();
+
+		// Nor is it refused for another one.
+		hub.emit({
+			type: "ERROR",
+			code: "CHANNEL_NOT_REUSABLE",
+			message: "Cannot bring that terminal back: it is already starting.",
+			channelId: "pi-b",
+		});
+		await Promise.resolve();
+		expect(settledA).not.toHaveBeenCalled();
+
+		hub.emit({ type: "SPAWN_OK", channelId: "pi-a", hostId: "host-pi" });
+		await expect(a).resolves.toBe("pi-a");
+	});
+
+	it("takes no answer about another host", async () => {
+		const hub = socket();
+		const store = useChannelsStore();
+		const spawned = store.spawnChannel("host-pi", { select: false });
+		const settled = vi.fn();
+		void spawned.then(settled, settled);
+
+		hub.emit({ type: "SPAWN_OK", channelId: "nas-1", hostId: "host-nas" });
+		hub.emit({ type: "ERROR", code: "HOST_UNREACHABLE", message: "NAS", hostId: "host-nas" });
+		await Promise.resolve();
+		expect(settled).not.toHaveBeenCalled();
+
+		hub.emit({ type: "SPAWN_OK", channelId: "pi-1", hostId: "host-pi" });
+		await expect(spawned).resolves.toBe("pi-1");
 	});
 });
 

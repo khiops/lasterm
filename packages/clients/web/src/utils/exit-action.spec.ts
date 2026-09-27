@@ -4,6 +4,7 @@ import {
 	ALWAYS_SCOPES,
 	type AlwaysChoice,
 	AUTO_RESTART_MIN_RUN_MS,
+	afterRestartFailure,
 	alwaysScopeOf,
 	answerFoundEnd,
 	answerWaiting,
@@ -516,6 +517,7 @@ describe("endedPaneShows: the card, or a quiet line in its place", () => {
 		cover: "exited",
 		opening: false,
 		restarting: false,
+		waitingForHost: null,
 		found: null,
 		settingOverdue: false,
 		exitMessage: "Shell exited (code 0)",
@@ -622,6 +624,66 @@ describe("endedPaneShows: the card, or a quiet line in its place", () => {
 		expect(endedPaneShows({ ...pane, opening: true, cover: "gone" })).toEqual(none);
 		expect(endedPaneShows({ ...pane, cover: null })).toEqual(none);
 		expect(endedPaneShows({ ...pane, cover: "not-connected", restarting: true })).toEqual(none);
+	});
+
+	// A restart whose host is away waits for it, on a line that offers Cancel
+	// (#605), in place of the card that said "Agent SPAWN timeout".
+	it("waits for the host of a restart that found it away, and offers to stop", () => {
+		const waiting = { ...pane, waitingForHost: { label: "raspberrypi" } };
+		expect(endedPaneShows(waiting)).toEqual({
+			kind: "quiet",
+			text: "Waiting for raspberrypi…",
+			cancel: true,
+		});
+		// Over an end found that the setting would otherwise answer, too.
+		expect(endedPaneShows({ ...waiting, found: restartSoon })).toEqual({
+			kind: "quiet",
+			text: "Waiting for raspberrypi…",
+			cancel: true,
+		});
+		// A host the window does not know by name.
+		expect(endedPaneShows({ ...pane, waitingForHost: { label: undefined } })).toEqual({
+			kind: "quiet",
+			text: "Waiting for its host…",
+			cancel: true,
+		});
+		// The restart its return sets off shows as any restart does.
+		expect(endedPaneShows({ ...waiting, restarting: true })).toEqual(quiet("Restarting…"));
+	});
+
+	// Cancel stops the wait: the card comes back, with the reason the pane keeps.
+	it("shows the card once the wait is cancelled", () => {
+		expect(endedPaneShows({ ...pane, waitingForHost: null })).toEqual(card);
+	});
+});
+
+// ─── A restart whose host is away (#605) ─────────────────────────────────────
+
+describe("afterRestartFailure: a restart that failed, and its host", () => {
+	const away = { hostAway: true, hostConnected: false, automatic: false };
+
+	// Seen on the Pi back from a reboot: every restart, the setting's and each
+	// click, ended on "Could not restart it: Agent SPAWN timeout", and stayed
+	// there once the host was back.
+	it("waits for a host that is away, whoever asked for the restart", () => {
+		expect(afterRestartFailure(away)).toBe("wait");
+		// And again after the restart its return set off met it away once more.
+		expect(afterRestartFailure({ ...away, automatic: true })).toBe("wait");
+	});
+
+	it("shows the card for any other failure, as before", () => {
+		for (const hostConnected of [true, false]) {
+			for (const automatic of [true, false]) {
+				expect(afterRestartFailure({ hostAway: false, hostConnected, automatic })).toBe("card");
+			}
+		}
+	});
+
+	// The refusal crossed the host's return: nothing left to wait for.
+	it("tries again at once when the host is back already, once", () => {
+		expect(afterRestartFailure({ ...away, hostConnected: true })).toBe("retry-now");
+		// That retry, refused the same way with the host connected, asks.
+		expect(afterRestartFailure({ ...away, hostConnected: true, automatic: true })).toBe("card");
 	});
 });
 

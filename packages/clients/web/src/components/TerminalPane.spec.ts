@@ -528,7 +528,7 @@ describe("TerminalPane shows the card only when it asks (#595)", () => {
 	// its text changes.
 	it("tells a screen reader the quiet line, without taking the keyboard", () => {
 		expect(SOURCE).toMatch(
-			/<div class="exit-status" role="status">\s*<span v-if="endedView\.kind === 'quiet'"/,
+			/<div class="exit-status">\s*<div class="exit-status__line" role="status">\s*<span v-if="endedView\.kind === 'quiet'"/,
 		);
 		const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
 		const status = /\n\.exit-status \{([^}]*)\}/.exec(style)?.[1] ?? "";
@@ -556,6 +556,66 @@ describe("TerminalPane shows the card only when it asks (#595)", () => {
 		const onRestart = body(/async function onRestart\(/);
 		expect(onRestart.indexOf("restarting.value = true;")).toBeGreaterThan(-1);
 		expect(onRestart.indexOf("restarting.value = true;")).toBeLessThan(onRestart.indexOf("await "));
+	});
+});
+
+// ─── A restart whose host is away waits for it (#605) ───────────────────────
+//
+// What a failure does is afterRestartFailure's to say (exit-action.spec.ts),
+// and how the pane waits useWaitForHost's (useWaitForHost.spec.ts). These
+// check that the pane hands it every restart's outcome, and shows its line.
+
+describe("TerminalPane waits for the host of a restart that found it away (#605)", () => {
+	// Every restart goes through onRestart: the card's, the setting's, a choice
+	// made on another overlay, and the host's return.
+	it("hands the wait every restart's outcome", () => {
+		const onRestart = body(/async function onRestart\(/);
+		expect(onRestart).toContain("async function onRestart(opts?: { automatic?: boolean })");
+		// A new attempt decides afresh, from before anything is awaited.
+		expect(onRestart.indexOf("hostWait.restartStarting();")).toBeGreaterThan(-1);
+		expect(onRestart.indexOf("hostWait.restartStarting();")).toBeLessThan(
+			onRestart.indexOf("await "),
+		);
+		expect(onRestart).toMatch(
+			/if \(!ok\) \{\s*endWatch\.lost\(\);[\s\S]*?hostWait\.restartFailed\(channelsStore\.restartFailures\.get\(chId\), opts\?\.automatic === true\);\s*\}/,
+		);
+	});
+
+	it("restarts on the host's return as one made on its own, over its terminal ended only", () => {
+		const call = /const hostWait = useWaitForHost\(\{[\s\S]*?\}\);/.exec(SOURCE)?.[0] ?? "";
+		expect(call, "the call moved").not.toBe("");
+		expect(call).toContain("ended: computed(() => cover.value === 'exited'),");
+		expect(call).toContain("channelId: effectiveChannelId,");
+		expect(call).toContain("restart: () => void onRestart({ automatic: true }),");
+		expect(SOURCE).toContain("import { useWaitForHost } from '../composables/useWaitForHost.js';");
+	});
+
+	it("says which host it waits for, and offers Cancel beside the line", () => {
+		const view = /const endedView = computed\(\(\) =>[\s\S]*?\r?\n\);/.exec(SOURCE)?.[0] ?? "";
+		expect(view).toContain("waitingForHost: waitingForHost.value,");
+		expect(SOURCE).toMatch(
+			/const hostId = hostWait\.waitingFor\.value;[\s\S]*?label: hostsStore\.hosts\.find\(\(h\) => h\.id === hostId\)\?\.label/,
+		);
+
+		// Outside the live region, so that a screen reader hears the line alone.
+		const status = /<div class="exit-status">[\s\S]*?<\/button>/.exec(SOURCE)?.[0] ?? "";
+		expect(status, "the status block moved").not.toBe("");
+		const region = /role="status">[\s\S]*?<\/div>/.exec(status)?.[0] ?? "";
+		expect(region).not.toContain("<button");
+		expect(status).toMatch(
+			/<button\s+v-if="endedView\.kind === 'quiet' && endedView\.cancel"[\s\S]*?@click="onCancelWaiting"[\s\S]*?>Cancel<\/button>/,
+		);
+		expect(body(/function onCancelWaiting\(/)).toContain("hostWait.cancel();");
+
+		// The line lets clicks through; its Cancel takes them.
+		const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
+		const cancel = /\n\.exit-status__cancel \{([^}]*)\}/.exec(style)?.[1] ?? "";
+		expect(cancel, "the .exit-status__cancel rule moved").toMatch(/pointer-events:\s*auto/);
+	});
+
+	// The card still says why, once the wait is cancelled or for any other failure.
+	it("shows the reason a restart failed on the card", () => {
+		expect(SOURCE).toContain("channelsStore.restartFailures.get(chId)?.reason;");
 	});
 });
 

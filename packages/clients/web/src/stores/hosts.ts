@@ -194,6 +194,19 @@ export const useHostsStore = defineStore("hosts", () => {
 		_sessionStatuses.value = new Map(_sessionStatuses.value);
 	}
 
+	/**
+	 * This hub has an agent of the host connected, as its last word on the
+	 * host's session said: `active`, or `detached` with nobody attached.
+	 *
+	 * What a pane waiting for its host watches (#605), local hosts included:
+	 * a local agent restarting is `disconnected` until the hub has it back,
+	 * which the rail's dot, going by this window's own socket, does not show.
+	 */
+	function isHostConnected(hostId: string): boolean {
+		const status = _sessionStatuses.value.get(hostId);
+		return status === "active" || status === "detached";
+	}
+
 	function getHostStatus(hostId: string): HostStatus {
 		// Local host ≡ the hub itself — if the WS connection is up, it's live.
 		const host = hosts.value.find((h) => h.id === hostId);
@@ -405,6 +418,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		fetchHostGroups,
 		selectHost,
 		updateSessionStatus,
+		isHostConnected,
 		getHostStatus,
 		getOutdatedAgent,
 		rememberOutdatedAgent,

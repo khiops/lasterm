@@ -468,6 +468,57 @@ export function answerFoundEnd(end: FoundEnd): WaitingAnswer {
 	return end.inView && end.focused ? "act" : "wait";
 }
 
+// ─── A restart whose host is away (#605) ─────────────────────────────────────
+
+/**
+ * What a pane does once a restart of its terminal failed: show the card and
+ * its reason, wait for the host, or try again at once.
+ */
+export type AfterRestartFailure = "card" | "wait" | "retry-now";
+
+/** What decides it, as the pane knows it when the restart fails. */
+export interface RestartFailureFacts {
+	/**
+	 * The hub said the terminal's host could not be reached (`HOST_UNREACHABLE`):
+	 * the terminal did not fail, its host is away.
+	 */
+	hostAway: boolean;
+	/** That host is connected now, as this window last heard, the refusal included. */
+	hostConnected: boolean;
+	/** The restart that failed was itself the one made on its own: the host's return, or a retry. */
+	automatic: boolean;
+}
+
+/**
+ * What a pane does once a restart of its terminal failed (#605), whether the
+ * setting asked for it, or a click, or the host's return.
+ *
+ * A failure of the terminal, or of anything but reaching its host, shows the
+ * card with its reason, as before.
+ *
+ * A host away is waited for: a quiet line says so, and the pane restarts its
+ * terminal once, on its own, when that host is connected again, whatever the
+ * view and the focus, since someone or the setting already asked. Only its
+ * host's return sets it off, never a clock.
+ *
+ * A host that is back already, as the refusal crossed its return, is tried
+ * again at once, once: a restart made on its own that meets a host away yet
+ * connected shows the card rather than try again and again.
+ *
+ * Cancel on the line brings the card back, and stops waiting: that is the
+ * pane's to do, not a failure's (`endedPaneShows`).
+ */
+export function afterRestartFailure(facts: RestartFailureFacts): AfterRestartFailure {
+	if (!facts.hostAway) return "card";
+	if (!facts.hostConnected) return "wait";
+	return facts.automatic ? "card" : "retry-now";
+}
+
+/** The quiet line of a pane waiting for its host to restart its terminal. */
+export function waitingForHostText(hostLabel: string | undefined): string {
+	return `Waiting for ${hostLabel ?? "its host"}…`;
+}
+
 // ─── What a pane shows over its ended terminal (#595) ────────────────────────
 
 /**
@@ -487,8 +538,11 @@ export type EndedView =
 	| { kind: "none" }
 	/** The card, which asks: Restart, Close, "Always do this". */
 	| { kind: "card" }
-	/** One line, which says what is being done, or waited for, and asks nothing. */
-	| { kind: "quiet"; text: string };
+	/**
+	 * One line, which says what is being done, or waited for, and asks nothing.
+	 * Waiting for its host, it offers to stop waiting (`cancel`, #605).
+	 */
+	| { kind: "quiet"; text: string; cancel?: true };
 
 /** What a pane knows that decides what it shows over its ended terminal. */
 export interface EndedPane {
@@ -498,6 +552,12 @@ export interface EndedPane {
 	opening: boolean;
 	/** A restart of its terminal is under way from this pane, whoever asked for it. */
 	restarting: boolean;
+	/**
+	 * A restart failed because the terminal's host is away, and the pane waits
+	 * for it (`afterRestartFailure`, #605): the host's label, or null. Cancel
+	 * sets it back to null.
+	 */
+	waitingForHost: { label: string | undefined } | null;
 	/** The end it found that the setting has still to answer (#592), or null. */
 	found: FoundEnd | null;
 	/** That end has waited `SETTING_READ_GRACE_MS` for its setting to be read. */
@@ -527,6 +587,11 @@ export interface EndedPane {
  *   read for its terminal: until then nothing says whether it will ask, and
  *   the pane promises nothing. Past `SETTING_READ_GRACE_MS` it asks.
  *
+ * A restart that failed because the host is away is waited out rather than
+ * asked about (#605): "Waiting for <host>…", with Cancel, until the host is
+ * back and the pane restarts it. Cancelled, the card comes back with the
+ * reason. Any other failure shows the card, which says why.
+ *
  * While the pane opens, "Connecting…" is all it says.
  */
 export function endedPaneShows(pane: EndedPane): EndedView {
@@ -534,6 +599,9 @@ export function endedPaneShows(pane: EndedPane): EndedView {
 	if (pane.cover === "gone") return { kind: "card" };
 	if (pane.cover !== "exited") return { kind: "none" };
 	if (pane.restarting) return { kind: "quiet", text: "Restarting…" };
+	if (pane.waitingForHost !== null) {
+		return { kind: "quiet", text: waitingForHostText(pane.waitingForHost.label), cancel: true };
+	}
 	const found = pane.found;
 	if (found === null) return { kind: "card" };
 	const closes = found.whenEnded === "close";

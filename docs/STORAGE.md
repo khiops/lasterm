@@ -410,9 +410,13 @@ Each DB has a `schema_version` table. On startup:
    a. Run migration scripts in order (v1→v2, v2→v3, ...)
    b. Update schema_version
 4. If version > CURRENT_VERSION:
-   a. Log error "Database is newer than this software"
-   b. Refuse to start (don't corrupt newer schema)
+   a. Log "[storage] DB schema version ahead of latest migration - skipping"
+   b. Open it as it is
 ```
+
+Nothing refuses a newer schema: a hub that was downgraded runs on the database a later one
+migrated. So a migration must not remove anything an older hub still uses, a column it names
+in a statement above all; an unused column is left in place instead (§ 3.1).
 
 ### 9.2 Migration Files
 

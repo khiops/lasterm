@@ -89,6 +89,13 @@ export const ErrorCode = {
 	OTHER_HUBS_HOLD_CHANNELS: "OTHER_HUBS_HOLD_CHANNELS",
 	/** REST: the host has no agent connected to this hub, so there is nobody to ask (#576). */
 	HOST_NOT_CONNECTED: "HOST_NOT_CONNECTED",
+	/**
+	 * SPAWN, and the restart route: the host is away. The hub lost it and is
+	 * reaching for it again, or lost it while the terminal was starting. Says
+	 * nothing about the terminal: started again once the host is back, it may
+	 * well run (#605).
+	 */
+	HOST_UNREACHABLE: "HOST_UNREACHABLE",
 	/** REST: the host's agent predates what was asked of it — here `env-modes` (#576). */
 	AGENT_TOO_OLD: "AGENT_TOO_OLD",
 	/** REST: the host's agent did not answer in time (#576). */

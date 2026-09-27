@@ -197,6 +197,14 @@ export interface ErrorMessage {
 	 * ERROR.
 	 */
 	otherOwnerChannels?: number;
+	/**
+	 * Hub → UI, on `HOST_UNREACHABLE` only: the status of the host's session as
+	 * the hub knows it when it refuses, the one SESSION_STATE carries (#605).
+	 * `disconnected` while the hub reaches for the host again; `active` when
+	 * the host came back over another connection while the terminal waited on
+	 * the one that went.
+	 */
+	hostStatus?: SessionStatus;
 }
 
 /** Agent → Hub (daemon mode): metadata for each alive channel on hub connect/reconnect */

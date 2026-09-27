@@ -651,7 +651,13 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 	const OLD_SESSION = "session-before-the-restart";
 
 	function makeHarness(
-		channels: Array<{ id: string; sessionId: string; status: string; hostId?: string }>,
+		channels: Array<{
+			id: string;
+			sessionId: string;
+			status: string;
+			hostId?: string;
+			startedAt?: number;
+		}>,
 		recorded: Record<string, { status: string }> = {},
 	) {
 		const statusCalls: Array<{ channelId: string; sessionId: string; status: string }> = [];
@@ -674,10 +680,12 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 						shell: "bash",
 						cols: 80,
 						rows: 24,
+						...(c.startedAt !== undefined && { startedAt: c.startedAt }),
 					},
 				]),
 			),
 			sessions: new Map([[HOST, { id: CURRENT_SESSION, hostId: HOST, status: "active" }]]),
+			startingChannels: new Set<string>(),
 		} as unknown as SharedSessionContext;
 
 		const broadcaster = {
@@ -763,6 +771,53 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 
 		expect(ctx.channels.has("ch-kept")).toBe(true);
 		expect(scheduler.untrackChannel).not.toHaveBeenCalled();
+	});
+
+	// The list is of what the daemon held when it was asked. The agent is the
+	// way to the host before the list arrives, so a pane can start a terminal
+	// meanwhile — bringing back one that ended under its own id, or a new one —
+	// and its SPAWN_OK can be read before the list is. The list does not name
+	// it, and the shell is running (#599).
+	describe("a terminal started after the list was asked for (#599)", () => {
+		const ASKED_AT = 10;
+
+		it("is left to its start, not ended", () => {
+			const { ctx, statusCalls, lifecycle } = makeHarness([
+				{ id: "ch-respawned", sessionId: CURRENT_SESSION, status: "live", startedAt: ASKED_AT + 1 },
+			]);
+
+			lifecycle.reconcileChannelState(HOST, [], undefined, ASKED_AT);
+
+			expect(statusCalls).toEqual([]);
+			expect(ctx.channels.get("ch-respawned")?.status).toBe("live");
+		});
+
+		it("is left to its start while that start is under way", () => {
+			const { ctx, statusCalls, lifecycle } = makeHarness([
+				{ id: "ch-restarting", sessionId: CURRENT_SESSION, status: "dead" },
+			]);
+			ctx.startingChannels.add("ch-restarting");
+
+			lifecycle.reconcileChannelState(HOST, [], undefined, ASKED_AT);
+
+			expect(statusCalls).toEqual([]);
+			expect(ctx.channels.has("ch-restarting")).toBe(true);
+		});
+
+		it("does not spare one that started before it was asked", () => {
+			const { ctx, statusCalls, lifecycle } = makeHarness([
+				{ id: "ch-before", sessionId: CURRENT_SESSION, status: "live", startedAt: ASKED_AT - 1 },
+				{ id: "ch-restored", sessionId: OLD_SESSION, status: "orphan" },
+			]);
+
+			lifecycle.reconcileChannelState(HOST, [], undefined, ASKED_AT);
+
+			expect(statusCalls).toEqual([
+				{ channelId: "ch-before", sessionId: CURRENT_SESSION, status: "dead" },
+				{ channelId: "ch-restored", sessionId: OLD_SESSION, status: "dead" },
+			]);
+			expect(ctx.channels.size).toBe(0);
+		});
 	});
 
 	// With hub-identity the daemon lists only this hub's channels, so one this
@@ -881,6 +936,7 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 			sessions: new Map([["host-1", { id: "session-now", hostId: "host-1", status: "active" }]]),
 			hubKey: null,
 			primaryToken: null,
+			channelClock: 0,
 		} as unknown as SharedSessionContext;
 		const lifecycle = new ChannelLifecycleManager(ctx, broadcaster as StateBroadcaster);
 		const reconcile = vi.spyOn(lifecycle, "reconcileChannelState").mockImplementation(() => {});
@@ -896,7 +952,25 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 		};
 
 		expect(await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never)).toBe(true);
-		expect(reconcile).toHaveBeenCalledWith("host-1", states, agent);
+		expect(reconcile).toHaveBeenCalledWith("host-1", states, agent, expect.any(Number));
+	});
+
+	// The list speaks of the terminals as they were when it was asked for:
+	// whatever starts after that is not the reconcile's to judge (#599).
+	it("says when it asked, before asking", async () => {
+		const { ctx, lifecycle, reconcile } = harness();
+		const agent = {
+			usedRemoteDaemon: true,
+			waitForChannelState: vi.fn(() => {
+				// A terminal that starts while the list is on its way.
+				ctx.channelClock++;
+				return Promise.resolve([]);
+			}),
+		};
+
+		await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never);
+
+		expect(reconcile).toHaveBeenCalledWith("host-1", [], agent, 1);
 	});
 
 	describe("a daemon that serves several hubs (#127)", () => {

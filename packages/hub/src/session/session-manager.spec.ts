@@ -7205,3 +7205,289 @@ describe("SessionManager — a terminal being brought back is started once (#592
 		expect([spawned === channelId, restarted].filter(Boolean)).toHaveLength(1);
 	});
 });
+
+// ─── An answer about a terminal started again since (#599) ──────────────────
+//
+// Seen in the real app after the Pi's daemon was replaced. At the next launch
+// every pane over one of its terminals attached, and the hub reached the host
+// for them. The new daemon held nothing, so each terminal was judged ended and
+// every window told. The pane in view followed "When a terminal ends" and
+// brought its terminal back under its own id. Meanwhile each attach that had
+// waited for the host went on to ask the new daemon about its terminal, and
+// the answer — "no such channel" — was read after the respawn's SPAWN_OK: the
+// hub ended the new shell, which ran on at the Pi where nothing could reach it.
+describe("SessionManager — an answer about a terminal started again since (#599)", () => {
+	let sm: SessionManager;
+	let dbManager: ReturnType<typeof openTestDatabases>;
+
+	beforeEach(() => {
+		sshSpawnCount = 0;
+		mockSshAgentInstance = null;
+		dbManager = openTestDatabases();
+		vi.mocked(_SshAgentForMock).mockClear();
+	});
+
+	afterEach(async () => {
+		await sm.shutdown();
+		dbManager.close();
+	});
+
+	const ids = (count: number) =>
+		Array.from({ length: count }, (_, i) => `01K599CHAN000000000000000${i + 1}`);
+
+	/** A host that keeps a daemon, and the terminals meta.db holds for it. */
+	function seedHost(channels: Array<{ id: string; ended?: "stopped" }>): string {
+		const dal = new MetaDAL(dbManager.meta);
+		const host = dal.createHost({
+			type: "ssh",
+			label: "pi",
+			sshHost: "user@pi.test",
+			sshAuth: "agent",
+			sshRemoteDaemon: true,
+			os: "linux",
+		});
+		const sessionId = "01K599SESSION0000000000000";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		for (const { id, ended } of channels) {
+			dal.createChannel({ id, sessionId, status: "live", shell: "bash" });
+			if (ended !== undefined) dal.updateChannelStatus(id, "dead", undefined, ended);
+		}
+		return host.id;
+	}
+
+	/**
+	 * The daemon the next connection reaches, running `holds`. Everything it
+	 * writes waits for `deliver`, which hands it over in the order written and
+	 * all in one go, as one read from its connection does: each frame is
+	 * handled before anything awaiting one of them resumes. Its list of what it
+	 * holds, written as it is reached, waits with the rest.
+	 */
+	function nextDaemon(holds: string[]) {
+		const running = new Set(holds);
+		const written: Array<() => void> = [];
+		let holding = true;
+		let daemon = null as MockSshAgent | null;
+		let resolveList: (states: unknown[]) => void = () => {};
+		const list = new Promise<unknown[]>((resolve) => {
+			resolveList = resolve;
+		});
+		const listed = [...running].map((channelId) => ({
+			type: "AGENT_CHANNEL_STATE",
+			channelId,
+			title: "bash",
+			pid: 4242,
+			alive: true,
+		}));
+		written.push(() => resolveList(listed));
+		// biome-ignore lint/complexity/useArrowFunction: vitest needs a constructable function for new-ed mocks
+		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (host: { id: string }) {
+			const agent = new MockSshAgent(host);
+			const write = (frame: Record<string, unknown>) => {
+				const emit = () => agent._emit("message", frame);
+				if (holding) written.push(emit);
+				else setImmediate(emit);
+			};
+			Object.assign(agent, { usedRemoteDaemon: true, waitForChannelState: vi.fn(() => list) });
+			agent.send = vi.fn((msg: ProtocolMessage) => {
+				const { requestId, channelId } = msg as unknown as {
+					requestId: string;
+					channelId?: string;
+				};
+				if (msg.type === "SPAWN") {
+					const started = channelId ?? nextSshChannelId();
+					running.add(started);
+					write({ type: "SPAWN_OK", requestId, channelId: started });
+				} else if (msg.type === "ATTACH" && channelId !== undefined) {
+					write(
+						running.has(channelId)
+							? {
+									type: "ATTACH_OK",
+									channelId,
+									snapshot: { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+									lastSeq: 0,
+								}
+							: {
+									type: "ERROR",
+									code: "CHANNEL_NOT_FOUND",
+									message: `channel ${channelId} not found`,
+									channelId,
+								},
+					);
+				}
+			});
+			daemon = agent;
+			mockSshAgentInstance = agent;
+			return agent as never;
+		});
+		return {
+			/** Hand over the first `count` frames written, or all of them and whatever follows. */
+			deliver(count?: number): void {
+				const frames = written.splice(0, count ?? written.length);
+				if (count === undefined) holding = false;
+				for (const frame of frames) frame();
+			},
+			sent(type: string): ProtocolMessage[] {
+				return (daemon?.send.mock.calls ?? [])
+					.map(([msg]) => msg as ProtocolMessage)
+					.filter((msg) => msg.type === type);
+			},
+		};
+	}
+
+	function statesOf(window: ProtocolMessage[], channelId: string): ProtocolMessage[] {
+		return window.filter((m) => m.type === "CHANNEL_STATE" && m.channelId === channelId);
+	}
+
+	function expectRunning(window: ProtocolMessage[], channelId: string): void {
+		expect(sm.channels.get(channelId)?.status).toBe("live");
+		expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("live");
+		// And the last word every window heard of it.
+		expect(statesOf(window, channelId).at(-1)).toMatchObject({ status: "live" });
+	}
+
+	it("the attaches that reached the host do not end the terminal a pane brought back meanwhile", async () => {
+		// Left live by the replace, as it was before #599's fix.
+		const channelIds = ids(5);
+		const hostId = seedHost(channelIds.map((id) => ({ id })));
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+		const daemon = nextDaemon([]);
+
+		// Each pane attaches; the host is reached for them, once.
+		const attaches = channelIds.map((channelId) => sm.handleAttach("c-window", channelId));
+		daemon.deliver(1);
+		// The new daemon holds none of them: each is judged ended, and every window told.
+		await vi.waitFor(() => {
+			for (const channelId of channelIds) {
+				expect(statesOf(window, channelId)).toContainEqual(
+					expect.objectContaining({ status: "dead" }),
+				);
+			}
+		});
+
+		// The pane in view follows its setting, and brings its terminal back.
+		const inView = channelIds[0] ?? "";
+		const respawn = sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: inView,
+		});
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
+		// What the daemon wrote arrives in one read: answers to any attach it
+		// was asked, then the SPAWN_OK — the order of the Pi's log.
+		daemon.deliver();
+
+		expect(await respawn).toBe(inView);
+		await Promise.all(attaches);
+		await flushImmediate();
+
+		// The shell brought back runs, as the hub says it does...
+		expectRunning(window, inView);
+		// ...and no attach went on to ask the daemon about a terminal already judged.
+		expect(daemon.sent("ATTACH")).toEqual([]);
+	});
+
+	it("an attach's answer read after the terminal was brought back does not end it", async () => {
+		const [reaching, asked] = ids(2) as [string, string];
+		const hostId = seedHost([{ id: reaching }, { id: asked }]);
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+		const daemon = nextDaemon([]);
+
+		// One pane's attach reaches the host. Its agent is the way there as
+		// soon as it answers, before its list of what it holds is read...
+		const reachingAttach = sm.handleAttach("c-window", reaching);
+		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
+		// ...so another pane's attach asks it at once.
+		const askedAttach = sm.handleAttach("c-window", asked);
+		await vi.waitFor(() => expect(daemon.sent("ATTACH")).toHaveLength(1));
+
+		// The list is read: neither is there, and both are judged ended.
+		daemon.deliver(1);
+		await vi.waitFor(() =>
+			expect(statesOf(window, asked)).toContainEqual(expect.objectContaining({ status: "dead" })),
+		);
+		// That pane brings its terminal back.
+		const respawn = sm.handleSpawn("c-window", { type: "SPAWN", hostId, reuseChannelId: asked });
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
+		// "No such channel", the answer to the attach, is read in the same go
+		// as the SPAWN_OK, which is handled first.
+		daemon.deliver();
+
+		expect(await respawn).toBe(asked);
+		await Promise.all([reachingAttach, askedAttach]);
+		await flushImmediate();
+
+		expectRunning(window, asked);
+		// The attach that asked is answered about the shell running there now.
+		expect(window).toContainEqual(
+			expect.objectContaining({ type: "ATTACH_OK", channelId: asked, cached: false }),
+		);
+	});
+
+	it("the daemon's list read after a terminal started meanwhile does not end it", async () => {
+		// One ended with the replaced agent; another still runs on the daemon.
+		const [stopped, held] = ids(2) as [string, string];
+		const hostId = seedHost([{ id: stopped, ended: "stopped" }, { id: held }]);
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+		const daemon = nextDaemon([held]);
+
+		// The pane over the running one attaches, and the host is reached.
+		const attach = sm.handleAttach("c-window", held);
+		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
+		// Found stopped, the other follows its setting (#592) while the list
+		// is on its way, and the daemon starts it.
+		const respawn = sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: stopped,
+		});
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
+		// The list, written before the SPAWN was read, and the SPAWN_OK arrive together.
+		daemon.deliver();
+
+		expect(await respawn).toBe(stopped);
+		await attach;
+		await flushImmediate();
+
+		expectRunning(window, stopped);
+		expect(statesOf(window, stopped)).not.toContainEqual(
+			expect.objectContaining({ status: "dead" }),
+		);
+		// What the list does speak of is judged as ever: held, and taken up.
+		expect(sm.channels.get(held)?.status).toBe("live");
+	});
+
+	// A new terminal has no id to claim before its SPAWN_OK: only when it
+	// started says the list cannot speak of it.
+	it("the daemon's list read after a new terminal opened meanwhile does not end it", async () => {
+		const [held] = ids(1) as [string];
+		const hostId = seedHost([{ id: held }]);
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+		const daemon = nextDaemon([held]);
+
+		const attach = sm.handleAttach("c-window", held);
+		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
+		// A new tab on that host, while the list is on its way.
+		const opened = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
+		daemon.deliver();
+
+		const channelId = await opened;
+		await attach;
+		await flushImmediate();
+
+		if (channelId === null) throw new Error("expected the new terminal");
+		expectRunning(window, channelId);
+	});
+});

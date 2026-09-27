@@ -278,6 +278,7 @@ export class ChannelLifecycleManager {
 						dynamicTitle: null,
 						processTitle: null,
 						displayTitle: DEFAULT_CHANNEL_NAME,
+						startedAt: this.startedNow(),
 					});
 					this.ctx.metaDal.updateChannelStatus(channelId, "live");
 					this.ctx.scheduler.trackChannel(channelId);
@@ -385,6 +386,69 @@ export class ChannelLifecycleManager {
 		this.clearElevationForChannel(channelId);
 		this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
 		this.forgetChannel(channelId);
+	}
+
+	/**
+	 * End every terminal this hub holds on a host whose agent it has just
+	 * stopped on request, and forget them (#599).
+	 *
+	 * The stop tears them down, and nobody aimed at any of them: each ends
+	 * `stopped`. A pane over one leaves it be rather than race the replacement
+	 * (#580), and one that finds it ended later follows its setting (#592).
+	 * This is said here, as the stop is confirmed, because a daemon's own
+	 * reports of those ends do not reach the hub: its connection goes first.
+	 * Left to them, the terminals stayed live until a later reconnect found
+	 * them unknown, and ended them with no reason at all.
+	 *
+	 * One whose end did arrive, `stopped` already, is only forgotten.
+	 */
+	endChannelsOfStoppedAgent(hostId: string): void {
+		for (const [channelId, ch] of this.ctx.channels.entries()) {
+			if (ch.hostId !== hostId) continue;
+			if (ch.status !== "dead") {
+				this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "stopped");
+			}
+			this.clearElevationForChannel(channelId);
+			this.forgetChannel(channelId);
+		}
+	}
+
+	// ─── Answers about terminals, and the starts they predate (#599) ─────────
+
+	/**
+	 * Note the moment a question about its terminals is put to an agent, just
+	 * before it is sent, and return it: what the answer says is about the
+	 * terminals as they were then.
+	 */
+	askingAgent(): number {
+		return ++this.ctx.channelClock;
+	}
+
+	/** The reading a terminal that has just started is stamped with. */
+	private startedNow(): number {
+		return ++this.ctx.channelClock;
+	}
+
+	/**
+	 * Whether an answer to a question asked at `askedAt` still speaks of the
+	 * terminal this hub tracks under `channelId`.
+	 *
+	 * Not when nothing is tracked there: someone else has judged it already.
+	 * Not when it started after the question: a daemon asked before a respawn
+	 * reports the id unknown, and the shell that answers to it now is running.
+	 * Not while a start of it is under way, which the start claims (#592):
+	 * that start's own answer decides.
+	 *
+	 * A pane that saw its terminal end and brought it back had the new shell
+	 * declared dead by the answer to a question asked before it existed; the
+	 * shell ran on out of reach, and the agent refused every Restart, since
+	 * it held that id.
+	 */
+	answerStillApplies(channelId: string, askedAt: number): boolean {
+		const current = this.ctx.channels.get(channelId);
+		if (current === undefined) return false;
+		if (this.ctx.startingChannels.has(channelId)) return false;
+		return (current.startedAt ?? 0) <= askedAt;
 	}
 
 	/**
@@ -839,6 +903,7 @@ export class ChannelLifecycleManager {
 			dynamicTitle: null,
 			processTitle: null,
 			displayTitle: DEFAULT_CHANNEL_NAME,
+			startedAt: this.startedNow(),
 		});
 		this.ctx.scheduler.trackChannel(channelId);
 		this.ctx.chunker.trackChannel(channelId);
@@ -1102,6 +1167,8 @@ export class ChannelLifecycleManager {
 				clearTimeout(timeout);
 				this.ctx.pendingRequests.delete(requestId);
 				if (incoming.type === "SPAWN_OK") {
+					// A new shell under the same id: no answer asked before it speaks of it.
+					ch.startedAt = this.startedNow();
 					onSpawnOk(channelId, ch);
 				} else {
 					onSpawnErr(channelId, ch);
@@ -1136,12 +1203,16 @@ export class ChannelLifecycleManager {
 	): Promise<boolean> {
 		if (agent.usedRemoteDaemon !== true) return false;
 		try {
+			// Its list is of the terminals it held when asked. The agent is
+			// already the way to this host, so a pane can start one before the
+			// list arrives, which is then not in it (#599).
+			const askedAt = this.askingAgent();
 			// A daemon that serves several hubs waits for this before it says
 			// what it holds, since what it says depends on who is asking (#127).
 			// It never gets this hub's token: see daemonAuthFrame.
 			const auth = daemonAuthFrame(agent, { token: null, hubKey: this.ctx.hubKey });
 			if (auth !== null) agent.send(auth);
-			this.reconcileChannelState(hostId, await agent.waitForChannelState(), agent);
+			this.reconcileChannelState(hostId, await agent.waitForChannelState(), agent, askedAt);
 			// The session was announced active before the daemon had said what
 			// other hubs hold there; say it now that it has.
 			if (agent.otherOwnerChannels !== undefined && this.ctx.agents.get(hostId) === agent) {
@@ -1167,11 +1238,19 @@ export class ChannelLifecycleManager {
 	 * everything it listed belongs to this hub (#127), so one this hub does not
 	 * know is its own orphan and is destroyed. Without that capability the
 	 * list may hold other hubs' channels, and anything unknown is left alone.
+	 *
+	 * `askedAt` is when the list was asked for (`askingAgent`). The whole of
+	 * this judgement is made here, as the list arrives, before any pane can
+	 * hear of an end it decides: no pane can bring a terminal back before it
+	 * has been judged. What the question could not know of is left out of
+	 * it: a terminal started since, or being started, is its start's to
+	 * answer for (#599). Without `askedAt`, everything tracked is judged.
 	 */
 	reconcileChannelState(
 		hostId: string,
 		states: AgentChannelStateMessage[],
 		agent?: AgentConnection,
+		askedAt?: number,
 	): void {
 		if (agent !== undefined && hasHubIdentity(agent)) {
 			this.destroyOrphans(hostId, states, agent);
@@ -1180,6 +1259,7 @@ export class ChannelLifecycleManager {
 
 		for (const [channelId, channelState] of this.ctx.channels) {
 			if (channelState.hostId !== hostId) continue;
+			if (askedAt !== undefined && !this.answerStillApplies(channelId, askedAt)) continue;
 
 			const session = this.ctx.sessions.get(hostId);
 			if (!session) continue;

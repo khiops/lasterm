@@ -133,11 +133,21 @@ function replace(payload?: unknown) {
  * connection it opened, and a window that holds it in its state.
  */
 function liveTerminalOn(agent: FakeSshAgent): { channelId: string; heard: ProtocolMessage[] } {
-	const sessionId = "01K580SESSION0000000000000";
-	const channelId = "01K580CHAN0000000000000001";
+	const { channelIds, heard } = liveTerminalsOn(agent, 1);
+	return { channelId: channelIds[0] ?? "", heard };
+}
+
+const SESSION_ID = "01K580SESSION0000000000000";
+
+/** As liveTerminalOn, with `count` terminals on that agent. */
+function liveTerminalsOn(
+	agent: FakeSshAgent,
+	count: number,
+): { channelIds: string[]; heard: ProtocolMessage[] } {
+	const sessionId = SESSION_ID;
+	const channelIds = Array.from({ length: count }, (_, i) => `01K580CHAN000000000000000${i + 1}`);
 	const metaDal = new MetaDAL(dbs.meta);
 	metaDal.createSession({ id: sessionId, hostId, status: "active" });
-	metaDal.createChannel({ id: channelId, sessionId, status: "live", shell: "bash" });
 	const internals = sm as unknown as {
 		ctx: SharedSessionContext;
 		agentMgr: { wireAgentEvents(hostId: string, sessionId: string, agent: unknown): void };
@@ -147,22 +157,25 @@ function liveTerminalOn(agent: FakeSshAgent): { channelId: string; heard: Protoc
 		hostId,
 		status: "active",
 	});
-	internals.ctx.channels.set(channelId, {
-		sessionId,
-		hostId,
-		status: "live",
-		clients: new Set(),
-		shell: "bash",
-		cols: 80,
-		rows: 24,
-		dynamicTitle: null,
-		processTitle: null,
-		displayTitle: "bash",
-	});
+	for (const channelId of channelIds) {
+		metaDal.createChannel({ id: channelId, sessionId, status: "live", shell: "bash" });
+		internals.ctx.channels.set(channelId, {
+			sessionId,
+			hostId,
+			status: "live",
+			clients: new Set(),
+			shell: "bash",
+			cols: 80,
+			rows: 24,
+			dynamicTitle: null,
+			processTitle: null,
+			displayTitle: "bash",
+		});
+	}
 	internals.agentMgr.wireAgentEvents(hostId, sessionId, agent);
 	const heard: ProtocolMessage[] = [];
 	sm.addClient({ id: "c-window", send: (msg) => heard.push(msg), attachedChannels: new Set() });
-	return { channelId, heard };
+	return { channelIds, heard };
 }
 
 function endsOf(heard: ProtocolMessage[], channelId: string): ProtocolMessage[] {
@@ -204,6 +217,71 @@ describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it 
 		expect(ends).toHaveLength(1);
 		expect(ends[0]).not.toHaveProperty("endReason");
 		expect(new MetaDAL(dbs.meta).getChannel(channelId)).not.toHaveProperty("endReason");
+	});
+});
+
+// What the real app does: the daemon tears its terminals down and its
+// connection goes before any of their exit reports reaches the hub. They were
+// left live, until a reconnect after the next launch found them unknown and
+// ended them with no reason at all (#599).
+describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", () => {
+	function expectEveryOneStopped(channelIds: string[], heard: ProtocolMessage[]): void {
+		const metaDal = new MetaDAL(dbs.meta);
+		for (const channelId of channelIds) {
+			// Told to every window as it happens: a pane over it shows that it
+			// was stopped from elsewhere, and does not start it again (#580).
+			expect(endsOf(heard, channelId)).toEqual([
+				{
+					type: "CHANNEL_STATE",
+					channelId,
+					sessionId: SESSION_ID,
+					status: "dead",
+					endReason: "stopped",
+				},
+			]);
+			// Kept with the end: found at the next launch, it follows its setting (#592).
+			expect(metaDal.getChannel(channelId)).toMatchObject({
+				status: "dead",
+				endReason: "stopped",
+			});
+			// And no longer held as running, by a hub that has no agent there.
+			expect(sm.channels.has(channelId)).toBe(false);
+		}
+	}
+
+	it("ends every terminal the agent held, stopped, once the STOP is confirmed", async () => {
+		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		const { channelIds, heard } = liveTerminalsOn(agent, 2);
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expectEveryOneStopped(channelIds, heard);
+	});
+
+	it("does the same when the agent is stopped with its own --stop", async () => {
+		const agent = connectedAgent(["multiplex"]);
+		const { channelIds, heard } = liveTerminalsOn(agent, 2);
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expect(agent.execOnHost).toHaveBeenCalledTimes(2);
+		expectEveryOneStopped(channelIds, heard);
+	});
+
+	// On stdio the agent is not stopped, and nothing it runs ends.
+	it("ends nothing when the agent is not stopped", async () => {
+		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		agent.usedRemoteDaemon = false;
+		const { channelIds, heard } = liveTerminalsOn(agent, 1);
+
+		expect((await replace()).statusCode).toBe(409);
+
+		const channelId = channelIds[0] ?? "";
+		expect(endsOf(heard, channelId)).toEqual([]);
+		expect(sm.channels.get(channelId)?.status).toBe("live");
+		expect(new MetaDAL(dbs.meta).getChannel(channelId)?.status).toBe("live");
 	});
 });
 

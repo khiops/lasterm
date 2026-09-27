@@ -119,13 +119,14 @@ export class StateBroadcaster {
 				});
 			}
 		}
-		// And the ones it ended on purpose that it still lists. A window that was
-		// away when one ended, or that opens later, learns why here rather than
-		// from a report it never heard: a pane finding such a terminal ended
+		// And the ones killed on purpose that it still lists. A window that was
+		// away when one was killed, or that opens later, learns it here rather
+		// than from a report it never heard: a pane finding such a terminal ended
 		// would otherwise take it for a shell that exited, and follow "When a
-		// terminal ends" to bring it back (#592).
+		// terminal ends" to bring it back (#592). One stopped with its agent or
+		// its hub is not listed: found later, it follows the setting anyway.
 		const listed = new Set(channels.map((entry) => entry.channelId));
-		for (const ended of this.ctx.metaDal.listChannelsEndedOnPurpose()) {
+		for (const ended of this.ctx.metaDal.listKilledChannels()) {
 			if (listed.has(ended.id)) continue;
 			channels.push({
 				channelId: ended.id,
@@ -180,16 +181,16 @@ export class StateBroadcaster {
 	/**
 	 * Record a channel's status and tell every client.
 	 *
-	 * `endReason` goes with a `dead` the hub caused on purpose (#580). Every end
-	 * heard while the hub quits is one: the quit stops the local agent, and
-	 * with it the terminals, whichever way their end reaches here. Nothing may
-	 * start again meanwhile, and a pane closing on one could delete a terminal
-	 * the next launch should still list.
+	 * `endReason` goes with a `dead` the hub caused (#580): `killed` for one
+	 * stopped on purpose, `stopped` for one that ended with its agent or its
+	 * hub. Every end heard while the hub quits, and not killed, is `stopped`:
+	 * the quit stops the local agent, and with it the terminals, whichever way
+	 * their end reaches here. Nothing may start again meanwhile, and a pane
+	 * closing on one could delete a terminal the next launch should still list.
 	 *
 	 * It is stored with the end, and cleared when the terminal runs again: a
 	 * pane that finds the end later, at a reload or the next launch, follows
-	 * "When a terminal ends" unless it reads there that the end was meant
-	 * (#592).
+	 * "When a terminal ends" unless it reads there that it was killed (#592).
 	 */
 	updateChannelStatus(
 		channelId: string,
@@ -205,7 +206,7 @@ export class StateBroadcaster {
 		const reason =
 			status !== "dead"
 				? undefined
-				: (endReason ?? (this.ctx.quitState === "QUITTING" ? "destroyed" : undefined));
+				: (endReason ?? (this.ctx.quitState === "QUITTING" ? "stopped" : undefined));
 		this.ctx.metaDal.updateChannelStatus(channelId, status, exitCode, reason);
 
 		const stateMsg: ChannelStateMessage = {

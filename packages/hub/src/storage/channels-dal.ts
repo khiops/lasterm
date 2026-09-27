@@ -70,7 +70,7 @@ function rowToChannel(row: ChannelRow): Channel {
 	if (row.elevated === 1) ch.elevated = true;
 	if (row.elevation_method != null) ch.elevationMethod = row.elevation_method;
 	// Only a reason this hub knows: anything else says nothing it can act on.
-	if (row.end_reason === "destroyed") ch.endReason = row.end_reason;
+	if (row.end_reason === "killed" || row.end_reason === "stopped") ch.endReason = row.end_reason;
 	if (row.args && row.args !== "[]") {
 		try {
 			const parsed = JSON.parse(row.args) as string[];
@@ -179,13 +179,13 @@ export class ChannelsDAL {
 	}
 
 	/**
-	 * Record a channel's status, and why it ended when the hub ended it on
-	 * purpose (#592).
+	 * Record a channel's status, and why it ended when the hub ended it
+	 * itself: `killed` or `stopped` (#592).
 	 *
 	 * `endReason` goes with `dead` only. A terminal that runs again has no end
 	 * to explain, so any other status clears it. One already dead keeps what
 	 * its end said when told again without a reason: a repeat of an end is not
-	 * a new one.
+	 * a new one. A reason given replaces the one there.
 	 */
 	updateChannelStatus(
 		id: string,
@@ -220,19 +220,19 @@ export class ChannelsDAL {
 	}
 
 	/**
-	 * The terminals the hub ended on purpose that it still lists (#592): what a
+	 * The terminals killed on purpose that the hub still lists (#592): what a
 	 * client that connects is told of them, so that no pane brings one back.
 	 */
-	listChannelsEndedOnPurpose(): Array<{
+	listKilledChannels(): Array<{
 		id: string;
 		sessionId: string;
 		exitCode: number | null;
-		endReason: ChannelEndReason;
+		endReason: "killed";
 	}> {
 		const rows = this.db
 			.prepare(
 				`SELECT id, session_id, exit_code FROM channels
-				 WHERE status = 'dead' AND end_reason = 'destroyed'
+				 WHERE status = 'dead' AND end_reason = 'killed'
 				 ORDER BY created_at ASC`,
 			)
 			.all() as Array<{ id: string; session_id: string; exit_code: number | null }>;
@@ -240,7 +240,7 @@ export class ChannelsDAL {
 			id: r.id,
 			sessionId: r.session_id,
 			exitCode: r.exit_code,
-			endReason: "destroyed",
+			endReason: "killed",
 		}));
 	}
 

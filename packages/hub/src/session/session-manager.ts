@@ -568,9 +568,9 @@ export class SessionManager {
 		clearContext(this.ctx, reconnectContextId(sessionId), clearSend);
 		clearElevationContextsForSession(this.ctx, sessionId, clearSend);
 
-		// Asked for (DELETE /api/sessions/:id): its terminals end on purpose, and
-		// a pane over one must not bring it back (#580).
-		this.lifecycle.closeSession(hostId, sessionId, "destroyed");
+		// Asked for (DELETE /api/sessions/:id): its terminals are killed, and a
+		// pane over one must not bring it back, now or later (#580, #592).
+		this.lifecycle.closeSession(hostId, sessionId, "killed");
 	}
 
 	// ─── WS message handlers ──────────────────────────────────────────────────
@@ -1790,8 +1790,9 @@ export class SessionManager {
 			};
 		}
 
-		// Its terminals end with it, on purpose: a pane over one must not bring
-		// it back (#580).
+		// Its terminals end with it, "stopped": a pane that sees one end leaves
+		// it be rather than race the replacement (#580); one that finds it ended
+		// later follows its setting, since nobody aimed at that terminal (#592).
 		this.ctx.stoppingAgents.add(hostId);
 		try {
 			return await this.stopAgentToReplace(hostId, agent, options);

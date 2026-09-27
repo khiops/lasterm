@@ -357,9 +357,10 @@ export class ChannelLifecycleManager {
 	 * untrack from scheduler/chunker, and remove from in-memory map.
 	 * Returns true if the channel was found and destroyed.
 	 *
-	 * The end is said to be the hub's doing, so that no pane over it brings it
-	 * back or closes on it (#580). The agent's CHANNEL_EXIT that follows finds
-	 * the channel forgotten and is not reported again.
+	 * The end is said to be a kill, so that no pane over it brings it back or
+	 * closes on it, now or when it finds it later (#580, #592). The agent's
+	 * CHANNEL_EXIT that follows finds the channel forgotten and is not reported
+	 * again.
 	 */
 	destroyChannel(channelId: string): boolean {
 		const ch = this.ctx.channels.get(channelId);
@@ -371,7 +372,7 @@ export class ChannelLifecycleManager {
 			agent.send({ type: "DESTROY", channelId } as DestroyMessage);
 		}
 
-		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "destroyed");
+		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "killed");
 
 		this.ctx.scheduler.untrackChannel(channelId);
 		this.ctx.chunker.untrackChannel(channelId);

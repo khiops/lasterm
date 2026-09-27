@@ -6894,7 +6894,7 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		);
 	}
 
-	it("a kill (DELETE /api/channels/:id) says the hub destroyed it, and says it once", async () => {
+	it("a kill (DELETE /api/channels/:id) says the hub killed it, and says it once", async () => {
 		const { channelId, sessionId, heard, agent } = await liveTerminal();
 
 		expect(sm.destroyChannel(channelId)).toBe(true);
@@ -6902,7 +6902,7 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 1 });
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "destroyed" },
+			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "killed" },
 		]);
 	});
 
@@ -6922,11 +6922,12 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		await sm.closeSession(sessionId);
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "destroyed" },
+			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "killed" },
 		]);
 	});
 
-	// Quit stops the local agent, whose terminals then report their ends.
+	// Quit stops the local agent, whose terminals then report their ends:
+	// stopped with the hub, which nobody aimed at them (#592).
 	it("a quit says so of every end it hears", async () => {
 		const { channelId, heard, agent } = await liveTerminal();
 
@@ -6934,7 +6935,7 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
 
 		expect(endsOf(heard, channelId)).toEqual([
-			expect.objectContaining({ status: "dead", exitCode: 0, endReason: "destroyed" }),
+			expect.objectContaining({ status: "dead", exitCode: 0, endReason: "stopped" }),
 		]);
 	});
 
@@ -6948,7 +6949,19 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		await flushImmediate();
 
 		expect(endsOf(heard, channelId)).toEqual([
-			expect.objectContaining({ status: "dead", endReason: "destroyed" }),
+			expect.objectContaining({ status: "dead", endReason: "stopped" }),
+		]);
+	});
+
+	// A kill asked for while the hub quits is still a kill.
+	it("a kill during a quit says it was killed", async () => {
+		const { channelId, heard } = await liveTerminal();
+
+		sm.beginQuit();
+		sm.destroyChannel(channelId);
+
+		expect(endsOf(heard, channelId)).toEqual([
+			expect.objectContaining({ status: "dead", endReason: "killed" }),
 		]);
 	});
 
@@ -7028,12 +7041,12 @@ describe("SessionManager — why a terminal ended, remembered (#592)", () => {
 		sm.destroyChannel(channelId);
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 1 });
 
-		expect(stored(channelId)).toMatchObject({ status: "dead", endReason: "destroyed" });
+		expect(stored(channelId)).toMatchObject({ status: "dead", endReason: "killed" });
 		expect(synced(channelId)).toEqual({
 			channelId,
 			sessionId,
 			status: "dead",
-			endReason: "destroyed",
+			endReason: "killed",
 		});
 	});
 
@@ -7042,11 +7055,13 @@ describe("SessionManager — why a terminal ended, remembered (#592)", () => {
 
 		await sm.closeSession(sessionId);
 
-		expect(stored(channelId)).toMatchObject({ status: "dead", endReason: "destroyed" });
-		expect(synced(channelId)).toMatchObject({ status: "dead", endReason: "destroyed" });
+		expect(stored(channelId)).toMatchObject({ status: "dead", endReason: "killed" });
+		expect(synced(channelId)).toMatchObject({ status: "dead", endReason: "killed" });
 	});
 
-	it("a quit stores it, for an end it hears and one it causes by stopping the agent", async () => {
+	// Stopped with the hub: found at the next launch, they follow the setting,
+	// so a window that connects is not told of them as killed.
+	it("a quit stores its terminals as stopped, for an end it hears and one it causes", async () => {
 		const heard = await liveTerminal();
 		const second = await sm.handleSpawn("c-pane", { type: "SPAWN", hostId: "local" });
 		if (second === null) throw new Error("expected a second channel");
@@ -7056,8 +7071,10 @@ describe("SessionManager — why a terminal ended, remembered (#592)", () => {
 		mockLocalAgents.at(-1)?.simulateDisconnect();
 		await flushImmediate();
 
-		expect(stored(heard.channelId)).toMatchObject({ exitCode: 0, endReason: "destroyed" });
-		expect(stored(second)).toMatchObject({ status: "dead", endReason: "destroyed" });
+		expect(stored(heard.channelId)).toMatchObject({ exitCode: 0, endReason: "stopped" });
+		expect(stored(second)).toMatchObject({ status: "dead", endReason: "stopped" });
+		expect(synced(heard.channelId)).toBeUndefined();
+		expect(synced(second)).toBeUndefined();
 	});
 
 	// Found at the next launch, it follows "When a terminal ends".

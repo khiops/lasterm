@@ -211,9 +211,10 @@ export interface Channel {
 	elevated?: boolean;
 	elevationMethod?: string;
 	/**
-	 * Only on a dead channel the hub ended on purpose: killed, its session
-	 * closed, its agent replaced, the hub quitting (#580). Stored, so that a
-	 * pane finding it ended later never brings it back (#592).
+	 * Only on a dead channel the hub ended itself: `killed` (it, or its
+	 * session, stopped on purpose) or `stopped` (with its agent replaced, or
+	 * the hub quitting) (#580). Stored, so that a pane finding it ended later
+	 * never brings back one that was killed (#592).
 	 */
 	endReason?: ChannelEndReason;
 	createdAt: string;

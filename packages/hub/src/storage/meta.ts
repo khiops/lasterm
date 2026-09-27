@@ -265,7 +265,7 @@ export class MetaDAL {
 		return this.channels.listChannels(sessionId);
 	}
 
-	/** `endReason` with `dead` only, when the hub ended it on purpose (#592). */
+	/** `endReason` with `dead` only, when the hub ended it itself (#592). */
 	updateChannelStatus(
 		id: string,
 		status: ChannelStatus,
@@ -275,8 +275,8 @@ export class MetaDAL {
 		this.channels.updateChannelStatus(id, status, exitCode, endReason);
 	}
 
-	listChannelsEndedOnPurpose(): ReturnType<ChannelsDAL["listChannelsEndedOnPurpose"]> {
-		return this.channels.listChannelsEndedOnPurpose();
+	listKilledChannels(): ReturnType<ChannelsDAL["listKilledChannels"]> {
+		return this.channels.listKilledChannels();
 	}
 
 	reviveChannel(id: string, sessionId: string, cols: number, rows: number): boolean {

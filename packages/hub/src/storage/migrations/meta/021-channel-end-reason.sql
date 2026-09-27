@@ -1,11 +1,15 @@
--- Migration 021: why a terminal ended, when the hub ended it on purpose (#592).
+-- Migration 021: why a terminal ended, when the hub ended it itself (#592).
 --
--- 'destroyed': someone killed it, closed its session, replaced its agent or
--- quit the hub (#580). A pane that finds such a terminal ended, at a reload or
--- the next launch, keeps asking rather than follow "When a terminal ends": a
--- deliberate stop is never undone by a setting. It used to travel only on the
--- live CHANNEL_STATE report, so an end found afterwards could not be told apart
--- from a shell that exited.
+-- 'killed': someone stopped that terminal, or its session, on purpose. A pane
+-- that finds it ended, at a reload or the next launch, keeps asking rather than
+-- follow "When a terminal ends": a deliberate stop is never undone by a setting.
+--
+-- 'stopped': it ended with its agent, replaced, or with the hub, quitting.
+-- Nobody aimed at it: found later, it follows the setting as a shell that
+-- exited does.
+--
+-- Both used to travel only on the live CHANNEL_STATE report (#580), so an end
+-- found afterwards could not be told apart from a shell that exited.
 --
 -- NULL for every other terminal: one running, and one that ended by itself or
 -- that the hub found gone. Set with the dead status, cleared when it runs again.

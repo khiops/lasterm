@@ -203,7 +203,7 @@ export interface SharedSessionContext {
 	restartTracking: Map<string, { count: number; windowStart: number }>;
 	/**
 	 * Hosts whose agent this hub is stopping on purpose, to replace it. Their
-	 * terminals that end meanwhile were ended by the hub (#580).
+	 * terminals that end meanwhile were ended by the hub: `stopped` (#580, #592).
 	 */
 	stoppingAgents: Set<string>;
 	/**

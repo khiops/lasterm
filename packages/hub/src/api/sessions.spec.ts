@@ -183,12 +183,13 @@ describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it 
 
 		expect(res.statusCode).toBe(200);
 		expect(endsOf(heard, channelId)).toEqual([
-			expect.objectContaining({ exitCode: 0, endReason: "destroyed" }),
+			expect.objectContaining({ exitCode: 0, endReason: "stopped" }),
 		]);
-		// Stored with the end, for a pane that finds it ended later (#592).
+		// Stopped, not killed: nobody aimed at that terminal. Stored with the
+		// end, a pane that finds it ended later follows its setting (#592).
 		expect(new MetaDAL(dbs.meta).getChannel(channelId)).toMatchObject({
 			status: "dead",
-			endReason: "destroyed",
+			endReason: "stopped",
 		});
 	});
 

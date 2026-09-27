@@ -255,9 +255,9 @@ export function registerChannelRoutes(
 
 		if (!sessionManager.destroyChannel(id)) {
 			// Channel exists in DB but not in SessionManager's in-memory map
-			// (e.g. orphaned after hub restart). Mark dead directly, as ended on
-			// purpose: a pane that finds it ended must not bring it back (#592).
-			metaDal.updateChannelStatus(id, "dead", undefined, "destroyed");
+			// (e.g. orphaned after hub restart). Mark dead directly, as killed:
+			// a pane that finds it ended must not bring it back (#592).
+			metaDal.updateChannelStatus(id, "dead", undefined, "killed");
 		}
 		return reply.code(200).send({ ok: true });
 	});

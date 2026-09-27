@@ -722,14 +722,14 @@ describe("MetaDAL — why a terminal ended (#592)", () => {
 		dbs.close();
 	});
 
-	it("is stored with the end the hub caused, and read back", () => {
-		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
-		expect(dal.getChannel(id)).toMatchObject({ status: "dead", endReason: "destroyed" });
+	it("is stored with the end the hub caused, killed or stopped, and read back", () => {
+		dal.updateChannelStatus(id, "dead", undefined, "killed");
+		expect(dal.getChannel(id)).toMatchObject({ status: "dead", endReason: "killed" });
 
 		const other = "ENDREASON02AAAAAAAAAAAAAAAAA";
 		dal.createChannel({ id: other, sessionId, status: "live" });
-		dal.updateChannelStatus(other, "dead", 3, "destroyed");
-		expect(dal.getChannel(other)).toMatchObject({ exitCode: 3, endReason: "destroyed" });
+		dal.updateChannelStatus(other, "dead", 3, "stopped");
+		expect(dal.getChannel(other)).toMatchObject({ exitCode: 3, endReason: "stopped" });
 	});
 
 	it("is none for a shell that exited", () => {
@@ -740,18 +740,25 @@ describe("MetaDAL — why a terminal ended (#592)", () => {
 
 	// Its own exit reported after the kill is not a second end.
 	it("stays when the same end is told again without one", () => {
-		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		dal.updateChannelStatus(id, "dead", undefined, "killed");
 		dal.updateChannelStatus(id, "dead", 1);
-		expect(dal.getChannel(id)).toMatchObject({ exitCode: 1, endReason: "destroyed" });
+		expect(dal.getChannel(id)).toMatchObject({ exitCode: 1, endReason: "killed" });
+	});
+
+	// Stopped with its agent, then killed from the list: the kill is what it says.
+	it("takes the reason given over the one there", () => {
+		dal.updateChannelStatus(id, "dead", undefined, "stopped");
+		dal.updateChannelStatus(id, "dead", undefined, "killed");
+		expect(dal.getChannel(id)).toMatchObject({ endReason: "killed" });
 	});
 
 	it("is cleared when the terminal runs again, whichever way it does", () => {
-		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		dal.updateChannelStatus(id, "dead", undefined, "killed");
 		dal.updateChannelStatus(id, "live");
 		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
 
 		// Brought back under its own id by a SPAWN.
-		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		dal.updateChannelStatus(id, "dead", undefined, "stopped");
 		dal.reviveChannel(id, sessionId, 80, 24);
 		expect(dal.getChannel(id)).toMatchObject({ status: "born" });
 		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
@@ -762,23 +769,25 @@ describe("MetaDAL — why a terminal ended (#592)", () => {
 	});
 
 	it("is carried by the list, as end_reason on the wire", () => {
-		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
-		expect(dal.listChannels(sessionId).find((ch) => ch.id === id)?.endReason).toBe("destroyed");
+		dal.updateChannelStatus(id, "dead", undefined, "stopped");
+		expect(dal.listChannels(sessionId).find((ch) => ch.id === id)?.endReason).toBe("stopped");
 	});
 
-	it("names the terminals ended on purpose that are still listed, and only those", () => {
+	// What STATE_SYNC names: those no pane may bring back.
+	it("names the terminals killed that are still listed, and only those", () => {
 		const exited = "ENDREASON03AAAAAAAAAAAAAAAAA";
 		const running = "ENDREASON04AAAAAAAAAAAAAAAAA";
+		const stopped = "ENDREASON05AAAAAAAAAAAAAAAAA";
 		dal.createChannel({ id: exited, sessionId, status: "live" });
 		dal.createChannel({ id: running, sessionId, status: "live" });
-		dal.updateChannelStatus(id, "dead", 9, "destroyed");
+		dal.createChannel({ id: stopped, sessionId, status: "live" });
+		dal.updateChannelStatus(id, "dead", 9, "killed");
 		dal.updateChannelStatus(exited, "dead", 0);
+		dal.updateChannelStatus(stopped, "dead", 0, "stopped");
 
-		expect(dal.listChannelsEndedOnPurpose()).toEqual([
-			{ id, sessionId, exitCode: 9, endReason: "destroyed" },
-		]);
+		expect(dal.listKilledChannels()).toEqual([{ id, sessionId, exitCode: 9, endReason: "killed" }]);
 		dal.deleteChannel(id);
-		expect(dal.listChannelsEndedOnPurpose()).toEqual([]);
+		expect(dal.listKilledChannels()).toEqual([]);
 	});
 
 	// Written by a later hub, say: nothing this one can act on.
@@ -786,7 +795,7 @@ describe("MetaDAL — why a terminal ended (#592)", () => {
 		dal.updateChannelStatus(id, "dead");
 		dbs.meta.prepare("UPDATE channels SET end_reason = 'something-else' WHERE id = ?").run(id);
 		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
-		expect(dal.listChannelsEndedOnPurpose()).toEqual([]);
+		expect(dal.listKilledChannels()).toEqual([]);
 	});
 });
 

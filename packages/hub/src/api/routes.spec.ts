@@ -750,7 +750,7 @@ describe("DELETE /api/channels/:id", () => {
 		expect(channel?.status).toBe("dead");
 		// Killed on purpose, though no terminal of this run held it: a pane that
 		// finds it ended does not bring it back (#592).
-		expect(channel?.endReason).toBe("destroyed");
+		expect(channel?.endReason).toBe("killed");
 	});
 
 	// The list is what a pane reads when it finds its terminal ended at a reload
@@ -768,7 +768,7 @@ describe("DELETE /api/channels/:id", () => {
 		>();
 		expect(rows.find((row) => row.id === channelId)).toMatchObject({
 			status: "dead",
-			end_reason: "destroyed",
+			end_reason: "killed",
 		});
 		const exited = rows.find((row) => row.id === exitedId);
 		expect(exited).toMatchObject({ status: "dead", exit_code: 0 });

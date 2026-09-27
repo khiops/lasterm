@@ -712,19 +712,58 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_terminal_starts_with_no_signal_ignored() {
-        use tokio::io::AsyncReadExt;
-
         // The agent's own state. The Rust runtime already set it; setting it
         // again keeps the test independent of that and changes nothing here.
         // SAFETY: SIG_IGN installs no handler.
         let previous = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
         assert_ne!(previous, libc::SIG_ERR, "could not ignore SIGPIPE");
 
+        let (output, status) = run_in_terminal("grep SigIgn /proc/self/status").await;
+
+        assert!(status.success(), "grep failed: {status}, output {output:?}");
+        let ignored = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("SigIgn:"))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("no SigIgn line in {output:?}"));
+        let ignored = u64::from_str_radix(ignored, 16).expect("SigIgn is a hexadecimal mask");
+        let sigpipe = 1_u64 << (libc::SIGPIPE - 1);
+        assert_eq!(
+            ignored & sigpipe,
+            0,
+            "the terminal starts with SIGPIPE ignored (SigIgn {ignored:016x})"
+        );
+        assert_eq!(
+            ignored, 0,
+            "the terminal starts with signals ignored (SigIgn {ignored:016x})"
+        );
+    }
+
+    /// A terminal's input is UTF-8 for the line discipline (#601). Without
+    /// `IUTF8`, Backspace over `é` or `€` in canonical mode (`read`, a password
+    /// prompt) erased one byte and left broken UTF-8 in the line.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_terminal_starts_with_iutf8() {
+        let (output, status) = run_in_terminal("stty -a").await;
+
+        assert!(status.success(), "stty failed: {status}, output {output:?}");
+        let flags: Vec<&str> = output.split_whitespace().collect();
+        assert!(
+            !flags.contains(&"-iutf8"),
+            "the terminal starts without IUTF8: {output:?}"
+        );
+        assert!(flags.contains(&"iutf8"), "no iutf8 in stty -a: {output:?}");
+    }
+
+    /// Run `command` with `/bin/sh -c` in a terminal the manager spawns, to its
+    /// end: everything it printed, then how it ended.
+    #[cfg(target_os = "linux")]
+    async fn run_in_terminal(command: &str) -> (String, ExitStatus) {
+        use tokio::io::AsyncReadExt;
+
         let mut manager = PtyManager::new();
-        let args = vec![
-            "-c".to_string(),
-            "grep SigIgn /proc/self/status".to_string(),
-        ];
+        let args = vec!["-c".to_string(), command.to_string()];
         let (channel_id, _) = manager
             .spawn(
                 OwnerId::legacy(),
@@ -750,25 +789,7 @@ mod tests {
             .await
             .expect("terminal exit timed out")
             .expect("wait for terminal exit");
-        let output = String::from_utf8_lossy(&output);
-
-        assert!(status.success(), "grep failed: {status}, output {output:?}");
-        let ignored = output
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("SigIgn:"))
-            .map(str::trim)
-            .unwrap_or_else(|| panic!("no SigIgn line in {output:?}"));
-        let ignored = u64::from_str_radix(ignored, 16).expect("SigIgn is a hexadecimal mask");
-        let sigpipe = 1_u64 << (libc::SIGPIPE - 1);
-        assert_eq!(
-            ignored & sigpipe,
-            0,
-            "the terminal starts with SIGPIPE ignored (SigIgn {ignored:016x})"
-        );
-        assert_eq!(
-            ignored, 0,
-            "the terminal starts with signals ignored (SigIgn {ignored:016x})"
-        );
+        (String::from_utf8_lossy(&output).into_owned(), status)
     }
 
     #[cfg(target_os = "linux")]

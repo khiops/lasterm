@@ -464,6 +464,10 @@ export interface SessionStateMessage {
  * `destroyed`: the hub ended it on purpose. Someone killed it, closed its
  * session, replaced its agent or quit the hub. A shell that exited, or a
  * terminal the hub found gone, carries no reason.
+ *
+ * The hub stores it with the end (`channels.end_reason`) and clears it when
+ * the terminal runs again, so that it reaches a pane that finds the end
+ * later: in the channel list (`end_reason`) and in STATE_SYNC (#592).
  */
 export type ChannelEndReason = "destroyed";
 
@@ -476,7 +480,8 @@ export interface ChannelStateMessage {
 	exitCode?: number;
 	/**
 	 * Only on a `dead` report, when the hub ended the terminal itself. A pane
-	 * never restarts or closes on such an end: someone meant it (#580).
+	 * never restarts or closes on such an end: someone meant it (#580). The
+	 * hub stores it, so a pane that finds the end later knows it too (#592).
 	 */
 	endReason?: ChannelEndReason;
 }
@@ -517,12 +522,20 @@ export interface StateSyncMessage {
 		/** Set only when other hubs hold channels there. See SessionStateMessage. */
 		otherOwnerChannels?: number;
 	}>;
+	/**
+	 * Every channel the hub holds that has not ended, and every one it ended
+	 * on purpose that it still lists (`dead`, with `endReason`): a window that
+	 * connects learns how those ended, and none of its panes brings one back
+	 * (#592). Any other channel absent from here has ended.
+	 */
 	channels: Array<{
 		channelId: string;
 		sessionId: string;
 		status: ChannelStatus;
 		exitCode?: number;
 		displayTitle?: string;
+		/** Only on a `dead` entry, when the hub ended it on purpose (#580). */
+		endReason?: ChannelEndReason;
 	}>;
 }
 

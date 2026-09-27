@@ -22,6 +22,7 @@ import {
 	normalizeFingerprint,
 	readUserKnownHosts,
 } from "../ssh/known-hosts.js";
+import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 
 export interface JumpTarget {
 	host: string;
@@ -71,6 +72,10 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 
 	return new Promise<JumpRoute>((resolve, reject) => {
 		let settled = false;
+		/** The route was handed out: from here on, an error is how it ends. */
+		let routed = false;
+		/** Whoever holds the route ended it: what goes wrong on the way out is no loss. */
+		let closing = false;
 		const fail = (error: Error): void => {
 			if (settled) return;
 			settled = true;
@@ -79,6 +84,15 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		};
 
 		client.on("error", (error: Error) => {
+			if (routed) {
+				if (closing) return;
+				// The target's connection ends with the route, and is lost like any
+				// other; only here is it known that the jump is what went.
+				console.error(
+					`[lasterm-ssh] lost the connection to the jump host ${options.jump.host}:${options.jump.port}: ${describeConnectionLoss(error)}`,
+				);
+				return;
+			}
 			fail(
 				presented === "" || error.message.includes("verification")
 					? error
@@ -107,11 +121,15 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 						return;
 					}
 					settled = true;
+					routed = true;
 					resolve({
 						stream,
 						fingerprint: presented,
 						fromKnownHosts,
-						close: () => client.end(),
+						close: () => {
+							closing = true;
+							client.end();
+						},
 					});
 				},
 			);
@@ -139,6 +157,8 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 
 		client.connect({
 			...options.auth,
+			// A bastion that goes silent is noticed like the host behind it (#607).
+			...SSH_KEEPALIVE,
 			host: options.jump.host,
 			port: options.jump.port,
 			username: options.jump.username,

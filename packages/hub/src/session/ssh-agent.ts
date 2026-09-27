@@ -17,6 +17,7 @@ import type { ResolvedJump } from "./proxy-jump.js";
 import { attachRemoteDaemon, describeRemoteDaemonPlacement } from "./remote-daemon.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
+import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 
 const HELLO_TIMEOUT_MS = 5_000;
 /** Reaching the agent at all: an exec, or a daemon launched and polled for. */
@@ -434,10 +435,17 @@ export class SshAgent extends AgentConnection {
 			return false;
 		}) as SyncHostVerifier;
 
+		// A host that goes silent without closing TCP is noticed, and lost like
+		// any other: the daemon (#79) is reached over this same connection (#607).
+		connectConfig.keepaliveInterval = SSH_KEEPALIVE.keepaliveInterval;
+		connectConfig.keepaliveCountMax = SSH_KEEPALIVE.keepaliveCountMax;
+
 		console.error(`[lasterm-ssh] connecting...`);
 		return new Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }>(
 			(resolve, reject) => {
 				let resolved = false;
+				/** The agent answered: from here on, an error is how the connection ends. */
+				let established = false;
 				const rejectOnce = (err: Error): void => {
 					if (resolved) return;
 					resolved = true;
@@ -447,6 +455,7 @@ export class SshAgent extends AgentConnection {
 				const resolveOnce = (msg: HelloMessage): void => {
 					if (resolved) return;
 					resolved = true;
+					established = true;
 					resolve({ hello: msg, keyVerification });
 				};
 
@@ -474,6 +483,17 @@ export class SshAgent extends AgentConnection {
 				// are also handled and don't become unhandled EventEmitter throws.
 				// rejectOnce is idempotent — only the first call wins.
 				client.on("error", (err) => {
+					if (established) {
+						// The hub is ending it: whatever goes wrong on the way out is not
+						// a loss.
+						if (this.closedByHub) return;
+						// The close that follows is what ends the session and reconnects
+						// the host; only here is it known why, so it is said here, once.
+						console.error(
+							`[lasterm-ssh] lost the connection to ${hostname}:${port}: ${describeConnectionLoss(err)}`,
+						);
+						return;
+					}
 					// ssh2 may emit a plain object (e.g. { code: 3 }) rather than an Error
 					// instance when hostVerifier returns false. Normalise to a proper Error
 					// so callers (and vitest .rejects.toThrow()) always receive an Error.

@@ -409,7 +409,7 @@ Host (permanent config)
  ├── hostGroup?: string | null         // display group name
  ├── hostGroupId?: string | null       // FK → HostGroup (future)
  ├── sortOrder: number
- ├── keepAliveSeconds: number          // SSH keep-alive interval (0 = disabled)
+ ├── keepAliveSeconds: number          // shown and stored, not read: the SSH keepalive is fixed (§ 5.5)
  ├── historyRetentionDays: number      // spool.db GC policy per host
  ├── discoveredShells?: string[]       // shells found on remote at last connect
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
@@ -723,7 +723,7 @@ User clicks [+ channel] on remote host
 ### 5.5 Disconnect + Reconnect
 
 ```
-SSH connection drops (network issue)
+SSH connection drops (network issue, or a host that stopped answering)
   │
   Hub: ssh2 'close' event
   Session → DISCONNECTED
@@ -740,6 +740,23 @@ SSH connection drops (network issue)
   └─ Timeout (5min): session CLOSED, channels DEAD
      UI: host icon 🔴, cached content still viewable
 ```
+
+A host that vanishes without closing TCP (power lost, rebooted at another address, the
+network cut) sends no close, and its connection would look up until a write to it failed,
+minutes after that write. So every SSH connection the hub opens (a host's own, which a
+remote daemon is reached over too, a jump host's, a Test connection's) sends an SSH
+keepalive request every 15 s, and ssh2 ends it 15 s after the third in a row has gone
+unanswered: 60 s after the host's last answer, which is 45 to 60 s after it went silent (#607).
+It can end sooner, when the hub's own TCP gives up retransmitting a request. Either way the
+connection then ends like any other above, and a restart waits for the host (#605). The hub
+logs why, once: `lost the connection to <host>:<port>: the host stopped answering its
+keepalives`, or the socket's error.
+
+A slow link is not taken for a silent one: a live server answers each request as it reads
+it, and at most a channel window (about 2 MB) is queued ahead of a request or its answer,
+so the 45 s the first unanswered request has are enough on any link carrying some 50 KB/s.
+Only a slower link, saturated, could lose a connection that was alive. The values are fixed
+(`packages/hub/src/session/ssh-keepalive.ts`); a host's `keepAliveSeconds` is not read.
 
 ### 5.6 Daemon Agent — Connect + Reconnect
 

@@ -697,6 +697,99 @@ describe("MetaDAL — updateChannelTitle", () => {
 	});
 });
 
+// ─── Why a terminal ended (#592) ─────────────────────────────────────────────
+//
+// A terminal the hub ended on purpose was told apart from a shell that exited
+// only on the live report. A pane that found it ended later, at a reload or the
+// next launch, could not tell the two apart, so the reason is stored with the
+// end and cleared when the terminal runs again.
+describe("MetaDAL — why a terminal ended (#592)", () => {
+	let dbs: DatabaseManager;
+	let dal: MetaDAL;
+	let sessionId: string;
+	const id = "ENDREASON01AAAAAAAAAAAAAAAAA";
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		dal = new MetaDAL(dbs.meta);
+		const host = dal.createHost({ type: "local", label: "end-reason-host" });
+		sessionId = "ENDSESS01AAAAAAAAAAAAAAAAAAA";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		dal.createChannel({ id, sessionId, status: "live" });
+	});
+
+	afterEach(() => {
+		dbs.close();
+	});
+
+	it("is stored with the end the hub caused, and read back", () => {
+		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		expect(dal.getChannel(id)).toMatchObject({ status: "dead", endReason: "destroyed" });
+
+		const other = "ENDREASON02AAAAAAAAAAAAAAAAA";
+		dal.createChannel({ id: other, sessionId, status: "live" });
+		dal.updateChannelStatus(other, "dead", 3, "destroyed");
+		expect(dal.getChannel(other)).toMatchObject({ exitCode: 3, endReason: "destroyed" });
+	});
+
+	it("is none for a shell that exited", () => {
+		dal.updateChannelStatus(id, "dead", 0);
+		expect(dal.getChannel(id)?.status).toBe("dead");
+		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
+	});
+
+	// Its own exit reported after the kill is not a second end.
+	it("stays when the same end is told again without one", () => {
+		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		dal.updateChannelStatus(id, "dead", 1);
+		expect(dal.getChannel(id)).toMatchObject({ exitCode: 1, endReason: "destroyed" });
+	});
+
+	it("is cleared when the terminal runs again, whichever way it does", () => {
+		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		dal.updateChannelStatus(id, "live");
+		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
+
+		// Brought back under its own id by a SPAWN.
+		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		dal.reviveChannel(id, sessionId, 80, 24);
+		expect(dal.getChannel(id)).toMatchObject({ status: "born" });
+		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
+
+		// And an end after that says only what it says.
+		dal.updateChannelStatus(id, "dead", 0);
+		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
+	});
+
+	it("is carried by the list, as end_reason on the wire", () => {
+		dal.updateChannelStatus(id, "dead", undefined, "destroyed");
+		expect(dal.listChannels(sessionId).find((ch) => ch.id === id)?.endReason).toBe("destroyed");
+	});
+
+	it("names the terminals ended on purpose that are still listed, and only those", () => {
+		const exited = "ENDREASON03AAAAAAAAAAAAAAAAA";
+		const running = "ENDREASON04AAAAAAAAAAAAAAAAA";
+		dal.createChannel({ id: exited, sessionId, status: "live" });
+		dal.createChannel({ id: running, sessionId, status: "live" });
+		dal.updateChannelStatus(id, "dead", 9, "destroyed");
+		dal.updateChannelStatus(exited, "dead", 0);
+
+		expect(dal.listChannelsEndedOnPurpose()).toEqual([
+			{ id, sessionId, exitCode: 9, endReason: "destroyed" },
+		]);
+		dal.deleteChannel(id);
+		expect(dal.listChannelsEndedOnPurpose()).toEqual([]);
+	});
+
+	// Written by a later hub, say: nothing this one can act on.
+	it("reads a reason it does not know as none", () => {
+		dal.updateChannelStatus(id, "dead");
+		dbs.meta.prepare("UPDATE channels SET end_reason = 'something-else' WHERE id = ?").run(id);
+		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
+		expect(dal.listChannelsEndedOnPurpose()).toEqual([]);
+	});
+});
+
 // ─── Sweep methods ────────────────────────────────────────────────────────────
 
 describe("MetaDAL — markAllChannelsDead", () => {

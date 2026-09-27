@@ -119,6 +119,22 @@ export class StateBroadcaster {
 				});
 			}
 		}
+		// And the ones it ended on purpose that it still lists. A window that was
+		// away when one ended, or that opens later, learns why here rather than
+		// from a report it never heard: a pane finding such a terminal ended
+		// would otherwise take it for a shell that exited, and follow "When a
+		// terminal ends" to bring it back (#592).
+		const listed = new Set(channels.map((entry) => entry.channelId));
+		for (const ended of this.ctx.metaDal.listChannelsEndedOnPurpose()) {
+			if (listed.has(ended.id)) continue;
+			channels.push({
+				channelId: ended.id,
+				sessionId: ended.sessionId,
+				status: "dead",
+				...(ended.exitCode !== null && { exitCode: ended.exitCode }),
+				endReason: ended.endReason,
+			});
+		}
 		return { type: "STATE_SYNC", sessions, channels };
 	}
 
@@ -169,6 +185,11 @@ export class StateBroadcaster {
 	 * with it the terminals, whichever way their end reaches here. Nothing may
 	 * start again meanwhile, and a pane closing on one could delete a terminal
 	 * the next launch should still list.
+	 *
+	 * It is stored with the end, and cleared when the terminal runs again: a
+	 * pane that finds the end later, at a reload or the next launch, follows
+	 * "When a terminal ends" unless it reads there that the end was meant
+	 * (#592).
 	 */
 	updateChannelStatus(
 		channelId: string,
@@ -181,18 +202,20 @@ export class StateBroadcaster {
 		if (ch) {
 			ch.status = status;
 		}
-		this.ctx.metaDal.updateChannelStatus(channelId, status, exitCode);
+		const reason =
+			status !== "dead"
+				? undefined
+				: (endReason ?? (this.ctx.quitState === "QUITTING" ? "destroyed" : undefined));
+		this.ctx.metaDal.updateChannelStatus(channelId, status, exitCode, reason);
 
-		const reason = endReason ?? (this.ctx.quitState === "QUITTING" ? "destroyed" : undefined);
 		const stateMsg: ChannelStateMessage = {
 			type: "CHANNEL_STATE",
 			channelId,
 			sessionId,
 			status,
 			...(exitCode !== undefined && { exitCode }),
-			// Said with the end only, and not stored: an end found later is never
-			// acted on, so only the report heard as it happens needs it.
-			...(status === "dead" && reason !== undefined && { endReason: reason }),
+			// Said with the end only.
+			...(reason !== undefined && { endReason: reason }),
 		};
 		// Every client, as STATE_SYNC and CHANNEL_CREATED go: each of them holds
 		// every channel in its state, and a window can show a terminal without

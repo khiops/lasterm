@@ -1,4 +1,4 @@
-import type { Channel, ChannelStatus } from "@lasterm/shared";
+import type { Channel, ChannelEndReason, ChannelStatus } from "@lasterm/shared";
 import type Database from "better-sqlite3";
 
 import type { CreateChannelInput } from "./meta-types.js";
@@ -27,6 +27,7 @@ interface ChannelRow {
 	launch_profile_id: string | null;
 	elevated: number;
 	elevation_method: string | null;
+	end_reason: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -68,6 +69,8 @@ function rowToChannel(row: ChannelRow): Channel {
 	if (row.launch_profile_id != null) ch.launchProfileId = row.launch_profile_id;
 	if (row.elevated === 1) ch.elevated = true;
 	if (row.elevation_method != null) ch.elevationMethod = row.elevation_method;
+	// Only a reason this hub knows: anything else says nothing it can act on.
+	if (row.end_reason === "destroyed") ch.endReason = row.end_reason;
 	if (row.args && row.args !== "[]") {
 		try {
 			const parsed = JSON.parse(row.args) as string[];
@@ -175,17 +178,70 @@ export class ChannelsDAL {
 		return rows.map(rowToChannel);
 	}
 
-	updateChannelStatus(id: string, status: ChannelStatus, exitCode?: number): void {
+	/**
+	 * Record a channel's status, and why it ended when the hub ended it on
+	 * purpose (#592).
+	 *
+	 * `endReason` goes with `dead` only. A terminal that runs again has no end
+	 * to explain, so any other status clears it. One already dead keeps what
+	 * its end said when told again without a reason: a repeat of an end is not
+	 * a new one.
+	 */
+	updateChannelStatus(
+		id: string,
+		status: ChannelStatus,
+		exitCode?: number,
+		endReason?: ChannelEndReason,
+	): void {
 		const now = new Date().toISOString();
+		// On the right of SET, `status` and `end_reason` are the row's values before this update.
+		const endReasonSql = `end_reason = CASE
+				WHEN @status <> 'dead' THEN NULL
+				WHEN @endReason IS NOT NULL THEN @endReason
+				WHEN status = 'dead' THEN end_reason
+				ELSE NULL
+			END`;
+		const params = { id, status, endReason: endReason ?? null, updatedAt: now };
 		if (exitCode !== undefined) {
 			this.db
-				.prepare("UPDATE channels SET status = ?, exit_code = ?, updated_at = ? WHERE id = ?")
-				.run(status, exitCode, now, id);
+				.prepare(
+					`UPDATE channels SET status = @status, exit_code = @exitCode, ${endReasonSql},
+					 updated_at = @updatedAt WHERE id = @id`,
+				)
+				.run({ ...params, exitCode });
 		} else {
 			this.db
-				.prepare("UPDATE channels SET status = ?, updated_at = ? WHERE id = ?")
-				.run(status, now, id);
+				.prepare(
+					`UPDATE channels SET status = @status, ${endReasonSql}, updated_at = @updatedAt
+					 WHERE id = @id`,
+				)
+				.run(params);
 		}
+	}
+
+	/**
+	 * The terminals the hub ended on purpose that it still lists (#592): what a
+	 * client that connects is told of them, so that no pane brings one back.
+	 */
+	listChannelsEndedOnPurpose(): Array<{
+		id: string;
+		sessionId: string;
+		exitCode: number | null;
+		endReason: ChannelEndReason;
+	}> {
+		const rows = this.db
+			.prepare(
+				`SELECT id, session_id, exit_code FROM channels
+				 WHERE status = 'dead' AND end_reason = 'destroyed'
+				 ORDER BY created_at ASC`,
+			)
+			.all() as Array<{ id: string; session_id: string; exit_code: number | null }>;
+		return rows.map((r) => ({
+			id: r.id,
+			sessionId: r.session_id,
+			exitCode: r.exit_code,
+			endReason: "destroyed",
+		}));
 	}
 
 	/**
@@ -194,14 +250,15 @@ export class ChannelsDAL {
 	 * Restarting a terminal keeps the terminal: the same id, the same tab, the
 	 * same scrollback. What changes is the session it belongs to, which is a
 	 * new one whenever the hub has been restarted since — and a row left on a
-	 * closed session would be a channel nothing can reach.
+	 * closed session would be a channel nothing can reach. Its end is over:
+	 * neither its exit code nor why it ended stays with it (#592).
 	 */
 	reviveChannel(id: string, sessionId: string, cols: number, rows: number): boolean {
 		const now = new Date().toISOString();
 		const result = this.db
 			.prepare(
 				`UPDATE channels
-				 SET session_id = @sessionId, status = 'born', exit_code = NULL,
+				 SET session_id = @sessionId, status = 'born', exit_code = NULL, end_reason = NULL,
 				     cols = @cols, rows = @rows, updated_at = @updatedAt
 				 WHERE id = @id`,
 			)

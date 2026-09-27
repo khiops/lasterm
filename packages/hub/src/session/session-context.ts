@@ -206,6 +206,13 @@ export interface SharedSessionContext {
 	 * terminals that end meanwhile were ended by the hub (#580).
 	 */
 	stoppingAgents: Set<string>;
+	/**
+	 * Dead channels a SPAWN is bringing back under their own id, from the
+	 * moment it was accepted until the hub has its answer. A second one naming
+	 * the same channel meanwhile is refused: two windows following "When a
+	 * terminal ends" on one terminal must not start it twice (#592).
+	 */
+	startingChannels: Set<string>;
 	/** requestId → callback for pending agent responses */
 	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
 	/** '${hostname}:${port}' → fingerprint trusted for this session only (trust_once, not persisted) */

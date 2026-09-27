@@ -748,6 +748,31 @@ describe("DELETE /api/channels/:id", () => {
 		const dal = new MetaDAL(dbs.meta);
 		const channel = dal.getChannel(channelId);
 		expect(channel?.status).toBe("dead");
+		// Killed on purpose, though no terminal of this run held it: a pane that
+		// finds it ended does not bring it back (#592).
+		expect(channel?.endReason).toBe("destroyed");
+	});
+
+	// The list is what a pane reads when it finds its terminal ended at a reload
+	// or the next launch, whichever host it is on (#592).
+	it("is listed afterwards with why it ended, and a terminal that exited without", async () => {
+		const { channelId } = await createTestChannel("del-listed");
+		const { channelId: exitedId } = await createTestChannel("del-exited");
+		const { MetaDAL } = await import("../storage/meta.js");
+		new MetaDAL(dbs.meta).updateChannelStatus(exitedId, "dead", 0);
+
+		await server.inject({ method: "DELETE", url: `/api/channels/${channelId}` });
+
+		const rows = (await server.inject({ method: "GET", url: "/api/channels" })).json<
+			Array<Record<string, unknown>>
+		>();
+		expect(rows.find((row) => row.id === channelId)).toMatchObject({
+			status: "dead",
+			end_reason: "destroyed",
+		});
+		const exited = rows.find((row) => row.id === exitedId);
+		expect(exited).toMatchObject({ status: "dead", exit_code: 0 });
+		expect(exited).not.toHaveProperty("end_reason");
 	});
 
 	it("returns 200 for already-dead channel (idempotent)", async () => {

@@ -705,6 +705,72 @@ mod tests {
         }
     }
 
+    /// A terminal does not start with SIGPIPE ignored, nor any other signal
+    /// (#597). The Rust runtime ignores SIGPIPE in the agent, and every command
+    /// a terminal ran used to inherit that: `yes | head -1` printed a write
+    /// error instead of `yes` dying quietly.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_terminal_starts_with_no_signal_ignored() {
+        use tokio::io::AsyncReadExt;
+
+        // The agent's own state. The Rust runtime already set it; setting it
+        // again keeps the test independent of that and changes nothing here.
+        // SAFETY: SIG_IGN installs no handler.
+        let previous = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        assert_ne!(previous, libc::SIG_ERR, "could not ignore SIGPIPE");
+
+        let mut manager = PtyManager::new();
+        let args = vec![
+            "-c".to_string(),
+            "grep SigIgn /proc/self/status".to_string(),
+        ];
+        let (channel_id, _) = manager
+            .spawn(
+                OwnerId::legacy(),
+                None,
+                "/bin/sh",
+                &args,
+                None,
+                None,
+                80,
+                24,
+            )
+            .await
+            .expect("spawn terminal");
+        let mut reader = manager.reader_for(&channel_id).expect("terminal reader");
+        let mut process = manager.remove(&channel_id).expect("terminal process");
+
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), reader.read_to_end(&mut output))
+            .await
+            .expect("terminal output timed out")
+            .expect("read terminal output");
+        let status = tokio::time::timeout(Duration::from_secs(10), process.wait())
+            .await
+            .expect("terminal exit timed out")
+            .expect("wait for terminal exit");
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(status.success(), "grep failed: {status}, output {output:?}");
+        let ignored = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("SigIgn:"))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("no SigIgn line in {output:?}"));
+        let ignored = u64::from_str_radix(ignored, 16).expect("SigIgn is a hexadecimal mask");
+        let sigpipe = 1_u64 << (libc::SIGPIPE - 1);
+        assert_eq!(
+            ignored & sigpipe,
+            0,
+            "the terminal starts with SIGPIPE ignored (SigIgn {ignored:016x})"
+        );
+        assert_eq!(
+            ignored, 0,
+            "the terminal starts with signals ignored (SigIgn {ignored:016x})"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     mod linux_teardown_tests {
         use std::fs;

@@ -109,7 +109,7 @@ dependencies = [
 [[package]]
 name = "async-xpty"
 version = "0.1.0"
-source = "git+https://github.com/khiops/async-xpty?rev=fa6ed33b5fe86128fb89b63bfdc5cd5e1c5f1598#fa6ed33b5fe86128fb89b63bfdc5cd5e1c5f1598"
+source = "git+https://github.com/khiops/async-xpty?rev=8962d55ffbb0ae17d89db46f72f5f200c19bdd5d#8962d55ffbb0ae17d89db46f72f5f200c19bdd5d"
 dependencies = [
  "libc",
  "nix",

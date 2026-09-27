@@ -17,7 +17,6 @@ function makeHost(overrides: Partial<Host> = {}): Host {
 		iconType: "auto",
 		trustRemoteHints: "apply",
 		sortOrder: 0,
-		keepAliveSeconds: 60,
 		historyRetentionDays: 30,
 		hostGroup: "production",
 		createdAt: "2026-01-01T00:00:00Z",

@@ -88,6 +88,12 @@ CREATE TABLE hosts (
 );
 ```
 
+Migration 006 added `keep_alive_seconds INTEGER DEFAULT 60`, the "Keep Alive (s)" a host used to
+show. Nothing ever read it, and the SSH keepalive is fixed (SPEC.md § 5.5), so the setting was
+removed and the hub neither reads nor writes the column. It stays, rather than being dropped by a
+migration: a hub older than that removal, opened on this database, carries on past a schema newer
+than its own (§ 9.1) and still names the column when it creates a host.
+
 ### 3.2 channel_groups
 
 ```sql

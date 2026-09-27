@@ -428,29 +428,14 @@
 									placeholder="e.g., /usr/local/bin/my-elevate"
 								/>
 							</div>
-							<div class="form-row">
-								<div class="field flex-1">
-									<label class="field-label">
-										Keep Alive (s)
-									</label>
-									<input
-										v-model.number="form.keepAliveSeconds"
-										type="number"
-										class="field-input"
-										min="0"
-									/>
-								</div>
-								<div class="field flex-1">
-									<label class="field-label">
-										History (days)
-									</label>
-									<input
-										v-model.number="form.historyRetentionDays"
-										type="number"
-										class="field-input"
-										min="1"
-									/>
-								</div>
+							<div class="field">
+								<label class="field-label">History (days)</label>
+								<input
+									v-model.number="form.historyRetentionDays"
+									type="number"
+									class="field-input"
+									min="1"
+								/>
 							</div>
 							<div class="field">
 								<label class="field-label">Remote Hints</label>

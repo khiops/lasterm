@@ -25,10 +25,9 @@
  * a connection that was still alive.
  *
  * A constant rather than a setting: no other SSH timing is one (the handshake,
- * HELLO and reconnect bounds are all fixed). A host's settings do show a "Keep
- * Alive (s)" value, `keepAliveSeconds`, but it has never been read by anything,
- * and every host stores 60 there: taken as the interval, a vanished host would
- * go unnoticed for three to four minutes.
+ * HELLO and reconnect bounds are all fixed), and a host that could turn it off
+ * would bring #605 back for itself. Hosts used to show a "Keep Alive (s)" value
+ * that nothing read; it is gone, and its column is left unused (STORAGE.md § 3.1).
  */
 export const SSH_KEEPALIVE = {
 	/** Milliseconds between two keepalive requests. */

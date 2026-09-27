@@ -35,7 +35,6 @@ export interface CreateHostInput {
 	sshRemoteDaemon?: boolean | null;
 	sshProxyFingerprint?: string | null;
 	sshUser?: string | null;
-	keepAliveSeconds?: number;
 	historyRetentionDays?: number;
 	elevationMethod?: ElevationMethod | null;
 	customCommand?: string | null;

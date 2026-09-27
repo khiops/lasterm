@@ -122,9 +122,11 @@ describe("TerminalPane restart", () => {
 		);
 	});
 
+	// Under way, the card gives way to "Restarting…" (#595): nothing to press
+	// again while it takes its time over SSH.
 	it("shows why a restart failed, and that one is under way", () => {
 		expect(SOURCE).toContain("Could not restart it: {{ restartFailure }}");
-		expect(SOURCE).toContain(':disabled="restarting"');
+		expect(SOURCE).toContain("restarting: restarting.value,");
 	});
 });
 
@@ -133,7 +135,9 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 	// connected" over a terminal it knows has ended.
 	it("covers its terminal with what paneCover decides", () => {
 		expect(SOURCE).toMatch(/v-if="cover === 'not-connected'" class="detached-banner"/);
-		expect(SOURCE).toMatch(/v-if="cover === 'exited' \|\| cover === 'gone'" class="exit-overlay"/);
+		// The card, or the line in its place, from the cover (#595).
+		expect(SOURCE).toMatch(/v-if="endedView\.kind === 'card'" class="exit-overlay"/);
+		expect(SOURCE).toMatch(/endedPaneShows\(\{\s*cover: cover\.value,/);
 		expect(SOURCE).toMatch(/status: channelsStore\.statusOf\(effectiveChannelId\.value\)/);
 	});
 
@@ -200,6 +204,24 @@ describe("TerminalPane covers its terminal with what the hub answers now (#559)"
 		expect(takeAnswer, "takeAnswer moved").toContain("hasEnded.value = facts.ended;");
 		expect(takeAnswer).toContain("isGone.value = facts.gone;");
 		expect(takeAnswer).toContain("isDetached.value = facts.detached;");
+	});
+});
+
+// A pane over an ended local terminal, in a global tab, showed an empty
+// terminal with no overlay, no lock and no Restart once the sidebar had moved
+// to the Raspberry Pi (#594). It had not attached, since the list said its
+// terminal had ended, and it had kept nothing of that: its cover read the
+// list of the host in view, which no longer carried it.
+describe("TerminalPane over an ended terminal of the host not in view (#594)", () => {
+	it("keeps the end it knew of when it did not attach, whatever list is in view", () => {
+		const open = body(/async function openChannel\(/);
+		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
+		expect(deadBranch, "the branch moved").not.toBe("");
+		// As the hub's CHANNEL_DEAD would have: hasEnded, which paneCover reads
+		// whatever the status says (pane-cover.spec.ts).
+		expect(deadBranch).toContain("takeAnswer(props.channelId, factsFromKnownEnd());");
+		expect(body(/function takeAnswer\(/)).toContain("hasEnded.value = facts.ended;");
+		expect(SOURCE).toMatch(/ended: hasEnded\.value,/);
 	});
 });
 
@@ -282,7 +304,7 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 
 describe("TerminalPane overlay (#574)", () => {
 	const overlay =
-		/<div v-if="cover === 'exited' \|\| cover === 'gone'" class="exit-overlay">[\s\S]*?\n\t\t<\/div>\n/.exec(
+		/<div v-if="endedView\.kind === 'card'" class="exit-overlay">[\s\S]*?\n\t\t<\/div>\n/.exec(
 			SOURCE.replace(/\r\n/g, "\n"),
 		)?.[0] ?? "";
 
@@ -434,9 +456,10 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 			/if \(reaction\.kind === 'overlay'\) \{[\s\S]*?return;/.exec(onEnded)?.[0] ?? "";
 		expect(overlayBranch).toContain("waitingAnswer.endFound(facts.endReason);");
 
+		// takeAnswer hands an end to onTerminalEnded (checked above).
 		const open = body(/async function openChannel\(/);
 		expect(open).toMatch(
-			/if \(isDead\.value\) \{\s*ready\.value = true;\s*onTerminalEnded\(endWatch\.ended\(props\.channelId\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
+			/if \(isDead\.value\) \{\s*ready\.value = true;\s*takeAnswer\(props\.channelId, factsFromKnownEnd\(\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
 		);
 	});
 
@@ -469,6 +492,70 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 			/const \{ profile: resolvedProfile, resolvedFor \} = useResolvedProfile\(/,
 		);
 		expect(SOURCE).toContain("import { useWindowFocus } from '../composables/useWindowFocus.js';");
+	});
+});
+
+// ─── The card only when the pane asks (#595) ─────────────────────────────────
+//
+// Which of the card and the quiet line shows, and what the line says, is
+// endedPaneShows's to decide (exit-action.spec.ts). These check that the pane
+// feeds it what it knows, and shows what it answers.
+
+describe("TerminalPane shows the card only when it asks (#595)", () => {
+	it("feeds endedPaneShows what it knows", () => {
+		const view = /const endedView = computed\(\(\) =>[\s\S]*?\r?\n\);/.exec(SOURCE)?.[0] ?? "";
+		expect(view, "endedView moved").not.toBe("");
+		expect(view).toContain("cover: cover.value,");
+		// Still opening, it says "Connecting…", and has not taken in the end yet.
+		expect(view).toContain("opening: !ready.value,");
+		expect(view).toContain("restarting: restarting.value,");
+		// The end the setting has still to answer, from useWaitingAnswer.
+		expect(view).toContain("found: waitingAnswer.found.value,");
+		expect(view).toContain("settingOverdue: waitingAnswer.settingOverdue.value,");
+		expect(view).toContain("exitMessage: exitMessage.value,");
+	});
+
+	it("shows the card when it says so, and the quiet line in its place otherwise", () => {
+		expect(SOURCE).toMatch(/<div v-if="endedView\.kind === 'card'" class="exit-overlay">/);
+		expect(SOURCE).toMatch(
+			/<span v-if="endedView\.kind === 'quiet'" class="exit-status__text">\{\{ endedView\.text \}\}<\/span>/,
+		);
+		// A restart under way no longer shows on the card, which gives way to it.
+		expect(SOURCE).not.toContain(':disabled="restarting"');
+	});
+
+	// Announced politely, and heard: a live region already in the page when
+	// its text changes.
+	it("tells a screen reader the quiet line, without taking the keyboard", () => {
+		expect(SOURCE).toMatch(
+			/<div class="exit-status" role="status">\s*<span v-if="endedView\.kind === 'quiet'"/,
+		);
+		const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
+		const status = /\n\.exit-status \{([^}]*)\}/.exec(style)?.[1] ?? "";
+		expect(status, "the .exit-status rule moved").toMatch(/pointer-events:\s*none/);
+	});
+
+	// When the setting turns out to ask, or a restart failed, the card comes up
+	// after the line, and takes the keyboard as it did before.
+	it("gives the keyboard to the card each time it comes up", () => {
+		const watcher =
+			/watch\(\s*\(\) => endedView\.value\.kind === 'card',[\s\S]*?\{ immediate: true \},\s*\);/.exec(
+				SOURCE,
+			)?.[0] ?? "";
+		expect(watcher, "the card watcher moved").not.toBe("");
+		expect(watcher).toContain("alwaysOn.value = false;");
+		expect(watcher).toContain("void nextTick(focusOverlay);");
+	});
+
+	// An end seen live that the setting restarts: the dead report and the
+	// restart are one step, so the card has no moment to show in.
+	it("starts a live restart before anything is drawn", () => {
+		expect(body(/function onTerminalEnded\(/)).toContain(
+			"if (reaction.kind === 'restart') void onRestart();",
+		);
+		const onRestart = body(/async function onRestart\(/);
+		expect(onRestart.indexOf("restarting.value = true;")).toBeGreaterThan(-1);
+		expect(onRestart.indexOf("restarting.value = true;")).toBeLessThan(onRestart.indexOf("await "));
 	});
 });
 
@@ -524,6 +611,8 @@ describe("TerminalPane overlay card contrast (#574)", () => {
 		"where, chosen": [".exit-card", ".exit-scope-option", ".exit-scope-option--on"],
 		button: [".exit-card", ".exit-btn"],
 		Restart: [".exit-card", ".exit-btn", ".exit-btn--primary"],
+		// In place of the card, while the setting acts (#595).
+		"quiet line": [".exit-status__text"],
 	};
 
 	function pair(rules: string[]): { text: string; ground: string } {

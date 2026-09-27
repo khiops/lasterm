@@ -1,5 +1,5 @@
 import type { ChannelEndReason } from "@lasterm/shared";
-import { onScopeDispose, type Ref, watch } from "vue";
+import { computed, onScopeDispose, type Ref, readonly, ref, shallowRef, watch } from "vue";
 import { useConfigStore } from "../stores/config.js";
 import {
 	type AlwaysChoice,
@@ -8,6 +8,7 @@ import {
 	type EndHold,
 	type FoundEnd,
 	type OverlayAction,
+	SETTING_READ_GRACE_MS,
 	type WaitingOverlay,
 	type WhenEnded,
 } from "../utils/exit-action.js";
@@ -32,7 +33,7 @@ export interface WaitingAnswerSources {
 	act: (action: OverlayAction) => void;
 }
 
-/** What the pane tells its waiting overlay. */
+/** What the pane tells its waiting overlay, and what it hears back. */
 export interface WaitingAnswerHandle {
 	/**
 	 * Its terminal was found ended, and this is the first it hears of that end
@@ -40,6 +41,14 @@ export interface WaitingAnswerHandle {
 	 * `endReason` is what the hub said of it then, if anything.
 	 */
 	endFound(endReason?: ChannelEndReason): void;
+	/**
+	 * The end found that the setting has still to answer, as it stands now:
+	 * what the pane shows in place of its card meanwhile (#595). Null once it
+	 * is answered, or when there is none.
+	 */
+	found: Readonly<Ref<FoundEnd | null>>;
+	/** That end has waited `SETTING_READ_GRACE_MS` for its setting to be read. */
+	settingOverdue: Readonly<Ref<boolean>>;
 }
 
 /**
@@ -54,6 +63,10 @@ export interface WaitingAnswerHandle {
  * It stops waiting when it acts, when it leaves the screen without having
  * acted (for a choice), when its overlay goes, and when the pane is handed
  * another terminal. Of the two, whichever acts first answers for both.
+ *
+ * Meanwhile it tells the pane the end the setting has still to answer, and
+ * whether its setting has been too long in coming: the pane shows a quiet
+ * line in place of its card until the setting asks (#595).
  */
 export function useWaitingAnswer(sources: WaitingAnswerSources): WaitingAnswerHandle {
 	const configStore = useConfigStore();
@@ -61,7 +74,18 @@ export function useWaitingAnswer(sources: WaitingAnswerSources): WaitingAnswerHa
 	/** The choice this overlay waits to follow, and whether it has been on screen since. */
 	let followed: { choice: AlwaysChoice; wasInView: boolean } | null = null;
 	/** An end found, waiting on the setting, and why the hub said it ended when it was found. */
-	let found: { endReason: ChannelEndReason | undefined } | null = null;
+	const found = shallowRef<{ endReason: ChannelEndReason | undefined } | null>(null);
+	/** That end has waited too long for its setting to be read: the pane asks. */
+	const settingOverdue = ref(false);
+	let overdueTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/** Forget the end found, and stop waiting for its setting. */
+	function dropFound(): void {
+		found.value = null;
+		settingOverdue.value = false;
+		if (overdueTimer !== null) clearTimeout(overdueTimer);
+		overdueTimer = null;
+	}
 
 	function overlay(wasInView: boolean): WaitingOverlay {
 		return {
@@ -86,7 +110,7 @@ export function useWaitingAnswer(sources: WaitingAnswerSources): WaitingAnswerHa
 		}
 		followed = null;
 		if (verdict !== "act") return;
-		found = null;
+		dropFound();
 		sources.act(current.choice.action);
 	}
 
@@ -106,11 +130,11 @@ export function useWaitingAnswer(sources: WaitingAnswerSources): WaitingAnswerHa
 
 	/** Act, keep waiting, or stop: what the setting says now of the end found. */
 	function answerFound(): void {
-		const current = found;
+		const current = found.value;
 		if (current === null) return;
 		const verdict = answerFoundEnd(foundEnd(current.endReason));
 		if (verdict === "wait") return;
-		found = null;
+		dropFound();
 		const action = sources.whenEnded.value;
 		if (verdict !== "act" || action === "ask") return;
 		followed = null;
@@ -131,7 +155,7 @@ export function useWaitingAnswer(sources: WaitingAnswerSources): WaitingAnswerHa
 	watch([sources.waiting, sources.channelId], ([waiting, channelId], [, channelBefore]) => {
 		if (!waiting || channelId !== channelBefore) {
 			followed = null;
-			found = null;
+			dropFound();
 		}
 	});
 	watch(
@@ -151,14 +175,27 @@ export function useWaitingAnswer(sources: WaitingAnswerSources): WaitingAnswerHa
 		},
 	);
 
-	onScopeDispose(stopHearing);
+	onScopeDispose(() => {
+		stopHearing();
+		dropFound();
+	});
 
 	return {
 		endFound(endReason) {
 			// Only over an overlay up and waiting: not one restarting.
 			if (!sources.waiting.value) return;
-			found = { endReason };
+			dropFound();
+			found.value = { endReason };
+			// A setting that cannot be read must not leave the pane without its
+			// card (#595): past the grace, it asks, and the setting still answers
+			// if it is read after all.
+			overdueTimer = setTimeout(() => {
+				overdueTimer = null;
+				settingOverdue.value = true;
+			}, SETTING_READ_GRACE_MS);
 			answerFound();
 		},
+		found: computed(() => (found.value === null ? null : foundEnd(found.value.endReason))),
+		settingOverdue: readonly(settingOverdue),
 	};
 }

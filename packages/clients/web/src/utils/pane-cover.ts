@@ -53,7 +53,20 @@ export function factsFromAttachOk(cached: boolean): AttachFacts {
  * saying anything about the terminal, and the pane keeps what it knew.
  */
 export function factsFromRefusal(code: string | undefined): AttachFacts | null {
-	if (code === "CHANNEL_DEAD") return { ended: true, gone: false, detached: false };
+	if (code === "CHANNEL_DEAD") return factsFromKnownEnd();
 	if (code === "CHANNEL_NOT_FOUND") return { ended: false, gone: true, detached: false };
 	return null;
+}
+
+/**
+ * What a pane knows when the client already says its terminal has ended, and
+ * it does not attach: what the hub would answer, CHANNEL_DEAD.
+ *
+ * The pane keeps it as its own. It learnt it from the list of the host in
+ * view, and that list changes with the rail: a pane over an ended terminal of
+ * the host just left went blank, with no overlay, no lock and nothing to
+ * type into, though its terminal was as ended as before (#594).
+ */
+export function factsFromKnownEnd(): AttachFacts {
+	return { ended: true, gone: false, detached: false };
 }

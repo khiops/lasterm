@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
+import { useHostsStore } from "./hosts.js";
 import { useSessionStore } from "./session.js";
 
 // ---------------------------------------------------------------------------
@@ -1611,5 +1612,162 @@ describe("useChannelsStore — restartChannel failures", () => {
 
 		expect(ok).toBe(true);
 		expect(store.restartFailures.has("ch-dead")).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The host in view: the rail's, and nothing else's (#594)
+// ---------------------------------------------------------------------------
+//
+// Tabs are global, so a pane can bring back a terminal of a host the rail is
+// not on: a Restart on its overlay, or the setting answering an end found at
+// launch (#592). The SPAWN_OK that followed fetched that host's list, and the
+// sidebar showed the Raspberry Pi's terminals under a rail still on "local".
+// Clicking "local" did nothing, since the rail was already there.
+
+describe("useChannelsStore — the host in view (#594)", () => {
+	function row(id: string, hostId: string, status: string): Record<string, unknown> {
+		return {
+			id,
+			session_id: "sess-1",
+			host_id: hostId,
+			display_title: id,
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status,
+			created_at: "2026-01-01T00:00:00Z",
+			updated_at: "2026-01-01T00:00:00Z",
+		};
+	}
+
+	const LOCAL = [row("local-dead", "host-local", "dead"), row("local-live", "host-local", "live")];
+	const PI = [row("pi-dead", "host-pi", "dead"), row("pi-live", "host-pi", "live")];
+
+	/** The hub: each host's list, the index of every host, and no groups. */
+	function listings(): void {
+		mockFetch.mockImplementation((url: string) => {
+			const host = /host_id=([^&]+)/.exec(url)?.[1];
+			let body: Record<string, unknown>[] = [...LOCAL, ...PI];
+			if (url.includes("/api/groups")) body = [];
+			else if (host === "host-local") body = LOCAL;
+			else if (host === "host-pi") body = PI;
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+	}
+
+	/** A socket whose SPAWNs the test answers, when it says. */
+	function spawnsAnsweredByHand(): { answer: (channelId: string) => void } {
+		const listeners = new Map<string, ((msg: unknown) => void)[]>();
+		const sessionStore = useSessionStore();
+		// @ts-expect-error — overwrite reactive wsClient for test
+		sessionStore.wsClient = {
+			on: vi.fn((type: string, cb: (msg: unknown) => void) => {
+				listeners.set(type, [...(listeners.get(type) ?? []), cb]);
+				return () => {
+					listeners.set(
+						type,
+						(listeners.get(type) ?? []).filter((c) => c !== cb),
+					);
+				};
+			}),
+			send: vi.fn(),
+		};
+		return {
+			answer: (channelId) => {
+				for (const cb of listeners.get("SPAWN_OK") ?? []) cb({ type: "SPAWN_OK", channelId });
+			},
+		};
+	}
+
+	/** Every fetch started so far has settled. */
+	async function settled(): Promise<void> {
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+	}
+
+	beforeEach(() => {
+		localStorageMap.set("lasterm_token", "test-token");
+		listings();
+	});
+
+	it("stays on the rail's host when a terminal of another host is brought back", async () => {
+		const hub = spawnsAnsweredByHand();
+		const hosts = useHostsStore();
+		const store = useChannelsStore();
+		// What App does when the rail selects a host.
+		hosts.selectHost("host-local");
+		await store.fetchChannels("host-local");
+
+		// A tab over the Pi's ended terminal, restarted from its pane.
+		const restarted = store.restartChannel("pi-dead", "host-pi");
+		hub.answer("pi-dead");
+		expect(await restarted).toBe(true);
+		await settled();
+
+		expect(store.activeHostId).toBe(hosts.selectedHostId);
+		expect(store.channels.map((c) => c.id)).toEqual(["local-dead", "local-live"]);
+		// The Pi's terminal is still known, as every host's is.
+		expect(store.channelIndex.get("pi-dead")?.hostId).toBe("host-pi");
+	});
+
+	it("keeps the host the rail moved to when a spawn on the one it left is answered", async () => {
+		const hub = spawnsAnsweredByHand();
+		const store = useChannelsStore();
+		await store.fetchChannels("host-local");
+
+		const spawned = store.spawnChannel("host-local");
+		// The rail moves to the Pi before the hub answers.
+		await store.fetchChannels("host-pi");
+		hub.answer("local-new");
+		await spawned;
+		await settled();
+
+		expect(store.activeHostId).toBe("host-pi");
+		expect(store.channels.map((c) => c.id)).toEqual(["pi-dead", "pi-live"]);
+	});
+
+	it("still refreshes its list after a spawn on the host in view", async () => {
+		const hub = spawnsAnsweredByHand();
+		const store = useChannelsStore();
+		await store.fetchChannels("host-local");
+		mockFetch.mockClear();
+
+		const spawned = store.spawnChannel("host-local");
+		hub.answer("local-new");
+		await spawned;
+		await settled();
+
+		expect(mockFetch.mock.calls.map(([url]) => String(url))).toContainEqual(
+			expect.stringContaining("/api/channels?host_id=host-local"),
+		);
+	});
+
+	// A pane over a terminal of the host not in view reads its status here:
+	// the list does not carry it, and no report may have come this session.
+	it("knows that a terminal of a host not in view ended", async () => {
+		const store = useChannelsStore();
+		await store.fetchChannels("host-local");
+		await store.fetchChannels("host-pi");
+
+		// From the list it was in when its host was in view…
+		expect(store.statusOf("local-dead")).toBe("dead");
+
+		// …and from the index of every host, at launch.
+		setActivePinia(createPinia());
+		const fresh = useChannelsStore();
+		await fresh.fetchChannels("host-pi");
+		await fresh.fetchChannelIndex();
+		expect(fresh.statusOf("local-dead")).toBe("dead");
+		// That one runs is for the hub's reports to say.
+		expect(fresh.statusOf("local-live")).toBeUndefined();
+	});
+
+	it("takes the hub's word over the index once it says the terminal runs", async () => {
+		const store = useChannelsStore();
+		await store.fetchChannels("host-pi");
+		await store.fetchChannelIndex();
+
+		store.updateChannelStatus("local-dead", "live");
+		expect(store.statusOf("local-dead")).toBe("live");
 	});
 });

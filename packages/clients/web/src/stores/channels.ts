@@ -130,6 +130,11 @@ export interface ChannelIndexEntry {
 	directProcess?: true;
 	/** It ended, and the hub ended it itself: killed, or stopped with its agent or hub (#592). */
 	endReason?: ChannelEndReason;
+	/**
+	 * It had ended when the listing was read: what `statusOf` says of a
+	 * terminal no list in view carries and no report has spoken of (#594).
+	 */
+	ended?: true;
 }
 
 export const useChannelsStore = defineStore("channels", () => {
@@ -222,7 +227,14 @@ export const useChannelsStore = defineStore("channels", () => {
 		restartFailures.value = next;
 	}
 
-	/** Channels that belong to the currently loaded host. */
+	/**
+	 * The host whose list is loaded: the one the rail has selected.
+	 *
+	 * `fetchChannels` sets it, and only a change of host in the rail calls it
+	 * with another host than this one: the rail and the sidebar must say the
+	 * same host (#594). A refresh after a spawn elsewhere goes to the index
+	 * instead (`refreshAfterSpawn`).
+	 */
 	const activeHostId = ref<string | null>(null);
 
 	/**
@@ -335,6 +347,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					displayTitle: title,
 					...(directProcess && { directProcess: true as const }),
 					...(endReason !== undefined && { endReason }),
+					...(row.status === "dead" && { ended: true as const }),
 				});
 				nextHostMap.set(id, rowHostId);
 			}
@@ -466,6 +479,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					displayTitle: ch.displayTitle ?? "",
 					...(ch.directProcess === true && { directProcess: true as const }),
 					...(ch.status === "dead" && ch.endReason !== undefined && { endReason: ch.endReason }),
+					...(ch.status === "dead" && { ended: true as const }),
 				});
 			}
 			channelHostMap.value = nextHostMap;
@@ -584,12 +598,23 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	/**
 	 * A channel's status as this client knows it: the list of the host in view
-	 * where it is listed, what the hub last reported otherwise.
+	 * where it is listed, what the hub last reported otherwise, and else that
+	 * it had ended when the index was read, whichever host it is on.
+	 *
+	 * Tabs are global: a pane can front an ended terminal of a host whose list
+	 * is not the one in view, with no report of it this session. Without the
+	 * index, such a pane had nothing to say its terminal had ended (#594).
+	 * The index says nothing of one that runs: a report does, and a report of
+	 * it running wins over the index saying it had ended.
 	 */
 	function statusOf(channelId: string | null): Channel["status"] | undefined {
 		if (channelId === null) return undefined;
 		const listed = channels.value.find((c) => c.id === channelId);
-		return listed?.status ?? reports.value.get(channelId)?.status;
+		return (
+			listed?.status ??
+			reports.value.get(channelId)?.status ??
+			(channelIndex.value.get(channelId)?.ended === true ? "dead" : undefined)
+		);
 	}
 
 	/**
@@ -891,6 +916,22 @@ export const useChannelsStore = defineStore("channels", () => {
 	// WS: spawn a new channel on a host
 	// -------------------------------------------------------------------------
 
+	/**
+	 * Learn what a spawn on `hostId` changed, without changing the host in view.
+	 *
+	 * The list is the host in view's, and only the rail chooses that host. A
+	 * spawn can be on another one: a pane of a global tab bringing its terminal
+	 * back, by its Restart or by the setting (#592), or a spawn answered after
+	 * the rail moved. Fetching that host's list made it the host in view behind
+	 * the rail's back, and the sidebar showed its terminals under a rail still
+	 * on the other host, whose click then did nothing (#594). There, the index
+	 * is what learns the terminal: its title, its host, that it runs.
+	 */
+	function refreshAfterSpawn(hostId: string): void {
+		if (activeHostId.value === hostId) void fetchChannels(hostId);
+		else void fetchChannelIndex();
+	}
+
 	function spawnChannel(
 		hostId: string,
 		opts?: {
@@ -949,7 +990,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				if (msg.type === "SPAWN_OK") {
 					clearTimeout(timer);
 					stopWaiting();
-					void fetchChannels(hostId);
+					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);
 					}

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { factsFromAttachOk, factsFromRefusal, type PaneFacts, paneCover } from "./pane-cover.js";
+import {
+	factsFromAttachOk,
+	factsFromKnownEnd,
+	factsFromRefusal,
+	type PaneFacts,
+	paneCover,
+} from "./pane-cover.js";
 
 const plain: PaneFacts = { status: "live", ended: false, gone: false, detached: false };
 
@@ -60,5 +66,18 @@ describe("what an answer to an ATTACH says", () => {
 	it("any other failure is no answer, and changes nothing", () => {
 		expect(factsFromRefusal(undefined)).toBeNull();
 		expect(factsFromRefusal("AGENT_ERROR")).toBeNull();
+	});
+});
+
+// A pane that did not attach, because the client already said its terminal
+// had ended, knows what the hub would have answered (#594).
+describe("an end the client already knew of", () => {
+	it("is what the hub's refusal would have said", () => {
+		expect(factsFromKnownEnd()).toEqual(factsFromRefusal("CHANNEL_DEAD"));
+	});
+
+	// The list that told it was the host in view's; the rail changes that.
+	it("keeps the overlay once no list in view carries the terminal", () => {
+		expect(paneCover({ status: undefined, ...factsFromKnownEnd() })).toBe("exited");
 	});
 });

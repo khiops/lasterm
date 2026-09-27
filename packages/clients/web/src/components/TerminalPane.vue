@@ -208,7 +208,13 @@ import {
 	alwaysScopeOf,
 	settingReadFor,
 } from '../utils/exit-action.js';
-import { type AttachFacts, factsFromAttachOk, factsFromRefusal, paneCover } from '../utils/pane-cover.js';
+import {
+	type AttachFacts,
+	factsFromAttachOk,
+	factsFromKnownEnd,
+	factsFromRefusal,
+	paneCover,
+} from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import SearchOverlay from './SearchOverlay.vue';
@@ -759,13 +765,15 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			} else {
 				// A terminal already known to have ended is not asked for: the
 				// hub would answer CHANNEL_DEAD, which is what the overlay says.
-				// Mark ready so the overlay renders immediately. Found, not seen:
+				// Mark ready so the overlay renders immediately. The pane takes
+				// that answer as its own: what told it may be the list of the
+				// host in view, which the rail changes (#594). Found, not seen:
 				// the setting answers it once the pane is on screen (#592). The
 				// pane still takes its profile and its bell below, for the
 				// terminal a restart brings back under it.
 				if (isDead.value) {
 					ready.value = true;
-					onTerminalEnded(endWatch.ended(props.channelId));
+					takeAnswer(props.channelId, factsFromKnownEnd());
 				} else {
 					// Existing channel — reattach (fetch snapshot + tail).
 					// Write-lock state is set by the WRITE_LOCK WS message handler

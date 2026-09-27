@@ -203,6 +203,24 @@ describe("TerminalPane covers its terminal with what the hub answers now (#559)"
 	});
 });
 
+// A pane over an ended local terminal, in a global tab, showed an empty
+// terminal with no overlay, no lock and no Restart once the sidebar had moved
+// to the Raspberry Pi (#594). It had not attached, since the list said its
+// terminal had ended, and it had kept nothing of that: its cover read the
+// list of the host in view, which no longer carried it.
+describe("TerminalPane over an ended terminal of the host not in view (#594)", () => {
+	it("keeps the end it knew of when it did not attach, whatever list is in view", () => {
+		const open = body(/async function openChannel\(/);
+		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
+		expect(deadBranch, "the branch moved").not.toBe("");
+		// As the hub's CHANNEL_DEAD would have: hasEnded, which paneCover reads
+		// whatever the status says (pane-cover.spec.ts).
+		expect(deadBranch).toContain("takeAnswer(props.channelId, factsFromKnownEnd());");
+		expect(body(/function takeAnswer\(/)).toContain("hasEnded.value = facts.ended;");
+		expect(SOURCE).toMatch(/ended: hasEnded\.value,/);
+	});
+});
+
 describe("TerminalPane lock indicator", () => {
 	// A terminal on another host that has ended is in no list the pane can
 	// read, so `isDead` stays false: the indicator offered "No lock" under an
@@ -434,9 +452,10 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 			/if \(reaction\.kind === 'overlay'\) \{[\s\S]*?return;/.exec(onEnded)?.[0] ?? "";
 		expect(overlayBranch).toContain("waitingAnswer.endFound(facts.endReason);");
 
+		// takeAnswer hands an end to onTerminalEnded (checked above).
 		const open = body(/async function openChannel\(/);
 		expect(open).toMatch(
-			/if \(isDead\.value\) \{\s*ready\.value = true;\s*onTerminalEnded\(endWatch\.ended\(props\.channelId\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
+			/if \(isDead\.value\) \{\s*ready\.value = true;\s*takeAnswer\(props\.channelId, factsFromKnownEnd\(\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
 		);
 	});
 

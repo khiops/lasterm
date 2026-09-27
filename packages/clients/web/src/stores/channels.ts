@@ -56,15 +56,15 @@ function apiRowToChannel(row: Record<string, unknown>): Channel {
 	if (row.dynamic_title != null) ch.dynamicTitle = row.dynamic_title as string;
 	if (row.process_title != null) ch.processTitle = row.process_title as string;
 	if (row.display_title != null) ch.displayTitle = row.display_title as string;
-	// A dead terminal the hub ended on purpose: no pane brings it back (#592).
+	// A dead terminal the hub ended itself: no pane brings back one killed (#592).
 	const endReason = endReasonOfRow(row);
 	if (endReason !== undefined) ch.endReason = endReason;
 	return ch;
 }
 
-/** Why a listed terminal ended, when the hub says it ended it on purpose (#592). */
+/** Why a listed terminal ended, when the hub says it ended it itself (#592). */
 function endReasonOfRow(row: Record<string, unknown>): ChannelEndReason | undefined {
-	return row.end_reason === "destroyed" ? "destroyed" : undefined;
+	return row.end_reason === "killed" || row.end_reason === "stopped" ? row.end_reason : undefined;
 }
 
 /** Convert a snake_case group row from the API to a camelCase ChannelGroup. */
@@ -128,7 +128,7 @@ export interface ChannelIndexEntry {
 	hostId: string;
 	displayTitle: string;
 	directProcess?: true;
-	/** It ended, and the hub ended it on purpose (#592). */
+	/** It ended, and the hub ended it itself: killed, or stopped with its agent or hub (#592). */
 	endReason?: ChannelEndReason;
 }
 
@@ -327,8 +327,8 @@ export const useChannelsStore = defineStore("channels", () => {
 				// is in view: its overlay offers Configure, and it is not restarted
 				// on its own (#574).
 				const directProcess = row.direct_process === 1 || row.direct_process === true;
-				// And, for one that ended, whether the hub ended it on purpose: such
-				// an end, found by a pane, keeps asking (#592).
+				// And, for one that ended, whether the hub ended it itself: a kill,
+				// found by a pane, keeps asking (#592).
 				const endReason = row.status === "dead" ? endReasonOfRow(row) : undefined;
 				nextIndex.set(id, {
 					hostId: rowHostId,
@@ -563,15 +563,15 @@ export const useChannelsStore = defineStore("channels", () => {
 	}
 
 	/**
-	 * Whether the hub ended this terminal on purpose (#580), as far as this
-	 * window has heard: `destroyed`, or nothing for a terminal that ended by
+	 * Whether the hub ended this terminal itself (#580), as far as this window
+	 * has heard: `killed`, `stopped`, or nothing for a terminal that ended by
 	 * itself or has not ended.
 	 *
 	 * A pane that finds its terminal ended reads it here, rather than on a
 	 * report it may never have heard (#592). The hub's last report wins: every
-	 * socket starts with a STATE_SYNC that names the terminals it ended on
-	 * purpose, and one that runs again or ends again is reported. Without one,
-	 * the list of the host in view says, then the index, whichever host it is on.
+	 * socket starts with a STATE_SYNC that names the terminals killed, and one
+	 * that runs again or ends again is reported. Without one, the list of the
+	 * host in view says, then the index, whichever host it is on.
 	 */
 	function endReasonOf(channelId: string | null): ChannelEndReason | undefined {
 		if (channelId === null) return undefined;
@@ -675,9 +675,9 @@ export const useChannelsStore = defineStore("channels", () => {
 		// (#559). A status the report already has is left as it is: a new report
 		// is news to a pane, and this is not.
 		//
-		// It also names the terminals the hub ended on purpose, dead: a pane that
-		// finds one of them ended reads why here, having heard no report of it
-		// (#592). That is news too when the report had it dead for no reason.
+		// It also names the terminals killed, dead: a pane that finds one of them
+		// ended reads why here, having heard no report of it (#592). That is news
+		// too when the report had it dead for no reason.
 		let nextReports: Map<string, ChannelReport> | null = null;
 		for (const sc of syncChannels) {
 			const known = reports.value.get(sc.channelId);

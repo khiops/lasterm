@@ -166,10 +166,14 @@ export interface EndFacts extends EndSeen {
 /**
  * What a pane does when its terminal ends.
  *
- * An end the hub caused on purpose (its report says `destroyed`: killed,
- * its session closed, its agent replaced, the hub quitting) is never acted
- * on, whatever the setting: someone meant it, and restarting it would undo
- * that, where closing the pane would hide it (#580). The overlay says so.
+ * An end the hub caused (its report says why) is not acted on, whatever the
+ * setting, and the overlay says it was stopped from elsewhere (#580):
+ * - `killed`, it or its session stopped on purpose: never, live or found.
+ *   Someone meant it, and restarting it would undo that, where closing the
+ *   pane would hide it;
+ * - `stopped`, with its agent replaced or the hub quitting: not as it happens,
+ *   so as not to race the replacement or the quit. Found later, nobody aimed
+ *   at that terminal, and it follows the setting as any end found (#592).
  *
  * An end that was found is shown here, with why a restart would hold back,
  * and left to `answerFoundEnd` once its pane is on screen (#592).
@@ -185,7 +189,7 @@ export interface EndFacts extends EndSeen {
  *   over it would restart it, and two restarts of one terminal race at the hub.
  */
 export function reactToEnd(prefs: EndedPrefs, end: EndFacts): EndReaction {
-	if (end.endReason === "destroyed") {
+	if (end.endReason === "killed" || (end.endReason === "stopped" && end.seen === "live")) {
 		return { kind: "overlay", heldBack: stoppedElsewhere(prefs.whenEnded) };
 	}
 	if (end.seen === "found") {
@@ -331,12 +335,14 @@ export type EndHold = Extract<HeldBack, "just-started" | "just-attached" | "not-
  * - another window holds its write lock, or nobody does.
  *
  * Nothing else is held back. An end found at a reload or an attach was never
- * watched, and one stopped from elsewhere (#580) did not fail: the choice was
- * just made explicitly, so both follow it. A restart from here that ended
- * before the pane could reach it still ended right after starting.
+ * watched, and one stopped from elsewhere (#580), killed or stopped, did not
+ * fail: the choice was just made explicitly, so both follow it. A restart
+ * from here that ended before the pane could reach it still ended right after
+ * starting. Whether the setting follows a found end on its own is
+ * `answerFoundEnd`'s to say, and it keeps asking over a kill (#592).
  */
 export function endHold(end: EndFacts): EndHold | null {
-	if (end.endReason === "destroyed") return null;
+	if (end.endReason !== undefined) return null;
 	if (end.seen === "found") return end.fromStart ? "just-started" : null;
 	if (end.watchedMs === null || end.watchedMs < AUTO_RESTART_MIN_RUN_MS) {
 		return end.fromStart ? "just-started" : "just-attached";
@@ -417,7 +423,7 @@ export interface FoundEnd {
 	hold: EndHold | null;
 	/** Its terminal runs a command rather than a shell. */
 	directProcess: boolean;
-	/** Why the hub says it ended, when it ended it on purpose (#580). */
+	/** Why the hub says it ended, when it ended it itself (#580). */
 	endReason?: ChannelEndReason | undefined;
 	/** "When a terminal ends", as its terminal's settings resolve it now. */
 	whenEnded: WhenEnded;
@@ -440,8 +446,9 @@ export interface FoundEnd {
  * acts the moment it is seen: its tab shown, or its window focused.
  *
  * It keeps asking, whatever the setting says, over:
- * - an end the hub caused on purpose (#580): a deliberate stop is never undone
- *   by a setting;
+ * - a terminal killed, it or its session (#580): a deliberate stop is never
+ *   undone by a setting. One `stopped` with its agent replaced or the hub
+ *   quitting was aimed at nothing in particular, and follows the setting;
  * - a terminal that runs a command: Restart would run it again, and Close
  *   would take away what it printed before anyone read it;
  * - a restart from here that ended before its pane could reach it: it ended
@@ -454,7 +461,7 @@ export interface FoundEnd {
  * `AUTO_RESTART_MIN_RUN_MS` of its start: `reactToEnd` holds that one back.
  */
 export function answerFoundEnd(end: FoundEnd): WaitingAnswer {
-	if (end.endReason === "destroyed" || end.directProcess || end.hold !== null) return "ask";
+	if (end.endReason === "killed" || end.directProcess || end.hold !== null) return "ask";
 	if (!end.settingKnown) return "wait";
 	if (end.whenEnded === "ask") return "ask";
 	return end.inView && end.focused ? "act" : "wait";

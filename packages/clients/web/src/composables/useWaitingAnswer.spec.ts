@@ -310,13 +310,13 @@ describe("useWaitingAnswer, over an end found (#592)", () => {
 		p.unmount();
 	});
 
-	// Killed from elsewhere, its session closed, its agent replaced, a quit (#580).
-	it("keeps asking over an end the hub caused, told with it or afterwards", async () => {
+	// Killed from elsewhere, or its session closed (#580).
+	it("keeps asking over a kill, told with it or afterwards", async () => {
 		const told = pane();
 		told.whenEnded.value = "restart";
 		told.inView.value = true;
 		await nextTick();
-		told.endFound("destroyed");
+		told.endFound("killed");
 		expect(told.acted).toEqual([]);
 		told.unmount();
 
@@ -324,12 +324,28 @@ describe("useWaitingAnswer, over an end found (#592)", () => {
 		later.whenEnded.value = "restart";
 		await nextTick();
 		later.endFound();
-		later.endReason.value = "destroyed";
+		later.endReason.value = "killed";
 		await nextTick();
 		later.inView.value = true;
 		await nextTick();
 		expect(later.acted).toEqual([]);
 		later.unmount();
+	});
+
+	// Its agent replaced, or the hub quit: found at the next launch, it follows
+	// the setting once seen.
+	it("follows the setting over a terminal stopped with its agent or its hub", async () => {
+		const p = pane();
+		p.whenEnded.value = "restart";
+		p.endReason.value = "stopped";
+		await nextTick();
+		p.endFound("stopped");
+		expect(p.acted).toEqual([]);
+
+		p.inView.value = true;
+		await nextTick();
+		expect(p.acted).toEqual(["restart"]);
+		p.unmount();
 	});
 
 	it("keeps asking over a command, and over a restart from here that ended at once", async () => {

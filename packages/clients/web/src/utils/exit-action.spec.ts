@@ -145,25 +145,32 @@ describe("reactToEnd: what the setting does with an end seen live", () => {
 // A terminal killed from another window, or by the REST API, ended while a
 // pane set to restart was watching it: the pane brought it back, with the id
 // it had, and nothing on screen said it had ever gone.
-describe("reactToEnd: a terminal the hub ended on purpose", () => {
-	const destroyed: EndFacts = { ...liveEnd, endReason: "destroyed" };
+describe("reactToEnd: a terminal the hub ended itself", () => {
+	// Killed, it or its session; or stopped with its agent replaced, or the hub
+	// quitting (#592). Seen as it happens, both are left be.
+	const killed: EndFacts = { ...liveEnd, endReason: "killed" };
+	const stopped: EndFacts = { ...liveEnd, endReason: "stopped" };
 
 	it("Restart leaves it ended, and says it was stopped from elsewhere", () => {
-		expect(reactToEnd(restart, destroyed)).toEqual({
-			kind: "overlay",
-			heldBack: "stopped-not-restarted",
-		});
+		for (const end of [killed, stopped]) {
+			expect(reactToEnd(restart, end), end.endReason).toEqual({
+				kind: "overlay",
+				heldBack: "stopped-not-restarted",
+			});
+		}
 		expect(heldBackMessage("stopped-not-restarted")).toBe(
 			"It was stopped from elsewhere, so it wasn't restarted.",
 		);
 	});
 
 	it("Close leaves its pane open over it, and says why", () => {
-		for (const prefs of [closeAndDelete, closeAndKeep]) {
-			expect(reactToEnd(prefs, destroyed)).toEqual({
-				kind: "overlay",
-				heldBack: "stopped-not-closed",
-			});
+		for (const end of [killed, stopped]) {
+			for (const prefs of [closeAndDelete, closeAndKeep]) {
+				expect(reactToEnd(prefs, end), end.endReason).toEqual({
+					kind: "overlay",
+					heldBack: "stopped-not-closed",
+				});
+			}
 		}
 		expect(heldBackMessage("stopped-not-closed")).toBe(
 			"It was stopped from elsewhere, so its pane wasn't closed.",
@@ -171,22 +178,42 @@ describe("reactToEnd: a terminal the hub ended on purpose", () => {
 	});
 
 	it("Ask shows the overlay, saying it was stopped from elsewhere", () => {
-		expect(reactToEnd(ask, destroyed)).toEqual({ kind: "overlay", heldBack: "stopped" });
+		for (const end of [killed, stopped]) {
+			expect(reactToEnd(ask, end), end.endReason).toEqual({ kind: "overlay", heldBack: "stopped" });
+		}
 		expect(heldBackMessage("stopped")).toBe("It was stopped from elsewhere.");
 	});
 
 	// Found or seen, however long it ran: it was meant to end.
-	it("does nothing on its own whatever else is true of the end", () => {
+	it("does nothing on its own over a kill, whatever else is true of the end", () => {
 		const ends: EndFacts[] = [
-			destroyed,
-			{ ...destroyed, seen: "found", watchedMs: null, fromStart: true },
-			{ ...destroyed, watchedMs: 1_000 },
-			{ ...destroyed, directProcess: true, writer: false },
+			killed,
+			{ ...killed, seen: "found", watchedMs: null, fromStart: true },
+			{ ...killed, seen: "found", watchedMs: null, fromStart: false },
+			{ ...killed, watchedMs: 1_000 },
+			{ ...killed, directProcess: true, writer: false },
 		];
 		for (const end of ends) {
 			for (const prefs of [ask, restart, closeAndDelete, closeAndKeep]) {
-				expect(reactToEnd(prefs, end).kind).toBe("overlay");
+				expect(reactToEnd(prefs, end)).toEqual({
+					kind: "overlay",
+					heldBack:
+						prefs === ask
+							? "stopped"
+							: prefs === restart
+								? "stopped-not-restarted"
+								: "stopped-not-closed",
+				});
 			}
+		}
+	});
+
+	// Nobody aimed at it: found later, it is an end found like any other, left
+	// to answerFoundEnd, and the overlay does not say it was stopped (#592).
+	it("shows a found stopped end as any end found", () => {
+		const foundStopped: EndFacts = { ...stopped, seen: "found", watchedMs: null, fromStart: false };
+		for (const prefs of [ask, restart, closeAndDelete, closeAndKeep]) {
+			expect(reactToEnd(prefs, foundStopped)).toEqual({ kind: "overlay" });
 		}
 	});
 
@@ -424,11 +451,21 @@ describe("answerFoundEnd: an end found, and the setting", () => {
 	});
 
 	// A deliberate stop is never undone by a setting (#580).
-	it("keeps asking over an end the hub caused on purpose", () => {
+	it("keeps asking over a terminal killed, it or its session", () => {
 		for (const whenEnded of ["restart", "close"] as const) {
-			expect(answerFoundEnd({ ...found, whenEnded, endReason: "destroyed" })).toBe("ask");
+			expect(answerFoundEnd({ ...found, whenEnded, endReason: "killed" })).toBe("ask");
 		}
 		expect(answerFoundEnd({ ...found, endReason: undefined })).toBe("act");
+	});
+
+	// Its agent replaced, or the hub quit: nobody aimed at that terminal.
+	it("follows the setting over one stopped with its agent or its hub, once seen", () => {
+		for (const whenEnded of ["restart", "close"] as const) {
+			expect(answerFoundEnd({ ...found, whenEnded, endReason: "stopped" })).toBe("act");
+		}
+		expect(answerFoundEnd({ ...found, endReason: "stopped", inView: false })).toBe("wait");
+		expect(answerFoundEnd({ ...found, endReason: "stopped", focused: false })).toBe("wait");
+		expect(answerFoundEnd({ ...found, endReason: "stopped", whenEnded: "ask" })).toBe("ask");
 	});
 
 	it("keeps asking over a terminal that runs a command", () => {
@@ -449,7 +486,7 @@ describe("answerFoundEnd: an end found, and the setting", () => {
 	// What holds it back is known at once: no need to wait for the screen.
 	it("says it keeps asking before it is on screen", () => {
 		const away = { ...found, inView: false, focused: false, settingKnown: false };
-		expect(answerFoundEnd({ ...away, endReason: "destroyed" })).toBe("ask");
+		expect(answerFoundEnd({ ...away, endReason: "killed" })).toBe("ask");
 		expect(answerFoundEnd({ ...away, directProcess: true })).toBe("ask");
 		expect(answerFoundEnd({ ...away, hold: "just-started" })).toBe("ask");
 	});
@@ -534,12 +571,14 @@ describe("endHold: what an end holds back from a choice made elsewhere", () => {
 		);
 	});
 
-	// It did not fail: someone stopped it (#580).
+	// It did not fail: someone stopped it, killed or with its agent (#580).
 	it("nothing, for a terminal stopped from elsewhere", () => {
-		const destroyed: EndFacts = { ...liveEnd, endReason: "destroyed" };
-		expect(endHold(destroyed)).toBeNull();
-		expect(endHold({ ...destroyed, watchedMs: 1_000, writer: false })).toBeNull();
-		expect(endHold({ ...destroyed, seen: "found", watchedMs: null })).toBeNull();
+		for (const endReason of ["killed", "stopped"] as const) {
+			const ended: EndFacts = { ...liveEnd, endReason };
+			expect(endHold(ended), endReason).toBeNull();
+			expect(endHold({ ...ended, watchedMs: 1_000, writer: false }), endReason).toBeNull();
+			expect(endHold({ ...ended, seen: "found", watchedMs: null }), endReason).toBeNull();
+		}
 	});
 
 	// The command is the terminal's, not the end's: answerWaiting reads it.
@@ -634,7 +673,7 @@ describe("answerWaiting: an overlay already waiting, and a choice made on anothe
 	// Found at a reload, or stopped from elsewhere (#580): nothing held back.
 	it("follows it over an end nothing holds back, however it was learnt", () => {
 		const found: EndFacts = { ...liveEnd, seen: "found", watchedMs: null, fromStart: false };
-		const stopped: EndFacts = { ...liveEnd, endReason: "destroyed", writer: false };
+		const stopped: EndFacts = { ...liveEnd, endReason: "killed", writer: false };
 		for (const end of [found, stopped]) {
 			expect(answerWaiting(restartHere, { ...waiting, hold: endHold(end) })).toBe("act");
 		}

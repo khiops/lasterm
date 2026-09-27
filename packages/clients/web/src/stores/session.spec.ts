@@ -480,9 +480,18 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 			channelId: PI_CHANNEL,
 			sessionId: "s-pi",
 			status: "dead",
-			endReason: "destroyed",
+			endReason: "killed",
 		});
-		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", endReason: "destroyed" });
+		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", endReason: "killed" });
+
+		ws?.emit({
+			type: "CHANNEL_STATE",
+			channelId: PI_CHANNEL,
+			sessionId: "s-pi",
+			status: "dead",
+			endReason: "stopped",
+		});
+		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", endReason: "stopped" });
 
 		ws?.emit({
 			type: "CHANNEL_STATE",
@@ -544,12 +553,12 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 			sessions: [{ sessionId: "s-local", hostId: "host-local", status: "active" }],
 			channels: [
 				{ channelId: LOCAL_CHANNEL.id, sessionId: "s-local", status: "live" },
-				{ channelId: PI_CHANNEL, sessionId: "s-pi", status: "dead", endReason: "destroyed" },
+				{ channelId: PI_CHANNEL, sessionId: "s-pi", status: "dead", endReason: "killed" },
 			],
 		});
 
 		expect(channels.statusOf(PI_CHANNEL)).toBe("dead");
-		expect(channels.endReasonOf(PI_CHANNEL)).toBe("destroyed");
+		expect(channels.endReasonOf(PI_CHANNEL)).toBe("killed");
 		// The sidebar still lists the host in view, and only it.
 		expect(channels.channels.map((c) => c.id)).toEqual([LOCAL_CHANNEL.id]);
 	});

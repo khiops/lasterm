@@ -472,12 +472,18 @@ describe("useChannelsStore — endReasonOf (#592)", () => {
 	}
 
 	it("reads it from the list of the host in view", async () => {
-		listing([row("killed", "dead", "destroyed"), row("exited", "dead"), row("running", "live")]);
+		listing([
+			row("killed", "dead", "killed"),
+			row("stopped", "dead", "stopped"),
+			row("exited", "dead"),
+			row("running", "live"),
+		]);
 		const store = useChannelsStore();
 		await store.fetchChannels("host-1");
 
-		expect(store.endReasonOf("killed")).toBe("destroyed");
-		expect(store.channels.find((c) => c.id === "killed")?.endReason).toBe("destroyed");
+		expect(store.endReasonOf("killed")).toBe("killed");
+		expect(store.channels.find((c) => c.id === "killed")?.endReason).toBe("killed");
+		expect(store.endReasonOf("stopped")).toBe("stopped");
 		expect(store.endReasonOf("exited")).toBeUndefined();
 		expect(store.endReasonOf("running")).toBeUndefined();
 		expect(store.endReasonOf(null)).toBeUndefined();
@@ -486,13 +492,15 @@ describe("useChannelsStore — endReasonOf (#592)", () => {
 	// A tab over a terminal on a host not in view.
 	it("reads it from the index, whichever host the terminal is on", async () => {
 		listing([
-			row("pi-killed", "dead", "destroyed", "host-pi"),
+			row("pi-killed", "dead", "killed", "host-pi"),
+			row("pi-stopped", "dead", "stopped", "host-pi"),
 			row("pi-exited", "dead", undefined, "host-pi"),
 		]);
 		const store = useChannelsStore();
 		await store.fetchChannelIndex();
 
-		expect(store.endReasonOf("pi-killed")).toBe("destroyed");
+		expect(store.endReasonOf("pi-killed")).toBe("killed");
+		expect(store.endReasonOf("pi-stopped")).toBe("stopped");
 		expect(store.endReasonOf("pi-exited")).toBeUndefined();
 		// A reason it does not know is none.
 		listing([row("pi-odd", "dead", "something-else", "host-pi")]);
@@ -501,16 +509,16 @@ describe("useChannelsStore — endReasonOf (#592)", () => {
 	});
 
 	// The window was away, or had not loaded any list yet.
-	it("reads it from the STATE_SYNC of its socket, which names the ones ended on purpose", () => {
+	it("reads it from the STATE_SYNC of its socket, which names the ones killed", () => {
 		const store = useChannelsStore();
 		store.applyStateSync([
 			{ channelId: "running", sessionId: "s1", status: "live" },
-			{ channelId: "killed", sessionId: "s0", status: "dead", endReason: "destroyed" },
+			{ channelId: "killed", sessionId: "s0", status: "dead", endReason: "killed" },
 		]);
 
-		expect(store.reportOf("killed")).toEqual({ status: "dead", endReason: "destroyed" });
+		expect(store.reportOf("killed")).toEqual({ status: "dead", endReason: "killed" });
 		expect(store.statusOf("killed")).toBe("dead");
-		expect(store.endReasonOf("killed")).toBe("destroyed");
+		expect(store.endReasonOf("killed")).toBe("killed");
 		expect(store.endReasonOf("running")).toBeUndefined();
 	});
 
@@ -521,16 +529,28 @@ describe("useChannelsStore — endReasonOf (#592)", () => {
 		const before = store.reportOf("killed");
 
 		store.applyStateSync([
-			{ channelId: "killed", sessionId: "s0", status: "dead", endReason: "destroyed" },
+			{ channelId: "killed", sessionId: "s0", status: "dead", endReason: "killed" },
 		]);
 
 		expect(store.reportOf("killed")).not.toBe(before);
-		expect(store.endReasonOf("killed")).toBe("destroyed");
+		expect(store.endReasonOf("killed")).toBe("killed");
+	});
+
+	// Seen stopped as the agent was replaced: a later kill says more.
+	it("takes a kill told over a stop it heard, and a report over what the list said", async () => {
+		listing([row("ch", "dead", "stopped")]);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		expect(store.endReasonOf("ch")).toBe("stopped");
+
+		store.updateChannelStatus("ch", "dead", undefined, "killed");
+		expect(store.endReasonOf("ch")).toBe("killed");
+		expect(store.channels.find((c) => c.id === "ch")?.endReason).toBe("killed");
 	});
 
 	// The list was fetched when it had been killed; it was brought back since.
 	it("goes when the hub says the terminal runs again, whatever the list said", async () => {
-		listing([row("killed", "dead", "destroyed")]);
+		listing([row("killed", "dead", "killed")]);
 		const store = useChannelsStore();
 		await store.fetchChannels("host-1");
 
@@ -541,13 +561,13 @@ describe("useChannelsStore — endReasonOf (#592)", () => {
 		// And an end after that says only what it says.
 		store.updateChannelStatus("killed", "dead", 0);
 		expect(store.endReasonOf("killed")).toBeUndefined();
-		store.updateChannelStatus("killed", "dead", undefined, "destroyed");
-		expect(store.endReasonOf("killed")).toBe("destroyed");
-		expect(store.channels.find((c) => c.id === "killed")?.endReason).toBe("destroyed");
+		store.updateChannelStatus("killed", "dead", undefined, "killed");
+		expect(store.endReasonOf("killed")).toBe("killed");
+		expect(store.channels.find((c) => c.id === "killed")?.endReason).toBe("killed");
 	});
 
 	it("goes from the list when the terminal is brought back under its own id", async () => {
-		listing([row("killed", "dead", "destroyed")]);
+		listing([row("killed", "dead", "killed")]);
 		const store = useChannelsStore();
 		await store.fetchChannels("host-1");
 

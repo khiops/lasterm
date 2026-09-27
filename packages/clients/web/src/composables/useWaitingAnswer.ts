@@ -22,7 +22,7 @@ export interface WaitingAnswerSources {
 	directProcess: Readonly<Ref<boolean>>;
 	whenEnded: Readonly<Ref<WhenEnded>>;
 	inView: Readonly<Ref<boolean>>;
-	/** Why the hub says its terminal ended, when it ended it on purpose (#580). */
+	/** Why the hub says its terminal ended, when it ended it itself (#580). */
 	endReason: Readonly<Ref<ChannelEndReason | undefined>>;
 	/** `whenEnded` was read for its terminal, and is no longer the default. */
 	settingKnown: Readonly<Ref<boolean>>;

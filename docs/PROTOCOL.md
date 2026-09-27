@@ -615,13 +615,34 @@ Hub broadcasts RESIZE to other attached clients.
 { type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string }
 ```
 
-A SPAWN with `reuse_channel_id` is refused with `ERROR { code: "CHANNEL_NOT_REUSABLE" }`, and
-starts nothing, when that terminal is not one this hub knows, belongs to another host, is still
-running, or is already starting: another SPAWN naming it, or a `POST /api/channels/:id/restart`,
-was accepted and has not had its answer yet. The id is claimed as the SPAWN is accepted, with no
-await between the check and the claim, and released once the hub has the agent's answer, by
-which time the terminal is live or did not start. Two windows following "When a terminal ends"
-over the same terminal therefore start it once (#592).
+A SPAWN with `reuse_channel_id` is refused with `ERROR { code: "CHANNEL_NOT_REUSABLE",
+channel_id }`, and starts nothing, when that terminal is not one this hub knows, belongs to
+another host, is still running, or is already starting: another SPAWN naming it, or a
+`POST /api/channels/:id/restart`, was accepted and has not had its answer yet. The id is claimed
+as the SPAWN is accepted, with no await between the check and the claim, and released once the
+hub has the agent's answer, by which time the terminal is live or did not start. Two windows
+following "When a terminal ends" over the same terminal therefore start it once (#592).
+
+A SPAWN, new or with `reuse_channel_id`, whose host is away is refused with
+`ERROR { code: "HOST_UNREACHABLE", host_id, host_status, channel_id? }` (#605). `channel_id`
+names the terminal being brought back, and is absent for a new one. It says nothing about the
+terminal: started again once the host is back, it may well run. Two cases:
+
+- **At once**, starting nothing, when the hub lost that host and is reaching for it again: its
+  connection dropped, and a reconnect is scheduled or under way. `host_status` is
+  `"disconnected"`. The next attempt is the reconnect's; the SPAWN neither opens a second
+  connection beside it nor waits out a host that does not answer. A host the hub is not
+  reaching for, a first terminal there or one whose reconnect gave up, is still connected by the
+  SPAWN itself, and a local host's agent still started by it.
+- **After the agent's ten seconds**, when the connection the SPAWN went over went down
+  meanwhile: `host_status` is what the host's session is then, `"disconnected"` while the hub
+  reaches for it again, or `"active"` when it came back over another connection. A SPAWN left
+  unanswered over a connection that is still up is the terminal's failure, `SPAWN_FAILED`, as
+  before, and so is one whose host the hub has stopped reaching for.
+
+A client waits for that host's `SESSION_STATE` to say it is `active` (or `detached`) again,
+rather than show a failure (§ 4.14). Its own deadline for a SPAWN is longer than the hub's ten
+seconds, so that it hears the hub's answer.
 
 ### 4.5 Write-Lock Messages
 
@@ -882,7 +903,14 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 ### 4.14 ERROR
 
 ```typescript
-{ type: "ERROR", code: string, message: string, channel_id?: string }
+{
+  type: "ERROR",
+  code: string,
+  message: string,
+  channel_id?: string,
+  host_id?: string,
+  host_status?: "starting" | "active" | "detached" | "disconnected" | "closed"  // on HOST_UNREACHABLE only: the host's session, as SESSION_STATE says it (§ 4.7)
+}
 ```
 
 **Error codes:**
@@ -893,9 +921,11 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 | `AUTH_INVALID` | Bad token |
 | `CHANNEL_NOT_FOUND` | Unknown channel ID |
 | `CHANNEL_DEAD` | ATTACH on a terminal that has ended (§ 4.2) |
+| `CHANNEL_NOT_REUSABLE` | SPAWN with `reuse_channel_id` refused; `channel_id` names that terminal (§ 4.4) |
 | `NOT_ATTACHED` | Op requires ATTACH first |
 | `WRITE_LOCK_HELD` | INPUT rejected, not the writer |
 | `HOST_NOT_FOUND` | Unknown host ID |
+| `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started. Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
 | `SSH_FAILED` | SSH connection failed |
 | `AGENT_ERROR` | Agent returned error |
 | `FRAME_TOO_LARGE` | Payload > 10 MB |
@@ -1130,7 +1160,7 @@ What the callers do with the answers:
 | GET | `/api/channels` | ● | `Channel[]` (query: `?host_id=X`). A dead channel the hub ended itself carries `end_reason`: `"killed"` or `"stopped"` (§ 4.7, #592) |
 | GET | `/api/channels/:id` | ● | `Channel`, with `end_reason` as in the list |
 | PATCH | `/api/channels/:id` | ● | Partial update (e.g. title) → `Channel` |
-| POST | `/api/channels/:id/restart` | ● | Restart dead channel → 200; 503 while a SPAWN or another restart is already starting it (§ 4.4) |
+| POST | `/api/channels/:id/restart` | ● | Restart dead channel → 200; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise |
 | DELETE | `/api/channels/:id` | ● | 204. A live channel is ended, and stored `dead` with `end_reason: "killed"` |
 | DELETE | `/api/channels/dead` | ● | Remove all dead channels → `{ purged }` (alias: `POST /api/channels/purge-dead`) |
 

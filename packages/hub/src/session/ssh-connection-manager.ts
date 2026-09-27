@@ -42,6 +42,7 @@ import {
 	SshAgent,
 	type SshAgentDeployOptions,
 } from "./ssh-agent.js";
+import { SSH_KEEPALIVE } from "./ssh-keepalive.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
 import { probeTestConnectPlatform } from "./test-connect-platform.js";
 
@@ -805,6 +806,9 @@ export function attemptSshTest(
 	let unverifiedFingerprint: string | undefined;
 	const config: SshConnectConfig = {
 		...connectConfig,
+		// Bounded on its own, well within the keepalive's minute; carried all the
+		// same, so that no connection the hub opens goes without it (#607).
+		...SSH_KEEPALIVE,
 		hostVerifier: ((key: Buffer) => {
 			const fingerprint = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
 			if (trusted.has(fingerprint)) return true;

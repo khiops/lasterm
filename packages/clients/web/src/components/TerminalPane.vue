@@ -760,21 +760,23 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				// A terminal already known to have ended is not asked for: the
 				// hub would answer CHANNEL_DEAD, which is what the overlay says.
 				// Mark ready so the overlay renders immediately. Found, not seen:
-				// the setting answers it once the pane is on screen (#592).
+				// the setting answers it once the pane is on screen (#592). The
+				// pane still takes its profile and its bell below, for the
+				// terminal a restart brings back under it.
 				if (isDead.value) {
 					ready.value = true;
 					onTerminalEnded(endWatch.ended(props.channelId));
-					return;
+				} else {
+					// Existing channel — reattach (fetch snapshot + tail).
+					// Write-lock state is set by the WRITE_LOCK WS message handler
+					// (fired by WriteLockManager.attach on the hub side), not from
+					// the ATTACH_OK payload — avoids a microtask race where
+					// setInitialHolder would overwrite a more recent WRITE_LOCK.
+					// A terminal that has ended, whichever host it is on, is
+					// answered as ended: the pane shows the exit overlay with
+					// Restart, and nothing restarts it on its own (#559).
+					await attachAndCover(props.channelId);
 				}
-				// Existing channel — reattach (fetch snapshot + tail).
-				// Write-lock state is set by the WRITE_LOCK WS message handler
-				// (fired by WriteLockManager.attach on the hub side), not from
-				// the ATTACH_OK payload — avoids a microtask race where
-				// setInitialHolder would overwrite a more recent WRITE_LOCK.
-				// A terminal that has ended, whichever host it is on, is
-				// answered as ended: the pane shows the exit overlay with
-				// Restart, and nothing restarts it on its own (#559).
-				await attachAndCover(props.channelId);
 			}
 			ready.value = true;
 			applyProfile(resolvedProfile.value);

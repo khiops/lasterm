@@ -436,7 +436,20 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 
 		const open = body(/async function openChannel\(/);
 		expect(open).toMatch(
-			/if \(isDead\.value\) \{\s*ready\.value = true;\s*onTerminalEnded\(endWatch\.ended\(props\.channelId\)\);\s*return;\s*\}/,
+			/if \(isDead\.value\) \{\s*ready\.value = true;\s*onTerminalEnded\(endWatch\.ended\(props\.channelId\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
+		);
+	});
+
+	// The restart the setting makes there runs under this pane: it takes the
+	// profile and the bell a pane that attached takes, rather than return first.
+	it("gives a pane over a terminal known to have ended its profile and its bell", () => {
+		const open = body(/async function openChannel\(/);
+		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
+		expect(deadBranch, "the branch moved").not.toBe("");
+		expect(deadBranch).not.toContain("return");
+		const afterAttach = open.slice(open.indexOf("await attachAndCover(props.channelId);"));
+		expect(afterAttach).toMatch(
+			/applyProfile\(resolvedProfile\.value\);[\s\S]*?terminal\.value\?\.onBell\(/,
 		);
 	});
 

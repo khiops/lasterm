@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-09-24
+> Last updated: 2026-09-27
 
 ## 1. Framing
 
@@ -595,12 +595,21 @@ Hub broadcasts RESIZE to other attached clients.
   shell?: string,     // default: host.default_shell ?? system default (/bin/bash or pwsh)
   cwd?: string,       // default: none sent; the agent starts the shell in its user's home (§ 3.2)
   env?: Record<string, string>,  // merged with system env (max 100 entries)
-  group_id?: string   // optional channel group to place new channel in
+  group_id?: string,  // optional channel group to place new channel in
+  reuse_channel_id?: string  // bring this ended terminal back under its own id (Restart)
 }
 
 // Hub → UI
 { type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string }
 ```
+
+A SPAWN with `reuse_channel_id` is refused with `ERROR { code: "CHANNEL_NOT_REUSABLE" }`, and
+starts nothing, when that terminal is not one this hub knows, belongs to another host, is still
+running, or is already starting: another SPAWN naming it, or a `POST /api/channels/:id/restart`,
+was accepted and has not had its answer yet. The id is claimed as the SPAWN is accepted, with no
+await between the check and the claim, and released once the hub has the agent's answer, by
+which time the terminal is live or did not start. Two windows following "When a terminal ends"
+over the same terminal therefore start it once (#592).
 
 ### 4.5 Write-Lock Messages
 
@@ -642,10 +651,19 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     session_id: string,
     status: "born" | "live" | "orphan" | "dead",
     exit_code?: number,
-    display_title?: string
+    display_title?: string,
+    // Only on a "dead" entry, as on CHANNEL_STATE (§ 4.7) (#592).
+    end_reason?: "destroyed"
   }>
 }
 ```
+
+`channels` lists every channel the hub holds that has not ended, and every one it
+ended on purpose that it still lists: `dead`, with `end_reason: "destroyed"`, read
+from `channels.end_reason` in meta.db (STORAGE.md § 3.4). A window that was away when
+such a terminal was killed, or that opens later, learns why it ended here rather than
+from a report it never heard, and no pane of it brings the terminal back (#592). Any
+other channel absent from `channels` has ended, or is unknown.
 
 ### 4.7 State Notifications
 
@@ -675,14 +693,16 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   status: "born" | "live" | "orphan" | "dead",
   exit_code?: number,
   // Only with "dead", when the hub ended the terminal itself (#580). Absent when
-  // its shell or command exited, or when the hub found it gone. Not stored: a
-  // later STATE_SYNC or channel list does not carry it.
+  // its shell or command exited, or when the hub found it gone. Stored with the
+  // end in channels.end_reason and cleared when the terminal runs again, so a
+  // later STATE_SYNC (§ 4.6) and the channel list (§ 6) carry it too (#592).
   end_reason?: "destroyed"
 }
 
 // end_reason "destroyed" is set by every hub path that ends a live terminal on
 // purpose:
-//   - DELETE /api/channels/:id on a live channel (the UI's Kill);
+//   - DELETE /api/channels/:id on a live channel (the UI's Kill), including one
+//     this hub run does not hold, which it marks dead with the reason directly;
 //   - DELETE /api/sessions/:id, for every terminal of that session;
 //   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
 //     sends while the hub stops it;
@@ -690,6 +710,9 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
 //     the local agent's CHANNEL_EXITs, and the session closing when it goes.
 // A client never restarts or closes a terminal on such an end, whatever "When a
 // terminal ends" says: someone meant it to end. It shows that it ended, and why.
+// That holds for an end a pane finds later, at a reload or the next launch, which
+// otherwise follows the setting once its pane is on screen in the window that has
+// the focus (#592): the pane reads the reason from STATE_SYNC or the channel list.
 
 // Hub → ALL connected clients: a new channel was created by any client.
 // Observers use this to add the channel to their list without a fetchChannels.
@@ -1086,11 +1109,11 @@ What the callers do with the answers:
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/channels` | ● | `Channel[]` (query: `?host_id=X`) |
-| GET | `/api/channels/:id` | ● | `Channel` |
+| GET | `/api/channels` | ● | `Channel[]` (query: `?host_id=X`). A dead channel the hub ended on purpose carries `end_reason: "destroyed"` (§ 4.7, #592) |
+| GET | `/api/channels/:id` | ● | `Channel`, with `end_reason` as in the list |
 | PATCH | `/api/channels/:id` | ● | Partial update (e.g. title) → `Channel` |
-| POST | `/api/channels/:id/restart` | ● | Restart dead channel → 200 |
-| DELETE | `/api/channels/:id` | ● | 204 |
+| POST | `/api/channels/:id/restart` | ● | Restart dead channel → 200; 503 while a SPAWN or another restart is already starting it (§ 4.4) |
+| DELETE | `/api/channels/:id` | ● | 204. A live channel is ended, and stored `dead` with `end_reason: "destroyed"` |
 | DELETE | `/api/channels/dead` | ● | Remove all dead channels → `{ purged }` (alias: `POST /api/channels/purge-dead`) |
 
 #### Channel Groups (tab groups)

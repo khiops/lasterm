@@ -74,6 +74,8 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		let settled = false;
 		/** The route was handed out: from here on, an error is how it ends. */
 		let routed = false;
+		/** Whoever holds the route ended it: what goes wrong on the way out is no loss. */
+		let closing = false;
 		const fail = (error: Error): void => {
 			if (settled) return;
 			settled = true;
@@ -83,6 +85,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 
 		client.on("error", (error: Error) => {
 			if (routed) {
+				if (closing) return;
 				// The target's connection ends with the route, and is lost like any
 				// other; only here is it known that the jump is what went.
 				console.error(
@@ -123,7 +126,10 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 						stream,
 						fingerprint: presented,
 						fromKnownHosts,
-						close: () => client.end(),
+						close: () => {
+							closing = true;
+							client.end();
+						},
 					});
 				},
 			);

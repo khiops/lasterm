@@ -109,8 +109,17 @@
 		<!-- In place of the card while the setting restarts or closes the terminal,
 		     or waits to: one line that asks nothing, told politely to a screen
 		     reader. Always in the page, so that each line it is given is heard. -->
-		<div class="exit-status" role="status">
-			<span v-if="endedView.kind === 'quiet'" class="exit-status__text">{{ endedView.text }}</span>
+		<div class="exit-status">
+			<div class="exit-status__line" role="status">
+				<span v-if="endedView.kind === 'quiet'" class="exit-status__text">{{ endedView.text }}</span>
+			</div>
+			<!-- Waiting for its host (#605), it offers to stop: beside the line
+			     rather than in it, so that a screen reader hears the line alone. -->
+			<button
+				v-if="endedView.kind === 'quiet' && endedView.cancel"
+				class="exit-btn exit-status__cancel"
+				@click="onCancelWaiting"
+			>Cancel</button>
 		</div>
 
 		<!-- Not connected: what is shown is remembered, not live -->
@@ -189,6 +198,7 @@ import { useSearchShortcuts } from '../composables/useSearchShortcuts.js';
 import { useTabTitle } from '../composables/useTabTitle.js';
 import { useTerminal } from '../composables/useTerminal.js';
 import { useVisualProfile } from '../composables/useVisualProfile.js';
+import { useWaitForHost } from '../composables/useWaitForHost.js';
 import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
 import { useWindowFocus } from '../composables/useWindowFocus.js';
 import { useChannelsStore } from '../stores/channels.js';
@@ -709,7 +719,7 @@ const cover = computed(() =>
 /** Why the last attempt to bring this terminal back failed, if it did. */
 const restartFailure = computed(() => {
 	const chId = effectiveChannelId.value;
-	return chId === null ? undefined : channelsStore.restartFailures.get(chId);
+	return chId === null ? undefined : channelsStore.restartFailures.get(chId)?.reason;
 });
 
 const exitMessage = computed(() => {
@@ -948,7 +958,12 @@ onUnmounted(() => {
 // Exit overlay actions (direct process)
 // ---------------------------------------------------------------------------
 
-async function onRestart(): Promise<void> {
+/**
+ * Bring the terminal back: the card's Restart, the setting, a choice made on
+ * another overlay, or, `automatic`, its host's return after a restart that
+ * found it away (#605).
+ */
+async function onRestart(opts?: { automatic?: boolean }): Promise<void> {
 	const chId = effectiveChannelId.value;
 	if (chId === null) return;
 
@@ -959,6 +974,8 @@ async function onRestart(): Promise<void> {
 	// is the opposite of what the button says.
 	if (restarting.value) return;
 	restarting.value = true;
+	// Whatever this one meets decides afresh whether to wait for the host.
+	hostWait.restartStarting();
 	// The attach that follows counts from this start: an end within seconds of
 	// it is one the setting does not restart again (#574).
 	endWatch.starting(chId);
@@ -969,7 +986,12 @@ async function onRestart(): Promise<void> {
 	} finally {
 		restarting.value = false;
 	}
-	if (!ok) endWatch.lost();
+	if (!ok) {
+		endWatch.lost();
+		// Its host away: wait for it, or try again now it is back; any other
+		// failure shows the card and its reason (#605).
+		hostWait.restartFailed(channelsStore.restartFailures.get(chId), opts?.automatic === true);
+	}
 	if (ok) {
 		// This pane may be over a terminal no list shows — one on another
 		// host — where the status watcher may not have heard it come back yet.
@@ -1129,6 +1151,31 @@ const waitingAnswer = useWaitingAnswer({
 });
 
 // ---------------------------------------------------------------------------
+// A restart whose host is away waits for it (#605)
+// ---------------------------------------------------------------------------
+
+// A restart that failed because the host is away, whoever asked for it, waits
+// for that host and restarts the terminal once when it is back, whatever the
+// view and the focus: see `afterRestartFailure`.
+const hostWait = useWaitForHost({
+	ended: computed(() => cover.value === 'exited'),
+	channelId: effectiveChannelId,
+	restart: () => void onRestart({ automatic: true }),
+});
+
+/** The host this pane waits for, as its line names it, or null. */
+const waitingForHost = computed(() => {
+	const hostId = hostWait.waitingFor.value;
+	if (hostId === null) return null;
+	return { label: hostsStore.hosts.find((h) => h.id === hostId)?.label };
+});
+
+/** Cancel, on "Waiting for <host>…": the card comes back, with the reason. */
+function onCancelWaiting(): void {
+	hostWait.cancel();
+}
+
+// ---------------------------------------------------------------------------
 // The card, or a quiet line in its place (#595)
 // ---------------------------------------------------------------------------
 
@@ -1142,6 +1189,7 @@ const endedView = computed(() =>
 		cover: cover.value,
 		opening: !ready.value,
 		restarting: restarting.value,
+		waitingForHost: waitingForHost.value,
 		found: waitingAnswer.found.value,
 		settingOverdue: waitingAnswer.settingOverdue.value,
 		exitMessage: exitMessage.value,
@@ -1803,11 +1851,20 @@ function onDragEnd(): void {
 	position: absolute;
 	inset: 0;
 	display: flex;
+	flex-direction: column;
 	align-items: center;
 	justify-content: center;
+	gap: 8px;
 	padding: 16px;
 	pointer-events: none;
 	z-index: 4;
+}
+
+/* Cancel, under "Waiting for <host>…" (#605): the one thing on the line that
+   takes a click, on the same opaque ground as the line. */
+.exit-status__cancel {
+	pointer-events: auto;
+	background: rgb(var(--nt-bg-rgb));
 }
 
 .exit-status__text {

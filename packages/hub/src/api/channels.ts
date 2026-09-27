@@ -214,6 +214,19 @@ export function registerChannelRoutes(
 		try {
 			const ok = await sessionManager.restartChannel(id);
 			if (!ok) {
+				// Its host is away, refused at once or gone while it started: said
+				// so, with the host and its status, for a pane to wait for it (#605).
+				const away = sessionManager.hostUnreachableFor(id);
+				if (away !== null) {
+					return reply.code(503).send({
+						error: {
+							code: away.code,
+							message: away.message,
+							host_id: away.hostId,
+							host_status: away.hostStatus,
+						},
+					});
+				}
 				return reply.code(503).send({
 					error: { code: "RESTART_FAILED", message: "Unable to restart channel" },
 				});

@@ -6135,6 +6135,23 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 // is pending, call closeSession(); resolve start(); assert the agent was
 // closed (not wired/stored) and onReconnectAgent returned false.
 
+/**
+ * The reconnect the hub scheduled when a host's connection dropped, given up.
+ *
+ * A restart while it is scheduled is refused, its host away (#605): these
+ * follow a restart that opens a connection of its own, which is what one does
+ * once nothing reaches for the host any more.
+ */
+function stopReconnecting(
+	ctx: import("./session-context.js").SharedSessionContext,
+	hostId: string,
+): void {
+	const timer = ctx.reconnectTimers.get(hostId);
+	expect(timer, "the drop scheduled a reconnect").toBeDefined();
+	clearTimeout(timer);
+	ctx.reconnectTimers.delete(hostId);
+}
+
 describe("SessionManager — Fix B: onReconnectAgent restart-reconnect revive guard", () => {
 	let sm: SessionManager;
 	let dbManager: ReturnType<typeof openTestDatabases>;
@@ -6190,6 +6207,7 @@ describe("SessionManager — Fix B: onReconnectAgent restart-reconnect revive gu
 
 		// Capture the sessionId before the race so we can verify it was not revived.
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		stopReconnecting(ctx, hostId);
 		const sessionBefore = ctx.sessions.get(hostId);
 		expect(sessionBefore).toBeDefined();
 		const originalSessionId = sessionBefore?.id ?? "";
@@ -6266,6 +6284,7 @@ describe("SessionManager — Fix B: onReconnectAgent restart-reconnect revive gu
 		await new Promise((r) => setImmediate(r));
 
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		stopReconnecting(ctx, hostId);
 
 		// Verify session still present before restart.
 		expect(ctx.sessions.has(hostId)).toBe(true);
@@ -6352,6 +6371,7 @@ describe("SessionManager — Fix C2: onReconnectAgent abort-safe on closeSession
 
 		// Capture context maps for assertions.
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		stopReconnecting(ctx, hostId);
 
 		const sessionBefore = ctx.sessions.get(hostId);
 		expect(sessionBefore).toBeDefined();
@@ -7489,5 +7509,157 @@ describe("SessionManager — an answer about a terminal started again since (#59
 
 		if (channelId === null) throw new Error("expected the new terminal");
 		expectRunning(window, channelId);
+	});
+});
+
+// ─── A host away (#605) ──────────────────────────────────────────────────────
+//
+// Seen on a Raspberry Pi back from a reboot at another address: while the hub
+// reached for it again, every restart of one of its terminals, the setting's
+// and each click, ended on "Could not restart it: Agent SPAWN timeout", and
+// nothing happened once the host was back. While the hub is reconnecting a
+// host, a start there is refused at once, and says the host is away.
+
+describe("SessionManager — a start on a host the hub is reconnecting (#605)", () => {
+	let sm: SessionManager;
+	let dbManager: ReturnType<typeof openTestDatabases>;
+
+	beforeEach(() => {
+		sshSpawnCount = 0;
+		mockSshAgentInstance = null;
+		nextSshStartError = null;
+		dbManager = openTestDatabases();
+		sm = new SessionManager(dbManager);
+		vi.mocked(_SshAgentForMock).mockClear();
+	});
+
+	afterEach(async () => {
+		vi.useRealTimers();
+		await sm.shutdown();
+		dbManager.close();
+	});
+
+	/** A terminal of the Pi that ended, then the Pi's connection dropped: the hub reconnects. */
+	async function piAwayWithAnEndedTerminal() {
+		const dal = new MetaDAL(dbManager.meta);
+		const host = dal.createHost({
+			type: "ssh",
+			label: "raspberrypi",
+			sshHost: "pi@raspberrypi.test",
+			sshAuth: "agent",
+		});
+		sm.addClient(makeClient("c-first", []));
+		const channelId = await sm.handleSpawn("c-first", { type: "SPAWN", hostId: host.id });
+		if (channelId === null) throw new Error("expected a channel");
+		const agent = mockSshAgentInstance;
+		if (agent === null) throw new Error("expected the Pi's agent");
+		agent._emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+		agent.simulateClose();
+		await flushImmediate();
+		expect(sm.sessions.get(host.id)?.status).toBe("disconnected");
+		const connections = vi.mocked(_SshAgentForMock).mock.calls.length;
+		return { hostId: host.id, channelId, connections };
+	}
+
+	it("refuses to bring a terminal back at once, saying its host is away", async () => {
+		const { hostId, channelId, connections } = await piAwayWithAnEndedTerminal();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+
+		const result = await sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: channelId,
+		});
+
+		expect(result).toBeNull();
+		expect(window).toContainEqual({
+			type: "ERROR",
+			code: "HOST_UNREACHABLE",
+			message: "raspberrypi cannot be reached right now.",
+			hostId,
+			hostStatus: "disconnected",
+			channelId,
+		});
+		// No connection of its own beside the reconnect's.
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(connections);
+	});
+
+	it("refuses a new terminal there the same way", async () => {
+		const { hostId, connections } = await piAwayWithAnEndedTerminal();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+
+		expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId })).toBeNull();
+
+		expect(window).toContainEqual(
+			expect.objectContaining({ type: "ERROR", code: "HOST_UNREACHABLE", hostId }),
+		);
+		expect(window.find((m) => m.type === "ERROR")).not.toHaveProperty("channelId");
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(connections);
+	});
+
+	// The restart route asks the same question, and answers the same way.
+	it("refuses a restart, and says why", async () => {
+		const { hostId, channelId } = await piAwayWithAnEndedTerminal();
+
+		expect(await sm.restartChannel(channelId)).toBe(false);
+		expect(sm.hostUnreachableFor(channelId)).toEqual({
+			type: "ERROR",
+			code: "HOST_UNREACHABLE",
+			message: "raspberrypi cannot be reached right now.",
+			hostId,
+			hostStatus: "disconnected",
+			channelId,
+		});
+	});
+
+	// The reconnect has the next attempt; once it has the host, starts go through.
+	it("brings the terminal back once the reconnect has the host again", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const { hostId, channelId } = await piAwayWithAnEndedTerminal();
+		const window: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-window", window));
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		await vi.waitFor(() => expect(sm.sessions.get(hostId)?.status).toBe("active"));
+		vi.useRealTimers();
+		expect(sm.hostUnreachableFor(channelId)).toBeNull();
+
+		const result = await sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: channelId,
+		});
+
+		expect(result).toBe(channelId);
+		expect(window.filter((m) => m.type === "ERROR")).toEqual([]);
+	});
+
+	// A host this hub is not reaching for is connected by the start itself, as
+	// a first terminal there always was.
+	it("still connects a host it is not reconnecting", async () => {
+		const dal = new MetaDAL(dbManager.meta);
+		const host = dal.createHost({
+			type: "ssh",
+			label: "nas",
+			sshHost: "admin@nas.test",
+			sshAuth: "agent",
+		});
+		// Its reconnect gave up: disconnected, and nothing reaching for it.
+		dal.createSession({
+			id: "01K605SESSION0000000000000",
+			hostId: host.id,
+			status: "disconnected",
+		});
+		(sm.sessions as unknown as Map<string, unknown>).set(host.id, {
+			id: "01K605SESSION0000000000000",
+			hostId: host.id,
+			status: "disconnected",
+		});
+		sm.addClient(makeClient("c-window", []));
+
+		expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId: host.id })).not.toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(1);
 	});
 });

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { factsFromAttachOk, factsFromRefusal, paneCover } from "../utils/pane-cover.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
+import { useHostsStore } from "./hosts.js";
 import { useSessionStore } from "./session.js";
 import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
@@ -561,5 +562,93 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 		expect(channels.endReasonOf(PI_CHANNEL)).toBe("killed");
 		// The sidebar still lists the host in view, and only it.
 		expect(channels.channels.map((c) => c.id)).toEqual([LOCAL_CHANNEL.id]);
+	});
+});
+
+// ─── A host coming back, as a waiting pane hears it (#605) ──────────────────
+//
+// A pane whose restart found its host away restarts it when the hub says the
+// host is connected again. That is SESSION_STATE, for a local host as for a
+// remote one: the rail's dot for a local host goes by this window's socket,
+// and says nothing of a local agent being restarted.
+
+describe("useSessionStore — a host coming back (#605)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("hears a local host and a remote one come back", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const hosts = useHostsStore();
+		hosts.hosts = [
+			{ id: "host-local", label: "This machine", type: "local" } as never,
+			{ id: "host-pi", label: "raspberrypi", type: "ssh" } as never,
+		];
+		const ws = wsHarness.instances[0];
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [
+				{ sessionId: "s-local", hostId: "host-local", status: "disconnected" },
+				{ sessionId: "s-pi", hostId: "host-pi", status: "disconnected" },
+			],
+			channels: [],
+		});
+		expect(hosts.isHostConnected("host-local")).toBe(false);
+		expect(hosts.isHostConnected("host-pi")).toBe(false);
+		// What the rail shows of a local host is this window's socket.
+		expect(hosts.getHostStatus("host-local")).toBe("live");
+
+		ws?.emit({
+			type: "SESSION_STATE",
+			sessionId: "s-local",
+			hostId: "host-local",
+			status: "active",
+		});
+		expect(hosts.isHostConnected("host-local")).toBe(true);
+		expect(hosts.isHostConnected("host-pi")).toBe(false);
+
+		ws?.emit({ type: "SESSION_STATE", sessionId: "s-pi", hostId: "host-pi", status: "active" });
+		expect(hosts.isHostConnected("host-pi")).toBe(true);
+		// Nobody attached is still connected.
+		ws?.emit({ type: "SESSION_STATE", sessionId: "s-pi", hostId: "host-pi", status: "detached" });
+		expect(hosts.isHostConnected("host-pi")).toBe(true);
+	});
+
+	// The pane over the terminal says it waits for its host: no toast besides.
+	it("leaves a host away to the pane of the terminal it was brought back for", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const toastStore = useToastStore();
+		const ws = wsHarness.instances[0];
+
+		ws?.emit({
+			type: "ERROR",
+			code: "HOST_UNREACHABLE",
+			message: "raspberrypi cannot be reached right now.",
+			hostId: "host-pi",
+			hostStatus: "disconnected",
+			channelId: "ch-on-the-pi",
+		});
+		expect(toastStore.messages).toHaveLength(0);
+
+		// A new terminal has no pane that waits: it is said.
+		ws?.emit({
+			type: "ERROR",
+			code: "HOST_UNREACHABLE",
+			message: "raspberrypi cannot be reached right now.",
+			hostId: "host-pi",
+			hostStatus: "disconnected",
+		});
+		expect(toastStore.messages).toHaveLength(1);
 	});
 });

@@ -1,4 +1,9 @@
-import { DEFAULT_CHANNEL_NAME, DEFAULT_NOTIFICATION_CONFIG, generateId } from "@lasterm/shared";
+import {
+	DEFAULT_CHANNEL_NAME,
+	DEFAULT_NOTIFICATION_CONFIG,
+	ErrorCode,
+	generateId,
+} from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { markRaw, ref, watch } from "vue";
 import { showSimpleNotification } from "../composables/useDesktopNotifications.js";
@@ -354,6 +359,11 @@ export const useSessionStore = defineStore("session", () => {
 				// shows it as a state rather than a red banner that outlives the
 				// glance it was worth.
 				if (msg.code === "CHANNEL_NOT_FOUND" || msg.code === "CHANNEL_DEAD") {
+					return;
+				}
+				// A terminal brought back whose host is away: its pane says it waits
+				// for that host (#605).
+				if (msg.code === ErrorCode.HOST_UNREACHABLE && msg.channelId !== undefined) {
 					return;
 				}
 				// All other error codes (SSH_CONNECT_FAILED, SPAWN_FAILED,

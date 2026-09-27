@@ -1,5 +1,6 @@
 import type { UiSpawnMessage } from "@lasterm/shared";
 import { isValidDimensions, isValidEnv, isValidUlid, validateShell } from "@lasterm/shared";
+import { HostUnreachableError } from "../../session/host-reachability.js";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleSpawn(msg: UiSpawnMessage, ctx: WsHandlerContext): void {
@@ -49,6 +50,12 @@ export function handleSpawn(msg: UiSpawnMessage, ctx: WsHandlerContext): void {
 		})
 		.catch((err: unknown) => {
 			log.error({ err }, "spawn-handler: handleSpawn threw");
+			// Its host went away while it started: said with the host and its
+			// status, and the terminal it was bringing back (#605).
+			if (err instanceof HostUnreachableError) {
+				client.send(err.toMessage(msg.reuseChannelId));
+				return;
+			}
 			const errorMsg = err instanceof Error ? err.message : String(err);
 			const code = (err as Record<string, unknown>)?.code;
 			client.send({

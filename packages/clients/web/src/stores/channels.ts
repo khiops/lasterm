@@ -1,8 +1,10 @@
-import type {
-	Channel,
-	ChannelCreatedMessage,
-	ChannelEndReason,
-	ChannelGroup,
+import {
+	type Channel,
+	type ChannelCreatedMessage,
+	type ChannelEndReason,
+	type ChannelGroup,
+	ErrorCode,
+	type SessionStatus,
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
@@ -10,6 +12,7 @@ import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 import { useConfigStore } from "./config.js";
+import { useHostsStore } from "./hosts.js";
 import { useSessionStore } from "./session.js";
 
 const COLLAPSED_KEY = "lasterm:collapsed-groups";
@@ -91,8 +94,15 @@ function apiGroupToChannelGroup(
  *
  * CHANNEL_STATE WebSocket messages update channel status in real time.
  */
-/** How long a spawn waits for the hub, when the hub has only itself to consult. */
-const SPAWN_DEADLINE_MS = 10_000;
+/**
+ * How long a spawn waits for the hub, when the hub has only itself to consult.
+ *
+ * Longer than the ten seconds the hub gives its agent, so that the hub's own
+ * answer to a SPAWN its agent left unanswered arrives first, and says why:
+ * that the host went away meanwhile, which a pane waits out, rather than a
+ * timeout of its own that says nothing (#605).
+ */
+const SPAWN_DEADLINE_MS = 15_000;
 
 /**
  * How long it waits once a prompt is on screen.
@@ -111,6 +121,28 @@ const SPAWN_PROMPTED_DEADLINE_MS = 300_000;
 function restartFailureReason(err: unknown): string {
 	const message = err instanceof Error ? err.message : String(err);
 	return message.replace(/^[A-Z][A-Z0-9_]+: /, "");
+}
+
+/** Why the last attempt to bring a terminal back failed. */
+export interface RestartFailure {
+	/** Said for the pane, without the hub's code. */
+	reason: string;
+	/**
+	 * The host the hub said it could not reach (`HOST_UNREACHABLE`, #605): the
+	 * terminal did not fail, its host is away. Absent for every other failure.
+	 */
+	hostAway?: { hostId: string };
+}
+
+/** A spawn's rejection, as the failure the pane shows or waits out. */
+function restartFailureOf(err: unknown, hostIdHint: string): RestartFailure {
+	const reason = restartFailureReason(err);
+	const refusal = err as { code?: unknown; hostId?: unknown } | null;
+	if (refusal?.code !== ErrorCode.HOST_UNREACHABLE) return { reason };
+	return {
+		reason,
+		hostAway: { hostId: typeof refusal.hostId === "string" ? refusal.hostId : hostIdHint },
+	};
 }
 
 /**
@@ -218,12 +250,12 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * the hub's explanation went nowhere. Kept here, the pane over that terminal
 	 * shows it, whichever gesture asked.
 	 */
-	const restartFailures = ref<Map<string, string>>(new Map());
+	const restartFailures = ref<Map<string, RestartFailure>>(new Map());
 
-	function setRestartFailure(channelId: string, reason: string | null): void {
+	function setRestartFailure(channelId: string, failure: RestartFailure | null): void {
 		const next = new Map(restartFailures.value);
-		if (reason === null) next.delete(channelId);
-		else next.set(channelId, reason);
+		if (failure === null) next.delete(channelId);
+		else next.set(channelId, failure);
 		restartFailures.value = next;
 	}
 
@@ -986,8 +1018,20 @@ export const useChannelsStore = defineStore("channels", () => {
 				}),
 			);
 
+			// The socket says nothing of which SPAWN an answer is for. A terminal
+			// brought back is answered under its own id, and every answer names its
+			// host: one for another spawn is not this one's. Several panes bring
+			// their terminals back at once when their host returns (#605), and each
+			// took the first answer to come for its own.
+			const notOurs = (msg: { hostId?: string; channelId?: string }): boolean =>
+				(msg.hostId !== undefined && msg.hostId !== hostId) ||
+				(opts?.reuseChannelId !== undefined &&
+					msg.channelId !== undefined &&
+					msg.channelId !== opts.reuseChannelId);
+
 			unsubOk = sessionStore.wsClient.on("SPAWN_OK", (msg) => {
 				if (msg.type === "SPAWN_OK") {
+					if (notOurs(msg)) return;
 					clearTimeout(timer);
 					stopWaiting();
 					refreshAfterSpawn(hostId);
@@ -1008,9 +1052,26 @@ export const useChannelsStore = defineStore("channels", () => {
 						// Legacy informational frame; modern hubs send AGENT_SYNCED instead.
 						return;
 					}
+					if (notOurs(msg)) return;
 					clearTimeout(timer);
 					stopWaiting();
-					reject(new Error(`${msg.code}: ${msg.message}`));
+					// The host is away: what the hub says of it now is the freshest word
+					// this window has, and a pane waits on it (#605).
+					if (
+						msg.code === ErrorCode.HOST_UNREACHABLE &&
+						msg.hostId !== undefined &&
+						msg.hostStatus !== undefined
+					) {
+						useHostsStore().updateSessionStatus(msg.hostId, msg.hostStatus);
+					}
+					// The code travels with it, and the host: what a pane does about it is
+					// not a decision to make by reading a sentence.
+					reject(
+						Object.assign(new Error(`${msg.code}: ${msg.message}`), {
+							code: msg.code,
+							...(msg.hostId !== undefined && { hostId: msg.hostId }),
+						}),
+					);
 				}
 			});
 
@@ -1333,6 +1394,33 @@ export const useChannelsStore = defineStore("channels", () => {
 		return true;
 	}
 
+	/**
+	 * The restart route's refusal, as the failure the pane shows or waits out:
+	 * its host away, with the status the hub gave it (#605), or the status code.
+	 */
+	async function restFailureOf(res: Response): Promise<RestartFailure> {
+		const generic: RestartFailure = { reason: `The hub could not restart it (${res.status}).` };
+		let body: {
+			error?: { code?: unknown; message?: unknown; host_id?: unknown; host_status?: unknown };
+		};
+		try {
+			body = (await res.json()) as typeof body;
+		} catch {
+			return generic;
+		}
+		const error = body?.error;
+		if (error?.code !== ErrorCode.HOST_UNREACHABLE || typeof error.host_id !== "string") {
+			return generic;
+		}
+		if (typeof error.host_status === "string") {
+			useHostsStore().updateSessionStatus(error.host_id, error.host_status as SessionStatus);
+		}
+		return {
+			reason: typeof error.message === "string" ? error.message : generic.reason,
+			hostAway: { hostId: error.host_id },
+		};
+	}
+
 	async function restartChannel(channelId: string, hostIdHint?: string): Promise<boolean> {
 		if (authStore.token === null) return false;
 		setRestartFailure(channelId, null);
@@ -1356,7 +1444,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				return true;
 			} catch (err) {
-				setRestartFailure(channelId, restartFailureReason(err));
+				setRestartFailure(channelId, restartFailureOf(err, hostId));
 				return false;
 			}
 		}
@@ -1368,7 +1456,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			},
 		});
 		if (!res.ok) {
-			setRestartFailure(channelId, `The hub could not restart it (${res.status}).`);
+			setRestartFailure(channelId, await restFailureOf(res));
 			return false;
 		}
 

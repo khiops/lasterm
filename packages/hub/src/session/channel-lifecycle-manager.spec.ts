@@ -638,6 +638,130 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 	});
 });
 
+// ─── A SPAWN left unanswered while its host went away (#605) ─────────────────
+//
+// Seen on a Raspberry Pi back from a reboot: every restart ended on "Could not
+// restart it: Agent SPAWN timeout", an internal timeout that said nothing of
+// the cause. When the connection the SPAWN went over went down meanwhile, the
+// host is away, and the refusal says so, with the status of its session.
+
+describe("ChannelLifecycleManager — a SPAWN unanswered while its host went away (#605)", () => {
+	const HOST = "host-pi";
+
+	type Agent = { connected: boolean; send: ReturnType<typeof vi.fn> };
+
+	/** A SPAWN sent to `agent`, its host's connection, and never answered. */
+	function unansweredSpawn(agent: Agent) {
+		const client = makeWsClient("c-1");
+		const agents = new Map<string, Agent>([[HOST, agent]]);
+		const sessions = new Map<string, { id: string; hostId: string; status: string }>([
+			[HOST, { id: "sess-1", hostId: HOST, status: "active" }],
+		]);
+		const ctx = {
+			clients: new Map([[client.id, client]]),
+			channels: new Map(),
+			pendingRequests: new Map(),
+			metaDal: { getHost: vi.fn(() => ({ id: HOST, label: "raspberrypi" })) },
+			sessions,
+			agents,
+			hubLogger: null,
+			primaryToken: null,
+		} as unknown as SharedSessionContext;
+		const manager = new ChannelLifecycleManager(ctx, new StateBroadcaster(ctx));
+		const spawned = manager.sendSpawnAndWait({
+			agent: agent as never,
+			spawnMsg: {
+				type: "SPAWN",
+				requestId: "req-1",
+				channelId: "pi-shell",
+				cols: 80,
+				rows: 24,
+			} as import("@lasterm/shared").AgentSpawnMessage,
+			clientId: client.id,
+			hostId: HOST,
+			session: { id: "sess-1" },
+			client: client as never,
+			resolvedShell: undefined,
+			resolvedArgs: [],
+			resolvedCwd: undefined,
+			resolvedDirectProcess: false,
+			resolvedLaunchProfileId: undefined,
+			cols: 80,
+			rows: 24,
+			reuseChannelId: "pi-shell",
+		});
+		// Settled or not, a rejection is read by the test, not left unhandled.
+		const outcome = spawned.then(
+			() => null,
+			(err: unknown) => err,
+		);
+		return { agents, sessions, outcome };
+	}
+
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("says the host is away when its connection went, and the hub reaches for it again", async () => {
+		const agent = { connected: true, send: vi.fn() };
+		const { agents, sessions, outcome } = unansweredSpawn(agent);
+		// The connection drops: the hub lets it go, and reconnects.
+		agent.connected = false;
+		agents.delete(HOST);
+		sessions.set(HOST, { id: "sess-1", hostId: HOST, status: "disconnected" });
+
+		await vi.advanceTimersByTimeAsync(10_000);
+
+		expect(await outcome).toMatchObject({
+			code: "HOST_UNREACHABLE",
+			hostId: HOST,
+			hostStatus: "disconnected",
+			message: "raspberrypi cannot be reached right now.",
+		});
+	});
+
+	// Back over another connection: a pane tries again at once.
+	it("says so too when the host came back over another connection meanwhile", async () => {
+		const agent = { connected: true, send: vi.fn() };
+		const { agents, outcome } = unansweredSpawn(agent);
+		agent.connected = false;
+		agents.set(HOST, { connected: true, send: vi.fn() });
+
+		await vi.advanceTimersByTimeAsync(10_000);
+
+		expect(await outcome).toMatchObject({ code: "HOST_UNREACHABLE", hostStatus: "active" });
+	});
+
+	// The agent was there, and did not answer: the terminal's failure, as before.
+	it("keeps the timeout when the connection it went over is still up", async () => {
+		const { outcome } = unansweredSpawn({ connected: true, send: vi.fn() });
+
+		await vi.advanceTimersByTimeAsync(10_000);
+
+		const err = await outcome;
+		expect(err).toBeInstanceOf(Error);
+		expect((err as Error).message).toBe("Agent SPAWN timeout");
+		expect(err).not.toHaveProperty("code");
+	});
+
+	// Nothing reaches for the host any more: nothing to wait for.
+	it("keeps the timeout once the hub has stopped reaching for the host", async () => {
+		const agent = { connected: true, send: vi.fn() };
+		const { agents, sessions, outcome } = unansweredSpawn(agent);
+		agent.connected = false;
+		agents.delete(HOST);
+		sessions.delete(HOST);
+
+		await vi.advanceTimersByTimeAsync(10_000);
+
+		expect(((await outcome) as Error).message).toBe("Agent SPAWN timeout");
+	});
+});
+
 // ─── reconcileChannelState ───────────────────────────────────────────────────
 //
 // What the agent says it is holding decides what is alive. A daemon that

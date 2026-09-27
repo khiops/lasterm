@@ -432,6 +432,142 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// Why a terminal ended, for a pane that finds it ended (#592)
+// ---------------------------------------------------------------------------
+
+// A pane that finds its terminal ended, at a launch, a reload or an attach,
+// heard no report of the end. It reads here whether the hub ended it on
+// purpose: from the hub's last report or STATE_SYNC, else the list of the host
+// in view, else the index of every host.
+describe("useChannelsStore — endReasonOf (#592)", () => {
+	function row(
+		id: string,
+		status: string,
+		endReason?: string,
+		hostId = "host-1",
+	): Record<string, unknown> {
+		return {
+			id,
+			session_id: "sess-1",
+			host_id: hostId,
+			display_title: id,
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status,
+			...(endReason !== undefined && { end_reason: endReason }),
+			created_at: "2026-01-01T00:00:00Z",
+			updated_at: "2026-01-01T00:00:00Z",
+		};
+	}
+
+	function listing(rows: Record<string, unknown>[]): void {
+		mockFetch.mockImplementation((url: string) =>
+			Promise.resolve({
+				ok: true,
+				json: () => Promise.resolve(url.includes("/api/groups") ? [] : rows),
+			}),
+		);
+	}
+
+	it("reads it from the list of the host in view", async () => {
+		listing([row("killed", "dead", "destroyed"), row("exited", "dead"), row("running", "live")]);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		expect(store.endReasonOf("killed")).toBe("destroyed");
+		expect(store.channels.find((c) => c.id === "killed")?.endReason).toBe("destroyed");
+		expect(store.endReasonOf("exited")).toBeUndefined();
+		expect(store.endReasonOf("running")).toBeUndefined();
+		expect(store.endReasonOf(null)).toBeUndefined();
+	});
+
+	// A tab over a terminal on a host not in view.
+	it("reads it from the index, whichever host the terminal is on", async () => {
+		listing([
+			row("pi-killed", "dead", "destroyed", "host-pi"),
+			row("pi-exited", "dead", undefined, "host-pi"),
+		]);
+		const store = useChannelsStore();
+		await store.fetchChannelIndex();
+
+		expect(store.endReasonOf("pi-killed")).toBe("destroyed");
+		expect(store.endReasonOf("pi-exited")).toBeUndefined();
+		// A reason it does not know is none.
+		listing([row("pi-odd", "dead", "something-else", "host-pi")]);
+		await store.fetchChannelIndex();
+		expect(store.endReasonOf("pi-odd")).toBeUndefined();
+	});
+
+	// The window was away, or had not loaded any list yet.
+	it("reads it from the STATE_SYNC of its socket, which names the ones ended on purpose", () => {
+		const store = useChannelsStore();
+		store.applyStateSync([
+			{ channelId: "running", sessionId: "s1", status: "live" },
+			{ channelId: "killed", sessionId: "s0", status: "dead", endReason: "destroyed" },
+		]);
+
+		expect(store.reportOf("killed")).toEqual({ status: "dead", endReason: "destroyed" });
+		expect(store.statusOf("killed")).toBe("dead");
+		expect(store.endReasonOf("killed")).toBe("destroyed");
+		expect(store.endReasonOf("running")).toBeUndefined();
+	});
+
+	// Heard dead for no reason before the socket went: why, it learns now.
+	it("takes a STATE_SYNC saying why over a report that said it ended, as news", () => {
+		const store = useChannelsStore();
+		store.updateChannelStatus("killed", "dead");
+		const before = store.reportOf("killed");
+
+		store.applyStateSync([
+			{ channelId: "killed", sessionId: "s0", status: "dead", endReason: "destroyed" },
+		]);
+
+		expect(store.reportOf("killed")).not.toBe(before);
+		expect(store.endReasonOf("killed")).toBe("destroyed");
+	});
+
+	// The list was fetched when it had been killed; it was brought back since.
+	it("goes when the hub says the terminal runs again, whatever the list said", async () => {
+		listing([row("killed", "dead", "destroyed")]);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		store.updateChannelStatus("killed", "live");
+		expect(store.endReasonOf("killed")).toBeUndefined();
+		expect(store.channels.find((c) => c.id === "killed")).not.toHaveProperty("endReason");
+
+		// And an end after that says only what it says.
+		store.updateChannelStatus("killed", "dead", 0);
+		expect(store.endReasonOf("killed")).toBeUndefined();
+		store.updateChannelStatus("killed", "dead", undefined, "destroyed");
+		expect(store.endReasonOf("killed")).toBe("destroyed");
+		expect(store.channels.find((c) => c.id === "killed")?.endReason).toBe("destroyed");
+	});
+
+	it("goes from the list when the terminal is brought back under its own id", async () => {
+		listing([row("killed", "dead", "destroyed")]);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		store.handleChannelCreated({
+			type: "CHANNEL_CREATED",
+			hostId: "host-1",
+			channelId: "killed",
+			sessionId: "sess-2",
+			cols: 80,
+			rows: 24,
+			status: "live",
+			displayTitle: "killed",
+			createdAt: "2026-01-01T00:00:00Z",
+			updatedAt: "2026-01-02T00:00:00Z",
+		});
+
+		expect(store.channels.find((c) => c.id === "killed")).not.toHaveProperty("endReason");
+	});
+});
+
 describe("useChannelsStore — spawnChannel autoGroup", () => {
 	function makeGroupRowWithOrder(
 		id: string,

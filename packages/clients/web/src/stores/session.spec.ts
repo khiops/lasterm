@@ -531,4 +531,26 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 		// And the sidebar still lists the host in view, and only it.
 		expect(channels.channels.map((c) => c.id)).toEqual([LOCAL_CHANNEL.id]);
 	});
+
+	// Killed from another window while this one's socket was down: no report
+	// reached it. The pane that finds the terminal ended must still know it was
+	// meant, or "When a terminal ends" would bring it back (#592).
+	it("hands a pane that finds its terminal ended why, from the STATE_SYNC of the new socket", async () => {
+		const { ws, channels } = await pageLoaded();
+		expect(channels.endReasonOf(PI_CHANNEL)).toBeUndefined();
+
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [{ sessionId: "s-local", hostId: "host-local", status: "active" }],
+			channels: [
+				{ channelId: LOCAL_CHANNEL.id, sessionId: "s-local", status: "live" },
+				{ channelId: PI_CHANNEL, sessionId: "s-pi", status: "dead", endReason: "destroyed" },
+			],
+		});
+
+		expect(channels.statusOf(PI_CHANNEL)).toBe("dead");
+		expect(channels.endReasonOf(PI_CHANNEL)).toBe("destroyed");
+		// The sidebar still lists the host in view, and only it.
+		expect(channels.channels.map((c) => c.id)).toEqual([LOCAL_CHANNEL.id]);
+	});
 });

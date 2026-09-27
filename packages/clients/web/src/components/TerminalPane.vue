@@ -183,6 +183,7 @@ import { useTabTitle } from '../composables/useTabTitle.js';
 import { useTerminal } from '../composables/useTerminal.js';
 import { useVisualProfile } from '../composables/useVisualProfile.js';
 import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
+import { useWindowFocus } from '../composables/useWindowFocus.js';
 import { useChannelsStore } from '../stores/channels.js';
 import { useConfigStore } from '../stores/config.js';
 import { useHostsStore } from '../stores/hosts.js';
@@ -205,6 +206,7 @@ import {
 	overlayChoice,
 	reactToEnd,
 	alwaysScopeOf,
+	settingReadFor,
 } from '../utils/exit-action.js';
 import { type AttachFacts, factsFromAttachOk, factsFromRefusal, paneCover } from '../utils/pane-cover.js';
 import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
@@ -303,7 +305,7 @@ const hostThemeName = (() => {
 	}
 })();
 
-const { profile: resolvedProfile } = useResolvedProfile(
+const { profile: resolvedProfile, resolvedFor } = useResolvedProfile(
 	computed(() => paneHostId.value),
 	computed(() => props.channelId ?? undefined),
 );
@@ -502,13 +504,15 @@ watch(effectiveChannelId, () => {
  *
  * `endReason` is what the hub's report said of it, when the hub ended the
  * terminal itself: stopped from elsewhere, nothing here undoes it (#580).
+ * An end learnt otherwise takes what the hub has said of it in the list or at
+ * connect (#592).
  */
 function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
 	const facts: EndFacts = {
 		...end,
 		directProcess: isDirectProcess.value,
 		writer: isWriter.value,
-		endReason,
+		endReason: endReason ?? channelsStore.endReasonOf(effectiveChannelId.value),
 	};
 	// An end found later keeps what the one seen said, as the reason below does.
 	const held = endHold(facts);
@@ -518,6 +522,9 @@ function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
 		// An end found later keeps the reason the one seen gave, which is still true.
 		if (reaction.heldBack !== undefined) heldBack.value = reaction.heldBack;
 		else if (end.seen === 'live') heldBack.value = null;
+		// Found, and heard of here first: the setting answers it once its pane is
+		// on screen, in the window with the focus (#592).
+		if (end.seen === 'found' && end.again !== true) waitingAnswer.endFound(facts.endReason);
 		return;
 	}
 	heldBack.value = null;
@@ -752,9 +759,11 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			} else {
 				// A terminal already known to have ended is not asked for: the
 				// hub would answer CHANNEL_DEAD, which is what the overlay says.
-				// Mark ready so the overlay renders immediately.
+				// Mark ready so the overlay renders immediately. Found, not seen:
+				// the setting answers it once the pane is on screen (#592).
 				if (isDead.value) {
 					ready.value = true;
+					onTerminalEnded(endWatch.ended(props.channelId));
 					return;
 				}
 				// Existing channel — reattach (fetch snapshot + tail).
@@ -1088,7 +1097,9 @@ function followChoice(action: OverlayAction): void {
 
 // An overlay already waiting when "Always do this" is clicked on another one
 // in its scope does the same, once, when it is on screen: see `answerWaiting`.
-useWaitingAnswer({
+// One over an end found rather than seen follows the setting, once, when it is
+// on screen in the window with the focus: see `answerFoundEnd` (#592).
+const waitingAnswer = useWaitingAnswer({
 	waiting: computed(() => cover.value === 'exited' && !restarting.value),
 	channelId: effectiveChannelId,
 	hostId: paneHostId,
@@ -1096,6 +1107,18 @@ useWaitingAnswer({
 	directProcess: isDirectProcess,
 	whenEnded: computed(() => prefs.value.whenEnded),
 	inView,
+	endReason: computed(() => channelsStore.endReasonOf(effectiveChannelId.value)),
+	// Read for this terminal, on its own host: see `settingReadFor`.
+	settingKnown: computed(() =>
+		settingReadFor(
+			resolvedFor.value,
+			effectiveChannelId.value,
+			effectiveChannelId.value === null
+				? undefined
+				: channelsStore.channelHostMap.get(effectiveChannelId.value),
+		),
+	),
+	focused: useWindowFocus(),
 	act: followChoice,
 });
 

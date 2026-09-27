@@ -53,8 +53,9 @@ export function endedPrefs(
  * running, over a socket that stayed up since that attach. Anything else is
  * `found`: the list said so when the page loaded, an attach was refused because
  * it had ended, or the report came after the socket was replaced. An end that
- * was found is shown, never acted on: nobody saw it happen, and #559's "nothing
- * restarts on its own" holds there.
+ * was found is shown at once, and acted on only once its pane is on screen in
+ * the window that has the focus (`answerFoundEnd`, #592): nobody saw it happen,
+ * and #559's "nothing restarts that nobody sees" holds there.
  */
 export interface EndSeen {
 	seen: "live" | "found";
@@ -62,6 +63,12 @@ export interface EndSeen {
 	watchedMs: number | null;
 	/** That watch began when the terminal started, which the pane saw or caused. */
 	fromStart: boolean;
+	/**
+	 * This end was told already, and nothing since said the terminal runs: a
+	 * report repeating it, the attach after it, a STATE_SYNC naming it. Only
+	 * the first word of an end is answered (#592).
+	 */
+	again?: true;
 }
 
 /**
@@ -87,15 +94,19 @@ export function createEndWatch(now: () => number): EndWatch {
 	let watching: { channelId: string; since: number; fromStart: boolean } | null = null;
 	/** A start from here, not yet attached to. */
 	let startingId: string | null = null;
+	/** The terminal whose end was told last, until something says it runs again. */
+	let toldId: string | null = null;
 
 	return {
 		starting(channelId) {
 			watching = null;
 			startingId = channelId;
+			toldId = null;
 		},
 		attached(channelId) {
 			watching = { channelId, since: now(), fromStart: startingId === channelId };
 			startingId = null;
+			toldId = null;
 		},
 		lost() {
 			watching = null;
@@ -104,9 +115,19 @@ export function createEndWatch(now: () => number): EndWatch {
 		ended(channelId) {
 			const watched = watching?.channelId === channelId ? watching : null;
 			const justStarted = startingId === channelId;
+			// Nothing said it runs since: `starting` and `attached` forget it.
+			const again = toldId === channelId;
 			watching = null;
 			startingId = null;
-			if (watched === null) return { seen: "found", watchedMs: null, fromStart: justStarted };
+			toldId = channelId;
+			if (watched === null) {
+				return {
+					seen: "found",
+					watchedMs: null,
+					fromStart: justStarted,
+					...(again && { again: true as const }),
+				};
+			}
 			return { seen: "live", watchedMs: now() - watched.since, fromStart: watched.fromStart };
 		},
 	};
@@ -150,6 +171,9 @@ export interface EndFacts extends EndSeen {
  * on, whatever the setting: someone meant it, and restarting it would undo
  * that, where closing the pane would hide it (#580). The overlay says so.
  *
+ * An end that was found is shown here, with why a restart would hold back,
+ * and left to `answerFoundEnd` once its pane is on screen (#592).
+ *
  * Otherwise only an end seen live is acted on. Restart holds back, with the
  * overlay and the reason, from:
  * - a terminal that ended within `AUTO_RESTART_MIN_RUN_MS` of starting, or of
@@ -169,6 +193,10 @@ export function reactToEnd(prefs: EndedPrefs, end: EndFacts): EndReaction {
 		// right after starting: worth saying, when the setting would restart.
 		if (prefs.whenEnded === "restart" && end.fromStart) {
 			return { kind: "overlay", heldBack: "just-started" };
+		}
+		// Found ends follow the setting now, save this one (#592).
+		if (prefs.whenEnded === "restart" && end.directProcess) {
+			return { kind: "overlay", heldBack: "runs-a-command" };
 		}
 		return { kind: "overlay" };
 	}
@@ -359,6 +387,77 @@ export function answerWaiting(choice: AlwaysChoice, overlay: WaitingOverlay): Wa
 	if (overlay.directProcess || overlay.hold !== null) return "ask";
 	if (!overlay.inView) return overlay.wasInView ? "ask" : "wait";
 	return overlay.whenEnded === choice.action ? "act" : "wait";
+}
+
+// ─── An end found, and the setting (#592) ────────────────────────────────────
+
+/**
+ * Whether "When a terminal ends" has been read for this terminal, on the host
+ * it runs on.
+ *
+ * Until its profile is read, a pane holds the default, which says "ask". And
+ * until the pane knows its terminal's host, it reads the profile of the host
+ * in view: a tab over another host's terminal, at launch, would follow that
+ * host's setting, and bring the terminal back on a host it never ran on.
+ * `resolved` is what the profile was last read for; `host`, the host the
+ * client knows the terminal is on, if it knows.
+ */
+export function settingReadFor(
+	resolved: { hostId: string | null; channelId: string | null } | null,
+	channelId: string | null,
+	host: string | undefined,
+): boolean {
+	if (resolved === null || channelId === null || host === undefined) return false;
+	return resolved.channelId === channelId && resolved.hostId === host;
+}
+
+/** An overlay over an end its pane found, and what decides whether it follows the setting. */
+export interface FoundEnd {
+	/** What about its end holds it back (`endHold`): for an end found, a restart from here that ended at once. */
+	hold: EndHold | null;
+	/** Its terminal runs a command rather than a shell. */
+	directProcess: boolean;
+	/** Why the hub says it ended, when it ended it on purpose (#580). */
+	endReason?: ChannelEndReason | undefined;
+	/** "When a terminal ends", as its terminal's settings resolve it now. */
+	whenEnded: WhenEnded;
+	/** That setting was read for its terminal: until then it shows the default, "ask". */
+	settingKnown: boolean;
+	/** It is on screen: its tab is the one shown, beside the pane selected or not. */
+	inView: boolean;
+	/** Its window has the focus. */
+	focused: boolean;
+}
+
+/**
+ * What an overlay over an end its pane found does with "When a terminal ends"
+ * (#592): an end that happened while the app was closed, or that a reload or
+ * an attach learnt of.
+ *
+ * It follows it, Restart or Close, once, and never in the background: only
+ * while it is on screen, in the window that has the focus, so that two windows
+ * showing the same terminal do not both act on it. Until then it waits, and it
+ * acts the moment it is seen: its tab shown, or its window focused.
+ *
+ * It keeps asking, whatever the setting says, over:
+ * - an end the hub caused on purpose (#580): a deliberate stop is never undone
+ *   by a setting;
+ * - a terminal that runs a command: Restart would run it again, and Close
+ *   would take away what it printed before anyone read it;
+ * - a restart from here that ended before its pane could reach it: it ended
+ *   right after starting (`endHold`).
+ *
+ * "Ask" asks. The setting is waited for until it has been read for its
+ * terminal: before that it reads "ask" for every one.
+ *
+ * A restart that ends again at once is an end seen live, within
+ * `AUTO_RESTART_MIN_RUN_MS` of its start: `reactToEnd` holds that one back.
+ */
+export function answerFoundEnd(end: FoundEnd): WaitingAnswer {
+	if (end.endReason === "destroyed" || end.directProcess || end.hold !== null) return "ask";
+	if (!end.settingKnown) return "wait";
+	if (end.whenEnded === "ask") return "ask";
+	return end.inView && end.focused ? "act" : "wait";
 }
 
 // ─── Closing ended terminals ─────────────────────────────────────────────────

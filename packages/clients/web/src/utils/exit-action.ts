@@ -1,4 +1,5 @@
 import type { ChannelEndReason, PanesConfig, TerminalProfile } from "@lasterm/shared";
+import type { PaneCover } from "./pane-cover.js";
 
 /**
  * What happens when a terminal ends (#574): the choice Settings › Terminal
@@ -465,6 +466,101 @@ export function answerFoundEnd(end: FoundEnd): WaitingAnswer {
 	if (!end.settingKnown) return "wait";
 	if (end.whenEnded === "ask") return "ask";
 	return end.inView && end.focused ? "act" : "wait";
+}
+
+// ─── What a pane shows over its ended terminal (#595) ────────────────────────
+
+/**
+ * How long an end found waits for "When a terminal ends" to be read for its
+ * terminal before its pane asks anyway.
+ *
+ * The read is one request, and takes a moment. One that fails, or a terminal
+ * whose host the client never learns, would otherwise leave the pane saying
+ * that its shell exited with nothing to click. If the setting is read after
+ * all, it still answers the end as `answerFoundEnd` says.
+ */
+export const SETTING_READ_GRACE_MS = 3_000;
+
+/** What a pane lays over its terminal once it has ended. */
+export type EndedView =
+	/** Nothing of its own: nothing ended, or the pane is still opening and says so. */
+	| { kind: "none" }
+	/** The card, which asks: Restart, Close, "Always do this". */
+	| { kind: "card" }
+	/** One line, which says what is being done, or waited for, and asks nothing. */
+	| { kind: "quiet"; text: string };
+
+/** What a pane knows that decides what it shows over its ended terminal. */
+export interface EndedPane {
+	/** What covers its terminal (`paneCover`). */
+	cover: PaneCover;
+	/** It is still opening: it says "Connecting…", and has not taken in its terminal's end yet. */
+	opening: boolean;
+	/** A restart of its terminal is under way from this pane, whoever asked for it. */
+	restarting: boolean;
+	/** The end it found that the setting has still to answer (#592), or null. */
+	found: FoundEnd | null;
+	/** That end has waited `SETTING_READ_GRACE_MS` for its setting to be read. */
+	settingOverdue: boolean;
+	/** What the card says first: "Shell exited (code 0)". */
+	exitMessage: string;
+}
+
+/**
+ * The card over an ended terminal, or a quiet line in its place (#595).
+ *
+ * The card is a question, so it shows only when the pane is going to ask:
+ * the setting says Ask, or something holds the end back (a restart that
+ * ended at once, a command, another window's write lock, a kill), or a
+ * restart failed, which it says. A terminal that the hub has no record of
+ * (`gone`) has only Close to offer, and always asks.
+ *
+ * While the setting is going to act, nothing is asked, and one line says
+ * what the pane does or waits for:
+ * - "Restarting…" while a restart is under way, and at the moment the
+ *   setting acts ("Closing…" for Close, which takes the pane away);
+ * - "Restarts when this window has the focus." for an end found in a window
+ *   without the focus ("Closes when…" for Close);
+ * - "Restarts when this terminal is shown." for one whose tab is not the one
+ *   shown, where the line is hidden with its pane anyway;
+ * - the exit message alone ("Shell exited") while the setting is still being
+ *   read for its terminal: until then nothing says whether it will ask, and
+ *   the pane promises nothing. Past `SETTING_READ_GRACE_MS` it asks.
+ *
+ * While the pane opens, "Connecting…" is all it says.
+ */
+export function endedPaneShows(pane: EndedPane): EndedView {
+	if (pane.opening) return { kind: "none" };
+	if (pane.cover === "gone") return { kind: "card" };
+	if (pane.cover !== "exited") return { kind: "none" };
+	if (pane.restarting) return { kind: "quiet", text: "Restarting…" };
+	const found = pane.found;
+	if (found === null) return { kind: "card" };
+	const closes = found.whenEnded === "close";
+	switch (answerFoundEnd(found)) {
+		case "ask":
+			return { kind: "card" };
+		case "act":
+			return { kind: "quiet", text: closes ? "Closing…" : "Restarting…" };
+		case "wait":
+			if (!found.settingKnown) {
+				return pane.settingOverdue ? { kind: "card" } : { kind: "quiet", text: pane.exitMessage };
+			}
+			if (!found.inView) {
+				return {
+					kind: "quiet",
+					text: closes
+						? "Closes when this terminal is shown."
+						: "Restarts when this terminal is shown.",
+				};
+			}
+			return {
+				kind: "quiet",
+				text: closes
+					? "Closes when this window has the focus."
+					: "Restarts when this window has the focus.",
+			};
+	}
 }
 
 // ─── Closing ended terminals ─────────────────────────────────────────────────

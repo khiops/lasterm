@@ -36,10 +36,12 @@
 		<!-- Background tint overlay (UX-07) -->
 		<div v-if="tintStyle" class="tint-overlay" :style="tintStyle" />
 
-		<!-- Exit overlay for all dead channels, and for one the hub has never heard of.
+		<!-- Exit overlay for a dead channel whose pane asks what to do, and for one
+		     the hub has never heard of. While "When a terminal ends" acts, or waits
+		     to, the line below says so instead: the card is a question (#595).
 		     The card carries its own opaque ground, so what is behind it — the
 		     terminal's content, a wallpaper — never decides whether it reads. -->
-		<div v-if="cover === 'exited' || cover === 'gone'" class="exit-overlay">
+		<div v-if="endedView.kind === 'card'" class="exit-overlay">
 			<div
 				ref="exitCard"
 				class="exit-card"
@@ -55,14 +57,12 @@
 					Could not restart it: {{ restartFailure }}
 				</p>
 				<div class="exit-actions">
+					<!-- A restart under way shows "Restarting…" in place of the card. -->
 					<button
 						v-if="!isGone"
 						class="exit-btn exit-btn--primary"
-						:disabled="restarting"
 						@click="onOverlayAction('restart')"
-					>
-						{{ restarting ? 'Restarting…' : 'Restart' }}
-					</button>
+					>Restart</button>
 					<button
 						v-if="isDirectProcess && !isGone"
 						class="exit-btn"
@@ -104,6 +104,13 @@
 					</div>
 				</div>
 			</div>
+		</div>
+
+		<!-- In place of the card while the setting restarts or closes the terminal,
+		     or waits to: one line that asks nothing, told politely to a screen
+		     reader. Always in the page, so that each line it is given is heard. -->
+		<div class="exit-status" role="status">
+			<span v-if="endedView.kind === 'quiet'" class="exit-status__text">{{ endedView.text }}</span>
 		</div>
 
 		<!-- Not connected: what is shown is remembered, not live -->
@@ -198,6 +205,7 @@ import {
 	type EndFacts,
 	type EndHold,
 	type EndSeen,
+	endedPaneShows,
 	endedPrefs,
 	endHold,
 	type HeldBack,
@@ -1061,18 +1069,6 @@ function focusOverlay(): void {
 	}
 }
 
-// Each time the overlay comes up, "Always do this" starts unchecked, on this host.
-watch(
-	() => cover.value === 'exited' || cover.value === 'gone',
-	(shown) => {
-		if (!shown) return;
-		alwaysOn.value = false;
-		alwaysWhere.value = 'host';
-		void nextTick(focusOverlay);
-	},
-	{ immediate: true },
-);
-
 // ---------------------------------------------------------------------------
 // "Always do this" clicked on another overlay (#586)
 // ---------------------------------------------------------------------------
@@ -1131,6 +1127,40 @@ const waitingAnswer = useWaitingAnswer({
 	focused: useWindowFocus(),
 	act: followChoice,
 });
+
+// ---------------------------------------------------------------------------
+// The card, or a quiet line in its place (#595)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the pane shows over its ended terminal: the card when it is going to
+ * ask, a quiet line while the setting restarts or closes it, or waits to. See
+ * `endedPaneShows`.
+ */
+const endedView = computed(() =>
+	endedPaneShows({
+		cover: cover.value,
+		opening: !ready.value,
+		restarting: restarting.value,
+		found: waitingAnswer.found.value,
+		settingOverdue: waitingAnswer.settingOverdue.value,
+		exitMessage: exitMessage.value,
+	}),
+);
+
+// Each time the card comes up, "Always do this" starts unchecked, on this
+// host, and the card takes the keyboard. It comes up only to ask: at once, or
+// after a quiet line, when the setting turns out to ask or a restart failed.
+watch(
+	() => endedView.value.kind === 'card',
+	(shown) => {
+		if (!shown) return;
+		alwaysOn.value = false;
+		alwaysWhere.value = 'host';
+		void nextTick(focusOverlay);
+	},
+	{ immediate: true },
+);
 
 // ---------------------------------------------------------------------------
 // Context menu
@@ -1764,6 +1794,30 @@ function onDragEnd(): void {
 .exit-scope-option:has(input:focus-visible) {
 	outline: 2px solid var(--nt-accent);
 	outline-offset: -2px;
+}
+
+/* The quiet line in place of the card (#595): no scrim, nothing to click, the
+   terminal left as it was. Above the terminal and its tint, like "Connecting…",
+   on the card's own opaque ground so that it reads over anything. */
+.exit-status {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	pointer-events: none;
+	z-index: 4;
+}
+
+.exit-status__text {
+	padding: 6px 12px;
+	border-radius: 6px;
+	background: rgb(var(--nt-bg-rgb));
+	color: var(--nt-text-strong);
+	border: 1px solid var(--nt-border);
+	font-size: 13px;
+	text-align: center;
 }
 
 /* Reconnecting overlay */

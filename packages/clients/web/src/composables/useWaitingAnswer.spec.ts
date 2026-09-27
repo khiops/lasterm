@@ -3,7 +3,13 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, nextTick, ref } from "vue";
 import { useConfigStore } from "../stores/config.js";
-import type { AlwaysChoice, EndHold, OverlayAction, WhenEnded } from "../utils/exit-action.js";
+import {
+	type AlwaysChoice,
+	type EndHold,
+	type OverlayAction,
+	SETTING_READ_GRACE_MS,
+	type WhenEnded,
+} from "../utils/exit-action.js";
 import { useWaitingAnswer, type WaitingAnswerHandle } from "./useWaitingAnswer.js";
 
 // "Always do this" on one overlay also answers the overlays already waiting
@@ -40,11 +46,22 @@ function pane() {
 	setActivePinia(pinia);
 	app.use(pinia);
 	app.mount(document.createElement("div"));
-	const endFound = (endReason?: ChannelEndReason): void => {
+	const mounted = (): WaitingAnswerHandle => {
 		if (handle === null) throw new Error("not mounted");
-		handle.endFound(endReason);
+		return handle;
 	};
-	return { ...sources, acted, endFound, unmount: () => app.unmount() };
+	const endFound = (endReason?: ChannelEndReason): void => {
+		mounted().endFound(endReason);
+	};
+	return {
+		...sources,
+		acted,
+		endFound,
+		/** The end found the setting has still to answer, as the pane reads it. */
+		found: () => mounted().found.value,
+		settingOverdue: () => mounted().settingOverdue.value,
+		unmount: () => app.unmount(),
+	};
 }
 
 /** "Always do this" clicked on another terminal of h1, once written. */
@@ -391,6 +408,69 @@ describe("useWaitingAnswer, over an end found (#592)", () => {
 		await nextTick();
 		expect(p.acted).toEqual([]);
 		p.unmount();
+	});
+
+	// What the pane shows in place of its card meanwhile is endedPaneShows's to
+	// say (exit-action.spec.ts): it reads the end found here (#595).
+	it("tells the pane the end its setting has still to answer, until it does", async () => {
+		const p = pane();
+		p.settingKnown.value = false;
+		await nextTick();
+		expect(p.found()).toBeNull();
+
+		p.endFound();
+		expect(p.found()).toMatchObject({ settingKnown: false, inView: false });
+
+		// As it stands: read now, and its tab not shown.
+		p.whenEnded.value = "restart";
+		p.settingKnown.value = true;
+		await nextTick();
+		expect(p.found()).toMatchObject({ whenEnded: "restart", settingKnown: true, inView: false });
+
+		p.inView.value = true;
+		await nextTick();
+		expect(p.acted).toEqual(["restart"]);
+		expect(p.found()).toBeNull();
+		p.unmount();
+	});
+
+	it("tells it nothing once the setting asks", async () => {
+		const p = pane();
+		p.settingKnown.value = false;
+		await nextTick();
+		p.endFound();
+		expect(p.found()).not.toBeNull();
+
+		p.settingKnown.value = true;
+		await nextTick();
+		expect(p.found()).toBeNull();
+		p.unmount();
+	});
+
+	// A setting that cannot be read must not leave the pane with nothing to click.
+	it("says when its setting has been too long in coming, and forgets it with the end", async () => {
+		vi.useFakeTimers();
+		try {
+			const p = pane();
+			p.settingKnown.value = false;
+			p.inView.value = true;
+			await nextTick();
+			p.endFound();
+			vi.advanceTimersByTime(SETTING_READ_GRACE_MS - 1);
+			expect(p.settingOverdue()).toBe(false);
+			vi.advanceTimersByTime(1);
+			expect(p.settingOverdue()).toBe(true);
+
+			// Read after all, it still answers.
+			p.whenEnded.value = "restart";
+			p.settingKnown.value = true;
+			await nextTick();
+			expect(p.acted).toEqual(["restart"]);
+			expect(p.settingOverdue()).toBe(false);
+			p.unmount();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	// "Always do this" on another overlay and the setting, both waiting.

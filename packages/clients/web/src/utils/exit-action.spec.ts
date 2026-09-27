@@ -8,8 +8,11 @@ import {
 	answerFoundEnd,
 	answerWaiting,
 	createEndWatch,
+	type EndedPane,
 	type EndedPrefs,
+	type EndedView,
 	type EndFacts,
+	endedPaneShows,
 	endedPrefs,
 	endedToDelete,
 	endHold,
@@ -489,6 +492,136 @@ describe("answerFoundEnd: an end found, and the setting", () => {
 		expect(answerFoundEnd({ ...away, endReason: "killed" })).toBe("ask");
 		expect(answerFoundEnd({ ...away, directProcess: true })).toBe("ask");
 		expect(answerFoundEnd({ ...away, hold: "just-started" })).toBe("ask");
+	});
+});
+
+// ─── What a pane shows over its ended terminal (#595) ────────────────────────
+//
+// With Restart set, a terminal the setting restarted showed Restart / Close /
+// "Always do this" for a moment first. The card is a question, and nothing
+// was being asked.
+
+describe("endedPaneShows: the card, or a quiet line in its place", () => {
+	/** A shell found ended, on screen, in the focused window, its setting read as Restart. */
+	const restartSoon: FoundEnd = {
+		hold: null,
+		directProcess: false,
+		whenEnded: "restart",
+		settingKnown: true,
+		inView: true,
+		focused: true,
+	};
+	/** A pane over a terminal that ended, open, with nothing under way. */
+	const pane: EndedPane = {
+		cover: "exited",
+		opening: false,
+		restarting: false,
+		found: null,
+		settingOverdue: false,
+		exitMessage: "Shell exited (code 0)",
+	};
+	const card: EndedView = { kind: "card" };
+	const quiet = (text: string): EndedView => ({ kind: "quiet", text });
+
+	// An end seen live that asks, or that the setting held back: `reactToEnd`
+	// showed the card, and the pane is asking.
+	it("shows the card when the pane asks", () => {
+		expect(endedPaneShows(pane)).toEqual(card);
+		expect(endedPaneShows({ ...pane, found: { ...restartSoon, whenEnded: "ask" } })).toEqual(card);
+		// Asked, whatever else it waits for.
+		expect(
+			endedPaneShows({
+				...pane,
+				found: { ...restartSoon, whenEnded: "ask", inView: false, focused: false },
+			}),
+		).toEqual(card);
+	});
+
+	it("shows the card over an end held back, before its setting is read or it is seen", () => {
+		const away = { ...restartSoon, settingKnown: false, inView: false, focused: false };
+		for (const found of [
+			{ ...away, endReason: "killed" as const },
+			{ ...away, directProcess: true },
+			{ ...away, hold: "just-started" as const },
+		]) {
+			expect(endedPaneShows({ ...pane, found })).toEqual(card);
+		}
+	});
+
+	// Until it is read, nothing says whether it will ask: the pane says what
+	// happened, and promises nothing.
+	it("says only that it exited while the setting is read for its terminal", () => {
+		const reading = { ...pane, found: { ...restartSoon, settingKnown: false } };
+		expect(endedPaneShows(reading)).toEqual(quiet("Shell exited (code 0)"));
+		// The default it reads meanwhile is "ask", which asks nothing yet.
+		expect(endedPaneShows({ ...reading, found: { ...reading.found, whenEnded: "ask" } })).toEqual(
+			quiet("Shell exited (code 0)"),
+		);
+	});
+
+	// A setting that cannot be read leaves something to click.
+	it("asks once the setting has been too long in coming", () => {
+		const reading = { ...pane, found: { ...restartSoon, settingKnown: false } };
+		expect(endedPaneShows({ ...reading, settingOverdue: true })).toEqual(card);
+		// Read in time, the overdue clock says nothing.
+		expect(endedPaneShows({ ...pane, found: restartSoon, settingOverdue: true })).toEqual(
+			quiet("Restarting…"),
+		);
+	});
+
+	it("says it restarts, or closes, when its window has the focus", () => {
+		const unfocused = { ...restartSoon, focused: false };
+		expect(endedPaneShows({ ...pane, found: unfocused })).toEqual(
+			quiet("Restarts when this window has the focus."),
+		);
+		expect(endedPaneShows({ ...pane, found: { ...unfocused, whenEnded: "close" } })).toEqual(
+			quiet("Closes when this window has the focus."),
+		);
+	});
+
+	// Hidden with its tab: the line is there for when it is shown.
+	it("says it restarts, or closes, when it is shown", () => {
+		for (const focused of [true, false]) {
+			const hidden = { ...restartSoon, inView: false, focused };
+			expect(endedPaneShows({ ...pane, found: hidden })).toEqual(
+				quiet("Restarts when this terminal is shown."),
+			);
+			expect(endedPaneShows({ ...pane, found: { ...hidden, whenEnded: "close" } })).toEqual(
+				quiet("Closes when this terminal is shown."),
+			);
+		}
+	});
+
+	// Seen live, or found, or from the card's own button.
+	it('says "Restarting…" while a restart is under way, and as the setting acts', () => {
+		expect(endedPaneShows({ ...pane, restarting: true })).toEqual(quiet("Restarting…"));
+		expect(
+			endedPaneShows({ ...pane, restarting: true, found: { ...restartSoon, whenEnded: "ask" } }),
+		).toEqual(quiet("Restarting…"));
+		expect(endedPaneShows({ ...pane, found: restartSoon })).toEqual(quiet("Restarting…"));
+		expect(endedPaneShows({ ...pane, found: { ...restartSoon, whenEnded: "close" } })).toEqual(
+			quiet("Closing…"),
+		);
+	});
+
+	// The pane shows its reason on the card, as before.
+	it("shows the card again once a restart failed", () => {
+		const failed = { ...pane, restarting: false, found: null };
+		expect(endedPaneShows(failed)).toEqual(card);
+	});
+
+	// Nothing about it is the setting's: it offers Close, and asks.
+	it("shows the card over a terminal the hub has no record of", () => {
+		expect(endedPaneShows({ ...pane, cover: "gone" })).toEqual(card);
+		expect(endedPaneShows({ ...pane, cover: "gone", restarting: true })).toEqual(card);
+	});
+
+	it('leaves "Connecting…" alone while the pane opens, and shows nothing over a terminal that runs', () => {
+		const none: EndedView = { kind: "none" };
+		expect(endedPaneShows({ ...pane, opening: true })).toEqual(none);
+		expect(endedPaneShows({ ...pane, opening: true, cover: "gone" })).toEqual(none);
+		expect(endedPaneShows({ ...pane, cover: null })).toEqual(none);
+		expect(endedPaneShows({ ...pane, cover: "not-connected", restarting: true })).toEqual(none);
 	});
 });
 

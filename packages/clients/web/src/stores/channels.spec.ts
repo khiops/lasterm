@@ -1675,6 +1675,7 @@ describe("useChannelsStore — restartChannel failures", () => {
 	// A live terminal restarts over REST, which says the same with its status code.
 	it("reads the restart route's refusal the same way", async () => {
 		const hosts = useHostsStore();
+		hosts.updateSessionStatus("host-pi", "active");
 		const store = useChannelsStore();
 		store.channels = [
 			{

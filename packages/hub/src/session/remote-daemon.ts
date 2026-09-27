@@ -18,11 +18,15 @@
  * reach. The order here is the same order the local path uses, and it is what
  * keeps that from happening.
  *
+ * Where the daemon runs on the remote, a systemd scope of its own or the SSH
+ * login session that started it, is `remoteDaemonLaunchCommand`'s (#600).
+ *
  * Windows remotes are not served by this: their daemon listens on a named pipe,
  * and OpenSSH has no channel type that carries one. They stay on stdio, and
  * their terminals still end with the connection.
  */
 
+import { randomBytes } from "node:crypto";
 import type { Duplex } from "node:stream";
 import type { Client } from "ssh2";
 
@@ -82,6 +86,11 @@ export interface RemoteDaemonLaunch {
 	logFormat?: string;
 	/** Seconds to stay up holding nothing, for nobody. See `IDLE_TIMEOUT_SECONDS`. */
 	idleTimeoutSeconds?: number;
+	/**
+	 * The systemd scope to start the daemon in, where the host has one to give
+	 * (#600). A fresh name by default; see `newRemoteDaemonScopeUnit`.
+	 */
+	scopeUnit?: string;
 }
 
 /**
@@ -98,13 +107,97 @@ export interface RemoteDaemonLaunch {
 export const IDLE_TIMEOUT_SECONDS = 1_800;
 
 /**
- * The command that starts the daemon and lets go of it.
+ * A name for the scope a daemon is started in, new at every launch.
+ *
+ * Not one per socket: `systemd-run` refuses a name that is still loaded, and a
+ * scope stays loaded as long as anything in it runs. That can be a daemon the
+ * hub replaced (#456) still finishing its exit when the next one starts, or a
+ * job someone left running from one of its terminals (`nohup`, a `tmux`
+ * server) after it ended. Nothing finds the daemon by its unit anyway: the
+ * hub, `--stop` and the identity record all go by the socket.
+ */
+export function newRemoteDaemonScopeUnit(): string {
+	return `lasterm-agent-${randomBytes(6).toString("hex")}.scope`;
+}
+
+/**
+ * What detaches the agent, whichever placement it gets. Run as
+ * `sh -c SCRIPT lasterm-agent LOG AGENT ARGS…`: the paths arrive as arguments,
+ * so none of them is quoted twice.
  *
  * `setsid` where it exists, `nohup` where it does not: either way the agent
  * must outlive the SSH session that started it, which means a session of its
  * own or an ignored SIGHUP. stdin comes from `/dev/null` and both outputs go to
  * the log, so nothing of it is left hanging off the exec channel — a process
  * still holding that channel keeps the exec from returning.
+ *
+ * `INVOCATION_ID` is what `systemd-run --scope` adds to the environment; it
+ * goes, so that the daemon, and every terminal inheriting from it, starts with
+ * the session's environment in either placement. An SSH session has none.
+ *
+ * No `${` and no `$$` in here: a recent `systemd-run` (262 does) expands both
+ * in the arguments it is handed, and would have this script's parameters
+ * replaced with its own environment before the shell ever saw them.
+ */
+export const DETACH_SCRIPT =
+	'log=$1; shift; unset INVOCATION_ID; if command -v setsid > /dev/null 2>&1; then setsid "$@" < /dev/null >> "$log" 2>&1 & ' +
+	'else nohup "$@" < /dev/null >> "$log" 2>&1 & fi';
+
+/** What the launch command prints last, so the hub can say where the daemon went. */
+const PLACEMENT_MARKER = "lasterm-daemon-placement:";
+
+/** Why a daemon was started in the SSH login session rather than a scope of its own. */
+export type RemoteDaemonSessionReason =
+	| "no-systemd-run"
+	| "no-linger"
+	| "no-user-manager"
+	| "systemd-run-failed";
+
+const SESSION_REASONS: readonly RemoteDaemonSessionReason[] = [
+	"no-systemd-run",
+	"no-linger",
+	"no-user-manager",
+	"systemd-run-failed",
+];
+
+/** Where a launch put the daemon. */
+export type RemoteDaemonPlacement =
+	| { kind: "scope"; unit: string }
+	| { kind: "session"; reason: RemoteDaemonSessionReason };
+
+/**
+ * The command that starts the daemon and lets go of it.
+ *
+ * **Where it runs (#600).** Started from the hub's SSH exec, the daemon lands in
+ * that connection's logind session, `session-N.scope`. A host with
+ * `KillUserProcesses=yes`, or a `loginctl terminate-session`, ends that scope
+ * at logout, and every terminal the daemon holds with it: the very terminals it
+ * exists to keep. So where systemd can give it a place of its own, it gets one:
+ * `systemd-run --user --scope` moves it into a transient scope under
+ * `user@UID.service`, outside every login session.
+ *
+ * A scope, not a service. A scope holds a process the caller started, so the
+ * daemon keeps the environment it had before — the one its terminals inherit
+ * (#576) — rather than the user manager's, and its output goes to its log as
+ * before. And a scope ends when the last process in it does, not when the
+ * daemon does: a job someone left running from a terminal outlives the daemon
+ * as it did in the session. A service would kill it (`KillMode=control-group`)
+ * or leave it in a dead unit (`KillMode=process`). The daemon's own ways of
+ * ending, STOP, `--stop`, the idle timeout and the hub's replace (#456), tear
+ * its terminals down themselves, as before; systemd kills nothing.
+ *
+ * Only with lingering on. The scope lives in the user manager, and without
+ * linger that manager stops at the user's last logout, taking the scope along,
+ * while the session scope outlives the logout wherever `KillUserProcesses=no`,
+ * Debian's default. So without linger the daemon stays where it was: neither
+ * placement is ever worse than before. Every other case falls back to the
+ * session too: no `systemd-run` (no systemd, a container), a user manager this
+ * connection cannot reach, or a `systemd-run` that refuses. A refusal leaves
+ * nothing started, since `systemd-run --scope` in the foreground either makes
+ * the scope and runs the command in it, or fails before running anything. So
+ * the fallback never starts a second daemon.
+ *
+ * The last line printed says which, for `parseRemoteDaemonPlacement`.
  */
 export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 	const { agentPath, paths } = launch;
@@ -114,24 +207,84 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 	const dir = quotePosix(paths.dir);
 	const level = quotePosix(launch.logLevel ?? "info");
 	const format = quotePosix(launch.logFormat ?? "jsonl");
+	const unit = launch.scopeUnit ?? newRemoteDaemonScopeUnit();
 
 	const idle = Math.max(0, Math.trunc(launch.idleTimeoutSeconds ?? IDLE_TIMEOUT_SECONDS));
+	// The agent's argv, as the positional parameters, which both placements pass
+	// on unchanged. Set whole in each branch rather than through an unquoted
+	// `$idle`: zsh, a login shell the exec may well run in, does not split one.
+	const run = `${agent} --daemon --socket ${socket} --log-level ${level} --format ${format}`;
 	// The binary on the remote may be older than this hub: a build of main
 	// carries the version of the last release and deploys that release's agent,
 	// which rejects a flag added since and exits before it ever listens. Asking
 	// the binary first keeps the one option it can live without from costing
 	// the whole daemon.
-	const probeIdle =
+	const argv =
 		`if ${agent} --help 2> /dev/null | grep -q -- '--idle-timeout'; ` +
-		`then idle='--idle-timeout ${idle}'; else idle=''; fi`;
-	const run = `${agent} --daemon --socket ${socket} --log-level ${level} --format ${format} $idle`;
-	const redirect = `< /dev/null >> ${log} 2>&1`;
+		`then set -- ${run} --idle-timeout ${idle}; else set -- ${run}; fi`;
+	// `$detach` is the shell's copy of DETACH_SCRIPT, set below.
+	const detachCall = `/bin/sh -c "$detach" lasterm-agent ${log} "$@"`;
+	const scope = [
+		"systemd-run --user --scope --quiet --collect",
+		quotePosix(`--unit=${unit}`),
+		quotePosix(`--description=lasterm agent daemon on ${paths.socket}`),
+		// Its own complaint, if it refuses, goes where a person looking for why
+		// the daemon is where it is will read.
+		`${detachCall} 2>> ${log}`,
+	].join(" ");
+	const place =
+		"if ! command -v systemd-run > /dev/null 2>&1; then placed='session no-systemd-run'; " +
+		// `-p Linger` rather than `--value`, which older systemd lacks.
+		`elif [ "$(loginctl show-user "$(id -u)" -p Linger 2> /dev/null)" != Linger=yes ]; then placed='session no-linger'; ` +
+		"elif ! systemctl --user show-environment > /dev/null 2>&1; then placed='session no-user-manager'; " +
+		`elif ${scope}; then placed=${quotePosix(`scope ${unit}`)}; ` +
+		"else placed='session systemd-run-failed'; fi";
 	return [
 		`mkdir -p ${dir}`,
 		`chmod 700 ${dir}`,
-		probeIdle,
-		`if command -v setsid > /dev/null 2>&1; then setsid ${run} ${redirect} & else nohup ${run} ${redirect} & fi`,
+		argv,
+		`detach=${quotePosix(DETACH_SCRIPT)}`,
+		place,
+		`case $placed in scope*) ;; *) ${detachCall} ;; esac`,
+		`printf '%s %s\\n' ${PLACEMENT_MARKER} "$placed"`,
 	].join(" && ");
+}
+
+/**
+ * Where the launch command says it put the daemon, from what it printed.
+ *
+ * The last marker line wins: a login script that prints something of its own
+ * comes before it. `null` for output that carries none, a launch cut short
+ * for instance.
+ */
+export function parseRemoteDaemonPlacement(stdout: string): RemoteDaemonPlacement | null {
+	const lines = stdout.split(/\r?\n/).filter((line) => line.startsWith(PLACEMENT_MARKER));
+	const last = lines.at(-1);
+	if (last === undefined) return null;
+	const [kind, detail, ...rest] = last.slice(PLACEMENT_MARKER.length).trim().split(/\s+/);
+	if (rest.length > 0 || detail === undefined) return null;
+	if (kind === "scope" && /^lasterm-agent-[A-Za-z0-9_-]+\.scope$/.test(detail)) {
+		return { kind: "scope", unit: detail };
+	}
+	const reason = SESSION_REASONS.find((known) => known === detail);
+	if (kind === "session" && reason !== undefined) return { kind: "session", reason };
+	return null;
+}
+
+/** Where the daemon went, in words for the hub's log. */
+export function describeRemoteDaemonPlacement(placement: RemoteDaemonPlacement): string {
+	if (placement.kind === "scope") {
+		return `in its own systemd scope, ${placement.unit}, outside any login session`;
+	}
+	const why: Record<RemoteDaemonSessionReason, string> = {
+		"no-systemd-run": "the host has no systemd-run",
+		"no-linger":
+			"lingering is off for this user, so a scope would end at their last logout; " +
+			"`loginctl enable-linger` there changes that",
+		"no-user-manager": "this connection cannot reach the user's systemd manager",
+		"systemd-run-failed": "systemd-run refused; its reason is in the daemon's log",
+	};
+	return `in the SSH login session: ${why[placement.reason]}`;
 }
 
 /**
@@ -189,6 +342,11 @@ export interface RemoteDaemonAttachment {
 	paths: RemoteDaemonPaths;
 	/** Whether this call is what started the daemon. */
 	started: boolean;
+	/**
+	 * Where this call started it: its own systemd scope, or the SSH login
+	 * session (#600). `null` when it did not start it, or the launch did not say.
+	 */
+	placement: RemoteDaemonPlacement | null;
 }
 
 /**
@@ -217,7 +375,12 @@ export async function attachRemoteDaemon(
 	const paths = remoteDaemonPaths(stateDir);
 
 	try {
-		return { stream: await open(options.conn, paths.socket), paths, started: false };
+		return {
+			stream: await open(options.conn, paths.socket),
+			paths,
+			started: false,
+			placement: null,
+		};
 	} catch {
 		// Nothing listening yet — the ordinary case on a first connect.
 	}
@@ -238,12 +401,13 @@ export async function attachRemoteDaemon(
 		);
 	}
 
+	const placement = parseRemoteDaemonPlacement(launch.stdout);
 	const deadline = now() + READY_DEADLINE_MS;
 	let lastError: unknown;
 	while (now() < deadline) {
 		await sleep(READY_POLL_MS);
 		try {
-			return { stream: await open(options.conn, paths.socket), paths, started: true };
+			return { stream: await open(options.conn, paths.socket), paths, started: true, placement };
 		} catch (err) {
 			lastError = err;
 		}

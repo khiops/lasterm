@@ -14,7 +14,7 @@ import {
 } from "./agent-deployer.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
-import { attachRemoteDaemon } from "./remote-daemon.js";
+import { attachRemoteDaemon, describeRemoteDaemonPlacement } from "./remote-daemon.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 
@@ -575,7 +575,11 @@ export class SshAgent extends AgentConnection {
 									this.reachedRunningDaemon = !attachment.started;
 									console.error(
 										`[lasterm-ssh] reached the remote daemon on ${attachment.paths.socket}` +
-											(attachment.started ? " (started it)" : " (already running)"),
+											(!attachment.started
+												? " (already running)"
+												: attachment.placement === null
+													? " (started it)"
+													: ` (started it ${describeRemoteDaemonPlacement(attachment.placement)})`),
 									);
 									onStream(attachment.stream as unknown as ClientChannel);
 								})

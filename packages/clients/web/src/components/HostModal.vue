@@ -276,6 +276,11 @@
 									connection drops, and across a Lasterm restart. It is a process on
 									that machine, which ends by itself once it holds no terminals.
 								</p>
+								<p class="field-hint auth-note">
+									If logging out of that machine ends your processes, run
+									<code>loginctl enable-linger</code> there: the agent then runs outside
+									your login sessions and survives it.
+								</p>
 								<p v-if="otherOwnerChannels" class="field-hint auth-note">
 									Other Lasterm hubs also use this host's agent, and hold
 									{{ otherOwnerChannels }} terminal{{ otherOwnerChannels === 1 ? "" : "s" }}

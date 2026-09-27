@@ -133,12 +133,11 @@ export function newRemoteDaemonScopeUnit(): string {
  *
  * `INVOCATION_ID` is what `systemd-run --scope` adds to the environment; it
  * goes, so that the daemon, and every terminal inheriting from it, starts with
- * the session's environment in either placement. It never is in an SSH
- * session's.
+ * the session's environment in either placement. An SSH session has none.
  *
- * No `${` and no `$$` in here: `systemd-run` (254 and later) expands both in
- * the arguments it is handed, and would have this script's parameters replaced
- * with its own environment before the shell ever saw them.
+ * No `${` and no `$$` in here: a recent `systemd-run` (262 does) expands both
+ * in the arguments it is handed, and would have this script's parameters
+ * replaced with its own environment before the shell ever saw them.
  */
 export const DETACH_SCRIPT =
 	'log=$1; shift; unset INVOCATION_ID; if command -v setsid > /dev/null 2>&1; then setsid "$@" < /dev/null >> "$log" 2>&1 & ' +

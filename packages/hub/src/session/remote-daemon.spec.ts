@@ -342,8 +342,8 @@ describe("remoteDaemonLaunchCommand — its own systemd scope", () => {
 	});
 
 	it("hands systemd-run nothing it would expand itself", () => {
-		// systemd-run 254+ replaces `${NAME}` and `$$` in its arguments with its
-		// own environment; `$NAME` only when it is a whole argument.
+		// A recent systemd-run (262 does) replaces `${NAME}` and `$$` in its
+		// arguments with its own environment; `$NAME` only as a whole argument.
 		expect(DETACH_SCRIPT).not.toContain("${");
 		expect(DETACH_SCRIPT).not.toContain("$$");
 		expect(DETACH_SCRIPT.startsWith("$")).toBe(false);

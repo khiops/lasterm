@@ -58,6 +58,7 @@ import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./age
 import { stopLocalAgent } from "./agent-launcher.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { requestDaemonStop } from "./daemon-stop.js";
+import { hostReconnecting, hostUnreachableMessage } from "./host-reachability.js";
 import { OutputChunker } from "./output-chunker.js";
 import {
 	clearContext,
@@ -518,8 +519,26 @@ export class SessionManager {
 		return this.lifecycle.destroyChannel(channelId);
 	}
 
+	/**
+	 * What to answer a restart of this terminal with while its host is away
+	 * (#605): the hub lost it and is reaching for it again. Null when it is
+	 * not, or the terminal is unknown.
+	 */
+	hostUnreachableFor(channelId: string): ErrorMessage | null {
+		const info = this.ctx.metaDal.getChannelWithHost(channelId);
+		if (!info) return null;
+		const status = hostReconnecting(this.ctx, info.hostId);
+		if (status === null) return null;
+		const label = this.ctx.metaDal.getHost(info.hostId)?.label;
+		return hostUnreachableMessage(info.hostId, label, status, channelId);
+	}
+
 	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean> {
 		if (this.isQuitting()) return false;
+		// Its host is away: the reconnect has the next attempt, and a restart
+		// would start one of its own beside it, aborting the reconnect's if one
+		// was under way. `hostUnreachableFor` says why (#605).
+		if (this.hostUnreachableFor(channelId) !== null) return false;
 		// A SPAWN, or another restart, is already starting it: a second start of
 		// one terminal is what two windows following the setting would race to
 		// (#592). Claimed for the length of this one, as a SPAWN claims it.
@@ -704,6 +723,9 @@ export class SessionManager {
 					type: "ERROR",
 					code: "CHANNEL_NOT_REUSABLE",
 					message: `Cannot bring that terminal back: ${reason}.`,
+					// Several may be brought back at once, when their host returns: the
+					// refusal names the one it is about (#605).
+					channelId: msg.reuseChannelId,
 				} satisfies ErrorMessage);
 				return null;
 			}
@@ -763,6 +785,20 @@ export class SessionManager {
 			type: host.type,
 			label: host.label,
 		});
+
+		// The hub lost this host and is reaching for it again: its reconnect has
+		// the next attempt. Refused at once rather than open a second connection
+		// beside that one, or wait out a host that does not answer, and said so:
+		// the terminal did not fail, its host is away (#605).
+		const reconnecting = hostReconnecting(this.ctx, hostId);
+		if (reconnecting !== null) {
+			this.ctx.hubLogger?.log("info", "handleSpawn: host is away, refused", {
+				hostId,
+				hostStatus: reconnecting,
+			});
+			client.send(hostUnreachableMessage(hostId, host.label, reconnecting, reuseChannelId));
+			return null;
+		}
 
 		let agent = this.ctx.agents.get(hostId);
 		this.ctx.hubLogger?.log("debug", "handleSpawn: existing agent", {

@@ -23,6 +23,7 @@ import type {
 import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@lasterm/shared";
 import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
+import { HostUnreachableError, hostAwayDuringSpawn } from "./host-reachability.js";
 import {
 	clearContext,
 	clearElevationContextsForChannel,
@@ -197,10 +198,20 @@ export class ChannelLifecycleManager {
 		return new Promise<{ channelId: string | null; errCode: string | null }>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// The connection it went over went down meanwhile: the host is away,
+				// which says nothing about the terminal (#605).
+				const hostStatus = hostAwayDuringSpawn(this.ctx, hostId, agent);
 				this.ctx.hubLogger?.log("error", "channel-lifecycle: SPAWN_OK timeout", {
 					requestId: spawnMsg.requestId,
 					timeoutMs: SPAWN_TIMEOUT_MS,
+					...(hostStatus !== null && { hostStatus }),
 				});
+				if (hostStatus !== null) {
+					reject(
+						new HostUnreachableError(hostId, this.ctx.metaDal.getHost(hostId)?.label, hostStatus),
+					);
+					return;
+				}
 				reject(new Error("Agent SPAWN timeout"));
 			}, SPAWN_TIMEOUT_MS);
 

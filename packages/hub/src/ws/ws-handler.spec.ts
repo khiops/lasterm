@@ -8,7 +8,9 @@ import {
 	isValidUlid,
 } from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
+import { HostUnreachableError } from "../session/host-reachability.js";
 import { handleAuthPromptResponse as handleAuthPromptResponseMessage } from "./handlers/auth-prompt-response.js";
+import { handleSpawn as handleSpawnMessage } from "./handlers/spawn.js";
 import type { WsHandlerContext } from "./handlers/types.js";
 
 /** Known token used across auth tests */
@@ -544,5 +546,59 @@ describe("ws-handler TEST_CONNECT validation", () => {
 		expect(decoded.type).toBe("TEST_CONNECT_FAIL");
 		expect(decoded.hostId ?? decoded.host_id).toBe("temp-host-123");
 		expect(decoded.message).toBe("Authentication failed");
+	});
+});
+
+// ─── A SPAWN whose host went away while it started (#605) ────────────────────
+
+describe("ws-handler SPAWN: a host gone while the terminal started", () => {
+	const HOST = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+	const CHANNEL = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+
+	function spawnFailingWith(err: unknown): { sent: () => ProtocolMessage[] } {
+		const client = { send: vi.fn() };
+		const ctx = {
+			clientId: "client-1",
+			client,
+			log: { debug: vi.fn(), error: vi.fn() } as never,
+			sessionManager: { handleSpawn: vi.fn().mockRejectedValue(err) } as never,
+			writeLockManager: {} as never,
+		} as unknown as WsHandlerContext;
+		handleSpawnMessage({ type: "SPAWN", hostId: HOST, reuseChannelId: CHANNEL }, ctx);
+		return { sent: () => client.send.mock.calls.map(([msg]) => msg as ProtocolMessage) };
+	}
+
+	it("says the host is away, with its status and the terminal it was for", async () => {
+		const { sent } = spawnFailingWith(
+			new HostUnreachableError(HOST, "raspberrypi", "disconnected"),
+		);
+		await vi.waitFor(() => expect(sent()).toHaveLength(1));
+
+		const [msg] = sent();
+		expect(msg).toEqual({
+			type: "ERROR",
+			code: "HOST_UNREACHABLE",
+			message: "raspberrypi cannot be reached right now.",
+			hostId: HOST,
+			hostStatus: "disconnected",
+			channelId: CHANNEL,
+		});
+		// On the wire, as every field is.
+		const decoded = decodeMessage(encodeMessage(msg as ProtocolMessage)) as unknown as Record<
+			string,
+			unknown
+		>;
+		expect(decoded.hostStatus ?? decoded.host_status).toBe("disconnected");
+	});
+
+	it("reports any other failure as before", async () => {
+		const { sent } = spawnFailingWith(new Error("Agent SPAWN timeout"));
+		await vi.waitFor(() => expect(sent()).toHaveLength(1));
+
+		expect(sent()[0]).toEqual({
+			type: "ERROR",
+			code: "SPAWN_FAILED",
+			message: "Agent SPAWN timeout",
+		});
 	});
 });

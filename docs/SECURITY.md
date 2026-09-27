@@ -553,7 +553,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 | Pairing code generated | `pairing.generated` | `pairingId`, `expiresAt`, `sourceIp` of the request | `POST /api/pair` issues a code |
 | Pairing code verified | `pairing.verified` | `pairingId`, `tokenId` of the token issued, `sourceIp` | `POST /api/pair/verify` redeems a code |
 | SSH connect | `ssh.connect` | `hostId`, `hostLabel`, `authMethod` (`agent`, `key`, `password`) | A host session takes up an authenticated connection: its first connect and every reconnect. A Test connection is not recorded |
-| SSH disconnect | `ssh.disconnect` | `hostId`, `reason` (`closed_by_hub`; `connection_lost`, ended by the network, the server or the remote agent) | That connection ends |
+| SSH disconnect | `ssh.disconnect` | `hostId`, `reason` (`closed_by_hub`; `connection_lost`, ended by the network, the server, the remote agent, or a host that stopped answering its keepalives, SPEC.md § 5.5) | That connection ends |
 | Write-lock force | `write_lock.force` | `channelId`, `byClientId`, `fromClientId` | A force takes the lock from another client. Forcing a free lock, or one already held, takes nothing and is not recorded |
 | Token rotated | `token.rotate` | `tokenId` (`primary`) | The hub starts with a token in `auth.json` other than the one it last recorded: the replacement of § 2.1, or a substitution nobody asked for |
 | Token reinstated | `token.reinstate` | `tokenId` (`primary`), `revokedAt` (when it had been revoked) | The hub starts, finds the primary token revoked, and clears the revocation (§ 2.1). Nothing in the hub revokes it any more: the revocation was left by a version before #515, which accepted `DELETE /api/auth/tokens/primary`, or by a hand edit of `meta.db` |

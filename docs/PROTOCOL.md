@@ -1305,7 +1305,7 @@ What the callers do with the answers:
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
   host_group?: string,                // group name (legacy)
   host_group_id?: string,             // host group ID
-  keep_alive_seconds?: number,        // SSH keepalive interval
+  keep_alive_seconds?: number,        // stored, not read: the SSH keepalive is fixed (SPEC.md § 5.5)
   history_retention_days?: number,    // spool retention
   profile_json?: string | object,     // host-level terminal profile (Layer 3)
   elevation_method?: string,          // e.g. "sudo", "doas", "pkexec", "gsudo"

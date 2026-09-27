@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -7,8 +16,11 @@ import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 import {
 	attachRemoteDaemon,
+	describeRemoteDaemonPlacement,
 	hostKeepsDaemon,
 	IDLE_TIMEOUT_SECONDS,
+	newRemoteDaemonScopeUnit,
+	parseRemoteDaemonPlacement,
 	quotePosix,
 	remoteDaemonLaunchCommand,
 	remoteDaemonPaths,
@@ -87,8 +99,9 @@ describe("remoteDaemonLaunchCommand", () => {
 
 	it("lets go of the exec channel: no stdin, both outputs to the log", () => {
 		const cmd = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
-		expect(cmd).toContain("< /dev/null");
-		expect(cmd).toContain(`>> ${paths.log} 2>&1`);
+		expect(cmd).toContain('< /dev/null >> "$log" 2>&1');
+		// The log is the detaching script's first argument, whichever placement.
+		expect(cmd).toContain(`/bin/sh -c "$detach" lasterm-agent ${paths.log} "$@"`);
 	});
 
 	it("makes the state directory the owner's alone", () => {
@@ -176,6 +189,37 @@ describe("attachRemoteDaemon", () => {
 		expect(commands.some((c) => c.includes("--daemon"))).toBe(true);
 	});
 
+	it("says where it started the daemon, from what the launch printed", async () => {
+		let opens = 0;
+		const attachment = await attachRemoteDaemon({
+			conn,
+			agentPath: "/usr/bin/lasterm-agent",
+			exec: async (_c, command) =>
+				command.includes("--daemon")
+					? { stdout: "lasterm-daemon-placement: scope lasterm-agent-aa.scope\n", exitCode: 0 }
+					: stateDirReply(dir),
+			open: async () => {
+				opens += 1;
+				if (opens === 1) throw new Error("ENOENT");
+				return new PassThrough();
+			},
+			sleep: async () => {},
+		});
+
+		expect(attachment.placement).toEqual({ kind: "scope", unit: "lasterm-agent-aa.scope" });
+	});
+
+	it("claims no placement for a daemon it did not start", async () => {
+		const attachment = await attachRemoteDaemon({
+			conn,
+			agentPath: "/usr/bin/lasterm-agent",
+			exec: async () => stateDirReply(dir),
+			open: async () => new PassThrough(),
+		});
+
+		expect(attachment.placement).toBeNull();
+	});
+
 	it("refuses a state directory that is not an absolute path", async () => {
 		await expect(
 			attachRemoteDaemon({
@@ -236,50 +280,388 @@ describe("remoteDaemonLaunchCommand — an agent older than the hub", () => {
 		const cmd = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
 		expect(cmd).toContain("/usr/bin/lasterm-agent --help");
 		expect(cmd).toContain("grep -q -- '--idle-timeout'");
-		expect(cmd).toContain("--format jsonl $idle");
+		expect(cmd).toContain(`--format jsonl --idle-timeout ${IDLE_TIMEOUT_SECONDS}; else set --`);
+		expect(cmd).toMatch(/--format jsonl; fi/);
 	});
 });
 
-// The shell logic itself, run: a fake agent that records how it was started.
-describe.skipIf(process.platform === "win32")("remoteDaemonLaunchCommand in a shell", () => {
-	function launchWith(help: string): string[] {
-		const root = mkdtempSync(path.join(os.tmpdir(), "daemon-launch-"));
-		try {
-			const agent = path.join(root, "lasterm-agent");
-			const argv = path.join(root, "argv");
-			writeFileSync(
-				agent,
-				`#!/bin/sh
-if [ "$1" = "--help" ]; then printf '%s\n' '${help}'; exit 0; fi
-printf '%s\n' "$@" > '${argv}'
-`,
-			);
-			chmodSync(agent, 0o755);
-			const cmd = remoteDaemonLaunchCommand({ agentPath: agent, paths: remoteDaemonPaths(root) });
-			execFileSync("sh", ["-c", `${cmd}; wait`]);
-			for (let i = 0; i < 50; i++) {
-				try {
-					return readFileSync(argv, "utf8").trim().split("\n");
-				} catch {
-					execFileSync("sleep", ["0.1"]);
-				}
-			}
-			throw new Error("the fake agent was never started");
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	}
+// ─── Its own systemd scope (#600) ────────────────────────────────────────────
+//
+// Started from the hub's SSH exec, the daemon lived in that connection's logind
+// session: on the Pi, a `session-N.scope` shown `closing` long after the SSH
+// connection ended. A host with KillUserProcesses=yes ends such a scope at
+// logout, and every terminal the daemon holds with it.
 
+describe("remoteDaemonLaunchCommand — its own systemd scope", () => {
+	const paths = remoteDaemonPaths("/home/pi/.local/state/lasterm");
+	const unit = "lasterm-agent-0123456789ab.scope";
+	const cmd = remoteDaemonLaunchCommand({
+		agentPath: "/usr/bin/lasterm-agent",
+		paths,
+		scopeUnit: unit,
+	});
+
+	it("starts it in a transient user scope, which it leaves when it ends", () => {
+		expect(cmd).toContain(`systemd-run --user --scope --quiet --collect --unit=${unit}`);
+	});
+
+	it("names the socket in the unit's description", () => {
+		expect(cmd).toContain(`'--description=lasterm agent daemon on ${paths.socket}'`);
+	});
+
+	it("gets a fresh unit name at every launch", () => {
+		const a = newRemoteDaemonScopeUnit();
+		const b = newRemoteDaemonScopeUnit();
+		expect(a).toMatch(/^lasterm-agent-[0-9a-f]{12}\.scope$/);
+		expect(a).not.toBe(b);
+		const generated = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
+		expect(generated).toMatch(/--unit=lasterm-agent-[0-9a-f]{12}\.scope /);
+	});
+
+	it("asks, in order: systemd-run, lingering, the user manager, then systemd-run itself", () => {
+		const steps = [
+			"command -v systemd-run",
+			`loginctl show-user "$(id -u)" -p Linger`,
+			"systemctl --user show-environment",
+			"systemd-run --user --scope",
+		].map((step) => cmd.indexOf(step));
+		expect(steps.every((at) => at >= 0)).toBe(true);
+		expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+	});
+
+	it("takes the scope only when lingering is on", () => {
+		expect(cmd).toContain("!= Linger=yes ]; then placed='session no-linger'");
+	});
+
+	it("falls back to the session, detached as before, unless the scope was made", () => {
+		expect(cmd).toContain(
+			`case $placed in scope*) ;; *) /bin/sh -c "$detach" lasterm-agent ${paths.log} "$@" ;; esac`,
+		);
+		expect(cmd).toContain("else placed='session systemd-run-failed'; fi");
+	});
+
+	it("says where the daemon went, last", () => {
+		expect(cmd.endsWith(`printf '%s %s\\n' lasterm-daemon-placement: "$placed"`)).toBe(true);
+		expect(cmd).toContain(`then placed='scope ${unit}'`);
+	});
+
+	it("quotes every path it hands systemd-run", () => {
+		const odd = remoteDaemonPaths("/home/o'brien/state dir/lasterm");
+		const quoted = remoteDaemonLaunchCommand({
+			agentPath: "/opt/my tools/lasterm-agent",
+			paths: odd,
+			scopeUnit: unit,
+		});
+		expect(quoted).toContain(`'--description=lasterm agent daemon on ${quotedInside(odd.socket)}'`);
+		expect(quoted).toContain(
+			`lasterm-agent ${quotePosix(odd.log)} "$@" 2>> ${quotePosix(odd.log)}`,
+		);
+		expect(quoted).toContain(
+			`set -- '/opt/my tools/lasterm-agent' --daemon --socket ${quotePosix(odd.socket)}`,
+		);
+	});
+});
+
+/** What `quotePosix` makes of a value inside single quotes it opened elsewhere. */
+function quotedInside(value: string): string {
+	return value.replace(/'/g, "'\\''");
+}
+
+describe("parseRemoteDaemonPlacement", () => {
+	it("reads a scope", () => {
+		expect(
+			parseRemoteDaemonPlacement(
+				"lasterm-daemon-placement: scope lasterm-agent-0123456789ab.scope\n",
+			),
+		).toEqual({ kind: "scope", unit: "lasterm-agent-0123456789ab.scope" });
+	});
+
+	it("reads every reason for the session", () => {
+		for (const reason of [
+			"no-systemd-run",
+			"no-linger",
+			"no-user-manager",
+			"systemd-run-failed",
+		] as const) {
+			expect(parseRemoteDaemonPlacement(`lasterm-daemon-placement: session ${reason}\n`)).toEqual({
+				kind: "session",
+				reason,
+			});
+		}
+	});
+
+	it("takes the last marker, after whatever a login script printed", () => {
+		expect(
+			parseRemoteDaemonPlacement(
+				"Welcome to the Pi\r\nlasterm-daemon-placement: session no-linger\r\n" +
+					"lasterm-daemon-placement: scope lasterm-agent-aa.scope\r\n",
+			),
+		).toEqual({ kind: "scope", unit: "lasterm-agent-aa.scope" });
+	});
+
+	it("answers null for output that says nothing it knows", () => {
+		expect(parseRemoteDaemonPlacement("")).toBeNull();
+		expect(parseRemoteDaemonPlacement("/home/pi/.local/state/lasterm")).toBeNull();
+		expect(parseRemoteDaemonPlacement("lasterm-daemon-placement: session sideways")).toBeNull();
+		expect(parseRemoteDaemonPlacement("lasterm-daemon-placement: scope sshd.service")).toBeNull();
+		expect(parseRemoteDaemonPlacement("lasterm-daemon-placement: scope")).toBeNull();
+	});
+});
+
+describe("describeRemoteDaemonPlacement", () => {
+	it("names the unit", () => {
+		expect(
+			describeRemoteDaemonPlacement({ kind: "scope", unit: "lasterm-agent-aa.scope" }),
+		).toContain("lasterm-agent-aa.scope");
+	});
+
+	it("says what to run when lingering is what kept it in the session", () => {
+		expect(describeRemoteDaemonPlacement({ kind: "session", reason: "no-linger" })).toContain(
+			"loginctl enable-linger",
+		);
+	});
+});
+
+// The shell logic itself, run: a fake agent that records how it was started,
+// and fake systemd tools, on a PATH that holds nothing else of systemd's — the
+// machine running this may well have the real ones.
+
+/** How the host answers the launch's questions about systemd. */
+interface FakeSystemd {
+	/** `systemd-run` starts the scope and runs the command, or refuses. */
+	systemdRun: "works" | "refuses";
+	linger: "yes" | "no";
+	userManager: boolean;
+}
+
+interface ShellLaunch {
+	/** What the agent was started with. */
+	argv: string[];
+	/** How many times it was started. */
+	starts: number;
+	/** What the launch printed. */
+	stdout: string;
+	/** What `systemd-run` was asked, or null if it never was. */
+	systemdRun: string[] | null;
+	log: string;
+	paths: ReturnType<typeof remoteDaemonPaths>;
+	agent: string;
+}
+
+const onPosix = process.platform !== "win32";
+
+function toolOnThisMachine(name: string): string | null {
+	try {
+		return (
+			execFileSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim() || null
+		);
+	} catch {
+		return null;
+	}
+}
+
+function launchIn(
+	options: {
+		help?: string;
+		systemd?: FakeSystemd;
+		/** Part of the directory name, to put odd characters in every path. */
+		label?: string;
+		/** The shell and its options, before `-c`. `/bin/sh` by default. */
+		shell?: string[];
+	} = {},
+): ShellLaunch {
+	const root = mkdtempSync(path.join(os.tmpdir(), `daemon-launch-${options.label ?? ""}`));
+	try {
+		const bin = path.join(root, "bin");
+		mkdirSync(bin);
+		// What the launch needs besides systemd's tools. `/bin/sh` it names itself.
+		for (const tool of ["mkdir", "chmod", "grep", "setsid", "nohup", "id"]) {
+			const real = toolOnThisMachine(tool);
+			if (real !== null) symlinkSync(real, path.join(bin, tool));
+		}
+		const script = (name: string, body: string) => {
+			writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`);
+			chmodSync(path.join(bin, name), 0o755);
+		};
+		const record = path.join(root, "systemd-run.args");
+		if (options.systemd !== undefined) {
+			const { systemdRun, linger, userManager } = options.systemd;
+			script(
+				"systemd-run",
+				[
+					`printf '%s\\n' "$@" > ${quotePosix(record)}`,
+					systemdRun === "refuses"
+						? `echo 'Failed to start transient scope unit: refused for the test' >&2; exit 1`
+						: // A scope runs its command in place: skip the options, run the rest.
+							'while [ $# -gt 0 ]; do case $1 in --*) shift ;; *) break ;; esac; done; exec "$@"',
+				].join("\n"),
+			);
+			script("loginctl", `echo Linger=${linger}`);
+			script("systemctl", `exit ${userManager ? 0 : 1}`);
+		}
+
+		const agent = path.join(root, "lasterm-agent");
+		const argv = path.join(root, "argv");
+		const starts = path.join(root, "starts");
+		writeFileSync(
+			agent,
+			`#!/bin/sh
+if [ "$1" = "--help" ]; then printf '%s\\n' ${quotePosix(options.help ?? "      --idle-timeout <SECONDS>")}; exit 0; fi
+printf 'started\\n' >> ${quotePosix(starts)}
+printf '%s\\n' "$@" > ${quotePosix(argv)}
+`,
+		);
+		chmodSync(agent, 0o755);
+
+		const paths = remoteDaemonPaths(path.join(root, "state dir"));
+		const cmd = remoteDaemonLaunchCommand({ agentPath: agent, paths });
+		const [shell = "/bin/sh", ...shellOptions] = options.shell ?? [];
+		const stdout = execFileSync(shell, [...shellOptions, "-c", cmd], {
+			encoding: "utf8",
+			env: { ...process.env, PATH: bin },
+		});
+		for (let i = 0; i < 50; i++) {
+			try {
+				const started = readFileSync(argv, "utf8").trim().split("\n");
+				// A second start, if the fallback ever made one, has had its chance.
+				execFileSync("sleep", ["0.2"]);
+				return {
+					argv: started,
+					starts: readFileSync(starts, "utf8").trim().split("\n").length,
+					stdout,
+					systemdRun: existsSync(record) ? readFileSync(record, "utf8").trim().split("\n") : null,
+					log: existsSync(paths.log) ? readFileSync(paths.log, "utf8") : "",
+					paths,
+					agent,
+				};
+			} catch {
+				execFileSync("sleep", ["0.1"]);
+			}
+		}
+		throw new Error(`the fake agent was never started; the launch printed: ${stdout}`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+const systemdReady: FakeSystemd = { systemdRun: "works", linger: "yes", userManager: true };
+
+describe.skipIf(!onPosix)("remoteDaemonLaunchCommand in a shell", () => {
 	it("starts an agent that does not know the option without it", () => {
-		const argv = launchWith("Usage: lasterm-agent [OPTIONS]  --daemon  --socket <SOCKET>");
+		const { argv } = launchIn({
+			help: "Usage: lasterm-agent [OPTIONS]  --daemon  --socket <SOCKET>",
+		});
 		expect(argv).toContain("--daemon");
 		expect(argv).not.toContain("--idle-timeout");
 	});
 
 	it("passes it to an agent that does", () => {
-		const argv = launchWith("      --idle-timeout <SECONDS>");
+		const { argv } = launchIn({ help: "      --idle-timeout <SECONDS>" });
 		expect(argv).toContain("--idle-timeout");
 		expect(argv).toContain(String(IDLE_TIMEOUT_SECONDS));
+	});
+
+	it("with no systemd, starts it in the session, as before", () => {
+		const launch = launchIn();
+		expect(parseRemoteDaemonPlacement(launch.stdout)).toEqual({
+			kind: "session",
+			reason: "no-systemd-run",
+		});
+		expect(launch.argv).toEqual([
+			"--daemon",
+			"--socket",
+			launch.paths.socket,
+			"--log-level",
+			"info",
+			"--format",
+			"jsonl",
+			"--idle-timeout",
+			String(IDLE_TIMEOUT_SECONDS),
+		]);
+		expect(launch.starts).toBe(1);
+	});
+
+	it("puts it in its own scope when systemd can give it one", () => {
+		const launch = launchIn({ systemd: systemdReady });
+		const placement = parseRemoteDaemonPlacement(launch.stdout);
+		expect(placement?.kind).toBe("scope");
+		const unit = placement?.kind === "scope" ? placement.unit : "";
+		// The scope runs the same detaching script, on the same argv.
+		expect(launch.systemdRun).toEqual([
+			"--user",
+			"--scope",
+			"--quiet",
+			"--collect",
+			`--unit=${unit}`,
+			`--description=lasterm agent daemon on ${launch.paths.socket}`,
+			"/bin/sh",
+			"-c",
+			expect.stringContaining('setsid "$@" < /dev/null >> "$log" 2>&1 &'),
+			"lasterm-agent",
+			launch.paths.log,
+			launch.agent,
+			...launch.argv,
+		]);
+		expect(launch.argv).toContain("--daemon");
+		expect(launch.starts).toBe(1);
+	});
+
+	it("without lingering, leaves systemd-run alone: the scope would end at logout", () => {
+		const launch = launchIn({ systemd: { ...systemdReady, linger: "no" } });
+		expect(parseRemoteDaemonPlacement(launch.stdout)).toEqual({
+			kind: "session",
+			reason: "no-linger",
+		});
+		expect(launch.systemdRun).toBeNull();
+		expect(launch.starts).toBe(1);
+	});
+
+	it("without a user manager to reach, starts it in the session", () => {
+		const launch = launchIn({ systemd: { ...systemdReady, userManager: false } });
+		expect(parseRemoteDaemonPlacement(launch.stdout)).toEqual({
+			kind: "session",
+			reason: "no-user-manager",
+		});
+		expect(launch.systemdRun).toBeNull();
+		expect(launch.starts).toBe(1);
+	});
+
+	it("when systemd-run refuses, starts one daemon in the session and logs why", () => {
+		const launch = launchIn({ systemd: { ...systemdReady, systemdRun: "refuses" } });
+		expect(parseRemoteDaemonPlacement(launch.stdout)).toEqual({
+			kind: "session",
+			reason: "systemd-run-failed",
+		});
+		expect(launch.systemdRun).not.toBeNull();
+		expect(launch.starts).toBe(1);
+		expect(launch.log).toContain("Failed to start transient scope unit: refused for the test");
+	});
+
+	it("survives a quote and spaces in every path, in both placements", () => {
+		for (const systemd of [systemdReady, undefined]) {
+			const launch = launchIn({ label: "it's a dir ", ...(systemd && { systemd }) });
+			expect(launch.argv).toContain(launch.paths.socket);
+			expect(launch.starts).toBe(1);
+			expect(parseRemoteDaemonPlacement(launch.stdout)?.kind).toBe(
+				systemd === undefined ? "session" : "scope",
+			);
+		}
+	});
+});
+
+// The exec runs in the user's login shell. zsh does not split an unquoted
+// variable, and the launch used to pass `$idle` unquoted: under zsh the agent
+// got "--idle-timeout 1800" as one argument, refused it, and never listened.
+const zsh = onPosix ? toolOnThisMachine("zsh") : null;
+describe.skipIf(zsh === null)("remoteDaemonLaunchCommand in zsh", () => {
+	it("hands the agent --idle-timeout and its value as two arguments", () => {
+		for (const systemd of [systemdReady, undefined]) {
+			// `-f`: no ~/.zshenv, which could put the real systemd back on PATH.
+			const { argv } = launchIn({ shell: [zsh ?? "", "-f"], ...(systemd && { systemd }) });
+			const at = argv.indexOf("--idle-timeout");
+			expect(at).toBeGreaterThan(0);
+			expect(argv[at + 1]).toBe(String(IDLE_TIMEOUT_SECONDS));
+		}
 	});
 });
 

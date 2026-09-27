@@ -130,9 +130,18 @@ export function newRemoteDaemonScopeUnit(): string {
  * own or an ignored SIGHUP. stdin comes from `/dev/null` and both outputs go to
  * the log, so nothing of it is left hanging off the exec channel — a process
  * still holding that channel keeps the exec from returning.
+ *
+ * `INVOCATION_ID` is what `systemd-run --scope` adds to the environment; it
+ * goes, so that the daemon, and every terminal inheriting from it, starts with
+ * the session's environment in either placement. It never is in an SSH
+ * session's.
+ *
+ * No `${` and no `$$` in here: `systemd-run` (254 and later) expands both in
+ * the arguments it is handed, and would have this script's parameters replaced
+ * with its own environment before the shell ever saw them.
  */
-const DETACH_SCRIPT =
-	'log=$1; shift; if command -v setsid > /dev/null 2>&1; then setsid "$@" < /dev/null >> "$log" 2>&1 & ' +
+export const DETACH_SCRIPT =
+	'log=$1; shift; unset INVOCATION_ID; if command -v setsid > /dev/null 2>&1; then setsid "$@" < /dev/null >> "$log" 2>&1 & ' +
 	'else nohup "$@" < /dev/null >> "$log" 2>&1 & fi';
 
 /** What the launch command prints last, so the hub can say where the daemon went. */

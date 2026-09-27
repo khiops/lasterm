@@ -16,6 +16,7 @@ import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 import {
 	attachRemoteDaemon,
+	DETACH_SCRIPT,
 	describeRemoteDaemonPlacement,
 	hostKeepsDaemon,
 	IDLE_TIMEOUT_SECONDS,
@@ -338,6 +339,21 @@ describe("remoteDaemonLaunchCommand — its own systemd scope", () => {
 			`case $placed in scope*) ;; *) /bin/sh -c "$detach" lasterm-agent ${paths.log} "$@" ;; esac`,
 		);
 		expect(cmd).toContain("else placed='session systemd-run-failed'; fi");
+	});
+
+	it("hands systemd-run nothing it would expand itself", () => {
+		// systemd-run 254+ replaces `${NAME}` and `$$` in its arguments with its
+		// own environment; `$NAME` only when it is a whole argument.
+		expect(DETACH_SCRIPT).not.toContain("${");
+		expect(DETACH_SCRIPT).not.toContain("$$");
+		expect(DETACH_SCRIPT.startsWith("$")).toBe(false);
+	});
+
+	it("drops the INVOCATION_ID systemd-run adds, keeping the session's environment", () => {
+		expect(DETACH_SCRIPT).toContain("unset INVOCATION_ID;");
+		expect(DETACH_SCRIPT.indexOf("unset INVOCATION_ID")).toBeLessThan(
+			DETACH_SCRIPT.indexOf("setsid"),
+		);
 	});
 
 	it("says where the daemon went, last", () => {

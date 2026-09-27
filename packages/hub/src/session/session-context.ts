@@ -167,6 +167,12 @@ export interface ChannelState {
 	dynamicTitle: string | null;
 	processTitle: string | null;
 	displayTitle: string;
+	/**
+	 * The `channelClock` reading when this terminal last started, as its
+	 * SPAWN_OK arrived. Absent for one this run did not start: restored from
+	 * meta.db, it started before anything was asked (#599).
+	 */
+	startedAt?: number;
 }
 
 export interface SessionState {
@@ -213,6 +219,14 @@ export interface SharedSessionContext {
 	 * terminal ends" on one terminal must not start it twice (#592).
 	 */
 	startingChannels: Set<string>;
+	/**
+	 * Ticks once for each terminal that starts and each question put to an
+	 * agent about the terminals it holds (#599). An answer speaks of the
+	 * terminals as they were when it was asked, so one started since — its
+	 * `startedAt` later than the question — is not the one it speaks of: a
+	 * daemon saying it has no such channel was not asked about that shell.
+	 */
+	channelClock: number;
 	/** requestId → callback for pending agent responses */
 	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
 	/** '${hostname}:${port}' → fingerprint trusted for this session only (trust_once, not persisted) */

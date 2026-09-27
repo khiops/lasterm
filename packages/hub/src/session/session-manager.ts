@@ -83,6 +83,7 @@ import {
 } from "./remote-daemon.js";
 import * as Acq from "./session-acquisition.js";
 import type {
+	ChannelState,
 	Lease,
 	SessionAcquisition,
 	SessionMetaDAL,
@@ -213,6 +214,7 @@ export class SessionManager {
 			restartTracking: new Map(),
 			stoppingAgents: new Set(),
 			startingChannels: new Set(),
+			channelClock: 0,
 			pendingRequests: new Map(),
 			trustedOnceFingerprints: new Map(),
 			trustedAgentSha256: new Map(),
@@ -1437,6 +1439,19 @@ export class SessionManager {
 				this.reconnectForAttach(channel.hostId),
 				new Promise((resolve) => setTimeout(resolve, SessionManager.ATTACH_RECONNECT_BUDGET)),
 			]);
+			// Reaching the host took up what its daemon holds, and judged this
+			// terminal with the rest: ended and forgotten, if the daemon no
+			// longer had it, and every window told. A pane that heard it may
+			// already be bringing it back under this id. Asking the daemon about
+			// it now would be asking about a terminal already judged, and the
+			// answer, "no such channel", could land after that respawn and end
+			// the new shell (#599). So the attach starts over, on whatever is
+			// tracked under this id now.
+			const current = this.ctx.channels.get(channelId);
+			if (current !== channel || current.status === "dead") {
+				this.letGoOfStaleAttach(client, channel, channelId);
+				return this.handleAttach(clientId, channelId);
+			}
 			agent = this.ctx.agents.get(channel.hostId);
 		}
 
@@ -1459,6 +1474,7 @@ export class SessionManager {
 		}
 
 		const agentAttach: AgentAttachMessage = { type: "ATTACH", channelId };
+		const askedAt = this.lifecycle.askingAgent();
 		agent.send(agentAttach);
 
 		const pendingKey = `attach:${channelId}`;
@@ -1514,6 +1530,16 @@ export class SessionManager {
 			client.send(attachOk);
 		} catch (err) {
 			if (isAgentChannelNotFoundError(err, channelId)) {
+				// The agent did not have the terminal it was asked about. By the
+				// time that is read here it may have been judged by someone else,
+				// or started again under this id — and every frame of one read
+				// is handled before this line runs, the new one's SPAWN_OK
+				// included. Ending whatever is tracked now would end a shell the
+				// question never saw (#599): the attach starts over on it instead.
+				if (!this.lifecycle.answerStillApplies(channelId, askedAt)) {
+					this.letGoOfStaleAttach(client, channel, channelId);
+					return this.handleAttach(clientId, channelId);
+				}
 				this.lifecycle.retireChannel(channelId, channel.sessionId);
 				channel.clients.delete(clientId);
 				client.attachedChannels.delete(channelId);
@@ -1542,6 +1568,19 @@ export class SessionManager {
 			client.send(attachOk);
 		}
 		return true;
+	}
+
+	/**
+	 * Undo what an attach did to a terminal that is no longer the one tracked
+	 * under its id, before the attach starts over. The client stays attached
+	 * to the id when the terminal tracked there now holds it: the window that
+	 * brought it back is attached to it by its SPAWN.
+	 */
+	private letGoOfStaleAttach(client: WsClient, stale: ChannelState, channelId: string): void {
+		stale.clients.delete(client.id);
+		if (this.ctx.channels.get(channelId)?.clients.has(client.id) !== true) {
+			client.attachedChannels.delete(channelId);
+		}
 	}
 
 	handleDetach(clientId: string, channelId: string): void {
@@ -1795,7 +1834,13 @@ export class SessionManager {
 		// later follows its setting, since nobody aimed at that terminal (#592).
 		this.ctx.stoppingAgents.add(hostId);
 		try {
-			return await this.stopAgentToReplace(hostId, agent, options);
+			const outcome = await this.stopAgentToReplace(hostId, agent, options);
+			// Said as the stop is confirmed, of every terminal it held: a daemon's
+			// reports of those ends do not arrive, its connection goes first
+			// (#599). Only a stop that happened ends anything. An agent on stdio,
+			// or a local one, is not stopped here, and its terminals run on.
+			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
+			return outcome;
 		} finally {
 			this.ctx.stoppingAgents.delete(hostId);
 		}

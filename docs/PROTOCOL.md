@@ -466,6 +466,18 @@ Hub connects to daemon UDS
 
 On a fresh daemon start (no prior channels), the agent sends HELLO followed immediately by CHANNEL_STATE_END (zero AGENT_CHANNEL_STATE messages).
 
+**An answer speaks of the terminals as they were when it was asked** (#599). A remote daemon's
+connection is the way to its host before its list arrives, so a pane can start a terminal meanwhile:
+one brought back under its own id, or a new one. The list does not name it, and its SPAWN_OK can be
+read before the list. So the hub notes when it asks — before the AUTH, and before each ATTACH — and
+stamps each terminal with when its SPAWN_OK arrived. A list, or an ATTACH answered "channel not
+found", judges only a terminal started before the question and not being started again right now;
+anything else is its start's to answer for. The judgement is made as the answer arrives, before any
+client can hear of an end it decides, so no pane can bring a terminal back before it has been judged.
+An attach that waited for the host to be reached starts over once it has: that reconnect's own list
+may have judged the terminal already, and asking the daemon about it again would only ask about one
+already judged.
+
 ### 3.17 STOP (Hub → Agent, daemon mode, `hub-identity`)
 
 ```typescript
@@ -707,7 +719,9 @@ absent from `channels` has ended, or is unknown.
 //   - DELETE /api/sessions/:id, for every terminal of that session.
 // end_reason "stopped": it ended with its agent or its hub, which nobody aimed at it.
 //   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
-//     sends while the hub stops it;
+//     sends while the hub stops it, and, once the stop is confirmed, for every other
+//     terminal the hub held on that host: a daemon's connection ends before its
+//     terminals' CHANNEL_EXITs reach the hub (#599);
 //   - quit (POST /api/quit), for every "dead" the hub reports once it is quitting and
 //     that was not a kill: the local agent's CHANNEL_EXITs, and the session closing
 //     when it goes.
@@ -1088,7 +1102,7 @@ What the callers do with the answers:
 | POST | `/api/hosts/:id/duplicate` | ● | → `Host` (201) |
 | PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → 200 |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
-| POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). An agent with `hub-identity` gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. Any other agent, or one the STOP cannot reach, is stopped with its own `--stop`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host |
+| POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). Once the stop is confirmed, every terminal this hub held there is reported dead with `end_reason: "stopped"` (§ 4.7, #599). An agent with `hub-identity` gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. Any other agent, or one the STOP cannot reach, is stopped with its own `--stop`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host |
 | GET | `/api/hosts/:id/agent-environment` | ● | `?mode=inherit\|minimal` (default `inherit`) → `{ mode, os, env }`: the variables a terminal on this host would start with in that mode, before any profile changes them, asked live of the agent over ENV_QUERY (§ 3.18) and answered with `Cache-Control: no-store` (#576). Never stored, never logged, names included. 409 `HOST_NOT_CONNECTED` when no agent of this host is connected to this hub, 409 `AGENT_TOO_OLD` when it lacks `env-modes`, 504 `AGENT_TIMEOUT` after 5 s without an answer, 400 `VALIDATION_ERROR` for another mode, 404 for an unknown host |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type, sort_order? }` → 204 |

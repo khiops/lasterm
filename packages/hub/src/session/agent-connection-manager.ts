@@ -635,6 +635,8 @@ export class AgentConnectionManager {
 			// so the CHANNEL_STATE listener is already armed before AUTH can trigger it.
 			// It carries the hub key, which is what makes this hub's channels its
 			// own on a daemon that serves several (#127).
+			// What it lists is what it held when asked (#599).
+			const askedAt = this.lifecycle.askingAgent();
 			const auth = daemonAuthFrame(agent, {
 				token: this.ctx.primaryToken || null,
 				hubKey: this.ctx.hubKey,
@@ -650,7 +652,7 @@ export class AgentConnectionManager {
 				hostId,
 				count: states.length,
 			});
-			this.lifecycle.reconcileChannelState(hostId, states, agent);
+			this.lifecycle.reconcileChannelState(hostId, states, agent, askedAt);
 
 			assertQuitFence(this.ctx, quitEpoch);
 			this.ctx.commits.adoptAgent(quitEpoch, hostId, agent);

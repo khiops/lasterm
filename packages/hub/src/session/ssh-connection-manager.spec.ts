@@ -490,7 +490,7 @@ describe("SshConnectionManager — reconnect cache-only promptAuth", () => {
 		} as unknown as SharedSessionContext;
 
 		const mgr = new SshConnectionManager(ctx, null as never, null as never, null as never);
-		const promptAuth = mgr.buildCacheOnlyPromptAuth(hostId);
+		const promptAuth = mgr.buildCacheOnlyPromptAuth();
 
 		// Must reject immediately (no pending promise, no UI send) with a
 		// distinct internal reason — NOT "Authentication cancelled by user".
@@ -508,7 +508,7 @@ describe("SshConnectionManager — reconnect cache-only promptAuth", () => {
 		} as unknown as SharedSessionContext;
 
 		const mgr = new SshConnectionManager(ctx, null as never, null as never, null as never);
-		const promptAuth = mgr.buildCacheOnlyPromptAuth(hostId);
+		const promptAuth = mgr.buildCacheOnlyPromptAuth();
 
 		// Must throw (fail-closed) on expired entry
 		await expect(promptAuth(hostId, "passphrase", "Enter passphrase")).rejects.toThrow(
@@ -528,11 +528,32 @@ describe("SshConnectionManager — reconnect cache-only promptAuth", () => {
 		} as unknown as SharedSessionContext;
 
 		const mgr = new SshConnectionManager(ctx, null as never, null as never, null as never);
-		const promptAuth = mgr.buildCacheOnlyPromptAuth(hostId);
+		const promptAuth = mgr.buildCacheOnlyPromptAuth();
 
 		// Non-passphrase prompt types must return null (cache is passphrase-only)
 		const result = await promptAuth(hostId, "password", "Enter password");
 		expect(result).toBeNull();
+	});
+
+	// A reconnect through a bastion asks for the bastion's key under the
+	// bastion's id, as the first connect did when the answer was cached (#609).
+	it("cache-only promptAuth answers each prompt for the host it names", async () => {
+		const ctx = {
+			passphraseCache: new Map([
+				["host-behind", { secret: "the host's", expiresAt: Date.now() + 60_000 }],
+				["host-bastion", { secret: "the bastion's", expiresAt: Date.now() + 60_000 }],
+			]),
+		} as unknown as SharedSessionContext;
+
+		const mgr = new SshConnectionManager(ctx, null as never, null as never, null as never);
+		const promptAuth = mgr.buildCacheOnlyPromptAuth();
+
+		await expect(promptAuth("host-bastion", "passphrase", "Enter passphrase")).resolves.toBe(
+			"the bastion's",
+		);
+		await expect(promptAuth("host-behind", "passphrase", "Enter passphrase")).resolves.toBe(
+			"the host's",
+		);
 	});
 });
 

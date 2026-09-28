@@ -69,7 +69,7 @@ import {
 	reconnectContextId,
 	trackElevationContext,
 } from "./prompt-context.js";
-import { planJump, type ResolvedJump } from "./proxy-jump.js";
+import { type ResolvedJump, resolveJump } from "./proxy-jump.js";
 import {
 	assertQuitFence,
 	captureQuitFence,
@@ -100,7 +100,7 @@ import {
 } from "./spawn-environment.js";
 import { SpoolGarbageCollector } from "./spool-gc.js";
 import type { SshAgentDeployOptions } from "./ssh-agent.js";
-import { parseSshHost, SshAgent } from "./ssh-agent.js";
+import { SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 import { StateBroadcaster } from "./state-broadcaster.js";
 
@@ -277,6 +277,18 @@ export class SessionManager {
 			if (!sessionBefore) return false;
 			const sessionId = sessionBefore.id;
 
+			// The same route as the first connection: a host behind a bastion is
+			// reached no other way (#609). Nothing new is pinned on the way.
+			const route = resolveJump(
+				host,
+				ctx.metaDal,
+				ctx.configResolver?.sshConfig?.trustKnownHosts === true,
+			);
+			if (route.kind === "refused") {
+				console.error(`[lasterm-ssh] cannot reconnect ${hostId}: ${route.message}`);
+				return false;
+			}
+
 			// Need a WS client to construct prompt/deploy callbacks. The reconnect
 			// PromptContext routes by live ctx.clients at prompt time, not this captured client.
 			const firstClientId = [...ctx.clients.keys()].sort()[0];
@@ -320,7 +332,12 @@ export class SessionManager {
 				const hostKey = `${sshHostname}:${sshPort}`;
 				const sessionTrustedFp = ctx.trustedOnceFingerprints.get(hostKey);
 
-				await sshAgent.start(storedFp, sessionTrustedFp, ac.signal);
+				await sshAgent.start(
+					storedFp,
+					sessionTrustedFp,
+					ac.signal,
+					route.kind === "jump" ? route.jump : undefined,
+				);
 
 				// Post-await currency re-check (mirrors scheduleReconnect invariant 10):
 				// closeSession() may have deleted the session entry while start() was
@@ -2008,6 +2025,25 @@ export class SessionManager {
 		return attempt;
 	}
 
+	/**
+	 * A jump that worked and had nothing pinned is pinned now: it was trusted on
+	 * the strength of known_hosts, and that answer is recorded here so a later
+	 * change of key is this hub's business too.
+	 *
+	 * Only a connection someone is making does this. A reconnect goes through
+	 * what is already trusted, and records nothing new.
+	 */
+	private pinJumpKey(jump: ResolvedJump | undefined, agent: SshAgent): void {
+		if (jump === undefined || agent.lastJumpFingerprint === null) return;
+		if (jump.pinTo.kind === "host") {
+			this.ctx.metaDal.updateHostFingerprint(jump.pinTo.hostId, agent.lastJumpFingerprint);
+		} else {
+			this.ctx.metaDal.updateHost(jump.pinTo.hostId, {
+				sshProxyFingerprint: agent.lastJumpFingerprint,
+			});
+		}
+	}
+
 	private async _connectSshAgent(
 		hostId: string,
 		host: import("@lasterm/shared").Host,
@@ -2030,63 +2066,21 @@ export class SessionManager {
 		const deployOpts = this._buildDeployOpts(hostId, host, approvedAgentSha);
 
 		// The route this host is reached by, when it is reached through another.
-		const plan = planJump(host);
-		if (plan.kind === "refused") {
+		const route = resolveJump(
+			host,
+			this.ctx.metaDal,
+			this.ctx.configResolver?.sshConfig?.trustKnownHosts === true,
+		);
+		if (route.kind === "refused") {
 			client.send({
 				type: "ERROR",
 				code: "SSH_JUMP_UNUSABLE",
-				message: plan.message,
+				message: route.message,
 				hostId,
 			} satisfies ErrorMessage);
-			throw new Error(plan.message);
+			throw new Error(route.message);
 		}
-		let resolvedJump: ResolvedJump | undefined;
-		if (plan.kind === "host") {
-			const jumpHost = this.ctx.metaDal.getHost(plan.hostId);
-			if (jumpHost?.type !== "ssh" || !jumpHost.sshHost) {
-				const message =
-					"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.";
-				client.send({
-					type: "ERROR",
-					code: "SSH_JUMP_UNUSABLE",
-					message,
-					hostId,
-				} satisfies ErrorMessage);
-				throw new Error(message);
-			}
-			const jumpParsed = parseSshHost(jumpHost.sshHost);
-			resolvedJump = {
-				jump: {
-					host: jumpParsed.hostname,
-					port: jumpHost.sshPort ?? 22,
-					username: jumpHost.sshUser || jumpParsed.username,
-				},
-				auth: {
-					method: jumpHost.sshAuth ?? "agent",
-					keyPath: jumpHost.sshKeyPath ?? undefined,
-				},
-				promptHostId: jumpHost.id,
-				pinnedFingerprint: this.ctx.metaDal.getHostFingerprint(jumpHost.id),
-				trustKnownHosts: this.ctx.configResolver?.sshConfig.trustKnownHosts === true,
-				pinTo: { kind: "host", hostId: jumpHost.id },
-			};
-		} else if (plan.kind === "spec") {
-			// A bastion named as an address is reached the way bastions are: with
-			// whatever the agent holds. A key of its own would be a second host,
-			// which is the other way of naming it.
-			resolvedJump = {
-				jump: {
-					host: plan.spec.host,
-					port: plan.spec.port,
-					username: plan.spec.user ?? host.sshUser ?? parseSshHost(host.sshHost ?? "").username,
-				},
-				auth: { method: "agent" },
-				promptHostId: hostId,
-				pinnedFingerprint: host.sshProxyFingerprint ?? null,
-				trustKnownHosts: this.ctx.configResolver?.sshConfig.trustKnownHosts === true,
-				pinTo: { kind: "spec", hostId },
-			};
-		}
+		const resolvedJump = route.kind === "jump" ? route.jump : undefined;
 
 		console.error(`[lasterm-ssh] creating SshAgent for host ${host.id}`);
 		const sshAgent = new SshAgent(
@@ -2101,21 +2095,7 @@ export class SessionManager {
 		try {
 			console.error("[lasterm-ssh] deploying agent...");
 			await sshAgent.start(storedFingerprint, sessionTrustedFp, signal, resolvedJump);
-			// A jump that worked and had nothing pinned is pinned now: it was
-			// trusted on the strength of known_hosts, and that answer is recorded
-			// here so a later change of key is this hub's business too.
-			if (resolvedJump !== undefined && sshAgent.lastJumpFingerprint !== null) {
-				if (resolvedJump.pinTo.kind === "host") {
-					this.ctx.metaDal.updateHostFingerprint(
-						resolvedJump.pinTo.hostId,
-						sshAgent.lastJumpFingerprint,
-					);
-				} else {
-					this.ctx.metaDal.updateHost(resolvedJump.pinTo.hostId, {
-						sshProxyFingerprint: sshAgent.lastJumpFingerprint,
-					});
-				}
-			}
+			this.pinJumpKey(resolvedJump, sshAgent);
 			console.error("[lasterm-ssh] agent deployed, exec starting");
 			console.error("[lasterm-ssh] SSH connection established");
 		} catch (err) {
@@ -2275,11 +2255,15 @@ export class SessionManager {
 				);
 				try {
 					console.error("[lasterm-ssh] deploying agent...");
+					// Through the same jump: the key just confirmed was seen through
+					// it, and a host behind a bastion is reached no other way.
 					await retryAgent.start(
 						action === "trust_permanent" ? retryFp : null,
 						action === "trust_once" ? retryFp : undefined,
 						signal,
+						resolvedJump,
 					);
+					this.pinJumpKey(resolvedJump, retryAgent);
 					console.error("[lasterm-ssh] agent deployed, exec starting");
 					console.error("[lasterm-ssh] SSH connection established");
 				} catch (retryErr) {

@@ -17,7 +17,8 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 - The staging layout under `msix/out/stage` uses `AppxManifest.xml`, which is the manifest filename expected by `MakeAppx.exe`.
 - The script resolves the desktop executable from `packages/clients/desktop/src-tauri/Cargo.toml` (`[package] name`) and stages it next to the sidecars.
 - The Windows target is x64-only: `x86_64-pc-windows-msvc`.
-- The staged package contains the desktop executable, `lasterm-hub.exe`, `lasterm-agent.exe`, required DLLs, and the Store logo assets from `src-tauri/icons`.
+- The staged package contains the desktop executable, `lasterm-hub.exe`, `lasterm-agent.exe`, required DLLs, and the logos from `msix/Assets`: one file per scale and, for `Square44x44Logo`, per target size, plated and unplated. `pnpm icons` renders them from `packaging/brand` (see its README).
+- `MakePri.exe` indexes those logos into `resources.pri`, so the manifest can name each one without its qualifiers. The default resource-pack split is removed from its config: every candidate stays in the one package.
 - Before packing, the script fails closed if any staged executable is not a 64-bit PE file.
 - Before packing, the script also fails closed if `lasterm-hub.exe` or `lasterm-agent.exe` reports a strict `x.y.z` version that does not match the first three components of the MSIX package version.
 

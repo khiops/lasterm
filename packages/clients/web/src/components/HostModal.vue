@@ -429,15 +429,6 @@
 								/>
 							</div>
 							<div class="field">
-								<label class="field-label">History (days)</label>
-								<input
-									v-model.number="form.historyRetentionDays"
-									type="number"
-									class="field-input"
-									min="1"
-								/>
-							</div>
-							<div class="field">
 								<label class="field-label">Remote Hints</label>
 								<select
 									v-model="form.trustRemoteHints"

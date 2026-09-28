@@ -88,11 +88,18 @@ CREATE TABLE hosts (
 );
 ```
 
-Migration 006 added `keep_alive_seconds INTEGER DEFAULT 60`, the "Keep Alive (s)" a host used to
-show. Nothing ever read it, and the SSH keepalive is fixed (SPEC.md § 5.5), so the setting was
-removed and the hub neither reads nor writes the column. It stays, rather than being dropped by a
-migration: a hub older than that removal, opened on this database, carries on past a schema newer
-than its own (§ 9.1) and still names the column when it creates a host.
+Migration 006 added two columns that no longer back any setting:
+
+- `keep_alive_seconds INTEGER DEFAULT 60`, the "Keep Alive (s)" a host used to show. The SSH
+  keepalive is fixed (SPEC.md § 5.5).
+- `history_retention_days INTEGER DEFAULT 30`, the "History (days)" a host used to show. Spool
+  GC has bounds of its own (§ 7), and the 30 days could never have applied: every chunk older
+  than seven days is deleted.
+
+Nothing ever read either, so both settings were removed and the hub neither reads nor writes
+these columns. They stay, rather than being dropped by a migration: a hub older than those
+removals, opened on this database, carries on past a schema newer than its own (§ 9.1) and still
+names both columns when it creates a host.
 
 ### 3.2 channel_groups
 
@@ -339,38 +346,38 @@ channel_id → {
 
 ### 7.1 Policy
 
+The bounds are global: no host or channel setting changes them
+(`packages/hub/src/session/spool-gc.ts`).
+
 | Parameter | Default | Config key |
 |-----------|---------|-----------|
-| Max age per channel | 7 days | `spool.gc_max_age_hours = 168` |
-| Max size total | 500 MB | `spool.gc_max_size_mb = 500` |
-| Keep last snapshot | Always | (not configurable — always keep) |
-| GC interval | 10 minutes | `spool.gc_interval_minutes = 10` |
+| Max age of a chunk | 7 days | none (`GC_MAX_AGE_HOURS = 168`) |
+| Max size per channel | 10 MB | `[gc] max_size_per_channel_mb` |
+| Retention of a dead channel | 24 hours | `[gc] dead_retention_hours` (0 = next run) |
+| GC interval | 10 minutes | none; the first run is 10 minutes after the hub starts |
 
 ### 7.2 Algorithm
 
 ```
-Every gc_interval_minutes:
+Every 10 minutes:
 
-1. Delete output chunks older than gc_max_age_hours
-   EXCEPT: keep the last snapshot chunk per channel (regardless of age)
+1. Delete every chunk older than 7 days, of any channel, live or dead,
+   EXCEPT each channel's latest snapshot
 
-2. If total spool size > gc_max_size_mb:
-   a. Find channels sorted by last_seen_at ASC (least recently active)
-   b. Delete oldest output chunks (ORDER BY ts ASC) from least-active channels (ORDER BY last_seen_at ASC)
-   c. Repeat until under limit (cross-DB: read cache_index from meta.db to find least-active)
-   d. NEVER delete the last snapshot per channel
+2. For each channel in spool.db over max_size_per_channel_mb:
+   delete its oldest output chunks (ORDER BY seq) until it is back under it.
+   Snapshots and resize chunks are never evicted here
 
-3. Delete chunks for channels with status = 'dead' and
-   last_seen_at older than gc_max_age_hours
+3. Delete every chunk, the last snapshot included, of each channel whose
+   status is 'dead' and whose updated_at (meta.db) is older than dead_retention_hours
 
 4. Run PRAGMA incremental_vacuum on spool.db (free pages to OS)
 ```
 
 ### 7.3 GC Safety
 
-- Always keep at least the last snapshot per channel (reconnect needs it)
-- Never delete chunks for LIVE or ORPHAN channels (active use)
-- DEAD channels: keep for gc_max_age_hours, then GC
+- Steps 1 and 2 keep each channel's latest snapshot, which a reconnect replays from
+- Only step 3 empties a channel, and only a dead one
 - Run incremental_vacuum (not full VACUUM) to avoid blocking writes
 
 ## 8. Data Access Patterns
@@ -492,15 +499,16 @@ Channel created (BORN)
   │
   Channel DEAD (PTY exited)
   │
-  ├─ Data retained for gc_max_age_hours
+  ├─ Data retained for dead_retention_hours (24 h by default)
   ├─ Scrollback still readable from spool.db
   │
-  GC runs
+  GC runs (every 10 min, § 7)
   │
-  ├─ Output chunks deleted (age-based)
-  ├─ Last snapshot kept (for review)
+  ├─ Chunks older than 7 days deleted, latest snapshot kept
+  ├─ Oldest output evicted past max_size_per_channel_mb
   │
-  Final GC (channel too old)
+  Channel dead for longer than dead_retention_hours
   │
-  └─ All chunks deleted, cache_index cleaned
+  └─ All its chunks deleted; its channel row and cache_index entry stay
+     until the channel is deleted
 ```

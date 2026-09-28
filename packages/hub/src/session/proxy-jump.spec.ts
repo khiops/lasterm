@@ -102,7 +102,6 @@ describe("resolveJump", () => {
 			iconType: "auto",
 			trustRemoteHints: "ignore",
 			sortOrder: 0,
-			historyRetentionDays: 30,
 			os: null,
 			arch: null,
 			createdAt: "2026-09-28T00:00:00.000Z",

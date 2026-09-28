@@ -1305,7 +1305,6 @@ What the callers do with the answers:
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
   host_group?: string,                // group name (legacy)
   host_group_id?: string,             // host group ID
-  history_retention_days?: number,    // spool retention
   profile_json?: string | object,     // host-level terminal profile (Layer 3)
   elevation_method?: string,          // e.g. "sudo", "doas", "pkexec", "gsudo"
   custom_command?: string,            // custom SSH/connect command template
@@ -1316,9 +1315,10 @@ What the callers do with the answers:
 
 **UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge).
 
-A field these routes do not know is ignored. That includes `keep_alive_seconds`, which clients from
-before its removal still send: nothing ever read it, since the SSH keepalive is fixed (SPEC.md
-§ 5.5). Host responses no longer carry it.
+A field these routes do not know is ignored. That includes `keep_alive_seconds` and
+`history_retention_days`, which clients from before their removal still send: nothing ever read
+either, since the SSH keepalive is fixed (SPEC.md § 5.5) and spool GC has bounds of its own
+(STORAGE.md § 7). Host responses no longer carry them.
 
 **CreateGroup:** (tab channel groups)
 ```typescript

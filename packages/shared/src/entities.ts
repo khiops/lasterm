@@ -114,7 +114,6 @@ export interface Host {
 	sortOrder: number;
 	sshConfigHost?: string | null;
 	sshUser?: string | null;
-	historyRetentionDays: number;
 	discoveredShells?: string[];
 	discoveredShellsAt?: string;
 	/** Operating system of the remote host (null = auto-detect on first connect) */

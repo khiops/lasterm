@@ -213,7 +213,6 @@ function makeHost(port: number): Host {
 		iconType: "auto",
 		trustRemoteHints: "ignore",
 		sortOrder: 0,
-		historyRetentionDays: 30,
 		os: "linux",
 		arch: "arm64",
 		createdAt: new Date().toISOString(),

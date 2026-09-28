@@ -33,7 +33,6 @@ interface HostRow {
 	sort_order: number;
 	ssh_config_host: string | null;
 	ssh_user: string | null;
-	history_retention_days: number;
 	discovered_shells: string | null;
 	discovered_shells_at: string | null;
 	elevation_method: string | null;
@@ -69,7 +68,6 @@ function rowToHost(row: HostRow): Host {
 		iconType: row.icon_type as Host["iconType"],
 		trustRemoteHints: row.trust_remote_hints as Host["trustRemoteHints"],
 		sortOrder: row.sort_order,
-		historyRetentionDays: row.history_retention_days,
 		os: row.os as HostOs | null,
 		arch: row.arch as HostArch | null,
 		createdAt: row.created_at,
@@ -138,7 +136,6 @@ export class HostsDAL {
 				default_shell, default_cwd,
 				host_group, host_group_id, sort_order, ssh_config_host, ssh_user,
 				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon,
-				history_retention_days,
 				elevation_method, custom_command,
 				os, arch,
 				created_at, updated_at
@@ -148,7 +145,6 @@ export class HostsDAL {
 				?, ?,
 				?, ?, ?, ?, ?,
 				?, ?, ?,
-				?,
 				?, ?,
 				?, ?,
 				?, ?
@@ -177,7 +173,6 @@ export class HostsDAL {
 				input.sshProxyHostId ?? null,
 				input.sshProxySpec ?? null,
 				input.sshRemoteDaemon == null ? null : input.sshRemoteDaemon ? 1 : 0,
-				input.historyRetentionDays ?? 30,
 				input.elevationMethod ?? null,
 				input.customCommand ?? null,
 				input.os ?? null,
@@ -251,7 +246,6 @@ export class HostsDAL {
 			sshProxySpec: "ssh_proxy_spec",
 			sshProxyFingerprint: "ssh_proxy_fingerprint",
 			sshRemoteDaemon: "ssh_remote_daemon",
-			historyRetentionDays: "history_retention_days",
 			elevationMethod: "elevation_method",
 			customCommand: "custom_command",
 			os: "os",
@@ -380,7 +374,6 @@ export class HostsDAL {
 			...(original.hostGroup != null && { hostGroup: original.hostGroup }),
 			...(original.sshConfigHost != null && { sshConfigHost: original.sshConfigHost }),
 			...(original.sshUser != null && { sshUser: original.sshUser }),
-			historyRetentionDays: original.historyRetentionDays,
 		});
 	}
 

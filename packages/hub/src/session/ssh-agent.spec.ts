@@ -213,7 +213,6 @@ function makeHost(port: number, overrides: Partial<Host> = {}): Host {
 		iconType: "auto",
 		trustRemoteHints: "ignore",
 		sortOrder: 0,
-		historyRetentionDays: 30,
 		os: null,
 		arch: null,
 		createdAt: new Date().toISOString(),

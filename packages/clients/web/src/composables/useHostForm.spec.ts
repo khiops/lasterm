@@ -43,7 +43,6 @@ describe("useHostForm", () => {
 				color: "",
 				hostGroup: "",
 				defaultShell: "",
-				historyRetentionDays: 30,
 				trustRemoteHints: "apply" as const,
 				sortOrder: 0,
 				os: null as null,

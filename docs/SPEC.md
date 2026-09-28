@@ -241,9 +241,11 @@ is; a terminal's key handler keeps them from its PTY, and the palette and Settin
 them from the same table. A shell keeps its own Ctrl+K, Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\, and moves
 by word on Ctrl+←/→: Alt+arrows move between panes (decisions.md KEYBOARD-NAV). The split and tab
 number chords are matched on the physical key (`ev.code`), so they are the same keys on every layout,
-and no chord matches while AltGr is held, which types `#`, `@` or `{` on AZERTY. F6 and Shift+F6 move
-the keyboard between the host rail, the terminal list, the tab bar and the focused pane; within each,
-the arrow keys move between its items, and Esc goes back to the pane.
+and no chord matches while AltGr is held, which types `#`, `@` or `{` on AZERTY. Ctrl+F6 and
+Ctrl+Shift+F6 move the keyboard between the host rail, the terminal list, the tab bar and the focused
+pane from anywhere; F6 and Shift+F6 do the same outside a terminal, and in one reach its program
+(htop's sort, Midnight Commander's move). Within each zone the arrow keys move between its items, and
+Esc goes back to the pane.
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub

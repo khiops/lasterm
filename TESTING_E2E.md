@@ -908,12 +908,14 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 - `cat -v` in a pane → Alt+arrows show nothing; Ctrl+←/→ show `^[[1;5D` and `^[[1;5C`, and in bash move the cursor by word
 - Alt+Shift+→ in the left pane moves the divider right, step by step, and stops where the mouse drag stops; Alt+Shift+← in the same pane moves it left
 - Ctrl+Shift+W in a split pane closes that pane only: a live terminal stays in the sidebar, an empty pane gives its room; in the last pane, the tab closes
-- F6 from a terminal → the selected host's badge in the rail, then the selected terminal in the list, then the active tab, then back to the pane; Shift+F6 goes the other way; with the list folded away, F6 passes it over. Midnight Commander no longer receives F6
+- Ctrl+F6 from a terminal → the selected host's badge in the rail, then the selected terminal in the list, then the active tab, then back to the pane; Ctrl+Shift+F6 goes the other way; with the list folded away, it passes it over
+- F6 and Shift+F6 in the rail, the list, the tab bar or an empty pane's picker → the same as Ctrl+F6 and Ctrl+Shift+F6; in a terminal they reach its program: `cat -v` shows `^[[17~` and `^[[17;2~`, htop sorts, Midnight Commander moves files
+- An empty pane's picker, several rows → Alt+↓ moves the focus to the pane below and leaves the picker's highlighted row where it was
 - In the rail (three columns) → ←/→ within a row, ↑/↓ between rows over the group headers, Home and End, Enter selects the host; Esc goes back to the pane
 - In the tab bar → ←/→ move without switching, Enter or Space switches, Delete closes the tab as its × does
 - In the list → ↑/↓ move over the group headers, Enter opens the terminal and the keyboard goes into it
 - The focus ring is the theme's accent, in every theme; a mouse click shows none
-- With Settings open, F6, Alt+arrows and Ctrl+Tab do nothing behind it
+- With Settings open, F6, Ctrl+F6, Alt+arrows and Ctrl+Tab do nothing behind it
 
 ---
 

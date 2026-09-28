@@ -25,8 +25,8 @@
 </template>
 
 <script setup lang="ts">
-// The app's shortcuts are shown from the table the window and the terminals read (#631).
-import { shortcutKeys } from "../../../utils/app-shortcuts.js";
+// The app's shortcuts are shown from the table the window and the terminals read (#631, #637).
+import { shortcutKeys, TAB_NUMBERS } from "../../../utils/app-shortcuts.js";
 
 interface Keybinding {
 	label: string;
@@ -47,10 +47,23 @@ const keybindingGroups: KeybindingGroup[] = [
 		],
 	},
 	{
+		name: "Focus",
+		bindings: [
+			{ label: "Next Area (rail, list, tabs, pane)", keys: shortcutKeys("zone.next") },
+			{ label: "Previous Area", keys: shortcutKeys("zone.previous") },
+			{ label: "Back to the Pane", keys: ["Escape"] },
+		],
+	},
+	{
 		name: "Tabs",
 		bindings: [
 			{ label: "New Channel", keys: shortcutKeys("tab.new") },
-			{ label: "Close Tab", keys: shortcutKeys("tab.close") },
+			{ label: "Next Tab", keys: shortcutKeys("tab.next") },
+			{ label: "Previous Tab", keys: shortcutKeys("tab.previous") },
+			...TAB_NUMBERS.map((n) => ({
+				label: n === 9 ? "Go to Last Tab" : `Go to Tab ${n}`,
+				keys: shortcutKeys(`tab.goTo${n}`),
+			})),
 		],
 	},
 	{
@@ -58,6 +71,15 @@ const keybindingGroups: KeybindingGroup[] = [
 		bindings: [
 			{ label: "Split Right", keys: shortcutKeys("pane.splitRight") },
 			{ label: "Split Down", keys: shortcutKeys("pane.splitDown") },
+			{ label: "Close Pane", keys: shortcutKeys("pane.close") },
+			{ label: "Focus Left", keys: shortcutKeys("pane.focusLeft") },
+			{ label: "Focus Right", keys: shortcutKeys("pane.focusRight") },
+			{ label: "Focus Up", keys: shortcutKeys("pane.focusUp") },
+			{ label: "Focus Down", keys: shortcutKeys("pane.focusDown") },
+			{ label: "Resize Left", keys: shortcutKeys("pane.resizeLeft") },
+			{ label: "Resize Right", keys: shortcutKeys("pane.resizeRight") },
+			{ label: "Resize Up", keys: shortcutKeys("pane.resizeUp") },
+			{ label: "Resize Down", keys: shortcutKeys("pane.resizeDown") },
 		],
 	},
 	{

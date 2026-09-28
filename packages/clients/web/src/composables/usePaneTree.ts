@@ -1,6 +1,7 @@
 import { DEFAULT_CHANNEL_NAME, generateId } from "@lasterm/shared";
 import { computed, type Ref } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
+import { clampSplitRatio } from "../utils/pane-geometry.js";
 import type { Tab } from "./useTabManager.js";
 
 // ---------------------------------------------------------------------------
@@ -537,8 +538,8 @@ export function usePaneTree(
 		const splitNode = getNodeAtPath(root, splitNodePath);
 		if (splitNode === null || splitNode.type !== "split") return;
 
-		const clamped = Math.min(0.9, Math.max(0.1, ratio));
-		const updated: PaneNode = { ...splitNode, ratio: clamped };
+		// The keys' resize (Alt+Shift+arrows) stops at the same bounds (#637).
+		const updated: PaneNode = { ...splitNode, ratio: clampSplitRatio(ratio) };
 		const newRoot = setNodeAtPath(root, splitNodePath, updated);
 		layouts.value = { ...layouts.value, [tab.id]: newRoot };
 	}

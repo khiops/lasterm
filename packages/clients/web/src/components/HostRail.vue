@@ -3,11 +3,13 @@
 		class="host-rail"
 		:class="{ 'host-rail--grid': grid }"
 		:style="railStyle"
+		data-focus-zone="rail"
 	>
 		<div
 			class="rail-hosts"
 			@dragover.prevent
 			@contextmenu.prevent="onRailContextMenu"
+			@focusout="onBadgesFocusOut"
 		>
 			<!-- Rows, read left to right then down: the local host alone first,
 			     then each section's hosts, `columns` to a row (#623). -->
@@ -24,7 +26,14 @@
 						:data-host-id="host.id"
 						:title="getTooltip(host)"
 						:draggable="row.section !== null"
+						role="button"
+						:aria-label="host.label"
+						:aria-pressed="host.id === hostsStore.selectedHostId"
+						:tabindex="host.id === rovingHostId ? 0 : -1"
+						data-zone-item
 						@click="hostsStore.selectHost(host.id)"
+						@focus="keyboardHostId = host.id"
+						@keydown="onBadgeKeydown($event, host.id)"
 						@contextmenu.prevent="
 							emit('host-context-menu', {
 								hostId: host.id,
@@ -203,7 +212,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { gridMove } from "../utils/focus-zones.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useChannelsStore } from "../stores/channels.js";
@@ -303,6 +313,53 @@ const rows = computed<RailRow[]>(() => {
 	}
 	return result;
 });
+
+// ── Keyboard (#637) ──────────────────────────────────────────────────────
+//
+// One badge takes Tab, and the arrow keys move along the grid: ← and → within a row, ↑ and ↓
+// between rows, over the group headers. Enter or Space selects the host, as a click does.
+
+/** The badges' rows, without the headers and separators between them. */
+const hostGrid = computed(() =>
+	rows.value.flatMap((row) => (row.kind === "hosts" ? [row.hosts.map((h) => h.id)] : [])),
+);
+
+/** The badge the keyboard is on while it is in the rail; null once it leaves. */
+const keyboardHostId = ref<string | null>(null);
+
+/** The one badge that takes Tab: the keyboard's, else the selected host's, else the first. */
+const rovingHostId = computed(() => {
+	const ids = hostGrid.value.flat();
+	for (const id of [keyboardHostId.value, hostsStore.selectedHostId]) {
+		if (id !== null && ids.includes(id)) return id;
+	}
+	return ids[0] ?? null;
+});
+
+function onBadgeKeydown(event: KeyboardEvent, hostId: string): void {
+	if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+	if (event.key === "Enter" || event.key === " ") {
+		event.preventDefault();
+		hostsStore.selectHost(hostId);
+		return;
+	}
+	const next = gridMove(hostGrid.value, hostId, event.key);
+	if (next === null) return;
+	event.preventDefault();
+	keyboardHostId.value = next;
+	const rail = (event.currentTarget as HTMLElement).closest(".host-rail");
+	void nextTick(() => {
+		const badges = rail?.querySelectorAll<HTMLElement>(".badge-wrapper[data-host-id]") ?? [];
+		[...badges].find((badge) => badge.dataset.hostId === next)?.focus();
+	});
+}
+
+/** Leaving the rail, Tab comes back to the selected host. */
+function onBadgesFocusOut(event: FocusEvent): void {
+	const into = event.relatedTarget as Node | null;
+	if (into !== null && (event.currentTarget as HTMLElement).contains(into)) return;
+	keyboardHostId.value = null;
+}
 
 const FOOTER_ACTIONS = ["palette", "settings", "add-host"] as const;
 const footerRows = computed(() => chunkIntoRows(FOOTER_ACTIONS, props.columns));
@@ -615,6 +672,17 @@ onMounted(() => {
 
 .badge-wrapper.selected .badge,
 .badge-wrapper:not(.selected):hover .badge {
+	border-radius: var(--rail-squircle);
+}
+
+/* The keyboard's badge (#637): a ring in the theme's accent, apart from the selection's. */
+.badge-wrapper:focus {
+	outline: none;
+}
+
+.badge-wrapper:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 3px;
 	border-radius: var(--rail-squircle);
 }
 

@@ -4,6 +4,7 @@
 		<template v-if="node.type === 'terminal'">
 			<div
 				class="pane-drop-wrapper"
+				:data-pane-id="node.paneId"
 				@mousedown="onPaneFocus(node.paneId)"
 				@dragover.prevent="onDragOver"
 				@dragleave="onDragLeave"
@@ -54,6 +55,7 @@
 		<template v-else-if="node.type === 'vacant'">
 			<div
 				class="pane-drop-wrapper"
+				:data-pane-id="node.id"
 				@dragover.prevent="onDragOver"
 				@dragleave="onDragLeave"
 				@drop="onDrop"

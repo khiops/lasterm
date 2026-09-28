@@ -200,11 +200,18 @@ export function useCommandPalette() {
 					shortcut: shortcutLabel("pane.splitDown"),
 				},
 				{
+					id: "action:close-pane",
+					label: "Close Pane",
+					type: "action",
+					icon: "✕",
+					shortcut: shortcutLabel("pane.close"),
+				},
+				// Its chord went to Close Pane, as in Windows Terminal (#637); the row stays.
+				{
 					id: "action:close-tab",
 					label: "Close Tab",
 					type: "action",
 					icon: "✕",
-					shortcut: shortcutLabel("tab.close"),
 				},
 				{
 					id: "action:pairing-code",

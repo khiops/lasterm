@@ -6,6 +6,9 @@
 			'channel-item--dead': channel.status === 'dead',
 		}"
 		:title="displayLabel"
+		:tabindex="focusable ? 0 : -1"
+		:data-channel-id="channel.id"
+		data-zone-item
 		@click="emit('select')"
 		@contextmenu.prevent="onContextMenu"
 	>
@@ -102,6 +105,8 @@ const props = defineProps<{
 	isSelected: boolean;
 	isUnread: boolean;
 	availableGroups: ChannelGroup[];
+	/** The one item of the list that takes Tab (#637); the arrow keys reach the others. */
+	focusable?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -226,6 +231,16 @@ onUnmounted(() => {
 .channel-item--selected {
 	background: var(--nt-tab-hover);
 	color: var(--nt-fg);
+}
+
+/* The keyboard's item (#637): a ring in the theme's accent. */
+.channel-item:focus {
+	outline: none;
+}
+
+.channel-item:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 
 .channel-item--dead {

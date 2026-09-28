@@ -233,7 +233,7 @@ import {
 	factsFromRefusal,
 	paneCover,
 } from '../utils/pane-cover.js';
-import { IS_MAC, terminalKeyHandler } from '../utils/terminal-keys.js';
+import { terminalKeyHandler } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import SearchOverlay from './SearchOverlay.vue';
 import UnreadLinesBar from './UnreadLinesBar.vue';
@@ -1467,9 +1467,7 @@ watch(terminal, (term) => {
 		terminalKeyHandler({
 			openSearch: () => search.open(),
 			isSearchOpen: () => search.isOpen.value,
-			input: (data) => term.input(data),
 			hasSelection: () => term.hasSelection(),
-			isMac: IS_MAC,
 		}),
 	);
 });

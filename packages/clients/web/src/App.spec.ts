@@ -76,3 +76,25 @@ describe("the panes on screen", () => {
 		expect(SOURCE).toContain('v-show="idx === layout.activeTabIndex.value"');
 	});
 });
+
+// Ctrl+K opened the palette and still reached the shell as ^K (#624). What the
+// chord is, and that a terminal keeps it from its PTY, is tested in
+// utils/palette-shortcut.spec.ts and utils/terminal-keys.spec.ts.
+describe("the window's shortcut for the palette", () => {
+	it("toggles the palette on the palette's chord, and takes it", () => {
+		const onGlobalKeydown = body(/function onGlobalKeydown\(/);
+		expect(onGlobalKeydown.replace(/\s+/g, " ")).toContain(
+			"if (isPaletteShortcut(event)) { event.preventDefault(); commandPalette.toggle(); return; }",
+		);
+		// Before an element's own handler can stop it.
+		expect(SOURCE).toContain(
+			"window.addEventListener('keydown', onGlobalKeydown, { capture: true });",
+		);
+	});
+
+	it("no longer takes Ctrl+K from the shell", () => {
+		const onGlobalKeydown = body(/function onGlobalKeydown\(/);
+		expect(onGlobalKeydown).not.toMatch(/event\.key === ['"]k['"]/i);
+		expect(onGlobalKeydown.match(/commandPalette\.toggle\(\)/g)).toHaveLength(1);
+	});
+});

@@ -176,7 +176,7 @@
 		<div class="rail-footer">
 			<button
 				class="rail-icon-btn"
-				title="Command palette (Ctrl+K)"
+				title="Command palette (Ctrl+Shift+P)"
 				aria-label="Open command palette"
 				@click="$emit('toggle-palette')"
 			>

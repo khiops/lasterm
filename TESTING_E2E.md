@@ -863,7 +863,7 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 
 ### 107. Command palette — ~ prefix
 
-- Open command palette (Ctrl+K) → type "~" → only profiles listed
+- Open command palette (Ctrl+Shift+P) → type "~" → only profiles listed
 - Type "~My" → filters to profiles matching "My"
 - Select a profile → terminal spawns with that profile
 - Without "~" prefix, profiles still appear (with lower score) in general results

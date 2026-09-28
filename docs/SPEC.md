@@ -230,7 +230,7 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 - `TabBar` — open channels as tabs, [+] new, right-click context menu
 - `TerminalPane` — xterm.js instance, fit addon, badge overlay
 - `PaneSplitter` — horizontal/vertical split, drag resize
-- `CommandPalette` — Ctrl+K (Cmd+K), fuzzy search hosts/channels/actions
+- `CommandPalette` — Ctrl+Shift+P (Cmd+Shift+P), fuzzy search hosts/channels/actions. The chord never reaches a terminal's PTY; Ctrl+K is the shell's
 - `HostModal` — add or edit a host: connection, jump host, whether it keeps an agent running, auth, shell, elevation, icon, color
 - `SettingsPanel` — settings at global, host and terminal scope (terminal, environment, appearance, keybindings, agents…)
 - `TitleBar` — the UI's version and build; the window controls in the desktop app

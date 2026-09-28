@@ -409,7 +409,6 @@ Host (permanent config)
  ├── hostGroup?: string | null         // display group name
  ├── hostGroupId?: string | null       // FK → HostGroup (future)
  ├── sortOrder: number
- ├── keepAliveSeconds: number          // shown and stored, not read: the SSH keepalive is fixed (§ 5.5)
  ├── historyRetentionDays: number      // spool.db GC policy per host
  ├── discoveredShells?: string[]       // shells found on remote at last connect
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
@@ -756,7 +755,9 @@ A slow link is not taken for a silent one: a live server answers each request as
 it, and at most a channel window (about 2 MB) is queued ahead of a request or its answer,
 so the 45 s the first unanswered request has are enough on any link carrying some 50 KB/s.
 Only a slower link, saturated, could lose a connection that was alive. The values are fixed
-(`packages/hub/src/session/ssh-keepalive.ts`); a host's `keepAliveSeconds` is not read.
+(`packages/hub/src/session/ssh-keepalive.ts`), and no host setting changes them: a host that
+could turn them off would bring #605 back for itself. Hosts used to show a "Keep Alive (s)"
+value that nothing read; it is gone (STORAGE.md § 3.1).
 
 ### 5.6 Daemon Agent — Connect + Reconnect
 

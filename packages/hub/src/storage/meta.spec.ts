@@ -286,7 +286,6 @@ describe("MetaDAL — Host Management fields", () => {
 		const host = dal.createHost({ type: "local", label: "defaults-test" });
 
 		expect(host.sortOrder).toBe(0);
-		expect(host.keepAliveSeconds).toBe(60);
 		expect(host.historyRetentionDays).toBe(30);
 		expect(host.hostGroup).toBeUndefined();
 		expect(host.sshConfigHost).toBeUndefined();
@@ -302,7 +301,6 @@ describe("MetaDAL — Host Management fields", () => {
 			sortOrder: 3,
 			sshConfigHost: "prod-server",
 			sshUser: "deploy",
-			keepAliveSeconds: 120,
 			historyRetentionDays: 90,
 		});
 
@@ -310,7 +308,6 @@ describe("MetaDAL — Host Management fields", () => {
 		expect(host.sortOrder).toBe(3);
 		expect(host.sshConfigHost).toBe("prod-server");
 		expect(host.sshUser).toBe("deploy");
-		expect(host.keepAliveSeconds).toBe(120);
 		expect(host.historyRetentionDays).toBe(90);
 	});
 
@@ -322,14 +319,10 @@ describe("MetaDAL — Host Management fields", () => {
 		expect(updated.hostGroup).toBe("staging");
 	});
 
-	it("updateHost updates keepAliveSeconds and historyRetentionDays", () => {
+	it("updateHost updates historyRetentionDays", () => {
 		const host = dal.createHost({ type: "local", label: "retention-test" });
 
-		const updated = dal.updateHost(host.id, {
-			keepAliveSeconds: 300,
-			historyRetentionDays: 7,
-		});
-		expect(updated.keepAliveSeconds).toBe(300);
+		const updated = dal.updateHost(host.id, { historyRetentionDays: 7 });
 		expect(updated.historyRetentionDays).toBe(7);
 	});
 

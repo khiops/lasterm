@@ -10,7 +10,6 @@ function makeHost(overrides: Partial<Host> & { id: string; label: string }): Hos
 		iconType: "auto",
 		trustRemoteHints: "apply",
 		sortOrder: 0,
-		keepAliveSeconds: 0,
 		historyRetentionDays: 30,
 		os: null,
 		arch: null,

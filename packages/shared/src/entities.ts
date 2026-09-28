@@ -114,7 +114,6 @@ export interface Host {
 	sortOrder: number;
 	sshConfigHost?: string | null;
 	sshUser?: string | null;
-	keepAliveSeconds: number;
 	historyRetentionDays: number;
 	discoveredShells?: string[];
 	discoveredShellsAt?: string;

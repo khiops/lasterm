@@ -26,7 +26,6 @@ export interface CreateHostBody {
 	ssh_proxy_host_id?: string | null;
 	ssh_proxy_spec?: string | null;
 	ssh_remote_daemon?: boolean | null;
-	keep_alive_seconds?: number;
 	history_retention_days?: number;
 	profile_json?: string;
 	elevation_method?: "sudo" | "doas" | "pkexec" | "gsudo" | "custom" | null;
@@ -55,7 +54,6 @@ export interface UpdateHostBody {
 	ssh_proxy_host_id?: string | null;
 	ssh_proxy_spec?: string | null;
 	ssh_remote_daemon?: boolean | null;
-	keep_alive_seconds?: number;
 	history_retention_days?: number;
 	profile_json?: string;
 	elevation_method?: "sudo" | "doas" | "pkexec" | "gsudo" | "custom" | null;

@@ -17,4 +17,6 @@ The colours are those of the website's design system: `#7c6fef` (prompt), `#1518
 | `packages/clients/web/public/` | The web client: `favicon.svg`, `icons/icon-32/192/512.png`, and a maskable 512 |
 | `packaging/brand/site/` | The website: `favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, and PWA icons, maskable included |
 
+`packages/clients/web/src/components/TitleBar.vue` draws the small drawing inline, at 20 px, in the desktop title bar: change it with the drawings.
+
 The maskable and apple-touch icons put the glyph on a violet square that fills the image, inside the maskable safe zone. The Store art sets the tile on the indigo ground.

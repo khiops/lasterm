@@ -95,7 +95,21 @@ pnpm lint                 # Lint + format check (biome)
 pnpm lint:fix             # Auto-fix lint issues
 pnpm -F @lasterm/hub test # Test single package
 pnpm -F @lasterm/web dev  # Dev single package
+scripts/dev/check.sh      # Everything CI checks on a PR, before pushing (below)
 ```
+
+### Local safety net
+
+`scripts/dev/check.sh [--desktop] [--dry-run] [label]` (bash; Git Bash on Windows) runs, in the
+checkout it is called from: biome, the shared build, `pnpm typecheck`,
+`pnpm build:test-tls-material --locked`, `pnpm test:run` and `cargo test --workspace` against a
+throwaway profile, `cargo fmt`, clippy (on Windows with `--target x86_64-pc-windows-msvc`) and the
+desktop crate's `cargo fmt`; `--desktop` adds that crate's clippy and tests. Every step runs, prints
+`<step>: exit=<code>` and keeps its log in `$TMPDIR/lasterm-check/<label>`; a summary with the test
+counts ends it. Every worktree builds into the main checkout's `target` directories, never a fresh
+one (see below), unless `LASTERM_CARGO_TARGET_DIR` or `CARGO_TARGET_DIR` names another. Its steps mirror
+the `lint`, `test` and `build-agent` jobs of `.github/workflows/build.yml` and the Windows lint jobs
+of `ci.yml`: change them together.
 
 ### TypeScript test prerequisite
 
@@ -143,7 +157,9 @@ cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.
 
 ```powershell
 .\scripts\dev\desktop-ui.ps1 [-Build]        # run the built app with a CDP port (9333)
-node scripts/dev/ui/cdp.mjs eval "<js>"      # also: type "<text>", shot <file.png>, watch <s> "<js>"
+node scripts/dev/ui/cdp.mjs eval "<js>"      # also: type [--no-enter] "<text>", shot <file.png>, watch <s> "<js>"
+node scripts/dev/ui/cdp.mjs eval-file <f.js> # also: type-file [--no-enter] <file>
+node scripts/dev/ui/cdp.mjs api GET api/health   # the app's hub REST API; JSON on stdout
 powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <cssX> -Y <cssY>
 .\scripts\dev\desktop-ui.ps1 -Stop
 ```
@@ -157,6 +173,16 @@ powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <c
 - A drag dispatched over CDP skips the window's native drop handling. `drag-file.ps1` performs a real
   OLE drag instead: it moves the user's mouse for a few seconds, then puts it back. Run it with
   `-SelfTest` first, before trusting a result it gives on the app.
+- Text with quotes, `|` or line breaks goes in a file, for `eval-file` or `type-file`. Volta's
+  `node` shim hands its arguments to cmd.exe, which cuts one at a newline, drops `^`, expands
+  `%NAME%`, and splits the command at a `|` or `&` outside what it takes for quotes. `eval-file`
+  yields the script's last value and keeps its `let`/`const` to itself. `type` presses Enter at the
+  end unless `--no-enter`, and each line break of the text is an Enter too.
+- `api <METHOD> <path> [body.json]` finds the hub's port in `runtime.json` in the state directory,
+  sends the token the page keeps in `localStorage` (`lasterm_token`), and connects to 127.0.0.1 only,
+  pinning the TLS key `runtime.json` records. POST, PUT and PATCH send `{}` without a body file. It
+  acts on the real profile: read before writing. From Git Bash, drop the path's leading `/`, which
+  it would rewrite into a Windows path.
 
 ## Conventions
 

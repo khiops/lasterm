@@ -174,6 +174,7 @@ pnpm typecheck        # Type-check every package
 pnpm lint             # Lint + format check (biome)
 pnpm lint:fix         # Auto-fix lint issues
 cargo test --workspace   # The agent and the other Rust crates
+scripts/dev/check.sh     # Everything CI checks on a pull request, one log per step (bash)
 
 # Single-package operations
 pnpm -F @lasterm/hub test   # builds the native addons itself

@@ -125,8 +125,11 @@ describe("the window's shortcuts", () => {
 	it("runs an app shortcut's action on its chord, and takes the chord", () => {
 		const onGlobalKeydown = flat(body(/function onGlobalKeydown\(/));
 		expect(onGlobalKeydown).toContain(
-			"const shortcut = appShortcutOf(event); if (shortcut !== null) { event.preventDefault();",
+			"const shortcut = windowShortcutOf(event); if (shortcut !== null) { event.preventDefault();",
 		);
+		// Where the key was typed decides whether F6 is a chord: in a terminal it is the
+		// program's, and only Ctrl+F6 moves between the zones (utils/app-shortcuts.spec.ts, #637).
+		expect(SOURCE).not.toMatch(/\bappShortcutOf\(/);
 		expect(onGlobalKeydown).toContain("runAppAction(shortcut); return; }");
 		// Before an element's own handler can stop it.
 		expect(SOURCE).toContain(

@@ -1,16 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import HOST_RAIL from "../components/HostRail.vue?raw";
 import {
 	APP_SHORTCUTS,
 	type AppActionId,
 	appShortcutOf,
+	keyboardPlaceOf,
 	matchesChord,
 	movesKeyboard,
+	OUTSIDE_TERMINAL_SHORTCUTS,
+	outsideTerminalKeys,
 	paneMoveOf,
 	shortcutKeys,
 	shortcutLabel,
 	TAB_NUMBERS,
 	tabNumberOf,
+	windowShortcutOf,
 } from "./app-shortcuts.js";
 
 type KeyInit = Partial<KeyboardEventInit> & { altGraph?: boolean };
@@ -85,13 +89,23 @@ describe("the table of the app's shortcuts", () => {
 			"Alt+Shift+→",
 			"Alt+Shift+↑",
 			"Alt+Shift+↓",
-			"F6",
-			"Shift+F6",
+			"Ctrl+F6",
+			"Ctrl+Shift+F6",
 		]);
 	});
 
-	it("gives each chord to one action only", () => {
-		const labels = IDS.map(shortcutLabel);
+	it("gives F6 and Shift+F6 to the zones outside a terminal only", () => {
+		expect(Object.keys(OUTSIDE_TERMINAL_SHORTCUTS)).toEqual(["zone.next", "zone.previous"]);
+		expect(outsideTerminalKeys("zone.next")).toEqual(["F6"]);
+		expect(outsideTerminalKeys("zone.previous")).toEqual(["Shift", "F6"]);
+		expect(outsideTerminalKeys("pane.close")).toBeNull();
+	});
+
+	it("gives each chord to one action only, those for outside a terminal included", () => {
+		const labels = [
+			...IDS.map(shortcutLabel),
+			...IDS.flatMap((id) => outsideTerminalKeys(id)?.join("+") ?? []),
+		];
 		expect(new Set(labels).size).toBe(labels.length);
 	});
 
@@ -100,7 +114,7 @@ describe("the table of the app's shortcuts", () => {
 		expect(shortcutKeys("pane.splitDown")).toEqual(["Alt", "Shift", "-"]);
 		expect(shortcutKeys("tab.goTo3")).toEqual(["Ctrl", "Alt", "3"]);
 		expect(shortcutKeys("pane.resizeUp")).toEqual(["Alt", "Shift", "↑"]);
-		expect(shortcutKeys("zone.previous")).toEqual(["Shift", "F6"]);
+		expect(shortcutKeys("zone.previous")).toEqual(["Ctrl", "Shift", "F6"]);
 	});
 });
 
@@ -300,16 +314,103 @@ describe("the pane chords", () => {
 	});
 });
 
+// htop sorts and Midnight Commander moves files with F6: in a terminal it is theirs. Elsewhere
+// it moves between the zones, as Windows' F6 does, and Ctrl+F6 does from anywhere.
 describe("the focus zone chords", () => {
-	it("are F6 and Shift+F6", () => {
-		expect(appShortcutOf(key("F6", { code: "F6" }))).toBe("zone.next");
-		expect(appShortcutOf(key("F6", { shiftKey: true, code: "F6" }))).toBe("zone.previous");
+	const F6 = { code: "F6" };
+	const SHIFT_F6 = { shiftKey: true, code: "F6" };
+	const CTRL_F6 = { ctrlKey: true, code: "F6" };
+	const CTRL_SHIFT_F6 = { ...CTRL_SHIFT, code: "F6" };
+
+	it("are Ctrl+F6 and Ctrl+Shift+F6 anywhere, a terminal included", () => {
+		for (const place of ["terminal", "elsewhere"] as const) {
+			expect(appShortcutOf(key("F6", CTRL_F6), place)).toBe("zone.next");
+			expect(appShortcutOf(key("F6", CTRL_SHIFT_F6), place)).toBe("zone.previous");
+		}
+	});
+
+	it("are F6 and Shift+F6 outside a terminal only", () => {
+		expect(appShortcutOf(key("F6", F6), "elsewhere")).toBe("zone.next");
+		expect(appShortcutOf(key("F6", SHIFT_F6), "elsewhere")).toBe("zone.previous");
+		expect(appShortcutOf(key("F6", F6), "terminal")).toBeNull();
+		expect(appShortcutOf(key("F6", SHIFT_F6), "terminal")).toBeNull();
+		// A terminal's key handler asks without saying: the strict set.
+		expect(appShortcutOf(key("F6", F6))).toBeNull();
 	});
 
 	it("are no other chord of F6", () => {
-		expect(appShortcutOf(key("F6", { ctrlKey: true, code: "F6" }))).toBeNull();
-		expect(appShortcutOf(key("F6", { altKey: true, code: "F6" }))).toBeNull();
-		expect(appShortcutOf(key("F5", { code: "F5" }))).toBeNull();
+		for (const place of ["terminal", "elsewhere"] as const) {
+			expect(appShortcutOf(key("F6", { altKey: true, code: "F6" }), place)).toBeNull();
+			expect(appShortcutOf(key("F6", { ...CTRL_ALT, code: "F6" }), place)).toBeNull();
+			expect(appShortcutOf(key("F5", { code: "F5" }), place)).toBeNull();
+		}
+	});
+
+	it("leave the other chords the same outside a terminal", () => {
+		for (const id of IDS) {
+			const chord = APP_SHORTCUTS[id];
+			const event = key(chord.key, {
+				ctrlKey: chord.ctrl,
+				altKey: chord.alt,
+				shiftKey: chord.shift,
+				...(chord.code !== undefined && { code: chord.code }),
+			});
+			expect(appShortcutOf(event, "elsewhere"), id).toBe(id);
+		}
+	});
+});
+
+// The window's listener asks with the place the key was typed in: the event's target.
+describe("the window's shortcut for a key", () => {
+	let terminalInput: HTMLTextAreaElement;
+	let railBadge: HTMLDivElement;
+	const seen: (string | null)[] = [];
+	const listen = (ev: Event): void => {
+		seen.push(windowShortcutOf(ev as KeyboardEvent));
+	};
+
+	beforeEach(() => {
+		// xterm's input sits in its `.xterm` element; a badge of the rail does not.
+		const xterm = document.createElement("div");
+		xterm.className = "xterm";
+		terminalInput = document.createElement("textarea");
+		xterm.appendChild(terminalInput);
+		railBadge = document.createElement("div");
+		railBadge.tabIndex = 0;
+		document.body.append(xterm, railBadge);
+		seen.length = 0;
+		window.addEventListener("keydown", listen, { capture: true });
+	});
+
+	afterEach(() => {
+		window.removeEventListener("keydown", listen, { capture: true });
+		document.body.replaceChildren();
+	});
+
+	const press = (target: Element, init: KeyInit): void => {
+		target.dispatchEvent(key("F6", { ...init, bubbles: true, cancelable: true }));
+	};
+
+	it("cycles the zones on F6 only when the keyboard is outside a terminal", () => {
+		press(railBadge, { code: "F6" });
+		press(terminalInput, { code: "F6" });
+		press(railBadge, { shiftKey: true, code: "F6" });
+		press(terminalInput, { shiftKey: true, code: "F6" });
+		expect(seen).toEqual(["zone.next", null, "zone.previous", null]);
+	});
+
+	it("cycles them on Ctrl+F6 wherever the keyboard is", () => {
+		press(terminalInput, { ctrlKey: true, code: "F6" });
+		press(railBadge, { ctrlKey: true, code: "F6" });
+		press(terminalInput, { ctrlKey: true, shiftKey: true, code: "F6" });
+		expect(seen).toEqual(["zone.next", "zone.next", "zone.previous"]);
+	});
+
+	it("reads the place from where the key is typed", () => {
+		expect(keyboardPlaceOf(terminalInput)).toBe("terminal");
+		expect(keyboardPlaceOf(railBadge)).toBe("elsewhere");
+		expect(keyboardPlaceOf(null)).toBe("elsewhere");
+		expect(keyboardPlaceOf(window)).toBe("elsewhere");
 	});
 });
 

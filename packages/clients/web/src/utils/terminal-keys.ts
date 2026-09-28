@@ -22,8 +22,8 @@ export function terminalKeyHandler(target: TerminalKeyTarget): (ev: KeyboardEven
 	return (ev) => {
 		// The app's shortcuts (utils/app-shortcuts.ts): the window's listener runs their
 		// actions. xterm does not look at `defaultPrevented`, so only this keeps a chord
-		// from the shell (#624, #631).
-		if (appShortcutOf(ev) !== null) return false;
+		// from the shell (#624, #631). A chord for outside a terminal, F6, is the shell's here.
+		if (appShortcutOf(ev, "terminal") !== null) return false;
 		// Ctrl+Shift+F opens the search overlay rather than reaching xterm.
 		if (ev.ctrlKey && ev.shiftKey && ev.key === "F") {
 			if (ev.type === "keydown") target.openSearch();

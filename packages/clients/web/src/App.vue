@@ -432,11 +432,11 @@ import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
 import {
 	type AppActionId,
-	appShortcutOf,
 	movesKeyboard,
 	type PaneDirection,
 	paneMoveOf,
 	tabNumberOf,
+	windowShortcutOf,
 } from './utils/app-shortcuts.js';
 import { type FocusZone, isFocusZone, zoneAfter } from './utils/focus-zones.js';
 import { type PaneLeaf, paneInDirection, paneLeaves, resizeTowards } from './utils/pane-geometry.js';
@@ -1220,11 +1220,12 @@ function isPtyFocused(): boolean {
  * Global keydown handler attached to the app root.
  * Runs the app's shortcuts (utils/app-shortcuts.ts: the palette, the tabs, the panes
  * and the focus zones), wherever the keyboard is (#624, #631, #637). A terminal's key
- * handler keeps those chords from its PTY, since xterm ignores preventDefault.
+ * handler keeps those chords from its PTY, since xterm ignores preventDefault. A chord
+ * for outside a terminal (F6) is left to the terminal when the keyboard is in one.
  * Intercepts Ctrl+Shift+1..9 to spawn profile N (INV-13: only when PTY is NOT focused).
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
-	const shortcut = appShortcutOf(event);
+	const shortcut = windowShortcutOf(event);
 	if (shortcut !== null) {
 		event.preventDefault();
 		// A modal dialog keeps the keyboard: nothing takes it behind the dialog (#637).

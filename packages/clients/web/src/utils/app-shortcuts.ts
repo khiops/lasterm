@@ -6,7 +6,8 @@
  * action (App.vue), every terminal's key handler keeps the chord from its PTY
  * (`terminalKeyHandler`), and the command palette and Settings › Keybindings show it. What is
  * shown cannot drift from what works, and a shell keeps its own Ctrl+T (transpose), Ctrl+W
- * (delete a word), Ctrl+K, Ctrl+-, Ctrl+\ and Ctrl+←/→ (a word back and forth).
+ * (delete a word), Ctrl+K, Ctrl+-, Ctrl+\ and Ctrl+←/→ (a word back and forth). A chord for
+ * outside a terminal (F6) holds everywhere but in one, where the key stays the program's.
  *
  * These are the defaults. Making them configurable means overriding a chord by its id, which the
  * shape of the table leaves room for.
@@ -94,10 +95,33 @@ export const APP_SHORTCUTS: Readonly<Record<AppActionId, Chord>> = {
 	"pane.resizeRight": { ...ALT_SHIFT, key: "→", code: "ArrowRight" },
 	"pane.resizeUp": { ...ALT_SHIFT, key: "↑", code: "ArrowUp" },
 	"pane.resizeDown": { ...ALT_SHIFT, key: "↓", code: "ArrowDown" },
-	// Between the host rail, the terminal list, the tab bar and the pane, as Windows does.
+	// Between the host rail, the terminal list, the tab bar and the pane, from anywhere; F6 alone
+	// does it only outside a terminal (OUTSIDE_TERMINAL_SHORTCUTS).
+	"zone.next": { ctrl: true, alt: false, shift: false, key: "F6" },
+	"zone.previous": { ctrl: true, alt: false, shift: true, key: "F6" },
+};
+
+/**
+ * Chords an action has besides its own, which hold only where the keyboard is not in a terminal.
+ * In a terminal the key is its program's: F6 is htop's sort and Midnight Commander's move, so it
+ * reaches the PTY there, and moves between the window's zones everywhere else, as Windows' F6
+ * does. Ctrl+F6, the action's own chord, moves between them from anywhere.
+ */
+export const OUTSIDE_TERMINAL_SHORTCUTS: Readonly<Partial<Record<AppActionId, Chord>>> = {
 	"zone.next": { ctrl: false, alt: false, shift: false, key: "F6" },
 	"zone.previous": { ctrl: false, alt: false, shift: true, key: "F6" },
 };
+
+/**
+ * Where a key is typed: in a terminal, whose keys only an action's own chord is taken from, or
+ * anywhere else in the window, where its chords for outside a terminal hold too.
+ */
+export type KeyboardPlace = "terminal" | "elsewhere";
+
+/** Whether the keyboard is in a terminal: xterm's own input, inside its `.xterm` element. */
+export function keyboardPlaceOf(target: EventTarget | null): KeyboardPlace {
+	return target instanceof Element && target.closest(".xterm") !== null ? "terminal" : "elsewhere";
+}
 
 /**
  * Whether `ev` is `chord`: on keydown, keypress and keyup alike, since xterm hands its key handler
@@ -116,12 +140,32 @@ export function matchesChord(ev: KeyboardEvent, chord: Chord): boolean {
 	return typeof ev.key === "string" && ev.key.toLowerCase() === chord.key.toLowerCase();
 }
 
-/** The action `ev` is the shortcut of, or null. */
-export function appShortcutOf(ev: KeyboardEvent): AppActionId | null {
+/**
+ * The action `ev` is the shortcut of where it is typed, or null. In a terminal — what a
+ * terminal's key handler asks, and the default — only the actions' own chords count; elsewhere,
+ * their chords for outside a terminal too.
+ */
+export function appShortcutOf(
+	ev: KeyboardEvent,
+	place: KeyboardPlace = "terminal",
+): AppActionId | null {
 	for (const [id, chord] of Object.entries(APP_SHORTCUTS) as [AppActionId, Chord][]) {
 		if (matchesChord(ev, chord)) return id;
 	}
+	if (place === "elsewhere") {
+		for (const [id, chord] of Object.entries(OUTSIDE_TERMINAL_SHORTCUTS) as [
+			AppActionId,
+			Chord,
+		][]) {
+			if (matchesChord(ev, chord)) return id;
+		}
+	}
 	return null;
+}
+
+/** The action a key typed anywhere in the window is the shortcut of: the window's listener asks. */
+export function windowShortcutOf(ev: KeyboardEvent): AppActionId | null {
+	return appShortcutOf(ev, keyboardPlaceOf(ev.target));
 }
 
 /** The tab a Ctrl+Alt+digit action goes to, or null for any other action. */
@@ -157,15 +201,24 @@ export function movesKeyboard(id: AppActionId): boolean {
 	);
 }
 
-/** An action's chord as Settings › Keybindings shows it, one key a cap: ["Ctrl", "Shift", "T"]. */
-export function shortcutKeys(id: AppActionId): string[] {
-	const chord = APP_SHORTCUTS[id];
+function capsOf(chord: Chord): string[] {
 	return [
 		...(chord.ctrl ? ["Ctrl"] : []),
 		...(chord.alt ? ["Alt"] : []),
 		...(chord.shift ? ["Shift"] : []),
 		chord.key,
 	];
+}
+
+/** An action's chord as Settings › Keybindings shows it, one key a cap: ["Ctrl", "Shift", "T"]. */
+export function shortcutKeys(id: AppActionId): string[] {
+	return capsOf(APP_SHORTCUTS[id]);
+}
+
+/** An action's chord for outside a terminal, one key a cap, or null when it has none. */
+export function outsideTerminalKeys(id: AppActionId): string[] | null {
+	const chord = OUTSIDE_TERMINAL_SHORTCUTS[id];
+	return chord === undefined ? null : capsOf(chord);
 }
 
 /** An action's chord as the command palette shows it: "Ctrl+Shift+T". */

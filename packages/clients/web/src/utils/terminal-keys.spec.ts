@@ -135,11 +135,29 @@ describe("terminalKeyHandler", () => {
 		// Alt+= and Alt+- without Shift, which readline binds too.
 		expect(handle(event("keydown", "=", { altKey: true, code: "Equal" }))).toBe(true);
 		expect(handle(event("keydown", "-", { altKey: true, code: "Minus" }))).toBe(true);
-		// Tab and Shift+Tab complete; F5 and Ctrl+F6 are a program's.
+		// Tab and Shift+Tab complete; F5 is a program's.
 		expect(handle(event("keydown", "Tab", { code: "Tab" }))).toBe(true);
 		expect(handle(event("keydown", "Tab", { shiftKey: true, code: "Tab" }))).toBe(true);
 		expect(handle(event("keydown", "F5", { code: "F5" }))).toBe(true);
-		expect(handle(event("keydown", "F6", { ctrlKey: true, code: "F6" }))).toBe(true);
+	});
+
+	// htop sorts and Midnight Commander moves files with F6: in a terminal it stays theirs, and
+	// only Ctrl+F6 moves between the window's zones from there (#637).
+	it("lets F6 and Shift+F6 through to xterm, and keeps Ctrl+F6 and Ctrl+Shift+F6 from it", () => {
+		const { handle } = pane();
+		for (const type of TYPES) {
+			expect(handle(event(type, "F6", { code: "F6" })), `${type} F6`).toBe(true);
+			expect(handle(event(type, "F6", { shiftKey: true, code: "F6" })), `${type} Shift+F6`).toBe(
+				true,
+			);
+			expect(handle(event(type, "F6", { ctrlKey: true, code: "F6" })), `${type} Ctrl+F6`).toBe(
+				false,
+			);
+			expect(
+				handle(event(type, "F6", { ctrlKey: true, shiftKey: true, code: "F6" })),
+				`${type} Ctrl+Shift+F6`,
+			).toBe(false);
+		}
 	});
 
 	it("leaves Ctrl+K to xterm, which sends it to the shell", () => {

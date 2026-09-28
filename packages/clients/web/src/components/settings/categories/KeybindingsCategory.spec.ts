@@ -7,6 +7,7 @@ import { type App, createApp } from "vue";
 import {
 	APP_SHORTCUTS,
 	type AppActionId,
+	outsideTerminalKeys,
 	shortcutKeys,
 	TAB_NUMBERS,
 } from "../../../utils/app-shortcuts.js";
@@ -22,19 +23,38 @@ afterEach(() => {
 	root?.remove();
 });
 
+interface Row {
+	group: string;
+	label: string;
+	keys: string[];
+	/** The caps shown for outside a terminal, or null. */
+	outsideTerminal: string[] | null;
+	/** What the row says, as read. */
+	text: string;
+}
+
 /** Each row of the page: its group, its label, and the caps of its keys. */
-function mountRows(): { group: string; label: string; keys: string[] }[] {
+function mountRows(): Row[] {
 	root = document.createElement("div");
 	document.body.appendChild(root);
 	app = createApp(KeybindingsCategory);
 	app.mount(root);
+	const caps = (el: Element | null): string[] =>
+		el === null ? [] : [...el.querySelectorAll(":scope > kbd")].map((k) => k.textContent ?? "");
 	return [...root.querySelectorAll(".keybinding-group")].flatMap((group) => {
 		const name = group.querySelector(".keybinding-group-title")?.textContent ?? "";
-		return [...group.querySelectorAll(".keybinding-row")].map((row) => ({
-			group: name,
-			label: row.querySelector(".keybinding-label")?.textContent ?? "",
-			keys: [...row.querySelectorAll("kbd")].map((k) => k.textContent ?? ""),
-		}));
+		return [...group.querySelectorAll(".keybinding-row")].map((row) => {
+			const alias = row.querySelector(".keybinding-alias");
+			return {
+				group: name,
+				label: row.querySelector(".keybinding-label")?.textContent ?? "",
+				keys: caps(row.querySelector(".keybinding-keys")),
+				outsideTerminal: alias === null ? null : caps(alias),
+				text: (row.querySelector(".keybinding-keys")?.textContent ?? "")
+					.replace(/\s+/g, " ")
+					.trim(),
+			};
+		});
 	});
 }
 
@@ -74,8 +94,26 @@ describe("Settings › Keybindings", () => {
 		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
 			const [group, label] = SHOWN[id];
 			const row = rows.find((candidate) => candidate.label === label);
-			expect(row, id).toEqual({ group, label, keys: shortcutKeys(id) });
+			expect(row, id).toMatchObject({
+				group,
+				label,
+				keys: shortcutKeys(id),
+				outsideTerminal: outsideTerminalKeys(id),
+			});
 		}
+	});
+
+	// F6 is a terminal program's (htop, Midnight Commander); Ctrl+F6 works from anywhere.
+	it("shows Ctrl+F6, and F6 outside a terminal, for the zones", () => {
+		const rows = mountRows();
+		const next = rows.find((row) => row.label === "Next Area (rail, list, tabs, pane)");
+		expect(next?.text).toMatch(/^Ctrl ?F6 ?\( ?F6 outside a terminal\)$/);
+		expect([next?.keys, next?.outsideTerminal]).toEqual([["Ctrl", "F6"], ["F6"]]);
+		const previous = rows.find((row) => row.label === "Previous Area");
+		expect([previous?.keys, previous?.outsideTerminal]).toEqual([
+			["Ctrl", "Shift", "F6"],
+			["Shift", "F6"],
+		]);
 	});
 
 	it("shows Ctrl+Shift+W as closing a pane, and no chord closing a tab", () => {

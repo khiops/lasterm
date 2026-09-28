@@ -18,6 +18,10 @@
 				<span class="keybinding-label">{{ binding.label }}</span>
 				<span class="keybinding-keys">
 					<kbd v-for="k in binding.keys" :key="k">{{ k }}</kbd>
+					<span v-if="binding.outsideTerminal" class="keybinding-alias">
+						(<kbd v-for="k in binding.outsideTerminal" :key="k">{{ k }}</kbd>
+						outside a terminal)
+					</span>
 				</span>
 			</div>
 		</div>
@@ -26,11 +30,17 @@
 
 <script setup lang="ts">
 // The app's shortcuts are shown from the table the window and the terminals read (#631, #637).
-import { shortcutKeys, TAB_NUMBERS } from "../../../utils/app-shortcuts.js";
+import {
+	outsideTerminalKeys,
+	shortcutKeys,
+	TAB_NUMBERS,
+} from "../../../utils/app-shortcuts.js";
 
 interface Keybinding {
 	label: string;
 	keys: string[];
+	/** The keys that do the same where the keyboard is not in a terminal (F6), if any. */
+	outsideTerminal?: string[] | null;
 }
 
 interface KeybindingGroup {
@@ -49,8 +59,16 @@ const keybindingGroups: KeybindingGroup[] = [
 	{
 		name: "Focus",
 		bindings: [
-			{ label: "Next Area (rail, list, tabs, pane)", keys: shortcutKeys("zone.next") },
-			{ label: "Previous Area", keys: shortcutKeys("zone.previous") },
+			{
+				label: "Next Area (rail, list, tabs, pane)",
+				keys: shortcutKeys("zone.next"),
+				outsideTerminal: outsideTerminalKeys("zone.next"),
+			},
+			{
+				label: "Previous Area",
+				keys: shortcutKeys("zone.previous"),
+				outsideTerminal: outsideTerminalKeys("zone.previous"),
+			},
 			{ label: "Back to the Pane", keys: ["Escape"] },
 		],
 	},
@@ -148,8 +166,17 @@ const keybindingGroups: KeybindingGroup[] = [
 
 .keybinding-keys {
 	display: flex;
+	align-items: center;
 	gap: 4px;
 	flex-shrink: 0;
+}
+
+.keybinding-alias {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 11px;
+	color: var(--nt-text-secondary);
 }
 
 kbd {

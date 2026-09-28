@@ -288,16 +288,21 @@ const channelsStore = useChannelsStore();
  * selected host, which gave it that host's profile and had Restart try to bring
  * the terminal back on a machine it had never run on.
  *
- * A pane still owing its spawn has no channel yet: there the selected host is
- * exactly right, since a new terminal opens on the host in view.
+ * A pane still owing its spawn has no channel yet: there it is the host the
+ * spawn is for, which an empty pane's picker or the palette may have chosen on
+ * another host than the one in view (#625), and the host in view otherwise.
  */
+const spawnHostId: string | null =
+	props.channelId !== null && props.channelId !== undefined
+		? channelsStore.consumePendingSpawn(props.channelId)
+		: null;
 const paneHostId = computed<string | undefined>(() => {
 	const channelId = props.channelId;
 	if (channelId !== null && channelId !== undefined) {
 		const known = channelsStore.channelHostMap.get(channelId);
 		if (known !== undefined) return known;
 	}
-	return props.hostId ?? undefined;
+	return spawnHostId ?? props.hostId ?? undefined;
 });
 const writeLockStore = useWriteLockStore();
 const configStore = useConfigStore();
@@ -305,8 +310,11 @@ const notificationStore = useNotificationStore();
 const terminalContainer = ref<HTMLElement | null>(null);
 const ready = ref(false);
 const error = ref<string | null>(null);
-/** Host of a spawn this pane owes, kept until the channel exists. */
-const pendingHostId = ref<string | null>(null);
+/**
+ * Host of a spawn this pane owes, kept until the channel exists: the one App.vue
+ * registered for this pane, kept so a retry can spawn it.
+ */
+const pendingHostId = ref<string | null>(spawnHostId);
 /** The BEL handler is registered on the terminal, so once is enough. */
 let bellBound = false;
 /** A reconnect landed while this pane was still opening: what it sent went out
@@ -872,11 +880,6 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 }
 
 onMounted(async () => {
-	// The spawn App.vue registered for this tab, kept so a retry can spawn it.
-	pendingHostId.value =
-		props.channelId !== null && props.channelId !== undefined
-			? channelsStore.consumePendingSpawn(props.channelId)
-			: null;
 	// Measure with the font the terminal will use: against a fallback the fit
 	// counts columns the window does not have, and the PTY is spawned that wide.
 	await awaitFont();

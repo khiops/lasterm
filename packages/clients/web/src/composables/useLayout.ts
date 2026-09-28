@@ -28,6 +28,7 @@ export {
 	tabIsOnHost,
 } from "./usePaneTree.js";
 export type { Tab } from "./useTabManager.js";
+export { hostToBringIntoView, newTabOpens } from "./useTabManager.js";
 
 // ---------------------------------------------------------------------------
 // localStorage persistence key
@@ -211,6 +212,7 @@ export function useLayout() {
 
 		// Tab operations (tabManager)
 		openTab: tabManager.openTab,
+		openVacantTab: tabManager.openVacantTab,
 		closeTab: tabManager.closeTab,
 		setActiveTab: tabManager.setActiveTab,
 		reorderTab: tabManager.reorderTab,

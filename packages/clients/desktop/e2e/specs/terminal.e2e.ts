@@ -111,6 +111,11 @@ describe("a terminal, used", () => {
 			async () => "the local host never came up",
 		);
 		await (await $(".tab-bar__add--main")).click();
+		// With [tabs] scope = "global", the default, a new tab opens the host
+		// picker (#625). Its first row is a new terminal on the host in view.
+		await (
+			await $('.pane-tab-container:not([style*="display: none"]) .vacant-pane .picker-row')
+		).click();
 		await waitForWriter("new terminal");
 		await runAndExpect("opened");
 	});

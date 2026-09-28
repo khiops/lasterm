@@ -25,7 +25,7 @@
 						@input="palette.search(localQuery)"
 						@keydown.up.prevent="palette.moveUp"
 						@keydown.down.prevent="palette.moveDown"
-						@keydown.enter.prevent="palette.executeSelected"
+						@keydown.enter.prevent="(e: KeyboardEvent) => palette.executeSelected({ switchOnly: e.shiftKey })"
 						@keydown.esc.prevent="palette.close"
 					/>
 				</div>
@@ -36,36 +36,48 @@
 					class="palette-results"
 					role="listbox"
 				>
-					<template
-						v-for="[groupKey, group] in groupedResults"
-						:key="groupKey"
-					>
-						<div class="palette-group-label">{{ groupLabel(groupKey) }}</div>
+					<template v-for="row in displayRows" :key="row.key">
+						<div
+							v-if="row.kind === 'heading'"
+							class="palette-group-label"
+							:class="{ 'palette-group-label--sub': row.sub }"
+						>{{ row.label }}</div>
 						<button
-							v-for="item in group"
-							:key="item.id"
+							v-else
 							class="palette-item"
-							:class="{ selected: palette.results.value.indexOf(item) === palette.selectedIndex.value }"
+							:class="{ selected: row.index === palette.selectedIndex.value }"
 							role="option"
-							:aria-selected="palette.results.value.indexOf(item) === palette.selectedIndex.value"
+							:aria-selected="row.index === palette.selectedIndex.value"
 							type="button"
-							@click="palette.execute(item)"
-							@mouseenter="palette.selectedIndex.value = palette.results.value.indexOf(item)"
+							@click="(e: MouseEvent) => palette.execute(row.item, { switchOnly: e.shiftKey })"
+							@mouseenter="palette.selectedIndex.value = row.index"
 						>
-							<span class="palette-item-icon" aria-hidden="true">
-							<img v-if="item.iconUrl" :src="item.iconUrl" class="palette-icon-img" />
-							<template v-else>{{ item.icon }}</template>
-						</span>
-							<span class="palette-item-text">
-								<span class="palette-item-label">{{ item.label }}</span>
-								<span v-if="item.description" class="palette-item-desc">{{ item.description }}</span>
-							</span>
-							<span class="palette-item-badge" :data-type="item.type">
-								{{ typeBadge(item.type) }}
-							</span>
-							<span v-if="item.shortcut" class="palette-item-shortcut">
-								{{ item.shortcut }}
-							</span>
+							<!-- A host: the empty pane's row, grouped as the rail groups it (#625). -->
+							<HostPickRow
+								v-if="row.host"
+								:host="row.host"
+								:status="hostRows.status(row.host.id)"
+								:address="hostRows.address(row.host)"
+								:count="hostRows.count(row.host.id)"
+								:action="statusAction(hostRows.status(row.host.id))"
+								:hint="row.index === palette.selectedIndex.value ? HOST_KEYS_HINT : null"
+							/>
+							<template v-else>
+								<span class="palette-item-icon" aria-hidden="true">
+									<img v-if="row.item.iconUrl" :src="row.item.iconUrl" class="palette-icon-img" />
+									<template v-else>{{ row.item.icon }}</template>
+								</span>
+								<span class="palette-item-text">
+									<span class="palette-item-label">{{ row.item.label }}</span>
+									<span v-if="row.item.description" class="palette-item-desc">{{ row.item.description }}</span>
+								</span>
+								<span class="palette-item-badge" :data-type="row.item.type">
+									{{ typeBadge(row.item.type) }}
+								</span>
+								<span v-if="row.item.shortcut" class="palette-item-shortcut">
+									{{ row.item.shortcut }}
+								</span>
+							</template>
 						</button>
 					</template>
 				</div>
@@ -78,10 +90,23 @@
 </template>
 
 <script setup lang="ts">
+import type { Host } from "@lasterm/shared";
 import { ref, watch, nextTick, computed } from "vue";
-import { useCommandPalette, type PaletteItem, type PaletteItemType } from "../composables/useCommandPalette.js";
+import { statusAction } from "../composables/hostPicker.js";
+import {
+	type PaletteItemType,
+	type PaletteRow,
+	paletteRows,
+	useCommandPalette,
+} from "../composables/useCommandPalette.js";
+import { useHostRows } from "../composables/useHostRows.js";
+import HostPickRow from "./HostPickRow.vue";
 
 const palette = useCommandPalette();
+const hostRows = useHostRows();
+
+/** What a host row's keys do (#625), named on the row that has them. */
+const HOST_KEYS_HINT = "Enter: new terminal · Shift+Enter: switch";
 
 const inputRef = ref<HTMLInputElement | null>(null);
 const localQuery = ref("");
@@ -100,55 +125,26 @@ watch(
 
 // ── Grouping ──────────────────────────────────────────────────────────────────
 
-type GroupKey = PaletteItemType | "recent";
+type DisplayRow =
+	| Extract<PaletteRow, { kind: "heading" }>
+	| (Extract<PaletteRow, { kind: "item" }> & { host: Host | null });
 
 /**
- * Returns an ordered array of [groupKey, items] tuples so v-for can
- * iterate with fully-typed destructuring in the template.
- *
- * When query is empty and there are recent items, they appear first under
- * a "Recent" heading (SC-21). The remaining items are grouped by type.
+ * The list as shown, in the order ↑ and ↓ walk: recent items first under
+ * "Recent" (SC-21), then each type under its heading, the hosts under their
+ * rail headings as well (#625).
  */
-const groupedResults = computed((): [GroupKey, PaletteItem[]][] => {
-	const groups: [GroupKey, PaletteItem[]][] = [];
-
-	// Recent section (SC-21) — only shown on empty query / no prefix
-	const recent = palette.recentResults.value;
-	if (recent.length > 0) {
-		groups.push(["recent", recent]);
-	}
-
-	// Non-recent items grouped by type
-	const recentIds = new Set(recent.map((it) => it.id));
-	const remaining = palette.results.value.filter((it) => !recentIds.has(it.id));
-
-	const map = new Map<PaletteItemType, PaletteItem[]>();
-	for (const item of remaining) {
-		const bucket = map.get(item.type) ?? [];
-		bucket.push(item);
-		map.set(item.type, bucket);
-	}
-	for (const [type, items] of map.entries()) {
-		groups.push([type, items]);
-	}
-
-	return groups;
-});
-
-function groupLabel(type: GroupKey): string {
-	switch (type) {
-		case "recent":
-			return "Recent";
-		case "host":
-			return "Hosts";
-		case "channel":
-			return "Channels";
-		case "action":
-			return "Actions";
-		case "profile":
-			return "Profiles";
-	}
-}
+const displayRows = computed((): DisplayRow[] =>
+	paletteRows(palette.results.value, palette.recentResults.value.length).map((row) =>
+		row.kind === "heading"
+			? row
+			: {
+					...row,
+					host:
+						row.item.type === "host" ? (hostRows.host(row.item.payload as string) ?? null) : null,
+				},
+	),
+);
 
 function typeBadge(type: PaletteItemType): string {
 	switch (type) {
@@ -253,6 +249,15 @@ function typeBadge(type: PaletteItemType): string {
 	user-select: none;
 }
 
+/* A host's rail heading, under "Hosts" (#625). */
+.palette-group-label--sub {
+	padding: 4px 16px 2px 24px;
+	font-size: 9px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	color: var(--nt-text-muted);
+}
+
 /* ── Result item ──────────────────────────────────────────────────────────── */
 .palette-item {
 	display: flex;
@@ -268,11 +273,14 @@ function typeBadge(type: PaletteItemType): string {
 	font-size: 13px;
 	font-family: inherit;
 	transition: background 0.08s;
+	/* A host badge's dot is ringed with what is behind it. */
+	--host-badge-ring: var(--nt-bg);
 }
 
 .palette-item:hover,
 .palette-item.selected {
 	background: var(--nt-border);
+	--host-badge-ring: var(--nt-border);
 }
 
 .palette-item-icon {

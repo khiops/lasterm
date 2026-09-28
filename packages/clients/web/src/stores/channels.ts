@@ -135,7 +135,7 @@ export interface RestartFailure {
 }
 
 /** A spawn's rejection, as the failure the pane shows or waits out. */
-function restartFailureOf(err: unknown, hostIdHint: string): RestartFailure {
+export function restartFailureOf(err: unknown, hostIdHint: string): RestartFailure {
 	const reason = restartFailureReason(err);
 	const refusal = err as { code?: unknown; hostId?: unknown } | null;
 	if (refusal?.code !== ErrorCode.HOST_UNREACHABLE) return { reason };
@@ -1034,6 +1034,10 @@ export const useChannelsStore = defineStore("channels", () => {
 					if (notOurs(msg)) return;
 					clearTimeout(timer);
 					stopWaiting();
+					// Its host is known now, before any listing says so: a pane over it
+					// on another host than the one in view reads its profile and its
+					// theme from this, and would take the host in view's meanwhile.
+					registerChannelHost(msg.channelId, hostId);
 					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);

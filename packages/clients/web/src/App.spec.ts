@@ -78,6 +78,42 @@ describe("the panes on screen", () => {
 	});
 });
 
+// The empty pane is a host picker, and a new tab follows [tabs] scope (#625).
+// What the picker does is tested in useHostPicker.spec.ts; what a new tab
+// opens, in useLayout.spec.ts.
+describe("an empty pane's host, and a new tab", () => {
+	it("spawns an empty pane's terminal on the host its picker chose, not the host in view", () => {
+		const onNewTerminalVacant = body(/function onNewTerminalVacant\(/);
+		expect(onNewTerminalVacant).toContain("vacantId: string, hostId: string");
+		expect(onNewTerminalVacant).toContain("channelsStore.registerPendingSpawn(tempId, hostId);");
+		expect(onNewTerminalVacant).not.toContain("activeHostId");
+		expect(SOURCE).toContain('@add-host="onAddHostFromPane"');
+	});
+
+	it("brings the chosen host into view where the tab would leave a per-host bar", () => {
+		expect(body(/function followFilledPane\(/)).toContain("hostToBringIntoView({");
+		expect(body(/function onFillVacant\(/)).toContain("followFilledPane(");
+	});
+
+	it("gives the tab bar's + to the new-tab rule", () => {
+		expect(SOURCE).toContain('@add-tab="onNewTab"');
+		const onNewTab = body(/function onNewTab\(/);
+		expect(onNewTab).toContain("newTabOpens(configStore.uiConfig.tabs) === 'picker'");
+		expect(onNewTab).toContain("layout.openVacantTab();");
+		expect(onNewTab).toContain("onAddTab();");
+	});
+
+	it("opens the palette's host in a new tab, brought into view with a per-host bar", () => {
+		const text = SOURCE.replace(/\r\n/g, "\n");
+		const wiring = /commandPalette\.onOpenHost\.value = [\s\S]*?\n\};\n/.exec(text)?.[0];
+		expect(wiring, "the palette's onOpenHost moved").toBeDefined();
+		expect(wiring).toContain("openPendingTab(hostId);");
+		expect(wiring).toContain(
+			"if (configStore.uiConfig.tabs?.scope === 'perHost') hostsStore.selectHost(hostId);",
+		);
+	});
+});
+
 // Ctrl+K opened the palette and still reached the shell as ^K (#624), and the
 // shortcuts listed for tabs and panes did nothing (#631). What the chords are,
 // and that a terminal keeps them from its PTY, is tested in
@@ -100,7 +136,7 @@ describe("the window's shortcuts", () => {
 		const runAppAction = flat(body(/function runAppAction\(/));
 		const actions: Record<AppActionId, string> = {
 			"palette.open": "commandPalette.toggle();",
-			"tab.new": "onAddTab();",
+			"tab.new": "onNewTab();",
 			"tab.close": "if (tab !== null) onCloseTab(layout.activeTabIndex.value);",
 			"pane.splitRight": "if (pane !== null) onSplit(pane, 'vertical');",
 			"pane.splitDown": "if (pane !== null) onSplit(pane, 'horizontal');",
@@ -112,7 +148,7 @@ describe("the window's shortcuts", () => {
 		expect(runAppAction).toContain(
 			"const tab = layout.activeTab.value; const pane = tab === null ? null : layout.getActiveChannelId(tab.id);",
 		);
-		expect(SOURCE).toContain('@add-tab="onAddTab"');
+		expect(SOURCE).toContain('@add-tab="onNewTab"');
 		expect(SOURCE).toContain('@close-tab="onCloseTab"');
 		expect(SOURCE).toContain('@split="onSplit"');
 	});

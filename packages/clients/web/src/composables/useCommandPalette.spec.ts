@@ -1,11 +1,17 @@
 import type { Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { type HostVisibleProfile, useProfilesStore } from "../stores/profiles.js";
 import { type AppActionId, shortcutLabel } from "../utils/app-shortcuts.js";
-import { fuzzyMatch, useCommandPalette } from "./useCommandPalette.js";
+import {
+	arrangeForDisplay,
+	fuzzyMatch,
+	type PaletteItem,
+	paletteRows,
+	useCommandPalette,
+} from "./useCommandPalette.js";
 
 vi.hoisted(() => {
 	const storage = new Map<string, string>();
@@ -712,6 +718,125 @@ describe("useCommandPalette", () => {
 
 			const item = palette.results.value.find((r) => r.type === "profile");
 			expect(item?.icon).toBe("▶");
+		});
+	});
+
+	// The palette lists hosts as the empty pane does (#625): the rail's order
+	// and headings; Enter opens a terminal on one, Shift+Enter switches to it.
+	describe("host rows (#625)", () => {
+		function railHosts(): void {
+			const hostsStore = useHostsStore();
+			hostsStore.hosts = [
+				{ ...makeHost("local", "local"), type: "local" },
+				makeHost("beta", "Beta"),
+				{ ...makeHost("alpha", "Alpha"), hostGroupId: "g2" },
+				{ ...makeHost("gamma", "Gamma"), hostGroupId: "g1" },
+			];
+			hostsStore.hostGroups = [
+				{ id: "g1", name: "Home", sortOrder: 0, createdAt: "", updatedAt: "" },
+				{ id: "g2", name: "Prod", sortOrder: 1, createdAt: "", updatedAt: "" },
+			];
+		}
+
+		afterEach(() => {
+			useCommandPalette().onOpenHost.value = null;
+		});
+
+		it("lists the hosts in the rail's order, under the rail's headings", () => {
+			railHosts();
+			const palette = useCommandPalette();
+			palette.search("@");
+
+			expect(palette.results.value.map((r) => r.payload)).toEqual([
+				"local",
+				"gamma",
+				"alpha",
+				"beta",
+			]);
+			const rows = paletteRows(palette.results.value, 0);
+			expect(rows.filter((r) => r.kind === "heading").map((r) => r.label)).toEqual([
+				"Hosts",
+				"Local",
+				"Home",
+				"Prod",
+				"Ungrouped",
+			]);
+			// Each result's row index is its place in `results`: ↑ and ↓ follow what is shown.
+			const indices = rows.flatMap((r) => (r.kind === "item" ? [r.index] : []));
+			expect(indices).toEqual([0, 1, 2, 3]);
+		});
+
+		it("opens a new terminal on a host with Enter", () => {
+			railHosts();
+			const hostsStore = useHostsStore();
+			hostsStore.selectHost("local");
+			const openOnHost = vi.fn();
+			const palette = useCommandPalette();
+			palette.onOpenHost.value = openOnHost;
+			palette.open();
+			palette.search("@gamma");
+			palette.executeSelected();
+
+			expect(openOnHost).toHaveBeenCalledWith("gamma");
+			expect(hostsStore.selectedHostId).toBe("local");
+			expect(palette.isOpen.value).toBe(false);
+		});
+
+		it("only switches to the host with Shift+Enter", () => {
+			railHosts();
+			const hostsStore = useHostsStore();
+			hostsStore.selectHost("local");
+			const openOnHost = vi.fn();
+			const palette = useCommandPalette();
+			palette.onOpenHost.value = openOnHost;
+			palette.search("@gamma");
+			palette.executeSelected({ switchOnly: true });
+
+			expect(hostsStore.selectedHostId).toBe("gamma");
+			expect(openOnHost).not.toHaveBeenCalled();
+		});
+
+		it("keeps each type together, so that the order shown is the order walked", () => {
+			const item = (type: PaletteItem["type"], id: string): PaletteItem => ({
+				id: `${type}:${id}`,
+				label: id,
+				type,
+				icon: "",
+				payload: id,
+			});
+			const arranged = arrangeForDisplay(
+				[item("host", "b"), item("channel", "x"), item("host", "a"), item("action", "y")],
+				new Map([
+					["a", 0],
+					["b", 1],
+				]),
+			);
+			expect(arranged.map((i) => i.id)).toEqual(["host:a", "host:b", "channel:x", "action:y"]);
+		});
+
+		it("heads the recent items apart, without the rail's headings", () => {
+			const recent: PaletteItem = {
+				id: "host:alpha",
+				label: "Alpha",
+				type: "host",
+				icon: "",
+				payload: "alpha",
+				section: "Prod",
+			};
+			const other: PaletteItem = {
+				...recent,
+				id: "host:beta",
+				payload: "beta",
+				section: "Ungrouped",
+			};
+			const rows = paletteRows([recent, other], 1);
+			expect(rows.map((r) => (r.kind === "heading" ? `# ${r.label}` : r.key))).toEqual([
+				"# Recent",
+				"host:alpha",
+				"# Hosts",
+				"# Ungrouped",
+				"host:beta",
+			]);
 		});
 	});
 });

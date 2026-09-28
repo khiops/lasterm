@@ -1,4 +1,4 @@
-import { generateId } from "@lasterm/shared";
+import { generateId, type TabsConfig } from "@lasterm/shared";
 import { type Ref, triggerRef } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
@@ -10,6 +10,43 @@ import { type PaneNode, tabIsOnHost } from "./usePaneTree.js";
 
 export interface Tab {
 	id: string;
+}
+
+/**
+ * What a new tab opens (#625), as `[tabs] scope` has the bar.
+ *
+ * With "perHost" the bar shows one host's tabs, so a new tab is a terminal on
+ * that host. With "global" the tabs of every host share the bar, and a new
+ * tab asks which host, with the empty pane's picker.
+ */
+export function newTabOpens(tabs: TabsConfig | undefined): "terminal" | "picker" {
+	return tabs?.scope === "perHost" ? "terminal" : "picker";
+}
+
+/**
+ * The host to bring into view once an empty pane took a terminal on `hostId`,
+ * or null (#625).
+ *
+ * With "perHost" the bar shows the tabs of the host in view, and a tab is on
+ * it while one of its terminals is. The tab in front taking a terminal on
+ * another host, with none left on the host in view, would leave the bar under
+ * the user's eyes: that host comes into view with it. A tab behind is left
+ * where it is, and so is a split that still has a terminal here.
+ */
+export function hostToBringIntoView(pane: {
+	tabs: TabsConfig | undefined;
+	/** The tab filled is the one in front. */
+	inFront: boolean;
+	/** The host of the terminal it took, when known. */
+	hostId: string | undefined;
+	hostInView: string | null;
+	/** The hosts of the tab's other terminals, where known. */
+	otherTerminalHosts: ReadonlyArray<string | undefined>;
+}): string | null {
+	if (pane.tabs?.scope !== "perHost" || !pane.inFront) return null;
+	if (pane.hostId === undefined || pane.hostId === pane.hostInView) return null;
+	if (pane.otherTerminalHosts.some((host) => host === pane.hostInView)) return null;
+	return pane.hostId;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,12 +90,24 @@ export function useTabManager(
 			}
 		}
 
+		const newPaneId = generateId();
+		addTab({ type: "terminal", channelId, paneId: newPaneId }, newPaneId);
+	}
+
+	/**
+	 * Open a tab whose one pane is empty, and activate it: the pane's picker
+	 * asks what goes in it (#625).
+	 */
+	function openVacantTab(): string {
+		return addTab({ type: "vacant", id: generateId() }, null);
+	}
+
+	/** Add a tab holding `root` where new tabs go, and activate it. */
+	function addTab(root: PaneNode, activePaneId: string | null): string {
 		const configStore = useConfigStore();
 		const newTabPosition = configStore.uiConfig.tabs?.newTabPosition;
-		const newPaneId = generateId();
 		const newTabId = generateId();
 		const newTab: Tab = { id: newTabId };
-		const newNode: PaneNode = { type: "terminal", channelId, paneId: newPaneId };
 		let activeIdx: number;
 
 		if (newTabPosition === "afterActive") {
@@ -72,15 +121,17 @@ export function useTabManager(
 			tabs.value = [...tabs.value, newTab];
 		}
 
-		// Initialize layout and active pane for the new tab
+		// Initialize layout and active pane for the new tab (an empty pane has none)
 		layouts.value = {
 			...layouts.value,
-			[newTabId]: newNode,
+			[newTabId]: root,
 		};
-		activePaneIds.value = {
-			...activePaneIds.value,
-			[newTabId]: newPaneId,
-		};
+		if (activePaneId !== null) {
+			activePaneIds.value = {
+				...activePaneIds.value,
+				[newTabId]: activePaneId,
+			};
+		}
 		activeTabIndex.value = activeIdx;
 
 		// Force Vue to re-evaluate v-show on the newly created v-for element.
@@ -88,6 +139,7 @@ export function useTabManager(
 		// assignment is a reactive no-op — triggerRef ensures the pane container
 		// gets the correct display state.
 		triggerRef(activeTabIndex);
+		return newTabId;
 	}
 
 	/**
@@ -339,6 +391,7 @@ export function useTabManager(
 
 	return {
 		openTab,
+		openVacantTab,
 		closeTab,
 		setActiveTab,
 		reorderTab,

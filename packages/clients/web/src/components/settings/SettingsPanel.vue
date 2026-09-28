@@ -118,6 +118,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { useChannelsStore } from '../../stores/channels.js';
 import { windowShortcutOf } from '../../utils/app-shortcuts.js';
 import { nextInCycle } from '../../utils/focus-zones.js';
+import { firstTabbable, trapTab } from '../../utils/focusable.js';
 import { useHostsStore } from '../../stores/hosts.js';
 import { type Scope, useSettingsStore } from '../../stores/settings.js';
 import { useToastStore } from '../../stores/toast.js';
@@ -199,10 +200,6 @@ const closeEl = ref<HTMLElement | null>(null);
 const SETTINGS_ZONES = ['menu', 'detail', 'close'] as const;
 type SettingsZone = (typeof SETTINGS_ZONES)[number];
 
-/** Elements that can take Tab, unless their tabindex keeps them out (a roving item's). */
-const TABBABLE =
-	'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]';
-
 /** Where the keyboard was before the panel opened, to go back to on close. */
 let returnFocusTo: HTMLElement | null = null;
 
@@ -221,21 +218,17 @@ watch(
 	},
 );
 
-function tabbablesIn(root: HTMLElement | null): HTMLElement[] {
-	if (root === null) return [];
-	return [...root.querySelectorAll<HTMLElement>(TABBABLE)].filter(
-		(el) => el.tabIndex >= 0 && el.closest('[hidden], [inert]') === null,
-	);
-}
-
 /** The current category's item in the menu: the one that takes Tab there. */
 function menuItem(): HTMLElement | null {
 	return panelEl.value?.querySelector<HTMLElement>('.category-nav [tabindex="0"]') ?? null;
 }
 
-/** The detail's first control, or the detail itself when it has none. */
+/**
+ * The detail's first control, or the detail itself when it has none. A control counts whatever
+ * its size: a switch's checkbox has no box of its own to speak of (utils/focusable.ts).
+ */
 function detailEntry(): HTMLElement | null {
-	return tabbablesIn(contentEl.value)[0] ?? contentEl.value;
+	return firstTabbable(contentEl.value) ?? contentEl.value;
 }
 
 function focusMenu(): void {
@@ -261,6 +254,8 @@ function zoneEntry(zone: SettingsZone): HTMLElement | null {
 
 function onPanelKeydown(event: KeyboardEvent): void {
 	const target = event.target as HTMLElement;
+	// A dialog open inside the panel (a confirmation) keeps its keys: they are its own.
+	if (target.closest('[aria-modal="true"]') !== panelEl.value) return;
 	// F6, Shift+F6 and their Ctrl chords, from the shortcut table: the window leaves them to this
 	// dialog (it takes the keys that move the keyboard, and runs none behind a modal), and they
 	// move between its own zones.
@@ -292,17 +287,7 @@ function onPanelKeydown(event: KeyboardEvent): void {
 		return;
 	}
 	// The panel is modal: Tab goes round inside it.
-	const tabbables = tabbablesIn(panelEl.value);
-	const first = tabbables[0];
-	const last = tabbables[tabbables.length - 1];
-	if (first === undefined || last === undefined) return;
-	if (!event.shiftKey && target === last) {
-		event.preventDefault();
-		first.focus();
-	} else if (event.shiftKey && target === first) {
-		event.preventDefault();
-		last.focus();
-	}
+	trapTab(event, panelEl.value);
 }
 
 // ─── Auto-fallback scope when context changes ─────────────────────────

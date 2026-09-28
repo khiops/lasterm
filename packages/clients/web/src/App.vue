@@ -439,6 +439,7 @@ import {
 	windowShortcutOf,
 } from './utils/app-shortcuts.js';
 import { type FocusZone, isFocusZone, zoneAfter } from './utils/focus-zones.js';
+import { isRendered, isTabbable, tabbables } from './utils/focusable.js';
 import { type PaneLeaf, paneInDirection, paneLeaves, resizeTowards } from './utils/pane-geometry.js';
 import { type TabSwitch, tabToSwitchTo } from './utils/tab-switch.js';
 
@@ -1337,10 +1338,6 @@ function runAppAction(action: AppActionId): void {
 
 // ─── Keyboard: tabs, panes and focus zones (#637) ────────────────────────────
 
-/** Elements that take the keyboard, for an empty pane's first control. */
-const FOCUSABLE =
-	'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
-
 function isInModalDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest('[aria-modal="true"]') !== null;
 }
@@ -1394,9 +1391,11 @@ function paneFocusTarget(paneId: string): HTMLElement | null {
 			pane.querySelector<HTMLElement>('.xterm-helper-textarea')
 		);
 	}
+	const controls = tabbables(pane);
 	return (
-		pane.querySelector<HTMLElement>('input[type="text"]:not([disabled])') ??
-		pane.querySelector<HTMLElement>(FOCUSABLE)
+		controls.find((el) => el instanceof HTMLInputElement && el.type === 'text') ??
+		controls[0] ??
+		null
 	);
 }
 
@@ -1424,9 +1423,11 @@ function focusActivePane(): boolean {
 function zoneEntry(zone: FocusZone): HTMLElement | null {
 	if (zone === 'pane') return activePaneTarget();
 	const el = document.querySelector<HTMLElement>(`[data-focus-zone="${zone}"]`);
-	if (el === null || el.getClientRects().length === 0) return null;
+	// A zone folded away (`display: none`) is passed over.
+	if (el === null || !isRendered(el)) return null;
 	// The one item of the zone that takes Tab: its roving tabindex.
-	return el.querySelector<HTMLElement>('[data-zone-item][tabindex="0"]');
+	const item = el.querySelector<HTMLElement>('[data-zone-item][tabindex="0"]');
+	return item !== null && isTabbable(item) ? item : null;
 }
 
 /** F6 and Shift+F6: the next zone that can take the keyboard, in FOCUS_ZONES order. */

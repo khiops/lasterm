@@ -66,12 +66,14 @@
 
 			<!-- Type toggle -->
 			<div class="theme-editor-field">
-				<label class="theme-editor-label">Type</label>
-				<div class="theme-editor-toggle">
+				<span id="te-type-label" class="theme-editor-label">Type</span>
+				<!-- Two buttons, one pressed: which one says so to the keyboard too (#637). -->
+				<div class="theme-editor-toggle" role="group" aria-labelledby="te-type-label">
 					<button
 						class="theme-editor-toggle-btn"
 						:class="{ 'theme-editor-toggle-btn--active': draft.type === 'dark' }"
 						type="button"
+						:aria-pressed="draft.type === 'dark'"
 						@click="draft.type = 'dark'"
 					>
 						Dark
@@ -80,6 +82,7 @@
 						class="theme-editor-toggle-btn"
 						:class="{ 'theme-editor-toggle-btn--active': draft.type === 'light' }"
 						type="button"
+						:aria-pressed="draft.type === 'light'"
 						@click="draft.type = 'light'"
 					>
 						Light

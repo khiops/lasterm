@@ -5,7 +5,8 @@
  * detail and the close button; Tab stays inside; the scope tabs are a tablist.
  *
  * The panel is mounted with its real stores. Each category but Keybindings, which has no control,
- * is stood in for by two controls, so that the detail has a first control without the hub's data.
+ * is stood in for by what Settings › Tabs begins with — a row whose control is a switch — then a
+ * button and a text field, so that the detail has controls without the hub's data.
  */
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,15 +17,20 @@ import { useSettingsStore } from "../../stores/settings.js";
 import SettingsPanel from "./SettingsPanel.vue";
 import SOURCE from "./SettingsPanel.vue?raw";
 
-/** A category: a button, then a text field. */
+/** A category: a row with a real switch, as Settings › Tabs begins, then a button and a text field. */
 const stubCategory = vi.hoisted(() => async () => {
 	const { defineComponent, h: render } = await import("vue");
+	const SettingRow = (await import("./SettingRow.vue")).default;
+	const SettingControl = (await import("./SettingControl.vue")).default;
 	return {
 		default: defineComponent({
 			inheritAttrs: false,
 			setup: () => () =>
 				render("div", { class: "stub-detail" }, [
-					render("button", { class: "stub-first", type: "button" }, "First"),
+					render(SettingRow, { label: "Close Button", scope: "global", isOverridden: true }, () =>
+						render(SettingControl, { type: "toggle", modelValue: true }),
+					),
+					render("button", { class: "stub-button", type: "button" }, "A button"),
 					render("input", { class: "stub-input", type: "text" }),
 				]),
 		}),
@@ -105,6 +111,9 @@ function el(selector: string): HTMLElement {
 
 const menuItem = (id: string): HTMLElement => el(`.category-nav [data-category-id="${id}"]`);
 
+/** The switch that begins the stand-in category, as Close Button begins Settings › Tabs. */
+const SWITCH = '.stub-detail input[role="switch"]';
+
 /** Press a key where the keyboard is, as the browser would send it. */
 async function press(key: string, init: KeyboardEventInit = {}): Promise<KeyboardEvent> {
 	const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
@@ -153,16 +162,25 @@ describe("Settings: the menu", () => {
 });
 
 describe("Settings: the menu and the detail", () => {
+	// Settings › Tabs: Enter from the menu passed over its first row's switch (#637).
+	it("goes onto a switch that begins the detail, on Enter from the menu", async () => {
+		mountPanel({ category: "tabs" });
+		await open();
+		await press("Enter");
+		expect(document.activeElement).toBe(el(SWITCH));
+		expect(el(SWITCH).getAttribute("role")).toBe("switch");
+	});
+
 	it("goes into the detail with → or Enter, onto its first control, and back with Esc", async () => {
 		const { close } = mountPanel({ category: "terminal" });
 		await open();
 		await press("ArrowRight");
-		expect(document.activeElement).toBe(el(".stub-first"));
+		expect(document.activeElement).toBe(el(SWITCH));
 		// Esc in the detail comes back to the category, and does not close.
 		await press("Escape");
 		expect(document.activeElement).toBe(menuItem("terminal"));
 		await press("Enter");
-		expect(document.activeElement).toBe(el(".stub-first"));
+		expect(document.activeElement).toBe(el(SWITCH));
 		el(".stub-input").focus();
 		await press("Escape");
 		expect(document.activeElement).toBe(menuItem("terminal"));
@@ -220,7 +238,7 @@ describe("Settings: F6", () => {
 		mountPanel({ category: "terminal" });
 		await open();
 		await press("F6", { code: "F6" });
-		expect(document.activeElement).toBe(el(".stub-first"));
+		expect(document.activeElement).toBe(el(SWITCH));
 		await press("F6", { code: "F6" });
 		expect(document.activeElement).toBe(el(".settings-close"));
 		await press("F6", { code: "F6" });

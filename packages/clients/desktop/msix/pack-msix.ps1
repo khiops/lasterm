@@ -106,7 +106,16 @@ function Copy-RequiredFile([string]$Source, [string]$Destination) {
 }
 
 function Resolve-MakeAppx {
-  $command = Get-Command MakeAppx.exe -ErrorAction SilentlyContinue
+  return Resolve-SdkTool "MakeAppx.exe"
+}
+
+# MakePri.exe ships beside MakeAppx.exe in every Windows SDK.
+function Resolve-MakePri {
+  return Resolve-SdkTool "MakePri.exe"
+}
+
+function Resolve-SdkTool([string]$ToolName) {
+  $command = Get-Command $ToolName -ErrorAction SilentlyContinue
   if ($command) {
     return $command.Source
   }
@@ -122,7 +131,7 @@ function Resolve-MakeAppx {
     $candidates = Get-ChildItem -LiteralPath $kitsRoot -Directory -ErrorAction SilentlyContinue |
       Sort-Object Name -Descending |
       ForEach-Object {
-        Join-Path $_.FullName "x64\MakeAppx.exe"
+        Join-Path $_.FullName "x64\$ToolName"
       } |
       Where-Object {
         Test-Path -LiteralPath $_ -PathType Leaf
@@ -134,7 +143,7 @@ function Resolve-MakeAppx {
     }
   }
 
-  throw "MakeAppx.exe was not found. Run this script on windows-latest or a Windows machine with the Windows SDK installed."
+  throw "$ToolName was not found. Run this script on windows-latest or a Windows machine with the Windows SDK installed."
 }
 
 function Get-CargoPackageName([string]$CargoTomlPath) {
@@ -377,10 +386,17 @@ Assert-StagedSidecarVersions `
 Get-ChildItem -Path (Join-Path (Split-Path -Parent $mainExe) "*") -File -Include "*.dll" |
   Copy-Item -Destination $stageDir -Force
 
-$iconDir = Join-Path $srcTauriDir "icons"
-foreach ($asset in @("StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png", "Square310x310Logo.png")) {
-  Copy-RequiredFile (Join-Path $iconDir $asset) (Join-Path $assetsDir $asset)
+# The logos, one file per scale or target size, rendered by `pnpm icons` from
+# packaging/brand. The manifest names each one without its qualifiers
+# (Assets\StoreLogo.png); resources.pri, built below, maps that name to them.
+$sourceAssetsDir = Resolve-PathStrict (Join-Path $scriptDir "Assets")
+foreach ($logo in @("StoreLogo", "Square44x44Logo", "Square71x71Logo", "Square150x150Logo", "Wide310x150Logo", "Square310x310Logo")) {
+  if (-not (Test-Path -LiteralPath (Join-Path $sourceAssetsDir "$logo.scale-100.png") -PathType Leaf)) {
+    throw "Missing $logo.scale-100.png in $sourceAssetsDir. Run 'pnpm icons'."
+  }
 }
+Get-ChildItem -LiteralPath $sourceAssetsDir -File -Filter "*.png" |
+  Copy-Item -Destination $assetsDir -Force
 
 Set-ManifestValues `
   -ManifestPath (Join-Path $stageDir "AppxManifest.xml") `
@@ -389,6 +405,28 @@ Set-ManifestValues `
   -PublisherDisplayName $PublisherDisplayName `
   -Version $appxVersion `
   -Executable $desktopBinaryName
+
+# Index the qualified logos (scale-200, targetsize-24_altform-unplated…) so
+# Windows picks the right file for each display. Without resources.pri, the
+# manifest's unqualified names would point at nothing.
+$makePri = Resolve-MakePri
+$priConfig = Join-Path $packageOutDir "priconfig.xml"
+& $makePri createconfig /cf $priConfig /dq en-US /pv 10.0.0 /o
+if ($LASTEXITCODE -ne 0) {
+  throw "MakePri createconfig failed with exit code $LASTEXITCODE."
+}
+# The default config splits scales and languages into resource packs, for a
+# bundle. This is one .msix: every candidate has to be in its resources.pri.
+[xml]$priXml = Get-Content -LiteralPath $priConfig -Raw
+$packagingNode = $priXml.SelectSingleNode("/resources/packaging")
+if ($packagingNode) {
+  [void]$packagingNode.ParentNode.RemoveChild($packagingNode)
+}
+$priXml.Save($priConfig)
+& $makePri new /pr $stageDir /cf $priConfig /mn (Join-Path $stageDir "AppxManifest.xml") /of (Join-Path $stageDir "resources.pri") /o
+if ($LASTEXITCODE -ne 0) {
+  throw "MakePri new failed with exit code $LASTEXITCODE."
+}
 
 $packArgs = @(
   "pack",

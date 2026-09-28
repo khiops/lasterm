@@ -56,6 +56,40 @@ describe("terminalKeyHandler", () => {
 		expect(target.openSearch).not.toHaveBeenCalled();
 	});
 
+	// The window runs them; a terminal with the keyboard must not also send them (#631).
+	it("keeps every app shortcut from the PTY, on every event of it", () => {
+		const { target, handle } = pane();
+		const chords: [string, Partial<KeyboardEventInit>][] = [
+			["T", { ctrlKey: true, shiftKey: true }],
+			["W", { ctrlKey: true, shiftKey: true }],
+			["+", { altKey: true, shiftKey: true, code: "Equal" }],
+			["_", { altKey: true, shiftKey: true, code: "Minus" }],
+			// AZERTY: Shift turns the key right of 0 into °.
+			["°", { altKey: true, shiftKey: true, code: "Minus" }],
+		];
+		for (const [k, mods] of chords) {
+			for (const type of ["keydown", "keypress", "keyup"]) {
+				expect(handle(event(type, k, mods)), `${type} ${k}`).toBe(false);
+			}
+		}
+		expect(target.input).not.toHaveBeenCalled();
+		expect(target.openSearch).not.toHaveBeenCalled();
+	});
+
+	// A shell's own: transpose, delete a word, readline's undo, SIGQUIT.
+	it("leaves Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\\ to xterm, which sends them to the shell", () => {
+		const { handle } = pane();
+		for (const type of ["keydown", "keypress", "keyup"]) {
+			expect(handle(event(type, "t", { ctrlKey: true, code: "KeyT" }))).toBe(true);
+			expect(handle(event(type, "w", { ctrlKey: true, code: "KeyW" }))).toBe(true);
+			expect(handle(event(type, "-", { ctrlKey: true, code: "Minus" }))).toBe(true);
+			expect(handle(event(type, "\\", { ctrlKey: true, code: "Backslash" }))).toBe(true);
+		}
+		// Alt+= and Alt+- without Shift, which readline binds too.
+		expect(handle(event("keydown", "=", { altKey: true, code: "Equal" }))).toBe(true);
+		expect(handle(event("keydown", "-", { altKey: true, code: "Minus" }))).toBe(true);
+	});
+
 	it("leaves Ctrl+K to xterm, which sends it to the shell", () => {
 		const { handle } = pane();
 		for (const type of ["keydown", "keypress", "keyup"]) {

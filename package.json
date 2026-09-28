@@ -31,13 +31,15 @@
 		"typecheck": "pnpm -r typecheck && tsc -p scripts/tsconfig.json",
 		"build:sea-hub": "tsx scripts/build-sea-hub.ts",
 		"package:sea-hub": "tsx scripts/package-sea-hub.ts",
-		"build:desktop": "bash scripts/build-desktop.sh"
+		"build:desktop": "bash scripts/build-desktop.sh",
+		"icons": "tsx scripts/generate-icons.ts"
 	},
 	"dependencies": {
 		"@lasterm/hub": "workspace:*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "catalog:",
+		"@resvg/resvg-js": "catalog:",
 		"@types/node": "catalog:",
 		"@vitejs/plugin-vue": "catalog:",
 		"concurrently": "catalog:",

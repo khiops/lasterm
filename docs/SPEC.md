@@ -227,13 +227,20 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 **Components:**
 - `HostRail` — host badges in one column, or a grid once its edge is dragged wider; click to select, right-click for settings
 - `ChannelSidebar` — channels for selected host, grouped, drag-reorder
-- `TabBar` — open channels as tabs, [+] new, right-click context menu
+- `TabBar` — open channels as tabs, [+] new (Ctrl+Shift+T), × close (Ctrl+Shift+W), right-click context menu
 - `TerminalPane` — xterm.js instance, fit addon, badge overlay
-- `PaneSplitter` — horizontal/vertical split, drag resize
-- `CommandPalette` — Ctrl+Shift+P (Cmd+Shift+P), fuzzy search hosts/channels/actions. The chord never reaches a terminal's PTY; Ctrl+K is the shell's
+- `PaneSplitter` — horizontal/vertical split, drag resize. Alt+Shift+= splits the focused pane right, Alt+Shift+- down
+- `CommandPalette` — Ctrl+Shift+P (Cmd+Shift+P), fuzzy search hosts/channels/actions
 - `HostModal` — add or edit a host: connection, jump host, whether it keeps an agent running, auth, shell, elevation, icon, color
 - `SettingsPanel` — settings at global, host and terminal scope (terminal, environment, appearance, keybindings, agents…)
 - `TitleBar` — the UI's version and build; the window controls in the desktop app
+
+**Keyboard shortcuts:** Windows Terminal's chords, held in one table keyed by action id
+(`utils/app-shortcuts.ts`, decisions.md APP-SHORTCUTS). The window runs them wherever the keyboard
+is; a terminal's key handler keeps them from its PTY, and the palette and Settings › Keybindings show
+them from the same table. A shell keeps its own Ctrl+K, Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\. The split
+chords are matched on the physical key (`ev.code`), the two right of 0, so they are the same keys on
+every layout.
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub

@@ -888,6 +888,17 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 - Per-host override "hide" → profile hidden for that host only
 - Per-host override "pin" → profile pinned to top for that host
 
+### 111. Tab and pane shortcuts (#631)
+
+- Cursor in a terminal, run `cat -v` → Ctrl+Shift+T opens a new tab on the host, as "+" does, and `cat` shows nothing of it
+- Back in the `cat -v` tab → Alt+Shift+= splits the pane right, Alt+Shift+- splits it down; `cat` shows nothing of either
+- On an AZERTY keyboard → Alt+Shift+= splits right, Alt+Shift+) splits down
+- At Settings › Panes › Max Panes → a split says the tab is full, as the pane's own menu does
+- Ctrl+Shift+W closes the tab; an ended terminal in it is deleted or kept as Settings › Terminal says
+- In the shell → Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\ reach it (`cat -v` shows ^T, ^W, ^_, and Ctrl+\ quits it)
+- Palette (Ctrl+Shift+P) → New Channel, Close Tab, Split Right and Split Down show the same chords, and do what the chords do
+- Settings › Keybindings shows the same chords
+
 ---
 
 ## Run Log

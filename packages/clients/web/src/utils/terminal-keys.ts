@@ -1,4 +1,4 @@
-import { isPaletteShortcut } from "./palette-shortcut.js";
+import { appShortcutOf } from "./app-shortcuts.js";
 
 const ESC = "\x1b";
 
@@ -51,9 +51,10 @@ export interface TerminalKeyTarget {
  */
 export function terminalKeyHandler(target: TerminalKeyTarget): (ev: KeyboardEvent) => boolean {
 	return (ev) => {
-		// The window's listener opens the palette on it. xterm does not look at
-		// `defaultPrevented`, so only this keeps the chord from the shell (#624).
-		if (isPaletteShortcut(ev)) return false;
+		// The app's shortcuts (utils/app-shortcuts.ts): the window's listener runs their
+		// actions. xterm does not look at `defaultPrevented`, so only this keeps a chord
+		// from the shell (#624, #631).
+		if (appShortcutOf(ev) !== null) return false;
 		// Ctrl+Shift+F opens the search overlay rather than reaching xterm.
 		if (ev.ctrlKey && ev.shiftKey && ev.key === "F") {
 			if (ev.type === "keydown") target.openSearch();

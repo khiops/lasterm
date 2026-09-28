@@ -22,7 +22,7 @@
 		<!-- The hub serves a newer UI than this tab runs (#560) -->
 		<HubUpdateBanner />
 
-		<!-- Command Palette — Teleport to body, triggered by Ctrl+P / Cmd+P -->
+		<!-- Command Palette — Teleport to body, triggered by Ctrl+Shift+P / Cmd+Shift+P -->
 		<CommandPalette />
 
 		<!-- Settings panel — rendered globally, outside layout, via Teleport -->
@@ -414,6 +414,7 @@ import { loadDesktopVersion } from './utils/desktop-version.js';
 import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
+import { isPaletteShortcut } from './utils/palette-shortcut.js';
 
 const authStore = useAuthStore();
 const sessionStore = useSessionStore();
@@ -850,7 +851,7 @@ function openPendingTab(hostId: string): void {
  * On mount: if we have a token, connect the WebSocket and fetch hosts.
  */
 onMounted(async () => {
-	// Ctrl+K / Cmd+K must be captured before Chrome's omnibox intercepts it (SC-14)
+	// Capture phase: the palette's shortcut is seen before any element's handler.
 	window.addEventListener('keydown', onGlobalKeydown, { capture: true });
 	window.addEventListener(WINDOW_BACKGROUND_RESTART_EVENT, onWindowBackgroundNeedsRestart);
 	try {
@@ -1168,13 +1169,12 @@ function isPtyFocused(): boolean {
 
 /**
  * Global keydown handler attached to the app root.
- * Intercepts Ctrl+K (Windows/Linux) and Cmd+K (macOS) to toggle the palette (SC-14).
+ * Intercepts Ctrl+Shift+P (Cmd+Shift+P) to toggle the palette (#624). A terminal's
+ * key handler keeps that chord from its PTY, since xterm ignores preventDefault.
  * Intercepts Ctrl+Shift+1..9 to spawn profile N (INV-13: only when PTY is NOT focused).
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
-	const isK = event.key === 'k' || event.key === 'K';
-	const modifier = event.ctrlKey || event.metaKey;
-	if (isK && modifier) {
+	if (isPaletteShortcut(event)) {
 		event.preventDefault();
 		commandPalette.toggle();
 		return;

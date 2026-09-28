@@ -25,6 +25,8 @@
 </template>
 
 <script setup lang="ts">
+import { PALETTE_SHORTCUT_KEYS } from "../../../utils/palette-shortcut.js";
+
 interface Keybinding {
 	label: string;
 	keys: string[];
@@ -39,7 +41,7 @@ const keybindingGroups: KeybindingGroup[] = [
 	{
 		name: "General",
 		bindings: [
-			{ label: "Command Palette", keys: ["Ctrl", "P"] },
+			{ label: "Command Palette", keys: [...PALETTE_SHORTCUT_KEYS] },
 			{ label: "Settings", keys: ["Gear icon in sidebar"] },
 		],
 	},

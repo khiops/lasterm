@@ -7,6 +7,15 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## PALETTE-SHORTCUT — the command palette opens with Ctrl+Shift+P (#624, 2026-09-28)
+
+- Ctrl+Shift+P opens and closes the palette, as in Windows Terminal and VS Code; Cmd+Shift+P too, since the palette has always taken Cmd for Ctrl. It replaces Ctrl+K (UX-11), which the app no longer takes at all: readline's `kill-line`, nano's cut and emacs rely on it.
+- The chord never reaches a PTY. The window's capture-phase listener opens the palette and calls `preventDefault()`, but xterm does not look at `defaultPrevented`: with Ctrl+K, the terminal still sent `^K` to the shell, and in bash or nano that erased what the user was typing. So the key handler a terminal gives xterm returns `false` for the chord, on keydown, keypress and keyup alike.
+- One predicate, `isPaletteShortcut` (`utils/palette-shortcut.ts`), is read by both, so the window and the terminals cannot disagree on the chord. Settings › Keybindings shows it from the same module; it named Ctrl+P while Ctrl+K was the key that worked.
+- No other binding of the app uses Ctrl+Shift+P. The profile shortcuts are Ctrl+Shift+1..9, and search is Ctrl+Shift+F.
+
+---
+
 ## SSH-KEEPALIVE — one fixed keepalive, and no host setting for it (#607, #611, #612, 2026-09-28)
 
 - Every SSH connection the hub opens carries ssh2's keepalive: a host's own, which a remote daemon is reached over too, a jump host's, and a Test connection's. A request goes out every 15 s, and the connection ends once 3 in a row go unanswered, so a host that went silent without closing TCP is lost 60 s after its last answer (`ssh-keepalive.ts`). That loss takes the path of any other: the session is disconnected, a reconnect is scheduled, and a restart waits for the host (#605).
@@ -360,6 +369,9 @@ The drag-and-drop mechanics below still hold.
 ---
 
 ## UX-11 — Connection Experience (2026-03-09)
+
+**Status:** one point superseded by PALETTE-SHORTCUT — the palette opens with Ctrl+Shift+P, and
+Ctrl+K is left to the shell. The rest still holds.
 
 - Fuzzy matching: custom scoring (~40 lines), no external dep, char-by-char (no regex on user input)
 - Quick connect parser: char-by-char for IPv6 bracket detection, ssh:// prefix support

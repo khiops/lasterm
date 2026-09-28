@@ -913,6 +913,7 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 - An empty pane's picker, several rows → Alt+↓ moves the focus to the pane below and leaves the picker's highlighted row where it was
 - In the rail (three columns) → ←/→ within a row, ↑/↓ between rows over the group headers, Home and End, Enter selects the host; Esc goes back to the pane
 - In the tab bar → ←/→ move without switching, Enter or Space switches, Delete closes the tab as its × does
+- Hover a tab → its name, then its Ctrl+Alt+N (tabs 1 to 8, and the last one Ctrl+Alt+9), then a line for Ctrl+Tab / Ctrl+Shift+Tab; the ninth of ten tabs names no chord. The "+" names Ctrl+Shift+T; the × says "Close tab" and names no chord
 - In the list → ↑/↓ move over the group headers, Enter opens the terminal and the keyboard goes into it
 - The focus ring is the theme's accent, in every theme; a mouse click shows none
 - With Settings open, F6, Ctrl+F6, Alt+arrows and Ctrl+Tab do nothing behind it

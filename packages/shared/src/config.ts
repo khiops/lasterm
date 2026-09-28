@@ -1,6 +1,7 @@
 // Config types and deep merge utility for lasterm config cascade
 import type { AppearanceConfig } from "./appearance.js";
 import type { ElevationMethod, TerminalProfile } from "./entities.js";
+import type { HostRailBadgeSize } from "./host-rail.js";
 import { isPlainObject } from "./utils.js";
 
 export type { TerminalProfile };
@@ -150,12 +151,6 @@ export interface SearchConfig {
 	historySize?: number;
 }
 
-export interface HostRailConfig {
-	width?: number;
-	showLabels?: boolean;
-	showStatusDot?: boolean;
-}
-
 export interface HostsDefaultsConfig {
 	defaultShell?: string;
 }
@@ -272,14 +267,21 @@ export const DEFAULT_PROFILE: TerminalProfile = {
 
 /** Persisted layout dimensions for resizable panels. */
 export interface LayoutConfig {
-	/** Host rail width in pixels. Default: 48. */
-	hostRailWidth: number;
+	/**
+	 * Host rail columns, 1 to 5 (#623): the rail's width follows from them and
+	 * from the badge size. A `host_rail_width` in pixels, which the rail kept
+	 * before, is read as the columns it holds. Default: 1.
+	 */
+	hostRailColumns: number;
+	/** Host rail badge size, global only. Default: "medium", the badge the rail always had. */
+	hostRailBadgeSize: HostRailBadgeSize;
 	/** Channel sidebar width in pixels. 0 means collapsed. Default: 200. */
 	sidebarWidth: number;
 }
 
 export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
-	hostRailWidth: 48,
+	hostRailColumns: 1,
+	hostRailBadgeSize: "medium",
 	sidebarWidth: 200,
 };
 
@@ -402,7 +404,7 @@ export const TITLE_CONFIG_KEYS = [
 
 export const SEARCH_CONFIG_KEYS = ["position", "highlightOnClose", "historySize"] as const;
 
-export const LAYOUT_CONFIG_KEYS = ["hostRailWidth", "sidebarWidth"] as const;
+export const LAYOUT_CONFIG_KEYS = ["hostRailColumns", "hostRailBadgeSize", "sidebarWidth"] as const;
 
 /** Map from UI section name to its allowed keys. */
 export const UI_SECTION_KEYS: Record<string, readonly string[]> = {

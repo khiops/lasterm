@@ -722,7 +722,7 @@ export async function deployAgentIfNeeded(
 		const expectedBinary = join(binaryCache, getAgentCacheFileName(os, arch, hubVersion));
 		throw new DeployError(
 			"AGENT_NOT_AVAILABLE",
-			`Agent binary not found in cache: ${expectedBinary}. Build it or copy it to the binary cache (see docs/MVP_ROADMAP.md).`,
+			`Agent binary not found in cache: ${expectedBinary}. Build it or copy it to the binary cache (see docs/SPEC.md §3.5).`,
 		);
 	}
 

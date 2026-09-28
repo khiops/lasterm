@@ -516,6 +516,12 @@ export class SshAgent extends AgentConnection {
 				client.on("close", () => {
 					this.client = null;
 					this.channelOpen = false;
+					// The bastion carried this connection and nothing else: it ends
+					// with it, whatever ended it — the hub, the host, the network, or
+					// an attempt that failed. Nobody closes an agent whose connection
+					// was lost, so no other place would (#609). What ended it is left
+					// as it was: a loss stays a loss in the security log.
+					this.endJumpRoute();
 					this.emit("close", undefined);
 				});
 
@@ -773,18 +779,26 @@ export class SshAgent extends AgentConnection {
 		return this.client !== null && this.channelOpen;
 	}
 
+	/**
+	 * Log out of the bastion this connection travels through, if it does.
+	 *
+	 * A bastion left logged in with nothing going through it is this
+	 * connection's leftover, not someone else's problem.
+	 */
+	private endJumpRoute(): void {
+		const route = this.jumpRoute;
+		if (route === null) return;
+		this.jumpRoute = null;
+		try {
+			route.close();
+		} catch {
+			// ignore errors during cleanup
+		}
+	}
+
 	private cleanup(): void {
 		this.sendQueue.clear();
-		if (this.jumpRoute) {
-			try {
-				// A bastion left logged in with nothing going through it is this
-				// connection's leftover, not someone else's problem.
-				this.jumpRoute.close();
-			} catch {
-				// ignore errors during cleanup
-			}
-			this.jumpRoute = null;
-		}
+		this.endJumpRoute();
 		if (this.channel) {
 			try {
 				this.channel.close();

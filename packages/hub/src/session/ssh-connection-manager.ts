@@ -32,6 +32,7 @@ import {
 	reconnectSessionId,
 	respond as respondCtx,
 } from "./prompt-context.js";
+import { resolveJump } from "./proxy-jump.js";
 import { captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
@@ -442,9 +443,12 @@ export class SshConnectionManager {
 	 * meaningful diagnostic rather than the generic "Authentication cancelled"
 	 * message — the error still propagates fail-closed (backoff retry / closeSession).
 	 * No secret material is included in the error message.
+	 *
+	 * Each prompt is answered for the host it names, as an interactive prompt is
+	 * cached: a host's bastion asks under its own id, for its own key (#609).
 	 */
-	buildCacheOnlyPromptAuth(hostId: string): AuthPromptFn {
-		return async (_hid, promptType, _message) => {
+	buildCacheOnlyPromptAuth(): AuthPromptFn {
+		return async (hostId, promptType, _message) => {
 			if (promptType !== "passphrase") return null;
 			const cached = this.ctx.passphraseCache.get(hostId);
 			if (cached && cached.expiresAt > Date.now()) {
@@ -538,13 +542,27 @@ export class SshConnectionManager {
 					},
 				};
 
+				// The same route as the first connection: a host behind a bastion is
+				// reached no other way, and dialled directly it failed every attempt
+				// until its session gave up (#609). Its key is checked against what
+				// is already trusted, and nothing new is pinned here.
+				const route = resolveJump(
+					host,
+					this.ctx.metaDal,
+					this.ctx.configResolver?.sshConfig?.trustKnownHosts === true,
+				);
+				if (route.kind === "refused") {
+					console.error(`[lasterm-ssh] cannot reconnect ${hostId}: ${route.message}`);
+					throw new Error(route.message);
+				}
+
 				// A host that keeps a daemon is reached through it here too. Built
 				// without it, the reconnect after a dropped link ran a new agent on
 				// stdio, and the daemon's terminals — the ones #79 keeps alive for
 				// exactly this — were left running where nothing could reach them.
 				const sshAgent = new SshAgent(
 					host,
-					this.buildCacheOnlyPromptAuth(hostId),
+					this.buildCacheOnlyPromptAuth(),
 					deployOpts,
 					this.ctx.agentConfig,
 					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
@@ -554,7 +572,12 @@ export class SshConnectionManager {
 				const sessionFp = this.ctx.trustedOnceFingerprints.get(hostKey);
 
 				// Thread the abort signal into start() so closeSession() can cancel mid-handshake.
-				await sshAgent.start(storedFp, sessionFp, ac.signal);
+				await sshAgent.start(
+					storedFp,
+					sessionFp,
+					ac.signal,
+					route.kind === "jump" ? route.jump : undefined,
+				);
 
 				// Post-await currency/abort re-check (invariant 10).
 				// closeSession() may have fired while start() was awaiting the SSH handshake.

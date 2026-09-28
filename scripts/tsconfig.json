@@ -2,6 +2,10 @@
 	"extends": "../tsconfig.base.json",
 	"compilerOptions": {
 		"noEmit": true,
+		// A module that plain `node` runs by stripping its types, such as
+		// dev/ui/cdp-lib.ts, names the TypeScript files it imports by their `.ts`
+		// name: Node maps no `.js` specifier to a `.ts` file.
+		"allowImportingTsExtensions": true,
 		"types": ["node"]
 	},
 	// The root package's scripts and their specs, checked by `pnpm typecheck`

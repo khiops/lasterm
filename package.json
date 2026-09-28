@@ -41,6 +41,7 @@
 		"@biomejs/biome": "catalog:",
 		"@resvg/resvg-js": "catalog:",
 		"@types/node": "catalog:",
+		"@vitejs/plugin-vue": "catalog:",
 		"concurrently": "catalog:",
 		"esbuild": "catalog:",
 		"happy-dom": "catalog:",

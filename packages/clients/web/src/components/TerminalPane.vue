@@ -233,7 +233,7 @@ import {
 	factsFromRefusal,
 	paneCover,
 } from '../utils/pane-cover.js';
-import { altArrowSequence, IS_MAC } from '../utils/terminal-keys.js';
+import { IS_MAC, terminalKeyHandler } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import SearchOverlay from './SearchOverlay.vue';
 import UnreadLinesBar from './UnreadLinesBar.vue';
@@ -1458,48 +1458,20 @@ watch(
 	{ immediate: true },
 );
 
-// Intercept Ctrl+Shift+F before xterm.js captures it.
-// attachCustomKeyEventHandler runs for every key event; returning false
-// prevents xterm from processing it (so the browser/our handler can act).
+// The keys xterm must not handle itself: the app's shortcuts, search's, paste and
+// copy (terminalKeyHandler). The handler runs for every key event; returning
+// false keeps the event from xterm, so the browser or our own handler acts.
 watch(terminal, (term) => {
 	if (!term) return;
-	term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-		if (ev.ctrlKey && ev.shiftKey && ev.key === 'F') {
-			if (ev.type === 'keydown') {
-				search.open();
-			}
-			return false; // prevent xterm from processing
-		}
-		// When search overlay is open, let Escape propagate to the overlay
-		if (ev.key === 'Escape' && search.isOpen.value) {
-			return false;
-		}
-		// When search is open, intercept Alt+C/R/W so they reach
-		// useSearchShortcuts instead of being sent to the PTY
-		if (ev.altKey && search.isOpen.value) {
-			const k = ev.key.toLowerCase();
-			if (k === 'c' || k === 'r' || k === 'w') {
-				return false;
-			}
-		}
-		// Alt+arrow → word motion, as xterm 5 did before leaving it to embedders
-		const altArrow = altArrowSequence(ev, IS_MAC);
-		if (altArrow !== null) {
-			if (ev.type === 'keydown') {
-				term.input(altArrow);
-			}
-			return false;
-		}
-		// Ctrl+V / Ctrl+Shift+V → let browser handle paste from clipboard
-		if (ev.ctrlKey && ev.key === 'v') {
-			return false;
-		}
-		// Ctrl+C with selection → copy to clipboard (not SIGINT)
-		if (ev.ctrlKey && ev.key === 'c' && term.hasSelection()) {
-			return false;
-		}
-		return true;
-	});
+	term.attachCustomKeyEventHandler(
+		terminalKeyHandler({
+			openSearch: () => search.open(),
+			isSearchOpen: () => search.isOpen.value,
+			input: (data) => term.input(data),
+			hasSelection: () => term.hasSelection(),
+			isMac: IS_MAC,
+		}),
+	);
 });
 
 // ---------------------------------------------------------------------------

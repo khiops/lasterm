@@ -14,6 +14,16 @@ function zIndexOf(selector: string): number {
 	return Number(rule[2]);
 }
 
+// What the handler lets through is tested in utils/terminal-keys.spec.ts: the
+// palette's chord never reaches the PTY, Ctrl+K does (#624).
+describe("TerminalPane keys", () => {
+	it("gives xterm terminalKeyHandler, and no handler of its own", () => {
+		const calls = [...SOURCE.matchAll(/attachCustomKeyEventHandler\(/g)];
+		expect(calls).toHaveLength(1);
+		expect(SOURCE).toMatch(/attachCustomKeyEventHandler\(\s*terminalKeyHandler\(\{/);
+	});
+});
+
 describe("TerminalPane layers", () => {
 	// A pane that cannot spawn or attach says so in `.terminal-error`, and one
 	// still connecting in `.terminal-loading`. Under the terminal's own opaque

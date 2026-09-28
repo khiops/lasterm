@@ -1,125 +1,29 @@
 <template>
-	<div class="host-rail">
+	<div
+		class="host-rail"
+		:class="{ 'host-rail--grid': grid }"
+		:style="railStyle"
+	>
 		<div
 			class="rail-hosts"
 			@dragover.prevent
 			@contextmenu.prevent="onRailContextMenu"
 		>
-			<!-- Local host always first -->
-			<div
-				v-if="localHost"
-				class="badge-wrapper"
-				:class="{ selected: localHost.id === hostsStore.selectedHostId }"
-				:title="getTooltip(localHost)"
-				@click="hostsStore.selectHost(localHost.id)"
-				@contextmenu.prevent="
-					emit('host-context-menu', {
-						hostId: localHost.id,
-						event: $event,
-					})
-				"
-			>
-				<div
-					class="badge"
-					:style="{
-						backgroundColor: localHost.color || getColorFromLabel(localHost.label),
-					}"
-				>
-					<img
-						v-if="localHost.iconType === 'image' && localHost.iconValue"
-						:src="localHost.iconValue"
-						class="host-icon-img"
-					/>
-					<span v-else class="badge-initials">{{
-						localHost.iconType === 'emoji' && localHost.iconValue
-							? localHost.iconValue
-							: getInitials(localHost.label)
-					}}</span>
-					<span
-						class="status-dot"
-						:class="[`status-dot--${hostsStore.getHostStatus(localHost.id)}`, { 'status-dot--older-agent': agentIsOlder(localHost.id) }]"
-						:title="agentIsOlder(localHost.id) ? olderAgentHint(localHost.id) : undefined"
-					></span>
-				</div>
-				<span
-					v-if="notificationStore.getBellCountForHost(localHost.id) > 0"
-					class="host-bell-badge"
-				>{{ notificationStore.getBellCountForHost(localHost.id) }}</span>
-			</div>
-
-			<!-- Separator after local host -->
-			<div
-				v-if="localHost && sections.length > 0"
-				class="rail-separator"
-			></div>
-
-			<!-- Group sections -->
-			<template
-				v-for="section in sections"
-				:key="
-					section.type === 'group' ? section.id : 'ungrouped'
-				"
-			>
-				<!-- Group header -->
-				<div
-					v-if="section.type === 'group'"
-					class="group-header"
-					:class="{ 'drop-target': dropTargetGroup === section.id }"
-					:title="`${section.name} (${section.hosts.length} hosts)`"
-					draggable="true"
-					@click="toggleGroup(section.id)"
-					@contextmenu.prevent="
-						emit('group-context-menu', {
-							groupId: section.id,
-							groupName: section.name,
-							event: $event,
-						})
-					"
-					@dragstart="onGroupDragStart($event, section.id)"
-					@dragenter.prevent
-					@dragover.prevent="onGroupDragOver($event, section.id)"
-					@dragleave="onGroupHeaderDragLeave"
-					@drop.prevent="onUnifiedGroupDrop($event, section.id)"
-					@dragend="onGroupDragEnd"
-				>
-					<span
-						class="group-chevron"
-						:class="{ collapsed: section.collapsed }"
-						>&#x25B8;</span
-					>
-					<span class="group-label">{{ section.name }}</span>
-				</div>
-
-				<!-- Ungrouped section header (drop target to move host to ungrouped) -->
-				<div
-					v-if="section.type === 'ungrouped'"
-					class="group-header ungrouped-header"
-					:class="{ 'drop-target': dropTargetGroup === 'ungrouped' }"
-					@dragenter.prevent
-					@dragover.prevent="onGroupHeaderDragOver($event, 'ungrouped')"
-					@dragleave="onGroupHeaderDragLeave"
-					@drop.prevent="onGroupHeaderDrop($event, null)"
-				>
-					<span class="group-label">Ungrouped</span>
-				</div>
-
-				<!-- Hosts in section (hidden if collapsed) -->
-				<template
-					v-if="
-						section.type === 'ungrouped' || !section.collapsed
-					"
-				>
+			<!-- Rows, read left to right then down: the local host alone first,
+			     then each section's hosts, `columns` to a row (#623). -->
+			<template v-for="row in rows" :key="row.key">
+				<div v-if="row.kind === 'hosts'" class="rail-row">
 					<div
-						v-for="host in section.hosts"
+						v-for="host in row.hosts"
 						:key="host.id"
 						class="badge-wrapper"
 						:class="{
-							selected:
-								host.id === hostsStore.selectedHostId,
+							selected: host.id === hostsStore.selectedHostId,
 							'drop-target': dropTargetHostId === host.id,
 						}"
+						:data-host-id="host.id"
 						:title="getTooltip(host)"
-						draggable="true"
+						:draggable="row.section !== null"
 						@click="hostsStore.selectHost(host.id)"
 						@contextmenu.prevent="
 							emit('host-context-menu', {
@@ -127,19 +31,26 @@
 								event: $event,
 							})
 						"
-						@dragstart="onDragStart($event, host)"
+						@dragstart="onDragStart($event, host, row.section)"
 						@dragenter.prevent
-						@dragover.prevent="onDragOver($event, host.id)"
+						@dragover.prevent="onDragOver($event, host.id, row.section)"
 						@dragleave="onHostDragLeave($event)"
 						@dragend="onHostDragEnd"
-						@drop.prevent="onDrop($event, host, section)"
+						@drop.prevent="onDrop($event, host, row.section)"
 					>
+						<!-- One column: the pill at the rail's edge. A grid rings the badge
+						     instead, since a pill cannot point at an inner column. -->
+						<span
+							v-if="!grid && host.id === hostsStore.selectedHostId"
+							class="selection-pill"
+						></span>
 						<div
 							class="badge"
+							:class="{
+								'badge--ring': grid && host.id === hostsStore.selectedHostId,
+							}"
 							:style="{
-								backgroundColor:
-									host.color ||
-									getColorFromLabel(host.label),
+								backgroundColor: host.color || getColorFromLabel(host.label),
 							}"
 						>
 							<img
@@ -162,84 +73,168 @@
 							v-if="notificationStore.getBellCountForHost(host.id) > 0"
 							class="host-bell-badge"
 						>{{ notificationStore.getBellCountForHost(host.id) }}</span>
+						<!-- Where a dropped badge lands: before this one, in reading order. -->
+						<span
+							v-if="dropTargetHostId === host.id"
+							class="drop-mark"
+							:class="grid ? 'drop-mark--vertical' : 'drop-mark--horizontal'"
+						></span>
 					</div>
-				</template>
+				</div>
 
-				<!-- Separator between groups -->
 				<div
-					v-if="section.type === 'group'"
-					class="rail-separator"
-				></div>
+					v-else-if="row.kind === 'group'"
+					class="group-header"
+					:class="{ 'drop-target': dropTargetGroup === row.section.id }"
+					:title="`${row.section.name} (${row.section.hosts.length} hosts)`"
+					draggable="true"
+					@click="toggleGroup(row.section.id)"
+					@contextmenu.prevent="
+						emit('group-context-menu', {
+							groupId: row.section.id,
+							groupName: row.section.name,
+							event: $event,
+						})
+					"
+					@dragstart="onGroupDragStart($event, row.section.id)"
+					@dragenter.prevent
+					@dragover.prevent="onGroupDragOver($event, row.section.id)"
+					@dragleave="onGroupHeaderDragLeave"
+					@drop.prevent="onUnifiedGroupDrop($event, row.section.id)"
+					@dragend="onGroupDragEnd"
+				>
+					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
+					<span
+						class="group-chevron"
+						:class="{ collapsed: row.section.collapsed }"
+						>&#x25B8;</span
+					>
+					<span class="group-label">{{ row.section.name }}</span>
+					<span
+						v-if="grid || row.section.collapsed"
+						class="group-count"
+					>{{ row.section.hosts.length }}</span>
+					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
+				</div>
+
+				<!-- Ungrouped section header (drop target to move host to ungrouped) -->
+				<div
+					v-else-if="row.kind === 'ungrouped'"
+					class="group-header ungrouped-header"
+					:class="{ 'drop-target': dropTargetGroup === 'ungrouped' }"
+					@dragenter.prevent
+					@dragover.prevent="onGroupHeaderDragOver($event, 'ungrouped')"
+					@dragleave="onGroupHeaderDragLeave"
+					@drop.prevent="onGroupHeaderDrop($event, null)"
+				>
+					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
+					<span class="group-label">Ungrouped</span>
+					<span v-if="grid" class="group-count">{{ row.section.hosts.length }}</span>
+					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
+				</div>
+
+				<div v-else class="rail-separator"></div>
 			</template>
 		</div>
 
+		<!-- The footer's buttons fill the same rows as the badges. -->
 		<div class="rail-footer">
-			<button
-				class="rail-icon-btn"
-				title="Command palette (Ctrl+K)"
-				aria-label="Open command palette"
-				@click="$emit('toggle-palette')"
+			<div
+				v-for="actions in footerRows"
+				:key="actions.join()"
+				class="rail-row"
 			>
-				<svg
-					class="rail-icon-svg"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<circle cx="11" cy="11" r="8" />
-					<line x1="21" y1="21" x2="16.65" y2="16.65" />
-				</svg>
-			</button>
-			<button
-				class="rail-icon-btn"
-				title="Settings"
-				aria-label="Open settings panel"
-				@click="$emit('toggle-settings')"
-			>
-				<svg
-					class="rail-icon-svg"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-					<circle cx="12" cy="12" r="3" />
-				</svg>
-			</button>
-			<button
-				class="add-host-btn"
-				title="Add host"
-				aria-label="Add new host"
-				@click="$emit('add-host')"
-			>
-				<span class="add-icon">+</span>
-			</button>
+				<template v-for="action in actions" :key="action">
+					<button
+						v-if="action === 'palette'"
+						class="rail-icon-btn"
+						title="Command palette (Ctrl+Shift+P)"
+						aria-label="Open command palette"
+						@click="$emit('toggle-palette')"
+					>
+						<svg
+							class="rail-icon-svg"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<circle cx="11" cy="11" r="8" />
+							<line x1="21" y1="21" x2="16.65" y2="16.65" />
+						</svg>
+					</button>
+					<button
+						v-else-if="action === 'settings'"
+						class="rail-icon-btn"
+						title="Settings"
+						aria-label="Open settings panel"
+						@click="$emit('toggle-settings')"
+					>
+						<svg
+							class="rail-icon-svg"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+							<circle cx="12" cy="12" r="3" />
+						</svg>
+					</button>
+					<button
+						v-else
+						class="add-host-btn"
+						title="Add host"
+						aria-label="Add new host"
+						@click="$emit('add-host')"
+					>
+						<span class="add-icon">+</span>
+					</button>
+				</template>
+			</div>
 		</div>
 	</div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useChannelsStore } from "../stores/channels.js";
 import {
 	useHostGroups,
+	type HostGroupSection,
 	type HostSection,
+	type UngroupedSection,
 } from "../composables/useHostGroups.js";
 import {
 	getInitials,
 	getColorFromLabel,
 } from "../composables/useHostIcon.js";
-import type { Host } from "@lasterm/shared";
+import {
+	chunkIntoRows,
+	HOST_RAIL_BADGE_GEOMETRY,
+	HOST_RAIL_GAP,
+	HOST_RAIL_PADDING,
+	type Host,
+	type HostRailBadgeSize,
+	moveBefore,
+} from "@lasterm/shared";
+
+const props = withDefaults(
+	defineProps<{
+		/** Badges to a row; more than one makes the rail a grid (#623). */
+		columns?: number;
+		badgeSize?: HostRailBadgeSize;
+	}>(),
+	{ columns: 1, badgeSize: "medium" },
+);
 
 const emit = defineEmits<{
 	"toggle-settings": [];
@@ -257,6 +252,60 @@ const hostsStore = useHostsStore();
 const notificationStore = useNotificationStore();
 const channelsStore = useChannelsStore();
 const { sections, localHost, toggleGroup, reorderGroups } = useHostGroups();
+
+const grid = computed(() => props.columns > 1);
+
+/** The badge size's geometry, for the stylesheet. */
+const railStyle = computed(() => {
+	const size = HOST_RAIL_BADGE_GEOMETRY[props.badgeSize];
+	return {
+		"--rail-badge": `${size.badge}px`,
+		"--rail-initials": `${size.initials}px`,
+		"--rail-dot": `${size.dot}px`,
+		"--rail-squircle": `${size.squircle}px`,
+		"--rail-pill": `${size.pill}px`,
+		"--rail-gap": `${HOST_RAIL_GAP}px`,
+		"--rail-padding": `${HOST_RAIL_PADDING}px`,
+	};
+});
+
+/**
+ * What the rail shows, top to bottom. A row of hosts belongs to its section,
+ * which a drop on one of its badges reorders; the local host's row has none.
+ */
+type RailRow =
+	| { kind: "hosts"; key: string; hosts: Host[]; section: HostSection | null }
+	| { kind: "group"; key: string; section: HostGroupSection }
+	| { kind: "ungrouped"; key: string; section: UngroupedSection }
+	| { kind: "separator"; key: string };
+
+const rows = computed<RailRow[]>(() => {
+	const result: RailRow[] = [];
+	const local = localHost.value;
+	if (local) {
+		result.push({ kind: "hosts", key: `hosts:${local.id}`, hosts: [local], section: null });
+		if (sections.value.length > 0) result.push({ kind: "separator", key: "separator:local" });
+	}
+	for (const section of sections.value) {
+		if (section.type === "group") {
+			result.push({ kind: "group", key: `group:${section.id}`, section });
+		} else {
+			result.push({ kind: "ungrouped", key: "group:ungrouped", section });
+		}
+		if (section.type === "ungrouped" || !section.collapsed) {
+			for (const hosts of chunkIntoRows(section.hosts, props.columns)) {
+				result.push({ kind: "hosts", key: `hosts:${hosts[0]?.id}`, hosts, section });
+			}
+		}
+		if (section.type === "group") {
+			result.push({ kind: "separator", key: `separator:${section.id}` });
+		}
+	}
+	return result;
+});
+
+const FOOTER_ACTIONS = ["palette", "settings", "add-host"] as const;
+const footerRows = computed(() => chunkIntoRows(FOOTER_ACTIONS, props.columns));
 
 /**
  * Whether this host is served by an agent from before an update.
@@ -349,7 +398,10 @@ function getTooltip(host: Host): string {
 	return parts.join("\n");
 }
 
-function onDragStart(event: DragEvent, host: Host): void {
+// ── Host DnD: the local host neither moves nor takes a drop ──────────────
+
+function onDragStart(event: DragEvent, host: Host, section: HostSection | null): void {
+	if (section === null) return;
 	dragHostId.value = host.id;
 	if (event.dataTransfer) {
 		event.dataTransfer.effectAllowed = "move";
@@ -357,8 +409,8 @@ function onDragStart(event: DragEvent, host: Host): void {
 	}
 }
 
-function onDragOver(event: DragEvent, hostId: string): void {
-	if (!dragHostId.value || dragHostId.value === hostId) {
+function onDragOver(event: DragEvent, hostId: string, section: HostSection | null): void {
+	if (section === null || !dragHostId.value || dragHostId.value === hostId) {
 		dropTargetHostId.value = null;
 		return;
 	}
@@ -375,39 +427,31 @@ function onHostDragLeave(event: DragEvent): void {
 	dropTargetHostId.value = null;
 }
 
+/**
+ * A badge dropped on another goes just before it, in the order the rail is
+ * read — left to right, then down — which is the section's own order: its
+ * rows are that order cut every `columns` hosts.
+ */
 function onDrop(
 	_event: DragEvent,
 	targetHost: Host,
-	section: HostSection,
+	section: HostSection | null,
 ): void {
 	dropTargetHostId.value = null;
-	if (!dragHostId.value || dragHostId.value === targetHost.id) return;
+	const moved = dragHostId.value;
+	dragHostId.value = null;
+	if (section === null || moved === null || moved === targetHost.id) return;
 
 	const group = section.type === "group" ? section.id : null;
-	const hostsInSection = section.hosts;
-	const draggedIdx = hostsInSection.findIndex(
-		(h) => h.id === dragHostId.value,
+	const orderedIds = moveBefore(
+		section.hosts.map((h) => h.id),
+		moved,
+		targetHost.id,
 	);
-	const targetIdx = hostsInSection.findIndex(
-		(h) => h.id === targetHost.id,
-	);
-
-	// Build new order
-	const orderedIds = hostsInSection.map((h) => h.id);
-	if (draggedIdx >= 0) {
-		// Reorder within same section
-		orderedIds.splice(draggedIdx, 1);
-		const insertIdx = targetIdx > draggedIdx ? targetIdx - 1 : targetIdx;
-		orderedIds.splice(insertIdx, 0, dragHostId.value);
-	} else {
-		// Move from different section
-		orderedIds.splice(targetIdx, 0, dragHostId.value);
-	}
 
 	hostsStore
 		.reorderHosts(group, orderedIds)
 		.then(() => hostsStore.fetchHosts());
-	dragHostId.value = null;
 }
 
 function onHostDragEnd(): void {
@@ -499,8 +543,10 @@ function onGroupHeaderDrop(event: DragEvent, targetGroupId: string | null): void
 }
 
 function onRailContextMenu(event: MouseEvent): void {
-	// Only fire when clicking the background itself, not a host or group header
-	if (event.target !== event.currentTarget) return;
+	// Only the background: the rail itself, or the room a row leaves beside
+	// its badges — not a host or a group header.
+	const target = event.target as HTMLElement;
+	if (target !== event.currentTarget && !target.classList.contains("rail-row")) return;
 	emit("rail-context-menu", { x: event.clientX, y: event.clientY });
 }
 
@@ -510,10 +556,11 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* Sizes come from the badge size, through the --rail-* variables the root
+   element sets; colours only from the theme. */
 .host-rail {
 	display: flex;
 	flex-direction: column;
-	align-items: center;
 	padding-top: 8px;
 	overflow-y: auto;
 	overflow-x: hidden;
@@ -527,68 +574,96 @@ onMounted(() => {
 .rail-hosts {
 	display: flex;
 	flex-direction: column;
-	align-items: center;
-	gap: 4px;
+	gap: var(--rail-gap);
 	flex: 1;
 	width: 100%;
 	padding: 4px 0;
 }
 
+/* A row of badges, or of the footer's buttons. One column centres its badge;
+   a grid fills its rows from the left. */
+.rail-row {
+	display: flex;
+	gap: var(--rail-gap);
+	padding: 0 var(--rail-padding);
+	justify-content: center;
+}
+
+.host-rail--grid .rail-hosts > .rail-row {
+	justify-content: flex-start;
+}
+
 .badge-wrapper {
 	position: relative;
-	width: 36px;
-	height: 36px;
+	width: var(--rail-badge);
+	height: var(--rail-badge);
 	cursor: pointer;
 	flex-shrink: 0;
 }
 
-/* Selected indicator — white left pill, same approach as Discord */
-.badge-wrapper.selected::before {
-	content: "";
+/* Selected, in one column — a pill at the rail's edge, as Discord does */
+.selection-pill {
 	position: absolute;
 	left: -6px;
 	top: 50%;
 	transform: translateY(-50%);
 	width: 4px;
-	height: 20px;
+	height: var(--rail-pill);
 	background: var(--nt-fg);
 	border-radius: 0 3px 3px 0;
 }
 
-.badge-wrapper.selected .badge {
-	border-radius: 12px;
-}
-
+.badge-wrapper.selected .badge,
 .badge-wrapper:not(.selected):hover .badge {
-	border-radius: 12px;
+	border-radius: var(--rail-squircle);
 }
 
-/* Drop indicator — horizontal line above target host */
-.badge-wrapper.drop-target::after {
-	content: "";
+/* Selected, in a grid — a ring: a gap in the rail's colour, then the foreground */
+.badge.badge--ring {
+	box-shadow:
+		0 0 0 2px var(--nt-host-rail),
+		0 0 0 4px var(--nt-fg);
+}
+
+/* Where a dropped badge lands, in the gap before its target: above it in one
+   column, to its left in a grid. */
+.drop-mark {
 	position: absolute;
-	top: -3px;
+	background: var(--nt-accent);
+	border-radius: 1px;
+	pointer-events: none;
+}
+
+.drop-mark--horizontal {
+	top: -4px;
 	left: 4px;
 	right: 4px;
 	height: 2px;
-	background: var(--nt-accent);
-	border-radius: 1px;
+}
+
+.drop-mark--vertical {
+	left: -4px;
+	top: 1px;
+	bottom: 1px;
+	width: 2px;
 }
 
 .badge {
-	width: 36px;
-	height: 36px;
+	width: var(--rail-badge);
+	height: var(--rail-badge);
 	border-radius: 50%;
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	position: relative;
-	transition: border-radius 0.15s ease;
+	transition:
+		border-radius 0.15s ease,
+		box-shadow 0.15s ease;
 	user-select: none;
 }
 
 .badge-initials {
-	font-size: 14px;
+	font-size: var(--rail-initials);
 	font-weight: 700;
 	color: var(--nt-bright-white);
 	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -607,8 +682,8 @@ onMounted(() => {
 	position: absolute;
 	bottom: -1px;
 	right: -1px;
-	width: 10px;
-	height: 10px;
+	width: var(--rail-dot);
+	height: var(--rail-dot);
 	border-radius: 50%;
 	border: 2px solid var(--nt-tab-bar);
 }
@@ -665,21 +740,29 @@ onMounted(() => {
 }
 
 .rail-separator {
-	width: 24px;
 	height: 1px;
 	background: var(--nt-tab-hover);
 	flex-shrink: 0;
-	margin: 2px 0;
+	margin: 0 12px;
 }
 
+.host-rail--grid .rail-separator {
+	margin: 0 2px;
+}
+
+/* Group headers are centred; a grid adds a hairline on each side, and the
+   host count, which one column shows only for a folded group. */
 .group-header {
 	display: flex;
 	flex-direction: row;
 	align-items: center;
+	justify-content: center;
 	gap: 4px;
-	width: 100%;
-	padding: 4px 6px;
+	margin: 0 var(--rail-padding);
+	padding: 2px 0;
+	border-top: 2px solid transparent;
 	font-size: 9px;
+	line-height: 12px;
 	text-transform: uppercase;
 	color: var(--nt-text-secondary);
 	cursor: pointer;
@@ -691,7 +774,7 @@ onMounted(() => {
 }
 
 .group-header.drop-target {
-	border-top: 2px solid var(--nt-accent);
+	border-top-color: var(--nt-accent);
 }
 
 /* Ungrouped header — no chevron, not draggable, drop-target only */
@@ -700,12 +783,21 @@ onMounted(() => {
 	opacity: 0.6;
 }
 
-.ungrouped-header:hover {
+.ungrouped-header:hover,
+.ungrouped-header.drop-target {
 	opacity: 1;
+}
+
+.group-hairline {
+	flex: 1 1 0;
+	min-width: 4px;
+	height: 1px;
+	background: var(--nt-border);
 }
 
 .group-chevron {
 	display: inline-block;
+	flex-shrink: 0;
 	font-size: 10px;
 	line-height: 1;
 	transition: transform 0.15s ease;
@@ -720,20 +812,26 @@ onMounted(() => {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	flex: 1;
 	min-width: 0;
 }
 
+.group-count {
+	flex-shrink: 0;
+	color: var(--nt-text-muted);
+	font-weight: 500;
+}
+
 .rail-footer {
-	padding: 8px 0 12px;
 	display: flex;
 	flex-direction: column;
-	align-items: center;
+	gap: var(--rail-gap);
+	padding: 8px 0 12px;
 }
 
 .rail-icon-btn {
-	width: 36px;
-	height: 36px;
+	width: var(--rail-badge);
+	height: var(--rail-badge);
+	flex-shrink: 0;
 	border-radius: 50%;
 	border: none;
 	background: transparent;
@@ -754,18 +852,19 @@ onMounted(() => {
 }
 
 .rail-icon-svg {
-	width: 18px;
-	height: 18px;
+	width: calc(var(--rail-badge) / 2);
+	height: calc(var(--rail-badge) / 2);
 }
 
 .add-host-btn {
-	width: 36px;
-	height: 36px;
+	width: var(--rail-badge);
+	height: var(--rail-badge);
+	flex-shrink: 0;
 	border-radius: 50%;
 	border: 2px dashed var(--nt-tab-hover);
 	background: transparent;
 	color: var(--nt-text-secondary);
-	font-size: 20px;
+	font-size: calc(var(--rail-badge) * 5 / 9);
 	line-height: 1;
 	display: flex;
 	align-items: center;

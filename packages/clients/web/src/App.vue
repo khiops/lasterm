@@ -231,6 +231,8 @@
 			<div class="app-layout" :style="layoutStyle">
 			<HostRail
 				class="host-rail"
+				:columns="railResize.columns.value"
+				:badge-size="railBadgeSize"
 				@toggle-settings="showSettings = !showSettings"
 				@toggle-palette="commandPalette.toggle()"
 				@add-host="showHostModal = true"
@@ -238,9 +240,12 @@
 				@host-context-menu="onHostContextMenu"
 				@group-context-menu="onGroupContextMenu"
 			/>
-			<!-- Resize handle after host rail -->
+			<!-- Resize handle after host rail: it snaps to whole columns -->
 			<div
 				class="resize-handle"
+				role="separator"
+				aria-orientation="vertical"
+				aria-label="Resize the host rail"
 				:style="{ left: railResize.width.value + 'px' }"
 				@mousedown="railResize.onMouseDown"
 				@dblclick="railResize.reset"
@@ -337,8 +342,14 @@
 </template>
 
 <script setup lang="ts">
-import type { Host } from '@lasterm/shared';
-import { DEFAULT_CHANNEL_NAME, generateId } from '@lasterm/shared';
+import type { Host, HostRailBadgeSize, LayoutConfig } from '@lasterm/shared';
+import {
+	DEFAULT_CHANNEL_NAME,
+	DEFAULT_LAYOUT_CONFIG,
+	generateId,
+	isHostRailBadgeSize,
+	isHostRailColumns,
+} from '@lasterm/shared';
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
 import AgentBinaryVerify from './components/AgentBinaryVerify.vue';
 import AgentDeployFailed from './components/AgentDeployFailed.vue';
@@ -374,6 +385,7 @@ import {
 } from './composables/useActiveWallpaper.js';
 import { useAutoSwitch } from './composables/useAutoSwitch.js';
 import { useCommandPalette } from './composables/useCommandPalette.js';
+import { useHostRailResize } from './composables/useHostRailResize.js';
 import { useHubUpdate } from './composables/useHubUpdate.js';
 import type { DropZone } from './composables/useLayout.js';
 import {
@@ -417,7 +429,7 @@ import { loadDesktopVersion } from './utils/desktop-version.js';
 import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
-import { isPaletteShortcut } from './utils/palette-shortcut.js';
+import { type AppActionId, appShortcutOf } from './utils/app-shortcuts.js';
 
 const authStore = useAuthStore();
 const sessionStore = useSessionStore();
@@ -433,23 +445,25 @@ void useServiceWorker().register(hubUpdate.signalUpdate);
 
 // ─── Resizable panels ────────────────────────────────────────────────────────
 
-function saveLayoutWidth(key: string, value: number): void {
+function saveLayout(values: Partial<LayoutConfig>): void {
 	if (authStore.token === null) return;
-	void hubFetch(`${hubBaseUrl()}/api/config/ui`, {
-		method: 'PUT',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${authStore.token}`,
-		},
-		body: JSON.stringify({ layout: { [key]: value } }),
-	}).then(() => configStore.loadUiConfig());
+	void configStore.saveUiSettings('layout', values);
 }
 
-const railResize = useResizable({
-	initialWidth: 48,
-	minWidth: 48,
-	maxWidth: 120,
-	onResizeEnd: (width) => saveLayoutWidth('hostRailWidth', width),
+// The host rail keeps its columns and its badge size, both global; its width
+// follows from them (#623).
+const railBadgeSize = computed<HostRailBadgeSize>(() => {
+	const size = configStore.uiConfig.layout?.hostRailBadgeSize;
+	return isHostRailBadgeSize(size) ? size : DEFAULT_LAYOUT_CONFIG.hostRailBadgeSize;
+});
+const railColumns = computed(() => {
+	const columns = configStore.uiConfig.layout?.hostRailColumns;
+	return isHostRailColumns(columns) ? columns : DEFAULT_LAYOUT_CONFIG.hostRailColumns;
+});
+const railResize = useHostRailResize({
+	columns: railColumns,
+	badgeSize: railBadgeSize,
+	onColumnsChange: (columns) => saveLayout({ hostRailColumns: columns }),
 });
 
 const sidebarResize = useResizable({
@@ -457,17 +471,14 @@ const sidebarResize = useResizable({
 	minWidth: 140,
 	maxWidth: 400,
 	collapseThreshold: 80,
-	onResizeEnd: (width) => saveLayoutWidth('sidebarWidth', width),
+	onResizeEnd: (width) => saveLayout({ sidebarWidth: width }),
 });
 
-// Apply persisted layout widths once the config loads (after auth).
+// Apply the persisted sidebar width once the config loads (after auth).
 watch(
 	() => configStore.uiConfig.layout,
 	(layout) => {
 		if (!layout) return;
-		if (layout.hostRailWidth > 0) {
-			railResize.width.value = layout.hostRailWidth;
-		}
 		const sw = layout.sidebarWidth;
 		if (sw === 0) {
 			sidebarResize.collapsed.value = true;
@@ -584,9 +595,22 @@ watch(
 	{ immediate: true },
 );
 
-// Wire up palette external actions (add-host, settings, ssh-import, toggle-sidebar, pairing-code)
+// Wire up palette external actions (add-host, settings, ssh-import, toggle-sidebar, pairing-code),
+// and the rows of the actions a shortcut runs, so a row and its chord do the same (#631).
 commandPalette.onExternalAction.value = (actionId: string) => {
 	switch (actionId) {
+		case 'action:new-channel':
+			runAppAction('tab.new');
+			break;
+		case 'action:close-tab':
+			runAppAction('tab.close');
+			break;
+		case 'action:split-right':
+			runAppAction('pane.splitRight');
+			break;
+		case 'action:split-down':
+			runAppAction('pane.splitDown');
+			break;
 		case 'action:add-host':
 			editingHost.value = null;
 			showHostModal.value = true;
@@ -1178,14 +1202,16 @@ function isPtyFocused(): boolean {
 
 /**
  * Global keydown handler attached to the app root.
- * Intercepts Ctrl+Shift+P (Cmd+Shift+P) to toggle the palette (#624). A terminal's
- * key handler keeps that chord from its PTY, since xterm ignores preventDefault.
+ * Runs the app's shortcuts (utils/app-shortcuts.ts: the palette, new and close tab,
+ * split right and down), wherever the keyboard is (#624, #631). A terminal's key
+ * handler keeps those chords from its PTY, since xterm ignores preventDefault.
  * Intercepts Ctrl+Shift+1..9 to spawn profile N (INV-13: only when PTY is NOT focused).
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
-	if (isPaletteShortcut(event)) {
+	const shortcut = appShortcutOf(event);
+	if (shortcut !== null) {
 		event.preventDefault();
-		commandPalette.toggle();
+		runAppAction(shortcut);
 		return;
 	}
 
@@ -1203,6 +1229,33 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 
 	if (event.key === 'Escape' && showSettings.value) {
 		showSettings.value = false;
+	}
+}
+
+/**
+ * An app shortcut's action, which the palette's row for it runs too: what the
+ * tab bar and the panes do. A new tab is the "+" button's, the tab closes as
+ * its × closes it, and the split is the focused pane's, under the pane limit.
+ */
+function runAppAction(action: AppActionId): void {
+	const tab = layout.activeTab.value;
+	const pane = tab === null ? null : layout.getActiveChannelId(tab.id);
+	switch (action) {
+		case 'palette.open':
+			commandPalette.toggle();
+			break;
+		case 'tab.new':
+			onNewTab();
+			break;
+		case 'tab.close':
+			if (tab !== null) onCloseTab(layout.activeTabIndex.value);
+			break;
+		case 'pane.splitRight':
+			if (pane !== null) onSplit(pane, 'vertical');
+			break;
+		case 'pane.splitDown':
+			if (pane !== null) onSplit(pane, 'horizontal');
+			break;
 	}
 }
 

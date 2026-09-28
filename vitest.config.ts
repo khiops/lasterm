@@ -1,3 +1,4 @@
+import vue from "@vitejs/plugin-vue";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
@@ -31,6 +32,9 @@ export default defineConfig({
 				},
 			},
 			{
+				// Compiles the single-file components a spec mounts; a `?raw`
+				// import still reads the source as text.
+				plugins: [vue()],
 				test: {
 					name: "web",
 					include: ["packages/clients/web/**/*.spec.ts"],

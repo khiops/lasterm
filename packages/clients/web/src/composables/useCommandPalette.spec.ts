@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { type HostVisibleProfile, useProfilesStore } from "../stores/profiles.js";
+import { type AppActionId, shortcutLabel } from "../utils/app-shortcuts.js";
 import {
 	arrangeForDisplay,
 	fuzzyMatch,
@@ -31,19 +32,6 @@ vi.hoisted(() => {
 		key: (index: number) => [...storage.keys()][index] ?? null,
 	});
 });
-
-/**
- * Mock useLayout — useCommandPalette depends on it but we only need stub values.
- * The module-level mock must come before importing the composable via vitest hoisting.
- */
-vi.mock("./useLayout.js", () => ({
-	useLayout: () => ({
-		activeTab: { value: null },
-		tabs: { value: [] },
-		closeTab: vi.fn(),
-		splitPane: vi.fn(),
-	}),
-}));
 
 /**
  * Mock useSessionStore to avoid WS dependency in unit tests.
@@ -528,6 +516,43 @@ describe("useCommandPalette", () => {
 			palette.onExternalAction.value = handler;
 			palette.execute({ id: "action:add-host", label: "Add Host", type: "action", icon: "➕" });
 			expect(handler).toHaveBeenCalledWith("action:add-host");
+		});
+	});
+
+	// The palette listed Ctrl+T, Ctrl+W, Ctrl+\ and Ctrl+- that nothing handled (#631).
+	describe("the actions a shortcut runs", () => {
+		const ROWS: [string, AppActionId][] = [
+			["action:new-channel", "tab.new"],
+			["action:close-tab", "tab.close"],
+			["action:split-right", "pane.splitRight"],
+			["action:split-down", "pane.splitDown"],
+		];
+
+		it("show the chord the window runs them on, read from the table", () => {
+			const palette = useCommandPalette();
+			palette.search(">");
+			for (const [row, id] of ROWS) {
+				const item = palette.results.value.find((r) => r.id === row);
+				expect(item?.shortcut).toBe(shortcutLabel(id));
+			}
+			expect(palette.results.value.find((r) => r.id === "action:new-channel")?.shortcut).toBe(
+				"Ctrl+Shift+T",
+			);
+		});
+
+		// App.vue runs them as the tab bar does, and as their chords do (App.spec.ts).
+		it("are run by the window, as their chords are", () => {
+			const palette = useCommandPalette();
+			const handler = vi.fn();
+			palette.onExternalAction.value = handler;
+			palette.search(">");
+			for (const [row] of ROWS) {
+				const item = palette.results.value.find((r) => r.id === row);
+				if (item === undefined) throw new Error(`${row} is not offered`);
+				palette.execute(item);
+				expect(handler).toHaveBeenLastCalledWith(row);
+			}
+			expect(handler).toHaveBeenCalledTimes(ROWS.length);
 		});
 	});
 

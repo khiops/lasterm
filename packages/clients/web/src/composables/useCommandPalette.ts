@@ -4,9 +4,9 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useProfilesStore } from "../stores/profiles.js";
 import { useWriteLockStore } from "../stores/writelock.js";
+import { shortcutLabel } from "../utils/app-shortcuts.js";
 import { formatConnectionString } from "../utils/host-display.js";
 import { useHostRows } from "./useHostRows.js";
-import { useLayout } from "./useLayout.js";
 import { useRecentPaletteItems } from "./useRecentPaletteItems.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -202,7 +202,6 @@ export function useCommandPalette() {
 	const writeLockStore = useWriteLockStore();
 	const _authStore = useAuthStore();
 	const profilesStore = useProfilesStore();
-	const layout = useLayout();
 	const hostRows = useHostRows();
 	const { recentIds, pushRecent } = useRecentPaletteItems();
 
@@ -272,34 +271,35 @@ export function useCommandPalette() {
 
 		// ── Actions (SC-17, SC-22, SC-23) ────────────────────────────────────
 		if (prefix === null || prefix === "action") {
+			// A shortcut shown here is the one the window runs (utils/app-shortcuts.ts, #631).
 			const actions: PaletteItem[] = [
 				{
 					id: "action:new-channel",
 					label: "New Channel",
 					type: "action",
 					icon: "⊕",
-					shortcut: "Ctrl+T",
+					shortcut: shortcutLabel("tab.new"),
 				},
 				{
 					id: "action:split-right",
 					label: "Split Right",
 					type: "action",
 					icon: "⬌",
-					shortcut: "Ctrl+\\",
+					shortcut: shortcutLabel("pane.splitRight"),
 				},
 				{
 					id: "action:split-down",
 					label: "Split Down",
 					type: "action",
 					icon: "⬍",
-					shortcut: "Ctrl+-",
+					shortcut: shortcutLabel("pane.splitDown"),
 				},
 				{
 					id: "action:close-tab",
 					label: "Close Tab",
 					type: "action",
 					icon: "✕",
-					shortcut: "Ctrl+W",
+					shortcut: shortcutLabel("tab.close"),
 				},
 				{
 					id: "action:pairing-code",
@@ -513,38 +513,9 @@ export function useCommandPalette() {
 	// ── Internal action dispatch ──────────────────────────────────────────────
 
 	function _executeAction(actionId: string): void {
-		const hostId = channelsStore.activeHostId;
 		const activeChannelId = channelsStore.selectedChannelId;
-		const activeTab = layout.activeTab.value;
 
 		switch (actionId) {
-			case "action:new-channel": {
-				if (hostId === null) break;
-				void channelsStore.spawnChannel(hostId).catch((err: unknown) => {
-					console.error("[CommandPalette] new channel failed:", err);
-				});
-				break;
-			}
-
-			case "action:split-right": {
-				if (activeChannelId === null) break;
-				_spawnAndSplit(activeChannelId, "vertical");
-				break;
-			}
-
-			case "action:split-down": {
-				if (activeChannelId === null) break;
-				_spawnAndSplit(activeChannelId, "horizontal");
-				break;
-			}
-
-			case "action:close-tab": {
-				if (activeTab === null) break;
-				const idx = layout.tabs.value.findIndex((t) => t.id === activeTab.id);
-				if (idx !== -1) layout.closeTab(idx);
-				break;
-			}
-
 			case "action:toggle-writelock": {
 				if (activeChannelId === null) break;
 				const holdsLock = writeLockStore.isWriter(activeChannelId);
@@ -557,17 +528,15 @@ export function useCommandPalette() {
 			}
 
 			default:
-				// Delegate to external handler (add-host, settings, ssh-import, toggle-sidebar)
+				// Delegate to external handler (add-host, settings, ssh-import, toggle-sidebar),
+				// and the actions a shortcut runs (new channel, close tab, splits): the window
+				// runs them as the tab bar does, whether a row or its chord asked (#631).
 				if (onExternalAction.value !== null) {
 					onExternalAction.value(actionId);
 				} else {
 					console.warn("[CommandPalette] unknown action:", actionId);
 				}
 		}
-	}
-
-	function _spawnAndSplit(existingChannelId: string, direction: "horizontal" | "vertical"): void {
-		layout.splitPane(existingChannelId, direction);
 	}
 
 	return {

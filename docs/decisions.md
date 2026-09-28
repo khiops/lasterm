@@ -7,7 +7,21 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## APP-SHORTCUTS — tabs and panes take Windows Terminal's chords, from one table (#631, 2026-09-28)
+
+- Ctrl+Shift+T opens a new tab, Ctrl+Shift+W closes the tab, Alt+Shift+= splits the focused pane right and Alt+Shift+- splits it down. The palette and Settings › Keybindings listed Ctrl+T, Ctrl+W, Ctrl+\ and Ctrl+-, which nothing handled; those stay the shell's: transpose, delete a word, SIGQUIT and readline's undo.
+- One table, `APP_SHORTCUTS` (`utils/app-shortcuts.ts`), holds every app shortcut, the palette's included, keyed by a stable action id (`palette.open`, `tab.new`, `tab.close`, `pane.splitRight`, `pane.splitDown`), each chord as data: modifiers, and a key or a physical key. One matcher tests an event against a chord. The window's capture-phase listener runs the matching action, a terminal's key handler returns `false` for every chord of the table so none reaches a PTY, and the palette and Settings › Keybindings read their labels from the table. The table is the basis for configurable keybindings: a chord would be overridden by its id.
+- An action runs as the tab bar and the panes run it, and the palette's rows for these actions run the same code as their chords: a new tab is the "+" button's (`onAddTab`), the tab closes as its × closes it (`onCloseTab`, which deletes the ended terminals the setting says to delete), and a split is the focused pane's, under Settings' pane limit (`onSplit`). The palette's rows had their own copies, which skipped the ended terminals and the limit.
+- The split chords are matched on `ev.code`, `Equal` and `Minus`: with Shift held, `ev.key` is "+" and "_" on a US layout, and AZERTY and QWERTZ put = and - elsewhere or behind Shift. They are the two keys right of 0 on every layout, whatever it prints on them (on AZERTY, split down is Alt+Shift+)). Letters are matched on `ev.key`, so Ctrl+Shift+W is the key marked W. AltGr, reported as Ctrl+Alt, is none of the chords.
+- No other binding of the app uses these chords: search is Ctrl+Shift+F, with Alt+C, Alt+R and Alt+W while it is open, and the profile shortcuts are Ctrl+Shift+1..9. The desktop app declares no native accelerator.
+- A browser tab keeps Ctrl+Shift+T and Ctrl+Shift+W for itself (reopen a closed tab, close the window): Chrome never hands them to the page. The desktop app gets them; in a browser tab, the palette runs the same actions.
+
+---
+
 ## PALETTE-SHORTCUT — the command palette opens with Ctrl+Shift+P (#624, 2026-09-28)
+
+**Status:** the predicate `isPaletteShortcut` became the `palette.open` entry of the app's shortcut
+table (APP-SHORTCUTS), which the window and the terminals still both read. The rest holds.
 
 - Ctrl+Shift+P opens and closes the palette, as in Windows Terminal and VS Code; Cmd+Shift+P too, since the palette has always taken Cmd for Ctrl. It replaces Ctrl+K (UX-11), which the app no longer takes at all: readline's `kill-line`, nano's cut and emacs rely on it.
 - The chord never reaches a PTY. The window's capture-phase listener opens the palette and calls `preventDefault()`, but xterm does not look at `defaultPrevented`: with Ctrl+K, the terminal still sent `^K` to the shell, and in bash or nano that erased what the user was typing. So the key handler a terminal gives xterm returns `false` for the chord, on keydown, keypress and keyup alike.

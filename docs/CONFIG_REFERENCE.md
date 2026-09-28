@@ -122,8 +122,11 @@ Whether matches are marked in the scrollbar is `[terminal] scrollbar_markers`, w
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| host_rail_width | number | `48` | Host rail width in pixels |
+| host_rail_columns | integer (1–5) | `1` | Host rail columns. More than one makes the rail a grid, filled left to right, then down |
+| host_rail_badge_size | `"small"` \| `"medium"` \| `"large"` | `"medium"` | Host rail badge size: 28, 36 or 44 px. Set in *Settings › Appearance › Host rail*, global only |
 | sidebar_width | number | `200` | Channel sidebar width in pixels (0 = collapsed) |
+
+The rail's width follows from its columns and its badge size: `12 + n·badge + (n−1)·6` px, never under 48 px, so one Medium column is 48 px. Dragging the rail's edge snaps to whole columns, and a new badge size keeps the columns. `host_rail_width`, the width in pixels the rail kept before, is still read, as the Medium columns it holds (48 to 89 px is one column, 90 to 131 two), while `host_rail_columns` is not set; the first time the columns are written, it is removed.
 
 ---
 

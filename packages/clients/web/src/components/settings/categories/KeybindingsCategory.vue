@@ -25,7 +25,8 @@
 </template>
 
 <script setup lang="ts">
-import { PALETTE_SHORTCUT_KEYS } from "../../../utils/palette-shortcut.js";
+// The app's shortcuts are shown from the table the window and the terminals read (#631).
+import { shortcutKeys } from "../../../utils/app-shortcuts.js";
 
 interface Keybinding {
 	label: string;
@@ -41,22 +42,22 @@ const keybindingGroups: KeybindingGroup[] = [
 	{
 		name: "General",
 		bindings: [
-			{ label: "Command Palette", keys: [...PALETTE_SHORTCUT_KEYS] },
+			{ label: "Command Palette", keys: shortcutKeys("palette.open") },
 			{ label: "Settings", keys: ["Gear icon in sidebar"] },
 		],
 	},
 	{
 		name: "Tabs",
 		bindings: [
-			{ label: "New Channel", keys: ["Ctrl", "T"] },
-			{ label: "Close Tab", keys: ["Ctrl", "W"] },
+			{ label: "New Channel", keys: shortcutKeys("tab.new") },
+			{ label: "Close Tab", keys: shortcutKeys("tab.close") },
 		],
 	},
 	{
 		name: "Panes",
 		bindings: [
-			{ label: "Split Right", keys: ["Ctrl", "\\"] },
-			{ label: "Split Down", keys: ["Ctrl", "-"] },
+			{ label: "Split Right", keys: shortcutKeys("pane.splitRight") },
+			{ label: "Split Down", keys: shortcutKeys("pane.splitDown") },
 		],
 	},
 	{

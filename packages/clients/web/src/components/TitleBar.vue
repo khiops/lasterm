@@ -53,10 +53,11 @@ onUnmounted(() => {
 	<div v-if="isTauri" class="titlebar">
 		<!-- Drag region: only this part is draggable -->
 		<div class="titlebar-drag" @mousedown.left="startDrag" @dblclick="toggleMaximize">
-			<svg class="titlebar-icon" width="20" height="20" viewBox="0 0 1024 1024">
-				<rect x="120" y="120" width="784" height="784" rx="80" fill="#151832" stroke="#7c6fef" stroke-width="30" />
-				<text x="380" y="620" font-family="monospace" font-weight="bold" font-size="480" fill="#7c6fef">></text>
-				<text x="570" y="600" font-family="monospace" font-weight="bold" font-size="260" fill="#a0e8af">_</text>
+			<!-- packaging/brand/lasterm-icon-small.svg: the drawing made for 16 to 24 px -->
+			<svg class="titlebar-icon" width="20" height="20" viewBox="0 0 256 256" aria-hidden="true">
+				<rect x="4" y="4" width="248" height="248" rx="56" fill="#7c6fef" />
+				<polyline points="62,68 134,128 62,188" fill="none" stroke="#151832" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" />
+				<rect x="168" y="76" width="54" height="104" rx="8" fill="#9ddeb4" />
 			</svg>
 			<span class="titlebar-title">Lasterm</span>
 			<span class="titlebar-build">{{ BUILD_LABEL }}</span>

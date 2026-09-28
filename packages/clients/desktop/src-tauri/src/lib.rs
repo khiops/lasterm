@@ -1340,6 +1340,71 @@ fn set_window_tone<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, dark: bo
 #[cfg(not(windows))]
 fn set_window_tone<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>, _dark: bool) {}
 
+/// Give the window its large icon, the one the taskbar and Alt+Tab draw.
+///
+/// Tauri sets only the small one (`WM_SETICON`, `ICON_SMALL`). Without a large
+/// icon the taskbar asks the shell for the executable's, through an icon cache
+/// kept per path; once the executable has been replaced in place, that cache
+/// can answer with the generic application icon. The icon is the bundle's own,
+/// embedded by tauri-build as resource 32512, at the size the system asks for.
+/// It lives as long as the window, so it is never destroyed.
+#[cfg(windows)]
+fn set_taskbar_icon<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, IMAGE_ICON, LR_DEFAULTCOLOR,
+        SM_CXICON, SM_CYICON, WM_SETICON,
+    };
+
+    /// tauri-build's resource id for the application icon.
+    const APP_ICON_RESOURCE: usize = 32512;
+
+    let handle = match window.hwnd() {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("[lasterm] WARN: cannot reach the window to set its taskbar icon: {error}");
+            return;
+        }
+    };
+    // SAFETY: the module is this executable, alive for the process; the
+    // resource name is an integer id, as MAKEINTRESOURCE passes it; the window
+    // belongs to this process and is alive for the call.
+    unsafe {
+        let module = match GetModuleHandleW(PCWSTR::null()) {
+            Ok(module) => module,
+            Err(error) => {
+                eprintln!("[lasterm] WARN: cannot find the executable's icon: {error}");
+                return;
+            }
+        };
+        let icon = match LoadImageW(
+            Some(HINSTANCE(module.0)),
+            PCWSTR(APP_ICON_RESOURCE as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON),
+            GetSystemMetrics(SM_CYICON),
+            LR_DEFAULTCOLOR,
+        ) {
+            Ok(icon) => icon,
+            Err(error) => {
+                eprintln!("[lasterm] WARN: cannot load the executable's icon: {error}");
+                return;
+            }
+        };
+        SendMessageW(
+            HWND(handle.0 as *mut _),
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(icon.0 as isize)),
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn set_taskbar_icon<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
 /// The tone the window was last told about, for the launch that comes before
 /// the page can say it again.
 fn remembered_window_tone() -> bool {
@@ -5584,6 +5649,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         if matches!(surface_at_launch, WindowSurface::Alpha) {
             set_windows_transparent_background(window)?;
         }
+        set_taskbar_icon(window);
 
         // Enable DevTools in debug builds only
         #[cfg(debug_assertions)]

@@ -2,6 +2,7 @@ import {
 	type ChannelsConfig,
 	DEFAULT_PROFILE,
 	type FontFamily,
+	type LayoutConfig,
 	type NotificationConfig,
 	type PanesConfig,
 	type SearchConfig,
@@ -97,11 +98,6 @@ export async function injectFontFaces(families: FontFamily[]): Promise<void> {
  * Config store — holds the resolved terminal profile and available fonts.
  * Fetches both from the hub on load.
  */
-interface LayoutConfig {
-	hostRailWidth: number;
-	sidebarWidth: number;
-}
-
 interface UiConfig {
 	onChannelDead: "close" | "readonly";
 	tabs?: TabsConfig;
@@ -112,6 +108,12 @@ interface UiConfig {
 	search?: SearchConfig;
 	notifications?: NotificationConfig;
 	layout?: LayoutConfig;
+}
+
+/** The UI sections `saveUiSettings` writes. */
+interface SavedUiSections {
+	panes: PanesConfig;
+	layout: LayoutConfig;
 }
 
 export const useConfigStore = defineStore("config", () => {
@@ -238,13 +240,17 @@ export const useConfigStore = defineStore("config", () => {
 	/**
 	 * Write settings of one UI section to the hub, and take them here at once.
 	 *
-	 * For a choice made outside Settings — the old "don't ask again" about
-	 * deleting an ended terminal, carried over (#574). The hub announces the
+	 * For a choice made outside Settings' schema — the old "don't ask again"
+	 * about deleting an ended terminal, carried over (#574); the panels' sizes;
+	 * the host rail's columns and badge size (#623). The hub announces the
 	 * change, so every other window reads it again; this one does not wait for
 	 * that to act on it. A write the hub refused is undone by reading back what
 	 * it holds.
 	 */
-	async function saveUiSettings(section: "panes", values: Partial<PanesConfig>): Promise<boolean> {
+	async function saveUiSettings<S extends keyof SavedUiSections>(
+		section: S,
+		values: Partial<SavedUiSections[S]>,
+	): Promise<boolean> {
 		uiConfig.value = {
 			...uiConfig.value,
 			[section]: { ...uiConfig.value[section], ...values },

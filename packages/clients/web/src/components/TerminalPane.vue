@@ -1461,7 +1461,7 @@ watch(
 	{ immediate: true },
 );
 
-// The keys xterm must not handle itself: the palette's, search's, paste and
+// The keys xterm must not handle itself: the app's shortcuts, search's, paste and
 // copy (terminalKeyHandler). The handler runs for every key event; returning
 // false keeps the event from xterm, so the browser or our own handler acts.
 watch(terminal, (term) => {

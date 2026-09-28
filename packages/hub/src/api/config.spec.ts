@@ -83,7 +83,16 @@ describe("UI_VALUE_VALIDATORS", () => {
 		["search", "historySize", "refuses", 101],
 		["search", "position", "accepts", "bottom-bar"],
 		["search", "position", "refuses", "top-left"],
-		["layout", "hostRailWidth", "accepts", 48],
+		["layout", "hostRailColumns", "accepts", 1],
+		["layout", "hostRailColumns", "accepts", 5],
+		["layout", "hostRailColumns", "refuses", 0],
+		["layout", "hostRailColumns", "refuses", 6],
+		["layout", "hostRailColumns", "refuses", 2.5],
+		["layout", "hostRailColumns", "refuses", "3"],
+		["layout", "hostRailBadgeSize", "accepts", "small"],
+		["layout", "hostRailBadgeSize", "accepts", "large"],
+		["layout", "hostRailBadgeSize", "refuses", "huge"],
+		["layout", "hostRailBadgeSize", "refuses", 36],
 		["layout", "sidebarWidth", "accepts", 200],
 		["layout", "sidebarWidth", "refuses", -1],
 	];
@@ -134,6 +143,23 @@ describe("PUT /api/config/ui value validation", () => {
 			error: {
 				code: "VALIDATION_ERROR",
 				message: 'Unknown key "scrollbarMarkers" in UI section "search"',
+			},
+		});
+	});
+
+	// The rail keeps its columns now (#623); a width in pixels is only read,
+	// from a config.toml written before.
+	it("refuses layout.hostRailWidth, now the rail's columns", async () => {
+		const res = await server.inject({
+			method: "PUT",
+			url: "/api/config/ui",
+			payload: { layout: { hostRailWidth: 90 } },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: 'Unknown key "hostRailWidth" in UI section "layout"',
 			},
 		});
 	});

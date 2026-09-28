@@ -9,11 +9,14 @@ import {
 	countPanes,
 	findChannelByPaneId,
 	findFirstLeafPaneId,
+	hostToBringIntoView,
+	newTabOpens,
 	purgeOrphanedTabs,
 	resolveTabLabel,
 	tabIsOnHost,
 	useLayout,
 } from "./useLayout.js";
+import { EMPTY_TAB_LABEL } from "./usePaneTree.js";
 
 let layout: ReturnType<typeof useLayout>;
 let scope: ReturnType<typeof effectScope>;
@@ -1649,5 +1652,77 @@ describe("findTabForChannel", () => {
 
 		// Should fall through to the first match (tabA).
 		expect(layout.findTabForChannel("ch-A")).toBe(tabA);
+	});
+});
+
+// ── New tab (#625) ────────────────────────────────────────────────────────
+
+describe("a new tab follows [tabs] scope (#625)", () => {
+	it("opens a terminal on the host in view with perHost, the picker with global", () => {
+		expect(newTabOpens({ scope: "perHost" })).toBe("terminal");
+		expect(newTabOpens({ scope: "global" })).toBe("picker");
+		// "global" is the default.
+		expect(newTabOpens({})).toBe("picker");
+		expect(newTabOpens(undefined)).toBe("picker");
+	});
+
+	it("opens a tab whose one pane is empty, activates it, and names it", () => {
+		openTabs("A");
+		const tabId = layout.openVacantTab();
+
+		expect(layout.tabs.value.map((t) => t.id)).toEqual([expect.any(String), tabId]);
+		expect(layout.activeTab.value?.id).toBe(tabId);
+		expect(layout.layouts.value[tabId]?.type).toBe("vacant");
+		expect(layout.getActiveChannelId(tabId)).toBeNull();
+		expect(layout.getTabLabel(tabId)).toBe(EMPTY_TAB_LABEL);
+	});
+
+	it("opens it where new tabs open", () => {
+		const configStore = useConfigStore();
+		configStore.uiConfig = {
+			...configStore.uiConfig,
+			tabs: { ...configStore.uiConfig.tabs, newTabPosition: "afterActive" },
+		};
+		const [tabA] = openTabs("A", "B");
+		layout.activeTabIndex.value = layout.tabs.value.findIndex((t) => t.id === tabA);
+
+		const tabId = layout.openVacantTab();
+
+		expect(layout.tabs.value.findIndex((t) => t.id === tabId)).toBe(1);
+		expect(layout.activeTabIndex.value).toBe(1);
+	});
+
+	it("brings the host of a picked terminal into view only where the tab would leave a per-host bar", () => {
+		const pane = {
+			tabs: { scope: "perHost" as const },
+			inFront: true,
+			hostId: "pi",
+			hostInView: "web-1",
+			otherTerminalHosts: [] as Array<string | undefined>,
+		};
+		expect(hostToBringIntoView(pane)).toBe("pi");
+		// Every host's tabs are on the bar: nothing to follow.
+		expect(hostToBringIntoView({ ...pane, tabs: { scope: "global" } })).toBeNull();
+		// A split that keeps a terminal on the host in view stays on its bar.
+		expect(hostToBringIntoView({ ...pane, otherTerminalHosts: ["web-1"] })).toBeNull();
+		// A tab behind is left where it is; the host in view needs nothing.
+		expect(hostToBringIntoView({ ...pane, inFront: false })).toBeNull();
+		expect(hostToBringIntoView({ ...pane, hostId: "web-1" })).toBeNull();
+		expect(hostToBringIntoView({ ...pane, hostId: undefined })).toBeNull();
+	});
+
+	it("fills its pane even once another tab is in front", () => {
+		const tabId = layout.openVacantTab();
+		const root = layout.layouts.value[tabId];
+		const vacantId = root?.type === "vacant" ? root.id : "";
+		openTabs("B");
+		expect(layout.activeTab.value?.id).not.toBe(tabId);
+
+		// The picker's host answered while the user was elsewhere.
+		expect(layout.fillVacant(vacantId, "ch-late")).toBe(tabId);
+
+		const filled = layout.layouts.value[tabId];
+		expect(filled?.type === "terminal" && filled.channelId).toBe("ch-late");
+		expect(layout.getActiveChannelId(tabId)).toBe("ch-late");
 	});
 });

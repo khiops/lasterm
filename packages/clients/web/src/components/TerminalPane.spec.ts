@@ -107,14 +107,27 @@ describe("TerminalPane host", () => {
 	});
 
 	it("leaves props.hostId to the pane that has no channel yet", () => {
-		// One use: the fallback inside paneHostId, for a pane still owing its
-		// spawn — there the host in view is the host to spawn on.
+		// One use: the last fallback inside paneHostId, after the host its
+		// channel is on and the host its spawn is for (#625).
 		const uses = [...SOURCE.matchAll(/props\.hostId/g)];
 		expect(uses).toHaveLength(1);
 	});
 
 	it("restarts a terminal on the host it runs on", () => {
 		expect(SOURCE).toMatch(/restartChannel\(chId,\s*paneHostId\.value\)/);
+	});
+
+	// An empty pane's picker, or the palette, can open a terminal on another
+	// host than the one in view (#625): until its channel is known, the pane
+	// speaks to the host its spawn is for, profile and theme included.
+	it("speaks to the host its spawn is for until its channel is known", () => {
+		expect(SOURCE).toMatch(
+			/const spawnHostId: string \| null =[\s\S]*?channelsStore\.consumePendingSpawn\(props\.channelId\)/,
+		);
+		expect(SOURCE).toContain("return spawnHostId ?? props.hostId ?? undefined;");
+		expect(SOURCE).toContain("const pendingHostId = ref<string | null>(spawnHostId);");
+		// Read once, at setup, before anything asks for the pane's host.
+		expect(SOURCE.match(/consumePendingSpawn\(/g)).toHaveLength(1);
 	});
 });
 

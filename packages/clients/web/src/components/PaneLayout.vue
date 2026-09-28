@@ -65,8 +65,9 @@
 					:vacant-id="node.id"
 					:host-id="hostId"
 					@select-channel="(vId: string, chId: string) => emit('fill-vacant', vId, chId)"
-					@new-terminal="(vId: string) => emit('new-terminal-vacant', vId)"
+					@new-terminal="(vId: string, hId: string) => emit('new-terminal-vacant', vId, hId)"
 					@rearrange="(vId: string) => emit('rearrange-vacant', vId)"
+					@add-host="emit('add-host')"
 				/>
 				<div v-if="showDropZones" class="drop-zones">
 					<div
@@ -93,8 +94,9 @@
 				@update-ratio="(path: NodePath, ratio: number) => emit('update-ratio', path, ratio)"
 				@channel-spawned="(tempId: string, realId: string) => emit('channel-spawned', tempId, realId)"
 				@fill-vacant="(vId: string, chId: string) => emit('fill-vacant', vId, chId)"
-				@new-terminal-vacant="(vId: string) => emit('new-terminal-vacant', vId)"
+				@new-terminal-vacant="(vId: string, hId: string) => emit('new-terminal-vacant', vId, hId)"
 				@rearrange-vacant="(vId: string) => emit('rearrange-vacant', vId)"
+				@add-host="emit('add-host')"
 				@drop-pane="(sourceChId: string, targetPId: string, tTabId: string, zone: DropZone) => emit('drop-pane', sourceChId, targetPId, tTabId, zone)"
 				@focus-pane="(tId: string, pId: string) => emit('focus-pane', tId, pId)"
 				@configure-command="(chId: string) => emit('configure-command', chId)"
@@ -125,8 +127,9 @@
 				@update-ratio="(path: NodePath, ratio: number) => emit('update-ratio', path, ratio)"
 				@channel-spawned="(tempId: string, realId: string) => emit('channel-spawned', tempId, realId)"
 				@fill-vacant="(vId: string, chId: string) => emit('fill-vacant', vId, chId)"
-				@new-terminal-vacant="(vId: string) => emit('new-terminal-vacant', vId)"
+				@new-terminal-vacant="(vId: string, hId: string) => emit('new-terminal-vacant', vId, hId)"
 				@rearrange-vacant="(vId: string) => emit('rearrange-vacant', vId)"
+				@add-host="emit('add-host')"
 				@drop-pane="(sourceChId: string, targetPId: string, tTabId: string, zone: DropZone) => emit('drop-pane', sourceChId, targetPId, tTabId, zone)"
 				@focus-pane="(tId: string, pId: string) => emit('focus-pane', tId, pId)"
 				@configure-command="(chId: string) => emit('configure-command', chId)"
@@ -157,7 +160,7 @@ const props = defineProps<{
 	 * Defaults to [] (root).
 	 */
 	nodePath?: NodePath;
-	/** Current host ID — passed to VacantPane for channel filtering. */
+	/** The host in view — this tab's host, for VacantPane's picker. */
 	hostId?: string | null;
 	/** The tab's ULID — needed for cross-tab DnD and focus-pane events. */
 	tabId?: string | null;
@@ -172,8 +175,9 @@ const emit = defineEmits<{
 	(e: "update-ratio", nodePath: NodePath, ratio: number): void;
 	(e: "channel-spawned", tempId: string, realId: string): void;
 	(e: "fill-vacant", vacantId: string, channelId: string): void;
-	(e: "new-terminal-vacant", vacantId: string): void;
+	(e: "new-terminal-vacant", vacantId: string, hostId: string): void;
 	(e: "rearrange-vacant", vacantId: string): void;
+	(e: "add-host"): void;
 	(e: "drop-pane", sourceChannelId: string, targetPaneId: string, targetTabId: string, zone: DropZone): void;
 	(e: "focus-pane", tabId: string, paneId: string): void;
 	(e: "configure-command", channelId: string): void;

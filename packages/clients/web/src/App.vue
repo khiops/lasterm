@@ -287,7 +287,7 @@
 					@close-others="onCloseOthers"
 					@close-to-right="layout.closeToRight"
 					@close-all="onCloseAll"
-					@add-tab="onAddTab"
+					@add-tab="onNewTab"
 					@rename-tab="onRenameTab"
 					@split="onSplit"
 					@set-welcome="onSetWelcome"
@@ -316,6 +316,7 @@
 							@fill-vacant="onFillVacant"
 							@new-terminal-vacant="onNewTerminalVacant"
 							@rearrange-vacant="onRearrangeVacant"
+							@add-host="onAddHostFromPane"
 							@drop-pane="onDropPane"
 							@focus-pane="onFocusPane"
 							@configure-command="onConfigureCommand"
@@ -391,6 +392,8 @@ import type { DropZone } from './composables/useLayout.js';
 import {
 	collectTerminalChannelIds,
 	countPanes,
+	hostToBringIntoView,
+	newTabOpens,
 	purgeDeadTabs,
 	purgeOrphanedTabs,
 	useLayout,
@@ -643,6 +646,12 @@ commandPalette.onExternalAction.value = (actionId: string) => {
 		default:
 			console.warn('[CommandPalette] unhandled external action:', actionId);
 	}
+};
+// Enter on a host in the palette: a new tab with a terminal on it (#625). With
+// the bar showing one host's tabs, that host comes into view with it.
+commandPalette.onOpenHost.value = (hostId: string) => {
+	openPendingTab(hostId);
+	if (configStore.uiConfig.tabs?.scope === 'perHost') hostsStore.selectHost(hostId);
 };
 const hostContextMenu = ref<{
 	hostId: string;
@@ -1284,7 +1293,7 @@ function runAppAction(action: AppActionId): void {
 			commandPalette.toggle();
 			break;
 		case 'tab.new':
-			onAddTab();
+			onNewTab();
 			break;
 		case 'tab.next':
 			switchTab('next');
@@ -1718,6 +1727,19 @@ function onAddTab(): void {
 }
 
 /**
+ * The tab bar's "+" (#625). With the bar showing one host's tabs, a new tab is
+ * a terminal on that host; with every host's tabs on it, a new tab asks which
+ * host, in its one pane.
+ */
+function onNewTab(): void {
+	if (newTabOpens(configStore.uiConfig.tabs) === 'picker') {
+		layout.openVacantTab();
+		return;
+	}
+	onAddTab();
+}
+
+/**
  * Rename a tab (and its channel) via inline edit in the tab bar.
  */
 function onRenameTab(channelId: string, title: string): void {
@@ -1859,19 +1881,42 @@ function onDetachPane(channelId: string): void {
  * Fill a vacant slot with an existing channel.
  */
 function onFillVacant(vacantId: string, channelId: string): void {
-	layout.fillVacant(vacantId, channelId);
+	const tabId = layout.fillVacant(vacantId, channelId);
+	followFilledPane(tabId, channelId, channelsStore.channelHostMap.get(channelId));
 }
 
 /**
- * Spawn a new terminal in a vacant slot.
+ * Spawn a new terminal in a vacant slot, on the host its picker chose (#625).
  */
-function onNewTerminalVacant(vacantId: string): void {
-	const hostId = channelsStore.activeHostId;
-	if (hostId === null) return;
-
+function onNewTerminalVacant(vacantId: string, hostId: string): void {
 	const tempId = generateId();
 	channelsStore.registerPendingSpawn(tempId, hostId);
-	layout.fillVacant(vacantId, tempId);
+	followFilledPane(layout.fillVacant(vacantId, tempId), tempId, hostId);
+}
+
+/**
+ * With the bar showing one host's tabs, the tab in front taking a terminal on
+ * another host, and none left on the host in view, would leave the bar under
+ * the user's eyes: that host comes into view with it, as from the palette (#625).
+ */
+function followFilledPane(tabId: string | null, channelId: string, hostId: string | undefined): void {
+	if (tabId === null) return;
+	const root = layout.layouts.value[tabId];
+	const others = root ? collectTerminalChannelIds(root).filter((id) => id !== channelId) : [];
+	const host = hostToBringIntoView({
+		tabs: configStore.uiConfig.tabs,
+		inFront: tabId === layout.activeTab.value?.id,
+		hostId,
+		hostInView: channelsStore.activeHostId,
+		otherTerminalHosts: others.map((id) => channelsStore.channelHostMap.get(id)),
+	});
+	if (host !== null) hostsStore.selectHost(host);
+}
+
+/** "Add a host" in an empty pane's picker. */
+function onAddHostFromPane(): void {
+	editingHost.value = null;
+	showHostModal.value = true;
 }
 
 /**

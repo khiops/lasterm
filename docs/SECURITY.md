@@ -240,7 +240,8 @@ plain text before this: one still live stopped working, and the rest were alread
 - The jump is named **either** as a host this hub knows — which brings its own authentication and its own pinned host key, described once — **or** as a `user@host:port` spec, which authenticates through the SSH agent and is pinned on the host that jumps through it (`hosts.ssh_proxy_fingerprint`).
 - **The jump's host key is verified like any other.** It is matched against what is already trusted for it: its pin, or `known_hosts` when `[ssh] trust_known_hosts` allows. A jump nothing trusts yet is **refused**, with a message saying to connect to it once as a host of its own. A first connection is a question for a person, and this one happens on the way to somewhere else, where nobody is looking.
 - A chain (`ProxyJump a,b`) is refused rather than half-honoured: taking only the first hop would connect somewhere nobody asked for.
-- The bastion's connection ends with the connection it carries: nothing is left logged in with nothing going through it.
+- The bastion's connection ends with the connection it carries, however that one ends — closed by the hub, lost, or failed: nothing is left logged in with nothing going through it. Ending it changes nothing about what the security log says ended the carried connection (#609).
+- Every connection to a jumped host goes through its jump, reconnects included, so a host reachable only from the bastion is never dialled directly. A reconnect pins nothing: the jump's key must match what is already trusted for it (#609).
 
 ### 3.3c Questions for a person
 

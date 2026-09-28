@@ -894,10 +894,26 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 - Back in the `cat -v` tab → Alt+Shift+= splits the pane right, Alt+Shift+- splits it down; `cat` shows nothing of either
 - On an AZERTY keyboard → Alt+Shift+= splits right, Alt+Shift+) splits down
 - At Settings › Panes › Max Panes → a split says the tab is full, as the pane's own menu does
-- Ctrl+Shift+W closes the tab; an ended terminal in it is deleted or kept as Settings › Terminal says
+- Ctrl+Shift+W closes the focused pane, and the tab with its last pane (#637); an ended terminal in it is deleted or kept as Settings › Terminal says
 - In the shell → Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\ reach it (`cat -v` shows ^T, ^W, ^_, and Ctrl+\ quits it)
-- Palette (Ctrl+Shift+P) → New Channel, Close Tab, Split Right and Split Down show the same chords, and do what the chords do
+- Palette (Ctrl+Shift+P) → New Channel, Close Pane, Split Right and Split Down show the same chords, and do what the chords do; Close Tab shows none and closes the tab
 - Settings › Keybindings shows the same chords
+
+### 112. Tabs, panes and zones from the keyboard (#637)
+
+- Three tabs → Ctrl+Tab goes to the next, wrapping from the last to the first; Ctrl+Shift+Tab goes back. The keyboard is in the new tab's pane
+- Ctrl+Alt+2 goes to the second tab; Ctrl+Alt+9, and Ctrl+Alt+5 with three tabs, go to the last. With Settings › Tabs showing one host's tabs, only those count
+- On an AZERTY keyboard, cursor in `cat -v` → AltGr+3 types `#`, AltGr+0 `@`, AltGr+4 `{`, and no tab changes; left Ctrl+Alt+3 goes to the third tab
+- Split a tab in four (right, then down in each) → Alt+←/→/↑/↓ move the keyboard to the pane on that side, and nothing at the tab's edge; an empty pane takes it too, on its first control
+- `cat -v` in a pane → Alt+arrows show nothing; Ctrl+←/→ show `^[[1;5D` and `^[[1;5C`, and in bash move the cursor by word
+- Alt+Shift+→ in the left pane moves the divider right, step by step, and stops where the mouse drag stops; Alt+Shift+← in the same pane moves it left
+- Ctrl+Shift+W in a split pane closes that pane only: a live terminal stays in the sidebar, an empty pane gives its room; in the last pane, the tab closes
+- F6 from a terminal → the selected host's badge in the rail, then the selected terminal in the list, then the active tab, then back to the pane; Shift+F6 goes the other way; with the list folded away, F6 passes it over. Midnight Commander no longer receives F6
+- In the rail (three columns) → ←/→ within a row, ↑/↓ between rows over the group headers, Home and End, Enter selects the host; Esc goes back to the pane
+- In the tab bar → ←/→ move without switching, Enter or Space switches, Delete closes the tab as its × does
+- In the list → ↑/↓ move over the group headers, Enter opens the terminal and the keyboard goes into it
+- The focus ring is the theme's accent, in every theme; a mouse click shows none
+- With Settings open, F6, Alt+arrows and Ctrl+Tab do nothing behind it
 
 ---
 

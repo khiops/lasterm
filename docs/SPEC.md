@@ -227,9 +227,9 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 **Components:**
 - `HostRail` — host badges in one column, or a grid once its edge is dragged wider; click to select, right-click for settings
 - `ChannelSidebar` — channels for selected host, grouped, drag-reorder
-- `TabBar` — open channels as tabs, [+] new (Ctrl+Shift+T), × close (Ctrl+Shift+W), right-click context menu
+- `TabBar` — open channels as tabs, [+] new (Ctrl+Shift+T), × close, right-click context menu. Ctrl+Tab and Ctrl+Shift+Tab go to the next and previous tab, Ctrl+Alt+1..9 to tab N (9: the last)
 - `TerminalPane` — xterm.js instance, fit addon, badge overlay
-- `PaneSplitter` — horizontal/vertical split, drag resize. Alt+Shift+= splits the focused pane right, Alt+Shift+- down
+- `PaneSplitter` — horizontal/vertical split, drag resize. Alt+Shift+= splits the focused pane right, Alt+Shift+- down; Alt+arrows move the focus to the pane on that side, Alt+Shift+arrows move the nearest divider, and Ctrl+Shift+W closes the focused pane (the tab with its last one)
 - `CommandPalette` — Ctrl+Shift+P (Cmd+Shift+P), fuzzy search hosts/channels/actions
 - `HostModal` — add or edit a host: connection, jump host, whether it keeps an agent running, auth, shell, elevation, icon, color
 - `SettingsPanel` — settings at global, host and terminal scope (terminal, environment, appearance, keybindings, agents…)
@@ -238,9 +238,12 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 **Keyboard shortcuts:** Windows Terminal's chords, held in one table keyed by action id
 (`utils/app-shortcuts.ts`, decisions.md APP-SHORTCUTS). The window runs them wherever the keyboard
 is; a terminal's key handler keeps them from its PTY, and the palette and Settings › Keybindings show
-them from the same table. A shell keeps its own Ctrl+K, Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\. The split
-chords are matched on the physical key (`ev.code`), the two right of 0, so they are the same keys on
-every layout.
+them from the same table. A shell keeps its own Ctrl+K, Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\, and moves
+by word on Ctrl+←/→: Alt+arrows move between panes (decisions.md KEYBOARD-NAV). The split and tab
+number chords are matched on the physical key (`ev.code`), so they are the same keys on every layout,
+and no chord matches while AltGr is held, which types `#`, `@` or `{` on AZERTY. F6 and Shift+F6 move
+the keyboard between the host rail, the terminal list, the tab bar and the focused pane; within each,
+the arrow keys move between its items, and Esc goes back to the pane.
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub

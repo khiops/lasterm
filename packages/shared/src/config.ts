@@ -154,7 +154,6 @@ export interface HostRailConfig {
 
 export interface HostsDefaultsConfig {
 	defaultShell?: string;
-	historyRetentionDays?: number;
 }
 
 // ---------------------------------------------------------------------------

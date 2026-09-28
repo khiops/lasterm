@@ -45,7 +45,6 @@ export interface HostFormData {
 	color: string;
 	hostGroup: string;
 	defaultShell: string;
-	historyRetentionDays: number;
 	trustRemoteHints: "apply" | "ask" | "ignore";
 	elevationMethod: string;
 	customCommand: string;
@@ -75,7 +74,6 @@ export function useHostForm(editHost?: Host) {
 		color: editHost?.color ?? "",
 		hostGroup: editHost?.hostGroupId ?? "",
 		defaultShell: editHost?.defaultShell ?? "",
-		historyRetentionDays: editHost?.historyRetentionDays ?? 30,
 		trustRemoteHints: editHost?.trustRemoteHints ?? "apply",
 		elevationMethod: editHost?.elevationMethod ?? "",
 		customCommand: "",
@@ -289,7 +287,6 @@ export function useHostForm(editHost?: Host) {
 				...(form.value.defaultShell && {
 					default_shell: form.value.defaultShell,
 				}),
-				history_retention_days: form.value.historyRetentionDays,
 				trust_remote_hints: form.value.trustRemoteHints,
 				elevation_method: form.value.elevationMethod || null,
 				custom_command: form.value.customCommand || null,

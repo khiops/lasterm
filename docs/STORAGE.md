@@ -88,11 +88,18 @@ CREATE TABLE hosts (
 );
 ```
 
-Migration 006 added `keep_alive_seconds INTEGER DEFAULT 60`, the "Keep Alive (s)" a host used to
-show. Nothing ever read it, and the SSH keepalive is fixed (SPEC.md § 5.5), so the setting was
-removed and the hub neither reads nor writes the column. It stays, rather than being dropped by a
-migration: a hub older than that removal, opened on this database, carries on past a schema newer
-than its own (§ 9.1) and still names the column when it creates a host.
+Migration 006 added two columns that no longer back any setting:
+
+- `keep_alive_seconds INTEGER DEFAULT 60`, the "Keep Alive (s)" a host used to show. The SSH
+  keepalive is fixed (SPEC.md § 5.5).
+- `history_retention_days INTEGER DEFAULT 30`, the "History (days)" a host used to show. Spool
+  GC has bounds of its own (§ 7), and the 30 days could never have applied: every chunk older
+  than seven days is deleted.
+
+Nothing ever read either, so both settings were removed and the hub neither reads nor writes
+these columns. They stay, rather than being dropped by a migration: a hub older than those
+removals, opened on this database, carries on past a schema newer than its own (§ 9.1) and still
+names both columns when it creates a host.
 
 ### 3.2 channel_groups
 

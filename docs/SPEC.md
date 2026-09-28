@@ -409,7 +409,6 @@ Host (permanent config)
  ├── hostGroup?: string | null         // display group name
  ├── hostGroupId?: string | null       // FK → HostGroup (future)
  ├── sortOrder: number
- ├── historyRetentionDays: number      // spool.db GC policy per host
  ├── discoveredShells?: string[]       // shells found on remote at last connect
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
  ├── os: 'linux' | 'darwin' | 'windows' | null    // null = auto-detect on first connect

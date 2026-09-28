@@ -86,9 +86,6 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 			...(body.ssh_proxy_host_id !== undefined && { sshProxyHostId: body.ssh_proxy_host_id }),
 			...(body.ssh_proxy_spec !== undefined && { sshProxySpec: body.ssh_proxy_spec }),
 			...(body.ssh_remote_daemon !== undefined && { sshRemoteDaemon: body.ssh_remote_daemon }),
-			...(body.history_retention_days !== undefined && {
-				historyRetentionDays: body.history_retention_days,
-			}),
 			...(body.profile_json !== undefined && { profileJson: body.profile_json }),
 			...(body.elevation_method !== undefined && { elevationMethod: body.elevation_method }),
 			...(body.custom_command !== undefined && { customCommand: body.custom_command }),
@@ -226,8 +223,6 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 			if (body.ssh_remote_daemon !== undefined) {
 				updateInput.sshRemoteDaemon = body.ssh_remote_daemon;
 			}
-			if (body.history_retention_days !== undefined)
-				updateInput.historyRetentionDays = body.history_retention_days;
 			if (body.profile_json !== undefined) updateInput.profileJson = body.profile_json;
 			if (body.elevation_method !== undefined) {
 				if (

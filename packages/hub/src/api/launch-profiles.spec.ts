@@ -610,7 +610,6 @@ describe("resolveHostOs", () => {
 			iconType: "auto",
 			trustRemoteHints: "apply",
 			sortOrder: 0,
-			historyRetentionDays: 30,
 			os: null,
 			arch: null,
 			createdAt: "2026-01-01T00:00:00Z",

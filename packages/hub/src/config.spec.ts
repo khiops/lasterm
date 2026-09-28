@@ -32,6 +32,7 @@ import {
 	extractLogConfig,
 	extractSshConfig,
 	extractUiConfig,
+	legacyHostRailColumns,
 	legacyScrollbarMarkers,
 	loadGcConfig,
 	loadTlsConfig,
@@ -1373,6 +1374,122 @@ describe("[search] scrollbar_markers carried over to [terminal]", () => {
 		const written = readFileSync(join(dir, "config.toml"), "utf8");
 		expect(written).not.toContain("[search]");
 		expect(resolver.resolve().scrollbarMarkers).toBe(false);
+	});
+});
+
+// ─── [layout] host rail: columns and badge size (#623) ───────────────────────
+
+describe("extractUiConfig — layout section", () => {
+	it("has one Medium column by default", () => {
+		const config = extractUiConfig({});
+		expect(config.layout).toEqual({
+			hostRailColumns: 1,
+			hostRailBadgeSize: "medium",
+			sidebarWidth: 200,
+		});
+	});
+
+	it("parses host_rail_columns and host_rail_badge_size", () => {
+		const config = extractUiConfig({
+			layout: { host_rail_columns: 3, host_rail_badge_size: "small", sidebar_width: 240 },
+		});
+		expect(config.layout).toEqual({
+			hostRailColumns: 3,
+			hostRailBadgeSize: "small",
+			sidebarWidth: 240,
+		});
+	});
+
+	it("ignores columns outside 1 to 5, and a size it does not know", () => {
+		for (const columns of [0, 6, 2.5, "3"]) {
+			const config = extractUiConfig({ layout: { host_rail_columns: columns } });
+			expect(config.layout.hostRailColumns, String(columns)).toBe(1);
+		}
+		const config = extractUiConfig({ layout: { host_rail_badge_size: "huge" } });
+		expect(config.layout.hostRailBadgeSize).toBe("medium");
+	});
+});
+
+// The rail kept its width in pixels before it had columns. A width already in
+// a config.toml is read as the columns it holds while host_rail_columns is not
+// set, and dropped the first time the columns are written.
+
+describe("[layout] host_rail_width read as columns", () => {
+	let dbs: DatabaseManager;
+	let metaDal: MetaDAL;
+	let dir: string;
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		metaDal = new MetaDAL(dbs.meta);
+		dir = makeTempDir("lasterm-legacy-rail-width-");
+	});
+
+	afterEach(async () => {
+		dbs.close();
+		await removeTempDir(dir);
+	});
+
+	function loaded(toml: string): ConfigResolver {
+		writeFileSync(join(dir, "config.toml"), toml);
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(dir);
+		return resolver;
+	}
+
+	it("reads the Medium columns a width holds", () => {
+		expect(legacyHostRailColumns({ layout: { host_rail_width: 48 } })).toBe(1);
+		expect(legacyHostRailColumns({ layout: { host_rail_width: 90 } })).toBe(2);
+		expect(legacyHostRailColumns({ layout: { host_rail_width: 120 } })).toBe(2);
+		expect(legacyHostRailColumns({ layout: { host_rail_width: "wide" } })).toBeUndefined();
+		expect(legacyHostRailColumns({ layout: { host_rail_width: -1 } })).toBeUndefined();
+		expect(legacyHostRailColumns({})).toBeUndefined();
+	});
+
+	it("is the columns while host_rail_columns is not set", () => {
+		const resolver = loaded("[layout]\nhost_rail_width = 96\nsidebar_width = 220\n");
+		expect(resolver.uiConfig.layout.hostRailColumns).toBe(2);
+		expect(resolver.getGlobalUiOverrides().layout).toEqual({
+			hostRailColumns: 2,
+			sidebarWidth: 220,
+		});
+	});
+
+	it("gives way to host_rail_columns", () => {
+		const resolver = loaded("[layout]\nhost_rail_width = 96\nhost_rail_columns = 4\n");
+		expect(resolver.uiConfig.layout.hostRailColumns).toBe(4);
+	});
+
+	it("is dropped when the columns are written, and never comes back", async () => {
+		const resolver = loaded(
+			"# mine\n[layout]\nhost_rail_width = 96\nsidebar_width = 220 # where I want it\n",
+		);
+
+		await resolver.saveGlobalUi("layout", "hostRailColumns", 3);
+
+		const written = readFileSync(join(dir, "config.toml"), "utf8");
+		expect(written).not.toContain("host_rail_width");
+		expect(written).toContain("host_rail_columns = 3");
+		expect(written).toContain("sidebar_width = 220 # where I want it");
+		expect(written).toContain("# mine");
+		expect(resolver.uiConfig.layout.hostRailColumns).toBe(3);
+
+		// With the columns removed, the default holds, not the old width.
+		await resolver.saveGlobalUi("layout", "hostRailColumns", null);
+		expect(resolver.uiConfig.layout.hostRailColumns).toBe(1);
+	});
+
+	it("stays when something else in [layout] is written", async () => {
+		const resolver = loaded("[layout]\nhost_rail_width = 96\n");
+
+		await resolver.saveGlobalUi("layout", "hostRailBadgeSize", "large");
+
+		const written = readFileSync(join(dir, "config.toml"), "utf8");
+		expect(written).toContain("host_rail_width = 96");
+		expect(resolver.uiConfig.layout).toMatchObject({
+			hostRailColumns: 2,
+			hostRailBadgeSize: "large",
+		});
 	});
 });
 

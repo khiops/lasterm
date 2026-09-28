@@ -7,6 +7,7 @@ export * from "./config.js";
 export * from "./constants.js";
 export * from "./entities.js";
 export * from "./framing.js";
+export * from "./host-rail.js";
 export * from "./protocol.js";
 export * from "./sanitize.js";
 export * from "./socket-path.js";

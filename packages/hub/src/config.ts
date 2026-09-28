@@ -43,6 +43,9 @@ import {
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
+	hostRailColumnsFromLegacyWidth,
+	isHostRailBadgeSize,
+	isHostRailColumns,
 	parseAgentConfig,
 	TERMINAL_PROFILE_KEYS,
 	UI_CONFIG_SECTIONS,
@@ -392,8 +395,14 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 	const layoutSection = parsed.layout;
 	if (layoutSection != null && typeof layoutSection === "object") {
 		const raw = layoutSection as Record<string, unknown>;
-		if (typeof raw.host_rail_width === "number" && raw.host_rail_width >= 0) {
-			config.layout.hostRailWidth = raw.host_rail_width;
+		const legacyColumns = legacyHostRailColumns(parsed);
+		if (isHostRailColumns(raw.host_rail_columns)) {
+			config.layout.hostRailColumns = raw.host_rail_columns;
+		} else if (legacyColumns !== undefined) {
+			config.layout.hostRailColumns = legacyColumns;
+		}
+		if (isHostRailBadgeSize(raw.host_rail_badge_size)) {
+			config.layout.hostRailBadgeSize = raw.host_rail_badge_size;
 		}
 		if (typeof raw.sidebar_width === "number" && raw.sidebar_width >= 0) {
 			config.layout.sidebarWidth = raw.sidebar_width;
@@ -814,6 +823,38 @@ function holdsLegacyScrollbarMarkers(toml: string): boolean {
 	}
 }
 
+// ─── [layout] host_rail_width, read as columns (#623) ────────────────────────
+
+/**
+ * The columns held by the width the host rail kept before it had columns,
+ * `[layout] host_rail_width` in pixels, of Medium badges.
+ *
+ * It stands while `host_rail_columns` is not set, and the first time the
+ * columns are written it is removed.
+ */
+export function legacyHostRailColumns(parsed: TOML.JsonMap): number | undefined {
+	const section = parsed.layout;
+	if (section == null || typeof section !== "object") return undefined;
+	const width = (section as Record<string, unknown>).host_rail_width;
+	return typeof width === "number" && width >= 0
+		? hostRailColumnsFromLegacyWidth(width)
+		: undefined;
+}
+
+/** Whether a `config.toml` text still holds that width. A malformed one does not. */
+function holdsLegacyHostRailWidth(toml: string): boolean {
+	try {
+		const section = TOML.parse(toml).layout;
+		return (
+			section != null &&
+			typeof section === "object" &&
+			(section as Record<string, unknown>).host_rail_width !== undefined
+		);
+	} catch {
+		return false;
+	}
+}
+
 // ─── ConfigResolver ──────────────────────────────────────────────────────────
 
 export class ConfigResolver {
@@ -1115,7 +1156,15 @@ export class ConfigResolver {
 		if (!(UI_CONFIG_SECTIONS as readonly string[]).includes(section)) {
 			throw new Error(`Unknown UI section: ${section}`);
 		}
-		await this.saveGlobalKey(section, key, value);
+		this.editConfigFile((toml) => {
+			const next = setTomlKey(toml, section, key, value);
+			// The columns now speak for the rail's width, set or removed: the old
+			// width in pixels goes with this write, so that it is carried over
+			// once and never comes back when the columns are removed (#623).
+			return section === "layout" && key === "hostRailColumns" && holdsLegacyHostRailWidth(next)
+				? setTomlKey(next, "layout", "hostRailWidth", null)
+				: next;
+		});
 	}
 
 	/**

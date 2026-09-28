@@ -414,7 +414,7 @@ import { loadDesktopVersion } from './utils/desktop-version.js';
 import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
-import { isPaletteShortcut } from './utils/palette-shortcut.js';
+import { type AppActionId, appShortcutOf } from './utils/app-shortcuts.js';
 
 const authStore = useAuthStore();
 const sessionStore = useSessionStore();
@@ -581,9 +581,22 @@ watch(
 	{ immediate: true },
 );
 
-// Wire up palette external actions (add-host, settings, ssh-import, toggle-sidebar, pairing-code)
+// Wire up palette external actions (add-host, settings, ssh-import, toggle-sidebar, pairing-code),
+// and the rows of the actions a shortcut runs, so a row and its chord do the same (#631).
 commandPalette.onExternalAction.value = (actionId: string) => {
 	switch (actionId) {
+		case 'action:new-channel':
+			runAppAction('tab.new');
+			break;
+		case 'action:close-tab':
+			runAppAction('tab.close');
+			break;
+		case 'action:split-right':
+			runAppAction('pane.splitRight');
+			break;
+		case 'action:split-down':
+			runAppAction('pane.splitDown');
+			break;
 		case 'action:add-host':
 			editingHost.value = null;
 			showHostModal.value = true;
@@ -1169,14 +1182,16 @@ function isPtyFocused(): boolean {
 
 /**
  * Global keydown handler attached to the app root.
- * Intercepts Ctrl+Shift+P (Cmd+Shift+P) to toggle the palette (#624). A terminal's
- * key handler keeps that chord from its PTY, since xterm ignores preventDefault.
+ * Runs the app's shortcuts (utils/app-shortcuts.ts: the palette, new and close tab,
+ * split right and down), wherever the keyboard is (#624, #631). A terminal's key
+ * handler keeps those chords from its PTY, since xterm ignores preventDefault.
  * Intercepts Ctrl+Shift+1..9 to spawn profile N (INV-13: only when PTY is NOT focused).
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
-	if (isPaletteShortcut(event)) {
+	const shortcut = appShortcutOf(event);
+	if (shortcut !== null) {
 		event.preventDefault();
-		commandPalette.toggle();
+		runAppAction(shortcut);
 		return;
 	}
 
@@ -1194,6 +1209,33 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 
 	if (event.key === 'Escape' && showSettings.value) {
 		showSettings.value = false;
+	}
+}
+
+/**
+ * An app shortcut's action, which the palette's row for it runs too: what the
+ * tab bar and the panes do. A new tab is the "+" button's, the tab closes as
+ * its × closes it, and the split is the focused pane's, under the pane limit.
+ */
+function runAppAction(action: AppActionId): void {
+	const tab = layout.activeTab.value;
+	const pane = tab === null ? null : layout.getActiveChannelId(tab.id);
+	switch (action) {
+		case 'palette.open':
+			commandPalette.toggle();
+			break;
+		case 'tab.new':
+			onAddTab();
+			break;
+		case 'tab.close':
+			if (tab !== null) onCloseTab(layout.activeTabIndex.value);
+			break;
+		case 'pane.splitRight':
+			if (pane !== null) onSplit(pane, 'vertical');
+			break;
+		case 'pane.splitDown':
+			if (pane !== null) onSplit(pane, 'horizontal');
+			break;
 	}
 }
 

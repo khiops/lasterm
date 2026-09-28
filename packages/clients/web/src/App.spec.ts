@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import SOURCE from "./App.vue?raw";
+import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
 
 /**
@@ -77,14 +78,16 @@ describe("the panes on screen", () => {
 	});
 });
 
-// Ctrl+K opened the palette and still reached the shell as ^K (#624). What the
-// chord is, and that a terminal keeps it from its PTY, is tested in
-// utils/palette-shortcut.spec.ts and utils/terminal-keys.spec.ts.
-describe("the window's shortcut for the palette", () => {
-	it("toggles the palette on the palette's chord, and takes it", () => {
-		const onGlobalKeydown = body(/function onGlobalKeydown\(/);
-		expect(onGlobalKeydown.replace(/\s+/g, " ")).toContain(
-			"if (isPaletteShortcut(event)) { event.preventDefault(); commandPalette.toggle(); return; }",
+// Ctrl+K opened the palette and still reached the shell as ^K (#624), and the
+// shortcuts listed for tabs and panes did nothing (#631). What the chords are,
+// and that a terminal keeps them from its PTY, is tested in
+// utils/app-shortcuts.spec.ts and utils/terminal-keys.spec.ts.
+describe("the window's shortcuts", () => {
+	const flat = (text: string): string => text.replace(/\s+/g, " ");
+
+	it("runs an app shortcut's action on its chord, and takes the chord", () => {
+		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
+			"const shortcut = appShortcutOf(event); if (shortcut !== null) { event.preventDefault(); runAppAction(shortcut); return; }",
 		);
 		// Before an element's own handler can stop it.
 		expect(SOURCE).toContain(
@@ -92,9 +95,43 @@ describe("the window's shortcut for the palette", () => {
 		);
 	});
 
+	// The tab bar's "+" and ×, and a pane's split, are these same handlers.
+	it("runs each action of the table as the tab bar and the panes do", () => {
+		const runAppAction = flat(body(/function runAppAction\(/));
+		const actions: Record<AppActionId, string> = {
+			"palette.open": "commandPalette.toggle();",
+			"tab.new": "onAddTab();",
+			"tab.close": "if (tab !== null) onCloseTab(layout.activeTabIndex.value);",
+			"pane.splitRight": "if (pane !== null) onSplit(pane, 'vertical');",
+			"pane.splitDown": "if (pane !== null) onSplit(pane, 'horizontal');",
+		};
+		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
+			expect(runAppAction).toContain(`case '${id}': ${actions[id]} break;`);
+		}
+		// The split is the focused pane's, in the tab shown.
+		expect(runAppAction).toContain(
+			"const tab = layout.activeTab.value; const pane = tab === null ? null : layout.getActiveChannelId(tab.id);",
+		);
+		expect(SOURCE).toContain('@add-tab="onAddTab"');
+		expect(SOURCE).toContain('@close-tab="onCloseTab"');
+		expect(SOURCE).toContain('@split="onSplit"');
+	});
+
+	it("runs the palette's rows for those actions the same way", () => {
+		const text = flat(SOURCE);
+		for (const [row, id] of [
+			["action:new-channel", "tab.new"],
+			["action:close-tab", "tab.close"],
+			["action:split-right", "pane.splitRight"],
+			["action:split-down", "pane.splitDown"],
+		]) {
+			expect(text).toContain(`case '${row}': runAppAction('${id}'); break;`);
+		}
+	});
+
 	it("no longer takes Ctrl+K from the shell", () => {
 		const onGlobalKeydown = body(/function onGlobalKeydown\(/);
 		expect(onGlobalKeydown).not.toMatch(/event\.key === ['"]k['"]/i);
-		expect(onGlobalKeydown.match(/commandPalette\.toggle\(\)/g)).toHaveLength(1);
+		expect(onGlobalKeydown).not.toContain("commandPalette.toggle()");
 	});
 });

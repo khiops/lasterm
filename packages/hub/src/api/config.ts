@@ -5,6 +5,8 @@ import {
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
+	isHostRailBadgeSize,
+	isHostRailColumns,
 	SSH_CONFIG_KEYS,
 	TERMINAL_PROFILE_KEYS,
 	UI_CONFIG_SECTIONS,
@@ -61,7 +63,8 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 		historySize: (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 100,
 	},
 	layout: {
-		hostRailWidth: (v) => typeof v === "number" && Number.isInteger(v) && v >= 0,
+		hostRailColumns: isHostRailColumns,
+		hostRailBadgeSize: isHostRailBadgeSize,
 		sidebarWidth: (v) => typeof v === "number" && Number.isInteger(v) && v >= 0,
 	},
 };
@@ -175,7 +178,7 @@ export function registerConfigRoutes(
 				}
 
 				for (const [key, value] of Object.entries(sectionData as Record<string, unknown>)) {
-					await configResolver.saveGlobalKey(section, key, value);
+					await configResolver.saveGlobalUi(section, key, value);
 				}
 			}
 

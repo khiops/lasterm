@@ -220,12 +220,12 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 
 | Column | Width | Content |
 |--------|-------|---------|
-| Host rail | 48px | Host icons (auto-initial + color), status dots, settings, [+] add |
+| Host rail | 1 to 5 columns (48px: one, Medium) | Host icons (auto-initial + color), status dots, settings, [+] add |
 | Channel sidebar | ~200px | Channels grouped by user-defined categories, collapsible |
 | Main area | Remaining | Tab bar + split terminal panes |
 
 **Components:**
-- `HostRail` — vertical icon list, click to select, right-click for settings
+- `HostRail` — host badges in one column, or a grid once its edge is dragged wider; click to select, right-click for settings
 - `ChannelSidebar` — channels for selected host, grouped, drag-reorder
 - `TabBar` — open channels as tabs, [+] new (Ctrl+Shift+T), × close (Ctrl+Shift+W), right-click context menu
 - `TerminalPane` — xterm.js instance, fit addon, badge overlay

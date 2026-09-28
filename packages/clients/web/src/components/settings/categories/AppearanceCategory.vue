@@ -108,18 +108,58 @@
 					/>
 				</SettingRow>
 			</section>
+
+			<!-- Host rail (global scope only: one rail for every host, #623) -->
+			<section v-if="scope === 'global'" class="settings-section">
+				<h3 class="section-title">Host rail</h3>
+				<SettingRow
+					label="Badge size"
+					description="How big each host badge is in the rail. The rail keeps its columns, and its width follows."
+					:scope="scope"
+					:is-overridden="true"
+				>
+					<div
+						class="badge-size"
+						role="radiogroup"
+						aria-label="Badge size"
+					>
+						<label
+							v-for="option in BADGE_SIZE_OPTIONS"
+							:key="option.value"
+							class="badge-size-option"
+							:class="{ 'badge-size-option--on': badgeSize === option.value }"
+						>
+							<input
+								type="radio"
+								name="host-rail-badge-size"
+								:value="option.value"
+								:checked="badgeSize === option.value"
+								@change="onBadgeSizeChange(option.value)"
+							/>
+							{{ option.label }}
+						</label>
+					</div>
+				</SettingRow>
+			</section>
 		</template>
 	</div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, reactive, watch } from "vue";
-import type { AppearanceConfig, LastermTheme } from "@lasterm/shared";
+import {
+	type AppearanceConfig,
+	DEFAULT_LAYOUT_CONFIG,
+	type HostRailBadgeSize,
+	isHostRailBadgeSize,
+	type LastermTheme,
+} from "@lasterm/shared";
 import ThemePicker from "../ThemePicker.vue";
 import ThemeEditor from "../ThemeEditor.vue";
 import SettingRow from "../SettingRow.vue";
 import SettingControl from "../SettingControl.vue";
 import { useAutoSwitch } from "../../../composables/useAutoSwitch.js";
+import { useConfigStore } from "../../../stores/config.js";
 import { useThemeStore } from "../../../stores/theme.js";
 import { useSettingsStore } from "../../../stores/settings.js";
 import type { Scope } from "../../../stores/settings.js";
@@ -130,6 +170,7 @@ const props = defineProps<{
 
 const themeStore = useThemeStore();
 const settingsStore = useSettingsStore();
+const configStore = useConfigStore();
 const autoSwitch = useAutoSwitch();
 
 // ── Editor state ──────────────────────────────────────────────────────
@@ -373,6 +414,25 @@ function onScrollbarChange(value: unknown) {
 		},
 	});
 }
+
+// ── Host rail ─────────────────────────────────────────────────────────
+
+const BADGE_SIZE_OPTIONS: { label: string; value: HostRailBadgeSize }[] = [
+	{ label: "Small", value: "small" },
+	{ label: "Medium", value: "medium" },
+	{ label: "Large", value: "large" },
+];
+
+/** `[layout] host_rail_badge_size`: a UI setting, so global only. */
+const badgeSize = computed<HostRailBadgeSize>(() => {
+	const size = configStore.uiConfig.layout?.hostRailBadgeSize;
+	return isHostRailBadgeSize(size) ? size : DEFAULT_LAYOUT_CONFIG.hostRailBadgeSize;
+});
+
+function onBadgeSizeChange(size: HostRailBadgeSize) {
+	if (size === badgeSize.value) return;
+	void configStore.saveUiSettings("layout", { hostRailBadgeSize: size });
+}
 </script>
 
 <style scoped>
@@ -429,5 +489,52 @@ function onScrollbarChange(value: unknown) {
 	background: var(--nt-hover);
 	border-color: var(--nt-accent);
 	color: var(--nt-accent);
+}
+
+/* Badge size: segments, the chosen one filled with the accent, as the exit
+   card's "Always do this" scopes are. */
+.badge-size {
+	display: inline-flex;
+	flex-shrink: 0;
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.badge-size-option {
+	position: relative;
+	padding: 4px 12px;
+	font-size: 12px;
+	background: transparent;
+	color: var(--nt-text-strong);
+	cursor: pointer;
+}
+
+.badge-size-option + .badge-size-option {
+	border-left: 1px solid var(--nt-border);
+}
+
+.badge-size-option:not(.badge-size-option--on):hover {
+	background: var(--nt-hover);
+}
+
+.badge-size-option--on {
+	background: var(--nt-accent);
+	color: var(--nt-accent-fg);
+}
+
+/* The radio itself is not drawn; the segment is. It stays in the page for the
+   keyboard and screen readers. */
+.badge-size-option input {
+	position: absolute;
+	inset: 0;
+	margin: 0;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.badge-size-option:has(input:focus-visible) {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 </style>

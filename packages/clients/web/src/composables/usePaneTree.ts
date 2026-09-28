@@ -33,6 +33,9 @@ export type NodePath = Array<"first" | "second">;
 /** Hard invariant INV-10: maximum panes per tab. Not user-configurable. */
 export const MAX_PANE_COUNT = 4;
 
+/** The name of a tab with no terminal in it, only empty panes. */
+export const EMPTY_TAB_LABEL = "New tab";
+
 // ---------------------------------------------------------------------------
 // Migration helpers (used by useLayout persistence layer)
 // ---------------------------------------------------------------------------
@@ -571,7 +574,8 @@ export function usePaneTree(
 	function getTabLabel(tabId: string): string {
 		const channelsStore = useChannelsStore();
 		const channelId = getActiveChannelId(tabId);
-		if (channelId === null) return DEFAULT_CHANNEL_NAME;
+		// No terminal in it: its panes are empty, and ask what goes in them (#625).
+		if (channelId === null) return EMPTY_TAB_LABEL;
 		return resolveTabLabel(channelId, channelsStore.channels, channelsStore.channelIndex);
 	}
 
@@ -617,23 +621,33 @@ export function usePaneTree(
 	/**
 	 * Fill a vacant slot with a channel.
 	 * After filling, set the active pane to the new pane.
+	 *
+	 * The slot is looked for in the active tab first, then in the others: an
+	 * empty pane's picker can fill it once a host answers (#625), and by then
+	 * its tab may no longer be the one in front. Returns the tab filled, or null.
 	 */
-	function fillVacant(vacantId: string, channelId: string): void {
-		const tab = activeTab.value;
-		if (tab === null) return;
+	function fillVacant(vacantId: string, channelId: string): string | null {
+		const active = activeTab.value;
+		const tabIds = [
+			...(active === null ? [] : [active.id]),
+			...tabs.value.map((tab) => tab.id).filter((id) => id !== active?.id),
+		];
+		for (const tabId of tabIds) {
+			const root = layouts.value[tabId];
+			if (root === null || root === undefined) continue;
 
-		const root = layouts.value[tab.id];
-		if (root === null || root === undefined) return;
+			const path = findVacantPath(root, vacantId);
+			if (path === null) continue;
 
-		const path = findVacantPath(root, vacantId);
-		if (path === null) return;
-
-		const newPaneId = generateId();
-		const replacement: PaneNode = { type: "terminal", channelId, paneId: newPaneId };
-		const newRoot = setNodeAtPath(root, path, replacement);
-		layouts.value = { ...layouts.value, [tab.id]: newRoot };
-		// Set active pane to the newly filled pane
-		activePaneIds.value = { ...activePaneIds.value, [tab.id]: newPaneId };
+			const newPaneId = generateId();
+			const replacement: PaneNode = { type: "terminal", channelId, paneId: newPaneId };
+			const newRoot = setNodeAtPath(root, path, replacement);
+			layouts.value = { ...layouts.value, [tabId]: newRoot };
+			// Set active pane to the newly filled pane
+			activePaneIds.value = { ...activePaneIds.value, [tabId]: newPaneId };
+			return tabId;
+		}
+		return null;
 	}
 
 	/**

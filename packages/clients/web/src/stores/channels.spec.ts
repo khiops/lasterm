@@ -709,6 +709,28 @@ describe("useChannelsStore — spawnChannel autoGroup", () => {
 		expect(msg.type).toBe("SPAWN");
 		expect(msg.groupId).toBeUndefined();
 	});
+
+	// An empty pane opens terminals on any host (#625): the pane over one on a
+	// host not in view reads its host, for its profile and theme, before any
+	// listing has named it.
+	it("knows a spawned terminal's host as soon as SPAWN_OK answers", async () => {
+		mockFetch.mockImplementation(() =>
+			Promise.resolve({ ok: true, json: () => Promise.resolve([]) }),
+		);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		const sessionStore = useSessionStore();
+		const { on, send } = setupWsClient([]);
+		// @ts-expect-error — overwrite reactive wsClient for test
+		sessionStore.wsClient = { on, send };
+
+		const channelId = await store.spawnChannel("host-2", { select: false });
+
+		expect(channelId).toBe("ch-new");
+		expect(store.channelHostMap.get("ch-new")).toBe("host-2");
+		expect(store.activeHostId).toBe("host-1");
+	});
 });
 
 describe("useChannelsStore — spawnChannel agent sync handling", () => {

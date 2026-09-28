@@ -5,6 +5,7 @@ import { useHostsStore } from "../stores/hosts.js";
 import { useProfilesStore } from "../stores/profiles.js";
 import { useWriteLockStore } from "../stores/writelock.js";
 import { formatConnectionString } from "../utils/host-display.js";
+import { useHostRows } from "./useHostRows.js";
 import { useLayout } from "./useLayout.js";
 import { useRecentPaletteItems } from "./useRecentPaletteItems.js";
 
@@ -23,6 +24,93 @@ export interface PaletteItem {
 	shortcut?: string;
 	/** Opaque payload used by execute() */
 	payload?: unknown;
+	/** A host's heading in the rail — "Local", its group, "Ungrouped" — which the list shows it under (#625). */
+	section?: string;
+}
+
+/** How a chosen item is acted on: Shift+Enter on a host only switches to it (#625). */
+export interface ExecuteOptions {
+	switchOnly?: boolean;
+}
+
+/**
+ * The results in the order they are shown, which ↑ and ↓ follow: each type
+ * together, the types in the order of their best match, and the hosts in the
+ * rail's order under its headings (#625). Within the other types, the best
+ * match first.
+ */
+export function arrangeForDisplay(
+	items: readonly PaletteItem[],
+	hostOrder: ReadonlyMap<string, number>,
+): PaletteItem[] {
+	const blocks = new Map<PaletteItemType, PaletteItem[]>();
+	for (const item of items) {
+		const block = blocks.get(item.type);
+		if (block === undefined) blocks.set(item.type, [item]);
+		else block.push(item);
+	}
+	const rank = (item: PaletteItem): number =>
+		hostOrder.get(item.payload as string) ?? Number.MAX_SAFE_INTEGER;
+	blocks.get("host")?.sort((a, b) => rank(a) - rank(b));
+	return [...blocks.values()].flat();
+}
+
+/** A line of the palette's list: a heading, or a result with its index in `results`. */
+export type PaletteRow =
+	| { kind: "heading"; key: string; label: string; sub: boolean }
+	| { kind: "item"; key: string; item: PaletteItem; index: number };
+
+/** What a block of results is headed by. */
+export function paletteGroupLabel(group: PaletteItemType | "recent"): string {
+	switch (group) {
+		case "recent":
+			return "Recent";
+		case "host":
+			return "Hosts";
+		case "channel":
+			return "Channels";
+		case "action":
+			return "Actions";
+		case "profile":
+			return "Profiles";
+	}
+}
+
+/**
+ * The palette's list as shown: the recent items first under "Recent", then
+ * each type under its heading, and the hosts under their rail headings too
+ * (#625). `results` is already in this order (`arrangeForDisplay`), so a row's
+ * index is its place for ↑ and ↓.
+ */
+export function paletteRows(results: readonly PaletteItem[], recentCount: number): PaletteRow[] {
+	const rows: PaletteRow[] = [];
+	let group: PaletteItemType | "recent" | null = null;
+	let section: string | null = null;
+	results.forEach((item, index) => {
+		const inRecent = index < recentCount;
+		const itemGroup = inRecent ? "recent" : item.type;
+		if (itemGroup !== group) {
+			rows.push({
+				kind: "heading",
+				key: `group:${itemGroup}`,
+				label: paletteGroupLabel(itemGroup),
+				sub: false,
+			});
+			group = itemGroup;
+			section = null;
+		}
+		if (
+			!inRecent &&
+			item.type === "host" &&
+			item.section !== undefined &&
+			item.section !== section
+		) {
+			rows.push({ kind: "heading", key: `section:${index}`, label: item.section, sub: true });
+			section = item.section;
+		}
+		rows.push({ kind: "item", key: item.id, item, index });
+	});
+	return rows;
 }
 
 // ─── Fuzzy Scoring Constants (INV-08) ─────────────────────────────────────────
@@ -102,6 +190,10 @@ const selectedIndex = ref(0);
 // Module-level callback for external actions (add-host, settings, etc.)
 const onExternalAction = ref<((actionId: string) => void) | null>(null);
 
+// Module-level callback that opens a new tab with a terminal on a host (#625):
+// the layout that holds the tabs is App.vue's.
+const onOpenHost = ref<((hostId: string) => void) | null>(null);
+
 // ─── Composable ───────────────────────────────────────────────────────────────
 
 export function useCommandPalette() {
@@ -111,6 +203,7 @@ export function useCommandPalette() {
 	const _authStore = useAuthStore();
 	const profilesStore = useProfilesStore();
 	const layout = useLayout();
+	const hostRows = useHostRows();
 	const { recentIds, pushRecent } = useRecentPaletteItems();
 
 	// ── Result computation ────────────────────────────────────────────────────
@@ -137,6 +230,7 @@ export function useCommandPalette() {
 					const desc = h.type === "ssh" ? formatConnectionString(h) : "Local";
 					const hostIcon = h.iconType === "emoji" && h.iconValue ? h.iconValue : "🖥";
 					const hostIconUrl = h.iconType === "image" && h.iconValue ? h.iconValue : undefined;
+					const section = hostRows.railSectionName.value.get(h.id);
 					scored.push({
 						item: {
 							id: `host:${h.id}`,
@@ -146,6 +240,7 @@ export function useCommandPalette() {
 							icon: hostIcon,
 							...(hostIconUrl !== undefined && { iconUrl: hostIconUrl }),
 							payload: h.id,
+							...(section !== undefined && { section }),
 						},
 						score,
 					});
@@ -279,9 +374,13 @@ export function useCommandPalette() {
 		// Sort by score descending (INV-04: deterministic)
 		scored.sort((a, b) => b.score - a.score);
 
+		const allItems = arrangeForDisplay(
+			scored.map((s) => s.item),
+			hostRows.railOrder.value,
+		);
+
 		// When query is empty and no prefix, recent items float to the top (SC-21)
 		if (!q && prefix === null && recentIds.value.length > 0) {
-			const allItems = scored.map((s) => s.item);
 			const recentSet = new Set(recentIds.value);
 
 			// Filter for items whose IDs are in recent list (SC-24b: deletes are filtered)
@@ -294,7 +393,7 @@ export function useCommandPalette() {
 			return [...recentItems, ...remainingItems];
 		}
 
-		return scored.map((s) => s.item);
+		return allItems;
 	});
 
 	// ── Recent items section (exposed for component "Recent" heading) ──────────
@@ -356,7 +455,7 @@ export function useCommandPalette() {
 
 	// ── Execute ───────────────────────────────────────────────────────────────
 
-	function execute(item: PaletteItem): void {
+	function execute(item: PaletteItem, options: ExecuteOptions = {}): void {
 		// Track in recent items (INV-07)
 		pushRecent(item.id);
 		close();
@@ -364,7 +463,10 @@ export function useCommandPalette() {
 		switch (item.type) {
 			case "host": {
 				const hostId = item.payload as string;
-				hostsStore.selectHost(hostId);
+				// Enter opens a new terminal on it, as the empty pane does; Shift+Enter
+				// only switches to it, which is what choosing a host used to do (#625).
+				if (options.switchOnly === true) hostsStore.selectHost(hostId);
+				else openOnHost(hostId);
 				break;
 			}
 
@@ -387,11 +489,25 @@ export function useCommandPalette() {
 		}
 	}
 
-	function executeSelected(): void {
+	function executeSelected(options: ExecuteOptions = {}): void {
 		const item = results.value[selectedIndex.value];
 		if (item !== undefined) {
-			execute(item);
+			execute(item, options);
 		}
+	}
+
+	/**
+	 * A new tab with a terminal on this host: App.vue's, which holds the tabs;
+	 * without it, the store's spawn, whose selection opens the tab.
+	 */
+	function openOnHost(hostId: string): void {
+		if (onOpenHost.value !== null) {
+			onOpenHost.value(hostId);
+			return;
+		}
+		void channelsStore.spawnChannel(hostId).catch((err: unknown) => {
+			console.error("[CommandPalette] new terminal on host failed:", err);
+		});
 	}
 
 	// ── Internal action dispatch ──────────────────────────────────────────────
@@ -461,6 +577,7 @@ export function useCommandPalette() {
 		recentResults,
 		selectedIndex,
 		onExternalAction,
+		onOpenHost,
 		open,
 		close,
 		toggle,

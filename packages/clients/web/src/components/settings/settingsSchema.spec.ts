@@ -40,11 +40,14 @@ describe("settingsSchema", () => {
 			expect(getSchemaForCategoryScope("panes", "channel")).toHaveLength(0);
 		});
 
-		it("should return search settings only for global scope", () => {
+		it("should return search settings for global scope, and only scrollbar markers below it", () => {
 			const result = getSchemaForCategoryScope("search", "global");
-			expect(result.length).toBeGreaterThan(0);
-			expect(getSchemaForCategoryScope("search", "host")).toHaveLength(0);
-			expect(getSchemaForCategoryScope("search", "channel")).toHaveLength(0);
+			expect(result.length).toBeGreaterThan(1);
+			for (const scope of ["host", "channel"]) {
+				expect(getSchemaForCategoryScope("search", scope).map((d) => d.key)).toEqual([
+					"scrollbarMarkers",
+				]);
+			}
 		});
 
 		it("should return startup settings only for global scope", () => {
@@ -115,6 +118,30 @@ describe("settingsSchema", () => {
 				).toBe(false);
 				sectionKeys.add(def.key);
 			}
+		});
+	});
+
+	// Settings wrote `[search] scrollbar_markers`, and the terminals read
+	// `[terminal] scrollbar_markers`: the toggle changed nothing (#614). It is
+	// the terminal key, cascaded like the others, shown under Search.
+	describe("Scrollbar Markers", () => {
+		const markers = settingsSchema.find((d) => d.key === "scrollbarMarkers");
+
+		it("writes the terminal profile's key, at every scope", () => {
+			expect(markers).toMatchObject({
+				category: "search",
+				section: "terminal",
+				scopes: ["global", "host", "channel"],
+			});
+			if (!markers) return;
+			expect(toStoreParams(markers)).toEqual({
+				storeSection: "terminal",
+				storeKey: "scrollbarMarkers",
+			});
+		});
+
+		it("is the only setting of that name", () => {
+			expect(settingsSchema.filter((d) => d.key === "scrollbarMarkers")).toHaveLength(1);
 		});
 	});
 

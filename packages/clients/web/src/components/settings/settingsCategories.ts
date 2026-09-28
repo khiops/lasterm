@@ -16,7 +16,8 @@ export const ALL_CATEGORIES: CategoryDef[] = [
 	{ id: "confirmations", label: "Confirmations", scopes: ["global"] },
 	{ id: "channels", label: "Channels", scopes: ["global"] },
 	{ id: "panes", label: "Panes", scopes: ["global"] },
-	{ id: "search", label: "Search", scopes: ["global"] },
+	// Per host and per terminal it holds Scrollbar Markers alone (#614).
+	{ id: "search", label: "Search", scopes: ["global", "host", "channel"] },
 	{ id: "startup", label: "Startup", scopes: ["global"] },
 	{ id: "elevation", label: "Elevation", scopes: ["global"] },
 	{ id: "desktop", label: "Desktop", scopes: ["global"], desktopOnly: true },

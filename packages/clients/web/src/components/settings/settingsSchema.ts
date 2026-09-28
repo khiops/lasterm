@@ -4,7 +4,10 @@ export interface SettingDefinition {
 	label: string;
 	description?: string;
 	type: "text" | "number" | "select" | "toggle" | "range" | "color" | "font";
-	/** UI category for navigation (e.g. "terminal", "tabs") */
+	/**
+	 * UI category for navigation (e.g. "terminal", "tabs"). Where the setting is
+	 * shown, not where it is stored: that is `section`.
+	 */
 	category: string;
 	/**
 	 * Config section name.
@@ -287,6 +290,9 @@ export const settingsSchema: SettingDefinition[] = [
 	},
 
 	// ─── Search category (global only, UI config) ──────────────────────
+	// Scrollbar Markers excepted: a terminal-profile key, cascaded like the
+	// Terminal category's, so this category is also offered per host and per
+	// terminal, with that one setting (#614).
 	{
 		key: "position",
 		label: "Search Position",
@@ -314,12 +320,13 @@ export const settingsSchema: SettingDefinition[] = [
 		],
 	},
 	{
+		// `[terminal] scrollbar_markers`, the key the terminals read.
 		key: "scrollbarMarkers",
 		label: "Scrollbar Markers",
 		type: "toggle",
 		category: "search",
-		section: "search",
-		scopes: ["global"],
+		section: "terminal",
+		scopes: ["global", "host", "channel"],
 		description: "Show search results in scrollbar",
 	},
 	{

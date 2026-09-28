@@ -139,10 +139,14 @@ export interface TitleConfig {
 	windowFormat?: string;
 }
 
+/**
+ * `[search]`. Whether matches are marked in the scrollbar is not set here: it
+ * is the terminal profile's `scrollbarMarkers`, which a host or a terminal can
+ * override (#614).
+ */
 export interface SearchConfig {
 	position?: "top-right" | "bottom-right" | "bottom-bar";
 	highlightOnClose?: "clear" | "fade" | "persist";
-	scrollbarMarkers?: boolean;
 	historySize?: number;
 }
 
@@ -396,12 +400,7 @@ export const TITLE_CONFIG_KEYS = [
 	"windowFormat",
 ] as const;
 
-export const SEARCH_CONFIG_KEYS = [
-	"position",
-	"highlightOnClose",
-	"scrollbarMarkers",
-	"historySize",
-] as const;
+export const SEARCH_CONFIG_KEYS = ["position", "highlightOnClose", "historySize"] as const;
 
 export const LAYOUT_CONFIG_KEYS = ["hostRailWidth", "sidebarWidth"] as const;
 

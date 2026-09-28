@@ -212,7 +212,6 @@ export const DEFAULT_TITLE_CONFIG: TitleConfig = {
 export const DEFAULT_SEARCH_CONFIG: SearchConfig = {
 	position: "top-right",
 	highlightOnClose: "clear",
-	scrollbarMarkers: true,
 	historySize: 20,
 };
 
@@ -382,9 +381,8 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		) {
 			config.search.highlightOnClose = raw.highlight_on_close;
 		}
-		if (typeof raw.scrollbar_markers === "boolean") {
-			config.search.scrollbarMarkers = raw.scrollbar_markers;
-		}
+		// `scrollbar_markers` here is not a search setting: see
+		// `legacyScrollbarMarkers`, which carries it to [terminal] (#614).
 		if (typeof raw.history_size === "number" && raw.history_size >= 1) {
 			config.search.historySize = raw.history_size;
 		}
@@ -449,6 +447,17 @@ function _tomlSectionToProfile(section: Record<string, unknown>): Partial<Termin
 /** Convert a camelCase key to snake_case for config.toml. */
 function camelToSnake(s: string): string {
 	return s.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
+}
+
+/**
+ * Set one key of a config.toml text, keeping its comments and layout; a null
+ * value removes the key. Section and key are given in camelCase.
+ */
+function setTomlKey(toml: string, section: string, key: string, value: unknown): string {
+	const snakeSection = section.split(".").map(camelToSnake).join(".");
+	const path = `${snakeSection}.${camelToSnake(key)}`;
+	// null = remove key (pass undefined to toml-edit)
+	return edit(toml, path, value === null ? undefined : value);
 }
 
 // ─── Appearance config extraction ────────────────────────────────────────────
@@ -779,6 +788,32 @@ export function envToToml(value: unknown): unknown {
 	return env;
 }
 
+// ─── [search] scrollbar_markers, carried over to [terminal] (#614) ───────────
+
+/**
+ * The choice Settings wrote to `[search] scrollbar_markers` before it moved.
+ *
+ * Nothing ever read it: the terminals follow `[terminal] scrollbar_markers`,
+ * the key Settings writes now. A choice made there is not lost for that. While
+ * `[terminal]` says nothing about markers, this one stands as its global value,
+ * and the first time Settings writes the terminal key it is removed.
+ */
+export function legacyScrollbarMarkers(parsed: TOML.JsonMap): boolean | undefined {
+	const section = parsed.search;
+	if (section == null || typeof section !== "object") return undefined;
+	const value = (section as Record<string, unknown>).scrollbar_markers;
+	return typeof value === "boolean" ? value : undefined;
+}
+
+/** Whether a `config.toml` text still holds that choice. A malformed one does not. */
+function holdsLegacyScrollbarMarkers(toml: string): boolean {
+	try {
+		return legacyScrollbarMarkers(TOML.parse(toml)) !== undefined;
+	} catch {
+		return false;
+	}
+}
+
 // ─── ConfigResolver ──────────────────────────────────────────────────────────
 
 export class ConfigResolver {
@@ -857,9 +892,10 @@ export class ConfigResolver {
 
 		// ── [terminal] section ──────────────────────────────────────────────
 		const terminalSection = parsed.terminal;
-		if (terminalSection != null && typeof terminalSection === "object") {
-			// Separate nested theme_overrides from flat keys
-			const flat: Record<string, unknown> = {};
+		const hasTerminal = terminalSection != null && typeof terminalSection === "object";
+		// Separate nested theme_overrides from flat keys
+		const flat: Record<string, unknown> = {};
+		if (hasTerminal) {
 			for (const [key, val] of Object.entries(terminalSection as Record<string, unknown>)) {
 				if (key === "theme_overrides" && val !== null && typeof val === "object") {
 					flat.themeOverrides = val as Record<string, string>;
@@ -869,7 +905,14 @@ export class ConfigResolver {
 					flat[snakeToCamel(key)] = val;
 				}
 			}
-
+		}
+		// The markers choice Settings once wrote under [search] (#614), until
+		// [terminal] makes its own.
+		const legacyMarkers = legacyScrollbarMarkers(parsed);
+		if (legacyMarkers !== undefined && flat.scrollbarMarkers === undefined) {
+			flat.scrollbarMarkers = legacyMarkers;
+		}
+		if (hasTerminal || legacyMarkers !== undefined) {
 			this.fileConfig = flat as Partial<TerminalProfile>;
 		}
 
@@ -998,6 +1041,14 @@ export class ConfigResolver {
 	 * Creates the file if missing. A null value removes the key.
 	 */
 	async saveGlobalKey(section: string, key: string, value: unknown): Promise<void> {
+		this.editConfigFile((toml) => setTomlKey(toml, section, key, value));
+	}
+
+	/**
+	 * Rewrite config.toml through `change`, which receives its text ("" when
+	 * there is none), then reload. One write, however many keys it changes.
+	 */
+	private editConfigFile(change: (toml: string) => string): void {
 		if (!this._configDir) {
 			throw new Error("ConfigResolver: configDir not set — call loadFromFile() first");
 		}
@@ -1008,13 +1059,7 @@ export class ConfigResolver {
 			tomlString = readFileSync(configPath, "utf8");
 		}
 
-		const snakeSection = section.split(".").map(camelToSnake).join(".");
-		const snakeKey = camelToSnake(key);
-		const path = `${snakeSection}.${snakeKey}`;
-
-		// null = remove key (pass undefined to toml-edit)
-		const editValue = value === null ? undefined : value;
-		tomlString = edit(tomlString, path, editValue);
+		tomlString = change(tomlString);
 
 		// Ensure the config directory exists (may not exist on first run or in CI)
 		mkdirSync(this._configDir, { recursive: true });
@@ -1033,7 +1078,15 @@ export class ConfigResolver {
 		if (!(TERMINAL_PROFILE_KEYS as readonly string[]).includes(key)) {
 			throw new Error(`Unknown terminal key: ${key}`);
 		}
-		await this.saveGlobalKey("terminal", key, key === "env" ? envToToml(value) : value);
+		this.editConfigFile((toml) => {
+			const next = setTomlKey(toml, "terminal", key, key === "env" ? envToToml(value) : value);
+			// The terminal key now speaks for the markers, set or removed: the old
+			// [search] one goes with this write, so that it is carried over once
+			// and never comes back when the terminal key is removed (#614).
+			return key === "scrollbarMarkers" && holdsLegacyScrollbarMarkers(next)
+				? setTomlKey(next, "search", "scrollbarMarkers", null)
+				: next;
+		});
 	}
 
 	/**

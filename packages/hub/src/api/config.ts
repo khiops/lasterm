@@ -58,7 +58,6 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 	search: {
 		position: (v) => v === "top-right" || v === "bottom-right" || v === "bottom-bar",
 		highlightOnClose: (v) => v === "clear" || v === "fade" || v === "persist",
-		scrollbarMarkers: (v) => typeof v === "boolean",
 		historySize: (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 100,
 	},
 	layout: {

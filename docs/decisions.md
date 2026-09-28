@@ -479,7 +479,7 @@ The drag-and-drop mechanics below still hold.
 - Scope toggle visible only when countPanes > 1
 - shallowRef for handle registry
 - Search history: localStorage lasterm:search-history, MRU order, dedup by query+regex
-- SearchConfig: position, highlightOnClose (clear/fade/persist), scrollbarMarkers, historySize
+- SearchConfig: position, highlightOnClose (clear/fade/persist), historySize. It also had a scrollbarMarkers, which Settings wrote and no terminal read; removed in #614, the TerminalProfile key being the setting (a `[search] scrollbar_markers` still in config.toml is read as its global value until that key is set)
 - Hub [search] section parser with DEFAULT_SEARCH_CONFIG
 - highlightOnClose=fade uses 300ms setTimeout before clearDecorations
 - getDecorationColors always returns matchOverviewRuler (transparent when disabled)

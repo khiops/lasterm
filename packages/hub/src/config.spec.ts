@@ -32,6 +32,7 @@ import {
 	extractLogConfig,
 	extractSshConfig,
 	extractUiConfig,
+	legacyScrollbarMarkers,
 	loadGcConfig,
 	loadTlsConfig,
 	loadUiConfig,
@@ -40,6 +41,7 @@ import { createServer } from "./server.fixture.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
+import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 import { getTestTls } from "./test-tls.fixture.js";
 
 // ─── Mock agents so no real PTY / SSH is spawned ─────────────────────────────
@@ -1215,9 +1217,12 @@ describe("extractUiConfig — search section", () => {
 		expect(config.search.highlightOnClose).toBe(DEFAULT_SEARCH_CONFIG.highlightOnClose);
 	});
 
-	it("parses scrollbar_markers = false", () => {
+	// The markers are the terminal profile's (#614): a search setting of that
+	// name was written by Settings and read by no terminal.
+	it("does not take scrollbar_markers as a search setting", () => {
 		const config = extractUiConfig({ search: { scrollbar_markers: false } });
-		expect(config.search.scrollbarMarkers).toBe(false);
+		expect(config.search).not.toHaveProperty("scrollbarMarkers");
+		expect(config.search).toEqual(DEFAULT_SEARCH_CONFIG);
 	});
 
 	it("parses history_size", () => {
@@ -1235,14 +1240,12 @@ describe("extractUiConfig — search section", () => {
 			search: {
 				position: "bottom-bar",
 				highlight_on_close: "persist",
-				scrollbar_markers: false,
 				history_size: 10,
 			},
 		});
 		expect(config.search).toEqual({
 			position: "bottom-bar",
 			highlightOnClose: "persist",
-			scrollbarMarkers: false,
 			historySize: 10,
 		});
 	});
@@ -1271,15 +1274,105 @@ describe("ConfigResolver.uiConfig — search", () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
-			'[search]\nposition = "bottom-right"\nhighlight_on_close = "fade"\nscrollbar_markers = false\nhistory_size = 30\n',
+			'[search]\nposition = "bottom-right"\nhighlight_on_close = "fade"\nhistory_size = 30\n',
 		);
 
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
 		expect(resolver.uiConfig.search.position).toBe("bottom-right");
 		expect(resolver.uiConfig.search.highlightOnClose).toBe("fade");
-		expect(resolver.uiConfig.search.scrollbarMarkers).toBe(false);
 		expect(resolver.uiConfig.search.historySize).toBe(30);
+	});
+});
+
+// ─── [search] scrollbar_markers, carried over to [terminal] (#614) ───────────
+//
+// Settings wrote the markers choice under [search], where no terminal read it.
+// It writes [terminal] now. A choice already in a config.toml is taken as the
+// global terminal value while [terminal] says nothing, and dropped the first
+// time Settings writes the terminal key.
+
+describe("[search] scrollbar_markers carried over to [terminal]", () => {
+	let dbs: DatabaseManager;
+	let metaDal: MetaDAL;
+	let dir: string;
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		metaDal = new MetaDAL(dbs.meta);
+		dir = makeTempDir("lasterm-legacy-markers-");
+	});
+
+	afterEach(async () => {
+		dbs.close();
+		await removeTempDir(dir);
+	});
+
+	function loaded(toml: string): ConfigResolver {
+		writeFileSync(join(dir, "config.toml"), toml);
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(dir);
+		return resolver;
+	}
+
+	it("reads it only from a boolean under [search]", () => {
+		expect(legacyScrollbarMarkers({ search: { scrollbar_markers: false } })).toBe(false);
+		expect(legacyScrollbarMarkers({ search: { scrollbar_markers: "no" } })).toBeUndefined();
+		expect(legacyScrollbarMarkers({ terminal: { scrollbar_markers: false } })).toBeUndefined();
+		expect(legacyScrollbarMarkers({})).toBeUndefined();
+	});
+
+	it("is the global terminal value while [terminal] says nothing", () => {
+		const resolver = loaded('[search]\nposition = "bottom-bar"\nscrollbar_markers = false\n');
+
+		expect(resolver.resolve().scrollbarMarkers).toBe(false);
+		expect(resolver.getGlobalTerminalOverrides()).toEqual({ scrollbarMarkers: false });
+		expect(resolver.getCascade().terminal.global).toEqual({ scrollbarMarkers: false });
+	});
+
+	it("gives way to [terminal] scrollbar_markers, and to a host's", () => {
+		const resolver = loaded(
+			"[terminal]\nscrollbar_markers = true\n\n[search]\nscrollbar_markers = false\n",
+		);
+		expect(resolver.resolve().scrollbarMarkers).toBe(true);
+
+		const legacyOnly = loaded(
+			"[terminal]\nfont_size = 13\n\n[search]\nscrollbar_markers = false\n",
+		);
+		expect(legacyOnly.getGlobalTerminalOverrides()).toEqual({
+			fontSize: 13,
+			scrollbarMarkers: false,
+		});
+		vi.spyOn(metaDal, "getHostProfile").mockReturnValue(JSON.stringify({ scrollbarMarkers: true }));
+		expect(legacyOnly.resolve("host-1").scrollbarMarkers).toBe(true);
+	});
+
+	it("is dropped when Settings writes the terminal key, and never comes back", async () => {
+		const resolver = loaded(
+			'# mine\n[search]\nposition = "bottom-bar" # where I want it\nscrollbar_markers = false\n',
+		);
+
+		await resolver.saveGlobalTerminal("scrollbarMarkers", true);
+
+		const written = readFileSync(join(dir, "config.toml"), "utf8");
+		expect(written).not.toMatch(/\[search\][^[]*scrollbar_markers/);
+		expect(written).toContain('position = "bottom-bar" # where I want it');
+		expect(written).toContain("# mine");
+		expect(resolver.resolve().scrollbarMarkers).toBe(true);
+
+		// With the terminal key removed, the default holds, not the old choice.
+		await resolver.saveGlobalTerminal("scrollbarMarkers", null);
+		expect(resolver.resolve().scrollbarMarkers).toBe(DEFAULT_PROFILE.scrollbarMarkers);
+	});
+
+	it("leaves a config.toml without it as it was, [search] included", async () => {
+		const resolver = loaded("[terminal]\nfont_size = 13\n");
+
+		await resolver.saveGlobalTerminal("scrollbarMarkers", false);
+
+		const written = readFileSync(join(dir, "config.toml"), "utf8");
+		expect(written).not.toContain("[search]");
+		expect(resolver.resolve().scrollbarMarkers).toBe(false);
 	});
 });
 

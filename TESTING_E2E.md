@@ -917,6 +917,9 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 - In the list → ↑/↓ move over the group headers, Enter opens the terminal and the keyboard goes into it
 - The focus ring is the theme's accent, in every theme; a mouse click shows none
 - With Settings open, F6, Ctrl+F6, Alt+arrows and Ctrl+Tab do nothing behind it
+- Cursor in a terminal → Ctrl+, opens Settings with the keyboard on the current category; `cat -v` shows nothing of it. Ctrl+, again, or Esc from the menu, closes it and the keyboard is back in the terminal. The palette's Settings row and the rail's gear tooltip name Ctrl+,
+- In Settings' menu → ↑/↓ move and show each category, Home and End go to the ends; → or Enter go onto the detail's first control (on Keybindings, onto the detail itself); Esc there, or Shift+Tab from that first control, come back to the category
+- In Settings → F6 goes menu, detail, close button, and round; Shift+F6 the other way. Tab never leaves the panel. The scope tabs (with a host and a terminal selected) move with ←/→. Every control shows the accent ring when reached from the keyboard
 
 ---
 

@@ -245,7 +245,8 @@ and no chord matches while AltGr is held, which types `#`, `@` or `{` on AZERTY.
 Ctrl+Shift+F6 move the keyboard between the host rail, the terminal list, the tab bar and the focused
 pane from anywhere; F6 and Shift+F6 do the same outside a terminal, and in one reach its program
 (htop's sort, Midnight Commander's move). Within each zone the arrow keys move between its items, and
-Esc goes back to the pane.
+Esc goes back to the pane. Ctrl+, opens and closes Settings, whose menu, detail and scope tabs work the
+same way from the keyboard (decisions.md KEYBOARD-NAV).
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub

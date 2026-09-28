@@ -1068,7 +1068,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect(error).toBeInstanceOf(DeployError);
 		expect((error as DeployError).code).toBe("AGENT_NOT_AVAILABLE");
 		expect((error as Error).message).toBe(
-			`Agent binary not found in cache: ${join(cacheDir, agentCacheName("linux", "x64"))}. Build it or copy it to the binary cache (see docs/MVP_ROADMAP.md).`,
+			`Agent binary not found in cache: ${join(cacheDir, agentCacheName("linux", "x64"))}. Build it or copy it to the binary cache (see docs/SPEC.md §3.5).`,
 		);
 	});
 

@@ -17,6 +17,9 @@
  * somewhere nobody asked for.
  */
 
+import type { Host } from "@lasterm/shared";
+import { parseSshHost } from "./ssh-agent.js";
+
 /** A jump named as a spec, once read. */
 export interface ParsedJumpSpec {
 	user: string | null;
@@ -134,4 +137,87 @@ export interface ResolvedJump {
 	trustKnownHosts: boolean;
 	/** Where the key is pinned once a connection through it has worked. */
 	pinTo: { kind: "host"; hostId: string } | { kind: "spec"; hostId: string };
+}
+
+export type JumpResolution =
+	/** No jump: the host is reached directly. */
+	| { kind: "direct" }
+	/** Through `jump`. */
+	| { kind: "jump"; jump: ResolvedJump }
+	/** Declared, and unusable — the message says why. */
+	| { kind: "refused"; message: string };
+
+/** What resolving a jump reads from this hub's hosts. */
+export interface JumpHosts {
+	getHost(id: string): Host | undefined;
+	getHostFingerprint(id: string): string | null;
+}
+
+/**
+ * The route to `host`, read afresh from what this hub knows now.
+ *
+ * Every connection to the host goes this way, reconnects included: a host
+ * reached only through its bastion is not reachable at all without it, and a
+ * reconnect that dialled it directly would fail every attempt until its
+ * session gave up (#609).
+ */
+export function resolveJump(
+	host: Host,
+	hosts: JumpHosts,
+	trustKnownHosts: boolean,
+): JumpResolution {
+	const plan = planJump(host);
+	switch (plan.kind) {
+		case "direct":
+		case "refused":
+			return plan;
+		case "host": {
+			const jumpHost = hosts.getHost(plan.hostId);
+			if (jumpHost?.type !== "ssh" || !jumpHost.sshHost) {
+				return {
+					kind: "refused",
+					message:
+						"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.",
+				};
+			}
+			const jumpParsed = parseSshHost(jumpHost.sshHost);
+			return {
+				kind: "jump",
+				jump: {
+					jump: {
+						host: jumpParsed.hostname,
+						port: jumpHost.sshPort ?? 22,
+						username: jumpHost.sshUser || jumpParsed.username,
+					},
+					auth: {
+						method: jumpHost.sshAuth ?? "agent",
+						keyPath: jumpHost.sshKeyPath ?? undefined,
+					},
+					promptHostId: jumpHost.id,
+					pinnedFingerprint: hosts.getHostFingerprint(jumpHost.id),
+					trustKnownHosts,
+					pinTo: { kind: "host", hostId: jumpHost.id },
+				},
+			};
+		}
+		case "spec":
+			// A bastion named as an address is reached the way bastions are: with
+			// whatever the agent holds. A key of its own would be a second host,
+			// which is the other way of naming it.
+			return {
+				kind: "jump",
+				jump: {
+					jump: {
+						host: plan.spec.host,
+						port: plan.spec.port,
+						username: plan.spec.user ?? host.sshUser ?? parseSshHost(host.sshHost ?? "").username,
+					},
+					auth: { method: "agent" },
+					promptHostId: host.id,
+					pinnedFingerprint: host.sshProxyFingerprint ?? null,
+					trustKnownHosts,
+					pinTo: { kind: "spec", hostId: host.id },
+				},
+			};
+	}
 }

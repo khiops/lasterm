@@ -1,5 +1,6 @@
+import type { Host } from "@lasterm/shared";
 import { describe, expect, it } from "vitest";
-import { parseJumpSpec, planJump } from "./proxy-jump.js";
+import { type JumpHosts, parseJumpSpec, planJump, resolveJump } from "./proxy-jump.js";
 
 describe("parseJumpSpec", () => {
 	it("reads the plain form ssh_config uses", () => {
@@ -88,5 +89,94 @@ describe("planJump", () => {
 		const broken = planJump({ sshProxySpec: "bastion:0" });
 		expect(broken.kind).toBe("refused");
 		expect(broken.kind === "refused" && broken.message).toContain("cannot be read");
+	});
+});
+
+describe("resolveJump", () => {
+	function sshHost(id: string, overrides: Partial<Host> = {}): Host {
+		return {
+			id,
+			type: "ssh",
+			label: id,
+			sshHost: `me@${id}.example.com`,
+			iconType: "auto",
+			trustRemoteHints: "ignore",
+			sortOrder: 0,
+			historyRetentionDays: 30,
+			os: null,
+			arch: null,
+			createdAt: "2026-09-28T00:00:00.000Z",
+			updatedAt: "2026-09-28T00:00:00.000Z",
+			...overrides,
+		};
+	}
+
+	/** The hosts this hub knows, with the keys pinned for them. */
+	function known(hosts: Host[], pins: Record<string, string> = {}): JumpHosts {
+		return {
+			getHost: (id) => hosts.find((host) => host.id === id),
+			getHostFingerprint: (id) => pins[id] ?? null,
+		};
+	}
+
+	it("has no jump to make when none is declared", () => {
+		expect(resolveJump(sshHost("target"), known([]), false)).toEqual({ kind: "direct" });
+	});
+
+	it("goes through a known host with its own address, authentication and pinned key", () => {
+		const bastion = sshHost("bastion", {
+			sshPort: 2222,
+			sshUser: "jumper",
+			sshAuth: "key",
+			sshKeyPath: "/keys/bastion",
+		});
+		const target = sshHost("target", { sshProxyHostId: "bastion" });
+
+		expect(resolveJump(target, known([bastion], { bastion: "SHA256:pinned" }), true)).toEqual({
+			kind: "jump",
+			jump: {
+				jump: { host: "bastion.example.com", port: 2222, username: "jumper" },
+				auth: { method: "key", keyPath: "/keys/bastion" },
+				promptHostId: "bastion",
+				pinnedFingerprint: "SHA256:pinned",
+				trustKnownHosts: true,
+				pinTo: { kind: "host", hostId: "bastion" },
+			},
+		});
+	});
+
+	it("goes through a bastion named as a spec, with the agent, as the host's user by default", () => {
+		const target = sshHost("target", {
+			sshProxySpec: "bastion.example.com:2200",
+			sshProxyFingerprint: "SHA256:spec-pin",
+		});
+
+		expect(resolveJump(target, known([]), false)).toEqual({
+			kind: "jump",
+			jump: {
+				jump: { host: "bastion.example.com", port: 2200, username: "me" },
+				auth: { method: "agent" },
+				promptHostId: "target",
+				pinnedFingerprint: "SHA256:spec-pin",
+				trustKnownHosts: false,
+				pinTo: { kind: "spec", hostId: "target" },
+			},
+		});
+	});
+
+	it("refuses a jump through a host that is gone, or is no SSH host", () => {
+		const target = sshHost("target", { sshProxyHostId: "bastion" });
+		const local = { ...sshHost("bastion"), type: "local" as const };
+
+		for (const hosts of [known([]), known([local])]) {
+			const route = resolveJump(target, hosts, false);
+			expect(route.kind).toBe("refused");
+			expect(route.kind === "refused" && route.message).toContain("no longer an SSH host");
+		}
+	});
+
+	it("refuses a declared jump that cannot be made, saying why", () => {
+		const route = resolveJump(sshHost("target", { sshProxySpec: "a,b" }), known([]), false);
+		expect(route.kind === "refused" && route.message).toContain("2 jumps");
 	});
 });

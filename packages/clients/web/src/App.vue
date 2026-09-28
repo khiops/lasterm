@@ -1366,7 +1366,8 @@ function focusedPane(): { tabId: string; root: PaneNode; leaf: PaneLeaf } | null
 /**
  * The element that takes a pane's keyboard: a terminal's ended card when it
  * shows one, else xterm's own input, as the pane itself focuses; an empty
- * pane's first control.
+ * pane's search field, where its picker puts the keyboard itself, else its
+ * first control.
  */
 function paneFocusTarget(paneId: string): HTMLElement | null {
 	const pane = document.querySelector(`.pane-area [data-pane-id="${CSS.escape(paneId)}"]`);
@@ -1377,7 +1378,10 @@ function paneFocusTarget(paneId: string): HTMLElement | null {
 			pane.querySelector<HTMLElement>('.xterm-helper-textarea')
 		);
 	}
-	return pane.querySelector<HTMLElement>(FOCUSABLE);
+	return (
+		pane.querySelector<HTMLElement>('input[type="text"]:not([disabled])') ??
+		pane.querySelector<HTMLElement>(FOCUSABLE)
+	);
 }
 
 /** Make a pane of the tab shown the active one, and give it the keyboard. */

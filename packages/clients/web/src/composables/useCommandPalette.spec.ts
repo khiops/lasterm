@@ -498,6 +498,15 @@ describe("useCommandPalette", () => {
 			expect(palette.results.value.some((r) => r.id === "action:settings")).toBe(true);
 		});
 
+		// Ctrl+, opens Settings (#637): the row names it, from the table.
+		it("Settings shows the chord that opens it", () => {
+			const palette = useCommandPalette();
+			palette.search(">settings");
+			const item = palette.results.value.find((r) => r.id === "action:settings");
+			expect(item?.shortcut).toBe(shortcutLabel("settings.open"));
+			expect(item?.shortcut).toBe("Ctrl+,");
+		});
+
 		it("Import SSH Config action exists", () => {
 			const palette = useCommandPalette();
 			palette.search(">import");

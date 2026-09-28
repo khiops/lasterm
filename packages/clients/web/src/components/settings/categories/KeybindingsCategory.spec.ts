@@ -62,6 +62,7 @@ describe("Settings › Keybindings", () => {
 	// The label each action of the table is shown under, and the group it is in.
 	const SHOWN: Record<AppActionId, [string, string]> = {
 		"palette.open": ["General", "Command Palette"],
+		"settings.open": ["General", "Settings"],
 		"zone.next": ["Focus", "Next Area (rail, list, tabs, pane)"],
 		"zone.previous": ["Focus", "Previous Area"],
 		"tab.new": ["Tabs", "New Channel"],

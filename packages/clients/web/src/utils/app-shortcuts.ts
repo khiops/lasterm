@@ -39,6 +39,7 @@ export type PaneDirection = "left" | "right" | "up" | "down";
 /** The actions a shortcut runs. An id names the action, never the keys, and does not change. */
 export type AppActionId =
 	| "palette.open"
+	| "settings.open"
 	| "tab.new"
 	| "tab.next"
 	| "tab.previous"
@@ -64,6 +65,9 @@ const ALT_SHIFT = { ctrl: false, alt: true, shift: true } as const;
 /** Each action's chord. */
 export const APP_SHORTCUTS: Readonly<Record<AppActionId, Chord>> = {
 	"palette.open": { ctrl: true, alt: false, shift: true, key: "P" },
+	// Opens and closes Settings, as in Windows Terminal and VS Code. Matched on the character:
+	// the comma is unshifted on US, AZERTY and QWERTZ alike, on whichever key it sits.
+	"settings.open": { ctrl: true, alt: false, shift: false, key: "," },
 	"tab.new": { ctrl: true, alt: false, shift: true, key: "T" },
 	// A browser tab keeps these two for itself; the desktop app gets them.
 	"tab.next": { ctrl: true, alt: false, shift: false, key: "Tab" },

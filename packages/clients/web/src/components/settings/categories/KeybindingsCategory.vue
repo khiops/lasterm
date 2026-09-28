@@ -53,7 +53,7 @@ const keybindingGroups: KeybindingGroup[] = [
 		name: "General",
 		bindings: [
 			{ label: "Command Palette", keys: shortcutKeys("palette.open") },
-			{ label: "Settings", keys: ["Gear icon in sidebar"] },
+			{ label: "Settings", keys: shortcutKeys("settings.open") },
 		],
 	},
 	{

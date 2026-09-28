@@ -11,6 +11,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { shortcutLabel } from "../utils/app-shortcuts.js";
 import HostRail from "./HostRail.vue";
 import SOURCE from "./HostRail.vue?raw";
 
@@ -311,6 +312,19 @@ describe("HostRail footer", () => {
 			[...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") ?? ""),
 		);
 	}
+
+	// Read from the shortcut table the window runs them from (#631, #637).
+	it("names the palette's and Settings' chords in its buttons' tooltips", () => {
+		mountRail({ columns: 1 });
+		const title = (label: string): string | null =>
+			root.querySelector(`.rail-footer button[aria-label="${label}"]`)?.getAttribute("title") ??
+			null;
+		expect(title("Open command palette")).toBe(
+			`Command palette (${shortcutLabel("palette.open")})`,
+		);
+		expect(title("Open settings panel")).toBe(`Settings (${shortcutLabel("settings.open")})`);
+		expect(title("Open settings panel")).toBe("Settings (Ctrl+,)");
+	});
 
 	it("stacks its buttons in one column", () => {
 		mountRail({ columns: 1 });

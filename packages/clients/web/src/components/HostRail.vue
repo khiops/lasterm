@@ -157,7 +157,7 @@
 					<button
 						v-if="action === 'palette'"
 						class="rail-icon-btn"
-						title="Command palette (Ctrl+Shift+P)"
+						:title="PALETTE_TOOLTIP"
 						aria-label="Open command palette"
 						@click="$emit('toggle-palette')"
 					>
@@ -178,7 +178,7 @@
 					<button
 						v-else-if="action === 'settings'"
 						class="rail-icon-btn"
-						title="Settings"
+						:title="SETTINGS_TOOLTIP"
 						aria-label="Open settings panel"
 						@click="$emit('toggle-settings')"
 					>
@@ -213,6 +213,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { shortcutLabel } from "../utils/app-shortcuts.js";
 import { gridMove } from "../utils/focus-zones.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
@@ -362,6 +363,10 @@ function onBadgesFocusOut(event: FocusEvent): void {
 }
 
 const FOOTER_ACTIONS = ["palette", "settings", "add-host"] as const;
+
+// The footer's shortcuts, from the table the window runs them from (#631, #637).
+const PALETTE_TOOLTIP = `Command palette (${shortcutLabel("palette.open")})`;
+const SETTINGS_TOOLTIP = `Settings (${shortcutLabel("settings.open")})`;
 const footerRows = computed(() => chunkIntoRows(FOOTER_ACTIONS, props.columns));
 
 /**

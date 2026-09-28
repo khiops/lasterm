@@ -48,9 +48,10 @@ const ALT_GR = { ctrlKey: true, altKey: true, altGraph: true };
 const IDS = Object.keys(APP_SHORTCUTS) as AppActionId[];
 
 describe("the table of the app's shortcuts", () => {
-	it("holds the palette, the tabs, the panes and the focus zones", () => {
+	it("holds the palette, Settings, the tabs, the panes and the focus zones", () => {
 		expect(IDS).toEqual([
 			"palette.open",
+			"settings.open",
 			"tab.new",
 			"tab.next",
 			"tab.previous",
@@ -74,6 +75,7 @@ describe("the table of the app's shortcuts", () => {
 	it("has Windows Terminal's chords, and Windows' F6", () => {
 		expect(IDS.map(shortcutLabel)).toEqual([
 			"Ctrl+Shift+P",
+			"Ctrl+,",
 			"Ctrl+Shift+T",
 			"Ctrl+Tab",
 			"Ctrl+Shift+Tab",
@@ -485,9 +487,32 @@ describe("matching an event", () => {
 	});
 });
 
+// Settings opens and closes on Ctrl+, as in Windows Terminal and VS Code (#637).
+describe("the Settings chord", () => {
+	it("is Ctrl+, on every layout that types a comma unshifted", () => {
+		// US and QWERTZ have the comma on the key right of M; AZERTY on the M key itself.
+		expect(appShortcutOf(key(",", { ctrlKey: true, code: "Comma" }))).toBe("settings.open");
+		expect(appShortcutOf(key(",", { ctrlKey: true, code: "KeyM" }))).toBe("settings.open");
+	});
+
+	it("is kept from a terminal, and is no other chord of the comma", () => {
+		expect(appShortcutOf(key(",", { ctrlKey: true }), "terminal")).toBe("settings.open");
+		expect(appShortcutOf(key(",", { altKey: true }))).toBeNull();
+		expect(appShortcutOf(key("<", { ...CTRL_SHIFT, code: "Comma" }))).toBeNull();
+		expect(appShortcutOf(key(",", {}))).toBeNull();
+	});
+
+	// Settings is a modal dialog: its chord must still close it from inside.
+	it("runs from inside a modal dialog", () => {
+		expect(movesKeyboard("settings.open")).toBe(false);
+	});
+});
+
 describe("the shortcuts where they are named", () => {
-	it("is what the rail's palette button says", () => {
-		expect(HOST_RAIL).toContain(`Command palette (${shortcutLabel("palette.open")})`);
+	it("are what the rail's buttons say, read from the table", () => {
+		expect(HOST_RAIL).toMatch(/`Command palette \(\$\{shortcutLabel\("palette\.open"\)\}\)`/);
+		expect(HOST_RAIL).toMatch(/`Settings \(\$\{shortcutLabel\("settings\.open"\)\}\)`/);
+		expect(HOST_RAIL).not.toMatch(/\b(Ctrl|Alt|Shift)\+/);
 		expect(HOST_RAIL).not.toContain("Ctrl+K");
 	});
 });

@@ -332,6 +332,7 @@ export function useCommandPalette() {
 					label: "Settings",
 					type: "action",
 					icon: "⚙",
+					shortcut: shortcutLabel("settings.open"),
 				},
 				{
 					id: "action:ssh-import",

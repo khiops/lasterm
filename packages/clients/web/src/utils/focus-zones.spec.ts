@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { FOCUS_ZONES, type FocusZone, gridMove, listMove, zoneAfter } from "./focus-zones.js";
+import {
+	FOCUS_ZONES,
+	type FocusZone,
+	gridMove,
+	listMove,
+	nextInCycle,
+	zoneAfter,
+} from "./focus-zones.js";
 
 const everywhere = (): boolean => true;
 const except =
@@ -40,6 +47,29 @@ describe("F6 and Shift+F6", () => {
 	it("stay put when no other zone can take the keyboard", () => {
 		expect(zoneAfter("pane", 1, (zone) => zone === "pane")).toBeNull();
 		expect(zoneAfter("rail", -1, () => false)).toBeNull();
+	});
+});
+
+// Settings' own zones use it: its menu, its detail and its close button (#637).
+describe("nextInCycle", () => {
+	const ORDER = ["menu", "detail", "close"] as const;
+	const any = (): boolean => true;
+
+	it("goes round the list both ways", () => {
+		expect(nextInCycle(ORDER, "menu", 1, any)).toBe("detail");
+		expect(nextInCycle(ORDER, "close", 1, any)).toBe("menu");
+		expect(nextInCycle(ORDER, "menu", -1, any)).toBe("close");
+	});
+
+	it("starts from the first going forward, and from the last going back, from nowhere", () => {
+		expect(nextInCycle(ORDER, null, 1, any)).toBe("menu");
+		expect(nextInCycle(ORDER, null, -1, any)).toBe("close");
+	});
+
+	it("passes over what cannot take the keyboard, and stays put when nothing else can", () => {
+		expect(nextInCycle(ORDER, "menu", 1, (item) => item !== "detail")).toBe("close");
+		expect(nextInCycle(ORDER, "menu", 1, (item) => item === "menu")).toBeNull();
+		expect(nextInCycle(ORDER, null, 1, () => false)).toBeNull();
 	});
 });
 

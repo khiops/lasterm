@@ -152,6 +152,7 @@ describe("the window's shortcuts", () => {
 		const runAppAction = flat(body(/function runAppAction\(/));
 		const actions: Partial<Record<AppActionId, string>> = {
 			"palette.open": "commandPalette.toggle();",
+			"settings.open": "showSettings.value = !showSettings.value;",
 			"tab.new": "onNewTab();",
 			"tab.next": "switchTab('next');",
 			"tab.previous": "switchTab('previous');",
@@ -249,6 +250,20 @@ describe("the keyboard among tabs, panes and zones", () => {
 		// Esc on the rail, the list or the tab bar goes back to the pane.
 		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
 			"if (zone !== null && zone !== 'pane' && focusActivePane()) { event.preventDefault(); return; }",
+		);
+	});
+
+	// Settings' own Esc goes from its detail back to its menu (components/settings/SettingsPanel.spec.ts).
+	it("leaves Esc inside Settings to Settings, and closes it on an Esc from outside", () => {
+		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
+			"if (event.key === 'Escape' && showSettings.value && !isInModalDialog(event.target)) { showSettings.value = false; }",
+		);
+	});
+
+	it("gives the keyboard to the pane when Settings closes with nowhere to give it back", () => {
+		const text = flat(SOURCE);
+		expect(text).toContain(
+			"watch(showSettings, (open) => { if (open) return; void nextTick(() => { const active = document.activeElement; if (active === null || active === document.body) focusActivePane(); }); });",
 		);
 	});
 

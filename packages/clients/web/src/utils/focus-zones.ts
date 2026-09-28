@@ -23,11 +23,29 @@ export function zoneAfter(
 	step: 1 | -1,
 	canTakeFocus: (zone: FocusZone) => boolean,
 ): FocusZone | null {
-	const count = FOCUS_ZONES.length;
-	const from = FOCUS_ZONES.indexOf(current);
-	for (let i = 1; i < count; i++) {
-		const zone = FOCUS_ZONES[(((from + step * i) % count) + count) % count];
-		if (zone !== undefined && canTakeFocus(zone)) return zone;
+	return nextInCycle(FOCUS_ZONES, current, step, canTakeFocus);
+}
+
+/**
+ * The item after `current` in `order` (`step` 1) or before it (-1), wrapping around, that
+ * `canTake` accepts, or null when none other does. From no item at all (`current` null), the
+ * first one going forward, the last one going back. Settings' own zones use it too: its menu,
+ * its detail and its close button.
+ */
+export function nextInCycle<T>(
+	order: readonly T[],
+	current: T | null,
+	step: 1 | -1,
+	canTake: (item: T) => boolean,
+): T | null {
+	const count = order.length;
+	const from = current === null ? -1 : order.indexOf(current);
+	// With no current item, start just outside the list on the side the step comes from.
+	const start = from === -1 ? (step === 1 ? -1 : count) : from;
+	for (let i = 1; i <= count; i++) {
+		const item = order[(((start + step * i) % count) + count) % count];
+		if (item === undefined || item === current) continue;
+		if (canTake(item)) return item;
 	}
 	return null;
 }

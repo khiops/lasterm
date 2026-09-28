@@ -1263,10 +1263,22 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 		}
 	}
 
-	if (event.key === 'Escape' && showSettings.value) {
+	// Inside a dialog, Esc is the dialog's: Settings' own sends the keyboard from its detail back
+	// to its menu, and closes it from there (#637).
+	if (event.key === 'Escape' && showSettings.value && !isInModalDialog(event.target)) {
 		showSettings.value = false;
 	}
 }
+
+// Settings gives the keyboard back to where it was when it opened; opened from the palette,
+// that was nowhere any more, and the keyboard goes to the pane (#637).
+watch(showSettings, (open) => {
+	if (open) return;
+	void nextTick(() => {
+		const active = document.activeElement;
+		if (active === null || active === document.body) focusActivePane();
+	});
+});
 
 /**
  * An app shortcut's action, which the palette's row for it runs too: what the
@@ -1292,6 +1304,9 @@ function runAppAction(action: AppActionId): void {
 	switch (action) {
 		case 'palette.open':
 			commandPalette.toggle();
+			break;
+		case 'settings.open':
+			showSettings.value = !showSettings.value;
 			break;
 		case 'tab.new':
 			onNewTab();

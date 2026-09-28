@@ -14,6 +14,7 @@
 #   --desktop  also compile, lint and test the desktop crate, as ci.yml's
 #              "Clippy (desktop, Windows)" job does. The packaged app is
 #              scripts/dev/desktop-ui.ps1 -Build (Windows) or build-desktop.sh.
+#              Not from a worktree inside the main checkout (see desktop_cargo).
 #   --dry-run  print the directories and the steps, run nothing.
 #
 # Keep the steps in sync with CI: .github/workflows/build.yml (jobs lint, test,
@@ -132,8 +133,24 @@ else
 	sidecar_ext=""
 fi
 
-# The desktop crate's cargo, in its directory and target.
+# The desktop crate's cargo, in its directory and target. From a worktree nested
+# in the main checkout, as Claude's are (.claude/worktrees), cargo refuses to run
+# there: looking for the crate's workspace, it passes the worktree's root
+# manifest, which excludes the crate, and takes it for a stray member of the main
+# checkout's. So --desktop needs a worktree outside the main checkout.
 desktop_cargo() { (cd "$desktop_crate" && CARGO_TARGET_DIR="$desktop_target" cargo "$@"); }
+
+# What `cargo fmt --all -- --check` runs in the desktop crate (ci.yml), without
+# cargo and so from any worktree: rustfmt on each target's root file, with the
+# crate's edition, which follows the modules from there.
+desktop_fmt() {
+	local edition file roots=()
+	edition="$(sed -n 's/^edition *= *"\([0-9]*\)".*/\1/p' "$desktop_crate/Cargo.toml" | head -n 1)"
+	for file in build.rs src/lib.rs src/main.rs src/bin/*.rs tests/*.rs benches/*.rs examples/*.rs; do
+		[ ! -f "$desktop_crate/$file" ] || roots+=("$file")
+	done
+	(cd "$desktop_crate" && rustfmt --check --edition "${edition:-2021}" "${roots[@]}")
+}
 
 # Tauri resolves the sidecars while compiling; clippy and the tests neither run
 # nor package them, so empty files do, as in ci.yml. A real one is kept.
@@ -196,7 +213,7 @@ step test isolated pnpm test:run
 step cargo-test isolated cargo test --workspace --no-fail-fast
 step cargo-fmt cargo fmt --all -- --check
 step clippy cargo clippy "${clippy_args[@]}"
-step desktop-fmt desktop_cargo fmt --all -- --check
+step desktop-fmt desktop_fmt
 if [ "$desktop" = 1 ]; then
 	step desktop-clippy desktop_clippy
 	step desktop-test isolated desktop_cargo test
@@ -222,8 +239,9 @@ mkdir -p "$log_dir" || exit 2
 rm -f "$log_dir"/*.log "$log_dir/summary.txt"
 profile="$(mktemp -d "${TMPDIR:-/tmp}/lasterm-check-profile.XXXXXX")" || exit 2
 mkdir -p "$profile/LocalAppData" "$profile/AppData" "$profile/config" "$profile/state" \
-	"$profile/data" "$profile/cache"
-mkdir -m 700 "$profile/runtime"
+	"$profile/data" "$profile/cache" "$profile/runtime"
+# XDG_RUNTIME_DIR must be the user's alone; Windows has no use for it.
+[ "$windows" = 1 ] || chmod 700 "$profile/runtime"
 # A process a test left behind may still hold a file on Windows; the system
 # temp folder then keeps what it holds.
 trap 'rm -rf "$profile" 2>/dev/null' EXIT

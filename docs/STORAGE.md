@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-27
+> Last updated: 2026-09-28
 
 ## 1. Overview
 
@@ -180,6 +180,9 @@ channel list carries it as `end_reason`, and STATE_SYNC names every dead channel
 
 ### 3.5 workspaces
 
+Created by the first migration and used by nothing: no route reads or writes it, and a tab's
+layout is kept in the browser's `localStorage` (SPEC.md § 3.4).
+
 ```sql
 CREATE TABLE workspaces (
   id         TEXT PRIMARY KEY,                           -- ULID
@@ -302,7 +305,7 @@ Periodic screen state captures:
 **Snapshot chunk data:**
 ```json
 {
-  "serialized": "<xterm serialize() output>",
+  "serialized": "<the agent's vt100 screen, as the escape sequences that draw it>",
   "cols": 120,
   "rows": 40,
   "cursor_x": 5,
@@ -451,12 +454,13 @@ Each migration is a **SQL file**, run inside a transaction. Files are discovered
 ### 10.1 Backup
 
 ```bash
-# Full backup (both DBs) — paths shown for Linux, see SPEC.md § 7 for Windows
-cp ~/.local/share/lasterm/meta.db backup/meta.db
-cp ~/.local/share/lasterm/spool.db backup/spool.db
+# Full backup (both DBs) — paths shown for Linux, see SPEC.md § 7 for Windows.
+# Stop the hub first: a copy taken while it runs can miss what is still in the -wal file.
+cp ~/.local/state/lasterm/meta.db backup/meta.db
+cp ~/.local/state/lasterm/spool.db backup/spool.db
 
 # Config-only backup (tiny, recommended for sync)
-cp ~/.local/share/lasterm/meta.db backup/meta.db
+cp ~/.local/state/lasterm/meta.db backup/meta.db
 cp ~/.config/lasterm/config.toml backup/config.toml
 # Spool is regeneratable — no need to backup
 ```
@@ -469,22 +473,8 @@ db.backup('backup/meta.db');
 
 ### 10.2 Workspace Export/Import
 
-```bash
-lasterm workspace export my-workspace -o workspace.json
-lasterm workspace import workspace.json
-```
-
-Export format:
-```json
-{
-  "version": 1,
-  "workspace": { "name": "...", "layout_json": "..." },
-  "hosts": [{ "label": "...", "type": "ssh", ... }],
-  "channel_groups": [{ "name": "...", "host_label": "..." }]
-}
-```
-
-Note: export does NOT include spool data (output/snapshots). Only structure.
+Not built: there is no `lasterm workspace` command, and the `workspaces` table is unused (§ 3.5).
+Hosts can be imported from `~/.ssh/config` (`POST /api/hosts/import`, PROTOCOL.md § 6).
 
 ## 11. Data Lifecycle
 

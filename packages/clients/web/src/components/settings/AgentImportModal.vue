@@ -1,10 +1,23 @@
 <template>
 	<Teleport to="body">
 		<div v-if="show" class="dialog-overlay" @click.self="emit('close')">
-			<div class="agent-import-dialog" role="dialog" aria-modal="true" aria-label="Import agent">
+			<div
+				ref="dialogEl"
+				class="agent-import-dialog"
+				role="dialog"
+				aria-modal="true"
+				aria-label="Import agent"
+				@keydown="onDialogKeydown"
+			>
 				<div class="dialog-header">
 					<span class="dialog-title">Import Agent</span>
-					<button class="dialog-close" type="button" title="Close" @click="emit('close')">
+					<button
+						class="dialog-close"
+						type="button"
+						title="Close"
+						aria-label="Close agent import"
+						@click="emit('close')"
+					>
 						&#10005;
 					</button>
 				</div>
@@ -42,10 +55,16 @@
 					</div>
 
 					<div class="drop-grid">
+						<!-- A drop zone is also the button that chooses the file (#637): Enter or
+						     Space opens the file chooser a click opens. -->
 						<div
 							class="drop-zone"
 							:class="{ 'drop-zone--dragging': isBinaryDragging }"
+							role="button"
+							tabindex="0"
 							@click="binaryInput?.click()"
+							@keydown.enter.prevent="binaryInput?.click()"
+							@keydown.space.prevent="binaryInput?.click()"
 							@dragenter="onBinaryDragEnter"
 							@dragover="onBinaryDragOver"
 							@dragleave="onBinaryDragLeave"
@@ -64,7 +83,11 @@
 						<div
 							class="drop-zone"
 							:class="{ 'drop-zone--dragging': isManifestDragging }"
+							role="button"
+							tabindex="0"
 							@click="manifestInput?.click()"
+							@keydown.enter.prevent="manifestInput?.click()"
+							@keydown.space.prevent="manifestInput?.click()"
 							@dragenter="onManifestDragEnter"
 							@dragover="onManifestDragOver"
 							@dragleave="onManifestDragLeave"
@@ -138,6 +161,7 @@
 import type { HostArch, HostOs } from "@lasterm/shared";
 import { computed, ref, watch } from "vue";
 import { useFileDrop } from "../../composables/useFileDrop.js";
+import { useModalFocus } from "../../composables/useModalFocus.js";
 import { type AgentImportResult, useAgentManagerStore } from "../../stores/agent-manager.js";
 import { pickDesktopAgentImportFiles } from "../../utils/desktop-agent-picker.js";
 import { isTauriRuntime } from "../../utils/hub-url.js";
@@ -149,6 +173,15 @@ const props = defineProps<{
 const emit = defineEmits<{
 	close: [];
 }>();
+
+// A modal dialog (#637): the keyboard goes into it on open and back on close; Esc closes it, and
+// Tab stays inside. It is teleported out of Settings, whose keys never reach it.
+const dialogEl = ref<HTMLElement | null>(null);
+const { onKeydown: onDialogKeydown } = useModalFocus({
+	open: () => props.show,
+	root: dialogEl,
+	close: () => emit("close"),
+});
 
 const store = useAgentManagerStore();
 
@@ -356,6 +389,13 @@ function formatOs(os: HostOs): string {
 </script>
 
 <style scoped>
+/* The keyboard's place on every control of the dialog (#637): teleported out of Settings, it
+   does not have the panel's ring. */
+.agent-import-dialog :deep(:focus-visible) {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
+}
+
 .dialog-overlay {
 	position: fixed;
 	inset: 0;

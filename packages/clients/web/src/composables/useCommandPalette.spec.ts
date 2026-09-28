@@ -498,6 +498,15 @@ describe("useCommandPalette", () => {
 			expect(palette.results.value.some((r) => r.id === "action:settings")).toBe(true);
 		});
 
+		// Ctrl+, opens Settings (#637): the row names it, from the table.
+		it("Settings shows the chord that opens it", () => {
+			const palette = useCommandPalette();
+			palette.search(">settings");
+			const item = palette.results.value.find((r) => r.id === "action:settings");
+			expect(item?.shortcut).toBe(shortcutLabel("settings.open"));
+			expect(item?.shortcut).toBe("Ctrl+,");
+		});
+
 		it("Import SSH Config action exists", () => {
 			const palette = useCommandPalette();
 			palette.search(">import");
@@ -523,7 +532,7 @@ describe("useCommandPalette", () => {
 	describe("the actions a shortcut runs", () => {
 		const ROWS: [string, AppActionId][] = [
 			["action:new-channel", "tab.new"],
-			["action:close-tab", "tab.close"],
+			["action:close-pane", "pane.close"],
 			["action:split-right", "pane.splitRight"],
 			["action:split-down", "pane.splitDown"],
 		];
@@ -538,6 +547,23 @@ describe("useCommandPalette", () => {
 			expect(palette.results.value.find((r) => r.id === "action:new-channel")?.shortcut).toBe(
 				"Ctrl+Shift+T",
 			);
+			// Windows Terminal's Ctrl+Shift+W closes a pane (#637).
+			const closePane = palette.results.value.find((r) => r.id === "action:close-pane");
+			expect([closePane?.label, closePane?.shortcut]).toEqual(["Close Pane", "Ctrl+Shift+W"]);
+		});
+
+		// Its chord went to Close Pane; the row still closes the tab, and shows no chord.
+		it("keep Close Tab, without a chord", () => {
+			const palette = useCommandPalette();
+			const handler = vi.fn();
+			palette.onExternalAction.value = handler;
+			palette.search(">close tab");
+			const item = palette.results.value.find((r) => r.id === "action:close-tab");
+			expect(item?.label).toBe("Close Tab");
+			expect(item?.shortcut).toBeUndefined();
+			if (item === undefined) throw new Error("Close Tab is not offered");
+			palette.execute(item);
+			expect(handler).toHaveBeenCalledExactlyOnceWith("action:close-tab");
 		});
 
 		// App.vue runs them as the tab bar does, and as their chords do (App.spec.ts).

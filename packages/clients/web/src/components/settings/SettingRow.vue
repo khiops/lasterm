@@ -3,7 +3,7 @@
 		<div v-if="isNonGlobal && isOverridden" class="override-bar" />
 		<div class="setting-main">
 			<div class="setting-info">
-				<label class="setting-label">{{ label }}</label>
+				<label :id="labelId" class="setting-label">{{ label }}</label>
 				<p v-if="description" class="setting-description">{{ description }}</p>
 				<p v-if="isNonGlobal && !isOverridden && inheritedFrom" class="setting-inherited">
 					(inherited: {{ formatInheritedValue(inheritedFrom.value) }}
@@ -35,8 +35,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, provide, useId } from "vue";
 import type { Scope } from "../../stores/settings.js";
+import { SETTING_ROW_LABEL_ID } from "./settingRowLabel.js";
 
 const props = defineProps<{
 	label: string;
@@ -50,6 +51,10 @@ const props = defineProps<{
 const emit = defineEmits<{
 	reset: [];
 }>();
+
+/** The control in the row is named by the row's label (#637). */
+const labelId = `setting-label-${useId()}`;
+provide(SETTING_ROW_LABEL_ID, labelId);
 
 const isNonGlobal = computed(() => props.scope !== "global");
 

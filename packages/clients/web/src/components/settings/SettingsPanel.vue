@@ -5,20 +5,22 @@
 				v-if="visible"
 				class="settings-overlay"
 				@mousedown.self="$emit('close')"
-				@keydown.escape="$emit('close')"
 			>
 				<Transition name="settings-slide">
 					<div
 						v-if="visible"
+						ref="panelEl"
 						class="settings-panel"
 						role="dialog"
 						aria-label="Settings"
 						aria-modal="true"
 						tabindex="-1"
+						@keydown="onPanelKeydown"
 					>
 						<div class="settings-header">
 							<h2 class="settings-title">Settings</h2>
 							<button
+								ref="closeEl"
 								class="settings-close"
 								type="button"
 								aria-label="Close settings panel"
@@ -43,8 +45,10 @@
 								v-model="settingsStore.activeCategory"
 								:scope="settingsStore.activeScope"
 								:show-desktop="runsInTauri"
+								@enter-detail="focusDetail"
 							/>
-							<div class="settings-content">
+							<!-- Focusable itself, for a category with no control: → still goes in. -->
+							<div ref="contentEl" class="settings-content" tabindex="-1">
 								<div v-if="settingsStore.loading" class="settings-loading">
 									Loading settings...
 								</div>
@@ -110,8 +114,11 @@
 
 <script setup lang="ts">
 import { DEFAULT_CHANNEL_NAME } from '@lasterm/shared';
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { useChannelsStore } from '../../stores/channels.js';
+import { windowShortcutOf } from '../../utils/app-shortcuts.js';
+import { nextInCycle } from '../../utils/focus-zones.js';
+import { firstTabbable, trapTab } from '../../utils/focusable.js';
 import { useHostsStore } from '../../stores/hosts.js';
 import { type Scope, useSettingsStore } from '../../stores/settings.js';
 import { useToastStore } from '../../stores/toast.js';
@@ -135,7 +142,7 @@ const props = defineProps<{
 	desktopVersion?: string | undefined;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
 	close: [];
 }>();
 
@@ -177,6 +184,111 @@ watch(
 		}
 	},
 );
+
+// ─── The keyboard (#637) ──────────────────────────────────────────────
+//
+// On open the keyboard lands on the current category of the menu, and on close it goes back to
+// where it was. ↑ and ↓ move along the menu (CategoryNav), → or Enter go into the detail, and
+// Esc or Shift+Tab from the detail's first control come back. Esc elsewhere closes. F6 moves
+// between the menu, the detail and the close button, and Tab stays inside: the panel is modal.
+
+const panelEl = ref<HTMLElement | null>(null);
+const contentEl = ref<HTMLElement | null>(null);
+const closeEl = ref<HTMLElement | null>(null);
+
+/** The panel's own zones, in the order F6 visits them. */
+const SETTINGS_ZONES = ['menu', 'detail', 'close'] as const;
+type SettingsZone = (typeof SETTINGS_ZONES)[number];
+
+/** Where the keyboard was before the panel opened, to go back to on close. */
+let returnFocusTo: HTMLElement | null = null;
+
+watch(
+	() => props.visible,
+	(isVisible) => {
+		if (isVisible) {
+			const active = document.activeElement;
+			returnFocusTo = active instanceof HTMLElement && active !== document.body ? active : null;
+			void nextTick(focusMenu);
+			return;
+		}
+		const back = returnFocusTo;
+		returnFocusTo = null;
+		if (back?.isConnected === true) back.focus();
+	},
+);
+
+/** The current category's item in the menu: the one that takes Tab there. */
+function menuItem(): HTMLElement | null {
+	return panelEl.value?.querySelector<HTMLElement>('.category-nav [tabindex="0"]') ?? null;
+}
+
+/**
+ * The detail's first control, or the detail itself when it has none. A control counts whatever
+ * its size: a switch's checkbox has no box of its own to speak of (utils/focusable.ts).
+ */
+function detailEntry(): HTMLElement | null {
+	return firstTabbable(contentEl.value) ?? contentEl.value;
+}
+
+function focusMenu(): void {
+	menuItem()?.focus();
+}
+
+function focusDetail(): void {
+	void nextTick(() => detailEntry()?.focus());
+}
+
+function zoneOf(target: HTMLElement): SettingsZone | null {
+	if (target.closest('.category-nav') !== null) return 'menu';
+	if (contentEl.value?.contains(target) === true) return 'detail';
+	if (target === closeEl.value) return 'close';
+	return null;
+}
+
+function zoneEntry(zone: SettingsZone): HTMLElement | null {
+	if (zone === 'menu') return menuItem();
+	if (zone === 'detail') return detailEntry();
+	return closeEl.value;
+}
+
+function onPanelKeydown(event: KeyboardEvent): void {
+	const target = event.target as HTMLElement;
+	// A dialog open inside the panel (a confirmation) keeps its keys: they are its own.
+	if (target.closest('[aria-modal="true"]') !== panelEl.value) return;
+	// F6, Shift+F6 and their Ctrl chords, from the shortcut table: the window leaves them to this
+	// dialog (it takes the keys that move the keyboard, and runs none behind a modal), and they
+	// move between its own zones.
+	const shortcut = windowShortcutOf(event);
+	if (shortcut === 'zone.next' || shortcut === 'zone.previous') {
+		event.preventDefault();
+		const next = nextInCycle(
+			SETTINGS_ZONES,
+			zoneOf(target),
+			shortcut === 'zone.next' ? 1 : -1,
+			(zone) => zoneEntry(zone) !== null,
+		);
+		if (next !== null) zoneEntry(next)?.focus();
+		return;
+	}
+	// A control that used the key itself — an open dropdown's Esc — keeps it.
+	if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+	if (event.key === 'Escape' && !event.shiftKey) {
+		event.preventDefault();
+		// From the detail, back to its category in the menu; anywhere else, the panel closes.
+		if (zoneOf(target) === 'detail') focusMenu();
+		else emit('close');
+		return;
+	}
+	if (event.key !== 'Tab') return;
+	if (event.shiftKey && zoneOf(target) === 'detail' && target === detailEntry()) {
+		event.preventDefault();
+		focusMenu();
+		return;
+	}
+	// The panel is modal: Tab goes round inside it.
+	trapTab(event, panelEl.value);
+}
 
 // ─── Auto-fallback scope when context changes ─────────────────────────
 
@@ -278,6 +390,20 @@ watch(
 .settings-close:hover {
 	color: var(--nt-fg);
 	background: var(--nt-hover);
+}
+
+/* The keyboard's place, on every control of the panel and of its categories (#637): a ring in
+   the theme's accent. A mouse click shows none. */
+.settings-panel :deep(:focus-visible) {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
+}
+
+/* The panel and the detail take the keyboard only to hand it on: inside, the ring. */
+.settings-panel:focus-visible,
+.settings-content:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 
 .settings-body {

@@ -4,6 +4,8 @@
 		class="tab-bar"
 		role="tablist"
 		aria-label="Open terminals"
+		data-focus-zone="tabs"
+		@focusout="onTabsFocusOut"
 		@wheel.prevent="onWheel"
 		@dragover.prevent="onTabBarDragOver"
 		@dragleave="onTabBarDragLeave"
@@ -17,8 +19,13 @@
 			:draggable="editingTabIndex !== idx"
 			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === lastVisibleIndex, 'tab--dragging': dragTabIndex === idx, 'tab--host-edge': hostMarkerStyle === 'edge' && hostMarkers.has(tab.id) }]"
 			:style="hostMarkers.get(tab.id) ? { '--tab-host-color': hostMarkers.get(tab.id)?.color } : undefined"
-			:title="hostMarkers.get(tab.id) ? `${getTabLabel(tab.id)} — on ${hostMarkers.get(tab.id)?.label}` : getTabLabel(tab.id)"
+			:title="tabTooltip(tab.id)"
+			:tabindex="tab.id === rovingTabId ? 0 : -1"
+			:data-tab-id="tab.id"
+			data-zone-item
 			@click="emit('select-tab', idx)"
+			@focus="keyboardTabId = tab.id"
+			@keydown="onTabKeydown($event, tab.id, idx)"
 			@mousedown.middle.prevent="emit('close-tab', idx)"
 			@contextmenu.prevent="onTabContextMenu(idx, $event)"
 			@dragstart="onTabDragStart(idx, $event)"
@@ -70,7 +77,7 @@
 			<button
 				class="tab-bar__add tab-bar__add--main"
 				aria-label="Open new terminal"
-				title="New terminal"
+				:title="NEW_TAB_TOOLTIP"
 				@click="emit('add-tab')"
 			>+</button>
 			<button
@@ -126,6 +133,9 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
+import { shortcutLabel, TAB_NUMBERS } from "../utils/app-shortcuts.js";
+import { listMove } from "../utils/focus-zones.js";
+import { tabToSwitchTo } from "../utils/tab-switch.js";
 import ProfileDropdown from "./ProfileDropdown.vue";
 import TabContextMenu from "./TabContextMenu.vue";
 
@@ -243,6 +253,102 @@ const hostMarkers = computed(() => {
 	}
 	return markers;
 });
+
+// -------------------------------------------------------------------------
+// Tooltips: the shortcuts, from the table the window runs them from (#637)
+// -------------------------------------------------------------------------
+//
+// The tab's × keeps no chord: `pane.close`'s closes the focused pane, not the tab, and the
+// palette's Close Tab has none.
+
+const NEW_TAB_TOOLTIP = `New terminal (${shortcutLabel("tab.new")})`;
+const SWITCH_TOOLTIP = `${shortcutLabel("tab.next")} / ${shortcutLabel("tab.previous")}: next / previous tab`;
+
+/**
+ * The `tab.goToN` chord that reaches each tab, by tab id: the lowest N that lands on it, as the
+ * window works it out. Tabs 1 to 8 of the bar have theirs, and the last one the ninth's when it
+ * is further along; the others have none.
+ */
+const tabChords = computed(() => {
+	const chords = new Map<string, string>();
+	const ids = props.tabs.map((tab) => tab.id);
+	for (const n of TAB_NUMBERS) {
+		const index = tabToSwitchTo({ goTo: n }, ids, props.activeTabIndex, props.visibleTabIds ?? null);
+		const id = index === null ? undefined : ids[index];
+		if (id !== undefined && !chords.has(id)) chords.set(id, shortcutLabel(`tab.goTo${n}`));
+	}
+	return chords;
+});
+
+/** A tab's tooltip: its name, its host when the bar marks hosts, its chord, and the tab keys. */
+function tabTooltip(tabId: string): string {
+	const host = hostMarkers.value.get(tabId);
+	const label = props.getTabLabel(tabId);
+	const name = host ? `${label} — on ${host.label}` : label;
+	const chord = tabChords.value.get(tabId);
+	return [chord === undefined ? name : `${name} — ${chord}`, SWITCH_TOOLTIP].join("\n");
+}
+
+// -------------------------------------------------------------------------
+// Keyboard (#637)
+// -------------------------------------------------------------------------
+//
+// One tab takes Tab: ← and → move along the bar, Home and End to its ends, Enter or Space
+// activates the tab as a click does, and Delete closes it as its × does.
+
+/** The tab the keyboard is on while it is in the bar, by id; null once it leaves. */
+const keyboardTabId = ref<string | null>(null);
+
+/** The one tab that takes Tab: the keyboard's, else the active one, else the first shown. */
+const rovingTabId = computed(() => {
+	const ids = visibleTabs.value.map(({ tab }) => tab.id);
+	for (const id of [keyboardTabId.value, props.tabs[props.activeTabIndex]?.id ?? null]) {
+		if (id !== null && ids.includes(id)) return id;
+	}
+	return ids[0] ?? null;
+});
+
+function focusTab(tabId: string | null): void {
+	if (tabId === null) return;
+	const tabs = tabBarEl.value?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [];
+	[...tabs].find((el) => el.dataset.tabId === tabId)?.focus();
+}
+
+function onTabKeydown(event: KeyboardEvent, tabId: string, idx: number): void {
+	// A tab being renamed keeps its keys, and a chord is the window's.
+	if (event.target !== event.currentTarget || event.defaultPrevented) return;
+	if (event.ctrlKey || event.altKey || event.metaKey) return;
+	const ids = visibleTabs.value.map(({ tab }) => tab.id);
+	const at = ids.indexOf(tabId);
+	if (event.key === "Enter" || event.key === " ") {
+		// In place of the button's own click, which would come on top.
+		event.preventDefault();
+		emit("select-tab", idx);
+		return;
+	}
+	if (event.key === "Delete") {
+		event.preventDefault();
+		// The keyboard stays in the bar, on the tab that takes the closed one's place.
+		const neighbour = ids[at + 1] ?? ids[at - 1] ?? null;
+		keyboardTabId.value = neighbour;
+		emit("close-tab", idx);
+		void nextTick(() => focusTab(neighbour));
+		return;
+	}
+	const next = listMove(ids.length, at, event.key, "horizontal");
+	if (next === null) return;
+	event.preventDefault();
+	const target = ids[next] ?? null;
+	keyboardTabId.value = target;
+	focusTab(target);
+}
+
+/** Leaving the bar, Tab comes back to the active tab. */
+function onTabsFocusOut(event: FocusEvent): void {
+	const into = event.relatedTarget as Node | null;
+	if (into !== null && tabBarEl.value?.contains(into)) return;
+	keyboardTabId.value = null;
+}
 
 // -------------------------------------------------------------------------
 // Horizontal scroll
@@ -505,6 +611,16 @@ function onTabDragEnd(): void {
 
 .tab--active:hover {
 	background: var(--nt-border);
+}
+
+/* The keyboard's tab (#637): a ring in the theme's accent, inside the tab. */
+.tab:focus {
+	outline: none;
+}
+
+.tab:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 
 .tab--dragging {

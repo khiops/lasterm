@@ -3,7 +3,12 @@
 	<Teleport to="body">
 		<div v-if="show" class="dialog-overlay" @click.self="emit('close')">
 			<div
+				ref="dialogEl"
 				class="font-picker-dialog"
+				role="dialog"
+				aria-modal="true"
+				aria-label="Font picker"
+				@keydown="onDialogKeydown"
 				@dragenter="onDragEnter"
 				@dragover="onDragOver"
 				@dragleave="onDragLeave"
@@ -17,7 +22,13 @@
 				<!-- Header -->
 				<div class="dialog-header">
 					<span class="dialog-title">Font Picker</span>
-					<button class="dialog-close" title="Close" @click="emit('close')">
+					<button
+						type="button"
+						class="dialog-close"
+						title="Close"
+						aria-label="Close font picker"
+						@click="emit('close')"
+					>
 						<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
 							<path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
 						</svg>
@@ -27,13 +38,21 @@
 				<!-- Error banner -->
 				<div v-if="error" class="font-picker-error">{{ error }}</div>
 
-				<div class="font-picker-tabs" role="tablist">
+				<div
+					ref="tablistEl"
+					class="font-picker-tabs"
+					role="tablist"
+					aria-label="Where the fonts come from"
+					@keydown="onTabsKeydown"
+				>
 					<button
 						type="button"
 						role="tab"
 						class="font-picker-tab"
+						data-tab="system"
 						:class="{ active: tab === 'system' }"
 						:aria-selected="tab === 'system'"
+						:tabindex="tab === 'system' ? 0 : -1"
 						@click="tab = 'system'"
 					>
 						System
@@ -42,8 +61,10 @@
 						type="button"
 						role="tab"
 						class="font-picker-tab"
+						data-tab="imported"
 						:class="{ active: tab === 'imported' }"
 						:aria-selected="tab === 'imported'"
+						:tabindex="tab === 'imported' ? 0 : -1"
 						@click="tab = 'imported'"
 					>
 						Imported
@@ -59,6 +80,7 @@
 							class="system-font-search"
 							placeholder="Search installed fonts"
 							aria-label="Search installed fonts"
+							@keydown.down.prevent="onSearchArrowDown"
 						/>
 						<label class="system-font-mono">
 							<input v-model="monospaceOnly" type="checkbox" />
@@ -70,15 +92,24 @@
 					<div v-else-if="shownSystemFonts.length === 0" class="font-picker-empty">
 						No installed font matches.
 					</div>
-					<ul v-else class="system-font-list" role="listbox" aria-label="Installed fonts">
-						<li v-for="font in shownSystemFonts" :key="font.family">
+					<ul
+						v-else
+						class="system-font-list"
+						role="listbox"
+						aria-label="Installed fonts"
+						@keydown="onFontListKeydown"
+					>
+						<li v-for="font in shownSystemFonts" :key="font.family" role="none">
 							<button
 								type="button"
 								role="option"
 								class="system-font-item"
+								:data-family="font.family"
 								:class="{ selected: modelValue === font.family }"
 								:aria-selected="modelValue === font.family"
+								:tabindex="font.family === rovingFamily ? 0 : -1"
 								@click="onSelect(font.family)"
+								@focus="keyboardFamily = font.family"
 							>
 								<span class="system-font-name">{{ font.family }}</span>
 								<span
@@ -130,10 +161,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import FontCard from "./FontCard.vue";
 import { useFileDrop } from "../../composables/useFileDrop.js";
+import { useModalFocus } from "../../composables/useModalFocus.js";
+import { listMove } from "../../utils/focus-zones.js";
 import { useConfigStore } from "../../stores/config.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { hubBaseUrl } from "../../utils/hub-url.js";
@@ -184,6 +217,79 @@ watch(
 	},
 	{ immediate: true },
 );
+
+// ─── The keyboard (#637) ──────────────────────────────────────────────────
+//
+// A modal dialog: the keyboard goes into it on open (the search, or the chosen imported font) and
+// back to the font button on close; Esc closes it and Tab stays inside. The two tabs are a
+// tablist (← and →), and the installed fonts a listbox that ↑ and ↓ walk.
+
+const dialogEl = ref<HTMLElement | null>(null);
+const tablistEl = ref<HTMLElement | null>(null);
+
+const { onKeydown: onDialogKeydown } = useModalFocus({
+	open: () => props.show,
+	root: dialogEl,
+	close: () => emit("close"),
+	initial: () =>
+		dialogEl.value?.querySelector<HTMLElement>(".system-font-search") ??
+		dialogEl.value?.querySelector<HTMLElement>(".font-card--selected .font-card-select") ??
+		dialogEl.value?.querySelector<HTMLElement>('.font-picker-tab[tabindex="0"]') ??
+		null,
+});
+
+const TABS = ["system", "imported"] as const;
+
+function onTabsKeydown(event: KeyboardEvent): void {
+	if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+	const next = listMove(TABS.length, TABS.indexOf(tab.value), event.key, "horizontal");
+	if (next === null) return;
+	event.preventDefault();
+	const target = TABS[next];
+	if (target === undefined) return;
+	tab.value = target;
+	void nextTick(() => {
+		tablistEl.value?.querySelector<HTMLElement>(`[data-tab="${target}"]`)?.focus();
+	});
+}
+
+/** The installed font the keyboard is on in the list; null until it moves there. */
+const keyboardFamily = ref<string | null>(null);
+
+/** The one installed font that takes Tab: the keyboard's, else the chosen one, else the first. */
+const rovingFamily = computed(() => {
+	const families = shownSystemFonts.value.map((font) => font.family);
+	for (const family of [keyboardFamily.value, props.modelValue ?? null]) {
+		if (family !== null && families.includes(family)) return family;
+	}
+	return families[0] ?? null;
+});
+
+function focusFamily(list: ParentNode | null | undefined, family: string): void {
+	const items = list?.querySelectorAll<HTMLElement>("[data-family]") ?? [];
+	[...items].find((item) => item.dataset.family === family)?.focus();
+}
+
+function onFontListKeydown(event: KeyboardEvent): void {
+	if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+	const current = (event.target as HTMLElement).dataset?.family;
+	if (current === undefined) return;
+	const families = shownSystemFonts.value.map((font) => font.family);
+	const next = listMove(families.length, families.indexOf(current), event.key, "vertical");
+	if (next === null) return;
+	event.preventDefault();
+	const family = families[next];
+	if (family === undefined) return;
+	keyboardFamily.value = family;
+	const list = event.currentTarget as HTMLElement;
+	void nextTick(() => focusFamily(list, family));
+}
+
+/** ↓ from the search goes into the list, onto its font that takes Tab. */
+function onSearchArrowDown(): void {
+	const family = rovingFamily.value;
+	if (family !== null) focusFamily(dialogEl.value, family);
+}
 
 function authHeader(): Record<string, string> {
 	return authStore.token ? { Authorization: `Bearer ${authStore.token}` } : {};
@@ -262,6 +368,13 @@ async function onFileInputChange(event: Event): Promise<void> {
 </script>
 
 <style scoped>
+/* The keyboard's place on every control of the dialog, its cards included (#637): the theme's
+   accent. Teleported out of Settings, it does not have the panel's. */
+.font-picker-dialog :deep(:focus-visible) {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
+}
+
 .dialog-overlay {
 	position: fixed;
 	inset: 0;

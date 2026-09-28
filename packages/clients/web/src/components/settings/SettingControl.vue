@@ -4,6 +4,7 @@
 			v-if="type === 'text'"
 			type="text"
 			class="control-text"
+			:aria-labelledby="labelledBy"
 			:value="modelValue"
 			:disabled="disabled"
 			:placeholder="placeholder"
@@ -14,6 +15,7 @@
 			v-else-if="type === 'number'"
 			type="number"
 			class="control-number"
+			:aria-labelledby="labelledBy"
 			:value="modelValue"
 			:min="min"
 			:max="max"
@@ -25,6 +27,7 @@
 		<select
 			v-else-if="type === 'select'"
 			class="control-select"
+			:aria-labelledby="labelledBy"
 			:value="modelValue"
 			:disabled="disabled"
 			@change="onSelectChange"
@@ -39,11 +42,15 @@
 			</option>
 		</select>
 
+		<!-- A switch (#637): the checkbox covers the track, so it has a box, takes the click, and
+		     is what the keyboard reaches; Space turns it, as a checkbox's own key. -->
 		<label v-else-if="type === 'toggle'" class="control-toggle">
 			<input
 				type="checkbox"
+				role="switch"
 				:checked="Boolean(modelValue)"
 				:disabled="disabled"
+				:aria-labelledby="labelledBy"
 				@change="onToggleChange"
 			/>
 			<span class="toggle-track">
@@ -55,6 +62,7 @@
 			<input
 				type="range"
 				class="control-range"
+				:aria-labelledby="labelledBy"
 				:value="modelValue"
 				:min="min"
 				:max="max"
@@ -69,13 +77,22 @@
 			v-else-if="type === 'color'"
 			type="color"
 			class="control-color"
+			:aria-labelledby="labelledBy"
 			:value="modelValue"
 			:disabled="disabled"
 			@input="onInput"
 		/>
 
 		<div v-else-if="type === 'font'" class="control-font">
-			<button class="control-font-trigger" :disabled="disabled" @click="showFontPicker = true">
+			<button
+				:id="fontTriggerId"
+				type="button"
+				class="control-font-trigger"
+				:disabled="disabled"
+				:aria-labelledby="labelledBy === undefined ? undefined : `${labelledBy} ${fontTriggerId}`"
+				aria-haspopup="dialog"
+				@click="showFontPicker = true"
+			>
 				{{ modelValue || 'Default' }}
 			</button>
 			<FontPicker
@@ -89,8 +106,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { inject, ref, useId } from "vue";
 import FontPicker from "./FontPicker.vue";
+import { SETTING_ROW_LABEL_ID } from "./settingRowLabel.js";
 
 const props = defineProps<{
 	modelValue: unknown;
@@ -106,6 +124,10 @@ const props = defineProps<{
 const emit = defineEmits<{
 	"update:modelValue": [value: unknown];
 }>();
+
+/** The label of the row the control is in, which names it (#637); none outside a row. */
+const labelledBy = inject(SETTING_ROW_LABEL_ID, undefined);
+const fontTriggerId = `font-trigger-${useId()}`;
 
 function onInput(event: Event): void {
 	const target = event.target as HTMLInputElement;
@@ -180,16 +202,28 @@ function onFontSelect(value: string | undefined): void {
 /* ── Toggle switch ─────────────────────────────────────────────────── */
 
 .control-toggle {
+	position: relative;
 	cursor: pointer;
 	display: inline-flex;
 	align-items: center;
 }
 
+/* Invisible, but the size of the track it stands on: a real box for the click and the keyboard. */
 .control-toggle input {
 	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	margin: 0;
 	opacity: 0;
-	width: 0;
-	height: 0;
+	cursor: inherit;
+	z-index: 1;
+}
+
+/* The keyboard's ring goes on the track, which is what shows. */
+.control-toggle input:focus-visible + .toggle-track {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
 }
 
 .toggle-track {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import SOURCE from "./App.vue?raw";
-import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
+import PANE_LAYOUT from "./components/PaneLayout.vue?raw";
+import { APP_SHORTCUTS, type AppActionId, paneMoveOf, tabNumberOf } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
 
 /**
@@ -122,31 +123,63 @@ describe("the window's shortcuts", () => {
 	const flat = (text: string): string => text.replace(/\s+/g, " ");
 
 	it("runs an app shortcut's action on its chord, and takes the chord", () => {
-		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
-			"const shortcut = appShortcutOf(event); if (shortcut !== null) { event.preventDefault(); runAppAction(shortcut); return; }",
+		const onGlobalKeydown = flat(body(/function onGlobalKeydown\(/));
+		expect(onGlobalKeydown).toContain(
+			"const shortcut = windowShortcutOf(event); if (shortcut !== null) { event.preventDefault();",
 		);
+		// Where the key was typed decides whether F6 is a chord: in a terminal it is the
+		// program's, and only Ctrl+F6 moves between the zones (utils/app-shortcuts.spec.ts, #637).
+		expect(SOURCE).not.toMatch(/\bappShortcutOf\(/);
+		expect(onGlobalKeydown).toContain("runAppAction(shortcut); return; }");
 		// Before an element's own handler can stop it.
 		expect(SOURCE).toContain(
 			"window.addEventListener('keydown', onGlobalKeydown, { capture: true });",
 		);
 	});
 
-	// The tab bar's "+" and ×, and a pane's split, are these same handlers.
+	// F6 behind Settings would leave the keyboard behind the dialog (#637).
+	it("takes a chord that moves the keyboard, but does not run it, while a modal dialog has it", () => {
+		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
+			"event.preventDefault(); // A modal dialog keeps the keyboard: nothing takes it behind the dialog (#637). if (movesKeyboard(shortcut) && isInModalDialog(event.target)) return; runAppAction(shortcut);",
+		);
+		expect(flat(body(/function isInModalDialog\(/))).toContain(
+			"target.closest('[aria-modal=\"true\"]') !== null",
+		);
+	});
+
+	// The tab bar's "+", a pane's split and its "Close Pane" are these same handlers.
 	it("runs each action of the table as the tab bar and the panes do", () => {
 		const runAppAction = flat(body(/function runAppAction\(/));
-		const actions: Record<AppActionId, string> = {
+		const actions: Partial<Record<AppActionId, string>> = {
 			"palette.open": "commandPalette.toggle();",
+			"settings.open": "showSettings.value = !showSettings.value;",
 			"tab.new": "onNewTab();",
-			"tab.close": "if (tab !== null) onCloseTab(layout.activeTabIndex.value);",
-			"pane.splitRight": "if (pane !== null) onSplit(pane, 'vertical');",
-			"pane.splitDown": "if (pane !== null) onSplit(pane, 'horizontal');",
+			"tab.next": "switchTab('next');",
+			"tab.previous": "switchTab('previous');",
+			"pane.splitRight": "if (terminal !== null) onSplit(terminal, 'vertical');",
+			"pane.splitDown": "if (terminal !== null) onSplit(terminal, 'horizontal');",
+			"pane.close": "closeFocusedPane();",
+			"zone.next": "cycleFocusZone(1);",
+			"zone.previous": "cycleFocusZone(-1);",
 		};
 		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
-			expect(runAppAction).toContain(`case '${id}': ${actions[id]} break;`);
+			const action = actions[id];
+			if (action !== undefined) {
+				expect(runAppAction).toContain(`case '${id}': ${action} break;`);
+			} else {
+				// Ctrl+Alt+digit, Alt+arrows and Alt+Shift+arrows, read from their id.
+				expect(tabNumberOf(id) !== null || paneMoveOf(id) !== null, id).toBe(true);
+			}
 		}
-		// The split is the focused pane's, in the tab shown.
 		expect(runAppAction).toContain(
-			"const tab = layout.activeTab.value; const pane = tab === null ? null : layout.getActiveChannelId(tab.id);",
+			"const tabNumber = tabNumberOf(action); if (tabNumber !== null) { switchTab({ goTo: tabNumber }); return; }",
+		);
+		expect(runAppAction).toContain(
+			"if (paneMove.move === 'focus') moveFocusToPane(paneMove.direction); else resizeFocusedPane(paneMove.direction);",
+		);
+		// The split is the focused pane's, and only a terminal's: an empty pane has none.
+		expect(runAppAction).toContain(
+			"const pane = focusedPane(); const terminal = pane?.leaf.node.type === 'terminal' ? pane.leaf.node.channelId : null;",
 		);
 		expect(SOURCE).toContain('@add-tab="onNewTab"');
 		expect(SOURCE).toContain('@close-tab="onCloseTab"');
@@ -157,17 +190,85 @@ describe("the window's shortcuts", () => {
 		const text = flat(SOURCE);
 		for (const [row, id] of [
 			["action:new-channel", "tab.new"],
-			["action:close-tab", "tab.close"],
+			["action:close-pane", "pane.close"],
 			["action:split-right", "pane.splitRight"],
 			["action:split-down", "pane.splitDown"],
 		]) {
 			expect(text).toContain(`case '${row}': runAppAction('${id}'); break;`);
 		}
+		// No chord closes a whole tab any more; the palette's row still does, as its × does.
+		expect(text).toContain(
+			"case 'action:close-tab': if (layout.activeTab.value !== null) onCloseTab(layout.activeTabIndex.value); break;",
+		);
 	});
 
 	it("no longer takes Ctrl+K from the shell", () => {
 		const onGlobalKeydown = body(/function onGlobalKeydown\(/);
 		expect(onGlobalKeydown).not.toMatch(/event\.key === ['"]k['"]/i);
 		expect(onGlobalKeydown).not.toContain("commandPalette.toggle()");
+	});
+});
+
+// Which pane and which divider the keys reach is tested in utils/pane-geometry.spec.ts, the
+// tabs in utils/tab-switch.spec.ts, and the zones' order in utils/focus-zones.spec.ts (#637).
+describe("the keyboard among tabs, panes and zones", () => {
+	const flat = (text: string): string => text.replace(/\s+/g, " ");
+
+	// Windows Terminal's: the tab closes with its last pane.
+	it("closes the focused pane as its own Close Pane does, and the tab with its last pane", () => {
+		const closeFocusedPane = flat(body(/function closeFocusedPane\(/));
+		expect(closeFocusedPane).toContain(
+			"if (root === null || root === undefined || root.type !== 'split') { onCloseTab(layout.activeTabIndex.value); }",
+		);
+		// A terminal keeps running, or an ended one goes as the setting says (onClosePane); an
+		// empty pane gives its room to its neighbour, as its own "Close Pane" does.
+		expect(closeFocusedPane).toContain(
+			"if (pane.leaf.node.type === 'terminal') onClosePane(pane.leaf.node.channelId); else onRearrangeVacant(pane.leaf.node.id);",
+		);
+		expect(SOURCE).toContain('@close-pane="onClosePane"');
+		expect(SOURCE).toContain('@rearrange-vacant="onRearrangeVacant"');
+		// The pane closed had the keyboard: it goes to the one that takes its place.
+		expect(closeFocusedPane).toContain("void nextTick(focusActivePane);");
+	});
+
+	it("moves a divider through the layout, which keeps it where the mouse can drag it", () => {
+		expect(flat(body(/function resizeFocusedPane\(/))).toContain(
+			"const change = resizeTowards(pane.root, pane.leaf.id, direction); if (change !== null) layout.updateRatio(change.path, change.ratio);",
+		);
+	});
+
+	it("switches among the tabs the bar shows, and takes the keyboard into the pane", () => {
+		const switchTab = flat(body(/function switchTab\(/));
+		expect(switchTab).toContain("layout.tabsInView(),");
+		expect(switchTab).toContain("layout.setActiveTab(index); void nextTick(focusActivePane);");
+	});
+
+	it("marks the panes' zone, and each pane, for F6, Esc and Alt+arrows", () => {
+		expect(SOURCE).toContain('<div class="pane-area" data-focus-zone="pane">');
+		expect(PANE_LAYOUT).toContain(':data-pane-id="node.paneId"');
+		expect(PANE_LAYOUT).toContain(':data-pane-id="node.id"');
+		// Esc on the rail, the list or the tab bar goes back to the pane.
+		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
+			"if (zone !== null && zone !== 'pane' && focusActivePane()) { event.preventDefault(); return; }",
+		);
+	});
+
+	// Settings' own Esc goes from its detail back to its menu (components/settings/SettingsPanel.spec.ts).
+	it("leaves Esc inside Settings to Settings, and closes it on an Esc from outside", () => {
+		expect(flat(body(/function onGlobalKeydown\(/))).toContain(
+			"if (event.key === 'Escape' && showSettings.value && !isInModalDialog(event.target)) { showSettings.value = false; }",
+		);
+	});
+
+	it("gives the keyboard to the pane when Settings closes with nowhere to give it back", () => {
+		const text = flat(SOURCE);
+		expect(text).toContain(
+			"watch(showSettings, (open) => { if (open) return; void nextTick(() => { const active = document.activeElement; if (active === null || active === document.body) focusActivePane(); }); });",
+		);
+	});
+
+	it("opens a terminal from the list on Enter, and takes the keyboard into it", () => {
+		expect(SOURCE).toContain('@open-channel="onOpenChannelFromList"');
+		expect(flat(body(/function onOpenChannelFromList\(/))).toContain("onSelectChannel(channelId);");
 	});
 });

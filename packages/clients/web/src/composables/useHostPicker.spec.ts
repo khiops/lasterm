@@ -196,6 +196,24 @@ describe("useHostPicker", () => {
 		expect(picker.query.value).toBe("");
 	});
 
+	// Alt+↑/↓ moves the focus to another pane (#637): the list must not move with it, nor a
+	// chord open a row.
+	it("leaves the keys held with Alt, Ctrl or Meta to the window", () => {
+		const { picker, asked } = mountPicker();
+		for (const modifier of ["altKey", "ctrlKey", "metaKey"] as const) {
+			for (const key of ["ArrowDown", "ArrowUp", "Enter", "Home", "End"]) {
+				const preventDefault = vi.fn();
+				picker.onKeydown({ key, [modifier]: true, preventDefault });
+				expect(preventDefault, `${modifier} ${key}`).not.toHaveBeenCalled();
+			}
+		}
+		expect(picker.highlighted.value).toBe(0);
+		expect(asked.newTerminal).toEqual([]);
+		// Unmodified, the same keys still move and open.
+		picker.onKeydown({ key: "ArrowDown", altKey: false, preventDefault: () => {} });
+		expect(picker.highlighted.value).toBe(1);
+	});
+
 	it("opens a new terminal on a live host in this pane, spawned by the pane at its size", async () => {
 		const channelsStore = useChannelsStore();
 		const spawn = vi.spyOn(channelsStore, "spawnChannel");

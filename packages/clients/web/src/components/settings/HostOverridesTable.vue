@@ -29,6 +29,7 @@
 					<td class="col-action">
 						<select
 							class="override-select"
+							:aria-label="`Override for ${host.label}`"
 							:value="getOverride(host.id) ?? ''"
 							:disabled="saving.has(host.id)"
 							@change="handleOverrideChange(host.id, ($event.target as HTMLSelectElement).value)"

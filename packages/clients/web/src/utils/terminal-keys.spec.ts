@@ -1,85 +1,132 @@
 import { describe, expect, it, vi } from "vitest";
-import { altArrowSequence, type TerminalKeyTarget, terminalKeyHandler } from "./terminal-keys.js";
+import { APP_SHORTCUTS, type AppActionId } from "./app-shortcuts.js";
+import { type TerminalKeyTarget, terminalKeyHandler } from "./terminal-keys.js";
 
-function key(k: string, mods: Partial<KeyboardEventInit> = {}): KeyboardEvent {
-	return new KeyboardEvent("keydown", { key: k, altKey: true, ...mods });
+type KeyInit = Partial<KeyboardEventInit> & { altGraph?: boolean };
+
+/**
+ * A key event as a browser reports it. AltGraph is held only for AltGr: happy-dom answers
+ * `getModifierState("AltGraph")` with `altKey`, which would make every Alt chord AltGr.
+ */
+function event(type: string, k: string, mods: KeyInit = {}): KeyboardEvent {
+	const { altGraph = false, ...init } = mods;
+	const ev = new KeyboardEvent(type, { key: k, ...init });
+	Object.defineProperty(ev, "getModifierState", {
+		value: (name: string) => (name === "AltGraph" ? altGraph : false),
+	});
+	return ev;
 }
 
-describe("altArrowSequence", () => {
-	it("sends Ctrl+arrow for Alt+arrow outside macOS", () => {
-		expect(altArrowSequence(key("ArrowLeft"), false)).toBe("\x1b[1;5D");
-		expect(altArrowSequence(key("ArrowRight"), false)).toBe("\x1b[1;5C");
-		expect(altArrowSequence(key("ArrowUp"), false)).toBe("\x1b[1;5A");
-		expect(altArrowSequence(key("ArrowDown"), false)).toBe("\x1b[1;5B");
-	});
-
-	it("sends the emacs word motions for Option+Left/Right on macOS", () => {
-		expect(altArrowSequence(key("ArrowLeft"), true)).toBe("\x1bb");
-		expect(altArrowSequence(key("ArrowRight"), true)).toBe("\x1bf");
-		expect(altArrowSequence(key("ArrowUp"), true)).toBeNull();
-	});
-
-	it("leaves every other combination to xterm", () => {
-		expect(altArrowSequence(key("ArrowLeft", { altKey: false }), false)).toBeNull();
-		expect(altArrowSequence(key("ArrowLeft", { shiftKey: true }), false)).toBeNull();
-		expect(altArrowSequence(key("ArrowLeft", { ctrlKey: true }), false)).toBeNull();
-		expect(altArrowSequence(key("ArrowLeft", { metaKey: true }), true)).toBeNull();
-		expect(altArrowSequence(key("b"), false)).toBeNull();
-	});
-});
+const TYPES = ["keydown", "keypress", "keyup"];
 
 describe("terminalKeyHandler", () => {
 	function pane(opts: { searchOpen?: boolean; selection?: boolean } = {}) {
 		const target = {
 			openSearch: vi.fn(),
 			isSearchOpen: () => opts.searchOpen ?? false,
-			input: vi.fn(),
 			hasSelection: () => opts.selection ?? false,
-			isMac: false,
 		} satisfies TerminalKeyTarget;
 		return { target, handle: terminalKeyHandler(target) };
-	}
-
-	function event(type: string, k: string, mods: Partial<KeyboardEventInit> = {}): KeyboardEvent {
-		return new KeyboardEvent(type, { key: k, ...mods });
 	}
 
 	// `false` is the only way to keep a key from the PTY: xterm ignores
 	// defaultPrevented, so the chord that opened the palette reached the shell (#624).
 	it("keeps the palette's shortcut from the PTY, on every event of it", () => {
 		const { target, handle } = pane();
-		for (const type of ["keydown", "keypress", "keyup"]) {
+		for (const type of TYPES) {
 			expect(handle(event(type, "P", { ctrlKey: true, shiftKey: true }))).toBe(false);
 			expect(handle(event(type, "P", { metaKey: true, shiftKey: true }))).toBe(false);
 		}
-		expect(target.input).not.toHaveBeenCalled();
 		expect(target.openSearch).not.toHaveBeenCalled();
 	});
 
-	// The window runs them; a terminal with the keyboard must not also send them (#631).
-	it("keeps every app shortcut from the PTY, on every event of it", () => {
+	// The window runs them; a terminal with the keyboard must not also send them (#631, #637).
+	it("keeps every chord of the table from the PTY, on every event of it", () => {
 		const { target, handle } = pane();
-		const chords: [string, Partial<KeyboardEventInit>][] = [
-			["T", { ctrlKey: true, shiftKey: true }],
-			["W", { ctrlKey: true, shiftKey: true }],
+		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
+			const chord = APP_SHORTCUTS[id];
+			const mods = {
+				ctrlKey: chord.ctrl,
+				altKey: chord.alt,
+				shiftKey: chord.shift,
+				...(chord.code !== undefined && { code: chord.code }),
+			};
+			// An arrow's `key` is its name, not the cap the table shows.
+			const k = chord.code?.startsWith("Arrow") === true ? chord.code : chord.key;
+			for (const type of TYPES) {
+				expect(handle(event(type, k, mods)), `${type} ${id}`).toBe(false);
+			}
+		}
+		expect(target.openSearch).not.toHaveBeenCalled();
+	});
+
+	it("keeps the chords from the PTY as other layouts report them", () => {
+		const { handle } = pane();
+		const chords: [string, KeyInit][] = [
+			// US: Shift turns = and - into + and _.
 			["+", { altKey: true, shiftKey: true, code: "Equal" }],
 			["_", { altKey: true, shiftKey: true, code: "Minus" }],
-			// AZERTY: Shift turns the key right of 0 into °.
+			// AZERTY: Shift turns the key right of 0 into °, and the 1 key types &.
 			["°", { altKey: true, shiftKey: true, code: "Minus" }],
+			["&", { ctrlKey: true, altKey: true, code: "Digit1" }],
+			["ç", { ctrlKey: true, altKey: true, code: "Digit9" }],
+			["w", { ctrlKey: true, shiftKey: true, code: "KeyW" }],
 		];
 		for (const [k, mods] of chords) {
-			for (const type of ["keydown", "keypress", "keyup"]) {
+			for (const type of TYPES) {
 				expect(handle(event(type, k, mods)), `${type} ${k}`).toBe(false);
 			}
 		}
-		expect(target.input).not.toHaveBeenCalled();
-		expect(target.openSearch).not.toHaveBeenCalled();
+	});
+
+	// A browser reports AltGr as Ctrl+Alt; on AZERTY, AltGr+3 types # (#637).
+	it("lets AltGr+digits through to xterm, which types their character", () => {
+		const { handle } = pane();
+		const altGr: [string, string][] = [
+			["~", "Digit2"],
+			["#", "Digit3"],
+			["{", "Digit4"],
+			["[", "Digit5"],
+			["|", "Digit6"],
+			["\\", "Digit8"],
+			["^", "Digit9"],
+			["@", "Digit0"],
+		];
+		for (const [k, code] of altGr) {
+			for (const type of TYPES) {
+				const ev = event(type, k, { ctrlKey: true, altKey: true, altGraph: true, code });
+				expect(handle(ev), `${type} AltGr+${code}`).toBe(true);
+			}
+		}
+	});
+
+	// A shell moves by word on Ctrl+←/→, as in Windows Terminal: xterm sends them as they are.
+	it("lets Ctrl+arrows and plain arrows through to xterm", () => {
+		const { handle } = pane();
+		for (const arrow of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+			for (const type of TYPES) {
+				expect(handle(event(type, arrow, { ctrlKey: true, code: arrow })), arrow).toBe(true);
+				expect(handle(event(type, arrow, { code: arrow })), arrow).toBe(true);
+				expect(handle(event(type, arrow, { shiftKey: true, code: arrow })), arrow).toBe(true);
+			}
+		}
+	});
+
+	// Alt+arrows were rewritten into a word motion, as xterm 5 did (#340); they move between
+	// panes now, and nothing of them reaches the shell (#637).
+	it("sends nothing for Alt+arrows, which move between panes", () => {
+		const { handle } = pane();
+		for (const arrow of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+			for (const type of TYPES) {
+				expect(handle(event(type, arrow, { altKey: true, code: arrow }))).toBe(false);
+			}
+		}
 	});
 
 	// A shell's own: transpose, delete a word, readline's undo, SIGQUIT.
 	it("leaves Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\\ to xterm, which sends them to the shell", () => {
 		const { handle } = pane();
-		for (const type of ["keydown", "keypress", "keyup"]) {
+		for (const type of TYPES) {
 			expect(handle(event(type, "t", { ctrlKey: true, code: "KeyT" }))).toBe(true);
 			expect(handle(event(type, "w", { ctrlKey: true, code: "KeyW" }))).toBe(true);
 			expect(handle(event(type, "-", { ctrlKey: true, code: "Minus" }))).toBe(true);
@@ -88,11 +135,34 @@ describe("terminalKeyHandler", () => {
 		// Alt+= and Alt+- without Shift, which readline binds too.
 		expect(handle(event("keydown", "=", { altKey: true, code: "Equal" }))).toBe(true);
 		expect(handle(event("keydown", "-", { altKey: true, code: "Minus" }))).toBe(true);
+		// Tab and Shift+Tab complete; F5 is a program's.
+		expect(handle(event("keydown", "Tab", { code: "Tab" }))).toBe(true);
+		expect(handle(event("keydown", "Tab", { shiftKey: true, code: "Tab" }))).toBe(true);
+		expect(handle(event("keydown", "F5", { code: "F5" }))).toBe(true);
+	});
+
+	// htop sorts and Midnight Commander moves files with F6: in a terminal it stays theirs, and
+	// only Ctrl+F6 moves between the window's zones from there (#637).
+	it("lets F6 and Shift+F6 through to xterm, and keeps Ctrl+F6 and Ctrl+Shift+F6 from it", () => {
+		const { handle } = pane();
+		for (const type of TYPES) {
+			expect(handle(event(type, "F6", { code: "F6" })), `${type} F6`).toBe(true);
+			expect(handle(event(type, "F6", { shiftKey: true, code: "F6" })), `${type} Shift+F6`).toBe(
+				true,
+			);
+			expect(handle(event(type, "F6", { ctrlKey: true, code: "F6" })), `${type} Ctrl+F6`).toBe(
+				false,
+			);
+			expect(
+				handle(event(type, "F6", { ctrlKey: true, shiftKey: true, code: "F6" })),
+				`${type} Ctrl+Shift+F6`,
+			).toBe(false);
+		}
 	});
 
 	it("leaves Ctrl+K to xterm, which sends it to the shell", () => {
 		const { handle } = pane();
-		for (const type of ["keydown", "keypress", "keyup"]) {
+		for (const type of TYPES) {
 			expect(handle(event(type, "k", { ctrlKey: true }))).toBe(true);
 		}
 		// Ctrl+P too: the shell's previous-history.
@@ -111,14 +181,6 @@ describe("terminalKeyHandler", () => {
 		expect(pane({ searchOpen: true }).handle(event("keydown", "r", { altKey: true }))).toBe(false);
 		expect(pane().handle(event("keydown", "Escape"))).toBe(true);
 		expect(pane().handle(event("keydown", "r", { altKey: true }))).toBe(true);
-	});
-
-	it("sends Alt+arrow as the word motion, on keydown only", () => {
-		const { target, handle } = pane();
-		expect(handle(event("keydown", "ArrowLeft", { altKey: true }))).toBe(false);
-		expect(handle(event("keyup", "ArrowLeft", { altKey: true }))).toBe(false);
-		expect(target.input).toHaveBeenCalledTimes(1);
-		expect(target.input).toHaveBeenCalledWith("\x1b[1;5D");
 	});
 
 	it("leaves paste, and copy of a selection, to the browser", () => {

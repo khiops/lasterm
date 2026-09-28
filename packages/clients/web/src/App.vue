@@ -254,6 +254,7 @@
 				v-show="!sidebarResize.collapsed.value"
 				class="channel-sidebar"
 				@select-channel="onSelectChannel"
+				@open-channel="onOpenChannelFromList"
 				@open-new-tab="onSidebarOpenNewTab"
 				@open-current-tab="onSidebarOpenCurrentTab"
 				@configure-command="onConfigureCommand"
@@ -294,7 +295,7 @@
 					@reorder-tab="layout.reorderTab"
 					@configure-command="onConfigureCommand"
 				/>
-				<div class="pane-area">
+				<div class="pane-area" data-focus-zone="pane">
 					<div
 						v-for="(tab, idx) in layout.tabs.value"
 						:key="tab.id"
@@ -350,7 +351,7 @@ import {
 	isHostRailBadgeSize,
 	isHostRailColumns,
 } from '@lasterm/shared';
-import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
 import AgentBinaryVerify from './components/AgentBinaryVerify.vue';
 import AgentDeployFailed from './components/AgentDeployFailed.vue';
 import AuthPromptDialog from './components/AuthPromptDialog.vue';
@@ -404,7 +405,7 @@ import {
 	displayedChannelIds,
 } from './composables/displayedChannels.js';
 import { MULTI_PANE_SEARCH_KEY, useMultiPaneSearch } from './composables/useMultiPaneSearch.js';
-import { MAX_PANE_COUNT } from './composables/usePaneTree.js';
+import { findFirstLeafPaneId, MAX_PANE_COUNT, type PaneNode } from './composables/usePaneTree.js';
 import { useResizable } from './composables/useResizable.js';
 import { useTabTitle } from './composables/useTabTitle.js';
 import {
@@ -429,7 +430,18 @@ import { loadDesktopVersion } from './utils/desktop-version.js';
 import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
-import { type AppActionId, appShortcutOf } from './utils/app-shortcuts.js';
+import {
+	type AppActionId,
+	movesKeyboard,
+	type PaneDirection,
+	paneMoveOf,
+	tabNumberOf,
+	windowShortcutOf,
+} from './utils/app-shortcuts.js';
+import { type FocusZone, isFocusZone, zoneAfter } from './utils/focus-zones.js';
+import { isRendered, isTabbable, tabbables } from './utils/focusable.js';
+import { type PaneLeaf, paneInDirection, paneLeaves, resizeTowards } from './utils/pane-geometry.js';
+import { type TabSwitch, tabToSwitchTo } from './utils/tab-switch.js';
 
 const authStore = useAuthStore();
 const sessionStore = useSessionStore();
@@ -602,8 +614,13 @@ commandPalette.onExternalAction.value = (actionId: string) => {
 		case 'action:new-channel':
 			runAppAction('tab.new');
 			break;
+		case 'action:close-pane':
+			runAppAction('pane.close');
+			break;
+		// No chord closes the whole tab any more (Ctrl+Shift+W closes a pane, #637): the
+		// palette's row still does, as the tab's × does.
 		case 'action:close-tab':
-			runAppAction('tab.close');
+			if (layout.activeTab.value !== null) onCloseTab(layout.activeTabIndex.value);
 			break;
 		case 'action:split-right':
 			runAppAction('pane.splitRight');
@@ -1202,17 +1219,37 @@ function isPtyFocused(): boolean {
 
 /**
  * Global keydown handler attached to the app root.
- * Runs the app's shortcuts (utils/app-shortcuts.ts: the palette, new and close tab,
- * split right and down), wherever the keyboard is (#624, #631). A terminal's key
- * handler keeps those chords from its PTY, since xterm ignores preventDefault.
+ * Runs the app's shortcuts (utils/app-shortcuts.ts: the palette, the tabs, the panes
+ * and the focus zones), wherever the keyboard is (#624, #631, #637). A terminal's key
+ * handler keeps those chords from its PTY, since xterm ignores preventDefault. A chord
+ * for outside a terminal (F6) is left to the terminal when the keyboard is in one.
  * Intercepts Ctrl+Shift+1..9 to spawn profile N (INV-13: only when PTY is NOT focused).
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
-	const shortcut = appShortcutOf(event);
+	const shortcut = windowShortcutOf(event);
 	if (shortcut !== null) {
 		event.preventDefault();
+		// A modal dialog keeps the keyboard: nothing takes it behind the dialog (#637).
+		if (movesKeyboard(shortcut) && isInModalDialog(event.target)) return;
 		runAppAction(shortcut);
 		return;
+	}
+
+	// Esc on the rail, the terminal list or the tab bar goes back to the pane (#637). A text
+	// field there, such as a tab being renamed, keeps its own Esc.
+	if (
+		event.key === 'Escape' &&
+		!event.ctrlKey &&
+		!event.altKey &&
+		!event.metaKey &&
+		!event.shiftKey &&
+		!isTextField(event.target)
+	) {
+		const zone = zoneOf(event.target);
+		if (zone !== null && zone !== 'pane' && focusActivePane()) {
+			event.preventDefault();
+			return;
+		}
 	}
 
 	// Ctrl+Shift+1..9 — spawn profile N (INV-13: skip when PTY has focus)
@@ -1227,36 +1264,244 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 		}
 	}
 
-	if (event.key === 'Escape' && showSettings.value) {
+	// Inside a dialog, Esc is the dialog's: Settings' own sends the keyboard from its detail back
+	// to its menu, and closes it from there (#637).
+	if (event.key === 'Escape' && showSettings.value && !isInModalDialog(event.target)) {
 		showSettings.value = false;
 	}
 }
 
+// Settings gives the keyboard back to where it was when it opened; opened from the palette,
+// that was nowhere any more, and the keyboard goes to the pane (#637).
+watch(showSettings, (open) => {
+	if (open) return;
+	void nextTick(() => {
+		const active = document.activeElement;
+		if (active === null || active === document.body) focusActivePane();
+	});
+});
+
 /**
  * An app shortcut's action, which the palette's row for it runs too: what the
- * tab bar and the panes do. A new tab is the "+" button's, the tab closes as
- * its × closes it, and the split is the focused pane's, under the pane limit.
+ * tab bar and the panes do. A new tab is the "+" button's, the split is the
+ * focused pane's, under the pane limit, and the focused pane closes as its own
+ * "Close Pane" closes it. The tabs, the panes and the zones take the keyboard
+ * with them (#637).
  */
 function runAppAction(action: AppActionId): void {
-	const tab = layout.activeTab.value;
-	const pane = tab === null ? null : layout.getActiveChannelId(tab.id);
+	const tabNumber = tabNumberOf(action);
+	if (tabNumber !== null) {
+		switchTab({ goTo: tabNumber });
+		return;
+	}
+	const paneMove = paneMoveOf(action);
+	if (paneMove !== null) {
+		if (paneMove.move === 'focus') moveFocusToPane(paneMove.direction);
+		else resizeFocusedPane(paneMove.direction);
+		return;
+	}
+	const pane = focusedPane();
+	const terminal = pane?.leaf.node.type === 'terminal' ? pane.leaf.node.channelId : null;
 	switch (action) {
 		case 'palette.open':
 			commandPalette.toggle();
 			break;
+		case 'settings.open':
+			showSettings.value = !showSettings.value;
+			break;
 		case 'tab.new':
 			onNewTab();
 			break;
-		case 'tab.close':
-			if (tab !== null) onCloseTab(layout.activeTabIndex.value);
+		case 'tab.next':
+			switchTab('next');
+			break;
+		case 'tab.previous':
+			switchTab('previous');
 			break;
 		case 'pane.splitRight':
-			if (pane !== null) onSplit(pane, 'vertical');
+			if (terminal !== null) onSplit(terminal, 'vertical');
 			break;
 		case 'pane.splitDown':
-			if (pane !== null) onSplit(pane, 'horizontal');
+			if (terminal !== null) onSplit(terminal, 'horizontal');
+			break;
+		case 'pane.close':
+			closeFocusedPane();
+			break;
+		case 'zone.next':
+			cycleFocusZone(1);
+			break;
+		case 'zone.previous':
+			cycleFocusZone(-1);
 			break;
 	}
+}
+
+// ─── Keyboard: tabs, panes and focus zones (#637) ────────────────────────────
+
+function isInModalDialog(target: EventTarget | null): boolean {
+	return target instanceof Element && target.closest('[aria-modal="true"]') !== null;
+}
+
+function isTextField(target: EventTarget | null): boolean {
+	return (
+		target instanceof Element &&
+		target.closest('input, textarea, select, [contenteditable="true"]') !== null
+	);
+}
+
+/** The zone an element is in: the rail, the terminal list, the tab bar or the panes. */
+function zoneOf(target: EventTarget | null): FocusZone | null {
+	if (!(target instanceof Element)) return null;
+	const zone = target.closest('[data-focus-zone]')?.getAttribute('data-focus-zone');
+	return isFocusZone(zone) ? zone : null;
+}
+
+/**
+ * The pane the keyboard is in, in the tab shown, and that tab: the pane holding
+ * the focus, or else the tab's active pane, or else its first terminal, or else
+ * its first empty pane. Null without a tab.
+ */
+function focusedPane(): { tabId: string; root: PaneNode; leaf: PaneLeaf } | null {
+	const tab = layout.activeTab.value;
+	const root = tab === null ? undefined : layout.layouts.value[tab.id];
+	if (tab === null || root === null || root === undefined) return null;
+	const leaves = paneLeaves(root);
+	const holder = document.activeElement?.closest('[data-pane-id]')?.getAttribute('data-pane-id');
+	const active = layout.activePaneIds.value[tab.id];
+	const firstTerminal = findFirstLeafPaneId(root);
+	for (const id of [holder, active, firstTerminal, leaves[0]?.id]) {
+		const leaf = leaves.find((candidate) => candidate.id === id);
+		if (leaf !== undefined) return { tabId: tab.id, root, leaf };
+	}
+	return null;
+}
+
+/**
+ * The element that takes a pane's keyboard: a terminal's ended card when it
+ * shows one, else xterm's own input, as the pane itself focuses; an empty
+ * pane's search field, where its picker puts the keyboard itself, else its
+ * first control.
+ */
+function paneFocusTarget(paneId: string): HTMLElement | null {
+	const pane = document.querySelector(`.pane-area [data-pane-id="${CSS.escape(paneId)}"]`);
+	if (pane === null) return null;
+	if (pane.querySelector('.terminal-pane') !== null) {
+		return (
+			pane.querySelector<HTMLElement>('.exit-card') ??
+			pane.querySelector<HTMLElement>('.xterm-helper-textarea')
+		);
+	}
+	const controls = tabbables(pane);
+	return (
+		controls.find((el) => el instanceof HTMLInputElement && el.type === 'text') ??
+		controls[0] ??
+		null
+	);
+}
+
+/** Make a pane of the tab shown the active one, and give it the keyboard. */
+function focusPane(tabId: string, paneId: string): void {
+	layout.setActivePaneId(tabId, paneId);
+	paneFocusTarget(paneId)?.focus();
+}
+
+/** Where the keyboard goes back to: the focused pane, or the empty area's button without a tab. */
+function activePaneTarget(): HTMLElement | null {
+	const pane = focusedPane();
+	if (pane === null) return document.querySelector<HTMLElement>('.pane-empty button');
+	return paneFocusTarget(pane.leaf.id);
+}
+
+/** Give the keyboard back to the focused pane; whether anything took it. */
+function focusActivePane(): boolean {
+	const target = activePaneTarget();
+	target?.focus();
+	return target !== null;
+}
+
+/** The element F6 lands on in a zone, or null for a zone hidden or with nothing to focus. */
+function zoneEntry(zone: FocusZone): HTMLElement | null {
+	if (zone === 'pane') return activePaneTarget();
+	const el = document.querySelector<HTMLElement>(`[data-focus-zone="${zone}"]`);
+	// A zone folded away (`display: none`) is passed over.
+	if (el === null || !isRendered(el)) return null;
+	// The one item of the zone that takes Tab: its roving tabindex.
+	const item = el.querySelector<HTMLElement>('[data-zone-item][tabindex="0"]');
+	return item !== null && isTabbable(item) ? item : null;
+}
+
+/** F6 and Shift+F6: the next zone that can take the keyboard, in FOCUS_ZONES order. */
+function cycleFocusZone(step: 1 | -1): void {
+	const current = zoneOf(document.activeElement) ?? 'pane';
+	const next = zoneAfter(current, step, (zone) => zoneEntry(zone) !== null);
+	if (next !== null) zoneEntry(next)?.focus();
+}
+
+/** Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+Alt+digit, among the tabs the bar shows. */
+function switchTab(target: TabSwitch): void {
+	const index = tabToSwitchTo(
+		target,
+		layout.tabs.value.map((tab) => tab.id),
+		layout.activeTabIndex.value,
+		layout.tabsInView(),
+	);
+	if (index === null) return;
+	layout.setActiveTab(index);
+	void nextTick(focusActivePane);
+}
+
+/** Alt+arrow: the focus goes to the pane on that side; nothing at the tab's edge. */
+function moveFocusToPane(direction: PaneDirection): void {
+	const pane = focusedPane();
+	if (pane === null) return;
+	const next = paneInDirection(pane.root, pane.leaf.id, direction);
+	if (next !== null) focusPane(pane.tabId, next);
+}
+
+/** Alt+Shift+arrow: the nearest divider moves that way, as far as the mouse could drag it. */
+function resizeFocusedPane(direction: PaneDirection): void {
+	const pane = focusedPane();
+	if (pane === null) return;
+	const change = resizeTowards(pane.root, pane.leaf.id, direction);
+	if (change !== null) layout.updateRatio(change.path, change.ratio);
+}
+
+/**
+ * Ctrl+Shift+W: the focused pane closes as its own "Close Pane" closes it — a
+ * live terminal keeps running, an ended one is deleted unless the setting keeps
+ * it, an empty pane gives its room to its neighbour. The tab's last pane closes
+ * the tab, as its × does (Windows Terminal's behaviour).
+ */
+function closeFocusedPane(): void {
+	const tab = layout.activeTab.value;
+	if (tab === null) return;
+	const root = layout.layouts.value[tab.id];
+	if (root === null || root === undefined || root.type !== 'split') {
+		onCloseTab(layout.activeTabIndex.value);
+	} else {
+		const pane = focusedPane();
+		if (pane === null) return;
+		if (pane.leaf.node.type === 'terminal') onClosePane(pane.leaf.node.channelId);
+		else onRearrangeVacant(pane.leaf.node.id);
+	}
+	void nextTick(focusActivePane);
+}
+
+/**
+ * Enter on a terminal in the list: it opens as a click opens it, and the
+ * keyboard goes into its pane (#637).
+ */
+function onOpenChannelFromList(channelId: string): void {
+	onSelectChannel(channelId);
+	void nextTick(() => {
+		const tab = layout.activeTab.value;
+		const root = tab === null ? undefined : layout.layouts.value[tab.id];
+		if (tab === null || root === null || root === undefined) return;
+		const leaf = paneLeaves(root).find(
+			(candidate) => candidate.node.type === 'terminal' && candidate.node.channelId === channelId,
+		);
+		if (leaf !== undefined) focusPane(tab.id, leaf.id);
+	});
 }
 
 /**

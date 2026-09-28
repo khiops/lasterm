@@ -894,10 +894,35 @@ Precondition: 1 host "local", 2 channels (A, B), both alive.
 - Back in the `cat -v` tab → Alt+Shift+= splits the pane right, Alt+Shift+- splits it down; `cat` shows nothing of either
 - On an AZERTY keyboard → Alt+Shift+= splits right, Alt+Shift+) splits down
 - At Settings › Panes › Max Panes → a split says the tab is full, as the pane's own menu does
-- Ctrl+Shift+W closes the tab; an ended terminal in it is deleted or kept as Settings › Terminal says
+- Ctrl+Shift+W closes the focused pane, and the tab with its last pane (#637); an ended terminal in it is deleted or kept as Settings › Terminal says
 - In the shell → Ctrl+T, Ctrl+W, Ctrl+- and Ctrl+\ reach it (`cat -v` shows ^T, ^W, ^_, and Ctrl+\ quits it)
-- Palette (Ctrl+Shift+P) → New Channel, Close Tab, Split Right and Split Down show the same chords, and do what the chords do
+- Palette (Ctrl+Shift+P) → New Channel, Close Pane, Split Right and Split Down show the same chords, and do what the chords do; Close Tab shows none and closes the tab
 - Settings › Keybindings shows the same chords
+
+### 112. Tabs, panes and zones from the keyboard (#637)
+
+- Three tabs → Ctrl+Tab goes to the next, wrapping from the last to the first; Ctrl+Shift+Tab goes back. The keyboard is in the new tab's pane
+- Ctrl+Alt+2 goes to the second tab; Ctrl+Alt+9, and Ctrl+Alt+5 with three tabs, go to the last. With Settings › Tabs showing one host's tabs, only those count
+- On an AZERTY keyboard, cursor in `cat -v` → AltGr+3 types `#`, AltGr+0 `@`, AltGr+4 `{`, and no tab changes; left Ctrl+Alt+3 goes to the third tab
+- Split a tab in four (right, then down in each) → Alt+←/→/↑/↓ move the keyboard to the pane on that side, and nothing at the tab's edge; an empty pane takes it too, on its first control
+- `cat -v` in a pane → Alt+arrows show nothing; Ctrl+←/→ show `^[[1;5D` and `^[[1;5C`, and in bash move the cursor by word
+- Alt+Shift+→ in the left pane moves the divider right, step by step, and stops where the mouse drag stops; Alt+Shift+← in the same pane moves it left
+- Ctrl+Shift+W in a split pane closes that pane only: a live terminal stays in the sidebar, an empty pane gives its room; in the last pane, the tab closes
+- Ctrl+F6 from a terminal → the selected host's badge in the rail, then the selected terminal in the list, then the active tab, then back to the pane; Ctrl+Shift+F6 goes the other way; with the list folded away, it passes it over
+- F6 and Shift+F6 in the rail, the list, the tab bar or an empty pane's picker → the same as Ctrl+F6 and Ctrl+Shift+F6; in a terminal they reach its program: `cat -v` shows `^[[17~` and `^[[17;2~`, htop sorts, Midnight Commander moves files
+- An empty pane's picker, several rows → Alt+↓ moves the focus to the pane below and leaves the picker's highlighted row where it was
+- In the rail (three columns) → ←/→ within a row, ↑/↓ between rows over the group headers, Home and End, Enter selects the host; Esc goes back to the pane
+- In the tab bar → ←/→ move without switching, Enter or Space switches, Delete closes the tab as its × does
+- Hover a tab → its name, then its Ctrl+Alt+N (tabs 1 to 8, and the last one Ctrl+Alt+9), then a line for Ctrl+Tab / Ctrl+Shift+Tab; the ninth of ten tabs names no chord. The "+" names Ctrl+Shift+T; the × says "Close tab" and names no chord
+- In the list → ↑/↓ move over the group headers, Enter opens the terminal and the keyboard goes into it
+- The focus ring is the theme's accent, in every theme; a mouse click shows none
+- With Settings open, F6, Ctrl+F6, Alt+arrows and Ctrl+Tab do nothing behind it
+- Cursor in a terminal → Ctrl+, opens Settings with the keyboard on the current category; `cat -v` shows nothing of it. Ctrl+, again, or Esc from the menu, closes it and the keyboard is back in the terminal. The palette's Settings row and the rail's gear tooltip name Ctrl+,
+- In Settings' menu → ↑/↓ move and show each category, Home and End go to the ends; → or Enter go onto the detail's first control (on Keybindings, onto the detail itself); Esc there, or Shift+Tab from that first control, come back to the category
+- In Settings → F6 goes menu, detail, close button, and round; Shift+F6 the other way. Tab never leaves the panel. The scope tabs (with a host and a terminal selected) move with ←/→. Every control shows the accent ring when reached from the keyboard
+- Settings › Tabs → Enter from the menu lands on the Close Button switch, whose track shows the ring; Space turns it, Enter does not. A screen reader names each control by its row
+- Settings › Appearance → Tab reaches each theme card (previewing it) and a custom theme's ✎, which shows when reached. Wallpaper → each thumbnail and its × are reached, the × shown. Terminal › Font → the picker opens on its search; ↓ goes into the installed fonts, ↑/↓ walk them, Enter chooses; ←/→ switch System/Imported; an imported font's card and its delete are reached; Esc closes and the keyboard is back on the font button
+- Settings › Agents → Import: the keyboard is in the dialog, the two drop zones open the file chooser on Enter or Space, Esc closes it. Profiles → Delete: the keyboard is on Cancel, Esc cancels and it is back on Delete
 
 ---
 

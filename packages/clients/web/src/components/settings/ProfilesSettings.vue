@@ -1,5 +1,5 @@
 <template>
-	<div class="profiles-settings">
+	<div ref="settingsEl" class="profiles-settings">
 		<!-- ── Form view ──────────────────────────────────────────────────── -->
 		<ProfileForm
 			v-if="formMode !== 'list'"
@@ -103,14 +103,26 @@
 
 		<!-- ── Delete confirmation ────────────────────────────────────────── -->
 		<div v-if="deletingProfile" class="delete-confirm-overlay" @click.self="deletingProfile = null">
-			<div class="delete-confirm-dialog" role="alertdialog" aria-modal="true">
-				<h4 class="delete-confirm-title">Delete Profile</h4>
-				<p class="delete-confirm-msg">
+			<div
+				ref="confirmEl"
+				class="delete-confirm-dialog"
+				role="alertdialog"
+				aria-modal="true"
+				aria-labelledby="delete-profile-title"
+				aria-describedby="delete-profile-message"
+				@keydown="onConfirmKeydown"
+			>
+				<h4 id="delete-profile-title" class="delete-confirm-title">Delete Profile</h4>
+				<p id="delete-profile-message" class="delete-confirm-msg">
 					Delete <strong>{{ deletingProfile.name }}</strong>? This cannot be undone.
 					Terminals using this profile will not be affected.
 				</p>
 				<div class="delete-confirm-actions">
-					<button type="button" class="btn btn-ghost" @click="deletingProfile = null">Cancel</button>
+					<button
+						type="button"
+						class="btn btn-ghost delete-confirm-cancel"
+						@click="deletingProfile = null"
+					>Cancel</button>
 					<button
 						type="button"
 						class="btn btn-danger"
@@ -129,7 +141,9 @@
 import { ref, onMounted } from "vue";
 import type { LaunchProfile, SupportedOs } from "@lasterm/shared";
 import ProfileForm from "./ProfileForm.vue";
+import { useModalFocus } from "../../composables/useModalFocus.js";
 import { useProfilesStore } from "../../stores/profiles.js";
+import { firstTabbable } from "../../utils/focusable.js";
 
 const profilesStore = useProfilesStore();
 
@@ -158,6 +172,21 @@ function handleSaved(_profile: LaunchProfile): void {
 
 const deletingProfile = ref<LaunchProfile | null>(null);
 const deleteInProgress = ref(false);
+
+// The confirmation is a modal alertdialog (#637): the keyboard goes onto Cancel, the harmless
+// answer; Esc cancels; Tab stays inside; and the keyboard comes back to the Delete button, or,
+// once the profile is gone with it, to the list's first control.
+const settingsEl = ref<HTMLElement | null>(null);
+const confirmEl = ref<HTMLElement | null>(null);
+const { onKeydown: onConfirmKeydown } = useModalFocus({
+	open: () => deletingProfile.value !== null,
+	root: confirmEl,
+	close: () => {
+		deletingProfile.value = null;
+	},
+	initial: () => confirmEl.value?.querySelector<HTMLElement>(".delete-confirm-cancel") ?? null,
+	fallback: () => firstTabbable(settingsEl.value),
+});
 
 function confirmDelete(profile: LaunchProfile): void {
 	deletingProfile.value = profile;

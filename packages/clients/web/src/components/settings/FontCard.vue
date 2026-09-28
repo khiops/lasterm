@@ -1,25 +1,32 @@
 
 <template>
-	<div
-		class="font-card"
-		:class="{ 'font-card--selected': selected }"
-		@click="emit('select')"
-	>
+	<div class="font-card" :class="{ 'font-card--selected': selected }">
+		<!-- Choosing the font: a button the size of the card, under its delete control, which a
+		     click anywhere else on the card reaches and the keyboard too (#637). -->
+		<button
+			type="button"
+			class="font-card-select"
+			:aria-label="family.family"
+			:aria-pressed="selected"
+			@click="emit('select')"
+		></button>
 		<div class="font-card-header">
 			<span class="font-card-name" :style="{ fontFamily: `'${family.family}'` }">
 				{{ family.family }}
 			</span>
 			<button
 				v-if="!confirmDelete"
+				type="button"
 				class="font-card-delete"
 				title="Delete font"
+				:aria-label="`Delete ${family.family}`"
 				@click.stop="confirmDelete = true"
 			>
 				<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
 					<path d="M2 3h10M5 3V2h4v1M3 3l.8 9h6.4L11 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
 				</svg>
 			</button>
-			<div v-else class="font-card-confirm" @click.stop>
+			<div v-else class="font-card-confirm">
 				<span class="font-card-confirm-label">Delete?</span>
 				<button class="font-card-confirm-btn font-card-confirm-btn--danger" @click.stop="emit('delete')">Delete</button>
 				<button class="font-card-confirm-btn" @click.stop="confirmDelete = false">Cancel</button>
@@ -53,6 +60,7 @@ const confirmDelete = ref(false);
 
 <style scoped>
 .font-card {
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -71,6 +79,37 @@ const confirmDelete = ref(false);
 .font-card--selected {
 	border-color: var(--nt-accent);
 	box-shadow: 0 0 0 1px var(--nt-accent);
+}
+
+.font-card-select {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	padding: 0;
+	border: none;
+	border-radius: inherit;
+	background: transparent;
+	cursor: pointer;
+}
+
+.font-card-select:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
+}
+
+/* The name and the preview let clicks through to the card's button; the delete control does not. */
+.font-card-header,
+.font-card-preview {
+	pointer-events: none;
+}
+
+.font-card-delete,
+.font-card-confirm {
+	position: relative;
+	z-index: 1;
+	pointer-events: auto;
 }
 
 .font-card-header {
@@ -107,8 +146,16 @@ const confirmDelete = ref(false);
 	transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
-.font-card:hover .font-card-delete {
+/* Shown with the card under the mouse, and whenever the keyboard is on the card or on it. */
+.font-card:hover .font-card-delete,
+.font-card:focus-within .font-card-delete {
 	opacity: 1;
+}
+
+.font-card-delete:focus-visible,
+.font-card-confirm-btn:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 1px;
 }
 
 .font-card-delete:hover {

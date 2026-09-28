@@ -11,6 +11,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { shortcutLabel } from "../utils/app-shortcuts.js";
 import HostRail from "./HostRail.vue";
 import SOURCE from "./HostRail.vue?raw";
 
@@ -312,6 +313,19 @@ describe("HostRail footer", () => {
 		);
 	}
 
+	// Read from the shortcut table the window runs them from (#631, #637).
+	it("names the palette's and Settings' chords in its buttons' tooltips", () => {
+		mountRail({ columns: 1 });
+		const title = (label: string): string | null =>
+			root.querySelector(`.rail-footer button[aria-label="${label}"]`)?.getAttribute("title") ??
+			null;
+		expect(title("Open command palette")).toBe(
+			`Command palette (${shortcutLabel("palette.open")})`,
+		);
+		expect(title("Open settings panel")).toBe(`Settings (${shortcutLabel("settings.open")})`);
+		expect(title("Open settings panel")).toBe("Settings (Ctrl+,)");
+	});
+
 	it("stacks its buttons in one column", () => {
 		mountRail({ columns: 1 });
 		expect(footerRows()).toEqual([
@@ -330,5 +344,128 @@ describe("HostRail footer", () => {
 			["Open command palette", "Open settings panel"],
 			["Add new host"],
 		]);
+	});
+});
+
+// ─── The keyboard (#637) ─────────────────────────────────────────────────────
+
+describe("HostRail keyboard", () => {
+	/** The badges that take Tab. */
+	function tabStops(): string[] {
+		return [...root.querySelectorAll('.badge-wrapper[tabindex="0"]')].map(
+			(el) => el.getAttribute("data-host-id") ?? "",
+		);
+	}
+
+	function focused(): string | null {
+		return document.activeElement?.getAttribute("data-host-id") ?? null;
+	}
+
+	/** Press `key` on the badge that has the keyboard, and let the rail move it. */
+	async function press(key: string): Promise<void> {
+		const target = document.activeElement ?? root;
+		target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+		await nextTick();
+		await nextTick();
+	}
+
+	it("is one zone, whose badges are its items", () => {
+		mountRail({ columns: 3 });
+		expect(rail().getAttribute("data-focus-zone")).toBe("rail");
+		for (const el of root.querySelectorAll(".badge-wrapper")) {
+			expect(el.hasAttribute("data-zone-item")).toBe(true);
+			expect(el.getAttribute("role")).toBe("button");
+		}
+	});
+
+	it("gives Tab to the selected host's badge only, or else to the first", async () => {
+		const { hostsStore } = mountRail({ columns: 3 });
+		expect(tabStops()).toEqual(["local"]);
+		hostsStore.selectHost("d");
+		await nextTick();
+		expect(tabStops()).toEqual(["d"]);
+		expect(badge("d").getAttribute("aria-pressed")).toBe("true");
+	});
+
+	it("in three columns, moves along the rows and across the group headers", async () => {
+		mountRail({ columns: 3 });
+		badge("a").focus();
+		await press("ArrowRight");
+		expect(focused()).toBe("b");
+		await press("ArrowDown");
+		expect(focused()).toBe("e");
+		// Over the "Ungrouped" header, to the same column.
+		await press("ArrowDown");
+		expect(focused()).toBe("u2");
+		await press("ArrowLeft");
+		expect(focused()).toBe("u1");
+		await press("ArrowUp");
+		expect(focused()).toBe("d");
+		await press("ArrowUp");
+		expect(focused()).toBe("a");
+		// Over the "Prod" header, to the local host alone on its row.
+		await press("ArrowUp");
+		expect(focused()).toBe("local");
+		expect(tabStops()).toEqual(["local"]);
+	});
+
+	it("in one column, moves up and down, and not sideways", async () => {
+		mountRail({ columns: 1 });
+		badge("local").focus();
+		await press("ArrowDown");
+		expect(focused()).toBe("a");
+		await press("ArrowRight");
+		expect(focused()).toBe("a");
+		await press("ArrowDown");
+		await press("ArrowDown");
+		expect(focused()).toBe("c");
+		await press("End");
+		expect(focused()).toBe("u2");
+		await press("Home");
+		expect(focused()).toBe("local");
+	});
+
+	it("passes over a folded group's badges", async () => {
+		mountRail({ columns: 3 });
+		header("Prod").click();
+		await nextTick();
+		badge("local").focus();
+		await press("ArrowDown");
+		expect(focused()).toBe("u1");
+	});
+
+	it("moves the keyboard without selecting, and selects on Enter or Space", async () => {
+		const { hostsStore } = mountRail({ columns: 3 });
+		const selectHost = vi.spyOn(hostsStore, "selectHost");
+		badge("a").focus();
+		await press("ArrowRight");
+		expect(selectHost).not.toHaveBeenCalled();
+		expect(tabStops()).toEqual(["b"]);
+		await press("Enter");
+		expect(selectHost).toHaveBeenLastCalledWith("b");
+		await press("ArrowRight");
+		await press(" ");
+		expect(selectHost).toHaveBeenLastCalledWith("c");
+	});
+
+	it("gives Tab back to the selected host once the keyboard leaves", async () => {
+		const { hostsStore } = mountRail({ columns: 3 });
+		hostsStore.selectHost("a");
+		await nextTick();
+		badge("a").focus();
+		await press("ArrowRight");
+		expect(tabStops()).toEqual(["b"]);
+		const outside = document.createElement("button");
+		document.body.appendChild(outside);
+		badge("b").dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: outside }));
+		await nextTick();
+		expect(tabStops()).toEqual(["a"]);
+		outside.remove();
+	});
+
+	it("draws the keyboard's ring from the theme", () => {
+		const ring = /\.badge-wrapper:focus-visible\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
+		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
+		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
 	});
 });

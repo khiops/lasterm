@@ -43,6 +43,9 @@ export interface PickerOpening {
 export interface PickerKey {
 	key: string;
 	isComposing?: boolean;
+	altKey?: boolean;
+	ctrlKey?: boolean;
+	metaKey?: boolean;
 	preventDefault(): void;
 }
 
@@ -205,6 +208,9 @@ export function useHostPicker(sources: HostPickerSources, actions: HostPickerAct
 
 	function onKeydown(event: PickerKey): void {
 		if (event.isComposing === true) return;
+		// A key held with Alt, Ctrl or Meta is the window's: Alt+↑/↓ moves the focus to another
+		// pane (#637), and must not move this list's highlight on the way.
+		if (event.altKey === true || event.ctrlKey === true || event.metaKey === true) return;
 		const count = list.value.options.length;
 		switch (event.key) {
 			case "ArrowDown":

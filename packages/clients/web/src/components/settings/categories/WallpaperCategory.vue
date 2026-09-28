@@ -55,6 +55,7 @@
 						class="wallpaper-thumb"
 						:class="{ active: currentWallpaper === wp }"
 						type="button"
+						:aria-pressed="currentWallpaper === wp"
 						@click="selectWallpaper(wp)"
 						>
 						<img
@@ -67,6 +68,7 @@
 						class="wallpaper-delete"
 						type="button"
 						title="Delete wallpaper"
+						:aria-label="`Delete wallpaper ${wp}`"
 						@click="deleteWallpaper(wp)"
 					>
 						&times;
@@ -535,7 +537,9 @@ onMounted(loadWallpapers);
 	transition: opacity 0.15s;
 }
 
-.wallpaper-thumb-wrapper:hover .wallpaper-delete {
+/* Shown with the thumbnail under the mouse, and whenever the keyboard is on it or on the button (#637). */
+.wallpaper-thumb-wrapper:hover .wallpaper-delete,
+.wallpaper-thumb-wrapper:focus-within .wallpaper-delete {
 	opacity: 1;
 }
 

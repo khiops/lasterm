@@ -1,36 +1,45 @@
 <template>
-	<button
-		class="theme-card"
-		:class="{ 'theme-card--active': isActive }"
-		:style="cardStyle"
-		type="button"
-		:title="theme.name"
-		@mouseenter="$emit('preview', theme)"
-		@mouseleave="$emit('preview-clear')"
-		@click="$emit('select', theme)"
-	>
-		<span class="theme-card-name">{{ theme.name }}</span>
-		<div class="theme-card-swatches">
-			<span
-				v-for="color in swatchColors"
-				:key="color"
-				class="theme-card-swatch"
-				:style="{ backgroundColor: color }"
-			></span>
-		</div>
-		<span v-if="isActive" class="theme-card-check" aria-label="Active theme">
-			&#10003;
-		</span>
+	<!-- The card and its edit button side by side: a button inside a button is not one the
+	     keyboard can reach (#637). -->
+	<div class="theme-card-wrapper">
+		<button
+			class="theme-card"
+			:class="{ 'theme-card--active': isActive }"
+			:style="cardStyle"
+			type="button"
+			:title="theme.name"
+			:aria-pressed="isActive"
+			@mouseenter="$emit('preview', theme)"
+			@mouseleave="$emit('preview-clear')"
+			@focus="$emit('preview', theme)"
+			@blur="$emit('preview-clear')"
+			@click="$emit('select', theme)"
+		>
+			<span class="theme-card-name">{{ theme.name }}</span>
+			<span class="theme-card-swatches" aria-hidden="true">
+				<span
+					v-for="color in swatchColors"
+					:key="color"
+					class="theme-card-swatch"
+					:style="{ backgroundColor: color }"
+				></span>
+			</span>
+			<span v-if="isActive" class="theme-card-check" aria-hidden="true">
+				&#10003;
+			</span>
+		</button>
 		<button
 			v-if="isCustom"
 			class="theme-card-edit"
 			type="button"
 			title="Edit theme"
-			@click.stop="$emit('edit', theme)"
+			:aria-label="`Edit ${theme.name}`"
+			:style="{ color: theme.colors.foreground }"
+			@click="$emit('edit', theme)"
 		>
 			&#9998;
 		</button>
-	</button>
+	</div>
 </template>
 
 <script setup lang="ts">
@@ -69,6 +78,10 @@ const swatchColors = computed(() => [
 </script>
 
 <style scoped>
+.theme-card-wrapper {
+	position: relative;
+}
+
 .theme-card {
 	position: relative;
 	display: flex;
@@ -140,11 +153,14 @@ const swatchColors = computed(() => [
 	transition: opacity 0.12s;
 }
 
-.theme-card:hover .theme-card-edit {
+/* Shown with the card under the mouse, and whenever the keyboard is on the card or on it. */
+.theme-card-wrapper:hover .theme-card-edit,
+.theme-card-wrapper:focus-within .theme-card-edit {
 	opacity: 0.7;
 }
 
-.theme-card-edit:hover {
+.theme-card-edit:hover,
+.theme-card-edit:focus-visible {
 	opacity: 1 !important;
 	background: var(--nt-hover);
 }

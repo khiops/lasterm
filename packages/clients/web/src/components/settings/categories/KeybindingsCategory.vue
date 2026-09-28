@@ -18,6 +18,10 @@
 				<span class="keybinding-label">{{ binding.label }}</span>
 				<span class="keybinding-keys">
 					<kbd v-for="k in binding.keys" :key="k">{{ k }}</kbd>
+					<span v-if="binding.outsideTerminal" class="keybinding-alias">
+						(<kbd v-for="k in binding.outsideTerminal" :key="k">{{ k }}</kbd>
+						outside a terminal)
+					</span>
 				</span>
 			</div>
 		</div>
@@ -25,12 +29,18 @@
 </template>
 
 <script setup lang="ts">
-// The app's shortcuts are shown from the table the window and the terminals read (#631).
-import { shortcutKeys } from "../../../utils/app-shortcuts.js";
+// The app's shortcuts are shown from the table the window and the terminals read (#631, #637).
+import {
+	outsideTerminalKeys,
+	shortcutKeys,
+	TAB_NUMBERS,
+} from "../../../utils/app-shortcuts.js";
 
 interface Keybinding {
 	label: string;
 	keys: string[];
+	/** The keys that do the same where the keyboard is not in a terminal (F6), if any. */
+	outsideTerminal?: string[] | null;
 }
 
 interface KeybindingGroup {
@@ -43,14 +53,35 @@ const keybindingGroups: KeybindingGroup[] = [
 		name: "General",
 		bindings: [
 			{ label: "Command Palette", keys: shortcutKeys("palette.open") },
-			{ label: "Settings", keys: ["Gear icon in sidebar"] },
+			{ label: "Settings", keys: shortcutKeys("settings.open") },
+		],
+	},
+	{
+		name: "Focus",
+		bindings: [
+			{
+				label: "Next Area (rail, list, tabs, pane)",
+				keys: shortcutKeys("zone.next"),
+				outsideTerminal: outsideTerminalKeys("zone.next"),
+			},
+			{
+				label: "Previous Area",
+				keys: shortcutKeys("zone.previous"),
+				outsideTerminal: outsideTerminalKeys("zone.previous"),
+			},
+			{ label: "Back to the Pane", keys: ["Escape"] },
 		],
 	},
 	{
 		name: "Tabs",
 		bindings: [
 			{ label: "New Channel", keys: shortcutKeys("tab.new") },
-			{ label: "Close Tab", keys: shortcutKeys("tab.close") },
+			{ label: "Next Tab", keys: shortcutKeys("tab.next") },
+			{ label: "Previous Tab", keys: shortcutKeys("tab.previous") },
+			...TAB_NUMBERS.map((n) => ({
+				label: n === 9 ? "Go to Last Tab" : `Go to Tab ${n}`,
+				keys: shortcutKeys(`tab.goTo${n}`),
+			})),
 		],
 	},
 	{
@@ -58,6 +89,15 @@ const keybindingGroups: KeybindingGroup[] = [
 		bindings: [
 			{ label: "Split Right", keys: shortcutKeys("pane.splitRight") },
 			{ label: "Split Down", keys: shortcutKeys("pane.splitDown") },
+			{ label: "Close Pane", keys: shortcutKeys("pane.close") },
+			{ label: "Focus Left", keys: shortcutKeys("pane.focusLeft") },
+			{ label: "Focus Right", keys: shortcutKeys("pane.focusRight") },
+			{ label: "Focus Up", keys: shortcutKeys("pane.focusUp") },
+			{ label: "Focus Down", keys: shortcutKeys("pane.focusDown") },
+			{ label: "Resize Left", keys: shortcutKeys("pane.resizeLeft") },
+			{ label: "Resize Right", keys: shortcutKeys("pane.resizeRight") },
+			{ label: "Resize Up", keys: shortcutKeys("pane.resizeUp") },
+			{ label: "Resize Down", keys: shortcutKeys("pane.resizeDown") },
 		],
 	},
 	{
@@ -126,8 +166,17 @@ const keybindingGroups: KeybindingGroup[] = [
 
 .keybinding-keys {
 	display: flex;
+	align-items: center;
 	gap: 4px;
 	flex-shrink: 0;
+}
+
+.keybinding-alias {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 11px;
+	color: var(--nt-text-secondary);
 }
 
 kbd {

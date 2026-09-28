@@ -1,5 +1,5 @@
 <template>
-	<div class="channel-sidebar">
+	<div class="channel-sidebar" data-focus-zone="sidebar">
 		<!-- Header: host label + new channel button -->
 		<div class="sidebar-header">
 			<span class="sidebar-header__label" :title="hostLabel">{{ hostLabel }}</span>
@@ -24,7 +24,12 @@
 		</div>
 
 		<!-- Channel list, grouped -->
-		<div class="sidebar-list" @contextmenu.self.prevent="emit('sidebar-context-menu', $event)">
+		<div
+			class="sidebar-list"
+			@contextmenu.self.prevent="emit('sidebar-context-menu', $event)"
+			@keydown="onListKeydown"
+			@focusout="onListFocusOut"
+		>
 			<!-- Loading state -->
 			<div v-if="channelsStore.loading" class="sidebar-state">Loading…</div>
 
@@ -90,6 +95,7 @@
 							:is-selected="ch.id === channelsStore.selectedChannelId"
 							:is-unread="channelsStore.unreadChannels.has(ch.id)"
 							:available-groups="otherGroups(group.id)"
+							:focusable="ch.id === rovingChannelId"
 							@select="emit('select-channel', ch.id)"
 							@move-to-group="channelsStore.moveChannelToGroup"
 							@rename="onRenameChannel"
@@ -123,6 +129,7 @@
 						:is-selected="ch.id === channelsStore.selectedChannelId"
 						:is-unread="channelsStore.unreadChannels.has(ch.id)"
 						:available-groups="channelsStore.groups.filter((g) => g.hostId === activeHostId || g.hostId === '')"
+						:focusable="ch.id === rovingChannelId"
 						@select="emit('select-channel', ch.id)"
 						@move-to-group="channelsStore.moveChannelToGroup"
 						@rename="onRenameChannel"
@@ -152,11 +159,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import type { ChannelGroup } from "@lasterm/shared";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useConfigStore } from "../stores/config.js";
+import { listMove } from "../utils/focus-zones.js";
 import ChannelGroupHeader from "./ChannelGroupHeader.vue";
 import ChannelItem from "./ChannelItem.vue";
 
@@ -172,6 +180,8 @@ const emit = defineEmits<{
 	"delete-channel": [channelId: string];
 	"kill-channel": [channelId: string];
 	"new-channel": [];
+	/** Enter on a terminal of the list (#637): open it and take the keyboard into it. */
+	"open-channel": [channelId: string];
 }>();
 
 const channelsStore = useChannelsStore();
@@ -209,6 +219,70 @@ const generalGroup = computed<ChannelGroup>(() => ({
 
 function toggleGeneral(): void {
 	channelsStore.toggleGeneralCollapsed();
+}
+
+// -------------------------------------------------------------------------
+// Keyboard (#637)
+// -------------------------------------------------------------------------
+//
+// One terminal of the list takes Tab: ↑ and ↓ move along the list, over the group headers,
+// Home and End to its ends, and Enter opens the terminal.
+
+/** The terminals the list shows, top to bottom: each open group's, then the general group's. */
+const listedChannelIds = computed<string[]>(() => {
+	const ids: string[] = [];
+	for (const group of channelsStore.groups) {
+		if (group.hostId !== activeHostId.value && group.hostId !== "") continue;
+		if (group.collapsed) continue;
+		for (const ch of channelsStore.channelsByGroup.get(group.id) ?? []) ids.push(ch.id);
+	}
+	if (!generalCollapsed.value) {
+		for (const ch of channelsStore.channelsByGroup.get(null) ?? []) ids.push(ch.id);
+	}
+	return ids;
+});
+
+/** The terminal the keyboard is on while it is in the list; null once it leaves. */
+const keyboardChannelId = ref<string | null>(null);
+
+/** The one terminal that takes Tab: the keyboard's, else the selected one, else the first. */
+const rovingChannelId = computed(() => {
+	const ids = listedChannelIds.value;
+	for (const id of [keyboardChannelId.value, channelsStore.selectedChannelId]) {
+		if (id !== null && ids.includes(id)) return id;
+	}
+	return ids[0] ?? null;
+});
+
+function onListKeydown(event: KeyboardEvent): void {
+	if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+	// An item itself, not a field in it: a terminal being renamed keeps its keys.
+	const item = event.target as HTMLElement;
+	const channelId = item.dataset?.channelId;
+	if (channelId === undefined) return;
+	if (event.key === "Enter") {
+		event.preventDefault();
+		emit("open-channel", channelId);
+		return;
+	}
+	const ids = listedChannelIds.value;
+	const next = listMove(ids.length, ids.indexOf(channelId), event.key, "vertical");
+	if (next === null) return;
+	event.preventDefault();
+	const target = ids[next] ?? null;
+	keyboardChannelId.value = target;
+	const list = event.currentTarget as HTMLElement;
+	void nextTick(() => {
+		const items = list.querySelectorAll<HTMLElement>("[data-channel-id]");
+		[...items].find((el) => el.dataset.channelId === target)?.focus();
+	});
+}
+
+/** Leaving the list, Tab comes back to the selected terminal. */
+function onListFocusOut(event: FocusEvent): void {
+	const into = event.relatedTarget as Node | null;
+	if (into !== null && (event.currentTarget as HTMLElement).contains(into)) return;
+	keyboardChannelId.value = null;
 }
 
 // -------------------------------------------------------------------------

@@ -2,17 +2,17 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-03-02
+> Last updated: 2026-09-28
 
 ## 1. Vision
 
-lasterm is a **local-first session terminal platform** that lets developers and SREs manage persistent terminal sessions across local and remote machines from a modern web UI. Sessions survive client disconnects and device switches; local sessions also survive hub restarts. (Surviving a dropped SSH transport to a remote host is on the roadmap, not yet shipped.)
+lasterm is a **local-first session terminal platform** that lets developers and SREs manage persistent terminal sessions across local and remote machines from a modern web UI. Sessions survive client disconnects and device switches; local sessions also survive hub restarts. Remote sessions survive a dropped SSH connection and a hub restart on hosts that keep an agent running (§ 3.2); elsewhere their shells end with the connection.
 
 **Core differentiators:**
 - Hub owns state (cache + snapshot) independently of UI clients
-- SSH stdio transport — zero ports opened on remote machines
+- SSH transport, on stdio or through a remote daemon's socket — zero ports opened on remote machines
 - Discord-style UI with per-host visual identity
-- Remote visual hints — agents can impose badges/themes on their terminals
+- Remote visual hints — agents can impose badges/themes on their terminals (designed, not wired today: § 4.4)
 - Config cascade — 4-layer deep merge (defaults → user TOML → host profile → channel profile)
 
 ## 2. Architecture Overview
@@ -25,8 +25,8 @@ lasterm is a **local-first session terminal platform** that lets developers and 
 └──────────┬──────────────────────────────┬───────────────────────┘
            │ REST (/api/*)                │ WS (/ws)
            │ CRUD: hosts, sessions,       │ Realtime: INPUT, OUTPUT,
-           │ workspaces, config, pair     │ ATTACH, DETACH, RESIZE,
-           │                              │ SNAPSHOT, WRITE_*, HEARTBEAT
+           │ channels, config, pair       │ ATTACH, DETACH, RESIZE,
+           │                              │ SPAWN, WRITE_*, *_STATE
 ┌──────────▼──────────────────────────────▼───────────────────────┐
 │                        Hub (Node.js daemon)                     │
 │   Binds 127.0.0.1:<assigned port> — HTTPS + WSS server          │
@@ -41,14 +41,14 @@ lasterm is a **local-first session terminal platform** that lets developers and 
 │   └──────────┘ └──────────────┘ └────────────┘ └────────────┘  │
 │                                                                  │
 │   ┌───────────────────────────────────────────────────────────┐  │
-│   │ Storage: meta.db (hosts, sessions, channels, workspaces) │  │
+│   │ Storage: meta.db (hosts, sessions, channels, tokens)      │  │
 │   │          spool.db (output chunks, snapshots)              │  │
 │   └───────────────────────────────────────────────────────────┘  │
 └──────────┬──────────────────────────────────────────────────────┘
-           │ Local: child_process.spawn("lasterm-agent --stdio")
-           │   ─or─ UDS to standalone daemon ("lasterm-agent --daemon")
-           │ Remote: SSH (ssh2) → "lasterm-agent --stdio"
-           │ Transport: MessagePack framed over stdio or UDS (all modes)
+           │ Local: UDS / named pipe to a detached daemon ("lasterm-agent --daemon")
+           │ Remote: SSH (ssh2) → "lasterm-agent --stdio", or a remote daemon's
+           │   socket through a direct-streamlocal channel
+           │ Transport: MessagePack framed over stdio, UDS or an SSH channel
            │
 ┌──────────▼──────────────────────────────────────────────────────┐
 │                    Agent (Rust, local or remote)                 │
@@ -58,7 +58,7 @@ lasterm is a **local-first session terminal platform** that lets developers and 
 │   │ PTY Manager  │ │ Screen Model   │ │ Protocol Handler     │  │
 │   │              │ │                │ │                      │  │
 │   │ async-xpty   │ │ vt100 crate    │ │ MessagePack framed   │  │
-│   │ spawn/resize │ │ headless       │ │ stdin/stdout         │  │
+│   │ spawn/resize │ │ headless       │ │ stdio or socket      │  │
 │   │ N channels   │ │ serialize()    │ │ multiplexed channels │  │
 │   └──────────────┘ └────────────────┘ └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -84,7 +84,8 @@ Universal PTY manager. Runs locally (a detached daemon) or remotely (via SSH). S
 
 **Responsibilities:**
 - Protocol handshake: HELLO with the protocol version, the agent's version, its capabilities, and the shells it found with its default one. It sends no visual hints.
-- PTY lifecycle: spawn, resize, destroy (via `async-xpty`)
+- PTY lifecycle: spawn, resize, destroy (via `async-xpty`). On Unix a terminal's shell starts with every signal at its default disposition and an empty signal mask, whatever the agent inherited or ignores itself, such as `SIGPIPE` (#597), and its PTY has `IUTF8` set, so the line discipline erases characters rather than bytes (#601)
+- Environment: the agent builds each terminal's environment from a cleared one, from `env_mode`, `env_unset` and `env` in SPAWN, and sets the terminal's identity (`TERM`, `COLORTERM`, `TERM_PROGRAM`); PROTOCOL.md § 3.2 and § 6 below
 - Screen model: a `vt100` parser per channel in `headless.rs`, keeping 1000 lines of scrollback
 - Snapshot: the visible screen, serialized when the hub asks, on ATTACH or SNAPSHOT_REQ. The hub decides when to ask: 3 s after a channel's last output, every 5 s, and when its last client detaches (`snapshot-scheduler.ts`).
 - Channel multiplexing: N channels per agent process
@@ -155,7 +156,7 @@ Local daemon, single process, binds to 127.0.0.1.
 **Responsibilities:**
 
 **HTTPS Server (single port, OS-assigned by default, configurable):**
-- REST API: CRUD for hosts, sessions, channels, workspaces, config
+- REST API: CRUD for hosts, sessions, channels, launch profiles, config
 - WebSocket upgrade on `/ws` path
 - Static file serving for UI (production build). A file missing under `/assets/` is a 404, never the SPA's `index.html`; cache headers in § 3.4, "Installable PWA"
 - Health endpoint (`GET /api/health`)
@@ -163,15 +164,14 @@ Local daemon, single process, binds to 127.0.0.1.
 - The certificate is the operator's configured pair, or one this hub generates for itself. In the generated case both the **key** and the leaf over it are created once and kept, in `hub-tls-key.pem` and `hub-tls-generated-cert.pem`; a restart serves the same bytes. A new leaf is signed only when the stored one cannot serve — absent, unreadable, for another key, expired or within seven days of it, dated in the future after a clock moved back, or failing the profile a generated leaf must have. That is decided at startup and not re-evaluated while the hub runs, so a hub up longer than its leaf's remaining validity serves an expired certificate until restarted (#193). Clients pin the recorded SPKI, which is the key's, so a reissue costs them nothing; a browser that accepted the certificate is asked again only when one happens.
 
 **Session Manager:**
-- Local sessions (daemon): connect to standalone agent via UDS (`connectOrLaunch`), auto-spawn if needed
-- Local sessions (fallback): spawn agent as child process (`child_process.spawn`, --stdio)
-- Remote sessions: open SSH via ssh2, launch agent, pipe stdio
+- Local sessions: connect to the agent daemon via UDS or named pipe (`connectOrLaunch`), launching it if none answers. There is no stdio fallback: when no daemon can be reached, the SPAWN fails (§ 3.2)
+- Remote sessions: open SSH via ssh2, then launch the agent on stdio, or reach a remote daemon's socket (§ 3.2)
 - Hub never spawns PTYs directly — agent is the universal PTY manager
 - `LastermAgent` (`lasterm-agent.ts`): hub-side class extending `AgentConnection`, `connectLocal(socketPath)` factory, `waitForChannelState()` for reconnect reconciliation
-- `connectOrLaunch` (`agent-launcher.ts`): probes socket, spawns detached daemon if needed, polls for readiness
+- `connectOrLaunch` (`agent-launcher.ts`): connects to the socket, spawns a detached daemon if that fails, then retries the connection until it is accepted
 - Session state machine: STARTING → ACTIVE ↔ DISCONNECTED → CLOSED, with DETACHED branch
 - Reconnect (remote): exponential backoff (1s, 2s, 4s, ... 30s max, 5min total timeout)
-- Reconnect (local): respawn agent immediately on unexpected exit
+- Reconnect (local): connect to the daemon again, launching a new one if none answers
 - Channel multiplexing: multiple PTYs per agent connection
 
 **Client Manager:**
@@ -189,22 +189,22 @@ Local daemon, single process, binds to 127.0.0.1.
 
 **Config Resolver:**
 - Layer 1: built-in defaults (code)
-- Layer 2: `$LASTERM_CONFIG_DIR/config.toml` (user file — see § 7 for platform paths)
+- Layer 2: `config.toml` in the config dir (user file — see § 7 for platform paths)
 - Layer 3: host.profile_json (meta.db)
-- Layer 3.5: agent visual_hints (from HELLO, if trust policy allows)
+- Layer 3.5: agent visual_hints (from HELLO, if trust policy allows); empty today, § 4.4
 - Layer 4: channel.profile_json (meta.db)
 - Resolution: deep merge in order, last wins
 
-**CLI:**
-- `lasterm start` — start daemon (foreground or background)
-- `lasterm stop` — stop daemon
-- `lasterm status` — show daemon status, active sessions
-- `lasterm host add|list|test|remove` — manage hosts
-- `lasterm session list|attach` — manage sessions
-- `lasterm workspace export|import` — workspace portability
+**CLI** (`cli.ts`; the single executable, `lasterm-hub`, takes the same commands):
+- `lasterm start [--port N] [--daemon] [--open]` — start the hub, in the foreground or as a daemon
+- `lasterm stop` — stop the hub alone; the local agent keeps its terminals for the next hub
+- `lasterm quit` — stop the local agent, and its terminals, then the hub
+- `lasterm status [--json]` — show the hub's status
+- `lasterm host add|list|remove` — manage hosts. There is no `host test`: a connection test asks for credentials, which a CLI cannot (TEST_CONNECT, PROTOCOL.md § 4.11)
+- `lasterm agent fetch|status|import` — the agent binary cache (§ 3.5)
+- `lasterm session list [--json]` — list active sessions
+- `lasterm pair [--code XXXXXXXX]` — generate a pairing code, or verify one
 - `lasterm config edit` — open config.toml in $EDITOR
-- `lasterm pair` — generate pairing code for multi-device
-- `lasterm decode` — decode MessagePack frames from stdin (debug tool)
 
 **Who may end a hub (#142).** A client that ends things (quit, stop) acts on the hub it **owns**, the one it launched, and never on a hub it only connected to, whose terminals belong to other people.
 - **Enforced by the hub:** `/api/quit` and `/api/shutdown` require a loopback connection and the owner token from `runtime.json`. Only a process of the hub's OS user, on the hub's machine, can read that file: the desktop that launched the hub, or `lasterm quit` / `lasterm stop`.
@@ -230,23 +230,22 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 - `TabBar` — open channels as tabs, [+] new, right-click context menu
 - `TerminalPane` — xterm.js instance, fit addon, badge overlay
 - `PaneSplitter` — horizontal/vertical split, drag resize
-- `CommandPalette` — Ctrl+P, fuzzy search hosts/channels/actions
-- `AddHostDialog` — form: label, host, port, auth, icon, color
-- `HostSettings` — connection, appearance, theme override, remote hints policy
-- `SettingsOverlay` — global settings (theme, keybindings, hub config)
-- `StatusBar` — session count, host count, hub health, current channel info
+- `CommandPalette` — Ctrl+K (Cmd+K), fuzzy search hosts/channels/actions
+- `HostModal` — add or edit a host: connection, jump host, whether it keeps an agent running, auth, shell, elevation, icon, color
+- `SettingsPanel` — settings at global, host and terminal scope (terminal, environment, appearance, keybindings, agents…)
+- `TitleBar` — the UI's version and build; the window controls in the desktop app
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub
 2. WS connect to `/ws` with auth token
 3. `fetch /api/hosts` → populate host rail
-4. User selects host → `fetch /api/channels?hostId=X` → populate sidebar
+4. User selects host → `fetch /api/channels?host_id=X` → populate sidebar
 5. User clicks channel → WS: ATTACH → receive SNAPSHOT → restore xterm → stream OUTPUT
 
 **State management:**
 - Pinia store for: hosts, sessions, channels, config, write-locks
 - Reactive: WS messages update store → Vue reactivity updates UI
-- Persistent: workspace layout saved to hub via REST on change
+- Persistent: the tabs and their splits are kept in the browser's `localStorage` (`useLayout`). The hub has a `workspaces` table that nothing uses (STORAGE.md § 3.5)
 
 **Client and hub versions (browser):** the hub is the source of truth for the UI it
 serves (#132). A tab loaded before a hub upgrade keeps running the old JavaScript
@@ -413,6 +412,11 @@ Host (permanent config)
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
  ├── os: 'linux' | 'darwin' | 'windows' | null    // null = auto-detect on first connect
  ├── arch: 'x64' | 'arm64' | null                 // null = auto-detect on first connect
+ ├── sshProxyHostId?: string | null    // jump host this hub knows (§ 4.5b)
+ ├── sshProxySpec?: string | null      // or a jump given as user@host:port
+ ├── sshProxyFingerprint?: string | null // the key pinned for a jump given as a spec
+ ├── sshRemoteDaemon?: boolean | null  // keep an agent running there (#79); null follows [ssh] remote_daemon
+ ├── agentSha256?: string | null       // SHA256 of the pinned remote agent binary
  ├── createdAt: string                 // ISO 8601
  └── updatedAt: string
 
@@ -444,6 +448,7 @@ Channel (PTY instance)
  ├── rows: number
  ├── status: 'born' | 'live' | 'orphan' | 'dead'
  ├── exitCode?: number
+ ├── endReason?: 'killed' | 'stopped'  // why the hub ended it, when it did (#580, #592; STORAGE.md § 3.4)
  ├── profileJson?: string              // JSON-encoded TerminalProfile (layer 4 overrides)
  ├── isWelcome?: boolean               // hub-created welcome channel flag
  ├── icon?: string                     // emoji or icon name
@@ -491,10 +496,12 @@ CacheIndex (per channel, hub-side)
 TerminalProfile (config override — used in layers 3 & 4)
  ├── fontFamily?: string
  ├── fontSize?: number
- ├── theme?: Record<string, string>   // color overrides
+ ├── theme?: string                    // theme name
+ ├── themeOverrides?: Record<string, string>   // color overrides
  ├── cursorStyle?: 'block' | 'underline' | 'bar'
  ├── scrollback?: number
- └── [key: string]: unknown            // extensible for future settings
+ └── …                                 // every [terminal] key of CONFIG_REFERENCE.md, camelCased:
+                                       // bell, wallpaper, background, envMode, env, whenEnded
 
 TabLayout (workspace persistence)
  ├── type: 'tabs'
@@ -546,6 +553,11 @@ On **first hub start** (meta.db is empty — schema_version table has version 1 
 
 ### 4.4 Remote Visual Hints Lifecycle
 
+**Not wired today.** The Rust agent sends no `visual_hints` in HELLO (§ 3.2), and the hub reads
+none: the resolver keeps a layer 3.5 (`ConfigResolver.setAgentHints`), which nothing fills, so
+it is always empty. A host's "Remote Hints" setting (`trust_remote_hints`) is stored and has
+nothing to act on. What follows is the design, should an agent send hints.
+
 Agent visual hints from HELLO are **ephemeral** (session-scoped, not persisted):
 
 1. Agent sends HELLO with `visual_hints: { badge, theme_overlay }`
@@ -580,14 +592,20 @@ Importing from `~/.ssh/config` keeps a `ProxyJump` as a spec, then links it to a
 
 ### 4.6 Known Hosts Verification
 
-On first SSH connect to an unknown host (fingerprint not in `~/.ssh/known_hosts`):
+A host key is trusted per host, in meta.db (`hosts.ssh_fingerprint`). On a first SSH connect to a
+host with no pinned key (SECURITY.md § 3.3):
 
 1. Hub receives fingerprint from ssh2 `hostVerifier` callback
-2. Hub sends a UI notification: `{ type: "HOST_VERIFY", hostId, fingerprint, algorithm }`
+2. Hub sends a UI notification: `{ type: "HOST_VERIFY", hostId, fingerprint, algorithm }`, saying
+   what `~/.ssh/known_hosts` already believes about that key, which the hub reads and never writes
 3. UI shows modal: "Trust host fingerprint? [sha256:XXXX] — [Trust once] [Trust permanently] [Cancel]"
-4. "Trust permanently": hub appends to `~/.ssh/known_hosts` + stores in meta.db hosts table
-5. "Trust once": hub accepts for this session only
+4. "Trust permanently": hub stores the fingerprint in the meta.db hosts table
+5. "Trust once": hub accepts for this run of the hub only
 6. "Cancel": connection aborted, session CLOSED
+
+With `[ssh] trust_known_hosts = true`, a first key that `known_hosts` already trusts is pinned
+without asking. A key that changes under a pinned one stops the connection, and a jump host's key
+is never asked about on the way to another host (§ 4.5b).
 
 ## 5. Data Flow Diagrams
 
@@ -602,14 +620,14 @@ User types "ls\n"
   │
   Hub: find channel ch-1, verify write-lock
   │
-  Hub → Agent (local stdio): [4-byte len][msgpack INPUT { channelId, data }]
+  Hub → Agent (local daemon socket): [4-byte len][msgpack INPUT { channelId, data }]
   │
   Agent: find PTY for ch-1 → pty.write(data)
   │
   PTY → Agent: pty.onData(output)
   │
   Agent: feed output to the vt100 screen model (for screen state)
-  Agent → Hub (local stdio): [4-byte len][msgpack OUTPUT { channelId, seqNo, ts, data }]
+  Agent → Hub (local daemon socket): [4-byte len][msgpack OUTPUT { channelId, seqNo, ts, data }]
   │
   Hub: write to spool.db (chunk)
   │
@@ -618,8 +636,9 @@ User types "ls\n"
   UI: xterm.js terminal.write(data) → renders on screen
 ```
 
-Note: local and remote data flows are now identical — only the transport differs
-(child_process stdio vs SSH stdio). Hub never touches PTYs directly.
+Note: local and remote data flows are identical — only the transport differs (the local
+daemon's socket, SSH stdio, or a remote daemon's socket through SSH). Hub never touches PTYs
+directly.
 
 ### 5.2 Remote PTY — Input/Output
 
@@ -680,12 +699,11 @@ User clicks [+ channel] on local host
   │
   ├─ No → create Session (STARTING)
   │  Hub: connectOrLaunch(socketPath) → connect to daemon (or spawn it)
-  │  Fallback: child_process.spawn("lasterm-agent", ["--stdio"])
-  │  Read HELLO from agent
+  │  Read HELLO from agent, send AUTH
   │  Session → ACTIVE
   │  Proceed to SPAWN
   │
-  └─ Yes (ACTIVE) → reuse agent connection (daemon UDS or stdio)
+  └─ Yes (ACTIVE) → reuse the daemon connection
      Hub → Agent: SPAWN { shell, cwd, env, env_unset, env_mode, cols, rows }
      Agent: build the environment (§ 6), spawn PTY, create the vt100 screen model
      Agent → Hub: SPAWN_OK { channelId: "ch-new" }
@@ -700,10 +718,11 @@ User clicks [+ channel] on remote host
   Hub: session exists for host?
   │
   ├─ No → create Session (STARTING)
-  │  Hub: ssh2.connect(host.sshConfig)
+  │  Hub: ssh2.connect(host.sshConfig)    (through its jump host, when it has one)
   │  ├─ Success:
-  │  │  ssh2.exec("lasterm-agent --stdio")
-  │  │  Read HELLO from agent stdout
+  │  │  ssh2.exec("lasterm-agent --stdio"), or, for a host that keeps a daemon,
+  │  │  reach its socket over direct-streamlocal, launching it if nothing answers
+  │  │  Read HELLO from agent
   │  │  Session → ACTIVE
   │  │  Proceed to SPAWN
   │  └─ Failure:
@@ -732,8 +751,10 @@ SSH connection drops (network issue, or a host that stopped answering)
   │
   ├─ SSH recovers:
   │  Agent HELLO → Hub checks channels
-  │  ├─ Agent still running: ATTACH each channel → SNAPSHOT → delta to UI → LIVE
-  │  └─ Agent restarted (reboot): channels DEAD, session CLOSED
+  │  ├─ A remote daemon (§ 3.2) still running: AUTH → AGENT_CHANNEL_STATE → the terminals
+  │  │  it still holds are adopted → LIVE; those it no longer holds → DEAD
+  │  └─ stdio: the agent ended with the connection, so each terminal not DEAD is started
+  │     again, a new shell under its own id (SPAWN with channel_id)
   │
   └─ Timeout (5min): session CLOSED, channels DEAD
      UI: host icon 🔴, cached content still viewable
@@ -765,21 +786,22 @@ Hub starts (or reconnects after restart)
   │
   Hub: connectOrLaunch(socketPath, config, binaryPath)
   │
-  ├─ probeSocket(socketPath) succeeds (daemon already running):
-  │  Hub: connect to UDS
-  │  Agent → Hub: HELLO { protocolVersion, capabilities }
-  │  Agent → Hub: AGENT_CHANNEL_STATE { channelId, title, pid, alive } (×N)
+  ├─ The connection is accepted (daemon already running):
+  │  Agent → Hub: HELLO { version, capabilities, ... }
+  │  Hub → Agent: AUTH { token, hub_key }
+  │  Agent → Hub: AGENT_CHANNEL_STATE { channelId, title, pid, alive } (×N, this hub's only)
   │  Agent → Hub: CHANNEL_STATE_END
   │  Hub: reconcileChannelState()
   │  ├─ alive channels → adopt into session, update DB
   │  └─ dead channels → mark dead in DB, notify UI
   │  Normal operation resumes
   │
-  └─ probeSocket(socketPath) fails (no daemon):
+  └─ The connection fails (no daemon):
      Hub: spawn detached "lasterm-agent --daemon --socket <path>"
-     Hub: poll probeSocket() every 200ms (up to 5s)
-     ├─ Socket appears → connect, receive HELLO (no AGENT_CHANNEL_STATE on fresh start)
-     └─ Timeout → fall back to child_process stdio mode (warm restart)
+     Hub: retry the connection every 100ms (up to 5s)
+     ├─ Accepted → HELLO, AUTH, and an empty channel state on a fresh start
+     └─ Timeout → the error names the socket and the daemon log's last lines;
+        there is no stdio fallback, so the SPAWN fails
 ```
 
 ### 5.7 Write-Lock Flow
@@ -807,16 +829,16 @@ Hub: broadcast WRITE_LOCK { holder: B }
 
 ```
 Layer 1: Built-in defaults (code)
-  │ font: "monospace", fontSize: 14, theme: catppuccin-mocha
+  │ font: "Consolas", "Liberation Mono", "Courier New", monospace; fontSize: 14; theme: catppuccin-mocha
   │
 Layer 2: config.toml (see § 7 for platform paths)
-  │ Overrides: font, theme, keybindings, hub settings
+  │ Overrides: any [terminal] key (CONFIG_REFERENCE.md)
   │
 Layer 3: Host profile (meta.db hosts.profile_json)
-  │ Overrides: theme colors, badge — per host
+  │ Overrides: any terminal setting — per host
   │
 Layer 3.5: Agent visual hints (from HELLO)
-  │ Overrides: badge, theme_overlay — if trust policy = "apply"
+  │ Overrides: badge, theme_overlay — if trust policy = "apply". Empty today (§ 4.4)
   │
 Layer 4: Channel profile (meta.db channels.profile_json)
   │ Overrides: any terminal setting — per channel
@@ -892,26 +914,31 @@ Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, 
 | Purpose | Linux / macOS (XDG) | Windows |
 |---------|---------------------|---------|
 | **Config** | `$XDG_CONFIG_HOME/lasterm/` → `~/.config/lasterm/` | `%APPDATA%\lasterm\` |
-| **Data** (DBs) | `$XDG_DATA_HOME/lasterm/` → `~/.local/share/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
-| **State** (runtime) | `$XDG_STATE_HOME/lasterm/` → `~/.local/state/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
+| **State** (DBs, runtime, logs) | `$XDG_STATE_HOME/lasterm/` → `~/.local/state/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
+| **Cache** (the native addons a single executable extracts) | `$XDG_CACHE_HOME/lasterm/` → `~/.cache/lasterm/` | `%LOCALAPPDATA%\lasterm\cache\` |
+| **Agent socket** | `$XDG_RUNTIME_DIR/lasterm/agent.sock`, else `/tmp/lasterm-<uid>/agent.sock` | `\\.\pipe\lasterm-agent-<user>` |
 
-All XDG variables respect user overrides. Fall back to defaults shown above.
+An XDG variable is used when it holds an absolute path; otherwise the default shown above. On
+Windows `APPDATA` and `LOCALAPPDATA` must be absolute paths, or the hub refuses to start, naming
+the variable (`platform-dirs.ts`). There is no separate data directory.
 
 ### Directory Contents
 
 ```
 Config dir:
 ├── config.toml              # User preferences (layer 2)
-└── auth.json                # { token: "crypto-random-hex" } (chmod 600 / ACL on Windows)
+└── auth.json                # { token: "crypto-random-hex" } (0600; on Windows the profile's default ACL)
 
-Data dir:
-├── meta.db                  # Hosts, sessions, channels, workspaces, groups
+State dir (0700):
+├── meta.db                  # Hosts, sessions, channels, launch profiles, tokens, groups (0600)
 ├── meta.db-wal
-├── spool.db                 # Output chunks, snapshots
-└── spool.db-wal
-
-State dir:
-├── runtime.json             # { port, pid, started_at, spki } — written on start, deleted on shutdown
+├── spool.db                 # Output chunks, snapshots (0600)
+├── spool.db-wal
+├── logs/                    # hub.jsonl, agent-daemon.jsonl, channels/<channel id>.jsonl
+├── binaries/                # the agent binary cache (§ 3.5)
+├── hub-daemon.log           # what `lasterm start --daemon` printed
+├── agent-daemon.log         # what the local agent daemon printed
+├── runtime.json             # { port, pid, started_at, instanceId, ownerToken, spki } (0600) — written on start, deleted on shutdown
 ├── hub-key                  # 0600 — 64 lowercase hex characters naming this hub to its agent
                              #        daemons, which keep its channels apart from other hubs' (#127).
                              #        Created on first start and never replaced: a malformed one stops
@@ -932,10 +959,18 @@ Written at startup for CLI/UI discovery of the OS-assigned or explicitly overrid
 and for the public-key identity serving it.
 
 ```json
-{ "port": 41237, "pid": 12345, "started_at": "2026-03-03T10:00:00Z", "spki": "base64-DER-SPKI" }
+{
+  "pid": 12345, "port": 41237, "started_at": "2026-03-03T10:00:00Z",
+  "instanceId": "…", "ownerToken": "…", "spki": "base64-DER-SPKI"
+}
 ```
 
-CLI and UI read this file to find the HTTPS/WSS hub and pin its key. Deleted on clean shutdown; stale file detected via PID check.
+CLI and UI read this file to find the HTTPS/WSS hub and pin its key. `ownerToken`, drawn anew at
+each start, is what `/api/shutdown` and `/api/quit` require (§ 3.3, #142), and `instanceId` tells
+a waiting `lasterm quit` this hub from one that replaced it. The file is written 0600 to a
+temporary name and renamed over the old one; on Windows a rename refused while another process
+reads the file is tried again for up to 425 ms, so a reader such as `lasterm status` cannot stop
+a hub from starting (#588). Deleted on clean shutdown; stale file detected via PID check.
 
 ## 8. Monorepo Structure
 
@@ -972,7 +1007,16 @@ lasterm/
 │   ├── PROTOCOL.md
 │   ├── STORAGE.md
 │   ├── SECURITY.md
-│   └── MVP_ROADMAP.md
+│   ├── CONFIG_REFERENCE.md
+│   ├── MVP_ROADMAP.md
+│   ├── decisions.md
+│   └── IDEATION_BRIEF.md
+├── crates/
+│   ├── lasterm-agent/       # the agent (Rust binary): PTYs, vt100 screens, daemon mode
+│   ├── lasterm-hub-lock/    # napi-rs addon: the single-hub lock
+│   ├── lasterm-tls-identity/ # napi-rs addon: the hub's TLS key and certificate
+│   ├── lasterm-process-lock/ # the kernel lock under the hub lock
+│   └── lasterm-protected-fs/ # descriptor-relative access to protected files
 ├── packages/
 │   ├── shared/              # @lasterm/shared — types, codec, framing
 │   │   ├── package.json
@@ -984,42 +1028,49 @@ lasterm/
 │   │       ├── config.ts    # Config types (TerminalProfile, TabLayout) + deep merge
 │   │       ├── entities.ts  # Host, Session, Channel, Workspace, ChannelGroup
 │   │       ├── constants.ts # Protocol version, defaults, error codes
+│   │       ├── platform-dirs.ts # Where state, config and cache live (§ 7)
 │   │       ├── socket-path.ts # getSocketPath(override?) + probeSocket(path) for UDS
 │   │       └── agent-config.ts # AgentConfig interface (daemon settings)
 │   ├── hub/                 # @lasterm/hub — local daemon
 │   │   ├── package.json
 │   │   └── src/
-│   │       ├── main.ts      # Daemon start (exported for root CLI)
+│   │       ├── cli.ts       # CLI commands (start, stop, quit, host, pair, ...); the root CLI and the single executable run it
+│   │       ├── main.ts      # Bare entry point: `pnpm dev`, and the daemon child outside the single executable
 │   │       ├── server.ts    # HTTP + WS server (Fastify)
 │   │       ├── api/         # REST route handlers
 │   │       ├── ws/          # WS message handlers
 │   │       ├── session/     # Session manager (local + SSH + daemon)
-│   │       │   ├── lasterm-agent.ts  # LastermAgent: hub-side AgentConnection over UDS
-│   │       │   └── agent-launcher.ts # connectOrLaunch: probe, spawn, poll daemon
-│   │       ├── ssh.ts       # SSH connection manager
-│   │       ├── cache.ts     # Cache manager
+│   │       │   ├── lasterm-agent.ts  # LastermAgent: hub-side AgentConnection over a socket
+│   │       │   ├── agent-launcher.ts # connectOrLaunch: connect, else spawn the daemon and retry
+│   │       │   ├── ssh-agent.ts      # SshAgent: the agent over SSH, on stdio or a daemon's socket
+│   │       │   ├── remote-daemon.ts  # Whether and how a remote host keeps a daemon (#79, #600)
+│   │       │   ├── ssh-keepalive.ts  # The SSH keepalive every connection carries (#607)
+│   │       │   └── spool-gc.ts       # Spool garbage collection (STORAGE.md § 7)
+│   │       ├── ssh/         # known_hosts reader, ~/.ssh/config parser
+│   │       ├── logging/     # hub.jsonl, channel logs, the security log
 │   │       ├── storage/     # SQLite DAL (meta.db + spool.db)
 │   │       │   └── migrations/
 │   │       │       ├── meta/    # 001-initial.sql, ...
 │   │       │       └── spool/   # 001-initial.sql, ...
 │   │       ├── config.ts    # Config resolver (4-layer cascade)
-│   │       ├── auth.ts      # Token auth + pairing
-│   │       └── cli.ts       # CLI commands (start, stop, host, pair, ...)
+│   │       └── auth.ts      # Token auth + pairing
 │   └── clients/
-│       ├── web/             # @lasterm/web — Vue 3 SPA (MVP)
+│       ├── web/             # @lasterm/web — Vue 3 SPA
 │       │   ├── package.json
 │       │   ├── vite.config.ts
 │       │   └── src/
 │       │       ├── App.vue
 │       │       ├── stores/      # Pinia (hosts, sessions, channels, config)
-│       │       ├── composables/ # useTerminal, useWs, useConfig
+│       │       ├── composables/ # useTerminal, useLayout, useHubUpdate, ...
 │       │       ├── components/  # HostRail, ChannelSidebar, TerminalPane, ...
+│       │       ├── pwa/         # The service worker and its registration (§ 3.4)
 │       │       └── services/    # API client, WS client
-│       └── desktop/         # @lasterm/desktop — Tauri v2 (P1, placeholder)
-│           └── README.md
+│       └── desktop/         # @lasterm/desktop — Tauri v2
+│           └── src-tauri/   # The desktop app (Rust): launches the hub, window materials
 └── scripts/
-    ├── dev.sh               # Start hub + web dev servers
-    └── install-agent.sh     # Install agent on remote via SSH
+    ├── build-agent.sh, build-hub.sh, build-desktop.sh (and .ps1) # Release builds
+    ├── dev-start.sh, dev-stop.sh (and .ps1) # Start and stop the dev servers in the background
+    └── dev/                 # Headless hub harness, desktop UI tests over CDP
 ```
 
 ### 8.3 Dependency Graph
@@ -1038,17 +1089,17 @@ crates/lasterm-agent (a Rust binary, not an npm package)
   ├── vt100       (screen model)
   └── rmp-serde   (MessagePack framing)
 
-Note: no Node process opens a PTY. Hub spawns the agent binary locally
-(child_process) or deploys and runs it over SSH.
+Note: no Node process opens a PTY. Hub launches the agent binary locally as a
+detached daemon, or deploys and runs it over SSH.
 
 @lasterm/web
   ├── @lasterm/shared (types only, tree-shaken)
   ├── vue 3
   ├── pinia
-  ├── xterm + @xterm/addon-fit + @xterm/addon-serialize
+  ├── @xterm/xterm + @xterm/addon-fit + @xterm/addon-search + @xterm/addon-unicode11
   └── @msgpack/msgpack
 
-@lasterm/desktop (P1)
+@lasterm/desktop
   └── @lasterm/web (embedded in Tauri webview)
 ```
 
@@ -1061,7 +1112,7 @@ Note: no Node process opens a PTY. Hub spawns the agent binary locally
 | Monorepo | pnpm workspaces | Package management |
 | PTY | `async-xpty` (Rust) | Terminal spawn/resize — in the agent; no Node PTY exists |
 | SSH | ssh2 | Remote connections |
-| Terminal (UI) | xterm.js + addon-fit + addon-serialize | Rendering + restore |
+| Terminal (UI) | xterm.js + addon-fit + addon-search + addon-unicode11 | Rendering; the agent's snapshot is written to it as it comes |
 | Terminal (Agent) | the `vt100` crate (Rust) | Screen model |
 | Codec | @msgpack/msgpack | Binary protocol framing |
 | Storage | better-sqlite3 | SQLite WAL persistence |
@@ -1071,7 +1122,7 @@ Note: no Node process opens a PTY. Hub spawns the agent binary locally
 | UI State | Pinia | Store management |
 | Config parse | @iarna/toml | TOML config file |
 | IDs | ulid | Sortable unique IDs |
-| Desktop (P1) | Tauri v2 | Optional packaging |
+| Desktop | Tauri v2 | The desktop app, which launches its own hub |
 
 ## 10. Cross-Cutting Concerns
 
@@ -1096,12 +1147,15 @@ Note: no Node process opens a PTY. Hub spawns the agent binary locally
 
 ### 10.3 Platform Support
 
-| Platform | Hub | Agent | UI |
-|----------|:---:|:-----:|:--:|
-| Linux x64 | ✅ | ✅ | ✅ |
-| macOS arm64/x64 | ✅ | ✅ | ✅ |
-| Windows x64 | ✅ | ✅ | ✅ |
-| WSL | ✅ | ✅ | ✅ |
+| Platform | Hub | Agent | Desktop app |
+|----------|-----|-------|-------------|
+| Linux x64 | Not released; built from source (`scripts/build-hub.sh`) | Release asset | Not released |
+| Linux arm64 | Not released | Release asset, for a remote host such as a Raspberry Pi | Not released |
+| Windows x64 | Release asset | Release asset | Release asset (NSIS, MSI) |
+| macOS | Not supported: nothing builds or tests it (#224) | Not supported | Not supported |
 
-Agent spawns PTYs for the host OS: bash/zsh (Linux/macOS), PowerShell/cmd/wsl.exe (Windows).
+What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser
+that reaches the hub.
+
+Agent spawns PTYs for the host OS: bash/zsh (Linux), PowerShell/cmd/wsl.exe (Windows).
 Hub never spawns PTYs directly — it delegates to the agent (local or remote).

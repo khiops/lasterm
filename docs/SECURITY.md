@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-25
+> Last updated: 2026-09-28
 
 ## 1. Threat Model
 
@@ -21,9 +21,9 @@
 │                      │            │ config.toml   │       │
 │                      │            └───────────────┘       │
 │                      │                                     │
-│                      │ UDS (local daemon agent)            │
-│                      │ agent.sock 0700 parent dir          │
-│                      │ No auth (filesystem perms)          │
+│                      │ UDS / named pipe (local daemon)     │
+│                      │ agent.sock 0600, parent dir 0700    │
+│                      │ AUTH token + filesystem perms       │
 └──────────────────────┼────────────────────────────────────┘
                        │ SSH (encrypted)
                        │ No port opened on remote
@@ -32,6 +32,8 @@
 │                                                            │
 │  lasterm-agent ──── stdin/stdout ──── SSH server            │
 │  (no network listener)               (port 22, standard)  │
+│  or, where the host keeps a daemon: its own UDS, reached   │
+│  through the SSH connection (direct-streamlocal)           │
 │                                                            │
 │  PTY processes run as the SSH user                         │
 └────────────────────────────────────────────────────────────┘
@@ -42,7 +44,7 @@
 | Boundary | Trust level | Notes |
 |----------|-------------|-------|
 | Hub process ↔ local filesystem | High | Same user, same machine |
-| Hub ↔ Agent daemon (UDS) | High | Same user, filesystem perms enforce access |
+| Hub ↔ Agent daemon (UDS) | High | Same user, filesystem perms enforce access; the local daemon also requires the token of `auth.json` (§ 3.5) |
 | Browser ↔ Hub (localhost) | Medium | Any local process can connect |
 | Hub ↔ Remote (SSH) | High | SSH provides encryption + auth |
 | Agent ↔ PTY | High | Same user on remote machine |
@@ -82,7 +84,7 @@
 ```
 1. Generate 32 bytes of crypto-random data
 2. Encode as hex string (64 chars)
-3. Write to $LASTERM_CONFIG_DIR/auth.json: { "token": "<hex>" }
+3. Write to auth.json in the config dir (SPEC.md § 7): { "token": "<hex>" }
 4. Set file permissions: chmod 600 (Linux/macOS). On Windows the file inherits the
    profile's ACL and nothing here sets or checks one; the profile's default ACL is
    relied on (#200)
@@ -220,7 +222,9 @@ plain text before this: one still live stopped working, and the rest were alread
 
 - lasterm NEVER copies private keys
 - Key path stored in meta.db (hosts.ssh_key_path) — points to user's existing key
-- Passphrase: prompted by ssh2 library callback, never stored
+- Passphrase: asked of the person before anything is dialled (§ 3.3c), never written to disk. It is
+  kept in the hub's memory, per host, for 60 s, or 15 min when the person asks to remember it, so
+  that a reconnect needs no prompt (§ 4.3)
 - ssh-agent: preferred — lasterm just requests signing, never sees key material
 
 ### 3.3 Known Hosts
@@ -273,6 +277,23 @@ ssh user@host "lasterm-agent --stdio"
 - Agent spawns PTYs as the same user
 - Hub controls what commands agent receives (validated protocol)
 
+**Remote (daemon, where the host keeps one, #79):**
+```
+lasterm-agent --daemon --socket ~/.local/state/lasterm/agent.sock --idle-timeout 1800
+```
+
+(`$XDG_STATE_HOME/lasterm/` instead, where the remote sets it.)
+
+- Started over SSH by the hub, detached, as the SSH user; on a host that lingers, in a systemd user
+  scope of its own (SPEC.md § 3.2, #600)
+- Listens on a Unix socket in a 0700 directory, never on the network. The hub reaches it through
+  the SSH connection it already holds (`direct-streamlocal`), so no port is opened
+- The hub's AUTH carries an empty token and the hub key: the hub's token never leaves its machine.
+  A remote with an `auth.json` of its own, because a hub runs there, refuses it (§ 3.6). Whoever
+  reaches the socket is already that user
+- Exits by itself after 30 minutes holding no terminal with no hub connected
+- Windows remotes never run one: no SSH channel carries a named pipe
+
 **Local (daemon mode):**
 ```
 lasterm-agent --daemon --socket $XDG_RUNTIME_DIR/lasterm/agent.sock
@@ -292,9 +313,16 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 - Windows: `\\.\pipe\lasterm-agent-<username>`
 
 **Filesystem protection:**
-- Parent directory (`$XDG_RUNTIME_DIR/lasterm/`) created with mode 0700 — only the owning user can list or access contents
+- Parent directory (`$XDG_RUNTIME_DIR/lasterm/`) created with mode 0700 — only the owning user can list or access contents — and the socket itself 0600
+- On Windows the named pipe is created with an owner-only DACL (SDDL `D:(A;;GA;;;OW)`), so another account cannot open it
 - `probeSocket(path)` throws on EACCES, preventing connection to another user's socket
-- No authentication on the UDS itself — OS filesystem permissions serve as the trust boundary (same model as Docker socket, ssh-agent socket)
+
+**Authentication.** Filesystem permissions are the first boundary. The second is the token: a
+daemon that has an `auth.json`, which the local one reads from the same configuration directory as
+the hub, refuses a connection whose first frame is not an AUTH carrying that token, and closes it
+after 5 s without one. One whose `auth.json` is missing beside a `meta.db`, unreadable or malformed
+refuses every connection. A remote daemon is sent an empty token, since the hub's token never
+leaves its machine, so its boundary is the socket's directory alone (§ 3.4, PROTOCOL.md § 3.1b).
 
 **Connection model:**
 - An agent with the `hub-identity` capability serves several hubs at once, and every channel has
@@ -306,7 +334,6 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
 
 **Future hardening (deferred):**
 - Linux: `SO_PEERCRED` peer UID verification (verify connecting process runs as the same user)
-- Windows: named pipe ACL hardening (restrict access to current user SID)
 
 ### 3.6 Hub identity on a shared daemon (#127)
 
@@ -395,6 +422,9 @@ again, which is now roughly every two and a quarter years rather than every rest
 - Hub key: read once at start and kept for the run, to put in each daemon connection's AUTH (§ 3.6)
 - Pairing-code key: 32 random bytes drawn at each hub start, never written; a restart discards it (§ 2.3)
 - SSH passwords: cleared after authentication (not stored)
+- SSH key passphrases: kept per host for 60 s, or 15 min when the person asks to remember it, so
+  that a reconnect needs no prompt; a reconnect uses only what is kept, and never asks
+- Elevation passwords: kept for 5 min, and sent to the agent in the SPAWN that needs them
 - Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
 - Terminal output (daemon agent): while a hub has no connection, up to 1000 frames per hub, about 8 MiB at most, oldest dropped (SPEC.md § 3.2). While a hub is connected, nothing bounds what waits for it to read (#553)
 - Snapshots: kept in cache, limited by GC policy
@@ -522,10 +552,14 @@ All incoming messages (from agent or UI) must be validated:
 
 | Endpoint / Action | Limit | Window |
 |-------------------|-------|--------|
-| POST /api/pair/verify | 10 attempts | 1 minute |
+| POST /api/pair/verify | 10 attempts per address | 1 minute |
 | POST /api/pair | 3 active codes | — |
-| WS AUTH_FAIL | 5 failures → 30s cooldown | Per IP |
-| SPAWN requests | 20 per host | 1 minute |
+| BELL relayed to clients | 10 per channel | 1 second |
+| NOTIFICATION relayed to clients | 5 per channel | 1 second |
+
+Nothing limits failed WebSocket AUTHs or SPAWN requests. An earlier draft of this table listed a
+30 s cooldown after 5 failed AUTHs and 20 SPAWNs per host per minute; neither was built. A token is
+64 hex characters, which no rate of guessing reaches, and every failure is recorded (§ 7.1).
 
 ## 7. Logging & Audit
 
@@ -615,7 +649,7 @@ Security notes:
   • Use ssh-agent for key management (recommended over key files)
   • auth.json must be readable only by you (chmod 600)
   • Do not share your auth token — use 'lasterm pair' for another browser on this machine
-  • Terminal output is stored locally in data dir (see SPEC.md § 7 for platform paths)
+  • Terminal output is stored locally in the state dir (see SPEC.md § 7 for platform paths)
   • Stored data is not encrypted at rest (SQLCipher is a P2 idea, not a feature)
 ```
 
@@ -624,7 +658,6 @@ Security notes:
 | Feature | Priority | Description |
 |---------|----------|-------------|
 | UDS SO_PEERCRED | P1 | Verify connecting process UID matches socket owner (Linux) |
-| Named pipe ACL | P1 | Restrict Windows named pipe access to current user SID |
 | SQLCipher | P2 | Encrypt meta.db and spool.db at rest |
 | OS keychain | P1 | Store auth token in OS keychain (keytar) |
 | TLS for non-localhost | P2 | If hub exposed beyond loopback |

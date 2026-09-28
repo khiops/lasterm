@@ -7,6 +7,75 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## SSH-KEEPALIVE — one fixed keepalive, and no host setting for it (#607, #611, #612, 2026-09-28)
+
+- Every SSH connection the hub opens carries ssh2's keepalive: a host's own, which a remote daemon is reached over too, a jump host's, and a Test connection's. A request goes out every 15 s, and the connection ends once 3 in a row go unanswered, so a host that went silent without closing TCP is lost 60 s after its last answer (`ssh-keepalive.ts`). That loss takes the path of any other: the session is disconnected, a reconnect is scheduled, and a restart waits for the host (#605).
+- The values lean towards tolerance. A live server answers each request as it reads it, and at most a channel window (about 2 MB) is queued ahead of it, so only a saturated link slower than about 50 KB/s could lose a connection that was alive. On stdio that would end its terminals.
+- A constant, not a setting. No other SSH timing is one, and a per-host value could only weaken this: "0 = off" brings back a host that shows connected while gone, and anything longer delays a restart that is waiting for it.
+- The hosts' "Keep Alive (s)", which nothing ever read, is removed rather than wired (#611). Read as the interval, every stored 60 would have meant three to four minutes before a vanished host is noticed; read as a silence window, it would mean what no other SSH client means by it. "History (days)" went the same way (#612): spool GC's bounds are global and delete every chunk older than seven days, so its 30 days never applied, and a per-host bound would add a lookup across the two databases to GC for a privacy case nobody has asked for.
+- The host routes ignore both fields, since clients from before still send them and a 400 would stop those saving a host. The columns stay: a downgraded hub opens a newer database as it is and still names them in its `INSERT` (STORAGE.md § 3.1, § 9.1).
+
+---
+
+## ENDED-TERMINALS — what a pane does over a terminal that has ended (#574, #580, #592, #605, 2026-09-28)
+
+- "When a terminal ends" (Ask, Restart, Close) is a terminal profile key, `when_ended`, cascaded like the font: global, per host, per terminal. "Always do this" on the overlay writes it for the host or everywhere, and drops the overrides closer to that terminal so that the choice holds where it was made. Close asks no second question; `[panes] keep_ended` decides whether it deletes the terminal (#574).
+- An end the hub caused is never acted on as it happens: a kill, a session closed, an agent replaced, a quit. The pane keeps the overlay and says the terminal was stopped from elsewhere, since restarting would undo a kill or race the replacement or the quit (#580).
+- An end found later, at launch, on a reload or an attach, shows the overlay first, then follows the setting once, when its pane is on screen in the window that has the focus (#592). Never in the background, where nobody sees what restarts, and never in two windows at once. The hub also claims a terminal being brought back, so a second SPAWN naming it is refused while the first runs.
+- The hub records why it ended a terminal, in `channels.end_reason`. Found later, `killed` keeps asking, because a deliberate stop is never undone by a setting; `stopped`, an agent replaced or a quit, follows the setting, which is the case that asked for this. STATE_SYNC names the killed ones, so a window that was away learns it before it could bring one back.
+- The card shows only when the pane asks something; otherwise a quiet status line says what is happening (#595). A restart whose host is away waits for it instead of failing (#605).
+
+---
+
+## REMOTE-DAEMON-SCOPE — a remote daemon leaves the login session only where the host lingers (#600, 2026-09-27)
+
+- Started by the hub's SSH `exec`, a remote daemon lives in that connection's logind session (`session-N.scope`), which `KillUserProcesses=yes` or a `loginctl terminate-session` ends, with every terminal it holds.
+- The launch asks whether there is a `systemd-run`, whether lingering is on for the user, and whether the connection reaches the user's manager. When all three say yes, the daemon starts under `systemd-run --user --scope --collect` in a transient scope under `user@<uid>.service`. Otherwise, and when `systemd-run` refuses, it is detached in the session as before (`setsid`, else `nohup`). A refusal starts nothing, so the fallback never makes a second daemon.
+- Only with linger: without it the user manager stops at the last logout and takes the scope with it, while the session scope survives the logout wherever `KillUserProcesses=no`, Debian's default. The scope is never worse than the session.
+- A scope, not a service: it keeps the session's environment, the one the terminals inherit, where a service would get the user manager's; and it ends when its last process does, so a `nohup` job or a `tmux` server outlives the daemon as it did in the session.
+- A new unit name at every launch, since `systemd-run` refuses a name still loaded. Nothing finds the daemon by its unit: the hub, `--stop` and the identity record go by the socket (SPEC.md § 3.2).
+
+---
+
+## TERMINAL-ENV — the agent builds each terminal's environment, and scopes store changes (#576, 2026-09-26)
+
+- The agent spawns every PTY from a cleared environment and builds it in order: the base (`inherit`, the agent's own environment; `minimal`, a fixed list taken from it and never invented), the inherited `NO_COLOR` dropped, the terminal's identity (`TERM=xterm-256color` on Unix, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`), `env_unset` then `env`, and elevation's variables last. It happens on the terminal's host because only the agent there knows that environment; the hub only ever knew its own.
+- A scope, global, host or terminal, stores its changes, a value or a removal, never the environment they produce, so a variable that appears on the host later still reaches new terminals. The closer scope wins either way. A removal is `null` in a profile and `false` in `config.toml`, which has no null.
+- Settings › Environment asks the host's agent for its variables live (`ENV_QUERY`), and neither side stores or logs them, names included. Only what a person types is stored.
+- A terminal on an SSH host that runs the host's default shell with no arguments starts as a login shell, as `ssh host` gives, so `PATH` is right whatever the remote agent was started with. Local terminals are unchanged.
+- An agent without the `env-modes` capability ignores the new SPAWN fields and is asked nothing.
+
+---
+
+## HUB-IDENTITY — a daemon serves several hubs, and a channel belongs to the hub that spawned it (#127, 2026-09-25)
+
+- Before, the last connection won: it saw every channel, and received the output queued while nobody was connected. Channels live in a hub's `meta.db`, so the daemon now keeps them apart by who spawned them.
+- The owner is the SHA-256 of a per-hub key, `hub-key` in the state directory, created once and sent in the AUTH of every daemon connection. The daemon keeps only the hash and compares it in constant time. A malformed key stops the hub rather than being replaced: a new key is a new owner, and the old one's channels would be out of reach with nothing to say why.
+- Another owner's channel answers exactly as an unknown one does. Each owner has its own queue while it is away, and a new connection displaces only its own hub's previous one. A connection that presents no key is `legacy`, and the last one wins among those.
+- STOP, sent over the hub's own connection, refuses while other hubs hold channels there unless it is forced; the host shows how many.
+- Rejected as the identity: the TLS key, whose rotation (#193) would orphan every channel, and the primary token, which every hub reading the same `auth.json` shares and which a remote daemon is never given: its AUTH carries an empty token and the key.
+- Not a boundary against the account itself (SECURITY.md § 3.6). Quit still stops a shared local agent, and with it the other hub's local terminals (#142).
+
+---
+
+## PWA-UPDATE — the hub decides which UI a page runs (#132, #564, 2026-09-25)
+
+- A browser tab compares its build with the one `GET /api/health` reports on every connection, and takes a chunk that fails to load for the same news. A hidden tab reloads at once, a visible one shows a banner. The desktop does none of this: its UI is bundled with it.
+- The service worker is hand-written and caches almost nothing: navigations go to the network every time and nothing caches `index.html`; only the build's hashed `/assets/*` are cached, per build. A precaching plugin such as vite-plugin-pwa would bring Workbox for the opposite default, a cached `index.html`, which is how a page gets stuck on an old version.
+- It registers only in a browser, in a secure context, and a browser registers none over a certificate error, so with the hub's generated certificate the web UI stays an ordinary tab. Installing it takes an operator certificate from a CA the browser trusts, and a fixed port (SPEC.md § 3.4).
+
+---
+
+## REMOTE-DAEMON — a remote agent that outlives its SSH connection, on request (#79, 2026-09-22)
+
+- Over stdio the agent is a child of the SSH session, so a dropped transport or a hub restart ends it and every PTY it holds. A daemon is started detached, listens on a Unix socket in its state directory on the remote, and the SSH connection reaches that socket through `direct-streamlocal`. What comes back speaks what the local daemon speaks, so `LastermAgent` drives it unchanged.
+- Off by default (`[ssh] remote_daemon`), and a host's own answer wins: leaving a process on someone else's machine is a thing to agree to rather than to discover. Windows remotes stay on stdio, since no SSH channel carries a named pipe.
+- Connect before launching, always. The agent unlinks a socket it cannot bind, so a daemon started on a live one's socket would take its place and leave its terminals unreachable.
+- At hub start, such a host's terminals stay orphan and the hub does not dial out: reaching a host can need a password, and nobody is there to answer. Selecting the host reconnects and adopts them.
+- The daemon exits after 30 minutes holding no terminal with no hub connected (`--idle-timeout 1800`): it lives on another machine and has to end by itself.
+
+---
+
 ## RELEASE-PM-PIN — the release workflow rebuilds only tags that pin the package manager (#236, 2026-09-05)
 
 - pnpm 11 reads its settings from `pnpm-workspace.yaml` and ignores the `pnpm` field of `package.json`, so a tag published before that move keeps its advisory overrides and build policy where pnpm 11 does not look. Rebuilding such a tag resolves dependencies differently from the artefacts that shipped under it, which is not a rebuild.
@@ -448,6 +517,9 @@ The drag-and-drop mechanics below still hold.
 
 ## UX-01 — Tab Actions, Split Panes & Welcome Tab (2026-03-07)
 
+**Status:** one point superseded by ENDED-TERMINALS — every ended terminal gets the exit overlay,
+with Restart and Close, not only a direct process, and closing it asks no second question.
+
 - TabContextMenu: Teleport to body, click-outside listener, fixed positioning from event coords
 - Close actions (closeOthers/closeToRight/closeAll): vacate panes in other tabs, tabs stay open (never removed)
 - vacateAllPanesInTab: walks layout tree, replaces all terminal nodes with vacant
@@ -508,7 +580,8 @@ under `[appearance]`, not in `appearance.json`. The rest still holds.
 
 **Status:** partly superseded by RUST-AGENT — the daemon is the Rust agent, not a Node `net`
 server. The socket paths, the framing and the reconnect messages below still hold, and
-last-connection-wins now applies only once a connection has authenticated (#127).
+last-connection-wins now applies only once a connection has authenticated, and only among the
+connections of one hub (HUB-IDENTITY).
 
 - Node.js net module for cross-platform socket transport (UDS + named pipes, same API)
 - Socket path per-user: $XDG_RUNTIME_DIR/lasterm/agent.sock (Linux) / \\.\pipe\lasterm-agent-<username> (Windows)
@@ -588,6 +661,10 @@ last-connection-wins now applies only once a connection has authenticated (#127)
 ---
 
 ## [backfill] Channel lifecycle & session persistence (2026-03-04)
+
+**Status:** the first point is superseded by AGENT-DAEMON and REMOTE-DAEMON — a hub restart no
+longer marks every channel dead: one a daemon may still hold stays orphan until the hub reaches that
+daemon again and adopts it.
 
 - On hub restart: mark all channels dead + sessions closed via startup sweep (markAllChannelsDead)
 - ATTACH protocol: TerminalPane sends ATTACH → hub replies ATTACH_OK with snapshot + tail → xterm restore

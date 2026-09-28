@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-09-27
+> Last updated: 2026-09-28
 
 ## 1. Framing
 
@@ -38,20 +38,17 @@ All messages (hub↔agent and hub↔UI) use the same framing:
 
 ### 1.3 Debugging
 
-```bash
-# Decode frames from a capture file
-./dist/sea/lasterm-hub decode < capture.bin
-
-# Pipe SSH stdio through decoder
-ssh user@host "lasterm-agent --stdio" | ./dist/sea/lasterm-hub decode --hex
-```
+No command decodes frames: the `decode` subcommand an earlier draft showed here was never built,
+and `lasterm --help` lists what exists (SPEC.md § 3.3). At `[logging] level = "debug"` the agent
+logs a one-line summary of each message a hub sends it: its type and a channel id's first
+characters, never the bytes it carries.
 
 ## 2. Transport Layers
 
-### 2.1 Hub ↔ Agent (stdio — SSH or local child process)
+### 2.1 Hub ↔ Agent (stdio — SSH)
 
 ```
-Hub ──── ssh2 session / child_process ──── Agent
+Hub ──── ssh2 session ──── Agent
              │                                │
              │ stdin  ◄────── framed messages ──────► stdout
              │                (MessagePack)
@@ -61,6 +58,7 @@ Hub ──── ssh2 session / child_process ──── Agent
 - Agent reads frames from stdin, writes frames to stdout
 - stderr reserved for log output (not parsed by hub)
 - SSH close = agent gone → hub enters reconnect loop
+- Only remote agents run on stdio. The local agent is always a daemon (§ 2.1b)
 
 ### 2.1b Hub ↔ Agent (UDS — daemon mode)
 
@@ -72,7 +70,9 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
 ```
 
 - Agent runs as a standalone daemon: `lasterm-agent --daemon --socket <path>`
-- Hub connects to the UDS via `connectOrLaunch(socketPath, config, binaryPath)`
+- Hub connects to the UDS via `connectOrLaunch(socketPath, config, binaryPath)`. A remote daemon's
+  socket is reached through the host's SSH connection, over a `direct-streamlocal` channel
+  (SPEC.md § 3.2); what that channel carries is the same
 - Same length-prefixed MessagePack framing as stdio
 - Connection displacement: an agent with the `hub-identity` capability serves several hubs at once,
   one connection per hub, and a new connection replaces only the same hub's previous one (§ 3.1b).
@@ -92,7 +92,7 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
 ### 2.2 Hub ↔ UI (WebSocket)
 
 ```
-UI ──── ws://localhost:4100/ws ──── Hub
+UI ──── wss://127.0.0.1:<port>/ws ──── Hub
              │                         │
              │ binary WS frames        │
              │ (one frame = one msg)   │
@@ -116,14 +116,20 @@ First message, sent immediately on start.
 {
   type: "HELLO",
   version: 1,
-  agent_version: "0.1.0",
-  capabilities: ["multiplex", "snapshot", "resize"],
-  visual_hints?: {
+  agent_version: "0.12.0",
+  capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes"],
+                            // a daemon adds "hub-identity"
+  available_shells?: string[],  // the shells the agent found on its host
+  default_shell?: string,       // its user's default shell
+  visual_hints?: {              // declared, never sent: no agent sends hints (SPEC.md § 4.4)
     badge?: { text: string, color: string },
     theme_overlay?: Record<string, string>
   }
 }
 ```
+
+The hub records `available_shells` and `default_shell` on the host, and seeds a launch profile
+for each shell.
 
 **Capability handling:** Hub checks `capabilities` array. If `"snapshot"` is missing, hub will not send SNAPSHOT_REQ (relies on local cache only). If `"resize"` is missing, hub skips RESIZE messages. All capabilities are optional — hub degrades gracefully. `"multiplex"` means agent supports multiple channels per process. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels (§ 3.1b); the hub reads it from the HELLO of each connection, never from an earlier one. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18); an agent without it ignores those fields and hands its own environment to every PTY, and the hub asks it nothing.
 
@@ -310,7 +316,7 @@ channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT.
 { type: "RESIZE", channel_id: string, cols: number, rows: number }
 ```
 
-Agent MUST: pty.resize() AND headless xterm.resize().
+Agent MUST resize both the PTY and the channel's `vt100` screen, so the next snapshot has the new size.
 
 ### 3.7 SNAPSHOT_REQ / SNAPSHOT_RES
 
@@ -352,7 +358,9 @@ Agent MUST: pty.resize() AND headless xterm.resize().
 { type: "HEARTBEAT_ACK", ts: string }  // Agent → Hub
 ```
 
-Interval: 15s. 3 consecutive misses (45s) → agent unresponsive.
+An agent answers HEARTBEAT with HEARTBEAT_ACK. The hub sends none today, and judges no agent by
+it: a remote host that stops answering is found by the SSH keepalive (SPEC.md § 5.5), and a local
+daemon's connection ends when the daemon does.
 
 ### 3.11 ERROR
 
@@ -448,7 +456,7 @@ know alone.
 ```
 Hub connects to daemon UDS
   │
-  Agent → Hub: HELLO { protocol_version, capabilities, ... }
+  Agent → Hub: HELLO { version, capabilities, ... }
   Hub → Agent: AUTH { token, hub_key }   (§ 3.1b)
   Agent → Hub: AGENT_CHANNEL_STATE { channel_id: "ch-1", title: "bash", pid: 4521, alive: true }
   Agent → Hub: AGENT_CHANNEL_STATE { channel_id: "ch-2", title: "vim", pid: 0, alive: false }
@@ -604,7 +612,7 @@ Hub broadcasts RESIZE to other attached clients.
 {
   type: "SPAWN",
   host_id: string,
-  shell?: string,     // default: host.default_shell ?? system default (/bin/bash or pwsh)
+  shell?: string,     // default: the launch profile's, else the host's first profile's, else none: the agent's default (§ 3.2)
   cwd?: string,       // default: none sent; the agent starts the shell in its user's home (§ 3.2)
   env?: Record<string, string>,  // merged with system env (max 100 entries)
   group_id?: string,  // optional channel group to place new channel in
@@ -780,7 +788,8 @@ absent from `channels` has ended, or is unknown.
 { type: "PONG" }
 ```
 
-Interval: 30s. 2 misses (60s) → client disconnected.
+The hub answers a PING with a PONG. No client sends one on a timer today, and the hub closes no
+socket for a missing one.
 
 ### 4.9 HOST_VERIFY (SSH Fingerprint)
 
@@ -792,7 +801,14 @@ Interval: 30s. 2 misses (60s) → client disconnected.
   fingerprint: string,         // "sha256:XXXXXXXXXXXX"
   algorithm: string,           // "ssh-ed25519", "ssh-rsa"
   old_fingerprint?: string,    // set when stored key differs — MITM warning
-  prompt_id?: string           // correlation ID; must be echoed in response for mismatch prompts
+  prompt_id: string,           // correlation ID; must be echoed in response for mismatch prompts
+  first_connect?: boolean,     // no key pinned for this host yet
+  hostname?: string,           // the address that presented the key
+  known_hosts?: {              // what this machine's OpenSSH already says about the key (SECURITY.md § 3.3)
+    verdict: "trusted" | "other-key",
+    file: string,
+    line: number               // 1-based
+  }
 }
 
 // UI → Hub (user decision)
@@ -814,18 +830,24 @@ Used when the hub needs to obtain a secret from the user interactively during SS
   type: "AUTH_PROMPT",
   host_id: string,
   prompt_type: "password" | "passphrase" | "elevation",
-  message: string    // human-readable prompt text (e.g. "Enter password for user@host")
+  message: string,   // human-readable prompt text (e.g. "Enter password for user@host")
+  prompt_id?: string // correlation ID, echoed in the response
 }
 
 // UI → Hub
 {
   type: "AUTH_PROMPT_RESPONSE",
   host_id: string,
-  secret: string | null    // null = user cancelled
+  secret: string | null,   // null = user cancelled
+  remember_session?: boolean,  // a key's passphrase: keep it in the hub's memory for 15 min
+  prompt_id?: string       // echoes AUTH_PROMPT's prompt_id, when it had one
 }
 ```
 
-**Security note:** The secret is never persisted — it is used once for the SSH handshake then discarded.
+**Security note:** The hub writes no secret to disk. A password is used for the SSH handshake and
+dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min with
+`remember_session`, so that a reconnect needs no prompt. An elevation password is kept in the
+hub's memory for 5 min, and sent to the agent in the SPAWN that needs it (SECURITY.md § 4.3).
 
 ### 4.11 TEST_CONNECT (SSH Connectivity Test)
 
@@ -936,19 +958,22 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 ### 5.1 Local Session
 
 ```
-UI                          Hub
- │── AUTH ──────────────────►│
- │◄── AUTH_OK ──────────────│
- │── SPAWN {host:"local"} ─►│── spawn PTY
- │◄── SPAWN_OK {ch_id} ────│
- │── ATTACH {ch_id} ───────►│
- │◄── ATTACH_OK {snapshot} ─│
- │── INPUT {data} ──────────►│── pty.write()
- │                           │◄── pty.onData()
- │◄── OUTPUT {data} ────────│
- │── RESIZE {cols,rows} ───►│── pty.resize()
- │── DETACH ────────────────►│── channel → ORPHAN
+UI                          Hub                        Local agent (daemon)
+ │── AUTH ──────────────────►│                           │
+ │◄── AUTH_OK ──────────────│                           │
+ │── SPAWN {host:"local"} ─►│── SPAWN {shell} ─────────►│── spawn PTY
+ │                           │◄── SPAWN_OK {ch_id} ─────│
+ │◄── SPAWN_OK {ch_id} ────│                           │
+ │── ATTACH {ch_id} ───────►│── SNAPSHOT_REQ ──────────►│
+ │◄── ATTACH_OK {snapshot} ─│◄── SNAPSHOT_RES ──────────│
+ │── INPUT {data} ──────────►│── INPUT ─────────────────►│── pty.write()
+ │◄── OUTPUT {data} ────────│◄── OUTPUT ────────────────│◄── PTY output
+ │── RESIZE {cols,rows} ───►│── RESIZE ────────────────►│── pty.resize()
+ │── DETACH ────────────────►│── channel → ORPHAN        │
 ```
+
+The hub reaches the local agent over its daemon socket, having sent AUTH after its HELLO
+(§ 3.1b); it never opens a PTY itself.
 
 ### 5.2 Remote Session
 
@@ -957,7 +982,7 @@ UI                          Hub                        Agent
  │── AUTH ──────────────────►│                           │
  │◄── AUTH_OK ──────────────│                           │
  │── SPAWN {host:"prod"} ──►│── ssh2.connect() ────────►│
- │                           │◄── HELLO {hints} ────────│
+ │                           │◄── HELLO ────────────────│
  │                           │── SPAWN {shell} ─────────►│
  │                           │◄── SPAWN_OK {ch_id} ─────│
  │◄── SPAWN_OK ─────────────│                           │
@@ -971,19 +996,24 @@ UI                          Hub                        Agent
 
 ### 5.3 Reconnect After SSH Drop
 
+A host that keeps a remote daemon (SPEC.md § 3.2):
+
 ```
-Hub                        Agent
+Hub                        Agent (remote daemon)
  │ ×× SSH drops ×× ─────────│ (agent keeps PTYs)
  │── retry 1s ───────────►  fail
  │── retry 2s ───────────►  fail
  │── retry 4s ───────────►  success
  │◄── HELLO ─────────────────│
- │── ATTACH {ch-1} ─────────►│
- │◄── ATTACH_OK {snapshot} ──│
- │── ATTACH {ch-2} ─────────►│
- │◄── ATTACH_OK {snapshot} ──│
- │  (resume OUTPUT)           │
+ │── AUTH {token:"", hub_key}►│ (§ 3.1b)
+ │◄── AGENT_CHANNEL_STATE ───│ (ch-1, alive)
+ │◄── CHANNEL_STATE_END ─────│
+ │  adopt ch-1; resume OUTPUT │
 ```
+
+On stdio the agent ended with the connection. The reconnect starts a new agent, and the hub
+sends it a SPAWN for each terminal that had not ended, naming its `channel_id`: a new shell under
+the same id. The backoff and the five-minute limit are in SPEC.md § 5.5.
 
 ### 5.4 Daemon Reconnect (Hub Restart)
 
@@ -1016,7 +1046,7 @@ Client A (WRITER)           Hub                Client B (READER)
 
 ## 6. REST API
 
-Base: `http://localhost:4100/api`
+Base: `https://127.0.0.1:<port>/api`, the port `runtime.json` records (SPEC.md § 7)
 Auth: `Authorization: Bearer <token>` (except `/health`).
 
 A bearer that is missing or malformed answers `401 AUTH_REQUIRED`, and one that is unknown,
@@ -1297,6 +1327,9 @@ What the callers do with the answers:
   ssh_auth?: 'agent' | 'key' | 'password',  // required if type=ssh
   ssh_key_path?: string,              // required if ssh_auth=key
   ssh_config_host?: string,           // Host alias from ~/.ssh/config
+  ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
+  ssh_proxy_spec?: string | null,     // or a jump as user@host:port; never both
+  ssh_remote_daemon?: boolean | null, // keep an agent running there (#79); null follows [ssh] remote_daemon
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'
   icon_value?: string,                // emoji char or image path
   color?: string,                     // hex "#rrggbb" or null for auto
@@ -1307,7 +1340,7 @@ What the callers do with the answers:
   host_group_id?: string,             // host group ID
   profile_json?: string | object,     // host-level terminal profile (Layer 3)
   elevation_method?: string,          // e.g. "sudo", "doas", "pkexec", "gsudo"
-  custom_command?: string,            // custom SSH/connect command template
+  custom_command?: string,            // the elevation command, when elevation_method is "custom"
   os?: 'linux' | 'darwin' | 'windows' | null,
   arch?: 'x64' | 'arm64' | null
 }
@@ -1486,8 +1519,9 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 |------|--------|---------|
 | `SHELL_NOT_FOUND` | Agent | Shell binary not found at path |
 | `PERMISSION_DENIED` | Agent | Cannot spawn PTY (user/cgroup restriction) |
-| `PTY_SPAWN_FAILED` | Agent | node-pty.spawn() threw (generic) |
-| `CHANNEL_LIMIT` | Agent | Max channels reached (default 50 per agent) |
+| `PTY_SPAWN_FAILED` | Agent | The PTY could not be spawned, for any other reason |
+| `CHANNEL_EXISTS` | Agent | SPAWN named a `channel_id` the agent already holds |
+| `ELEVATION_PASSWORD_REQUIRED` | Agent | An elevated SPAWN needs a password; the hub asks for one (AUTH_PROMPT) and sends the SPAWN again |
 | `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT/RESIZE for unknown channel_id (DESTROY and SNAPSHOT_REQ answer nothing); with `hub-identity`, also for a channel another hub owns, which is never told apart from an unknown one, byte for byte |
 | `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
 | `VERSION_MISMATCH` | Hub | Agent protocol version too new |

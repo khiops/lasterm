@@ -2,6 +2,11 @@
 
 > Session terminal platform — local-first, multi-OS, hub/agent architecture
 
+> **Historical.** This is the ideation that preceded the specifications, kept as it was written.
+> Where it disagrees with them, `SPEC.md` and the code are right: the agent became a Rust binary
+> with no node-pty or headless xterm.js, npm was dropped as a channel, and macOS is not a
+> supported target. `decisions.md` records what was decided since.
+
 ## Problem Statement
 
 **Problem:** Les terminaux distants (SSH) n'ont pas de persistance session + reprise multi-device + UI moderne. On perd le contexte terminal quand on change de device ou de client.

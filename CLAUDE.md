@@ -31,7 +31,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 | Test pattern | `*.spec.ts` (colocated) |
 | PTY | `async-xpty` — Rust, inside the agent. No Node PTY anywhere |
 | SSH (client + mock server) | ssh2 (Client + Server) |
-| Terminal (UI) | xterm.js + addon-fit + addon-serialize |
+| Terminal (UI) | xterm.js + addon-fit + addon-search + addon-unicode11 |
 | Terminal (Agent) | the `vt100` crate — Rust screen model in `headless.rs` |
 | Codec | @msgpack/msgpack |
 | Storage | better-sqlite3 (WAL mode) |
@@ -53,8 +53,11 @@ packages/
     ├── web/          → @lasterm/web (not published, embedded by hub)
     └── desktop/      → @lasterm/desktop (Tauri)
 crates/
-├── lasterm-agent/    → the agent. A Rust binary, not an npm package.
-└── lasterm-hub-lock/ → napi-rs addon holding the single-hub lock
+├── lasterm-agent/        → the agent. A Rust binary, not an npm package.
+├── lasterm-hub-lock/     → napi-rs addon holding the single-hub lock
+├── lasterm-tls-identity/ → napi-rs addon generating and keeping the hub's TLS key and certificate
+├── lasterm-process-lock/ → the kernel lock under the hub lock
+└── lasterm-protected-fs/ → descriptor-relative access to protected files
 ```
 
 **No working Lasterm reaches users through npm, and nothing here publishes.** No
@@ -203,15 +206,15 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 ## Architecture Quick Reference
 
 ```
-UI (Vue 3 + xterm.js) ──── WS + REST ──── Hub (Fastify, 127.0.0.1:4100)
-                                            ├── Local Agent (child_process, stdio)
-                                            ├── Remote Agent (ssh2, stdio)
+UI (Vue 3 + xterm.js) ──── WSS + HTTPS ──── Hub (Fastify, 127.0.0.1:<assigned port>)
+                                            ├── Local agent daemon (UDS / named pipe)
+                                            ├── Remote agent (ssh2: stdio, or a daemon's socket)
                                             ├── meta.db (config, relational)
                                             └── spool.db (output, snapshots)
 
 Agent (local or remote, same binary):
-  stdin → MessagePack frames → PTY manager (async-xpty, Rust) → N channels
-  stdout ← MessagePack frames ← OUTPUT/SNAPSHOT
+  stdio or socket → MessagePack frames → PTY manager (async-xpty, Rust) → N channels
+                  ← MessagePack frames ← OUTPUT/SNAPSHOT
   Hub never touches PTY directly — agent is the universal PTY manager.
 ```
 
@@ -273,7 +276,7 @@ Workspace (layout persistence)
 1. Built-in defaults (code)
 2. `config.toml` (XDG config dir on Linux, %APPDATA% on Windows — see SPEC.md § 7)
 3. `hosts.profile_json` (per-host, meta.db)
-3.5. Agent visual hints (from HELLO, ephemeral)
+3.5. Agent visual hints (from HELLO, ephemeral — no agent sends any today, so this layer is empty)
 4. `channels.profile_json` (per-channel, meta.db)
 
 **Port:** the `--port` flag, else `LASTERM_PORT`, gives an explicit port; otherwise the OS assigns

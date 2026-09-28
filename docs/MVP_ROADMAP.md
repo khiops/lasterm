@@ -1,8 +1,30 @@
 # lasterm — MVP Roadmap
 
 > Version: 0.1.0 (MVP)
-> Status: draft
-> Last updated: 2026-03-02
+> Status: the plan as written on 2026-03-02; § 0 says what shipped
+> Last updated: 2026-09-28
+
+## 0. Status (2026-09-28)
+
+Sections 1 to 9 are the plan as it was written, and are kept that way: they do not track
+progress, and where they name a technology or a number, the code may have moved on. This
+section records what shipped, milestone by milestone, and where it differs from the plan. The
+decisions named here are in [decisions.md](decisions.md).
+
+| Milestone | Status | Differs from the plan |
+|-----------|--------|-----------------------|
+| M0 Foundation | Shipped | — |
+| M1 Local Terminal | Shipped | The agent is a Rust binary (`crates/lasterm-agent`) whose PTYs come from `async-xpty`; no node-pty exists anywhere (RUST-AGENT). The local agent is a detached daemon on a Unix socket or named pipe, not a `--stdio` child (AGENT-DAEMON). The hub listens on an OS-assigned port unless given one, not on 4100, and serves HTTPS. |
+| M2 Remote Terminal | Shipped | The connection test is the WebSocket message `TEST_CONNECT`, not `POST /hosts/:id/test` (TEST-CONNECT-WS). |
+| M3 Session Persistence | Shipped | Block 3.1's spike was overtaken: the agent's screen model is the `vt100` crate, and no headless xterm.js or DOM polyfill exists (SPEC.md § 3.2). A remote terminal survives a dropped connection only on a host that keeps an agent running (REMOTE-DAEMON); on stdio it ends with the connection. |
+| M4 Multi-Client | Shipped for a browser on the hub's machine | `lasterm pair` issues 8-digit codes, but the hub binds `127.0.0.1`, so no other device can pair yet (#96, #193). |
+| M5 Polish | Shipped, except remote visual hints; the CLI in part | Remote visual hints (block 5.5) were not built: the agent sends none in HELLO and the hub reads none, so the resolver's layer 3.5 is always empty (SPEC.md § 4.4). The palette opens with Ctrl+K (UX-11). The CLI has `start`, `stop`, `quit`, `status`, `host add/list/remove`, `agent fetch/status/import`, `session list`, `pair` and `config edit`; `host test` went with TEST-CONNECT-WS, and `session attach` and `workspace export/import` were never built. A tab's layout is kept in the browser's `localStorage`, not in the hub's `workspaces` table, which nothing uses. |
+
+Of the post-MVP priorities (§ 8), two have shipped: Tauri desktop packaging (`packages/clients/desktop`),
+and the hub fetching and deploying the agent binary for a remote host (SPEC.md § 3.5). The CI matrix
+of § 6 is superseded: CI runs Node 24, on Linux and Windows, and macOS is not a supported target
+(#224). The release builds the agent for Linux x64 and arm64 and for Windows x64, and the hub and the
+desktop app for Windows x64 (`.github/build-matrix.json`).
 
 ## 1. Milestone Overview
 

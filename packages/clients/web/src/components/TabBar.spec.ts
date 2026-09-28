@@ -7,6 +7,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
+import { shortcutLabel } from "../utils/app-shortcuts.js";
 import TabBar from "./TabBar.vue";
 import SOURCE from "./TabBar.vue?raw";
 
@@ -171,5 +172,53 @@ describe("TabBar keyboard", () => {
 		const ring = /\.tab:focus-visible\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
 		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
 		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+	});
+});
+
+// The shortcuts where the mouse is, read from the table the window runs them from (#637).
+describe("TabBar tooltips", () => {
+	const SWITCH = `${shortcutLabel("tab.next")} / ${shortcutLabel("tab.previous")}: next / previous tab`;
+
+	const tooltip = (id: string): string => tab(id).getAttribute("title") ?? "";
+
+	it("give each tab its name, its Ctrl+Alt+N, and the keys to the next and previous tab", () => {
+		mountBar(["t0", "t1", "t2"]);
+		expect(tooltip("t0")).toBe(`Label t0 — ${shortcutLabel("tab.goTo1")}\n${SWITCH}`);
+		expect(tooltip("t2")).toBe(`Label t2 — ${shortcutLabel("tab.goTo3")}\n${SWITCH}`);
+		expect(shortcutLabel("tab.goTo3")).toBe("Ctrl+Alt+3");
+		expect(SWITCH).toBe("Ctrl+Tab / Ctrl+Shift+Tab: next / previous tab");
+	});
+
+	// Ctrl+Alt+9 goes to the last tab, however many there are: the ninth of ten has no chord.
+	it("name the chord that truly reaches the tab", () => {
+		const ids = Array.from({ length: 10 }, (_, i) => `t${i}`);
+		mountBar(ids);
+		expect(tooltip("t7").split("\n")[0]).toBe(`Label t7 — ${shortcutLabel("tab.goTo8")}`);
+		expect(tooltip("t8").split("\n")[0]).toBe("Label t8");
+		expect(tooltip("t9").split("\n")[0]).toBe(`Label t9 — ${shortcutLabel("tab.goTo9")}`);
+	});
+
+	it("count the tabs the bar shows, as the chords do", () => {
+		visibleTabIds.value = new Set(["t0", "t2", "t3"]);
+		mountBar(["t0", "t1", "t2", "t3"]);
+		expect(tooltip("t2").split("\n")[0]).toBe(`Label t2 — ${shortcutLabel("tab.goTo2")}`);
+		expect(tooltip("t3").split("\n")[0]).toBe(`Label t3 — ${shortcutLabel("tab.goTo3")}`);
+	});
+
+	it("name the new tab's chord on the + button", () => {
+		mountBar(["t0"]);
+		const add = root.querySelector(".tab-bar__add--main");
+		expect(add?.getAttribute("title")).toBe(`New terminal (${shortcutLabel("tab.new")})`);
+	});
+
+	// Ctrl+Shift+W closes the focused pane, not the tab: the × does not claim it.
+	it("keep the tab's × to what it does, without a chord it does not run", () => {
+		mountBar(["t0"]);
+		const close = tab("t0").querySelector(".tab__close");
+		expect(close?.getAttribute("title")).toBe("Close tab");
+	});
+
+	it("write no chord of their own", () => {
+		expect(SOURCE).not.toMatch(/\b(Ctrl|Alt|Shift)\+/);
 	});
 });

@@ -64,7 +64,6 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 				search: {
 					position: "top-right",
 					highlightOnClose: "clear",
-					scrollbarMarkers: true,
 					historySize: 20,
 				},
 				layout: { hostRailWidth: 48, sidebarWidth: 200 },
@@ -93,7 +92,6 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 				search: {
 					position: "top-right",
 					highlightOnClose: "clear",
-					scrollbarMarkers: true,
 					historySize: 20,
 				},
 				layout: { hostRailWidth: 48, sidebarWidth: 200 },

@@ -96,4 +96,11 @@ describe("UI_SECTION_KEYS", () => {
 	it("no longer lists panes.defaultSplitDirection", () => {
 		expect(UI_SECTION_KEYS.panes).not.toContain("defaultSplitDirection");
 	});
+
+	// Settings wrote `[search] scrollbar_markers`, and the terminals read
+	// `[terminal] scrollbar_markers`: the toggle changed nothing (#614). The
+	// terminal key is the setting; the search one is no longer taken.
+	it("no longer lists search.scrollbarMarkers", () => {
+		expect(UI_SECTION_KEYS.search).not.toContain("scrollbarMarkers");
+	});
 });

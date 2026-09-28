@@ -40,6 +40,7 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | bell_sound | `"mute"` \| `"system"` \| `"custom"` | `"mute"` | Sound when the terminal receives BEL: none, a generated tone, or `bell_custom_file` |
 | bell_custom_file | string | — | With `bell_sound = "custom"`: a file name in the config dir's `sounds/` (.wav, .mp3, .ogg) |
 | bell_badge | boolean | `true` | Mark the terminal's tab when it receives BEL |
+| scrollbar_markers | boolean | `true` | Mark a search's matches in the terminal's scrollbar. With `[appearance.scrollbar] style = "hidden"`, the gutter kept for them goes too. Settings › Search › Scrollbar Markers, for every host, one host or one terminal. Until this key is set, a `scrollbar_markers` under `[search]`, where Settings used to write the choice, stands in for it; the first write of this key from Settings removes that one (#614) |
 | wallpaper | string | `""` | Wallpaper filename (jpg/jpeg/png/webp/gif/avif, max 10 MB) |
 | wallpaper_blur | number (0–20) | `0` | Wallpaper blur in pixels |
 | wallpaper_dim | number (0–100) | `0` | Wallpaper dim percentage |
@@ -111,8 +112,9 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 |-----|------|---------|-------------|
 | position | `"top-right"` \| `"bottom-right"` \| `"bottom-bar"` | `"top-right"` | Search box position |
 | highlight_on_close | `"clear"` \| `"fade"` \| `"persist"` | `"clear"` | Search highlight behavior when closing the box |
-| scrollbar_markers | boolean | `true` | Show match indicators in the scrollbar |
 | history_size | number | `20` | Number of recent searches to remember |
+
+Whether matches are marked in the scrollbar is `[terminal] scrollbar_markers`, which a host or a terminal can override. A `scrollbar_markers` left here is read only as that key's global value, while `[terminal]` does not set it.
 
 ---
 

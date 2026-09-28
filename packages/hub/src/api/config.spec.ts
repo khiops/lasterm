@@ -121,6 +121,23 @@ describe("PUT /api/config/ui value validation", () => {
 		expect(read.json<{ tabs: { closeButton: boolean } }>().tabs.closeButton).toBe(false);
 	});
 
+	// The markers are a terminal setting (#614): Settings writes them through
+	// PUT /api/config/global, and one sent here would again reach no terminal.
+	it("refuses search.scrollbarMarkers, no longer a UI setting", async () => {
+		const res = await server.inject({
+			method: "PUT",
+			url: "/api/config/ui",
+			payload: { search: { scrollbarMarkers: false } },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: 'Unknown key "scrollbarMarkers" in UI section "search"',
+			},
+		});
+	});
+
 	it("still rejects unknown keys (existing behaviour)", async () => {
 		const res = await server.inject({
 			method: "PUT",

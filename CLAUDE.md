@@ -93,6 +93,7 @@ pnpm build                # Build all packages
 pnpm test                 # Run all tests (vitest)
 pnpm lint                 # Lint + format check (biome)
 pnpm lint:fix             # Auto-fix lint issues
+pnpm icons                # Render every icon file from packaging/brand (see its README)
 pnpm -F @lasterm/hub test # Test single package
 pnpm -F @lasterm/web dev  # Dev single package
 scripts/dev/check.sh      # Everything CI checks on a PR, before pushing (below)

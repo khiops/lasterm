@@ -61,6 +61,7 @@ catalog:
   webdriverio: "~9.30.1"
   "ws": "^8.21.3"
   "@types/ws": "^8.18.1"
+  "@resvg/resvg-js": "^2.6.2"
 
 # Written by `pnpm approve-builds`; pnpm 11 and later read this instead of the
 # onlyBuiltDependencies / ignoredBuiltDependencies lists it replaced.

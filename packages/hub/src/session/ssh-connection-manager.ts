@@ -478,6 +478,8 @@ export class SshConnectionManager {
 		// This can be called directly from an agent "close" listener. A quit refusal
 		// is normal control flow there, not an exception escaping the listener.
 		if (this.ctx.quitState === "QUITTING") return;
+		// Its user disconnected it: nothing brings it back but them (#648).
+		if (this.ctx.userDisconnectedHosts.has(hostId)) return;
 		const reconnectFence = captureQuitFence(this.ctx);
 		const elapsed = Date.now() - startTime;
 		if (elapsed >= RECONNECT_TIMEOUT_MS) {
@@ -495,6 +497,8 @@ export class SshConnectionManager {
 			// or superseded by a newer session while the timer was pending.
 			const session = this.ctx.sessions.get(hostId);
 			if (!session || session.status === "closed" || session.id !== sessionId) return;
+			// Disconnected by its user while this waited (#648).
+			if (this.ctx.userDisconnectedHosts.has(hostId)) return;
 
 			const host = this.ctx.metaDal.getHost(hostId);
 			if (!host) {

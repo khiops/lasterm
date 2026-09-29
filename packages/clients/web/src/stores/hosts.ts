@@ -1,4 +1,10 @@
-import { type Host, type HostGroup, type SessionStatus, toCamelCase } from "@lasterm/shared";
+import {
+	type Host,
+	type HostConnectionResponse,
+	type HostGroup,
+	type SessionStatus,
+	toCamelCase,
+} from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
@@ -6,8 +12,27 @@ import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 import { useSessionStore } from "./session.js";
 
-/** Derived per-host connectivity status rendered in the rail status dot. */
-export type HostStatus = "live" | "offline" | "error" | "reconnecting";
+/**
+ * Derived per-host connectivity status rendered in the rail status dot.
+ *
+ * `disconnected` is a host its user disconnected (#648): offline, like one
+ * never connected, but on purpose, and the hub does not reach for it again
+ * until someone acts on it. `error` is one the hub lost.
+ */
+export type HostStatus = "live" | "offline" | "error" | "reconnecting" | "disconnected";
+
+/** What the hub answered a Connect, Reconnect or Disconnect, reduced to what a caller reads (#648). */
+export interface HostConnectionAnswer {
+	readonly ok: boolean;
+	readonly status: number;
+	readonly body: Partial<HostConnectionResponse> & {
+		readonly error?: {
+			readonly code?: string;
+			readonly message?: string;
+			readonly terminals?: number;
+		};
+	};
+}
 
 /**
  * Map a raw SessionStatus value (or absence thereof) to the four visual states
@@ -188,6 +213,68 @@ export const useHostsStore = defineStore("hosts", () => {
 		_otherOwnerChannels.value = next;
 	}
 
+	/** Hosts their user disconnected, as the hub last said (#648). */
+	const _disconnectedByUser = ref<ReadonlySet<string>>(new Set());
+
+	/** Whether the host's user disconnected it, and the hub waits for someone to act on it. */
+	function isDisconnectedByUser(hostId: string): boolean {
+		return _disconnectedByUser.value.has(hostId);
+	}
+
+	/** What a SESSION_STATE said of it: each one says, the flag there or not. */
+	function rememberDisconnectedByUser(hostId: string, disconnected: boolean): void {
+		if (_disconnectedByUser.value.has(hostId) === disconnected) return;
+		const next = new Set(_disconnectedByUser.value);
+		if (disconnected) next.add(hostId);
+		else next.delete(hostId);
+		_disconnectedByUser.value = next;
+	}
+
+	/** What a STATE_SYNC listed: the whole of it. */
+	function setDisconnectedByUser(hostIds: readonly string[]): void {
+		_disconnectedByUser.value = new Set(hostIds);
+	}
+
+	/** POST one of the host connection routes, and say what came back. */
+	async function postHostConnection(
+		hostId: string,
+		action: "connect" | "reconnect" | "disconnect",
+		body: Record<string, unknown>,
+	): Promise<HostConnectionAnswer> {
+		const clientId = authStore.clientId;
+		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/${action}`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${authStore.token}`,
+				"Content-Type": "application/json",
+			},
+			// This window's id: the questions a connection asks come here.
+			body: JSON.stringify({ ...body, ...(clientId !== null && { client_id: clientId }) }),
+		});
+		let parsed: HostConnectionAnswer["body"] = {};
+		try {
+			parsed = (await res.json()) as HostConnectionAnswer["body"];
+		} catch {
+			// No body: the status says it.
+		}
+		return { ok: res.ok, status: res.status, body: parsed };
+	}
+
+	/** Connect the host, without opening a terminal (#648). */
+	function connectHost(hostId: string): Promise<HostConnectionAnswer> {
+		return postHostConnection(hostId, "connect", {});
+	}
+
+	/** Close the host's connection and open it again; `force` ends what that ends (#648). */
+	function reconnectHost(hostId: string, force: boolean): Promise<HostConnectionAnswer> {
+		return postHostConnection(hostId, "reconnect", { force });
+	}
+
+	/** Close the host's connection, and keep it closed; `force` ends what that ends (#648). */
+	function disconnectHost(hostId: string, force: boolean): Promise<HostConnectionAnswer> {
+		return postHostConnection(hostId, "disconnect", { force });
+	}
+
 	function updateSessionStatus(hostId: string, status: SessionStatus): void {
 		_sessionStatuses.value.set(hostId, status);
 		// Trigger Vue reactivity on the Map by replacing the ref value
@@ -214,6 +301,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			const sessionStore = useSessionStore();
 			return sessionStore.connected ? "live" : "offline";
 		}
+		if (_disconnectedByUser.value.has(hostId)) return "disconnected";
 		return sessionStatusToHostStatus(_sessionStatuses.value.get(hostId));
 	}
 
@@ -420,6 +508,12 @@ export const useHostsStore = defineStore("hosts", () => {
 		updateSessionStatus,
 		isHostConnected,
 		getHostStatus,
+		isDisconnectedByUser,
+		rememberDisconnectedByUser,
+		setDisconnectedByUser,
+		connectHost,
+		reconnectHost,
+		disconnectHost,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
 		getOtherOwnerChannels,

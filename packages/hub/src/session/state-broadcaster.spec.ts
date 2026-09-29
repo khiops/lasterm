@@ -31,6 +31,7 @@ function makeBroadcaster(agentVersion: string | undefined) {
 		processTitleDebounceTimers: new Map(),
 		bellTimestamps: new Map(),
 		notificationTimestamps: new Map(),
+		userDisconnectedHosts: new Set(),
 	} as unknown as SharedSessionContext;
 
 	return { sent, broadcaster: new StateBroadcaster(ctx) };
@@ -121,6 +122,7 @@ function makeRenameBroadcaster(inMemory: boolean) {
 		processTitleDebounceTimers: new Map(),
 		bellTimestamps: new Map(),
 		notificationTimestamps: new Map(),
+		userDisconnectedHosts: new Set(),
 	} as unknown as SharedSessionContext;
 
 	return { sent, broadcaster: new StateBroadcaster(ctx) };

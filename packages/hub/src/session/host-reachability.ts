@@ -81,6 +81,23 @@ export function hostUnreachableMessage(
 }
 
 /**
+ * The refusal of a start nobody asked for, on a host its user disconnected
+ * (#648). The same code as a host away: a pane waits for it, and its terminal
+ * starts once someone connects the host again.
+ */
+export function hostDisconnectedMessage(
+	hostId: string,
+	hostLabel: string | undefined,
+	hostStatus: SessionStatus,
+	channelId?: string,
+): ErrorMessage {
+	return {
+		...hostUnreachableMessage(hostId, hostLabel, hostStatus, channelId),
+		message: `${hostLabel ?? "This host"} is disconnected. Connect it to start its terminals.`,
+	};
+}
+
+/**
  * A start refused because its host is away, thrown where the refusal is
  * found and sent by whoever answers the client (`ws/handlers/spawn.ts`).
  */

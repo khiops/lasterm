@@ -14,16 +14,27 @@
 			</template>
 
 			<template v-else-if="host">
+				<!-- What can be done with its connection, as it stands (#648). -->
 				<button
-					v-if="status === 'offline'"
+					v-if="canConnect"
 					class="ctx-item"
+					data-action="connect"
 					@click="onConnect"
 				>
 					Connect
 				</button>
 				<button
+					v-if="canReconnect"
+					class="ctx-item"
+					data-action="reconnect"
+					@click="onReconnect"
+				>
+					Reconnect
+				</button>
+				<button
 					v-if="status === 'live'"
 					class="ctx-item"
+					data-action="disconnect"
 					@click="onDisconnect"
 				>
 					Disconnect
@@ -95,6 +106,7 @@ const emit = defineEmits<{
 	(e: "edit", hostId: string): void;
 	(e: "delete", hostId: string): void;
 	(e: "connect", hostId: string): void;
+	(e: "reconnect", hostId: string): void;
 	(e: "disconnect", hostId: string): void;
 	(e: "new-group", hostId: string): void;
 }>();
@@ -108,6 +120,14 @@ const host = computed(() =>
 );
 
 const status = computed(() => hostsStore.getHostStatus(props.hostId));
+
+/** Nothing connected: never, or its user disconnected it. */
+const canConnect = computed(() => status.value === "offline" || status.value === "disconnected");
+
+/** A connection up, being reached, or lost: close it and open it again. */
+const canReconnect = computed(
+	() => status.value === "live" || status.value === "reconnecting" || status.value === "error",
+);
 
 const groups = computed(() => hostsStore.getHostGroups());
 
@@ -146,6 +166,13 @@ function onDelete(): void {
 function onConnect(): void {
 	if (host.value) {
 		emit("connect", host.value.id);
+	}
+	emit("close");
+}
+
+function onReconnect(): void {
+	if (host.value) {
+		emit("reconnect", host.value.id);
 	}
 	emit("close");
 }

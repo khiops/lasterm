@@ -96,6 +96,11 @@ export class StateBroadcaster {
 		};
 	}
 
+	/** What a SESSION_STATE says of a host its user disconnected (#648): nothing otherwise. */
+	private userDisconnectedOn(hostId: string): Pick<SessionStateMessage, "disconnectedByUser"> {
+		return this.ctx.userDisconnectedHosts.has(hostId) ? { disconnectedByUser: true } : {};
+	}
+
 	getStateSnapshot(): StateSyncMessage {
 		const sessions: StateSyncMessage["sessions"] = [];
 		for (const [hostId, state] of this.ctx.sessions) {
@@ -136,7 +141,15 @@ export class StateBroadcaster {
 				endReason: ended.endReason,
 			});
 		}
-		return { type: "STATE_SYNC", sessions, channels };
+		// A host whose connection ran its terminals has no session left once
+		// disconnected, so these are listed by host, sessions or not (#648).
+		const userDisconnectedHosts = [...this.ctx.userDisconnectedHosts];
+		return {
+			type: "STATE_SYNC",
+			sessions,
+			channels,
+			...(userDisconnectedHosts.length > 0 && { userDisconnectedHosts }),
+		};
 	}
 
 	// ─── Status updates (in-memory + DB + broadcast) ────────────────────────
@@ -158,6 +171,7 @@ export class StateBroadcaster {
 			hostId,
 			status,
 			...this.agentStatusOn(hostId),
+			...this.userDisconnectedOn(hostId),
 		};
 		this.broadcastToAllClients(stateMsg);
 	}
@@ -175,6 +189,7 @@ export class StateBroadcaster {
 			hostId,
 			status: state.status,
 			...this.agentStatusOn(hostId),
+			...this.userDisconnectedOn(hostId),
 		} satisfies SessionStateMessage);
 	}
 

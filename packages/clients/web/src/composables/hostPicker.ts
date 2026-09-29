@@ -90,6 +90,8 @@ export function statusWord(status: HostStatus): string {
 			return "Offline";
 		case "error":
 			return "Error";
+		case "disconnected":
+			return "Disconnected";
 	}
 }
 
@@ -112,6 +114,8 @@ export function statusAction(status: HostStatus): RowAction {
 			return { text: "Offline", tone: "muted" };
 		case "error":
 			return { text: "Error", tone: "error" };
+		case "disconnected":
+			return { text: "Disconnected", tone: "muted" };
 	}
 }
 
@@ -152,6 +156,9 @@ export function hostRowView(row: {
 	switch (row.status) {
 		case "offline":
 			return { action: { text: "Connect", tone: "accent" }, note: null };
+		// Offline on purpose (#648): said, and connected like any other.
+		case "disconnected":
+			return { action: { text: "Disconnected · connect", tone: "accent" }, note: null };
 		case "error":
 			return { action: { text: "Error · retry", tone: "error" }, note: null };
 		default:

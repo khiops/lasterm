@@ -114,7 +114,7 @@ describe("TerminalPane host", () => {
 	});
 
 	it("restarts a terminal on the host it runs on", () => {
-		expect(SOURCE).toMatch(/restartChannel\(chId,\s*paneHostId\.value\)/);
+		expect(SOURCE).toMatch(/restartChannel\(chId,\s*paneHostId\.value,/);
 	});
 
 	// An empty pane's picker, or the palette, can open a terminal on another
@@ -317,7 +317,9 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 		expect(onEnded).toMatch(
 			/writer: isWriter\.value,\s*endReason: endReason \?\? channelsStore\.endReasonOf\(effectiveChannelId\.value\),\s*\};/,
 		);
-		expect(onEnded).toContain("if (reaction.kind === 'restart') void onRestart();");
+		expect(onEnded).toContain(
+			"if (reaction.kind === 'restart') void onRestart({ bySetting: true });",
+		);
 		expect(onEnded).toContain("else closeEnded(reaction.keep);");
 		expect(SOURCE).toContain(
 			'<p v-if="heldBack !== null && !isGone" class="exit-reason">{{ heldBackText }}</p>',
@@ -453,7 +455,7 @@ describe("TerminalPane follows a choice made on another overlay (#586)", () => {
 	it("acts as the overlay's buttons do", () => {
 		const follow = body(/function followChoice\(/);
 		expect(follow).toContain("overlayChoice(action, null, prefs.value.keepEnded);");
-		expect(follow).toContain("if (act.kind === 'restart') void onRestart();");
+		expect(follow).toContain("if (act.kind === 'restart') void onRestart({ bySetting: true });");
 		expect(follow).toContain("else closeEnded(act.keep);");
 		expect(follow).not.toContain("saveWhenEnded");
 	});
@@ -574,11 +576,55 @@ describe("TerminalPane shows the card only when it asks (#595)", () => {
 	// restart are one step, so the card has no moment to show in.
 	it("starts a live restart before anything is drawn", () => {
 		expect(body(/function onTerminalEnded\(/)).toContain(
-			"if (reaction.kind === 'restart') void onRestart();",
+			"if (reaction.kind === 'restart') void onRestart({ bySetting: true });",
 		);
 		const onRestart = body(/async function onRestart\(/);
 		expect(onRestart.indexOf("restarting.value = true;")).toBeGreaterThan(-1);
 		expect(onRestart.indexOf("restarting.value = true;")).toBeLessThan(onRestart.indexOf("await "));
+	});
+});
+
+// ─── A host its user disconnected (#648) ─────────────────────────────────────
+//
+// What the hub does with a start nobody asked for is session-manager's to
+// say (session-manager-connection.spec.ts): it refuses it on such a host, and
+// the pane waits for the host as for one away. These check that the pane says
+// which of its restarts nobody asked for, and what it shows over a terminal
+// whose host was disconnected.
+
+describe("TerminalPane over a host its user disconnected (#648)", () => {
+	it("tells the hub which restarts nobody asked for: the setting's and the host's return", () => {
+		expect(body(/async function onRestart\(/)).toMatch(
+			/channelsStore\.restartChannel\(chId, paneHostId\.value, \{\s*automatic: opts\?\.automatic === true \|\| opts\?\.bySetting === true,\s*\}\)/,
+		);
+		expect(body(/function onTerminalEnded\(/)).toContain("void onRestart({ bySetting: true })");
+		expect(body(/function followChoice\(/)).toContain("void onRestart({ bySetting: true })");
+		expect(SOURCE).toContain("restart: () => void onRestart({ automatic: true }),");
+	});
+
+	it("leaves the card's Restart a person's, which connects the host again", () => {
+		expect(body(/function onOverlayAction\(/)).toContain(
+			"if (act.kind === 'restart') void onRestart();",
+		);
+	});
+
+	it("shows its terminal not connected: what it last showed, typing going nowhere", () => {
+		expect(SOURCE).toMatch(
+			/const hostDisconnectedByUser = computed\(\(\) => \{[\s\S]*?hostsStore\.isDisconnectedByUser\(hostId\)/,
+		);
+		expect(SOURCE).toContain("detached: isDetached.value || hostDisconnectedByUser.value,");
+	});
+
+	it("connects that host on its Reconnect, before attaching", () => {
+		expect(SOURCE).toContain(
+			'<button class="detached-btn" @click="onReconnectClicked">Reconnect</button>',
+		);
+		const clicked = body(/async function onReconnectClicked\(/);
+		expect(clicked).toContain("hostsStore.isDisconnectedByUser(hostId)");
+		expect(clicked.indexOf("hostsStore.connectHost(hostId)")).toBeGreaterThan(-1);
+		expect(clicked.indexOf("hostsStore.connectHost(hostId)")).toBeLessThan(
+			clicked.indexOf("await onReconnect();"),
+		);
 	});
 });
 
@@ -593,7 +639,9 @@ describe("TerminalPane waits for the host of a restart that found it away (#605)
 	// made on another overlay, and the host's return.
 	it("hands the wait every restart's outcome", () => {
 		const onRestart = body(/async function onRestart\(/);
-		expect(onRestart).toContain("async function onRestart(opts?: { automatic?: boolean })");
+		expect(onRestart).toContain(
+			"async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean })",
+		);
 		// A new attempt decides afresh, from before anything is awaited.
 		expect(onRestart.indexOf("hostWait.restartStarting();")).toBeGreaterThan(-1);
 		expect(onRestart.indexOf("hostWait.restartStarting();")).toBeLessThan(

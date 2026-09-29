@@ -18,7 +18,7 @@ function hostRow(id: string, label: string, type = "ssh"): Record<string, unknow
 let hostRows: Record<string, unknown>[] = [];
 
 /** The hub's answer to the hosts and host-groups listings. */
-const fetchStub = vi.fn(async (url: string) => {
+const fetchStub = vi.fn(async (url: string, _init?: RequestInit) => {
 	const body = String(url).includes("/api/host-groups") ? [] : hostRows;
 	return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
 });
@@ -100,5 +100,77 @@ describe("the selected host across a reload (#561)", () => {
 		await after.fetchHosts();
 
 		expect(after.selectedHostId).toBe("local");
+	});
+});
+
+describe("a host's connection, asked for (#648)", () => {
+	const WINDOW = "01K6480000000000000000WNDW";
+
+	/** The requests the hub was sent, with their bodies. */
+	function sent(): Array<{ url: string; body: unknown }> {
+		return fetchStub.mock.calls
+			.filter(([url]) => /\/(connect|reconnect|disconnect)$/.test(String(url)))
+			.map(([url, init]) => ({
+				url: String(url),
+				body: JSON.parse(String((init as RequestInit | undefined)?.body)),
+			}));
+	}
+
+	it("asks for each with this window's id, where the questions it raises go", async () => {
+		const store = load();
+		useAuthStore().setClientId(WINDOW);
+		fetchStub.mockClear();
+
+		await store.connectHost("pi");
+		await store.reconnectHost("pi", false);
+		await store.disconnectHost("pi", true);
+
+		expect(sent()).toEqual([
+			{ url: expect.stringMatching(/\/api\/hosts\/pi\/connect$/), body: { client_id: WINDOW } },
+			{
+				url: expect.stringMatching(/\/api\/hosts\/pi\/reconnect$/),
+				body: { force: false, client_id: WINDOW },
+			},
+			{
+				url: expect.stringMatching(/\/api\/hosts\/pi\/disconnect$/),
+				body: { force: true, client_id: WINDOW },
+			},
+		]);
+	});
+
+	it("hands back what the hub answered, refusal included", async () => {
+		const store = load();
+		fetchStub.mockImplementationOnce(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: { code: "TERMINALS_WOULD_END", message: "2 terminals…", terminals: 2 },
+					}),
+					{ status: 409, headers: { "Content-Type": "application/json" } },
+				),
+		);
+
+		const answer = await store.disconnectHost("pi", false);
+
+		expect(answer).toEqual({
+			ok: false,
+			status: 409,
+			body: { error: { code: "TERMINALS_WOULD_END", message: "2 terminals…", terminals: 2 } },
+		});
+	});
+
+	it("shows a host its user disconnected apart from one offline or lost", () => {
+		const store = load();
+		store.hosts = [{ id: "pi", label: "Pi", type: "ssh" } as never];
+		store.updateSessionStatus("pi", "disconnected");
+		expect(store.getHostStatus("pi")).toBe("error");
+
+		store.rememberDisconnectedByUser("pi", true);
+		expect(store.getHostStatus("pi")).toBe("disconnected");
+		// Still not connected, for a pane waiting on it.
+		expect(store.isHostConnected("pi")).toBe(false);
+
+		store.rememberDisconnectedByUser("pi", false);
+		expect(store.getHostStatus("pi")).toBe("error");
 	});
 });

@@ -426,6 +426,7 @@ export const useSessionStore = defineStore("session", () => {
 				hostsStore.updateSessionStatus(msg.hostId, msg.status);
 				hostsStore.rememberOutdatedAgent(msg.hostId, msg.outdatedAgent);
 				hostsStore.rememberOtherOwnerChannels(msg.hostId, msg.otherOwnerChannels);
+				hostsStore.rememberDisconnectedByUser(msg.hostId, msg.disconnectedByUser === true);
 			}
 		});
 	}
@@ -523,6 +524,7 @@ export const useSessionStore = defineStore("session", () => {
 	): void {
 		wsClient.on("STATE_SYNC", (msg) => {
 			if (msg.type === "STATE_SYNC") {
+				hostsStore.setDisconnectedByUser(msg.userDisconnectedHosts ?? []);
 				// Build sessionId → hostId lookup for channel-host mapping
 				const sessionHostMap = new Map<string, string>();
 				for (const s of msg.sessions) {

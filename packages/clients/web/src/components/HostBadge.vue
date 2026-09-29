@@ -106,6 +106,12 @@ const dotSize = computed(() => Math.max(8, Math.round(props.size * 0.375)));
 	background: var(--nt-badge);
 }
 
+/* Offline on purpose (#648): the offline dot, hollow. */
+.host-badge__dot--disconnected {
+	background: var(--host-badge-ring, var(--nt-tab-bar));
+	box-shadow: inset 0 0 0 2px var(--nt-text-muted);
+}
+
 .host-badge__dot--reconnecting {
 	background: var(--nt-yellow);
 	animation: host-badge-pulse 1.4s ease-in-out infinite;

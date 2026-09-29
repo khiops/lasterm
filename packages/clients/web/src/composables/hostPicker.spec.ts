@@ -130,6 +130,12 @@ describe("status words", () => {
 		expect(statusAction("reconnecting").tone).toBe("warn");
 		expect(statusAction("error").tone).toBe("error");
 	});
+
+	// Offline on purpose, and said apart from a host never connected (#648).
+	it("says a host its user disconnected is disconnected, quietly", () => {
+		expect(statusWord("disconnected")).toBe("Disconnected");
+		expect(statusAction("disconnected")).toEqual({ text: "Disconnected", tone: "muted" });
+	});
 });
 
 describe("hostRowView", () => {
@@ -148,6 +154,13 @@ describe("hostRowView", () => {
 		expect(hostRowView({ ...base, status: "error" }).action).toEqual({
 			text: "Error · retry",
 			tone: "error",
+		});
+	});
+
+	it("offers to connect a host its user disconnected, and says so (#648)", () => {
+		expect(hostRowView({ ...base, status: "disconnected" }).action).toEqual({
+			text: "Disconnected · connect",
+			tone: "accent",
 		});
 	});
 

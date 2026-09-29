@@ -125,7 +125,7 @@
 		<!-- Not connected: what is shown is remembered, not live -->
 		<div v-if="cover === 'not-connected'" class="detached-banner">
 			<span class="detached-text">Not connected. This is what this terminal last showed; typing here goes nowhere.</span>
-			<button class="detached-btn" @click="onReconnect">Reconnect</button>
+			<button class="detached-btn" @click="onReconnectClicked">Reconnect</button>
 		</div>
 
 		<!-- Reconnecting overlay — shown when WS drops after terminal was initialized -->
@@ -226,6 +226,7 @@ import {
 	alwaysScopeOf,
 	settingReadFor,
 } from '../utils/exit-action.js';
+import { hostConnectionFailure } from '../utils/host-connection.js';
 import {
 	type AttachFacts,
 	factsFromAttachOk,
@@ -560,7 +561,8 @@ function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
 		return;
 	}
 	heldBack.value = null;
-	if (reaction.kind === 'restart') void onRestart();
+	// The setting's doing, not a click: see `onRestart`.
+	if (reaction.kind === 'restart') void onRestart({ bySetting: true });
 	else closeEnded(reaction.keep);
 }
 
@@ -633,6 +635,29 @@ async function onReconnect(): Promise<void> {
 	} finally {
 		reattaching = false;
 	}
+}
+
+/**
+ * Reconnect, on the banner: someone asking for this terminal's host. One its
+ * user disconnected is connected first, since an attach alone no longer
+ * reaches for it (#648); the hub then takes up what its daemon kept, and the
+ * attach finds the terminal there.
+ */
+async function onReconnectClicked(): Promise<void> {
+	const hostId = paneHostId.value;
+	if (hostId !== undefined && hostsStore.isDisconnectedByUser(hostId)) {
+		try {
+			const answer = await hostsStore.connectHost(hostId);
+			if (!answer.ok) {
+				useToastStore().show('error', hostConnectionFailure(answer));
+				return;
+			}
+		} catch {
+			// The hub cannot be reached: the banner is already saying so.
+			return;
+		}
+	}
+	await onReconnect();
 }
 
 /**
@@ -714,13 +739,23 @@ watch(
 	},
 );
 
+/**
+ * Its host's user disconnected it (#648). A daemon's terminal keeps running
+ * there, out of reach: what is on screen is what it last showed, and typing
+ * goes nowhere, as on an attach answered from memory.
+ */
+const hostDisconnectedByUser = computed(() => {
+	const hostId = paneHostId.value;
+	return hostId !== undefined && hostsStore.isDisconnectedByUser(hostId);
+});
+
 /** What the pane lays over its terminal, if anything. */
 const cover = computed(() =>
 	paneCover({
 		status: channelsStore.statusOf(effectiveChannelId.value),
 		ended: hasEnded.value,
 		gone: isGone.value,
-		detached: isDetached.value,
+		detached: isDetached.value || hostDisconnectedByUser.value,
 	}),
 );
 
@@ -965,8 +1000,14 @@ onUnmounted(() => {
  * Bring the terminal back: the card's Restart, the setting, a choice made on
  * another overlay, or, `automatic`, its host's return after a restart that
  * found it away (#605).
+ *
+ * `bySetting` is the setting, or a choice made on another overlay: like
+ * `automatic`, nobody asked for this terminal. Both go to the hub as a start
+ * nobody asked for, which does not connect a host its user disconnected, and
+ * the pane waits for that host instead (#648). Only `automatic` changes what
+ * a failure does (`afterRestartFailure`).
  */
-async function onRestart(opts?: { automatic?: boolean }): Promise<void> {
+async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean }): Promise<void> {
 	const chId = effectiveChannelId.value;
 	if (chId === null) return;
 
@@ -985,7 +1026,9 @@ async function onRestart(opts?: { automatic?: boolean }): Promise<void> {
 	heldBack.value = null;
 	let ok: boolean;
 	try {
-		ok = await channelsStore.restartChannel(chId, paneHostId.value);
+		ok = await channelsStore.restartChannel(chId, paneHostId.value, {
+			automatic: opts?.automatic === true || opts?.bySetting === true,
+		});
 	} finally {
 		restarting.value = false;
 	}
@@ -1122,7 +1165,7 @@ watch(cover, (now) => {
  */
 function followChoice(action: OverlayAction): void {
 	const { act } = overlayChoice(action, null, prefs.value.keepEnded);
-	if (act.kind === 'restart') void onRestart();
+	if (act.kind === 'restart') void onRestart({ bySetting: true });
 	else closeEnded(act.keep);
 }
 

@@ -616,7 +616,8 @@ Hub broadcasts RESIZE to other attached clients.
   cwd?: string,       // default: none sent; the agent starts the shell in its user's home (§ 3.2)
   env?: Record<string, string>,  // merged with system env (max 100 entries)
   group_id?: string,  // optional channel group to place new channel in
-  reuse_channel_id?: string  // bring this ended terminal back under its own id (Restart)
+  reuse_channel_id?: string,  // bring this ended terminal back under its own id (Restart)
+  automatic?: boolean  // nobody asked for it: "When a terminal ends", or its host's return (#648)
 }
 
 // Hub → UI
@@ -651,6 +652,15 @@ terminal: started again once the host is back, it may well run. Two cases:
 A client waits for that host's `SESSION_STATE` to say it is `active` (or `detached`) again,
 rather than show a failure (§ 4.14). Its own deadline for a SPAWN is longer than the hub's ten
 seconds, so that it hears the hub's answer.
+
+A host its user disconnected (`POST /api/hosts/:id/disconnect`, § 6, #648) is not connected
+again by a start nobody asked for. A SPAWN with `automatic: true` on it is refused at once with
+the same `HOST_UNREACHABLE`, `host_status` being its session's status, or `"closed"` when it has
+none; its pane waits for the host as above, and starts its terminal once someone connects it.
+Any other SPAWN on it, a new terminal or a Restart someone pressed, is that person acting on the
+host: the hub stops holding back, and connects it as for a first terminal. The web sends
+`automatic: true` for a terminal brought back by "When a terminal ends", by a choice made on
+another pane's overlay, or by its host's return; `automatic` changes nothing on any other host.
 
 ### 4.5 Write-Lock Messages
 
@@ -695,7 +705,10 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     display_title?: string,
     // Only on a "dead" entry: "killed", as on CHANNEL_STATE (§ 4.7) (#592).
     end_reason?: "killed"
-  }>
+  }>,
+  // The hosts their user disconnected (#648), with a session or without one: a host
+  // whose connection ran its terminals has none left. Absent when there are none.
+  user_disconnected_hosts?: string[]
 }
 ```
 
@@ -721,7 +734,13 @@ absent from `channels` has ended, or is unknown.
   // Only when other hubs hold channels on that agent, as its CHANNEL_STATE_END said
   // (§ 3.16, #127). Informational: replacing the agent would end them too. Sent
   // again with the same status once the count is known.
-  other_owner_channels?: number
+  other_owner_channels?: number,
+  // Only while the host's user has disconnected it (POST /api/hosts/:id/disconnect,
+  // § 6, #648): the hub does not reach for it again until someone acts on it. Every
+  // SESSION_STATE of that host carries it until then, and none after: a client takes
+  // its absence as the flag gone. A client shows such a host apart from one merely
+  // offline, or one the hub lost.
+  disconnected_by_user?: true
 }
 
 // Hub → every client, attached to the channel or not: each one holds every
@@ -949,7 +968,7 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 | `NOT_ATTACHED` | Op requires ATTACH first |
 | `WRITE_LOCK_HELD` | INPUT rejected, not the writer |
 | `HOST_NOT_FOUND` | Unknown host ID |
-| `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started. Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
+| `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started, or, for a SPAWN marked `automatic`, its user disconnected it (#648). Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
 | `SSH_FAILED` | SSH connection failed |
 | `AGENT_ERROR` | Agent returned error |
 | `FRAME_TOO_LARGE` | Payload > 10 MB |
@@ -1166,9 +1185,18 @@ What the callers do with the answers:
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
 | POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). Once the stop is confirmed, every terminal this hub held there is reported dead with `end_reason: "stopped"` (§ 4.7, #599). An agent with `hub-identity` gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. Any other agent, or one the STOP cannot reach, is stopped with its own `--stop`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host |
 | GET | `/api/hosts/:id/agent-environment` | ● | `?mode=inherit\|minimal` (default `inherit`) → `{ mode, os, env }`: the variables a terminal on this host would start with in that mode, before any profile changes them, asked live of the agent over ENV_QUERY (§ 3.18) and answered with `Cache-Control: no-store` (#576). Never stored, never logged, names included. 409 `HOST_NOT_CONNECTED` when no agent of this host is connected to this hub, 409 `AGENT_TOO_OLD` when it lacks `env-modes`, 504 `AGENT_TIMEOUT` after 5 s without an answer, 400 `VALIDATION_ERROR` for another mode, 404 for an unknown host |
+| POST | `/api/hosts/:id/connect` | ● | `{ client_id? }` → 202 `{ status: "connecting", ended: 0 }`, or 200 `{ status: "connected" }` when it is already. Connects an SSH host and readies its agent, without starting a terminal (#648): the first connection of a terminal, less the terminal, through the same SPAWN acquisition, so a SPAWN, a restart or an attach meanwhile waits for it rather than dial again. What a remote daemon still holds is taken up; on stdio, terminals a lost link left waiting start again under their ids. It answers at once: the host's `SESSION_STATE` says `starting`, then `active`, or `closed` / `disconnected` when it failed. Its questions (host key, passphrase, agent binary) go to the window `client_id` names, the id its `AUTH_OK` gave it, or else to the first window connected; a failure is an `ERROR` sent to that window, as for a SPAWN. A pending automatic reconnect gives way to it |
+| POST | `/api/hosts/:id/reconnect` | ● | `{ client_id?, force? }` → 202 `{ status: "connecting", ended }`. Closes the host's connection, then connects as above. A remote daemon keeps its terminals, taken up on the new connection. An agent on stdio ends with its connection, and its terminals with it (`end_reason: "stopped"`, § 4.7): unless `force` is `true`, the hub does nothing and answers 409 `{ error: { code: "TERMINALS_WOULD_END", message, terminals } }` with how many, for the client to ask its user and send `force: true`. With no connection up there is nothing to close and nothing ends |
+| POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`. The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type, sort_order? }` → 204 |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
+
+The three connection routes answer alike when they refuse: 404 `NOT_FOUND` for an unknown host,
+400 `VALIDATION_ERROR` for a body that is not an object, a `force` that is not a boolean or a
+`client_id` that is not a ULID (`readHostConnectionBody`, `api/host-connection.ts`), 400
+`NOT_SSH_HOST` for the local host, which has no connection to act on, and 409 `HUB_QUITTING`
+while the hub quits. Connect reads `client_id` only.
 
 #### SSH Config Import
 

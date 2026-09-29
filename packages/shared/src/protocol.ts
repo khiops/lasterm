@@ -202,7 +202,8 @@ export interface ErrorMessage {
 	 * the hub knows it when it refuses, the one SESSION_STATE carries (#605).
 	 * `disconnected` while the hub reaches for the host again; `active` when
 	 * the host came back over another connection while the terminal waited on
-	 * the one that went.
+	 * the one that went. For a host its user disconnected, whatever its session
+	 * is, `closed` when it has none (#648).
 	 */
 	hostStatus?: SessionStatus;
 }
@@ -336,6 +337,14 @@ export interface UiSpawnMessage {
 	 * behind and open a stranger beside it.
 	 */
 	reuseChannelId?: string;
+	/**
+	 * Nobody asked for this start: a pane following "When a terminal ends", or
+	 * waiting for its host (#605). On a host its user disconnected, the hub
+	 * refuses it with HOST_UNREACHABLE rather than connect the host again,
+	 * which only that user's own gesture does (#648). Anywhere else it changes
+	 * nothing.
+	 */
+	automatic?: boolean;
 }
 
 /** Hub → UI: channel spawned successfully */
@@ -464,6 +473,12 @@ export interface SessionStateMessage {
 	 * request to learn the hub's own version.
 	 */
 	outdatedAgent?: { running: string; expected: string };
+	/**
+	 * Set only while the host's user has disconnected it (#648): the hub does
+	 * not reach for it again until someone acts on it. Absent from every
+	 * SESSION_STATE sent once they have.
+	 */
+	disconnectedByUser?: boolean;
 }
 
 /**
@@ -540,6 +555,12 @@ export interface StateSyncMessage {
 		/** Set only when other hubs hold channels there. See SessionStateMessage. */
 		otherOwnerChannels?: number;
 	}>;
+	/**
+	 * The hosts their user disconnected, sessions or not: a host whose
+	 * connection ran its terminals has none left (#648). Absent when there
+	 * are none.
+	 */
+	userDisconnectedHosts?: string[];
 	/**
 	 * Every channel the hub holds that has not ended, and every one killed on
 	 * purpose that it still lists (`dead`, with `endReason: "killed"`): a

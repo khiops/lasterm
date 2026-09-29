@@ -15,7 +15,7 @@
 				<div v-if="form.label.trim()" class="host-preview">
 					<div
 						class="preview-badge"
-						:style="{ background: form.color || getColorFromLabel(form.label) }"
+						:style="{ background: hostColor }"
 					>
 						<img
 							v-if="form.iconType === 'image' && form.iconValue"
@@ -464,7 +464,7 @@
 										<input
 											type="color"
 											class="identity-color-input"
-											:value="form.color || getColorFromLabel(form.label)"
+											:value="hostColor"
 											@input="form.color = ($event.target as HTMLInputElement).value"
 										/>
 										<button
@@ -554,7 +554,7 @@
 								<span v-if="form.iconType === 'image' && iconError" class="field-error">{{ iconError }}</span>
 							</div>
 							</div>
-							<VisualProfileSettings v-model="visualProfile" />
+							<VisualProfileSettings v-model="visualProfile" :host-color="hostColor" />
 						</div>
 					</div>
 				</div>
@@ -586,7 +586,7 @@
 import { computed, ref, type PropType } from "vue";
 import type { Host, VisualProfile } from "@lasterm/shared";
 import { useHostForm } from "../composables/useHostForm.js";
-import { getColorFromLabel } from "../composables/useHostIcon.js";
+import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
 import { useAuthStore } from "../stores/auth.js";
@@ -708,6 +708,15 @@ const {
 // What the first session on this host will need, from the connection test.
 const testPlatform = computed(() =>
 	testResult.value?.platform ? describeTestPlatform(testResult.value.platform) : null,
+);
+
+/**
+ * The colour this host will show once saved, as its badge draws it: the one being
+ * picked, else its label's. A visual profile border with no colour of its own
+ * uses it too (#663).
+ */
+const hostColor = computed(() =>
+	getHostColor({ color: form.value.color, label: form.value.label }),
 );
 
 // Visual profile state — initialized from editHost.profileJson

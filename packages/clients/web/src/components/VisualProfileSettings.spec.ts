@@ -1,8 +1,7 @@
 /**
  * VisualProfileSettings — unit tests
  *
- * The component has no @vue/test-utils in this project; tests cover the pure
- * logic that drives the component's visual states:
+ * Most tests cover the pure logic that drives the component's visual states:
  *
  *   - bannerTextError computed (SC-04 override indicator: error state)
  *   - opacityWarning computed (SC-06 inherited value: clamping behaviour)
@@ -10,11 +9,15 @@
  *   - onBannerField / onBorderField / onTintField merge-and-emit pattern
  *   - update() always sets preset to "custom" for manual edits
  *   - onTintField clamps opacity > 15 to 15
+ *
+ * The border colour's "Use host color" box is read on the component, mounted (#663).
  */
 
 import type { BorderStyle, VisualPreset, VisualProfile } from "@lasterm/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { type App, createApp, h, nextTick, ref } from "vue";
 import { DEFAULT_VISUAL_PROFILE, resolvePreset } from "../utils/visual-presets.js";
+import VisualProfileSettings from "./VisualProfileSettings.vue";
 
 // ---------------------------------------------------------------------------
 // Helpers — replicate the component's internal functions as pure functions
@@ -380,6 +383,118 @@ describe("DEFAULT_VISUAL_PROFILE — initial state", () => {
 // ---------------------------------------------------------------------------
 // Preset options coverage — all four VisualPreset values are handled
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Border colour — "Use host color", mounted (#663)
+// ---------------------------------------------------------------------------
+
+describe("border colour: Use host color (#663)", () => {
+	const HOST_COLOR = "#3fa9f5";
+
+	let app: App | null = null;
+	let root: HTMLElement | null = null;
+
+	afterEach(() => {
+		app?.unmount();
+		app = null;
+		root?.remove();
+		root = null;
+	});
+
+	/** Mounted as HostModal mounts it: v-model on a profile, and the host's colour. */
+	function mountSettings(border: VisualProfile["border"]) {
+		const model = ref<VisualProfile>(makeProfile({ border }));
+		const emitted: VisualProfile[] = [];
+		root = document.createElement("div");
+		document.body.appendChild(root);
+		app = createApp({
+			render: () =>
+				h(VisualProfileSettings, {
+					modelValue: model.value,
+					hostColor: HOST_COLOR,
+					"onUpdate:modelValue": (value: VisualProfile) => {
+						emitted.push(value);
+						model.value = value;
+					},
+				}),
+		});
+		app.mount(root);
+		const container = root;
+		return {
+			model,
+			emitted,
+			inherit: () => container.querySelector<HTMLInputElement>("input.border-inherit"),
+			picker: () => container.querySelector<HTMLInputElement>("input.border-color"),
+			swatch: () => container.querySelector<HTMLElement>(".host-swatch"),
+		};
+	}
+
+	function setChecked(box: HTMLInputElement | null, checked: boolean): void {
+		if (!box) throw new Error("no Use host color box");
+		box.checked = checked;
+		box.dispatchEvent(new Event("change"));
+	}
+
+	it("is checked when no colour is stored, and shows the host's colour, not a picker", () => {
+		const { inherit, picker, swatch } = mountSettings({ style: "subtle", color: "" });
+		expect(inherit()?.checked).toBe(true);
+		expect(inherit()?.closest("label")?.textContent?.trim()).toBe("Use host color");
+		expect(picker()).toBeNull();
+		expect(swatch()?.getAttribute("aria-label")).toBe(`Host color ${HOST_COLOR}`);
+		expect(swatch()?.getAttribute("style")).toContain(HOST_COLOR);
+	});
+
+	it("is unchecked when a colour is stored, and shows that colour in the picker", () => {
+		const { inherit, picker, swatch } = mountSettings({ style: "strong", color: "#123456" });
+		expect(inherit()?.checked).toBe(false);
+		expect(picker()?.value).toBe("#123456");
+		expect(picker()?.getAttribute("aria-label")).toBe("Border color");
+		expect(swatch()).toBeNull();
+	});
+
+	it("unchecked, starts the picker from the host's colour", async () => {
+		const { inherit, picker, swatch, emitted } = mountSettings({ style: "subtle", color: "" });
+		setChecked(inherit(), false);
+		expect(emitted.at(-1)?.border).toEqual({ style: "subtle", color: HOST_COLOR });
+		expect(emitted.at(-1)?.preset).toBe("custom");
+		await nextTick();
+		expect(inherit()?.checked).toBe(false);
+		expect(picker()?.value).toBe(HOST_COLOR);
+		expect(swatch()).toBeNull();
+	});
+
+	it("checked again, stores no colour, and the host's shows again", async () => {
+		const { inherit, picker, swatch, emitted, model } = mountSettings({
+			style: "strong",
+			color: "#123456",
+		});
+		setChecked(inherit(), true);
+		expect(emitted.at(-1)?.border).toEqual({ style: "strong", color: "" });
+		expect(model.value.border.color).toBe("");
+		await nextTick();
+		expect(inherit()?.checked).toBe(true);
+		expect(picker()).toBeNull();
+		expect(swatch()?.getAttribute("aria-label")).toBe(`Host color ${HOST_COLOR}`);
+	});
+
+	it("a colour picked replaces the host's", async () => {
+		const { inherit, picker, emitted } = mountSettings({ style: "subtle", color: "" });
+		setChecked(inherit(), false);
+		await nextTick();
+		const input = picker();
+		if (!input) throw new Error("no border colour picker");
+		input.value = "#00ff88";
+		input.dispatchEvent(new Event("input"));
+		expect(emitted.at(-1)?.border.color).toBe("#00ff88");
+	});
+
+	it("offers no colour while the border is off", () => {
+		const { inherit, picker, swatch } = mountSettings({ style: "none", color: "" });
+		expect(inherit()).toBeNull();
+		expect(picker()).toBeNull();
+		expect(swatch()).toBeNull();
+	});
+});
 
 describe("preset options", () => {
 	const presetOptions: VisualPreset[] = ["none", "caution", "danger", "custom"];

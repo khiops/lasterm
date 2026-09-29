@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getColorFromLabel, getInitials } from "./useHostIcon.js";
+import { getColorFromLabel, getHostColor, getInitials } from "./useHostIcon.js";
 
 describe("getInitials", () => {
 	it("returns first letters of two words joined by hyphen", () => {
@@ -72,5 +72,17 @@ describe("getColorFromLabel", () => {
 	it("handles empty string without throwing", () => {
 		const color = getColorFromLabel("");
 		expect(color).toMatch(/^#[0-9a-f]{6}$/);
+	});
+});
+
+describe("getHostColor", () => {
+	it("is the colour the host was given", () => {
+		expect(getHostColor({ color: "#123456", label: "prod-db" })).toBe("#123456");
+	});
+
+	it("is the label's colour when the host has none, as its badge draws it (#659, #663)", () => {
+		expect(getHostColor({ label: "prod-db" })).toBe(getColorFromLabel("prod-db"));
+		expect(getHostColor({ color: null, label: "prod-db" })).toBe(getColorFromLabel("prod-db"));
+		expect(getHostColor({ color: "", label: "prod-db" })).toBe(getColorFromLabel("prod-db"));
 	});
 });

@@ -62,3 +62,12 @@ export function getColorFromLabel(label: string): string {
 	const hue = HUE_PALETTE[hashString(label) % HUE_PALETTE.length] ?? 210;
 	return hslToHex(hue, 0.65, 0.52);
 }
+
+/**
+ * The colour a host shows: the one it was given, else the one its label gives, as
+ * its badge draws it (#659). A visual profile's border with no colour of its own
+ * takes this one, and the profile's settings show it (#663).
+ */
+export function getHostColor(host: { color?: string | null | undefined; label: string }): string {
+	return host.color || getColorFromLabel(host.label);
+}

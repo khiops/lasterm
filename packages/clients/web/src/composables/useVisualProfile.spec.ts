@@ -1,10 +1,13 @@
 import type { Host } from "@lasterm/shared";
 import { describe, expect, it } from "vitest";
+import { ref } from "vue";
+import { getColorFromLabel, getHostColor } from "./useHostIcon.js";
 import {
 	clampOpacity,
 	getVisualProfile,
 	isValidHexColor,
 	resolveBannerTokens,
+	useVisualProfile,
 } from "./useVisualProfile.js";
 
 function makeHost(overrides: Partial<Host> = {}): Host {
@@ -134,6 +137,44 @@ describe("clampOpacity", () => {
 		expect(clampOpacity(15)).toBe(15);
 		expect(clampOpacity(20)).toBe(15);
 		expect(clampOpacity(100)).toBe(15);
+	});
+});
+
+describe("useVisualProfile border (#663)", () => {
+	function withBorder(border: { style: string; color?: string }, host: Partial<Host> = {}): Host {
+		return makeHost({ ...host, profileJson: JSON.stringify({ visualProfile: { border } }) });
+	}
+
+	it("draws a border with no colour of its own in the host's colour", () => {
+		const { borderStyle } = useVisualProfile(
+			ref(withBorder({ style: "subtle", color: "" }, { color: "#123456" })),
+		);
+		expect(borderStyle.value).toEqual({ borderLeft: "2px solid #123456" });
+	});
+
+	it("draws it in the colour the label gives when the host has none, as its badge shows", () => {
+		const host = withBorder({ style: "strong" });
+		const expected = `3px solid ${getHostColor(host)}`;
+		expect(getHostColor(host)).toBe(getColorFromLabel("prod-server"));
+		const { borderStyle } = useVisualProfile(ref(host));
+		expect(borderStyle.value).toEqual({
+			borderLeft: expected,
+			borderRight: expected,
+			borderBottom: expected,
+		});
+	});
+
+	it("draws a colour of its own over the host's", () => {
+		const { borderStyle } = useVisualProfile(
+			ref(withBorder({ style: "subtle", color: "#abcdef" }, { color: "#123456" })),
+		);
+		expect(borderStyle.value).toEqual({ borderLeft: "2px solid #abcdef" });
+	});
+
+	it("draws nothing without a host, or with no border", () => {
+		expect(useVisualProfile(ref<Host | null>(null)).borderStyle.value).toEqual({});
+		const none = useVisualProfile(ref(withBorder({ style: "none", color: "#abcdef" })));
+		expect(none.borderStyle.value).toEqual({});
 	});
 });
 

@@ -100,14 +100,16 @@ describe("HostsDAL — the local host (#658)", () => {
 		expect(dal.listHosts(1, 0).map((host) => host.id)).toEqual([older.id]);
 	});
 
-	it("breaks a tie on the creation time by id", () => {
-		const a = dal.createHost({ type: "local", label: "local" });
-		const b = dal.createHost({ type: "local", label: "workstation" });
-		setCreatedAt(a.id, "2026-01-01T00:00:00.000Z");
-		setCreatedAt(b.id, "2026-01-01T00:00:00.000Z");
+	// Two ULIDs of the same millisecond are in no particular order.
+	it("breaks a tie on the creation time by the order of creation", () => {
+		const ids: string[] = [];
+		for (const label of ["local", "b", "c", "d", "e", "f", "g", "h"]) {
+			const host = dal.createHost({ type: "local", label });
+			setCreatedAt(host.id, "2026-01-01T00:00:00.000Z");
+			ids.push(host.id);
+		}
 
-		const byId = [a.id, b.id].sort();
-		expect(dal.listLocalHosts().map((host) => host.id)).toEqual(byId);
-		expect(dal.listHosts().map((host) => host.id)).toEqual(byId);
+		expect(dal.listLocalHosts().map((host) => host.id)).toEqual(ids);
+		expect(dal.listHosts().map((host) => host.id)).toEqual(ids);
 	});
 });

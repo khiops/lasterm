@@ -15,6 +15,21 @@ import type { WsClient } from "./session-manager.js";
 import type { SnapshotScheduler } from "./snapshot-scheduler.js";
 
 /**
+ * The configuration to launch an agent with now. It is the hub's startup
+ * configuration, except for the daemon log's file count, read from config.toml
+ * as it is at this moment (#646): Settings changes it while the hub runs, and it
+ * reaches the next daemon started, local or remote. Nothing else is read again:
+ * the socket must not move under a running hub.
+ */
+export function agentLaunchConfig(
+	ctx: Pick<SharedSessionContext, "agentConfig" | "configResolver">,
+): AgentConfig {
+	// A partial resolver, as some tests build, has no agent configuration.
+	const current = ctx.configResolver?.agentConfig?.logFilesKept;
+	return current === undefined ? ctx.agentConfig : { ...ctx.agentConfig, logFilesKept: current };
+}
+
+/**
  * Maps remain readable and teardown can remove dead state, but revival writes
  * are private to commits. ReadonlyMap also makes forEach expose a readonly map.
  */

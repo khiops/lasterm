@@ -28,6 +28,36 @@
 		<section class="agent-section">
 			<div class="section-heading">
 				<div>
+					<h3 class="section-title">Agent logs</h3>
+					<p class="section-note">
+						An agent daemon, local or remote, writes one log file a day it has something to
+						log, and deletes the oldest beyond this number. A change applies when a daemon
+						next starts.
+					</p>
+				</div>
+			</div>
+
+			<div class="files-kept-row">
+				<label for="agent-log-files-kept">Log files kept</label>
+				<input
+					id="agent-log-files-kept"
+					class="files-kept-input"
+					type="number"
+					min="0"
+					:max="MAX_AGENT_LOG_FILES_KEPT"
+					step="1"
+					:value="filesKept"
+					:disabled="savingFilesKept"
+					@change="saveFilesKept"
+				/>
+				<span class="daemon-note">One file a day; 0 keeps them all.</span>
+			</div>
+			<p v-if="filesKeptError" class="agent-warning">{{ filesKeptError }}</p>
+		</section>
+
+		<section class="agent-section">
+			<div class="section-heading">
+				<div>
 					<h3 class="section-title">Agents</h3>
 					<p class="section-note">Cached remote agent binaries for built targets.</p>
 				</div>
@@ -174,7 +204,14 @@
 </template>
 
 <script setup lang="ts">
-import type { HostArch, HostOs } from "@lasterm/shared";
+import {
+	DEFAULT_AGENT_LOG_FILES_KEPT,
+	type HostArch,
+	type HostOs,
+	isAgentLogFilesKept,
+	type LoggingSettings,
+	MAX_AGENT_LOG_FILES_KEPT,
+} from "@lasterm/shared";
 import { computed, inject, onMounted, ref, watch } from "vue";
 import AgentImportModal from "../AgentImportModal.vue";
 import {
@@ -257,6 +294,64 @@ watch(remoteDaemon, async (wanted) => {
 		savingDaemon.value = false;
 	}
 });
+
+// ─── Agent logs (#646) ───────────────────────────────────────────────────────
+
+const filesKept = ref(DEFAULT_AGENT_LOG_FILES_KEPT);
+const savingFilesKept = ref(false);
+const filesKeptError = ref<string | null>(null);
+
+async function loggingConfigFetch(init?: RequestInit): Promise<Response> {
+	return hubFetch(`${hubBaseUrl()}/api/config/logging`, {
+		...init,
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${useAuthStore().token ?? ""}`,
+			...(init?.headers ?? {}),
+		},
+	});
+}
+
+onMounted(async () => {
+	try {
+		const response = await loggingConfigFetch();
+		if (response.ok) {
+			const settings = (await response.json()) as Partial<LoggingSettings>;
+			if (isAgentLogFilesKept(settings.agentFilesKept)) filesKept.value = settings.agentFilesKept;
+		}
+	} catch {
+		// The default shown is the hub's own default: it says what applies.
+	}
+});
+
+async function saveFilesKept(event: Event): Promise<void> {
+	const input = event.target as HTMLInputElement;
+	const wanted = input.value.trim() === "" ? Number.NaN : Number(input.value);
+	filesKeptError.value = null;
+	if (!isAgentLogFilesKept(wanted)) {
+		filesKeptError.value = `A whole number from 0 to ${MAX_AGENT_LOG_FILES_KEPT}.`;
+		input.value = String(filesKept.value);
+		return;
+	}
+	if (wanted === filesKept.value) return;
+	savingFilesKept.value = true;
+	try {
+		const response = await loggingConfigFetch({
+			method: "PUT",
+			body: JSON.stringify({ agentFilesKept: wanted }),
+		});
+		if (!response.ok) throw new Error(`hub answered ${response.status}`);
+		const saved = (await response.json()) as LoggingSettings;
+		filesKept.value = saved.agentFilesKept;
+	} catch (error) {
+		// A field that silently kept a value it never saved would be read as saved.
+		filesKeptError.value = `Could not save that: ${error instanceof Error ? error.message : String(error)}`;
+		input.value = String(filesKept.value);
+	} finally {
+		savingFilesKept.value = false;
+	}
+}
+
 const toastStore = useToastStore();
 
 const showImport = ref(false);
@@ -618,6 +713,38 @@ function formatProgress(progress: AgentFetchJob | null): string {
 	margin-top: 4px;
 	color: var(--nt-text-secondary);
 	font-size: 12px;
+}
+
+.files-kept-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.files-kept-row .daemon-note {
+	margin-top: 0;
+}
+
+.files-kept-input {
+	width: 80px;
+	padding: 4px 8px;
+	font-size: 12px;
+	font-family: inherit;
+	background: var(--nt-input-bg);
+	color: var(--nt-fg);
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+}
+
+.files-kept-input:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 1px;
+}
+
+.files-kept-input:disabled {
+	opacity: 0.5;
 }
 
 .status-badge--cached {

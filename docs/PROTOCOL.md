@@ -1268,6 +1268,8 @@ while the hub quits. Connect reads `client_id` only.
 | PUT | `/api/config/appearance` | ● | `{ theme?, autoSwitch?, ... }` → `{ ok }` |
 | GET | `/api/config/elevation` | ● | Current elevation config |
 | PUT | `/api/config/elevation` | ● | `{ methodLinux?, methodDarwin?, ... }` → `{ ok }` |
+| GET | `/api/config/logging` | ● | What Settings edits of `[logging]`: `{ agentFilesKept }`, the log files an agent daemon keeps (STORAGE.md § 12.1) |
+| PUT | `/api/config/logging` | ● | `{ agentFilesKept }` → `{ agentFilesKept }`, as saved. A whole number from 0 (all) to 3650, else 400 `INVALID_VALUE`; any other key 400 `VALIDATION_ERROR`. Reaches each agent daemon when it next starts |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
 | PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576) |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |

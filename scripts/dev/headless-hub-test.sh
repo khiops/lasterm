@@ -78,8 +78,13 @@ case "${1:-}" in
 		fi
 		;;
 	alog)
-		if [[ -f "$STATE_DIR/logs/agent-daemon.jsonl" ]]; then
-			tail -80 "$STATE_DIR/logs/agent-daemon.jsonl"
+		# One file per day since #646; the names sort by date, the last is today's.
+		latest=""
+		for day_log in "$STATE_DIR"/logs/agent-daemon.????-??-??.jsonl; do
+			[[ -f "$day_log" ]] && latest="$day_log"
+		done
+		if [[ -n "$latest" ]]; then
+			tail -80 "$latest"
 		elif [[ -f "$STATE_DIR/agent-daemon.log" ]]; then
 			tail -80 "$STATE_DIR/agent-daemon.log"
 		else

@@ -7,6 +7,8 @@ import {
 	ELEVATION_METHODS_WINDOWS,
 	isHostRailBadgeSize,
 	isHostRailColumns,
+	LOGGING_SETTINGS_KEYS,
+	LOGGING_SETTINGS_VALIDATORS,
 	SSH_CONFIG_KEYS,
 	TERMINAL_PROFILE_KEYS,
 	UI_CONFIG_SECTIONS,
@@ -334,6 +336,46 @@ export function registerConfigRoutes(
 			await configResolver.saveGlobalKey("ssh", key, value);
 		}
 		return configResolver.sshConfig;
+	});
+
+	// GET /api/config/logging — what Settings edits of [logging]
+	server.get("/api/config/logging", async () => {
+		return configResolver.loggingSettings;
+	});
+
+	// PUT /api/config/logging — write those keys to config.toml. They reach the
+	// agent daemons this hub starts from then on, not those already running.
+	server.put("/api/config/logging", async (request, reply) => {
+		const body = request.body as Record<string, unknown> | null;
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			return reply.code(400).send({
+				error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+			});
+		}
+
+		for (const [key, value] of Object.entries(body)) {
+			if (!(LOGGING_SETTINGS_KEYS as readonly string[]).includes(key)) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: `Unknown logging key: ${key}` },
+				});
+			}
+			const valid = LOGGING_SETTINGS_VALIDATORS[key as (typeof LOGGING_SETTINGS_KEYS)[number]];
+			if (!valid(value)) {
+				return reply.code(400).send({
+					error: {
+						code: "INVALID_VALUE",
+						message: `Invalid value for "logging.${key}": ${JSON.stringify(value)}`,
+					},
+				});
+			}
+		}
+
+		for (const [key, value] of Object.entries(body)) {
+			// `agentFilesKept` is written `agent_files_kept`; the write reloads
+			// the file, so the getter answers with what was just written.
+			await configResolver.saveGlobalKey("logging", key, value);
+		}
+		return configResolver.loggingSettings;
 	});
 
 	// GET /api/config/elevation — read current elevation config

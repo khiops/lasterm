@@ -190,6 +190,29 @@ describe("attachRemoteDaemon", () => {
 		expect(commands.some((c) => c.includes("--daemon"))).toBe(true);
 	});
 
+	it("hands the daemon it starts the number of log files to keep (#646)", async () => {
+		let opens = 0;
+		const commands: string[] = [];
+		await attachRemoteDaemon({
+			conn,
+			agentPath: "/usr/bin/lasterm-agent",
+			logFilesKept: 0,
+			exec: async (_c, command) => {
+				commands.push(command);
+				return stateDirReply(dir);
+			},
+			open: async () => {
+				opens += 1;
+				if (opens === 1) throw new Error("ENOENT");
+				return new PassThrough();
+			},
+			sleep: async () => {},
+		});
+
+		const launch = commands.find((c) => c.includes("--daemon"));
+		expect(launch).toContain('set -- "$@" --log-files-kept 0; fi');
+	});
+
 	it("says where it started the daemon, from what the launch printed", async () => {
 		let opens = 0;
 		const attachment = await attachRemoteDaemon({
@@ -283,6 +306,35 @@ describe("remoteDaemonLaunchCommand — an agent older than the hub", () => {
 		expect(cmd).toContain("grep -q -- '--idle-timeout'");
 		expect(cmd).toContain(`--format jsonl --idle-timeout ${IDLE_TIMEOUT_SECONDS}; else set --`);
 		expect(cmd).toMatch(/--format jsonl; fi/);
+	});
+
+	it("asks it about --log-files-kept too, and appends it to what was set (#646)", () => {
+		const cmd = remoteDaemonLaunchCommand({
+			agentPath: "/usr/bin/lasterm-agent",
+			paths,
+			logFilesKept: 30,
+		});
+		expect(cmd).toContain(
+			"/usr/bin/lasterm-agent --help 2> /dev/null | grep -q -- '--log-files-kept'; " +
+				'then set -- "$@" --log-files-kept 30; fi',
+		);
+		// Once the argv is set, and before the daemon is started with it.
+		const asked = cmd.indexOf("grep -q -- '--log-files-kept'");
+		expect(asked).toBeGreaterThan(cmd.indexOf("grep -q -- '--idle-timeout'"));
+		expect(asked).toBeLessThan(cmd.indexOf("detach="));
+	});
+
+	it("keeps seven files unless told otherwise, and passes a whole count, 0 included", () => {
+		const count = (logFilesKept?: number) =>
+			remoteDaemonLaunchCommand({
+				agentPath: "/usr/bin/lasterm-agent",
+				paths,
+				...(logFilesKept !== undefined && { logFilesKept }),
+			}).match(/--log-files-kept (\S+); fi/)?.[1];
+		expect(count()).toBe("7");
+		expect(count(0)).toBe("0");
+		expect(count(2.7)).toBe("2");
+		expect(count(-3)).toBe("0");
 	});
 });
 
@@ -484,6 +536,8 @@ function launchIn(
 		label?: string;
 		/** The shell and its options, before `-c`. `/bin/sh` by default. */
 		shell?: string[];
+		/** What the launch is asked to pass as `--log-files-kept`. */
+		logFilesKept?: number;
 	} = {},
 ): ShellLaunch {
 	const root = mkdtempSync(path.join(os.tmpdir(), `daemon-launch-${options.label ?? ""}`));
@@ -530,7 +584,11 @@ printf '%s\\n' "$@" > ${quotePosix(argv)}
 		chmodSync(agent, 0o755);
 
 		const paths = remoteDaemonPaths(path.join(root, "state dir"));
-		const cmd = remoteDaemonLaunchCommand({ agentPath: agent, paths });
+		const cmd = remoteDaemonLaunchCommand({
+			agentPath: agent,
+			paths,
+			...(options.logFilesKept !== undefined && { logFilesKept: options.logFilesKept }),
+		});
 		const [shell = "/bin/sh", ...shellOptions] = options.shell ?? [];
 		const stdout = execFileSync(shell, [...shellOptions, "-c", cmd], {
 			encoding: "utf8",
@@ -562,6 +620,9 @@ printf '%s\\n' "$@" > ${quotePosix(argv)}
 
 const systemdReady: FakeSystemd = { systemdRun: "works", linger: "yes", userManager: true };
 
+/** What `--help` prints in an agent that knows both options the launch asks about. */
+const HELP_WITH_FILES_KEPT = "      --idle-timeout <SECONDS>\n      --log-files-kept <COUNT>";
+
 describe.skipIf(!onPosix)("remoteDaemonLaunchCommand in a shell", () => {
 	it("starts an agent that does not know the option without it", () => {
 		const { argv } = launchIn({
@@ -575,6 +636,28 @@ describe.skipIf(!onPosix)("remoteDaemonLaunchCommand in a shell", () => {
 		const { argv } = launchIn({ help: "      --idle-timeout <SECONDS>" });
 		expect(argv).toContain("--idle-timeout");
 		expect(argv).toContain(String(IDLE_TIMEOUT_SECONDS));
+	});
+
+	it("passes --log-files-kept, last, to an agent that knows it (#646)", () => {
+		const { argv } = launchIn({ help: HELP_WITH_FILES_KEPT, logFilesKept: 30 });
+		expect(argv.slice(-4)).toEqual([
+			"--idle-timeout",
+			String(IDLE_TIMEOUT_SECONDS),
+			"--log-files-kept",
+			"30",
+		]);
+	});
+
+	it("starts an agent that does not know --log-files-kept without it", () => {
+		const { argv } = launchIn({ logFilesKept: 30 });
+		expect(argv).toContain("--idle-timeout");
+		expect(argv).not.toContain("--log-files-kept");
+	});
+
+	it("passes --log-files-kept to an agent that knows only it", () => {
+		const { argv } = launchIn({ help: "      --log-files-kept <COUNT>" });
+		expect(argv).not.toContain("--idle-timeout");
+		expect(argv.slice(-2)).toEqual(["--log-files-kept", "7"]);
 	});
 
 	it("with no systemd, starts it in the session, as before", () => {
@@ -677,6 +760,18 @@ describe.skipIf(zsh === null)("remoteDaemonLaunchCommand in zsh", () => {
 			const at = argv.indexOf("--idle-timeout");
 			expect(at).toBeGreaterThan(0);
 			expect(argv[at + 1]).toBe(String(IDLE_TIMEOUT_SECONDS));
+		}
+	});
+
+	it("hands the agent --log-files-kept and its value as two arguments (#646)", () => {
+		for (const systemd of [systemdReady, undefined]) {
+			const { argv } = launchIn({
+				shell: [zsh ?? "", "-f"],
+				help: HELP_WITH_FILES_KEPT,
+				logFilesKept: 12,
+				...(systemd && { systemd }),
+			});
+			expect(argv.slice(-2)).toEqual(["--log-files-kept", "12"]);
 		}
 	});
 });

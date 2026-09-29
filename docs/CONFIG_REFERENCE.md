@@ -222,6 +222,7 @@ The agent's log level and format come from `[logging]` (SPEC.md § 6.2); a `log_
 | output | `"stderr"` \| `"file"` \| `"both"` | `"file"` | Where the hub writes its log; `file` and `both` write `logs/hub.jsonl` in the state directory |
 | max_age_days | number | `30` | Age in days past which a hub started through `main.ts` deletes a channel log in `logs/channels/` as it starts; 0 keeps them. No hub writes channel logs (SPEC.md § 7), so it deletes nothing, and it never applies to `hub.jsonl` |
 | max_size_mb | number | `50` | Read only by the channel logger, which nothing starts: it has no effect |
+| agent_files_kept | number | `7` | Log files an agent daemon keeps, one per day it logs something; 0 keeps them all. A whole number up to 3650; anything else leaves the default. Passed to every daemon the hub starts, local or remote, when it starts: Settings › Agents › Agent logs sets it (STORAGE.md § 12.1) |
 
 What each entry point writes is in SPEC.md § 6.2.
 

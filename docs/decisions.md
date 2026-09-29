@@ -7,6 +7,17 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## AGENT-DAEMON-LOG — one file per day, and a number of them kept (#646, 2026-09-29)
+
+- An agent daemon appended to `logs/agent-daemon.jsonl` for as long as it ran, never rotated: a remote daemon left for months, as on the Raspberry Pi, grew it without bound. It now writes one file per UTC day it logs something, `logs/agent-daemon.YYYY-MM-DD.jsonl`, through `tracing-appender`'s daily rotation, as Candeo's log does.
+- **Days, not a size.** The hub's logs move aside at 10 MB (`hub.jsonl.old`), and doing the same here was the first design. It was dropped: a rename can be refused (on Windows, by anything holding the file without sharing deletion), and a daemon that keeps appending meanwhile grows the full file again, the very failure being fixed. A new day's file is a new name, which nothing holds; no file is ever renamed.
+- **A count, not an age.** The `[logging] agent_files_kept` most recent files are kept, 7 by default (a week of activity covers "it started on Monday"), `0` keeping all, as OpenRGB's `file_count_limit`. Days without activity have no file, so a quiet daemon keeps a longer history in as many files. The cap counts files, not bytes: at INFO the daemon logs its lifecycle and little else, and it is the level that bounds a day.
+- **Pruned by the daemon**, when it starts and when a new day's file starts, by the date in the names: only `agent-daemon.YYYY-MM-DD.jsonl` regular files. `tracing-appender`'s own `max_log_files` is not used: it goes by creation time, counts any file with the prefix and the suffix, and reports on stderr. A file that cannot be deleted is a warning in the log, tried again at the next occasion; the warning written from inside a write goes through a short-lived thread, so the log never re-enters itself.
+- **The old file** `agent-daemon.jsonl` counts as one more file, dated by its last write, so it goes once as many newer days have their own file as are kept. It is not renamed: a daemon from before may still be appending to it while it is replaced.
+- **A setting, passed at launch.** Settings › Agents › Agent logs writes it (`PUT /api/config/logging`). The hub reads it when it starts a daemon, local or remote, and passes `--log-files-kept`; one already running keeps its count. A remote binary is asked first (`--help`), as for `--idle-timeout`: a build of main deploys the last release's agent, which would refuse the option and never listen. The local agent ships with the hub and gets it unasked.
+
+---
+
 ## DESKTOP-UPDATES — the desktop app does not update itself (#645, 2026-09-29)
 
 - The desktop ships no updater. `tauri-plugin-updater` was registered in builds without an MSIX identity, with an endpoint and a public key, but nothing ever called it, and no release published the `latest.json` and signature it would have read: a GitHub-release install never updated. It is removed with everything that served only it: its configuration and capability, the `@tauri-apps/plugin-updater` package, the MSIX-identity probe that kept it out of Store builds (#112), and `scripts/generate-updater-key.sh`.

@@ -31,7 +31,11 @@ import { daemonAuthFrame } from "./daemon-auth.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { assertQuitFence, captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
-import type { SessionState, SharedSessionContext } from "./session-context.js";
+import {
+	agentLaunchConfig,
+	type SessionState,
+	type SharedSessionContext,
+} from "./session-context.js";
 import { seedShellProfiles } from "./shell-profile-seed.js";
 import { SshAgent } from "./ssh-agent.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
@@ -615,7 +619,7 @@ export class AgentConnectionManager {
 		try {
 			agent = await connectOrLaunch(
 				socketPath,
-				this.ctx.agentConfig,
+				agentLaunchConfig(this.ctx),
 				undefined,
 				this.ctx.hubLogger ?? undefined,
 				() => assertQuitFence(this.ctx, quitEpoch),

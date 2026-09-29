@@ -1208,5 +1208,9 @@ detached daemon, or deploys and runs it over SSH.
 What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser
 that reaches the hub.
 
+The desktop app has no updater of its own. The Microsoft Store updates the MSIX build, winget the
+installs it makes (#620), and an install from a release asset is updated by installing the newer
+release (`docs/decisions.md`, DESKTOP-UPDATES).
+
 Agent spawns PTYs for the host OS: bash/zsh (Linux), PowerShell/cmd/wsl.exe (Windows).
 Hub never spawns PTYs directly — it delegates to the agent (local or remote).

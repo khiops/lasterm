@@ -540,9 +540,11 @@ name = "lasterm-hub-lock"
 version = "0.6.0"
 dependencies = [
  "lasterm-process-lock",
+ "libc",
  "napi",
  "napi-build",
  "napi-derive",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

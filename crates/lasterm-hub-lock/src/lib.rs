@@ -1,7 +1,13 @@
+//! The hub's native addon: the single-hub lock, and the connection to the local
+//! agent, checked for the account at its other end before the hub writes to it
+//! (`local_agent`).
+
 use lasterm_process_lock::ProcessLock;
 use napi_derive::napi;
 use std::io;
 use std::path::Path;
+
+mod local_agent;
 
 /// Owns the kernel lock. It deliberately owns the file descriptor/handle rather
 /// than a pathname: closing this object (or process termination) releases it.
@@ -49,6 +55,44 @@ pub fn try_acquire(path: String) -> napi::Result<Option<HubLock>> {
         .map_err(|error| {
             napi::Error::from_reason(format!("cannot acquire hub lock at {path}: {error}"))
         })
+}
+
+/// What connecting to the local agent gave: a descriptor, or why there is none.
+#[napi(object)]
+pub struct LocalAgentConnection {
+    /// The connection, as a descriptor the caller adopts and closes. Nothing
+    /// has been written to it, and nothing may be until
+    /// `verify_local_agent_peer` has accepted it.
+    pub fd: Option<i32>,
+    /// The name Node gives the failure (`ENOENT`, `ECONNREFUSED`, `EACCES`,
+    /// `EBUSY`, `EINVAL`, or `UNKNOWN`).
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+/// Connect to the local agent's Unix socket or named pipe, writing nothing.
+#[napi]
+pub fn connect_local_agent(path: String) -> LocalAgentConnection {
+    match local_agent::connect_for_node(&path) {
+        Ok(fd) => LocalAgentConnection {
+            fd: Some(fd),
+            code: None,
+            message: None,
+        },
+        Err(error) => LocalAgentConnection {
+            fd: None,
+            code: Some(error.code.to_owned()),
+            message: Some(error.message),
+        },
+    }
+}
+
+/// Accept a connection from `connect_local_agent` only if the process at its
+/// other end runs as this process's user: the socket's peer credentials on
+/// Unix, the pipe server's token on Windows. Throws otherwise.
+#[napi]
+pub fn verify_local_agent_peer(fd: i32) -> napi::Result<()> {
+    local_agent::verify_for_node(fd).map_err(napi::Error::from_reason)
 }
 
 #[cfg(test)]

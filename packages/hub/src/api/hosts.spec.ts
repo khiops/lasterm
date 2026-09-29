@@ -5,6 +5,7 @@ import {
 	validateCreateHost,
 	validateHostColor,
 	validateIconImage,
+	validateProfileJson,
 } from "./hosts.js";
 
 // The rules POST /api/hosts applies, asserted where they live so a broken one
@@ -110,5 +111,27 @@ describe("validateHostColor", () => {
 		for (const color of ["notacolor", "", "#fff", "00ff00", "#00ff00 ", 0xff00, true]) {
 			expect(validateHostColor(color)).toBe("color must be in hex format #rrggbb");
 		}
+	});
+});
+
+// POST and PUT /api/hosts apply it to profile_json.
+describe("validateProfileJson", () => {
+	function withBorderColor(color: unknown): string {
+		return JSON.stringify({ visualProfile: { border: { style: "subtle", color } } });
+	}
+
+	it("accepts a border colour of #rrggbb", () => {
+		expect(validateProfileJson(withBorderColor("#123456"))).toBeNull();
+	});
+
+	it("accepts a border with no colour, which follows the host's (#663)", () => {
+		expect(validateProfileJson(withBorderColor(""))).toBeNull();
+		expect(
+			validateProfileJson(JSON.stringify({ visualProfile: { border: { style: "subtle" } } })),
+		).toBeNull();
+	});
+
+	it("refuses a colour that is not #rrggbb", () => {
+		expect(validateProfileJson(withBorderColor("red"))).toBe("Invalid color value: red");
 	});
 });

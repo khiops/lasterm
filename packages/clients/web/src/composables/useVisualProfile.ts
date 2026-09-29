@@ -1,6 +1,7 @@
 import type { Host, VisualProfile } from "@lasterm/shared";
 import { computed, type Ref } from "vue";
 import { DEFAULT_VISUAL_PROFILE, HEX_COLOR_RE } from "../utils/visual-presets.js";
+import { getHostColor } from "./useHostIcon.js";
 
 /**
  * Deep-merge two VisualProfile objects: defaults first, then overrides.
@@ -74,10 +75,14 @@ export function useVisualProfile(host: Ref<Host | undefined | null>) {
 
 	const borderStyle = computed(() => {
 		const p = profile.value;
+		// No colour of its own: the host's, as its badge shows it. A host without a
+		// colour takes its label's, so its border still shows (#663).
 		const color =
 			p.border.color && isValidHexColor(p.border.color)
 				? p.border.color
-				: (host.value?.color ?? "");
+				: host.value
+					? getHostColor(host.value)
+					: "";
 
 		if (p.border.style === "subtle" && color) {
 			return { borderLeft: `2px solid ${color}` };

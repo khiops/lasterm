@@ -84,12 +84,34 @@
 				</div>
 			</div>
 			<div v-if="modelValue.border.style !== 'none'" class="field">
-				<label class="field-label">Color (empty = use host color)</label>
-				<input
-					type="color"
-					:value="modelValue.border.color || '#e06c75'"
-					@input="onBorderField('color', ($event.target as HTMLInputElement).value)"
-				/>
+				<span class="field-label">Color</span>
+				<div class="inherit-row">
+					<label class="inherit-toggle">
+						<input
+							type="checkbox"
+							class="border-inherit"
+							:checked="borderInherits"
+							@change="onBorderInherit(($event.target as HTMLInputElement).checked)"
+						/>
+						Use host color
+					</label>
+					<span
+						v-if="borderInherits"
+						class="host-swatch"
+						role="img"
+						:aria-label="`Host color ${hostColor}`"
+						:title="hostColor"
+						:style="{ backgroundColor: hostColor }"
+					/>
+					<input
+						v-else
+						type="color"
+						class="border-color"
+						aria-label="Border color"
+						:value="modelValue.border.color"
+						@input="onBorderField('color', ($event.target as HTMLInputElement).value)"
+					/>
+				</div>
 			</div>
 		</fieldset>
 
@@ -141,6 +163,11 @@ import TintPreview from "./TintPreview.vue";
 
 const props = defineProps<{
 	modelValue: VisualProfile;
+	/**
+	 * The colour of the host this profile belongs to, as its badge shows it: what a
+	 * border with no colour of its own is drawn in (#663).
+	 */
+	hostColor: string;
 }>();
 
 const emit = defineEmits<{
@@ -186,6 +213,17 @@ function onBorderField(field: string, value: unknown): void {
 	update({ border: { ...props.modelValue.border, [field]: value } });
 }
 
+/**
+ * No border colour stored: the border follows the host's colour. A colour picker
+ * cannot be emptied, so this box is the only way back to it (#663).
+ */
+const borderInherits = computed(() => !props.modelValue.border.color);
+
+/** Checked stores no colour; unchecked starts the picker from the host's colour. */
+function onBorderInherit(inherit: boolean): void {
+	onBorderField("color", inherit ? "" : props.hostColor);
+}
+
 function onTintField(field: string, value: unknown): void {
 	const tint = { ...props.modelValue.tint, [field]: value };
 	// Clamp opacity
@@ -225,13 +263,29 @@ function onTintField(field: string, value: unknown): void {
 	flex-wrap: wrap;
 }
 
-.preset-radio {
+.preset-radio,
+.inherit-toggle {
 	display: flex;
 	align-items: center;
 	gap: 4px;
 	font-size: 12px;
 	color: var(--nt-fg);
 	cursor: pointer;
+}
+
+.inherit-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 28px;
+}
+
+.host-swatch {
+	width: 16px;
+	height: 16px;
+	border: 1px solid var(--nt-border);
+	border-radius: 3px;
+	flex-shrink: 0;
 }
 
 .preset-label {

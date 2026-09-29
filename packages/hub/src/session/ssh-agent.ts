@@ -173,8 +173,10 @@ export async function buildSshConnectConfig(
 				throw new Error("Key is passphrase-protected but no prompt callback available");
 			}
 			const secret = await promptAuth(hostId, "passphrase", `Enter passphrase for ${auth.keyPath}`);
+			// Whether there is one, never its length: a length narrows a
+			// brute-force search, and the desktop keeps stderr in hub.log (#644).
 			console.error(
-				`[lasterm-ssh] passphrase obtained: ${secret ? `yes (length ${secret.length})` : "null (cancelled)"}`,
+				`[lasterm-ssh] passphrase obtained: ${secret === null ? "no (cancelled)" : "yes"}`,
 			);
 			if (secret === null) {
 				throw new Error("Authentication cancelled by user");
@@ -190,9 +192,6 @@ export async function buildSshConnectConfig(
 			console.error(`[lasterm-ssh] key verified (type: ${verifiedKey.type})`);
 			connectConfig.privateKey = keyContent;
 			connectConfig.passphrase = secret;
-			console.error(
-				`[lasterm-ssh] connectConfig has privateKey (${keyContent.length}B) + passphrase (${secret.length}ch)`,
-			);
 		} else {
 			connectConfig.privateKey = keyContent;
 		}

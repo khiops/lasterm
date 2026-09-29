@@ -35,7 +35,11 @@ import {
 import { resolveJump } from "./proxy-jump.js";
 import { captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
-import type { PromptContext, SharedSessionContext } from "./session-context.js";
+import {
+	agentLaunchConfig,
+	type PromptContext,
+	type SharedSessionContext,
+} from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import {
 	type AuthPromptFn,
@@ -564,7 +568,7 @@ export class SshConnectionManager {
 					host,
 					this.buildCacheOnlyPromptAuth(),
 					deployOpts,
-					this.ctx.agentConfig,
+					agentLaunchConfig(this.ctx),
 					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 				const storedFp = this.ctx.metaDal.getHostFingerprint(hostId);

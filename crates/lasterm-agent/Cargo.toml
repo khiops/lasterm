@@ -24,6 +24,11 @@ sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# The daemon's log, one file per day that nothing ever renames (#646).
+tracing-appender = "0.2"
+# The day the file from before one per day was last written, to rank it among
+# the daily files (#646). Already built for tracing-appender.
+time = { version = "0.3", default-features = false, features = ["std"] }
 ulid = "3"
 vt100 = "0.16"
 zeroize = { version = "1", features = ["derive"] }

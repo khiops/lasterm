@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-09-28
+> Last updated: 2026-09-29
 
 ## 1. Framing
 
@@ -844,10 +844,12 @@ Used when the hub needs to obtain a secret from the user interactively during SS
 }
 ```
 
-**Security note:** The hub writes no secret to disk. A password is used for the SSH handshake and
-dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min with
-`remember_session`, so that a reconnect needs no prompt. An elevation password is kept in the
-hub's memory for 5 min, and sent to the agent in the SPAWN that needs it (SECURITY.md § 4.3).
+**Security note:** The hub writes none of these secrets to disk. A password is used for the SSH
+handshake and dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min
+with `remember_session`, so that a reconnect needs no prompt. An elevation password is kept in the
+hub's memory, per host and client, for 5 min when it was typed to open an elevated terminal and
+15 min when it was typed to restart one, and sent to the agent in the SPAWN that needs it
+(SECURITY.md § 4.3).
 
 ### 4.11 TEST_CONNECT (SSH Connectivity Test)
 
@@ -1302,7 +1304,7 @@ What the callers do with the answers:
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/logs/hub` | ● | `{ entries, total }` from `hub.jsonl`, in file order. Query: `level` (minimum), `from_t` and `to_t` (ISO 8601), `search` (in `msg`, any case), `limit`, `offset` (see Pagination) |
-| GET | `/api/logs/channels/:channelId` | ● | `{ entries, total }` for one channel, with the same query; `from_t` and `to_t` are milliseconds since the channel opened. An id that is not 26 alphanumerics answers 400 `INVALID_CHANNEL_ID` |
+| GET | `/api/logs/channels/:channelId` | ● | `{ entries, total }` for one channel, with the same query; `from_t` and `to_t` are milliseconds since the channel opened. An id that is not 26 alphanumerics answers 400 `INVALID_CHANNEL_ID`. No hub writes a channel's log (SPEC.md § 7), so the list is always empty |
 
 #### Static Assets (served by @fastify/static)
 

@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-28
+> Last updated: 2026-09-29
 
 ## 1. Vision
 
@@ -679,7 +679,7 @@ User types "ls\n"
   Agent: feed output to the vt100 screen model (for screen state)
   Agent → Hub (SSH stdio): [4-byte len][msgpack OUTPUT { channelId, seqNo, ts, data }]
   │
-  Hub: write to spool.db (chunk), update cache_index
+  Hub: write to spool.db (chunk); cache_index moves only with a snapshot (§ 5.3)
   │
   Hub → ALL attached clients (WS): OUTPUT { channelId, seqNo, ts, data }
   │
@@ -925,8 +925,8 @@ Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, 
 | `level` | string | `"info"` | Hub and agent log level: trace, debug, info, warn, error |
 | `format` | string | `"jsonl"` | Console/stderr line rendering: `jsonl` for machine-readable JSON lines, `text` for human-readable single-line records. The hub file sink remains JSONL; the agent applies this to its own output stream. |
 | `output` | string | `"file"` | Hub output target: stderr, file, both. `file` and `both` write JSONL to `logs/hub.jsonl`. |
-| `max_age_days` | number | 30 | Log retention in days; 0 keeps forever |
-| `max_size_mb` | number | 50 | Per-channel log size limit in MB; 0 is unlimited |
+| `max_age_days` | number | 30 | Age in days past which a hub started through `main.ts` deletes a channel log in `logs/channels/` as it starts (`log-gc.ts`); 0 keeps them. No hub writes channel logs (§ 7), so it deletes nothing. It never applies to `hub.jsonl`, which rotates at 10 MB (SECURITY.md § 7.1) |
+| `max_size_mb` | number | 50 | Read only by the channel logger (`channel-logger.ts`), which nothing starts: it has no effect |
 
 ## 7. File System Layout
 
@@ -941,24 +941,44 @@ Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, 
 
 An XDG variable is used when it holds an absolute path; otherwise the default shown above. On
 Windows `APPDATA` and `LOCALAPPDATA` must be absolute paths, or the hub refuses to start, naming
-the variable (`platform-dirs.ts`). There is no separate data directory.
+the variable (`platform-dirs.ts`). The hub has no separate data directory. The desktop keeps
+`hub.log` and its pinned-key store in the platform's local data directory (`dirs::data_local_dir`):
+`%LOCALAPPDATA%\lasterm\` on Windows, which is the state directory, and `$XDG_DATA_HOME/lasterm/`
+(`~/.local/share/lasterm/`) on Linux, where no desktop is released (§ 10.3).
 
 ### Directory Contents
 
 ```
-Config dir:
-├── config.toml              # User preferences (layer 2)
-└── auth.json                # { token: "crypto-random-hex" } (0600; on Windows the profile's default ACL)
+Config dir (created 0700; SECURITY.md § 2.2, item 1):
+├── config.toml              # User preferences (layer 2). Rewritten through config.toml.tmp when a
+                             #        setting is saved, with the umask's mode
+├── auth.json                # { token: "crypto-random-hex" } (0600; on Windows the profile's default ACL)
+├── themes/                  # <name>.json: the bundled themes, copied in at each start when missing,
+                             #        and the ones saved from Settings
+├── fonts/                   # fonts uploaded from Settings, served under /public/fonts/
+├── sounds/                  # bell sounds placed there by hand, served under /public/sounds/
+├── wallpapers/              # wallpapers uploaded from Settings, served under /public/wallpapers/
+└── close-behavior.json      # the desktop's answer to "close or quit"
 
 State dir (0700):
+├── hub.lock                 # the single-hub lock (`hub-lock.ts`)
 ├── meta.db                  # Hosts, sessions, channels, launch profiles, tokens, groups (0600)
-├── meta.db-wal
+├── meta.db-wal, meta.db-shm # 0600, as are spool.db's (STORAGE.md § 2)
 ├── spool.db                 # Output chunks, snapshots (0600)
-├── spool.db-wal
-├── logs/                    # hub.jsonl, agent-daemon.jsonl, channels/<channel id>.jsonl
+├── spool.db-wal, spool.db-shm
+├── logs/
+│   ├── hub.jsonl            # the hub's log, with the security events (SECURITY.md § 7.1); moved
+│   │                        #        to hub.jsonl.old at 10 MB
+│   ├── agent-daemon.jsonl   # the local agent daemon's own log, appended to and never rotated
+│   └── channels/            # made, empty, by a hub started through main.ts (§ 6.2). No hub writes
+│                            #        a channel log into it
 ├── binaries/                # the agent binary cache (§ 3.5)
-├── hub-daemon.log           # what `lasterm start --daemon` printed
+├── hub-daemon.log           # what `lasterm start --daemon` printed; moved to hub-daemon.log.old at 10 MB
 ├── agent-daemon.log         # what the local agent daemon printed
+├── agent.identity-<hash>.json # Windows only (elsewhere beside the socket, 0600): the local agent
+                             #        daemon's record of itself while it runs
+├── agent.exit-<hash>.json   # the same place: how that daemon ended
+├── cache/                   # Windows only: the cache directory of Platform Paths above
 ├── runtime.json             # { port, pid, started_at, instanceId, ownerToken, spki } (0600) — written on start, deleted on shutdown
 ├── hub-key                  # 0600 — 64 lowercase hex characters naming this hub to its agent
                              #        daemons, which keep its channels apart from other hubs' (#127).
@@ -966,13 +986,20 @@ State dir (0700):
                              #        the hub, naming the file. Deleting it gives the hub a new identity
                              #        and leaves its terminals on every daemon out of its reach
                              #        (SECURITY.md § 3.6)
-├── hub-tls-cert.pem         # 0600 — a copy of whatever certificate is in effect, an operator's
-                             #        included. Nothing decides anything from it
 ├── hub-tls-generated-cert.pem # 0600 — the leaf this hub generated over its own key, reused across
                              #        restarts and replaced only when it can no longer serve
 └── hub-tls-key.pem          # 0600 — the durable identity. Losing it re-pairs every client; back it
                              #        up with the same care as a private key, never share it
+
+Desktop, in the local data directory above (on Windows, the state dir):
+├── hub.log                  # what the desktop's hub printed; moved to hub.log.old at 10 MB (#512)
+├── identity/known_hubs.json # the pinned-key store (SECURITY.md § 4.4)
+└── runtime/desktop-instance.lock # Windows; in /tmp/lasterm-<uid>/ elsewhere, beside desktop-raise.sock
 ```
+
+Both TLS files are written only for a generated identity: an operator's configured pair is read
+where it is and copied nowhere (`tls-identity.ts`). The TLS files, `hub-key`, `runtime.json` and
+the databases are 0600 on Unix; on Windows every file here has the profile's default ACL (#200).
 
 ### runtime.json (TLS endpoint discovery)
 

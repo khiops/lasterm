@@ -881,12 +881,18 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 	// A passphrase's length narrows a brute-force search as surely as its value
 	// gives it away. Both lengths are four digits that no timestamp holds, and
 	// they differ, so a count of bytes is caught as well as one of characters.
-	const fragment = "spec-passphrase-644-é-";
-	const passphrase = fragment.repeat(100).slice(0, 1789);
+	//
+	// And the passphrase fits in 1024 bytes. From Node 24.20, an encrypted PKCS#1
+	// key is written through OpenSSL's encoder, which asks for the passphrase
+	// with a PEM_BUFSIZE (1024-byte) buffer and silently keeps only what fits
+	// (ossl_pw_get_passphrase): a longer one encrypts the key under its first
+	// 1024 bytes, which ssh2, hashing all of it, then cannot decrypt.
+	const fragment = "spec-passphrase-644-";
+	const passphrase = `${"é".repeat(8)}${fragment.repeat(60)}`.slice(0, 1009);
 	const lengths = [passphrase.length, Buffer.byteLength(passphrase)];
 
 	it("logs neither the passphrase nor its length, asked for or remembered", async () => {
-		expect(lengths).toEqual([1789, 1870]);
+		expect(lengths).toEqual([1009, 1017]);
 		const { buildSshConnectConfig } =
 			await vi.importActual<typeof import("./session/ssh-agent.js")>("./session/ssh-agent.js");
 		const keyPath = path.join(log.dir, "id_rsa");

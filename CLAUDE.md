@@ -76,7 +76,9 @@ The hub ships as a single executable that embeds its own Node, so an npm install
 would reintroduce the runtime requirement that executable exists to remove. Today the
 only channel that works end to end is **building from this repository or downloading
 a release asset**. The Microsoft Store path has packaging in CI but submission is
-manual and not yet done (#110), and winget is a plan with no manifest.
+manual and not yet done (#110), and winget is a plan with no manifest. The desktop has
+no updater of its own, by decision: each channel updates its own installs, and a
+release-asset install is updated by hand (DESKTOP-UPDATES in `docs/decisions.md`).
 
 Dependencies: shared ← hub, shared ← web.
 The hub spawns the agent binary for local sessions and deploys it over SSH for remote

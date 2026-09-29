@@ -7,6 +7,15 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## DESKTOP-UPDATES — the desktop app does not update itself (#645, 2026-09-29)
+
+- The desktop ships no updater. `tauri-plugin-updater` was registered in builds without an MSIX identity, with an endpoint and a public key, but nothing ever called it, and no release published the `latest.json` and signature it would have read: a GitHub-release install never updated. It is removed with everything that served only it: its configuration and capability, the `@tauri-apps/plugin-updater` package, the MSIX-identity probe that kept it out of Store builds (#112), and `scripts/generate-updater-key.sh`.
+- Each channel updates its own installs. The Microsoft Store updates the MSIX build, and winget the MSI and NSIS installs it makes once it lists Lasterm (#620). An install from a GitHub release asset is updated by hand, by installing the newer release.
+- Wiring the updater instead would have taken a signing key kept as a CI secret and in step with the key in the app, a `latest.json` and a signature on every release, a request to GitHub at start-up to declare in the privacy policy, and a consent prompt, for the one channel no package manager covers.
+- A notice that a newer version exists may come later. It would only say so; it would download and install nothing. Not now.
+
+---
+
 ## KEYBOARD-NAV — tabs, panes and the window's zones from the keyboard alone (#637, 2026-09-28)
 
 - Windows Terminal's default keys, added to the table of APP-SHORTCUTS: Ctrl+Tab and Ctrl+Shift+Tab go to the next and previous tab, wrapping; Ctrl+Alt+1..8 to tab N, and Ctrl+Alt+9, or a number past the count, to the last. Only the tabs the bar shows count: with `[tabs] scope = "perHost"`, those of the host in view. Alt+arrows move the focus to the pane on that side; Alt+Shift+arrows move a divider. Ctrl+Shift+W closes the focused pane (`pane.close`), no longer the whole tab.
@@ -274,6 +283,8 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 - Review finding F-001 deferred: trust_once/trust_permanent both persist fingerprint (UI only exposes trust_permanent)
 
 ## PKG — Full Packaging Pipeline: SEA Binaries + CI + Auto-Deploy + Tauri (2026-03-13)
+
+**Status:** superseded in part. The desktop's auto-updater was removed: see DESKTOP-UPDATES (#645).
 
 - Two separate SEA binaries: lasterm-agent (node-pty) + lasterm-hub (better-sqlite3)
 - Hub finds agent binary in same directory or PATH (sea-agent-resolver.ts)

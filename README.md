@@ -59,6 +59,9 @@ There is no `npx lasterm`, and there will not be one under that name: the unscop
 executable that embeds its own Node, so npm would add a runtime requirement it
 exists to remove. Packaged builds land in the [releases](../../releases).
 
+The desktop app does not update itself. An install from a release asset is updated by
+installing the newer release; the Microsoft Store and winget update the installs they made.
+
 ---
 
 ## Architecture

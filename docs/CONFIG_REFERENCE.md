@@ -220,8 +220,8 @@ The agent's log level and format come from `[logging]` (SPEC.md § 6.2); a `log_
 | level | `"trace"` \| `"debug"` \| `"info"` \| `"warn"` \| `"error"` | `"info"` | Hub and agent log level. The security events of SECURITY.md § 7.1 are written whatever it says |
 | format | `"jsonl"` \| `"text"` | `"jsonl"` | How lines are rendered on stderr. `logs/hub.jsonl` is always JSONL |
 | output | `"stderr"` \| `"file"` \| `"both"` | `"file"` | Where the hub writes its log; `file` and `both` write `logs/hub.jsonl` in the state directory |
-| max_age_days | number | `30` | Channel log retention in days; 0 keeps them |
-| max_size_mb | number | `50` | Size limit of one channel's log in MB; 0 is unlimited |
+| max_age_days | number | `30` | Age in days past which a hub started through `main.ts` deletes a channel log in `logs/channels/` as it starts; 0 keeps them. No hub writes channel logs (SPEC.md § 7), so it deletes nothing, and it never applies to `hub.jsonl` |
+| max_size_mb | number | `50` | Read only by the channel logger, which nothing starts: it has no effect |
 
 What each entry point writes is in SPEC.md § 6.2.
 

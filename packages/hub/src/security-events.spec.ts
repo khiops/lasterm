@@ -1,8 +1,16 @@
+import { generateKeyPairSync } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
-import { decodeMessage, encodeMessage, isValidUlid, type ProtocolMessage } from "@lasterm/shared";
+import { format } from "node:util";
+import {
+	type AuthPromptMessage,
+	decodeMessage,
+	encodeMessage,
+	isValidUlid,
+	type ProtocolMessage,
+} from "@lasterm/shared";
 import type { FastifyInstance, LogLevel } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getBootAssetToken } from "./asset-token.js";
@@ -10,6 +18,9 @@ import { createToken, revokeToken } from "./auth.js";
 import { HubLogger } from "./logging/hub-logger.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { createServer, startServer as listen } from "./server.fixture.js";
+import type { SharedSessionContext } from "./session/session-context.js";
+import type { WsClient } from "./session/session-manager.js";
+import { SshConnectionManager } from "./session/ssh-connection-manager.js";
 import { type DatabaseManager, openTestDatabases } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
 import { getTestTls } from "./test-tls.fixture.js";
@@ -833,6 +844,117 @@ describe("no logged request carries a secret, at any level", () => {
 			expect(text).toContain("/spec/returns-after-send?asset_token=[redacted]");
 		} finally {
 			await hub.close();
+		}
+	});
+});
+
+// ─── SSH key passphrases ──────────────────────────────────────────────────────
+
+/**
+ * Everything the process writes while it runs: the console, and stdout and
+ * stderr underneath it. The desktop keeps the hub's stderr in `hub.log`.
+ */
+function captureOutput(): { text: () => string; restore: () => void } {
+	const written: string[] = [];
+	const spies = [
+		...(["log", "info", "warn", "error", "debug", "trace"] as const).map((method) =>
+			vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+				written.push(format(...args));
+			}),
+		),
+		...[process.stdout, process.stderr].map((stream) =>
+			vi.spyOn(stream, "write").mockImplementation(((chunk: unknown) => {
+				written.push(String(chunk));
+				return true;
+			}) as never),
+		),
+	];
+	return {
+		text: () => written.join("\n"),
+		restore: () => {
+			for (const spy of spies) spy.mockRestore();
+		},
+	};
+}
+
+describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
+	// A passphrase's length narrows a brute-force search as surely as its value
+	// gives it away. Both lengths are four digits that no timestamp holds, and
+	// they differ, so a count of bytes is caught as well as one of characters.
+	const fragment = "spec-passphrase-644-é-";
+	const passphrase = fragment.repeat(100).slice(0, 1789);
+	const lengths = [passphrase.length, Buffer.byteLength(passphrase)];
+
+	it("logs neither the passphrase nor its length, asked for or remembered", async () => {
+		expect(lengths).toEqual([1789, 1870]);
+		const { buildSshConnectConfig } =
+			await vi.importActual<typeof import("./session/ssh-agent.js")>("./session/ssh-agent.js");
+		const keyPath = path.join(log.dir, "id_rsa");
+		const { privateKey } = generateKeyPairSync("rsa", {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: "pkcs1", format: "pem" },
+			privateKeyEncoding: { type: "pkcs1", format: "pem", cipher: "aes-256-cbc", passphrase },
+		});
+		fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
+
+		const hostId = "spec-host";
+		const sent: AuthPromptMessage[] = [];
+		const client = {
+			id: "spec-client",
+			send: (msg: AuthPromptMessage) => sent.push(msg),
+		} as unknown as WsClient;
+		const ctx = {
+			passphraseCache: new Map(),
+			promptContexts: new Map(),
+			promptIndex: new Map(),
+			pendingPrompts: new Map(),
+			clients: new Map([[client.id, client]]),
+			channels: new Map(),
+			acquisitions: new Map(),
+			hubLogger: new HubLogger(log.dir, {
+				level: "trace",
+				format: "jsonl",
+				output: "file",
+				maxAgeDays: 30,
+				maxSizeMb: 50,
+			}),
+		} as unknown as SharedSessionContext;
+		const manager = new SshConnectionManager(ctx, null as never, null as never, null as never);
+		const promptAuth = manager.buildPromptAuth(client);
+		const connect = () =>
+			buildSshConnectConfig({ method: "key", keyPath }, "pi.local", 22, "pi", promptAuth, hostId);
+
+		const output = captureOutput();
+		try {
+			// Asked for: the person types it and asks the hub to remember it.
+			const asked = connect();
+			await vi.waitFor(() => expect(sent).toHaveLength(1));
+			const prompt = sent[0] as AuthPromptMessage;
+			expect(prompt).toMatchObject({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" });
+			manager.handleAuthPromptResponse(
+				client.id,
+				hostId,
+				passphrase,
+				true,
+				prompt.promptId,
+				prompt.deliveryEpoch,
+			);
+			expect((await asked).passphrase).toBe(passphrase);
+			// Remembered: the next connection takes it from the cache, unasked.
+			expect((await connect()).passphrase).toBe(passphrase);
+			expect(sent).toHaveLength(1);
+		} finally {
+			output.restore();
+		}
+
+		const text = `${output.text()}\n${log.text()}`;
+		// The path was heard, and says whether it has a passphrase.
+		expect(text).toContain("[lasterm-ssh] passphrase obtained: yes");
+		expect(text).toContain("[lasterm-ssh] returning cached passphrase");
+		// Neither the passphrase, nor any piece of it, nor its length.
+		expect(text).not.toContain(fragment);
+		for (const length of lengths) {
+			expect(text).not.toMatch(new RegExp(`(?<![0-9A-Za-z])${length}(?!\\d)`));
 		}
 	});
 });

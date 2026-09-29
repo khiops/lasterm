@@ -617,6 +617,8 @@ the number that were not.
 - Auth tokens (never in logs)
 - The hub key (never in logs, nor quoted by an error about its file; § 3.6)
 - SSH passwords (never in logs)
+- SSH key passphrases, nor their length (never in logs — only whether one was given, cached or
+  cancelled; #644)
 - Terminal output content (never in logs — goes to spool.db only)
 - Pairing codes (never in logs — only expiry time)
 - Asset tokens, and every other query value (#511)

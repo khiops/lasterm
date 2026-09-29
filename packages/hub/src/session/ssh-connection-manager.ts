@@ -175,9 +175,8 @@ export class SshConnectionManager {
 				);
 				if (cached) {
 					if (cached.expiresAt > Date.now()) {
-						console.error(
-							`[lasterm-ssh] returning cached passphrase (length ${cached.secret.length})`,
-						);
+						// Never its length: see buildSshConnectConfig (#644).
+						console.error("[lasterm-ssh] returning cached passphrase");
 						return cached.secret;
 					}
 					// Expired — evict and fall through to prompt

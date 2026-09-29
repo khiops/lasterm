@@ -815,9 +815,9 @@ and `/disconnect` (PROTOCOL.md § 6):
 | Reconnect | live, being reached, or lost (`error`) | Closes the connection, then connects as above. A daemon's terminals survive and are taken up again. On stdio they end with the connection |
 | Disconnect | live | Closes the connection. A daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end, and the session closes |
 
-Terminals that end this way end `stopped` (§ 4.2, PROTOCOL.md § 4.7): nobody aimed at one, so a
+Terminals that end this way end `stopped` (PROTOCOL.md § 4.7): nobody aimed at one, so a
 pane that sees it leaves it be. Before ending any, the hub refuses with how many
-(`TERMINALS_WOULD_END`), and the client asks "N terminals on <host> will end" before sending the
+(`TERMINALS_WOULD_END`), and the client asks `N terminals on <host> will end.` before sending the
 request again with `force`. A host whose daemon keeps them is never asked about.
 
 Connect goes through the same acquisition as a SPAWN (`session-acquisition.ts`), so a SPAWN, a

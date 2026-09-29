@@ -169,7 +169,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - Remote sessions: open SSH via ssh2, then launch the agent on stdio, or reach a remote daemon's socket (§ 3.2)
 - Hub never spawns PTYs directly — agent is the universal PTY manager
 - `LastermAgent` (`lasterm-agent.ts`): hub-side class extending `AgentConnection`, `connectLocal(socketPath)` factory, `waitForChannelState()` for reconnect reconciliation
-- `connectOrLaunch` (`agent-launcher.ts`): connects to the socket, spawns a detached daemon if that fails, then retries the connection until it is accepted
+- `connectOrLaunch` (`agent-launcher.ts`): connects to the socket, spawns a detached daemon if that fails, then retries the connection until it is accepted. Every connection is checked before anything is sent on it (`local-agent-endpoint.ts`, SECURITY.md § 3.5), and a refused endpoint is not replaced by a launch
 - Session state machine: STARTING → ACTIVE ↔ DISCONNECTED → CLOSED, with DETACHED branch
 - Reconnect (remote): exponential backoff (1s, 2s, 4s, ... 30s max, 5min total timeout)
 - Reconnect (local): connect to the daemon again, launching a new one if none answers
@@ -1064,7 +1064,7 @@ lasterm/
 │   └── IDEATION_BRIEF.md
 ├── crates/
 │   ├── lasterm-agent/       # the agent (Rust binary): PTYs, vt100 screens, daemon mode
-│   ├── lasterm-hub-lock/    # napi-rs addon: the single-hub lock
+│   ├── lasterm-hub-lock/    # napi-rs addon: the single-hub lock, and the checked local agent connection
 │   ├── lasterm-tls-identity/ # napi-rs addon: the hub's TLS key and certificate
 │   ├── lasterm-process-lock/ # the kernel lock under the hub lock
 │   └── lasterm-protected-fs/ # descriptor-relative access to protected files
@@ -1093,6 +1093,7 @@ lasterm/
 │   │       ├── session/     # Session manager (local + SSH + daemon)
 │   │       │   ├── lasterm-agent.ts  # LastermAgent: hub-side AgentConnection over a socket
 │   │       │   ├── agent-launcher.ts # connectOrLaunch: connect, else spawn the daemon and retry
+│   │       │   ├── local-agent-endpoint.ts # The local agent's endpoint, checked before the hub writes to it
 │   │       │   ├── ssh-agent.ts      # SshAgent: the agent over SSH, on stdio or a daemon's socket
 │   │       │   ├── remote-daemon.ts  # Whether and how a remote host keeps a daemon (#79, #600)
 │   │       │   ├── ssh-keepalive.ts  # The SSH keepalive every connection carries (#607)

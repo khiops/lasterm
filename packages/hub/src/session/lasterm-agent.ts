@@ -1,8 +1,8 @@
-import net from "node:net";
 import type { Duplex } from "node:stream";
 import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { AgentConnection } from "./agent-connection.js";
+import { type LocalAgentEndpointOptions, openLocalAgentEndpoint } from "./local-agent-endpoint.js";
 import { SendQueue } from "./send-queue.js";
 
 const HELLO_TIMEOUT_MS = 5_000;
@@ -104,11 +104,6 @@ export class LastermAgent extends AgentConnection {
 	}
 
 	/**
-	 * Connect to a local agent daemon via Unix domain socket or named pipe.
-	 * Resolves after HELLO is received (agent is ready).
-	 * Rejects on connection error or HELLO timeout (5s).
-	 */
-	/**
 	 * Drive an agent over a stream someone else opened — an SSH channel to a
 	 * remote daemon's socket, today.
 	 *
@@ -144,45 +139,21 @@ export class LastermAgent extends AgentConnection {
 		});
 	}
 
-	static connectLocal(socketPath: string, hubLogger?: HubLogger): Promise<LastermAgent> {
-		return new Promise((resolve, reject) => {
-			const socket = net.connect(socketPath);
-			let settled = false;
-
-			socket.once("connect", () => {
-				const agent = new LastermAgent(socket, hubLogger);
-
-				const timer = setTimeout(() => {
-					if (!settled) {
-						settled = true;
-						agent.close();
-						reject(new Error(`HELLO timeout after ${HELLO_TIMEOUT_MS}ms`));
-					}
-				}, HELLO_TIMEOUT_MS);
-
-				agent.once("ready", () => {
-					if (!settled) {
-						settled = true;
-						clearTimeout(timer);
-						resolve(agent);
-					}
-				});
-
-				agent.once("error", (err) => {
-					if (!settled) {
-						settled = true;
-						clearTimeout(timer);
-						reject(err);
-					}
-				});
-			});
-
-			socket.once("error", (err) => {
-				if (!settled) {
-					settled = true;
-					reject(err);
-				}
-			});
-		});
+	/**
+	 * Connect to the local agent daemon via Unix domain socket or named pipe.
+	 * Resolves after HELLO is received (agent is ready).
+	 * Rejects on connection error or HELLO timeout (5s).
+	 *
+	 * The endpoint is checked before anything is written to it: an endpoint
+	 * that is not this account's own rejects with a `LocalAgentEndpointError`
+	 * (local-agent-endpoint.ts), and nothing has been sent.
+	 */
+	static async connectLocal(
+		socketPath: string,
+		hubLogger?: HubLogger,
+		endpoint: LocalAgentEndpointOptions = {},
+	): Promise<LastermAgent> {
+		const socket = await openLocalAgentEndpoint(socketPath, endpoint);
+		return LastermAgent.overStream(socket, hubLogger);
 	}
 }

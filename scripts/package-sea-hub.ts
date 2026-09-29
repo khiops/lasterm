@@ -237,9 +237,25 @@ export function loadHubLockAddon(addonPath: string): void {
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(`[package-sea-hub] hub lock addon cannot be loaded: ${addonPath}: ${detail}`);
 	}
-	if (typeof mod.exports.HubLock !== "function" || typeof mod.exports.tryAcquire !== "function") {
+	checkHubLockExports(mod.exports, addonPath);
+}
+
+/**
+ * The hub lock addon also carries the local agent's connection and its peer
+ * check: a hub packaged without them could not reach its local agent.
+ */
+export function checkHubLockExports(exports: Record<string, unknown>, addonPath: string): void {
+	if (typeof exports.HubLock !== "function" || typeof exports.tryAcquire !== "function") {
 		throw new Error(
 			`[package-sea-hub] hub lock addon at ${addonPath} has no HubLock/tryAcquire export.`,
+		);
+	}
+	if (
+		typeof exports.connectLocalAgent !== "function" ||
+		typeof exports.verifyLocalAgentPeer !== "function"
+	) {
+		throw new Error(
+			`[package-sea-hub] hub lock addon at ${addonPath} has no connectLocalAgent/verifyLocalAgentPeer export: it was built from older sources.`,
 		);
 	}
 }

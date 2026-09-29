@@ -54,7 +54,7 @@ packages/
     └── desktop/      → @lasterm/desktop (Tauri)
 crates/
 ├── lasterm-agent/        → the agent. A Rust binary, not an npm package.
-├── lasterm-hub-lock/     → napi-rs addon holding the single-hub lock
+├── lasterm-hub-lock/     → napi-rs addon holding the single-hub lock, and opening the local agent's socket or pipe after checking its peer's account
 ├── lasterm-tls-identity/ → napi-rs addon generating and keeping the hub's TLS key and certificate
 ├── lasterm-process-lock/ → the kernel lock under the hub lock
 └── lasterm-protected-fs/ → descriptor-relative access to protected files

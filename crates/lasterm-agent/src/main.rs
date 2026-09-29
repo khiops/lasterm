@@ -15,6 +15,8 @@ mod process;
 mod protocol;
 mod pty;
 mod shell;
+#[cfg(unix)]
+mod socket_dir;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -255,26 +257,16 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
             None => default_socket_path()?,
         };
 
-        // Ensure the socket's parent directory exists when --socket is provided.
-        // The unwrap_or_else default branch already calls create_dir_all for its
-        // own path; an explicit --socket value may point to a directory that was
-        // never created (e.g. /run/user/1000/lasterm/ under XDG_RUNTIME_DIR on
-        // a freshly-booted WSL2 instance), causing UnixListener::bind to fail
-        // with ENOENT and the daemon to exit silently.
-        // On Windows the socket is a named pipe (\\.\pipe\...) with no real
-        // parent directory — skip create_dir_all to avoid a misleading error.
+        // The socket's directory must exist and be this user's own before
+        // anything goes in it: the identity record is written there, and a hub
+        // looks for this daemon's socket there. A missing one, such as
+        // /run/user/1000/lasterm/ on a freshly booted WSL2 instance, is created
+        // 0700 (socket_dir.rs). A named pipe (Windows) has no directory.
         #[cfg(unix)]
-        if let Some(parent) = std::path::Path::new(&socket).parent() {
-            if !parent.as_os_str().is_empty() {
-                use std::os::unix::fs::DirBuilderExt;
-                if let Err(e) = std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(parent)
-                {
-                    tracing::warn!(error = %e, dir = ?parent, "failed to create socket parent directory");
-                }
-            }
+        if let Err(error) = socket_dir::ensure_private_socket_dir_for(std::path::Path::new(&socket))
+        {
+            tracing::error!(%error, "the daemon's socket directory is refused");
+            return Err(error);
         }
 
         let socket_identity = identity::socket_identity(&socket);
@@ -487,8 +479,13 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
 fn default_socket_path() -> std::io::Result<String> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::DirBuilderExt;
         let state_dir = identity::state_dir_for_socket("")?;
-        let _ = std::fs::create_dir_all(&state_dir);
+        // Owner-only, as the daemon requires of its socket's directory.
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&state_dir);
         Ok(state_dir
             .join("agent.socket")
             .to_string_lossy()

@@ -1422,20 +1422,26 @@ either, since the SSH keepalive is fixed (SPEC.md § 5.5) and spool GC has bound
 **CreateLaunchProfile:**
 ```typescript
 {
-  name: string,                 // required, 1-64 chars, unique
-  shell?: string,               // shell binary path
-  args?: string[],              // shell arguments
-  cwd?: string,                 // working directory
-  env?: Record<string, string>, // environment variables (values masked in responses)
-  description?: string,
-  color?: string,               // hex "#rrggbb"
-  icon?: string,                // emoji
-  os_filter?: 'linux' | 'darwin' | 'windows' | null,
+  name: string,                 // required, 1-100 chars, unique (case-insensitive)
+  shell: string,                // required, an executable path, not a command
+  args?: string[] | null,       // at most 64, each at most 1024 chars
+  cwd?: string | null,          // working directory, at most 1024 chars
+  env?: Record<string, string> | null, // at most 100 (values masked in responses)
+  mode?: 'shell' | 'process',   // default 'shell'
+  elevated?: boolean,           // default false
+  supported_os?: 'linux' | 'darwin' | 'windows' | 'any', // default 'any'
+  icon_type?: 'auto' | 'emoji' | 'image', // default 'auto'
+  icon_value?: string | null,   // at most 256 chars
+  color?: string | null,        // hex "#rrggbb"
+  profile_overrides?: Partial<TerminalProfile> | null, // stored as sent, camelCase inside
   sort_order?: number
 }
 ```
 
-**UpdateLaunchProfile:** Same fields as CreateLaunchProfile, all optional.
+**UpdateLaunchProfile:** Same fields as CreateLaunchProfile, all optional. A field left out keeps
+its stored value. `null` clears a field that may be empty (`args`, `cwd`, `env`, `icon_value`,
+`color`, `profile_overrides`), and is refused on the others (#665). In `env`, the mask
+`"********"` keeps the stored value of that variable.
 
 **AgentTarget:**
 ```typescript

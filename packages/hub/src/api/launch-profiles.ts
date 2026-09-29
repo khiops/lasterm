@@ -7,6 +7,7 @@ import {
 	importWindowsTerminalProfiles,
 	parseWindowsTerminalSettings,
 } from "../shell-discovery.js";
+import type { LaunchProfileUpdate } from "../storage/launch-profiles-dal.js";
 import type { MetaDAL } from "../storage/meta.js";
 import { parsePagination } from "./pagination.js";
 
@@ -29,7 +30,45 @@ export function validateCreateBody(body: CreateLaunchProfileBody): string | null
 	}
 	const shellErr = validateShell(body.shell ?? "");
 	if (shellErr) return shellErr;
-	if (body.args !== undefined) {
+	return validateProfileFields(body);
+}
+
+/** The fields that always hold a value: PUT cannot clear them. */
+const REQUIRED_ON_UPDATE = ["mode", "elevated", "supported_os", "icon_type", "sort_order"] as const;
+
+/**
+ * What PUT /api/launch-profiles/:id accepts: the fields it is given, by the rules
+ * POST applies. null clears a field that may be empty (args, cwd, env, icon_value,
+ * color, profile_overrides): refusing or dropping it kept what the user had
+ * cleared (#665). A field that always holds a value refuses null. Unit-tested in
+ * `launch-profiles.spec.ts`, and the route keeps one test proving it consults this.
+ */
+export function validateUpdateBody(body: UpdateLaunchProfileBody): string | null {
+	if (
+		body.name !== undefined &&
+		(typeof body.name !== "string" || body.name.trim().length === 0 || body.name.length > 100)
+	) {
+		return "name must be 1-100 characters";
+	}
+	if (body.shell !== undefined) {
+		const shellErr = validateShell(body.shell ?? "");
+		if (shellErr) return shellErr;
+	}
+	const fields = body as Record<string, unknown>;
+	for (const field of REQUIRED_ON_UPDATE) {
+		if (fields[field] === null) return `${field} cannot be cleared`;
+	}
+	return validateProfileFields(body);
+}
+
+/**
+ * The rules of every field but the name and the shell, on POST and PUT alike. A
+ * field that may be empty accepts null, which stores none (#665).
+ */
+function validateProfileFields(
+	body: CreateLaunchProfileBody | UpdateLaunchProfileBody,
+): string | null {
+	if (body.args !== undefined && body.args !== null) {
 		if (!Array.isArray(body.args) || body.args.length > 64) {
 			return "args must be an array of at most 64 items";
 		}
@@ -124,7 +163,7 @@ function profileToWire(profile: LaunchProfile): unknown {
 export interface CreateLaunchProfileBody {
 	name: string;
 	shell: string;
-	args?: string[];
+	args?: string[] | null;
 	cwd?: string | null;
 	env?: Record<string, string> | null;
 	mode?: "shell" | "process" | null;
@@ -137,7 +176,8 @@ export interface CreateLaunchProfileBody {
 	sort_order?: number | null;
 }
 
-interface UpdateLaunchProfileBody {
+/** A field left out stays as stored; null clears one that may be empty (#665). */
+export interface UpdateLaunchProfileBody {
 	name?: string;
 	shell?: string;
 	args?: string[] | null;
@@ -265,27 +305,15 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 
 			const body = request.body;
 
-			// Validate shell if provided
-			if (body.shell !== undefined) {
-				const shellErr = validateShell(body.shell);
-				if (shellErr) {
-					return reply.code(400).send({
-						error: { code: "VALIDATION_ERROR", message: shellErr },
-					});
-				}
+			const validationError = validateUpdateBody(body);
+			if (validationError) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: validationError },
+				});
 			}
 
-			// Validate name if provided
+			// Duplicate name check (excluding self)
 			if (body.name !== undefined) {
-				if (!body.name || body.name.trim().length === 0 || body.name.length > 100) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message: "name must be 1-100 characters",
-						},
-					});
-				}
-				// Duplicate check (excluding self)
 				const conflict = metaDal.getLaunchProfileByName(body.name.trim());
 				if (conflict && conflict.id !== request.params.id) {
 					return reply.code(409).send({
@@ -297,38 +325,9 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				}
 			}
 
-			// Validate color if provided
-			if (body.color !== undefined && body.color !== null && !COLOR_RE.test(body.color)) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: "color must be in hex format #rrggbb" },
-				});
-			}
-
-			// Validate args if provided
-			if (body.args !== undefined && body.args !== null) {
-				if (!Array.isArray(body.args) || body.args.length > 64) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message: "args must be an array of at most 64 items",
-						},
-					});
-				}
-				for (const arg of body.args) {
-					if (typeof arg !== "string" || arg.length > 1024) {
-						return reply.code(400).send({
-							error: {
-								code: "VALIDATION_ERROR",
-								message: "each arg must be a string of at most 1024 characters",
-							},
-						});
-					}
-				}
-			}
-
-			// Build update object — only include fields present in request body.
-			// exactOptionalPropertyTypes: never assign undefined to optional keys — use delete.
-			const updates: Partial<LaunchProfile> = {
+			// Only the fields present in the body. null on a field that may be empty
+			// is stored as none: dropping it kept the value the user had cleared (#665).
+			const updates: LaunchProfileUpdate = {
 				...(body.name !== undefined && { name: body.name.trim() }),
 				...(body.shell !== undefined && { shell: body.shell.trim() }),
 				...(body.mode !== undefined && { mode: body.mode }),
@@ -336,31 +335,21 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				...(body.supported_os !== undefined && { supportedOs: body.supported_os }),
 				...(body.icon_type !== undefined && { iconType: body.icon_type }),
 				...(body.sort_order !== undefined && { sortOrder: body.sort_order }),
-				...(body.icon_value != null && { iconValue: body.icon_value }),
-				...(body.color != null && { color: body.color }),
-				...(body.cwd != null && { cwd: body.cwd }),
+				...(body.args !== undefined && { args: body.args }),
+				...(body.cwd !== undefined && { cwd: body.cwd }),
+				...(body.icon_value !== undefined && { iconValue: body.icon_value }),
+				...(body.color !== undefined && { color: body.color }),
+				...(body.profile_overrides !== undefined && {
+					profileOverrides: body.profile_overrides as NonNullable<
+						LaunchProfile["profileOverrides"]
+					> | null,
+				}),
 			};
 
-			// args: null means clear (set to empty, DAL will store null in DB)
-			if ("args" in body) {
-				if (body.args != null) {
-					updates.args = body.args;
-				}
-				// null/undefined means clear: DAL checks "args" in updates and stores null
-			}
-
-			// profile_overrides: null means clear
-			if ("profile_overrides" in body) {
-				if (body.profile_overrides != null) {
-					updates.profileOverrides = body.profile_overrides as NonNullable<
-						LaunchProfile["profileOverrides"]
-					>;
-				}
-				// null means clear
-			}
-
-			// env: sentinel handling (INV-12)
-			if ("env" in body && body.env != null) {
+			// env: sentinel handling (INV-12); null clears it
+			if (body.env === null) {
+				updates.env = null;
+			} else if (body.env !== undefined) {
 				const existingEnv = existing.env ?? {};
 				const mergedEnv: Record<string, string> = {};
 				for (const [k, v] of Object.entries(body.env)) {
@@ -369,7 +358,6 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				}
 				updates.env = mergedEnv;
 			}
-			// env: null means clear — leave updates.env absent so DAL stores null
 
 			const updated = metaDal.updateLaunchProfile(request.params.id, updates);
 			if (!updated) {

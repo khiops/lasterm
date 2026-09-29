@@ -179,6 +179,26 @@ describe("MetaDAL — Launch Profiles", () => {
 			const restored = dal.updateLaunchProfile(created.id, { elevated: false });
 			expect(restored?.elevated).toBe(false);
 		});
+
+		it("stores null as none on each field that may be empty, and keeps what it is not given (#665)", () => {
+			const full = {
+				args: ["-l"],
+				cwd: "/srv",
+				env: { KEEP: "1" },
+				iconValue: "🐚",
+				color: "#123456",
+				profileOverrides: { fontSize: 14 },
+			};
+			for (const field of Object.keys(full) as Array<keyof typeof full>) {
+				const created = dal.createLaunchProfile(
+					makeProfile({ name: `clear-${field}`, iconType: "emoji", ...full }),
+				);
+				const updated = dal.updateLaunchProfile(created.id, { [field]: null });
+				expect(updated).not.toHaveProperty(field);
+				const { [field]: _cleared, ...kept } = full;
+				expect(updated).toMatchObject(kept);
+			}
+		});
 	});
 
 	// ─── deleteLaunchProfile ──────────────────────────────────────────────

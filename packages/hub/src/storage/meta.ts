@@ -17,7 +17,7 @@ import type Database from "better-sqlite3";
 import { ChannelGroupsDAL } from "./channel-groups-dal.js";
 import { ChannelsDAL } from "./channels-dal.js";
 import { HostsDAL } from "./hosts-dal.js";
-import { LaunchProfilesDAL } from "./launch-profiles-dal.js";
+import { LaunchProfilesDAL, type LaunchProfileUpdate } from "./launch-profiles-dal.js";
 import type {
 	CreateChannelInput,
 	CreateHostInput,
@@ -429,7 +429,7 @@ export class MetaDAL {
 		return this.launchProfiles.countLaunchProfiles();
 	}
 
-	updateLaunchProfile(id: string, updates: Partial<LaunchProfile>): LaunchProfile | undefined {
+	updateLaunchProfile(id: string, updates: LaunchProfileUpdate): LaunchProfile | undefined {
 		return this.launchProfiles.updateLaunchProfile(id, updates);
 	}
 

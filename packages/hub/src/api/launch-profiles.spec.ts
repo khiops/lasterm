@@ -6,7 +6,12 @@ import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import { resolveHostOs } from "./host-profiles.js";
-import { type CreateLaunchProfileBody, validateCreateBody } from "./launch-profiles.js";
+import {
+	type CreateLaunchProfileBody,
+	type UpdateLaunchProfileBody,
+	validateCreateBody,
+	validateUpdateBody,
+} from "./launch-profiles.js";
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -246,6 +251,69 @@ describe("validateCreateBody", () => {
 	});
 });
 
+// ─── validateUpdateBody — the rules PUT /api/launch-profiles/:id applies ──────
+
+describe("validateUpdateBody", () => {
+	/** A body as a client sends it: JSON, which the interface does not police. */
+	function body(fields: Record<string, unknown>): UpdateLaunchProfileBody {
+		return fields as unknown as UpdateLaunchProfileBody;
+	}
+
+	it("accepts a body that changes nothing, or one field", () => {
+		expect(validateUpdateBody(body({}))).toBeNull();
+		expect(validateUpdateBody(body({ name: "Renamed" }))).toBeNull();
+		expect(validateUpdateBody(body({ color: "#A0b1C2" }))).toBeNull();
+	});
+
+	it("accepts null on a field that may be empty, which clears it (#665)", () => {
+		for (const field of ["args", "cwd", "env", "icon_value", "color", "profile_overrides"]) {
+			expect(validateUpdateBody(body({ [field]: null }))).toBeNull();
+		}
+	});
+
+	it("refuses null on a field that always holds a value", () => {
+		for (const field of ["mode", "elevated", "supported_os", "icon_type", "sort_order"]) {
+			expect(validateUpdateBody(body({ [field]: null }))).toBe(`${field} cannot be cleared`);
+		}
+	});
+
+	it("refuses an empty or missing name, and a shell POST would refuse", () => {
+		for (const name of ["", "   ", null, "x".repeat(101)]) {
+			expect(validateUpdateBody(body({ name }))).toBe("name must be 1-100 characters");
+		}
+		expect(validateUpdateBody(body({ shell: "" }))).toBe("shell must not be empty");
+		expect(validateUpdateBody(body({ shell: null }))).toBe("shell must not be empty");
+		expect(validateUpdateBody(body({ shell: "/bin/bash; evil" }))).toBe(
+			"shell must be an executable path, not a command",
+		);
+	});
+
+	it("refuses a colour that is not #rrggbb, the empty string included", () => {
+		for (const color of ["red", "", "#fff"]) {
+			expect(validateUpdateBody(body({ color }))).toBe("color must be in hex format #rrggbb");
+		}
+	});
+
+	it("applies the rules POST applies to the other fields", () => {
+		expect(validateUpdateBody(body({ cwd: "x".repeat(1025) }))).toBe(
+			"cwd must be 1024 characters or fewer",
+		);
+		expect(validateUpdateBody(body({ icon_value: "x".repeat(257) }))).toBe(
+			"icon_value must be 256 characters or fewer",
+		);
+		expect(validateUpdateBody(body({ args: "not-an-array" }))).toBe(
+			"args must be an array of at most 64 items",
+		);
+		expect(validateUpdateBody(body({ mode: "daemon" }))).toBe("mode must be 'shell' or 'process'");
+		expect(validateUpdateBody(body({ supported_os: "beos" }))).toBe(
+			"supported_os must be 'linux', 'darwin', 'windows', or 'any'",
+		);
+		expect(validateUpdateBody(body({ icon_type: "svg" }))).toBe(
+			"icon_type must be 'auto', 'emoji', or 'image'",
+		);
+	});
+});
+
 // ─── GET /api/launch-profiles/:id ─────────────────────────────────────────────
 
 describe("GET /api/launch-profiles/:id", () => {
@@ -340,6 +408,46 @@ describe("PUT /api/launch-profiles/:id", () => {
 			payload: { shell: "/bin/bash; evil" },
 		});
 		expect(res.statusCode).toBe(400);
+	});
+
+	// validateUpdateBody is unit-tested above; this proves the route consults it,
+	// and stores the clears the profile form sends (#665).
+	it("stores the fields given as null as none, keeps the others, and refuses what the validator refuses", async () => {
+		const created = await createProfile({
+			name: "ClearMe",
+			args: ["-l"],
+			cwd: "/srv",
+			env: { KEEP: "1" },
+			icon_type: "emoji",
+			icon_value: "🐚",
+			color: "#123456",
+		});
+		const url = `/api/launch-profiles/${created.id}`;
+
+		const cleared = await server.inject({
+			method: "PUT",
+			url,
+			payload: { cwd: null, icon_value: null, color: null },
+		});
+		expect(cleared.statusCode).toBe(200);
+
+		const stored = (await server.inject({ method: "GET", url })).json<Record<string, unknown>>();
+		expect(stored).not.toHaveProperty("cwd");
+		expect(stored).not.toHaveProperty("icon_value");
+		expect(stored).not.toHaveProperty("color");
+		expect(stored).toMatchObject({
+			name: "ClearMe",
+			args: ["-l"],
+			env: { KEEP: "1" },
+			icon_type: "emoji",
+		});
+
+		const payload = { color: "" };
+		const refused = await server.inject({ method: "PUT", url, payload });
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: validateUpdateBody(payload) },
+		});
 	});
 
 	it("env sentinel preserves existing value (SC-36)", async () => {

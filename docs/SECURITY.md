@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-28
+> Last updated: 2026-09-29
 
 ## 1. Threat Model
 
@@ -69,10 +69,10 @@
 | Spool data exposure | Read spool.db | MEDIUM — output history | LOW (requires same user) | On Unix, 0600 on every database file and its WAL files, and a 0700 state directory, both held to that at every start (§ 2.2, item 3; STORAGE.md § 2). On Windows, the profile's default ACL (#200) |
 | Crafted agent messages | Compromised remote | MEDIUM — protocol abuse | LOW | Validate all agent messages, size limits |
 | SSH credential theft | Read key files | HIGH — remote access | LOW (requires same user) | Use ssh-agent, never store passwords |
-| DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit, backpressure |
+| DoS via large frames | Agent sends huge output | LOW — hub OOM | LOW | 10 MB frame limit (`MAX_FRAME_SIZE`). There is no backpressure: the hub never pauses an agent's stream (§ 4.3) |
 | Multi-device token sharing | Token copied insecurely | MEDIUM | MEDIUM | For a browser on this machine, `lasterm pair` issues an 8-digit code valid for 60 seconds and usable once. No other device can pair yet (#193) |
 | Pairing code disclosure | Read `meta.db`, its WAL or a copy of it while a code is live, without reading the hub's memory | HIGH — the code is redeemed for a token | LOW | `meta.db` holds a keyed hash of the code, never the code, under a key that exists only in the hub's memory for one run (§ 2.3) |
-| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
+| Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-generated-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 | Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
 | Native addon substitution | Another account able to write a directory on the path to the addon cache leaves a library where the single executable extracts its native addons | HIGH — the library runs inside the hub, which holds the token and terminal authority | LOW | Every addon is authenticated against the SHA-256 of the copy embedded in the executable, read through the descriptor it is opened with. On Linux the cache is used only when every directory on its path is private to this account or root — otherwise the addons are extracted under `XDG_RUNTIME_DIR`, checked the same way, or the hub does not start — and the addon is loaded through that descriptor. On Windows neither holds: the chain is not examined and LoadLibrary resolves the name again — see § 4.5 |
 
@@ -213,15 +213,29 @@ plain text before this: one still live stopped working, and the rest were alread
 | Method | How | Security level |
 |--------|-----|---------------|
 | **ssh-agent** (recommended) | Hub uses running ssh-agent via `SSH_AUTH_SOCK` | HIGH — keys never touch disk via lasterm |
-| Key file | Hub reads private key path | MEDIUM — key on disk, lasterm doesn't copy it |
+| Key file | Hub reads private key path | MEDIUM — key on disk. The hub reads it at each connection and does not copy it; a key uploaded through the key browser is written into `~/.ssh` (§ 3.2) |
 | Password | Hub sends password over SSH | LOW — password in memory (not stored) |
 
 **MVP:** Support all three. Recommend ssh-agent in UI. Never store passwords in meta.db.
 
 ### 3.2 SSH Key Handling
 
-- lasterm NEVER copies private keys
-- Key path stored in meta.db (hosts.ssh_key_path) — points to user's existing key
+- A key a host names by path stays where it is: meta.db stores the path (`hosts.ssh_key_path`), and
+  the hub reads the file at each connection (`buildSshConnectConfig`, `session/ssh-agent.ts`)
+  without copying it.
+- The one place lasterm writes an SSH private key is the key browser's upload, `POST /api/ssh-keys`
+  (`api/ssh-keys.ts`). It writes the uploaded bytes unchanged (a passphrase-protected key stays
+  encrypted) to `~/.ssh/<file name>`, or to a subdirectory of `~/.ssh` the request names, created
+  0700 when it is missing. A name or directory that would leave `~/.ssh` is refused, and so is a
+  name already taken (409). It accepts at most 100 KB, and only what ssh2 parses as a key or reports
+  as encrypted. The file is created with the umask's mode, then set to 0600; on Windows that sets
+  nothing, and the file has the profile's default ACL, as `auth.json` does (#200). No other code
+  path writes an SSH key: a remote deploy uploads the agent binary alone (SPEC.md § 3.5).
+- Listing keys (`GET /api/ssh-keys`) creates `~/.ssh` 0700 when it is missing, and reads every
+  regular file of up to 1 MB in the directory it lists, to show its algorithm and fingerprint;
+  `*.pub`, `known_hosts`, `known_hosts.old`, `config` and `authorized_keys` are skipped. `DELETE /api/ssh-keys`
+  removes the file it names from `~/.ssh` or from the subdirectory named, without checking that
+  the file is a key.
 - Passphrase: asked of the person before anything is dialled (§ 3.3c), never written to disk. It is
   kept in the hub's memory, per host, for 60 s, or 15 min when the person asks to remember it, so
   that a reconnect needs no prompt (§ 4.3)
@@ -302,18 +316,23 @@ lasterm-agent --daemon --socket $XDG_RUNTIME_DIR/lasterm/agent.sock
 - Daemon spawned detached by hub via `connectOrLaunch()` (survives hub restart)
 - Listens on UDS only — no TCP listener, not reachable from network
 - Runs as the same user as the hub (inherited from parent process)
-- Socket parent directory permissions (0700) prevent other users from connecting
+- The socket is 0600, and its parent directory 0700 when lasterm creates it (§ 3.5)
 
 ### 3.5 Daemon Socket Security (UDS / Named Pipe)
 
 The agent daemon communicates with the hub over a Unix domain socket (Linux/macOS) or named pipe (Windows).
 
 **Socket paths:**
-- Linux: `$XDG_RUNTIME_DIR/lasterm/agent.sock` (typically `/run/user/<uid>/lasterm/agent.sock`)
+- Linux: `$XDG_RUNTIME_DIR/lasterm/agent.sock` (typically `/run/user/<uid>/lasterm/agent.sock`), or
+  `/tmp/lasterm-<uid>/agent.sock` when `XDG_RUNTIME_DIR` is not set (`socket-path.ts`)
 - Windows: `\\.\pipe\lasterm-agent-<username>`
 
 **Filesystem protection:**
-- Parent directory (`$XDG_RUNTIME_DIR/lasterm/`) created with mode 0700 — only the owning user can list or access contents — and the socket itself 0600
+- The socket is set to 0600 once bound. Its parent directory is created 0700 when the hub
+  (`agent-launcher.ts`) or the agent is the one to create it. A parent that already exists is used
+  as it is: neither refuses it for its owner or its mode, and the agent only declines to write its
+  identity record into one that group or others can write. Under `XDG_RUNTIME_DIR` it is the
+  user's own runtime directory; `/tmp/lasterm-<uid>` is a name another account can create first
 - On Windows the named pipe is created with an owner-only DACL (SDDL `D:(A;;GA;;;OW)`), so another account cannot open it
 - `probeSocket(path)` throws on EACCES, preventing connection to another user's socket
 
@@ -392,6 +411,8 @@ not even an empty one. Before #127 no hub sent an empty token, and that marker m
 | Terminal output | spool.db | chmod 600 | SQLCipher |
 | Snapshots | spool.db | chmod 600 | SQLCipher |
 | Config prefs | config.toml | Standard file perms | — |
+| SSH private key uploaded through the key browser | `~/.ssh/<name>`, the bytes as uploaded (§ 3.2) | 0600 once written, on Unix; on Windows the profile's default ACL | — |
+| Client token and UI state | `localStorage` of the browser for the hub's origin, or of the desktop's webview: the token (`lasterm_token`), the tab layout, the terminal search history | The browser or webview profile's own protection; nothing here encrypts it | — |
 | Web UI files (PWA) | The browser's Cache Storage for the hub's origin | Only the build's hashed static files: the service worker never caches `/api/*`, `/ws`, `/public/*`, `index.html`, or any request carrying credentials (SPEC.md § 3.4) | — |
 
 ### 4.2 In Transit
@@ -401,7 +422,7 @@ not even an empty one. Before #127 no hub sent an empty token, and that marker m
 | Desktop, CLI, dev proxy ↔ Hub | TLS, key-pinned | The peer key must match `runtime.json`'s recorded SPKI. This is **key** identity, not certificate identity: these clients accept when the handshake proves possession of that key and refuse otherwise, with chain, expiry, hostname and trust roots taking no part. An expired certificate over the pinned key connects |
 | Browser ↔ Hub | TLS, **not pinned** | A browser applies its own trust decision — its root store, or an exception the user accepted for the hub's self-signed certificate. It does not read `runtime.json` and does not check the recorded key, so a certificate the browser trusts for another reason is accepted. What bounds the exposure there is that a browser pairing does not outlive the hub run it was made against |
 | Hub ↔ Agent (daemon) | None (UDS) | Kernel-only IPC, same user, no network transit |
-| Hub ↔ Agent (SSH) | SSH (AES-256-GCM or ChaCha20) | Standard SSH encryption |
+| Hub ↔ Agent (SSH) | SSH, with ssh2's default ciphers | The hub sets no `algorithms`, so the cipher is negotiated from ssh2's defaults: AES-GCM (128, 256), AES-CTR (128, 192, 256) and ChaCha20-Poly1305 |
 
 **Note:** the hub binds `127.0.0.1` today, which is the default of the local launch rather than the
 design — pairing exists so a client can reach a hub across a network, and #96 covers hardening that
@@ -423,9 +444,22 @@ again, which is now roughly every two and a quarter years rather than every rest
 - Pairing-code key: 32 random bytes drawn at each hub start, never written; a restart discards it (§ 2.3)
 - SSH passwords: cleared after authentication (not stored)
 - SSH key passphrases: kept per host for 60 s, or 15 min when the person asks to remember it, so
-  that a reconnect needs no prompt; a reconnect uses only what is kept, and never asks
-- Elevation passwords: kept for 5 min, and sent to the agent in the SPAWN that needs them
-- Terminal output (hub): buffer limited by backpressure (max ~1MB per channel in memory)
+  that a reconnect needs no prompt; a reconnect uses only what is kept, and never asks. One that
+  has expired is removed the next time the hub looks for that host's passphrase, and stays in
+  memory until then (`ssh-connection-manager.ts`)
+- Elevation passwords: kept per host and per client, the one that typed it, and sent to the agent
+  in each SPAWN that needs one. How long depends on where it was typed: 5 min when opening an
+  elevated terminal (`spawnOnHost`, `session-manager.ts`), 15 min when restarting one
+  (`restartChannel`, `channel-lifecycle-manager.ts`). Until then, the same client opens or
+  restarts an elevated terminal on that host without being asked. A restart goes by the first
+  client attached to the terminal, using what that client typed or asking it; with none attached,
+  it asks nobody and uses any unexpired password kept for that host, whichever client typed it. An
+  expired one is never removed: it stays in memory until the same client types another for that
+  host, or the hub stops
+- Terminal output (hub): up to 256 KB per channel waits in memory, for 1 s at most, before it is
+  written to spool.db as a chunk (`output-chunker.ts`, STORAGE.md § 5.1). Nothing else bounds it:
+  the hub applies no backpressure, never pausing an agent's stream, and does not check how much a
+  WebSocket client has yet to read
 - Terminal output (daemon agent): while a hub has no connection, up to 1000 frames per hub, about 8 MiB at most, oldest dropped (SPEC.md § 3.2). While a hub is connected, nothing bounds what waits for it to read (#553)
 - Snapshots: kept in cache, limited by GC policy
 - A host's environment (#576): asked of its agent over the hub's authenticated connection

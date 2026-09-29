@@ -127,6 +127,14 @@ connection is dropped within a minute. The hub then reconnects it, retrying for 
 minutes, through its jump host when it has one, and a terminal restart asked for meanwhile
 waits for the host rather than fail.
 
+A remote host's menu (right-click its badge in the rail) connects it without opening a
+terminal, reconnects it, or disconnects it. A host that keeps an agent running keeps its
+terminals through both: they run on, and the next connection takes them up. On stdio they end
+with the connection, so Reconnect and Disconnect first say how many and ask. After a Disconnect
+the hub leaves the host alone, even when a window reopens its terminals, until you connect it,
+reconnect it, or open or restart a terminal there. A hub restart forgets that, and reaches the
+host as usual. See [`docs/SPEC.md` §5.5b](docs/SPEC.md).
+
 ---
 
 ## Packages

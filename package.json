@@ -12,6 +12,9 @@
 	"engines": {
 		"node": ">=24.0.0"
 	},
+	"volta": {
+		"node": "24.21.0"
+	},
 	"bin": {
 		"lasterm": "./bin/lasterm.js"
 	},

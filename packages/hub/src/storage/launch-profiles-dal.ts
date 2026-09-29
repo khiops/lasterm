@@ -29,6 +29,17 @@ interface LaunchProfileRow {
 	updated_at: string;
 }
 
+/** The fields of a launch profile that may be empty. */
+type ClearableField = "args" | "cwd" | "env" | "iconValue" | "color" | "profileOverrides";
+
+/**
+ * What updateLaunchProfile changes. A field left out stays as stored; null on a
+ * field that may be empty stores none, which is how a client clears it (#665).
+ */
+export type LaunchProfileUpdate = Partial<Omit<LaunchProfile, ClearableField>> & {
+	[K in ClearableField]?: NonNullable<LaunchProfile[K]> | null;
+};
+
 interface HostLaunchProfileRow {
 	host_id: string;
 	profile_id: string;
@@ -155,7 +166,7 @@ export class LaunchProfilesDAL {
 		return row.n;
 	}
 
-	updateLaunchProfile(id: string, updates: Partial<LaunchProfile>): LaunchProfile | undefined {
+	updateLaunchProfile(id: string, updates: LaunchProfileUpdate): LaunchProfile | undefined {
 		const existing = this.getLaunchProfile(id);
 		if (!existing) return undefined;
 

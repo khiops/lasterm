@@ -84,13 +84,36 @@ export function acquireHubLock(
 }
 
 function loadHubLockAddon(): HubLockAddon {
-	if (detectSea()) return loadSeaAddon();
-	const override = process.env.LASTERM_HUB_LOCK_ADDON;
-	const addonPath = override && override.length > 0 ? override : localAddonPath();
-	return dlopenAddon(addonPath);
+	const { exports, source } = hubNativeAddon();
+	return asHubLockAddon(exports, source);
 }
 
-function loadSeaAddon(): HubLockAddon {
+/** The hub's native addon, once loaded: its exports, and where they came from. */
+export interface HubNativeAddon {
+	readonly exports: Record<string, unknown>;
+	readonly source: string;
+}
+
+let loadedNativeAddon: HubNativeAddon | undefined;
+
+/**
+ * The hub's native addon, loaded once per process. Besides the hub lock, it
+ * connects to the local agent and checks the account at the other end
+ * (session/local-agent-endpoint.ts). A failed load is not remembered.
+ */
+export function hubNativeAddon(): HubNativeAddon {
+	loadedNativeAddon ??= loadHubNativeAddon();
+	return loadedNativeAddon;
+}
+
+function loadHubNativeAddon(): HubNativeAddon {
+	if (detectSea()) return { exports: loadSeaAddon(), source: SEA_ASSET_NAME };
+	const override = process.env.LASTERM_HUB_LOCK_ADDON;
+	const addonPath = override && override.length > 0 ? override : localAddonPath();
+	return { exports: dlopenAddon(addonPath), source: addonPath };
+}
+
+function loadSeaAddon(): Record<string, unknown> {
 	const req = createRequire(import.meta.url);
 	const sea = req("node:sea") as {
 		getRawAsset: (name: string) => ArrayBuffer;
@@ -99,12 +122,11 @@ function loadSeaAddon(): HubLockAddon {
 	// Loaded through the authenticated cache, never by a path handed back from
 	// it: the path is only a name, and a name can change between the check and
 	// the load.
-	const exports = loadCachedAddon(
+	return loadCachedAddon(
 		SEA_ASSET_NAME,
 		getAddonCacheDir(readSeaVersion(sea)),
 		Buffer.from(sea.getRawAsset(SEA_ASSET_NAME)),
 	);
-	return asHubLockAddon(exports, SEA_ASSET_NAME);
 }
 
 function localAddonPath(): string {
@@ -114,10 +136,10 @@ function localAddonPath(): string {
 	return join(cargoTargetDir(), "release", filename);
 }
 
-function dlopenAddon(addonPath: string): HubLockAddon {
+function dlopenAddon(addonPath: string): Record<string, unknown> {
 	const mod = { exports: {} as Record<string, unknown> };
 	process.dlopen(mod, addonPath);
-	return asHubLockAddon(mod.exports, addonPath);
+	return mod.exports;
 }
 
 function asHubLockAddon(exports: Record<string, unknown>, source: string): HubLockAddon {

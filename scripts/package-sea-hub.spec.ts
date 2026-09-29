@@ -108,6 +108,28 @@ describe("loadHubLockAddon", () => {
 	});
 });
 
+describe("checkHubLockExports", () => {
+	const lock = { HubLock: class {}, tryAcquire: () => null };
+	const local = { connectLocalAgent: () => ({}), verifyLocalAgentPeer: () => {} };
+
+	it("accepts the hub lock with the local agent's connection and peer check", async () => {
+		const { checkHubLockExports } = await import("./package-sea-hub.js");
+		expect(() => checkHubLockExports({ ...lock, ...local }, "addon")).not.toThrow();
+	});
+
+	it("refuses a hub lock addon built without the local agent's peer check", async () => {
+		const { checkHubLockExports } = await import("./package-sea-hub.js");
+		// Mutation caught: without this check, an addon from before it was added
+		// packages a hub that cannot reach its local agent.
+		expect(() => checkHubLockExports(lock, "addon")).toThrow(
+			"no connectLocalAgent/verifyLocalAgentPeer export",
+		);
+		expect(() =>
+			checkHubLockExports({ ...lock, connectLocalAgent: local.connectLocalAgent }, "addon"),
+		).toThrow("no connectLocalAgent/verifyLocalAgentPeer export");
+	});
+});
+
 describe("assertNativeHubTarget", () => {
 	const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
 	const hostTriple =

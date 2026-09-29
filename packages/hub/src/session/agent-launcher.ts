@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
-import { closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,11 @@ import { createOwnerOnlyDirectory } from "../auth.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import { resolveAgentBinaryPath } from "../sea-agent-resolver.js";
 import { LastermAgent } from "./lasterm-agent.js";
+import {
+	ensurePrivateSocketDirectory,
+	LocalAgentEndpointError,
+	type LocalAgentEndpointOptions,
+} from "./local-agent-endpoint.js";
 import { HubQuittingError } from "./quit-fence.js";
 
 // The agent itself waits ten seconds before reporting its own terminal result.
@@ -140,10 +145,12 @@ export function stopLocalAgent(
  *
  * Flow:
  * 1. Verify agent binary exists
- * 2. Try the authoritative local connection directly
- * 3. If EACCES → throw (different user's socket — do NOT unlink)
- * 4. Spawn: child_process.spawn with detached + unref
- * 5. Poll with LastermAgent.connectLocal until the daemon accepts
+ * 2. Unix: the socket's directory must be this user's own, created 0700 if missing
+ * 3. Try the authoritative local connection directly
+ * 4. If EACCES → throw (different user's socket — do NOT unlink)
+ * 5. If the endpoint is refused (LocalAgentEndpointError) → throw, no launch
+ * 6. Spawn: child_process.spawn with detached + unref
+ * 7. Poll with LastermAgent.connectLocal until the daemon accepts
  */
 export async function connectOrLaunch(
 	socketPath: string,
@@ -151,6 +158,7 @@ export async function connectOrLaunch(
 	agentBinaryPath?: string,
 	hubLogger?: HubLogger,
 	assertRunning: () => void = () => {},
+	endpoint: LocalAgentEndpointOptions = {},
 ): Promise<LastermAgent> {
 	const agentPath = agentBinaryPath ?? resolveAgentPath();
 
@@ -163,13 +171,22 @@ export async function connectOrLaunch(
 		);
 	}
 
+	// The socket's directory, before anything is tried in it: a connection
+	// would find an agent there, and a launch would put one there. It may not
+	// exist yet — on WSL, or under a fresh XDG_RUNTIME_DIR — and the agent's
+	// bind needs it. A named pipe (win32) lives in the kernel's pipe namespace
+	// and has no directory.
+	if ((endpoint.platform ?? process.platform) !== "win32") {
+		ensurePrivateSocketDirectory(socketPath, endpoint.fs);
+	}
+
 	// Try direct connect first — avoids a throwaway probe connection that
 	// confuses the agent's AUTH handshake on Windows named pipes.  Keep
 	// invalidation distinct from a failed transport: a fenced operation is not
 	// allowed to enter *any* recovery path, particularly endpoint deletion.
 	try {
 		assertRunning();
-		const connected = await LastermAgent.connectLocal(socketPath, hubLogger);
+		const connected = await LastermAgent.connectLocal(socketPath, hubLogger, endpoint);
 		// Do not hand a post-quit connection back to a caller which could adopt it.
 		try {
 			assertRunning();
@@ -180,6 +197,8 @@ export async function connectOrLaunch(
 		return connected;
 	} catch (err) {
 		if (err instanceof HubQuittingError) throw err;
+		// Not this account's endpoint: starting an agent would not replace it.
+		if (err instanceof LocalAgentEndpointError) throw err;
 		if ((err as NodeJS.ErrnoException).code === "EACCES") {
 			throw new Error(`Permission denied connecting to socket: ${socketPath}`);
 		}
@@ -196,7 +215,7 @@ export async function connectOrLaunch(
 	// socket probe: the connection that proves the daemon ready is the one this
 	// hub keeps. The daemon makes a connection active, displacing the previous
 	// one, only once it has authenticated (#127).
-	const connected = await connectWhenReady(socketPath, daemonLogPath, hubLogger);
+	const connected = await connectWhenReady(socketPath, daemonLogPath, hubLogger, endpoint);
 	try {
 		assertRunning();
 	} catch (err) {
@@ -243,21 +262,8 @@ function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig
 	const stateDir = lastermDir("state");
 	createOwnerOnlyDirectory(stateDir);
 
-	// Ensure the socket's parent directory exists — on WSL / XDG_RUNTIME_DIR
-	// environments the directory may not yet exist, causing the agent's
-	// UnixListener::bind to fail with ENOENT and exit silently.
-	// On win32 the socket path is a named pipe (\\.\pipe\...) which lives in the
-	// kernel pipe namespace, not the filesystem — mkdirSync must be skipped there.
-	// Gating on platform (not on the path string) is more robust: path-prefix
-	// matching is case-sensitive and misses alternate pipe forms, while the
-	// platform is the authoritative oracle for which path getSocketPath returns.
-	if (process.platform !== "win32") {
-		// mode: 0o700 makes the created dir owner-only so other local users
-		// cannot reach the agent socket inside it.  Only applies to directories
-		// CREATED by this call; pre-existing parents (e.g. /run/user/<uid>)
-		// are untouched — matching the socket file's 0600 intent.
-		mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
-	}
+	// The socket's directory exists, and is this user's own: connectOrLaunch
+	// made sure of it before the first connection attempt.
 	const logPath = join(stateDir, "agent-daemon.log");
 	const logFd = openSync(logPath, "a");
 
@@ -343,15 +349,17 @@ async function connectWhenReady(
 	socketPath: string,
 	daemonLogPath?: string,
 	hubLogger?: HubLogger,
+	endpoint: LocalAgentEndpointOptions = {},
 ): Promise<LastermAgent> {
 	const deadline = Date.now() + AGENT_SOCKET_TIMEOUT;
 	let lastErr: unknown;
 
 	while (Date.now() < deadline) {
 		try {
-			return await LastermAgent.connectLocal(socketPath, hubLogger);
+			return await LastermAgent.connectLocal(socketPath, hubLogger, endpoint);
 		} catch (err) {
 			lastErr = err;
+			if (err instanceof LocalAgentEndpointError) throw err;
 			if ((err as NodeJS.ErrnoException).code === "EACCES") {
 				throw new Error(`Permission denied connecting to socket: ${socketPath}`);
 			}

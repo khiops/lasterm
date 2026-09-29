@@ -1,4 +1,4 @@
-import { existsSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlatformDirs } from "../platform-dirs.fixture.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { LastermAgent } from "./lasterm-agent.js";
+import { type EndpointFs, LocalAgentEndpointError } from "./local-agent-endpoint.js";
 import { HubQuittingError } from "./quit-fence.js";
 import { getTestSocketPath } from "./test-socket-path.js";
 
@@ -316,8 +317,8 @@ describe("connectOrLaunch", () => {
 	});
 
 	/**
-	 * Mutation caught: removing the `mkdirSync(dirname(socketPath), ...)` call
-	 * in launchDaemon causes the agent's UnixListener::bind to fail with ENOENT
+	 * Mutation caught: removing the `ensurePrivateSocketDirectory` call in
+	 * connectOrLaunch causes the agent's UnixListener::bind to fail with ENOENT
 	 * on WSL / XDG_RUNTIME_DIR environments where the socket parent dir does not
 	 * pre-exist. This test verifies the directory is created before spawn is called.
 	 */
@@ -337,7 +338,7 @@ describe("connectOrLaunch", () => {
 
 				let dirCreatedBeforeSpawn = false;
 				mockSpawnImpl = (..._args: unknown[]) => {
-					// At this point launchDaemon has already run mkdirSync — check it.
+					// At this point connectOrLaunch has already made the directory — check it.
 					dirCreatedBeforeSpawn = existsSync(missingParent);
 					// Start the mock daemon so waitForSocket succeeds.
 					setTimeout(async () => {
@@ -402,6 +403,106 @@ describe("connectOrLaunch", () => {
 		},
 		TEST_TIMEOUT,
 	);
+});
+
+/** A mock daemon's connections, and whether the hub started an agent. */
+async function refusedWithoutContact(
+	attempt: (socketPath: string) => Promise<unknown>,
+	socketPath: string,
+): Promise<LocalAgentEndpointError> {
+	const daemon = await createMockDaemon(socketPath);
+	let spawned = false;
+	mockSpawnImpl = () => {
+		spawned = true;
+		return { unref: vi.fn(), pid: 99999 };
+	};
+	try {
+		const error = await attempt(socketPath).then(
+			() => {
+				throw new Error("expected a refusal");
+			},
+			(caught: unknown) => caught,
+		);
+		expect(error).toBeInstanceOf(LocalAgentEndpointError);
+		// Neither a connection, which would carry the token, nor a launch.
+		expect(daemon.connections).toHaveLength(0);
+		expect(spawned).toBe(false);
+		return error as LocalAgentEndpointError;
+	} finally {
+		await closeServer(daemon.server);
+	}
+}
+
+describe("connectOrLaunch refuses a socket directory that is not this user's own", () => {
+	let tmpDir: string;
+	let dummyBinary: string;
+	let restoreStateRoot: () => void = () => {};
+	const config: AgentConfig = { ...DEFAULT_AGENT_CONFIG };
+
+	beforeEach(async () => {
+		tmpDir = makeTempDir("lasterm-launcher-refusal-");
+		restoreStateRoot = usePlatformDirs({ state: tmpDir });
+		dummyBinary = path.join(tmpDir, "fake-agent.js");
+		await writeFile(dummyBinary, "// placeholder");
+	});
+
+	afterEach(async () => {
+		mockSpawnImpl = () => ({ unref: vi.fn(), pid: 99999 });
+		await removeTempDir(tmpDir);
+		restoreStateRoot();
+	});
+
+	// Another account's directory cannot be made without root, so its answer to
+	// lstat is supplied. The daemon behind the path is real: on Windows a named
+	// pipe, which these Unix checks stand in front of all the same.
+	it("owned by another account", async () => {
+		const fs: EndpointFs = {
+			lstat: () => ({
+				uid: 4242,
+				mode: 0o40700,
+				isDirectory: () => true,
+				isSymbolicLink: () => false,
+				isSocket: () => false,
+			}),
+			mkdir: vi.fn(),
+			uid: () => 1000,
+		};
+		const error = await refusedWithoutContact(
+			(socketPath) =>
+				connectOrLaunch(socketPath, config, dummyBinary, undefined, undefined, {
+					platform: "linux",
+					fs,
+				}),
+			getTestSocketPath(),
+		);
+		expect(error.reason).toBe("is owned by uid 4242, not by this user (uid 1000)");
+		expect(fs.mkdir).not.toHaveBeenCalled();
+	});
+
+	it.skipIf(process.platform === "win32")("open to group or others", async () => {
+		const directory = path.join(tmpDir, "shared");
+		mkdirSync(directory, { mode: 0o700 });
+		chmodSync(directory, 0o750);
+		const error = await refusedWithoutContact(
+			(socketPath) => connectOrLaunch(socketPath, config, dummyBinary),
+			path.join(directory, "agent.sock"),
+		);
+		expect(error.path).toBe(directory);
+		expect(error.reason).toBe("gives group or others access (mode 750); it must be 700");
+	});
+
+	it.skipIf(process.platform === "win32")("reached through a symbolic link", async () => {
+		const real = path.join(tmpDir, "real");
+		mkdirSync(real, { mode: 0o700 });
+		const link = path.join(tmpDir, "link");
+		symlinkSync(real, link);
+		const error = await refusedWithoutContact(
+			(socketPath) => connectOrLaunch(socketPath, config, dummyBinary),
+			path.join(link, "agent.sock"),
+		);
+		expect(error.path).toBe(link);
+		expect(error.reason).toBe("is a symbolic link, not a directory");
+	});
 });
 
 describe("stopLocalAgent", () => {

@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-28
+> Last updated: 2026-09-29
 
 ## 1. Overview
 
@@ -335,15 +335,15 @@ The `cache_index` table (meta.db) tracks the latest cache state per channel:
 ```
 channel_id → {
   last_snapshot_chunk_id: points to latest snapshot in spool.db
-  last_seq: highest output seq number cached
-  last_seen_at: when hub last received data for this channel
+  last_seq: the seq just before that snapshot's
+  last_seen_at: when that snapshot was stored
 }
 ```
 
-**Used for:**
-- Fast ATTACH: read snapshot + tail (chunks where seq > snapshot's seq)
-- Offline view: when agent unreachable, serve from cache
-- GC decisions: channels not seen recently = candidates for cleanup
+It is written each time a snapshot is stored (`storeSnapshot`), and deleted with its channel.
+Nothing reads it: an ATTACH, cached or not, finds the latest snapshot in spool.db itself
+(`getLatestSnapshot`) and reads the tail after it, and GC goes by chunk age, size and the
+channel's status (§ 7), never by this table.
 
 ## 7. Garbage Collection
 
@@ -391,10 +391,11 @@ Every 10 minutes:
 |-----------|-----------|----------|-------|
 | OUTPUT chunk write | Continuous (10s–100s/sec) | spool.db | chunks |
 | Snapshot write | Every 3-5s per active channel | spool.db | chunks |
-| Cache index update | Every chunk write | meta.db | cache_index |
+| Cache index update | Every snapshot write | meta.db | cache_index |
 | Session/channel status | On state change | meta.db | sessions, channels |
 | Host CRUD | Rare (user action) | meta.db | hosts |
-| Workspace save | On layout change | meta.db | workspaces |
+
+A tab layout is not written here: the browser keeps it in `localStorage` (§ 3.5).
 
 ### 8.2 Read Patterns
 
@@ -462,7 +463,8 @@ cp ~/.local/state/lasterm/spool.db backup/spool.db
 # Config-only backup (tiny, recommended for sync)
 cp ~/.local/state/lasterm/meta.db backup/meta.db
 cp ~/.config/lasterm/config.toml backup/config.toml
-# Spool is regeneratable — no need to backup
+# spool.db is not regenerated from anything: leaving it out loses the terminals' output
+# history and snapshots, and nothing else
 ```
 
 **Online backup (while hub running):**
@@ -483,7 +485,7 @@ Channel created (BORN)
   │
   ├─ Output flowing → chunks accumulate in spool.db
   ├─ Snapshots taken periodically → snapshot chunks in spool.db
-  ├─ cache_index updated with every chunk
+  ├─ cache_index updated with every snapshot
   │
   Channel LIVE → ORPHAN → LIVE (reconnect cycle)
   │

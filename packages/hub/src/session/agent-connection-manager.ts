@@ -58,6 +58,9 @@ export class AgentConnectionManager {
 
 	private readonly daemonAttachPromises = new Map<string, Promise<LastermAgent>>();
 
+	/** Whether this run has said that the profile holds several local hosts (#658). */
+	private severalLocalHostsReported = false;
+
 	constructor(
 		private readonly ctx: SharedSessionContext,
 		private readonly broadcaster: StateBroadcaster,
@@ -66,13 +69,34 @@ export class AgentConnectionManager {
 
 	// ─── Host / session helpers ───────────────────────────────────────────────
 
+	/**
+	 * The local host, found by its type: its label is the user's to change, and
+	 * going by it created a second local host after a rename (#658). A profile
+	 * that already holds several uses the oldest, the one renamed, and nothing
+	 * here deletes the others.
+	 */
 	async ensureLocalHost(): Promise<string> {
-		const existing = this.ctx.metaDal.getHostByLabel("local");
-		if (existing) return existing.id;
-		const host = this.ctx.metaDal.createHost({ type: "local", label: "local" });
+		const [oldest, ...others] = this.ctx.metaDal.listLocalHosts();
+		if (oldest) {
+			if (others.length > 0 && !this.severalLocalHostsReported) {
+				this.severalLocalHostsReported = true;
+				this.ctx.hubLogger?.log(
+					"info",
+					"agent-connection-manager: several local hosts, using the oldest",
+					{ hostId: oldest.id, otherHostIds: others.map((host) => host.id) },
+				);
+			}
+			return oldest.id;
+		}
+		// Labels are unique, and with the local host gone a remote one may
+		// have taken "local".
+		let label = "local";
+		for (let n = 2; this.ctx.metaDal.getHostByLabel(label); n++) label = `local-${n}`;
+		const host = this.ctx.metaDal.createHost({ type: "local", label });
 		return host.id;
 	}
 
+	/** An absent id, or the alias "local", means the local host, whatever its label. */
 	async resolveHostId(requestedId?: string): Promise<string> {
 		if (!requestedId || requestedId === "local") {
 			return this.ensureLocalHost();

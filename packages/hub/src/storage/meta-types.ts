@@ -19,8 +19,10 @@ export interface CreateHostInput {
 	sshAuth?: "agent" | "key" | "password";
 	sshKeyPath?: string;
 	iconType?: "auto" | "emoji" | "image";
-	iconValue?: string;
-	color?: string;
+	/** null stores none, which is how a client clears it (#659). */
+	iconValue?: string | null;
+	/** null stores none, which is how a client clears it (#659). */
+	color?: string | null;
 	profileJson?: string;
 	trustRemoteHints?: "apply" | "ask" | "ignore";
 	defaultShell?: string;

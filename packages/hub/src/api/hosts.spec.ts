@@ -3,6 +3,7 @@ import {
 	type CreateHostBody,
 	MAX_ICON_IMAGE_LENGTH,
 	validateCreateHost,
+	validateHostColor,
 	validateIconImage,
 } from "./hosts.js";
 
@@ -84,5 +85,30 @@ describe("validateIconImage", () => {
 		expect(validateIconImage("image", `data:image/png;base64,${"A".repeat(70_000)}`)).toBe(
 			`an image icon must be at most ${MAX_ICON_IMAGE_LENGTH} characters`,
 		);
+	});
+
+	it("accepts null, which clears the icon (#659)", () => {
+		expect(validateIconImage("auto", null)).toBeNull();
+		expect(validateIconImage("image", null)).toBeNull();
+	});
+});
+
+// PUT /api/hosts/:id applies it too.
+describe("validateHostColor", () => {
+	it("accepts a #rrggbb colour", () => {
+		expect(validateHostColor("#00ff00")).toBeNull();
+		expect(validateHostColor("#A0b1C2")).toBeNull();
+	});
+
+	it("accepts null, which clears the colour (#659)", () => {
+		expect(validateHostColor(null)).toBeNull();
+		expect(validateHostColor(undefined)).toBeNull();
+		expect(validateCreateHost(body({ type: "local", label: "no-color", color: null }))).toBeNull();
+	});
+
+	it("refuses anything else, the empty string included", () => {
+		for (const color of ["notacolor", "", "#fff", "00ff00", "#00ff00 ", 0xff00, true]) {
+			expect(validateHostColor(color)).toBe("color must be in hex format #rrggbb");
+		}
 	});
 });

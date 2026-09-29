@@ -11,6 +11,7 @@ import { registerChannelRoutes } from "./api/channels.js";
 import { registerConfigRoutes } from "./api/config.js";
 import { registerFontRoutes } from "./api/fonts.js";
 import { registerGroupRoutes } from "./api/groups.js";
+import { registerHostConnectionRoutes } from "./api/host-connection.js";
 import { registerHostGroupRoutes } from "./api/host-groups.js";
 import { registerHostRoutes } from "./api/hosts.js";
 import { registerLaunchProfileRoutes } from "./api/launch-profiles.js";
@@ -560,6 +561,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerHostGroupRoutes(server, metaDal);
 		registerLaunchProfileRoutes(server, metaDal);
 		registerSessionRoutes(server, metaDal, activeSessionManager);
+		registerHostConnectionRoutes(server, metaDal, activeSessionManager);
 		registerChannelRoutes(
 			server,
 			metaDal,

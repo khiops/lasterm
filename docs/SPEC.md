@@ -172,6 +172,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - `connectOrLaunch` (`agent-launcher.ts`): connects to the socket, spawns a detached daemon if that fails, then retries the connection until it is accepted. Every connection is checked before anything is sent on it (`local-agent-endpoint.ts`, SECURITY.md § 3.5), and a refused endpoint is not replaced by a launch
 - Session state machine: STARTING → ACTIVE ↔ DISCONNECTED → CLOSED, with DETACHED branch
 - Reconnect (remote): exponential backoff (1s, 2s, 4s, ... 30s max, 5min total timeout)
+- Connect, Reconnect and Disconnect a remote host on its user's request, and hold back from reconnecting one its user disconnected (§ 5.5b)
 - Reconnect (local): connect to the daemon again, launching a new one if none answers
 - Channel multiplexing: multiple PTYs per agent connection
 
@@ -548,8 +549,10 @@ All protocol messages use **snake_case** for field names (e.g., `channel_id`, `c
 | From | To | Trigger |
 |------|----|---------|
 | starting | active | SSH connected + HELLO received (or local PTY spawned) |
-| active | disconnected | SSH connection lost (ssh2 'close' event) |
+| active | disconnected | SSH connection lost (ssh2 'close' event); or its user's Disconnect or Reconnect, when a remote daemon keeps its terminals (§ 5.5b) |
+| active | closed | Its user's Disconnect or Reconnect, when its agent runs on stdio: its terminals end (§ 5.5b) |
 | active | detached | All clients DETACH from all channels in session AND no channels LIVE |
+| disconnected | starting | Its user's Connect or Reconnect (§ 5.5b) |
 | disconnected | active | SSH reconnect succeeds + HELLO received |
 | disconnected | closed | Reconnect timeout (5 min) |
 | detached | active | Any client sends ATTACH for a channel in this session |
@@ -800,6 +803,52 @@ Only a slower link, saturated, could lose a connection that was alive. The value
 (`packages/hub/src/session/ssh-keepalive.ts`), and no host setting changes them: a host that
 could turn them off would bring #605 back for itself. Hosts used to show a "Keep Alive (s)"
 value that nothing read; it is gone (STORAGE.md § 3.1).
+
+### 5.5b Connect, Reconnect and Disconnect, on request (#648)
+
+A remote host's menu in the rail (right-click its badge) acts on its connection, and never on
+the local host's. The hub does the work, through `POST /api/hosts/:id/connect`, `/reconnect`
+and `/disconnect` (PROTOCOL.md § 6):
+
+| Item | Shown when the host is | What the hub does |
+|------|------------------------|-------------------|
+| Connect | offline, or disconnected by its user | Connects it and readies its agent, deploying or checking the binary as for a first terminal, and starts no terminal. The same questions (host key, passphrase, agent binary) go to the window that asked. What a daemon still holds is taken up. The host shows `starting`, then `active` |
+| Reconnect | live, being reached, or lost (`error`) | Closes the connection, then connects as above. A daemon's terminals survive and are taken up again. On stdio they end with the connection |
+| Disconnect | live | Closes the connection. A daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end, and the session closes |
+
+Terminals that end this way end `stopped` (PROTOCOL.md § 4.7): nobody aimed at one, so a
+pane that sees it leaves it be. Before ending any, the hub refuses with how many
+(`TERMINALS_WOULD_END`), and the client asks `N terminals on <host> will end.` before sending the
+request again with `force`. A host whose daemon keeps them is never asked about.
+
+Connect goes through the same acquisition as a SPAWN (`session-acquisition.ts`), so a SPAWN, a
+restart or an attach that comes meanwhile waits for that connection rather than open a second
+one beside it, which a daemon would take for a newer connection of the same hub and keep in
+place of the first (#127). A reconnect the hub had waiting after a lost link gives way to it.
+
+**After a Disconnect, the hub leaves the host alone** until someone acts on it. It keeps the
+host in `userDisconnectedHosts` and:
+- schedules no reconnect when a link closes or a keepalive gives up (`scheduleReconnect`);
+- does not reach for it when a window attaches to one of its terminals: the attach is
+  answered from the spool, and the pane says its terminal is not connected;
+- refuses a start nobody asked for (`SPAWN` with `automatic`: a pane following "When a
+  terminal ends", or waiting for its host, § 5.5), with `HOST_UNREACHABLE`; the pane waits for
+  the host as for one that is away.
+
+Acting on it is Connect, Reconnect, a new terminal opened there (the rail's +, the empty pane's
+picker, the palette), or a Restart pressed on one of its terminals, from its pane, the sidebar or
+the restart route; a pane's Reconnect over one of its terminals connects the host first. Each
+reaches the host as usual and ends the hold.
+
+The rail and the picker show such a host **disconnected**, apart from offline (never connected,
+or its session closed) and from an error (lost, the hub reaching for it again): a hollow dot, and
+"Disconnected" in its tooltip and its row. The hub says it in each `SESSION_STATE` of that host
+(`disconnected_by_user`) and lists those hosts in `STATE_SYNC` (`user_disconnected_hosts`), since
+a host whose connection ran its terminals has no session left to carry it.
+
+**Nothing of it is persisted.** The hold lives in the hub's memory: a hub that restarts has
+forgotten it, and reaches the host as it always did (§ 5.6, #79): a daemon's terminals stay
+orphan until a window attaches to one, which reconnects the host.
 
 ### 5.6 Daemon Agent — Connect + Reconnect
 

@@ -59,7 +59,7 @@
 			:confirm-label="confirmDialog.confirmLabel"
 			:show-remember="confirmDialog.showRemember"
 			@confirm="onConfirmAction"
-			@cancel="confirmDialog.visible = false"
+			@cancel="onCancelConfirm"
 		/>
 
 		<!-- Add/Edit Host modal — opened from rail "+" or host context menu -->
@@ -82,6 +82,7 @@
 			@edit="onEditHost"
 			@delete="onDeleteHost"
 			@connect="onConnectHost"
+			@reconnect="onReconnectHost"
 			@disconnect="onDisconnectHost"
 			@new-group="onNewGroupForHost"
 		/>
@@ -437,6 +438,12 @@ import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
 import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
+import {
+	closeConnectionWithConsent,
+	type HostConnectionAction,
+	type HostConnectionQuestion,
+	hostConnectionFailure,
+} from './utils/host-connection.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
 import {
@@ -879,7 +886,38 @@ function onWindowBackgroundNeedsRestart(event: Event): void {
 	};
 }
 
+/** What a question asked through `askToConfirm` does on Cancel: answer no. */
+let confirmCancelled: (() => void) | null = null;
+
+/**
+ * Put a question in the confirm dialog and resolve with the answer: true on
+ * its button, false on Cancel or when another question takes its place.
+ */
+function askToConfirm(question: HostConnectionQuestion): Promise<boolean> {
+	confirmCancelled?.();
+	return new Promise<boolean>((resolve) => {
+		confirmCancelled = () => resolve(false);
+		confirmDialog.value = {
+			visible: true,
+			title: question.title,
+			message: question.message,
+			confirmLabel: question.confirmLabel,
+			action: () => resolve(true),
+			actionKey: 'ConfirmHostConnection',
+			showRemember: false,
+		};
+	});
+}
+
+function onCancelConfirm(): void {
+	confirmDialog.value.visible = false;
+	const cancelled = confirmCancelled;
+	confirmCancelled = null;
+	cancelled?.();
+}
+
 function onConfirmAction(remember: { host: boolean; global: boolean }): void {
+	confirmCancelled = null;
 	const action = confirmDialog.value.action;
 	const actionKey = confirmDialog.value.actionKey;
 
@@ -1585,12 +1623,45 @@ function onDeleteHost(hostId: string): void {
 	deleteHostId.value = hostId;
 }
 
-function onConnectHost(hostId: string): void {
-	hostsStore.selectHost(hostId);
+/**
+ * Connect the host, without opening a terminal (#648). The hub answers at
+ * once: its questions come to this window, and the rail shows the rest.
+ */
+async function onConnectHost(hostId: string): Promise<void> {
+	try {
+		const answer = await hostsStore.connectHost(hostId);
+		if (!answer.ok) toastStore.show('error', hostConnectionFailure(answer));
+	} catch (err) {
+		toastStore.show('error', `Could not reach the hub: ${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
-function onDisconnectHost(_hostId: string): void {
-	// TODO: implement disconnect via session store
+function onReconnectHost(hostId: string): Promise<void> {
+	return closeHostConnection(hostId, 'reconnect');
+}
+
+function onDisconnectHost(hostId: string): Promise<void> {
+	return closeHostConnection(hostId, 'disconnect');
+}
+
+/**
+ * Reconnect or Disconnect a host (#648): asked first when terminals would
+ * end, which only a host with no daemon to keep them says.
+ */
+async function closeHostConnection(hostId: string, action: HostConnectionAction): Promise<void> {
+	const label = hostsStore.hosts.find((h) => h.id === hostId)?.label ?? 'this host';
+	try {
+		const result = await closeConnectionWithConsent(action, label, {
+			post: (force) =>
+				action === 'reconnect'
+					? hostsStore.reconnectHost(hostId, force)
+					: hostsStore.disconnectHost(hostId, force),
+			confirm: askToConfirm,
+		});
+		if (result.kind === 'failed') toastStore.show('error', result.message);
+	} catch (err) {
+		toastStore.show('error', `Could not reach the hub: ${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
 function onNewGroupForHost(hostId: string): void {

@@ -446,6 +446,8 @@ function getTooltip(host: Host): string {
 			`${host.sshUser ?? ""}@${host.sshHost}:${host.sshPort ?? 22}`,
 		);
 	if (host.hostGroup) parts.push(`Group: ${host.hostGroup}`);
+	// Offline on purpose: said, since its dot is only hollow (#648).
+	if (hostsStore.getHostStatus(host.id) === "disconnected") parts.push("Disconnected");
 
 	// Channel count
 	const channelCount = getChannelCount(host.id);
@@ -776,6 +778,12 @@ onMounted(() => {
 
 .status-dot--error {
 	background: var(--nt-badge);
+}
+
+/* Offline on purpose (#648): the offline dot, hollow. */
+.status-dot--disconnected {
+	background: var(--nt-tab-bar);
+	box-shadow: inset 0 0 0 2px var(--nt-text-muted);
 }
 
 .status-dot--reconnecting {

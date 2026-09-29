@@ -335,6 +335,20 @@ export interface AgentEnvironmentResponse {
 	env: Record<string, string>;
 }
 
+// ─── Host connection endpoints' responses ─────────────────────────────────────
+
+/**
+ * `POST /api/hosts/:id/connect`, `/reconnect` and `/disconnect` (#648): what
+ * the hub did. `connecting` is under way, and the host's SESSION_STATE says
+ * how it ends; a failure is an ERROR to the window that asked, as for a
+ * terminal's first connection.
+ */
+export interface HostConnectionResponse {
+	status: "connected" | "connecting" | "disconnected";
+	/** How many terminals of this hub ended with the connection it closed. */
+	ended?: number;
+}
+
 // ─── Cascade endpoint response ────────────────────────────────────────────────
 
 export interface CascadeResponse {

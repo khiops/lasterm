@@ -332,6 +332,10 @@ async fn run_daemon_impl_with_manager(
         ));
     }
 
+    // Nothing is looked at, removed or bound in a directory that is not this
+    // user's own (socket_dir.rs). A missing one is created 0700.
+    crate::socket_dir::ensure_private_socket_dir_for(&path)?;
+
     // A socket file left by a daemon that died is cleaned up; one a daemon is
     // still serving is not touched. Removing it would bind this process in its
     // place and leave the first holding terminals nobody can reach (#454).
@@ -1320,6 +1324,21 @@ mod tests {
         dir
     }
 
+    /// Where a test daemon's socket goes: in a directory of its own, which the
+    /// daemon creates 0700, as it requires of any socket directory.
+    #[cfg(unix)]
+    fn socket_path(prefix: &str) -> PathBuf {
+        temp_path(prefix).join("agent.sock")
+    }
+
+    /// Remove a test socket and the directory `socket_path` put it in.
+    #[cfg(unix)]
+    fn remove_socket(path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     fn no_shutdown_request() -> ShutdownReceiver {
         shutdown_channel().1
     }
@@ -1371,11 +1390,7 @@ mod tests {
         let config_dir = empty_config.to_string_lossy().to_string();
         let state_dir = temp_dir("lasterm-test-state-noop").await;
 
-        let sock_name = format!(
-            "lasterm-test-{}.sock",
-            ulid::Ulid::generate().to_string().to_lowercase()
-        );
-        let path = std::env::temp_dir().join(&sock_name);
+        let path = socket_path("lasterm-test");
         let path_str = path.to_string_lossy().to_string();
 
         // Start daemon in background
@@ -1408,7 +1423,7 @@ mod tests {
 
         drop(stream);
         daemon_handle.abort();
-        let _ = std::fs::remove_file(&path_str);
+        remove_socket(&path);
         let _ = tokio::fs::remove_dir_all(&empty_config).await;
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
     }
@@ -1424,11 +1439,7 @@ mod tests {
         let config_dir = empty_config.to_string_lossy().to_string();
         let state_dir = temp_dir("lasterm-test-state-disp").await;
 
-        let sock_name = format!(
-            "lasterm-test-displace-{}.sock",
-            ulid::Ulid::generate().to_string().to_lowercase()
-        );
-        let path = std::env::temp_dir().join(&sock_name);
+        let path = socket_path("lasterm-test-displace");
         let path_str = path.to_string_lossy().to_string();
 
         let daemon_handle = tokio::spawn(run_daemon_impl(
@@ -1494,7 +1505,7 @@ mod tests {
         drop(stream1);
         drop(stream2);
         daemon_handle.abort();
-        let _ = std::fs::remove_file(&path_str);
+        remove_socket(&path);
         let _ = tokio::fs::remove_dir_all(&empty_config).await;
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
     }
@@ -1510,11 +1521,7 @@ mod tests {
         let config_dir = empty_config.to_string_lossy().to_string();
         let state_dir = temp_dir("lasterm-test-state-perms").await;
 
-        let sock_name = format!(
-            "lasterm-test-perms-{}.sock",
-            ulid::Ulid::generate().to_string().to_lowercase()
-        );
-        let path = std::env::temp_dir().join(&sock_name);
+        let path = socket_path("lasterm-test-perms");
         let path_str = path.to_string_lossy().to_string();
 
         let daemon_handle = tokio::spawn(run_daemon_impl(
@@ -1532,11 +1539,62 @@ mod tests {
             let meta = std::fs::metadata(&path_str).unwrap();
             let mode = meta.permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "socket must be 0600, got {:o}", mode);
+            // The daemon made the socket's directory, and made it owner-only.
+            let dir = std::fs::metadata(path.parent().unwrap()).unwrap();
+            let dir_mode = dir.permissions().mode() & 0o777;
+            assert_eq!(
+                dir_mode, 0o700,
+                "socket directory must be 0700, got {dir_mode:o}"
+            );
         }
 
         daemon_handle.abort();
-        let _ = std::fs::remove_file(&path_str);
+        remove_socket(&path);
         let _ = tokio::fs::remove_dir_all(&empty_config).await;
+        let _ = tokio::fs::remove_dir_all(&state_dir).await;
+    }
+
+    /// A socket directory open to others is refused before anything is bound
+    /// or removed in it, whatever else is there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_daemon_refuses_a_socket_directory_open_to_others() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config_dir = temp_dir("lasterm-test-cfg-opendir").await;
+        let state_dir = temp_dir("lasterm-test-state-opendir").await;
+        let path = socket_path("lasterm-test-opendir");
+        let dir = path.parent().unwrap().to_path_buf();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Something where the socket goes, which a daemon would otherwise
+        // take for a dead daemon's leftover and remove.
+        std::fs::write(&path, b"").unwrap();
+
+        let result = run_daemon_impl(
+            path.to_string_lossy().into_owned(),
+            config_dir.to_string_lossy().into_owned(),
+            state_dir.clone(),
+            no_shutdown_request(),
+            None,
+            None,
+        )
+        .await;
+
+        let error = result.expect_err("a directory open to others must be refused");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        assert!(error.to_string().contains("mode 755"), "{error}");
+        assert!(
+            std::fs::metadata(&path).unwrap().is_file(),
+            "nothing in a refused directory is removed or bound"
+        );
+
+        remove_socket(&path);
+        let _ = tokio::fs::remove_dir_all(&config_dir).await;
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
     }
 
@@ -1551,11 +1609,7 @@ mod tests {
         let config_dir = empty_config.to_string_lossy().to_string();
         let state_dir = temp_dir("lasterm-test-state-stateend").await;
 
-        let sock_name = format!(
-            "lasterm-test-state-end-{}.sock",
-            ulid::Ulid::generate().to_string().to_lowercase()
-        );
-        let path = std::env::temp_dir().join(&sock_name);
+        let path = socket_path("lasterm-test-state-end");
         let path_str = path.to_string_lossy().to_string();
 
         let daemon_handle = tokio::spawn(run_daemon_impl(
@@ -1647,7 +1701,7 @@ mod tests {
 
         drop(stream);
         daemon_handle.abort();
-        let _ = std::fs::remove_file(&path_str);
+        remove_socket(&path);
         let _ = tokio::fs::remove_dir_all(&empty_config).await;
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
     }
@@ -1867,7 +1921,14 @@ mod tests {
         async fn daemon_paths(label: &str) -> (String, String, PathBuf) {
             let config_dir = temp_dir(&format!("lasterm-daemon-shutdown-config-{label}")).await;
             let state_dir = temp_dir(&format!("lasterm-daemon-shutdown-state-{label}")).await;
-            let socket_path = temp_path(&format!("lasterm-daemon-shutdown-{label}"));
+            let socket_path = super::socket_path(&format!("lasterm-daemon-shutdown-{label}"));
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(socket_path.parent().expect("a socket directory"))
+                    .expect("create the socket directory");
+            }
             (
                 socket_path.to_string_lossy().to_string(),
                 config_dir.to_string_lossy().to_string(),
@@ -1876,7 +1937,7 @@ mod tests {
         }
 
         async fn cleanup_paths(socket_path: &str, config_dir: &str, state_dir: &Path) {
-            let _ = fs::remove_file(socket_path);
+            super::remove_socket(Path::new(socket_path));
             let _ = tokio::fs::remove_dir_all(config_dir).await;
             let _ = tokio::fs::remove_dir_all(state_dir).await;
         }
@@ -2687,11 +2748,11 @@ mod tests {
         let config_dir = config_dir_path.to_string_lossy().to_string();
         let state_dir = temp_dir("lasterm-test-state-auth").await;
 
+        // Not made here: the daemon makes its socket's directory, 0700.
         let sock_dir = std::env::temp_dir().join(format!(
             "lasterm-daemon-auth-{}",
             ulid::Ulid::generate().to_string().to_lowercase()
         ));
-        tokio::fs::create_dir_all(&sock_dir).await.unwrap();
         let sock_path = sock_dir.join("agent.sock");
         let path_str = sock_path.to_string_lossy().to_string();
 
@@ -2765,11 +2826,11 @@ mod tests {
         let config_dir = config_dir_path.to_string_lossy().to_string();
         let state_dir = temp_dir("lasterm-test-state-authok").await;
 
+        // Not made here: the daemon makes its socket's directory, 0700.
         let sock_dir = std::env::temp_dir().join(format!(
             "lasterm-daemon-authok-{}",
             ulid::Ulid::generate().to_string().to_lowercase()
         ));
-        tokio::fs::create_dir_all(&sock_dir).await.unwrap();
         let sock_path = sock_dir.join("agent.sock");
         let path_str = sock_path.to_string_lossy().to_string();
 
@@ -2821,6 +2882,168 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&config_dir_path).await;
         let _ = tokio::fs::remove_dir_all(&sock_dir).await;
         let _ = tokio::fs::remove_dir_all(&state_dir).await;
+    }
+
+    /// A SID as `S-1-…`, and the memory it came in freed.
+    #[cfg(windows)]
+    fn sid_string(sid: windows_sys::Win32::Security::PSID) -> String {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: `sid` is valid; the text is freed below.
+        assert_ne!(
+            unsafe { ConvertSidToStringSidW(sid, &mut text) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        let mut units = 0;
+        // SAFETY: ConvertSidToStringSidW NUL-terminates the text.
+        while unsafe { *text.add(units) } != 0 {
+            units += 1;
+        }
+        // SAFETY: `units` UTF-16 units precede the terminator.
+        let string = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, units) });
+        // SAFETY: allocated for this function by ConvertSidToStringSidW.
+        unsafe { LocalFree(text as _) };
+        string
+    }
+
+    /// A kernel object's owner, as `S-1-…`, and its DACL, in SDDL.
+    #[cfg(windows)]
+    fn owner_and_dacl(handle: std::os::windows::io::RawHandle) -> (String, String) {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+            SE_KERNEL_OBJECT,
+        };
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        };
+
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `handle` is live; the descriptor, which `owner` points
+        // into, is freed below.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle as _,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(status, 0, "GetSecurityInfo failed with {status}");
+        let owner = sid_string(owner);
+        let mut text: *mut u16 = std::ptr::null_mut();
+        let mut length = 0u32;
+        // SAFETY: `descriptor` came from GetSecurityInfo; the text is freed below.
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                &mut length,
+            )
+        };
+        assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `length` UTF-16 units, the terminator included.
+        let dacl = String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(text, length.saturating_sub(1) as usize)
+        });
+        // SAFETY: both were allocated for this function by the calls above.
+        unsafe {
+            LocalFree(text as _);
+            LocalFree(descriptor as _);
+        }
+        (owner, dacl)
+    }
+
+    /// Who owns what this process creates: its token's default owner.
+    #[cfg(windows)]
+    fn default_owner() -> String {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenOwner, TOKEN_OWNER, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token = std::ptr::null_mut();
+        // SAFETY: the current-process pseudo-handle needs no closing.
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        // SAFETY: OpenProcessToken returned a handle this function owns.
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let mut buffer = [0u64; 64];
+        let mut length = 0u32;
+        // SAFETY: `buffer` holds 512 writable bytes, 8-byte aligned.
+        let ok = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenOwner,
+                buffer.as_mut_ptr().cast(),
+                std::mem::size_of_val(&buffer) as u32,
+                &mut length,
+            )
+        };
+        assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: filled with a TOKEN_OWNER whose SID points into `buffer`.
+        sid_string(unsafe { (*buffer.as_ptr().cast::<TOKEN_OWNER>()).Owner })
+    }
+
+    /// The agent's pipe grants access to its owner and to nobody else, and its
+    /// owner is the account the agent runs as.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn create_secure_pipe_grants_its_owner_alone() {
+        use std::os::windows::io::AsRawHandle;
+
+        let pipe_name = format!(
+            r"\\.\pipe\lasterm-test-dacl-{}",
+            ulid::Ulid::generate().to_string().to_lowercase()
+        );
+        let server = create_secure_pipe(&pipe_name, true).expect("create the pipe");
+
+        let (owner, dacl) = owner_and_dacl(server.as_raw_handle());
+        // One ACE: allow all file access (what GA maps to on a pipe) to OWNER
+        // RIGHTS, and nothing for anyone else.
+        assert_eq!(dacl, "D:(A;;FA;;;OW)");
+        assert_eq!(owner, default_owner());
+    }
+
+    /// The daemon's first instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE:
+    /// a name another server already holds is refused, rather than joined as a
+    /// further instance of that server's pipe.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn create_secure_pipe_refuses_a_name_another_server_holds() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+        let pipe_name = format!(
+            r"\\.\pipe\lasterm-test-first-{}",
+            ulid::Ulid::generate().to_string().to_lowercase()
+        );
+        let _holder = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)
+            .expect("another server takes the name first");
+
+        let error = create_secure_pipe(&pipe_name, true)
+            .expect_err("the daemon must not serve as another instance of that pipe");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "{error}"
+        );
     }
 
     /// Windows: create_secure_pipe creates a pipe that can accept connections.
@@ -2950,7 +3173,7 @@ mod tests {
                 let (bound_tx, bound_rx) = oneshot::channel();
                 #[cfg(unix)]
                 let (endpoint, daemon) = {
-                    let endpoint = temp_path(&format!("lasterm-routing-{label}"))
+                    let endpoint = super::socket_path(&format!("lasterm-routing-{label}"))
                         .to_string_lossy()
                         .into_owned();
                     let daemon = run_daemon_impl(
@@ -3055,7 +3278,7 @@ mod tests {
                 let _ = self.shutdown.send(true);
                 let _ = tokio::time::timeout(DEADLINE, self.task).await;
                 #[cfg(unix)]
-                let _ = std::fs::remove_file(&self.endpoint);
+                super::remove_socket(std::path::Path::new(&self.endpoint));
                 let _ = tokio::fs::remove_dir_all(&self.config_dir).await;
                 let _ = tokio::fs::remove_dir_all(&self.state_dir).await;
             }
@@ -3067,7 +3290,7 @@ mod tests {
                     .expect("the daemon stops in time")
                     .expect("the daemon task does not panic");
                 #[cfg(unix)]
-                let _ = std::fs::remove_file(&self.endpoint);
+                super::remove_socket(std::path::Path::new(&self.endpoint));
                 let _ = tokio::fs::remove_dir_all(&self.config_dir).await;
                 let _ = tokio::fs::remove_dir_all(&self.state_dir).await;
                 result

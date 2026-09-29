@@ -576,6 +576,11 @@ On **first hub start** (meta.db is empty — schema_version table has version 1 
 2. This host appears in the host rail as the first entry (always present, cannot be deleted)
 3. On first UI load with no active channels: auto-spawn a local shell channel and open it
 
+The hub finds this host by `type = 'local'`, never by its label, which the user may change; the
+host id `local` in a request is an alias for it. A profile holding several local hosts (a hub that
+went by the label created another after a rename, #658) uses the oldest, lists it first, and
+deletes none.
+
 ### 4.4 Remote Visual Hints Lifecycle
 
 **Not wired today.** The Rust agent sends no `visual_hints` in HELLO (§ 3.2), and the hub reads

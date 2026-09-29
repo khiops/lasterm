@@ -14,8 +14,10 @@ export interface CreateHostBody {
 	ssh_auth?: "agent" | "key" | "password";
 	ssh_key_path?: string;
 	icon_type?: "auto" | "emoji" | "image";
-	icon_value?: string;
-	color?: string;
+	/** null stores none (#659). */
+	icon_value?: string | null;
+	/** null stores none: the colour then comes from the label (#659). */
+	color?: string | null;
 	default_shell?: string;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
@@ -41,8 +43,10 @@ export interface UpdateHostBody {
 	ssh_auth?: "agent" | "key" | "password";
 	ssh_key_path?: string;
 	icon_type?: "auto" | "emoji" | "image";
-	icon_value?: string;
-	color?: string;
+	/** null clears it: the dialog's Remove (#659). */
+	icon_value?: string | null;
+	/** null clears it, back to the colour the label gives: the dialog's Reset (#659). */
+	color?: string | null;
 	default_shell?: string;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
@@ -58,6 +62,18 @@ export interface UpdateHostBody {
 	custom_command?: string | null;
 	os?: "linux" | "darwin" | "windows" | null;
 	arch?: "x64" | "arm64" | null;
+}
+
+/**
+ * A host's colour is #rrggbb, or null for none: the colour then comes from the
+ * label. Refusing null left a colour the user had reset stored (#659).
+ */
+export function validateHostColor(color: unknown): string | null {
+	if (color === undefined || color === null) return null;
+	if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) {
+		return "color must be in hex format #rrggbb";
+	}
+	return null;
 }
 
 /** The longest image icon accepted: a small picture, never a stored file. */
@@ -119,9 +135,8 @@ export function validateCreateHost(body: CreateHostBody): string | null {
 			return "ssh_port must be an integer between 1 and 65535";
 		}
 	}
-	if (body.color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(body.color)) {
-		return "color must be in hex format #rrggbb";
-	}
+	const colorError = validateHostColor(body.color);
+	if (colorError) return colorError;
 	if (
 		body.elevation_method !== undefined &&
 		body.elevation_method !== null &&

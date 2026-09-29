@@ -510,8 +510,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		metaDal.migrateHostGroupData();
 		migrateLegacyShellDefaults(metaDal, configResolver);
 
-		// First-run: ensure the built-in "local" host exists
-		const wasNew = !metaDal.getHostByLabel("local");
+		// First-run: ensure the built-in local host exists. It is known by its
+		// type: the user may have renamed it (#658).
+		const wasNew = metaDal.listLocalHosts().length === 0;
 		await activeSessionManager.ensureLocalHost();
 		if (wasNew) {
 			server.log.info("Created default local host");

@@ -59,3 +59,55 @@ describe("HostsDAL — agent SHA256 pinning", () => {
 		expect(fetched?.agentSha256).toBeUndefined();
 	});
 });
+
+describe("HostsDAL — the local host (#658)", () => {
+	let dbs: DatabaseManager;
+	let dal: HostsDAL;
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		dal = new HostsDAL(dbs.meta);
+	});
+
+	afterEach(() => {
+		dbs.close();
+	});
+
+	function setCreatedAt(hostId: string, createdAt: string): void {
+		dbs.meta.prepare("UPDATE hosts SET created_at = ? WHERE id = ?").run(createdAt, hostId);
+	}
+
+	it("finds a renamed local host by its type", () => {
+		const local = dal.createHost({ type: "local", label: "local" });
+		dal.updateHost(local.id, { label: "workstation" });
+		dal.createHost({ type: "ssh", label: "prod", sshHost: "10.0.0.1" });
+
+		expect(dal.listLocalHosts().map((host) => [host.id, host.label])).toEqual([
+			[local.id, "workstation"],
+		]);
+	});
+
+	it("lists several local hosts oldest first, here and in the host list", () => {
+		// Inserted newest first, so the insertion order does not decide.
+		const newer = dal.createHost({ type: "local", label: "local" });
+		const remote = dal.createHost({ type: "ssh", label: "prod", sshHost: "10.0.0.1" });
+		const older = dal.createHost({ type: "local", label: "workstation" });
+		setCreatedAt(older.id, "2026-01-01T00:00:00.000Z");
+		setCreatedAt(newer.id, "2026-02-01T00:00:00.000Z");
+
+		expect(dal.listLocalHosts().map((host) => host.id)).toEqual([older.id, newer.id]);
+		expect(dal.listHosts().map((host) => host.id)).toEqual([older.id, newer.id, remote.id]);
+		expect(dal.listHosts(1, 0).map((host) => host.id)).toEqual([older.id]);
+	});
+
+	it("breaks a tie on the creation time by id", () => {
+		const a = dal.createHost({ type: "local", label: "local" });
+		const b = dal.createHost({ type: "local", label: "workstation" });
+		setCreatedAt(a.id, "2026-01-01T00:00:00.000Z");
+		setCreatedAt(b.id, "2026-01-01T00:00:00.000Z");
+
+		const byId = [a.id, b.id].sort();
+		expect(dal.listLocalHosts().map((host) => host.id)).toEqual(byId);
+		expect(dal.listHosts().map((host) => host.id)).toEqual(byId);
+	});
+});

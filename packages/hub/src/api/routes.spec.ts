@@ -67,6 +67,35 @@ describe("GET /api/hosts", () => {
 		// ensureLocalHost creates a 'local' host on startup
 		expect(body.length).toBeGreaterThanOrEqual(1);
 	});
+
+	it("keeps one local host, the renamed one, across a restart (#658)", async () => {
+		const locals = async () =>
+			(await server.inject({ method: "GET", url: "/api/hosts" }))
+				.json<Array<{ id: string; type: string; label: string }>>()
+				.filter((host) => host.type === "local")
+				.map((host) => [host.id, host.label]);
+
+		const before = await locals();
+		expect(before).toHaveLength(1);
+		const id = before[0]?.[0];
+		const renamed = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${id}`,
+			payload: { label: "workstation" },
+		});
+		expect(renamed.statusCode).toBe(200);
+
+		// The hub stops and starts again on the same profile.
+		await server.close();
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+		});
+
+		expect(await locals()).toEqual([[id, "workstation"]]);
+	});
 });
 
 describe("POST /api/hosts", () => {
@@ -276,6 +305,46 @@ describe("PUT /api/hosts/:id", () => {
 		const body = res.json<Record<string, unknown>>();
 		expect(body.label).toBe("updated-label");
 		expect(body.color).toBe("#00ff00");
+	});
+
+	// validateHostColor is unit-tested in hosts.spec.ts; this proves the route
+	// consults it, and stores the clears the host dialog sends (#659).
+	it("stores a colour and an icon given as null, and refuses a colour that is not one", async () => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: {
+					type: "local",
+					label: "clear-me",
+					color: "#00ff00",
+					icon_type: "emoji",
+					icon_value: "🚀",
+				},
+			})
+		).json<Record<string, unknown>>();
+
+		const refused = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { color: "notacolor" },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: "color must be in hex format #rrggbb" },
+		});
+
+		const cleared = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { color: null, icon_type: "auto", icon_value: null },
+		});
+		expect(cleared.statusCode).toBe(200);
+		const reread = await server.inject({ method: "GET", url: `/api/hosts/${created.id}` });
+		const stored = reread.json<Record<string, unknown>>();
+		expect(stored).not.toHaveProperty("color");
+		expect(stored).not.toHaveProperty("icon_value");
+		expect(stored.icon_type).toBe("auto");
 	});
 
 	// A client from before these settings were removed still sends them. Nothing

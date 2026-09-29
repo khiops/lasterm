@@ -1,6 +1,7 @@
+import type { Host } from "@lasterm/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import { proxyFields, useHostForm } from "./useHostForm.js";
+import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 
 const createHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
 const updateHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
@@ -90,6 +91,100 @@ describe("useHostForm", () => {
 			const call = createHostSpy.mock.calls[0] as [Record<string, unknown>];
 			const body = call[0];
 			expect(body).toHaveProperty("ssh_port", 2222);
+		});
+	});
+
+	describe("what a save of an existing host sends", () => {
+		const PNG =
+			"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+		function storedHost(fields: Partial<Host>): Host {
+			return {
+				id: "h1",
+				label: "myhost",
+				type: "ssh",
+				sshHost: "10.0.0.1",
+				sshAuth: "agent",
+				iconType: "auto",
+				trustRemoteHints: "apply",
+				sortOrder: 0,
+				os: null,
+				arch: null,
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				...fields,
+			};
+		}
+
+		async function savedBody(
+			host: Host,
+			edit: (form: ReturnType<typeof useHostForm>["form"]["value"]) => void = () => {},
+		): Promise<Record<string, unknown>> {
+			updateHostSpy.mockClear();
+			const { form, save } = useHostForm(host);
+			edit(form.value);
+			await save();
+			expect(updateHostSpy).toHaveBeenCalledOnce();
+			const [id, body] = updateHostSpy.mock.calls[0] as [string, Record<string, unknown>];
+			expect(id).toBe(host.id);
+			return body;
+		}
+
+		it("sends a reset colour as null, which the hub clears (#659)", async () => {
+			const body = await savedBody(storedHost({ color: "#ff8800" }), (form) => {
+				form.color = "";
+			});
+			expect(body).toHaveProperty("color", null);
+		});
+
+		it("sends a removed image as no icon at all (#659)", async () => {
+			const host = storedHost({ iconType: "image", iconValue: PNG });
+			const body = await savedBody(host, (form) => {
+				form.iconValue = "";
+			});
+			expect(body).toMatchObject({ icon_type: "auto", icon_value: null });
+		});
+
+		it("sends no icon value once the type is back to initials (#659)", async () => {
+			const host = storedHost({ iconType: "emoji", iconValue: "🚀" });
+			const body = await savedBody(host, (form) => {
+				form.iconType = "auto";
+			});
+			expect(body).toMatchObject({ icon_type: "auto", icon_value: null });
+		});
+
+		it("sends back a colour and an icon left alone", async () => {
+			const host = storedHost({ color: "#ff8800", iconType: "emoji", iconValue: "🚀" });
+			const body = await savedBody(host);
+			expect(body).toMatchObject({ color: "#ff8800", icon_type: "emoji", icon_value: "🚀" });
+		});
+
+		it("sends back the stored custom elevation command when the field is left alone (#660)", async () => {
+			for (const type of ["ssh", "local"] as const) {
+				const host = storedHost({
+					type,
+					elevationMethod: "custom",
+					customCommand: "/usr/local/bin/my-elevate",
+				});
+				const { form } = useHostForm(host);
+				expect(form.value.customCommand).toBe("/usr/local/bin/my-elevate");
+
+				const body = await savedBody(host, (f) => {
+					f.label = "renamed";
+				});
+				expect(body).toMatchObject({
+					elevation_method: "custom",
+					custom_command: "/usr/local/bin/my-elevate",
+				});
+			}
+		});
+
+		it("still clears the custom elevation command when the field is emptied", async () => {
+			const host = storedHost({ elevationMethod: "custom", customCommand: "/usr/bin/elevate" });
+			const body = await savedBody(host, (form) => {
+				form.customCommand = "";
+			});
+			expect(body).toHaveProperty("custom_command", null);
 		});
 	});
 
@@ -297,5 +392,25 @@ describe("proxyFields", () => {
 	// leftover nobody can see.
 	it("clears both when nothing is chosen", () => {
 		expect(proxyFields("   ", known)).toEqual({ ssh_proxy_host_id: null, ssh_proxy_spec: null });
+	});
+});
+
+describe("iconFields", () => {
+	it("keeps an emoji, its shortcode resolved", () => {
+		expect(iconFields("emoji", ":rocket:")).toEqual({ icon_type: "emoji", icon_value: "🚀" });
+	});
+
+	it("keeps an image", () => {
+		expect(iconFields("image", "data:image/png;base64,AAAA")).toEqual({
+			icon_type: "image",
+			icon_value: "data:image/png;base64,AAAA",
+		});
+	});
+
+	// null, not a missing key: the hub keeps what a body leaves out (#659).
+	it("sends no icon for no value, or for the initials", () => {
+		expect(iconFields("image", "")).toEqual({ icon_type: "auto", icon_value: null });
+		expect(iconFields("emoji", "  ")).toEqual({ icon_type: "auto", icon_value: null });
+		expect(iconFields("auto", "🚀")).toEqual({ icon_type: "auto", icon_value: null });
 	});
 });

@@ -77,6 +77,10 @@ export class MetaDAL {
 		return this.hosts.getHostByLabel(label);
 	}
 
+	listLocalHosts(): Host[] {
+		return this.hosts.listLocalHosts();
+	}
+
 	listHosts(limit?: number, offset?: number): Host[] {
 		return this.hosts.listHosts(limit, offset);
 	}

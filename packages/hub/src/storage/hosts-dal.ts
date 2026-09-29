@@ -196,17 +196,35 @@ export class HostsDAL {
 		return row ? rowToHost(row) : undefined;
 	}
 
+	/**
+	 * The local hosts, oldest first. The hub knows its local host by its type,
+	 * never by its label, which the user may change (#658). A profile can hold
+	 * more than one: a hub that went by the label created a second after a
+	 * rename. The first of this list is the one the hub uses. Two created in
+	 * the same millisecond keep the order they were inserted in: ULIDs of one
+	 * millisecond do not.
+	 */
+	listLocalHosts(): Host[] {
+		const rows = this.db
+			.prepare("SELECT * FROM hosts WHERE type = 'local' ORDER BY created_at ASC, rowid ASC")
+			.all() as HostRow[];
+		return rows.map(rowToHost);
+	}
+
 	listHosts(limit?: number, offset?: number): Host[] {
+		// Local hosts first, and among several the oldest first (#658): a client
+		// shows the first as the local host, which is the one the hub uses.
+		// '~' sorts after all alphanumeric chars in ASCII, placing ungrouped hosts last.
+		const order = `ORDER BY
+				CASE WHEN type = 'local' THEN 0 ELSE 1 END,
+				CASE WHEN type = 'local' THEN created_at END ASC,
+				CASE WHEN type = 'local' THEN rowid END ASC,
+				COALESCE(host_group, '~') ASC,
+				sort_order ASC`;
 		const sql =
 			limit !== undefined
-				? `SELECT * FROM hosts ORDER BY
-				CASE WHEN type = 'local' THEN 0 ELSE 1 END,
-				COALESCE(host_group, '~') ASC,
-				sort_order ASC LIMIT ? OFFSET ?`
-				: `SELECT * FROM hosts ORDER BY
-				CASE WHEN type = 'local' THEN 0 ELSE 1 END,
-				COALESCE(host_group, '~') ASC, -- '~' sorts after all alphanumeric chars in ASCII, placing ungrouped hosts last
-				sort_order ASC`;
+				? `SELECT * FROM hosts ${order} LIMIT ? OFFSET ?`
+				: `SELECT * FROM hosts ${order}`;
 		const rows = (
 			limit !== undefined
 				? this.db.prepare(sql).all(limit, offset ?? 0)

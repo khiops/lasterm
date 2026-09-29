@@ -2,7 +2,12 @@ import { ELEVATION_METHODS_ALL, toSnakeCase, validateCustomCommand } from "@last
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
-import { validateCreateHost, validateIconImage, validateProfileJson } from "./hosts.js";
+import {
+	validateCreateHost,
+	validateHostColor,
+	validateIconImage,
+	validateProfileJson,
+} from "./hosts.js";
 import { parsePagination } from "./pagination.js";
 
 export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
@@ -138,11 +143,10 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 
 			const body = request.body;
 
-			// Validate color if provided
-			if (body.color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(body.color)) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: "color must be in hex format #rrggbb" },
-				});
+			// A colour, or null to clear it (#659)
+			const colorError = validateHostColor(body.color);
+			if (colorError) {
+				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: colorError } });
 			}
 
 			// Validate ssh_port if provided

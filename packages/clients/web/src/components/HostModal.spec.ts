@@ -2,6 +2,7 @@ import type { Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
+import { getColorFromLabel } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
 import HostModal from "./HostModal.vue";
 
@@ -260,6 +261,84 @@ describe("HostModal for the local host (#656)", () => {
 			}),
 		);
 		expect(onClose).toHaveBeenCalled();
+	});
+});
+
+describe("HostModal visual profile: a border in the host's colour (#663)", () => {
+	/** The local host, with a border of a colour of its own and another setting beside it. */
+	const BORDERED: Host = {
+		...LOCAL,
+		profileJson: JSON.stringify({
+			fontSize: 15,
+			visualProfile: {
+				preset: "custom",
+				banner: { enabled: false, text: "", bgColor: "#e06c75", textColor: "#ffffff" },
+				border: { style: "subtle", color: "#123456" },
+				tint: { enabled: false, color: "#e06c75", opacity: 0 },
+			},
+		}),
+	};
+
+	function check(selector: string, checked: boolean): void {
+		const box = el<HTMLInputElement>(selector);
+		if (!box) throw new Error(`no ${selector}`);
+		box.checked = checked;
+		box.dispatchEvent(new Event("change"));
+	}
+
+	it("shows the host's colour as its badge has it, and follows the one being picked", async () => {
+		mountModal(BORDERED);
+		expect(el<HTMLInputElement>("#panel-appearance input.border-inherit")?.checked).toBe(false);
+		check("#panel-appearance input.border-inherit", true);
+		await nextTick();
+		// The local host has no colour: its badge, and so its border, take the label's.
+		expect(el(".host-swatch")?.getAttribute("aria-label")).toBe(
+			`Host color ${getColorFromLabel("local")}`,
+		);
+
+		const identity = el<HTMLInputElement>(".identity-color-input");
+		if (!identity) throw new Error("no host colour input");
+		identity.value = "#ff8800";
+		identity.dispatchEvent(new Event("input"));
+		await nextTick();
+		expect(el(".host-swatch")?.getAttribute("aria-label")).toBe("Host color #ff8800");
+	});
+
+	it("saves no border colour once Use host color is checked again", async () => {
+		const answer = {
+			id: LOCAL.id,
+			type: "local",
+			label: "local",
+			icon_type: "auto",
+			trust_remote_hints: "apply",
+			sort_order: 0,
+			os: "windows",
+			arch: "x64",
+			created_at: STAMP,
+			updated_at: STAMP,
+		};
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(answer), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+		mountModal(BORDERED);
+		check("#panel-appearance input.border-inherit", true);
+		await nextTick();
+
+		el<HTMLButtonElement>(".dialog-actions .btn-primary")?.click();
+		await settle();
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [, init] = fetchSpy.mock.calls[0] ?? [];
+		const body = JSON.parse(String(init?.body)) as { profile_json: string };
+		const saved = JSON.parse(body.profile_json) as {
+			fontSize: number;
+			visualProfile: { border: unknown };
+		};
+		expect(saved.visualProfile.border).toEqual({ style: "subtle", color: "" });
+		expect(saved.fontSize).toBe(15);
 	});
 });
 

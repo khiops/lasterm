@@ -241,12 +241,13 @@ function onFontSelect(value: string | undefined): void {
 	background: var(--nt-accent);
 }
 
+/* The track is border-box, so its inside is 34 by 18: a 14px thumb leaves 2px all round. */
 .toggle-thumb {
 	position: absolute;
 	top: 2px;
 	left: 2px;
-	width: 16px;
-	height: 16px;
+	width: 14px;
+	height: 14px;
 	background: var(--nt-fg);
 	border-radius: 50%;
 	transition: transform 0.2s ease;

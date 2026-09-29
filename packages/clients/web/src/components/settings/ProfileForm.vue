@@ -144,22 +144,25 @@
 			</div>
 
 			<div class="form-row">
-				<label class="form-label" for="pf-color">Color</label>
-				<div class="color-row">
+				<span id="pf-color-label" class="form-label">Color</span>
+				<div class="color-row" role="group" aria-labelledby="pf-color-label">
+					<label class="form-label-inline">
+						<input
+							id="pf-no-color"
+							type="checkbox"
+							class="form-checkbox"
+							:checked="noColor"
+							@change="onNoColor(($event.target as HTMLInputElement).checked)"
+						/>
+						No color
+					</label>
 					<input
+						v-if="!noColor"
 						id="pf-color"
-						v-model="form.color"
-						class="form-input color-hex"
-						type="text"
-						maxlength="7"
-						placeholder="#3b82f6"
-						pattern="^#[0-9a-fA-F]{6}$"
-						autocomplete="off"
-					/>
-					<input
 						type="color"
 						class="color-picker"
-						:value="form.color || '#3b82f6'"
+						aria-label="Profile color"
+						:value="form.color"
 						@input="form.color = ($event.target as HTMLInputElement).value"
 					/>
 				</div>
@@ -290,7 +293,7 @@ import { ref, reactive, computed, watch } from "vue";
 import type { LaunchProfile, LaunchProfileMode, SupportedOs, IconType } from "@lasterm/shared";
 import type { TerminalProfile } from "@lasterm/shared";
 import HostOverridesTable from "./HostOverridesTable.vue";
-import { useProfilesStore } from "../../stores/profiles.js";
+import { type LaunchProfileBody, useProfilesStore } from "../../stores/profiles.js";
 
 // ── Props & emits ───────────────────────────────────────────────────────────
 
@@ -355,6 +358,22 @@ watch(
 	},
 	{ immediate: false },
 );
+
+// ── Color ───────────────────────────────────────────────────────────────────
+
+/** The colour the picker starts from once No color is unchecked. */
+const FIRST_PICKED_COLOR = "#3b82f6";
+
+/**
+ * No colour stored. A colour picker cannot be emptied, and it showed a colour when
+ * none was set, so this box is how a profile goes back to none (#665).
+ */
+const noColor = computed(() => form.color === "");
+
+/** Checked clears the colour; unchecked starts the picker from one to change. */
+function onNoColor(none: boolean): void {
+	form.color = none ? "" : FIRST_PICKED_COLOR;
+}
 
 // ── Args handling ───────────────────────────────────────────────────────────
 
@@ -442,6 +461,24 @@ const saving = ref(false);
 
 const profilesStore = useProfilesStore();
 
+/** The fields of a profile that may be empty. */
+type ClearableKey = "args" | "cwd" | "env" | "icon_value" | "color" | "profile_overrides";
+
+/**
+ * A field that may be empty, as the save sends it: its value; null once the user
+ * emptied one the profile had, which is how the hub clears it (an empty field used
+ * to be left out, and the hub kept the old value, #665); nothing when it was empty
+ * and still is, so a save never clears what the form did not load.
+ */
+function clearable<K extends ClearableKey>(
+	key: K,
+	value: NonNullable<LaunchProfileBody[K]> | undefined,
+	stored: unknown,
+): Pick<LaunchProfileBody, K> {
+	if (value !== undefined) return { [key]: value } as Pick<LaunchProfileBody, K>;
+	return (stored === undefined ? {} : { [key]: null }) as Pick<LaunchProfileBody, K>;
+}
+
 async function handleSave(): Promise<void> {
 	errorMessage.value = null;
 
@@ -462,40 +499,47 @@ async function handleSave(): Promise<void> {
 		if (form.profileOverrides.fontFamily?.trim()) {
 			overrides.fontFamily = form.profileOverrides.fontFamily.trim();
 		}
-		if (form.profileOverrides.fontSize != null && form.profileOverrides.fontSize > 0) {
-			overrides.fontSize = form.profileOverrides.fontSize;
+		// A number field emptied holds "", which is not a number to send.
+		const { fontSize, scrollback } = form.profileOverrides;
+		if (typeof fontSize === "number" && fontSize > 0) {
+			overrides.fontSize = fontSize;
 		}
 		if (form.profileOverrides.cursorStyle) {
 			overrides.cursorStyle = form.profileOverrides.cursorStyle;
 		}
-		if (form.profileOverrides.scrollback != null && form.profileOverrides.scrollback >= 0) {
-			overrides.scrollback = form.profileOverrides.scrollback;
+		if (typeof scrollback === "number" && scrollback >= 0) {
+			overrides.scrollback = scrollback;
 		}
 		if (form.profileOverrides.envMode) {
 			overrides.envMode = form.profileOverrides.envMode as 'minimal' | 'inherit';
 		}
 
-		const envRecord = buildEnvRecord();
-		const data: Partial<LaunchProfile> = {
+		// What the form loaded: a field it shows empty is cleared only if this had one.
+		const stored = props.profile;
+		const body: LaunchProfileBody = {
 			name: form.name.trim(),
 			shell: form.shell.trim(),
-			...(form.args.length > 0 && { args: [...form.args] }),
-			...(form.cwd.trim() !== "" && { cwd: form.cwd.trim() }),
 			mode: form.mode,
-			supportedOs: form.supportedOs,
+			supported_os: form.supportedOs,
 			elevated: form.elevated,
-			iconType: form.iconType,
-			...(form.iconValue.trim() !== "" && { iconValue: form.iconValue.trim() }),
-			...(form.color.trim() !== "" && { color: form.color.trim() }),
-			...(envRecord !== undefined && { env: envRecord }),
-			...(Object.keys(overrides).length > 0 && { profileOverrides: overrides }),
+			icon_type: form.iconType,
+			...clearable("args", form.args.length > 0 ? [...form.args] : undefined, stored?.args),
+			...clearable("cwd", form.cwd.trim() || undefined, stored?.cwd),
+			...clearable("icon_value", form.iconValue.trim() || undefined, stored?.iconValue),
+			...clearable("color", form.color || undefined, stored?.color),
+			...clearable("env", buildEnvRecord(), stored?.env),
+			...clearable(
+				"profile_overrides",
+				Object.keys(overrides).length > 0 ? overrides : undefined,
+				stored?.profileOverrides,
+			),
 		};
 
 		let saved: LaunchProfile;
 		if (isEdit.value && props.profile) {
-			saved = await profilesStore.updateProfile(props.profile.id, data);
+			saved = await profilesStore.updateProfile(props.profile.id, body);
 		} else {
-			saved = await profilesStore.createProfile(data);
+			saved = await profilesStore.createProfile(body);
 		}
 		emit("saved", saved);
 	} catch (err) {
@@ -695,10 +739,8 @@ async function handleSave(): Promise<void> {
 	align-items: center;
 	gap: 8px;
 	flex: 1;
-}
-
-.color-hex {
-	flex: 1;
+	/* The picker's height: the row keeps it while the picker is hidden. */
+	min-height: 32px;
 }
 
 .color-picker {

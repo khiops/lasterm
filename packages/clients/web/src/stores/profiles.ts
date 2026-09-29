@@ -1,4 +1,33 @@
-import { type LaunchProfile, toCamelCase } from "@lasterm/shared";
+import {
+	type IconType,
+	type LaunchProfile,
+	type LaunchProfileMode,
+	type SupportedOs,
+	type TerminalProfile,
+	toCamelCase,
+} from "@lasterm/shared";
+
+/**
+ * A launch profile as POST and PUT /api/launch-profiles take it: snake_case, as
+ * on the wire. The form sent camelCase, and the hub read none of those keys
+ * (#665). On PUT a field left out stays as stored, and null clears one that may
+ * be empty.
+ */
+export interface LaunchProfileBody {
+	name?: string;
+	shell?: string;
+	args?: string[] | null;
+	cwd?: string | null;
+	env?: Record<string, string> | null;
+	mode?: LaunchProfileMode;
+	elevated?: boolean;
+	supported_os?: SupportedOs;
+	icon_type?: IconType;
+	icon_value?: string | null;
+	color?: string | null;
+	/** Kept in camelCase inside: the hub stores it as it comes. */
+	profile_overrides?: Partial<TerminalProfile> | null;
+}
 
 /** Profile with host-specific override info (from GET /api/hosts/:id/profiles). */
 export type HostVisibleProfile = LaunchProfile & {
@@ -64,7 +93,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 	// REST: CRUD
 	// -------------------------------------------------------------------------
 
-	async function createProfile(data: Partial<LaunchProfile>): Promise<LaunchProfile> {
+	async function createProfile(body: LaunchProfileBody): Promise<LaunchProfile> {
 		if (authStore.token === null) throw new Error("Not authenticated");
 		const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles`, {
 			method: "POST",
@@ -72,7 +101,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${authStore.token}`,
 			},
-			body: JSON.stringify(data),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) throw new Error(`POST /api/launch-profiles failed: ${res.status}`);
 		const created = toCamelCase(await res.json()) as LaunchProfile;
@@ -80,7 +109,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 		return created;
 	}
 
-	async function updateProfile(id: string, data: Partial<LaunchProfile>): Promise<LaunchProfile> {
+	async function updateProfile(id: string, body: LaunchProfileBody): Promise<LaunchProfile> {
 		if (authStore.token === null) throw new Error("Not authenticated");
 		const res = await hubFetch(`${hubBaseUrl()}/api/launch-profiles/${encodeURIComponent(id)}`, {
 			method: "PUT",
@@ -88,7 +117,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${authStore.token}`,
 			},
-			body: JSON.stringify(data),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) throw new Error(`PUT /api/launch-profiles/${id} failed: ${res.status}`);
 		const updated = toCamelCase(await res.json()) as LaunchProfile;

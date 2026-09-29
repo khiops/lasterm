@@ -83,12 +83,13 @@ import {
 	remoteDaemonStopCommand,
 } from "./remote-daemon.js";
 import * as Acq from "./session-acquisition.js";
-import type {
-	ChannelState,
-	Lease,
-	SessionAcquisition,
-	SessionMetaDAL,
-	SharedSessionContext,
+import {
+	agentLaunchConfig,
+	type ChannelState,
+	type Lease,
+	type SessionAcquisition,
+	type SessionMetaDAL,
+	type SharedSessionContext,
 } from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import {
@@ -320,7 +321,7 @@ export class SessionManager {
 					host,
 					promptAuth,
 					deployOpts,
-					ctx.agentConfig,
+					agentLaunchConfig(ctx),
 					hostKeepsDaemon(host, ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 
@@ -2087,7 +2088,7 @@ export class SessionManager {
 			host,
 			promptAuth,
 			deployOpts,
-			this.ctx.agentConfig,
+			agentLaunchConfig(this.ctx),
 			hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 		);
 
@@ -2246,7 +2247,7 @@ export class SessionManager {
 					host,
 					promptAuth,
 					deployOpts,
-					this.ctx.agentConfig,
+					agentLaunchConfig(this.ctx),
 					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);

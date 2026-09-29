@@ -22,7 +22,9 @@ import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 const HELLO_TIMEOUT_MS = 5_000;
 /** Reaching the agent at all: an exec, or a daemon launched and polled for. */
 const TRANSPORT_TIMEOUT_MS = 20_000;
-type AgentLoggingConfig = Pick<AgentConfig, "logLevel" | "logFormat">;
+/** How the agent logs. The file count only concerns a daemon (#646). */
+type AgentLoggingConfig = Pick<AgentConfig, "logLevel" | "logFormat"> &
+	Partial<Pick<AgentConfig, "logFilesKept">>;
 
 /**
  * Result of SSH host key verification, populated by the hostVerifier closure
@@ -594,6 +596,9 @@ export class SshAgent extends AgentConnection {
 								agentPath: daemonPath,
 								logLevel: this.loggingConfig.logLevel,
 								logFormat: this.loggingConfig.logFormat,
+								...(this.loggingConfig.logFilesKept !== undefined && {
+									logFilesKept: this.loggingConfig.logFilesKept,
+								}),
 							})
 								.then((attachment) => {
 									this.usedRemoteDaemon = true;

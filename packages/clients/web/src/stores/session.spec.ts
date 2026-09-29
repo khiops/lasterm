@@ -652,3 +652,66 @@ describe("useSessionStore — a host coming back (#605)", () => {
 		expect(toastStore.messages).toHaveLength(1);
 	});
 });
+
+// ─── A host its user disconnected (#648) ─────────────────────────────────────
+//
+// The hub says it in each SESSION_STATE of that host, and lists every such
+// host in the STATE_SYNC of a new socket: one whose connection ran its
+// terminals has no session left to carry it.
+
+describe("useSessionStore — a host its user disconnected (#648)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("shows it disconnected, apart from offline and lost, until the hub says otherwise", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const hosts = useHostsStore();
+		hosts.hosts = [
+			{ id: "host-pi", label: "raspberrypi", type: "ssh" } as never,
+			{ id: "host-box", label: "box", type: "ssh" } as never,
+		];
+		const ws = wsHarness.instances[0];
+
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [{ sessionId: "s-pi", hostId: "host-pi", status: "disconnected" }],
+			channels: [],
+			userDisconnectedHosts: ["host-pi", "host-box"],
+		});
+		expect(hosts.getHostStatus("host-pi")).toBe("disconnected");
+		expect(hosts.getHostStatus("host-box")).toBe("disconnected");
+
+		// Someone connected it: the SESSION_STATE that says so carries no flag.
+		ws?.emit({ type: "SESSION_STATE", sessionId: "s-pi", hostId: "host-pi", status: "starting" });
+		expect(hosts.getHostStatus("host-pi")).toBe("reconnecting");
+		ws?.emit({ type: "SESSION_STATE", sessionId: "s-pi", hostId: "host-pi", status: "active" });
+		expect(hosts.getHostStatus("host-pi")).toBe("live");
+
+		// Disconnected again, its terminals ending with it.
+		ws?.emit({
+			type: "SESSION_STATE",
+			sessionId: "s-pi",
+			hostId: "host-pi",
+			status: "closed",
+			disconnectedByUser: true,
+		});
+		expect(hosts.getHostStatus("host-pi")).toBe("disconnected");
+		expect(hosts.isDisconnectedByUser("host-pi")).toBe(true);
+
+		// A new socket's STATE_SYNC says it all again: here, none.
+		ws?.emit({ type: "STATE_SYNC", sessions: [], channels: [] });
+		expect(hosts.getHostStatus("host-pi")).toBe("offline");
+		expect(hosts.getHostStatus("host-box")).toBe("offline");
+	});
+});

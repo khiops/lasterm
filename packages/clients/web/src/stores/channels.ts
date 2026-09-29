@@ -976,6 +976,11 @@ export const useChannelsStore = defineStore("channels", () => {
 			directProcess?: boolean;
 			/** Bring this dead terminal back rather than open a new one beside it. */
 			reuseChannelId?: string;
+			/**
+			 * Nobody asked for it: the setting, or a host's return. A host its user
+			 * disconnected is not connected again by it (#648).
+			 */
+			automatic?: boolean;
 		},
 	): Promise<string> {
 		const sessionStore = useSessionStore();
@@ -1100,6 +1105,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				...(opts?.args !== undefined && opts.args.length > 0 ? { args: opts.args } : {}),
 				...(opts?.directProcess ? { directProcess: true } : {}),
 				...(opts?.reuseChannelId !== undefined ? { reuseChannelId: opts.reuseChannelId } : {}),
+				...(opts?.automatic === true ? { automatic: true } : {}),
 			});
 		});
 	}
@@ -1425,7 +1431,16 @@ export const useChannelsStore = defineStore("channels", () => {
 		};
 	}
 
-	async function restartChannel(channelId: string, hostIdHint?: string): Promise<boolean> {
+	/**
+	 * Bring a terminal back. `automatic` when nobody asked for it — the "When a
+	 * terminal ends" setting, or its host's return — which the hub refuses on
+	 * a host its user disconnected, and the pane then waits for it (#648).
+	 */
+	async function restartChannel(
+		channelId: string,
+		hostIdHint?: string,
+		opts?: { automatic?: boolean },
+	): Promise<boolean> {
 		if (authStore.token === null) return false;
 		setRestartFailure(channelId, null);
 
@@ -1445,6 +1460,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					reuseChannelId: channelId,
 					...(channel?.shell !== undefined ? { shell: channel.shell } : {}),
 					...(channel?.args !== undefined && channel.args.length > 0 ? { args: channel.args } : {}),
+					...(opts?.automatic === true ? { automatic: true } : {}),
 				});
 				return true;
 			} catch (err) {

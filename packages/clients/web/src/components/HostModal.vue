@@ -149,10 +149,12 @@
 						</div>
 					</div>
 
-					<!-- Modal Tabs (B3) -->
-					<div v-if="form.type === 'ssh'" class="modal-tabs">
+					<!-- Modal Tabs (B3). The local host has no connection to set up:
+					     it keeps its terminal settings and its identity (#656). -->
+					<div class="modal-tabs">
 						<div class="tab-headers" role="tablist">
 							<button
+								v-if="form.type === 'ssh'"
 								id="tab-connection"
 								role="tab"
 								:aria-selected="activeTab === 'connection'"
@@ -187,6 +189,7 @@
 
 						<!-- Connection tab panel -->
 						<div
+							v-if="form.type === 'ssh'"
 							id="panel-connection"
 							v-show="activeTab === 'connection'"
 							role="tabpanel"
@@ -428,7 +431,9 @@
 									placeholder="e.g., /usr/local/bin/my-elevate"
 								/>
 							</div>
-							<div class="field">
+							<!-- Whether to trust what a remote machine's agent imposes: the
+							     local host is not one. -->
+							<div v-if="form.type === 'ssh'" class="field">
 								<label class="field-label">Remote Hints</label>
 								<select
 									v-model="form.trustRemoteHints"
@@ -720,8 +725,12 @@ const visualProfile = ref<VisualProfile>((() => {
 	return { ...DEFAULT_VISUAL_PROFILE };
 })());
 
-// INV-05: reset to connection tab when opening for a new host, persist for edits
-const activeTab = ref<"connection" | "terminal" | "appearance">("connection");
+// INV-05: reset to connection tab when opening for a new host, persist for edits.
+// The local host has no Connection tab: it opens on its identity, which is what
+// its "Edit Name / Icon" is for (#656).
+const activeTab = ref<"connection" | "terminal" | "appearance">(
+	form.value.type === "ssh" ? "connection" : "appearance",
+);
 
 const showEmojiPicker = ref(false);
 const iconFileInput = ref<HTMLInputElement | null>(null);

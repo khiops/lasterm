@@ -20,6 +20,7 @@ import type {
 	ChannelsConfig,
 	ElevationConfig,
 	ElevationMethod,
+	KeyboardConfig,
 	LayoutConfig,
 	LogConfig,
 	PanesConfig,
@@ -221,6 +222,10 @@ export const DEFAULT_SEARCH_CONFIG: SearchConfig = {
 export type { LayoutConfig };
 export { DEFAULT_LAYOUT_CONFIG };
 
+export const DEFAULT_KEYBOARD_CONFIG: KeyboardConfig = {
+	keyHints: true,
+};
+
 export const DEFAULT_UI_CONFIG: UiConfig = {
 	onChannelDead: "readonly",
 	tabs: { ...DEFAULT_TABS_CONFIG },
@@ -230,6 +235,7 @@ export const DEFAULT_UI_CONFIG: UiConfig = {
 	title: { ...DEFAULT_TITLE_CONFIG },
 	search: { ...DEFAULT_SEARCH_CONFIG },
 	layout: { ...DEFAULT_LAYOUT_CONFIG },
+	keyboard: { ...DEFAULT_KEYBOARD_CONFIG },
 };
 
 /**
@@ -246,6 +252,7 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		title: { ...DEFAULT_TITLE_CONFIG },
 		search: { ...DEFAULT_SEARCH_CONFIG },
 		layout: { ...DEFAULT_LAYOUT_CONFIG },
+		keyboard: { ...DEFAULT_KEYBOARD_CONFIG },
 	};
 
 	// ── [ui] section ────────────────────────────────────────────────────
@@ -406,6 +413,15 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		}
 		if (typeof raw.sidebar_width === "number" && raw.sidebar_width >= 0) {
 			config.layout.sidebarWidth = raw.sidebar_width;
+		}
+	}
+
+	// ── [keyboard] section (#639) ───────────────────────────────────────
+	const keyboardSection = parsed.keyboard;
+	if (keyboardSection != null && typeof keyboardSection === "object") {
+		const raw = keyboardSection as Record<string, unknown>;
+		if (typeof raw.key_hints === "boolean") {
+			config.keyboard.keyHints = raw.key_hints;
 		}
 	}
 

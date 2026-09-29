@@ -12,6 +12,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useChannelsStore } from "../../stores/channels.js";
+import { useConfigStore } from "../../stores/config.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useSettingsStore } from "../../stores/settings.js";
 import SettingsPanel from "./SettingsPanel.vue";
@@ -201,12 +202,23 @@ describe("Settings: the menu and the detail", () => {
 	});
 
 	it("goes into a detail with no control, onto the detail itself", async () => {
-		mountPanel({ category: "keybindings" });
+		const { settingsStore } = mountPanel({ category: "terminal" });
 		await open();
+		// While the settings load, the detail says so and has no control.
+		settingsStore.loading = true;
+		await settle();
 		await press("ArrowRight");
 		expect(document.activeElement).toBe(el(".settings-content"));
 		await press("Escape");
-		expect(document.activeElement).toBe(menuItem("keybindings"));
+		expect(document.activeElement).toBe(menuItem("terminal"));
+	});
+
+	// Keybindings had no control; its link to the shortcuts overlay is one now (#639).
+	it("goes onto Keybindings' link to the shortcuts overlay", async () => {
+		mountPanel({ category: "keybindings" });
+		await open();
+		await press("ArrowRight");
+		expect(document.activeElement).toBe(el(".keybindings-overlay-link"));
 	});
 
 	it("leaves an Esc that a control used to the control", async () => {
@@ -310,5 +322,76 @@ describe("Settings: the focus ring", () => {
 		const ring = /\.settings-panel :deep\(:focus-visible\)\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
 		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
 		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+	});
+});
+
+// The strip at the bottom of the panel (#639): the keys that work where the keyboard is, for the
+// keyboard only. Which keys each control gets is tested in utils/key-hints.spec.ts.
+describe("Settings: the key hints", () => {
+	/** The hints the strip shows, as they read, or null when it shows none. */
+	function shownHints(): string | null {
+		const strip = document.querySelector(".settings-panel .key-hint-strip");
+		if (strip === null) return null;
+		return [...strip.querySelectorAll(".key-hint")]
+			.map((hint) => (hint.textContent ?? "").replace(/\s+/g, " ").trim())
+			.join(" · ");
+	}
+
+	function click(target: HTMLElement): void {
+		target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+		target.focus();
+	}
+
+	it("names the keys where the keyboard is, as it moves", async () => {
+		mountPanel({ category: "terminal", hostAndChannel: true });
+		// Opened from the keyboard, as Ctrl+, does.
+		await press("Tab");
+		await open();
+		expect(shownHints()).toBe("↑↓ categories · → or Enter open · Esc close");
+		await press("ArrowRight");
+		expect(shownHints()).toBe("Space toggle · Esc back to the menu");
+		el(".stub-input").focus();
+		await settle();
+		expect(shownHints()).toBe("Esc back to the menu");
+		el(".scope-tab").focus();
+		await settle();
+		expect(shownHints()).toBe("←→ scope · Tab into the settings");
+		el(".settings-close").focus();
+		await settle();
+		expect(shownHints()).toBe("Esc close");
+	});
+
+	it("is hidden from screen readers, which name each control themselves", async () => {
+		mountPanel({ category: "terminal" });
+		await press("Tab");
+		await open();
+		expect(el(".settings-panel .key-hint-strip").getAttribute("aria-hidden")).toBe("true");
+	});
+
+	it("shows nothing for a click, and comes back with a key", async () => {
+		mountPanel({ category: "terminal" });
+		// Opened with the mouse: the keyboard is on the menu, but nobody is using it.
+		click(opener);
+		await open();
+		expect(document.activeElement).toBe(menuItem("terminal"));
+		expect(shownHints()).toBeNull();
+		await press("ArrowRight");
+		expect(shownHints()).toBe("Space toggle · Esc back to the menu");
+		click(el(".stub-button"));
+		await settle();
+		expect(shownHints()).toBeNull();
+	});
+
+	it("shows nothing when Appearance turns the key hints off", async () => {
+		mountPanel({ category: "terminal" });
+		const configStore = useConfigStore();
+		configStore.uiConfig = { onChannelDead: "readonly", keyboard: { keyHints: false } };
+		await press("Tab");
+		await open();
+		expect(document.activeElement).toBe(menuItem("terminal"));
+		expect(shownHints()).toBeNull();
+		configStore.uiConfig = { onChannelDead: "readonly", keyboard: { keyHints: true } };
+		await settle();
+		expect(shownHints()).toBe("↑↓ categories · → or Enter open · Esc close");
 	});
 });

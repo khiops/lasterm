@@ -153,6 +153,7 @@ describe("the window's shortcuts", () => {
 		const actions: Partial<Record<AppActionId, string>> = {
 			"palette.open": "commandPalette.toggle();",
 			"settings.open": "showSettings.value = !showSettings.value;",
+			"help.shortcuts": "shortcutsOverlay.toggle();",
 			"tab.new": "onNewTab();",
 			"tab.next": "switchTab('next');",
 			"tab.previous": "switchTab('previous');",
@@ -200,12 +201,36 @@ describe("the window's shortcuts", () => {
 		expect(text).toContain(
 			"case 'action:close-tab': if (layout.activeTab.value !== null) onCloseTab(layout.activeTabIndex.value); break;",
 		);
+		// The palette's Keyboard Shortcuts row opens the overlay Ctrl+/ toggles (#639).
+		expect(text).toContain("case 'action:keyboard-shortcuts': shortcutsOverlay.open(); break;");
 	});
 
 	it("no longer takes Ctrl+K from the shell", () => {
 		const onGlobalKeydown = body(/function onGlobalKeydown\(/);
 		expect(onGlobalKeydown).not.toMatch(/event\.key === ['"]k['"]/i);
 		expect(onGlobalKeydown).not.toContain("commandPalette.toggle()");
+	});
+});
+
+// The strip for the rail, the list and the tab bar (#639). Which keys it names, and when it shows,
+// is tested in utils/key-hints.spec.ts and components/KeyHintStrip.spec.ts.
+describe("the key hints of the window's zones", () => {
+	const flat = (text: string): string => text.replace(/\s+/g, " ");
+
+	it("name the keys of the zone the keyboard is in, in one place", () => {
+		expect(SOURCE).toContain('<KeyHintStrip class="zone-key-hints" :resolve="windowKeyHints" />');
+		expect(SOURCE.match(/<KeyHintStrip\b/g)).toHaveLength(1);
+	});
+
+	// Under the rail and the list: the terminals take both rows, so the strip coming and going
+	// never resizes one, and it is never drawn over one.
+	it("sit under the rail and the list, never over a terminal", () => {
+		const css = flat(SOURCE);
+		expect(css).toContain("grid-template-rows: minmax(0, 1fr) auto;");
+		expect(css).toContain(".app-layout > .terminal-main { grid-column: 3; grid-row: 1 / span 2; }");
+		expect(css).toContain(".app-layout > .zone-key-hints { grid-column: 1 / span 2; grid-row: 2;");
+		expect(css).toContain(".app-layout > .host-rail { grid-column: 1; grid-row: 1; }");
+		expect(css).toContain(".app-layout > .channel-sidebar { grid-column: 2; grid-row: 1; }");
 	});
 });
 
@@ -264,6 +289,15 @@ describe("the keyboard among tabs, panes and zones", () => {
 		const text = flat(SOURCE);
 		expect(text).toContain(
 			"watch(showSettings, (open) => { if (open) return; void nextTick(() => { const active = document.activeElement; if (active === null || active === document.body) focusActivePane(); }); });",
+		);
+	});
+
+	// Opened from the palette, the shortcuts overlay has nothing to give the keyboard back to (#639).
+	it("gives the keyboard to the pane when the shortcuts overlay closes with nowhere to give it back", () => {
+		const text = flat(SOURCE);
+		expect(text).toContain("<ShortcutsOverlay />");
+		expect(text).toContain(
+			"watch(shortcutsOverlay.isOpen, (open) => { if (open) return; void nextTick(() => { const active = document.activeElement; if (active === null || active === document.body) focusActivePane(); }); });",
 		);
 	});
 

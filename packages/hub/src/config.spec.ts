@@ -17,6 +17,7 @@ import {
 	ConfigResolver,
 	DEFAULT_CHANNELS_CONFIG,
 	DEFAULT_GC_CONFIG,
+	DEFAULT_KEYBOARD_CONFIG,
 	DEFAULT_LOG_CONFIG,
 	DEFAULT_PANES_CONFIG,
 	DEFAULT_SEARCH_CONFIG,
@@ -1407,6 +1408,53 @@ describe("extractUiConfig — layout section", () => {
 		}
 		const config = extractUiConfig({ layout: { host_rail_badge_size: "huge" } });
 		expect(config.layout.hostRailBadgeSize).toBe("medium");
+	});
+});
+
+// ─── [keyboard] key hints (#639) ─────────────────────────────────────────────
+
+describe("extractUiConfig — keyboard section", () => {
+	it("shows the key hints by default", () => {
+		expect(DEFAULT_KEYBOARD_CONFIG).toEqual({ keyHints: true });
+		expect(extractUiConfig({}).keyboard).toEqual({ keyHints: true });
+	});
+
+	it("parses key_hints = false", () => {
+		expect(extractUiConfig({ keyboard: { key_hints: false } }).keyboard.keyHints).toBe(false);
+	});
+
+	it("ignores a key_hints that is not a boolean", () => {
+		expect(extractUiConfig({ keyboard: { key_hints: "no" } }).keyboard.keyHints).toBe(true);
+	});
+});
+
+describe("[keyboard] key_hints written from Settings", () => {
+	let dbs: DatabaseManager;
+	let dir: string;
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		dir = makeTempDir("lasterm-key-hints-");
+	});
+
+	afterEach(async () => {
+		dbs.close();
+		await removeTempDir(dir);
+	});
+
+	it("lands in [keyboard] and is read back, and only a change is an override", async () => {
+		writeFileSync(join(dir, "config.toml"), "");
+		const resolver = new ConfigResolver(new MetaDAL(dbs.meta));
+		resolver.loadFromFile(dir);
+		expect(resolver.getGlobalUiOverrides().keyboard).toBeUndefined();
+
+		await resolver.saveGlobalUi("keyboard", "keyHints", false);
+
+		expect(readFileSync(join(dir, "config.toml"), "utf8")).toMatch(
+			/\[keyboard\]\s*\nkey_hints = false/,
+		);
+		expect(resolver.uiConfig.keyboard.keyHints).toBe(false);
+		expect(resolver.getGlobalUiOverrides().keyboard).toEqual({ keyHints: false });
 	});
 });
 

@@ -141,6 +141,23 @@
 					</div>
 				</SettingRow>
 			</section>
+
+			<!-- Key hints (global scope only: one window's keys, #639) -->
+			<section v-if="scope === 'global'" class="settings-section">
+				<h3 class="section-title">Keyboard</h3>
+				<SettingRow
+					label="Show key hints"
+					description="A line naming the keys that work where the keyboard is: at the bottom of Settings, and under the rail and the list while the keyboard is in the rail, the list or the tab bar."
+					:scope="scope"
+					:is-overridden="true"
+				>
+					<SettingControl
+						type="toggle"
+						:model-value="keyHints"
+						@update:model-value="onKeyHintsToggle"
+					/>
+				</SettingRow>
+			</section>
 		</template>
 	</div>
 </template>
@@ -163,6 +180,7 @@ import { useConfigStore } from "../../../stores/config.js";
 import { useThemeStore } from "../../../stores/theme.js";
 import { useSettingsStore } from "../../../stores/settings.js";
 import type { Scope } from "../../../stores/settings.js";
+import { keyHintsShown } from "../../../utils/key-hints.js";
 
 const props = defineProps<{
 	scope: Scope;
@@ -432,6 +450,15 @@ const badgeSize = computed<HostRailBadgeSize>(() => {
 function onBadgeSizeChange(size: HostRailBadgeSize) {
 	if (size === badgeSize.value) return;
 	void configStore.saveUiSettings("layout", { hostRailBadgeSize: size });
+}
+
+// ── Key hints ─────────────────────────────────────────────────────────
+
+/** `[keyboard] key_hints`: a UI setting, so global only; on unless turned off. */
+const keyHints = computed(() => keyHintsShown(configStore.uiConfig.keyboard));
+
+function onKeyHintsToggle(value: unknown) {
+	void configStore.saveUiSettings("keyboard", { keyHints: Boolean(value) });
 }
 </script>
 

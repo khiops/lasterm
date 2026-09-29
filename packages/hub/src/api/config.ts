@@ -67,6 +67,9 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 		hostRailBadgeSize: isHostRailBadgeSize,
 		sidebarWidth: (v) => typeof v === "number" && Number.isInteger(v) && v >= 0,
 	},
+	keyboard: {
+		keyHints: (v) => typeof v === "boolean",
+	},
 };
 
 export function registerConfigRoutes(

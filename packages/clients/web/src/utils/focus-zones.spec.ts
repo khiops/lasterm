@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	FOCUS_ZONES,
 	type FocusZone,
+	focusZoneOf,
 	gridMove,
 	listMove,
 	nextInCycle,
@@ -47,6 +48,27 @@ describe("F6 and Shift+F6", () => {
 	it("stay put when no other zone can take the keyboard", () => {
 		expect(zoneAfter("pane", 1, (zone) => zone === "pane")).toBeNull();
 		expect(zoneAfter("rail", -1, () => false)).toBeNull();
+	});
+});
+
+// The window's Esc and F6, and the key hints (#639), ask which zone an element is in.
+describe("focusZoneOf", () => {
+	it("is the zone an element sits under, or null outside every zone", () => {
+		const rail = document.createElement("div");
+		rail.dataset.focusZone = "rail";
+		const badge = document.createElement("button");
+		rail.appendChild(badge);
+		const elsewhere = document.createElement("button");
+		const unknown = document.createElement("div");
+		unknown.dataset.focusZone = "footer";
+		const inUnknown = document.createElement("button");
+		unknown.appendChild(inUnknown);
+		expect(focusZoneOf(badge)).toBe("rail");
+		expect(focusZoneOf(rail)).toBe("rail");
+		expect(focusZoneOf(elsewhere)).toBeNull();
+		expect(focusZoneOf(inUnknown)).toBeNull();
+		expect(focusZoneOf(null)).toBeNull();
+		expect(focusZoneOf(window)).toBeNull();
 	});
 });
 

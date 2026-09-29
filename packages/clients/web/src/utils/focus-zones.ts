@@ -13,6 +13,13 @@ export function isFocusZone(value: unknown): value is FocusZone {
 	return (FOCUS_ZONES as readonly unknown[]).includes(value);
 }
 
+/** The zone an element is in, by the `data-focus-zone` it sits under, or null. */
+export function focusZoneOf(target: EventTarget | null): FocusZone | null {
+	if (!(target instanceof Element)) return null;
+	const zone = target.closest("[data-focus-zone]")?.getAttribute("data-focus-zone");
+	return isFocusZone(zone) ? zone : null;
+}
+
 /**
  * The zone F6 (`step` 1) or Shift+F6 (`step` -1) goes to from `current`, wrapping around, or null
  * when no other zone can take the keyboard. A zone that is hidden, or has nothing to focus, is

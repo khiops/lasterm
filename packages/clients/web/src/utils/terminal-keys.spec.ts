@@ -160,6 +160,29 @@ describe("terminalKeyHandler", () => {
 		}
 	});
 
+	// The shortcuts overlay's chord (#639): readline's undo, which Ctrl+- still is, gives way.
+	it("keeps Ctrl+/ from the PTY, as each layout types it", () => {
+		const { target, handle } = pane();
+		const chords: [string, KeyInit][] = [
+			["/", { ctrlKey: true, code: "Slash" }],
+			// AZERTY: / is Shift+:. QWERTZ: Shift+7. And the numeric keypad's.
+			["/", { ctrlKey: true, shiftKey: true, code: "Period" }],
+			["/", { ctrlKey: true, shiftKey: true, code: "Digit7" }],
+			["/", { ctrlKey: true, code: "NumpadDivide" }],
+		];
+		for (const [k, mods] of chords) {
+			for (const type of TYPES) {
+				expect(handle(event(type, k, mods)), `${type} ${mods.code}`).toBe(false);
+			}
+		}
+		// A plain /, and Ctrl+? on US, are the shell's.
+		expect(handle(event("keydown", "/", { code: "Slash" }))).toBe(true);
+		expect(handle(event("keydown", "?", { ctrlKey: true, shiftKey: true, code: "Slash" }))).toBe(
+			true,
+		);
+		expect(target.openSearch).not.toHaveBeenCalled();
+	});
+
 	it("leaves Ctrl+K to xterm, which sends it to the shell", () => {
 		const { handle } = pane();
 		for (const type of TYPES) {

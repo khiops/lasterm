@@ -4,7 +4,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useProfilesStore } from "../stores/profiles.js";
 import { useWriteLockStore } from "../stores/writelock.js";
-import { shortcutLabel } from "../utils/app-shortcuts.js";
+import { APP_SHORTCUT_NAMES, shortcutLabel } from "../utils/app-shortcuts.js";
 import { formatConnectionString } from "../utils/host-display.js";
 import { useHostRows } from "./useHostRows.js";
 import { useRecentPaletteItems } from "./useRecentPaletteItems.js";
@@ -333,6 +333,14 @@ export function useCommandPalette() {
 					type: "action",
 					icon: "⚙",
 					shortcut: shortcutLabel("settings.open"),
+				},
+				// Every shortcut, and the keys inside each area (#639).
+				{
+					id: "action:keyboard-shortcuts",
+					label: APP_SHORTCUT_NAMES["help.shortcuts"],
+					type: "action",
+					icon: "⌨",
+					shortcut: shortcutLabel("help.shortcuts"),
 				},
 				{
 					id: "action:ssh-import",

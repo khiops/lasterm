@@ -21,6 +21,7 @@ import type {
 	AgentEnvQueryMessage,
 	AgentSpawnMessage,
 	AgentSyncedMessage,
+	ChannelEndReason,
 	ElevationMethod,
 	EnvMode,
 	ErrorMessage,
@@ -58,7 +59,17 @@ import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./age
 import { stopLocalAgent } from "./agent-launcher.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { requestDaemonStop } from "./daemon-stop.js";
-import { hostReconnecting, hostUnreachableMessage } from "./host-reachability.js";
+import {
+	type HostConnectionFacts,
+	terminalsEndedByDisconnect,
+	terminalsEndedByReconnect,
+	terminalsOutliveConnection,
+} from "./host-connection.js";
+import {
+	hostDisconnectedMessage,
+	hostReconnecting,
+	hostUnreachableMessage,
+} from "./host-reachability.js";
 import { OutputChunker } from "./output-chunker.js";
 import {
 	clearContext,
@@ -88,6 +99,7 @@ import type {
 	Lease,
 	SessionAcquisition,
 	SessionMetaDAL,
+	SessionState,
 	SharedSessionContext,
 } from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
@@ -139,6 +151,23 @@ export type ReplaceAgentOutcome =
 			/** How many, when the agent said. */
 			readonly otherOwnerChannels?: number;
 	  };
+
+/** What came of asking to connect, reconnect or disconnect a host (#648). */
+export type HostConnectionOutcome =
+	/** The local host: it has no connection to act on. */
+	| { readonly kind: "not-ssh" }
+	| { readonly kind: "quitting" }
+	/** Closing the connection would end terminals, and `force` did not say to: nothing was done. */
+	| { readonly kind: "terminals-would-end"; readonly terminals: number }
+	/** Connected already. */
+	| { readonly kind: "connected" }
+	/**
+	 * Being reached. The host's session says how that ends, and so does
+	 * `done`, true once connected; it never rejects. `ended` terminals ended
+	 * with the connection a Reconnect closed first.
+	 */
+	| { readonly kind: "connecting"; readonly ended: number; readonly done: Promise<boolean> }
+	| { readonly kind: "disconnected"; readonly ended: number };
 
 function isAgentChannelNotFoundError(err: unknown, channelId: string): err is ErrorMessage {
 	if (typeof err !== "object" || err === null) return false;
@@ -214,6 +243,7 @@ export class SessionManager {
 			reconnectAbortControllers: new Map(),
 			restartTracking: new Map(),
 			stoppingAgents: new Set(),
+			userDisconnectedHosts: new Set(),
 			startingChannels: new Set(),
 			channelClock: 0,
 			pendingRequests: new Map(),
@@ -270,6 +300,19 @@ export class SessionManager {
 			// daemon kept, and every keystroke goes nowhere.
 			const reachable = ctx.agents.get(hostId);
 			if (reachable?.connected === true) return true;
+
+			// A connection already on its way, for a terminal or asked for from the
+			// host's menu (#648): its outcome is this one's. Dialling beside it
+			// would be the second connection to one daemon described above.
+			const connecting = ctx.acquisitions.get(hostId);
+			if (connecting !== undefined) {
+				try {
+					await connecting.connectPromise;
+				} catch {
+					return false;
+				}
+				return ctx.agents.get(hostId)?.connected === true;
+			}
 
 			// Snapshot the session entry BEFORE any await so we can currency-check it
 			// after start() returns (mirrors the invariant-10 guard in scheduleReconnect).
@@ -556,6 +599,10 @@ export class SessionManager {
 		// would start one of its own beside it, aborting the reconnect's if one
 		// was under way. `hostUnreachableFor` says why (#605).
 		if (this.hostUnreachableFor(channelId) !== null) return false;
+		// A restart asked for is someone acting on its host, which reconnects
+		// it if they had disconnected it (#648).
+		const restartHostId = this.ctx.metaDal.getChannelWithHost(channelId)?.hostId;
+		if (restartHostId !== undefined) this.userActsOnHost(restartHostId, true);
 		// A SPAWN, or another restart, is already starting it: a second start of
 		// one terminal is what two windows following the setting would race to
 		// (#592). Claimed for the length of this one, as a SPAWN claims it.
@@ -802,6 +849,27 @@ export class SessionManager {
 			type: host.type,
 			label: host.label,
 		});
+
+		// Its user disconnected it (#648). A start nobody asked for waits for
+		// them, as it would for a host that is away; any other is them acting
+		// on it, and reaches it again.
+		if (this.ctx.userDisconnectedHosts.has(hostId)) {
+			if (msg.automatic === true) {
+				this.ctx.hubLogger?.log("info", "handleSpawn: host disconnected by its user, refused", {
+					hostId,
+				});
+				client.send(
+					hostDisconnectedMessage(
+						hostId,
+						host.label,
+						this.ctx.sessions.get(hostId)?.status ?? "closed",
+						reuseChannelId,
+					),
+				);
+				return null;
+			}
+			this.userActsOnHost(hostId, true);
+		}
 
 		// The hub lost this host and is reaching for it again: its reconnect has
 		// the next attempt. Refused at once rather than open a second connection
@@ -1989,7 +2057,347 @@ export class SessionManager {
 		}
 	}
 
+	// ─── A host's connection, on request (#648) ──────────────────────────────
+
+	/**
+	 * Connect an SSH host and make its agent ready, without starting a
+	 * terminal: the host menu's Connect.
+	 *
+	 * The first connection a terminal makes, less the terminal: the same
+	 * questions (host key, passphrase, agent binary), put to the window that
+	 * asked, and the same errors, sent to it. What a daemon still holds there
+	 * is taken up. It answers at once, since a question may stay on screen for
+	 * as long as it takes to answer, which no request waits out: the host's
+	 * session says the rest, `starting` then `active`.
+	 */
+	connectHost(hostId: string, options: { readonly clientId?: string } = {}): HostConnectionOutcome {
+		const host = this.ctx.metaDal.getHost(hostId);
+		if (host?.type !== "ssh") return { kind: "not-ssh" };
+		if (this.isQuitting()) return { kind: "quitting" };
+		if (this.ctx.agents.get(hostId)?.connected === true) {
+			this.userActsOnHost(hostId, true);
+			return { kind: "connected" };
+		}
+		// Said by the `starting` that follows at once, with the flag gone.
+		this.userActsOnHost(hostId, false);
+		return {
+			kind: "connecting",
+			ended: 0,
+			done: this.reachHostOnRequest(hostId, host, options.clientId),
+		};
+	}
+
+	/**
+	 * Close a host's connection and open it again: the host menu's Reconnect.
+	 *
+	 * A daemon keeps its terminals across it, and they are taken up on the
+	 * new connection. An agent on stdio ends with its connection, and its
+	 * terminals with it (`stopped`): that is refused, and nothing is done,
+	 * unless `force` says the person was told how many.
+	 */
+	reconnectHost(
+		hostId: string,
+		options: { readonly clientId?: string; readonly force?: boolean } = {},
+	): HostConnectionOutcome {
+		const host = this.ctx.metaDal.getHost(hostId);
+		if (host?.type !== "ssh") return { kind: "not-ssh" };
+		if (this.isQuitting()) return { kind: "quitting" };
+		const facts = this.connectionFacts(hostId, host);
+		const ending = terminalsEndedByReconnect(facts);
+		if (ending > 0 && options.force !== true) {
+			return { kind: "terminals-would-end", terminals: ending };
+		}
+		this.userActsOnHost(hostId, false);
+		const agent = this.ctx.agents.get(hostId);
+		if (agent?.connected === true) {
+			if (terminalsOutliveConnection(facts)) this.dropConnection(hostId, agent);
+			else this.endHostSession(hostId, "stopped");
+		}
+		return {
+			kind: "connecting",
+			ended: ending,
+			done: this.reachHostOnRequest(hostId, host, options.clientId),
+		};
+	}
+
+	/**
+	 * Close a host's connection, and leave it closed: the host menu's
+	 * Disconnect.
+	 *
+	 * A daemon's terminals keep running on the host, and its session waits,
+	 * `disconnected`, as after a hub restart. On stdio the terminals end with
+	 * the connection (`stopped`), which is refused unless `force` says the
+	 * person was told how many. Either way the hub reaches for the host no
+	 * more (`userDisconnectedHosts`) until someone acts on it again.
+	 */
+	disconnectHost(
+		hostId: string,
+		options: { readonly force?: boolean } = {},
+	): HostConnectionOutcome {
+		const host = this.ctx.metaDal.getHost(hostId);
+		if (host?.type !== "ssh") return { kind: "not-ssh" };
+		if (this.isQuitting()) return { kind: "quitting" };
+		const facts = this.connectionFacts(hostId, host);
+		const ending = terminalsEndedByDisconnect(facts);
+		if (ending > 0 && options.force !== true) {
+			return { kind: "terminals-would-end", terminals: ending };
+		}
+		const session = this.ctx.sessions.get(hostId);
+		const agent = this.ctx.agents.get(hostId);
+		// Nothing connected, nothing on its way, nothing waiting to come back.
+		if (session === undefined && agent === undefined && !this.ctx.acquisitions.has(hostId)) {
+			return { kind: "disconnected", ended: 0 };
+		}
+
+		// First, so that everything said from here on carries it.
+		this.ctx.userDisconnectedHosts.add(hostId);
+		this.cancelReconnect(hostId);
+		this.closeAcquisition(hostId);
+		// A session still starting has nothing to keep: it never connected.
+		if (
+			terminalsOutliveConnection(facts) &&
+			session !== undefined &&
+			session.status !== "starting"
+		) {
+			if (agent !== undefined) this.dropConnection(hostId, agent);
+			else this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+		} else {
+			this.endHostSession(hostId, "stopped");
+		}
+		this.ctx.hubLogger?.log("info", "session-manager: host disconnected by its user", {
+			hostId,
+			ended: ending,
+		});
+		return { kind: "disconnected", ended: ending };
+	}
+
+	/** What decides how many terminals end with a host's connection. */
+	private connectionFacts(hostId: string, host: Host): HostConnectionFacts {
+		const agent = this.ctx.agents.get(hostId);
+		let liveTerminals = 0;
+		for (const channel of this.ctx.channels.values()) {
+			if (channel.hostId === hostId && channel.status !== "dead") liveTerminals++;
+		}
+		return {
+			agent:
+				agent === undefined
+					? undefined
+					: {
+							connected: agent.connected,
+							usedRemoteDaemon: agent instanceof SshAgent && agent.usedRemoteDaemon,
+						},
+			hostKeepsDaemon: hostKeepsDaemon(
+				host,
+				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+			),
+			liveTerminals,
+		};
+	}
+
+	/**
+	 * Someone acted on this host: what they did reaches for it, and the hub
+	 * holds back from doing so no more (#648). `announce` tells every window
+	 * at once; a caller that is about to say `starting` lets that say it.
+	 */
+	private userActsOnHost(hostId: string, announce: boolean): void {
+		if (!this.ctx.userDisconnectedHosts.delete(hostId)) return;
+		if (announce) this.broadcaster.announceSessionState(hostId);
+	}
+
+	/**
+	 * Close this hub's connection to a host on purpose. It is let go of first,
+	 * so that its end is read as the hub's doing, not as a lost link to dial
+	 * again.
+	 */
+	private letGoOfConnection(hostId: string, agent: AgentConnection): void {
+		this.releaseAgent(hostId, agent);
+		void agent.close();
+	}
+
+	/** Close the connection, and keep the session: its terminals are still out there. */
+	private dropConnection(hostId: string, agent: AgentConnection): void {
+		this.letGoOfConnection(hostId, agent);
+		const session = this.ctx.sessions.get(hostId);
+		if (session !== undefined) {
+			this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+		}
+	}
+
+	/**
+	 * Close the connection and the session with it, its terminals ending for
+	 * `endReason`, as `closeSession` does for DELETE /api/sessions/:id.
+	 */
+	private endHostSession(hostId: string, endReason: ChannelEndReason): void {
+		const agent = this.ctx.agents.get(hostId);
+		if (agent !== undefined) this.letGoOfConnection(hostId, agent);
+		this.closeAcquisition(hostId);
+		const session = this.ctx.sessions.get(hostId);
+		if (session === undefined) return;
+		const clearSend = (routeClientId: string, msg: Record<string, unknown>) => {
+			this.ctx.clients.get(routeClientId)?.send(msg as unknown as ProtocolMessage);
+		};
+		clearContext(this.ctx, reconnectContextId(session.id), clearSend);
+		clearElevationContextsForSession(this.ctx, session.id, clearSend);
+		this.lifecycle.closeSession(hostId, session.id, endReason);
+	}
+
+	/** Stop the connection a SPAWN or a Connect is making, and its questions. */
+	private closeAcquisition(hostId: string): void {
+		const closed = Acq.close(this.ctx, hostId);
+		if (closed === null) return;
+		clearContext(this.ctx, closed.id, (routeClientId, msg) => {
+			this.ctx.clients.get(routeClientId)?.send(msg as unknown as ProtocolMessage);
+		});
+	}
+
+	/** Call off the reconnect a lost link has waiting, or under way. */
+	private cancelReconnect(hostId: string): void {
+		const timer = this.ctx.reconnectTimers.get(hostId);
+		if (timer !== undefined) {
+			clearTimeout(timer);
+			this.ctx.reconnectTimers.delete(hostId);
+		}
+		const controller = this.ctx.reconnectAbortControllers.get(hostId);
+		if (controller !== undefined) {
+			controller.abort();
+			this.ctx.reconnectAbortControllers.delete(hostId);
+		}
+	}
+
+	/** Whether this hub holds a terminal on the host that has not ended. */
+	private hostHasLiveChannels(hostId: string): boolean {
+		for (const channel of this.ctx.channels.values()) {
+			if (channel.hostId === hostId && channel.status !== "dead") return true;
+		}
+		return false;
+	}
+
+	/**
+	 * The window a connection asked for over REST puts its questions to: the
+	 * one it names, while it is here; else the first there is, as for the
+	 * reconnect a pane asks for. With none, nothing can be asked, and a host
+	 * that needs an answer is not reached.
+	 */
+	private promptClientFor(clientId: string | undefined): WsClient {
+		const named = clientId === undefined ? undefined : this.ctx.clients.get(clientId);
+		if (named !== undefined) return named;
+		const firstId = [...this.ctx.clients.keys()].sort()[0];
+		const first = firstId === undefined ? undefined : this.ctx.clients.get(firstId);
+		return first ?? { id: `rest-${generateId()}`, send: () => {}, attachedChannels: new Set() };
+	}
+
+	/**
+	 * Reach an SSH host for someone, and settle true once its agent is ready.
+	 *
+	 * The way a SPAWN reaches a host it has no connection to, through the
+	 * acquisition, so that a SPAWN, a restart or an attach meanwhile waits for
+	 * this connection rather than open a second one; less the terminal. A
+	 * daemon's terminals are taken up; an agent on stdio starts again those
+	 * a lost link left waiting, under their ids, as the reconnect after a
+	 * dropped link does. Never rejects: a failure has been said to `client`.
+	 */
+	private async reachHostOnRequest(
+		hostId: string,
+		host: Host,
+		clientId: string | undefined,
+	): Promise<boolean> {
+		let fence: QuitFence;
+		try {
+			fence = captureQuitFence(this.ctx);
+		} catch {
+			return false;
+		}
+		const client = this.promptClientFor(clientId);
+		// Someone asked: the attempt a lost link had waiting, or under way, gives
+		// way to theirs, which may ask what that one could not.
+		this.cancelReconnect(hostId);
+
+		const inFlight = this.ctx.acquisitions.get(hostId);
+		if (inFlight !== undefined) {
+			const joined = Acq.join(inFlight, client.id);
+			if (joined !== null) {
+				try {
+					await inFlight.connectPromise;
+					return this.ctx.agents.get(hostId)?.connected === true;
+				} catch {
+					return false;
+				} finally {
+					Acq.release(this.ctx, joined, () => this.hostHasLiveChannels(hostId));
+				}
+			}
+		}
+
+		const { acq, lease } = Acq.acquire(this.ctx, hostId, client.id);
+		let session: SessionState | undefined;
+		let neverConnected = false;
+		try {
+			session = await this.agentMgr.getOrCreateSession(hostId, true, fence);
+			neverConnected = session.status === "starting";
+			// Said at once: the host is being reached, not lost.
+			this.broadcaster.updateSessionStatus(hostId, session.id, "starting");
+			const agent = await this._connectSshAgent(
+				hostId,
+				host,
+				client,
+				session.id,
+				acq.controller.signal,
+				acq.id,
+			);
+			if (
+				this.ctx.acquisitions.get(hostId) !== acq ||
+				acq.state !== "CONNECTING" ||
+				acq.controller.signal.aborted ||
+				this.ctx.sessions.get(hostId)?.id !== session.id
+			) {
+				void agent.close();
+				throw new Error("SSH connect aborted");
+			}
+			this.ctx.commits.adoptAgent(fence, hostId, agent);
+			const adopted = await this.lifecycle.adoptWhatTheDaemonHolds(hostId, agent);
+			// Disconnected, or its session closed, while the daemon said what it
+			// holds: whoever did that has let go of this connection already.
+			if (acq.state !== "CONNECTING" || this.ctx.agents.get(hostId) !== agent) return false;
+			if (!adopted) this.lifecycle.reAttachChannels(hostId, session.id, agent);
+			Acq.commit(this.ctx, acq, session);
+			clearContext(this.ctx, acq.id);
+			return true;
+		} catch (err) {
+			this.ctx.hubLogger?.log("warn", "session-manager: connecting a host on request failed", {
+				hostId,
+				message: err instanceof Error ? err.message : String(err),
+			});
+			this.settleFailedConnect(hostId, session, neverConnected);
+			this.failConnectingAcq(acq, err, lease, () => this.hostHasLiveChannels(hostId));
+			return false;
+		} finally {
+			if (!lease.released) Acq.release(this.ctx, lease, () => this.hostHasLiveChannels(hostId));
+		}
+	}
+
+	/**
+	 * Put a host's session back as it was before a connection asked for
+	 * failed: gone, if it never connected; waiting, `disconnected`, if its
+	 * terminals are still out there.
+	 */
+	private settleFailedConnect(
+		hostId: string,
+		session: SessionState | undefined,
+		neverConnected: boolean,
+	): void {
+		if (session === undefined || this.ctx.sessions.get(hostId)?.id !== session.id) return;
+		if (neverConnected) {
+			this.broadcaster.updateSessionStatus(hostId, session.id, "closed");
+			this.ctx.sessions.delete(hostId);
+			return;
+		}
+		this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+	}
+
 	private async reconnectForAttach(hostId: string): Promise<boolean> {
+		// Its user disconnected it: a pane attaching is a window opening, not
+		// someone asking for the host, and is answered from what the hub
+		// remembers (#648). The pane's own Reconnect connects it first.
+		if (this.ctx.userDisconnectedHosts.has(hostId)) return false;
 		// Only where something may still be holding the terminal. On stdio the
 		// agent died with its connection, so dialling out would reach a machine
 		// nobody asked for — and ask for a password — to find nothing.

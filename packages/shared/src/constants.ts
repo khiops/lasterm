@@ -93,9 +93,17 @@ export const ErrorCode = {
 	 * SPAWN, and the restart route: the host is away. The hub lost it and is
 	 * reaching for it again, or lost it while the terminal was starting. Says
 	 * nothing about the terminal: started again once the host is back, it may
-	 * well run (#605).
+	 * well run (#605). Also a SPAWN marked `automatic` on a host its user
+	 * disconnected, which nothing but that user brings back (#648).
 	 */
 	HOST_UNREACHABLE: "HOST_UNREACHABLE",
+	/**
+	 * REST, reconnect and disconnect: closing this host's connection would end
+	 * terminals, and the request did not say `force`. Carries how many (#648).
+	 */
+	TERMINALS_WOULD_END: "TERMINALS_WOULD_END",
+	/** REST, connect, reconnect and disconnect: the host is the local one, which has no connection to act on (#648). */
+	NOT_SSH_HOST: "NOT_SSH_HOST",
 	/** REST: the host's agent predates what was asked of it — here `env-modes` (#576). */
 	AGENT_TOO_OLD: "AGENT_TOO_OLD",
 	/** REST: the host's agent did not answer in time (#576). */

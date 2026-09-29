@@ -213,6 +213,14 @@ export interface SharedSessionContext {
 	 */
 	stoppingAgents: Set<string>;
 	/**
+	 * Hosts their user disconnected (#648). The hub does not reach for one of
+	 * them again by itself — no reconnect after a lost link, none for a window
+	 * attaching, no start nobody asked for — until someone acts on it: Connect,
+	 * Reconnect, a terminal opened or restarted there. Kept in memory only: a
+	 * hub that restarts has forgotten it, and reaches its hosts as it always did.
+	 */
+	userDisconnectedHosts: Set<string>;
+	/**
 	 * Dead channels a SPAWN is bringing back under their own id, from the
 	 * moment it was accepted until the hub has its answer. A second one naming
 	 * the same channel meanwhile is refused: two windows following "When a

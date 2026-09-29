@@ -44,7 +44,7 @@
 | Boundary | Trust level | Notes |
 |----------|-------------|-------|
 | Hub process ↔ local filesystem | High | Same user, same machine |
-| Hub ↔ Agent daemon (UDS) | High | Same user, filesystem perms enforce access; the local daemon also requires the token of `auth.json` (§ 3.5) |
+| Hub ↔ Agent daemon (UDS) | High | Same user, filesystem perms enforce access. Before it sends anything, the hub checks the socket's directory, the socket and the account of the process serving it (on Windows, of the pipe's server); the local daemon also requires the token of `auth.json` (§ 3.5) |
 | Browser ↔ Hub (localhost) | Medium | Any local process can connect |
 | Hub ↔ Remote (SSH) | High | SSH provides encryption + auth |
 | Agent ↔ PTY | High | Same user on remote machine |
@@ -316,7 +316,8 @@ lasterm-agent --daemon --socket $XDG_RUNTIME_DIR/lasterm/agent.sock
 - Daemon spawned detached by hub via `connectOrLaunch()` (survives hub restart)
 - Listens on UDS only — no TCP listener, not reachable from network
 - Runs as the same user as the hub (inherited from parent process)
-- The socket is 0600, and its parent directory 0700 when lasterm creates it (§ 3.5)
+- The socket is 0600, in a directory that both the hub and the agent require to be the user's own
+  and closed to everyone else; the hub also checks the process behind the socket (§ 3.5)
 
 ### 3.5 Daemon Socket Security (UDS / Named Pipe)
 
@@ -327,14 +328,34 @@ The agent daemon communicates with the hub over a Unix domain socket (Linux/macO
   `/tmp/lasterm-<uid>/agent.sock` when `XDG_RUNTIME_DIR` is not set (`socket-path.ts`)
 - Windows: `\\.\pipe\lasterm-agent-<username>`
 
-**Filesystem protection:**
-- The socket is set to 0600 once bound. Its parent directory is created 0700 when the hub
-  (`agent-launcher.ts`) or the agent is the one to create it. A parent that already exists is used
-  as it is: neither refuses it for its owner or its mode, and the agent only declines to write its
-  identity record into one that group or others can write. Under `XDG_RUNTIME_DIR` it is the
-  user's own runtime directory; `/tmp/lasterm-<uid>` is a name another account can create first
-- On Windows the named pipe is created with an owner-only DACL (SDDL `D:(A;;GA;;;OW)`), so another account cannot open it
-- `probeSocket(path)` throws on EACCES, preventing connection to another user's socket
+**What the hub checks before it sends anything.** The first frame the hub sends is the AUTH that
+carries the token of `auth.json`; terminal input and spawn requests, which can carry an elevation
+password, follow it. So the endpoint is checked first (`local-agent-endpoint.ts`). One that fails
+is refused with `LASTERM_LOCAL_AGENT_ENDPOINT_REFUSED`, naming the path and what is wrong with it:
+nothing is sent, and the hub does not start an agent in its place.
+
+- **Unix, the directory.** Before connecting and before starting an agent, `lstat` of the socket's
+  directory must show a directory, not a symbolic link, owned by the hub's uid, with no permission
+  for group or others (`mode & 0o077 == 0`). A missing one is created 0700, then looked at again and
+  judged as if it had been found: a directory that appeared between the two looks gets no
+  exemption. `/tmp/lasterm-<uid>` is held to the same rule, and the hub does not fall back to
+  another location when it fails
+- **Unix, the socket.** `lstat` of the socket must show a socket owned by the hub's uid
+- **Unix, the process.** The hub's native addon (`lasterm-hub-lock`) connects, and the peer's
+  credentials (`SO_PEERCRED`) must name the hub's effective uid. Node has no call for this, so it
+  receives the connection as a descriptor only once the check has passed
+- **Windows, the process.** The addon opens the pipe at `SECURITY_IDENTIFICATION`, takes the server's
+  process id (`GetNamedPipeServerProcessId`), opens that process and its token, and requires the
+  token's user SID to be the hub's own. Only then does Node receive the pipe
+
+**What the agent checks before it binds.** On Unix the daemon holds its socket's directory to the
+same rule before it removes a leftover socket file or binds (`socket_dir.rs`): a missing directory
+is created 0700, and one that is a symbolic link, not a directory, owned by another uid, or open to
+group or others is refused. The socket is set to 0600 once bound. On Windows the pipe is created
+with a DACL of one ACE, allowing the pipe's owner (SDDL `D:(A;;GA;;;OW)`), and the owner is the
+account the agent runs as (its token's default owner). The first instance is created with
+`FILE_FLAG_FIRST_PIPE_INSTANCE`, so the daemon refuses a pipe name that another server already
+holds rather than adding an instance to it. Tests pin the DACL, the owner and that refusal.
 
 **Authentication.** Filesystem permissions are the first boundary. The second is the token: a
 daemon that has an `auth.json`, which the local one reads from the same configuration directory as
@@ -349,10 +370,8 @@ leaves its machine, so its boundary is the socket's directory alone (§ 3.4, PRO
   one (§ 3.6, PROTOCOL.md § 3.1b)
 - An agent without it serves one hub at a time: the newest authenticated connection displaces the
   previous one, which is told so with `DISPLACED`
-- Stale socket detection: `probeSocket()` distinguishes ECONNREFUSED (stale, safe to unlink) from EACCES (another user's socket, must not touch)
-
-**Future hardening (deferred):**
-- Linux: `SO_PEERCRED` peer UID verification (verify connecting process runs as the same user)
+- Stale socket detection: a daemon removes a socket file nobody answers on before it binds, and
+  refuses to take one that another daemon still serves (#454)
 
 ### 3.6 Hub identity on a shared daemon (#127)
 
@@ -691,7 +710,6 @@ Security notes:
 
 | Feature | Priority | Description |
 |---------|----------|-------------|
-| UDS SO_PEERCRED | P1 | Verify connecting process UID matches socket owner (Linux) |
 | SQLCipher | P2 | Encrypt meta.db and spool.db at rest |
 | OS keychain | P1 | Store auth token in OS keychain (keytar) |
 | TLS for non-localhost | P2 | If hub exposed beyond loopback |

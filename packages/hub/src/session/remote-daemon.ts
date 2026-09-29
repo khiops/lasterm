@@ -28,6 +28,7 @@
 
 import { randomBytes } from "node:crypto";
 import type { Duplex } from "node:stream";
+import { DEFAULT_AGENT_LOG_FILES_KEPT } from "@lasterm/shared";
 import type { Client } from "ssh2";
 
 /**
@@ -84,6 +85,12 @@ export interface RemoteDaemonLaunch {
 	paths: RemoteDaemonPaths;
 	logLevel?: string;
 	logFormat?: string;
+	/**
+	 * Daemon log files to keep, one per day; 0 keeps them all (#646). Passed only
+	 * to a binary that knows the option; one that does not keeps its log as it
+	 * always did.
+	 */
+	logFilesKept?: number;
 	/** Seconds to stay up holding nothing, for nobody. See `IDLE_TIMEOUT_SECONDS`. */
 	idleTimeoutSeconds?: number;
 	/**
@@ -222,6 +229,13 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 	const argv =
 		`if ${agent} --help 2> /dev/null | grep -q -- '--idle-timeout'; ` +
 		`then set -- ${run} --idle-timeout ${idle}; else set -- ${run}; fi`;
+	// The same question for the daemon log's file count, added after it (#646).
+	// Appended to what the line above set, and whole: `"$@"` is split by every
+	// shell, zsh included. An `if` without `else` succeeds when it does nothing.
+	const kept = Math.max(0, Math.trunc(launch.logFilesKept ?? DEFAULT_AGENT_LOG_FILES_KEPT));
+	const filesKept =
+		`if ${agent} --help 2> /dev/null | grep -q -- '--log-files-kept'; ` +
+		`then set -- "$@" --log-files-kept ${kept}; fi`;
 	// `$detach` is the shell's copy of DETACH_SCRIPT, set below.
 	const detachCall = `/bin/sh -c "$detach" lasterm-agent ${log} "$@"`;
 	const scope = [
@@ -243,6 +257,7 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 		`mkdir -p ${dir}`,
 		`chmod 700 ${dir}`,
 		argv,
+		filesKept,
 		`detach=${quotePosix(DETACH_SCRIPT)}`,
 		place,
 		`case $placed in scope*) ;; *) ${detachCall} ;; esac`,
@@ -329,6 +344,8 @@ export interface AttachRemoteDaemonOptions {
 	agentPath: string;
 	logLevel?: string;
 	logFormat?: string;
+	/** Daemon log files a daemon this call starts keeps. See `RemoteDaemonLaunch`. */
+	logFilesKept?: number;
 	/** Injected in tests; defaults to the real `sshExec`. */
 	exec?: (client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>;
 	/** Injected in tests; defaults to a real `direct-streamlocal` channel. */
@@ -392,6 +409,7 @@ export async function attachRemoteDaemon(
 			paths,
 			...(options.logLevel !== undefined && { logLevel: options.logLevel }),
 			...(options.logFormat !== undefined && { logFormat: options.logFormat }),
+			...(options.logFilesKept !== undefined && { logFilesKept: options.logFilesKept }),
 		}),
 	);
 	if (launch.exitCode !== 0) {

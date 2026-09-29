@@ -23,6 +23,7 @@ import type {
 	KeyboardConfig,
 	LayoutConfig,
 	LogConfig,
+	LoggingSettings,
 	PanesConfig,
 	SearchConfig,
 	SshConfig,
@@ -45,6 +46,7 @@ import {
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
 	hostRailColumnsFromLegacyWidth,
+	isAgentLogFilesKept,
 	isHostRailBadgeSize,
 	isHostRailColumns,
 	parseAgentConfig,
@@ -753,7 +755,10 @@ export function extractLogConfig(parsed: TOML.JsonMap): LogConfig {
 
 /**
  * Extract AgentConfig from parsed TOML. Daemon-specific knobs still live under
- * [agent], but log level/format come from the shared [logging] contract.
+ * [agent], but log level/format come from the shared [logging] contract, and so
+ * does how many daemon log files an agent keeps (`agent_files_kept`, #646). A
+ * value `isAgentLogFilesKept` refuses leaves the default: clamped, a negative
+ * would become 0, which keeps every file.
  */
 export function extractAgentConfig(parsed: TOML.JsonMap): AgentConfig {
 	const section = parsed.agent;
@@ -762,11 +767,17 @@ export function extractAgentConfig(parsed: TOML.JsonMap): AgentConfig {
 			? (section as Record<string, unknown>)
 			: undefined;
 	const logging = extractLogConfig(parsed);
+	const loggingSection = parsed.logging;
+	const filesKept =
+		loggingSection != null && typeof loggingSection === "object"
+			? (loggingSection as Record<string, unknown>).agent_files_kept
+			: undefined;
 
 	return {
 		...parseAgentConfig(agentSection),
 		logLevel: logging.level,
 		logFormat: logging.format,
+		...(isAgentLogFilesKept(filesKept) && { logFilesKept: filesKept }),
 	};
 }
 
@@ -926,6 +937,11 @@ export class ConfigResolver {
 	/** Returns the resolved local agent daemon configuration. */
 	get agentConfig(): AgentConfig {
 		return this._agentConfig;
+	}
+
+	/** What Settings edits of [logging] (`GET /api/config/logging`). */
+	get loggingSettings(): LoggingSettings {
+		return { agentFilesKept: this._agentConfig.logFilesKept };
 	}
 
 	/**

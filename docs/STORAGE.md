@@ -504,3 +504,44 @@ Channel created (BORN)
   └─ All its chunks deleted; its channel row and cache_index entry stay
      until the channel is deleted
 ```
+
+## 12. Logs
+
+Besides the two databases, Lasterm keeps logs, in the state directory unless the table says
+otherwise. None is encrypted. Each is bounded except `agent-daemon.log`, which receives almost
+nothing. What goes into a log, and what never does, is in CLAUDE.md (Logging) and SECURITY.md § 7.
+
+| File | Written by | Bound |
+|------|-----------|-------|
+| `logs/hub.jsonl` | The hub: its security events (SECURITY.md § 7.1), and its diagnostics when started through `main.ts` | Moves to `hub.jsonl.old` at 10 MB, replacing the one before |
+| `hub-daemon.log` | What `lasterm start --daemon` printed | Copied to `hub-daemon.log.old` and emptied at 10 MB |
+| `hub.log` (the desktop's application data directory) | What the desktop's hub printed | Moves to `hub.log.old` at 10 MB |
+| `logs/channels/` | Nothing: a hub started through `main.ts` makes the directory, and no hub writes a channel log into it (SPEC.md § 7) | — |
+| `logs/agent-daemon.YYYY-MM-DD.jsonl` | An agent daemon, one file per UTC day it logs something | The `[logging] agent_files_kept` most recent files are kept (7 by default, `0` keeps all); older ones are deleted (below) |
+| `agent-daemon.log` | What an agent daemon printed outside its log: a refused start, a panic, `systemd-run`'s complaint on a remote host | Not bounded. Every launch appends to it |
+
+On a remote host the agent daemon's files are under that host's state directory
+(`$XDG_STATE_HOME/lasterm`, or `~/.local/state/lasterm`), which only that host's user reads.
+
+### 12.1 The agent daemon's log (#646)
+
+A daemon writes one file per day (UTC), named by `tracing-appender`'s daily rotation:
+`logs/agent-daemon.2026-09-29.jsonl`. A day with nothing to log has no file, so what is kept is
+the most recent *days with activity*, not calendar days. At INFO a daemon logs its lifecycle and
+little else; the count caps files, not bytes, and a daemon left at `trace` fills its day's file as
+fast as it runs.
+
+- **Kept:** the `agent_files_kept` most recent files, by the date in their name. The hub passes
+  the number to every daemon it starts, local or remote, as `--log-files-kept`. A change in
+  Settings reaches a daemon when it next starts; one already running keeps the number it was given.
+  A remote agent older than the hub, which does not know the option, is started without it and
+  keeps its log as it always did.
+- **Deleted:** when the daemon starts, and when a new day's file starts. Only regular files named
+  `agent-daemon.YYYY-MM-DD.jsonl` are deleted, and `agent-daemon.jsonl` (below); nothing else in
+  `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
+  deletion) is said in a warning in the log, and tried again on the next of those occasions.
+- **Never renamed.** Nothing moves a file aside: a rename that is refused would leave the daemon
+  appending to a full file, which is the growth this replaced.
+- **`agent-daemon.jsonl`**, the single file daemons before #646 appended to for as long as they
+  ran, counts as one more file, dated by its last write. It goes once as many newer days have their
+  own file as are kept, or never with `0`. Nothing renames or rewrites it before then.

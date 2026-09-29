@@ -2839,6 +2839,7 @@ describe("extractAgentConfig", () => {
 			logging: {
 				level: 5,
 				format: [],
+				agent_files_kept: "30",
 			},
 		} as unknown as JsonMap;
 
@@ -2846,5 +2847,17 @@ describe("extractAgentConfig", () => {
 
 		const result = extractAgentConfig(parsed);
 		expect(result).toEqual(DEFAULT_AGENT_CONFIG);
+	});
+
+	it("reads how many daemon log files an agent keeps from [logging] (#646)", () => {
+		expect(extractAgentConfig({}).logFilesKept).toBe(7);
+		expect(extractAgentConfig({ logging: { agent_files_kept: 30 } }).logFilesKept).toBe(30);
+		expect(extractAgentConfig({ logging: { agent_files_kept: 0 } }).logFilesKept).toBe(0);
+	});
+
+	it("keeps the default for a count it refuses: a negative is not 0, which keeps them all", () => {
+		for (const refused of [-1, 2.5, 3651]) {
+			expect(extractAgentConfig({ logging: { agent_files_kept: refused } }).logFilesKept).toBe(7);
+		}
 	});
 });

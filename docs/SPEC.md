@@ -93,14 +93,15 @@ Universal PTY manager. Runs locally (a detached daemon) or remotely (via SSH). S
 - No backpressure: nothing pauses a PTY read. Frames for a connected hub wait in an unbounded queue in front of its connection, so a hub that stops reading without disconnecting lets the agent's memory grow (#553).
 - Daemon mode (`run_daemon` in `daemon.rs`): a standalone process listening on a Unix socket, or a named pipe on Windows. HELLO and AUTH handshake, one connection per hub, channels kept apart by the hub that owns them (#127).
 - Output while a hub is away: `HubRoutes` (`daemon.rs`) keeps up to 1000 frames per hub (`MAX_FRAME_QUEUE`), dropping the oldest, shared by all that hub's channels: about 8 MiB at most. The screen comes back through the snapshot of the next ATTACH; what was dropped is output the hub's spool never receives. Details below.
-- CLI: `lasterm-agent --stdio` (the default), `lasterm-agent --daemon [--socket <path>] [--idle-timeout <seconds>]`, and `lasterm-agent --stop [--socket <path>]`; all take `--log-level` and `--format` (§ 6.2).
+- CLI: `lasterm-agent --stdio` (the default), `lasterm-agent --daemon [--socket <path>] [--idle-timeout <seconds>] [--log-files-kept <count>]`, and `lasterm-agent --stop [--socket <path>]`; all take `--log-level` and `--format` (§ 6.2).
+- Daemon log: one file per UTC day with something logged, `logs/agent-daemon.YYYY-MM-DD.jsonl` in the state directory, never renamed. `--log-files-kept` (7 by default, 0 keeps all) says how many are kept; older ones are deleted when the daemon starts and when a new day's file starts (STORAGE.md § 12.1, #646).
 - `--buffer-per-channel <bytes>` and `--buffer-global <bytes>` are accepted and ignored. No Rust agent has ever read them: they sized the Node agent's `OutputBuffer`, removed with that agent. The hub no longer passes them, but hubs from before still do, and they can meet a newer agent: a development hub runs whatever `target/release` holds, and a single executable with no agent beside it runs the first one on `PATH`. A daemon that rejected the flags would exit before it listens (#484), and the hub would open no local terminal. So the agent keeps accepting them, hidden from `--help`.
 
 **Process model (local — daemon):**
 ```
 hub: connectOrLaunch(socketPath, config, binaryPath)
   → Connects to the socket; if that fails:
-  → spawn detached "lasterm-agent --daemon --socket <path> --log-level <level> --format <format>"
+  → spawn detached "lasterm-agent --daemon --socket <path> --log-level <level> --format <format> --log-files-kept <count>"
   → Retries the connection every 100 ms, up to 5 s
   → Agent sends HELLO (with protocolVersion)
   → Hub sends AUTH { token, hub_key }: the key names the hub, the owner of what it spawns
@@ -927,6 +928,7 @@ Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, 
 | `output` | string | `"file"` | Hub output target: stderr, file, both. `file` and `both` write JSONL to `logs/hub.jsonl`. |
 | `max_age_days` | number | 30 | Age in days past which a hub started through `main.ts` deletes a channel log in `logs/channels/` as it starts (`log-gc.ts`); 0 keeps them. No hub writes channel logs (§ 7), so it deletes nothing. It never applies to `hub.jsonl`, which rotates at 10 MB (SECURITY.md § 7.1) |
 | `max_size_mb` | number | 50 | Read only by the channel logger (`channel-logger.ts`), which nothing starts: it has no effect |
+| `agent_files_kept` | number | 7 | Log files an agent daemon keeps, one per day it logs something; 0 keeps them all. Read when a daemon starts, local or remote, and passed as `--log-files-kept`; a remote agent that does not know the option is started without it (STORAGE.md § 12.1) |
 
 ## 7. File System Layout
 
@@ -969,7 +971,8 @@ State dir (0700):
 ├── logs/
 │   ├── hub.jsonl            # the hub's log, with the security events (SECURITY.md § 7.1); moved
 │   │                        #        to hub.jsonl.old at 10 MB
-│   ├── agent-daemon.jsonl   # the local agent daemon's own log, appended to and never rotated
+│   ├── agent-daemon.YYYY-MM-DD.jsonl # the local agent daemon's own log, one file per UTC day;
+│   │                        #        the --log-files-kept most recent are kept (STORAGE.md § 12.1)
 │   └── channels/            # made, empty, by a hub started through main.ts (§ 6.2). No hub writes
 │                            #        a channel log into it
 ├── binaries/                # the agent binary cache (§ 3.5)

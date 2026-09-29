@@ -65,6 +65,11 @@ struct Cli {
     /// Agent tracing line format from the shared [logging] contract
     #[arg(long = "format", value_enum, default_value = "jsonl")]
     format: LogFormat,
+
+    /// Daemon log files kept, one per day with something logged; 0 keeps them
+    /// all (daemon mode). The hub passes `[logging] agent_files_kept`.
+    #[arg(long = "log-files-kept", value_name = "COUNT", default_value_t = logging::DEFAULT_FILES_KEPT)]
+    log_files_kept: u32,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -98,6 +103,7 @@ impl LogLevel {
 struct LoggingConfig {
     level: LogLevel,
     format: LogFormat,
+    files_kept: u32,
 }
 
 impl From<&Cli> for LoggingConfig {
@@ -105,6 +111,7 @@ impl From<&Cli> for LoggingConfig {
         Self {
             level: cli.log_level,
             format: cli.format,
+            files_kept: cli.log_files_kept,
         }
     }
 }
@@ -242,9 +249,6 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     }
 
     if cli.daemon {
-        // Daemon mode writes to its own log file; stdio mode writes to stderr.
-        let log_path = logging::daemon_log_path()?;
-        tracing::info!(log_path = %log_path.display(), "daemon log file opened");
         // Resolve socket path — platform-specific default when not provided via --socket
         let socket = match cli.socket {
             Some(socket) => socket,
@@ -555,23 +559,31 @@ fn write_clean_exit_record(
 
 fn init_tracing(config: LoggingConfig, daemon: bool) -> std::io::Result<()> {
     if daemon {
-        let log_path = logging::daemon_log_path()?;
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
+        // Daemon mode writes one file a day in its own log directory (#646);
+        // stdio mode writes to stderr.
+        let log = logging::DaemonLog::open(&logging::daemon_log_dir()?, config.files_kept)?;
+        let log_dir = log.dir().to_path_buf();
+        // Before the subscriber exists: what it could not delete is said once
+        // it does.
+        let not_deleted = log.prune();
         match config.format {
             LogFormat::Jsonl => tracing_subscriber::fmt()
                 .with_env_filter(env_filter(config.level))
                 .json()
-                .with_writer(log_file)
+                .with_writer(log)
                 .init(),
             LogFormat::Text => tracing_subscriber::fmt()
                 .with_env_filter(env_filter(config.level))
                 .with_target(false)
-                .with_writer(log_file)
+                .with_writer(log)
                 .init(),
         }
+        tracing::info!(
+            log_dir = %log_dir.display(),
+            files_kept = config.files_kept,
+            "daemon log opened, one file a day"
+        );
+        logging::warn_not_deleted(&not_deleted);
     } else {
         match config.format {
             LogFormat::Jsonl => tracing_subscriber::fmt()
@@ -652,6 +664,27 @@ mod tests {
 
         assert_eq!(config.level, LogLevel::Info);
         assert_eq!(config.format, LogFormat::Jsonl);
+        assert_eq!(config.files_kept, logging::DEFAULT_FILES_KEPT);
+    }
+
+    #[test]
+    fn logging_config_reads_the_files_kept() {
+        for (given, kept) in [("0", 0), ("30", 30)] {
+            let cli = Cli::try_parse_from(["lasterm-agent", "--daemon", "--log-files-kept", given])
+                .unwrap();
+            assert_eq!(LoggingConfig::from(&cli).files_kept, kept);
+        }
+        assert!(Cli::try_parse_from(["lasterm-agent", "--log-files-kept", "-1"]).is_err());
+    }
+
+    /// The hub asks a remote binary's `--help` for the flag before passing it,
+    /// since an agent older than the hub would refuse it and never listen.
+    #[test]
+    fn help_names_the_files_kept_flag_the_hub_looks_for() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("--log-files-kept"), "{help}");
     }
 
     #[test]

@@ -223,6 +223,10 @@ describe("connectOrLaunch", () => {
 				expect(cliArgs).toContain(config.logLevel);
 				expect(cliArgs).toContain("--format");
 				expect(cliArgs).toContain(config.logFormat);
+				// The daemon log's file count, as its flag and value side by side (#646).
+				const kept = cliArgs.indexOf("--log-files-kept");
+				expect(kept).toBeGreaterThan(0);
+				expect(cliArgs[kept + 1]).toBe(String(config.logFilesKept));
 
 				// Verify detached + stdio: stdin=ignore, stdout+stderr=log fd
 				const opts = capturedArgs[2] as Record<string, unknown>;
@@ -287,7 +291,8 @@ describe("connectOrLaunch", () => {
 				const seaBinary = path.join(tmpDir, "lasterm-agent");
 				await writeFile(seaBinary, "#!/bin/sh\n");
 
-				agent = await connectOrLaunch(socketPath, config, seaBinary);
+				// A count Settings chose, not the default: it is what reaches the daemon.
+				agent = await connectOrLaunch(socketPath, { ...config, logFilesKept: 30 }, seaBinary);
 
 				expect(agent).toBeDefined();
 				expect(agent.connected).toBe(true);
@@ -304,6 +309,7 @@ describe("connectOrLaunch", () => {
 				expect(cliArgs).toContain(config.logLevel);
 				expect(cliArgs).toContain("--format");
 				expect(cliArgs).toContain(config.logFormat);
+				expect(cliArgs.slice(-2)).toEqual(["--log-files-kept", "30"]);
 			},
 			TEST_TIMEOUT,
 		);

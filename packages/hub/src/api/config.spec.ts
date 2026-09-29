@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -357,6 +359,57 @@ describe("config writes — CONFIG_CHANGED to every client", () => {
 		});
 		expect(res.statusCode).toBe(200);
 		expect(announced).toEqual([{ type: "CONFIG_CHANGED", scope: "host", hostId: host.id }]);
+	});
+});
+
+// ─── /api/config/logging — consults LOGGING_SETTINGS_VALIDATORS (#646) ────────
+//
+// The rule itself is tested beside it, in the shared agent-config.spec.ts.
+
+describe("/api/config/logging", () => {
+	useHubServer();
+
+	it("reads the daemon log files kept, seven until someone says otherwise", async () => {
+		const res = await server.inject({ method: "GET", url: "/api/config/logging" });
+		expect(res.statusCode).toBe(200);
+		expect(res.json()).toEqual({ agentFilesKept: 7 });
+	});
+
+	it("refuses a value the validator rejects, and stores one it accepts", async () => {
+		const refused = await server.inject({
+			method: "PUT",
+			url: "/api/config/logging",
+			payload: { agentFilesKept: -1 },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: { code: "INVALID_VALUE", message: 'Invalid value for "logging.agentFilesKept": -1' },
+		});
+
+		const accepted = await server.inject({
+			method: "PUT",
+			url: "/api/config/logging",
+			payload: { agentFilesKept: 0 },
+		});
+		expect(accepted.statusCode).toBe(200);
+		expect(accepted.json()).toEqual({ agentFilesKept: 0 });
+		const read = await server.inject({ method: "GET", url: "/api/config/logging" });
+		expect(read.json()).toEqual({ agentFilesKept: 0 });
+		expect(readFileSync(join(configDir, "config.toml"), "utf8")).toMatch(
+			/\[logging\][^[]*agent_files_kept = 0/,
+		);
+	});
+
+	it("refuses a key it does not edit", async () => {
+		const res = await server.inject({
+			method: "PUT",
+			url: "/api/config/logging",
+			payload: { level: "trace" },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: "Unknown logging key: level" },
+		});
 	});
 });
 

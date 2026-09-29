@@ -25,6 +25,21 @@ import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { getInitials } from "./useHostIcon.js";
 
+/**
+ * The icon, as the hub stores it. Both keys are always sent: null is how the
+ * hub clears a value, and a key left out kept the stored one, so a removed
+ * image came back (#659). No value is no icon, whatever type was picked, and
+ * the initials show again.
+ */
+export function iconFields(
+	iconType: HostFormData["iconType"],
+	iconValue: string,
+): { icon_type: HostFormData["iconType"]; icon_value: string | null } {
+	const value = iconType === "emoji" ? resolveEmojiShortcode(iconValue) : iconValue;
+	if (iconType === "auto" || value.trim() === "") return { icon_type: "auto", icon_value: null };
+	return { icon_type: iconType, icon_value: value };
+}
+
 export interface HostFormData {
 	label: string;
 	type: "local" | "ssh";
@@ -76,7 +91,9 @@ export function useHostForm(editHost?: Host) {
 		defaultShell: editHost?.defaultShell ?? "",
 		trustRemoteHints: editHost?.trustRemoteHints ?? "apply",
 		elevationMethod: editHost?.elevationMethod ?? "",
-		customCommand: "",
+		// Loaded, so that a save sends it back as it was: starting empty made
+		// every save erase it (#660). Emptying the field still clears it.
+		customCommand: editHost?.customCommand ?? "",
 		os: editHost?.os ?? null,
 		arch: editHost?.arch ?? null,
 	});
@@ -275,14 +292,9 @@ export function useHostForm(editHost?: Host) {
 					ssh_remote_daemon:
 						form.value.sshRemoteDaemon === "" ? null : form.value.sshRemoteDaemon === "yes",
 				}),
-				icon_type: form.value.iconType,
-				...(form.value.iconValue && {
-					icon_value:
-						form.value.iconType === "emoji"
-							? resolveEmojiShortcode(form.value.iconValue)
-							: form.value.iconValue,
-				}),
-				...(form.value.color && { color: form.value.color }),
+				...iconFields(form.value.iconType, form.value.iconValue),
+				// null once reset: the colour then comes from the label (#659).
+				color: form.value.color || null,
 				host_group_id: groupId,
 				...(form.value.defaultShell && {
 					default_shell: form.value.defaultShell,

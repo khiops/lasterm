@@ -233,6 +233,8 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 - `CommandPalette` — Ctrl+Shift+P (Cmd+Shift+P), fuzzy search hosts/channels/actions
 - `HostModal` — add or edit a host: connection, jump host, whether it keeps an agent running, auth, shell, elevation, icon, color
 - `SettingsPanel` — settings at global, host and terminal scope (terminal, environment, appearance, keybindings, agents…)
+- `ShortcutsOverlay` — Ctrl+/, every shortcut of the table and the keys inside each area, with a search field
+- `KeyHintStrip` — one line naming the keys that work where the keyboard is: at the bottom of Settings, and under the rail and the list
 - `TitleBar` — the UI's version and build; the window controls in the desktop app
 
 **Keyboard shortcuts:** Windows Terminal's chords, held in one table keyed by action id
@@ -246,7 +248,13 @@ Ctrl+Shift+F6 move the keyboard between the host rail, the terminal list, the ta
 pane from anywhere; F6 and Shift+F6 do the same outside a terminal, and in one reach its program
 (htop's sort, Midnight Commander's move). Within each zone the arrow keys move between its items, and
 Esc goes back to the pane. Ctrl+, opens and closes Settings, whose menu, detail and scope tabs work the
-same way from the keyboard (decisions.md KEYBOARD-NAV).
+same way from the keyboard (decisions.md KEYBOARD-NAV). A quiet strip names the keys that work where
+the keyboard is — at the bottom of Settings, and under the rail and the list while the keyboard is in
+the rail, the list or the tab bar, never over a terminal — from the focused control's role and, for
+the app's actions, from the table; it shows for the keyboard only, is hidden from screen readers, and
+Settings › Appearance turns it off (`[keyboard] key_hints`). Ctrl+/ opens an overlay listing every
+shortcut of the table and the keys inside each area, from the same source, with a search field; the
+palette's Keyboard Shortcuts row and Settings › Keybindings open it too (decisions.md KEYBOARD-NAV).
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub

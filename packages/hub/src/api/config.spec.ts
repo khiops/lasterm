@@ -95,6 +95,9 @@ describe("UI_VALUE_VALIDATORS", () => {
 		["layout", "hostRailBadgeSize", "refuses", 36],
 		["layout", "sidebarWidth", "accepts", 200],
 		["layout", "sidebarWidth", "refuses", -1],
+		["keyboard", "keyHints", "accepts", false],
+		["keyboard", "keyHints", "refuses", "off"],
+		["keyboard", "keyHints", "refuses", 0],
 	];
 
 	it.each(cases)("%s.%s %s %j", (section, key, verdict, value) => {

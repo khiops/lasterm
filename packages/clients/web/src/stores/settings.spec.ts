@@ -67,6 +67,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					historySize: 20,
 				},
 				layout: { hostRailColumns: 1, hostRailBadgeSize: "medium", sidebarWidth: 200 },
+				keyboard: { keyHints: true },
 			},
 			global: {
 				tabs: { closeButton: false },
@@ -95,6 +96,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					historySize: 20,
 				},
 				layout: { hostRailColumns: 1, hostRailBadgeSize: "medium", sidebarWidth: 200 },
+				keyboard: { keyHints: true },
 			},
 		},
 		appearance: {

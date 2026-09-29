@@ -93,6 +93,9 @@
 							</div>
 						</div>
 
+						<!-- The keys that work where the keyboard is (#639) -->
+						<KeyHintStrip :resolve="keyHintsAt" />
+
 						<!-- About footer -->
 						<div class="settings-footer">
 							<button
@@ -119,10 +122,12 @@ import { useChannelsStore } from '../../stores/channels.js';
 import { windowShortcutOf } from '../../utils/app-shortcuts.js';
 import { nextInCycle } from '../../utils/focus-zones.js';
 import { firstTabbable, trapTab } from '../../utils/focusable.js';
+import { controlKindOf, type KeyHint, settingsKeyHints } from '../../utils/key-hints.js';
 import { useHostsStore } from '../../stores/hosts.js';
 import { type Scope, useSettingsStore } from '../../stores/settings.js';
 import { useToastStore } from '../../stores/toast.js';
 import AboutModal from '../AboutModal.vue';
+import KeyHintStrip from '../KeyHintStrip.vue';
 import CategoryNav from './CategoryNav.vue';
 import AgentManagerCategory from './categories/AgentManagerCategory.vue';
 import AppearanceCategory from './categories/AppearanceCategory.vue';
@@ -239,11 +244,21 @@ function focusDetail(): void {
 	void nextTick(() => detailEntry()?.focus());
 }
 
-function zoneOf(target: HTMLElement): SettingsZone | null {
+function zoneOf(target: Element): SettingsZone | null {
 	if (target.closest('.category-nav') !== null) return 'menu';
 	if (contentEl.value?.contains(target) === true) return 'detail';
 	if (target === closeEl.value) return 'close';
 	return null;
+}
+
+/**
+ * The keys the strip names for where the keyboard is in the panel, from its zone and its control.
+ * None in a dialog of its own (a confirmation), whose keys are that dialog's.
+ */
+function keyHintsAt(el: Element): readonly KeyHint[] | null {
+	const panel = panelEl.value;
+	if (panel === null || el.closest('[aria-modal="true"]') !== panel) return null;
+	return settingsKeyHints(zoneOf(el), controlKindOf(el));
 }
 
 function zoneEntry(zone: SettingsZone): HTMLElement | null {

@@ -10,10 +10,14 @@
  * outside a terminal (F6) holds everywhere but in one, where the key stays the program's.
  *
  * These are the defaults. Making them configurable means overriding a chord by its id, which the
- * shape of the table leaves room for.
+ * shape of the table leaves room for. Each action's name, which Settings › Keybindings and the
+ * keyboard shortcuts overlay show, is kept here too (`APP_SHORTCUT_NAMES`).
  */
 
-/** A chord, as data. Each modifier is either held or not held: no other modifier may be. */
+/**
+ * A chord, as data. Each modifier is either held or not held: no other modifier may be. Only a
+ * chord matched on its character may leave Shift to what typing it takes (`shiftAsTyped`).
+ */
 export interface Chord {
 	/** Ctrl, or Cmd, which stands in for it as it always has for the palette. */
 	readonly ctrl: boolean;
@@ -27,6 +31,13 @@ export interface Chord {
 	 * `key` is only how the chord is shown.
 	 */
 	readonly code?: string;
+	/**
+	 * For a chord matched on its character: Shift is whatever typing that character takes, and is
+	 * not looked at. `/` is Shift+: on AZERTY and Shift+7 on QWERTZ; on US it is unshifted, and
+	 * Shift makes it `?`, another character, so no other chord can match instead. `shift` stays
+	 * false: the chord is shown without it.
+	 */
+	readonly shiftAsTyped?: true;
 }
 
 /** The tabs Ctrl+Alt+digit goes to: the ninth is the last one, however many there are. */
@@ -40,6 +51,7 @@ export type PaneDirection = "left" | "right" | "up" | "down";
 export type AppActionId =
 	| "palette.open"
 	| "settings.open"
+	| "help.shortcuts"
 	| "tab.new"
 	| "tab.next"
 	| "tab.previous"
@@ -68,6 +80,11 @@ export const APP_SHORTCUTS: Readonly<Record<AppActionId, Chord>> = {
 	// Opens and closes Settings, as in Windows Terminal and VS Code. Matched on the character:
 	// the comma is unshifted on US, AZERTY and QWERTZ alike, on whichever key it sits.
 	"settings.open": { ctrl: true, alt: false, shift: false, key: "," },
+	// The keyboard shortcuts overlay (#639), matched on the character as the comma is, with the
+	// Shift that typing it takes: / is Shift+: on AZERTY, so Ctrl+Shift+: there, and Shift+7 on
+	// QWERTZ; the numeric keypad's / on every layout. Taken from the shell, whose Ctrl+/ is
+	// readline's undo, as Ctrl+- still is.
+	"help.shortcuts": { ctrl: true, alt: false, shift: false, key: "/", shiftAsTyped: true },
 	"tab.new": { ctrl: true, alt: false, shift: true, key: "T" },
 	// A browser tab keeps these two for itself; the desktop app gets them.
 	"tab.next": { ctrl: true, alt: false, shift: false, key: "Tab" },
@@ -137,7 +154,8 @@ export function keyboardPlaceOf(target: EventTarget | null): KeyboardPlace {
 export function matchesChord(ev: KeyboardEvent, chord: Chord): boolean {
 	if (ev.getModifierState?.("AltGraph") === true) return false;
 	if ((ev.ctrlKey || ev.metaKey) !== chord.ctrl) return false;
-	if (ev.altKey !== chord.alt || ev.shiftKey !== chord.shift) return false;
+	if (ev.altKey !== chord.alt) return false;
+	if (chord.shiftAsTyped !== true && ev.shiftKey !== chord.shift) return false;
 	if (chord.code !== undefined) return ev.code === chord.code;
 	// Shift makes `key` "P", or "p" under Caps Lock. A synthetic keydown, such as one from a
 	// browser's autofill, can carry no `key` at all.
@@ -229,3 +247,35 @@ export function outsideTerminalKeys(id: AppActionId): string[] | null {
 export function shortcutLabel(id: AppActionId): string {
 	return shortcutKeys(id).join("+");
 }
+
+/** What each action is called where its chord is shown: Settings › Keybindings, the overlay. */
+export const APP_SHORTCUT_NAMES: Readonly<Record<AppActionId, string>> = {
+	"palette.open": "Command Palette",
+	"settings.open": "Settings",
+	"help.shortcuts": "Keyboard Shortcuts",
+	"tab.new": "New Channel",
+	"tab.next": "Next Tab",
+	"tab.previous": "Previous Tab",
+	"tab.goTo1": "Go to Tab 1",
+	"tab.goTo2": "Go to Tab 2",
+	"tab.goTo3": "Go to Tab 3",
+	"tab.goTo4": "Go to Tab 4",
+	"tab.goTo5": "Go to Tab 5",
+	"tab.goTo6": "Go to Tab 6",
+	"tab.goTo7": "Go to Tab 7",
+	"tab.goTo8": "Go to Tab 8",
+	"tab.goTo9": "Go to Last Tab",
+	"pane.splitRight": "Split Right",
+	"pane.splitDown": "Split Down",
+	"pane.close": "Close Pane",
+	"pane.focusLeft": "Focus Left",
+	"pane.focusRight": "Focus Right",
+	"pane.focusUp": "Focus Up",
+	"pane.focusDown": "Focus Down",
+	"pane.resizeLeft": "Resize Left",
+	"pane.resizeRight": "Resize Right",
+	"pane.resizeUp": "Resize Up",
+	"pane.resizeDown": "Resize Down",
+	"zone.next": "Next Area (rail, list, tabs, pane)",
+	"zone.previous": "Previous Area",
+};

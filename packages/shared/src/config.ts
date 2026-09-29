@@ -151,6 +151,20 @@ export interface SearchConfig {
 	historySize?: number;
 }
 
+/**
+ * `[keyboard]`: the window's keys (#639). The chords themselves are the app's
+ * table (web `utils/app-shortcuts.ts`); making them configurable (#632) would
+ * put its overrides here.
+ */
+export interface KeyboardConfig {
+	/**
+	 * The strip naming the keys that work where the keyboard is: at the bottom
+	 * of Settings, and under the rail and the list while the keyboard is in the
+	 * rail, the list or the tab bar. Global only. Default: true
+	 */
+	keyHints?: boolean;
+}
+
 export interface HostsDefaultsConfig {
 	defaultShell?: string;
 }
@@ -285,7 +299,7 @@ export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
 	sidebarWidth: 200,
 };
 
-/** UI behavioral configuration (from [ui], [tabs], [panes], [channels], [startup], [title], [search], [layout] in config.toml). */
+/** UI behavioral configuration (from [ui], [tabs], [panes], [channels], [startup], [title], [search], [layout], [keyboard] in config.toml). */
 export interface UiConfig {
 	/** What to do when a channel dies: "close" the tab or keep it "readonly". Default: "readonly". */
 	onChannelDead: "close" | "readonly";
@@ -303,6 +317,8 @@ export interface UiConfig {
 	search: SearchConfig;
 	/** Persisted panel layout dimensions. */
 	layout: LayoutConfig;
+	/** The window's keys: the key hints (#639). */
+	keyboard: KeyboardConfig;
 }
 
 // ─── Agent environment endpoint response ─────────────────────────────────────
@@ -374,6 +390,7 @@ export const UI_CONFIG_SECTIONS = [
 	"title",
 	"search",
 	"layout",
+	"keyboard",
 ] as const;
 
 /** Per-section key whitelists — derived from the TypeScript interfaces above. */
@@ -406,6 +423,8 @@ export const SEARCH_CONFIG_KEYS = ["position", "highlightOnClose", "historySize"
 
 export const LAYOUT_CONFIG_KEYS = ["hostRailColumns", "hostRailBadgeSize", "sidebarWidth"] as const;
 
+export const KEYBOARD_CONFIG_KEYS = ["keyHints"] as const;
+
 /** Map from UI section name to its allowed keys. */
 export const UI_SECTION_KEYS: Record<string, readonly string[]> = {
 	tabs: TABS_CONFIG_KEYS,
@@ -415,6 +434,7 @@ export const UI_SECTION_KEYS: Record<string, readonly string[]> = {
 	title: TITLE_CONFIG_KEYS,
 	search: SEARCH_CONFIG_KEYS,
 	layout: LAYOUT_CONFIG_KEYS,
+	keyboard: KEYBOARD_CONFIG_KEYS,
 };
 
 export interface ElevationConfig {

@@ -2,6 +2,7 @@ import {
 	type ChannelsConfig,
 	DEFAULT_PROFILE,
 	type FontFamily,
+	type KeyboardConfig,
 	type LayoutConfig,
 	type NotificationConfig,
 	type PanesConfig,
@@ -108,12 +109,14 @@ interface UiConfig {
 	search?: SearchConfig;
 	notifications?: NotificationConfig;
 	layout?: LayoutConfig;
+	keyboard?: KeyboardConfig;
 }
 
 /** The UI sections `saveUiSettings` writes. */
 interface SavedUiSections {
 	panes: PanesConfig;
 	layout: LayoutConfig;
+	keyboard: KeyboardConfig;
 }
 
 export const useConfigStore = defineStore("config", () => {
@@ -242,10 +245,10 @@ export const useConfigStore = defineStore("config", () => {
 	 *
 	 * For a choice made outside Settings' schema — the old "don't ask again"
 	 * about deleting an ended terminal, carried over (#574); the panels' sizes;
-	 * the host rail's columns and badge size (#623). The hub announces the
-	 * change, so every other window reads it again; this one does not wait for
-	 * that to act on it. A write the hub refused is undone by reading back what
-	 * it holds.
+	 * the host rail's columns and badge size (#623); the key hints (#639). The
+	 * hub announces the change, so every other window reads it again; this one
+	 * does not wait for that to act on it. A write the hub refused is undone by
+	 * reading back what it holds.
 	 */
 	async function saveUiSettings<S extends keyof SavedUiSections>(
 		section: S,

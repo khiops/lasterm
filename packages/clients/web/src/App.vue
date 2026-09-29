@@ -25,6 +25,9 @@
 		<!-- Command Palette — Teleport to body, triggered by Ctrl+Shift+P / Cmd+Shift+P -->
 		<CommandPalette />
 
+		<!-- Every shortcut, and the keys inside each area — Teleport to body, Ctrl+/ (#639) -->
+		<ShortcutsOverlay />
+
 		<!-- Settings panel — rendered globally, outside layout, via Teleport -->
 		<SettingsPanel
 			:visible="showSettings"
@@ -337,6 +340,9 @@
 					</div>
 				</div>
 			</div>
+			<!-- The keys of the rail, the list or the tab bar while the keyboard is in one of
+			     them: under the rail and the list, never over a terminal (#639). -->
+			<KeyHintStrip class="zone-key-hints" :resolve="windowKeyHints" />
 			</div>
 		</template>
 	</div>
@@ -361,6 +367,8 @@ import CloseModal from './components/CloseModal.vue';
 import HubExitedModal from './components/HubExitedModal.vue';
 import HubUpdateBanner from './components/HubUpdateBanner.vue';
 import CommandPalette from './components/CommandPalette.vue';
+import KeyHintStrip from './components/KeyHintStrip.vue';
+import ShortcutsOverlay from './components/ShortcutsOverlay.vue';
 import ConfigureCommandDialog from './components/ConfigureCommandDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import DeleteHostModal from './components/DeleteHostModal.vue';
@@ -407,6 +415,7 @@ import {
 import { MULTI_PANE_SEARCH_KEY, useMultiPaneSearch } from './composables/useMultiPaneSearch.js';
 import { findFirstLeafPaneId, MAX_PANE_COUNT, type PaneNode } from './composables/usePaneTree.js';
 import { useResizable } from './composables/useResizable.js';
+import { useShortcutsOverlay } from './composables/useShortcutsOverlay.js';
 import { useTabTitle } from './composables/useTabTitle.js';
 import {
 	isTauriRuntime,
@@ -438,8 +447,9 @@ import {
 	tabNumberOf,
 	windowShortcutOf,
 } from './utils/app-shortcuts.js';
-import { type FocusZone, isFocusZone, zoneAfter } from './utils/focus-zones.js';
+import { type FocusZone, focusZoneOf, zoneAfter } from './utils/focus-zones.js';
 import { isRendered, isTabbable, tabbables } from './utils/focusable.js';
+import { windowKeyHints } from './utils/key-hints.js';
 import { type PaneLeaf, paneInDirection, paneLeaves, resizeTowards } from './utils/pane-geometry.js';
 import { type TabSwitch, tabToSwitchTo } from './utils/tab-switch.js';
 
@@ -562,6 +572,7 @@ provide(
 	computed(() => channelsOnScreen(layout.layouts.value, layout.activeTab.value?.id ?? null)),
 );
 const commandPalette = useCommandPalette();
+const shortcutsOverlay = useShortcutsOverlay();
 const profilesStore = useProfilesStore();
 const showSettings = ref(false);
 const desktopVersion = ref<string | undefined>(undefined);
@@ -643,6 +654,9 @@ commandPalette.onExternalAction.value = (actionId: string) => {
 			break;
 		case 'action:pairing-code':
 			showPairingGenerator.value = true;
+			break;
+		case 'action:keyboard-shortcuts':
+			shortcutsOverlay.open();
 			break;
 		default:
 			console.warn('[CommandPalette] unhandled external action:', actionId);
@@ -1245,7 +1259,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 		!event.shiftKey &&
 		!isTextField(event.target)
 	) {
-		const zone = zoneOf(event.target);
+		const zone = focusZoneOf(event.target);
 		if (zone !== null && zone !== 'pane' && focusActivePane()) {
 			event.preventDefault();
 			return;
@@ -1281,6 +1295,16 @@ watch(showSettings, (open) => {
 	});
 });
 
+// The shortcuts overlay does the same (#639): opened from the palette, it has nowhere to give the
+// keyboard back to either.
+watch(shortcutsOverlay.isOpen, (open) => {
+	if (open) return;
+	void nextTick(() => {
+		const active = document.activeElement;
+		if (active === null || active === document.body) focusActivePane();
+	});
+});
+
 /**
  * An app shortcut's action, which the palette's row for it runs too: what the
  * tab bar and the panes do. A new tab is the "+" button's, the split is the
@@ -1308,6 +1332,9 @@ function runAppAction(action: AppActionId): void {
 			break;
 		case 'settings.open':
 			showSettings.value = !showSettings.value;
+			break;
+		case 'help.shortcuts':
+			shortcutsOverlay.toggle();
 			break;
 		case 'tab.new':
 			onNewTab();
@@ -1347,13 +1374,6 @@ function isTextField(target: EventTarget | null): boolean {
 		target instanceof Element &&
 		target.closest('input, textarea, select, [contenteditable="true"]') !== null
 	);
-}
-
-/** The zone an element is in: the rail, the terminal list, the tab bar or the panes. */
-function zoneOf(target: EventTarget | null): FocusZone | null {
-	if (!(target instanceof Element)) return null;
-	const zone = target.closest('[data-focus-zone]')?.getAttribute('data-focus-zone');
-	return isFocusZone(zone) ? zone : null;
 }
 
 /**
@@ -1432,7 +1452,7 @@ function zoneEntry(zone: FocusZone): HTMLElement | null {
 
 /** F6 and Shift+F6: the next zone that can take the keyboard, in FOCUS_ZONES order. */
 function cycleFocusZone(step: 1 | -1): void {
-	const current = zoneOf(document.activeElement) ?? 'pane';
+	const current = focusZoneOf(document.activeElement) ?? 'pane';
 	const next = zoneAfter(current, step, (zone) => zoneEntry(zone) !== null);
 	if (next !== null) zoneEntry(next)?.focus();
 }
@@ -2125,12 +2145,38 @@ body,
 .app-layout {
 	display: grid;
 	grid-template-columns: var(--rail-w, 48px) var(--sidebar-w, 200px) 1fr;
+	/* The second row is the key hints' (#639), under the rail and the list only: the terminals
+	   take both rows, so the strip coming and going never resizes one. */
+	grid-template-rows: minmax(0, 1fr) auto;
 	flex: 1;
 	min-height: 0;
 	background: transparent;
 	color: var(--nt-fg);
 	position: relative;
 	z-index: 1;
+}
+
+.app-layout > .host-rail {
+	grid-column: 1;
+	grid-row: 1;
+}
+
+.app-layout > .channel-sidebar {
+	grid-column: 2;
+	grid-row: 1;
+}
+
+.app-layout > .terminal-main {
+	grid-column: 3;
+	grid-row: 1 / span 2;
+}
+
+.app-layout > .zone-key-hints {
+	grid-column: 1 / span 2;
+	grid-row: 2;
+	min-width: 0;
+	background: rgba(var(--nt-sidebar-rgb), var(--nt-sidebar-alpha));
+	border-right: 1px solid var(--nt-border);
 }
 
 .resize-handle {

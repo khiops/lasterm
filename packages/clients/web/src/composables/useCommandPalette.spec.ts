@@ -552,6 +552,21 @@ describe("useCommandPalette", () => {
 			expect([closePane?.label, closePane?.shortcut]).toEqual(["Close Pane", "Ctrl+Shift+W"]);
 		});
 
+		// The keyboard shortcuts overlay (#639): App.vue opens it (App.spec.ts), as Ctrl+/ does.
+		it("offer Keyboard Shortcuts, with its chord, run by the window", () => {
+			const palette = useCommandPalette();
+			const handler = vi.fn();
+			palette.onExternalAction.value = handler;
+			palette.search(">keyboard");
+			const item = palette.results.value.find((r) => r.id === "action:keyboard-shortcuts");
+			expect([item?.label, item?.shortcut]).toEqual(["Keyboard Shortcuts", "Ctrl+/"]);
+			expect(item?.shortcut).toBe(shortcutLabel("help.shortcuts"));
+			if (item === undefined) throw new Error("Keyboard Shortcuts is not offered");
+			palette.execute(item);
+			expect(handler).toHaveBeenCalledExactlyOnceWith("action:keyboard-shortcuts");
+			expect(palette.isOpen.value).toBe(false);
+		});
+
 		// Its chord went to Close Pane; the row still closes the tab, and shows no chord.
 		it("keep Close Tab, without a chord", () => {
 			const palette = useCommandPalette();

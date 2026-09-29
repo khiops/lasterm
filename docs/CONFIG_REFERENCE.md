@@ -130,6 +130,16 @@ The rail's width follows from its columns and its badge size: `12 + n·badge + (
 
 ---
 
+### [keyboard] — Keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| key_hints | boolean | `true` | A line naming the keys that work where the keyboard is: at the bottom of Settings, and under the host rail and the terminal list while the keyboard is in the rail, the list or the tab bar. It shows for the keyboard only, never for a click. Set in *Settings › Appearance › Keyboard › Show key hints*, global only |
+
+The chords themselves are not configurable yet (#632); Ctrl+/ lists them all.
+
+---
+
 ### [ui] — UI Behavior
 
 | Key | Type | Default | Description |

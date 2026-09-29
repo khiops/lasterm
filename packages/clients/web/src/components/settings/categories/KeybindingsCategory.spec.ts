@@ -4,6 +4,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { type App, createApp } from "vue";
+import { useShortcutsOverlay } from "../../../composables/useShortcutsOverlay.js";
 import {
 	APP_SHORTCUTS,
 	type AppActionId,
@@ -63,6 +64,7 @@ describe("Settings › Keybindings", () => {
 	const SHOWN: Record<AppActionId, [string, string]> = {
 		"palette.open": ["General", "Command Palette"],
 		"settings.open": ["General", "Settings"],
+		"help.shortcuts": ["General", "Keyboard Shortcuts"],
 		"zone.next": ["Focus", "Next Area (rail, list, tabs, pane)"],
 		"zone.previous": ["Focus", "Previous Area"],
 		"tab.new": ["Tabs", "New Channel"],
@@ -124,6 +126,26 @@ describe("Settings › Keybindings", () => {
 		expect(rows.find((row) => row.label === "Focus Left")?.keys).toEqual(["Alt", "←"]);
 		expect(rows.find((row) => row.label === "Go to Tab 2")?.keys).toEqual(["Ctrl", "Alt", "2"]);
 		expect(rows.find((row) => row.label === "Back to the Pane")?.keys).toEqual(["Escape"]);
+	});
+
+	// The overlay lists these too, with the keys inside each area, and searches them (#639).
+	it("links to the keyboard shortcuts overlay, naming its chord from the table", () => {
+		mountRows();
+		const overlay = useShortcutsOverlay();
+		overlay.close();
+		const link = root.querySelector<HTMLButtonElement>(".keybindings-overlay-link");
+		expect(link?.tagName).toBe("BUTTON");
+		expect([...(link?.querySelectorAll("kbd") ?? [])].map((k) => k.textContent)).toEqual(
+			shortcutKeys("help.shortcuts"),
+		);
+		link?.click();
+		expect(overlay.isOpen.value).toBe(true);
+		overlay.close();
+	});
+
+	it("names the actions as the table does", () => {
+		expect(SOURCE).toContain("label: APP_SHORTCUT_NAMES[id]");
+		expect(SOURCE).toMatch(/label: APP_SHORTCUT_NAMES\[`tab\.goTo\$\{n\}`\]/);
 	});
 
 	it("reads the chords of the table from the table", () => {

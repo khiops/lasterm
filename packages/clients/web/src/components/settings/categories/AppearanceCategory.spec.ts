@@ -84,3 +84,37 @@ describe("Appearance › Host rail › Badge size", () => {
 		expect(radio("Small").closest("label")?.classList.contains("badge-size-option--on")).toBe(true);
 	});
 });
+
+// Appearance › Keyboard › Show key hints (#639): the window's keys, so global only.
+describe("Appearance › Keyboard › Show key hints", () => {
+	function keyHintsSwitch(): HTMLInputElement | null {
+		const row = [...root.querySelectorAll(".setting-row")].find(
+			(r) => r.querySelector(".setting-label")?.textContent === "Show key hints",
+		);
+		return row?.querySelector<HTMLInputElement>('input[role="switch"]') ?? null;
+	}
+
+	it("is offered at global scope, on by default", () => {
+		mount("global");
+		expect(keyHintsSwitch()?.checked).toBe(true);
+	});
+
+	it("is not offered for a host or a terminal", () => {
+		mount("host");
+		expect(keyHintsSwitch()).toBeNull();
+		app?.unmount();
+		root.remove();
+		mount("channel");
+		expect(keyHintsSwitch()).toBeNull();
+	});
+
+	it("writes [keyboard] key_hints, and shows what the config holds", async () => {
+		const { configStore, save } = mount("global");
+		keyHintsSwitch()?.click();
+		expect(save).toHaveBeenCalledExactlyOnceWith("keyboard", { keyHints: false });
+
+		configStore.uiConfig = { onChannelDead: "readonly", keyboard: { keyHints: false } };
+		await nextTick();
+		expect(keyHintsSwitch()?.checked).toBe(false);
+	});
+});

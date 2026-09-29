@@ -4,6 +4,13 @@
 			Keyboard shortcuts available in lasterm. Editing is not supported in
 			this version.
 		</p>
+		<!-- The overlay lists these too, with the keys inside each area, and searches them (#639). -->
+		<button type="button" class="keybindings-overlay-link" @click="shortcutsOverlay.open()">
+			Search all keyboard shortcuts
+			<span class="keybinding-keys">
+				<kbd v-for="k in shortcutKeys('help.shortcuts')" :key="k">{{ k }}</kbd>
+			</span>
+		</button>
 		<div
 			v-for="group in keybindingGroups"
 			:key="group.name"
@@ -29,12 +36,18 @@
 </template>
 
 <script setup lang="ts">
-// The app's shortcuts are shown from the table the window and the terminals read (#631, #637).
+// The app's shortcuts are shown from the table the window and the terminals read (#631, #637),
+// under the names it gives them (#639).
+import { useShortcutsOverlay } from "../../../composables/useShortcutsOverlay.js";
 import {
+	APP_SHORTCUT_NAMES,
+	type AppActionId,
 	outsideTerminalKeys,
 	shortcutKeys,
 	TAB_NUMBERS,
 } from "../../../utils/app-shortcuts.js";
+
+const shortcutsOverlay = useShortcutsOverlay();
 
 interface Keybinding {
 	label: string;
@@ -48,38 +61,36 @@ interface KeybindingGroup {
 	bindings: Keybinding[];
 }
 
+/** An action of the table: its name and its keys, and those outside a terminal, if any. */
+function fromTable(id: AppActionId): Keybinding {
+	return {
+		label: APP_SHORTCUT_NAMES[id],
+		keys: shortcutKeys(id),
+		outsideTerminal: outsideTerminalKeys(id),
+	};
+}
+
 const keybindingGroups: KeybindingGroup[] = [
 	{
 		name: "General",
-		bindings: [
-			{ label: "Command Palette", keys: shortcutKeys("palette.open") },
-			{ label: "Settings", keys: shortcutKeys("settings.open") },
-		],
+		bindings: [fromTable("palette.open"), fromTable("settings.open"), fromTable("help.shortcuts")],
 	},
 	{
 		name: "Focus",
 		bindings: [
-			{
-				label: "Next Area (rail, list, tabs, pane)",
-				keys: shortcutKeys("zone.next"),
-				outsideTerminal: outsideTerminalKeys("zone.next"),
-			},
-			{
-				label: "Previous Area",
-				keys: shortcutKeys("zone.previous"),
-				outsideTerminal: outsideTerminalKeys("zone.previous"),
-			},
+			fromTable("zone.next"),
+			fromTable("zone.previous"),
 			{ label: "Back to the Pane", keys: ["Escape"] },
 		],
 	},
 	{
 		name: "Tabs",
 		bindings: [
-			{ label: "New Channel", keys: shortcutKeys("tab.new") },
-			{ label: "Next Tab", keys: shortcutKeys("tab.next") },
-			{ label: "Previous Tab", keys: shortcutKeys("tab.previous") },
+			fromTable("tab.new"),
+			fromTable("tab.next"),
+			fromTable("tab.previous"),
 			...TAB_NUMBERS.map((n) => ({
-				label: n === 9 ? "Go to Last Tab" : `Go to Tab ${n}`,
+				label: APP_SHORTCUT_NAMES[`tab.goTo${n}`],
 				keys: shortcutKeys(`tab.goTo${n}`),
 			})),
 		],
@@ -87,17 +98,17 @@ const keybindingGroups: KeybindingGroup[] = [
 	{
 		name: "Panes",
 		bindings: [
-			{ label: "Split Right", keys: shortcutKeys("pane.splitRight") },
-			{ label: "Split Down", keys: shortcutKeys("pane.splitDown") },
-			{ label: "Close Pane", keys: shortcutKeys("pane.close") },
-			{ label: "Focus Left", keys: shortcutKeys("pane.focusLeft") },
-			{ label: "Focus Right", keys: shortcutKeys("pane.focusRight") },
-			{ label: "Focus Up", keys: shortcutKeys("pane.focusUp") },
-			{ label: "Focus Down", keys: shortcutKeys("pane.focusDown") },
-			{ label: "Resize Left", keys: shortcutKeys("pane.resizeLeft") },
-			{ label: "Resize Right", keys: shortcutKeys("pane.resizeRight") },
-			{ label: "Resize Up", keys: shortcutKeys("pane.resizeUp") },
-			{ label: "Resize Down", keys: shortcutKeys("pane.resizeDown") },
+			fromTable("pane.splitRight"),
+			fromTable("pane.splitDown"),
+			fromTable("pane.close"),
+			fromTable("pane.focusLeft"),
+			fromTable("pane.focusRight"),
+			fromTable("pane.focusUp"),
+			fromTable("pane.focusDown"),
+			fromTable("pane.resizeLeft"),
+			fromTable("pane.resizeRight"),
+			fromTable("pane.resizeUp"),
+			fromTable("pane.resizeDown"),
 		],
 	},
 	{
@@ -130,6 +141,26 @@ const keybindingGroups: KeybindingGroup[] = [
 	font-size: 12px;
 	color: var(--nt-text-secondary);
 	line-height: 1.5;
+}
+
+.keybindings-overlay-link {
+	align-self: flex-start;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: -8px;
+	padding: 4px 8px;
+	background: transparent;
+	border: 1px solid var(--nt-border);
+	border-radius: 4px;
+	color: var(--nt-accent);
+	font-size: 12px;
+	font-family: inherit;
+	cursor: pointer;
+}
+
+.keybindings-overlay-link:hover {
+	background: var(--nt-hover);
 }
 
 .keybinding-group {

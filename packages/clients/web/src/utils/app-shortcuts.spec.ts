@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import HOST_RAIL from "../components/HostRail.vue?raw";
 import {
+	APP_SHORTCUT_NAMES,
 	APP_SHORTCUTS,
 	type AppActionId,
 	appShortcutOf,
@@ -48,10 +49,11 @@ const ALT_GR = { ctrlKey: true, altKey: true, altGraph: true };
 const IDS = Object.keys(APP_SHORTCUTS) as AppActionId[];
 
 describe("the table of the app's shortcuts", () => {
-	it("holds the palette, Settings, the tabs, the panes and the focus zones", () => {
+	it("holds the palette, Settings, the shortcuts overlay, the tabs, the panes and the focus zones", () => {
 		expect(IDS).toEqual([
 			"palette.open",
 			"settings.open",
+			"help.shortcuts",
 			"tab.new",
 			"tab.next",
 			"tab.previous",
@@ -76,6 +78,7 @@ describe("the table of the app's shortcuts", () => {
 		expect(IDS.map(shortcutLabel)).toEqual([
 			"Ctrl+Shift+P",
 			"Ctrl+,",
+			"Ctrl+/",
 			"Ctrl+Shift+T",
 			"Ctrl+Tab",
 			"Ctrl+Shift+Tab",
@@ -111,6 +114,15 @@ describe("the table of the app's shortcuts", () => {
 		expect(new Set(labels).size).toBe(labels.length);
 	});
 
+	// Settings › Keybindings and the shortcuts overlay show them (#639).
+	it("names each action, each name once", () => {
+		expect(Object.keys(APP_SHORTCUT_NAMES)).toEqual(IDS);
+		const names = Object.values(APP_SHORTCUT_NAMES);
+		expect(new Set(names).size).toBe(names.length);
+		expect(APP_SHORTCUT_NAMES["help.shortcuts"]).toBe("Keyboard Shortcuts");
+		expect(APP_SHORTCUT_NAMES["tab.goTo9"]).toBe("Go to Last Tab");
+	});
+
 	it("names each chord's keys one cap each, modifiers first", () => {
 		expect(shortcutKeys("tab.new")).toEqual(["Ctrl", "Shift", "T"]);
 		expect(shortcutKeys("pane.splitDown")).toEqual(["Alt", "Shift", "-"]);
@@ -140,6 +152,41 @@ describe("the palette's chord", () => {
 		expect(appShortcutOf(key("P", { shiftKey: true }))).toBeNull();
 		expect(appShortcutOf(key("p"))).toBeNull();
 		expect(appShortcutOf(key("P", { ...CTRL_SHIFT, altKey: true }))).toBeNull();
+	});
+});
+
+// The keyboard shortcuts overlay (#639). `/` is unshifted on US, Shift+: on AZERTY and Shift+7 on
+// QWERTZ: the chord is the character, with whatever Shift typing it takes.
+describe("the shortcuts overlay's chord", () => {
+	it("is Ctrl+/ on a US keyboard, and the numeric keypad's / anywhere", () => {
+		expect(appShortcutOf(key("/", { ctrlKey: true, code: "Slash" }))).toBe("help.shortcuts");
+		expect(appShortcutOf(key("/", { ctrlKey: true, code: "NumpadDivide" }))).toBe("help.shortcuts");
+		expect(appShortcutOf(key("/", { metaKey: true, code: "Slash" }))).toBe("help.shortcuts");
+	});
+
+	it("is Ctrl+Shift+: on AZERTY and Ctrl+Shift+7 on QWERTZ, where / takes Shift", () => {
+		expect(appShortcutOf(key("/", { ...CTRL_SHIFT, code: "Period" }))).toBe("help.shortcuts");
+		expect(appShortcutOf(key("/", { ...CTRL_SHIFT, code: "Digit7" }))).toBe("help.shortcuts");
+		// Ctrl+: alone types no /.
+		expect(appShortcutOf(key(":", { ctrlKey: true, code: "Period" }))).toBeNull();
+	});
+
+	it("is shown as Ctrl+/, without the Shift a layout may take", () => {
+		expect(shortcutKeys("help.shortcuts")).toEqual(["Ctrl", "/"]);
+	});
+
+	it("is no other chord of /", () => {
+		// Ctrl+Shift+/ on US is Ctrl+?, another character.
+		expect(appShortcutOf(key("?", { ...CTRL_SHIFT, code: "Slash" }))).toBeNull();
+		expect(appShortcutOf(key("/", { code: "Slash" }))).toBeNull();
+		expect(appShortcutOf(key("/", { shiftKey: true, code: "Period" }))).toBeNull();
+		expect(appShortcutOf(key("/", { altKey: true, code: "Slash" }))).toBeNull();
+		expect(appShortcutOf(key("/", { ...CTRL_ALT, code: "Slash" }))).toBeNull();
+	});
+
+	// It opens a dialog over the others rather than moving the keyboard behind one.
+	it("does not move the keyboard, so it works with Settings open", () => {
+		expect(movesKeyboard("help.shortcuts")).toBe(false);
 	});
 });
 

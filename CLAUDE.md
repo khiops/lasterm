@@ -211,7 +211,7 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 
 - **INFO is what ships.** The shipped hub and agent log at INFO, and those logs are kept: the desktop writes the hub's output to `hub.log`, and there are also `hub.jsonl` and `agent-daemon.jsonl`. A line at INFO or above is for rare events only: lifecycle, errors, security events.
 - **Hot paths log at DEBUG, or not at all.** Nothing that runs per WebSocket frame, keystroke, output chunk or routine request may log at INFO or above. A line per keystroke records when and how fast someone types, even without the bytes.
-- **Never log user content, at any level.** That means input bytes, terminal output, clipboard, and secrets (tokens, pairing codes, passwords, passphrases, the asset token inside a URL). Name the type, size or id instead.
+- **Never log user content, at any level.** That means input bytes, terminal output, clipboard, and secrets (tokens, pairing codes, passwords, passphrases, the asset token inside a URL). Name the type, size or id instead, but never a secret's size: a length narrows a brute-force search. Say whether one was given, cached or cancelled; the passphrase spec in `packages/hub/src/security-events.spec.ts` checks it (#644).
 - **Security events** go through `SecurityLog`, and they carry no secret either.
 - **Adding a hot path:** extend the keystroke spec in `packages/hub/src/security-events.spec.ts`, which fails if a burst of INPUT frames leaves anything at INFO or above, or the routine-request spec beside it, which does the same for REST requests.
 

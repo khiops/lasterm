@@ -214,6 +214,43 @@ describe("HostRail selection", () => {
 	});
 });
 
+describe("HostRail local badge (#656)", () => {
+	it("draws the colour and emoji saved for the local host", async () => {
+		const { hostsStore } = mountRail();
+		const disc = (): HTMLElement => badge("local").querySelector(".badge") as HTMLElement;
+		const before = disc().style.backgroundColor;
+		// The host as the hub answers its update, which the store puts in the list.
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					id: "local",
+					type: "local",
+					label: "local",
+					icon_type: "emoji",
+					icon_value: "🚀",
+					color: "#ff8800",
+					trust_remote_hints: "ask",
+					sort_order: 0,
+					os: null,
+					arch: null,
+					created_at: STAMP,
+					updated_at: STAMP,
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		);
+		await hostsStore.updateHost("local", {
+			color: "#ff8800",
+			icon_type: "emoji",
+			icon_value: "🚀",
+		});
+		await nextTick();
+		expect(before).not.toBe("#ff8800");
+		expect(disc().style.backgroundColor).toBe("#ff8800");
+		expect(disc().querySelector(".badge-initials")?.textContent).toBe("🚀");
+	});
+});
+
 describe("HostRail group headers", () => {
 	it("are centred", () => {
 		const rule = /\n\.group-header\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";

@@ -347,6 +347,46 @@ describe("PUT /api/hosts/:id", () => {
 		expect(stored.icon_type).toBe("auto");
 	});
 
+	// The dialog's Appearance tab, for the host the hub creates itself (#656).
+	it("stores the colour and icon given to the built-in local host, which stays local", async () => {
+		const hosts = (await server.inject({ method: "GET", url: "/api/hosts" })).json<
+			Array<Record<string, unknown>>
+		>();
+		const local = hosts.find((h) => h.type === "local");
+		if (!local) throw new Error("no built-in local host");
+
+		const res = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${local.id}`,
+			payload: {
+				label: local.label,
+				type: "local",
+				icon_type: "emoji",
+				icon_value: "🚀",
+				color: "#ff8800",
+				host_group_id: null,
+				trust_remote_hints: "apply",
+				elevation_method: null,
+				custom_command: null,
+				os: local.os,
+				arch: local.arch,
+			},
+		});
+		expect(res.statusCode).toBe(200);
+
+		const stored = (await server.inject({ method: "GET", url: `/api/hosts/${local.id}` })).json<
+			Record<string, unknown>
+		>();
+		expect(stored).toMatchObject({
+			type: "local",
+			label: local.label,
+			icon_type: "emoji",
+			icon_value: "🚀",
+			color: "#ff8800",
+		});
+		expect(stored).not.toHaveProperty("ssh_host");
+	});
+
 	// A client from before these settings were removed still sends them. Nothing
 	// ever read either (the SSH keepalive is fixed, SPEC.md § 5.5; spool GC has
 	// its own bounds, STORAGE.md § 7), so they are ignored like any other field

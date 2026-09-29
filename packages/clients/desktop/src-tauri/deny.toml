@@ -16,7 +16,6 @@ allow = [
 	"Unicode-3.0",
 	"Zlib",
 	"MPL-2.0",
-	"CDLA-Permissive-2.0",
 ]
 exceptions = [
 	# Our own application crates — AGPL by decision (#78).

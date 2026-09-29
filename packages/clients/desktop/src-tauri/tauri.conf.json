@@ -89,7 +89,6 @@
 			"lasterm-hub",
 			"lasterm-agent"
 		],
-		"createUpdaterArtifacts": false,
 		"resources": {},
 		"shortDescription": "Local-first session terminal platform",
 		"category": "DeveloperTool",
@@ -106,13 +105,6 @@
 		}
 	},
 	"plugins": {
-		"updater": {
-			"endpoints": [
-				"https://github.com/khiops/lasterm/releases/latest/download/latest.json"
-			],
-			"dialog": true,
-			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwRTI3QUYwRDI1MjgxNUUKUldSZWdWTFM4SHJpc0ZjcVR5UXdGSDUwK3RpZmRiZlRFZzJRUTd4SFNTekkwVnpLQ2hEYWJTdkQK"
-		},
 		"shell": {
 			"open": "https://.+"
 		}

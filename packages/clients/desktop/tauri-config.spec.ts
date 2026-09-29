@@ -59,13 +59,6 @@ describe("tauri.conf.json", () => {
 		expect(resolved).toMatch(/packages[/\\]clients[/\\]web[/\\]dist$/);
 	});
 
-	// Enabling this requires the signing key at build time, which would break
-	// every unsigned build path. A signed-release workflow must opt into it.
-	it("bundle.createUpdaterArtifacts is disabled", () => {
-		const bundle = conf.bundle as Record<string, unknown>;
-		expect(bundle.createUpdaterArtifacts).toBe(false);
-	});
-
 	it("devUrl is configured for vite dev server", () => {
 		const build = conf.build as Record<string, unknown>;
 		expect(build.devUrl).toBe("http://localhost:5173");
@@ -135,22 +128,13 @@ describe("tauri.conf.json", () => {
 		);
 	});
 
-	it("updater plugin is configured with endpoint", () => {
-		const plugins = conf.plugins as Record<string, unknown>;
-		expect(plugins).toBeDefined();
-		const updater = plugins.updater as Record<string, unknown>;
-		expect(updater).toBeDefined();
-		const endpoints = updater.endpoints as string[];
-		expect(Array.isArray(endpoints)).toBe(true);
-		expect(endpoints.length).toBeGreaterThan(0);
-		expect(endpoints[0]).toContain("github.com");
-		// Pinned deliberately: this key must stay in step with the
-		// TAURI_SIGNING_PRIVATE_KEY CI secret. Signatures produced with a
-		// different key are rejected by installed clients, so rotating it is a
-		// conscious act that updates this expectation too.
-		expect(updater.pubkey).toBe(
-			"dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwRTI3QUYwRDI1MjgxNUUKUldSZWdWTFM4SHJpc0ZjcVR5UXdGSDUwK3RpZmRiZlRFZzJRUTd4SFNTekkwVnpLQ2hEYWJTdkQK",
-		);
+	// The desktop does not update itself: the Store updates the MSIX build,
+	// winget the others, and a GitHub-release install is updated by hand
+	// (DESKTOP-UPDATES in docs/decisions.md, #645).
+	it("configures no updater", () => {
+		const bundle = conf.bundle as Record<string, unknown>;
+		expect(bundle).not.toHaveProperty("createUpdaterArtifacts");
+		expect(conf.plugins as Record<string, unknown>).not.toHaveProperty("updater");
 	});
 });
 
@@ -209,6 +193,14 @@ describe("capabilities/default.json", () => {
 		expect(permissions).not.toContain("os:default");
 	});
 
+	it("grants no updater permission", () => {
+		const permissions = caps.permissions as unknown[];
+		const identifiers = permissions.map((p) =>
+			typeof p === "string" ? p : String((p as Record<string, unknown>).identifier),
+		);
+		expect(identifiers.filter((id) => id.startsWith("updater:"))).toEqual([]);
+	});
+
 	it("targets the main window", () => {
 		const windows = caps.windows as string[];
 		expect(Array.isArray(windows)).toBe(true);
@@ -231,8 +223,8 @@ describe("Cargo.toml", () => {
 		expect(cargo).toMatch(/^tauri-plugin-shell\s*=/m);
 	});
 
-	it("contains tauri-plugin-updater dependency", () => {
-		expect(cargo).toMatch(/^tauri-plugin-updater\s*=/m);
+	it("does not depend on tauri-plugin-updater", () => {
+		expect(cargo).not.toMatch(/tauri-plugin-updater/);
 	});
 
 	it("contains tauri-plugin-os dependency", () => {
@@ -269,9 +261,9 @@ describe("package.json", () => {
 		expect(deps).toHaveProperty("@tauri-apps/plugin-shell");
 	});
 
-	it("depends on @tauri-apps/plugin-updater", () => {
-		const deps = pkg.dependencies as Record<string, string>;
-		expect(deps).toHaveProperty("@tauri-apps/plugin-updater");
+	it("does not depend on @tauri-apps/plugin-updater", () => {
+		expect(pkg.dependencies).not.toHaveProperty("@tauri-apps/plugin-updater");
+		expect(pkg.devDependencies).not.toHaveProperty("@tauri-apps/plugin-updater");
 	});
 
 	it("has tauri CLI as devDependency", () => {

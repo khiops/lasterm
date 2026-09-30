@@ -1,7 +1,7 @@
 # lasterm
 
 A local-first session terminal platform. Hub daemon + remote agents + SSH transport + PWA UI.
-Sessions survive client disconnects and device switches; local sessions also survive hub restarts,
+Sessions survive client disconnects; local sessions also survive hub restarts,
 and so do remote ones on hosts that keep an agent running.
 
 ![Status](https://img.shields.io/badge/status-under%20active%20development-yellow)
@@ -14,7 +14,7 @@ and so do remote ones on hosts that keep an agent running.
 
 ## Features
 
-- **Session persistence** — terminals outlive client/UI disconnects and device switches; reattach and the hub restores the screen from its snapshot and spool. Local terminals also survive hub restarts: they run in a detached agent daemon the hub reconnects to.
+- **Session persistence** — terminals outlive client/UI disconnects; reattach and the hub restores the screen from its snapshot and spool. Local terminals also survive hub restarts: they run in a detached agent daemon the hub reconnects to.
 - **Remote terminals that outlive the connection** — a remote host can keep an agent running (`[ssh] remote_daemon`, or "Keep an agent running there" in the host's settings). Its terminals then survive a dropped SSH connection and a hub restart. Without it, and on Windows remotes, their shells end with the connection, and a reconnect starts new ones in their place.
 - **SSH transport** — agents are reached over SSH, on stdio or through a daemon's Unix socket; no port is opened on remote machines. A host can be reached through a jump host (ProxyJump), reconnects included, and one that stops answering is noticed within a minute.
 - **Local-first** — the hub daemon owns all state; the UI is a thin client that can come and go

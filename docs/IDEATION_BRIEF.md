@@ -86,7 +86,7 @@
 
 21. Workspace export/import avec blobs
 22. SQLCipher encryption at-rest
-23. OIDC/mTLS
+23. mTLS (OIDC/SSO : fonction d'organisation, hors de ce dépôt)
 24. Auto-install agent si Node absent (pkg/sea binary)
 25. Collaboration multi-writers
 

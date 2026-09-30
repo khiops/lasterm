@@ -208,7 +208,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - `lasterm pair [--code XXXXXXXX]` — generate a pairing code, or verify one
 - `lasterm config edit` — open config.toml in $EDITOR
 
-**Who may end a hub (#142).** A client that ends things (quit, stop) acts on the hub it **owns**, the one it launched, and never on a hub it only connected to, whose terminals belong to other people.
+**Who may end a hub (#142).** A client that ends things (quit, stop) acts on the hub it **owns**, the one it launched, and never on a hub it only connected to, which is not its to end.
 - **Enforced by the hub:** `/api/quit` and `/api/shutdown` require a loopback connection and the owner token from `runtime.json`. Only a process of the hub's OS user, on the hub's machine, can read that file: the desktop that launched the hub, or `lasterm quit` / `lasterm stop`.
 - **Paired clients** (a browser, or a remote client) authenticate with a token that can drive the hub but never end it.
 - **The desktop's hub** also ends with the desktop, through `--exit-with-stdin` (#188).

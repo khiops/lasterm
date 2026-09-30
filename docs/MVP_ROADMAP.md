@@ -329,7 +329,7 @@ M5: [5.1] → [5.2] → [5.3] → [5.4]  (UI progressive)
 | OS keychain for auth token | P1 | M6 | — |
 | Workspace export/import with blobs | P2 | M7 | — |
 | SQLCipher encryption | P2 | M7 | — |
-| OIDC / mTLS | P2 | M8 | — |
+| mTLS | P2 | M8 | — |
 | Auto-install agent binary | P2 | M7 | Node SEA or pkg |
 | Collaboration (multi-writer CRDT) | P2 | M8+ | Research required |
 

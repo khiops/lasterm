@@ -344,5 +344,12 @@ ecosystem adoption.
 the application components will remain AGPL-3.0-only and the libraries will remain
 MIT OR Apache-2.0.
 
+**The project model.** Everything in this repository is free software and stays free for everyone:
+the hub, the agent, the desktop and web clients, session persistence, every device you own.
+Features only organisations need — single sign-on, a control plane over several hubs, audit
+retention and compliance exports — may later be offered as separate commercial products that talk
+to the hub through its public API. None of that code will ever live in this repository, and nothing
+shipped here will move behind a paywall.
+
 Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/)
 (inbound = outbound). There is no CLA.

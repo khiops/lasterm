@@ -626,7 +626,8 @@ and stderr (SPEC.md § 6.2). In a hub started by `lasterm start` they are the on
 
 The file rotates at 10 MB into `hub.jsonl.old`, so it holds the recent past rather than a history.
 Anything able to reach the port can produce failures faster than they are read and push older
-entries out. A store that keeps them is the audit log of § 9, which is a separate decision.
+entries out. Keeping them longer, exporting them or forwarding them elsewhere is an organisational
+feature, outside this repository (§ 9).
 
 **Shape.** One JSON line per event: `ts`, `lvl` (`info`), `msg` (`security: …`), `event`, then the
 fields below. `clientId` is the id a WebSocket connection receives in `AUTH_OK`, so the same value
@@ -715,7 +716,10 @@ Security notes:
 | SQLCipher | P2 | Encrypt meta.db and spool.db at rest |
 | OS keychain | P1 | Store auth token in OS keychain (keytar) |
 | TLS for non-localhost | P2 | If hub exposed beyond loopback |
-| OIDC | P2 | Enterprise SSO for multi-user |
 | mTLS | P2 | Mutual TLS for hub ↔ remote |
-| Audit log | P1 | Persistent security event log |
-| Session recording | P2 | Immutable audit trail of terminal sessions |
+| Session recording | P2 | Record and replay your own sessions, stored on your machine (#80) |
+
+Features only organisations need are not planned in this repository: single sign-on (OIDC, SAML),
+a control plane over several hubs, audit retention, compliance exports and forwarding to a SIEM.
+They may come later as separate products that talk to the hub through its public API (#81; README,
+*The project model*).

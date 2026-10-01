@@ -277,8 +277,8 @@ export function useHostForm(editHost?: Host) {
 					form.value.sshHost === host &&
 					form.value.sshPort === sshPort &&
 					form.value.sshUser === sshUser &&
-					sshProxy === "" &&
-					form.value.sshProxy === ""
+					sshProxy.trim() === "" &&
+					form.value.sshProxy.trim() === ""
 						? result.platform?.os
 						: undefined;
 			}

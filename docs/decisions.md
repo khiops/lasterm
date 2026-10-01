@@ -9,7 +9,7 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ## REMOTE-DAEMON-PRESELECT — ask at host creation, with Yes preselected (2026-10-01)
 
-- Refines REMOTE-DAEMON: creating a Unix SSH host through the app asks whether it may keep a small agent running, with Yes preselected and a disclosure of its 30-minute idle stop, systemd-without-lingering logout risk, and No behaviour.
+- Refines REMOTE-DAEMON: the Add Host dialog asks, for a Unix SSH host, whether it may keep a small agent running, with Yes preselected and a disclosure of its 30-minute idle stop, systemd-without-lingering logout risk, and No behaviour. The batch import and Duplicate do not ask (below).
 - The global `[ssh] remote_daemon` default remains false, and existing hosts and API-created hosts without the field retain their current inherited behaviour.
 - The Add Host dialog offers Yes (preselected), No and "Follow the global setting"; the batch import offers one Yes/No checkbox for the whole batch, ticked by default; Duplicate copies the source host's answer.
 - Windows hosts stay on stdio whatever is stored: the dialog stores no answer for a host it knows to be Windows, while the batch import cannot know the OS and may store a value that is then ignored.

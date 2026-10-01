@@ -1,0 +1,91 @@
+name: Setup report
+description: Tell us whether lasterm worked on your machine. A failure helps as much as a success.
+title: "Setup report: "
+labels: ["setup-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking two minutes. Do not paste host names, user names, IP addresses, keys or tokens.
+  - type: input
+    id: version
+    attributes:
+      label: lasterm version
+      placeholder: "0.14.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: How you installed it
+      options:
+        - winget
+        - Setup installer (.exe)
+        - MSI
+        - Microsoft Store (MSIX)
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: desk-os
+    attributes:
+      label: Your desktop OS and version
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: host-os
+    attributes:
+      label: Remote host OS
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - BSD or other
+        - No remote host
+    validations:
+      required: true
+  - type: dropdown
+    id: host-arch
+    attributes:
+      label: Remote host architecture
+      options:
+        - x86_64
+        - aarch64
+        - Other
+        - No remote host
+  - type: dropdown
+    id: remote-daemon
+    attributes:
+      label: Was "Keep an agent running there" on for that host?
+      options:
+        - "On"
+        - "Off"
+        - Don't know
+  - type: dropdown
+    id: survived-drop
+    attributes:
+      label: Did a terminal survive a dropped connection?
+      options:
+        - "Yes"
+        - "No"
+        - Not tried
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Overall
+      options:
+        - It worked
+        - It worked after a workaround
+        - It failed
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: What failed or needed a workaround
+      description: The step, the message you saw, what you did next.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else

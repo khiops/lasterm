@@ -66,7 +66,8 @@ publish cannot release one by accident.
 
 **`@lasterm` is unclaimed on npm.** What exists there is three `@termora/*` names
 holding 0.0.1 placeholders, published before the rename, which now reserve a scope this
-product does not use. The unscoped `lasterm` belongs to an unrelated project. Since
+product does not use. The unscoped `lasterm` is not on npm either: `npm view lasterm`
+answered E404 on 2026-10-01. Since
 nothing here publishes, the only thing the scope buys is that nobody else takes it —
 worth an hour, and it is not done. Verified against the registry on 2026-08-07 rather
 than inferred: `npm view @termora/hub version` answers 0.0.1, `@lasterm/hub` answers

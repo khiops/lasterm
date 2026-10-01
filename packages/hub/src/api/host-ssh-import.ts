@@ -7,6 +7,53 @@ import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";
 import type { MetaDAL } from "../storage/meta.js";
 
+type SshConfigImportValidation = { entries: SshConfigImport[] } | { error: string };
+type SshConfigImportRequestBodyFromUntrustedJson = unknown;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+/** Validate and narrow the JSON body before an import can create any host. */
+export function validateSshConfigImportEntries(body: unknown): SshConfigImportValidation {
+	if (!isRecord(body) || !Array.isArray(body.entries) || body.entries.length === 0) {
+		return { error: "entries must be a non-empty array" };
+	}
+
+	const entries: SshConfigImport[] = [];
+	for (const value of body.entries) {
+		if (
+			!isRecord(value) ||
+			typeof value.name !== "string" ||
+			value.name.length === 0 ||
+			typeof value.label !== "string" ||
+			value.label.length === 0
+		) {
+			return { error: "Each entry must have name and label" };
+		}
+		const sshRemoteDaemon = value.sshRemoteDaemon;
+		if (
+			sshRemoteDaemon !== undefined &&
+			sshRemoteDaemon !== null &&
+			typeof sshRemoteDaemon !== "boolean"
+		) {
+			return { error: "sshRemoteDaemon must be a boolean or null when provided" };
+		}
+		const hostGroup = value.hostGroup;
+		if (hostGroup !== undefined && typeof hostGroup !== "string") {
+			return { error: "hostGroup must be a string when provided" };
+		}
+		entries.push({
+			name: value.name,
+			label: value.label,
+			...(hostGroup !== undefined && { hostGroup }),
+			...(sshRemoteDaemon !== undefined && { sshRemoteDaemon }),
+		});
+	}
+
+	return { entries };
+}
+
 export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
 	// GET /api/ssh-config — parse user's ~/.ssh/config
 	server.get("/api/ssh-config", async (_request, reply) => {
@@ -27,19 +74,19 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 	});
 
 	// POST /api/hosts/import — batch import hosts from SSH config
-	server.post<{ Body: { entries: SshConfigImport[] } }>(
+	server.post<{ Body: SshConfigImportRequestBodyFromUntrustedJson }>(
 		"/api/hosts/import",
 		async (request, reply) => {
-			const { entries } = request.body;
-
-			if (!Array.isArray(entries) || entries.length === 0) {
+			const validation = validateSshConfigImportEntries(request.body);
+			if ("error" in validation) {
 				return reply.code(400).send({
 					error: {
 						code: "VALIDATION_ERROR",
-						message: "entries must be a non-empty array",
+						message: validation.error,
 					},
 				});
 			}
+			const { entries } = validation;
 
 			// Parse SSH config to get full details
 			let sshResult: ParseResult;
@@ -62,14 +109,6 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 
 			// Validate all entries have matching SSH config entries
 			for (const entry of entries) {
-				if (!entry.name || !entry.label) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message: "Each entry must have name and label",
-						},
-					});
-				}
 				if (!entryMap.has(entry.name)) {
 					return reply.code(400).send({
 						error: {
@@ -129,6 +168,9 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 					// this list when one turns out to be that bastion.
 					...(sshEntry.proxyJump != null ? { sshProxySpec: sshEntry.proxyJump } : {}),
 					...(entry.hostGroup !== undefined && { hostGroup: entry.hostGroup }),
+					...(entry.sshRemoteDaemon !== undefined && {
+						sshRemoteDaemon: entry.sshRemoteDaemon,
+					}),
 				};
 			});
 

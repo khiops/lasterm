@@ -133,7 +133,7 @@ const SSH: Host = {
 let app: App | null = null;
 let root: HTMLElement;
 
-function mountModal(editHost: Host) {
+function mountModal(editHost: Host | null = null) {
 	const pinia = createPinia();
 	setActivePinia(pinia);
 	useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }];
@@ -349,5 +349,95 @@ describe("HostModal for an SSH host", () => {
 		expect(shown(el("#panel-connection"))).toBe(true);
 		expect(shown(el("#panel-appearance"))).toBe(false);
 		expect(el("#panel-terminal")?.textContent).toContain("Remote Hints");
+	});
+});
+
+describe("HostModal remote daemon choice", () => {
+	function selectWithOption(text: string): HTMLSelectElement {
+		const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+			(candidate) => Array.from(candidate.options).some((option) => option.textContent === text),
+		);
+		if (!select) throw new Error(`no select with ${text}`);
+		return select;
+	}
+
+	function choose(select: HTMLSelectElement, value: string): void {
+		select.value = value;
+		select.dispatchEvent(new Event("change"));
+	}
+
+	async function prepareNewHost(): Promise<() => Promise<Record<string, unknown>>> {
+		const answer = {
+			...SSH,
+			id: "01NEWSSHHOST00000000000000",
+			label: "daemon-host",
+			ssh_host: "10.0.0.8",
+			ssh_auth: "agent",
+			ssh_remote_daemon: true,
+			created_at: STAMP,
+			updated_at: STAMP,
+		};
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(answer), {
+				status: 201,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+		mountModal();
+		const name = el<HTMLInputElement>("input[placeholder='prod-server']");
+		const host = el<HTMLInputElement>("input[placeholder='192.168.1.100']");
+		if (!name || !host) throw new Error("no new-host inputs");
+		name.value = "daemon-host";
+		name.dispatchEvent(new Event("input"));
+		host.value = "10.0.0.8";
+		host.dispatchEvent(new Event("input"));
+		choose(selectWithOption("SSH Agent"), "agent");
+		await nextTick();
+		return () =>
+			new Promise((resolve) => {
+				const save = el<HTMLButtonElement>(".dialog-actions .btn-primary");
+				if (!save) throw new Error("no save button");
+				save.click();
+				setTimeout(() => {
+					const [, init] = fetchSpy.mock.calls[0] ?? [];
+					resolve(JSON.parse(String(init?.body)));
+				}, 0);
+			});
+	}
+
+	it("discloses the preselected Yes choice and saves true for a new host", async () => {
+		const save = await prepareNewHost();
+		expect(el("#panel-connection")?.textContent).toContain(
+			"30 minutes with no terminal and no hub connected",
+		);
+		const body = await save();
+		expect(body).toHaveProperty("ssh_remote_daemon", true);
+	});
+
+	it("saves false after choosing No", async () => {
+		const save = await prepareNewHost();
+		choose(selectWithOption("No — leave nothing behind"), "no");
+		expect(await save()).toHaveProperty("ssh_remote_daemon", false);
+	});
+
+	it("saves null after choosing Follow the global setting", async () => {
+		const save = await prepareNewHost();
+		choose(selectWithOption("Follow the global setting"), "");
+		expect(await save()).toHaveProperty("ssh_remote_daemon", null);
+	});
+
+	it("hides the choice and saves null when Windows is selected", async () => {
+		const save = await prepareNewHost();
+		choose(selectWithOption("Windows"), "windows");
+		await nextTick();
+		expect(el("#panel-connection")?.textContent).toContain("Not available on Windows hosts");
+		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
+		expect(await save()).toHaveProperty("ssh_remote_daemon", null);
+	});
+
+	it("shows the setting as unavailable when editing a Windows host", () => {
+		mountModal({ ...SSH, os: "windows", sshRemoteDaemon: true });
+		expect(el("#panel-connection")?.textContent).toContain("Not available on Windows hosts");
+		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
 	});
 });

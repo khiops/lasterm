@@ -83,7 +83,13 @@ export function useHostForm(editHost?: Host) {
 		sshKeyPath: editHost?.sshKeyPath ?? "",
 		sshProxy: editHost?.sshProxyHostId ?? editHost?.sshProxySpec ?? "",
 		sshRemoteDaemon:
-			editHost?.sshRemoteDaemon == null ? "" : editHost.sshRemoteDaemon ? "yes" : "no",
+			editHost === undefined
+				? "yes"
+				: editHost.sshRemoteDaemon == null
+					? ""
+					: editHost.sshRemoteDaemon
+						? "yes"
+						: "no",
 		iconType: editHost?.iconType ?? "auto",
 		iconValue: editHost?.iconValue ?? "",
 		color: editHost?.color ?? "",
@@ -122,6 +128,13 @@ export function useHostForm(editHost?: Host) {
 	} | null>(null);
 	const testing = ref(false);
 	const saving = ref(false);
+	let latestTestConnection = 0;
+
+	const sshRemoteDaemonUnavailable = computed(
+		() =>
+			form.value.os === "windows" ||
+			(testResult.value?.ok === true && testResult.value.platform?.os === "windows"),
+	);
 
 	// New group creation inline
 	const newGroupName = ref("");
@@ -192,6 +205,7 @@ export function useHostForm(editHost?: Host) {
 	}
 
 	async function testConnectionInline(): Promise<void> {
+		const testConnection = ++latestTestConnection;
 		testing.value = true;
 		testResult.value = null;
 		try {
@@ -245,11 +259,13 @@ export function useHostForm(editHost?: Host) {
 				});
 			});
 
-			testResult.value = result;
+			if (testConnection === latestTestConnection) testResult.value = result;
 		} catch {
-			testResult.value = { ok: false, message: "Connection test failed" };
+			if (testConnection === latestTestConnection) {
+				testResult.value = { ok: false, message: "Connection test failed" };
+			}
 		} finally {
-			testing.value = false;
+			if (testConnection === latestTestConnection) testing.value = false;
 		}
 	}
 
@@ -287,10 +303,16 @@ export function useHostForm(editHost?: Host) {
 						form.value.sshProxy,
 						hostsStore.hosts.map((candidate) => candidate.id),
 					),
-					// null is not "no": it is no answer for this host, which leaves
-					// the global setting speaking for it.
-					ssh_remote_daemon:
-						form.value.sshRemoteDaemon === "" ? null : form.value.sshRemoteDaemon === "yes",
+					// An unavailable setting is recorded as null for a new Windows host.
+					// On an existing one, leave the stored answer alone instead.
+					...(!isEdit || !sshRemoteDaemonUnavailable.value
+						? {
+								ssh_remote_daemon:
+									sshRemoteDaemonUnavailable.value || form.value.sshRemoteDaemon === ""
+										? null
+										: form.value.sshRemoteDaemon === "yes",
+							}
+						: {}),
 				}),
 				...iconFields(form.value.iconType, form.value.iconValue),
 				// null once reset: the colour then comes from the label (#659).
@@ -394,6 +416,7 @@ export function useHostForm(editHost?: Host) {
 		testResult,
 		testing,
 		saving,
+		sshRemoteDaemonUnavailable,
 		labelError,
 		canSave,
 		previewInitials,

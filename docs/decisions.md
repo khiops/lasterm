@@ -7,6 +7,15 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## REMOTE-DAEMON-PRESELECT — ask at host creation, with Yes preselected (2026-10-01)
+
+- Refines REMOTE-DAEMON: creating a Unix SSH host through the app asks whether it may keep a small agent running, with Yes preselected and a disclosure of its 30-minute idle stop, systemd-without-lingering logout risk, and No behaviour.
+- The global `[ssh] remote_daemon` default remains false, and existing hosts and API-created hosts without the field retain their current inherited behaviour.
+- Windows hosts exclude the setting and stay on stdio; an explicit stored value is harmless there.
+- The hub-side operation to disable and stop an already-running agent is a separate change.
+
+---
+
 ## AGENT-DAEMON-LOG — one file per day, and a number of them kept (#646, 2026-09-29)
 
 - An agent daemon appended to `logs/agent-daemon.jsonl` for as long as it ran, never rotated: a remote daemon left for months, as on the Raspberry Pi, grew it without bound. It now writes one file per UTC day it logs something, `logs/agent-daemon.YYYY-MM-DD.jsonl`, through `tracing-appender`'s daily rotation, as Candeo's log does.

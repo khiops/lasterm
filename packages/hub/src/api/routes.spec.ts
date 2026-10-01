@@ -1951,3 +1951,86 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		expect(hosts[0]?.ssh_auth == null).toBe(true);
 	});
 });
+
+describe("POST /api/hosts/import — remote daemon choice", () => {
+	function configEntry() {
+		return {
+			entries: [
+				{
+					name: "daemon-host",
+					hostname: "10.0.0.9",
+					port: 22,
+					user: "deploy",
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+			],
+			hasInclude: false,
+		};
+	}
+
+	async function importedDaemonChoice(label: string, sshRemoteDaemon: boolean | null | undefined) {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce(configEntry());
+		const entry = {
+			name: "daemon-host",
+			label,
+			...(sshRemoteDaemon !== undefined && { sshRemoteDaemon }),
+		};
+		const created = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [entry] },
+		});
+		expect(created.statusCode).toBe(201);
+		const [host] = created.json<Array<{ id: string }>>();
+		expect(host).toBeDefined();
+		if (host === undefined) throw new Error("Import returned no host");
+		return server.inject({ method: "GET", url: `/api/hosts/${host.id}` });
+	}
+
+	it("stores true and reads it back", async () => {
+		const response = await importedDaemonChoice("daemon-true", true);
+		expect(response.json<{ ssh_remote_daemon?: boolean }>().ssh_remote_daemon).toBe(true);
+	});
+
+	it("stores false and reads it back", async () => {
+		const response = await importedDaemonChoice("daemon-false", false);
+		expect(response.json<{ ssh_remote_daemon?: boolean }>().ssh_remote_daemon).toBe(false);
+	});
+
+	it("keeps an explicit null as the inherited setting", async () => {
+		const response = await importedDaemonChoice("daemon-null", null);
+		expect(
+			response.json<{ ssh_remote_daemon?: boolean | null }>().ssh_remote_daemon ?? null,
+		).toBeNull();
+	});
+
+	it("keeps an absent choice as the inherited setting for older clients", async () => {
+		const response = await importedDaemonChoice("daemon-absent", undefined);
+		expect(
+			response.json<{ ssh_remote_daemon?: boolean | null }>().ssh_remote_daemon ?? null,
+		).toBeNull();
+	});
+
+	it("refuses an invalid value before it creates any host", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce(configEntry());
+		const before = await server.inject({ method: "GET", url: "/api/hosts" });
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: {
+				entries: [{ name: "daemon-host", label: "daemon-invalid", sshRemoteDaemon: "yes" }],
+			},
+		});
+		expect(response.statusCode).toBe(400);
+		expect(response.json<{ error: { code: string; message: string } }>().error).toEqual({
+			code: "VALIDATION_ERROR",
+			message: "sshRemoteDaemon must be a boolean or null when provided",
+		});
+		const after = await server.inject({ method: "GET", url: "/api/hosts" });
+		expect(after.json()).toEqual(before.json());
+	});
+});

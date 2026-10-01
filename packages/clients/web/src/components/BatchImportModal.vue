@@ -66,6 +66,18 @@
 							</button>
 						</div>
 
+						<label class="field-hint auth-note remote-daemon-option">
+							<input v-model="keepRemoteDaemon" type="checkbox" :disabled="importing" />
+							Keep an agent running on imported hosts
+						</label>
+						<p class="field-hint auth-note">
+							Lasterm keeps a small agent running on each host, so its terminals survive
+							a dropped connection. It stops by itself after 30 minutes with no terminal
+							and no hub connected. On a systemd host without lingering, logging out may
+							end it. Not available on Windows hosts. Untick this to end the shells with
+							the connection.
+						</p>
+
 						<!-- Host entries -->
 						<div class="entry-list">
 							<label
@@ -190,6 +202,7 @@ const checked = ref<string[]>([]);
 const importing = ref(false);
 const conflictError = ref<string | null>(null);
 const successMessage = ref<string | null>(null);
+const keepRemoteDaemon = ref(true);
 
 /** Count of checked entries. */
 const checkedCount = computed(() => checked.value.length);
@@ -300,6 +313,7 @@ async function onImport(): Promise<void> {
 	const importEntries = checked.value.map((name) => ({
 		name,
 		label: name,
+		sshRemoteDaemon: keepRemoteDaemon.value,
 	}));
 
 	try {
@@ -361,6 +375,7 @@ watch(
 			// Reset state on close
 			entries.value = [];
 			checked.value = [];
+			keepRemoteDaemon.value = true;
 			fetchError.value = null;
 			conflictError.value = null;
 			successMessage.value = null;

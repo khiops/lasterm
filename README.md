@@ -8,7 +8,7 @@ and so do remote ones on hosts that keep an agent running.
 ![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 
-> **Not yet published to npm.** Under active development.
+> **Under active development.** Not distributed through npm; see Quick Start.
 
 ---
 
@@ -54,10 +54,12 @@ without an exception, which takes a certificate you configure from a CA your bro
 trusts, and a fixed port. With the generated certificate the browser runs it as an
 ordinary tab. [SPEC.md § 3.4](docs/SPEC.md) lists which setups are installable.
 
-There is no `npx lasterm`, and there will not be one under that name: the unscoped
-`lasterm` on npm belongs to an unrelated project. The hub ships as a single
-executable that embeds its own Node, so npm would add a runtime requirement it
-exists to remove. Packaged builds land in the [releases](../../releases).
+There is no `npx lasterm`: the hub ships as a single executable that embeds its own
+Node, so npm would add a runtime requirement it exists to remove. Each
+[release](../../releases) carries the Windows desktop installers (`.exe`, `.msi`,
+`.msix`), the Windows hub executable, and the agents for Linux (x86_64, aarch64) and
+Windows. No release carries a Linux or macOS hub yet (#565); on Linux, build it from
+source as above.
 
 The desktop app does not update itself. An install from a release asset is updated by
 installing the newer release; the Microsoft Store and winget update the installs they made.
@@ -139,7 +141,7 @@ host as usual. See [`docs/SPEC.md` §5.5b](docs/SPEC.md).
 
 ## Packages
 
-| Package | npm name | Description |
+| Package | Workspace name (not published) | Description |
 |---------|----------|-------------|
 | `packages/shared` | `@lasterm/shared` | Protocol types, MessagePack codec, entity types, config types |
 | `crates/lasterm-agent` | a Rust binary | PTY manager — async-xpty + the vt100 crate + MessagePack framing |
@@ -345,7 +347,7 @@ the application components will remain AGPL-3.0-only and the libraries will rema
 MIT OR Apache-2.0.
 
 **The project model.** Everything in this repository is free software and stays free for everyone:
-the hub, the agent, the desktop and web clients, session persistence, every device you own.
+the hub, the agent, the desktop and web clients, and session persistence.
 Features only organisations need — single sign-on, a control plane over several hubs, audit
 retention and compliance exports — may later be offered as separate commercial products that talk
 to the hub through its public API. None of that code will ever live in this repository, and nothing

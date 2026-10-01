@@ -1,0 +1,45 @@
+name: Using lasterm in a team
+description: Tell us how your team would use lasterm. Your answers decide what gets built next.
+title: "Team use: "
+labels: ["team-interest"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        lasterm serves one user per hub today. If several people at your organisation would use it, tell us how. Do not paste host names, IP addresses or credentials.
+  - type: dropdown
+    id: people
+    attributes:
+      label: People who would use it
+      options:
+        - "2–5"
+        - "6–10"
+        - "11–50"
+        - More than 50
+    validations:
+      required: true
+  - type: dropdown
+    id: hosts
+    attributes:
+      label: Servers they reach
+      options:
+        - "1–5"
+        - "6–20"
+        - "21–100"
+        - More than 100
+    validations:
+      required: true
+  - type: textarea
+    id: tooling
+    attributes:
+      label: What you use today
+      description: SSH clients, tmux or screen, Teleport, Tailscale, a bastion, coding agents.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem you want solved
+      description: What goes wrong today, and what it costs you.
+    validations:
+      required: true

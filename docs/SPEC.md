@@ -1084,7 +1084,7 @@ a hub from starting (#588). Deleted on clean shutdown; stale file detected via P
 **Nothing here is published.** Every package is marked private, no workflow runs
 `npm publish`, and the names below are workspace identifiers only.
 
-| Package | npm name | Purpose |
+| Package | Workspace name | Purpose |
 |---------|----------|---------|
 | Root | workspace root | CLI entrypoint, built from this repository |
 | shared | `@lasterm/shared` | Types, codec, framing |

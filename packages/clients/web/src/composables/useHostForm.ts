@@ -126,14 +126,23 @@ export function useHostForm(editHost?: Host) {
 		message?: string;
 		platform?: TestConnectPlatform;
 	} | null>(null);
+	const lastCompletedTestPlatformOs = ref<string | undefined>(undefined);
 	const testing = ref(false);
 	const saving = ref(false);
 	let latestTestConnection = 0;
 
+	// A completed test only describes the connection details it tested. Clear
+	// it before a synchronous save can use it after any detail changes.
+	watch(
+		() => [form.value.sshHost, form.value.sshPort, form.value.sshUser],
+		() => {
+			lastCompletedTestPlatformOs.value = undefined;
+		},
+		{ flush: "sync" },
+	);
+
 	const sshRemoteDaemonUnavailable = computed(
-		() =>
-			form.value.os === "windows" ||
-			(testResult.value?.ok === true && testResult.value.platform?.os === "windows"),
+		() => form.value.os === "windows" || lastCompletedTestPlatformOs.value === "windows",
 	);
 
 	// New group creation inline
@@ -219,7 +228,8 @@ export function useHostForm(editHost?: Host) {
 			// Always read from form — it's initialized with editHost values,
 			// so form.value already reflects DB state + user edits
 			const host = form.value.sshHost;
-			const port = form.value.sshPort ?? 22;
+			const sshPort = form.value.sshPort;
+			const port = sshPort ?? 22;
 			const sshAuth = form.value.sshAuth;
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
@@ -259,10 +269,20 @@ export function useHostForm(editHost?: Host) {
 				});
 			});
 
-			if (testConnection === latestTestConnection) testResult.value = result;
+			if (testConnection === latestTestConnection) {
+				testResult.value = result;
+				lastCompletedTestPlatformOs.value =
+					result.ok &&
+					form.value.sshHost === host &&
+					form.value.sshPort === sshPort &&
+					form.value.sshUser === sshUser
+						? result.platform?.os
+						: undefined;
+			}
 		} catch {
 			if (testConnection === latestTestConnection) {
 				testResult.value = { ok: false, message: "Connection test failed" };
+				lastCompletedTestPlatformOs.value = undefined;
 			}
 		} finally {
 			if (testConnection === latestTestConnection) testing.value = false;

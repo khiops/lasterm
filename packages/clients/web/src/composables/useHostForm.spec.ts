@@ -224,6 +224,64 @@ describe("useHostForm", () => {
 			await failed;
 			expect(sshRemoteDaemonUnavailable.value).toBe(false);
 		});
+
+		it("keeps the Windows rule while a newer test is pending when creating", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+
+			const pendingSecondTest = testConnectionInline();
+			await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(2));
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			// Catches basing the rule on testResult, which is null while this test is pending.
+			expect(body).toHaveProperty("ssh_remote_daemon", null);
+			await harness.respondOk(1, "linux");
+			await pendingSecondTest;
+		});
+
+		it("clears the completed Windows result when a newer test fails", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			const failed = testConnectionInline();
+			await harness.respondFail(1);
+			await failed;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("clears the completed Windows result when the host address changes", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			form.value.sshHost = "10.0.0.2";
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
 	});
 
 	describe("SC-10: save omits sshPort when undefined", () => {
@@ -377,6 +435,25 @@ describe("useHostForm", () => {
 				form.label = "renamed";
 			});
 			expect(body).not.toHaveProperty("ssh_remote_daemon");
+		});
+
+		it("keeps the Windows rule while a newer test is pending when editing", async () => {
+			updateHostSpy.mockClear();
+			const { save, testConnectionInline } = useHostForm(storedHost({ os: null }));
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+
+			const pendingSecondTest = testConnectionInline();
+			await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(2));
+			await save();
+
+			const [, body] = updateHostSpy.mock.calls[0] as [string, Record<string, unknown>];
+			// Catches basing the rule on testResult, which is null while this test is pending.
+			expect(body).not.toHaveProperty("ssh_remote_daemon");
+			await harness.respondOk(1, "linux");
+			await pendingSecondTest;
 		});
 	});
 

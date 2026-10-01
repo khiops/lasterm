@@ -1803,6 +1803,80 @@ describe("PATCH /api/channels/:id/profile — key validation", () => {
 
 // ─── POST /api/hosts/import — the auth an entry is imported with ────────────
 
+describe("POST /api/hosts/import — label validation and conflicts", () => {
+	function configEntry(name: string) {
+		return {
+			entries: [
+				{
+					name,
+					hostname: "example.test",
+				},
+			],
+			hasInclude: false,
+		};
+	}
+
+	it("refuses a whitespace-only label before creating a host", async () => {
+		const before = await server.inject({ method: "GET", url: "/api/hosts" });
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [{ name: "app", label: "   " }] },
+		});
+		expect(response.statusCode).toBe(400);
+		expect(response.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: "Label is required" },
+		});
+		const after = await server.inject({ method: "GET", url: "/api/hosts" });
+		expect(after.json()).toEqual(before.json());
+	});
+
+	it("reports trimmed duplicate labels before creating either host", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce({
+			entries: [
+				{ name: "first", hostname: "first.example.test" },
+				{ name: "second", hostname: "second.example.test" },
+			],
+			hasInclude: false,
+		});
+		const before = await server.inject({ method: "GET", url: "/api/hosts" });
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: {
+				entries: [
+					{ name: "first", label: "shared" },
+					{ name: "second", label: " shared " },
+				],
+			},
+		});
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toEqual({
+			error: {
+				code: "CONFLICT",
+				message: "Labels already in use: shared",
+				conflicting_labels: ["shared"],
+			},
+		});
+		const after = await server.inject({ method: "GET", url: "/api/hosts" });
+		expect(after.json()).toEqual(before.json());
+	});
+
+	it("stores a 64-character label after trimming its surrounding whitespace", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce(configEntry("long-label"));
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [{ name: "long-label", label: ` ${"a".repeat(64)} ` }] },
+		});
+		expect(response.statusCode).toBe(201);
+		const [host] = response.json<Array<{ label: string }>>();
+		expect(host?.label).toBe("a".repeat(64));
+	});
+});
+
 describe("POST /api/hosts/import — the auth an entry is imported with", () => {
 	it("sets sshAuth to 'key' when identityFile is present in SSH config entry", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");

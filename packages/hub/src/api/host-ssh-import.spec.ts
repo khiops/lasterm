@@ -38,6 +38,34 @@ describe("validateSshConfigImportEntries", () => {
 		});
 	});
 
+	it("refuses a whitespace-only label", () => {
+		expect(validateSshConfigImportEntries({ entries: [{ name: "a", label: "   " }] })).toEqual({
+			error: "Label is required",
+		});
+	});
+
+	it("refuses a label longer than 64 characters after trimming", () => {
+		expect(
+			validateSshConfigImportEntries({ entries: [{ name: "a", label: "a".repeat(65) }] }),
+		).toEqual({ error: "Label must be 64 characters or fewer" });
+	});
+
+	it("accepts a 64-character label surrounded by whitespace", () => {
+		expect(
+			validateSshConfigImportEntries({
+				entries: [{ name: "a", label: ` ${"a".repeat(64)} ` }],
+			}),
+		).toEqual({ entries: [{ name: "a", label: ` ${"a".repeat(64)} ` }] });
+	});
+
+	it("accepts SSH config alias characters not accepted by create-host", () => {
+		expect(
+			validateSshConfigImportEntries({ entries: [{ name: "a", label: "prod+blue" }] }),
+		).toEqual({
+			entries: [{ name: "a", label: "prod+blue" }],
+		});
+	});
+
 	it.each(["yes", 1, {}])("refuses a non-boolean, non-null choice: %j", (sshRemoteDaemon) => {
 		expect(
 			validateSshConfigImportEntries({ entries: [{ name: "a", label: "a", sshRemoteDaemon }] }),

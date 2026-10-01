@@ -26,10 +26,17 @@ export function validateSshConfigImportEntries(body: unknown): SshConfigImportVa
 			!isRecord(value) ||
 			typeof value.name !== "string" ||
 			value.name.length === 0 ||
-			typeof value.label !== "string" ||
-			value.label.length === 0
+			typeof value.label !== "string"
 		) {
 			return { error: "Each entry must have name and label" };
+		}
+		const trimmedLabel = value.label.trim();
+		// SSH config aliases can contain +, @, and :, so imports intentionally skip create-host's character class.
+		if (trimmedLabel.length === 0) {
+			return { error: "Label is required" };
+		}
+		if (trimmedLabel.length > 64) {
+			return { error: "Label must be 64 characters or fewer" };
 		}
 		const sshRemoteDaemon = value.sshRemoteDaemon;
 		if (
@@ -120,19 +127,23 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 			}
 
 			// Check ALL labels for conflicts before creating any
-			const conflictingLabels: string[] = [];
+			const seenLabels = new Set<string>();
+			const conflictingLabels = new Set<string>();
 			for (const entry of entries) {
-				const existing = metaDal.getHostByLabel(entry.label.trim());
-				if (existing) {
-					conflictingLabels.push(entry.label);
+				const label = entry.label.trim();
+				const existing = metaDal.getHostByLabel(label);
+				if (seenLabels.has(label) || existing) {
+					conflictingLabels.add(label);
 				}
+				seenLabels.add(label);
 			}
-			if (conflictingLabels.length > 0) {
+			if (conflictingLabels.size > 0) {
+				const labels = [...conflictingLabels];
 				return reply.code(409).send({
 					error: {
 						code: "CONFLICT",
-						message: `Labels already in use: ${conflictingLabels.join(", ")}`,
-						conflicting_labels: conflictingLabels,
+						message: `Labels already in use: ${labels.join(", ")}`,
+						conflicting_labels: labels,
 					},
 				});
 			}

@@ -1803,6 +1803,101 @@ describe("PATCH /api/channels/:id/profile — key validation", () => {
 
 // ─── POST /api/hosts/import — the auth an entry is imported with ────────────
 
+describe("POST /api/hosts/import — label validation and conflicts", () => {
+	function configEntry(name: string) {
+		return {
+			entries: [
+				{
+					name,
+					hostname: "example.test",
+					port: 22,
+					user: null,
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+			],
+			hasInclude: false,
+		};
+	}
+
+	it("refuses a whitespace-only label before creating a host", async () => {
+		const before = await server.inject({ method: "GET", url: "/api/hosts" });
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [{ name: "app", label: "   " }] },
+		});
+		expect(response.statusCode).toBe(400);
+		expect(response.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: "Label is required" },
+		});
+		const after = await server.inject({ method: "GET", url: "/api/hosts" });
+		expect(after.json()).toEqual(before.json());
+	});
+
+	it("reports trimmed duplicate labels before creating either host", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce({
+			entries: [
+				{
+					name: "first",
+					hostname: "first.example.test",
+					port: 22,
+					user: null,
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+				{
+					name: "second",
+					hostname: "second.example.test",
+					port: 22,
+					user: null,
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+			],
+			hasInclude: false,
+		});
+		const before = await server.inject({ method: "GET", url: "/api/hosts" });
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: {
+				entries: [
+					{ name: "first", label: "shared" },
+					{ name: "second", label: " shared " },
+				],
+			},
+		});
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toEqual({
+			error: {
+				code: "CONFLICT",
+				message: "Labels already in use: shared",
+				conflicting_labels: ["shared"],
+			},
+		});
+		const after = await server.inject({ method: "GET", url: "/api/hosts" });
+		expect(after.json()).toEqual(before.json());
+	});
+
+	it("stores a 64-character label after trimming its surrounding whitespace", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce(configEntry("long-label"));
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [{ name: "long-label", label: ` ${"a".repeat(64)} ` }] },
+		});
+		expect(response.statusCode).toBe(201);
+		const [host] = response.json<Array<{ label: string }>>();
+		expect(host?.label).toBe("a".repeat(64));
+	});
+});
+
 describe("POST /api/hosts/import — the auth an entry is imported with", () => {
 	it("sets sshAuth to 'key' when identityFile is present in SSH config entry", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
@@ -1949,5 +2044,88 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		// ssh_auth should be null/undefined (not set to "key")
 		expect(hosts[0]).toBeDefined();
 		expect(hosts[0]?.ssh_auth == null).toBe(true);
+	});
+});
+
+describe("POST /api/hosts/import — remote daemon choice", () => {
+	function configEntry() {
+		return {
+			entries: [
+				{
+					name: "daemon-host",
+					hostname: "10.0.0.9",
+					port: 22,
+					user: "deploy",
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+			],
+			hasInclude: false,
+		};
+	}
+
+	async function importedDaemonChoice(label: string, sshRemoteDaemon: boolean | null | undefined) {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce(configEntry());
+		const entry = {
+			name: "daemon-host",
+			label,
+			...(sshRemoteDaemon !== undefined && { sshRemoteDaemon }),
+		};
+		const created = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: [entry] },
+		});
+		expect(created.statusCode).toBe(201);
+		const [host] = created.json<Array<{ id: string }>>();
+		expect(host).toBeDefined();
+		if (host === undefined) throw new Error("Import returned no host");
+		return server.inject({ method: "GET", url: `/api/hosts/${host.id}` });
+	}
+
+	it("stores true and reads it back", async () => {
+		const response = await importedDaemonChoice("daemon-true", true);
+		expect(response.json<{ ssh_remote_daemon?: boolean }>().ssh_remote_daemon).toBe(true);
+	});
+
+	it("stores false and reads it back", async () => {
+		const response = await importedDaemonChoice("daemon-false", false);
+		expect(response.json<{ ssh_remote_daemon?: boolean }>().ssh_remote_daemon).toBe(false);
+	});
+
+	it("keeps an explicit null as the inherited setting", async () => {
+		const response = await importedDaemonChoice("daemon-null", null);
+		expect(
+			response.json<{ ssh_remote_daemon?: boolean | null }>().ssh_remote_daemon ?? null,
+		).toBeNull();
+	});
+
+	it("keeps an absent choice as the inherited setting for older clients", async () => {
+		const response = await importedDaemonChoice("daemon-absent", undefined);
+		expect(
+			response.json<{ ssh_remote_daemon?: boolean | null }>().ssh_remote_daemon ?? null,
+		).toBeNull();
+	});
+
+	it("refuses an invalid value before it creates any host", async () => {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValueOnce(configEntry());
+		const before = await server.inject({ method: "GET", url: "/api/hosts" });
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: {
+				entries: [{ name: "daemon-host", label: "daemon-invalid", sshRemoteDaemon: "yes" }],
+			},
+		});
+		expect(response.statusCode).toBe(400);
+		expect(response.json<{ error: { code: string; message: string } }>().error).toEqual({
+			code: "VALIDATION_ERROR",
+			message: "sshRemoteDaemon must be a boolean or null when provided",
+		});
+		const after = await server.inject({ method: "GET", url: "/api/hosts" });
+		expect(after.json()).toEqual(before.json());
 	});
 });

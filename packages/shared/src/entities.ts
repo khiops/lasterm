@@ -248,6 +248,8 @@ export interface SshConfigImport {
 	name: string;
 	label: string;
 	hostGroup?: string;
+	/** An explicit answer for this imported host; null or absent keeps the global setting. */
+	sshRemoteDaemon?: boolean | null;
 }
 
 export interface LaunchProfile {

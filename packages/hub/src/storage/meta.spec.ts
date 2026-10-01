@@ -1428,6 +1428,21 @@ describe("MetaDAL — Host Group Operations", () => {
 		expect(copy?.id).not.toBe(original.id);
 	});
 
+	// The override is tri-state: all three stored answers must copy, not fall back
+	// to the current global default while a host is duplicated.
+	it.each([true, false, null])("duplicateHost preserves sshRemoteDaemon %j", (sshRemoteDaemon) => {
+		const original = dal.createHost({
+			type: "ssh",
+			label: `dup-daemon-${String(sshRemoteDaemon)}`,
+			sshHost: "10.0.0.12",
+			sshRemoteDaemon,
+		});
+
+		const copy = dal.duplicateHost(original.id);
+
+		expect(copy?.sshRemoteDaemon ?? null).toBe(sshRemoteDaemon);
+	});
+
 	it("duplicateHost increments suffix: -copy, -copy-2, -copy-3", () => {
 		const original = dal.createHost({
 			type: "ssh",

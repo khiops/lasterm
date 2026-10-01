@@ -392,6 +392,9 @@ export class HostsDAL {
 			...(original.hostGroup != null && { hostGroup: original.hostGroup }),
 			...(original.sshConfigHost != null && { sshConfigHost: original.sshConfigHost }),
 			...(original.sshUser != null && { sshUser: original.sshUser }),
+			...(original.sshRemoteDaemon !== undefined && {
+				sshRemoteDaemon: original.sshRemoteDaemon,
+			}),
 		});
 	}
 

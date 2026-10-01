@@ -83,7 +83,13 @@ export function useHostForm(editHost?: Host) {
 		sshKeyPath: editHost?.sshKeyPath ?? "",
 		sshProxy: editHost?.sshProxyHostId ?? editHost?.sshProxySpec ?? "",
 		sshRemoteDaemon:
-			editHost?.sshRemoteDaemon == null ? "" : editHost.sshRemoteDaemon ? "yes" : "no",
+			editHost === undefined
+				? "yes"
+				: editHost.sshRemoteDaemon == null
+					? ""
+					: editHost.sshRemoteDaemon
+						? "yes"
+						: "no",
 		iconType: editHost?.iconType ?? "auto",
 		iconValue: editHost?.iconValue ?? "",
 		color: editHost?.color ?? "",
@@ -120,8 +126,24 @@ export function useHostForm(editHost?: Host) {
 		message?: string;
 		platform?: TestConnectPlatform;
 	} | null>(null);
+	const lastCompletedTestPlatformOs = ref<string | undefined>(undefined);
 	const testing = ref(false);
 	const saving = ref(false);
+	let latestTestConnection = 0;
+
+	// A completed test only describes the connection details it tested. Clear
+	// it before a synchronous save can use it after any detail changes.
+	watch(
+		() => [form.value.sshHost, form.value.sshPort, form.value.sshUser, form.value.sshProxy],
+		() => {
+			lastCompletedTestPlatformOs.value = undefined;
+		},
+		{ flush: "sync" },
+	);
+
+	const sshRemoteDaemonUnavailable = computed(
+		() => form.value.os === "windows" || lastCompletedTestPlatformOs.value === "windows",
+	);
 
 	// New group creation inline
 	const newGroupName = ref("");
@@ -192,6 +214,7 @@ export function useHostForm(editHost?: Host) {
 	}
 
 	async function testConnectionInline(): Promise<void> {
+		const testConnection = ++latestTestConnection;
 		testing.value = true;
 		testResult.value = null;
 		try {
@@ -205,10 +228,12 @@ export function useHostForm(editHost?: Host) {
 			// Always read from form — it's initialized with editHost values,
 			// so form.value already reflects DB state + user edits
 			const host = form.value.sshHost;
-			const port = form.value.sshPort ?? 22;
+			const sshPort = form.value.sshPort;
+			const port = sshPort ?? 22;
 			const sshAuth = form.value.sshAuth;
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
+			const sshProxy = form.value.sshProxy;
 
 			const result = await new Promise<{
 				ok: boolean;
@@ -245,11 +270,25 @@ export function useHostForm(editHost?: Host) {
 				});
 			});
 
-			testResult.value = result;
+			if (testConnection === latestTestConnection) {
+				testResult.value = result;
+				lastCompletedTestPlatformOs.value =
+					result.ok &&
+					form.value.sshHost === host &&
+					form.value.sshPort === sshPort &&
+					form.value.sshUser === sshUser &&
+					sshProxy === "" &&
+					form.value.sshProxy === ""
+						? result.platform?.os
+						: undefined;
+			}
 		} catch {
-			testResult.value = { ok: false, message: "Connection test failed" };
+			if (testConnection === latestTestConnection) {
+				testResult.value = { ok: false, message: "Connection test failed" };
+				lastCompletedTestPlatformOs.value = undefined;
+			}
 		} finally {
-			testing.value = false;
+			if (testConnection === latestTestConnection) testing.value = false;
 		}
 	}
 
@@ -287,10 +326,16 @@ export function useHostForm(editHost?: Host) {
 						form.value.sshProxy,
 						hostsStore.hosts.map((candidate) => candidate.id),
 					),
-					// null is not "no": it is no answer for this host, which leaves
-					// the global setting speaking for it.
-					ssh_remote_daemon:
-						form.value.sshRemoteDaemon === "" ? null : form.value.sshRemoteDaemon === "yes",
+					// An unavailable setting is recorded as null for a new Windows host.
+					// On an existing one, leave the stored answer alone instead.
+					...(!isEdit || !sshRemoteDaemonUnavailable.value
+						? {
+								ssh_remote_daemon:
+									sshRemoteDaemonUnavailable.value || form.value.sshRemoteDaemon === ""
+										? null
+										: form.value.sshRemoteDaemon === "yes",
+							}
+						: {}),
 				}),
 				...iconFields(form.value.iconType, form.value.iconValue),
 				// null once reset: the colour then comes from the label (#659).
@@ -394,6 +439,7 @@ export function useHostForm(editHost?: Host) {
 		testResult,
 		testing,
 		saving,
+		sshRemoteDaemonUnavailable,
 		labelError,
 		canSave,
 		previewInitials,

@@ -269,21 +269,26 @@
 
 							<div class="field">
 								<label class="field-label">Keep an agent running there</label>
-								<select v-model="form.sshRemoteDaemon" class="field-select">
-									<option value="">Follow the global setting</option>
-									<option value="yes">Yes — terminals survive the connection</option>
-									<option value="no">No — leave nothing behind</option>
-								</select>
-								<p class="field-hint auth-note">
-									An agent left running keeps this host's terminals alive when the
-									connection drops, and across a Lasterm restart. It is a process on
-									that machine, which ends by itself once it holds no terminals.
+								<p v-if="sshRemoteDaemonUnavailable" class="field-hint auth-note">
+									Not available on Windows hosts.
 								</p>
-								<p class="field-hint auth-note">
-									If logging out of that machine ends your processes, run
-									<code>loginctl enable-linger</code> there: the agent then runs outside
-									your login sessions and survives it.
-								</p>
+								<template v-else>
+									<select v-model="form.sshRemoteDaemon" class="field-select">
+										<option value="">Follow the global setting</option>
+										<option value="yes">Yes — terminals survive the connection</option>
+										<option value="no">No — leave nothing behind</option>
+									</select>
+									<p class="field-hint auth-note">
+										Lasterm keeps a small agent running on this host, so its terminals
+										survive a dropped connection. It stops by itself after 30 minutes with
+										no terminal and no hub connected. On a systemd host without lingering,
+										logging out may end it. Choose No to end the shells with the connection.
+									</p>
+									<p class="field-hint auth-note">
+										If logging out of that machine ends your processes, run
+										<code>loginctl enable-linger</code> there so the agent survives logout.
+									</p>
+								</template>
 								<p v-if="otherOwnerChannels" class="field-hint auth-note">
 									Other Lasterm hubs also use this host's agent, and hold
 									{{ otherOwnerChannels }} terminal{{ otherOwnerChannels === 1 ? "" : "s" }}
@@ -693,6 +698,7 @@ const {
 	testResult,
 	testing,
 	saving,
+	sshRemoteDaemonUnavailable,
 	labelError,
 	canSave,
 	previewInitials,

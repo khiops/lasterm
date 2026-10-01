@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 
+const testWsClient = vi.hoisted(() => ({ on: vi.fn(), send: vi.fn() }));
 const createHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
 const updateHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
 
@@ -18,10 +19,80 @@ vi.mock("../stores/auth.js", () => ({
 	useAuthStore: () => ({ token: "test-token" }),
 }));
 
+vi.mock("../stores/session.js", () => ({
+	useSessionStore: () => ({ wsClient: testWsClient }),
+}));
+
 describe("useHostForm", () => {
 	beforeEach(() => {
 		vi.restoreAllMocks();
+		testWsClient.on.mockReset();
+		testWsClient.send.mockReset();
 	});
+
+	function testConnectionHarness(): {
+		respondOk: (index: number, os: string) => Promise<void>;
+		respondFail: (index: number) => Promise<void>;
+	} {
+		const handlers = new Map<
+			string,
+			Array<
+				(message: {
+					type: string;
+					hostId: string;
+					platform?: { os: string; system: string; agent: "ready"; agentVersion: string };
+					message?: string;
+				}) => void
+			>
+		>();
+		testWsClient.on.mockImplementation(
+			(
+				type: string,
+				handler: (message: {
+					type: string;
+					hostId: string;
+					platform?: { os: string; system: string; agent: "ready"; agentVersion: string };
+					message?: string;
+				}) => void,
+			) => {
+				const current = handlers.get(type) ?? [];
+				current.push(handler);
+				handlers.set(type, current);
+				return () =>
+					handlers.set(
+						type,
+						current.filter((candidate) => candidate !== handler),
+					);
+			},
+		);
+		function messageAt(index: number): { hostId: string } {
+			const message = testWsClient.send.mock.calls[index]?.[0];
+			if (!message || typeof message.hostId !== "string") {
+				throw new Error(`No test-connection request at index ${index}`);
+			}
+			return { hostId: message.hostId };
+		}
+		return {
+			respondOk: async (index, os) => {
+				await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(index + 1));
+				const { hostId } = messageAt(index);
+				for (const handler of handlers.get("TEST_CONNECT_OK") ?? []) {
+					handler({
+						type: "TEST_CONNECT_OK",
+						hostId,
+						platform: { os, system: os, agent: "ready", agentVersion: "test" },
+					});
+				}
+			},
+			respondFail: async (index) => {
+				await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(index + 1));
+				const { hostId } = messageAt(index);
+				for (const handler of handlers.get("TEST_CONNECT_FAIL") ?? []) {
+					handler({ type: "TEST_CONNECT_FAIL", hostId, message: "failed" });
+				}
+			},
+		};
+	}
 
 	describe("SC-09: port placeholder behavior", () => {
 		it("new host form has undefined sshPort", () => {
@@ -53,6 +124,231 @@ describe("useHostForm", () => {
 			};
 			const { form } = useHostForm(editHost);
 			expect(form.value.sshPort).toBe(2222);
+		});
+	});
+
+	describe("remote daemon choice for new SSH hosts", () => {
+		async function newHostSave(
+			change: (form: ReturnType<typeof useHostForm>["form"]["value"]) => void = () => {},
+		): Promise<Record<string, unknown>> {
+			createHostSpy.mockClear();
+			const { form, save } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			change(form.value);
+			await save();
+			return (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+		}
+
+		it("starts at Yes and saves an explicit true", async () => {
+			const { form } = useHostForm();
+			expect(form.value.sshRemoteDaemon).toBe("yes");
+			expect(await newHostSave()).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("saves No as false", async () => {
+			expect(
+				await newHostSave((form) => {
+					form.sshRemoteDaemon = "no";
+				}),
+			).toHaveProperty("ssh_remote_daemon", false);
+		});
+
+		it("saves Follow the global setting as null", async () => {
+			expect(
+				await newHostSave((form) => {
+					form.sshRemoteDaemon = "";
+				}),
+			).toHaveProperty("ssh_remote_daemon", null);
+		});
+
+		it("makes the setting unavailable and saves null for Windows", async () => {
+			const { form, sshRemoteDaemonUnavailable } = useHostForm();
+			form.value.os = "windows";
+			expect(sshRemoteDaemonUnavailable.value).toBe(true);
+			expect(
+				await newHostSave((newForm) => {
+					newForm.os = "windows";
+				}),
+			).toHaveProperty("ssh_remote_daemon", null);
+		});
+
+		it("keeps an explicit No through Windows then Auto", async () => {
+			expect(
+				await newHostSave((form) => {
+					form.sshRemoteDaemon = "no";
+					form.os = "windows";
+					form.os = null;
+				}),
+			).toHaveProperty("ssh_remote_daemon", false);
+		});
+
+		it("keeps Follow the global setting through Windows then Auto", async () => {
+			expect(
+				await newHostSave((form) => {
+					form.sshRemoteDaemon = "";
+					form.os = "windows";
+					form.os = null;
+				}),
+			).toHaveProperty("ssh_remote_daemon", null);
+		});
+
+		it("returns the setting to available after a Windows test then a Linux test", async () => {
+			const { form, sshRemoteDaemonUnavailable, testConnectionInline } = useHostForm();
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			expect(sshRemoteDaemonUnavailable.value).toBe(true);
+			const linux = testConnectionInline();
+			await harness.respondOk(1, "linux");
+			await linux;
+			expect(sshRemoteDaemonUnavailable.value).toBe(false);
+			expect(form.value.sshRemoteDaemon).toBe("yes");
+		});
+
+		it("returns the setting to the OS-field rule after a Windows test then a failure", async () => {
+			const { form, sshRemoteDaemonUnavailable, testConnectionInline } = useHostForm();
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			expect(sshRemoteDaemonUnavailable.value).toBe(true);
+			const failed = testConnectionInline();
+			await harness.respondFail(1);
+			await failed;
+			expect(sshRemoteDaemonUnavailable.value).toBe(false);
+		});
+
+		it("keeps the Windows rule while a newer test is pending when creating", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+
+			const pendingSecondTest = testConnectionInline();
+			await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(2));
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			// Catches basing the rule on testResult, which is null while this test is pending.
+			expect(body).toHaveProperty("ssh_remote_daemon", null);
+			await harness.respondOk(1, "linux");
+			await pendingSecondTest;
+		});
+
+		it("clears the completed Windows result when a newer test fails", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			const failed = testConnectionInline();
+			await harness.respondFail(1);
+			await failed;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("clears the completed Windows result when the host address changes", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			form.value.sshHost = "10.0.0.2";
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("does not trust a Windows result from a test started through a proxy", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			form.value.sshProxy = "jump.example.test";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("clears a completed Windows result when the proxy changes", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			form.value.sshProxy = "jump.example.test";
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("saves null from an unchanged Windows test without a proxy", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", null);
+		});
+
+		it("does not trust a Windows result when a proxy is set before its reply", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(1));
+			form.value.sshProxy = "jump.example.test";
+			await harness.respondOk(0, "windows");
+			await windows;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
 		});
 	});
 
@@ -185,6 +481,47 @@ describe("useHostForm", () => {
 				form.customCommand = "";
 			});
 			expect(body).toHaveProperty("custom_command", null);
+		});
+
+		it.each([null, true, false])(
+			"saves a stored remote daemon choice unchanged: %j",
+			async (sshRemoteDaemon) => {
+				const body = await savedBody(storedHost({ sshRemoteDaemon }));
+				expect(body).toHaveProperty("ssh_remote_daemon", sshRemoteDaemon);
+			},
+		);
+
+		it("makes the setting unavailable for a Windows host", () => {
+			const { sshRemoteDaemonUnavailable } = useHostForm(
+				storedHost({ os: "windows", sshRemoteDaemon: true }),
+			);
+			expect(sshRemoteDaemonUnavailable.value).toBe(true);
+		});
+
+		it("does not rewrite a Windows host remote daemon choice", async () => {
+			const body = await savedBody(storedHost({ os: "windows", sshRemoteDaemon: true }), (form) => {
+				form.label = "renamed";
+			});
+			expect(body).not.toHaveProperty("ssh_remote_daemon");
+		});
+
+		it("keeps the Windows rule while a newer test is pending when editing", async () => {
+			updateHostSpy.mockClear();
+			const { save, testConnectionInline } = useHostForm(storedHost({ os: null }));
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+
+			const pendingSecondTest = testConnectionInline();
+			await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(2));
+			await save();
+
+			const [, body] = updateHostSpy.mock.calls[0] as [string, Record<string, unknown>];
+			// Catches basing the rule on testResult, which is null while this test is pending.
+			expect(body).not.toHaveProperty("ssh_remote_daemon");
+			await harness.respondOk(1, "linux");
+			await pendingSecondTest;
 		});
 	});
 

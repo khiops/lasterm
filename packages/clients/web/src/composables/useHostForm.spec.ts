@@ -282,6 +282,74 @@ describe("useHostForm", () => {
 			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
 			expect(body).toHaveProperty("ssh_remote_daemon", true);
 		});
+
+		it("does not trust a Windows result from a test started through a proxy", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			form.value.sshProxy = "jump.example.test";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("clears a completed Windows result when the proxy changes", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			form.value.sshProxy = "jump.example.test";
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
+
+		it("saves null from an unchanged Windows test without a proxy", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await harness.respondOk(0, "windows");
+			await windows;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", null);
+		});
+
+		it("does not trust a Windows result when a proxy is set before its reply", async () => {
+			createHostSpy.mockClear();
+			const { form, save, testConnectionInline } = useHostForm();
+			form.value.label = "daemon-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+			const harness = testConnectionHarness();
+			const windows = testConnectionInline();
+			await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(1));
+			form.value.sshProxy = "jump.example.test";
+			await harness.respondOk(0, "windows");
+			await windows;
+			await save();
+
+			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+			expect(body).toHaveProperty("ssh_remote_daemon", true);
+		});
 	});
 
 	describe("SC-10: save omits sshPort when undefined", () => {

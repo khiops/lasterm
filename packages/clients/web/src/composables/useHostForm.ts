@@ -134,7 +134,7 @@ export function useHostForm(editHost?: Host) {
 	// A completed test only describes the connection details it tested. Clear
 	// it before a synchronous save can use it after any detail changes.
 	watch(
-		() => [form.value.sshHost, form.value.sshPort, form.value.sshUser],
+		() => [form.value.sshHost, form.value.sshPort, form.value.sshUser, form.value.sshProxy],
 		() => {
 			lastCompletedTestPlatformOs.value = undefined;
 		},
@@ -233,6 +233,7 @@ export function useHostForm(editHost?: Host) {
 			const sshAuth = form.value.sshAuth;
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
+			const sshProxy = form.value.sshProxy;
 
 			const result = await new Promise<{
 				ok: boolean;
@@ -275,7 +276,9 @@ export function useHostForm(editHost?: Host) {
 					result.ok &&
 					form.value.sshHost === host &&
 					form.value.sshPort === sshPort &&
-					form.value.sshUser === sshUser
+					form.value.sshUser === sshUser &&
+					sshProxy === "" &&
+					form.value.sshProxy === ""
 						? result.platform?.os
 						: undefined;
 			}

@@ -1810,6 +1810,11 @@ describe("POST /api/hosts/import — label validation and conflicts", () => {
 				{
 					name,
 					hostname: "example.test",
+					port: 22,
+					user: null,
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
 				},
 			],
 			hasInclude: false,
@@ -1835,8 +1840,24 @@ describe("POST /api/hosts/import — label validation and conflicts", () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
 		vi.mocked(readSshConfig).mockReturnValueOnce({
 			entries: [
-				{ name: "first", hostname: "first.example.test" },
-				{ name: "second", hostname: "second.example.test" },
+				{
+					name: "first",
+					hostname: "first.example.test",
+					port: 22,
+					user: null,
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
+				{
+					name: "second",
+					hostname: "second.example.test",
+					port: 22,
+					user: null,
+					identityFile: null,
+					proxyJump: null,
+					isGitHost: false,
+				},
 			],
 			hasInclude: false,
 		});

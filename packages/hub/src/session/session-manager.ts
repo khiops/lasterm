@@ -1,3 +1,4 @@
+import { sshAddress, targetRoute } from "../ssh-route.js";
 /**
  * SessionManager — coordinator for hub session management.
  *
@@ -368,13 +369,10 @@ export class SessionManager {
 					hostKeepsDaemon(host, ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 
-				const storedFp = ctx.metaDal.getHostFingerprint(hostId);
-				const sshHostname = host.sshHost?.includes("@")
-					? (host.sshHost.split("@")[1] ?? host.sshHost)
-					: (host.sshHost ?? host.label);
-				const sshPort = host.sshPort ?? 22;
-				const hostKey = `${sshHostname}:${sshPort}`;
-				const sessionTrustedFp = ctx.trustedOnceFingerprints.get(hostKey);
+				const hostKey = targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id)));
+				const storedFp = ctx.metaDal.getHostFingerprint(hostId, hostKey);
+				const sessionTrustedFp =
+					hostKey === null ? undefined : ctx.trustedOnceFingerprints.get(hostKey);
 
 				await sshAgent.start(
 					storedFp,
@@ -2442,9 +2440,14 @@ export class SessionManager {
 	 * Only a connection someone is making does this. A reconnect goes through
 	 * what is already trusted, and records nothing new.
 	 */
-	private pinJumpKey(jump: ResolvedJump | undefined, agent: SshAgent): void {
+	private pinJumpKey(
+		jump: ResolvedJump | undefined,
+		agent: SshAgent,
+		expectedRoute: string | null,
+	): void {
 		if (jump === undefined || agent.lastJumpFingerprint === null) return;
-		pinJumpKey(this.ctx.metaDal, jump, agent.lastJumpFingerprint);
+		if (!pinJumpKey(this.ctx.metaDal, jump, agent.lastJumpFingerprint, expectedRoute))
+			console.error(`[lasterm-ssh] skipped jump pin for host ${jump.pinTo.hostId}`);
 	}
 
 	private async _connectSshAgent(
@@ -2458,14 +2461,25 @@ export class SessionManager {
 	): Promise<import("./agent-connection.js").AgentConnection> {
 		const promptAuth = this.sshMgr.buildPromptAuth(client, signal, ownerAcqId);
 
-		const storedFingerprint = this.ctx.metaDal.getHostFingerprint(hostId);
+		const hostKey = targetRoute(host, (id) => sshAddress(this.ctx.metaDal.getHost(id)));
+		const storedFingerprint = this.ctx.metaDal.getHostFingerprint(hostId, hostKey);
 		const sshHostname = host.sshHost?.includes("@")
 			? (host.sshHost.split("@")[1] ?? host.sshHost)
 			: (host.sshHost ?? host.label);
 		const sshPort = host.sshPort ?? 22;
-		const hostKey = `${sshHostname}:${sshPort}`;
-		const sessionTrustedFp = this.ctx.trustedOnceFingerprints.get(hostKey);
+		const sessionTrustedFp =
+			hostKey === null ? undefined : this.ctx.trustedOnceFingerprints.get(hostKey);
 
+		const hostChanged = (): never => {
+			const message = "The host changed while connecting. Connect again.";
+			client.send({
+				type: "ERROR",
+				code: "SSH_CONNECT_FAILED",
+				message,
+				hostId,
+			} satisfies ErrorMessage);
+			throw new Error(message);
+		};
 		const deployOpts = this._buildDeployOpts(hostId, host, approvedAgentSha);
 
 		// The route this host is reached by, when it is reached through another.
@@ -2498,7 +2512,7 @@ export class SessionManager {
 		try {
 			console.error("[lasterm-ssh] deploying agent...");
 			await sshAgent.start(storedFingerprint, sessionTrustedFp, signal, resolvedJump);
-			this.pinJumpKey(resolvedJump, sshAgent);
+			this.pinJumpKey(resolvedJump, sshAgent, hostKey);
 			console.error("[lasterm-ssh] agent deployed, exec starting");
 			console.error("[lasterm-ssh] SSH connection established");
 		} catch (err) {
@@ -2569,6 +2583,15 @@ export class SessionManager {
 			}
 
 			const kv = sshAgent.lastKeyVerification;
+			if (kv.revoked) {
+				client.send({
+					type: "ERROR",
+					code: "SSH_HOST_KEY_REVOKED",
+					message: `This host's key is marked @revoked in ${kv.revoked.file}:${kv.revoked.line}. Refusing to connect.`,
+					hostId,
+				} satisfies ErrorMessage);
+				throw err;
+			}
 			if (kv.tofu || kv.mismatch) {
 				// What this machine's own SSH already says about the key, which is
 				// the difference between a host nobody has ever seen and one the
@@ -2585,18 +2608,6 @@ export class SessionManager {
 					namesToLookUp.flatMap((name) => findKnownHostKeys(name, sshPort, knownHostsSources)),
 				);
 
-				// A key its owner has withdrawn is the one verdict with no question
-				// attached: not offered for trust, at any level.
-				if (verdict.kind === "revoked") {
-					client.send({
-						type: "ERROR",
-						code: "SSH_HOST_KEY_REVOKED",
-						message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
-						hostId,
-					} satisfies ErrorMessage);
-					throw new Error("SSH host key revoked in known_hosts");
-				}
-
 				// Trusted there, and the person has said once that this is reason
 				// enough: pinned here without asking again. Only ever for a first
 				// connection — a key that changed under a pin is never silent.
@@ -2605,7 +2616,8 @@ export class SessionManager {
 					verdict.kind === "trusted" &&
 					this.ctx.configResolver?.sshConfig.trustKnownHosts === true
 				) {
-					this.ctx.metaDal.updateHostFingerprint(hostId, kv.capturedFingerprint);
+					if (!this.ctx.metaDal.updateHostFingerprint(hostId, kv.capturedFingerprint, hostKey))
+						hostChanged();
 					return await this._connectSshAgent(hostId, host, client, sessionId, signal, ownerAcqId);
 				}
 
@@ -2638,8 +2650,8 @@ export class SessionManager {
 					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 				}
 				if (action === "trust_permanent") {
-					this.ctx.metaDal.updateHostFingerprint(hostId, retryFp);
-				} else {
+					if (!this.ctx.metaDal.updateHostFingerprint(hostId, retryFp, hostKey)) hostChanged();
+				} else if (hostKey !== null) {
 					this.ctx.trustedOnceFingerprints.set(hostKey, retryFp);
 				}
 				// The same agent as the first attempt, daemon included: built without
@@ -2666,7 +2678,7 @@ export class SessionManager {
 						signal,
 						resolvedJump,
 					);
-					this.pinJumpKey(resolvedJump, retryAgent);
+					this.pinJumpKey(resolvedJump, retryAgent, hostKey);
 					console.error("[lasterm-ssh] agent deployed, exec starting");
 					console.error("[lasterm-ssh] SSH connection established");
 				} catch (retryErr) {

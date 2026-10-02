@@ -1,3 +1,4 @@
+import { sshAddress, targetRoute } from "../ssh-route.js";
 /**
  * A host reached through a bastion is reached through it every time, and the
  * bastion is let go of when the connection it carried ends.
@@ -154,15 +155,22 @@ interface Unreachable {
 	port: number;
 	/** How many times something dialled it. */
 	dials: number;
+	forwardTo?: number;
 	close: () => Promise<void>;
 }
 
 /** What the host's address leads to from the hub: nothing that answers SSH. */
 function unreachableFromTheHub(): Promise<Unreachable> {
-	const result = { port: 0, dials: 0, close: async () => {} };
+	const result: Unreachable = { port: 0, dials: 0, close: async () => {} };
 	const server = net.createServer((socket) => {
 		result.dials++;
-		socket.destroy();
+		if (result.forwardTo !== undefined) {
+			const onward = net.connect(result.forwardTo, "127.0.0.1");
+			onward.on("error", () => socket.destroy());
+			socket.on("error", () => onward.destroy());
+			socket.on("close", () => onward.destroy());
+			socket.pipe(onward).pipe(socket);
+		} else socket.destroy();
 	});
 	return new Promise((resolve) => {
 		server.listen(0, "127.0.0.1", () => {
@@ -249,7 +257,11 @@ beforeEach(async () => {
 		sshAuth: "key",
 		sshKeyPath: CLIENT_KEY_PATH,
 	});
-	ctx.metaDal.updateHostFingerprint(bastionHost.id, HOST_FINGERPRINT);
+	ctx.metaDal.updateHostFingerprint(
+		bastionHost.id,
+		HOST_FINGERPRINT,
+		targetRoute(bastionHost, (id) => sshAddress(ctx.metaDal.getHost(id))),
+	);
 	const host = ctx.metaDal.createHost({
 		type: "ssh",
 		label: "behind-the-bastion",
@@ -326,11 +338,16 @@ function jumpThroughBastion(): ResolvedJump {
 	const { bastion, bastionHost } = the();
 	return {
 		jump: { host: "127.0.0.1", port: bastion.port, username: "jump" },
+		knownHostsNames: ["127.0.0.1"],
 		auth: { method: "key", keyPath: CLIENT_KEY_PATH },
 		promptHostId: bastionHost.id,
 		pinnedFingerprint: HOST_FINGERPRINT,
 		trustKnownHosts: false,
-		pinTo: { kind: "host", hostId: bastionHost.id },
+		pinTo: {
+			kind: "host",
+			hostId: bastionHost.id,
+			expectedRoute: targetRoute(bastionHost, () => undefined),
+		},
 	};
 }
 
@@ -358,7 +375,11 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 	it("after its connection was lost", async () => {
 		const { ctx, host, target, bastion, direct } = the();
 		const first = await connectedThroughBastion();
-		ctx.metaDal.updateHostFingerprint(host.id, HOST_FINGERPRINT);
+		ctx.metaDal.updateHostFingerprint(
+			host.id,
+			HOST_FINGERPRINT,
+			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
+		);
 
 		// The host ends the connection: the hub did not ask for it, so it reconnects.
 		for (const connection of target.accepted) connection.end();
@@ -377,7 +398,11 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 
 	it("when a pane asks for it again", async () => {
 		const { sm, ctx, host, lifecycle, bastion, direct } = the();
-		ctx.metaDal.updateHostFingerprint(host.id, HOST_FINGERPRINT);
+		ctx.metaDal.updateHostFingerprint(
+			host.id,
+			HOST_FINGERPRINT,
+			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
+		);
 		seedSession("disconnected");
 		const client: WsClient = { id: "c-jump", send: () => {}, attachedChannels: new Set() };
 		sm.addClient(client);
@@ -392,13 +417,15 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 	});
 
 	it("once its key is confirmed, on a first connection", async () => {
-		const { sm, host, bastion, direct } = the();
+		const { sm, ctx, lifecycle, host, bastion, direct, target } = the();
+		let questions = 0;
 		seedSession("starting");
 		// Whoever is asked trusts the key, for this session only.
 		const client: WsClient = {
 			id: "c-jump",
 			send: (message: ProtocolMessage) => {
 				if (message.type !== "HOST_VERIFY") return;
+				questions++;
 				const { promptId } = message as HostVerifyMessage;
 				queueMicrotask(() => sm.handleHostVerifyResponse(promptId, "trust_once", "c-jump"));
 			},
@@ -421,6 +448,75 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 		expect(agent.connected).toBe(true);
 		expect(direct.dials).toBe(0);
 		expect(bastion.routes).toEqual([`127.0.0.1:${direct.port}`, `127.0.0.1:${direct.port}`]);
+		expect(questions).toBe(1);
+		agent.close();
+		seedSession("disconnected");
+		await expect(lifecycle.onReconnectAgent?.(host.id)).resolves.toBe(true);
+		expect(questions).toBe(1);
+		const separate = ctx.metaDal.createHost({
+			type: "ssh",
+			label: "direct-target",
+			sshHost: host.sshHost!,
+			sshPort: host.sshPort!,
+			sshAuth: "key",
+			sshKeyPath: CLIENT_KEY_PATH,
+		});
+		(ctx.sessions as Map<string, SessionState>).set(separate.id, {
+			id: "direct-session",
+			hostId: separate.id,
+			status: "starting",
+		});
+		direct.forwardTo = target.port;
+		const directAgent = await connect(separate.id, separate, client, "direct-session");
+		expect(directAgent.connected).toBe(true);
+		expect(questions).toBe(2);
+		directAgent.close();
+	});
+	it("does not pin or retry a stale route after the key question", async () => {
+		const { sm, ctx, host, bastion } = the();
+		seedSession("starting");
+		const pin = vi.spyOn(ctx.metaDal, "updateHostFingerprint");
+		const messages: ProtocolMessage[] = [];
+		const client: WsClient = {
+			id: "c-edit",
+			attachedChannels: new Set(),
+			send: (message) => {
+				messages.push(message);
+				if (message.type === "HOST_VERIFY") {
+					ctx.metaDal.updateHost(host.id, { sshHost: "edited" });
+					queueMicrotask(() =>
+						sm.handleHostVerifyResponse(message.promptId, "trust_permanent", "c-edit"),
+					);
+				}
+			},
+		};
+		sm.addClient(client);
+		const connect = sm as unknown as {
+			_connectSshAgent(
+				id: string,
+				host: Host,
+				client: WsClient,
+				sessionId: string,
+			): Promise<SshAgent>;
+		};
+		await expect(connect._connectSshAgent(host.id, host, client, SESSION_ID)).rejects.toThrow(
+			"The host changed while connecting. Connect again.",
+		);
+		expect(pin).toHaveBeenCalledWith(
+			host.id,
+			HOST_FINGERPRINT,
+			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
+		);
+		expect(pin.mock.results.at(-1)?.value).toBe(false);
+		expect(ctx.metaDal.getHost(host.id)?.sshFingerprint).toBeNull();
+		expect(bastion.routes).toHaveLength(1);
+		expect(messages).toContainEqual(
+			expect.objectContaining({
+				type: "ERROR",
+				message: "The host changed while connecting. Connect again.",
+			}),
+		);
+		pin.mockRestore();
 	});
 });
 

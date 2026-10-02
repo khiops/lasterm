@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
 import {
+	findHostKeyRevocation,
 	findKnownHostKeys,
 	judgeAgainstKnownHosts,
 	normalizeFingerprint,
@@ -35,6 +36,8 @@ export interface JumpOptions {
 	timeoutMs?: number;
 	/** Where the jump is, and who it is reached as. */
 	jump: JumpTarget;
+	/** Names used for revocation and trust lookup in `known_hosts`. */
+	knownHostsNames: string[];
 	/** The ssh2 configuration authenticating to the jump (agent, key, password). */
 	auth: Record<string, unknown>;
 	/** The fingerprint already trusted for this jump, when there is one. */
@@ -154,6 +157,16 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		const hostVerifier = ((key: Buffer) => {
 			presented = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
 			const offered = normalizeFingerprint(presented);
+			const revoked = findHostKeyRevocation(presented, options.knownHostsNames, options.jump.port);
+			if (revoked) {
+				keyRefused = true;
+				fail(
+					new JumpRefusedError(
+						`The jump host ${options.jump.host} presented a key marked @revoked in ${revoked.file}:${revoked.line}. Nothing was connected.`,
+					),
+				);
+				return false;
+			}
 
 			const pinned = options.pinnedFingerprint;
 			if (pinned) {
@@ -163,9 +176,12 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 
 			// Nothing pinned yet: what this machine's own SSH already trusts is the
 			// only answer available without a person to ask.
+			const sources = readUserKnownHosts();
 			const verdict = judgeAgainstKnownHosts(
 				presented,
-				findKnownHostKeys(options.jump.host, options.jump.port, readUserKnownHosts()),
+				options.knownHostsNames.flatMap((name) =>
+					findKnownHostKeys(name, options.jump.port, sources),
+				),
 			);
 			if (verdict.kind === "trusted" && options.trustKnownHosts) {
 				fromKnownHosts = true;

@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import ssh2, { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
+import { findHostKeyRevocation } from "../ssh/known-hosts.js";
+import { parseSshHost } from "../ssh-route.js";
 import { AgentConnection } from "./agent-connection.js";
 import {
 	AgentBinaryDecisionNeeded,
@@ -33,6 +35,7 @@ type AgentLoggingConfig = Pick<AgentConfig, "logLevel" | "logFormat"> &
 export interface HostKeyVerification {
 	/** SHA256:<base64> fingerprint seen during this connect attempt. */
 	capturedFingerprint: string;
+	revoked?: { file: string; line: number } | undefined;
 	/** True when the server presented a key that differs from the stored fingerprint. */
 	mismatch: boolean;
 	/** True when this is the very first connection (TOFU) — no stored fingerprint yet. */
@@ -50,19 +53,7 @@ export type AuthPromptFn = (
  * Parse the username and hostname from an sshHost string.
  * Accepts "user@hostname" or just "hostname".
  */
-export function parseSshHost(sshHost: string): { username: string; hostname: string } {
-	const atIdx = sshHost.indexOf("@");
-	if (atIdx !== -1) {
-		return {
-			username: sshHost.slice(0, atIdx),
-			hostname: sshHost.slice(atIdx + 1),
-		};
-	}
-	return {
-		username: process.env.USER ?? process.env.USERNAME ?? "root",
-		hostname: sshHost,
-	};
-}
+export { parseSshHost } from "../ssh-route.js";
 
 function quotePosixShellArg(value: string): string {
 	if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
@@ -408,6 +399,7 @@ export class SshAgent extends AgentConnection {
 			const jumpAuth = await buildJumpAuth(jump, this.promptAuth);
 			const route = await openJumpRoute({
 				jump: jump.jump,
+				knownHostsNames: jump.knownHostsNames,
 				auth: jumpAuth as unknown as Record<string, unknown>,
 				pinnedFingerprint: jump.pinnedFingerprint,
 				trustKnownHosts: jump.trustKnownHosts,
@@ -422,6 +414,12 @@ export class SshAgent extends AgentConnection {
 			const hash = createHash("sha256").update(key).digest("base64");
 			const fingerprint = `SHA256:${hash}`;
 			keyVerification.capturedFingerprint = fingerprint;
+			keyVerification.revoked = findHostKeyRevocation(
+				fingerprint,
+				[hostname, this.host.sshConfigHost].filter((name): name is string => !!name),
+				port,
+			);
+			if (keyVerification.revoked) return false;
 
 			if (sessionTrustedFingerprint && sessionTrustedFingerprint === fingerprint) {
 				// Session-trusted (trust_once): accepted for this hub session, skip TOFU prompt.
@@ -503,6 +501,18 @@ export class SshAgent extends AgentConnection {
 					// ssh2 may emit a plain object (e.g. { code: 3 }) rather than an Error
 					// instance when hostVerifier returns false. Normalise to a proper Error
 					// so callers (and vitest .rejects.toThrow()) always receive an Error.
+					if (keyVerification.revoked) {
+						const { file, line } = keyVerification.revoked;
+						rejectOnce(
+							Object.assign(
+								new Error(
+									`This host's key is marked @revoked in ${file}:${line}. Refusing to connect.`,
+								),
+								{ keyVerification },
+							),
+						);
+						return;
+					}
 					if (keyVerification.tofu) {
 						// TOFU rejection — caller will prompt user for first-connect trust decision.
 						rejectOnce(new Error("SSH_TOFU"));

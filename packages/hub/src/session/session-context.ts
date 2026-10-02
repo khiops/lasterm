@@ -252,7 +252,7 @@ export interface SharedSessionContext {
 	channelClock: number;
 	/** requestId → callback for pending agent responses */
 	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
-	/** '${hostname}:${port}' → fingerprint trusted for this session only (trust_once, not persisted) */
+	/** Target route tuple → fingerprint trusted for this hub run (trust_once, not persisted). */
 	trustedOnceFingerprints: Map<string, string>;
 	/** Per-host SHA256 of agent binary trusted for this session only (trust_once). */
 	trustedAgentSha256: Map<string, string>;

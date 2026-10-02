@@ -116,6 +116,18 @@ function buildAgentCommandForDeployResult(
  *   agent.close();
  */
 
+/** Build the bastion authentication once, with prompts owned by that jump. */
+export function buildJumpAuth(jump: ResolvedJump, promptAuth?: AuthPromptFn) {
+	return buildSshConnectConfig(
+		jump.auth,
+		jump.jump.host,
+		jump.jump.port,
+		jump.jump.username,
+		promptAuth,
+		jump.promptHostId,
+	);
+}
+
 /**
  * Build the ssh2 ConnectConfig for a given auth method.
  * Throws on missing config or user-cancelled prompts.
@@ -393,14 +405,7 @@ export class SshAgent extends AgentConnection {
 		// The route first, when there is one: the target's connection runs inside a
 		// channel on the bastion, so there is nothing to connect until it is open.
 		if (jump !== undefined) {
-			const jumpAuth = await buildSshConnectConfig(
-				jump.auth,
-				jump.jump.host,
-				jump.jump.port,
-				jump.jump.username,
-				this.promptAuth ?? undefined,
-				jump.promptHostId,
-			);
+			const jumpAuth = await buildJumpAuth(jump, this.promptAuth);
 			const route = await openJumpRoute({
 				jump: jump.jump,
 				auth: jumpAuth as unknown as Record<string, unknown>,

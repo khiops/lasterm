@@ -1,3 +1,4 @@
+import { openJumpRoute } from "./jump-connection.js";
 /**
  * SshConnectionManager — SSH-specific connection logic:
  *   - auth prompt request/response
@@ -18,6 +19,11 @@ import type {
 } from "@lasterm/shared";
 import { Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
+import {
+	findKnownHostKeys,
+	judgeAgainstKnownHosts,
+	readUserKnownHosts,
+} from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
 import { computeTargetStatus } from "./agent-status.js";
@@ -32,7 +38,7 @@ import {
 	reconnectSessionId,
 	respond as respondCtx,
 } from "./prompt-context.js";
-import { resolveJump } from "./proxy-jump.js";
+import { pinJumpKey, resolveJump } from "./proxy-jump.js";
 import { captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
 import {
@@ -43,7 +49,9 @@ import {
 import type { WsClient } from "./session-manager.js";
 import {
 	type AuthPromptFn,
+	buildJumpAuth,
 	buildSshConnectConfig,
+	parseSshHost,
 	SshAgent,
 	type SshAgentDeployOptions,
 } from "./ssh-agent.js";
@@ -638,6 +646,7 @@ export class SshConnectionManager {
 	async handleTestConnect(clientId: string, msg: TestConnectMessage): Promise<void> {
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return;
+		const parsed = parseSshHost(msg.hostname);
 
 		// ── Task 2: Test-connect isolation (invariant 1) ──────────────────────────
 		// Open a dedicated "test" PromptContext scoped to this client and this request.
@@ -686,7 +695,7 @@ export class SshConnectionManager {
 				{
 					type: "HOST_VERIFY",
 					hostId: msg.hostId,
-					hostname: msg.port === 22 ? msg.hostname : `${msg.hostname}:${msg.port}`,
+					hostname: msg.port === 22 ? parsed.hostname : `${parsed.hostname}:${msg.port}`,
 					fingerprint: newFingerprint,
 					algorithm: "SHA256",
 					...(oldFingerprint ? { oldFingerprint } : {}),
@@ -702,7 +711,7 @@ export class SshConnectionManager {
 		};
 
 		try {
-			const result = await this._testSshConnectivity(msg, promptAuth, verifyHostKey);
+			const result = await this._testSshConnectivity(msg, promptAuth, verifyHostKey, parsed);
 			if (result.ok) {
 				client.send({
 					type: "TEST_CONNECT_OK",
@@ -738,14 +747,67 @@ export class SshConnectionManager {
 		msg: TestConnectMessage,
 		promptAuth: AuthPromptFn,
 		verifyHostKey: HostKeyVerifyFn,
+		parsed: ReturnType<typeof parseSshHost>,
 	): Promise<TestConnectResult> {
-		const username = msg.sshUser ?? process.env.USER ?? "root";
+		const username = msg.sshUser || parsed.username || process.env.USER || "root";
+		const saved = this.ctx.metaDal.getHost(msg.hostId);
+		const sameSpec = saved !== undefined && saved.sshProxySpec?.trim() === msg.sshProxySpec?.trim();
+		const resolution = resolveJump(
+			{
+				id: msg.hostId,
+				sshHost: msg.hostname,
+				sshUser: msg.sshUser || null,
+				sshProxyHostId: msg.sshProxyHostId ?? null,
+				sshProxySpec: msg.sshProxySpec ?? null,
+				sshProxyFingerprint: sameSpec ? (saved.sshProxyFingerprint ?? null) : null,
+			},
+			this.ctx.metaDal,
+			this.ctx.configResolver?.sshConfig?.trustKnownHosts === true,
+		);
+		if (resolution.kind === "refused") return { ok: false, message: resolution.message };
+		const jump = resolution.kind === "jump" ? resolution.jump : undefined;
+		const jumpAuth = jump ? await buildJumpAuth(jump, promptAuth) : undefined;
+		let successfulJumpFingerprint: string | undefined;
+		const attempt = async (trusted: ReadonlySet<string>) => {
+			if (!jump || !jumpAuth) return attemptSshTest(connectConfig, trusted, probePlatform);
+			const route = await openJumpRoute({
+				jump: jump.jump,
+				auth: jumpAuth as Record<string, unknown>,
+				pinnedFingerprint: jump.pinnedFingerprint,
+				trustKnownHosts: jump.trustKnownHosts,
+				destination: { host: parsed.hostname, port: msg.port },
+				timeoutMs: SSH_TEST_TIMEOUT_MS,
+			});
+			try {
+				const result = await attemptSshTest(
+					{ ...connectConfig, sock: route.stream },
+					trusted,
+					probePlatform,
+				);
+				if (result.result.ok) successfulJumpFingerprint = route.fingerprint;
+				return result;
+			} finally {
+				route.close();
+			}
+		};
+		const finish = (result: TestConnectResult): TestConnectResult => {
+			if (
+				result.ok &&
+				jump &&
+				!jump.pinnedFingerprint &&
+				successfulJumpFingerprint &&
+				(jump.pinTo.kind === "host" || sameSpec)
+			) {
+				pinJumpKey(this.ctx.metaDal, jump, successfulJumpFingerprint);
+			}
+			return result;
+		};
 
 		let connectConfig: SshConnectConfig;
 		try {
 			connectConfig = await buildSshConnectConfig(
 				{ method: msg.sshAuth ?? "key", keyPath: msg.sshKeyPath },
-				msg.hostname,
+				parsed.hostname,
 				msg.port,
 				username,
 				promptAuth,
@@ -759,43 +821,61 @@ export class SshConnectionManager {
 		}
 		connectConfig.readyTimeout = SSH_TEST_TIMEOUT_MS;
 
-		// Same identity as a session's: a saved host's key counts only while the
-		// test targets the address it was recorded for.
-		const saved = this.ctx.metaDal.getHost(msg.hostId);
-		const savedAddress =
-			saved?.type === "ssh" && saved.sshHost === msg.hostname && (saved.sshPort ?? 22) === msg.port;
-		const storedFingerprint = savedAddress ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
-		const sshHostname = msg.hostname.includes("@")
-			? (msg.hostname.split("@")[1] ?? msg.hostname)
-			: msg.hostname;
-		const hostKey = `${sshHostname}:${msg.port}`;
+		// A saved target key counts only when the test uses the saved address
+		// and jump declaration: a different route may reach a different machine.
+		const savedRoute =
+			saved?.type === "ssh" &&
+			saved.sshHost === msg.hostname &&
+			(saved.sshPort ?? 22) === msg.port &&
+			(saved.sshProxyHostId ?? null) === (msg.sshProxyHostId ?? null) &&
+			(saved.sshProxySpec?.trim() || null) === (msg.sshProxySpec?.trim() || null);
+		const storedFingerprint = savedRoute ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
+		const hostKey = `${parsed.hostname}:${msg.port}`;
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
-		const sessionTrusted = this.ctx.trustedOnceFingerprints.get(hostKey);
+		const canUseAddressTrust = resolution.kind !== "jump" && (!saved || savedRoute);
+		const sessionTrusted = canUseAddressTrust
+			? this.ctx.trustedOnceFingerprints.get(hostKey)
+			: undefined;
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
-		const first = await attemptSshTest(connectConfig, trusted, probePlatform);
-		if (first.unverifiedFingerprint === undefined) return first.result;
+		const first = await attempt(trusted);
+		if (first.unverifiedFingerprint === undefined) return finish(first.result);
 
 		const fingerprint = first.unverifiedFingerprint;
+		const knownHostsSources = readUserKnownHosts();
+		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
+			(name): name is string => typeof name === "string" && name.length > 0,
+		);
+		const verdict = judgeAgainstKnownHosts(
+			fingerprint,
+			namesToLookUp.flatMap((name) => findKnownHostKeys(name, msg.port, knownHostsSources)),
+		);
+		if (verdict.kind === "revoked") {
+			return {
+				ok: false,
+				message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
+			};
+		}
 		const action = await verifyHostKey(
 			storedFingerprint ?? "",
 			fingerprint,
 			storedFingerprint === null,
 		);
 		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
-		if (action === "trust_permanent" && savedAddress) {
+		// The saved route can retain a permanent pin, including through a jump.
+		// Only eligible direct tests cache address trust for later sessions.
+		// Jump tests and edited saved routes retain the key only for this retry.
+		if (action === "trust_permanent" && savedRoute) {
 			this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint);
-		} else {
-			// An unsaved host has no row to hold the key yet: it is trusted for this
-			// hub run, so its first session does not ask again.
+		} else if (canUseAddressTrust) {
 			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
 		}
-		const second = await attemptSshTest(connectConfig, new Set([fingerprint]), probePlatform);
+		const second = await attempt(new Set([fingerprint]));
 		if (second.unverifiedFingerprint !== undefined) {
 			return { ok: false, message: "SSH host key changed during the test" };
 		}
-		return second.result;
+		return finish(second.result);
 	}
 }
 

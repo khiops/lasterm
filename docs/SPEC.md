@@ -609,6 +609,8 @@ Each host record specifies exactly one auth method via `ssh_auth` field (`'agent
 
 ### 4.5b Reaching a host through another (ProxyJump)
 
+The host dialog's connection test travels the declared jump, with a session's jump and bastion rules; how it treats the target's key is in `docs/SECURITY.md` §3.3b.
+
 A host may declare a jump, in one of two ways and never both:
 
 | Field | Meaning |

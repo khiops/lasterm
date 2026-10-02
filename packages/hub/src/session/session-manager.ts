@@ -80,7 +80,7 @@ import {
 	reconnectContextId,
 	trackElevationContext,
 } from "./prompt-context.js";
-import { type ResolvedJump, resolveJump } from "./proxy-jump.js";
+import { pinJumpKey, type ResolvedJump, resolveJump } from "./proxy-jump.js";
 import {
 	assertQuitFence,
 	captureQuitFence,
@@ -2444,13 +2444,7 @@ export class SessionManager {
 	 */
 	private pinJumpKey(jump: ResolvedJump | undefined, agent: SshAgent): void {
 		if (jump === undefined || agent.lastJumpFingerprint === null) return;
-		if (jump.pinTo.kind === "host") {
-			this.ctx.metaDal.updateHostFingerprint(jump.pinTo.hostId, agent.lastJumpFingerprint);
-		} else {
-			this.ctx.metaDal.updateHost(jump.pinTo.hostId, {
-				sshProxyFingerprint: agent.lastJumpFingerprint,
-			});
-		}
+		pinJumpKey(this.ctx.metaDal, jump, agent.lastJumpFingerprint);
 	}
 
 	private async _connectSshAgent(

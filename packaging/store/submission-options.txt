@@ -1,0 +1,20 @@
+=== RESTRICTED CAPABILITIES - justification for runFullTrust ===
+
+Lasterm is a developer terminal application packaged as MSIX. It declares
+runFullTrust because it launches its packaged local hub and agent processes,
+listens on 127.0.0.1 for the transport between the app's window and that hub,
+and runs the user's shells and SSH sessions, which are the product's core
+function. This is the same architecture as Windows Terminal (9N0DX20HK701).
+runFullTrust is the only restricted capability the package declares.
+
+=== NOTES FOR CERTIFICATION ===
+
+No account and no remote machine are needed to test the app. At first launch
+it starts its hub and opens a terminal on this computer. Closing the window
+asks whether to minimize to the notification area, where terminals keep
+running, or to quit completely.
+
+Remote hosts are optional: adding one needs an SSH server the tester can
+reach. Lasterm makes no network connection other than to the hosts the user
+adds and, when a host needs an agent the app does not carry, to GitHub to
+download it.

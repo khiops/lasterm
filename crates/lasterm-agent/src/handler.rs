@@ -1584,8 +1584,12 @@ mod stdio_tests {
             Arc::new(Mutex::new(HashMap::new())),
         )
         .await;
-        if let Some(process) = manager.lock().await.remove("log-privacy") {
+        if let Some(mut process) = manager.lock().await.remove("log-privacy") {
             let _ = process.kill_tree();
+            tokio::time::timeout(std::time::Duration::from_secs(10), process.wait())
+                .await
+                .expect("shell exit timed out")
+                .expect("wait for shell exit");
         }
         std::fs::remove_dir_all(&dir).unwrap();
         result.expect("SPAWN is answered");

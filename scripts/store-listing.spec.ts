@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, test, vi } from "vitest";
@@ -56,6 +56,20 @@ test("a listing gives its locale and four texts", () => {
 test("a section missing is refused rather than read out of place", () => {
 	const withoutTerms = LISTING.slice(0, LISTING.indexOf("## Search terms"));
 	assert.throws(() => parseListing(withoutTerms), /4 sections expected/);
+});
+
+test("a wrapped feature continuation is refused naming the line", () => {
+	assert.throws(
+		() => parseListing(LISTING.replace("- One feature.", "- One feature.\n  continued")),
+		/feature line " {2}continued"/,
+	);
+});
+
+test("a whitespace-only description is refused naming description", () => {
+	assert.throws(
+		() => parseListing(LISTING.replace("First paragraph.\n\nSecond paragraph.", " \t\n  ")),
+		/description/,
+	);
 });
 
 test("the Store limits are checked before submitting", () => {
@@ -232,7 +246,7 @@ test("absent locale, baseListing and every mapped field are refused", () => {
 	}
 	assert.throws(() => applyListings({}, [listing]), /no listings/);
 });
-function repo(news: boolean) {
+function repo(news: boolean, change?: (root: string) => void) {
 	const root = temp();
 	mkdirSync(join(root, "packaging/store/news"), { recursive: true });
 	writeFileSync(join(root, "packaging/store/listing-en.md"), LISTING);
@@ -259,6 +273,7 @@ function repo(news: boolean) {
 		writeFileSync(join(root, "packaging/store/news/b.md"), "en: Second.");
 		writeFileSync(join(root, "packaging/store/news/a.md"), "en: First.");
 	}
+	change?.(root);
 	git("add", ".");
 	git("-c", "commit.gpgsign=false", "commit", "-qm", "new");
 	git("tag", "v0.2.0");
@@ -281,6 +296,33 @@ test("detached release SHA excludes its own tag and gathers added fragments only
 		"Version 0.2.0\n\n• First.\n• Second.\n\nAll changes: https://github.com/khiops/lasterm/releases/tag/v0.2.0",
 	);
 });
+test("an accented fragment added between tags appears in What's new", () => {
+	const root = repo(false, (root) => {
+		writeFileSync(join(root, "packaging/store/news/éclairage.md"), "en: Lighting improved.");
+	});
+	const output = vi.spyOn(console, "log").mockImplementation(() => {});
+	assert.equal(main(["0.2.0"], root), 0);
+	const listing = JSON.parse(String(output.mock.calls[0]?.[0]));
+	assert.match(listing[0].fields.releaseNotes, /• Lighting improved\./);
+});
+
+test("a released fragment renamed between tags is refused naming it", () => {
+	const root = repo(false, (root) => {
+		renameSync(
+			join(root, "packaging/store/news/old.md"),
+			join(root, "packaging/store/news/renamed.md"),
+		);
+	});
+	assert.throws(() => main(["0.2.0"], root), /packaging\/store\/news\/old\.md/);
+});
+
+test("a released fragment deleted between tags is refused naming it", () => {
+	const root = repo(false, (root) => {
+		rmSync(join(root, "packaging/store/news/old.md"));
+	});
+	assert.throws(() => main(["0.2.0"], root), /packaging\/store\/news\/old\.md/);
+});
+
 test("no news exits 3 and prints nothing on stdout", () => {
 	const root = repo(false);
 	// Run the actual CLI with a copied layout so its default root is the fixture.

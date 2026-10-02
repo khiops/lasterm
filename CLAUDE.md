@@ -330,4 +330,5 @@ explicit port that is taken moves up to 99 ports higher (`zero_conf`).
 
 A change users will see adds its own named `packaging/store/news/<change>.md`
 file in its own pull request, with one `<language>: …` line per listing language
-(today `en`). See `packaging/store/news/README.md`.
+(today `en`). A new listing language also needs its What's new frame in
+`scripts/store-listing.ts`. See `packaging/store/news/README.md`.

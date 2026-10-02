@@ -72,7 +72,10 @@ export function parseListing(markdown: string): Listing {
 			`4 sections expected (short description, description, features, search terms), found ${sections.length}`,
 		);
 	}
-	const bodies = sections.map((section) => section.slice(section.indexOf("\n") + 1).trim());
+	const bodies = sections.map((section, index) => {
+		const body = section.slice(section.indexOf("\n") + 1);
+		return index === 2 ? body : body.trim();
+	});
 
 	const [shortDescription, description, features, keywords] = bodies as [
 		string,
@@ -81,14 +84,19 @@ export function parseListing(markdown: string): Listing {
 		string,
 	];
 	if (shortDescription.length > 1000) throw new Error("shortDescription exceeds 1000 characters");
+	if (!description) throw new Error("description is empty");
 	if (description.length > 10000) throw new Error("description exceeds 10000 characters");
 
 	// One feature per list item, as Partner Center shows them.
-	const items = features
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => /^[-•]\s/.test(line))
-		.map((line) => line.replace(/^[-•]\s+/, ""));
+	const items: string[] = [];
+	for (const line of features.split("\n")) {
+		if (!line.trim()) continue;
+		if (!/^[-•] /.test(line)) {
+			throw new Error(`feature line "${line}" must start with "- " or "• "`);
+		}
+		const item = line.slice(2).trim();
+		if (item) items.push(item);
+	}
 	if (items.length === 0) throw new Error("the features section lists nothing");
 	if (items.length > FEATURES_MAX)
 		throw new Error(`${items.length} features, the Store takes ${FEATURES_MAX}`);
@@ -238,7 +246,7 @@ function isFragment(path: string) {
 }
 
 function git(cwd: string, ...args: string[]) {
-	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+	return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
 /**
@@ -247,16 +255,47 @@ function git(cwd: string, ...args: string[]) {
  */
 export function previousRelease(version: string, ref = "HEAD", cwd = ROOT) {
 	const exclude = version ? ["--exclude", `v${version}`] : [];
-	return git(cwd, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", ...exclude, ref);
+	return git(cwd, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", ...exclude, ref).trim();
 }
 
 /**
  * The fragments added between `since` and `ref`, by path from `cwd`. Added only:
- * a fragment released and edited later stays with its release.
+ * a fragment released and edited later stays with its release. Deleting or
+ * renaming a released fragment is refused before gathering additions.
  */
 export function newsAdded(since: string, ref = "HEAD", cwd = ROOT) {
-	return git(cwd, "diff", "--name-only", "--no-renames", "--diff-filter=A", since, ref, "--", NEWS)
-		.split("\n")
+	const deleted = git(
+		cwd,
+		"diff",
+		"-z",
+		"--name-only",
+		"--no-renames",
+		"--diff-filter=D",
+		since,
+		ref,
+		"--",
+		NEWS,
+	)
+		.split("\0")
+		.filter(Boolean)
+		.filter(isFragment);
+	if (deleted.length > 0) {
+		throw new Error(`released news fragments deleted or renamed: ${deleted.join(", ")}`);
+	}
+	return git(
+		cwd,
+		"diff",
+		"-z",
+		"--name-only",
+		"--no-renames",
+		"--diff-filter=A",
+		since,
+		ref,
+		"--",
+		NEWS,
+	)
+		.split("\0")
+		.filter(Boolean)
 		.filter(isFragment);
 }
 

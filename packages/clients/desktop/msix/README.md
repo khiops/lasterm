@@ -95,9 +95,9 @@ When ready:
 
 ## Releasing to the Microsoft Store
 
-The release workflow submits each later release's unsigned MSIX after the GitHub
-release is public, when `STORE_PRODUCT_ID` is set and the frozen MSIX build is enabled.
-A failed Store job leaves the GitHub release published.
+The release workflow's `store` job submits a release's unsigned MSIX after the
+GitHub release is public, when `STORE_PRODUCT_ID` is set and the frozen MSIX build
+is enabled. A failed Store job leaves the GitHub release published.
 
 [Microsoft Learn: Publish app updates to Microsoft Store with GitHub Actions](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/github-actions)
 (updated 2026-08-30) requires a free product, an Entra application holding the
@@ -112,10 +112,12 @@ Manager role in Partner Center, and an app already published and live. Set
 | `PARTNER_CENTER_CLIENT_ID` | Repository secret | Entra application client ID |
 | `PARTNER_CENTER_CLIENT_SECRET` | Repository secret | Entra application client secret |
 
-All four secrets must be present before the job changes Partner Center. The job
-uploads the package as a draft, applies the reviewed `packaging/store/listing-*.md`
-texts and What's new from news files added since the previous release, then sends
-it to certification. Each user-visible change adds its own news file in its pull
+Before it changes Partner Center, the job checks the package, the listing texts,
+the news files and the four secrets, and stops if any check fails. It
+then uploads the package as a draft, applies the reviewed `packaging/store/listing-*.md`
+texts and What's new from news files added since the previous release, and sends
+it to certification. The Store CLI it runs is MSStoreCLI v0.4.3, downloaded from
+its GitHub release and refused unless its SHA-256 matches the one in the workflow. Each user-visible change adds its own news file in its pull
 request (see `packaging/store/news/README.md`).
 
 With no new news file, the job succeeds with a warning: the package is uploaded
@@ -125,6 +127,12 @@ frozen commit. A later release's job replaces a draft still waiting.
 
 Before rerunning a failed job, check the submission's status in Partner Center:
 it may be unchanged, a draft, or already in certification if the runner failed
-after the publish request reached Partner Center. Jobs are serialized for the
-product's single pending submission. Retrieval of the package the Store signs,
+after the publish request reached Partner Center.
+
+Only one Store job runs at a time, and GitHub keeps one waiting job per
+concurrency group: when releases come faster than the job, a newer release's job
+replaces the one waiting, and that skipped release is not submitted. The lock ends
+with the job, not with certification: a release whose job runs while the previous
+submission is still in certification may fail to submit; submit it from Partner
+Center once certification ends. Retrieval of the package the Store signs,
 attachment to the release (#619), and winget publication are later work.

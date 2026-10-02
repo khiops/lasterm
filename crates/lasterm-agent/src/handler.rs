@@ -655,12 +655,13 @@ async fn handle_spawn(
         env,
         login_shell,
     } = spawn_env;
-    // Counts and the mode only: names and values can be secrets.
+    // Counts, presence and the mode only: environment names and values,
+    // arguments and the working directory can be secrets.
     tracing::info!(
         request_id = %request_id,
         owner = owner.short(),
         shell = ?shell,
-        cwd = ?cwd,
+        cwd_given = cwd.is_some(),
         cols = cols,
         rows = rows,
         elevated = ?elevated,
@@ -834,8 +835,7 @@ async fn handle_spawn(
                     channel_id = %ch_id,
                     pid = pty_pid,
                     program = %effective_program,
-                    args = ?effective_args,
-                    cwd = ?expanded_cwd,
+                    arg_count = effective_args.len(),
                     "SPAWN_OK — PTY created"
                 );
 
@@ -1500,6 +1500,110 @@ mod stdio_tests {
                 ],
             )
         }
+    }
+
+    #[derive(Clone)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_logs_neither_arguments_nor_working_directory() {
+        let arg_marker = format!("lasterm-secret-{}", ulid::Ulid::generate());
+        let cwd_marker = format!("lasterm-cwd-secret-{}", ulid::Ulid::generate());
+        let dir = std::env::temp_dir().join(&cwd_marker);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (shell, args) = if cfg!(windows) {
+            (
+                "cmd.exe",
+                vec!["/C".into(), "rem".into(), arg_marker.clone()],
+            )
+        } else {
+            ("/bin/sh", vec!["-c".into(), format!(": {arg_marker}")])
+        };
+        let capture = LogCapture(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        // Keep two dispatches alive: tracing's single-dispatch optimization
+        // otherwise caches "never" when a parallel test first hits a callsite
+        // without a thread-local subscriber.
+        let _parallel_dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+
+        let result = handle_spawn(
+            "log-privacy".into(),
+            Some("log-privacy".into()),
+            Some(shell.into()),
+            args,
+            Some(dir.to_string_lossy().into_owned()),
+            SpawnEnvironment {
+                mode: EnvMode::Inherit,
+                unset: vec![],
+                env: None,
+                login_shell: false,
+            },
+            80,
+            24,
+            None,
+            None,
+            None,
+            None,
+            OwnerId::legacy(),
+            Arc::clone(&manager),
+            frame_tx,
+            channel_events,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await;
+        if let Some(process) = manager.lock().await.remove("log-privacy") {
+            let _ = process.kill_tree();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        result.expect("SPAWN is answered");
+        let frame = frame_rx.recv().await.expect("an answer");
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        assert_eq!(answer["type"], "SPAWN_OK", "{answer}");
+
+        let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logs.contains("SPAWN_OK — PTY created"),
+            "spawn event captured"
+        );
+        assert!(logs.contains("arg_count"), "argument count captured");
+        assert!(!logs.contains(&arg_marker), "arguments must not be logged");
+        assert!(
+            !logs.contains(&cwd_marker),
+            "working directory must not be logged"
+        );
     }
 
     /// The whole chain, from SPAWN to the shell: what the request removes is

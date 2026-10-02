@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	checksumsName,
 	extractArtifacts,
 	globToRegExp,
 	type Matrix,
@@ -23,56 +24,67 @@ const MATRIX = JSON.parse(
 	readFileSync(join(ROOT, ".github", "build-matrix.json"), "utf8"),
 ) as Matrix;
 
-/** What the v0.10.1 build wrote, per artifact, as seen in its logs and assets. */
-function v0101Contents(): Map<string, string[]> {
+/** The release artifacts the current matrix's producers write. */
+function releaseContents(): Map<string, string[]> {
 	return new Map([
 		["agent-x86_64-unknown-linux-gnu", ["lasterm-agent"]],
 		["agent-aarch64-unknown-linux-gnu", ["lasterm-agent"]],
 		["agent-x86_64-pc-windows-msvc", ["lasterm-agent.exe"]],
 		["hub-x86_64-pc-windows-msvc", ["lasterm-hub.exe"]],
-		[
-			"desktop-x86_64-pc-windows-msvc",
-			["Lasterm_0.10.1_x64-setup.exe", "Lasterm_0.10.1_x64_en-US.msi"],
-		],
-		["msix-x86_64-pc-windows-msvc", ["Lasterm_0.10.1.0_x64.msix"]],
 	]);
 }
 
+function installerMatrix(): Matrix {
+	return {
+		targets: [
+			{
+				triple: "x86_64-pc-windows-msvc",
+				os: "windows",
+				enabled: true,
+				desktop: true,
+				artifacts: {
+					bundles: ["nsis", "msi"],
+					desktop: ["Lasterm_{version}_x64-setup.exe", "Lasterm_{version}_x64_*.msi"],
+				},
+			},
+		],
+	};
+}
+
+function installerContents(files: string[]): Map<string, string[]> {
+	return new Map([["desktop-x86_64-pc-windows-msvc", files]]);
+}
+
 describe("resolveReleaseAssets", () => {
-	it("resolves the v0.10.1 build to exactly the assets v0.10.1 published", () => {
-		const { assets, errors } = resolveReleaseAssets(MATRIX, "0.10.1", true, v0101Contents());
+	it("resolves the current matrix to exactly the Store-only release assets", () => {
+		const { assets, errors } = resolveReleaseAssets(MATRIX, "0.10.1", releaseContents());
 		expect(errors).toEqual([]);
-		// The release as published, minus SHA256SUMS, which publish-release writes itself.
-		expect(assets.map((a) => a.asset).sort()).toEqual(
+		// SHA256SUMS is written by publish-release from the agent assets below.
+		expect([...assets.map((a) => a.asset), checksumsName("0.10.1")].sort()).toEqual(
 			[
+				"SHA256SUMS-0.10.1.txt",
 				"lasterm-agent-aarch64-unknown-linux-gnu-0.10.1",
 				"lasterm-agent-x86_64-pc-windows-msvc-0.10.1.exe",
 				"lasterm-agent-x86_64-unknown-linux-gnu-0.10.1",
 				"lasterm-hub-x86_64-pc-windows-msvc.exe",
-				"Lasterm_0.10.1.0_x64.msix",
-				"Lasterm_0.10.1_x64-setup.exe",
-				"Lasterm_0.10.1_x64_en-US.msi",
 			].sort(),
 		);
 	});
 
-	it("neither expects nor accepts an MSIX when publication is disabled", () => {
-		const contents = v0101Contents();
-		const withMsix = resolveReleaseAssets(MATRIX, "0.10.1", false, contents);
-		expect(withMsix.errors).toEqual([
+	it("refuses an MSIX workflow artifact so it cannot reach a release", () => {
+		const contents = releaseContents();
+		contents.set("msix-x86_64-pc-windows-msvc", ["Lasterm_0.10.1.0_x64.msix"]);
+		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", contents);
+		expect(errors).toEqual([
 			'unexpected artifact "msix-x86_64-pc-windows-msvc": no enabled target produces it',
 		]);
-		contents.delete("msix-x86_64-pc-windows-msvc");
-		const without = resolveReleaseAssets(MATRIX, "0.10.1", false, contents);
-		expect(without.errors).toEqual([]);
-		expect(without.assets.some((a) => a.kind === "msix")).toBe(false);
 	});
 
 	it("reports a missing artifact and one no enabled target produces", () => {
-		const contents = v0101Contents();
+		const contents = releaseContents();
 		contents.delete("agent-aarch64-unknown-linux-gnu");
 		contents.set("hub-x86_64-unknown-linux-gnu", ["lasterm-hub"]);
-		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", true, contents);
+		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", contents);
 		expect(errors).toContain(
 			'missing artifact "agent-aarch64-unknown-linux-gnu" for the agent of aarch64-unknown-linux-gnu',
 		);
@@ -82,11 +94,11 @@ describe("resolveReleaseAssets", () => {
 	});
 
 	it("requires the executable's own name, so a bare name on Windows is refused", () => {
-		const contents = v0101Contents();
+		const contents = releaseContents();
 		// The shape MSYS fabricated for 0.10.0: `lasterm-hub` next to `lasterm-hub.exe`.
 		contents.set("hub-x86_64-pc-windows-msvc", ["lasterm-hub", "lasterm-hub.exe"]);
 		contents.set("agent-x86_64-pc-windows-msvc", ["lasterm-agent"]);
-		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", true, contents);
+		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", contents);
 		expect(errors).toEqual([
 			'agent-x86_64-pc-windows-msvc: expected exactly "lasterm-agent.exe", found "lasterm-agent"',
 			'hub-x86_64-pc-windows-msvc: expected exactly "lasterm-hub.exe", found "lasterm-hub", "lasterm-hub.exe"',
@@ -94,25 +106,26 @@ describe("resolveReleaseAssets", () => {
 	});
 
 	it("refuses a desktop file no declaration names, such as an updater signature", () => {
-		const contents = v0101Contents();
-		contents.set("desktop-x86_64-pc-windows-msvc", [
-			"Lasterm_0.10.1_x64-setup.exe",
-			"Lasterm_0.10.1_x64-setup.exe.sig",
-			"Lasterm_0.10.1_x64_en-US.msi",
-		]);
-		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", true, contents);
+		const { errors } = resolveReleaseAssets(
+			installerMatrix(),
+			"0.10.1",
+			installerContents([
+				"Lasterm_0.10.1_x64-setup.exe",
+				"Lasterm_0.10.1_x64-setup.exe.sig",
+				"Lasterm_0.10.1_x64_en-US.msi",
+			]),
+		);
 		expect(errors).toEqual([
 			'desktop-x86_64-pc-windows-msvc: "Lasterm_0.10.1_x64-setup.exe.sig" matches no artifacts.desktop declaration; declared: "Lasterm_0.10.1_x64-setup.exe", "Lasterm_0.10.1_x64_*.msi"',
 		]);
 	});
 
 	it("refuses a declaration that matches nothing, or more than one file", () => {
-		const contents = v0101Contents();
-		contents.set("desktop-x86_64-pc-windows-msvc", [
-			"Lasterm_0.10.1_x64_en-US.msi",
-			"Lasterm_0.10.1_x64_fr-FR.msi",
-		]);
-		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", true, contents);
+		const { errors } = resolveReleaseAssets(
+			installerMatrix(),
+			"0.10.1",
+			installerContents(["Lasterm_0.10.1_x64_en-US.msi", "Lasterm_0.10.1_x64_fr-FR.msi"]),
+		);
 		expect(errors).toEqual([
 			'desktop-x86_64-pc-windows-msvc: artifacts.desktop[0] "Lasterm_0.10.1_x64-setup.exe" matched no file; candidates: "Lasterm_0.10.1_x64_en-US.msi", "Lasterm_0.10.1_x64_fr-FR.msi"',
 			'desktop-x86_64-pc-windows-msvc: artifacts.desktop[1] "Lasterm_0.10.1_x64_*.msi" matched more than one file: "Lasterm_0.10.1_x64_en-US.msi", "Lasterm_0.10.1_x64_fr-FR.msi"',
@@ -120,13 +133,15 @@ describe("resolveReleaseAssets", () => {
 	});
 
 	it("refuses two declarations resolving to the same file", () => {
-		const matrix = structuredClone(MATRIX);
-		const windows = matrix.targets.find((t) => t.triple === "x86_64-pc-windows-msvc");
+		const matrix = installerMatrix();
+		const windows = matrix.targets[0];
 		if (!windows?.artifacts) throw new Error("the matrix has no Windows artifacts");
 		windows.artifacts.desktop = ["Lasterm_{version}_x64*", "Lasterm_{version}_x64-setup.exe"];
-		const contents = v0101Contents();
-		contents.set("desktop-x86_64-pc-windows-msvc", ["Lasterm_0.10.1_x64-setup.exe"]);
-		const { errors } = resolveReleaseAssets(matrix, "0.10.1", true, contents);
+		const { errors } = resolveReleaseAssets(
+			matrix,
+			"0.10.1",
+			installerContents(["Lasterm_0.10.1_x64-setup.exe"]),
+		);
 		expect(errors).toEqual([
 			'desktop-x86_64-pc-windows-msvc: artifacts.desktop "Lasterm_0.10.1_x64*" and "Lasterm_0.10.1_x64-setup.exe" both matched "Lasterm_0.10.1_x64-setup.exe"',
 		]);
@@ -137,18 +152,22 @@ describe("resolveReleaseAssets", () => {
 		const windows = matrix.targets.find((t) => t.triple === "x86_64-pc-windows-msvc");
 		if (!windows?.artifacts) throw new Error("the matrix has no Windows artifacts");
 		windows.artifacts.hub = ["lasterm-hub-x86_64-pc-windows-msvc.exe\r"];
-		const { errors } = resolveReleaseAssets(matrix, "0.10.1", true, v0101Contents());
+		const { errors } = resolveReleaseAssets(matrix, "0.10.1", releaseContents());
 		expect(errors[0]).toContain('"lasterm-hub-x86_64-pc-windows-msvc.exe\\r" matched no file');
 	});
 
 	it("refuses bracket expressions rather than giving them a meaning", () => {
-		const matrix = structuredClone(MATRIX);
-		const windows = matrix.targets.find((t) => t.triple === "x86_64-pc-windows-msvc");
+		const matrix = installerMatrix();
+		const windows = matrix.targets[0];
 		if (!windows?.artifacts) throw new Error("the matrix has no Windows artifacts");
-		windows.artifacts.msix = ["Lasterm_{version}.[0-9]_x64.msix"];
-		const { errors } = resolveReleaseAssets(matrix, "0.10.1", true, v0101Contents());
+		windows.artifacts.desktop = ["Lasterm_{version}.[0-9]_x64.msix"];
+		const { errors } = resolveReleaseAssets(
+			matrix,
+			"0.10.1",
+			installerContents(["Lasterm_0.10.1.0_x64.msix"]),
+		);
 		expect(errors).toEqual([
-			'msix-x86_64-pc-windows-msvc: artifacts.msix[0] "Lasterm_{version}.[0-9]_x64.msix" uses a bracket expression, which this resolver does not support',
+			'desktop-x86_64-pc-windows-msvc: artifacts.desktop[0] "Lasterm_{version}.[0-9]_x64.msix" uses a bracket expression, which this resolver does not support',
 		]);
 	});
 
@@ -160,14 +179,14 @@ describe("resolveReleaseAssets", () => {
 					os: "linux",
 					enabled: true,
 					desktop: true,
-					artifacts: { desktop: ["lasterm_{version}_amd64.deb"] },
+					artifacts: { bundles: ["deb"], desktop: ["lasterm_{version}_amd64.deb"] },
 				},
 				{
 					triple: "x86_64-unknown-linux-musl",
 					os: "linux",
 					enabled: true,
 					desktop: true,
-					artifacts: { desktop: ["lasterm_{version}_amd64.deb"] },
+					artifacts: { bundles: ["deb"], desktop: ["lasterm_{version}_amd64.deb"] },
 				},
 			],
 		};
@@ -175,7 +194,7 @@ describe("resolveReleaseAssets", () => {
 			["desktop-x86_64-unknown-linux-gnu", ["lasterm_1.0.0_amd64.deb"]],
 			["desktop-x86_64-unknown-linux-musl", ["lasterm_1.0.0_amd64.deb"]],
 		]);
-		const { errors } = resolveReleaseAssets(matrix, "1.0.0", false, contents);
+		const { errors } = resolveReleaseAssets(matrix, "1.0.0", contents);
 		expect(errors).toEqual([
 			'"lasterm_1.0.0_amd64.deb" is produced by both desktop-x86_64-unknown-linux-gnu and desktop-x86_64-unknown-linux-musl',
 		]);
@@ -294,8 +313,6 @@ describe("release-assets CLI", () => {
 				"matrix.json",
 				"--version",
 				"1.2.3",
-				"--msix",
-				"false",
 				"--downloads",
 				"downloads",
 				"--extract-to",
@@ -330,8 +347,6 @@ describe("release-assets CLI", () => {
 				"matrix.json",
 				"--version",
 				"1.2.3",
-				"--msix",
-				"false",
 				"--downloads",
 				"downloads",
 				"--extract-to",

@@ -3,15 +3,17 @@
  *
  * Decides what a release publishes, from the workflow artifacts a build produced.
  *
- * build.yml uploads one artifact per producer and enabled target — agent-,
- * hub-, desktop- and msix-<triple> — each holding a single <name>.tar. This
- * extracts them and resolves the files against .github/build-matrix.json:
+ * build.yml uploads one artifact per producer and enabled target, each holding
+ * a single <name>.tar. Its callers download only the agent-, hub- and
+ * desktop-<triple> ones; the msix-<triple> artifact is a Store-submission input
+ * and is refused here if it arrives. This extracts the downloaded artifacts and
+ * resolves the files against .github/build-matrix.json:
  *
  *   - the artifacts present are exactly the expected ones, no more, no less;
  *   - each tar holds regular files at its top level and nothing else;
  *   - agent and hub artifacts hold the one executable their producer writes,
  *     published under the name the hub fetches (agent) or the matrix declares (hub);
- *   - each desktop / MSIX declaration matches exactly one file, and every file
+ *   - each desktop declaration matches exactly one file, and every file
  *     matches a declaration;
  *   - no two deliverables share a public name.
  *
@@ -22,7 +24,7 @@
  *
  * Usage:
  *   node scripts/release-assets.ts --matrix .github/build-matrix.json \
- *     --version 0.10.1 --msix true --downloads <dir> --extract-to <dir> --out <manifest.json>
+ *     --version 0.10.1 --downloads <dir> --extract-to <dir> --out <manifest.json>
  */
 
 import { spawnSync } from "node:child_process";
@@ -41,7 +43,6 @@ export interface MatrixTarget {
 		bundles?: string[];
 		hub?: string[];
 		desktop?: string[];
-		msix?: string[];
 	};
 }
 
@@ -49,7 +50,7 @@ export interface Matrix {
 	targets: MatrixTarget[];
 }
 
-export type Kind = "agent" | "hub" | "desktop" | "msix";
+export type Kind = "agent" | "hub" | "desktop";
 
 export interface ReleaseAsset {
 	kind: Kind;
@@ -66,12 +67,6 @@ export interface Resolution {
 	assets: ReleaseAsset[];
 	errors: string[];
 }
-
-/**
- * The one triple whose desktop build packages an MSIX. build.yml's packaging
- * and upload steps carry the same predicate; change them together.
- */
-export const MSIX_TRIPLE = "x86_64-pc-windows-msvc";
 
 export function checksumsName(version: string): string {
 	return `SHA256SUMS-${version}.txt`;
@@ -125,16 +120,14 @@ function declarationErrors(artifact: string, kind: Kind, declared: readonly stri
 /** Artifact name → the producer and target it must come from. */
 export function expectedArtifacts(
 	matrix: Matrix,
-	msix: boolean,
 ): Map<string, { kind: Kind; target: MatrixTarget }> {
 	const expected = new Map<string, { kind: Kind; target: MatrixTarget }>();
 	for (const target of matrix.targets) {
 		if (!target.enabled) continue;
 		if (target.agent) expected.set(`agent-${target.triple}`, { kind: "agent", target });
 		if (target.hub) expected.set(`hub-${target.triple}`, { kind: "hub", target });
-		if (target.desktop) expected.set(`desktop-${target.triple}`, { kind: "desktop", target });
-		if (target.desktop && msix && target.triple === MSIX_TRIPLE) {
-			expected.set(`msix-${target.triple}`, { kind: "msix", target });
+		if (target.desktop && target.artifacts?.bundles && target.artifacts.desktop) {
+			expected.set(`desktop-${target.triple}`, { kind: "desktop", target });
 		}
 	}
 	return expected;
@@ -231,11 +224,10 @@ function resolveExecutable(
 export function resolveReleaseAssets(
 	matrix: Matrix,
 	version: string,
-	msix: boolean,
 	contents: ReadonlyMap<string, readonly string[]>,
 ): Resolution {
 	const out: Resolution = { assets: [], errors: [] };
-	const expected = expectedArtifacts(matrix, msix);
+	const expected = expectedArtifacts(matrix);
 
 	for (const name of contents.keys()) {
 		if (!expected.has(name)) {
@@ -367,16 +359,22 @@ function argument(argv: readonly string[], flag: string): string {
 	return value;
 }
 
+function rejectUnknownOptions(argv: readonly string[]): void {
+	const known = new Set(["--matrix", "--version", "--downloads", "--extract-to", "--out"]);
+	for (const value of argv) {
+		if (value.startsWith("--") && !known.has(value)) {
+			throw new Error(`unknown option ${value}`);
+		}
+	}
+}
+
 function main(argv: readonly string[]): number {
+	rejectUnknownOptions(argv);
 	const matrix = JSON.parse(readFileSync(argument(argv, "--matrix"), "utf8")) as Matrix;
 	const version = argument(argv, "--version");
-	const msixFlag = argument(argv, "--msix");
-	if (msixFlag !== "true" && msixFlag !== "false") {
-		throw new Error(`--msix must be true or false, got ${show(msixFlag)}`);
-	}
 	const extractDir = argument(argv, "--extract-to");
 	const extracted = extractArtifacts(argument(argv, "--downloads"), extractDir);
-	const resolution = resolveReleaseAssets(matrix, version, msixFlag === "true", extracted.contents);
+	const resolution = resolveReleaseAssets(matrix, version, extracted.contents);
 	const errors = [...extracted.errors, ...resolution.errors];
 	if (errors.length > 0) {
 		for (const error of errors) console.error(`::error::${error}`);

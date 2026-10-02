@@ -6,10 +6,10 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 
 ## Current Flow
 
-- `.github/workflows/build.yml` builds the Windows desktop target and runs `pack-msix.ps1 -SkipBuild`. When MSIX publication is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`.
-- A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow, and resolves it against `.github/build-matrix.json` as a release would.
-- `.github/workflows/release.yml` calls the same build workflow; its `publish-release` job uploads the `.msix` to the GitHub Release with the desktop installers.
-- There is no signing step and no Store submission step in CI.
+- `.github/workflows/build.yml` builds the Windows desktop executable with `tauri build --no-bundle` and runs `pack-msix.ps1 -SkipBuild`. When MSIX packaging is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`, kept 30 days on a release.
+- A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow.
+- `.github/workflows/release.yml` calls the same build workflow. This unsigned `.msix` is never uploaded to the GitHub Release, and the release workflow publishes no desktop installer; only the package the Store signs may join a release after certification (STORE-ONLY-DESKTOP in `docs/decisions.md`).
+- There is no signing step: the Microsoft Store signs the package. CI has no Store submission step yet (#619).
 
 ## Package Inputs
 
@@ -70,8 +70,8 @@ Validate these points on the next Windows CI dispatch or release run:
 3. The staged desktop executable, hub sidecar, and agent sidecar all pass the x64 PE check.
 4. The sidecar version gate passes for `lasterm-hub.exe` and `lasterm-agent.exe`.
 5. `MakeAppx.exe pack /d ... /p ... /o` writes `Lasterm_<version>.0_x64.msix`.
-6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX publication is enabled.
-7. Release runs upload the `.msix` asset alongside the existing desktop installers.
+6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX packaging is enabled.
+7. Release runs keep the `.msix` as that run artifact; it is not uploaded to the release.
 
 ## Later: Manual Partner Center Submission
 

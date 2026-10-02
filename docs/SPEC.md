@@ -1257,15 +1257,14 @@ detached daemon, or deploys and runs it over SSH.
 |----------|-----|-------|-------------|
 | Linux x64 | Not released; built from source (`scripts/build-hub.sh`) | Release asset | Not released |
 | Linux arm64 | Not released | Release asset, for a remote host such as a Raspberry Pi | Not released |
-| Windows x64 | Release asset | Release asset | Release asset (NSIS, MSI) |
+| Windows x64 | Release asset | Release asset | Microsoft Store (MSIX); no release asset |
 | macOS | Not supported: nothing builds or tests it (#224) | Not supported | Not supported |
 
 What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser
 that reaches the hub.
 
-The desktop app has no updater of its own. The Microsoft Store updates the MSIX build, winget the
-installs it makes (#620), and an install from a release asset is updated by installing the newer
-release (`docs/decisions.md`, DESKTOP-UPDATES).
+The desktop app has no updater of its own. The Microsoft Store updates it, and winget is planned to
+install the package the Store signs (#620) (`docs/decisions.md`, STORE-ONLY-DESKTOP).
 
 Agent spawns PTYs for the host OS: bash/zsh (Linux), PowerShell/cmd/wsl.exe (Windows).
 Hub never spawns PTYs directly — it delegates to the agent (local or remote).

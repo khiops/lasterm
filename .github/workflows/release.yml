@@ -25,9 +25,9 @@ on:
 permissions: {}
 
 env:
-  # MSIX publication depends on all three repository variables. Only the matrix
+  # MSIX packaging depends on all three repository variables. Only the matrix
   # job reads this, once; every later job gets its frozen value.
-  MSIX_PUBLICATION_ENABLED: >-
+  MSIX_PACKAGING_ENABLED: >-
     ${{
       vars.MSIX_IDENTITY_NAME != '' &&
       vars.MSIX_PUBLISHER != '' &&
@@ -104,18 +104,18 @@ jobs:
       - id: freeze
         env:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          MSIX_RELEASE_ENABLED: ${{ env.MSIX_PUBLICATION_ENABLED }}
+          MSIX_PACKAGING_ENABLED: ${{ env.MSIX_PACKAGING_ENABLED }}
         run: |
           # Read once, here, and handed to every later job. The repository
-          # variables behind MSIX_PUBLICATION_ENABLED are read when each job
+          # variables behind MSIX_PACKAGING_ENABLED are read when each job
           # starts, so a variable changed mid-run would otherwise have the job
-          # that packages and the job that publishes disagree. The matrix
-          # itself is validated by build.yml, on this same frozen commit.
+          # that packages and the Store-submission consumer disagree. The
+          # matrix itself is validated by build.yml, on this same frozen commit.
           VERSION="${TAG_NAME#v}"
-          echo "version=$VERSION msix=$MSIX_RELEASE_ENABLED"
+          echo "version=$VERSION msix=$MSIX_PACKAGING_ENABLED"
           {
             echo "version=$VERSION"
-            echo "msix=$MSIX_RELEASE_ENABLED"
+            echo "msix=$MSIX_PACKAGING_ENABLED"
           } >> "$GITHUB_OUTPUT"
 
   create-release:
@@ -319,19 +319,17 @@ jobs:
       # artifacts are build inputs and never match this pattern.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "{agent,hub,desktop,msix}-*"
+          pattern: "{agent,hub,desktop}-*"
           path: _release/downloads/
       # The resolution build.yml already ran, repeated on the files this job is
       # about to publish rather than trusted from another job's output.
       - name: Resolve release assets
         env:
           VERSION: ${{ needs.matrix.outputs.version }}
-          MSIX: ${{ needs.matrix.outputs.msix }}
         run: >-
           node scripts/release-assets.ts
           --matrix .github/build-matrix.json
           --version "$VERSION"
-          --msix "$MSIX"
           --downloads _release/downloads
           --extract-to _release/extracted
           --out _release/manifest.json

@@ -19,10 +19,9 @@ body:
     attributes:
       label: How you installed it
       options:
+        - Microsoft Store
         - winget
-        - Setup installer (.exe)
-        - MSI
-        - Microsoft Store (MSIX)
+        - An earlier release installer (.exe or .msi)
         - Built from source
     validations:
       required: true

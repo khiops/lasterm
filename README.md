@@ -56,13 +56,13 @@ ordinary tab. [SPEC.md § 3.4](docs/SPEC.md) lists which setups are installable.
 
 There is no `npx lasterm`: the hub ships as a single executable that embeds its own
 Node, so npm would add a runtime requirement it exists to remove. Each
-[release](../../releases) carries the Windows desktop installers (`.exe`, `.msi`,
-`.msix`), the Windows hub executable, and the agents for Linux (x86_64, aarch64) and
-Windows. No release carries a Linux or macOS hub yet (#565); on Linux, build it from
-source as above.
+[release](../../releases) carries the Windows hub executable and the agents for Linux
+(x86_64, aarch64) and Windows. No release carries a Linux or macOS hub yet (#565); on
+Linux, build it from source as above.
 
-The desktop app does not update itself. An install from a release asset is updated by
-installing the newer release; the Microsoft Store and winget update the installs they made.
+The desktop app is distributed through the Microsoft Store only, which signs it and
+updates it; no release carries a desktop installer (STORE-ONLY-DESKTOP in
+`docs/decisions.md`).
 
 ---
 
@@ -250,8 +250,9 @@ which only the hub's OS user on its machine can read, and a paired browser canno
 
 ### Release MSIX identity
 
-The release workflow only builds and uploads the MSIX installer when the repository has the Partner Center
-package identity configured as GitHub repository variables. Set these once under
+The release workflow packages the unsigned MSIX for the Microsoft Store only when the repository has the
+Partner Center package identity configured as GitHub repository variables. The package stays a workflow-run
+artifact (`msix-x86_64-pc-windows-msvc`, kept 30 days); it is never a release asset. Set these once under
 `Settings` -> `Secrets and variables` -> `Actions` -> `Variables`:
 
 | Variable | Value |
@@ -260,9 +261,9 @@ package identity configured as GitHub repository variables. Set these once under
 | `MSIX_PUBLISHER` | Partner Center publisher subject, for example `CN=...` |
 | `MSIX_PUBLISHER_DISPLAY_NAME` | Publisher display name shown for the app |
 
-If any of these variables are unset, `release.yml` skips the MSIX build and upload but still ships the NSIS
-and MSI desktop installers. The CI inspection build in `build.yml` still creates its placeholder MSIX artifact
-unconditionally.
+If any of these variables are unset, a release packages no MSIX. A CI build that is not a release always
+packages the MSIX on Windows, with placeholder identity values when the variables are unset, and keeps it as
+an artifact only when they are set.
 
 ---
 

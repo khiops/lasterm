@@ -7,6 +7,16 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## STORE-ONLY-DESKTOP — the desktop app ships through the Microsoft Store only (2026-10-02)
+
+- A release carries the agents, the Windows hub executable and `SHA256SUMS-<version>.txt`, and no desktop installer: no NSIS `setup.exe`, no MSI, no MSIX. The Microsoft Store signs the package it distributes at no cost; the GitHub installers were unsigned, so Windows warned about an unknown publisher, and Authenticode signing is a recurring cost not taken.
+- The release still packages the unsigned MSIX when the three `MSIX_*` variables are set, as the workflow-run artifact `msix-x86_64-pc-windows-msvc` (kept 30 days), for the Store submission (#619). It is never a release asset.
+- Once the Store has certified a version, the package it signed is attached to that release, with a checksum file of its own, and published to winget as an `msix` installer (#619, #620). `SHA256SUMS-<version>.txt` keeps listing the agents only: the hub's agent fetch reads it.
+- File-system virtualization stays on: the package does not declare `unvirtualizedResources`, which Microsoft reserves for some games and for apps packaged with an external location because it defeats a clean uninstall. A Store install therefore keeps the files it creates under `AppData` in the package's private folder, removed at uninstall; the paths this repository documents describe an unpackaged build, and the Store paths are documented once observed on Windows.
+- Supersedes the second bullet of DESKTOP-UPDATES: the Store updates the desktop app, winget installs the package the Store signed, and there is no release-asset install to update by hand.
+
+---
+
 ## REMOTE-DAEMON-PRESELECT — ask at host creation, with Yes preselected (2026-10-01)
 
 - Refines REMOTE-DAEMON: the Add Host dialog asks, for a Unix SSH host, whether it may keep a small agent running, with Yes preselected and a disclosure of its 30-minute idle stop, systemd-without-lingering logout risk, and No behaviour. The batch import and Duplicate do not ask (below).
@@ -29,6 +39,8 @@ heading, with a pointer to the section that replaced it. A section without one i
 ---
 
 ## DESKTOP-UPDATES — the desktop app does not update itself (#645, 2026-09-29)
+
+**Status:** the second bullet is superseded by STORE-ONLY-DESKTOP (2026-10-02); the rest holds.
 
 - The desktop ships no updater. `tauri-plugin-updater` was registered in builds without an MSIX identity, with an endpoint and a public key, but nothing ever called it, and no release published the `latest.json` and signature it would have read: a GitHub-release install never updated. It is removed with everything that served only it: its configuration and capability, the `@tauri-apps/plugin-updater` package, the MSIX-identity probe that kept it out of Store builds (#112), and `scripts/generate-updater-key.sh`.
 - Each channel updates its own installs. The Microsoft Store updates the MSIX build, and winget the MSI and NSIS installs it makes once it lists Lasterm (#620). An install from a GitHub release asset is updated by hand, by installing the newer release.

@@ -175,7 +175,7 @@ describe("MetaDAL — Hosts CRUD", () => {
 
 		it("throws when updating non-existent host", () => {
 			expect(() => dal.updateHost("no-such-id", { label: "Ghost" })).toThrow(
-				"Host not found after update",
+				"Host not found: no-such-id",
 			);
 		});
 	});

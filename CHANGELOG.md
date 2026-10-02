@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.14.0](https://github.com/khiops/lasterm/compare/v0.13.0...v0.14.0) (2026-10-02)
+
+
+### Features
+
+* **shared,hub,web:** a host's Connect, Reconnect and Disconnect do what they say ([#648](https://github.com/khiops/lasterm/issues/648)) ([#654](https://github.com/khiops/lasterm/issues/654)) ([8426797](https://github.com/khiops/lasterm/commit/84267974316cda9ca2e0865a0afa940fcd01bf66))
+* **web:** Ctrl+Shift+T/W and Alt+Shift+=/- for tabs and panes, from one shortcut table ([#634](https://github.com/khiops/lasterm/issues/634)) ([4b9b2f9](https://github.com/khiops/lasterm/commit/4b9b2f91d6bcaf518a894aa722063d2748c4f6a7)), closes [#631](https://github.com/khiops/lasterm/issues/631)
+* **web:** full keyboard use — tabs, panes, resize, and the rail, the list and the tab bar ([#637](https://github.com/khiops/lasterm/issues/637)) ([#638](https://github.com/khiops/lasterm/issues/638)) ([1c84079](https://github.com/khiops/lasterm/commit/1c840798222867138c343b14b5ab0c9bbaa45d2e))
+* **web:** key hints that follow the focus, and a keyboard shortcuts overlay on Ctrl+/ ([#639](https://github.com/khiops/lasterm/issues/639)) ([#640](https://github.com/khiops/lasterm/issues/640)) ([1876e0c](https://github.com/khiops/lasterm/commit/1876e0c6650e00b7ed82335886ca3824b1c550dd))
+* **web:** preselect remote daemon for SSH hosts ([#673](https://github.com/khiops/lasterm/issues/673)) ([45ee032](https://github.com/khiops/lasterm/commit/45ee032b151d9d438edc8881c0e81ed77695d9d7))
+* **web:** the empty pane is a host picker; the palette lists hosts the same way ([#625](https://github.com/khiops/lasterm/issues/625)) ([#633](https://github.com/khiops/lasterm/issues/633)) ([893d423](https://github.com/khiops/lasterm/commit/893d4234283dbd1161a1bb1733cf67b065c35e27))
+* **web:** the host rail becomes a grid, with Small, Medium and Large badges ([#623](https://github.com/khiops/lasterm/issues/623)) ([#630](https://github.com/khiops/lasterm/issues/630)) ([eb59286](https://github.com/khiops/lasterm/commit/eb59286f936ee660dffb61cdaef6b8ac094ba2cc))
+
+
+### Bug Fixes
+
+* **agent:** keep terminal arguments and directories out of the log ([#683](https://github.com/khiops/lasterm/issues/683)) ([6d232b5](https://github.com/khiops/lasterm/commit/6d232b538620497776a558044b0c37e04e015149))
+* **agent:** write the daemon log one file per day, keeping the last seven ([#646](https://github.com/khiops/lasterm/issues/646)) ([#652](https://github.com/khiops/lasterm/issues/652)) ([49f4e7b](https://github.com/khiops/lasterm/commit/49f4e7bafd68a57949cb1732d36799951f33db87))
+* **desktop:** give the window its large icon, for the taskbar ([#636](https://github.com/khiops/lasterm/issues/636)) ([e75e35b](https://github.com/khiops/lasterm/commit/e75e35bd62b508b0f04cd219004b2615dfcd9776))
+* **hub,web:** launch profiles save a cleared colour, icon or working directory ([#665](https://github.com/khiops/lasterm/issues/665)) ([#666](https://github.com/khiops/lasterm/issues/666)) ([ede69fa](https://github.com/khiops/lasterm/commit/ede69fa4372f9d7df2b2d7c6fa160e1801002658))
+* **hub,web:** the local host keeps its identity, and the host dialog saves clears and the custom command ([#661](https://github.com/khiops/lasterm/issues/661)) ([474a494](https://github.com/khiops/lasterm/commit/474a49436bd11eb8041151ec1715d6c28fd1ccf6))
+* **hub:** log whether an SSH key passphrase was given, never its length ([#644](https://github.com/khiops/lasterm/issues/644)) ([#649](https://github.com/khiops/lasterm/issues/649)) ([3d7c46e](https://github.com/khiops/lasterm/commit/3d7c46e6e8b95b8f9d8eea6e760e70c27100fcb7))
+* **hub:** test a host's connection through its jump host ([#686](https://github.com/khiops/lasterm/issues/686)) ([628f93c](https://github.com/khiops/lasterm/commit/628f93c520748d030fcfdccbb39518536665cc8f))
+* **hub:** trust a host key only for the route it was seen on ([#689](https://github.com/khiops/lasterm/issues/689)) ([090f32e](https://github.com/khiops/lasterm/commit/090f32e964cabfe959a256ade03dd3f0db1f1afb))
+* **web:** centre the switch's thumb ([#641](https://github.com/khiops/lasterm/issues/641)) ([f63c8c2](https://github.com/khiops/lasterm/commit/f63c8c23aa76aaf72dfe2ce21a3730525953d756))
+* **web:** let a visual profile's border go back to the host colour ([#663](https://github.com/khiops/lasterm/issues/663)) ([#664](https://github.com/khiops/lasterm/issues/664)) ([9760739](https://github.com/khiops/lasterm/commit/976073956c5cc48414ece41955b0ce7115752c59))
+* **web:** let the local host's colour and icon be changed ([#657](https://github.com/khiops/lasterm/issues/657)) ([33d85d2](https://github.com/khiops/lasterm/commit/33d85d2309d3cf6a35798e6dc6f51c89c34d9fdc))
+* **web:** open the command palette with Ctrl+Shift+P, and keep it from the PTY ([#627](https://github.com/khiops/lasterm/issues/627)) ([f319029](https://github.com/khiops/lasterm/commit/f3190299ca994b884f726132b98b90b48dcb2771)), closes [#624](https://github.com/khiops/lasterm/issues/624)
+* **web:** trim proxy when checking Windows test result ([#676](https://github.com/khiops/lasterm/issues/676)) ([01257b4](https://github.com/khiops/lasterm/commit/01257b45fb6d66634f809eae97801e5b384b69c4)), closes [#672](https://github.com/khiops/lasterm/issues/672)
+
+
+### Documentation
+
+* **desktop:** describe the automated Store submission after the first ([#682](https://github.com/khiops/lasterm/issues/682)) ([8e5a8b2](https://github.com/khiops/lasterm/commit/8e5a8b2c42791378330bd9ffaf54bfdd70509c9c))
+* **root:** add the Microsoft Store listing texts ([#679](https://github.com/khiops/lasterm/issues/679)) ([0813faa](https://github.com/khiops/lasterm/commit/0813faa8438059f0c46eaa1aaf11f34af307381e)), closes [#618](https://github.com/khiops/lasterm/issues/618)
+* **root:** align public documentation with shipped features and processes ([#670](https://github.com/khiops/lasterm/issues/670)) ([d24ebbb](https://github.com/khiops/lasterm/commit/d24ebbbc6eb823ac1b78a6f11a77951962eee808))
+* **root:** drop the device-switch claim until another device can connect ([#669](https://github.com/khiops/lasterm/issues/669)) ([e88086c](https://github.com/khiops/lasterm/commit/e88086c5af5386d22a1e404df42a24990d70319b)), closes [#668](https://github.com/khiops/lasterm/issues/668)
+* **root:** say when a known_hosts revocation stops a connection ([#687](https://github.com/khiops/lasterm/issues/687)) ([b5e3f89](https://github.com/khiops/lasterm/commit/b5e3f891ea1b64958ed307bdc9012cf675ac8f44))
+* **root:** SECURITY, SPEC and STORAGE say what the code does ([#647](https://github.com/khiops/lasterm/issues/647)) ([#650](https://github.com/khiops/lasterm/issues/650)) ([8f6b0b7](https://github.com/khiops/lasterm/commit/8f6b0b7652411301653fab4775faaa3bfd760cae))
+* **root:** state the host-key and CORS rules the code follows ([#690](https://github.com/khiops/lasterm/issues/690)) ([3a1cbbf](https://github.com/khiops/lasterm/commit/3a1cbbf940d6a5b30bb55d5bd9a656527b03480e))
+* **root:** state the project model and keep organisational features out of the roadmap ([#667](https://github.com/khiops/lasterm/issues/667)) ([176ea35](https://github.com/khiops/lasterm/commit/176ea356d9b0ea9b2fc89e8d245835a31aa54707))
+
+
+### CI/CD
+
+* **release:** submit each release to the Microsoft Store ([#681](https://github.com/khiops/lasterm/issues/681)) ([8c56840](https://github.com/khiops/lasterm/commit/8c56840edca27105f8843469be06649cd32aa360))
+
 ## [0.13.0](https://github.com/khiops/lasterm/compare/v0.12.0...v0.13.0) (2026-09-28)
 
 

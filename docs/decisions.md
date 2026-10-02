@@ -7,6 +7,16 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## ROUTE-BOUND-HOST-TRUST — a host key is trusted for the route it was seen on, and a revocation always wins (2026-10-02)
+
+- A target's key is trusted for its address and the host's declared jump together: direct, a saved jump host (by its id and its current address), or a jump spec (by the bastion address `planJump` reads from it). Through a bastion the target's name is resolved on the bastion's side, so one address on two routes can be two machines (#685). A host with no SSH address has no route.
+- The hub's run-long "trust once" cache is keyed by that route, for sessions, reconnects and the connection test alike: a key accepted on one route is asked about again on another. A changed route needs no cache invalidation, since it has another key.
+- A host's stored pins belong to its current route. An update that changes the target's address (hostname or port) or its jump declaration clears the target pin (`ssh_fingerprint`), and one that changes the jump declaration also clears the spec jump pin (`ssh_proxy_fingerprint`), in the same update. Changing a saved jump host's own address clears its pin and the target pins of the hosts that go through it. Deleting a jump host changes the route of the hosts that went through it (`ON DELETE SET NULL`: direct, or a spec left beside the id), and their pins are cleared with it. A pin is read and written only for the route it belongs to: a connection prepared before an edit neither uses the new route's pin nor records one for a route the row no longer declares, and such an attempt ends with a message to connect again. A saved jump host is reached as a bastion directly at its address, so its pin serves that use only when the host is itself declared direct. A changed user name is not a route change (#684).
+- A key `known_hosts` marks `@revoked` is refused on every connection — session, reconnect, connection test, bastion — even when it is pinned or was accepted earlier in the run. A revocation is the user's own SSH saying a key must no longer be trusted, and a pin recorded before it does not outrank it.
+- Not decided here: applying `trust_known_hosts` to the connection test's target, and the `known_hosts` evidence its question omits (#685).
+
+---
+
 ## STORE-ONLY-DESKTOP — the desktop app ships through the Microsoft Store only (2026-10-02)
 
 - The only desktop package distributed is the one the Microsoft Store signs. The Store signs it at no cost; the GitHub installers were unsigned, so Windows warned about an unknown publisher, and Authenticode signing is a recurring cost not taken.

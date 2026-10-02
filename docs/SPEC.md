@@ -624,7 +624,7 @@ Importing from `~/.ssh/config` keeps a `ProxyJump` as a spec, then links it to a
 
 ### 4.6 Known Hosts Verification
 
-A host key is trusted per host, in meta.db (`hosts.ssh_fingerprint`). On a first SSH connect to a
+A host key is stored on the host in meta.db (`hosts.ssh_fingerprint`) for its target route: target hostname and port plus the declared jump, including a saved jump's id and current address. Route edits clear the target pin; jump edits also clear the spec jump pin. Bastion address edits clear dependent target pins, and bastion deletion clears both dependent pins. User and label edits preserve trust. Reads and writes require the route the connection used; trust for this hub run uses that same route for sessions, reconnects and connection tests. On a first SSH connect to a
 host with no pinned key (SECURITY.md § 3.3):
 
 1. Hub receives fingerprint from ssh2 `hostVerifier` callback

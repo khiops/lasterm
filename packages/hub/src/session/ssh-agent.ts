@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import ssh2, { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
+import { parseSshHost } from "../ssh-route.js";
 import { AgentConnection } from "./agent-connection.js";
 import {
 	AgentBinaryDecisionNeeded,
@@ -50,19 +51,7 @@ export type AuthPromptFn = (
  * Parse the username and hostname from an sshHost string.
  * Accepts "user@hostname" or just "hostname".
  */
-export function parseSshHost(sshHost: string): { username: string; hostname: string } {
-	const atIdx = sshHost.indexOf("@");
-	if (atIdx !== -1) {
-		return {
-			username: sshHost.slice(0, atIdx),
-			hostname: sshHost.slice(atIdx + 1),
-		};
-	}
-	return {
-		username: process.env.USER ?? process.env.USERNAME ?? "root",
-		hostname: sshHost,
-	};
-}
+export { parseSshHost } from "../ssh-route.js";
 
 function quotePosixShellArg(value: string): string {
 	if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;

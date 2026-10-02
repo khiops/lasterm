@@ -1,3 +1,4 @@
+import { sshAddress, targetRoute } from "../ssh-route.js";
 /**
  * A host's Connect, Reconnect and Disconnect, asked for from its menu (#648),
  * against a mock SSH server: the agent on stdio, or a daemon reached over its
@@ -239,7 +240,12 @@ async function hubWith(
 		sshKeyPath: CLIENT_KEY_PATH,
 		sshRemoteDaemon: options.daemon,
 	});
-	if (options.pinned !== false) ctx.metaDal.updateHostFingerprint(host.id, HOST_FINGERPRINT);
+	if (options.pinned !== false)
+		ctx.metaDal.updateHostFingerprint(
+			host.id,
+			HOST_FINGERPRINT,
+			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
+		);
 
 	const heard: ProtocolMessage[] = [];
 	const window: WsClient = {

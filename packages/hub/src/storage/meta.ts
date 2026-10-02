@@ -105,12 +105,24 @@ export class MetaDAL {
 		this.hosts.updateHostAgentSha256(id, sha256);
 	}
 
-	getHostFingerprint(hostId: string): string | null {
-		return this.hosts.getHostFingerprint(hostId);
+	getHostFingerprint(hostId: string, expectedRoute: string | null): string | null {
+		return this.hosts.getHostFingerprint(hostId, expectedRoute);
 	}
 
-	updateHostFingerprint(hostId: string, fingerprint: string): void {
-		this.hosts.updateHostFingerprint(hostId, fingerprint);
+	updateHostProxyFingerprint(
+		hostId: string,
+		fingerprint: string,
+		expectedRoute: string | null,
+	): boolean {
+		return this.hosts.updateHostProxyFingerprint(hostId, fingerprint, expectedRoute);
+	}
+
+	updateHostFingerprint(
+		hostId: string,
+		fingerprint: string,
+		expectedRoute: string | null,
+	): boolean {
+		return this.hosts.updateHostFingerprint(hostId, fingerprint, expectedRoute);
 	}
 
 	deleteHost(id: string): boolean {

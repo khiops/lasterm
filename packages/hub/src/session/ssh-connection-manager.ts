@@ -1,3 +1,4 @@
+import { sshAddress, targetRoute } from "../ssh-route.js";
 import { openJumpRoute } from "./jump-connection.js";
 /**
  * SshConnectionManager — SSH-specific connection logic:
@@ -582,9 +583,10 @@ export class SshConnectionManager {
 					agentLaunchConfig(this.ctx),
 					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
-				const storedFp = this.ctx.metaDal.getHostFingerprint(hostId);
-				const hostKey = `${sshHostname}:${host.sshPort ?? 22}`;
-				const sessionFp = this.ctx.trustedOnceFingerprints.get(hostKey);
+				const hostKey = targetRoute(host, (id) => sshAddress(this.ctx.metaDal.getHost(id)));
+				const storedFp = this.ctx.metaDal.getHostFingerprint(hostId, hostKey);
+				const sessionFp =
+					hostKey === null ? undefined : this.ctx.trustedOnceFingerprints.get(hostKey);
 
 				// Thread the abort signal into start() so closeSession() can cancel mid-handshake.
 				await sshAgent.start(
@@ -751,7 +753,18 @@ export class SshConnectionManager {
 	): Promise<TestConnectResult> {
 		const username = msg.sshUser || parsed.username || process.env.USER || "root";
 		const saved = this.ctx.metaDal.getHost(msg.hostId);
-		const sameSpec = saved !== undefined && saved.sshProxySpec?.trim() === msg.sshProxySpec?.trim();
+		const declaration = {
+			id: msg.hostId,
+			type: "ssh" as const,
+			sshHost: msg.hostname,
+			sshPort: msg.port,
+			sshProxyHostId: msg.sshProxyHostId ?? null,
+			sshProxySpec: msg.sshProxySpec ?? null,
+		};
+		const lookup = (id: string) => sshAddress(this.ctx.metaDal.getHost(id));
+		const hostKey = targetRoute(declaration, lookup);
+		const savedRoute =
+			saved !== undefined && hostKey !== null && targetRoute(saved, lookup) === hostKey;
 		const resolution = resolveJump(
 			{
 				id: msg.hostId,
@@ -759,7 +772,7 @@ export class SshConnectionManager {
 				sshUser: msg.sshUser || null,
 				sshProxyHostId: msg.sshProxyHostId ?? null,
 				sshProxySpec: msg.sshProxySpec ?? null,
-				sshProxyFingerprint: sameSpec ? (saved.sshProxyFingerprint ?? null) : null,
+				sshProxyFingerprint: savedRoute ? (saved.sshProxyFingerprint ?? null) : null,
 			},
 			this.ctx.metaDal,
 			this.ctx.configResolver?.sshConfig?.trustKnownHosts === true,
@@ -796,9 +809,10 @@ export class SshConnectionManager {
 				jump &&
 				!jump.pinnedFingerprint &&
 				successfulJumpFingerprint &&
-				(jump.pinTo.kind === "host" || sameSpec)
+				(jump.pinTo.kind === "host" || savedRoute)
 			) {
-				pinJumpKey(this.ctx.metaDal, jump, successfulJumpFingerprint);
+				if (!pinJumpKey(this.ctx.metaDal, jump, successfulJumpFingerprint, hostKey))
+					return { ok: false, message: "The host changed while connecting. Connect again." };
 			}
 			return result;
 		};
@@ -821,22 +835,13 @@ export class SshConnectionManager {
 		}
 		connectConfig.readyTimeout = SSH_TEST_TIMEOUT_MS;
 
-		// A saved target key counts only when the test uses the saved address
-		// and jump declaration: a different route may reach a different machine.
-		const savedRoute =
-			saved?.type === "ssh" &&
-			saved.sshHost === msg.hostname &&
-			(saved.sshPort ?? 22) === msg.port &&
-			(saved.sshProxyHostId ?? null) === (msg.sshProxyHostId ?? null) &&
-			(saved.sshProxySpec?.trim() || null) === (msg.sshProxySpec?.trim() || null);
-		const storedFingerprint = savedRoute ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
-		const hostKey = `${parsed.hostname}:${msg.port}`;
+		const storedFingerprint = savedRoute
+			? this.ctx.metaDal.getHostFingerprint(msg.hostId, hostKey)
+			: null;
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
-		const canUseAddressTrust = resolution.kind !== "jump" && (!saved || savedRoute);
-		const sessionTrusted = canUseAddressTrust
-			? this.ctx.trustedOnceFingerprints.get(hostKey)
-			: undefined;
+		const sessionTrusted =
+			hostKey === null ? undefined : this.ctx.trustedOnceFingerprints.get(hostKey);
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
 		const first = await attempt(trusted);
@@ -863,14 +868,13 @@ export class SshConnectionManager {
 			storedFingerprint === null,
 		);
 		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
-		// The saved route can retain a permanent pin, including through a jump.
-		// Only eligible direct tests cache address trust for later sessions.
-		// Jump tests and edited saved routes retain the key only for this retry.
 		if (action === "trust_permanent" && savedRoute) {
-			this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint);
-		} else if (canUseAddressTrust) {
+			if (!this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint, hostKey))
+				return { ok: false, message: "The host changed while connecting. Connect again." };
+		} else if (hostKey !== null) {
 			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
 		}
+
 		const second = await attempt(new Set([fingerprint]));
 		if (second.unverifiedFingerprint !== undefined) {
 			return { ok: false, message: "SSH host key changed during the test" };

@@ -18,111 +18,10 @@
  */
 
 import type { Host } from "@lasterm/shared";
-import { parseSshHost } from "./ssh-agent.js";
+import { parseSshHost, planJump, targetRoute } from "../ssh-route.js";
 
-/** A jump named as a spec, once read. */
-export interface ParsedJumpSpec {
-	user: string | null;
-	host: string;
-	port: number;
-}
-
-export type JumpSpecResult =
-	| { kind: "spec"; spec: ParsedJumpSpec }
-	| { kind: "chain"; hops: number }
-	| { kind: "invalid"; reason: string };
-
-/**
- * Read a `ProxyJump` value the way `ssh_config(5)` writes it.
- *
- * `[host]:port` is accepted as well as `host:port`: both appear in the wild,
- * and the bracketed form is the one a copied `known_hosts` line offers.
- */
-export function parseJumpSpec(raw: string): JumpSpecResult {
-	const trimmed = raw.trim();
-	if (trimmed === "") return { kind: "invalid", reason: "it is empty" };
-	if (trimmed.toLowerCase() === "none") {
-		return { kind: "invalid", reason: "`none` means no jump at all" };
-	}
-
-	const hops = trimmed.split(",").filter((hop) => hop.trim() !== "");
-	if (hops.length > 1) return { kind: "chain", hops: hops.length };
-
-	const single = hops[0] ?? trimmed;
-	const at = single.lastIndexOf("@");
-	const user = at === -1 ? null : single.slice(0, at);
-	const hostAndPort = at === -1 ? single : single.slice(at + 1);
-	if (at !== -1 && user === "") return { kind: "invalid", reason: "it names an empty user" };
-
-	// [host]:port, the bracketed form
-	const bracketed = hostAndPort.match(/^\[([^\]]+)\](?::(\d+))?$/);
-	if (bracketed) {
-		const host = bracketed[1] ?? "";
-		const port = bracketed[2] === undefined ? 22 : Number.parseInt(bracketed[2], 10);
-		if (host === "") return { kind: "invalid", reason: "it names no host" };
-		if (!Number.isInteger(port) || port < 1 || port > 65535) {
-			return { kind: "invalid", reason: `port ${bracketed[2]} is not a port` };
-		}
-		return { kind: "spec", spec: { user, host, port } };
-	}
-
-	const colon = hostAndPort.lastIndexOf(":");
-	// An IPv6 address without brackets has several colons and no port.
-	const looksLikeIpv6 = hostAndPort.indexOf(":") !== colon;
-	const host = colon === -1 || looksLikeIpv6 ? hostAndPort : hostAndPort.slice(0, colon);
-	const portText = colon === -1 || looksLikeIpv6 ? null : hostAndPort.slice(colon + 1);
-	if (host === "") return { kind: "invalid", reason: "it names no host" };
-
-	const port = portText === null ? 22 : Number.parseInt(portText, 10);
-	if (!Number.isInteger(port) || port < 1 || port > 65535) {
-		return { kind: "invalid", reason: `port ${portText} is not a port` };
-	}
-	return { kind: "spec", spec: { user, host, port } };
-}
-
-/** What a host says about the jump it is reached through. */
-export interface JumpDeclaration {
-	sshProxyHostId?: string | null;
-	sshProxySpec?: string | null;
-}
-
-export type JumpPlan =
-	/** No jump: the host is reached directly. */
-	| { kind: "direct" }
-	/** Through a host this hub knows, by its id. */
-	| { kind: "host"; hostId: string }
-	/** Through a bastion named as a spec. */
-	| { kind: "spec"; spec: ParsedJumpSpec }
-	/** Declared, and unusable — the message says why. */
-	| { kind: "refused"; message: string };
-
-/**
- * What a host's declaration amounts to.
- *
- * A host id wins over a spec: a jump this hub knows is the one with the
- * authentication and the pinned key, and a spec left beside it is a leftover
- * from before it was linked.
- */
-export function planJump(declaration: JumpDeclaration): JumpPlan {
-	const hostId = declaration.sshProxyHostId?.trim();
-	if (hostId) return { kind: "host", hostId };
-
-	const raw = declaration.sshProxySpec?.trim();
-	if (!raw) return { kind: "direct" };
-
-	const parsed = parseJumpSpec(raw);
-	switch (parsed.kind) {
-		case "spec":
-			return { kind: "spec", spec: parsed.spec };
-		case "chain":
-			return {
-				kind: "refused",
-				message: `This host is reached through ${parsed.hops} jumps in a row, which Lasterm does not do yet. Name the last one, or add the chain as hosts of their own.`,
-			};
-		case "invalid":
-			return { kind: "refused", message: `This host's jump cannot be read: ${parsed.reason}.` };
-	}
-}
+export type { JumpDeclaration, JumpPlan, JumpSpecResult, ParsedJumpSpec } from "../ssh-route.js";
+export { parseJumpSpec, planJump } from "../ssh-route.js";
 
 /** A jump turned into what it takes to travel through it. */
 export interface ResolvedJump {
@@ -136,7 +35,9 @@ export interface ResolvedJump {
 	/** Whether a key `known_hosts` already trusts is enough on its own. */
 	trustKnownHosts: boolean;
 	/** Where the key is pinned once a connection through it has worked. */
-	pinTo: { kind: "host"; hostId: string } | { kind: "spec"; hostId: string };
+	pinTo:
+		| { kind: "host"; hostId: string; expectedRoute: string | null }
+		| { kind: "spec"; hostId: string };
 }
 
 export type JumpResolution =
@@ -150,7 +51,7 @@ export type JumpResolution =
 /** What resolving a jump reads from this hub's hosts. */
 export interface JumpHosts {
 	getHost(id: string): Host | undefined;
-	getHostFingerprint(id: string): string | null;
+	getHostFingerprint(id: string, expectedRoute: string | null): string | null;
 }
 
 /**
@@ -184,6 +85,10 @@ export function resolveJump(
 				};
 			}
 			const jumpParsed = parseSshHost(jumpHost.sshHost);
+			const expectedRoute = targetRoute(
+				{ ...jumpHost, sshProxyHostId: null, sshProxySpec: null },
+				() => undefined,
+			);
 			return {
 				kind: "jump",
 				jump: {
@@ -197,9 +102,13 @@ export function resolveJump(
 						keyPath: jumpHost.sshKeyPath ?? undefined,
 					},
 					promptHostId: jumpHost.id,
-					pinnedFingerprint: hosts.getHostFingerprint(jumpHost.id),
+					pinnedFingerprint: hosts.getHostFingerprint(jumpHost.id, expectedRoute),
 					trustKnownHosts,
-					pinTo: { kind: "host", hostId: jumpHost.id },
+					pinTo: {
+						kind: "host",
+						hostId: jumpHost.id,
+						expectedRoute,
+					},
 				},
 			};
 		}
@@ -228,12 +137,18 @@ export function resolveJump(
 /** Record a jump key only after the caller has established a successful connection. */
 export function pinJumpKey(
 	writer: {
-		updateHostFingerprint(id: string, fingerprint: string): unknown;
-		updateHost(id: string, fields: { sshProxyFingerprint: string }): unknown;
+		updateHostFingerprint(id: string, fingerprint: string, expectedRoute: string | null): boolean;
+		updateHostProxyFingerprint(
+			id: string,
+			fingerprint: string,
+			expectedRoute: string | null,
+		): boolean;
 	},
 	jump: ResolvedJump,
 	fingerprint: string,
-): void {
-	if (jump.pinTo.kind === "host") writer.updateHostFingerprint(jump.pinTo.hostId, fingerprint);
-	else writer.updateHost(jump.pinTo.hostId, { sshProxyFingerprint: fingerprint });
+	expectedRoute: string | null,
+): boolean {
+	if (jump.pinTo.kind === "host")
+		return writer.updateHostFingerprint(jump.pinTo.hostId, fingerprint, jump.pinTo.expectedRoute);
+	return writer.updateHostProxyFingerprint(jump.pinTo.hostId, fingerprint, expectedRoute);
 }

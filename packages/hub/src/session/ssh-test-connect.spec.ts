@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { generateId, type TestConnectMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
+import { sshAddress, targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
@@ -75,7 +76,7 @@ type SavedHost = {
 };
 
 function setup(saved?: SavedHost) {
-	const updateHostFingerprint = vi.fn();
+	const updateHostFingerprint = vi.fn().mockReturnValue(true);
 	const ctx = {
 		passphraseCache: new Map(),
 		promptContexts: new Map<string, PromptContext>(),
@@ -87,7 +88,12 @@ function setup(saved?: SavedHost) {
 		trustedOnceFingerprints: new Map<string, string>(),
 		metaDal: {
 			getHost: (id: string) => (saved && id === "saved-host" ? { id, ...saved } : undefined),
-			getHostFingerprint: (id: string) => (saved && id === "saved-host" ? saved.fingerprint : null),
+			getHostFingerprint: (id: string, expectedRoute: string | null) =>
+				saved &&
+				id === "saved-host" &&
+				targetRoute({ id, ...saved }, () => undefined) === expectedRoute
+					? saved.fingerprint
+					: null,
 			updateHostFingerprint,
 		},
 	};
@@ -100,6 +106,20 @@ function setup(saved?: SavedHost) {
 		null as never,
 	);
 	return { ctx, client, mgr, updateHostFingerprint };
+}
+
+function testedRoute(msg: TestConnectMessage, ctx?: ReturnType<typeof setup>["ctx"]): string {
+	return targetRoute(
+		{
+			id: msg.hostId,
+			type: "ssh",
+			sshHost: msg.hostname,
+			sshPort: msg.port,
+			sshProxyHostId: msg.sshProxyHostId ?? null,
+			sshProxySpec: msg.sshProxySpec ?? null,
+		},
+		(id) => sshAddress(ctx?.metaDal.getHost(id)),
+	)!;
 }
 
 function testMessage(hostId: string, port: number): TestConnectMessage {
@@ -239,7 +259,9 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			expect(mock.auth.attempts).toBeGreaterThan(0);
 			// An unsaved host has no row to record the key in: this hub run trusts it.
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(ctx.trustedOnceFingerprints.get(`127.0.0.1:${mock.port}`)).toBe(prompt.fingerprint);
+			expect(ctx.trustedOnceFingerprints.get(testedRoute(testMessage("new-host", mock.port)))).toBe(
+				prompt.fingerprint,
+			);
 		},
 	);
 
@@ -259,7 +281,11 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		await done;
 
 		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
-		expect(updateHostFingerprint).toHaveBeenCalledWith("saved-host", prompt.fingerprint);
+		expect(updateHostFingerprint).toHaveBeenCalledWith(
+			"saved-host",
+			prompt.fingerprint,
+			expect.any(String),
+		);
 	});
 
 	it.each(["trust_once", "trust_permanent"] as const)(
@@ -274,7 +300,13 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				fingerprint: "SHA256:recorded-for-another-address",
 			});
 
-			ctx.trustedOnceFingerprints.set(`127.0.0.1:${mock.port}`, await serverFingerprint(mock.port));
+			ctx.trustedOnceFingerprints.set(
+				targetRoute(
+					{ id: "saved-host", type: "ssh", sshHost: "127.0.0.2", sshPort: mock.port },
+					() => undefined,
+				)!,
+				await serverFingerprint(mock.port),
+			);
 			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
 			const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
 			const prompt = await hostVerifyPrompt(client);
@@ -283,7 +315,10 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			await done;
 			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+			expect(ctx.trustedOnceFingerprints.size).toBe(cacheBefore.size + 1);
+			expect(
+				ctx.trustedOnceFingerprints.get(testedRoute(testMessage("saved-host", mock.port))),
+			).toBe(prompt.fingerprint);
 		},
 	);
 
@@ -459,7 +494,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				: join(home, "unused-agent.sock"),
 		);
 		const { ctx, client, mgr, updateHostFingerprint } = setup();
-		const updateHost = vi.fn();
+		const updateHost = vi.fn().mockReturnValue(true);
 		const hosts = new Map<string, Record<string, unknown>>();
 		hosts.set("jump", {
 			id: "jump",
@@ -482,8 +517,9 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			});
 		Object.assign(ctx.metaDal, {
 			getHost: (id: string) => hosts.get(id),
-			getHostFingerprint: (id: string) => (id === "jump" && !options.unpinned ? fingerprint : null),
-			updateHost,
+			getHostFingerprint: (id: string, expectedRoute: string | null) =>
+				expectedRoute !== null && id === "jump" && !options.unpinned ? fingerprint : null,
+			updateHostProxyFingerprint: updateHost,
 		});
 		Object.assign(ctx, {
 			configResolver: { sshConfig: { trustKnownHosts: options.known === true } },
@@ -493,7 +529,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			hostname: "target",
 			...(options.spec ? { sshProxySpec: spec } : { sshProxyHostId: "jump" }),
 		};
-		ctx.trustedOnceFingerprints.set("target:2222", fingerprint);
+		ctx.trustedOnceFingerprints.set(JSON.stringify(["target", 2222, ["direct"]]), fingerprint);
 		return {
 			ctx,
 			client,
@@ -507,6 +543,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			updateHost,
 			updateHostFingerprint,
 			targetAuth: target.auth,
+			targetPort: target.port,
 		};
 	}
 	function reply(f: Awaited<ReturnType<typeof fixture>>) {
@@ -528,9 +565,9 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		cleanup.push(() => unreachable.close());
 		const port = (unreachable.address() as net.AddressInfo).port;
 		const msg: TestConnectMessage = { ...f.msg, hostname: "127.0.0.1", port };
-		f.ctx.trustedOnceFingerprints.set(`127.0.0.1:${port}`, fingerprint);
 		const direct = { ...msg };
 		delete direct.sshProxyHostId;
+		f.ctx.trustedOnceFingerprints.set(testedRoute(direct), fingerprint);
 		await f.mgr.handleTestConnect("c1", direct);
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
 		expect(dials).toBe(1);
@@ -546,7 +583,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 	});
 
 	it.each([true, false])(
-		"ignores address trust through a jump and leaves it unchanged (unsaved=%s)",
+		"isolates direct trust and remembers trust through a jump (unsaved=%s)",
 		async (unsaved) => {
 			const f = await fixture({ unsaved });
 			const cacheBefore = new Map(f.ctx.trustedOnceFingerprints);
@@ -558,34 +595,70 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			expect(new Map(f.ctx.trustedOnceFingerprints)).toEqual(cacheBefore);
-			expect(cacheWrite).not.toHaveBeenCalled();
+			expect(f.ctx.trustedOnceFingerprints.size).toBe(cacheBefore.size + 1);
+			expect(f.ctx.trustedOnceFingerprints.get(testedRoute(f.msg, f.ctx))).toBe(fingerprint);
+			expect(cacheWrite).toHaveBeenCalledWith(testedRoute(f.msg, f.ctx), fingerprint);
+			f.client.send.mockClear();
+			await f.mgr.handleTestConnect("c1", f.msg);
+			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+			expect(f.client.send).not.toHaveBeenCalledWith(
+				expect.objectContaining({ type: "HOST_VERIFY" }),
+			);
 			expect(f.updateHostFingerprint).not.toHaveBeenCalled();
 			await ended(f);
 		},
 	);
 
-	it("asks again when an unsaved address is tested through another jump", async () => {
+	it("reuses jump A trust, but asks through jump B and direct at the same address", async () => {
 		const f = await fixture({ unsaved: true });
 		const other = await fixture({ unsaved: true });
-		f.hosts.set("jump-b", other.hosts.get("jump")!);
-		f.ctx.metaDal.getHostFingerprint = (id: string) =>
-			id === "jump" || id === "jump-b" ? fingerprint : null;
+		f.hosts.set("jump-b", { ...other.hosts.get("jump")!, id: "jump-b" });
+		f.ctx.metaDal.getHostFingerprint = (id: string, expectedRoute: string | null) =>
+			expectedRoute !== null && (id === "jump" || id === "jump-b") ? fingerprint : null;
 		f.ctx.trustedOnceFingerprints.clear();
-		for (const sshProxyHostId of ["jump", "jump-b"]) {
+		const msg = { ...f.msg, hostname: "127.0.0.1", port: f.targetPort };
+		for (const sshProxyHostId of ["jump", "jump", "jump-b", null]) {
 			f.client.send.mockClear();
-			const done = f.mgr.handleTestConnect("c1", { ...f.msg, sshProxyHostId });
-			const prompt = await hostVerifyPrompt(f.client);
-			expect(prompt.fingerprint).toBe(fingerprint);
-			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+			const declaration: TestConnectMessage = { ...msg };
+			if (sshProxyHostId) declaration.sshProxyHostId = sshProxyHostId;
+			else delete declaration.sshProxyHostId;
+			const cached = f.ctx.trustedOnceFingerprints.has(testedRoute(declaration, f.ctx));
+			const done = f.mgr.handleTestConnect("c1", declaration);
+			if (!cached) {
+				const prompt = await hostVerifyPrompt(f.client);
+				expect(prompt.fingerprint).toBe(fingerprint);
+				f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+			}
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			expect(f.ctx.trustedOnceFingerprints.size).toBe(0);
+			if (cached)
+				expect(f.client.send).not.toHaveBeenCalledWith(
+					expect.objectContaining({ type: "HOST_VERIFY" }),
+				);
 		}
-		expect(f.routes).toEqual(["target:2222", "target:2222"]);
-		expect(other.routes).toEqual(["target:2222", "target:2222"]);
+		expect(f.ctx.trustedOnceFingerprints.size).toBe(3);
 		await ended(f);
 		await ended(other);
+	});
+	it("fails when a target pin write is refused after a route edit during the question", async () => {
+		const f = await fixture();
+		f.ctx.trustedOnceFingerprints.clear();
+		f.updateHostFingerprint.mockReturnValue(false);
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const prompt = await hostVerifyPrompt(f.client);
+		f.hosts.get("saved-host")!.sshHost = "edited";
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({
+			type: "TEST_CONNECT_FAIL",
+			message: "The host changed while connecting. Connect again.",
+		});
+		expect(f.routes).toHaveLength(1);
+		expect(f.updateHostFingerprint).toHaveBeenCalledWith(
+			"saved-host",
+			fingerprint,
+			testedRoute(f.msg, f.ctx),
+		);
 	});
 
 	it("refuses a revoked target through a jump before asking or writing", async () => {
@@ -627,8 +700,13 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		await done;
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 		if (spec)
-			expect(f.updateHost).toHaveBeenCalledWith("saved-host", { sshProxyFingerprint: fingerprint });
-		else expect(f.updateHostFingerprint).toHaveBeenCalledWith("jump", fingerprint);
+			expect(f.updateHost).toHaveBeenCalledWith(
+				"saved-host",
+				fingerprint,
+				testedRoute(f.msg, f.ctx),
+			);
+		else
+			expect(f.updateHostFingerprint).toHaveBeenCalledWith("jump", fingerprint, expect.any(String));
 		await ended(f);
 	});
 	it.each([{ unsaved: true }, { stale: true }])(
@@ -660,7 +738,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			),
 		),
 	)(
-		"does not reuse or save a target key learned through an edited route (%j)",
+		"isolates saved pins while caching the tested edited route (%j)",
 		async ({ declaration, action, matchingCache }) => {
 			const f = await fixture({ spec: true, known: true });
 			const saved = f.hosts.get("saved-host")!;
@@ -670,18 +748,29 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				f.msg.sshProxyHostId = "jump";
 			}
 			if (!matchingCache)
-				f.ctx.trustedOnceFingerprints.set("target:2222", "SHA256:previous-cache-key");
+				f.ctx.trustedOnceFingerprints.set(testedRoute(f.msg, f.ctx), "SHA256:previous-cache-key");
 			const cacheBefore = new Map(f.ctx.trustedOnceFingerprints);
 			f.ctx.metaDal.getHostFingerprint = (id: string) =>
 				id === "saved-host" ? "SHA256:saved-row-pin" : fingerprint;
+			if (matchingCache) f.ctx.trustedOnceFingerprints.set(testedRoute(f.msg, f.ctx), fingerprint);
 			const done = f.mgr.handleTestConnect("c1", f.msg);
-			const prompt = await hostVerifyPrompt(f.client);
-			f.mgr.handleHostVerifyResponse(prompt.promptId, action, "c1");
+			if (!matchingCache) {
+				const prompt = await hostVerifyPrompt(f.client);
+				f.mgr.handleHostVerifyResponse(prompt.promptId, action, "c1");
+			}
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			expect(f.updateHostFingerprint).not.toHaveBeenCalledWith("saved-host", expect.anything());
-			expect(f.ctx.trustedOnceFingerprints).toEqual(cacheBefore);
-			expect(f.ctx.metaDal.getHostFingerprint("saved-host")).toBe("SHA256:saved-row-pin");
+			if (matchingCache)
+				expect(f.client.send).not.toHaveBeenCalledWith(
+					expect.objectContaining({ type: "HOST_VERIFY" }),
+				);
+			expect(f.updateHostFingerprint).not.toHaveBeenCalledWith(
+				"saved-host",
+				expect.anything(),
+				expect.anything(),
+			);
+			expect(f.ctx.trustedOnceFingerprints.get(testedRoute(f.msg, f.ctx))).toBe(fingerprint);
+			expect(f.ctx.trustedOnceFingerprints.size).toBeGreaterThanOrEqual(cacheBefore.size);
 			await ended(f);
 		},
 	);
@@ -703,7 +792,11 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			expect(f.updateHostFingerprint).toHaveBeenCalledWith("saved-host", prompt.fingerprint);
+			expect(f.updateHostFingerprint).toHaveBeenCalledWith(
+				"saved-host",
+				prompt.fingerprint,
+				expect.any(String),
+			);
 			await ended(f);
 		},
 	);
@@ -718,7 +811,11 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
 		await done;
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-		expect(f.updateHostFingerprint).not.toHaveBeenCalledWith("saved-host", expect.anything());
+		expect(f.updateHostFingerprint).not.toHaveBeenCalledWith(
+			"saved-host",
+			expect.anything(),
+			expect.anything(),
+		);
 		await ended(f);
 	});
 	it("uses the parsed target user for a spec jump when sshUser is empty", async () => {

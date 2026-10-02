@@ -1257,7 +1257,7 @@ detached daemon, or deploys and runs it over SSH.
 |----------|-----|-------|-------------|
 | Linux x64 | Not released; built from source (`scripts/build-hub.sh`) | Release asset | Not released |
 | Linux arm64 | Not released | Release asset, for a remote host such as a Raspberry Pi | Not released |
-| Windows x64 | Release asset | Release asset | Microsoft Store (MSIX); no release asset |
+| Windows x64 | Release asset | Release asset | Microsoft Store (the MSIX the Store signs); the release workflow publishes no desktop installer |
 | macOS | Not supported: nothing builds or tests it (#224) | Not supported | Not supported |
 
 What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser

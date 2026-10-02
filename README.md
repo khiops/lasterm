@@ -60,9 +60,9 @@ Node, so npm would add a runtime requirement it exists to remove. Each
 (x86_64, aarch64) and Windows. No release carries a Linux or macOS hub yet (#565); on
 Linux, build it from source as above.
 
-The desktop app is distributed through the Microsoft Store only, which signs it and
-updates it; no release carries a desktop installer (STORE-ONLY-DESKTOP in
-`docs/decisions.md`).
+The only desktop package distributed is the one the Microsoft Store signs: the Store
+installs and updates it, and the release workflow publishes no desktop installer
+(STORE-ONLY-DESKTOP in `docs/decisions.md`).
 
 ---
 
@@ -251,8 +251,9 @@ which only the hub's OS user on its machine can read, and a paired browser canno
 ### Release MSIX identity
 
 The release workflow packages the unsigned MSIX for the Microsoft Store only when the repository has the
-Partner Center package identity configured as GitHub repository variables. The package stays a workflow-run
-artifact (`msix-x86_64-pc-windows-msvc`, kept 30 days); it is never a release asset. Set these once under
+Partner Center package identity configured as GitHub repository variables. The unsigned package stays a
+workflow-run artifact (`msix-x86_64-pc-windows-msvc`, kept 30 days) and is never uploaded to the release. Set
+these once under
 `Settings` -> `Secrets and variables` -> `Actions` -> `Variables`:
 
 | Variable | Value |
@@ -261,9 +262,9 @@ artifact (`msix-x86_64-pc-windows-msvc`, kept 30 days); it is never a release as
 | `MSIX_PUBLISHER` | Partner Center publisher subject, for example `CN=...` |
 | `MSIX_PUBLISHER_DISPLAY_NAME` | Publisher display name shown for the app |
 
-If any of these variables are unset, a release packages no MSIX. A CI build that is not a release always
-packages the MSIX on Windows, with placeholder identity values when the variables are unset, and keeps it as
-an artifact only when they are set.
+If any of these variables are unset, a release packages no MSIX. Pushes and pull requests do not build the
+desktop app. A manual `ci.yml` dispatch packages the MSIX on Windows, with placeholder identity values when
+the variables are unset, and keeps it as an artifact only when they are set.
 
 ---
 

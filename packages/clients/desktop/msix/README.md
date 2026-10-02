@@ -8,7 +8,7 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 
 - `.github/workflows/build.yml` builds the Windows desktop executable with `tauri build --no-bundle` and runs `pack-msix.ps1 -SkipBuild`. When MSIX packaging is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`, kept 30 days on a release.
 - A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow.
-- `.github/workflows/release.yml` calls the same build workflow. The `.msix` is never a GitHub Release asset, and a release carries no desktop installer (STORE-ONLY-DESKTOP in `docs/decisions.md`).
+- `.github/workflows/release.yml` calls the same build workflow. This unsigned `.msix` is never uploaded to the GitHub Release, and the release workflow publishes no desktop installer; only the package the Store signs may join a release after certification (STORE-ONLY-DESKTOP in `docs/decisions.md`).
 - There is no signing step: the Microsoft Store signs the package. CI has no Store submission step yet (#619).
 
 ## Package Inputs

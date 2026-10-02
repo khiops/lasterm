@@ -655,8 +655,9 @@ jobs:
           retention-days: ${{ needs.matrix.outputs.retention }}
           compression-level: 0
           overwrite: true
-      # This Store-submission input is retained for 30 days on a release; it is
-      # never a GitHub release asset.
+      # This unsigned package is the Store-submission input, retained for 30 days
+      # on a release. It is never uploaded to the GitHub release; only the
+      # package the Store signs may join the release after certification.
       - name: Pack MSIX
         if: needs.matrix.outputs.msix == 'true' && matrix.triple == 'x86_64-pc-windows-msvc'
         shell: bash

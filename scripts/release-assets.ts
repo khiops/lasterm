@@ -3,9 +3,11 @@
  *
  * Decides what a release publishes, from the workflow artifacts a build produced.
  *
- * build.yml uploads one artifact per producer and enabled target — agent-,
- * hub- and desktop-<triple> — each holding a single <name>.tar. This
- * extracts them and resolves the files against .github/build-matrix.json:
+ * build.yml uploads one artifact per producer and enabled target, each holding
+ * a single <name>.tar. Its callers download only the agent-, hub- and
+ * desktop-<triple> ones; the msix-<triple> artifact is a Store-submission input
+ * and is refused here if it arrives. This extracts the downloaded artifacts and
+ * resolves the files against .github/build-matrix.json:
  *
  *   - the artifacts present are exactly the expected ones, no more, no less;
  *   - each tar holds regular files at its top level and nothing else;

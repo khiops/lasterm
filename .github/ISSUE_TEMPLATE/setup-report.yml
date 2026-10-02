@@ -21,7 +21,7 @@ body:
       options:
         - Microsoft Store
         - winget
-        - An earlier release installer (.exe or .msi)
+        - An earlier release installer (.exe, .msi or .msix)
         - Built from source
     validations:
       required: true

@@ -74,10 +74,11 @@ than inferred: `npm view @termora/hub version` answers 0.0.1, `@lasterm/hub` ans
 that it does not exist.
 
 The hub ships as a single executable that embeds its own Node, so an npm install
-would reintroduce the runtime requirement that executable exists to remove. The desktop
-app is distributed through the **Microsoft Store only**: releases carry the agents and
-the Windows hub, no desktop installer, and the release workflow keeps the unsigned MSIX
-as a run artifact for the Store (STORE-ONLY-DESKTOP in `docs/decisions.md`). The first
+would reintroduce the runtime requirement that executable exists to remove. The only
+desktop package distributed is **the one the Microsoft Store signs**: the release
+workflow publishes the agents and the Windows hub, no desktop installer, and keeps the
+unsigned MSIX as a run artifact for the Store (STORE-ONLY-DESKTOP in
+`docs/decisions.md`). The first
 Store submission is manual and not yet done (#618); submitting each release and
 publishing the package the Store signs to winget are planned (#619, #620). Until the
 Store lists it, the only way to run the desktop app is **building from this

@@ -65,9 +65,9 @@ until you delete it. The `[gc]` section of `config.toml` changes the size and th
 
 **The logs** record events such as the hub starting, a browser signing in with the address it came
 from, and a connection to a host with its name, address and user name. The agent's log also
-records, for each terminal it starts, the program, its arguments and its working directory, so a
-password written into a terminal's command would appear there. The logs never contain what you
-type, what a terminal shows, or a password, passphrase or token you give Lasterm. Each of the hub's
+records, for each terminal it starts, the program and how many arguments it was given, never the
+arguments or the working directory. The logs never contain what you type, what a terminal shows,
+or a password, passphrase or token you give Lasterm. Each of the hub's
 logs is set aside when it reaches 10 MB, replacing the one set aside before. The agent writes one
 log file per day and keeps the last 7 (`[logging] agent_files_kept` in `config.toml`); what it
 prints when it starts goes to `agent-daemon.log` in the state folder, which is kept until you

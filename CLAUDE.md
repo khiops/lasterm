@@ -325,3 +325,9 @@ explicit port that is taken moves up to 99 ports higher (`zero_conf`).
 - SQLite cross-DB: no FK between meta.db and spool.db — use cache_index for consistency
 - Auth token comparison: always `crypto.timingSafeEqual` (constant-time)
 - astix auto-indexes via file watcher — NEVER call `reindex_project` explicitly unless you get a stale index error after a `get_symbol`/`get_symbols` failure. Write → get_symbols works without reindex.
+
+### Microsoft Store news
+
+A change users will see adds its own named `packaging/store/news/<change>.md`
+file in its own pull request, with one `<language>: …` line per listing language
+(today `en`). See `packaging/store/news/README.md`.

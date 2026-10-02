@@ -20,6 +20,17 @@ on:
         required: false
         type: string
 
+    # No other job reads a secret other than GITHUB_TOKEN.
+    secrets:
+      PARTNER_CENTER_TENANT_ID:
+        required: false
+      PARTNER_CENTER_SELLER_ID:
+        required: false
+      PARTNER_CENTER_CLIENT_ID:
+        required: false
+      PARTNER_CENTER_CLIENT_SECRET:
+        required: false
+
 # Empty baseline, so a job added later starts from nothing rather than from the
 # repository default. Every job below declares the scopes it needs.
 permissions: {}
@@ -478,3 +489,82 @@ jobs:
             echo "::error::Release $TAG_NAME is still draft after edit!"
             exit 1
           fi
+
+  # Runs after the GitHub release is public. Failure leaves that release published
+  # and the Store unchanged, holding a draft, or already in certification if the
+  # runner fails after submission publish reached Partner Center.
+  store:
+    needs: [matrix, publish-release]
+    if: vars.STORE_PRODUCT_ID != '' && needs.matrix.outputs.msix == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: microsoft-store-submission
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.matrix.outputs.sha }}
+          # Every tag: What's new counts from the previous release.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: msix-x86_64-pc-windows-msvc, path: msix }
+      - name: Check Store package
+        shell: bash
+        env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir _store-package
+          tar -xf msix/msix-x86_64-pc-windows-msvc.tar -C _store-package
+          node scripts/store-package.ts _store-package "$VERSION"
+      - uses: microsoft/microsoft-store-apppublisher@cc9910a8d59f2eb55cbb83df0a3800cf3b5300e0 # v1.4
+        with: { version: v0.4.3 }
+      - name: Submit to the Store
+        shell: bash
+        env:
+          TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+          CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+          PRODUCT_ID: ${{ vars.STORE_PRODUCT_ID }}
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in TENANT_ID SELLER_ID CLIENT_ID CLIENT_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::PARTNER_CENTER_$name is empty"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          msstore reconfigure --tenantId "$TENANT_ID" --sellerId "$SELLER_ID" \
+            --clientId "$CLIENT_ID" --clientSecret "$CLIENT_SECRET"
+          # Uploaded as a draft first: `publish` rebuilds the draft from the last
+          # published submission, so the listing can only be written after it.
+          msstore publish "_store-package/Lasterm_${VERSION}.0_x64.msix" --appId "$PRODUCT_ID" --noCommit
+          msstore submission get "$PRODUCT_ID" > "$RUNNER_TEMP/submission.json"
+
+          # What's new is gathered from the lines added to packaging/store/news/
+          # since the previous release. With none, Store users would be told
+          # nothing: the draft waits for someone to write it instead.
+          status=0
+          node scripts/store-listing.ts "$VERSION" "$RUNNER_TEMP/submission.json" \
+            > "$RUNNER_TEMP/updated.json" || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::No line added to packaging/store/news/ since the previous release. The package is uploaded and the submission waits in Partner Center as a draft: write its What's new there, then submit it."
+            echo "The package is uploaded. The submission waits in Partner Center as a draft: write its What's new there, then submit it. Rerunning cannot fix missing news: it checks out the same frozen commit." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$status" -eq 0 ] || exit "$status"
+
+          msstore submission update "$PRODUCT_ID" "$(cat "$RUNNER_TEMP/updated.json")"
+          msstore submission publish "$PRODUCT_ID"
+          echo "Submitted $VERSION to the Store for certification." >> "$GITHUB_STEP_SUMMARY"

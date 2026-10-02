@@ -92,3 +92,39 @@ When ready:
 3. Submit the unsigned `.msix` manually in Partner Center. Microsoft Store re-signs the package during ingestion.
 4. In certification notes, explain `runFullTrust`: Lasterm is a developer terminal app that launches its packaged local hub and agent sidecars, listens only on localhost for its UI transport, and manages user-initiated terminal/SSH session subprocesses.
 5. Attach Windows App Certification Kit results and document any accepted full-trust warnings.
+
+## Releasing to the Microsoft Store
+
+The release workflow submits each later release's unsigned MSIX after the GitHub
+release is public, when `STORE_PRODUCT_ID` is set and the frozen MSIX build is enabled.
+A failed Store job leaves the GitHub release published.
+
+[Microsoft Learn: Publish app updates to Microsoft Store with GitHub Actions](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/github-actions)
+(updated 2026-08-30) requires a free product, an Entra application holding the
+Manager role in Partner Center, and an app already published and live. Set
+`STORE_PRODUCT_ID` only once #618's first manual submission is published and live.
+
+| Configuration | Kind | Value |
+| --- | --- | --- |
+| `STORE_PRODUCT_ID` | Repository variable | Store product ID; enables automatic submission |
+| `PARTNER_CENTER_TENANT_ID` | Repository secret | Associated Entra tenant ID |
+| `PARTNER_CENTER_SELLER_ID` | Repository secret | Partner Center seller ID |
+| `PARTNER_CENTER_CLIENT_ID` | Repository secret | Entra application client ID |
+| `PARTNER_CENTER_CLIENT_SECRET` | Repository secret | Entra application client secret |
+
+All four secrets must be present before the job changes Partner Center. The job
+uploads the package as a draft, applies the reviewed `packaging/store/listing-*.md`
+texts and What's new from news files added since the previous release, then sends
+it to certification. Each user-visible change adds its own news file in its pull
+request (see `packaging/store/news/README.md`).
+
+With no new news file, the job succeeds with a warning: the package is uploaded
+but waits as a draft. Someone must write its What's new in Partner Center and
+submit it there. Rerunning cannot fix missing news because it checks out the same
+frozen commit. A later release's job replaces a draft still waiting.
+
+Before rerunning a failed job, check the submission's status in Partner Center:
+it may be unchanged, a draft, or already in certification if the runner failed
+after the publish request reached Partner Center. Jobs are serialized for the
+product's single pending submission. Retrieval of the package the Store signs,
+attachment to the release (#619), and winget publication are later work.

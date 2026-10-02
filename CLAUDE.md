@@ -74,12 +74,17 @@ than inferred: `npm view @termora/hub version` answers 0.0.1, `@lasterm/hub` ans
 that it does not exist.
 
 The hub ships as a single executable that embeds its own Node, so an npm install
-would reintroduce the runtime requirement that executable exists to remove. Today the
-only channel that works end to end is **building from this repository or downloading
-a release asset**. The Microsoft Store path has packaging in CI but submission is
-manual and not yet done (#110), and winget is a plan with no manifest. The desktop has
-no updater of its own, by decision: each channel updates its own installs, and a
-release-asset install is updated by hand (DESKTOP-UPDATES in `docs/decisions.md`).
+would reintroduce the runtime requirement that executable exists to remove. The only
+desktop package distributed is **the one the Microsoft Store signs**: the release
+workflow publishes the agents and the Windows hub, no desktop installer, and keeps the
+unsigned MSIX as a run artifact for the Store (STORE-ONLY-DESKTOP in
+`docs/decisions.md`). The first
+Store submission is manual and not yet done (#618). After it, the release workflow's
+`store` job submits a release once `STORE_PRODUCT_ID` is set
+(`packages/clients/desktop/msix/README.md`); attaching the package the Store signs to
+the release and publishing it to winget are planned (#619, #620). Until the
+Store lists it, the only way to run the desktop app is **building from this
+repository**. The desktop has no updater of its own: the Store updates it.
 
 Dependencies: shared ← hub, shared ← web.
 The hub spawns the agent binary for local sessions and deploys it over SSH for remote
@@ -322,3 +327,10 @@ explicit port that is taken moves up to 99 ports higher (`zero_conf`).
 - SQLite cross-DB: no FK between meta.db and spool.db — use cache_index for consistency
 - Auth token comparison: always `crypto.timingSafeEqual` (constant-time)
 - astix auto-indexes via file watcher — NEVER call `reindex_project` explicitly unless you get a stale index error after a `get_symbol`/`get_symbols` failure. Write → get_symbols works without reindex.
+
+### Microsoft Store news
+
+A change users will see adds its own named `packaging/store/news/<change>.md`
+file in its own pull request, with one `<language>: …` line per listing language
+(today `en`). A new listing language also needs its What's new frame in
+`scripts/store-listing.ts`. See `packaging/store/news/README.md`.

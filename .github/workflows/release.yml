@@ -20,14 +20,25 @@ on:
         required: false
         type: string
 
+    # No other job reads a secret other than GITHUB_TOKEN.
+    secrets:
+      PARTNER_CENTER_TENANT_ID:
+        required: false
+      PARTNER_CENTER_SELLER_ID:
+        required: false
+      PARTNER_CENTER_CLIENT_ID:
+        required: false
+      PARTNER_CENTER_CLIENT_SECRET:
+        required: false
+
 # Empty baseline, so a job added later starts from nothing rather than from the
 # repository default. Every job below declares the scopes it needs.
 permissions: {}
 
 env:
-  # MSIX publication depends on all three repository variables. Only the matrix
+  # MSIX packaging depends on all three repository variables. Only the matrix
   # job reads this, once; every later job gets its frozen value.
-  MSIX_PUBLICATION_ENABLED: >-
+  MSIX_PACKAGING_ENABLED: >-
     ${{
       vars.MSIX_IDENTITY_NAME != '' &&
       vars.MSIX_PUBLISHER != '' &&
@@ -104,18 +115,18 @@ jobs:
       - id: freeze
         env:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
-          MSIX_RELEASE_ENABLED: ${{ env.MSIX_PUBLICATION_ENABLED }}
+          MSIX_PACKAGING_ENABLED: ${{ env.MSIX_PACKAGING_ENABLED }}
         run: |
           # Read once, here, and handed to every later job. The repository
-          # variables behind MSIX_PUBLICATION_ENABLED are read when each job
+          # variables behind MSIX_PACKAGING_ENABLED are read when each job
           # starts, so a variable changed mid-run would otherwise have the job
-          # that packages and the job that publishes disagree. The matrix
-          # itself is validated by build.yml, on this same frozen commit.
+          # that packages and the Store-submission consumer disagree. The
+          # matrix itself is validated by build.yml, on this same frozen commit.
           VERSION="${TAG_NAME#v}"
-          echo "version=$VERSION msix=$MSIX_RELEASE_ENABLED"
+          echo "version=$VERSION msix=$MSIX_PACKAGING_ENABLED"
           {
             echo "version=$VERSION"
-            echo "msix=$MSIX_RELEASE_ENABLED"
+            echo "msix=$MSIX_PACKAGING_ENABLED"
           } >> "$GITHUB_OUTPUT"
 
   create-release:
@@ -319,19 +330,17 @@ jobs:
       # artifacts are build inputs and never match this pattern.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "{agent,hub,desktop,msix}-*"
+          pattern: "{agent,hub,desktop}-*"
           path: _release/downloads/
       # The resolution build.yml already ran, repeated on the files this job is
       # about to publish rather than trusted from another job's output.
       - name: Resolve release assets
         env:
           VERSION: ${{ needs.matrix.outputs.version }}
-          MSIX: ${{ needs.matrix.outputs.msix }}
         run: >-
           node scripts/release-assets.ts
           --matrix .github/build-matrix.json
           --version "$VERSION"
-          --msix "$MSIX"
           --downloads _release/downloads
           --extract-to _release/extracted
           --out _release/manifest.json
@@ -480,3 +489,112 @@ jobs:
             echo "::error::Release $TAG_NAME is still draft after edit!"
             exit 1
           fi
+
+  # Runs after the GitHub release is public. Failure leaves that release published
+  # and the Store unchanged, holding a draft, or already in certification if the
+  # runner fails after submission publish reached Partner Center.
+  store:
+    needs: [matrix, publish-release]
+    if: vars.STORE_PRODUCT_ID != '' && needs.matrix.outputs.msix == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    # One Store job runs at a time. GitHub keeps one waiting job per group,
+    # so a newer release's job replaces a waiting one. The lock ends with the
+    # job, not with certification.
+    concurrency:
+      group: microsoft-store-submission
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.matrix.outputs.sha }}
+          # Every tag: What's new counts from the previous release.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: msix-x86_64-pc-windows-msvc, path: msix }
+      - name: Check Store package
+        shell: bash
+        env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir _store-package
+          tar -xf msix/msix-x86_64-pc-windows-msvc.tar -C _store-package
+          node scripts/store-package.ts _store-package "$VERSION"
+      - name: Check Store listing
+        shell: bash
+        env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: |
+          set -euo pipefail
+          status=0
+          node scripts/store-listing.ts "$VERSION" > /dev/null || status=$?
+          [ "$status" -eq 0 ] || [ "$status" -eq 3 ] || exit "$status"
+      - name: Install Store CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # v0.4.3: the digest is the release's own, published in the GitHub asset
+          # digest and MSStoreCLI-win-x64.zip.sha256.txt. A version bump changes both lines below.
+          $url = 'https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-win-x64.zip'
+          $expectedHash = 'C5FB008B616F96B1B55F1D52E4E0A5DD8F6C156129B5F52F9B97EC0EED11BD57'
+          $archive = Join-Path $env:RUNNER_TEMP 'MSStoreCLI-win-x64.zip'
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          if ((Get-FileHash -Path $archive -Algorithm SHA256).Hash -ine $expectedHash) {
+            throw 'Store CLI archive SHA256 does not match the release digest'
+          }
+          $directory = Join-Path $env:RUNNER_TEMP ('msstore-' + [guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $directory
+          if (-not (Test-Path -LiteralPath (Join-Path $directory 'msstore.exe') -PathType Leaf)) {
+            throw 'Store CLI archive has no msstore.exe at its root'
+          }
+          $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Submit to the Store
+        shell: bash
+        env:
+          TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+          CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+          PRODUCT_ID: ${{ vars.STORE_PRODUCT_ID }}
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in TENANT_ID SELLER_ID CLIENT_ID CLIENT_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::PARTNER_CENTER_$name is empty"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          msstore reconfigure --tenantId "$TENANT_ID" --sellerId "$SELLER_ID" \
+            --clientId "$CLIENT_ID" --clientSecret "$CLIENT_SECRET"
+          # Uploaded as a draft first: `publish` rebuilds the draft from the last
+          # published submission, so the listing can only be written after it.
+          msstore publish "_store-package/Lasterm_${VERSION}.0_x64.msix" --appId "$PRODUCT_ID" --noCommit
+          msstore submission get "$PRODUCT_ID" > "$RUNNER_TEMP/submission.json"
+
+          # What's new is gathered from the lines added to packaging/store/news/
+          # since the previous release. With none, Store users would be told
+          # nothing: the draft waits for someone to write it instead.
+          status=0
+          node scripts/store-listing.ts "$VERSION" "$RUNNER_TEMP/submission.json" \
+            > "$RUNNER_TEMP/updated.json" || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::No line added to packaging/store/news/ since the previous release. The package is uploaded and the submission waits in Partner Center as a draft: write its What's new there, then submit it."
+            echo "The package is uploaded. The submission waits in Partner Center as a draft: write its What's new there, then submit it. Rerunning cannot fix missing news: it checks out the same frozen commit." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$status" -eq 0 ] || exit "$status"
+
+          msstore submission update "$PRODUCT_ID" --payload "$RUNNER_TEMP/updated.json"
+          msstore submission publish "$PRODUCT_ID"
+          echo "Submitted $VERSION to the Store for certification." >> "$GITHUB_STEP_SUMMARY"

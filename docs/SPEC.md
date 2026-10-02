@@ -124,7 +124,7 @@ hub: ssh2.exec("lasterm-agent --stdio")
   → INPUT flows: Hub → SSH → framed stdin → Agent → PTY
 ```
 
-A host that keeps a daemon (`[ssh] remote_daemon`, or the host's own choice) runs `lasterm-agent --daemon` instead, and the hub reaches its socket through a `direct-streamlocal` SSH channel, so its terminals outlive the SSH connection (#79). The Add Host dialog preselects Yes, its other choices are No and "Follow the global setting", and a host it knows to be Windows stores no answer; the batch import stores one Yes/No checkbox for every imported host (Windows ones included, where the value is ignored); Duplicate copies the source host's answer; older hosts and API-created hosts without the field retain the global default. Windows remotes stay on stdio: no SSH channel carries a named pipe (`remote-daemon.ts`).
+A host that keeps a daemon (`[ssh] remote_daemon`, or the host's own choice) runs `lasterm-agent --daemon` instead, and the hub reaches its socket through a `direct-streamlocal` SSH channel, so its terminals outlive the SSH connection (#79). The Add Host dialog preselects Yes, its other choices are No and "Follow the global setting", and a host it knows to be Windows stores no answer; the batch import stores one Yes/No checkbox, ticked by default, for every imported host (Windows ones included, where the value is ignored); Duplicate copies the source host's answer; older hosts and API-created hosts without the field retain the global default. Windows remotes stay on stdio: no SSH channel carries a named pipe (`remote-daemon.ts`).
 
 **Where a remote daemon runs (#600).** Started by the hub's SSH `exec`, the daemon would live in that connection's logind session, `session-N.scope`. A host with `KillUserProcesses=yes`, or a `loginctl terminate-session`, ends that scope at logout, and every terminal the daemon holds with it. So the launch asks, in order: is there a `systemd-run`, is lingering on for this user (`loginctl show-user <uid> -p Linger`), and can this connection reach the user's manager (`systemctl --user show-environment`)? When all three say yes, `systemd-run --user --scope --collect --unit=lasterm-agent-<random>.scope` puts the daemon in a transient scope under `user@<uid>.service`, outside every login session. Otherwise, and when `systemd-run` refuses, the daemon is detached in the session as before (`setsid`, else `nohup`). A refusal starts nothing, so the fallback never makes a second daemon. The launch's last line says which (`lasterm-daemon-placement: scope <unit>` or `session <reason>`), and the hub's log repeats it in words.
 
@@ -438,7 +438,7 @@ Host (permanent config)
  ├── sshProxyHostId?: string | null    // jump host this hub knows (§ 4.5b)
  ├── sshProxySpec?: string | null      // or a jump given as user@host:port
  ├── sshProxyFingerprint?: string | null // the key pinned for a jump given as a spec
- ├── sshRemoteDaemon?: boolean | null  // keep an agent running there (#79); app-created hosts preselect Yes; null follows [ssh] remote_daemon
+ ├── sshRemoteDaemon?: boolean | null  // keep an agent running there (#79); the Add Host dialog preselects Yes; null follows [ssh] remote_daemon
  ├── agentSha256?: string | null       // SHA256 of the pinned remote agent binary
  ├── createdAt: string                 // ISO 8601
  └── updatedAt: string
@@ -1257,15 +1257,14 @@ detached daemon, or deploys and runs it over SSH.
 |----------|-----|-------|-------------|
 | Linux x64 | Not released; built from source (`scripts/build-hub.sh`) | Release asset | Not released |
 | Linux arm64 | Not released | Release asset, for a remote host such as a Raspberry Pi | Not released |
-| Windows x64 | Release asset | Release asset | Release asset (NSIS, MSI) |
+| Windows x64 | Release asset | Release asset | Microsoft Store (the MSIX the Store signs); the release workflow publishes no desktop installer |
 | macOS | Not supported: nothing builds or tests it (#224) | Not supported | Not supported |
 
 What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser
 that reaches the hub.
 
-The desktop app has no updater of its own. The Microsoft Store updates the MSIX build, winget the
-installs it makes (#620), and an install from a release asset is updated by installing the newer
-release (`docs/decisions.md`, DESKTOP-UPDATES).
+The desktop app has no updater of its own. The Microsoft Store updates it, and winget is planned to
+install the package the Store signs (#620) (`docs/decisions.md`, STORE-ONLY-DESKTOP).
 
 Agent spawns PTYs for the host OS: bash/zsh (Linux), PowerShell/cmd/wsl.exe (Windows).
 Hub never spawns PTYs directly — it delegates to the agent (local or remote).

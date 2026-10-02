@@ -6,10 +6,10 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 
 ## Current Flow
 
-- `.github/workflows/build.yml` builds the Windows desktop target and runs `pack-msix.ps1 -SkipBuild`. When MSIX publication is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`.
-- A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow, and resolves it against `.github/build-matrix.json` as a release would.
-- `.github/workflows/release.yml` calls the same build workflow; its `publish-release` job uploads the `.msix` to the GitHub Release with the desktop installers.
-- There is no signing step and no Store submission step in CI.
+- `.github/workflows/build.yml` builds the Windows desktop executable with `tauri build --no-bundle` and runs `pack-msix.ps1 -SkipBuild`. When MSIX packaging is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`, kept 30 days on a release.
+- A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow.
+- `.github/workflows/release.yml` calls the same build workflow. This unsigned `.msix` is never uploaded to the GitHub Release, and the release workflow publishes no desktop installer; only the package the Store signs may join a release after certification (STORE-ONLY-DESKTOP in `docs/decisions.md`).
+- There is no signing step: the Microsoft Store signs the package. The first submission is manual (see "First Partner Center Submission"); later releases go through the release workflow's `store` job once `STORE_PRODUCT_ID` is set (see "Releasing to the Microsoft Store").
 
 ## Package Inputs
 
@@ -70,17 +70,19 @@ Validate these points on the next Windows CI dispatch or release run:
 3. The staged desktop executable, hub sidecar, and agent sidecar all pass the x64 PE check.
 4. The sidecar version gate passes for `lasterm-hub.exe` and `lasterm-agent.exe`.
 5. `MakeAppx.exe pack /d ... /p ... /o` writes `Lasterm_<version>.0_x64.msix`.
-6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX publication is enabled.
-7. Release runs upload the `.msix` asset alongside the existing desktop installers.
+6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX packaging is enabled.
+7. Release runs keep the `.msix` as that run artifact; it is not uploaded to the release.
 
-## Later: Manual Partner Center Submission
+## First Partner Center Submission
 
-Store submission is deferred and remains manual.
-
-When ready:
+The first submission is made by hand (#618). The release workflow's `store` job only
+updates an app that is already published and live, so leave `STORE_PRODUCT_ID` unset
+until this submission is live.
 
 1. Create or open the app in Partner Center and reserve the product name.
-2. Copy the Package/Identity values from Partner Center into `pack-msix.ps1` parameters:
+2. Copy the Package/Identity values from Partner Center into the repository variables
+   `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER` and `MSIX_PUBLISHER_DISPLAY_NAME`, which CI
+   passes to `pack-msix.ps1`. A local package takes them as parameters:
 
 ```powershell
 .\packages\clients\desktop\msix\pack-msix.ps1 `
@@ -89,6 +91,50 @@ When ready:
   -PublisherDisplayName "TODO Publisher Display Name"
 ```
 
-3. Submit the unsigned `.msix` manually in Partner Center. Microsoft Store re-signs the package during ingestion.
+3. Submit the unsigned `.msix` from a release run's `msix-x86_64-pc-windows-msvc` artifact manually in Partner Center. Microsoft Store re-signs the package during ingestion.
 4. In certification notes, explain `runFullTrust`: Lasterm is a developer terminal app that launches its packaged local hub and agent sidecars, listens only on localhost for its UI transport, and manages user-initiated terminal/SSH session subprocesses.
 5. Attach Windows App Certification Kit results and document any accepted full-trust warnings.
+
+## Releasing to the Microsoft Store
+
+The release workflow's `store` job submits a release's unsigned MSIX after the
+GitHub release is public, when `STORE_PRODUCT_ID` is set and the frozen MSIX build
+is enabled. A failed Store job leaves the GitHub release published.
+
+[Microsoft Learn: Publish app updates to Microsoft Store with GitHub Actions](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/github-actions)
+(updated 2026-08-30) requires a free product, an Entra application holding the
+Manager role in Partner Center, and an app already published and live. Set
+`STORE_PRODUCT_ID` only once #618's first manual submission is published and live.
+
+| Configuration | Kind | Value |
+| --- | --- | --- |
+| `STORE_PRODUCT_ID` | Repository variable | Store product ID; enables automatic submission |
+| `PARTNER_CENTER_TENANT_ID` | Repository secret | Associated Entra tenant ID |
+| `PARTNER_CENTER_SELLER_ID` | Repository secret | Partner Center seller ID |
+| `PARTNER_CENTER_CLIENT_ID` | Repository secret | Entra application client ID |
+| `PARTNER_CENTER_CLIENT_SECRET` | Repository secret | Entra application client secret |
+
+Before it changes Partner Center, the job checks the package, the listing texts,
+the news files and the four secrets, and stops if any check fails. It
+then uploads the package as a draft, applies the reviewed `packaging/store/listing-*.md`
+texts and What's new from news files added since the previous release, and sends
+it to certification. The Store CLI it runs is MSStoreCLI v0.4.3, downloaded from
+its GitHub release and refused unless its SHA-256 matches the one in the workflow. Each user-visible change adds its own news file in its pull
+request (see `packaging/store/news/README.md`).
+
+With no new news file, the job succeeds with a warning: the package is uploaded
+but waits as a draft. Someone must write its What's new in Partner Center and
+submit it there. Rerunning cannot fix missing news because it checks out the same
+frozen commit. A later release's job replaces a draft still waiting.
+
+Before rerunning a failed job, check the submission's status in Partner Center:
+it may be unchanged, a draft, or already in certification if the runner failed
+after the publish request reached Partner Center.
+
+Only one Store job runs at a time, and GitHub keeps one waiting job per
+concurrency group: when releases come faster than the job, a newer release's job
+replaces the one waiting, and that skipped release is not submitted. The lock ends
+with the job, not with certification: a release whose job runs while the previous
+submission is still in certification may fail to submit; submit it from Partner
+Center once certification ends. Retrieval of the package the Store signs,
+attachment to the release (#619), and winget publication are later work.

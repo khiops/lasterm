@@ -50,3 +50,8 @@ jobs:
       # release-please-action documents `sha` as "SHA that a GitHub release was
       # tagged at"; when it is empty release.yml falls back to `tag`.
       ref: ${{ needs.release-please.outputs.sha }}
+    secrets:
+      PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+      PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+      PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+      PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}

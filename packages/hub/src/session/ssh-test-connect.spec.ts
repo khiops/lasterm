@@ -66,7 +66,13 @@ function sshServer(
 	});
 }
 
-type SavedHost = { type: "ssh"; sshHost: string; sshPort: number; fingerprint: string | null };
+type SavedHost = {
+	type: "ssh";
+	sshHost: string;
+	sshPort: number;
+	fingerprint: string | null;
+	sshConfigHost?: string;
+};
 
 function setup(saved?: SavedHost) {
 	const updateHostFingerprint = vi.fn();
@@ -141,6 +147,55 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		server = undefined;
 	});
 
+	it.each(["address", "saved-alias", "edited-alias"])(
+		"checks target revocation under the eligible names (%s)",
+		async (name) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const home = makeTempDir("lasterm-revoked-home-");
+			try {
+				mkdirSync(join(home, ".ssh"));
+				const key = utils.parseKey(HOST_KEY);
+				if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+				const knownHosts = join(home, ".ssh", "known_hosts");
+				writeFileSync(
+					knownHosts,
+					`@revoked [${name === "address" ? "127.0.0.1" : "alias"}]:${mock.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
+				);
+				vi.stubEnv("HOME", home);
+				const { ctx, client, mgr, updateHostFingerprint } = setup({
+					type: "ssh",
+					sshHost: name === "edited-alias" ? "127.0.0.2" : "127.0.0.1",
+					sshPort: mock.port,
+					sshConfigHost: "alias",
+					fingerprint: null,
+				});
+				const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
+				if (name === "edited-alias") {
+					const prompt = await hostVerifyPrompt(client);
+					mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");
+				}
+				await done;
+				if (name !== "edited-alias") {
+					expect(client.send).toHaveBeenCalledWith({
+						type: "TEST_CONNECT_FAIL",
+						hostId: "saved-host",
+						message: `This host's key is marked @revoked in ${knownHosts}:1. Refusing to connect.`,
+					});
+					expect(client.send).not.toHaveBeenCalledWith(
+						expect.objectContaining({ type: "HOST_VERIFY" }),
+					);
+				}
+				expect(mock.auth.attempts).toBe(0);
+				expect(updateHostFingerprint).not.toHaveBeenCalled();
+				expect(ctx.trustedOnceFingerprints.size).toBe(0);
+			} finally {
+				vi.unstubAllEnvs();
+				removeTempDir(home);
+			}
+		},
+	);
+
 	it("asks about an unknown key before authenticating, and stops when it is rejected", async () => {
 		const mock = await sshServer();
 		server = mock.server;
@@ -167,22 +222,25 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		expect(mock.auth.attempts).toBe(0);
 	});
 
-	it("retries under a trusted key, and remembers it for the first session", async () => {
-		const mock = await sshServer();
-		server = mock.server;
-		const { ctx, client, mgr, updateHostFingerprint } = setup();
+	it.each(["trust_once", "trust_permanent"] as const)(
+		"retries under a trusted key, and remembers it for the first session (%s)",
+		async (action) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { ctx, client, mgr, updateHostFingerprint } = setup();
 
-		const done = mgr.handleTestConnect("c1", testMessage("new-host", mock.port));
-		const prompt = await hostVerifyPrompt(client);
-		mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
-		await done;
+			const done = mgr.handleTestConnect("c1", testMessage("new-host", mock.port));
+			const prompt = await hostVerifyPrompt(client);
+			mgr.handleHostVerifyResponse(prompt.promptId, action, "c1");
+			await done;
 
-		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "new-host" });
-		expect(mock.auth.attempts).toBeGreaterThan(0);
-		// An unsaved host has no row to record the key in: this hub run trusts it.
-		expect(updateHostFingerprint).not.toHaveBeenCalled();
-		expect(ctx.trustedOnceFingerprints.get(`127.0.0.1:${mock.port}`)).toBe(prompt.fingerprint);
-	});
+			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "new-host" });
+			expect(mock.auth.attempts).toBeGreaterThan(0);
+			// An unsaved host has no row to record the key in: this hub run trusts it.
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+			expect(ctx.trustedOnceFingerprints.get(`127.0.0.1:${mock.port}`)).toBe(prompt.fingerprint);
+		},
+	);
 
 	it("records a trusted key on the saved host it was tested for", async () => {
 		const mock = await sshServer();
@@ -203,22 +261,30 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		expect(updateHostFingerprint).toHaveBeenCalledWith("saved-host", prompt.fingerprint);
 	});
 
-	it("does not apply a saved host's key to another address being tested", async () => {
-		const mock = await sshServer();
-		server = mock.server;
-		const { client, mgr } = setup({
-			type: "ssh",
-			sshHost: "127.0.0.2",
-			sshPort: mock.port,
-			fingerprint: "SHA256:recorded-for-another-address",
-		});
+	it.each(["trust_once", "trust_permanent"] as const)(
+		"isolates an edited address from cached trust (%s)",
+		async (action) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { ctx, client, mgr, updateHostFingerprint } = setup({
+				type: "ssh",
+				sshHost: "127.0.0.2",
+				sshPort: mock.port,
+				fingerprint: "SHA256:recorded-for-another-address",
+			});
 
-		const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
-		const prompt = await hostVerifyPrompt(client);
-		expect(prompt.firstConnect, "the edited address is a first connection").toBe(true);
-		mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");
-		await done;
-	});
+			ctx.trustedOnceFingerprints.set(`127.0.0.1:${mock.port}`, await serverFingerprint(mock.port));
+			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+			const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
+			const prompt = await hostVerifyPrompt(client);
+			expect(prompt.firstConnect, "the edited address is a first connection").toBe(true);
+			mgr.handleHostVerifyResponse(prompt.promptId, action, "c1");
+			await done;
+			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+			expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+		},
+	);
 
 	it("accepts the key a saved host already recorded, without asking", async () => {
 		const mock = await sshServer();
@@ -330,6 +396,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			password?: boolean;
 			refuseAuth?: boolean;
 			stall?: boolean;
+			revokedTarget?: boolean;
 		} = {},
 	) {
 		const target = await sshServer();
@@ -374,7 +441,10 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		mkdirSync(join(home, ".ssh"));
 		writeFileSync(
 			join(home, ".ssh", "known_hosts"),
-			options.known ? `[127.0.0.1]:${port} ${keyType} ${publicKey.toString("base64")}\n` : "",
+			(options.known ? `[127.0.0.1]:${port} ${keyType} ${publicKey.toString("base64")}\n` : "") +
+				(options.revokedTarget
+					? `@revoked [target]:2222 ${keyType} ${publicKey.toString("base64")}\n`
+					: ""),
 		);
 		vi.stubEnv("HOME", home);
 		// The mock accepts ssh2's initial none authentication, so it never queries this agent.
@@ -397,7 +467,8 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				type: "ssh",
 				sshHost: "target",
 				sshPort: 2222,
-				sshProxySpec: options.stale ? "other-jump" : spec,
+				sshProxySpec: options.stale ? "other-jump" : options.spec ? spec : null,
+				sshProxyHostId: options.spec ? null : "jump",
 				sshProxyFingerprint: options.stale ? fingerprint : null,
 			});
 		Object.assign(ctx.metaDal, {
@@ -438,7 +509,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		await vi.waitFor(() => expect(f.connections.every((c) => c.ended)).toBe(true));
 	}
 	it("routes an otherwise unreachable target through its pinned saved bastion", async () => {
-		const f = await fixture();
+		const f = await fixture({ unsaved: true });
 		let dials = 0;
 		const unreachable = net.createServer((socket) => {
 			dials++;
@@ -459,6 +530,25 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 		expect(f.routes).toEqual([`127.0.0.1:${port}`]);
 		expect(dials).toBe(1);
+		await ended(f);
+	});
+
+	it("refuses a revoked target through a jump before asking or writing", async () => {
+		const f = await fixture({ revokedTarget: true });
+		f.ctx.trustedOnceFingerprints.clear();
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(reply(f)).toEqual({
+			type: "TEST_CONNECT_FAIL",
+			hostId: "saved-host",
+			message: `This host's key is marked @revoked in ${join(process.env.HOME!, ".ssh", "known_hosts")}:1. Refusing to connect.`,
+		});
+		expect(f.client.send).not.toHaveBeenCalledWith(
+			expect.objectContaining({ type: "HOST_VERIFY" }),
+		);
+		expect(f.targetAuth.attempts).toBe(0);
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+		expect(f.updateHost).not.toHaveBeenCalled();
+		expect(f.ctx.trustedOnceFingerprints.size).toBe(0);
 		await ended(f);
 	});
 
@@ -487,7 +577,12 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		"never writes a spec pin to an ineligible row: %j",
 		async (mode) => {
 			const f = await fixture({ ...mode, spec: true, known: true });
-			await f.mgr.handleTestConnect("c1", f.msg);
+			const done = f.mgr.handleTestConnect("c1", f.msg);
+			if (mode.stale) {
+				const prompt = await hostVerifyPrompt(f.client);
+				f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+			}
+			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 			expect(f.updateHost).not.toHaveBeenCalled();
 			await ended(f);
@@ -502,9 +597,15 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		});
 		expect(f.routes).toEqual([]);
 	});
-	it.each(["direct", "other-spec", "host-id"])(
-		"does not save a target key learned through an edited route (saved=%s)",
-		async (declaration) => {
+	it.each(
+		["direct", "other-spec", "host-id"].flatMap((declaration) =>
+			(["trust_once", "trust_permanent"] as const).flatMap((action) =>
+				[true, false].map((matchingCache) => ({ declaration, action, matchingCache })),
+			),
+		),
+	)(
+		"does not reuse or save a target key learned through an edited route (%j)",
+		async ({ declaration, action, matchingCache }) => {
 			const f = await fixture({ spec: true, known: true });
 			const saved = f.hosts.get("saved-host")!;
 			saved.sshProxySpec = declaration === "other-spec" ? "other-jump" : null;
@@ -512,14 +613,19 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				delete f.msg.sshProxySpec;
 				f.msg.sshProxyHostId = "jump";
 			}
-			f.ctx.trustedOnceFingerprints.clear();
+			if (!matchingCache)
+				f.ctx.trustedOnceFingerprints.set("target:2222", "SHA256:previous-cache-key");
+			const cacheBefore = new Map(f.ctx.trustedOnceFingerprints);
+			f.ctx.metaDal.getHostFingerprint = (id: string) =>
+				id === "saved-host" ? "SHA256:saved-row-pin" : fingerprint;
 			const done = f.mgr.handleTestConnect("c1", f.msg);
 			const prompt = await hostVerifyPrompt(f.client);
-			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
+			f.mgr.handleHostVerifyResponse(prompt.promptId, action, "c1");
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 			expect(f.updateHostFingerprint).not.toHaveBeenCalledWith("saved-host", expect.anything());
-			expect(f.ctx.trustedOnceFingerprints.get("target:2222")).toBe(prompt.fingerprint);
+			expect(f.ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+			expect(f.ctx.metaDal.getHostFingerprint("saved-host")).toBe("SHA256:saved-row-pin");
 			await ended(f);
 		},
 	);
@@ -560,7 +666,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		await ended(f);
 	});
 	it("uses the parsed target user for a spec jump when sshUser is empty", async () => {
-		const f = await fixture({ spec: true, known: true });
+		const f = await fixture({ spec: true, known: true, unsaved: true });
 		await f.mgr.handleTestConnect("c1", {
 			...f.msg,
 			hostname: "parsed-user@target",

@@ -19,6 +19,11 @@ import type {
 } from "@lasterm/shared";
 import { Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
+import {
+	findKnownHostKeys,
+	judgeAgainstKnownHosts,
+	readUserKnownHosts,
+} from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
 import { computeTargetStatus } from "./agent-status.js";
@@ -828,24 +833,40 @@ export class SshConnectionManager {
 		const hostKey = `${parsed.hostname}:${msg.port}`;
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
-		const sessionTrusted = this.ctx.trustedOnceFingerprints.get(hostKey);
+		const sessionTrusted =
+			!saved || savedRoute ? this.ctx.trustedOnceFingerprints.get(hostKey) : undefined;
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
 		const first = await attempt(trusted);
 		if (first.unverifiedFingerprint === undefined) return finish(first.result);
 
 		const fingerprint = first.unverifiedFingerprint;
+		const knownHostsSources = readUserKnownHosts();
+		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
+			(name): name is string => typeof name === "string" && name.length > 0,
+		);
+		const verdict = judgeAgainstKnownHosts(
+			fingerprint,
+			namesToLookUp.flatMap((name) => findKnownHostKeys(name, msg.port, knownHostsSources)),
+		);
+		if (verdict.kind === "revoked") {
+			return {
+				ok: false,
+				message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
+			};
+		}
 		const action = await verifyHostKey(
 			storedFingerprint ?? "",
 			fingerprint,
 			storedFingerprint === null,
 		);
 		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
+		// The saved route can retain a permanent pin or a hub-run trust decision.
+		// An unsaved host caches the key for its first session; an edited route
+		// on a saved host keeps the accepted key only for this test's retry.
 		if (action === "trust_permanent" && savedRoute) {
 			this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint);
-		} else {
-			// An unsaved host has no row to hold the key yet: it is trusted for this
-			// hub run, so its first session does not ask again.
+		} else if (!saved || savedRoute) {
 			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
 		}
 		const second = await attempt(new Set([fingerprint]));

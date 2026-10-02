@@ -437,6 +437,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			stall?: boolean;
 			revokedTarget?: boolean;
 			revokedJump?: boolean;
+			jumpAlias?: string;
 		} = {},
 	) {
 		const target = await sshServer();
@@ -482,7 +483,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		writeFileSync(
 			join(home, ".ssh", "known_hosts"),
 			(options.known || options.revokedJump
-				? `${options.revokedJump ? "@revoked " : ""}[127.0.0.1]:${port} ${keyType} ${publicKey.toString("base64")}\n`
+				? `${options.revokedJump ? "@revoked " : ""}[${options.jumpAlias ?? "127.0.0.1"}]:${port} ${keyType} ${publicKey.toString("base64")}\n`
 				: "") +
 				(options.revokedTarget
 					? `@revoked [target]:2222 ${keyType} ${publicKey.toString("base64")}\n`
@@ -506,6 +507,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			id: "jump",
 			type: "ssh",
 			sshHost: "127.0.0.1",
+			sshConfigHost: options.jumpAlias,
 			sshPort: port,
 			sshUser: "tester",
 			sshAuth: options.password ? "password" : "key",
@@ -562,6 +564,21 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 	}
 	it("refuses a pinned revoked bastion without opening a route", async () => {
 		const f = await fixture({ revokedJump: true });
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(f.client.send).toHaveBeenCalledWith({
+			type: "TEST_CONNECT_FAIL",
+			hostId: "saved-host",
+			message: `The jump host 127.0.0.1 presented a key marked @revoked in ${join(process.env.HOME!, ".ssh", "known_hosts")}:1. Nothing was connected.`,
+		});
+		expect(f.client.send).not.toHaveBeenCalledWith(
+			expect.objectContaining({ type: "HOST_VERIFY" }),
+		);
+		expect(f.routes).toEqual([]);
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+	});
+
+	it("refuses a saved pinned bastion revoked under its config alias without opening a route", async () => {
+		const f = await fixture({ revokedJump: true, jumpAlias: "alias" });
 		await f.mgr.handleTestConnect("c1", f.msg);
 		expect(f.client.send).toHaveBeenCalledWith({
 			type: "TEST_CONNECT_FAIL",

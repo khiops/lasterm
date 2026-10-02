@@ -136,6 +136,7 @@ describe("resolveJump", () => {
 		expect(resolution.kind).toBe("jump");
 		if (resolution.kind === "jump") {
 			expect(resolution.jump.pinnedFingerprint).toBeNull();
+			expect(resolution.jump.knownHostsNames).toEqual(["bastion.example.com"]);
 			expect(resolution.jump.jump.host).toBe("bastion.example.com");
 			expect(resolution.jump.pinTo).toEqual({
 				kind: "host",
@@ -152,6 +153,7 @@ describe("resolveJump", () => {
 	it("goes through a known host with its own address, authentication and pinned key", () => {
 		const bastion = sshHost("bastion", {
 			sshPort: 2222,
+			sshConfigHost: "alias",
 			sshUser: "jumper",
 			sshAuth: "key",
 			sshKeyPath: "/keys/bastion",
@@ -162,6 +164,7 @@ describe("resolveJump", () => {
 			kind: "jump",
 			jump: {
 				jump: { host: "bastion.example.com", port: 2222, username: "jumper" },
+				knownHostsNames: ["bastion.example.com", "alias"],
 				auth: { method: "key", keyPath: "/keys/bastion" },
 				promptHostId: "bastion",
 				pinnedFingerprint: "SHA256:pinned",
@@ -185,6 +188,7 @@ describe("resolveJump", () => {
 			kind: "jump",
 			jump: {
 				jump: { host: "bastion.example.com", port: 2200, username: "me" },
+				knownHostsNames: ["bastion.example.com"],
 				auth: { method: "agent" },
 				promptHostId: "target",
 				pinnedFingerprint: "SHA256:spec-pin",

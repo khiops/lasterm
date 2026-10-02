@@ -26,6 +26,8 @@ export { parseJumpSpec, planJump } from "../ssh-route.js";
 /** A jump turned into what it takes to travel through it. */
 export interface ResolvedJump {
 	jump: { host: string; port: number; username: string };
+	/** Names used to look up this jump in `known_hosts`. */
+	knownHostsNames: string[];
 	/** How the jump itself is authenticated, as `buildSshConnectConfig` takes it. */
 	auth: { method: string; keyPath?: string | undefined };
 	/** The host id any prompt for the jump belongs to. */
@@ -97,6 +99,9 @@ export function resolveJump(
 						port: jumpHost.sshPort ?? 22,
 						username: jumpHost.sshUser || jumpParsed.username,
 					},
+					knownHostsNames: [jumpParsed.hostname, jumpHost.sshConfigHost].filter(
+						(name): name is string => !!name,
+					),
 					auth: {
 						method: jumpHost.sshAuth ?? "agent",
 						keyPath: jumpHost.sshKeyPath ?? undefined,
@@ -124,6 +129,7 @@ export function resolveJump(
 						port: plan.spec.port,
 						username: plan.spec.user ?? host.sshUser ?? parseSshHost(host.sshHost ?? "").username,
 					},
+					knownHostsNames: [plan.spec.host],
 					auth: { method: "agent" },
 					promptHostId: host.id,
 					pinnedFingerprint: host.sshProxyFingerprint ?? null,

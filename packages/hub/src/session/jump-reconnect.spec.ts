@@ -338,6 +338,7 @@ function jumpThroughBastion(): ResolvedJump {
 	const { bastion, bastionHost } = the();
 	return {
 		jump: { host: "127.0.0.1", port: bastion.port, username: "jump" },
+		knownHostsNames: ["127.0.0.1"],
 		auth: { method: "key", keyPath: CLIENT_KEY_PATH },
 		promptHostId: bastionHost.id,
 		pinnedFingerprint: HOST_FINGERPRINT,

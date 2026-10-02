@@ -785,6 +785,7 @@ export class SshConnectionManager {
 				return attemptSshTest(connectConfig, trusted, probePlatform, undefined, namesToLookUp);
 			const route = await openJumpRoute({
 				jump: jump.jump,
+				knownHostsNames: jump.knownHostsNames,
 				auth: jumpAuth as Record<string, unknown>,
 				pinnedFingerprint: jump.pinnedFingerprint,
 				trustKnownHosts: jump.trustKnownHosts,

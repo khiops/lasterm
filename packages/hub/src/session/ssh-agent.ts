@@ -399,6 +399,7 @@ export class SshAgent extends AgentConnection {
 			const jumpAuth = await buildJumpAuth(jump, this.promptAuth);
 			const route = await openJumpRoute({
 				jump: jump.jump,
+				knownHostsNames: jump.knownHostsNames,
 				auth: jumpAuth as unknown as Record<string, unknown>,
 				pinnedFingerprint: jump.pinnedFingerprint,
 				trustKnownHosts: jump.trustKnownHosts,

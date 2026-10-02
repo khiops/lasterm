@@ -751,7 +751,7 @@ export class SshConnectionManager {
 			{
 				id: msg.hostId,
 				sshHost: msg.hostname,
-				sshUser: msg.sshUser ?? null,
+				sshUser: msg.sshUser || null,
 				sshProxyHostId: msg.sshProxyHostId ?? null,
 				sshProxySpec: msg.sshProxySpec ?? null,
 				sshProxyFingerprint: sameSpec ? (saved.sshProxyFingerprint ?? null) : null,
@@ -816,11 +816,15 @@ export class SshConnectionManager {
 		}
 		connectConfig.readyTimeout = SSH_TEST_TIMEOUT_MS;
 
-		// Same identity as a session's: a saved host's key counts only while the
-		// test targets the address it was recorded for.
-		const savedAddress =
-			saved?.type === "ssh" && saved.sshHost === msg.hostname && (saved.sshPort ?? 22) === msg.port;
-		const storedFingerprint = savedAddress ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
+		// A saved target key counts only when the test uses the saved address
+		// and jump declaration: a different route may reach a different machine.
+		const savedRoute =
+			saved?.type === "ssh" &&
+			saved.sshHost === msg.hostname &&
+			(saved.sshPort ?? 22) === msg.port &&
+			(saved.sshProxyHostId ?? null) === (msg.sshProxyHostId ?? null) &&
+			(saved.sshProxySpec?.trim() || null) === (msg.sshProxySpec?.trim() || null);
+		const storedFingerprint = savedRoute ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
 		const hostKey = `${parsed.hostname}:${msg.port}`;
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
@@ -837,7 +841,7 @@ export class SshConnectionManager {
 			storedFingerprint === null,
 		);
 		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
-		if (action === "trust_permanent" && savedAddress) {
+		if (action === "trust_permanent" && savedRoute) {
 			this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint);
 		} else {
 			// An unsaved host has no row to hold the key yet: it is trusted for this

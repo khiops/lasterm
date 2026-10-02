@@ -335,6 +335,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		const target = await sshServer();
 		cleanup.push(() => target.server.close());
 		const routes: string[] = [];
+		const bastionUsernames: string[] = [];
 		const connections: Array<{ ended: boolean }> = [];
 		const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
 			const state = { ended: false };
@@ -345,6 +346,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				state.ended = true;
 			});
 			conn.on("authentication", (auth) => {
+				bastionUsernames.push(auth.username);
 				if (options.refuseAuth) auth.reject();
 				else if (options.password && auth.method !== "password") auth.reject(["password"]);
 				else auth.accept();
@@ -418,6 +420,8 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			mgr,
 			msg,
 			routes,
+			hosts,
+			bastionUsernames,
 			connections,
 			port,
 			updateHost,
@@ -497,6 +501,76 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			message: expect.stringContaining("nothing here trusts it yet"),
 		});
 		expect(f.routes).toEqual([]);
+	});
+	it.each(["direct", "other-spec", "host-id"])(
+		"does not save a target key learned through an edited route (saved=%s)",
+		async (declaration) => {
+			const f = await fixture({ spec: true, known: true });
+			const saved = f.hosts.get("saved-host")!;
+			saved.sshProxySpec = declaration === "other-spec" ? "other-jump" : null;
+			if (declaration === "host-id") {
+				delete f.msg.sshProxySpec;
+				f.msg.sshProxyHostId = "jump";
+			}
+			f.ctx.trustedOnceFingerprints.clear();
+			const done = f.mgr.handleTestConnect("c1", f.msg);
+			const prompt = await hostVerifyPrompt(f.client);
+			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
+			await done;
+			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+			expect(f.updateHostFingerprint).not.toHaveBeenCalledWith("saved-host", expect.anything());
+			expect(f.ctx.trustedOnceFingerprints.get("target:2222")).toBe(prompt.fingerprint);
+			await ended(f);
+		},
+	);
+	it.each(["spec", "trimmed-spec", "host-id", "blank-spec"])(
+		"records a target key learned through its saved declaration (%s)",
+		async (declaration) => {
+			const f = await fixture({ spec: true, known: true });
+			const saved = f.hosts.get("saved-host")!;
+			if (declaration === "trimmed-spec") saved.sshProxySpec = `  ${f.msg.sshProxySpec}  `;
+			if (declaration === "host-id" || declaration === "blank-spec") {
+				saved.sshProxyHostId = "jump";
+				saved.sshProxySpec = declaration === "blank-spec" ? "  " : null;
+				delete f.msg.sshProxySpec;
+				f.msg.sshProxyHostId = "jump";
+			}
+			f.ctx.trustedOnceFingerprints.clear();
+			const done = f.mgr.handleTestConnect("c1", f.msg);
+			const prompt = await hostVerifyPrompt(f.client);
+			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
+			await done;
+			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+			expect(f.updateHostFingerprint).toHaveBeenCalledWith("saved-host", prompt.fingerprint);
+			await ended(f);
+		},
+	);
+	it("asks about a matching stored target key when the jump declaration differs", async () => {
+		const f = await fixture({ spec: true, stale: true, known: true });
+		f.ctx.metaDal.getHostFingerprint = (id: string) => (id === "saved-host" ? fingerprint : null);
+		f.ctx.trustedOnceFingerprints.clear();
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const prompt = await hostVerifyPrompt(f.client);
+		expect(prompt).toMatchObject({ firstConnect: true, fingerprint });
+		expect(f.targetAuth.attempts).toBe(0);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect(f.updateHostFingerprint).not.toHaveBeenCalledWith("saved-host", expect.anything());
+		await ended(f);
+	});
+	it("uses the parsed target user for a spec jump when sshUser is empty", async () => {
+		const f = await fixture({ spec: true, known: true });
+		await f.mgr.handleTestConnect("c1", {
+			...f.msg,
+			hostname: "parsed-user@target",
+			sshUser: "",
+			sshProxySpec: `127.0.0.1:${f.port}`,
+		});
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect(f.bastionUsernames).toContain("parsed-user");
+		expect(f.targetAuth.usernames).toContain("parsed-user");
+		await ended(f);
 	});
 	it("rejecting the target key closes the bastion and pins nothing", async () => {
 		const f = await fixture({ known: true, unpinned: true });

@@ -254,6 +254,8 @@ plain text before this: one still live stopped working, and the rest were alread
 
 ### 3.3b Jump hosts (ProxyJump)
 
+The host dialog's connection test travels the declared jump under the same resolution, authentication and host-key rules as a session. It asks about the target key, refuses an unknown bastion without a prompt, and pins the jump key only after success, as a user-made session does. A spec key is recorded only on a saved host declaring that same spec. Each test route is bounded and closed after its attempt.
+
 - A host may be reached through another: the SSH connection to it is carried inside a channel opened on a bastion, so the target needs no route of its own.
 - The jump is named **either** as a host this hub knows — which brings its own authentication and its own pinned host key, described once — **or** as a `user@host:port` spec, which authenticates through the SSH agent and is pinned on the host that jumps through it (`hosts.ssh_proxy_fingerprint`).
 - **The jump's host key is verified like any other.** It is matched against what is already trusted for it: its pin, or `known_hosts` when `[ssh] trust_known_hosts` allows. A jump nothing trusts yet is **refused**, with a message saying to connect to it once as a host of its own. A first connection is a question for a person, and this one happens on the way to somewhere else, where nobody is looking.

@@ -162,7 +162,10 @@ export interface JumpHosts {
  * session gave up (#609).
  */
 export function resolveJump(
-	host: Host,
+	host: Pick<
+		Host,
+		"id" | "sshHost" | "sshUser" | "sshProxyHostId" | "sshProxySpec" | "sshProxyFingerprint"
+	>,
 	hosts: JumpHosts,
 	trustKnownHosts: boolean,
 ): JumpResolution {
@@ -220,4 +223,17 @@ export function resolveJump(
 				},
 			};
 	}
+}
+
+/** Record a jump key only after the caller has established a successful connection. */
+export function pinJumpKey(
+	writer: {
+		updateHostFingerprint(id: string, fingerprint: string): unknown;
+		updateHost(id: string, fields: { sshProxyFingerprint: string }): unknown;
+	},
+	jump: ResolvedJump,
+	fingerprint: string,
+): void {
+	if (jump.pinTo.kind === "host") writer.updateHostFingerprint(jump.pinTo.hostId, fingerprint);
+	else writer.updateHost(jump.pinTo.hostId, { sshProxyFingerprint: fingerprint });
 }

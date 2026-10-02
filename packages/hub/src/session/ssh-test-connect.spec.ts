@@ -1,8 +1,9 @@
-import { generateKeyPairSync } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { join } from "node:path";
 import type { TestConnectMessage } from "@lasterm/shared";
-import { Server, type Server as SshServer } from "ssh2";
+import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
@@ -32,13 +33,14 @@ afterAll(() => removeTempDir(KEY_DIR));
  */
 function sshServer(
 	uname?: string,
-): Promise<{ server: SshServer; port: number; auth: { attempts: number } }> {
-	const auth = { attempts: 0 };
+): Promise<{ server: SshServer; port: number; auth: { attempts: number; usernames: string[] } }> {
+	const auth = { attempts: 0, usernames: [] as string[] };
 	return new Promise((resolve) => {
 		const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
 			client.on("error", () => {});
 			client.on("authentication", (context) => {
 				auth.attempts++;
+				auth.usernames.push(context.username);
 				context.accept();
 			});
 			client.on("ready", () => {
@@ -303,5 +305,293 @@ describe("the connection test's platform report", { timeout: 20_000 }, () => {
 
 	it("reports nothing when the remote lets nothing be read", async () => {
 		expect(await probeWith(undefined, "cached")).toEqual({ ok: true });
+	});
+});
+
+/** These loopback tests are run by the orchestrator, not the hermetic dispatch. */
+describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
+	const key = utils.parseKey(HOST_KEY);
+	if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+	const publicKey = key.getPublicSSH();
+	const keyType = key.type;
+	const fingerprint = `SHA256:${createHash("sha256").update(publicKey).digest("base64")}`;
+	const cleanup: Array<() => void> = [];
+	afterEach(() => {
+		for (const close of cleanup.splice(0)) close();
+		vi.unstubAllEnvs();
+	});
+	async function fixture(
+		options: {
+			unpinned?: boolean;
+			known?: boolean;
+			spec?: boolean;
+			unsaved?: boolean;
+			stale?: boolean;
+			password?: boolean;
+			refuseAuth?: boolean;
+			stall?: boolean;
+		} = {},
+	) {
+		const target = await sshServer();
+		cleanup.push(() => target.server.close());
+		const routes: string[] = [];
+		const connections: Array<{ ended: boolean }> = [];
+		const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
+			const state = { ended: false };
+			connections.push(state);
+			cleanup.push(() => conn.end());
+			conn.on("error", () => {});
+			conn.on("close", () => {
+				state.ended = true;
+			});
+			conn.on("authentication", (auth) => {
+				if (options.refuseAuth) auth.reject();
+				else if (options.password && auth.method !== "password") auth.reject(["password"]);
+				else auth.accept();
+			});
+			conn.on("ready", () =>
+				conn.on("tcpip", (accept, _reject, info) => {
+					routes.push(`${info.destIP}:${info.destPort}`);
+					if (options.stall) return;
+					const stream = accept();
+					const onward = net.connect(target.port, "127.0.0.1");
+					onward.on("error", () => stream.destroy());
+					stream.on("error", () => onward.destroy());
+					stream.on("close", () => onward.destroy());
+					stream.pipe(onward).pipe(stream);
+				}),
+			);
+		});
+		server.on("error", () => {});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		cleanup.push(() => server.close());
+		const port = (server.address() as net.AddressInfo).port;
+		const spec = `tester@127.0.0.1:${port}`;
+		const home = makeTempDir("lasterm-jump-home-");
+		cleanup.push(() => removeTempDir(home));
+		mkdirSync(join(home, ".ssh"));
+		writeFileSync(
+			join(home, ".ssh", "known_hosts"),
+			options.known ? `[127.0.0.1]:${port} ${keyType} ${publicKey.toString("base64")}\n` : "",
+		);
+		vi.stubEnv("HOME", home);
+		// The mock accepts ssh2's initial none authentication, so it never queries this agent.
+		vi.stubEnv("SSH_AUTH_SOCK", join(home, "unused-agent.sock"));
+		const { ctx, client, mgr, updateHostFingerprint } = setup();
+		const updateHost = vi.fn();
+		const hosts = new Map<string, Record<string, unknown>>();
+		hosts.set("jump", {
+			id: "jump",
+			type: "ssh",
+			sshHost: "127.0.0.1",
+			sshPort: port,
+			sshUser: "tester",
+			sshAuth: options.password ? "password" : "key",
+			sshKeyPath: CLIENT_KEY_PATH,
+		});
+		if (!options.unsaved)
+			hosts.set("saved-host", {
+				id: "saved-host",
+				type: "ssh",
+				sshHost: "target",
+				sshPort: 2222,
+				sshProxySpec: options.stale ? "other-jump" : spec,
+				sshProxyFingerprint: options.stale ? fingerprint : null,
+			});
+		Object.assign(ctx.metaDal, {
+			getHost: (id: string) => hosts.get(id),
+			getHostFingerprint: (id: string) => (id === "jump" && !options.unpinned ? fingerprint : null),
+			updateHost,
+		});
+		Object.assign(ctx, {
+			configResolver: { sshConfig: { trustKnownHosts: options.known === true } },
+		});
+		const msg = {
+			...testMessage(options.unsaved ? "unsaved" : "saved-host", 2222),
+			hostname: "target",
+			...(options.spec ? { sshProxySpec: spec } : { sshProxyHostId: "jump" }),
+		};
+		ctx.trustedOnceFingerprints.set("target:2222", fingerprint);
+		return {
+			ctx,
+			client,
+			mgr,
+			msg,
+			routes,
+			connections,
+			port,
+			updateHost,
+			updateHostFingerprint,
+			targetAuth: target.auth,
+		};
+	}
+	function reply(f: Awaited<ReturnType<typeof fixture>>) {
+		return f.client.send.mock.calls
+			.map(([m]) => m)
+			.find((m) => m.type === "TEST_CONNECT_OK" || m.type === "TEST_CONNECT_FAIL");
+	}
+	async function ended(f: Awaited<ReturnType<typeof fixture>>) {
+		await vi.waitFor(() => expect(f.connections.every((c) => c.ended)).toBe(true));
+	}
+	it("routes an otherwise unreachable target through its pinned saved bastion", async () => {
+		const f = await fixture();
+		let dials = 0;
+		const unreachable = net.createServer((socket) => {
+			dials++;
+			socket.destroy();
+		});
+		await new Promise<void>((resolve) => unreachable.listen(0, "127.0.0.1", resolve));
+		cleanup.push(() => unreachable.close());
+		const port = (unreachable.address() as net.AddressInfo).port;
+		const msg: TestConnectMessage = { ...f.msg, hostname: "127.0.0.1", port };
+		f.ctx.trustedOnceFingerprints.set(`127.0.0.1:${port}`, fingerprint);
+		const direct = { ...msg };
+		delete direct.sshProxyHostId;
+		await f.mgr.handleTestConnect("c1", direct);
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
+		expect(dials).toBe(1);
+		f.client.send.mockClear();
+		await f.mgr.handleTestConnect("c1", msg);
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect(f.routes).toEqual([`127.0.0.1:${port}`]);
+		expect(dials).toBe(1);
+		await ended(f);
+	});
+
+	it("refuses an unknown bastion without a route or pin", async () => {
+		const f = await fixture({ unpinned: true });
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(reply(f)).toMatchObject({
+			type: "TEST_CONNECT_FAIL",
+			message: expect.stringContaining("nothing here trusts it yet"),
+		});
+		expect(f.routes).toEqual([]);
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+		expect(f.updateHost).not.toHaveBeenCalled();
+		await ended(f);
+	});
+	it.each([false, true])("pins a known_hosts trusted bastion (spec=%s)", async (spec) => {
+		const f = await fixture({ unpinned: true, known: true, spec });
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		if (spec)
+			expect(f.updateHost).toHaveBeenCalledWith("saved-host", { sshProxyFingerprint: fingerprint });
+		else expect(f.updateHostFingerprint).toHaveBeenCalledWith("jump", fingerprint);
+		await ended(f);
+	});
+	it.each([{ unsaved: true }, { stale: true }])(
+		"never writes a spec pin to an ineligible row: %j",
+		async (mode) => {
+			const f = await fixture({ ...mode, spec: true, known: true });
+			await f.mgr.handleTestConnect("c1", f.msg);
+			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+			expect(f.updateHost).not.toHaveBeenCalled();
+			await ended(f);
+		},
+	);
+	it("does not inherit a pin from another saved spec", async () => {
+		const f = await fixture({ spec: true, stale: true });
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(reply(f)).toMatchObject({
+			type: "TEST_CONNECT_FAIL",
+			message: expect.stringContaining("nothing here trusts it yet"),
+		});
+		expect(f.routes).toEqual([]);
+	});
+	it("rejecting the target key closes the bastion and pins nothing", async () => {
+		const f = await fixture({ known: true, unpinned: true });
+		f.ctx.trustedOnceFingerprints.clear();
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL", message: "SSH host key rejected" });
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+		expect(f.updateHost).not.toHaveBeenCalled();
+		await ended(f);
+	});
+	it("accepting the target key opens two routes but prompts for the bastion password once by promptId", async () => {
+		const f = await fixture({ password: true });
+		f.ctx.trustedOnceFingerprints.clear();
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const auth = await vi.waitFor(() => {
+			const m = f.client.send.mock.calls.map(([m]) => m).find((m) => m.type === "AUTH_PROMPT");
+			expect(m).toBeDefined();
+			return m;
+		});
+		expect(auth.hostId).toBe("jump");
+		f.mgr.handleAuthPromptResponse("c1", "jump", "password", true, auth.promptId);
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect(f.routes).toEqual(["target:2222", "target:2222"]);
+		expect(f.client.send.mock.calls.filter(([m]) => m.type === "AUTH_PROMPT")).toHaveLength(1);
+		expect(f.ctx.passphraseCache.size).toBe(0);
+		await ended(f);
+	});
+	it("cancelling the bastion password opens no route and pins nothing", async () => {
+		const f = await fixture({ password: true });
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const auth = await vi.waitFor(() => {
+			const m = f.client.send.mock.calls.map(([m]) => m).find((m) => m.type === "AUTH_PROMPT");
+			expect(m).toBeDefined();
+			return m;
+		});
+		f.mgr.handleAuthPromptResponse("c1", "jump", null, false, auth.promptId);
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
+		expect(f.routes).toEqual([]);
+		expect(f.connections).toEqual([]);
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+	});
+	it("bounds a stalled channel open and closes the bastion", async () => {
+		const f = await fixture({ stall: true });
+		const started = Date.now();
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(reply(f)).toEqual({
+			type: "TEST_CONNECT_FAIL",
+			hostId: f.msg.hostId,
+			message: "The jump host 127.0.0.1 timed out after 10000ms",
+		});
+		expect(Date.now() - started).toBeLessThan(12_000);
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+		expect(f.updateHost).not.toHaveBeenCalled();
+		await ended(f);
+	});
+	it("preserves authentication failure on a trusted bastion", async () => {
+		const f = await fixture({ refuseAuth: true });
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(reply(f)).toMatchObject({
+			type: "TEST_CONNECT_FAIL",
+			message: "Cannot reach the jump host 127.0.0.1: All configured authentication methods failed",
+		});
+		expect(f.routes).toEqual([]);
+		await ended(f);
+	});
+	it("refuses a chain with the planJump message", async () => {
+		const f = await fixture();
+		const msg: TestConnectMessage = { ...f.msg, sshProxySpec: "a,b" };
+		delete msg.sshProxyHostId;
+		await f.mgr.handleTestConnect("c1", msg);
+		expect(reply(f)).toMatchObject({
+			type: "TEST_CONNECT_FAIL",
+			message:
+				"This host is reached through 2 jumps in a row, which Lasterm does not do yet. Name the last one, or add the chain as hosts of their own.",
+		});
+		expect(f.connections).toEqual([]);
+	});
+	it("parses user@target for the route, authentication and HOST_VERIFY label", async () => {
+		const f = await fixture();
+		f.ctx.trustedOnceFingerprints.clear();
+		const done = f.mgr.handleTestConnect("c1", { ...f.msg, hostname: "user@target", sshUser: "" });
+		const prompt = await hostVerifyPrompt(f.client);
+		expect(prompt.hostname).toBe("target:2222");
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect(f.routes).toEqual(["target:2222", "target:2222"]);
+		expect(f.targetAuth.usernames).toContain("user");
+		await ended(f);
 	});
 });

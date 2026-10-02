@@ -1,3 +1,4 @@
+import { openJumpRoute } from "./jump-connection.js";
 /**
  * SshConnectionManager — SSH-specific connection logic:
  *   - auth prompt request/response
@@ -32,7 +33,7 @@ import {
 	reconnectSessionId,
 	respond as respondCtx,
 } from "./prompt-context.js";
-import { resolveJump } from "./proxy-jump.js";
+import { pinJumpKey, resolveJump } from "./proxy-jump.js";
 import { captureQuitFence } from "./quit-fence.js";
 import { hostKeepsDaemon } from "./remote-daemon.js";
 import {
@@ -43,7 +44,9 @@ import {
 import type { WsClient } from "./session-manager.js";
 import {
 	type AuthPromptFn,
+	buildJumpAuth,
 	buildSshConnectConfig,
+	parseSshHost,
 	SshAgent,
 	type SshAgentDeployOptions,
 } from "./ssh-agent.js";
@@ -638,6 +641,7 @@ export class SshConnectionManager {
 	async handleTestConnect(clientId: string, msg: TestConnectMessage): Promise<void> {
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return;
+		const parsed = parseSshHost(msg.hostname);
 
 		// ── Task 2: Test-connect isolation (invariant 1) ──────────────────────────
 		// Open a dedicated "test" PromptContext scoped to this client and this request.
@@ -686,7 +690,7 @@ export class SshConnectionManager {
 				{
 					type: "HOST_VERIFY",
 					hostId: msg.hostId,
-					hostname: msg.port === 22 ? msg.hostname : `${msg.hostname}:${msg.port}`,
+					hostname: msg.port === 22 ? parsed.hostname : `${parsed.hostname}:${msg.port}`,
 					fingerprint: newFingerprint,
 					algorithm: "SHA256",
 					...(oldFingerprint ? { oldFingerprint } : {}),
@@ -702,7 +706,7 @@ export class SshConnectionManager {
 		};
 
 		try {
-			const result = await this._testSshConnectivity(msg, promptAuth, verifyHostKey);
+			const result = await this._testSshConnectivity(msg, promptAuth, verifyHostKey, parsed);
 			if (result.ok) {
 				client.send({
 					type: "TEST_CONNECT_OK",
@@ -738,14 +742,67 @@ export class SshConnectionManager {
 		msg: TestConnectMessage,
 		promptAuth: AuthPromptFn,
 		verifyHostKey: HostKeyVerifyFn,
+		parsed: ReturnType<typeof parseSshHost>,
 	): Promise<TestConnectResult> {
-		const username = msg.sshUser ?? process.env.USER ?? "root";
+		const username = msg.sshUser || parsed.username || process.env.USER || "root";
+		const saved = this.ctx.metaDal.getHost(msg.hostId);
+		const sameSpec = saved !== undefined && saved.sshProxySpec?.trim() === msg.sshProxySpec?.trim();
+		const resolution = resolveJump(
+			{
+				id: msg.hostId,
+				sshHost: msg.hostname,
+				sshUser: msg.sshUser ?? null,
+				sshProxyHostId: msg.sshProxyHostId ?? null,
+				sshProxySpec: msg.sshProxySpec ?? null,
+				sshProxyFingerprint: sameSpec ? (saved.sshProxyFingerprint ?? null) : null,
+			},
+			this.ctx.metaDal,
+			this.ctx.configResolver?.sshConfig?.trustKnownHosts === true,
+		);
+		if (resolution.kind === "refused") return { ok: false, message: resolution.message };
+		const jump = resolution.kind === "jump" ? resolution.jump : undefined;
+		const jumpAuth = jump ? await buildJumpAuth(jump, promptAuth) : undefined;
+		let successfulJumpFingerprint: string | undefined;
+		const attempt = async (trusted: ReadonlySet<string>) => {
+			if (!jump || !jumpAuth) return attemptSshTest(connectConfig, trusted, probePlatform);
+			const route = await openJumpRoute({
+				jump: jump.jump,
+				auth: jumpAuth as Record<string, unknown>,
+				pinnedFingerprint: jump.pinnedFingerprint,
+				trustKnownHosts: jump.trustKnownHosts,
+				destination: { host: parsed.hostname, port: msg.port },
+				timeoutMs: SSH_TEST_TIMEOUT_MS,
+			});
+			try {
+				const result = await attemptSshTest(
+					{ ...connectConfig, sock: route.stream },
+					trusted,
+					probePlatform,
+				);
+				if (result.result.ok) successfulJumpFingerprint = route.fingerprint;
+				return result;
+			} finally {
+				route.close();
+			}
+		};
+		const finish = (result: TestConnectResult): TestConnectResult => {
+			if (
+				result.ok &&
+				jump &&
+				!jump.pinnedFingerprint &&
+				successfulJumpFingerprint &&
+				(jump.pinTo.kind === "host" || sameSpec)
+			) {
+				pinJumpKey(this.ctx.metaDal, jump, successfulJumpFingerprint);
+			}
+			return result;
+		};
 
 		let connectConfig: SshConnectConfig;
 		try {
 			connectConfig = await buildSshConnectConfig(
 				{ method: msg.sshAuth ?? "key", keyPath: msg.sshKeyPath },
-				msg.hostname,
+				parsed.hostname,
 				msg.port,
 				username,
 				promptAuth,
@@ -761,21 +818,17 @@ export class SshConnectionManager {
 
 		// Same identity as a session's: a saved host's key counts only while the
 		// test targets the address it was recorded for.
-		const saved = this.ctx.metaDal.getHost(msg.hostId);
 		const savedAddress =
 			saved?.type === "ssh" && saved.sshHost === msg.hostname && (saved.sshPort ?? 22) === msg.port;
 		const storedFingerprint = savedAddress ? this.ctx.metaDal.getHostFingerprint(msg.hostId) : null;
-		const sshHostname = msg.hostname.includes("@")
-			? (msg.hostname.split("@")[1] ?? msg.hostname)
-			: msg.hostname;
-		const hostKey = `${sshHostname}:${msg.port}`;
+		const hostKey = `${parsed.hostname}:${msg.port}`;
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
 		const sessionTrusted = this.ctx.trustedOnceFingerprints.get(hostKey);
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
-		const first = await attemptSshTest(connectConfig, trusted, probePlatform);
-		if (first.unverifiedFingerprint === undefined) return first.result;
+		const first = await attempt(trusted);
+		if (first.unverifiedFingerprint === undefined) return finish(first.result);
 
 		const fingerprint = first.unverifiedFingerprint;
 		const action = await verifyHostKey(
@@ -791,11 +844,11 @@ export class SshConnectionManager {
 			// hub run, so its first session does not ask again.
 			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
 		}
-		const second = await attemptSshTest(connectConfig, new Set([fingerprint]), probePlatform);
+		const second = await attempt(new Set([fingerprint]));
 		if (second.unverifiedFingerprint !== undefined) {
 			return { ok: false, message: "SSH host key changed during the test" };
 		}
-		return second.result;
+		return finish(second.result);
 	}
 }
 

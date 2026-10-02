@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
-import type { TestConnectMessage } from "@lasterm/shared";
+import { generateId, type TestConnectMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -163,6 +163,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 					`@revoked [${name === "address" ? "127.0.0.1" : "alias"}]:${mock.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
 				);
 				vi.stubEnv("HOME", home);
+				vi.stubEnv("USERPROFILE", home);
 				const { ctx, client, mgr, updateHostFingerprint } = setup({
 					type: "ssh",
 					sshHost: name === "edited-alias" ? "127.0.0.2" : "127.0.0.1",
@@ -447,8 +448,16 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 					: ""),
 		);
 		vi.stubEnv("HOME", home);
-		// The mock accepts ssh2's initial none authentication, so it never queries this agent.
-		vi.stubEnv("SSH_AUTH_SOCK", join(home, "unused-agent.sock"));
+		vi.stubEnv("USERPROFILE", home);
+		// The mock accepts ssh2's initial none authentication, so it never queries
+		// this agent. On Windows the address is a missing OpenSSH pipe rather than
+		// a socket path, which ssh2 would read as a Cygwin agent.
+		vi.stubEnv(
+			"SSH_AUTH_SOCK",
+			process.platform === "win32"
+				? String.raw`\\.\pipe\lasterm-unused-agent-${generateId()}`
+				: join(home, "unused-agent.sock"),
+		);
 		const { ctx, client, mgr, updateHostFingerprint } = setup();
 		const updateHost = vi.fn();
 		const hosts = new Map<string, Record<string, unknown>>();

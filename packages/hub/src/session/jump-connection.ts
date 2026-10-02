@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
 import {
+	findHostKeyRevocation,
 	findKnownHostKeys,
 	judgeAgainstKnownHosts,
 	normalizeFingerprint,
@@ -154,6 +155,16 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		const hostVerifier = ((key: Buffer) => {
 			presented = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
 			const offered = normalizeFingerprint(presented);
+			const revoked = findHostKeyRevocation(presented, [options.jump.host], options.jump.port);
+			if (revoked) {
+				keyRefused = true;
+				fail(
+					new JumpRefusedError(
+						`The jump host ${options.jump.host} presented a key marked @revoked in ${revoked.file}:${revoked.line}. Nothing was connected.`,
+					),
+				);
+				return false;
+			}
 
 			const pinned = options.pinnedFingerprint;
 			if (pinned) {

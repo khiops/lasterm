@@ -2583,6 +2583,15 @@ export class SessionManager {
 			}
 
 			const kv = sshAgent.lastKeyVerification;
+			if (kv.revoked) {
+				client.send({
+					type: "ERROR",
+					code: "SSH_HOST_KEY_REVOKED",
+					message: `This host's key is marked @revoked in ${kv.revoked.file}:${kv.revoked.line}. Refusing to connect.`,
+					hostId,
+				} satisfies ErrorMessage);
+				throw err;
+			}
 			if (kv.tofu || kv.mismatch) {
 				// What this machine's own SSH already says about the key, which is
 				// the difference between a host nobody has ever seen and one the
@@ -2598,18 +2607,6 @@ export class SessionManager {
 					kv.capturedFingerprint,
 					namesToLookUp.flatMap((name) => findKnownHostKeys(name, sshPort, knownHostsSources)),
 				);
-
-				// A key its owner has withdrawn is the one verdict with no question
-				// attached: not offered for trust, at any level.
-				if (verdict.kind === "revoked") {
-					client.send({
-						type: "ERROR",
-						code: "SSH_HOST_KEY_REVOKED",
-						message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
-						hostId,
-					} satisfies ErrorMessage);
-					throw new Error("SSH host key revoked in known_hosts");
-				}
 
 				// Trusted there, and the person has said once that this is reason
 				// enough: pinned here without asking again. Only ever for a first

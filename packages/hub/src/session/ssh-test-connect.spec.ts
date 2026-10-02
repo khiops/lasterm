@@ -167,7 +167,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		server = undefined;
 	});
 
-	it.each(["address", "saved-alias", "edited-alias"])(
+	it.each(["address", "saved-alias", "edited-alias", "pinned"])(
 		"checks target revocation under the eligible names (%s)",
 		async (name) => {
 			const mock = await sshServer();
@@ -180,7 +180,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				const knownHosts = join(home, ".ssh", "known_hosts");
 				writeFileSync(
 					knownHosts,
-					`@revoked [${name === "address" ? "127.0.0.1" : "alias"}]:${mock.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
+					`@revoked [${name === "address" || name === "pinned" ? "127.0.0.1" : "alias"}]:${mock.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
 				);
 				vi.stubEnv("HOME", home);
 				vi.stubEnv("USERPROFILE", home);
@@ -189,7 +189,10 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 					sshHost: name === "edited-alias" ? "127.0.0.2" : "127.0.0.1",
 					sshPort: mock.port,
 					sshConfigHost: "alias",
-					fingerprint: null,
+					fingerprint:
+						name === "pinned"
+							? `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`
+							: null,
 				});
 				const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
 				if (name === "edited-alias") {
@@ -433,6 +436,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			refuseAuth?: boolean;
 			stall?: boolean;
 			revokedTarget?: boolean;
+			revokedJump?: boolean;
 		} = {},
 	) {
 		const target = await sshServer();
@@ -477,7 +481,9 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		mkdirSync(join(home, ".ssh"));
 		writeFileSync(
 			join(home, ".ssh", "known_hosts"),
-			(options.known ? `[127.0.0.1]:${port} ${keyType} ${publicKey.toString("base64")}\n` : "") +
+			(options.known || options.revokedJump
+				? `${options.revokedJump ? "@revoked " : ""}[127.0.0.1]:${port} ${keyType} ${publicKey.toString("base64")}\n`
+				: "") +
 				(options.revokedTarget
 					? `@revoked [target]:2222 ${keyType} ${publicKey.toString("base64")}\n`
 					: ""),
@@ -554,6 +560,21 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 	async function ended(f: Awaited<ReturnType<typeof fixture>>) {
 		await vi.waitFor(() => expect(f.connections.every((c) => c.ended)).toBe(true));
 	}
+	it("refuses a pinned revoked bastion without opening a route", async () => {
+		const f = await fixture({ revokedJump: true });
+		await f.mgr.handleTestConnect("c1", f.msg);
+		expect(f.client.send).toHaveBeenCalledWith({
+			type: "TEST_CONNECT_FAIL",
+			hostId: "saved-host",
+			message: `The jump host 127.0.0.1 presented a key marked @revoked in ${join(process.env.HOME!, ".ssh", "known_hosts")}:1. Nothing was connected.`,
+		});
+		expect(f.client.send).not.toHaveBeenCalledWith(
+			expect.objectContaining({ type: "HOST_VERIFY" }),
+		);
+		expect(f.routes).toEqual([]);
+		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+	});
+
 	it("routes an otherwise unreachable target through its pinned saved bastion", async () => {
 		const f = await fixture({ unsaved: true });
 		let dials = 0;

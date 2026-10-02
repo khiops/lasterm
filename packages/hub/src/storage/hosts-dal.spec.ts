@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 import type { DatabaseManager } from "./db.js";
 import { openTestDatabases } from "./db.js";
@@ -183,7 +183,15 @@ describe("HostsDAL — route-bound pins", () => {
 		pin(b.id);
 		pin(h.id);
 		pin(other.id);
-		dal.updateHost(b.id, fields);
+		const before = dal.getHost(h.id)?.updatedAt;
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(Date.now() + 1000));
+		try {
+			dal.updateHost(b.id, fields);
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(dal.getHost(h.id)?.updatedAt).not.toBe(before);
 		expect(dal.getHost(b.id)?.sshFingerprint).toBeNull();
 		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
 		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
@@ -198,8 +206,16 @@ describe("HostsDAL — route-bound pins", () => {
 			});
 			pin(h.id);
 		}
-		expect(dal.deleteHost(b.id)).toBe(true);
+		const timestamps = new Map(dal.listHosts().map((host) => [host.id, host.updatedAt]));
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(Date.now() + 1000));
+		try {
+			expect(dal.deleteHost(b.id)).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
 		for (const h of dal.listHosts()) {
+			expect(h.updatedAt).not.toBe(timestamps.get(h.id));
 			expect(h.sshFingerprint).toBeNull();
 			expect(h.sshProxyFingerprint).toBeUndefined();
 			expect(h.sshProxyHostId).toBeUndefined();

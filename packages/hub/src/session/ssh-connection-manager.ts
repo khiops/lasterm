@@ -20,11 +20,7 @@ import type {
 } from "@lasterm/shared";
 import { Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
-import {
-	findKnownHostKeys,
-	judgeAgainstKnownHosts,
-	readUserKnownHosts,
-} from "../ssh/known-hosts.js";
+import { findHostKeyRevocation } from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
 import { computeTargetStatus } from "./agent-status.js";
@@ -780,9 +776,13 @@ export class SshConnectionManager {
 		if (resolution.kind === "refused") return { ok: false, message: resolution.message };
 		const jump = resolution.kind === "jump" ? resolution.jump : undefined;
 		const jumpAuth = jump ? await buildJumpAuth(jump, promptAuth) : undefined;
+		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
+			(name): name is string => typeof name === "string" && name.length > 0,
+		);
 		let successfulJumpFingerprint: string | undefined;
 		const attempt = async (trusted: ReadonlySet<string>) => {
-			if (!jump || !jumpAuth) return attemptSshTest(connectConfig, trusted, probePlatform);
+			if (!jump || !jumpAuth)
+				return attemptSshTest(connectConfig, trusted, probePlatform, undefined, namesToLookUp);
 			const route = await openJumpRoute({
 				jump: jump.jump,
 				auth: jumpAuth as Record<string, unknown>,
@@ -796,6 +796,8 @@ export class SshConnectionManager {
 					{ ...connectConfig, sock: route.stream },
 					trusted,
 					probePlatform,
+					undefined,
+					namesToLookUp,
 				);
 				if (result.result.ok) successfulJumpFingerprint = route.fingerprint;
 				return result;
@@ -848,20 +850,12 @@ export class SshConnectionManager {
 		if (first.unverifiedFingerprint === undefined) return finish(first.result);
 
 		const fingerprint = first.unverifiedFingerprint;
-		const knownHostsSources = readUserKnownHosts();
-		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
-			(name): name is string => typeof name === "string" && name.length > 0,
-		);
-		const verdict = judgeAgainstKnownHosts(
-			fingerprint,
-			namesToLookUp.flatMap((name) => findKnownHostKeys(name, msg.port, knownHostsSources)),
-		);
-		if (verdict.kind === "revoked") {
+		const revoked = findHostKeyRevocation(fingerprint, namesToLookUp, msg.port);
+		if (revoked)
 			return {
 				ok: false,
-				message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
+				message: `This host's key is marked @revoked in ${revoked.file}:${revoked.line}. Refusing to connect.`,
 			};
-		}
 		const action = await verifyHostKey(
 			storedFingerprint ?? "",
 			fingerprint,
@@ -915,9 +909,11 @@ export function attemptSshTest(
 	trusted: ReadonlySet<string>,
 	probe?: (client: SshClient) => Promise<TestConnectPlatform | undefined>,
 	createClient: () => SshClient = () => new SshClient(),
+	names: readonly string[] = connectConfig.host ? [connectConfig.host] : [],
 ): Promise<{ result: TestConnectResult; unverifiedFingerprint?: string }> {
 	const sshClient = createClient();
 	let unverifiedFingerprint: string | undefined;
+	let revoked: { file: string; line: number } | undefined;
 	const config: SshConnectConfig = {
 		...connectConfig,
 		// Bounded on its own, well within the keepalive's minute; carried all the
@@ -925,6 +921,8 @@ export function attemptSshTest(
 		...SSH_KEEPALIVE,
 		hostVerifier: ((key: Buffer) => {
 			const fingerprint = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
+			revoked = findHostKeyRevocation(fingerprint, names, connectConfig.port ?? 22);
+			if (revoked) return false;
 			if (trusted.has(fingerprint)) return true;
 			unverifiedFingerprint = fingerprint;
 			return false;
@@ -956,6 +954,14 @@ export function attemptSshTest(
 		});
 
 		sshClient.on("error", (err: Error) => {
+			if (revoked) {
+				sshClient.end();
+				finish({
+					ok: false,
+					message: `This host's key is marked @revoked in ${revoked.file}:${revoked.line}. Refusing to connect.`,
+				});
+				return;
+			}
 			if (unverifiedFingerprint !== undefined) {
 				sshClient.end();
 				finish({ ok: false, message: "SSH host key not trusted" });

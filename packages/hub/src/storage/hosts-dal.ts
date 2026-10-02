@@ -309,8 +309,10 @@ export class HostsDAL {
 				this.db.prepare("UPDATE hosts SET ssh_proxy_fingerprint = NULL WHERE id = ?").run(id);
 			if (JSON.stringify(oldAddress) !== JSON.stringify(sshAddress(updated))) {
 				this.db
-					.prepare("UPDATE hosts SET ssh_fingerprint = NULL WHERE ssh_proxy_host_id = ?")
-					.run(id);
+					.prepare(
+						"UPDATE hosts SET ssh_fingerprint = NULL, updated_at = ? WHERE ssh_proxy_host_id = ?",
+					)
+					.run(new Date().toISOString(), id);
 			}
 			return this.getHost(id) as Host;
 		})();
@@ -384,9 +386,9 @@ export class HostsDAL {
 		return this.db.transaction(() => {
 			this.db
 				.prepare(
-					"UPDATE hosts SET ssh_fingerprint = NULL, ssh_proxy_fingerprint = NULL WHERE ssh_proxy_host_id = ?",
+					"UPDATE hosts SET ssh_fingerprint = NULL, ssh_proxy_fingerprint = NULL, updated_at = ? WHERE ssh_proxy_host_id = ?",
 				)
-				.run(id);
+				.run(new Date().toISOString(), id);
 			return this.db.prepare("DELETE FROM hosts WHERE id = ?").run(id).changes > 0;
 		})();
 	}

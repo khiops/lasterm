@@ -10,7 +10,7 @@ import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type net from "node:net";
 import { join } from "node:path";
 import {
@@ -342,6 +342,38 @@ function sessionOf(h: Harness): SessionState | undefined {
 // ─── Connect ─────────────────────────────────────────────────────────────────
 
 describe("Connect (#648)", { timeout: 20_000 }, () => {
+	it("refuses a pinned revoked key without prompting or changing the pin", async () => {
+		const h = await hubWith({ daemon: false });
+		const home = makeTempDir("lasterm-revoked-session-");
+		cleanups.push(() => {
+			vi.unstubAllEnvs();
+			removeTempDir(home);
+		});
+		mkdirSync(join(home, ".ssh"));
+		const key = ssh2.utils.parseKey(HOST_KEY);
+		if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+		const file = join(home, ".ssh", "known_hosts");
+		writeFileSync(
+			file,
+			`@revoked [127.0.0.1]:${h.remote.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
+		);
+		vi.stubEnv("HOME", home);
+		vi.stubEnv("USERPROFILE", home);
+		const outcome = h.sm.connectHost(h.host.id, { clientId: h.window.id });
+		expect(outcome.kind).toBe("connecting");
+		if (outcome.kind !== "connecting") throw new Error("expected connecting");
+		await expect(outcome.done).resolves.toBe(false);
+		expect(h.heard).toContainEqual(
+			expect.objectContaining({
+				type: "ERROR",
+				code: "SSH_HOST_KEY_REVOKED",
+				message: `This host's key is marked @revoked in ${file}:1. Refusing to connect.`,
+			}),
+		);
+		expect(h.heard.some((m) => m.type === "HOST_VERIFY")).toBe(false);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint).toBe(HOST_FINGERPRINT);
+	});
+
 	it("reaches the host and readies its agent, and starts no terminal", async () => {
 		const h = await hubWith({ daemon: false });
 

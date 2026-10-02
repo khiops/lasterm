@@ -225,3 +225,17 @@ export function judgeAgainstKnownHosts(
 	if (other) return { kind: "other-key", file: other.file, line: other.line };
 	return { kind: "unknown" };
 }
+
+/** Revocation overrides every source of trust, on every connection attempt. */
+export function findHostKeyRevocation(
+	fingerprint: string,
+	names: readonly string[],
+	port: number,
+): { file: string; line: number } | undefined {
+	const sources = readUserKnownHosts();
+	const verdict = judgeAgainstKnownHosts(
+		fingerprint,
+		names.flatMap((name) => findKnownHostKeys(name, port, sources)),
+	);
+	return verdict.kind === "revoked" ? { file: verdict.file, line: verdict.line } : undefined;
+}

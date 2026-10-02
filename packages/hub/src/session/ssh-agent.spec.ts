@@ -1,9 +1,9 @@
-import { generateKeyPairSync } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HelloMessage, Host } from "@lasterm/shared";
 import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
-import { Server, type Server as SshServer } from "ssh2";
+import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
@@ -985,6 +985,50 @@ describe("SshAgent — TOFU host key verification", () => {
 		);
 		servers = [];
 	});
+
+	it.each(["stored", "session", "unrevoked"])(
+		"checks revocation before %s trust",
+		async (trust) => {
+			const { server, port } = await createMockSshServer((stream) => {
+				stream.write(makeHelloFrame());
+			});
+			servers.push(server);
+			const home = makeTempDir("lasterm-key-revocation-");
+			try {
+				mkdirSync(join(home, ".ssh"));
+				const key = utils.parseKey(HOST_KEY);
+				if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+				const file = join(home, ".ssh", "known_hosts");
+				writeFileSync(
+					file,
+					`${trust === "unrevoked" ? "" : "@revoked "}[127.0.0.1]:${port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
+				);
+				vi.stubEnv("HOME", home);
+				vi.stubEnv("USERPROFILE", home);
+				const agent = new SshAgent(makeHost(port));
+				agents.push(agent);
+				const fingerprint = `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`;
+				const start = agent.start(
+					trust === "session" ? null : fingerprint,
+					trust === "session" ? fingerprint : undefined,
+				);
+				if (trust === "unrevoked") {
+					await expect(start).resolves.toHaveProperty("keyVerification.revoked", undefined);
+				} else {
+					await expect(start).rejects.toMatchObject({
+						keyVerification: { revoked: { file, line: 1 } },
+					});
+					expect(agent.lastKeyVerification.revoked).toEqual({ file, line: 1 });
+					expect(agent.lastKeyVerification.tofu).toBe(false);
+					expect(agent.lastKeyVerification.mismatch).toBe(false);
+				}
+			} finally {
+				vi.unstubAllEnvs();
+				removeTempDir(home);
+			}
+		},
+		TEST_TIMEOUT,
+	);
 
 	it(
 		"TOFU: rejects with SSH_TOFU on first connect and captures fingerprint",

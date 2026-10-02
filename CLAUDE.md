@@ -79,8 +79,10 @@ desktop package distributed is **the one the Microsoft Store signs**: the releas
 workflow publishes the agents and the Windows hub, no desktop installer, and keeps the
 unsigned MSIX as a run artifact for the Store (STORE-ONLY-DESKTOP in
 `docs/decisions.md`). The first
-Store submission is manual and not yet done (#618); submitting each release and
-publishing the package the Store signs to winget are planned (#619, #620). Until the
+Store submission is manual and not yet done (#618). After it, the release workflow's
+`store` job submits a release once `STORE_PRODUCT_ID` is set
+(`packages/clients/desktop/msix/README.md`); attaching the package the Store signs to
+the release and publishing it to winget are planned (#619, #620). Until the
 Store lists it, the only way to run the desktop app is **building from this
 repository**. The desktop has no updater of its own: the Store updates it.
 

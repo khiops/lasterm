@@ -9,7 +9,7 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 - `.github/workflows/build.yml` builds the Windows desktop executable with `tauri build --no-bundle` and runs `pack-msix.ps1 -SkipBuild`. When MSIX packaging is enabled (the three `MSIX_*` repository variables are set), it uploads the package as the `msix-x86_64-pc-windows-msvc` artifact, a tar holding the `.msix`, kept 30 days on a release.
 - A manual `ci.yml` dispatch produces that artifact through the same reusable build workflow.
 - `.github/workflows/release.yml` calls the same build workflow. This unsigned `.msix` is never uploaded to the GitHub Release, and the release workflow publishes no desktop installer; only the package the Store signs may join a release after certification (STORE-ONLY-DESKTOP in `docs/decisions.md`).
-- There is no signing step: the Microsoft Store signs the package. CI has no Store submission step yet (#619).
+- There is no signing step: the Microsoft Store signs the package. The first submission is manual (see "First Partner Center Submission"); later releases go through the release workflow's `store` job once `STORE_PRODUCT_ID` is set (see "Releasing to the Microsoft Store").
 
 ## Package Inputs
 
@@ -73,14 +73,16 @@ Validate these points on the next Windows CI dispatch or release run:
 6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX packaging is enabled.
 7. Release runs keep the `.msix` as that run artifact; it is not uploaded to the release.
 
-## Later: Manual Partner Center Submission
+## First Partner Center Submission
 
-Store submission is deferred and remains manual.
-
-When ready:
+The first submission is made by hand (#618). The release workflow's `store` job only
+updates an app that is already published and live, so leave `STORE_PRODUCT_ID` unset
+until this submission is live.
 
 1. Create or open the app in Partner Center and reserve the product name.
-2. Copy the Package/Identity values from Partner Center into `pack-msix.ps1` parameters:
+2. Copy the Package/Identity values from Partner Center into the repository variables
+   `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER` and `MSIX_PUBLISHER_DISPLAY_NAME`, which CI
+   passes to `pack-msix.ps1`. A local package takes them as parameters:
 
 ```powershell
 .\packages\clients\desktop\msix\pack-msix.ps1 `
@@ -89,7 +91,7 @@ When ready:
   -PublisherDisplayName "TODO Publisher Display Name"
 ```
 
-3. Submit the unsigned `.msix` manually in Partner Center. Microsoft Store re-signs the package during ingestion.
+3. Submit the unsigned `.msix` from a release run's `msix-x86_64-pc-windows-msvc` artifact manually in Partner Center. Microsoft Store re-signs the package during ingestion.
 4. In certification notes, explain `runFullTrust`: Lasterm is a developer terminal app that launches its packaged local hub and agent sidecars, listens only on localhost for its UI transport, and manages user-initiated terminal/SSH session subprocesses.
 5. Attach Windows App Certification Kit results and document any accepted full-trust warnings.
 

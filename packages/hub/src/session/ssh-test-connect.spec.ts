@@ -526,11 +526,57 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
 		expect(dials).toBe(1);
 		f.client.send.mockClear();
-		await f.mgr.handleTestConnect("c1", msg);
+		const done = f.mgr.handleTestConnect("c1", msg);
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-		expect(f.routes).toEqual([`127.0.0.1:${port}`]);
+		expect(f.routes).toEqual([`127.0.0.1:${port}`, `127.0.0.1:${port}`]);
 		expect(dials).toBe(1);
 		await ended(f);
+	});
+
+	it.each([true, false])(
+		"ignores address trust through a jump and leaves it unchanged (unsaved=%s)",
+		async (unsaved) => {
+			const f = await fixture({ unsaved });
+			const cacheBefore = new Map(f.ctx.trustedOnceFingerprints);
+			const cacheWrite = vi.spyOn(f.ctx.trustedOnceFingerprints, "set");
+			const done = f.mgr.handleTestConnect("c1", f.msg);
+			const prompt = await hostVerifyPrompt(f.client);
+			expect(prompt.fingerprint).toBe(fingerprint);
+			expect(f.targetAuth.attempts).toBe(0);
+			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+			await done;
+			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+			expect(new Map(f.ctx.trustedOnceFingerprints)).toEqual(cacheBefore);
+			expect(cacheWrite).not.toHaveBeenCalled();
+			expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+			await ended(f);
+		},
+	);
+
+	it("asks again when an unsaved address is tested through another jump", async () => {
+		const f = await fixture({ unsaved: true });
+		const other = await fixture({ unsaved: true });
+		f.hosts.set("jump-b", other.hosts.get("jump")!);
+		f.ctx.metaDal.getHostFingerprint = (id: string) =>
+			id === "jump" || id === "jump-b" ? fingerprint : null;
+		f.ctx.trustedOnceFingerprints.clear();
+		for (const sshProxyHostId of ["jump", "jump-b"]) {
+			f.client.send.mockClear();
+			const done = f.mgr.handleTestConnect("c1", { ...f.msg, sshProxyHostId });
+			const prompt = await hostVerifyPrompt(f.client);
+			expect(prompt.fingerprint).toBe(fingerprint);
+			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+			await done;
+			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+			expect(f.ctx.trustedOnceFingerprints.size).toBe(0);
+		}
+		expect(f.routes).toEqual(["target:2222", "target:2222"]);
+		expect(other.routes).toEqual(["target:2222", "target:2222"]);
+		await ended(f);
+		await ended(other);
 	});
 
 	it("refuses a revoked target through a jump before asking or writing", async () => {
@@ -566,7 +612,10 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 	});
 	it.each([false, true])("pins a known_hosts trusted bastion (spec=%s)", async (spec) => {
 		const f = await fixture({ unpinned: true, known: true, spec });
-		await f.mgr.handleTestConnect("c1", f.msg);
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 		if (spec)
 			expect(f.updateHost).toHaveBeenCalledWith("saved-host", { sshProxyFingerprint: fingerprint });
@@ -578,10 +627,8 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		async (mode) => {
 			const f = await fixture({ ...mode, spec: true, known: true });
 			const done = f.mgr.handleTestConnect("c1", f.msg);
-			if (mode.stale) {
-				const prompt = await hostVerifyPrompt(f.client);
-				f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
-			}
+			const prompt = await hostVerifyPrompt(f.client);
+			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 			expect(f.updateHost).not.toHaveBeenCalled();
@@ -667,12 +714,15 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 	});
 	it("uses the parsed target user for a spec jump when sshUser is empty", async () => {
 		const f = await fixture({ spec: true, known: true, unsaved: true });
-		await f.mgr.handleTestConnect("c1", {
+		const done = f.mgr.handleTestConnect("c1", {
 			...f.msg,
 			hostname: "parsed-user@target",
 			sshUser: "",
 			sshProxySpec: `127.0.0.1:${f.port}`,
 		});
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 		expect(f.bastionUsernames).toContain("parsed-user");
 		expect(f.targetAuth.usernames).toContain("parsed-user");

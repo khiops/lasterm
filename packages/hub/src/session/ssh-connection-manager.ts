@@ -833,8 +833,10 @@ export class SshConnectionManager {
 		const hostKey = `${parsed.hostname}:${msg.port}`;
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
-		const sessionTrusted =
-			!saved || savedRoute ? this.ctx.trustedOnceFingerprints.get(hostKey) : undefined;
+		const canUseAddressTrust = resolution.kind !== "jump" && (!saved || savedRoute);
+		const sessionTrusted = canUseAddressTrust
+			? this.ctx.trustedOnceFingerprints.get(hostKey)
+			: undefined;
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
 		const first = await attempt(trusted);
@@ -861,12 +863,12 @@ export class SshConnectionManager {
 			storedFingerprint === null,
 		);
 		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
-		// The saved route can retain a permanent pin or a hub-run trust decision.
-		// An unsaved host caches the key for its first session; an edited route
-		// on a saved host keeps the accepted key only for this test's retry.
+		// The saved route can retain a permanent pin, including through a jump.
+		// Only eligible direct tests cache address trust for later sessions.
+		// Jump tests and edited saved routes retain the key only for this retry.
 		if (action === "trust_permanent" && savedRoute) {
 			this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint);
-		} else if (!saved || savedRoute) {
+		} else if (canUseAddressTrust) {
 			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
 		}
 		const second = await attempt(new Set([fingerprint]));

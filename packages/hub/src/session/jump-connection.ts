@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
 import {
+	findHostKeyRevocation,
 	findKnownHostKeys,
 	judgeAgainstKnownHosts,
 	normalizeFingerprint,
@@ -31,8 +32,12 @@ export interface JumpTarget {
 }
 
 export interface JumpOptions {
+	/** How long opening the route may take, from connecting to the open channel; none when absent. */
+	timeoutMs?: number;
 	/** Where the jump is, and who it is reached as. */
 	jump: JumpTarget;
+	/** Names used for revocation and trust lookup in `known_hosts`. */
+	knownHostsNames: string[];
 	/** The ssh2 configuration authenticating to the jump (agent, key, password). */
 	auth: Record<string, unknown>;
 	/** The fingerprint already trusted for this jump, when there is one. */
@@ -69,6 +74,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 	const client = new Client();
 	let presented = "";
 	let fromKnownHosts = false;
+	let keyRefused = false;
 
 	return new Promise<JumpRoute>((resolve, reject) => {
 		let settled = false;
@@ -76,9 +82,21 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		let routed = false;
 		/** Whoever holds the route ended it: what goes wrong on the way out is no loss. */
 		let closing = false;
+		const timer =
+			options.timeoutMs === undefined
+				? undefined
+				: setTimeout(() => {
+						fail(
+							new Error(
+								`The jump host ${options.jump.host} timed out after ${options.timeoutMs}ms`,
+							),
+						);
+						client.destroy();
+					}, options.timeoutMs);
 		const fail = (error: Error): void => {
 			if (settled) return;
 			settled = true;
+			clearTimeout(timer);
 			client.end();
 			reject(error);
 		};
@@ -120,6 +138,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 						client.end();
 						return;
 					}
+					clearTimeout(timer);
 					settled = true;
 					routed = true;
 					resolve({
@@ -138,34 +157,55 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		const hostVerifier = ((key: Buffer) => {
 			presented = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
 			const offered = normalizeFingerprint(presented);
+			const revoked = findHostKeyRevocation(presented, options.knownHostsNames, options.jump.port);
+			if (revoked) {
+				keyRefused = true;
+				fail(
+					new JumpRefusedError(
+						`The jump host ${options.jump.host} presented a key marked @revoked in ${revoked.file}:${revoked.line}. Nothing was connected.`,
+					),
+				);
+				return false;
+			}
 
 			const pinned = options.pinnedFingerprint;
-			if (pinned) return normalizeFingerprint(pinned) === offered;
+			if (pinned) {
+				keyRefused = normalizeFingerprint(pinned) !== offered;
+				return !keyRefused;
+			}
 
 			// Nothing pinned yet: what this machine's own SSH already trusts is the
 			// only answer available without a person to ask.
+			const sources = readUserKnownHosts();
 			const verdict = judgeAgainstKnownHosts(
 				presented,
-				findKnownHostKeys(options.jump.host, options.jump.port, readUserKnownHosts()),
+				options.knownHostsNames.flatMap((name) =>
+					findKnownHostKeys(name, options.jump.port, sources),
+				),
 			);
 			if (verdict.kind === "trusted" && options.trustKnownHosts) {
 				fromKnownHosts = true;
 				return true;
 			}
+			keyRefused = true;
 			return false;
 		}) as SyncHostVerifier;
 
-		client.connect({
-			...options.auth,
-			// A bastion that goes silent is noticed like the host behind it (#607).
-			...SSH_KEEPALIVE,
-			host: options.jump.host,
-			port: options.jump.port,
-			username: options.jump.username,
-			hostVerifier,
-		});
+		try {
+			client.connect({
+				...options.auth,
+				// A bastion that goes silent is noticed like the host behind it (#607).
+				...SSH_KEEPALIVE,
+				host: options.jump.host,
+				port: options.jump.port,
+				username: options.jump.username,
+				hostVerifier,
+			});
+		} catch (error) {
+			fail(error instanceof Error ? error : new Error(String(error)));
+		}
 	}).catch((error: unknown) => {
-		if (presented !== "" && error instanceof Error && !(error instanceof JumpRefusedError)) {
+		if (keyRefused && error instanceof Error && !(error instanceof JumpRefusedError)) {
 			// The key was seen and not accepted: say what to do about it, since
 			// nothing here can ask.
 			throw new JumpRefusedError(

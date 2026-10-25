@@ -213,6 +213,13 @@ export function useHostForm(editHost?: Host) {
 		if (!form.value.label) form.value.label = name;
 	}
 
+	function formProxyFields(chosen = form.value.sshProxy) {
+		return proxyFields(
+			chosen,
+			hostsStore.hosts.map((candidate) => candidate.id),
+		);
+	}
+
 	async function testConnectionInline(): Promise<void> {
 		const testConnection = ++latestTestConnection;
 		testing.value = true;
@@ -234,6 +241,7 @@ export function useHostForm(editHost?: Host) {
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
 			const sshProxy = form.value.sshProxy;
+			const proxy = formProxyFields(sshProxy);
 
 			const result = await new Promise<{
 				ok: boolean;
@@ -267,6 +275,8 @@ export function useHostForm(editHost?: Host) {
 					sshAuth: sshAuth,
 					...(sshKeyPath && { sshKeyPath }),
 					...(sshUser && { sshUser }),
+					...(proxy.ssh_proxy_host_id && { sshProxyHostId: proxy.ssh_proxy_host_id }),
+					...(proxy.ssh_proxy_spec && { sshProxySpec: proxy.ssh_proxy_spec }),
 				});
 			});
 
@@ -277,8 +287,7 @@ export function useHostForm(editHost?: Host) {
 					form.value.sshHost === host &&
 					form.value.sshPort === sshPort &&
 					form.value.sshUser === sshUser &&
-					sshProxy.trim() === "" &&
-					form.value.sshProxy.trim() === ""
+					form.value.sshProxy === sshProxy
 						? result.platform?.os
 						: undefined;
 			}
@@ -322,10 +331,7 @@ export function useHostForm(editHost?: Host) {
 					// One of the two, never both: an id names a host this hub knows,
 					// anything else is an address written the way ssh_config writes
 					// it. Empty clears whichever was set.
-					...proxyFields(
-						form.value.sshProxy,
-						hostsStore.hosts.map((candidate) => candidate.id),
-					),
+					...formProxyFields(),
 					// An unavailable setting is recorded as null for a new Windows host.
 					// On an existing one, leave the stored answer alone instead.
 					...(!isEdit || !sshRemoteDaemonUnavailable.value

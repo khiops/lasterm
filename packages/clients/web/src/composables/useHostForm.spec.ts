@@ -3,13 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 
+const knownHosts = vi.hoisted(() => [] as Host[]);
 const testWsClient = vi.hoisted(() => ({ on: vi.fn(), send: vi.fn() }));
 const createHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
 const updateHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
 
 vi.mock("../stores/hosts.js", () => ({
 	useHostsStore: () => ({
-		hosts: [],
+		hosts: knownHosts,
 		createHost: createHostSpy,
 		updateHost: updateHostSpy,
 	}),
@@ -25,6 +26,7 @@ vi.mock("../stores/session.js", () => ({
 
 describe("useHostForm", () => {
 	beforeEach(() => {
+		knownHosts.length = 0;
 		vi.restoreAllMocks();
 		testWsClient.on.mockReset();
 		testWsClient.send.mockReset();
@@ -283,7 +285,7 @@ describe("useHostForm", () => {
 			expect(body).toHaveProperty("ssh_remote_daemon", true);
 		});
 
-		it("does not trust a Windows result from a test started through a proxy", async () => {
+		it("trusts a Windows result from a test through an unchanged proxy", async () => {
 			createHostSpy.mockClear();
 			const { form, save, testConnectionInline } = useHostForm();
 			form.value.label = "daemon-host";
@@ -297,7 +299,7 @@ describe("useHostForm", () => {
 			await save();
 
 			const body = (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
-			expect(body).toHaveProperty("ssh_remote_daemon", true);
+			expect(body).toHaveProperty("ssh_remote_daemon", null);
 		});
 
 		it("clears a completed Windows result when the proxy changes", async () => {
@@ -368,6 +370,38 @@ describe("useHostForm", () => {
 			expect(body).toHaveProperty("ssh_remote_daemon", true);
 		});
 	});
+
+	it.each([
+		["jump-id", "sshProxyHostId", "ssh_proxy_host_id"],
+		["user@jump:22", "sshProxySpec", "ssh_proxy_spec"],
+		["   ", null, null],
+	])(
+		"save and test classify proxy %s identically and failure ends testing",
+		async (value, wire, stored) => {
+			knownHosts.push({ id: "jump-id", label: "jump" } as Host);
+			createHostSpy.mockClear();
+			const { form, save, testing, testConnectionInline } = useHostForm();
+			form.value.label = "target";
+			form.value.sshHost = "target";
+			form.value.sshAuth = "agent";
+			form.value.sshProxy = value;
+			const harness = testConnectionHarness();
+			const done = testConnectionInline();
+			await harness.respondFail(0);
+			await done;
+			expect(testing.value).toBe(false);
+			await save();
+			const sent = testWsClient.send.mock.calls[0]?.[0];
+			const body = createHostSpy.mock.calls[0]?.[0];
+			if (wire && stored) {
+				expect(sent[wire]).toBe(value.trim());
+				expect(body[stored]).toBe(sent[wire]);
+			} else {
+				expect(sent).not.toHaveProperty("sshProxyHostId");
+				expect(sent).not.toHaveProperty("sshProxySpec");
+			}
+		},
+	);
 
 	describe("SC-10: save omits sshPort when undefined", () => {
 		beforeEach(() => {

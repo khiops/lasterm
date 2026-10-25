@@ -9,6 +9,27 @@ export function handleTestConnect(msg: TestConnectMessage, ctx: WsHandlerContext
 		client.send({ type: "ERROR", code: "INVALID_INPUT", message: "Invalid hostId" });
 		return;
 	}
+	for (const [field, limit] of [
+		["sshProxyHostId", 128],
+		["sshProxySpec", 4096],
+	] as const) {
+		const value = msg[field];
+		if (
+			value !== undefined &&
+			(typeof value !== "string" || !value.trim() || value.length > limit)
+		) {
+			client.send({ type: "TEST_CONNECT_FAIL", hostId: msg.hostId, message: `Invalid ${field}` });
+			return;
+		}
+	}
+	if (msg.sshProxyHostId !== undefined && msg.sshProxySpec !== undefined) {
+		client.send({
+			type: "TEST_CONNECT_FAIL",
+			hostId: msg.hostId,
+			message: "Cannot specify both sshProxyHostId and sshProxySpec",
+		});
+		return;
+	}
 	if (typeof msg.hostname !== "string" || msg.hostname.length === 0 || msg.hostname.length > 4096) {
 		client.send({ type: "ERROR", code: "INVALID_INPUT", message: "Invalid hostname" });
 		return;

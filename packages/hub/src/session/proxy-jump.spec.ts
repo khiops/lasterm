@@ -1,5 +1,6 @@
 import type { Host } from "@lasterm/shared";
 import { describe, expect, it } from "vitest";
+import { sshAddress, targetRoute } from "../ssh-route.js";
 import { type JumpHosts, parseJumpSpec, planJump, resolveJump } from "./proxy-jump.js";
 
 describe("parseJumpSpec", () => {
@@ -114,9 +115,36 @@ describe("resolveJump", () => {
 	function known(hosts: Host[], pins: Record<string, string> = {}): JumpHosts {
 		return {
 			getHost: (id) => hosts.find((host) => host.id === id),
-			getHostFingerprint: (id) => pins[id] ?? null,
+			getHostFingerprint: (id, expectedRoute) => {
+				const host = hosts.find((h) => h.id === id);
+				return host &&
+					targetRoute(host, (jumpId) => sshAddress(hosts.find((h) => h.id === jumpId))) ===
+						expectedRoute
+					? (pins[id] ?? null)
+					: null;
+			},
 		};
 	}
+
+	it("cannot use a saved jumped host's target pin for direct bastion access", () => {
+		const bastion = sshHost("bastion", { sshProxySpec: "other" });
+		const resolution = resolveJump(
+			sshHost("target", { sshProxyHostId: "bastion" }),
+			known([bastion], { bastion: "SHA256:pinned-through-other" }),
+			false,
+		);
+		expect(resolution.kind).toBe("jump");
+		if (resolution.kind === "jump") {
+			expect(resolution.jump.pinnedFingerprint).toBeNull();
+			expect(resolution.jump.knownHostsNames).toEqual(["bastion.example.com"]);
+			expect(resolution.jump.jump.host).toBe("bastion.example.com");
+			expect(resolution.jump.pinTo).toEqual({
+				kind: "host",
+				hostId: bastion.id,
+				expectedRoute: targetRoute({ ...bastion, sshProxySpec: null }, () => undefined),
+			});
+		}
+	});
 
 	it("has no jump to make when none is declared", () => {
 		expect(resolveJump(sshHost("target"), known([]), false)).toEqual({ kind: "direct" });
@@ -125,6 +153,7 @@ describe("resolveJump", () => {
 	it("goes through a known host with its own address, authentication and pinned key", () => {
 		const bastion = sshHost("bastion", {
 			sshPort: 2222,
+			sshConfigHost: "alias",
 			sshUser: "jumper",
 			sshAuth: "key",
 			sshKeyPath: "/keys/bastion",
@@ -135,11 +164,16 @@ describe("resolveJump", () => {
 			kind: "jump",
 			jump: {
 				jump: { host: "bastion.example.com", port: 2222, username: "jumper" },
+				knownHostsNames: ["bastion.example.com", "alias"],
 				auth: { method: "key", keyPath: "/keys/bastion" },
 				promptHostId: "bastion",
 				pinnedFingerprint: "SHA256:pinned",
 				trustKnownHosts: true,
-				pinTo: { kind: "host", hostId: "bastion" },
+				pinTo: {
+					kind: "host",
+					hostId: "bastion",
+					expectedRoute: targetRoute(bastion, () => undefined),
+				},
 			},
 		});
 	});
@@ -154,6 +188,7 @@ describe("resolveJump", () => {
 			kind: "jump",
 			jump: {
 				jump: { host: "bastion.example.com", port: 2200, username: "me" },
+				knownHostsNames: ["bastion.example.com"],
 				auth: { method: "agent" },
 				promptHostId: "target",
 				pinnedFingerprint: "SHA256:spec-pin",

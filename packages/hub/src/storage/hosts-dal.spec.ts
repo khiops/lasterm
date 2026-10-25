@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sshAddress, targetRoute } from "../ssh-route.js";
 import type { DatabaseManager } from "./db.js";
 import { openTestDatabases } from "./db.js";
 import { HostsDAL } from "./hosts-dal.js";
+import type { CreateHostInput } from "./meta-types.js";
 
 describe("HostsDAL — agent SHA256 pinning", () => {
 	let dbs: DatabaseManager;
@@ -111,5 +113,161 @@ describe("HostsDAL — the local host (#658)", () => {
 
 		expect(dal.listLocalHosts().map((host) => host.id)).toEqual(ids);
 		expect(dal.listHosts().map((host) => host.id)).toEqual(ids);
+	});
+});
+
+describe("HostsDAL — route-bound pins", () => {
+	let dbs: DatabaseManager;
+	let dal: HostsDAL;
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		dal = new HostsDAL(dbs.meta);
+	});
+	afterEach(() => dbs.close());
+	const route = (id: string) =>
+		targetRoute(dal.getHost(id)!, (jumpId) => sshAddress(dal.getHost(jumpId)));
+	const create = (label: string, fields: Partial<CreateHostInput> = {}) =>
+		dal.createHost({ type: "ssh", sshHost: label, label, ...fields });
+	const pin = (id: string) => {
+		expect(dal.updateHostFingerprint(id, "target-pin", route(id))).toBe(true);
+		expect(dal.updateHostProxyFingerprint(id, "jump-pin", route(id))).toBe(true);
+	};
+	it("clears target pins on address changes and retains the jump pin", () => {
+		const h = create("target", { sshProxySpec: "b" });
+		for (const fields of [{ sshHost: "other" }, { sshPort: 2222 }]) {
+			pin(h.id);
+			dal.updateHost(h.id, fields);
+			expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
+			expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
+		}
+	});
+	it("clears both pins when the declared jump changes, overriding an explicit pin", () => {
+		const b = create("b");
+		const h = create("target", { sshProxySpec: "b" });
+		for (const fields of [
+			{ sshProxySpec: "c" },
+			{ sshProxyHostId: b.id },
+			{ sshProxyHostId: null, sshProxySpec: null },
+			{ sshProxySpec: "b" },
+		]) {
+			pin(h.id);
+			dal.updateHost(h.id, { ...fields, sshProxyFingerprint: "explicit" });
+			expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
+			expect(dal.getHost(h.id)?.sshProxyFingerprint).toBeUndefined();
+		}
+	});
+	it("preserves trust across label, user, normalized port and spec user edits", () => {
+		const h = create("target", { sshProxySpec: "alice@b" });
+		pin(h.id);
+		for (const fields of [
+			{ label: "new" },
+			{ sshUser: "bob" },
+			{ sshHost: "bob@target", sshPort: 22 },
+			{ sshProxySpec: "bob@b" },
+			{ sshProxyFingerprint: "jump-pin" },
+		]) {
+			dal.updateHost(h.id, fields);
+			expect(dal.getHostFingerprint(h.id, route(h.id))).toBe("target-pin");
+			expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
+		}
+	});
+	it.each([
+		{ sshHost: "new" },
+		{ sshPort: 2222 },
+		{ type: "local" as const },
+		{ sshHost: null as unknown as string },
+	])("invalidates dependents on bastion endpoint edits: %j", (fields) => {
+		const b = create("b");
+		const h = create("target", { sshProxyHostId: b.id });
+		const other = create("other");
+		pin(b.id);
+		pin(h.id);
+		pin(other.id);
+		const before = dal.getHost(h.id)?.updatedAt;
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(Date.now() + 1000));
+		try {
+			dal.updateHost(b.id, fields);
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(dal.getHost(h.id)?.updatedAt).not.toBe(before);
+		expect(dal.getHost(b.id)?.sshFingerprint).toBeNull();
+		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
+		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
+		expect(dal.getHostFingerprint(other.id, route(other.id))).toBe("target-pin");
+	});
+	it("clears dependent pins with deletion, including a dormant spec", () => {
+		const b = create("b");
+		for (const sshProxySpec of [null, "other"]) {
+			const h = create(sshProxySpec ? "target-with-spec" : "target", {
+				sshProxyHostId: b.id,
+				sshProxySpec,
+			});
+			pin(h.id);
+		}
+		const timestamps = new Map(dal.listHosts().map((host) => [host.id, host.updatedAt]));
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(Date.now() + 1000));
+		try {
+			expect(dal.deleteHost(b.id)).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+		for (const h of dal.listHosts()) {
+			expect(h.updatedAt).not.toBe(timestamps.get(h.id));
+			expect(h.sshFingerprint).toBeNull();
+			expect(h.sshProxyFingerprint).toBeUndefined();
+			expect(h.sshProxyHostId).toBeUndefined();
+		}
+	});
+	it("rejects stale conditional reads and writes and accepts the current route", () => {
+		const h = create("target");
+		pin(h.id);
+		const old = route(h.id);
+		dal.updateHost(h.id, { sshHost: "new" });
+		expect(dal.getHostFingerprint(h.id, old)).toBeNull();
+		expect(dal.updateHostFingerprint(h.id, "stale", old)).toBe(false);
+		expect(dal.updateHostProxyFingerprint(h.id, "stale", old)).toBe(false);
+		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
+		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
+		pin(h.id);
+		expect(dal.getHostFingerprint(h.id, route(h.id))).toBe("target-pin");
+		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
+	});
+	it("has no pins usable for a non-SSH host, or as a direct bastion with a declared jump", () => {
+		const h = create("target", { sshProxySpec: "b" });
+		pin(h.id);
+		expect(
+			dal.getHostFingerprint(
+				h.id,
+				targetRoute({ ...h, sshProxySpec: null }, () => undefined),
+			),
+		).toBeNull();
+		dal.updateHost(h.id, { type: "local" });
+		expect(route(h.id)).toBeNull();
+		expect(dal.updateHostFingerprint(h.id, "pin", null)).toBe(false);
+	});
+	it("refuses a dependent pin from a snapshot before its bastion moved", () => {
+		const b = create("b");
+		const h = create("target", { sshProxyHostId: b.id });
+		pin(h.id);
+		const old = route(h.id);
+		dal.updateHost(b.id, { sshHost: "new-b" });
+		expect(dal.getHostFingerprint(h.id, old)).toBeNull();
+		expect(dal.updateHostFingerprint(h.id, "stale", old)).toBe(false);
+		expect(dal.updateHostProxyFingerprint(h.id, "stale", old)).toBe(false);
+		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
+	});
+
+	it("distinguishes saved bastions at the same address", () => {
+		const a = create("b");
+		const b = create("other-b", { sshHost: "b" });
+		const h = create("target", { sshProxyHostId: a.id });
+		pin(h.id);
+		const old = route(h.id);
+		dal.updateHost(h.id, { sshProxyHostId: b.id });
+		expect(route(h.id)).not.toBe(old);
+		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
 	});
 });

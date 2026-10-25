@@ -8,6 +8,7 @@ import type {
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
+import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import type { CreateHostInput } from "./meta-types.js";
 
@@ -239,63 +240,82 @@ export class HostsDAL {
 	}
 
 	updateHost(id: string, input: Partial<CreateHostInput>): Host {
-		const now = new Date().toISOString();
+		return this.db.transaction(() => {
+			const before = this.getHost(id);
+			if (!before) throw new Error(`Host not found: ${id}`);
+			const oldRoute = this.route(before);
+			const oldJump = this.jumpRoute(before);
+			const oldAddress = sshAddress(before);
+			const now = new Date().toISOString();
 
-		const fieldMap: Record<string, string> = {
-			type: "type",
-			label: "label",
-			sshHost: "ssh_host",
-			sshPort: "ssh_port",
-			sshAuth: "ssh_auth",
-			sshKeyPath: "ssh_key_path",
-			iconType: "icon_type",
-			iconValue: "icon_value",
-			color: "color",
-			profileJson: "profile_json",
-			trustRemoteHints: "trust_remote_hints",
-			defaultShell: "default_shell",
-			defaultCwd: "default_cwd",
-			hostGroup: "host_group",
-			hostGroupId: "host_group_id",
-			sortOrder: "sort_order",
-			sshConfigHost: "ssh_config_host",
-			sshUser: "ssh_user",
-			sshProxyHostId: "ssh_proxy_host_id",
-			sshProxySpec: "ssh_proxy_spec",
-			sshProxyFingerprint: "ssh_proxy_fingerprint",
-			sshRemoteDaemon: "ssh_remote_daemon",
-			elevationMethod: "elevation_method",
-			customCommand: "custom_command",
-			os: "os",
-			arch: "arch",
-		};
+			const fieldMap: Record<string, string> = {
+				type: "type",
+				label: "label",
+				sshHost: "ssh_host",
+				sshPort: "ssh_port",
+				sshAuth: "ssh_auth",
+				sshKeyPath: "ssh_key_path",
+				iconType: "icon_type",
+				iconValue: "icon_value",
+				color: "color",
+				profileJson: "profile_json",
+				trustRemoteHints: "trust_remote_hints",
+				defaultShell: "default_shell",
+				defaultCwd: "default_cwd",
+				hostGroup: "host_group",
+				hostGroupId: "host_group_id",
+				sortOrder: "sort_order",
+				sshConfigHost: "ssh_config_host",
+				sshUser: "ssh_user",
+				sshProxyHostId: "ssh_proxy_host_id",
+				sshProxySpec: "ssh_proxy_spec",
+				sshProxyFingerprint: "ssh_proxy_fingerprint",
+				sshRemoteDaemon: "ssh_remote_daemon",
+				elevationMethod: "elevation_method",
+				customCommand: "custom_command",
+				os: "os",
+				arch: "arch",
+			};
 
-		const setClauses: string[] = ["updated_at = ?"];
-		const values: unknown[] = [now];
+			const setClauses: string[] = ["updated_at = ?"];
+			const values: unknown[] = [now];
 
-		for (const [camel, snake] of Object.entries(fieldMap)) {
-			if (camel in input) {
-				setClauses.push(`${snake} = ?`);
-				const val = input[camel as keyof CreateHostInput];
-				// SQLite binds no booleans: an answer about this host is 1 or 0,
-				// and "no answer" stays null so the global setting still speaks.
-				if (typeof val === "boolean") {
-					values.push(val ? 1 : 0);
-				} else {
-					values.push(val !== undefined ? val : null);
+			for (const [camel, snake] of Object.entries(fieldMap)) {
+				if (camel in input) {
+					setClauses.push(`${snake} = ?`);
+					const val = input[camel as keyof CreateHostInput];
+					// SQLite binds no booleans: an answer about this host is 1 or 0,
+					// and "no answer" stays null so the global setting still speaks.
+					if (typeof val === "boolean") {
+						values.push(val ? 1 : 0);
+					} else {
+						values.push(val !== undefined ? val : null);
+					}
 				}
 			}
-		}
 
-		values.push(id);
+			values.push(id);
 
-		this.db.prepare(`UPDATE hosts SET ${setClauses.join(", ")} WHERE id = ?`).run(...values);
+			this.db.prepare(`UPDATE hosts SET ${setClauses.join(", ")} WHERE id = ?`).run(...values);
 
-		const updated = this.getHost(id);
-		if (!updated) {
-			throw new Error(`Host not found after update: ${id}`);
-		}
-		return updated;
+			const updated = this.getHost(id);
+			if (!updated) {
+				throw new Error(`Host not found after update: ${id}`);
+			}
+			const newRoute = this.route(updated);
+			if (oldRoute !== newRoute)
+				this.db.prepare("UPDATE hosts SET ssh_fingerprint = NULL WHERE id = ?").run(id);
+			if (oldJump !== this.jumpRoute(updated))
+				this.db.prepare("UPDATE hosts SET ssh_proxy_fingerprint = NULL WHERE id = ?").run(id);
+			if (JSON.stringify(oldAddress) !== JSON.stringify(sshAddress(updated))) {
+				this.db
+					.prepare(
+						"UPDATE hosts SET ssh_fingerprint = NULL, updated_at = ? WHERE ssh_proxy_host_id = ?",
+					)
+					.run(new Date().toISOString(), id);
+			}
+			return this.getHost(id) as Host;
+		})();
 	}
 
 	updateHostOsArch(id: string, os: HostOs, arch: HostArch): void {
@@ -319,25 +339,58 @@ export class HostsDAL {
 		return row?.agent_sha256 ?? null;
 	}
 
-	/** Return the stored SSH host key fingerprint for a host, or null if never seen. */
-	getHostFingerprint(hostId: string): string | null {
-		const row = this.db.prepare("SELECT ssh_fingerprint FROM hosts WHERE id = ?").get(hostId) as
-			| { ssh_fingerprint: string | null }
-			| undefined;
-		return row?.ssh_fingerprint ?? null;
+	private route(host: import("../ssh-route.js").RouteHost): string | null {
+		return targetRoute(host, (id) => sshAddress(this.getHost(id)));
+	}
+	private jumpRoute(host: import("../ssh-route.js").RouteHost): string | null {
+		// Compare the jump independently of whether the target has an address.
+		return this.route({ ...host, type: "ssh", sshHost: "route-jump", sshPort: 22 });
 	}
 
-	/** Persist a trusted SSH host key fingerprint (SHA256:<base64>) for a host. */
-	updateHostFingerprint(hostId: string, fingerprint: string): void {
-		const now = new Date().toISOString();
-		this.db
-			.prepare("UPDATE hosts SET ssh_fingerprint = ?, updated_at = ? WHERE id = ?")
-			.run(fingerprint, now, hostId);
+	getHostFingerprint(hostId: string, expectedRoute: string | null): string | null {
+		const host = this.getHost(hostId);
+		return host && expectedRoute !== null && this.route(host) === expectedRoute
+			? (host.sshFingerprint ?? null)
+			: null;
 	}
-
+	updateHostFingerprint(
+		hostId: string,
+		fingerprint: string,
+		expectedRoute: string | null,
+	): boolean {
+		return this.writePin(hostId, fingerprint, expectedRoute, "ssh_fingerprint");
+	}
+	updateHostProxyFingerprint(
+		hostId: string,
+		fingerprint: string,
+		expectedRoute: string | null,
+	): boolean {
+		return this.writePin(hostId, fingerprint, expectedRoute, "ssh_proxy_fingerprint");
+	}
+	private writePin(
+		hostId: string,
+		fingerprint: string,
+		expectedRoute: string | null,
+		column: "ssh_fingerprint" | "ssh_proxy_fingerprint",
+	): boolean {
+		return this.db.transaction(() => {
+			const host = this.getHost(hostId);
+			if (!host || expectedRoute === null || this.route(host) !== expectedRoute) return false;
+			this.db
+				.prepare(`UPDATE hosts SET ${column} = ?, updated_at = ? WHERE id = ?`)
+				.run(fingerprint, new Date().toISOString(), hostId);
+			return true;
+		})();
+	}
 	deleteHost(id: string): boolean {
-		const result = this.db.prepare("DELETE FROM hosts WHERE id = ?").run(id);
-		return result.changes > 0;
+		return this.db.transaction(() => {
+			this.db
+				.prepare(
+					"UPDATE hosts SET ssh_fingerprint = NULL, ssh_proxy_fingerprint = NULL, updated_at = ? WHERE ssh_proxy_host_id = ?",
+				)
+				.run(new Date().toISOString(), id);
+			return this.db.prepare("DELETE FROM hosts WHERE id = ?").run(id).changes > 0;
+		})();
 	}
 
 	importHosts(inputs: CreateHostInput[]): Host[] {

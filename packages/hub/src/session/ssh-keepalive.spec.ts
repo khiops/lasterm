@@ -314,6 +314,7 @@ describe("a host that stops answering, without closing, is lost (#607)", {
 		cleanups.unshift(() => new Promise<void>((done) => bastion.close(() => done())));
 		const agent = await connectedAgent(link.port, false, {
 			jump: { host: "127.0.0.1", port: bastionPort, username: "jump" },
+			knownHostsNames: ["127.0.0.1"],
 			auth: { method: "key", keyPath: CLIENT_KEY_PATH },
 			promptHostId: HOST_ID,
 			pinnedFingerprint: HOST_FINGERPRINT,
@@ -470,6 +471,7 @@ describe("every SSH connection the hub opens carries the keepalive", () => {
 		await expect(
 			openJumpRoute({
 				jump: { host: "127.0.0.1", port: 22, username: "jump" },
+				knownHostsNames: ["127.0.0.1"],
 				auth: {},
 				pinnedFingerprint: HOST_FINGERPRINT,
 				trustKnownHosts: false,

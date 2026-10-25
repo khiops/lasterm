@@ -288,6 +288,29 @@ describe("GET /api/hosts/:id", () => {
 });
 
 describe("PUT /api/hosts/:id", () => {
+	it.each([{ ssh_host: "new" }, { label: "renamed" }])(
+		"returns the route's pin after update %j",
+		async (payload) => {
+			const created = (
+				await server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "ssh", label: "pinned", ssh_host: "old" },
+				})
+			).json<{ id: string }>();
+			dbs.meta
+				.prepare("UPDATE hosts SET ssh_fingerprint = ? WHERE id = ?")
+				.run("SHA256:pinned", created.id);
+			const result = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${created.id}`,
+				payload,
+			});
+			expect(result.statusCode).toBe(200);
+			expect(result.json().ssh_fingerprint).toBe("ssh_host" in payload ? null : "SHA256:pinned");
+		},
+	);
+
 	it("updates host fields", async () => {
 		const createRes = await server.inject({
 			method: "POST",

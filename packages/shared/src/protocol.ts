@@ -774,6 +774,8 @@ export interface TestConnectMessage {
 	sshAuth: "agent" | "key" | "password";
 	sshKeyPath?: string;
 	sshUser?: string;
+	sshProxyHostId?: string;
+	sshProxySpec?: string;
 }
 
 /** Hub → UI: test connectivity succeeded */

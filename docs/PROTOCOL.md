@@ -872,7 +872,9 @@ hub's memory, per host and client, for 5 min when it was typed to open an elevat
 
 ### 4.11 TEST_CONNECT (SSH Connectivity Test)
 
-Allows the UI to test SSH connectivity for a host without creating a full session. The hub may send `AUTH_PROMPT` messages during the test if credentials are needed.
+Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+
+The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`ready`, `download`, `unsupported`, or `unknown`), and `agentVersion`.
 
 ```typescript
 // UI → Hub
@@ -883,11 +885,13 @@ Allows the UI to test SSH connectivity for a host without creating a full sessio
   port: number,
   ssh_auth: "agent" | "key" | "password",
   ssh_key_path?: string,
-  ssh_user?: string
+  ssh_user?: string,
+  ssh_proxy_host_id?: string, // saved jump host; mutually exclusive with spec
+  ssh_proxy_spec?: string    // ProxyJump address
 }
 
 // Hub → UI (success)
-{ type: "TEST_CONNECT_OK", host_id: string }
+{ type: "TEST_CONNECT_OK", host_id: string, platform?: TestConnectPlatform }
 
 // Hub → UI (failure)
 { type: "TEST_CONNECT_FAIL", host_id: string, message: string }

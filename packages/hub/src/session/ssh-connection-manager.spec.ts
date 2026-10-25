@@ -372,6 +372,7 @@ describe("SshConnectionManager — reconnect reaches the daemon", () => {
 			reconnectTimers: new Map(),
 			reconnectAbortControllers: new Map(),
 			userDisconnectedHosts: new Set(),
+			stoppingAgents: new Set(),
 			metaDal: {
 				getHost: vi.fn().mockReturnValue({
 					id: hostId,
@@ -428,6 +429,7 @@ describe("SshConnectionManager — reconnect cache-only promptAuth", () => {
 			reconnectTimers: new Map(),
 			reconnectAbortControllers: new Map(),
 			userDisconnectedHosts: new Set(),
+			stoppingAgents: new Set(),
 			metaDal: {
 				getHost: vi.fn().mockReturnValue({
 					id: hostId,
@@ -1388,6 +1390,7 @@ describe("Fix B: abort-before-overwrite — scheduleReconnect aborts displaced c
 			reconnectAbortControllers: new Map([[hostId, firstAc]]),
 			reconnectTimers: new Map(),
 			userDisconnectedHosts: new Set(),
+			stoppingAgents: new Set(),
 			passphraseCache: new Map(),
 			sessions: new Map(),
 			agents: new Map(),

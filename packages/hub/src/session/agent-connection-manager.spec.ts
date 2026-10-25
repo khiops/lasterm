@@ -185,6 +185,7 @@ function makeHarness(): {
 		channels: new Map(),
 		clients: new Map(),
 		reconnectTimers: new Map(),
+		stoppingAgents: new Set(),
 		reconnectAbortControllers: new Map(),
 		restartTracking: new Map(),
 		pendingRequests: new Map(),

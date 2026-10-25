@@ -44,6 +44,10 @@ function terminalsText(count: number): string {
 /** Say what came of it, in the shapes PROTOCOL.md § 6 gives. */
 function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyReply {
 	switch (outcome.kind) {
+		case "busy":
+			return reply.code(409).send({
+				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+			});
 		case "not-ssh":
 			return reply.code(400).send({
 				error: {

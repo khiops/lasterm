@@ -213,6 +213,11 @@ export function registerChannelRoutes(
 
 		try {
 			const ok = await sessionManager.restartChannel(id);
+			if (ok === "busy") {
+				return reply.code(409).send({
+					error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+				});
+			}
 			if (!ok) {
 				// Its host is away, refused at once or gone while it started: said
 				// so, with the host and its status, for a pane to wait for it (#605).

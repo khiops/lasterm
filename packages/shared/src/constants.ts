@@ -97,6 +97,8 @@ export const ErrorCode = {
 	 * disconnected, which nothing but that user brings back (#648).
 	 */
 	HOST_UNREACHABLE: "HOST_UNREACHABLE",
+	/** SessionManager refuses host actions while Replace holds its stop marker. */
+	HOST_BUSY: "HOST_BUSY",
 	/**
 	 * REST, reconnect and disconnect: closing this host's connection would end
 	 * terminals, and the request did not say `force`. Carries how many (#648).

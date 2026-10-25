@@ -8,6 +8,7 @@ import { requestDaemonStop } from "./daemon-stop.js";
 class FakeDaemonConnection extends EventEmitter {
 	readonly sent: ProtocolMessage[] = [];
 	otherOwnerChannels: number | undefined;
+	closedByHub = false;
 	send = vi.fn((msg: ProtocolMessage) => {
 		this.sent.push(msg);
 	});
@@ -116,10 +117,9 @@ describe("requestDaemonStop (#127)", () => {
 		});
 	});
 
-	it("is not answered by a channel's error, nor by a connection being replaced", async () => {
+	it("is not answered by a channel's error", async () => {
 		const daemon = new FakeDaemonConnection();
 		daemon.answer({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "x", channelId: "ch-1" });
-		daemon.answer({ type: "ERROR", code: "DISPLACED", message: "replaced" });
 		daemon.end();
 
 		expect(await requestDaemonStop(asAgent(daemon), { force: false })).toEqual({ kind: "stopped" });
@@ -147,5 +147,55 @@ describe("requestDaemonStop (#127)", () => {
 			kind: "unsent",
 			message: "SSH agent not connected",
 		});
+	});
+});
+
+describe("#674 stop close classification", () => {
+	it("observes DISPLACED before an earlier listener closes the connection", async () => {
+		const daemon = new FakeDaemonConnection();
+		daemon.on("message", () => {
+			daemon.closedByHub = true;
+			daemon.emit("close");
+		});
+		const stopped = vi.fn();
+		const pending = requestDaemonStop(asAgent(daemon), { force: false, onStopped: stopped });
+		daemon.emit("message", { type: "ERROR", code: "DISPLACED", message: "another hub" });
+		expect(await pending).toEqual({ kind: "displaced" });
+		expect(stopped).not.toHaveBeenCalled();
+	});
+	it("reads a hub-issued close as unconfirmed", async () => {
+		const daemon = new FakeDaemonConnection();
+		const stopped = vi.fn();
+		const pending = requestDaemonStop(asAgent(daemon), { force: false, onStopped: stopped });
+		daemon.closedByHub = true;
+		daemon.emit("close");
+		expect(await pending).toEqual({ kind: "closed_by_hub" });
+		expect(stopped).not.toHaveBeenCalled();
+	});
+	it("reads a close while quitting as unconfirmed", async () => {
+		const daemon = new FakeDaemonConnection();
+		let quitting = false;
+		const stopped = vi.fn();
+		const pending = requestDaemonStop(asAgent(daemon), {
+			force: false,
+			onStopped: stopped,
+			isHubQuitting: () => quitting,
+		});
+		quitting = true;
+		daemon.emit("close");
+		expect(await pending).toEqual({ kind: "closed_by_hub" });
+		expect(stopped).not.toHaveBeenCalled();
+	});
+	it("still confirms a plain daemon close", async () => {
+		const daemon = new FakeDaemonConnection();
+		const stopped = vi.fn();
+		const pending = requestDaemonStop(asAgent(daemon), {
+			force: false,
+			onStopped: stopped,
+			isHubQuitting: () => false,
+		});
+		daemon.emit("close");
+		expect(await pending).toEqual({ kind: "stopped" });
+		expect(stopped).toHaveBeenCalledOnce();
 	});
 });

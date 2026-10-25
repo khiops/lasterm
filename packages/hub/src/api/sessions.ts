@@ -109,7 +109,7 @@ export function registerSessionRoutes(
 
 			const outcome = await sessionManager.replaceAgent(request.params.id, options);
 			if (!outcome.replaced) {
-				if (outcome.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS) {
+				if (outcome.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS || outcome.code === "HOST_BUSY") {
 					return reply.code(409).send({
 						error: {
 							code: outcome.code,
@@ -153,7 +153,11 @@ export function registerSessionRoutes(
 			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Session not found" } });
 		}
 
-		await sessionManager.closeSession(request.params.id);
+		if ((await sessionManager.closeSession(request.params.id)) === "busy") {
+			return reply.code(409).send({
+				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+			});
+		}
 		return reply.code(204).send();
 	});
 }

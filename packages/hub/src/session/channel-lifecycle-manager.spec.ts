@@ -388,6 +388,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 		clients.set(observer.id, observer as never);
 
 		const ctx = {
+			stoppingAgents: new Set<string>(),
 			clients,
 			channels,
 			pendingRequests,
@@ -514,6 +515,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 		};
 
 		const ctx = {
+			stoppingAgents: new Set<string>(),
 			clients,
 			channels,
 			pendingRequests,
@@ -581,6 +583,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 		clients.set(observer.id, observer as never);
 
 		const ctx = {
+			stoppingAgents: new Set<string>(),
 			clients,
 			channels,
 			pendingRequests,
@@ -658,6 +661,7 @@ describe("ChannelLifecycleManager — a SPAWN unanswered while its host went awa
 			[HOST, { id: "sess-1", hostId: HOST, status: "active" }],
 		]);
 		const ctx = {
+			stoppingAgents: new Set<string>(),
 			clients: new Map([[client.id, client]]),
 			channels: new Map(),
 			pendingRequests: new Map(),
@@ -1180,5 +1184,75 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 		// Not starting its terminals again: the daemon may well be running them.
 		expect(await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never)).toBe(true);
 		expect(reconcile).not.toHaveBeenCalled();
+	});
+});
+
+describe("#674 SPAWN send fences", () => {
+	it.each([undefined, "existing-channel"])(
+		"reports HOST_BUSY with channel %s even when elevation errors are suppressed",
+		async (reuseChannelId) => {
+			const ctx = {
+				stoppingAgents: new Set(["host"]),
+				pendingRequests: new Map(),
+			} as unknown as SharedSessionContext;
+			const manager = new ChannelLifecycleManager(ctx, {} as StateBroadcaster);
+			const send = vi.fn();
+			const client = makeWsClient("client", send);
+			const agent = { connected: true, send: vi.fn() };
+			const result = await manager.sendSpawnAndWait({
+				agent: agent as never,
+				spawnMsg: { type: "SPAWN", requestId: "request", cols: 80, rows: 24 },
+				clientId: client.id,
+				hostId: "host",
+				session: { id: "session" },
+				client: client as never,
+				resolvedShell: undefined,
+				resolvedArgs: [],
+				resolvedCwd: undefined,
+				resolvedDirectProcess: false,
+				resolvedLaunchProfileId: undefined,
+				cols: 80,
+				rows: 24,
+				suppressClientError: true,
+				...(reuseChannelId !== undefined && { reuseChannelId }),
+			});
+			expect(result).toEqual({ channelId: null, errCode: "HOST_BUSY" });
+			expect(send).toHaveBeenCalledExactlyOnceWith({
+				type: "ERROR",
+				code: "HOST_BUSY",
+				message: "This host's agent is being stopped.",
+				hostId: "host",
+				...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+			});
+			expect(agent.send).not.toHaveBeenCalled();
+			expect(ctx.pendingRequests.size).toBe(0);
+		},
+	);
+
+	it("sends no SPAWN for a marked host through restart or bulk respawn", async () => {
+		const ctx = {
+			stoppingAgents: new Set(["host"]),
+			channels: new Map([["channel", { hostId: "host", status: "live" }]]),
+			pendingRequests: new Map(),
+		} as unknown as SharedSessionContext;
+		const manager = new ChannelLifecycleManager(ctx, {} as StateBroadcaster);
+		const agent = { send: vi.fn() };
+		const restart = manager as unknown as {
+			sendRestartSpawn: (agent: unknown, msg: unknown, hostId: string) => Promise<unknown>;
+		};
+		expect(
+			await restart.sendRestartSpawn(
+				agent,
+				{ type: "SPAWN", requestId: "request", channelId: "channel" },
+				"host",
+			),
+		).toEqual({ ok: false, channelId: null, errCode: "HOST_BUSY" });
+		const onOk = vi.fn();
+		const onErr = vi.fn();
+		await manager.spawnChannelsForHost("host", agent as never, onOk, onErr);
+		expect(agent.send).not.toHaveBeenCalled();
+		expect(ctx.pendingRequests.size).toBe(0);
+		expect(onOk).not.toHaveBeenCalled();
+		expect(onErr).not.toHaveBeenCalled();
 	});
 });

@@ -1,5 +1,6 @@
 import { ELEVATION_METHODS_ALL } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
+import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
 import { registerHostCrudRoutes } from "./host-crud.js";
 import { registerHostProfileRoutes } from "./host-profiles.js";
@@ -197,8 +198,12 @@ export function validateProfileJson(profileJson: string | object | undefined): s
 	return null;
 }
 
-export function registerHostRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
-	registerHostCrudRoutes(server, metaDal);
+export function registerHostRoutes(
+	server: FastifyInstance,
+	metaDal: MetaDAL,
+	sessionManager: Pick<SessionManager, "hostIsBeingStopped">,
+): void {
+	registerHostCrudRoutes(server, metaDal, sessionManager);
 	registerHostWelcomeRoutes(server, metaDal);
 	registerHostSshImportRoutes(server, metaDal);
 	registerHostProfileRoutes(server, metaDal);

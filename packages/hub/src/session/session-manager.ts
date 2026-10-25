@@ -149,7 +149,7 @@ export type ReplaceAgentOutcome =
 			 * Set when the agent refused because other hubs hold channels there
 			 * (#127): asking again with `force` ends them too.
 			 */
-			readonly code?: typeof ErrorCode.OTHER_HUBS_HOLD_CHANNELS;
+			readonly code?: typeof ErrorCode.OTHER_HUBS_HOLD_CHANNELS | typeof ErrorCode.HOST_BUSY;
 			/** How many, when the agent said. */
 			readonly otherOwnerChannels?: number;
 	  };
@@ -159,6 +159,7 @@ export type HostConnectionOutcome =
 	/** The local host: it has no connection to act on. */
 	| { readonly kind: "not-ssh" }
 	| { readonly kind: "quitting" }
+	| { readonly kind: "busy" }
 	/** Closing the connection would end terminals, and `force` did not say to: nothing was done. */
 	| { readonly kind: "terminals-would-end"; readonly terminals: number }
 	/** Connected already. */
@@ -228,6 +229,10 @@ export class SessionManager {
 			commits: {
 				adoptAgent(fence, hostId, agent) {
 					assertQuitFence(ctx, fence);
+					if (ctx.stoppingAgents.has(hostId)) {
+						void agent.close();
+						throw new Error("This host's agent is being stopped.");
+					}
 					agents.set(hostId, agent);
 				},
 				persistSession(fence, hostId, state) {
@@ -291,6 +296,7 @@ export class SessionManager {
 
 		// Wire reconnect callback for restartChannel on SSH hosts
 		this.lifecycle.onReconnectAgent = async (hostId: string): Promise<boolean> => {
+			if (this.hostIsBeingStopped(hostId)) return false;
 			const reconnectFence = captureQuitFence(ctx);
 			const host = ctx.metaDal.getHost(hostId);
 			if (host?.type !== "ssh") return false;
@@ -313,7 +319,7 @@ export class SessionManager {
 				} catch {
 					return false;
 				}
-				return ctx.agents.get(hostId)?.connected === true;
+				return !this.hostIsBeingStopped(hostId) && ctx.agents.get(hostId)?.connected === true;
 			}
 
 			// Snapshot the session entry BEFORE any await so we can currency-check it
@@ -386,6 +392,7 @@ export class SessionManager {
 				// awaiting the SSH handshake. If the session is gone or was replaced
 				// (different id), close the fresh agent and bail — do NOT wire/store/revive.
 				if (
+					this.hostIsBeingStopped(hostId) ||
 					ac.signal.aborted ||
 					ctx.reconnectAbortControllers.get(hostId) !== ac ||
 					ctx.sessions.get(hostId)?.id !== sessionId
@@ -394,22 +401,17 @@ export class SessionManager {
 					return false;
 				}
 
-				// Clear the controller — attempt settled successfully.
-				ctx.reconnectAbortControllers.delete(hostId);
-
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
 				ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
 				await this.lifecycle.adoptWhatTheDaemonHolds(hostId, sshAgent);
 				return true;
 			} catch {
-				// Clear the controller on failure (identity-guarded so a newer concurrent
-				// attempt is not clobbered).
+				return false;
+			} finally {
 				if (ctx.reconnectAbortControllers.get(hostId) === ac) {
 					ctx.reconnectAbortControllers.delete(hostId);
 				}
-				return false;
-			} finally {
 				clearContext(ctx, reconnectCtxId, sendPromptCancel);
 			}
 		};
@@ -592,7 +594,9 @@ export class SessionManager {
 		return hostUnreachableMessage(info.hostId, label, status, channelId);
 	}
 
-	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean> {
+	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean | "busy"> {
+		const hostId = this.ctx.metaDal.getChannelWithHost(channelId)?.hostId;
+		if (hostId !== undefined && this.hostIsBeingStopped(hostId)) return "busy";
 		if (this.isQuitting()) return false;
 		// Its host is away: the reconnect has the next attempt, and a restart
 		// would start one of its own beside it, aborting the reconnect's if one
@@ -614,7 +618,9 @@ export class SessionManager {
 		}
 	}
 
-	async closeSession(sessionId: string): Promise<void> {
+	async closeSession(sessionId: string): Promise<"closed" | "busy"> {
+		const recorded = this.ctx.metaDal.getSession(sessionId);
+		if (recorded && this.hostIsBeingStopped(recorded.hostId)) return "busy";
 		let hostId: string | undefined;
 		for (const [hId, state] of this.ctx.sessions.entries()) {
 			if (state.id === sessionId) {
@@ -625,7 +631,7 @@ export class SessionManager {
 
 		if (!hostId) {
 			this.ctx.metaDal.updateSessionStatus(sessionId, "closed");
-			return;
+			return "closed";
 		}
 
 		const agent = this.ctx.agents.get(hostId);
@@ -655,6 +661,7 @@ export class SessionManager {
 		// Asked for (DELETE /api/sessions/:id): its terminals are killed, and a
 		// pane over one must not bring it back, now or later (#580, #592).
 		this.lifecycle.closeSession(hostId, sessionId, "killed");
+		return "closed";
 	}
 
 	// ─── WS message handlers ──────────────────────────────────────────────────
@@ -829,6 +836,16 @@ export class SessionManager {
 		reuseChannelId: string | undefined,
 		reusedCwd: string | undefined,
 	): Promise<string | null> {
+		if (this.hostIsBeingStopped(hostId)) {
+			client.send({
+				type: "ERROR",
+				code: ErrorCode.HOST_BUSY,
+				message: "This host's agent is being stopped.",
+				hostId,
+				...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+			});
+			return null;
+		}
 		this.ctx.hubLogger?.log("debug", "handleSpawn: resolvedHostId", { hostId });
 		const host = this.ctx.metaDal.getHost(hostId);
 		if (!host) {
@@ -1916,6 +1933,10 @@ export class SessionManager {
 		});
 	}
 
+	hostIsBeingStopped(hostId: string): boolean {
+		return this.ctx.stoppingAgents.has(hostId);
+	}
+
 	/**
 	 * Replace the agent serving a host with the one this hub carries.
 	 *
@@ -1937,32 +1958,45 @@ export class SessionManager {
 		hostId: string,
 		options: { readonly force?: boolean } = {},
 	): Promise<ReplaceAgentOutcome> {
-		const agent = this.ctx.agents.get(hostId);
-		if (!(agent instanceof SshAgent) || !agent.connected) {
-			return { replaced: false, message: "This host has no agent connected to replace." };
-		}
-		if (!agent.usedRemoteDaemon) {
+		if (this.hostIsBeingStopped(hostId)) {
 			return {
 				replaced: false,
-				message:
-					"This host's agent runs with its connection, so it is already replaced whenever it reconnects.",
+				code: ErrorCode.HOST_BUSY,
+				message: "This host's agent is being stopped.",
 			};
 		}
-
-		// Its terminals end with it, "stopped": a pane that sees one end leaves
-		// it be rather than race the replacement (#580); one that finds it ended
-		// later follows its setting, since nobody aimed at that terminal (#592).
 		this.ctx.stoppingAgents.add(hostId);
+		let heldAgent = false;
 		try {
+			const agent = this.ctx.agents.get(hostId);
+			if (!(agent instanceof SshAgent) || !agent.connected) {
+				return { replaced: false, message: "This host has no agent connected to replace." };
+			}
+			if (!agent.usedRemoteDaemon) {
+				return {
+					replaced: false,
+					message:
+						"This host's agent runs with its connection, so it is already replaced whenever it reconnects.",
+				};
+			}
+			heldAgent = true;
 			const outcome = await this.stopAgentToReplace(hostId, agent, options);
-			// Said as the stop is confirmed, of every terminal it held: a daemon's
-			// reports of those ends do not arrive, its connection goes first
-			// (#599). Only a stop that happened ends anything. An agent on stdio,
-			// or a local one, is not stopped here, and its terminals run on.
 			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
 			return outcome;
 		} finally {
 			this.ctx.stoppingAgents.delete(hostId);
+			const session = this.ctx.sessions.get(hostId);
+			if (
+				heldAgent &&
+				session?.status === "disconnected" &&
+				!this.ctx.agents.has(hostId) &&
+				!this.ctx.reconnectTimers.has(hostId) &&
+				!this.ctx.reconnectAbortControllers.has(hostId) &&
+				!this.ctx.acquisitions.has(hostId) &&
+				!this.ctx.userDisconnectedHosts.has(hostId)
+			) {
+				this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
+			}
 		}
 	}
 
@@ -1975,6 +2009,7 @@ export class SessionManager {
 		if (hasHubIdentity(agent)) {
 			const stop = await requestDaemonStop(agent, {
 				force: options.force === true,
+				isHubQuitting: () => this.isQuitting(),
 				// Let go first: a stop that was asked for is not a dropped link to
 				// dial again, which is what the close handling would otherwise read,
 				// and the security log records the disconnect as this hub's doing.
@@ -1984,6 +2019,12 @@ export class SessionManager {
 				},
 			});
 			switch (stop.kind) {
+				case "displaced":
+				case "closed_by_hub":
+					return {
+						replaced: false,
+						message: "The connection ended without confirming the agent stopped.",
+					};
 				case "stopped":
 					return {
 						replaced: true,
@@ -2071,6 +2112,7 @@ export class SessionManager {
 	 */
 	connectHost(hostId: string, options: { readonly clientId?: string } = {}): HostConnectionOutcome {
 		const host = this.ctx.metaDal.getHost(hostId);
+		if (this.hostIsBeingStopped(hostId)) return { kind: "busy" };
 		if (host?.type !== "ssh") return { kind: "not-ssh" };
 		if (this.isQuitting()) return { kind: "quitting" };
 		if (this.ctx.agents.get(hostId)?.connected === true) {
@@ -2099,6 +2141,7 @@ export class SessionManager {
 		options: { readonly clientId?: string; readonly force?: boolean } = {},
 	): HostConnectionOutcome {
 		const host = this.ctx.metaDal.getHost(hostId);
+		if (this.hostIsBeingStopped(hostId)) return { kind: "busy" };
 		if (host?.type !== "ssh") return { kind: "not-ssh" };
 		if (this.isQuitting()) return { kind: "quitting" };
 		const facts = this.connectionFacts(hostId, host);
@@ -2134,6 +2177,7 @@ export class SessionManager {
 		options: { readonly force?: boolean } = {},
 	): HostConnectionOutcome {
 		const host = this.ctx.metaDal.getHost(hostId);
+		if (this.hostIsBeingStopped(hostId)) return { kind: "busy" };
 		if (host?.type !== "ssh") return { kind: "not-ssh" };
 		if (this.isQuitting()) return { kind: "quitting" };
 		const facts = this.connectionFacts(hostId, host);
@@ -2393,6 +2437,7 @@ export class SessionManager {
 	}
 
 	private async reconnectForAttach(hostId: string): Promise<boolean> {
+		if (this.hostIsBeingStopped(hostId)) return false;
 		// Its user disconnected it: a pane attaching is a window opening, not
 		// someone asking for the host, and is answered from what the hub
 		// remembers (#648). The pane's own Reconnect connects it first.
@@ -2500,6 +2545,7 @@ export class SessionManager {
 		const resolvedJump = route.kind === "jump" ? route.jump : undefined;
 
 		console.error(`[lasterm-ssh] creating SshAgent for host ${host.id}`);
+		if (this.hostIsBeingStopped(hostId)) throw new Error("This host's agent is being stopped.");
 		const sshAgent = new SshAgent(
 			host,
 			promptAuth,
@@ -2551,7 +2597,11 @@ export class SessionManager {
 				// The answer was about the binary that was shown. The attempt that
 				// resumes compares what it finds against that hash, and asks again
 				// if the remote binary changed while the question was open.
-				if (signal?.aborted || this.ctx.sessions.get(hostId)?.id !== sessionId) {
+				if (
+					this.hostIsBeingStopped(hostId) ||
+					signal?.aborted ||
+					this.ctx.sessions.get(hostId)?.id !== sessionId
+				) {
 					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 				}
 				return await this._connectSshAgent(
@@ -2646,7 +2696,11 @@ export class SessionManager {
 				// the user was responding to the verify prompt, discard the trust decision.
 				// Without this guard, a response arriving after closeSession() would
 				// persist a fingerprint for a session that is no longer current.
-				if (signal?.aborted || this.ctx.sessions.get(hostId)?.id !== sessionId) {
+				if (
+					this.hostIsBeingStopped(hostId) ||
+					signal?.aborted ||
+					this.ctx.sessions.get(hostId)?.id !== sessionId
+				) {
 					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 				}
 				if (action === "trust_permanent") {
@@ -2707,7 +2761,11 @@ export class SessionManager {
 				}
 				// Session-currency guard: verify the session is still the one we started.
 				// An abort racing the final wiring could revive a closed session without this.
-				if (signal?.aborted || this.ctx.sessions.get(hostId)?.id !== sessionId) {
+				if (
+					this.hostIsBeingStopped(hostId) ||
+					signal?.aborted ||
+					this.ctx.sessions.get(hostId)?.id !== sessionId
+				) {
 					retryAgent.close();
 					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 				}
@@ -2727,7 +2785,11 @@ export class SessionManager {
 		// Session-currency guard: verify the session is still the one we started.
 		// An abort racing the final wiring (between start() returning and this line)
 		// cannot revive a closed session because we check here before wiring.
-		if (signal?.aborted || this.ctx.sessions.get(hostId)?.id !== sessionId) {
+		if (
+			this.hostIsBeingStopped(hostId) ||
+			signal?.aborted ||
+			this.ctx.sessions.get(hostId)?.id !== sessionId
+		) {
 			sshAgent.close();
 			throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 		}

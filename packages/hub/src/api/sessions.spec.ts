@@ -1,4 +1,4 @@
-import type { HelloMessage, ProtocolMessage } from "@lasterm/shared";
+import type { AgentChannelStateMessage, HelloMessage, ProtocolMessage } from "@lasterm/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,9 +9,21 @@ import {
 import type { SessionState, SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
 import { SshAgent } from "../session/ssh-agent.js";
+import { SshConnectionManager } from "../session/ssh-connection-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
+import { SpoolDAL } from "../storage/spool.js";
+import { registerChannelRoutes } from "./channels.js";
+import { registerHostConnectionRoutes } from "./host-connection.js";
+import { registerHostRoutes } from "./hosts.js";
 import { readReplaceAgentBody, registerSessionRoutes } from "./sessions.js";
+
+const agentHooks = vi.hoisted(() => ({
+	start: undefined as (() => Promise<void>) | undefined,
+	channelState: undefined as (() => Promise<AgentChannelStateMessage[]>) | undefined,
+}));
+
+const constructedAgents = vi.hoisted(() => [] as object[]);
 
 // The connection to a remote daemon, as replaceAgent sees it: connected, a
 // daemon, and answering a STOP the way the agent of #127 does.
@@ -19,6 +31,29 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../session/ssh-agent.js")>();
 	const { EventEmitter } = await import("node:events");
 	class FakeSshAgent extends EventEmitter {
+		constructor() {
+			super();
+			constructedAgents.push(this);
+		}
+		closedByHub = false;
+		start = vi.fn(async () => {
+			await agentHooks.start?.();
+		});
+		lastKeyVerification = { capturedFingerprint: null, mismatch: false, tofu: false };
+		waitForChannelState = vi.fn(
+			async (): Promise<AgentChannelStateMessage[]> =>
+				agentHooks.channelState
+					? agentHooks.channelState()
+					: [
+							{
+								type: "AGENT_CHANNEL_STATE",
+								channelId: "01K580CHAN0000000000000001",
+								title: "bash",
+								pid: 1,
+								alive: true,
+							},
+						],
+		);
 		connected = true;
 		usedRemoteDaemon = true;
 		remoteAgentPath = "/home/pi/.local/bin/lasterm-agent";
@@ -33,6 +68,17 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 		environments: Record<string, Record<string, string>> | undefined;
 		send = vi.fn((msg: ProtocolMessage) => {
 			this.sent.push(msg);
+			if (msg.type === "ATTACH") {
+				queueMicrotask(() =>
+					this.emit("message", {
+						type: "ATTACH_OK",
+						channelId: msg.channelId,
+						snapshot: new Uint8Array(),
+						lastSeq: 0,
+					}),
+				);
+				return;
+			}
 			if (msg.type === "ENV_QUERY") {
 				const env = this.environments?.[msg.mode];
 				if (env === undefined) return;
@@ -67,13 +113,16 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 				: { stdout: "", exitCode: 0 },
 		);
 		close = vi.fn(async () => {
+			this.closedByHub = true;
 			this.connected = false;
+			queueMicrotask(() => this.emit("close"));
 		});
 	}
 	return { ...actual, SshAgent: FakeSshAgent };
 });
 
 type FakeSshAgent = SshAgent & {
+	connected: boolean;
 	othersHold: number;
 	exitsOnStop: string[];
 	environments: Record<string, Record<string, string>> | undefined;
@@ -95,17 +144,24 @@ let server: FastifyInstance;
 let hostId: string;
 
 beforeEach(async () => {
+	constructedAgents.length = 0;
+	agentHooks.start = undefined;
+	agentHooks.channelState = undefined;
 	dbs = openTestDatabases();
 	const metaDal = new MetaDAL(dbs.meta);
 	hostId = metaDal.createHost({ type: "ssh", label: "pi", sshHost: "pi@pi.local" }).id;
 	sm = new SessionManager(dbs);
 	server = Fastify({ logger: false });
 	registerSessionRoutes(server, metaDal, sm);
+	registerHostConnectionRoutes(server, metaDal, sm);
+	registerHostRoutes(server, metaDal, sm);
+	registerChannelRoutes(server, metaDal, sm, new SpoolDAL(dbs.spool));
 	await server.ready();
 });
 
 afterEach(async () => {
 	await server.close();
+	vi.restoreAllMocks();
 	sm.beginQuit();
 	await sm.shutdown();
 	dbs.close();
@@ -132,9 +188,13 @@ function replace(payload?: unknown) {
  * A terminal running on `agent`, which the manager hears as it hears a
  * connection it opened, and a window that holds it in its state.
  */
-function liveTerminalOn(agent: FakeSshAgent): { channelId: string; heard: ProtocolMessage[] } {
-	const { channelIds, heard } = liveTerminalsOn(agent, 1);
-	return { channelId: channelIds[0] ?? "", heard };
+function liveTerminalOn(agent: FakeSshAgent): {
+	channelId: string;
+	heard: ProtocolMessage[];
+	ctx: SharedSessionContext;
+} {
+	const { channelIds, heard, ctx } = liveTerminalsOn(agent, 1);
+	return { channelId: channelIds[0] ?? "", heard, ctx };
 }
 
 const SESSION_ID = "01K580SESSION0000000000000";
@@ -143,7 +203,7 @@ const SESSION_ID = "01K580SESSION0000000000000";
 function liveTerminalsOn(
 	agent: FakeSshAgent,
 	count: number,
-): { channelIds: string[]; heard: ProtocolMessage[] } {
+): { channelIds: string[]; heard: ProtocolMessage[]; ctx: SharedSessionContext } {
 	const sessionId = SESSION_ID;
 	const channelIds = Array.from({ length: count }, (_, i) => `01K580CHAN000000000000000${i + 1}`);
 	const metaDal = new MetaDAL(dbs.meta);
@@ -175,7 +235,7 @@ function liveTerminalsOn(
 	internals.agentMgr.wireAgentEvents(hostId, sessionId, agent);
 	const heard: ProtocolMessage[] = [];
 	sm.addClient({ id: "c-window", send: (msg) => heard.push(msg), attachedChannels: new Set() });
-	return { channelIds, heard };
+	return { channelIds, heard, ctx: internals.ctx };
 }
 
 function endsOf(heard: ProtocolMessage[], channelId: string): ProtocolMessage[] {
@@ -493,6 +553,410 @@ describe("readReplaceAgentBody", () => {
 	it("refuses anything else, rather than guess that it means yes", () => {
 		for (const body of [{ force: "true" }, { force: 1 }, { force: null }, [], "force", 1]) {
 			expect(readReplaceAgentBody(body)).toHaveProperty("error");
+		}
+	});
+});
+
+describe("#674 reconnect timer after ATTACH", () => {
+	it("does not construct or adopt a second agent after ATTACH reconnects a dropped host", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		try {
+			const meta = new MetaDAL(dbs.meta);
+			meta.updateHost(hostId, { sshRemoteDaemon: true });
+			const old = connectedAgent(["hub-identity"]);
+			const { channelId, ctx } = liveTerminalOn(old);
+			old.connected = false;
+			old.emit("close");
+			expect(ctx.reconnectTimers.has(hostId)).toBe(true);
+			expect(await sm.handleAttach("c-window", channelId)).toBe(true);
+			const adopted = sm.agents.get(hostId);
+			expect(adopted).toBeInstanceOf(SshAgent);
+			expect(adopted).not.toBe(old);
+			const count = constructedAgents.length;
+			await vi.advanceTimersByTimeAsync(1_100);
+			await Promise.resolve();
+			expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+			expect(constructedAgents).toHaveLength(count);
+			expect(sm.agents.get(hostId)).toBe(adopted);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("#674 in-flight stop fences", () => {
+	it("refuses an in-flight SPAWN after Replace marks the host", async () => {
+		const old = connectedAgent(["hub-identity"]);
+		const { ctx, heard } = liveTerminalOn(old);
+		ctx.agents.delete(hostId);
+		let release!: () => void;
+		let entered!: () => void;
+		const waiting = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		agentHooks.channelState = async () => {
+			entered();
+			await gate;
+			return [];
+		};
+		const spawn = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
+		await waiting;
+		const agent = sm.agents.get(hostId) as FakeSshAgent;
+		agent.helloMessage = hello(["hub-identity"]);
+		let stopped!: () => void;
+		const stopSent = new Promise<void>((resolve) => {
+			stopped = resolve;
+		});
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			agent.sent.push(msg);
+			if (msg.type === "STOP") stopped();
+		});
+		const pending = replace().then((response) => response);
+		await stopSent;
+		expect(ctx.stoppingAgents.has(hostId)).toBe(true);
+		release();
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			agent.sent.push(msg);
+			if (msg.type === "SPAWN") throw new Error("unexpected SPAWN");
+		});
+		try {
+			expect(await spawn).toBeNull();
+			expect(agent.sent.some((msg) => msg.type === "SPAWN")).toBe(false);
+			expect(heard).toContainEqual({
+				type: "ERROR",
+				code: "HOST_BUSY",
+				message: "This host's agent is being stopped.",
+				hostId,
+			});
+		} finally {
+			refuseStop(agent);
+			await pending;
+		}
+	});
+
+	it.each([
+		{ kind: "restart", superseded: false },
+		{ kind: "timer", superseded: false },
+		{ kind: "restart", superseded: true },
+		{ kind: "timer", superseded: true },
+	])(
+		"settles a stop-marked $kind reconnect without stale controllers (superseded: $superseded)",
+		async ({ kind, superseded }) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+			try {
+				const old = connectedAgent(["hub-identity"]);
+				const { ctx } = liveTerminalOn(old);
+				old.connected = false;
+				ctx.agents.delete(hostId);
+				let release!: () => void;
+				let entered!: () => void;
+				const waiting = new Promise<void>((resolve) => {
+					entered = resolve;
+				});
+				const gate = new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				agentHooks.start = async () => {
+					entered();
+					await gate;
+				};
+				let attempt: Promise<boolean> | undefined;
+				if (kind === "restart") {
+					const lifecycle = (
+						sm as unknown as { lifecycle: { onReconnectAgent: (id: string) => Promise<boolean> } }
+					).lifecycle;
+					attempt = lifecycle.onReconnectAgent(hostId);
+				} else {
+					const sshMgr = (sm as unknown as { sshMgr: SshConnectionManager }).sshMgr;
+					sshMgr.scheduleReconnect(hostId, SESSION_ID, 0, Date.now());
+					await vi.advanceTimersByTimeAsync(1_100);
+				}
+				await waiting;
+				expect(ctx.reconnectAbortControllers.has(hostId)).toBe(true);
+				ctx.stoppingAgents.add(hostId);
+				const newer = new AbortController();
+				if (superseded) ctx.reconnectAbortControllers.set(hostId, newer);
+				release();
+				if (attempt) expect(await attempt).toBe(false);
+				await vi.advanceTimersByTimeAsync(0);
+				expect(ctx.reconnectAbortControllers.get(hostId)).toBe(superseded ? newer : undefined);
+				expect(sm.agents.has(hostId)).toBe(false);
+				ctx.stoppingAgents.delete(hostId);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+});
+
+async function heldReplace() {
+	const agent = connectedAgent(["hub-identity"]);
+	const terminal = liveTerminalOn(agent);
+	let sent!: () => void;
+	const stopSent = new Promise<void>((resolve) => {
+		sent = resolve;
+	});
+	agent.send.mockImplementation((msg: ProtocolMessage) => {
+		agent.sent.push(msg);
+		if (msg.type === "STOP") sent();
+	});
+	const pending = replace().then((response) => response);
+	await stopSent;
+	return { agent, ...terminal, pending };
+}
+
+function refuseStop(agent: FakeSshAgent): void {
+	agent.emit("message", {
+		type: "ERROR",
+		code: "OTHER_HUBS_HOLD_CHANNELS",
+		message: "1 terminal held",
+	});
+}
+
+describe("#674 exclusive Replace", () => {
+	it("refuses a second Replace while the first STOP waits", async () => {
+		const { agent, pending } = await heldReplace();
+		const second = replace().then((response) => response);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		refuseStop(agent);
+		const response = await second;
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toMatchObject({ error: { code: "HOST_BUSY" } });
+		expect(agent.sent.filter((msg) => msg.type === "STOP")).toHaveLength(1);
+		await pending;
+	});
+
+	it.each(["displaced", "hub-close", "quitting"] as const)(
+		"does not replace after %s",
+		async (cause) => {
+			const { agent, pending, heard, channelId } = await heldReplace();
+			if (cause === "displaced")
+				agent.emit("message", { type: "ERROR", code: "DISPLACED", message: "another hub" });
+			else if (cause === "hub-close") await agent.close();
+			else {
+				sm.beginQuit();
+				agent.connected = false;
+				agent.emit("close");
+			}
+			const response = await pending;
+			expect(response.statusCode).toBe(409);
+			expect(response.json()).toMatchObject({ error: { code: "AGENT_NOT_REPLACED" } });
+			expect(
+				endsOf(heard, channelId).filter(
+					(msg) => msg.type === "CHANNEL_STATE" && msg.endReason === "stopped",
+				),
+			).toEqual([]);
+		},
+	);
+
+	it("answers a displaced Replace before the displaced connection finishes closing", async () => {
+		const { agent, pending } = await heldReplace();
+		vi.spyOn(agent, "close").mockImplementation(async () => {
+			agent.closedByHub = true;
+			agent.connected = false;
+		});
+		agent.emit("message", { type: "ERROR", code: "DISPLACED", message: "another hub" });
+		const response = await Promise.race([
+			pending,
+			new Promise<undefined>((resolve) => setImmediate(() => resolve(undefined))),
+		]);
+		agent.emit("close");
+		await pending;
+		expect(response?.statusCode).toBe(409);
+		expect(response?.json()).toMatchObject({ error: { code: "AGENT_NOT_REPLACED" } });
+	});
+
+	const refused = [
+		{ name: "connect", method: "POST", path: () => `/api/hosts/${hostId}/connect` },
+		{ name: "reconnect", method: "POST", path: () => `/api/hosts/${hostId}/reconnect` },
+		{ name: "disconnect", method: "POST", path: () => `/api/hosts/${hostId}/disconnect` },
+		{
+			name: "restart",
+			method: "POST",
+			path: () => `/api/channels/01K580CHAN0000000000000001/restart`,
+		},
+		{ name: "session-delete", method: "DELETE", path: () => `/api/sessions/${SESSION_ID}` },
+		{ name: "host-delete", method: "DELETE", path: () => `/api/hosts/${hostId}` },
+		{
+			name: "daemon-policy",
+			method: "PUT",
+			path: () => `/api/hosts/${hostId}`,
+			payload: { ssh_remote_daemon: false },
+		},
+		{
+			name: "os-policy",
+			method: "PUT",
+			path: () => `/api/hosts/${hostId}`,
+			payload: { os: "linux" },
+		},
+	] as const;
+	for (const entry of refused) {
+		it(`refuses ${entry.name} at the route while STOP waits`, async () => {
+			const { agent, pending, ctx } = await heldReplace();
+			ctx.userDisconnectedHosts.add(hostId);
+			const count = constructedAgents.length;
+			const response = await server.inject({
+				method: entry.method,
+				url: entry.path(),
+				...("payload" in entry ? { payload: entry.payload } : {}),
+			});
+			expect(response.statusCode).toBe(409);
+			expect(response.json()).toMatchObject({ error: { code: "HOST_BUSY" } });
+			expect(constructedAgents).toHaveLength(count);
+			expect(ctx.userDisconnectedHosts.has(hostId)).toBe(true);
+			refuseStop(agent);
+			await pending;
+		});
+	}
+
+	it("refuses WS SPAWN before clearing a user's disconnect", async () => {
+		const { agent, pending, heard, ctx } = await heldReplace();
+		ctx.userDisconnectedHosts.add(hostId);
+		const count = constructedAgents.length;
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			agent.sent.push(msg);
+			if (msg.type === "SPAWN" && "requestId" in msg) {
+				queueMicrotask(() =>
+					agent.emit("message", {
+						type: "SPAWN_OK",
+						requestId: msg.requestId,
+						channelId: "01K580CHAN0000000000000002",
+					}),
+				);
+			}
+		});
+		const spawned = await sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			cols: 80,
+			rows: 24,
+		});
+		refuseStop(agent);
+		await pending;
+		expect(heard).toContainEqual({
+			type: "ERROR",
+			code: "HOST_BUSY",
+			message: "This host's agent is being stopped.",
+			hostId,
+		});
+		expect(spawned).toBeNull();
+		expect(constructedAgents).toHaveLength(count);
+		expect(ctx.userDisconnectedHosts.has(hostId)).toBe(true);
+	});
+
+	it("allows a label-only PUT while STOP waits", async () => {
+		const { agent, pending } = await heldReplace();
+		const response = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}`,
+			payload: { label: "renamed" },
+		});
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({ label: "renamed" });
+		refuseStop(agent);
+		await pending;
+	});
+
+	it("the held agent's close does not ask the reconnect manager to schedule", async () => {
+		const { agent, pending } = await heldReplace();
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		let callsWhileHeld = -1;
+		agent.once("close", () => {
+			callsWhileHeld = schedule.mock.calls.length;
+		});
+		await agent.close();
+		expect(callsWhileHeld).toBe(0);
+		expect((await pending).statusCode).toBe(409);
+	});
+
+	it("does not replay a reconnect when Replace finds an already disconnected host without an agent", async () => {
+		const ctx = (sm as unknown as { ctx: SharedSessionContext }).ctx;
+		new MetaDAL(dbs.meta).createSession({ id: SESSION_ID, hostId, status: "disconnected" });
+		(ctx.sessions as unknown as Map<string, SessionState>).set(hostId, {
+			id: SESSION_ID,
+			hostId,
+			status: "disconnected",
+		});
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		expect(ctx.reconnectAbortControllers.has(hostId)).toBe(false);
+		expect(ctx.acquisitions.has(hostId)).toBe(false);
+		expect(ctx.userDisconnectedHosts.has(hostId)).toBe(false);
+
+		const response = await replace();
+
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toMatchObject({ error: { code: "AGENT_NOT_REPLACED" } });
+		expect(schedule).not.toHaveBeenCalled();
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+	});
+
+	it("replays exactly one suppressed reconnect after an unconfirmed Replace releases the host", async () => {
+		const { agent, pending, ctx } = await heldReplace();
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		await agent.close();
+		expect((await pending).statusCode).toBe(409);
+		expect(schedule).toHaveBeenCalledExactlyOnceWith(hostId, SESSION_ID, 0, expect.any(Number));
+		expect(ctx.reconnectTimers.has(hostId)).toBe(true);
+		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+		expect(ctx.agents.has(hostId)).toBe(false);
+	});
+
+	it("does not replay a reconnect after an unconfirmed Replace while a reconnect controller exists", async () => {
+		const { agent, pending, ctx } = await heldReplace();
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		const controller = new AbortController();
+		ctx.reconnectAbortControllers.set(hostId, controller);
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		await agent.close();
+		expect((await pending).statusCode).toBe(409);
+		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(ctx.sessions.get(hostId)?.status).toBe("disconnected");
+		expect(schedule).not.toHaveBeenCalled();
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		expect(ctx.reconnectAbortControllers.get(hostId)).toBe(controller);
+		expect(controller.signal.aborted).toBe(false);
+	});
+
+	it("does not replay a reconnect after an unconfirmed Replace while an acquisition exists", async () => {
+		const { agent, pending, ctx } = await heldReplace();
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		let resolveConnect!: (session: SessionState) => void;
+		let rejectConnect!: (error: Error) => void;
+		const connectPromise = new Promise<SessionState>((resolve, reject) => {
+			resolveConnect = resolve;
+			rejectConnect = reject;
+		});
+		const acquisition = {
+			id: "pending-acquisition",
+			hostId,
+			state: "CONNECTING" as const,
+			controller: new AbortController(),
+			connectPromise,
+			_resolve: resolveConnect,
+			_reject: rejectConnect,
+			leases: new Set<never>(),
+		};
+		ctx.acquisitions.set(hostId, acquisition);
+		try {
+			expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+			expect(ctx.reconnectAbortControllers.has(hostId)).toBe(false);
+			await agent.close();
+			expect((await pending).statusCode).toBe(409);
+			expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+			expect(ctx.agents.has(hostId)).toBe(false);
+			expect(ctx.sessions.get(hostId)?.status).toBe("disconnected");
+			expect(schedule).not.toHaveBeenCalled();
+			expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+			expect(ctx.acquisitions.get(hostId)).toBe(acquisition);
+		} finally {
+			ctx.acquisitions.delete(hostId);
 		}
 	});
 });

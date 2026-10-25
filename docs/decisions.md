@@ -7,6 +7,17 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## ONE-STOP-PER-HOST — a stop has the host to itself, and a close the hub caused is not a stop (#674, 2026-10-25)
+
+- Within one hub, one Replace runs per host at a time: it marks the host in `stoppingAgents` before anything else and answers `HOST_BUSY` when the host is already marked. The stop-keeping operation planned in #674 will take the same marker. The operations below only read it.
+- While a host is marked, no reconnect timer or attach-triggered reconnect starts, and no agent is adopted for it. An SSH start already under way may complete; its agent is then closed. An ATTACH is still served by the live connection or from what the hub remembers.
+- Requests that start while the host is marked are refused with `HOST_BUSY`: terminal opens, Restart, Connect, Reconnect, Disconnect, session and host deletion, and a host edit carrying `ssh_remote_daemon` or `os`.
+- A terminal open or Restart already under way checks the marker again just before it writes its SPAWN, and writes none if the host is marked at that moment: the terminal open is told `HOST_BUSY`, the Restart answers 503, as any Restart that did not start does. The check reads the marker as it is then: an operation that resumes after a Replace has released the host goes on as if no Replace had run. A SPAWN already written is not recalled.
+- Terminal opens are refused rather than queued, since a terminal opened on an agent being stopped would end with it. The STOP wait is capped at 15 seconds; an agent without `hub-identity` is stopped with `--stop`, which takes two SSH commands of at most 10 seconds each.
+- For an agent stopped with STOP, the stop reads as done only when the daemon closes its connection by itself afterwards. A DISPLACED answer, a close the hub issued (`SshAgent.close()`), or a close while the hub quits does not count, and Replace answers that the agent was not replaced. With `--stop`, a zero exit status counts as done.
+- A Replace that held the host's agent calls `scheduleReconnect` once when it releases the host, if the host is then disconnected with no agent, no pending timer, no reconnect attempt or acquisition running, and no user disconnect. This recovers a reconnect the marker held back. `scheduleReconnect` ignores the call while the hub quits.
+- A reconnect timer that fires while a connected agent serves its host builds no second one. Before this decision, an ATTACH that reconnected a host left the earlier timer armed, and that timer then replaced the adopted agent.
+
 ## ROUTE-BOUND-HOST-TRUST — a host key is trusted for the route it was seen on, and a revocation always wins (2026-10-02)
 
 - A target's key is trusted for its address and the host's declared jump together: direct, a saved jump host (by its id and its current address), or a jump spec (by the bastion address `planJump` reads from it). Through a bastion the target's name is resolved on the bastion's side, so one address on two routes can be two machines (#685). A host with no SSH address has no route.

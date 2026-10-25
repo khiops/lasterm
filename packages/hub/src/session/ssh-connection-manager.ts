@@ -484,6 +484,9 @@ export class SshConnectionManager {
 		if (this.ctx.quitState === "QUITTING") return;
 		// Its user disconnected it: nothing brings it back but them (#648).
 		if (this.ctx.userDisconnectedHosts.has(hostId)) return;
+		if (this.ctx.stoppingAgents.has(hostId)) {
+			return;
+		}
 		const reconnectFence = captureQuitFence(this.ctx);
 		const elapsed = Date.now() - startTime;
 		if (elapsed >= RECONNECT_TIMEOUT_MS) {
@@ -496,6 +499,8 @@ export class SshConnectionManager {
 
 		const timer = setTimeout(async () => {
 			this.ctx.reconnectTimers.delete(hostId);
+			if (this.ctx.stoppingAgents.has(hostId)) return;
+			if (this.ctx.agents.get(hostId)?.connected === true) return;
 
 			// Currency check before any async work: bail if session was closed
 			// or superseded by a newer session while the timer was pending.
@@ -596,6 +601,7 @@ export class SshConnectionManager {
 				// closeSession() may have fired while start() was awaiting the SSH handshake.
 				// Do NOT wire/store/reAttach if the session is no longer current or was aborted.
 				if (
+					this.ctx.stoppingAgents.has(hostId) ||
 					ac.signal.aborted ||
 					this.ctx.reconnectAbortControllers.get(hostId) !== ac ||
 					this.ctx.sessions.get(hostId)?.id !== sessionId
@@ -603,9 +609,6 @@ export class SshConnectionManager {
 					sshAgent.close();
 					return;
 				}
-
-				// Clear the controller — attempt settled successfully.
-				this.ctx.reconnectAbortControllers.delete(hostId);
 
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
@@ -617,11 +620,6 @@ export class SshConnectionManager {
 					this.lifecycle.reAttachChannels(hostId, sessionId, sshAgent);
 				}
 			} catch {
-				// Clear the controller on failure (aborted or real error).
-				if (this.ctx.reconnectAbortControllers.get(hostId) === ac) {
-					this.ctx.reconnectAbortControllers.delete(hostId);
-				}
-
 				// If the attempt was aborted by closeSession(), do nothing — session is already closed.
 				if (ac.signal.aborted) return;
 
@@ -633,6 +631,10 @@ export class SshConnectionManager {
 					}
 				} else {
 					this.scheduleReconnect(hostId, sessionId, attemptIndex + 1, startTime);
+				}
+			} finally {
+				if (this.ctx.reconnectAbortControllers.get(hostId) === ac) {
+					this.ctx.reconnectAbortControllers.delete(hostId);
 				}
 			}
 		}, delayMs);

@@ -1,5 +1,6 @@
 import { ELEVATION_METHODS_ALL, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
+import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
@@ -10,7 +11,11 @@ import {
 } from "./hosts.js";
 import { parsePagination } from "./pagination.js";
 
-export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
+export function registerHostCrudRoutes(
+	server: FastifyInstance,
+	metaDal: MetaDAL,
+	sessionManager: Pick<SessionManager, "hostIsBeingStopped">,
+): void {
 	// GET /api/hosts?limit=N&offset=M
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
 		"/api/hosts",
@@ -142,6 +147,14 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 			}
 
 			const body = request.body;
+			if (
+				("ssh_remote_daemon" in body || "os" in body) &&
+				sessionManager.hostIsBeingStopped(host.id)
+			) {
+				return reply.code(409).send({
+					error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+				});
+			}
 
 			// A colour, or null to clear it (#659)
 			const colorError = validateHostColor(body.color);
@@ -287,6 +300,11 @@ export function registerHostCrudRoutes(server: FastifyInstance, metaDal: MetaDAL
 		const existing = metaDal.getHost(hostId);
 		if (!existing) {
 			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
+		}
+		if (sessionManager.hostIsBeingStopped(hostId)) {
+			return reply.code(409).send({
+				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+			});
 		}
 		// Cascade-delete dependents: cache_index → channels → sessions
 		// channel_groups has ON DELETE CASCADE in schema but we do it explicitly for safety

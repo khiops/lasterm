@@ -401,22 +401,17 @@ export class SessionManager {
 					return false;
 				}
 
-				// Clear the controller — attempt settled successfully.
-				ctx.reconnectAbortControllers.delete(hostId);
-
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
 				ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
 				await this.lifecycle.adoptWhatTheDaemonHolds(hostId, sshAgent);
 				return true;
 			} catch {
-				// Clear the controller on failure (identity-guarded so a newer concurrent
-				// attempt is not clobbered).
+				return false;
+			} finally {
 				if (ctx.reconnectAbortControllers.get(hostId) === ac) {
 					ctx.reconnectAbortControllers.delete(hostId);
 				}
-				return false;
-			} finally {
 				clearContext(ctx, reconnectCtxId, sendPromptCancel);
 			}
 		};

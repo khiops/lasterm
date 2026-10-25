@@ -610,9 +610,6 @@ export class SshConnectionManager {
 					return;
 				}
 
-				// Clear the controller — attempt settled successfully.
-				this.ctx.reconnectAbortControllers.delete(hostId);
-
 				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
 				this.ctx.commits.adoptAgent(reconnectFence, hostId, sshAgent);
@@ -623,11 +620,6 @@ export class SshConnectionManager {
 					this.lifecycle.reAttachChannels(hostId, sessionId, sshAgent);
 				}
 			} catch {
-				// Clear the controller on failure (aborted or real error).
-				if (this.ctx.reconnectAbortControllers.get(hostId) === ac) {
-					this.ctx.reconnectAbortControllers.delete(hostId);
-				}
-
 				// If the attempt was aborted by closeSession(), do nothing — session is already closed.
 				if (ac.signal.aborted) return;
 
@@ -639,6 +631,10 @@ export class SshConnectionManager {
 					}
 				} else {
 					this.scheduleReconnect(hostId, sessionId, attemptIndex + 1, startTime);
+				}
+			} finally {
+				if (this.ctx.reconnectAbortControllers.get(hostId) === ac) {
+					this.ctx.reconnectAbortControllers.delete(hostId);
 				}
 			}
 		}, delayMs);

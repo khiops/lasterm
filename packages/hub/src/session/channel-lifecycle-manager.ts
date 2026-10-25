@@ -175,6 +175,16 @@ export class ChannelLifecycleManager {
 			shell: spawnMsg.shell,
 			agentConnected: agent.connected,
 		});
+		if (this.ctx.stoppingAgents.has(hostId)) {
+			client.send({
+				type: "ERROR",
+				code: "HOST_BUSY",
+				message: "This host's agent is being stopped.",
+				hostId,
+				...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+			} satisfies ErrorMessage);
+			return { channelId: null, errCode: "HOST_BUSY" };
+		}
 		let quitEpoch: QuitFence;
 		try {
 			// The send is the irreversible side effect; fence it immediately before it.
@@ -654,7 +664,7 @@ export class ChannelLifecycleManager {
 			}
 
 			// Cache miss — try passwordless first
-			const firstResult = await this.sendRestartSpawn(agent, baseElevatedSpawn);
+			const firstResult = await this.sendRestartSpawn(agent, baseElevatedSpawn, hostId);
 			if (firstResult.ok && firstResult.channelId !== null) {
 				this.applyRestartState(
 					firstResult.channelId,
@@ -742,7 +752,7 @@ export class ChannelLifecycleManager {
 			rows,
 		};
 
-		const restartResult = await this.sendRestartSpawn(agent, restartSpawn);
+		const restartResult = await this.sendRestartSpawn(agent, restartSpawn, hostId);
 		if (!restartResult.ok || restartResult.channelId === null) return false;
 
 		this.applyRestartState(
@@ -780,7 +790,7 @@ export class ChannelLifecycleManager {
 		rows: number,
 		directProcess?: boolean,
 	): Promise<boolean> {
-		const result = await this.sendRestartSpawn(agent, spawnMsg);
+		const result = await this.sendRestartSpawn(agent, spawnMsg, hostId);
 		if (!result.ok || result.channelId === null) return false;
 		this.applyRestartState(
 			result.channelId,
@@ -802,7 +812,11 @@ export class ChannelLifecycleManager {
 	private async sendRestartSpawn(
 		agent: AgentConnection,
 		spawnMsg: AgentSpawnMessage,
+		hostId: string,
 	): Promise<RestartSpawnResult> {
+		if (this.ctx.stoppingAgents.has(hostId)) {
+			return { ok: false, channelId: null, errCode: "HOST_BUSY" };
+		}
 		let quitEpoch: QuitFence;
 		try {
 			quitEpoch = this.sendGuardedSpawn(agent, spawnMsg);
@@ -1138,6 +1152,10 @@ export class ChannelLifecycleManager {
 
 			pending++;
 			const requestId = generateId();
+			if (this.ctx.stoppingAgents.has(hostId)) {
+				pending--;
+				break;
+			}
 			if (!isQuitFenceCurrent(this.ctx, quitEpoch)) break;
 			this.sendGuardedSpawn(
 				agent,

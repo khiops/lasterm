@@ -511,7 +511,9 @@ export class AgentConnectionManager {
 
 			if (host?.type === "ssh") {
 				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
-				this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
+				if (!this.ctx.stoppingAgents.has(hostId)) {
+					this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
+				}
 			} else {
 				this.warmRestartLocal(hostId, session.id).catch(() => {
 					this.lifecycle.closeSession(hostId, session.id);

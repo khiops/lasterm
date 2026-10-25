@@ -7,6 +7,14 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## ONE-STOP-PER-HOST — a stop has the host to itself, and a close the hub caused is not a stop (#674, 2026-10-25)
+
+- One stop runs per host at a time: Replace marks the host in `stoppingAgents` before anything else and answers `HOST_BUSY` when it is already marked. The operation added later in #674 shares that marker.
+- While a host is marked, nothing in the hub builds or adopts an agent for it, and nothing reconnects it. Reconnect timers, attach, terminal opens, Restart, Connect, Reconnect, Disconnect, session and host deletion, and a host edit carrying `ssh_remote_daemon` or `os` are refused with `HOST_BUSY`. Terminal opens are refused rather than queued: a stop lasts at most 15 seconds, and a terminal opened on an agent being stopped would end with it.
+- A stop reads as done only when the daemon closes its connection after STOP. A DISPLACED answer, a close the hub issued itself (`SshAgent.close()`), or a close while the hub quits does not count as stopped, and Replace answers that the agent was not replaced.
+- A reconnect the marker held back is replayed once when the host is released. This covers a host with a disconnected session, no agent, no timer and no user disconnect.
+- A reconnect timer that fires while a connected agent serves its host builds no second one. Before this decision, an ATTACH that reconnected a host left the earlier timer armed, and that timer then replaced the adopted agent.
+
 ## ROUTE-BOUND-HOST-TRUST — a host key is trusted for the route it was seen on, and a revocation always wins (2026-10-02)
 
 - A target's key is trusted for its address and the host's declared jump together: direct, a saved jump host (by its id and its current address), or a jump spec (by the bastion address `planJump` reads from it). Through a bastion the target's name is resolved on the bastion's side, so one address on two routes can be two machines (#685). A host with no SSH address has no route.

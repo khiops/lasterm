@@ -12,6 +12,8 @@ export const DAEMON_STOP_TIMEOUT_MS = 15_000;
 export type DaemonStopOutcome =
 	/** The connection ended: the daemon is shutting down, and its terminals with it. */
 	| { readonly kind: "stopped" }
+	| { readonly kind: "displaced" }
+	| { readonly kind: "closed_by_hub" }
 	/** Other hubs hold channels there, and the STOP was not forced: nothing stopped. */
 	| {
 			readonly kind: "refused";
@@ -29,6 +31,7 @@ export type DaemonStopOutcome =
 export interface DaemonStopOptions {
 	readonly force: boolean;
 	readonly timeoutMs?: number;
+	readonly isHubQuitting?: () => boolean;
 	/**
 	 * Run when the connection ends, before anyone else hears of it. The
 	 * connection's owner uses it to let go of the agent first, so that its own
@@ -48,7 +51,7 @@ export interface DaemonStopOptions {
  * its refusal states how many.
  */
 export function requestDaemonStop(
-	agent: AgentConnection,
+	agent: AgentConnection & { closedByHub?: boolean },
 	options: DaemonStopOptions,
 ): Promise<DaemonStopOutcome> {
 	const timeoutMs = options.timeoutMs ?? DAEMON_STOP_TIMEOUT_MS;
@@ -66,9 +69,11 @@ export function requestDaemonStop(
 		const onMessage = (msg: ProtocolMessage): void => {
 			if (msg.type !== "ERROR") return;
 			const error = msg as ErrorMessage;
-			// An error about a channel, or the connection being replaced, is not
-			// the answer to a STOP; the manager deals with those as it always has.
-			if (error.channelId !== undefined || error.code === ErrorCode.DISPLACED) return;
+			if (error.channelId !== undefined) return;
+			if (error.code === ErrorCode.DISPLACED) {
+				finish({ kind: "displaced" });
+				return;
+			}
 			const message = typeof error.message === "string" ? error.message : "";
 			if (error.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS) {
 				finish({
@@ -83,12 +88,16 @@ export function requestDaemonStop(
 
 		const onClose = (): void => {
 			if (settled) return;
+			if (agent.closedByHub || options.isHubQuitting?.()) {
+				finish({ kind: "closed_by_hub" });
+				return;
+			}
 			options.onStopped?.();
 			finish({ kind: "stopped" });
 		};
 
 		const timer = setTimeout(() => finish({ kind: "timeout" }), timeoutMs);
-		agent.on("message", onMessage);
+		agent.prependListener("message", onMessage);
 		// First in line, so the owner lets go before its own close handling runs.
 		agent.prependListener("close", onClose);
 

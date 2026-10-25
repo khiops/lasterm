@@ -558,7 +558,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			options.authToken ? (options.dbManager.meta ?? null) : null,
 			options.authToken ? authConfig.tokenTtlDays : undefined,
 		);
-		registerHostRoutes(server, metaDal);
+		registerHostRoutes(server, metaDal, activeSessionManager);
 		registerHostGroupRoutes(server, metaDal);
 		registerLaunchProfileRoutes(server, metaDal);
 		registerSessionRoutes(server, metaDal, activeSessionManager);

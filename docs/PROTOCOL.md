@@ -1209,9 +1209,10 @@ refuse with 409 `HOST_BUSY` while Replace holds the host, before changing its us
 state. Connect reads `client_id` only.
 
 While Replace holds the host, `SessionManager.restartChannel` and `closeSession` also refuse
-a Restart or DELETE session that starts then with 409 `HOST_BUSY`. A Restart already waiting
-for its host when Replace begins sends no SPAWN and answers 503, as any Restart that did not
-start does (`HOST_UNREACHABLE` when its host is away, `RESTART_FAILED` otherwise). `registerHostCrudRoutes` refuses DELETE host
+a Restart or DELETE session that starts then with 409 `HOST_BUSY`. A Restart already under way
+that reaches its SPAWN while Replace still holds the host sends none and answers 503, as any
+Restart that did not start does (`HOST_UNREACHABLE` when its host is away, `RESTART_FAILED`
+otherwise); one that resumes after Replace has released the host goes on. `registerHostCrudRoutes` refuses DELETE host
 and PUT carrying `ssh_remote_daemon` or `os` with the same error; a label-only PUT can save.
 `requestDaemonStop` treats DISPLACED, a hub-issued close, and a close while quitting as
 unconfirmed, so none of those closes lets Replace end channels as `stopped`.

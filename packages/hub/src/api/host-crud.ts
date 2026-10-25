@@ -14,7 +14,7 @@ import { parsePagination } from "./pagination.js";
 export function registerHostCrudRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "hostIsBeingStopped">,
+	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
 ): void {
 	// GET /api/hosts?limit=N&offset=M
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
@@ -156,6 +156,19 @@ export function registerHostCrudRoutes(
 				});
 			}
 
+			if (
+				body.ssh_remote_daemon !== undefined &&
+				body.ssh_remote_daemon !== null &&
+				typeof body.ssh_remote_daemon !== "boolean"
+			) {
+				return reply.code(400).send({
+					error: {
+						code: "VALIDATION_ERROR",
+						message: "ssh_remote_daemon must be boolean or null",
+					},
+				});
+			}
+
 			// A colour, or null to clear it (#659)
 			const colorError = validateHostColor(body.color);
 			if (colorError) {
@@ -287,6 +300,23 @@ export function registerHostCrudRoutes(
 				updateInput.arch = body.arch;
 			}
 
+			if (
+				("ssh_remote_daemon" in body || "os" in body) &&
+				sessionManager.daemonPolicyWouldBeRevoked(host, {
+					os: updateInput.os !== undefined ? updateInput.os : host.os,
+					sshRemoteDaemon:
+						updateInput.sshRemoteDaemon !== undefined
+							? updateInput.sshRemoteDaemon
+							: (host.sshRemoteDaemon ?? null),
+				})
+			) {
+				return reply.code(409).send({
+					error: {
+						code: "DAEMON_CONNECTED",
+						message: "Use Stop keeping an agent here to stop the connected daemon.",
+					},
+				});
+			}
 			const updated = metaDal.updateHost(request.params.id, updateInput);
 
 			return toSnakeCase(updated);

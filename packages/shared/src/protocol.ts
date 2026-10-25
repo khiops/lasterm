@@ -449,6 +449,8 @@ export interface WriteLockMessage {
 
 /** Hub → UI: session lifecycle state change */
 export interface SessionStateMessage {
+	/** StateBroadcaster.agentStatusOn sets true only for a live remote daemon connection. */
+	connectedThroughRemoteDaemon?: boolean;
 	type: "SESSION_STATE";
 	sessionId: string;
 	hostId: string;
@@ -547,6 +549,8 @@ export interface ChannelCreatedMessage {
 export interface StateSyncMessage {
 	type: "STATE_SYNC";
 	sessions: Array<{
+		/** Same live connection fact as SessionStateMessage.connectedThroughRemoteDaemon. */
+		connectedThroughRemoteDaemon?: boolean;
 		sessionId: string;
 		hostId: string;
 		status: SessionStatus;

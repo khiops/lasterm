@@ -1,6 +1,8 @@
 import type { AgentChannelStateMessage, HelloMessage, ProtocolMessage } from "@lasterm/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ConfigResolver } from "../config.js";
+import { captureQuitFence } from "../session/quit-fence.js";
 import {
 	REMOTE_STATE_DIR_COMMAND,
 	remoteDaemonPaths,
@@ -958,5 +960,488 @@ describe("#674 exclusive Replace", () => {
 		} finally {
 			ctx.acquisitions.delete(hostId);
 		}
+	});
+});
+
+describe("POST stop-keeping", () => {
+	function stop(payload: object = {}, id = hostId) {
+		return server.inject({ method: "POST", url: `/api/hosts/${id}/agent/stop-keeping`, payload });
+	}
+
+	function fixture(capabilities = ["hub-identity"], count = 2) {
+		const agent = connectedAgent(capabilities);
+		const live = liveTerminalsOn(agent, count);
+		const dal = new MetaDAL(dbs.meta);
+		dal.updateHost(hostId, { sshRemoteDaemon: true });
+		return { agent, dal, ...live };
+	}
+
+	function unchanged(f: ReturnType<typeof fixture>) {
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(true);
+		expect(f.ctx.sessions.get(hostId)?.status).toBe("active");
+		expect(sm.agents.get(hostId)).toBe(f.agent);
+		expect(f.agent.connected).toBe(true);
+		expect(f.agent.close).not.toHaveBeenCalled();
+		for (const id of f.channelIds) {
+			expect(f.ctx.channels.get(id)?.status).toBe("live");
+			expect(f.dal.getChannel(id)?.endReason).toBeUndefined();
+		}
+		expect(f.ctx.stoppingAgents.has(hostId)).toBe(false);
+	}
+
+	async function disabled(f: ReturnType<typeof fixture>, payload: object) {
+		const response = await stop(payload);
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({
+			outcome: "disabled_not_stopped",
+			message: expect.any(String),
+			host: { ssh_remote_daemon: false },
+		});
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(false);
+		expect(f.ctx.userDisconnectedHosts.has(hostId)).toBe(true);
+		expect(f.ctx.sessions.get(hostId)?.status).toBe("disconnected");
+		expect(sm.agents.has(hostId)).toBe(false);
+		expect(f.agent.close).toHaveBeenCalled();
+		for (const id of f.channelIds) {
+			expect(f.dal.getChannel(id)?.endReason).toBeUndefined();
+			expect(endsOf(f.heard, id)).toEqual([]);
+		}
+		expect(f.heard).toContainEqual(
+			expect.objectContaining({
+				type: "SESSION_STATE",
+				status: "disconnected",
+				disconnectedByUser: true,
+			}),
+		);
+		const before = constructedAgents.length;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(constructedAgents).toHaveLength(before);
+		expect(f.ctx.reconnectTimers.has(hostId)).toBe(false);
+	}
+
+	it("requires consent for this hub's terminals, then stops and saves No", async () => {
+		const f = fixture();
+		const refusal = await stop();
+		expect(refusal.statusCode).toBe(409);
+		expect(refusal.json()).toMatchObject({ error: { code: "TERMINALS_WOULD_END", terminals: 2 } });
+		unchanged(f);
+		expect(f.agent.send).not.toHaveBeenCalled();
+		const response = await stop({ end_terminals: true });
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({
+			outcome: "stopped",
+			ended: 2,
+			host: { ssh_remote_daemon: false },
+		});
+		expect(f.agent.sent).toContainEqual({ type: "STOP", force: false });
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(false);
+		for (const id of f.channelIds) {
+			expect(f.dal.getChannel(id)).toMatchObject({ status: "dead", endReason: "stopped" });
+		}
+		expect(f.heard).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", status: "closed" }),
+		);
+		expect(f.ctx.sessions.has(hostId)).toBe(false);
+	});
+
+	it("preserves everything on an other-hub refusal and forwards forced retry", async () => {
+		const f = fixture();
+		f.agent.othersHold = 3;
+		const response = await stop({ end_terminals: true });
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		unchanged(f);
+		expect(f.agent.execOnHost).not.toHaveBeenCalled();
+		const retry = await stop({ end_terminals: true, force: true });
+		expect(retry.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(f.agent.sent).toContainEqual({ type: "STOP", force: true });
+	});
+
+	it("requires other-hub consent before any legacy command", async () => {
+		const f = fixture([]);
+		const response = await stop({ end_terminals: true });
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toMatchObject({ error: { code: "OTHER_HUBS_MAY_BE_AFFECTED" } });
+		unchanged(f);
+		expect(f.agent.send).not.toHaveBeenCalled();
+		expect(f.agent.execOnHost).not.toHaveBeenCalled();
+	});
+
+	it.each(["exit-zero", "daemon-close"])("legacy stop confirms on %s", async (mode) => {
+		const f = fixture([]);
+		if (mode === "daemon-close") {
+			f.agent.execOnHost.mockImplementation(async (command: string) => {
+				if (command === REMOTE_STATE_DIR_COMMAND) return { stdout: "/state", exitCode: 0 };
+				f.agent.connected = false;
+				f.agent.emit("close");
+				return { stdout: "", exitCode: 1 };
+			});
+		}
+		const response = await stop({ end_terminals: true, force: true });
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+		expect(f.agent.send).not.toHaveBeenCalled();
+		for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
+	});
+
+	it.each(["timeout", "error", "displaced", "closed_by_hub", "unsent"])(
+		"unconfirmed STOP %s disables and disconnects",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				f.agent.send.mockImplementation(() => {
+					if (mode === "unsent") throw new Error("transport unavailable");
+					if (mode === "timeout") return;
+					queueMicrotask(() => {
+						if (mode === "closed_by_hub") void f.agent.close();
+						else
+							f.agent.emit("message", {
+								type: "ERROR",
+								code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
+								message: "unconfirmed",
+							});
+					});
+				});
+				const result = disabled(f, { end_terminals: true });
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await vi.advanceTimersByTimeAsync(15_001);
+				await result;
+				expect(f.agent.execOnHost).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it.each([
+		"missing-path",
+		"state-exit",
+		"state-relative",
+		"state-reject",
+		"state-close",
+		"exec-reject",
+		"exec-timeout",
+		"nonzero",
+		"hub-close",
+	])("legacy %s is unconfirmed", async (mode) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const f = fixture([]);
+			if (mode === "missing-path") f.agent.remoteAgentPath = null;
+			f.agent.execOnHost.mockImplementation(async (command: string) => {
+				if (command === REMOTE_STATE_DIR_COMMAND) {
+					if (mode === "state-reject") throw new Error("state command failed");
+					if (mode === "state-close") {
+						f.agent.connected = false;
+						f.agent.emit("close");
+						return { stdout: "", exitCode: 1 };
+					}
+					return {
+						stdout: mode === "state-relative" ? "relative" : "/state",
+						exitCode: mode === "state-exit" ? 1 : 0,
+					};
+				}
+				if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
+				if (mode === "hub-close") await f.agent.close();
+				return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
+			});
+			await disabled(f, { end_terminals: true, force: true });
+			if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("allows only a forced unsent STOP to fall back to --stop", async () => {
+		const f = fixture();
+		f.agent.send.mockImplementation(() => {
+			throw new Error("unsent");
+		});
+		const response = await stop({ end_terminals: true, force: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped" });
+		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+	});
+
+	it.each([
+		"unknown",
+		"local",
+		"quitting",
+		"stopping",
+		"acquiring",
+		"absent",
+		"disconnected",
+		"stdio",
+	])("admission: %s", async (mode) => {
+		const f = fixture();
+		let id = hostId;
+		if (mode === "unknown") id = "unknown";
+		if (mode === "local") id = f.dal.createHost({ type: "local", label: "local-stop" }).id;
+		if (mode === "quitting") sm.beginQuit();
+		if (mode === "stopping") f.ctx.stoppingAgents.add(hostId);
+		if (mode === "acquiring") {
+			const acquisition = { id: "pending", state: "CONNECTING" };
+			Object.defineProperty(f.ctx.acquisitions, "has", {
+				value: (key: string) => key === hostId && acquisition.state === "CONNECTING",
+				configurable: true,
+			});
+		}
+		if (mode === "absent") f.ctx.agents.delete(hostId);
+		if (mode === "stdio") f.agent.usedRemoteDaemon = false;
+		if (mode === "disconnected") f.agent.connected = false;
+		const before = {
+			row: f.dal.getHost(hostId),
+			session: f.ctx.sessions.get(hostId)?.status,
+			channels: f.channelIds.map((id) => f.dal.getChannel(id)),
+			agent: f.ctx.agents.get(hostId),
+			connected: f.agent.connected,
+		};
+		const response = await stop({ end_terminals: true, force: true }, id);
+		const codes: Record<string, string> = {
+			unknown: "NOT_FOUND",
+			local: "NOT_SSH_HOST",
+			quitting: "HUB_QUITTING",
+			stopping: "HOST_BUSY",
+			acquiring: "HOST_BUSY",
+			absent: "HOST_NOT_CONNECTED",
+			disconnected: "HOST_NOT_CONNECTED",
+			stdio: "NO_DAEMON_CONNECTION",
+		};
+		expect(response.statusCode).toBe(mode === "unknown" ? 404 : mode === "local" ? 400 : 409);
+		expect(response.json()).toMatchObject({ error: { code: codes[mode] } });
+		expect({
+			row: f.dal.getHost(hostId),
+			session: f.ctx.sessions.get(hostId)?.status,
+			channels: f.channelIds.map((id) => f.dal.getChannel(id)),
+			agent: f.ctx.agents.get(hostId),
+			connected: f.agent.connected,
+		}).toEqual(before);
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(true);
+		expect(f.agent.send).not.toHaveBeenCalled();
+		expect(f.agent.execOnHost).not.toHaveBeenCalled();
+		if (mode !== "stopping") expect(f.ctx.stoppingAgents.has(hostId)).toBe(false);
+		f.ctx.stoppingAgents.delete(hostId);
+	});
+
+	it("holds the admission marker synchronously until STOP settles", async () => {
+		const f = fixture();
+		let markerAtSend = false;
+		f.agent.send.mockImplementation(() => {
+			markerAtSend = f.ctx.stoppingAgents.has(hostId);
+		});
+		const pending = sm.stopKeepingAgent(hostId, { endTerminals: true, force: false });
+		expect(markerAtSend).toBe(true);
+		expect(f.ctx.stoppingAgents.has(hostId)).toBe(true);
+		const second = await stop({ end_terminals: true });
+		expect(second.json()).toMatchObject({ error: { code: "HOST_BUSY" } });
+		f.agent.emit("message", { type: "ERROR", code: "STOP_FAILED", message: "failed" });
+		await pending;
+		expect(f.ctx.stoppingAgents.has(hostId)).toBe(false);
+	});
+
+	it("quitting during STOP writes and publishes nothing after quit", async () => {
+		const f = fixture();
+		f.agent.send.mockImplementation(() => {});
+		const pending = sm.stopKeepingAgent(hostId, { endTerminals: true, force: false });
+		sm.beginQuit();
+		const heardAtQuit = f.heard.length;
+		await f.agent.close();
+		const result = await pending;
+		expect(result).toMatchObject({ kind: "error", code: "HUB_QUITTING" });
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(true);
+		expect(f.heard).toHaveLength(heardAtQuit);
+	});
+
+	it.each([true, false])("write failure after confirmed=%s", async (confirmed) => {
+		const f = fixture();
+		if (!confirmed)
+			f.agent.send.mockImplementation(() =>
+				queueMicrotask(() =>
+					f.agent.emit("message", { type: "ERROR", code: "FAILED", message: "no" }),
+				),
+			);
+		vi.spyOn(f.ctx.metaDal, "updateHost").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		const response = await stop({ end_terminals: true });
+		expect(response.statusCode).toBe(500);
+		expect(response.json().error.message).toBe(
+			confirmed
+				? "The agent was stopped, but the setting could not be saved."
+				: "The setting could not be saved; the agent was not confirmed stopped.",
+		);
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(true);
+		if (confirmed) {
+			expect(f.ctx.sessions.has(hostId)).toBe(false);
+			expect(f.ctx.userDisconnectedHosts.has(hostId)).toBe(true);
+			for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
+		} else unchanged(f);
+	});
+
+	it("replays a suppressed reconnect when an unconfirmed stop cannot save No", async () => {
+		const f = fixture();
+		const reconnect = vi
+			.spyOn(SshConnectionManager.prototype, "scheduleReconnect")
+			.mockImplementation(() => {});
+		vi.spyOn(f.ctx.metaDal, "updateHost").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		f.agent.send.mockImplementation(() =>
+			queueMicrotask(() => {
+				f.agent.emit("message", { type: "ERROR", code: "STOP_FAILED", message: "not stopped" });
+				f.agent.connected = false;
+				f.agent.emit("close");
+			}),
+		);
+		const response = await stop({ end_terminals: true });
+		expect(response.statusCode).toBe(500);
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(true);
+		expect(f.ctx.userDisconnectedHosts.has(hostId)).toBe(false);
+		expect(reconnect).toHaveBeenCalledTimes(1);
+		expect(reconnect).toHaveBeenCalledWith(hostId, SESSION_ID, 0, expect.any(Number));
+	});
+
+	it("observes admission precedence before connected-agent checks", async () => {
+		const f = fixture();
+		const local = f.dal.createHost({ type: "local", label: "precedence" });
+		f.ctx.stoppingAgents.add(hostId);
+		f.ctx.agents.delete(hostId);
+		sm.beginQuit();
+		expect((await stop({}, local.id)).json().error.code).toBe("NOT_SSH_HOST");
+		expect((await stop()).json().error.code).toBe("HUB_QUITTING");
+		f.ctx.stoppingAgents.delete(hostId);
+	});
+
+	it.each(["end_terminals", "force"])("validates %s consent", async (key) => {
+		const f = fixture();
+		for (const value of [1, "true", null, [], {}]) {
+			const response = await stop({ [key]: value });
+			expect(response.statusCode).toBe(400);
+			expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+			unchanged(f);
+		}
+	});
+
+	it("publishes the daemon fact and clears it on release", async () => {
+		const f = fixture();
+		expect(sm.getStateSnapshot().sessions).toContainEqual(
+			expect.objectContaining({ hostId, connectedThroughRemoteDaemon: true }),
+		);
+		await stop({ end_terminals: true });
+		const released = f.heard.filter((m) => m.type === "SESSION_STATE");
+		expect(released).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", status: "active" }),
+		);
+		for (const message of released)
+			expect(message).not.toHaveProperty("connectedThroughRemoteDaemon");
+	});
+
+	it("announces the daemon fact immediately at the shared adoption commit", () => {
+		const f = fixture();
+		f.ctx.agents.delete(hostId);
+		f.heard.length = 0;
+		f.ctx.commits.adoptAgent(captureQuitFence(f.ctx), hostId, f.agent);
+		expect(f.heard[0]).toMatchObject({ type: "SESSION_STATE", connectedThroughRemoteDaemon: true });
+	});
+
+	it.each(["disconnected", "stdio", "starting"])("does not re-announce on %s adoption", (mode) => {
+		const f = fixture();
+		if (mode === "disconnected") f.agent.connected = false;
+		if (mode === "stdio") f.agent.usedRemoteDaemon = false;
+		if (mode === "starting") {
+			const session = f.ctx.sessions.get(hostId);
+			if (!session) throw new Error("expected the host session");
+			session.status = "starting";
+		}
+		f.ctx.agents.delete(hostId);
+		f.heard.length = 0;
+		f.ctx.commits.adoptAgent(captureQuitFence(f.ctx), hostId, f.agent);
+		expect(f.heard.filter((m) => m.type === "SESSION_STATE")).toEqual([]);
+	});
+
+	it.each(["disconnected", "stdio"])("omits the session daemon fact for %s agents", (mode) => {
+		const f = fixture();
+		if (mode === "disconnected") f.agent.connected = false;
+		else f.agent.usedRemoteDaemon = false;
+		expect(sm.getStateSnapshot().sessions[0]).not.toHaveProperty("connectedThroughRemoteDaemon");
+	});
+
+	it("clears the daemon fact on displacement", async () => {
+		const f = fixture();
+		f.agent.emit("message", { type: "ERROR", code: "DISPLACED", message: "new connection" });
+		expect(sm.getStateSnapshot().sessions[0]).not.toHaveProperty("connectedThroughRemoteDaemon");
+		expect(f.heard).toContainEqual(expect.objectContaining({ type: "SESSION_STATE", hostId }));
+		for (const message of f.heard.filter((m) => m.type === "SESSION_STATE"))
+			expect(message).not.toHaveProperty("connectedThroughRemoteDaemon");
+	});
+
+	it.each([false, "false", 0, {}, []])(
+		"PUT validates or refuses daemon revocation: %j",
+		async (value) => {
+			const f = fixture();
+			const response = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${hostId}`,
+				payload: { ssh_remote_daemon: value, label: "changed" },
+			});
+			expect(response.statusCode).toBe(typeof value === "boolean" ? 409 : 400);
+			expect(response.json().error.code).toBe(
+				typeof value === "boolean" ? "DAEMON_CONNECTED" : "VALIDATION_ERROR",
+			);
+			unchanged(f);
+			expect(f.dal.getHost(hostId)?.label).toBe("pi");
+		},
+	);
+
+	it("PUT refuses OS policy revocation but allows unrelated edits and unchanged policy", async () => {
+		const f = fixture();
+		const os = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}`,
+			payload: { os: "windows" },
+		});
+		expect(os.statusCode).toBe(409);
+		expect(os.json().error.code).toBe("DAEMON_CONNECTED");
+		unchanged(f);
+		for (const payload of [{ label: "renamed" }, { ssh_remote_daemon: true }, { os: "linux" }]) {
+			const response = await server.inject({ method: "PUT", url: `/api/hosts/${hostId}`, payload });
+			expect(response.statusCode).toBe(200);
+		}
+	});
+	it.each([true, false])(
+		"PUT resolves a null policy against global default %s",
+		async (globalDefault) => {
+			const f = fixture();
+			f.dal.updateHost(hostId, { sshRemoteDaemon: null });
+			const resolver = new ConfigResolver(f.dal);
+			vi.spyOn(resolver, "sshConfig", "get").mockReturnValue({
+				...resolver.sshConfig,
+				remoteDaemon: globalDefault,
+			});
+			Object.defineProperty(f.ctx, "configResolver", { value: resolver, configurable: true });
+			const response = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${hostId}`,
+				payload: { ssh_remote_daemon: false },
+			});
+			expect(response.statusCode).toBe(globalDefault ? 409 : 200);
+			expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBe(globalDefault ? undefined : false);
+		},
+	);
+
+	it("PUT accepts null when no daemon is connected", async () => {
+		const f = fixture();
+		f.agent.usedRemoteDaemon = false;
+		const response = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}`,
+			payload: { ssh_remote_daemon: null },
+		});
+		expect(response.statusCode).toBe(200);
+		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBeUndefined();
 	});
 });

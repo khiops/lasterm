@@ -698,7 +698,8 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     host_id: string,
     status: "starting" | "active" | "detached" | "disconnected" | "closed",
     outdated_agent?: { running: string, expected: string },  // as in SESSION_STATE
-    other_owner_channels?: number                             // as in SESSION_STATE
+    other_owner_channels?: number,                            // as in SESSION_STATE
+    connected_through_remote_daemon?: boolean                  // as in SESSION_STATE
   }>,
   channels: Array<{
     channel_id: string,
@@ -729,6 +730,9 @@ absent from `channels` has ended, or is unknown.
 ```typescript
 {
   type: "SESSION_STATE",
+  // StateBroadcaster.agentStatusOn: true only for a connected SshAgent using a daemon.
+  // Absent after release; adoption re-announces the session with the current fact.
+  connected_through_remote_daemon?: boolean,
   session_id: string,
   host_id: string,
   status: "starting" | "active" | "detached" | "disconnected" | "closed",
@@ -1196,9 +1200,34 @@ What the callers do with the answers:
 | POST | `/api/hosts/:id/connect` | ● | `{ client_id? }` → 202 `{ status: "connecting", ended: 0 }`, or 200 `{ status: "connected" }` when it is already. Connects an SSH host and readies its agent, without starting a terminal (#648): the first connection of a terminal, less the terminal, through the same SPAWN acquisition, so a SPAWN, a restart or an attach meanwhile waits for it rather than dial again. What a remote daemon still holds is taken up; on stdio, terminals a lost link left waiting start again under their ids. It answers at once: the host's `SESSION_STATE` says `starting`, then `active`, or `closed` / `disconnected` when it failed. Its questions (host key, passphrase, agent binary) go to the window `client_id` names, the id its `AUTH_OK` gave it, or else to the first window connected; a failure is an `ERROR` sent to that window, as for a SPAWN. A pending automatic reconnect gives way to it |
 | POST | `/api/hosts/:id/reconnect` | ● | `{ client_id?, force? }` → 202 `{ status: "connecting", ended }`. Closes the host's connection, then connects as above. A remote daemon keeps its terminals, taken up on the new connection. An agent on stdio ends with its connection, and its terminals with it (`end_reason: "stopped"`, § 4.7): unless `force` is `true`, the hub does nothing and answers 409 `{ error: { code: "TERMINALS_WOULD_END", message, terminals } }` with how many, for the client to ask its user and send `force: true`. With no connection up there is nothing to close and nothing ends |
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`. The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
+| POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean }`; `SessionManager.stopKeepingAgent` stops the connected remote daemon and stores No. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type, sort_order? }` → 204 |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
+
+`SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
+400 `NOT_SSH_HOST`, 409 `HUB_QUITTING`, 409 `HOST_BUSY` (stop or acquisition),
+409 `HOST_NOT_CONNECTED`, then 409 `NO_DAEMON_CONNECTION` (connected over stdio).
+`readStopKeepingBody` rejects a non-object body or non-boolean consent with 400
+`VALIDATION_ERROR`. Its consent fields are optional; unknown fields are ignored.
+
+The operation's refusal answers change nothing: 409 `TERMINALS_WOULD_END` carries
+`error.terminals` until `end_terminals: true`; 409 `OTHER_HUBS_MAY_BE_AFFECTED`
+requires `force: true` for a daemon without hub-identity; a STOP refusal answers
+409 `OTHER_HUBS_HOLD_CHANNELS` with `error.other_owner_channels` when known.
+A forced retry sends forced STOP, or permits the legacy `--stop` fallback.
+
+`stopKeepingAgent` stores No only after the stop outcome. A confirmed stop closes
+the session and ends this hub's channels with `end_reason: "stopped"`. An
+unconfirmed stop stores No, releases the connection, and publishes `disconnected`
+with `disconnected_by_user`; its message says the agent may still be running.
+A failed save answers 500: a confirmed stop still ends the session; an unconfirmed
+stop keeps the connection as it is. Quitting during the wait saves nothing.
+
+`registerHostCrudRoutes` validates PUT `ssh_remote_daemon` as boolean or null.
+A policy-bearing PUT that changes effective Yes to No while connected through a
+daemon answers 409 `DAEMON_CONNECTED`; use stop-keeping to revoke it. Unrelated
+edits remain allowed.
 
 The three connection routes answer alike when they refuse: 404 `NOT_FOUND` for an unknown host,
 400 `VALIDATION_ERROR` for a body that is not an object, a `force` that is not a boolean or a

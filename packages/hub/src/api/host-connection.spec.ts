@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HostConnectionOutcome } from "../session/session-manager.js";
+import type { HostConnectionOutcome, SessionManager } from "../session/session-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { readHostConnectionBody, registerHostConnectionRoutes } from "./host-connection.js";
@@ -54,6 +54,7 @@ let server: FastifyInstance;
 let sshHostId: string;
 let localHostId: string;
 const manager = {
+	stopKeepingAgent: vi.fn<SessionManager["stopKeepingAgent"]>(),
 	connectHost: vi.fn<(hostId: string, options?: object) => HostConnectionOutcome>(),
 	reconnectHost: vi.fn<(hostId: string, options?: object) => HostConnectionOutcome>(),
 	disconnectHost: vi.fn<(hostId: string, options?: object) => HostConnectionOutcome>(),
@@ -94,7 +95,7 @@ describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 			});
 			expect(Object.values(manager).some((fn) => fn.mock.calls.length > 0)).toBe(false);
 
-			for (const fn of Object.values(manager)) {
+			for (const fn of [manager.connectHost, manager.reconnectHost, manager.disconnectHost]) {
 				fn.mockReturnValue({ kind: "disconnected", ended: 0 });
 			}
 			const accepted = await post(action, sshHostId, { force: true, client_id: WINDOW_ID });

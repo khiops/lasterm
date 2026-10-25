@@ -31,6 +31,7 @@ import type {
 	ProtocolMessage,
 	ResizeMessage,
 	StateSyncMessage,
+	StopKeepingAgentResponse,
 	TestConnectMessage,
 	UiAttachOkMessage,
 	UiSpawnMessage,
@@ -181,6 +182,17 @@ function isAgentChannelNotFoundError(err: unknown, channelId: string): err is Er
 	return typeof maybeErr.message === "string" && /channel .*not found/i.test(maybeErr.message);
 }
 
+export type StopKeepingAgentOutcome =
+	| { kind: "done"; response: StopKeepingAgentResponse }
+	| {
+			kind: "error";
+			status: number;
+			code: string;
+			message: string;
+			terminals?: number;
+			otherOwnerChannels?: number;
+	  };
+
 export class SessionManager {
 	// ─── Shared runtime state ─────────────────────────────────────────────────
 	private readonly ctx: SharedSessionContext;
@@ -227,13 +239,21 @@ export class SessionManager {
 			agents,
 			sessions,
 			commits: {
-				adoptAgent(fence, hostId, agent) {
+				adoptAgent: (fence, hostId, agent) => {
 					assertQuitFence(ctx, fence);
 					if (ctx.stoppingAgents.has(hostId)) {
 						void agent.close();
 						throw new Error("This host's agent is being stopped.");
 					}
 					agents.set(hostId, agent);
+					if (
+						agent instanceof SshAgent &&
+						agent.connected &&
+						agent.usedRemoteDaemon &&
+						sessions.get(hostId)?.status === "active"
+					) {
+						this.broadcaster.announceSessionState(hostId);
+					}
 				},
 				persistSession(fence, hostId, state) {
 					assertQuitFence(ctx, fence);
@@ -1937,6 +1957,192 @@ export class SessionManager {
 		return this.ctx.stoppingAgents.has(hostId);
 	}
 
+	private connectedThroughRemoteDaemon(hostId: string): boolean {
+		const agent = this.ctx.agents.get(hostId);
+		return agent instanceof SshAgent && agent.connected && agent.usedRemoteDaemon;
+	}
+
+	daemonPolicyWouldBeRevoked(host: Host, updated: Pick<Host, "os" | "sshRemoteDaemon">): boolean {
+		const globalDefault = this.ctx.configResolver?.sshConfig?.remoteDaemon === true;
+		return (
+			hostKeepsDaemon(host, globalDefault) &&
+			!hostKeepsDaemon(updated, globalDefault) &&
+			this.connectedThroughRemoteDaemon(host.id)
+		);
+	}
+
+	async stopKeepingAgent(
+		hostId: string,
+		options: { readonly endTerminals: boolean; readonly force: boolean },
+	): Promise<StopKeepingAgentOutcome> {
+		const error = (status: number, code: string, message: string): StopKeepingAgentOutcome => ({
+			kind: "error",
+			status,
+			code,
+			message,
+		});
+		const host = this.ctx.metaDal.getHost(hostId);
+		if (!host) return error(404, "NOT_FOUND", "Host not found");
+		if (host.type !== "ssh")
+			return error(400, ErrorCode.NOT_SSH_HOST, "This host is not an SSH host.");
+		if (this.isQuitting()) return error(409, "HUB_QUITTING", "The hub is quitting.");
+		if (this.ctx.stoppingAgents.has(hostId) || this.ctx.acquisitions.has(hostId)) {
+			return error(409, ErrorCode.HOST_BUSY, "This host is busy.");
+		}
+		this.ctx.stoppingAgents.add(hostId);
+		try {
+			const agent = this.ctx.agents.get(hostId);
+			if (!agent?.connected)
+				return error(409, ErrorCode.HOST_NOT_CONNECTED, "This host has no connected agent.");
+			if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {
+				return error(
+					409,
+					ErrorCode.NO_DAEMON_CONNECTION,
+					"This connection does not reach a remote daemon.",
+				);
+			}
+			const ended = this.connectionFacts(hostId, host).liveTerminals;
+			if (ended > 0 && !options.endTerminals) {
+				return {
+					kind: "error",
+					status: 409,
+					code: ErrorCode.TERMINALS_WOULD_END,
+					message: "Send end_terminals: true to end this hub's terminals.",
+					terminals: ended,
+				};
+			}
+			if (!hasHubIdentity(agent) && !options.force) {
+				return error(
+					409,
+					ErrorCode.OTHER_HUBS_MAY_BE_AFFECTED,
+					"Other hubs' terminals may end. Send force: true to continue.",
+				);
+			}
+			let stopped = false;
+			let legacy = !hasHubIdentity(agent);
+			if (!legacy) {
+				const stop = await requestDaemonStop(agent, {
+					force: options.force,
+					isHubQuitting: () => this.isQuitting(),
+					onStopped: () => {
+						agent.closedByHub = true;
+						this.releaseAgent(hostId, agent);
+					},
+				});
+				if (stop.kind === "refused") {
+					return {
+						kind: "error",
+						status: 409,
+						code: ErrorCode.OTHER_HUBS_HOLD_CHANNELS,
+						message: stop.message,
+						...(stop.otherOwnerChannels !== null && {
+							otherOwnerChannels: stop.otherOwnerChannels,
+						}),
+					};
+				}
+				stopped = stop.kind === "stopped";
+				legacy = stop.kind === "unsent" && options.force;
+			}
+			if (legacy && agent.remoteAgentPath !== null && !this.isQuitting()) {
+				stopped = await this.stopKeepingLegacyAgent(hostId, agent);
+			}
+			if (this.isQuitting()) return error(409, "HUB_QUITTING", "The hub is quitting.");
+			let updated: Host | undefined;
+			try {
+				updated = this.ctx.metaDal.updateHost(hostId, { sshRemoteDaemon: false });
+				if (!updated) throw new Error("Host disappeared while saving its setting.");
+			} catch (cause) {
+				this.ctx.hubLogger?.log("error", "stop-keeping: setting write failed", {
+					hostId,
+					cause: String(cause),
+				});
+				if (stopped) {
+					this.ctx.userDisconnectedHosts.add(hostId);
+					this.endHostSession(hostId, "stopped");
+				}
+				return error(
+					500,
+					"INTERNAL_ERROR",
+					stopped
+						? "The agent was stopped, but the setting could not be saved."
+						: "The setting could not be saved; the agent was not confirmed stopped.",
+				);
+			}
+			this.ctx.userDisconnectedHosts.add(hostId);
+			this.cancelReconnect(hostId);
+			if (stopped) {
+				this.endHostSession(hostId, "stopped");
+				return { kind: "done", response: { outcome: "stopped", ended, host: updated } };
+			}
+			this.dropConnection(hostId, agent);
+			return {
+				kind: "done",
+				response: {
+					outcome: "disabled_not_stopped",
+					host: updated,
+					message:
+						"Lasterm will no longer keep an agent running here. The agent may still be running on the host.",
+				},
+			};
+		} finally {
+			this.ctx.stoppingAgents.delete(hostId);
+			const session = this.ctx.sessions.get(hostId);
+			if (
+				!this.isQuitting() &&
+				session?.status === "disconnected" &&
+				!this.ctx.agents.has(hostId) &&
+				!this.ctx.reconnectTimers.has(hostId) &&
+				!this.ctx.reconnectAbortControllers.has(hostId) &&
+				!this.ctx.acquisitions.has(hostId) &&
+				!this.ctx.userDisconnectedHosts.has(hostId)
+			) {
+				this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
+			}
+		}
+	}
+
+	private async stopKeepingLegacyAgent(hostId: string, agent: SshAgent): Promise<boolean> {
+		let onClose: () => void = () => {};
+		let displaced = false;
+		const onMessage = (msg: ProtocolMessage): void => {
+			if (msg.type === "ERROR" && msg.code === ErrorCode.DISPLACED) displaced = true;
+		};
+		let stateDir: string;
+		try {
+			const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
+			stateDir = resolved.stdout.trim();
+			if (resolved.exitCode !== 0 || !stateDir.startsWith("/") || this.isQuitting()) return false;
+		} catch {
+			return false;
+		}
+		const remotePath = agent.remoteAgentPath;
+		if (remotePath === null || !agent.connected) return false;
+		const closed = new Promise<boolean>((resolve) => {
+			onClose = () => {
+				const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
+				if (stopped) {
+					agent.closedByHub = true;
+					this.releaseAgent(hostId, agent);
+				}
+				resolve(stopped);
+			};
+		});
+		agent.prependListener("message", onMessage);
+		agent.prependListener("close", onClose);
+		try {
+			const exec = async (): Promise<boolean> => {
+				const result = await agent.execOnHost(
+					remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
+				);
+				return result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
+			};
+			return await Promise.race([closed, exec().catch(() => false)]);
+		} finally {
+			agent.off("message", onMessage);
+			agent.off("close", onClose);
+		}
+	}
+
 	/**
 	 * Replace the agent serving a host with the one this hub carries.
 	 *
@@ -2094,6 +2300,7 @@ export class SessionManager {
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
 			this.ctx.agentCapabilities.delete(hostId);
+			if (!this.isQuitting()) this.broadcaster.announceSessionState(hostId);
 		}
 	}
 

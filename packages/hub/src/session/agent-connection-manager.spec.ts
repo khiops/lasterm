@@ -227,6 +227,7 @@ function makeHarness(): {
 		broadcastToAllClients: vi.fn(),
 		broadcastToChannel: vi.fn(),
 		updateSessionStatus: vi.fn(),
+		announceSessionState: vi.fn(),
 		updateChannelStatus: vi.fn(),
 		handleTitleChange: vi.fn(),
 		handleProcessTitle: vi.fn(),

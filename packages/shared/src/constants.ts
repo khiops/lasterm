@@ -87,7 +87,13 @@ export const ErrorCode = {
 	DISPLACED: "DISPLACED",
 	/** Agent: a STOP without `force`, refused while other hubs hold channels there (#127). */
 	OTHER_HUBS_HOLD_CHANNELS: "OTHER_HUBS_HOLD_CHANNELS",
-	/** REST: the host has no agent connected to this hub, so there is nobody to ask (#576). */
+	/** REST stop-keeping: the connected agent did not reach a remote daemon. */
+	NO_DAEMON_CONNECTION: "NO_DAEMON_CONNECTION",
+	/** REST stop-keeping: legacy agents need force consent before --stop. */
+	OTHER_HUBS_MAY_BE_AFFECTED: "OTHER_HUBS_MAY_BE_AFFECTED",
+	/** REST PUT host: use stop-keeping before revoking a connected daemon policy. */
+	DAEMON_CONNECTED: "DAEMON_CONNECTED",
+	/** REST: the host has no agent connected to this hub, so there is nobody to ask (#576), including POST /api/hosts/:id/agent/stop-keeping. */
 	HOST_NOT_CONNECTED: "HOST_NOT_CONNECTED",
 	/**
 	 * SPAWN, and the restart route: the host is away. The hub lost it and is
@@ -100,11 +106,11 @@ export const ErrorCode = {
 	/** SessionManager refuses host actions while Replace holds its stop marker. */
 	HOST_BUSY: "HOST_BUSY",
 	/**
-	 * REST, reconnect and disconnect: closing this host's connection would end
-	 * terminals, and the request did not say `force`. Carries how many (#648).
+	 * REST, reconnect, disconnect and POST /api/hosts/:id/agent/stop-keeping: closing this host's connection would end
+	 * terminals. Consent is read by readHostConnectionBody or readStopKeepingBody (#648).
 	 */
 	TERMINALS_WOULD_END: "TERMINALS_WOULD_END",
-	/** REST, connect, reconnect and disconnect: the host is the local one, which has no connection to act on (#648). */
+	/** REST, connect, reconnect, disconnect and POST /api/hosts/:id/agent/stop-keeping: the host is the local one, which has no connection to act on (#648). */
 	NOT_SSH_HOST: "NOT_SSH_HOST",
 	/** REST: the host's agent predates what was asked of it — here `env-modes` (#576). */
 	AGENT_TOO_OLD: "AGENT_TOO_OLD",

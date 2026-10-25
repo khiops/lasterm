@@ -872,6 +872,30 @@ describe("#674 exclusive Replace", () => {
 		expect((await pending).statusCode).toBe(409);
 	});
 
+	it("does not replay a reconnect when Replace finds an already disconnected host without an agent", async () => {
+		const ctx = (sm as unknown as { ctx: SharedSessionContext }).ctx;
+		new MetaDAL(dbs.meta).createSession({ id: SESSION_ID, hostId, status: "disconnected" });
+		(ctx.sessions as unknown as Map<string, SessionState>).set(hostId, {
+			id: SESSION_ID,
+			hostId,
+			status: "disconnected",
+		});
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		expect(ctx.reconnectAbortControllers.has(hostId)).toBe(false);
+		expect(ctx.acquisitions.has(hostId)).toBe(false);
+		expect(ctx.userDisconnectedHosts.has(hostId)).toBe(false);
+
+		const response = await replace();
+
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toMatchObject({ error: { code: "AGENT_NOT_REPLACED" } });
+		expect(schedule).not.toHaveBeenCalled();
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+	});
+
 	it("replays exactly one suppressed reconnect after an unconfirmed Replace releases the host", async () => {
 		const { agent, pending, ctx } = await heldReplace();
 		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
@@ -881,5 +905,58 @@ describe("#674 exclusive Replace", () => {
 		expect(ctx.reconnectTimers.has(hostId)).toBe(true);
 		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
 		expect(ctx.agents.has(hostId)).toBe(false);
+	});
+
+	it("does not replay a reconnect after an unconfirmed Replace while a reconnect controller exists", async () => {
+		const { agent, pending, ctx } = await heldReplace();
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		const controller = new AbortController();
+		ctx.reconnectAbortControllers.set(hostId, controller);
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		await agent.close();
+		expect((await pending).statusCode).toBe(409);
+		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(ctx.sessions.get(hostId)?.status).toBe("disconnected");
+		expect(schedule).not.toHaveBeenCalled();
+		expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+		expect(ctx.reconnectAbortControllers.get(hostId)).toBe(controller);
+		expect(controller.signal.aborted).toBe(false);
+	});
+
+	it("does not replay a reconnect after an unconfirmed Replace while an acquisition exists", async () => {
+		const { agent, pending, ctx } = await heldReplace();
+		const schedule = vi.spyOn(SshConnectionManager.prototype, "scheduleReconnect");
+		let resolveConnect!: (session: SessionState) => void;
+		let rejectConnect!: (error: Error) => void;
+		const connectPromise = new Promise<SessionState>((resolve, reject) => {
+			resolveConnect = resolve;
+			rejectConnect = reject;
+		});
+		const acquisition = {
+			id: "pending-acquisition",
+			hostId,
+			state: "CONNECTING" as const,
+			controller: new AbortController(),
+			connectPromise,
+			_resolve: resolveConnect,
+			_reject: rejectConnect,
+			leases: new Set<never>(),
+		};
+		ctx.acquisitions.set(hostId, acquisition);
+		try {
+			expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+			expect(ctx.reconnectAbortControllers.has(hostId)).toBe(false);
+			await agent.close();
+			expect((await pending).statusCode).toBe(409);
+			expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+			expect(ctx.agents.has(hostId)).toBe(false);
+			expect(ctx.sessions.get(hostId)?.status).toBe("disconnected");
+			expect(schedule).not.toHaveBeenCalled();
+			expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+			expect(ctx.acquisitions.get(hostId)).toBe(acquisition);
+		} finally {
+			ctx.acquisitions.delete(hostId);
+		}
 	});
 });

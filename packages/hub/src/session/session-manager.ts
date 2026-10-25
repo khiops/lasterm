@@ -1966,6 +1966,7 @@ export class SessionManager {
 			};
 		}
 		this.ctx.stoppingAgents.add(hostId);
+		let heldAgent = false;
 		try {
 			const agent = this.ctx.agents.get(hostId);
 			if (!(agent instanceof SshAgent) || !agent.connected) {
@@ -1978,6 +1979,7 @@ export class SessionManager {
 						"This host's agent runs with its connection, so it is already replaced whenever it reconnects.",
 				};
 			}
+			heldAgent = true;
 			const outcome = await this.stopAgentToReplace(hostId, agent, options);
 			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
 			return outcome;
@@ -1985,9 +1987,12 @@ export class SessionManager {
 			this.ctx.stoppingAgents.delete(hostId);
 			const session = this.ctx.sessions.get(hostId);
 			if (
+				heldAgent &&
 				session?.status === "disconnected" &&
 				!this.ctx.agents.has(hostId) &&
 				!this.ctx.reconnectTimers.has(hostId) &&
+				!this.ctx.reconnectAbortControllers.has(hostId) &&
+				!this.ctx.acquisitions.has(hostId) &&
 				!this.ctx.userDisconnectedHosts.has(hostId)
 			) {
 				this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());

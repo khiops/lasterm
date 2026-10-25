@@ -975,7 +975,7 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 | `NOT_ATTACHED` | Op requires ATTACH first |
 | `WRITE_LOCK_HELD` | INPUT rejected, not the writer |
 | `HOST_NOT_FOUND` | Unknown host ID |
-| `HOST_BUSY` | SPAWN refused by `SessionManager.spawnOnHost` while Replace holds the host: "This host's agent is being stopped." |
+| `HOST_BUSY` | SPAWN refused while Replace holds the host, at `SessionManager.spawnOnHost` or, for one already under way, before its frame is written: "This host's agent is being stopped." |
 | `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started, or, for a SPAWN marked `automatic`, its user disconnected it (#648). Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
 | `SSH_FAILED` | SSH connection failed |
 | `AGENT_ERROR` | Agent returned error |
@@ -1209,7 +1209,9 @@ refuse with 409 `HOST_BUSY` while Replace holds the host, before changing its us
 state. Connect reads `client_id` only.
 
 While Replace holds the host, `SessionManager.restartChannel` and `closeSession` also refuse
-Restart and DELETE session with 409 `HOST_BUSY`. `registerHostCrudRoutes` refuses DELETE host
+a Restart or DELETE session that starts then with 409 `HOST_BUSY`. A Restart already waiting
+for its host when Replace begins sends no SPAWN and answers 503, as any Restart that did not
+start does (`HOST_UNREACHABLE` when its host is away, `RESTART_FAILED` otherwise). `registerHostCrudRoutes` refuses DELETE host
 and PUT carrying `ssh_remote_daemon` or `os` with the same error; a label-only PUT can save.
 `requestDaemonStop` treats DISPLACED, a hub-issued close, and a close while quitting as
 unconfirmed, so none of those closes lets Replace end channels as `stopped`.

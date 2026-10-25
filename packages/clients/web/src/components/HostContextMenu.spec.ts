@@ -60,6 +60,7 @@ async function openMenu(hostId: string): Promise<void> {
 				onConnect: record("connect"),
 				onReconnect: record("reconnect"),
 				onDisconnect: record("disconnect"),
+				onStopAgent: record("stop-agent"),
 				onClose: () => emitted.push(["close", hostId]),
 			}),
 	});
@@ -135,5 +136,43 @@ describe("the host menu's connection items (#648)", () => {
 		document.body.querySelector<HTMLElement>('[data-action="reconnect"]')?.click();
 
 		expect(emitted[0]).toEqual(["reconnect", "pi"]);
+	});
+});
+
+describe("stop-agent visibility", () => {
+	it("offers and emits stop-agent for a live daemon", async () => {
+		sessionIs("active");
+		useHostsStore().rememberConnectedThroughRemoteDaemon("pi", true);
+		await openMenu("pi");
+		expect(offered()).toContain("stop-agent");
+		document.body.querySelector<HTMLElement>('[data-action="stop-agent"]')?.click();
+		expect(emitted).toEqual([
+			["stop-agent", "pi"],
+			["close", "pi"],
+		]);
+	});
+
+	it.each(["active", "closed", "disconnected"] as const)(
+		"omits stop-agent for stdio or unavailable %s",
+		async (status) => {
+			sessionIs(status);
+			if (status !== "active") useHostsStore().rememberConnectedThroughRemoteDaemon("pi", true);
+			await openMenu("pi");
+			expect(offered()).not.toContain("stop-agent");
+		},
+	);
+
+	it("omits stop-agent for a user-disconnected daemon", async () => {
+		sessionIs("active");
+		useHostsStore().rememberConnectedThroughRemoteDaemon("pi", true);
+		useHostsStore().rememberDisconnectedByUser("pi", true);
+		await openMenu("pi");
+		expect(offered()).not.toContain("stop-agent");
+	});
+
+	it("omits stop-agent for local even with the flag", async () => {
+		useHostsStore().rememberConnectedThroughRemoteDaemon("local", true);
+		await openMenu("local");
+		expect(offered()).not.toContain("stop-agent");
 	});
 });

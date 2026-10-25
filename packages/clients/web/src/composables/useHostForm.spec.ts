@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 
+const daemonConnection = vi.hoisted(() => ({ connected: false }));
 const knownHosts = vi.hoisted(() => [] as Host[]);
 const testWsClient = vi.hoisted(() => ({ on: vi.fn(), send: vi.fn() }));
 const createHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
@@ -11,6 +12,7 @@ const updateHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" }
 vi.mock("../stores/hosts.js", () => ({
 	useHostsStore: () => ({
 		hosts: knownHosts,
+		isConnectedThroughRemoteDaemon: () => daemonConnection.connected,
 		createHost: createHostSpy,
 		updateHost: updateHostSpy,
 	}),
@@ -27,6 +29,7 @@ vi.mock("../stores/session.js", () => ({
 describe("useHostForm", () => {
 	beforeEach(() => {
 		knownHosts.length = 0;
+		daemonConnection.connected = false;
 		vi.restoreAllMocks();
 		testWsClient.on.mockReset();
 		testWsClient.send.mockReset();
@@ -800,5 +803,36 @@ describe("iconFields", () => {
 		expect(iconFields("image", "")).toEqual({ icon_type: "auto", icon_value: null });
 		expect(iconFields("emoji", "  ")).toEqual({ icon_type: "auto", icon_value: null });
 		expect(iconFields("auto", "🚀")).toEqual({ icon_type: "auto", icon_value: null });
+	});
+});
+
+describe("daemon PUT guard", () => {
+	it.each([true, false])("omits only the policy for a live daemon: %s", async (connected) => {
+		daemonConnection.connected = connected;
+		updateHostSpy.mockClear();
+		const host: Host = {
+			id: "pi",
+			label: "pi",
+			type: "ssh",
+			sshHost: "pi.test",
+			sshAuth: "agent",
+			iconType: "auto",
+			trustRemoteHints: "apply",
+			sortOrder: 0,
+			os: "linux",
+			arch: null,
+			createdAt: "",
+			updatedAt: "",
+			sshRemoteDaemon: true,
+		};
+		const { form, save } = useHostForm(host);
+		form.value.sshRemoteDaemon = "no";
+		form.value.label = "updated";
+		await save();
+		const body = updateHostSpy.mock.calls[0]?.[1];
+		expect(body).toHaveProperty("label", "updated");
+		expect(body).toHaveProperty("ssh_host", "pi.test");
+		if (connected) expect(body).not.toHaveProperty("ssh_remote_daemon");
+		else expect(body).toHaveProperty("ssh_remote_daemon", false);
 	});
 });

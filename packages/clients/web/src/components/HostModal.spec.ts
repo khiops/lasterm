@@ -441,3 +441,24 @@ describe("HostModal remote daemon choice", () => {
 		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
 	});
 });
+
+describe("live daemon edit guard", () => {
+	it.each([true, false])(
+		"disables the daemon select only for a daemon connection: %s",
+		async (connected) => {
+			mountModal(SSH);
+			useHostsStore().rememberConnectedThroughRemoteDaemon(SSH.id, connected);
+			await nextTick();
+			const select = Array.from(document.body.querySelectorAll("select")).find((candidate) =>
+				Array.from(candidate.options).some((option) => option.value === "yes"),
+			);
+			expect(select).toBeDefined();
+			expect(select?.disabled).toBe(connected);
+			expect(
+				document.body.textContent?.includes(
+					"To stop it, use Stop keeping an agent here in the host menu.",
+				),
+			).toBe(connected);
+		},
+	);
+});

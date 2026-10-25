@@ -715,3 +715,33 @@ describe("useSessionStore — a host its user disconnected (#648)", () => {
 		expect(hosts.getHostStatus("host-box")).toBe("offline");
 	});
 });
+
+describe("daemon connection facts", () => {
+	it("sets, clears, and replaces facts from the message handlers", async () => {
+		await useSessionStore().connect();
+		const hosts = useHostsStore();
+		const ws = wsHarness.instances[0];
+		const state = {
+			type: "SESSION_STATE",
+			sessionId: "s",
+			hostId: "pi",
+			status: "active",
+		} as const;
+		ws?.emit({ ...state, connectedThroughRemoteDaemon: true });
+		expect(hosts.isConnectedThroughRemoteDaemon("pi")).toBe(true);
+		ws?.emit(state);
+		expect(hosts.isConnectedThroughRemoteDaemon("pi")).toBe(false);
+		ws?.emit({ ...state, connectedThroughRemoteDaemon: true });
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [
+				{ sessionId: "s2", hostId: "box", status: "active", connectedThroughRemoteDaemon: true },
+			],
+			channels: [],
+		});
+		expect(hosts.isConnectedThroughRemoteDaemon("pi")).toBe(false);
+		expect(hosts.isConnectedThroughRemoteDaemon("box")).toBe(true);
+		ws?.emit({ type: "STATE_SYNC", sessions: [], channels: [] });
+		expect(hosts.isConnectedThroughRemoteDaemon("box")).toBe(false);
+	});
+});

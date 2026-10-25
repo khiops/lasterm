@@ -273,7 +273,7 @@
 									Not available on Windows hosts.
 								</p>
 								<template v-else>
-									<select v-model="form.sshRemoteDaemon" class="field-select">
+									<select v-model="form.sshRemoteDaemon" class="field-select" :disabled="connectedThroughRemoteDaemon">
 										<option value="">Follow the global setting</option>
 										<option value="yes">Yes — terminals survive the connection</option>
 										<option value="no">No — leave nothing behind</option>
@@ -289,6 +289,9 @@
 										<code>loginctl enable-linger</code> there so the agent survives logout.
 									</p>
 								</template>
+								<p v-if="connectedThroughRemoteDaemon" class="field-hint auth-note">
+									To stop it, use Stop keeping an agent here in the host menu.
+								</p>
 								<p v-if="otherOwnerChannels" class="field-hint auth-note">
 									Other Lasterm hubs also use this host's agent, and hold
 									{{ otherOwnerChannels }} terminal{{ otherOwnerChannels === 1 ? "" : "s" }}
@@ -699,6 +702,7 @@ const {
 	testing,
 	saving,
 	sshRemoteDaemonUnavailable,
+	connectedThroughRemoteDaemon,
 	labelError,
 	canSave,
 	previewInitials,

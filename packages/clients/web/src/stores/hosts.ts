@@ -3,6 +3,7 @@ import {
 	type HostConnectionResponse,
 	type HostGroup,
 	type SessionStatus,
+	type StopKeepingAgentResponse,
 	toCamelCase,
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
@@ -30,6 +31,24 @@ export interface HostConnectionAnswer {
 			readonly code?: string;
 			readonly message?: string;
 			readonly terminals?: number;
+		};
+	};
+}
+
+export interface StopKeepingAgentBody {
+	end_terminals?: boolean;
+	force?: boolean;
+}
+
+export interface StopKeepingAgentAnswer {
+	readonly ok: boolean;
+	readonly status: number;
+	readonly body: Partial<StopKeepingAgentResponse> & {
+		readonly error?: {
+			code?: string;
+			message?: string;
+			terminals?: number;
+			other_owner_channels?: number;
 		};
 	};
 }
@@ -213,6 +232,38 @@ export const useHostsStore = defineStore("hosts", () => {
 		_otherOwnerChannels.value = next;
 	}
 
+	const _connectedThroughRemoteDaemon = ref<Map<string, true>>(new Map());
+
+	function isConnectedThroughRemoteDaemon(hostId: string): boolean {
+		return _connectedThroughRemoteDaemon.value.has(hostId);
+	}
+
+	function rememberConnectedThroughRemoteDaemon(
+		hostId: string,
+		connected: boolean | undefined,
+	): void {
+		const next = new Map(_connectedThroughRemoteDaemon.value);
+		if (connected === true) next.set(hostId, true);
+		else next.delete(hostId);
+		_connectedThroughRemoteDaemon.value = next;
+	}
+
+	function setConnectedThroughRemoteDaemon(hostIds: readonly string[]): void {
+		_connectedThroughRemoteDaemon.value = new Map(hostIds.map((id) => [id, true]));
+	}
+
+	function stopKeepingAgent(
+		hostId: string,
+		body: StopKeepingAgentBody,
+	): Promise<StopKeepingAgentAnswer> {
+		return postHostConnection(hostId, "agent/stop-keeping", { ...body });
+	}
+
+	function replaceCachedHost(host: Host): void {
+		const idx = hosts.value.findIndex((h) => h.id === host.id);
+		if (idx >= 0) hosts.value[idx] = host;
+	}
+
 	/** Hosts their user disconnected, as the hub last said (#648). */
 	const _disconnectedByUser = ref<ReadonlySet<string>>(new Set());
 
@@ -238,9 +289,9 @@ export const useHostsStore = defineStore("hosts", () => {
 	/** POST one of the host connection routes, and say what came back. */
 	async function postHostConnection(
 		hostId: string,
-		action: "connect" | "reconnect" | "disconnect",
+		action: "connect" | "reconnect" | "disconnect" | "agent/stop-keeping",
 		body: Record<string, unknown>,
-	): Promise<HostConnectionAnswer> {
+	): Promise<HostConnectionAnswer & StopKeepingAgentAnswer> {
 		const clientId = authStore.clientId;
 		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/${action}`, {
 			method: "POST",
@@ -249,14 +300,18 @@ export const useHostsStore = defineStore("hosts", () => {
 				"Content-Type": "application/json",
 			},
 			// This window's id: the questions a connection asks come here.
-			body: JSON.stringify({ ...body, ...(clientId !== null && { client_id: clientId }) }),
+			body: JSON.stringify({
+				...body,
+				...(action !== "agent/stop-keeping" && clientId !== null && { client_id: clientId }),
+			}),
 		});
-		let parsed: HostConnectionAnswer["body"] = {};
+		let parsed: HostConnectionAnswer["body"] & StopKeepingAgentAnswer["body"] = {};
 		try {
-			parsed = (await res.json()) as HostConnectionAnswer["body"];
+			parsed = (await res.json()) as HostConnectionAnswer["body"] & StopKeepingAgentAnswer["body"];
 		} catch {
 			// No body: the status says it.
 		}
+		if (parsed.host) parsed.host = toCamelCase(parsed.host) as Host;
 		return { ok: res.ok, status: res.status, body: parsed };
 	}
 
@@ -350,8 +405,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		});
 		if (!res.ok) return null;
 		const updated = toCamelCase(await res.json()) as Host;
-		const idx = hosts.value.findIndex((h) => h.id === id);
-		if (idx >= 0) hosts.value[idx] = updated;
+		replaceCachedHost(updated);
 		return updated;
 	}
 
@@ -514,6 +568,11 @@ export const useHostsStore = defineStore("hosts", () => {
 		connectHost,
 		reconnectHost,
 		disconnectHost,
+		stopKeepingAgent,
+		replaceCachedHost,
+		isConnectedThroughRemoteDaemon,
+		rememberConnectedThroughRemoteDaemon,
+		setConnectedThroughRemoteDaemon,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
 		getOtherOwnerChannels,

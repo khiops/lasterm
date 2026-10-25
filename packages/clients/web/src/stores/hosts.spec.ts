@@ -174,3 +174,44 @@ describe("a host's connection, asked for (#648)", () => {
 		expect(store.getHostStatus("pi")).toBe("error");
 	});
 });
+
+describe("stop-keeping store", () => {
+	it("sets, deletes and replaces the per-host daemon map", () => {
+		const store = load();
+		expect(store.isConnectedThroughRemoteDaemon("pi")).toBe(false);
+		store.rememberConnectedThroughRemoteDaemon("pi", true);
+		expect(store.isConnectedThroughRemoteDaemon("pi")).toBe(true);
+		store.rememberConnectedThroughRemoteDaemon("pi", undefined);
+		expect(store.isConnectedThroughRemoteDaemon("pi")).toBe(false);
+		store.rememberConnectedThroughRemoteDaemon("pi", true);
+		store.rememberConnectedThroughRemoteDaemon("pi", false);
+		expect(store.isConnectedThroughRemoteDaemon("pi")).toBe(false);
+		store.setConnectedThroughRemoteDaemon(["pi", "nas"]);
+		store.setConnectedThroughRemoteDaemon(["nas"]);
+		expect(store.isConnectedThroughRemoteDaemon("pi")).toBe(false);
+		expect(store.isConnectedThroughRemoteDaemon("nas")).toBe(true);
+	});
+
+	it("posts consent without client_id and converts the returned host for the cache", async () => {
+		const store = load();
+		await store.fetchHosts();
+		useAuthStore().setClientId("window-id");
+		const fetch = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					outcome: "disabled_not_stopped",
+					message: "may still run",
+					host: { ...hostRow("pi", "Pi"), ssh_remote_daemon: false },
+				}),
+			),
+		);
+		vi.stubGlobal("fetch", fetch);
+		const answer = await store.stopKeepingAgent("pi", { end_terminals: true, force: true });
+		expect(fetch.mock.calls[0]?.[0]).toMatch(/\/api\/hosts\/pi\/agent\/stop-keeping$/);
+		expect(JSON.parse(fetch.mock.calls[0]?.[1].body)).toEqual({ end_terminals: true, force: true });
+		expect(answer.body.host?.sshRemoteDaemon).toBe(false);
+		if (!answer.body.host) throw new Error("missing host");
+		store.replaceCachedHost(answer.body.host);
+		expect(store.hosts.find((h) => h.id === "pi")?.sshRemoteDaemon).toBe(false);
+	});
+});

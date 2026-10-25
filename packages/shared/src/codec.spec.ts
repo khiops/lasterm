@@ -373,3 +373,37 @@ describe("hub identity on the wire (#127)", () => {
 		}
 	});
 });
+
+describe("remote daemon session fact", () => {
+	it.each([true, false])("round-trips SESSION_STATE presence=%s", (present) => {
+		const message: ProtocolMessage = {
+			type: "SESSION_STATE",
+			sessionId: "session",
+			hostId: "host",
+			status: "active",
+			...(present && { connectedThroughRemoteDaemon: true }),
+		};
+		expect(decodeMessage(encodeMessage(message))).toEqual(message);
+		const wire = toSnakeCase(message);
+		if (present) expect(wire).toHaveProperty("connected_through_remote_daemon", true);
+		else expect(wire).not.toHaveProperty("connected_through_remote_daemon");
+	});
+	it.each([true, false])("round-trips STATE_SYNC presence=%s", (present) => {
+		const message: ProtocolMessage = {
+			type: "STATE_SYNC",
+			sessions: [
+				{
+					sessionId: "session",
+					hostId: "host",
+					status: "active",
+					...(present && { connectedThroughRemoteDaemon: true }),
+				},
+			],
+			channels: [],
+		};
+		expect(decodeMessage(encodeMessage(message))).toEqual(message);
+		expect(toSnakeCase(message)).toMatchObject({
+			sessions: [present ? { connected_through_remote_daemon: true } : { host_id: "host" }],
+		});
+	});
+});

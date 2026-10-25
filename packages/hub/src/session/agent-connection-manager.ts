@@ -484,6 +484,7 @@ export class AgentConnectionManager {
 
 		agent.on("close", () => {
 			this.ctx.hubLogger?.log("info", "agent-connection-manager: agent closed", { hostId });
+			if (this.ctx.quitState === "QUITTING" && this.ctx.stoppingAgents.has(hostId)) return;
 			const session = this.ctx.sessions.get(hostId);
 			const host = this.ctx.metaDal.getHost(hostId);
 			// Fix C (invariant 10): identity-guard ALL side effects — not just agents.delete.
@@ -564,6 +565,7 @@ export class AgentConnectionManager {
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
 			this.ctx.agentCapabilities.delete(hostId);
+			if (this.ctx.quitState !== "QUITTING") this.broadcaster.announceSessionState(hostId);
 		}
 		agent.close();
 	}

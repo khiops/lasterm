@@ -1,6 +1,6 @@
 // Config types and deep merge utility for lasterm config cascade
 import type { AppearanceConfig } from "./appearance.js";
-import type { ElevationMethod, TerminalProfile } from "./entities.js";
+import type { ElevationMethod, Host, TerminalProfile } from "./entities.js";
 import type { HostRailBadgeSize } from "./host-rail.js";
 import { isPlainObject } from "./utils.js";
 
@@ -347,6 +347,14 @@ export interface HostConnectionResponse {
 	status: "connected" | "connecting" | "disconnected";
 	/** How many terminals of this hub ended with the connection it closed. */
 	ended?: number;
+}
+
+/** Response of POST /api/hosts/:id/agent/stop-keeping, defined by SessionManager.stopKeepingAgent. */
+export interface StopKeepingAgentResponse {
+	outcome: "stopped" | "disabled_not_stopped";
+	ended?: number;
+	message?: string;
+	host: Host;
 }
 
 // ─── Cascade endpoint response ────────────────────────────────────────────────

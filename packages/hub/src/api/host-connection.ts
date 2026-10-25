@@ -1,4 +1,4 @@
-import { ErrorCode, type HostConnectionResponse, isValidUlid } from "@lasterm/shared";
+import { ErrorCode, type HostConnectionResponse, isValidUlid, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { HostConnectionOutcome, SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -88,8 +88,34 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 export function registerHostConnectionRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "connectHost" | "reconnectHost" | "disconnectHost">,
+	sessionManager: Pick<
+		SessionManager,
+		"connectHost" | "reconnectHost" | "disconnectHost" | "stopKeepingAgent"
+	>,
 ): void {
+	server.post<{ Params: { id: string }; Body: unknown }>(
+		"/api/hosts/:id/agent/stop-keeping",
+		async (request, reply) => {
+			if (!metaDal.getHost(request.params.id)) {
+				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
+			}
+			const body = readStopKeepingBody(request.body);
+			if ("error" in body)
+				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: body.error } });
+			const outcome = await sessionManager.stopKeepingAgent(request.params.id, body);
+			if (outcome.kind === "done") return reply.code(200).send(toSnakeCase(outcome.response));
+			return reply.code(outcome.status).send({
+				error: {
+					code: outcome.code,
+					message: outcome.message,
+					...(outcome.terminals !== undefined && { terminals: outcome.terminals }),
+					...(outcome.otherOwnerChannels !== undefined && {
+						other_owner_channels: outcome.otherOwnerChannels,
+					}),
+				},
+			});
+		},
+	);
 	const routes: ReadonlyArray<{
 		readonly path: string;
 		readonly act: (hostId: string, request: HostConnectionRequest) => HostConnectionOutcome;
@@ -125,4 +151,22 @@ export function registerHostConnectionRoutes(
 			return answer(reply, route.act(host.id, body));
 		});
 	}
+}
+
+/** Parse consent for SessionManager.stopKeepingAgent. */
+export function readStopKeepingBody(
+	body: unknown,
+): { endTerminals: boolean; force: boolean } | { error: string } {
+	if (body === undefined || body === null) return { endTerminals: false, force: false };
+	if (typeof body !== "object" || Array.isArray(body))
+		return { error: "The body must be a JSON object." };
+	const { end_terminals: endTerminals, force } = body as {
+		end_terminals?: unknown;
+		force?: unknown;
+	};
+	if (endTerminals !== undefined && typeof endTerminals !== "boolean")
+		return { error: "end_terminals must be true or false." };
+	if (force !== undefined && typeof force !== "boolean")
+		return { error: "force must be true or false." };
+	return { endTerminals: endTerminals === true, force: force === true };
 }

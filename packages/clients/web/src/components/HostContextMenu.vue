@@ -14,6 +14,9 @@
 			</template>
 
 			<template v-else-if="host">
+				<button v-if="canStopAgent" class="ctx-item" data-action="stop-agent" @click="onStopAgent">
+					Stop keeping an agent here
+				</button>
 				<!-- What can be done with its connection, as it stands (#648). -->
 				<button
 					v-if="canConnect"
@@ -108,6 +111,7 @@ const emit = defineEmits<{
 	(e: "connect", hostId: string): void;
 	(e: "reconnect", hostId: string): void;
 	(e: "disconnect", hostId: string): void;
+	(e: "stop-agent", hostId: string): void;
 	(e: "new-group", hostId: string): void;
 }>();
 
@@ -128,6 +132,8 @@ const canConnect = computed(() => status.value === "offline" || status.value ===
 const canReconnect = computed(
 	() => status.value === "live" || status.value === "reconnecting" || status.value === "error",
 );
+
+const canStopAgent = computed(() => host.value?.type === "ssh" && status.value === "live" && hostsStore.isConnectedThroughRemoteDaemon(props.hostId));
 
 const groups = computed(() => hostsStore.getHostGroups());
 
@@ -174,6 +180,11 @@ function onReconnect(): void {
 	if (host.value) {
 		emit("reconnect", host.value.id);
 	}
+	emit("close");
+}
+
+function onStopAgent(): void {
+	if (host.value) emit("stop-agent", host.value.id);
 	emit("close");
 }
 

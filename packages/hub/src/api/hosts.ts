@@ -201,7 +201,7 @@ export function validateProfileJson(profileJson: string | object | undefined): s
 export function registerHostRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "hostIsBeingStopped">,
+	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
 ): void {
 	registerHostCrudRoutes(server, metaDal, sessionManager);
 	registerHostWelcomeRoutes(server, metaDal);

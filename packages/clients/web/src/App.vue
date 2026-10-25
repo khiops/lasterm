@@ -84,6 +84,7 @@
 			@connect="onConnectHost"
 			@reconnect="onReconnectHost"
 			@disconnect="onDisconnectHost"
+			@stop-agent="onStopAgent"
 			@new-group="onNewGroupForHost"
 		/>
 
@@ -375,6 +376,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue';
 import DeleteHostModal from './components/DeleteHostModal.vue';
 import GroupActionDialog from './components/GroupActionDialog.vue';
 import GroupContextMenu from './components/GroupContextMenu.vue';
+import { stopAgentWithConsent } from './utils/stop-agent.js';
 import HostContextMenu from './components/HostContextMenu.vue';
 import HostKeyWarning from './components/HostKeyWarning.vue';
 import HostModal from './components/HostModal.vue';
@@ -1638,6 +1640,25 @@ async function onConnectHost(hostId: string): Promise<void> {
 
 function onReconnectHost(hostId: string): Promise<void> {
 	return closeHostConnection(hostId, 'reconnect');
+}
+
+async function onStopAgent(hostId: string): Promise<void> {
+	const label = hostsStore.hosts.find((h) => h.id === hostId)?.label ?? 'this host';
+	try {
+		const result = await stopAgentWithConsent(label, {
+			post: (body) => hostsStore.stopKeepingAgent(hostId, body),
+			confirm: askToConfirm,
+		});
+		if (result.kind === 'failed') toastStore.show('error', result.message);
+		if (result.kind === 'done') {
+			hostsStore.replaceCachedHost(result.outcome.host);
+			if (result.outcome.outcome === 'disabled_not_stopped' && result.outcome.message) {
+				toastStore.show('error', result.outcome.message);
+			}
+		}
+	} catch (err) {
+		toastStore.show('error', `Could not reach the hub: ${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
 function onDisconnectHost(hostId: string): Promise<void> {

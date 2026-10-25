@@ -81,25 +81,31 @@ interface MockHost {
 	socketOpens: number;
 	/** The terminals its daemon holds, reported alive on every connection. */
 	held: string[];
+	stops: boolean[];
 	close: () => Promise<void>;
 }
 
-function hello(): Buffer {
+function hello(daemon = false): Buffer {
 	return Buffer.from(
 		encodeFrame({
 			type: "HELLO",
 			version: PROTOCOL_VERSION,
 			agentVersion: HUB_VERSION,
-			capabilities: ["multiplex", "snapshot", "resize"],
+			capabilities: ["multiplex", "snapshot", "resize", ...(daemon ? ["hub-identity"] : [])],
 		}),
 	);
 }
 
 /** An agent: HELLO, then a SPAWN_OK for every SPAWN, under the id asked for or a new one. */
-function serveAgent(stream: Stream): void {
+function serveAgent(stream: Stream, remote?: MockHost): void {
 	const reader = new FrameReader();
 	stream.on("data", (data: Buffer) => {
 		for (const msg of reader.push(data)) {
+			if (msg.type === "STOP" && remote) {
+				remote.stops.push(msg.force === true);
+				stream.end();
+				continue;
+			}
 			if (msg.type !== "SPAWN") continue;
 			const spawn = msg as AgentSpawnMessage;
 			stream.write(
@@ -113,7 +119,7 @@ function serveAgent(stream: Stream): void {
 			);
 		}
 	});
-	stream.write(hello());
+	stream.write(hello(remote !== undefined));
 }
 
 /**
@@ -128,6 +134,7 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 		connections: 0,
 		socketOpens: 0,
 		held: [],
+		stops: [],
 		close: async () => {},
 	};
 	const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
@@ -164,7 +171,7 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 				}
 				result.socketOpens++;
 				const stream = accept();
-				serveAgent(stream);
+				serveAgent(stream, result);
 				for (const channelId of result.held) {
 					stream.write(
 						Buffer.from(
@@ -670,5 +677,31 @@ describe("a host its user did not disconnect", { timeout: 20_000 }, () => {
 		// Nothing more is under test once the reconnect is seen waiting.
 		clearTimeout(timer);
 		h.ctx.reconnectTimers.delete(h.host.id);
+	});
+});
+
+describe("Stop keeping (#674)", { timeout: 20_000 }, () => {
+	it("stops the daemon, ends two terminals and saves No", async () => {
+		const h = await hubWith({ daemon: true });
+		await connected(h);
+		const ids = terminalsOn(h, 2);
+		expect(h.heard.filter((m) => m.type === "SESSION_STATE").at(-1)).toMatchObject({
+			connectedThroughRemoteDaemon: true,
+		});
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 2 });
+		expect(h.remote.stops).toEqual([]);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: false }),
+		).toMatchObject({
+			kind: "done",
+			response: { outcome: "stopped", ended: 2, host: { sshRemoteDaemon: false } },
+		});
+		expect(h.remote.stops).toEqual([false]);
+		for (const id of ids)
+			expect(h.ctx.metaDal.getChannel(id)).toMatchObject({ status: "dead", endReason: "stopped" });
+		expect(sessionStates(h).at(-1)).toMatchObject({ status: "closed" });
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 	});
 });

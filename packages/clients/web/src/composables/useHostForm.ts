@@ -141,6 +141,10 @@ export function useHostForm(editHost?: Host) {
 		{ flush: "sync" },
 	);
 
+	const connectedThroughRemoteDaemon = computed(
+		() => !!editHost && hostsStore.isConnectedThroughRemoteDaemon(editHost.id),
+	);
+
 	const sshRemoteDaemonUnavailable = computed(
 		() => form.value.os === "windows" || lastCompletedTestPlatformOs.value === "windows",
 	);
@@ -334,7 +338,7 @@ export function useHostForm(editHost?: Host) {
 					...formProxyFields(),
 					// An unavailable setting is recorded as null for a new Windows host.
 					// On an existing one, leave the stored answer alone instead.
-					...(!isEdit || !sshRemoteDaemonUnavailable.value
+					...(!connectedThroughRemoteDaemon.value && (!isEdit || !sshRemoteDaemonUnavailable.value)
 						? {
 								ssh_remote_daemon:
 									sshRemoteDaemonUnavailable.value || form.value.sshRemoteDaemon === ""
@@ -446,6 +450,7 @@ export function useHostForm(editHost?: Host) {
 		testing,
 		saving,
 		sshRemoteDaemonUnavailable,
+		connectedThroughRemoteDaemon,
 		labelError,
 		canSave,
 		previewInitials,

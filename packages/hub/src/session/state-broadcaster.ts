@@ -22,6 +22,7 @@ import { DEFAULT_CHANNEL_NAME, resolveChannelDisplayName } from "@lasterm/shared
 import { HUB_VERSION } from "../build-version.js";
 import type { SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
+import { SshAgent } from "./ssh-agent.js";
 
 const TITLE_DEBOUNCE_MS = 100;
 
@@ -87,10 +88,17 @@ export class StateBroadcaster {
 	/** What a SESSION_STATE or a STATE_SYNC entry says about the agent serving a host. */
 	private agentStatusOn(
 		hostId: string,
-	): Pick<SessionStateMessage, "outdatedAgent" | "otherOwnerChannels"> {
+	): Pick<
+		SessionStateMessage,
+		"outdatedAgent" | "otherOwnerChannels" | "connectedThroughRemoteDaemon"
+	> {
+		const agent = this.ctx.agents.get(hostId);
+		const connectedThroughRemoteDaemon =
+			agent instanceof SshAgent && agent.connected && agent.usedRemoteDaemon;
 		const outdatedAgent = this.outdatedAgentOn(hostId);
 		const otherOwnerChannels = this.otherOwnerChannelsOn(hostId);
 		return {
+			...(connectedThroughRemoteDaemon && { connectedThroughRemoteDaemon: true }),
 			...(outdatedAgent !== null && { outdatedAgent }),
 			...(otherOwnerChannels !== null && { otherOwnerChannels }),
 		};

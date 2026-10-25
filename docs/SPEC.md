@@ -822,6 +822,7 @@ and `/disconnect` (PROTOCOL.md § 6):
 | Connect | offline, or disconnected by its user | Connects it and readies its agent, deploying or checking the binary as for a first terminal, and starts no terminal. The same questions (host key, passphrase, agent binary) go to the window that asked. What a daemon still holds is taken up. The host shows `starting`, then `active` |
 | Reconnect | live, being reached, or lost (`error`) | Closes the connection, then connects as above. A daemon's terminals survive and are taken up again. On stdio they end with the connection |
 | Disconnect | live | Closes the connection. A daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end, and the session closes |
+| Stop keeping an agent here | live, through its remote daemon (`connected_through_remote_daemon`) | Stops that daemon, then stores No for the host, so its next terminal runs over stdio (#674). The questions, the answers and what an unconfirmed stop leaves are in PROTOCOL.md § 6, `POST /api/hosts/:id/agent/stop-keeping`. A daemon left on a host this hub is not connected to is not reached (#701) |
 
 Terminals that end this way end `stopped` (PROTOCOL.md § 4.7): nobody aimed at one, so a
 pane that sees it leaves it be. Before ending any, the hub refuses with how many

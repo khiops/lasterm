@@ -30,7 +30,7 @@ tracing-appender = "0.2"
 # the daily files (#646). Already built for tracing-appender.
 time = { version = "0.3", default-features = false, features = ["std"] }
 ulid = "3"
-vt100 = "0.16"
+vt100 = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]

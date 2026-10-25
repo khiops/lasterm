@@ -1,3 +1,4 @@
+use std::num::NonZeroU16;
 use std::time::Instant;
 
 /// Receives the window title. vt100 reports it through callbacks rather than
@@ -37,8 +38,12 @@ impl HeadlessMirror {
     /// Create a new headless terminal mirror.
     /// scrollback: number of scrollback lines (default 1000)
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
-        let parser =
-            vt100::Parser::new_with_callbacks(rows, cols, scrollback, TitleCallbacks::default());
+        let parser = vt100::Parser::new_with_callbacks(
+            dimension(rows),
+            dimension(cols),
+            scrollback,
+            TitleCallbacks::default(),
+        );
         Self {
             parser,
             current_title: String::new(),
@@ -100,20 +105,19 @@ impl HeadlessMirror {
 
     /// Resize the terminal mirror.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.parser.screen_mut().set_size(rows, cols);
+        self.parser.set_size(dimension(rows), dimension(cols));
     }
 
     /// Produce a snapshot of the current terminal state.
     /// Returns ANSI escape sequences that reconstruct the screen content.
     pub fn snapshot(&self) -> SnapshotInfo {
         let screen = self.parser.screen();
-        // contents_formatted returns the screen content with ANSI formatting
-        let serialized_bytes = screen.contents_formatted();
-        let serialized = String::from_utf8_lossy(&serialized_bytes).to_string();
+        let (rows, cols) = screen.size();
         SnapshotInfo {
-            serialized,
-            cols: screen.size().1,
-            rows: screen.size().0,
+            // The screen content with ANSI formatting.
+            serialized: screen.contents_formatted(),
+            cols: cols.get(),
+            rows: rows.get(),
             cursor_x: screen.cursor_position().1,
             cursor_y: screen.cursor_position().0,
         }
@@ -135,6 +139,12 @@ impl HeadlessMirror {
     pub fn take_notification(&mut self) -> Option<String> {
         self.pending_notification.take()
     }
+}
+
+/// vt100 takes no zero dimension: the hub never sends one (`isValidDimensions`),
+/// and a zero that reaches the agent anyway becomes 1 rather than a panic.
+fn dimension(value: u16) -> NonZeroU16 {
+    NonZeroU16::new(value).unwrap_or(NonZeroU16::MIN)
 }
 
 pub struct SnapshotInfo {
@@ -286,6 +296,16 @@ mod tests {
         let snap = mirror.snapshot();
         assert_eq!(snap.cols, 120);
         assert_eq!(snap.rows, 40);
+    }
+
+    #[test]
+    fn test_zero_size_becomes_one() {
+        let mut mirror = HeadlessMirror::new(0, 0, 1000);
+        let snap = mirror.snapshot();
+        assert_eq!((snap.cols, snap.rows), (1, 1));
+        mirror.resize(0, 40);
+        let snap = mirror.snapshot();
+        assert_eq!((snap.cols, snap.rows), (1, 40));
     }
 
     #[test]

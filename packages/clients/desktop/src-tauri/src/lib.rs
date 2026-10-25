@@ -1416,9 +1416,7 @@ fn apply_window_effect<R: tauri::Runtime>(
     window
         .set_effects(native.map(|native| WindowEffectsConfig {
             effects: vec![native],
-            state: None,
-            radius: None,
-            color: None,
+            ..Default::default()
         }))
         .map_err(|error| error.to_string())?;
 

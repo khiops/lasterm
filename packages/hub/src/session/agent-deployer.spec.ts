@@ -78,6 +78,7 @@ interface RemoteFile {
 
 interface MockSftpOptions {
 	mkdirError?: Error;
+	directories?: Set<string>;
 	/** Fails the upload after part of the file was written, as a dropped transfer does. */
 	fastPutError?: Error;
 	chmodError?: Error;
@@ -105,8 +106,20 @@ function moveRemoteFile(files: Map<string, RemoteFile>, from: string, to: string
 
 function makeMockSftp(opts: MockSftpOptions = {}): SFTPWrapper {
 	const files = opts.files ?? new Map<string, RemoteFile>();
+	const directories = opts.directories ?? new Set<string>();
 	return {
-		mkdir: vi.fn((_path: string, cb: (err: Error | undefined) => void) => {
+		stat: vi.fn(
+			(
+				path: string,
+				cb: (err: Error | undefined, attrs?: { isDirectory: () => boolean }) => void,
+			) => {
+				cb(directories.has(path) ? undefined : new Error("No such file"), {
+					isDirectory: () => directories.has(path),
+				});
+			},
+		),
+		mkdir: vi.fn((path: string, cb: (err: Error | undefined) => void) => {
+			if (!opts.mkdirError) directories.add(path);
 			cb(opts.mkdirError);
 		}),
 		fastPut: vi.fn((local: string, remote: string, cb: (err: Error | undefined) => void) => {
@@ -682,27 +695,150 @@ describe("uploadAgentBinary", () => {
 		).rejects.toThrow("SFTP not available");
 	});
 
-	it("swallows mkdir errors (parent may already exist)", async () => {
-		const sftp = makeMockSftp({ mkdirError: new Error("EEXIST") });
-		const client = makeSftpClient(sftp);
-
+	it("continues when another writer creates the directory after mkdir fails", async () => {
+		const directories = new Set<string>();
+		const sftp = makeMockSftp({ directories });
+		vi.mocked(sftp.mkdir).mockImplementation((path, cb) => {
+			directories.add(path);
+			cb(new Error("Failure"));
+		});
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/.local/bin/lasterm-agent", "linux"),
+			uploadAgentBinary(makeSftpClient(sftp), "/local/binary", "/remote/.local/bin/agent", "linux"),
 		).resolves.toBeUndefined();
+		expect(
+			vi.mocked(sftp.stat).mock.calls.filter(([path]) => path === "/remote/.local/bin"),
+		).toHaveLength(2);
 	});
 
-	it("handles Windows backslash paths for parent dir extraction", async () => {
+	it.each([new Error("Transfer refused"), "transfer rejected"])(
+		"preserves both directory and transfer failures: %s",
+		async (transferError) => {
+			const mkdirError = new Error("Permission denied");
+			const sftp = makeMockSftp({ directories: new Set(["/remote"]), mkdirError });
+			vi.mocked(sftp.fastPut).mockImplementation((_local, _remote, cb) => {
+				Reflect.apply(cb, undefined, [transferError]);
+			});
+			const failure = await uploadAgentBinary(
+				makeSftpClient(sftp),
+				"local",
+				"/remote/bin/agent",
+				"linux",
+			).catch((error: unknown) => error);
+			expect(failure).toBeInstanceOf(Error);
+			const combined = (failure as Error).cause as Error;
+			const walkMessage = "Could not create the directory /remote/bin: Permission denied";
+			const transferMessage =
+				transferError instanceof Error ? transferError.message : String(transferError);
+			expect(combined.message).toBe(`${walkMessage}; the transfer also failed: ${transferMessage}`);
+			expect((failure as Error).message).toContain(combined.message);
+			expect((failure as Error).message).toMatch(/^Could not upload the agent to /);
+			expect(combined.cause).toBeInstanceOf(AggregateError);
+			const aggregate = combined.cause as AggregateError;
+			expect(aggregate.message).toBe("Directory creation and transfer both failed");
+			expect(aggregate.errors).toHaveLength(2);
+			expect(aggregate.errors[0]).toMatchObject({ message: walkMessage, cause: mkdirError });
+			expect(aggregate.errors[1]).toBe(transferError);
+			expect(sftp.fastPut).toHaveBeenCalledOnce();
+			expect(sftp.unlink).toHaveBeenCalledExactlyOnceWith(uploadedTo(sftp), expect.any(Function));
+			expect(vi.mocked(sftp.stat).mock.calls.map(([path]) => path)).toEqual([
+				"/remote/bin",
+				"/remote",
+				"/remote/bin",
+			]);
+			expect(vi.mocked(sftp.mkdir).mock.calls).toEqual([["/remote/bin", expect.any(Function)]]);
+		},
+	);
+
+	it("completes a POSIX transfer despite a directory walk failure", async () => {
+		const sftp = makeMockSftp({ mkdirError: new Error("Permission denied") });
+		await expect(
+			uploadAgentBinary(makeSftpClient(sftp), "local", "/remote/bin/agent", "linux"),
+		).resolves.toBeUndefined();
+		expect(sftp.fastPut).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		["/a//b/agent", ["/a", "/a//b"], "linux"],
+		["//host/x/agent", ["//host", "//host/x"], "linux"],
+		["/a\\b/c/agent", ["/a\\b", "/a\\b/c"], "linux"],
+		[
+			"/Users/alice/.local/bin/agent",
+			["/Users", "/Users/alice", "/Users/alice/.local", "/Users/alice/.local/bin"],
+			"darwin",
+		],
+	] as const)("walks literal prefixes of %s", async (target, levels, os) => {
 		const sftp = makeMockSftp();
-		const client = makeSftpClient(sftp);
-
-		await uploadAgentBinary(
-			client,
-			"C:\\local\\lasterm-agent.exe",
-			"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
-			"windows",
+		await uploadAgentBinary(makeSftpClient(sftp), "local", target, os);
+		expect(vi.mocked(sftp.mkdir).mock.calls).toEqual(
+			levels.map((level) => [level, expect.any(Function)]),
 		);
+		expect(vi.mocked(sftp.stat).mock.calls.map(([path]) => path)).toEqual([...levels].reverse());
+	});
 
-		expect(sftp.mkdir).toHaveBeenCalledWith("%LOCALAPPDATA%\\lasterm", expect.any(Function));
+	it.each([
+		["~/.local/bin/agent", "~/.local/bin", "linux"],
+		["a//b/agent", "a//b", "linux"],
+		["a/b//agent", "a/b/", "linux"],
+		["bin/agent", "bin", "linux"],
+		["%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe", "%LOCALAPPDATA%\\lasterm", "windows"],
+		["C:\\lasterm-agent.exe", "C:", "windows"],
+		["\\\\?\\C:\\lasterm-agent.exe", "\\\\?\\C:", "windows"],
+		["\\\\server\\share\\dir\\agent.exe", "\\\\server\\share\\dir", "windows"],
+		["/remote/bin/agent.exe", "/remote/bin", "windows"],
+	] as const)("sends only one advisory mkdir for %s", async (target, parent, os) => {
+		for (const failed of [false, true]) {
+			const transferError = new Error("Transfer refused");
+			const sftp = makeMockSftp({
+				mkdirError: new Error("Permission denied"),
+				...(failed ? { fastPutError: transferError } : {}),
+			});
+			const upload = uploadAgentBinary(makeSftpClient(sftp), "local", target, os);
+			if (!failed) await expect(upload).resolves.toBeUndefined();
+			else if (os === "windows") await expect(upload).rejects.toBe(transferError);
+			else await expect(upload).rejects.toMatchObject({ cause: transferError });
+			expect(sftp.stat).not.toHaveBeenCalled();
+			expect(vi.mocked(sftp.mkdir).mock.calls).toEqual([[parent, expect.any(Function)]]);
+			expect(sftp.fastPut).toHaveBeenCalledOnce();
+		}
+	});
+
+	it("reports every refused level including the deeper permission blocker", async () => {
+		const levels = ["/home", "/home/alice", "/home/alice/.local", "/home/alice/.local/bin"];
+		const errors = ["Failure", "Failure", "Permission denied", "No such file"].map(
+			(message) => new Error(message),
+		);
+		const sftp = makeMockSftp({ fastPutError: new Error("Failure") });
+		vi.mocked(sftp.mkdir).mockImplementation((path, cb) => cb(errors[levels.indexOf(path)]));
+		await expect(
+			uploadAgentBinary(makeSftpClient(sftp), "local", `${levels[3]}/agent`, "linux"),
+		).rejects.toMatchObject({
+			message: expect.stringContaining("/home/alice/.local: Permission denied"),
+			cause: {
+				message: `${levels
+					.map((level, i) => `Could not create the directory ${level}: ${errors[i]?.message}`)
+					.join("; ")}; the transfer also failed: Failure`,
+				cause: expect.objectContaining({
+					errors: [
+						expect.objectContaining({ cause: expect.any(AggregateError) }),
+						expect.any(Error),
+					],
+				}),
+			},
+		});
+		expect(vi.mocked(sftp.mkdir).mock.calls).toEqual(
+			levels.map((level) => [level, expect.any(Function)]),
+		);
+		expect(vi.mocked(sftp.stat).mock.calls.map(([path]) => path)).toEqual(
+			[...levels].reverse().concat(levels),
+		);
+		expect(sftp.fastPut).toHaveBeenCalledOnce();
+	});
+
+	it("stats only the parent when every level exists", async () => {
+		const sftp = makeMockSftp({ directories: new Set(["/remote/bin"]) });
+		await uploadAgentBinary(makeSftpClient(sftp), "local", "/remote/bin/agent", "linux");
+		expect(sftp.stat).toHaveBeenCalledExactlyOnceWith("/remote/bin", expect.any(Function));
+		expect(sftp.mkdir).not.toHaveBeenCalled();
 	});
 
 	// A Windows agent runs on stdio and exits with its connection, so nothing

@@ -317,15 +317,66 @@ function openSftp(client: SshClient): Promise<SFTPWrapper> {
 	});
 }
 
-/** mkdir -p via SFTP: creates dir and ignores EEXIST errors. */
-function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<void> {
-	return new Promise((resolve) => {
-		sftp.mkdir(remotePath, (_err) => {
-			// Swallow all errors: EEXIST is expected when the directory already
-			// exists. Other errors (e.g. permission denied) will surface at
-			// fastPut time, which provides a clearer message.
-			resolve();
+/**
+ * mkdir -p via SFTP for an absolute POSIX parent, advisory: creates its missing levels, each a
+ * literal prefix of it, and returns an error naming every level it could not create. Never throws.
+ */
+async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error | undefined> {
+	const separator = remotePath.includes("/") ? "/" : "\\";
+	const levels: string[] = [];
+	for (let end = 1; end <= remotePath.length; end++) {
+		if (end !== remotePath.length && remotePath[end] !== separator) continue;
+		const level = remotePath.slice(0, end);
+		if (level.endsWith(separator)) continue;
+		levels.push(level);
+	}
+	const isDirectory = (path: string): Promise<boolean> =>
+		new Promise((resolve) => {
+			sftp.stat(path, (error, attrs) => resolve(!error && attrs.isDirectory()));
 		});
+	let existing = levels.length - 1;
+	for (const level of [...levels].reverse()) {
+		if (await isDirectory(level)) break;
+		existing--;
+	}
+	const failures: { level: string; error: Error }[] = [];
+	for (const level of levels.slice(existing + 1)) {
+		const error = await new Promise<Error | undefined>((resolve) => {
+			sftp.mkdir(level, (error) => resolve(error ?? undefined));
+		});
+		if (error && !(await isDirectory(level))) failures.push({ level, error });
+	}
+	if (failures.length === 0) return undefined;
+	return new Error(
+		failures
+			.map(({ level, error }) => `Could not create the directory ${level}: ${error.message}`)
+			.join("; "),
+		{
+			cause:
+				failures.length === 1
+					? failures[0]?.error
+					: new AggregateError(failures.map(({ error }) => error)),
+		},
+	);
+}
+
+/** One mkdir of a Windows or relative parent, its error ignored: SFTP does not expand these paths (#711). */
+function sftpMkdirOnce(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+	return new Promise((resolve) => {
+		sftp.mkdir(remotePath, () => resolve());
+	});
+}
+
+/** The transfer error, joined with the directory walk's error when there is one, so neither is lost. */
+function transferFailure(walkError: Error | undefined, transferError: unknown): unknown {
+	if (!walkError) return transferError;
+	const transferMessage =
+		transferError instanceof Error ? transferError.message : String(transferError);
+	return new Error(`${walkError.message}; the transfer also failed: ${transferMessage}`, {
+		cause: new AggregateError(
+			[walkError, transferError],
+			"Directory creation and transfer both failed",
+		),
 	});
 }
 
@@ -476,19 +527,23 @@ export async function uploadAgentBinary(
 ): Promise<void> {
 	const sftp = await openSftp(client);
 	try {
-		// Ensure parent directory exists (ignore failures — will fail at fastPut if real error)
 		const parentDir = remotePath.includes("/")
 			? remotePath.slice(0, remotePath.lastIndexOf("/"))
 			: remotePath.includes("\\")
 				? remotePath.slice(0, remotePath.lastIndexOf("\\"))
 				: ".";
-		if (parentDir && parentDir !== ".") {
-			await sftpMkdir(sftp, parentDir);
-		}
+		// The walk only runs for an absolute POSIX parent: SFTP does not expand Windows or relative
+		// paths (#711). Its error is reported only if the transfer then fails.
+		const walkParent = os !== "windows" && parentDir.startsWith("/");
+		let walkError: Error | undefined;
+		if (walkParent) walkError = await sftpMkdir(sftp, parentDir);
+		else if (parentDir && parentDir !== ".") await sftpMkdirOnce(sftp, parentDir);
 
 		if (os === "windows") {
 			// Upload binary using fastPut (streaming — handles large binaries ~120 MB)
-			await sftpFastPut(sftp, localPath, remotePath);
+			await sftpFastPut(sftp, localPath, remotePath).catch((error) => {
+				throw transferFailure(walkError, error);
+			});
 			// Make executable (chmod 755) — no-op on Windows but harmless
 			await sftpChmod(sftp, remotePath, 0o755);
 			return;
@@ -498,7 +553,9 @@ export async function uploadAgentBinary(
 		const temp = uploadTempPath(remotePath);
 		let step = `upload the agent to ${temp}`;
 		try {
-			await sftpFastPut(sftp, localPath, temp);
+			await sftpFastPut(sftp, localPath, temp).catch((error) => {
+				throw transferFailure(walkError, error);
+			});
 			step = `make ${temp} executable`;
 			await sftpChmod(sftp, temp, 0o755);
 			step = `move the agent into place at ${remotePath}`;

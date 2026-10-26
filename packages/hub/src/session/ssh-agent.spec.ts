@@ -345,7 +345,7 @@ describe("SshAgent", () => {
 			vi.mocked(deployAgentIfNeeded).mockResolvedValueOnce({
 				deployed: true,
 				remoteMatchesHubVersionCache: false,
-				remotePath: "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
+				remotePath: "C:\\Users\\Rémi\\AppData\\Local\\lasterm\\lasterm-agent.exe",
 				os: "windows",
 				arch: "x64",
 			});
@@ -372,7 +372,7 @@ describe("SshAgent", () => {
 			await agent.start(fp);
 
 			expect(command).toBe(
-				'"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe" --stdio --log-level "debug" --format "text"',
+				'"C:\\Users\\Rémi\\AppData\\Local\\lasterm\\lasterm-agent.exe" --stdio --log-level "debug" --format "text"',
 			);
 			expect(command).not.toContain("'");
 		},

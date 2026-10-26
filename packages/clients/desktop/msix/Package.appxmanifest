@@ -15,7 +15,7 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Lasterm Terminal</DisplayName>
+    <DisplayName>Lasterm</DisplayName>
     <PublisherDisplayName>TODO-PARTNER-CENTER-PUBLISHER-DISPLAY-NAME</PublisherDisplayName>
     <Description>Local-first session terminal platform.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
@@ -37,7 +37,7 @@
       uap10:RuntimeBehavior="packagedClassicApp"
       uap10:TrustLevel="mediumIL">
       <uap:VisualElements
-        DisplayName="Lasterm Terminal"
+        DisplayName="Lasterm"
         Description="Local-first session terminal platform."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"

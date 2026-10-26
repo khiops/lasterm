@@ -187,10 +187,10 @@ function temp() {
 	return root;
 }
 
-test("real English listing passes every limit", () => {
+test("real English and French listings pass every limit", () => {
 	assert.deepEqual(
 		readListings().map((listing) => listing.locale),
-		["en-us"],
+		["en-us", "fr-fr"],
 	);
 });
 test.each([

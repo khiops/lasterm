@@ -317,16 +317,38 @@ function openSftp(client: SshClient): Promise<SFTPWrapper> {
 	});
 }
 
-/** mkdir -p via SFTP: creates dir and ignores EEXIST errors. */
-function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<void> {
-	return new Promise((resolve) => {
-		sftp.mkdir(remotePath, (_err) => {
-			// Swallow all errors: EEXIST is expected when the directory already
-			// exists. Other errors (e.g. permission denied) will surface at
-			// fastPut time, which provides a clearer message.
-			resolve();
+/** sftpMkdir creates missing ancestor directories and reports the first level it cannot create. */
+async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+	const separator = remotePath.includes("/") ? "/" : "\\";
+	const segments = remotePath.split(separator).filter(Boolean);
+	const prefix = remotePath.startsWith(separator) ? separator : "";
+	const isDirectory = (path: string): Promise<boolean> =>
+		new Promise((resolve) => {
+			sftp.stat(path, (error, attrs) => resolve(!error && attrs.isDirectory()));
 		});
-	});
+	const ensure = async (count: number): Promise<void> => {
+		if (count === 0) return;
+		const level = prefix + segments.slice(0, count).join(separator);
+		if (await isDirectory(level)) return;
+		await ensure(count - 1);
+		await new Promise<void>((resolve, reject) => {
+			sftp.mkdir(level, (error) => {
+				if (!error) resolve();
+				else {
+					void isDirectory(level).then((exists) => {
+						if (exists) resolve();
+						else
+							reject(
+								new Error(`Could not create the directory ${level}: ${error.message}`, {
+									cause: error,
+								}),
+							);
+					});
+				}
+			});
+		});
+	};
+	await ensure(segments.length);
 }
 
 /** Upload a local file to a remote path via SFTP fastPut (streaming — handles large files). */
@@ -476,7 +498,7 @@ export async function uploadAgentBinary(
 ): Promise<void> {
 	const sftp = await openSftp(client);
 	try {
-		// Ensure parent directory exists (ignore failures — will fail at fastPut if real error)
+		// sftpMkdir ensures every parent level exists before any upload starts.
 		const parentDir = remotePath.includes("/")
 			? remotePath.slice(0, remotePath.lastIndexOf("/"))
 			: remotePath.includes("\\")

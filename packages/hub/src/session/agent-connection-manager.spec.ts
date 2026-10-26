@@ -97,6 +97,14 @@ function createHelloDaemon(
 
 function makeMockSftp(): SFTPWrapper {
 	return {
+		stat: vi.fn(
+			(
+				_path: string,
+				cb: (err: Error | undefined, attrs?: { isDirectory: () => boolean }) => void,
+			) => {
+				cb(undefined, { isDirectory: () => true });
+			},
+		),
 		mkdir: vi.fn((_path: string, cb: (err: Error | undefined) => void) => {
 			cb(undefined);
 		}),

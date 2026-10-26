@@ -3,7 +3,7 @@
 A change users will see adds one Markdown file here in its own pull request,
 named for the change, for example `ssh-jump-host.md`. Each file has exactly one
 `<language>: …` line per listing language (the language of `listing-*.md`:
-English only today). Blank lines are allowed; duplicate, missing and unknown
+English and French, `en` and `fr`). Blank lines are allowed; duplicate, missing and unknown
 language lines are refused with the file name.
 
 ```text

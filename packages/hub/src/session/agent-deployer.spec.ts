@@ -436,12 +436,28 @@ describe("checkRemoteAgent", () => {
 });
 
 describe("OS-specific discovery edges", () => {
+	it("E5 returns the first supported where line without known-folder probes", async () => {
+		const client = makeMockClient({
+			"where lasterm-agent": {
+				stdout: "C:\\a!b\\lasterm-agent.exe\r\n  C:\\ok\\lasterm-agent.exe  \r\n",
+				stderr: "",
+				exitCode: 0,
+			},
+		});
+		expect(await checkRemoteAgent(client, "windows")).toBe("C:\\ok\\lasterm-agent.exe");
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual(["where lasterm-agent"]);
+	});
+
 	it.each(["C:\\%TEMP%\\agent.exe", "C:\\!TEMP!\\agent.exe", "/c/Users/u/agent.exe"])(
-		"E5 skips unsafe where output %s",
+		"E5 probes known folders when every where line is refused: %s",
 		async (unsafe) => {
 			const path = "C:\\Program Files\\lasterm\\lasterm-agent.exe";
 			const client = makeMockClient({
-				"where lasterm-agent": { stdout: `${unsafe}\r\nC:\\ignored.exe`, stderr: "", exitCode: 0 },
+				"where lasterm-agent": {
+					stdout: `${unsafe}\r\n  C:\\also!refused.exe  \r\n`,
+					stderr: "",
+					exitCode: 0,
+				},
 				[folderCommand("ProgramFiles")]: folderOutput("C:\\Program Files"),
 				[`if exist "${path}" echo ok`]: { stdout: "ok", stderr: "", exitCode: 0 },
 			});
@@ -1566,25 +1582,42 @@ describe("deployAgentIfNeeded — agent already present", () => {
 					"unexpected output",
 				] as const,
 		),
-		...[
-			"%LOCALAPPDATA%",
-			"relative",
-			"\\\\server\\share",
-			"C:\\!TEMP!",
-			"C:\\%TEMP%",
-			'C:\\a"b',
-			"C:\\a\nb",
-			"C:\\a\u007fb",
-		].map(
+		...["", "C:\\a\nb", "C:\\a\u007fb"].map(
 			(path) =>
 				[`invalid path ${JSON.stringify(path)}`, folderOutput(path), "unexpected output"] as const,
+		),
+		...(
+			[
+				["%LOCALAPPDATA%", "contains a character cmd.exe expands"],
+				["C:\\!TEMP!", "contains a character cmd.exe expands"],
+				["C:\\%TEMP%", "contains a character cmd.exe expands"],
+				["C:\\Users\\a!b\\AppData\\Local", "contains a character cmd.exe expands"],
+				["C:\\Users\\a%b\\AppData\\Local", "contains a character cmd.exe expands"],
+				['C:\\a"b', "contains a double quote"],
+				["C:/Users/u/AppData/Local", "not a drive path with backslashes"],
+				["Users\\u", "not a drive path with backslashes"],
+				["relative", "not a drive path with backslashes"],
+				["\\\\server\\share", "not a drive path with backslashes"],
+				["\\\\server\\share\\u", "not a drive path with backslashes"],
+			] as const
+		).map(
+			([path, why]) =>
+				[
+					`unsupported path ${path}`,
+					folderOutput(path),
+					`unsupported path ${path} (${why})`,
+				] as const,
 		),
 	])("E3 rejects %s before SFTP", async (_name, output, reason) => {
 		writeCachedAgentBinary("windows", "x64");
 		const client = makeMockClient({ [folderCommand("LocalApplicationData")]: output });
-		await expect(
-			deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions()),
-		).rejects.toThrow(
+		const error = await deployAgentIfNeeded(
+			client,
+			{ os: "windows", arch: "x64" },
+			makeOptions(),
+		).catch((error: unknown) => error);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toBe(
 			`Could not determine the LocalAppData directory of the Windows host: ${reason}`,
 		);
 		expect(client.sftp).not.toHaveBeenCalled();

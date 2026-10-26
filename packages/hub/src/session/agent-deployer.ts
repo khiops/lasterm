@@ -176,7 +176,15 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 		} catch {
 			return { reason: "unexpected output" };
 		}
-		if (!isWindowsPath(path)) return { reason: "unexpected output" };
+		if (!path || /\p{Cc}/u.test(path)) return { reason: "unexpected output" };
+		if (!isWindowsPath(path)) {
+			const why = /[%!]/.test(path)
+				? "contains a character cmd.exe expands"
+				: path.includes('"')
+					? "contains a double quote"
+					: "not a drive path with backslashes";
+			return { reason: `unsupported path ${path} (${why})` };
+		}
 		return { path: path.replace(/\\+$/, "") + (/^[A-Za-z]:\\+$/.test(path) ? "\\" : "") };
 	} catch (error) {
 		return { reason: error instanceof Error ? error.message : String(error) };
@@ -263,8 +271,15 @@ export async function checkRemoteAgent(
 			os === "windows" ? "where lasterm-agent" : "which lasterm-agent",
 		);
 		if (exitCode === 0) {
-			const path = os === "windows" ? stdout.split(/\r?\n/)[0]?.trim() : stdout.trim();
-			if (path && (os !== "windows" || isWindowsPath(path))) return path;
+			const path =
+				os === "windows"
+					? stdout
+							.trim()
+							.split(/\r?\n/)
+							.map((line) => line.trim())
+							.find((line) => line && isWindowsPath(line))
+					: stdout.trim();
+			if (path) return path;
 		}
 	} catch {
 		// Continue with the common paths.

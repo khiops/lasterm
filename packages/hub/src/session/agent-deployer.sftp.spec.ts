@@ -1,4 +1,3 @@
-import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client } from "ssh2";
@@ -6,12 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { uploadAgentBinary } from "./agent-deployer.js";
 import { startSftpServer } from "./sftp-server.fixture.js";
-
-const { privateKey } = generateKeyPairSync("rsa", {
-	modulusLength: 2048,
-	publicKeyEncoding: { type: "pkcs1", format: "pem" },
-	privateKeyEncoding: { type: "pkcs1", format: "pem" },
-});
 
 // uploadAgentBinary's execRename needs a POSIX shell.
 describe.skipIf(process.platform === "win32")("agent upload over filesystem SFTP", () => {
@@ -34,7 +27,12 @@ describe.skipIf(process.platform === "win32")("agent upload over filesystem SFTP
 		client = connection;
 		await new Promise<void>((resolve, reject) => {
 			connection.once("ready", resolve).once("error", reject);
-			connection.connect({ host: "127.0.0.1", port: started.port, username: "test", privateKey });
+			connection.connect({
+				host: "127.0.0.1",
+				port: started.port,
+				username: "test",
+				password: started.password,
+			});
 		});
 	});
 	afterEach(async () => {
@@ -51,6 +49,32 @@ describe.skipIf(process.platform === "win32")("agent upload over filesystem SFTP
 		if (!client) throw new Error("Client not connected");
 		return uploadAgentBinary(client, local, target, "linux");
 	};
+	it.each(["password", "none"] as const)(
+		"refuses %s authentication without the server password",
+		async (method) => {
+			if (!server) throw new Error("Server not started");
+			const port = server.port;
+			const refused = new Client();
+			try {
+				await expect(
+					new Promise<void>((resolve, reject) => {
+						refused.once("ready", resolve).once("error", reject);
+						refused.connect({
+							host: "127.0.0.1",
+							port,
+							username: "test",
+							password: "wrong",
+							authHandler: [method],
+						});
+					}),
+				).rejects.toThrow("All configured authentication methods failed");
+			} finally {
+				const closed = new Promise<void>((resolve) => refused.once("close", resolve));
+				refused.destroy();
+				await closed;
+			}
+		},
+	);
 	it("P1 creates every missing level and uploads executable bytes", async () => {
 		await upload();
 		expect(await readFile(target, "utf8")).toBe("new agent bytes");

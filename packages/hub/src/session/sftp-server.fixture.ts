@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { type Connection, Server, utils } from "ssh2";
 
@@ -10,7 +10,13 @@ const { privateKey } = generateKeyPairSync("rsa", {
 });
 const codes = utils.sftp.STATUS_CODE;
 
-export async function startSftpServer(): Promise<{ port: number; close: () => Promise<void> }> {
+export async function startSftpServer(): Promise<{
+	port: number;
+	password: string;
+	close: () => Promise<void>;
+}> {
+	const password = randomBytes(32).toString("hex");
+	const expectedPassword = Buffer.from(password);
 	const clients = new Set<Connection>();
 	const handles = new Map<string, fs.FileHandle>();
 	let nextHandle = 0;
@@ -18,7 +24,19 @@ export async function startSftpServer(): Promise<{ port: number; close: () => Pr
 		clients.add(client);
 		client.on("close", () => clients.delete(client));
 		client.on("error", () => {});
-		client.on("authentication", (context) => context.accept());
+		client.on("authentication", (context) => {
+			if (context.method === "password") {
+				const supplied = Buffer.from(context.password);
+				if (
+					supplied.length === expectedPassword.length &&
+					timingSafeEqual(supplied, expectedPassword)
+				) {
+					context.accept();
+					return;
+				}
+			}
+			context.reject();
+		});
 		client.on("ready", () => {
 			client.on("session", (accept) => {
 				const session = accept();
@@ -140,6 +158,7 @@ export async function startSftpServer(): Promise<{ port: number; close: () => Pr
 		server.listen(0, "127.0.0.1", resolve);
 	});
 	return {
+		password,
 		port: (server.address() as { port: number }).port,
 		close: async () => {
 			for (const client of clients) client.end();

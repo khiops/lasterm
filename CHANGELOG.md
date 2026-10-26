@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.1](https://github.com/khiops/lasterm/compare/v0.14.0...v0.14.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **desktop:** name the package Lasterm, the name the Store reserved ([#708](https://github.com/khiops/lasterm/issues/708)) ([b84c7c3](https://github.com/khiops/lasterm/commit/b84c7c35d66224f1f0a6be19ad022d6a78daabdc)), closes [#707](https://github.com/khiops/lasterm/issues/707)
+
+
+### Documentation
+
+* **root:** add the French Store listing ([#705](https://github.com/khiops/lasterm/issues/705)) ([b825e13](https://github.com/khiops/lasterm/commit/b825e131895118571da221f6c24298659c8e2dd4))
+
 ## [0.14.0](https://github.com/khiops/lasterm/compare/v0.13.0...v0.14.0) (2026-10-25)
 
 

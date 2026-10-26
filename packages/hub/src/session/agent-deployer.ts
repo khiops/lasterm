@@ -318,8 +318,8 @@ function openSftp(client: SshClient): Promise<SFTPWrapper> {
 }
 
 /**
- * mkdir -p via SFTP, advisory: creates the missing levels of `remotePath`, each a literal
- * prefix of it, and returns an error naming every level it could not create. Never throws.
+ * mkdir -p via SFTP for an absolute POSIX parent, advisory: creates its missing levels, each a
+ * literal prefix of it, and returns an error naming every level it could not create. Never throws.
  */
 async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error | undefined> {
 	const separator = remotePath.includes("/") ? "/" : "\\";
@@ -358,6 +358,26 @@ async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error |
 					: new AggregateError(failures.map(({ error }) => error)),
 		},
 	);
+}
+
+/** One mkdir of a Windows or relative parent, its error ignored: SFTP does not expand these paths (#711). */
+function sftpMkdirOnce(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+	return new Promise((resolve) => {
+		sftp.mkdir(remotePath, () => resolve());
+	});
+}
+
+/** The transfer error, joined with the directory walk's error when there is one, so neither is lost. */
+function transferFailure(walkError: Error | undefined, transferError: unknown): unknown {
+	if (!walkError) return transferError;
+	const transferMessage =
+		transferError instanceof Error ? transferError.message : String(transferError);
+	return new Error(`${walkError.message}; the transfer also failed: ${transferMessage}`, {
+		cause: new AggregateError(
+			[walkError, transferError],
+			"Directory creation and transfer both failed",
+		),
+	});
 }
 
 /** Upload a local file to a remote path via SFTP fastPut (streaming — handles large files). */
@@ -507,19 +527,22 @@ export async function uploadAgentBinary(
 ): Promise<void> {
 	const sftp = await openSftp(client);
 	try {
-		// Create the parent's missing levels. Their error only replaces a failed transfer: a
-		// server may refuse stat or mkdir on a root such as `C:` and still accept the write.
 		const parentDir = remotePath.includes("/")
 			? remotePath.slice(0, remotePath.lastIndexOf("/"))
 			: remotePath.includes("\\")
 				? remotePath.slice(0, remotePath.lastIndexOf("\\"))
 				: ".";
-		const walkError = parentDir && parentDir !== "." ? await sftpMkdir(sftp, parentDir) : undefined;
+		// The walk only runs for an absolute POSIX parent: SFTP does not expand Windows or relative
+		// paths (#711). Its error is reported only if the transfer then fails.
+		const walkParent = os !== "windows" && parentDir.startsWith("/");
+		let walkError: Error | undefined;
+		if (walkParent) walkError = await sftpMkdir(sftp, parentDir);
+		else if (parentDir && parentDir !== ".") await sftpMkdirOnce(sftp, parentDir);
 
 		if (os === "windows") {
 			// Upload binary using fastPut (streaming — handles large binaries ~120 MB)
 			await sftpFastPut(sftp, localPath, remotePath).catch((error) => {
-				throw walkError ?? error;
+				throw transferFailure(walkError, error);
 			});
 			// Make executable (chmod 755) — no-op on Windows but harmless
 			await sftpChmod(sftp, remotePath, 0o755);
@@ -531,7 +554,7 @@ export async function uploadAgentBinary(
 		let step = `upload the agent to ${temp}`;
 		try {
 			await sftpFastPut(sftp, localPath, temp).catch((error) => {
-				throw walkError ?? error;
+				throw transferFailure(walkError, error);
 			});
 			step = `make ${temp} executable`;
 			await sftpChmod(sftp, temp, 0o755);

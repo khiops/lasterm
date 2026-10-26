@@ -86,9 +86,11 @@ describe.skipIf(process.platform === "win32")("agent upload over filesystem SFTP
 		await upload();
 		expect(await readFile(target, "utf8")).toBe("new agent bytes");
 	});
-	it("R1 rejects a regular file ancestor before any upload", async () => {
+	it("reports the regular-file ancestor when the transfer fails and leaves no agent bytes", async () => {
 		await writeFile(join(home, ".local"), "not a directory");
-		await expect(upload()).rejects.toThrow(`Could not create the directory ${home}/.local`);
+		const failure = upload();
+		await expect(failure).rejects.toThrow(`Could not create the directory ${home}/.local`);
+		await expect(failure).rejects.toThrow("; the transfer also failed:");
 		expect(await readdir(home, { recursive: true })).toEqual([".local"]);
 	});
 	// Root ignores the home directory's mode.
@@ -96,9 +98,11 @@ describe.skipIf(process.platform === "win32")("agent upload over filesystem SFTP
 		"R2 reports permission denied at the refused level",
 		async () => {
 			await chmod(home, 0o500);
-			await expect(upload()).rejects.toThrow(
+			const failure = upload();
+			await expect(failure).rejects.toThrow(
 				`Could not create the directory ${home}/.local: Permission denied`,
 			);
+			await expect(failure).rejects.toThrow("; the transfer also failed:");
 			expect(await readdir(home)).toEqual([]);
 		},
 	);

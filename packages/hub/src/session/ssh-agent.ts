@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import ssh2, { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import { findHostKeyRevocation } from "../ssh/known-hosts.js";
 import { parseSshHost } from "../ssh-route.js";
 import { AgentConnection } from "./agent-connection.js";
@@ -411,8 +411,7 @@ export class SshAgent extends AgentConnection {
 		}
 
 		connectConfig.hostVerifier = ((key: Buffer) => {
-			const hash = createHash("sha256").update(key).digest("base64");
-			const fingerprint = `SHA256:${hash}`;
+			const fingerprint = fingerprintOf(key);
 			keyVerification.capturedFingerprint = fingerprint;
 			keyVerification.revoked = findHostKeyRevocation(
 				fingerprint,

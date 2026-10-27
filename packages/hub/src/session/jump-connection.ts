@@ -14,8 +14,8 @@
  * where nobody is looking.
  */
 
-import { createHash } from "node:crypto";
 import { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import {
 	findHostKeyRevocation,
 	findKnownHostKeys,
@@ -155,7 +155,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		});
 
 		const hostVerifier = ((key: Buffer) => {
-			presented = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
+			presented = fingerprintOf(key);
 			const offered = normalizeFingerprint(presented);
 			const revoked = findHostKeyRevocation(presented, options.knownHostsNames, options.jump.port);
 			if (revoked) {

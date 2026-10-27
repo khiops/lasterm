@@ -826,7 +826,7 @@ socket for a missing one.
 {
   type: "HOST_VERIFY",
   host_id: string,
-  fingerprint: string,         // "sha256:XXXXXXXXXXXX"
+  fingerprint: string,         // "SHA256:<base64>", unpadded as OpenSSH prints it
   algorithm: string,           // "ssh-ed25519", "ssh-rsa"
   old_fingerprint?: string,    // set when stored key differs — MITM warning
   prompt_id: string,           // correlation ID; must be echoed in response for mismatch prompts

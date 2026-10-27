@@ -13,6 +13,8 @@ import {
 	type DeployOptions,
 	type DeployResult,
 	deployAgentIfNeeded,
+	probeSftp,
+	type SftpSupport,
 } from "./agent-deployer.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
@@ -205,8 +207,9 @@ export async function buildSshConnectConfig(
 
 /**
  * Options for auto-deploying the agent binary to a remote host.
- * When provided, SshAgent will attempt to upload the binary via SFTP
- * if lasterm-agent is not found on the remote host after SSH connect.
+ * When provided, SshAgent will attempt to upload the binary, over SFTP or,
+ * where the server offers none, an exec channel (#722), if lasterm-agent is
+ * not found on the remote host after SSH connect.
  */
 export interface SshAgentDeployOptions {
 	/** Path to the local binary cache directory. */
@@ -286,6 +289,13 @@ export class SshAgent extends AgentConnection {
 	remoteAgentPath: string | null = null;
 
 	/**
+	 * Whether the server offers SFTP, as this connection asked once it was up
+	 * (#722). Null until the probe has answered. Without SFTP the agent travels
+	 * over an exec channel, and the host says so in its status.
+	 */
+	sftpSupport: SftpSupport | null = null;
+
+	/**
 	 * Whether this hub ended the connection, as against the network, the server or
 	 * the remote agent ending it under the hub. The security log says which.
 	 */
@@ -347,6 +357,7 @@ export class SshAgent extends AgentConnection {
 		this.deployedThisSession = false;
 		this.remoteMatchesHubVersionCache = false;
 		this.reachedRunningDaemon = false;
+		this.sftpSupport = null;
 		if (!this.host.sshHost) {
 			throw new Error("Host has no sshHost configured");
 		}
@@ -551,6 +562,19 @@ export class SshAgent extends AgentConnection {
 						rejectOnce(Object.assign(new Error("SSH connect aborted"), { name: "AbortError" }));
 						return;
 					}
+					// Whether the server offers SFTP is asked once, now, beside the
+					// deploy's first commands (#722). An upload waits for the answer, and
+					// so does the agent's start: the host's status carries it as soon as
+					// this connection is the host's, before any terminal is asked for.
+					const sftpProbe = probeSftp(client).then((support) => {
+						if (this.client === client) this.sftpSupport = support;
+						console.error(
+							support.offered
+								? "[lasterm-ssh] SFTP: offered"
+								: `[lasterm-ssh] SFTP: not offered (${support.reason}); the agent travels over the SSH command channel`,
+						);
+						return support;
+					});
 					// The deploy replaced the agent on disk. What that means is only
 					// known once this connection has reached an agent: a daemon that was
 					// already running still runs the one the upload replaced, and saying
@@ -682,13 +706,17 @@ export class SshAgent extends AgentConnection {
 						// (the user may have installed it manually in a non-standard path).
 						// DeployError (user-initiated rejection) propagates; infrastructure failures fall back.
 						console.error("[lasterm-ssh] deploy phase starting");
-						deployAgentIfNeeded(client, this.host, {
-							...toDeployOptions(this.deployOptions, this.host, hostname),
-							onAgentUpdated: () => {
-								replacedAgent = true;
-							},
-						})
-							.then((result) => {
+						Promise.all([
+							deployAgentIfNeeded(client, this.host, {
+								...toDeployOptions(this.deployOptions, this.host, hostname),
+								onAgentUpdated: () => {
+									replacedAgent = true;
+								},
+								sftp: sftpProbe,
+							}),
+							sftpProbe,
+						])
+							.then(([result]) => {
 								this.deployedThisSession = result.deployed;
 								this.remoteMatchesHubVersionCache = result.remoteMatchesHubVersionCache;
 								// Notify caller if new OS/arch info was detected (either via deploy or detection)
@@ -752,11 +780,20 @@ export class SshAgent extends AgentConnection {
 								rejectOnce(new Error(`Agent deployment failed: ${deployErrMsg}`));
 							});
 					} else {
-						console.error("[lasterm-ssh] exec lasterm-agent...");
-						runAgent(
-							buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false),
-							this.daemonBinary("lasterm-agent", this.host.os),
-						);
+						void sftpProbe.then(() => {
+							// Aborted, or the connection failed, while the probe ran.
+							if (resolved) return;
+							console.error("[lasterm-ssh] exec lasterm-agent...");
+							try {
+								runAgent(
+									buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false),
+									this.daemonBinary("lasterm-agent", this.host.os),
+								);
+							} catch (err) {
+								this.cleanup();
+								rejectOnce(err instanceof Error ? err : new Error(String(err)));
+							}
+						});
 					}
 				});
 

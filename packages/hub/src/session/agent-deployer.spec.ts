@@ -1,6 +1,9 @@
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Duplex, PassThrough } from "node:stream";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
@@ -15,9 +18,12 @@ import {
 	getBinaryCacheDir,
 	getLocalSha256,
 	getRemoteSha256,
+	posixUploadCommand,
+	probeSftp,
 	readRemoteSystem,
 	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
+	windowsUploadCommand,
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
 
@@ -64,6 +70,14 @@ function makeMockClient(
 		exec: sshExecImpl,
 		sftp: sftpImpl ?? vi.fn(),
 	} as unknown as SshClient;
+}
+
+function folderCommand(folder: "LocalApplicationData" | "ProgramFiles"): string {
+	return `powershell -NoProfile -NonInteractive -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Environment]::GetFolderPath('${folder}')))"`;
+}
+
+function folderOutput(path: string): ExecResult {
+	return { stdout: Buffer.from(path, "utf8").toString("base64"), stderr: "", exitCode: 0 };
 }
 
 // ---------- Mock SFTP helpers -------------------------------------------------
@@ -185,6 +199,159 @@ function makeSftpClient(
 			cb(sftpError, sftp);
 		}),
 	} as unknown as SshClient;
+}
+
+const ENCODED_POWERSHELL = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+
+/**
+ * The Windows hash script, written out: the path as Base64 data, then .NET's
+ * SHA256, with no module to autoload (#722).
+ */
+function expectedHashScript(encodedPath: string): string {
+	return (
+		"$ErrorActionPreference='Stop';" +
+		`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));` +
+		"$s=[IO.File]::OpenRead($p);" +
+		"try{$h=[Security.Cryptography.SHA256]::Create().ComputeHash($s)}finally{$s.Dispose()};" +
+		"[BitConverter]::ToString($h).Replace('-','').ToLower()"
+	);
+}
+
+/** The PowerShell script inside an encoded command line. */
+function decodePowerShell(command: string): string {
+	return Buffer.from(command.slice(ENCODED_POWERSHELL.length), "base64").toString("utf16le");
+}
+
+/** Whether a command is the one the agent's bytes are streamed to, on either kind of host (#722). */
+function isUploadCommand(command: string): boolean {
+	return (
+		command.includes(" && cat > ") ||
+		(command.startsWith(ENCODED_POWERSHELL) &&
+			decodePowerShell(command).includes("OpenStandardInput"))
+	);
+}
+
+/**
+ * An exec channel that takes stdin, as the upload over the SSH command channel
+ * needs (#722): it answers once its input has ended, with what `answer` makes
+ * of that input.
+ */
+class MockExecChannel extends Duplex {
+	readonly stderr = new PassThrough();
+	private readonly input: Buffer[] = [];
+	private shutDown = false;
+
+	constructor(private readonly answer: (input: Buffer) => ExecResult) {
+		super({ emitClose: false });
+	}
+
+	override _read(): void {}
+
+	override _write(chunk: Buffer, _encoding: BufferEncoding, callback: () => void): void {
+		this.input.push(chunk);
+		callback();
+	}
+
+	override _final(callback: () => void): void {
+		callback();
+		const result = this.answer(Buffer.concat(this.input));
+		setImmediate(() => {
+			if (result.stdout) this.push(Buffer.from(result.stdout));
+			if (result.stderr) this.stderr.write(result.stderr);
+			this.emit("exit", result.exitCode);
+			this.push(null);
+			this.shut(result.exitCode);
+		});
+	}
+
+	/** The channel's close, once. */
+	shut(code: number | null): void {
+		if (this.shutDown) return;
+		this.shutDown = true;
+		setImmediate(() => this.emit("close", code));
+	}
+
+	close(): void {
+		this.shut(null);
+	}
+}
+
+/**
+ * A client whose SFTP cannot be opened, and whose exec answers through
+ * `onExec`, or, for the upload command, through `onUpload` with the bytes
+ * streamed on its stdin.
+ */
+function makeExecClient(
+	onExec: (command: string) => ExecResult,
+	onUpload: (command: string, input: Buffer) => ExecResult,
+	sftpError: Error = new Error("Unable to start subsystem: sftp"),
+): SshClient {
+	return {
+		exec: vi.fn((command: string, cb: (err: Error | undefined, stream: unknown) => void) => {
+			if (isUploadCommand(command)) {
+				cb(undefined, new MockExecChannel((input) => onUpload(command, input)));
+				return;
+			}
+			const result = onExec(command);
+			const stream = new MockSshStream();
+			cb(undefined, stream);
+			setImmediate(() => {
+				if (result.stdout) stream.emit("data", Buffer.from(result.stdout));
+				if (result.stderr) stream.stderr.emit("data", Buffer.from(result.stderr));
+				stream.emit("close", result.exitCode);
+			});
+		}),
+		sftp: vi.fn((cb: (err: Error | undefined) => void) => cb(sftpError)),
+	} as unknown as SshClient;
+}
+
+/**
+ * A POSIX remote reached over exec alone: the upload command stores what
+ * arrived under its temporary name, and `sha256sum`, `chmod`, `mv`, `rm` and
+ * the sweep act on those files. `transform` alters what is stored, as a
+ * transfer that lost or changed bytes would.
+ */
+function posixExecRemote(
+	files: Map<string, RemoteFile & { bytes?: Buffer }>,
+	transform: (input: Buffer) => Buffer = (input) => input,
+): {
+	onExec: (command: string) => ExecResult;
+	onUpload: (command: string, input: Buffer) => ExecResult;
+} {
+	const moving = shellMoving(files);
+	const sweeping = shellSweeping(files);
+	return {
+		onUpload: (command, input) => {
+			const temp = unquotePosix(/ && cat > ('(?:[^']|'\\'')*'|\S+) && /.exec(command)?.[1] ?? "");
+			const stored = transform(input);
+			files.set(temp, { content: stored.toString("latin1"), bytes: stored, mode: 0o600 });
+			return { stdout: `${stored.length}\n`, stderr: "", exitCode: 0 };
+		},
+		onExec: (command) => {
+			const hash = /^sha256sum ('(?:[^']|'\\'')*')$/.exec(command);
+			if (hash !== null) {
+				const path = unquotePosix(hash[1] ?? "");
+				const bytes = files.get(path)?.bytes;
+				if (bytes === undefined) return { stdout: "", stderr: "No such file", exitCode: 1 };
+				const sha = createHash("sha256").update(bytes).digest("hex");
+				return { stdout: `${sha}  ${path}\n`, stderr: "", exitCode: 0 };
+			}
+			const mode = /^chmod 755 -- (\S+)$/.exec(command);
+			if (mode !== null) {
+				const file = files.get(unquotePosix(mode[1] ?? ""));
+				if (file === undefined) return { stdout: "", stderr: "No such file", exitCode: 1 };
+				file.mode = 0o755;
+				return { stdout: "", stderr: "", exitCode: 0 };
+			}
+			const remove = /^rm -f -- (\S+)$/.exec(command);
+			if (remove !== null) {
+				files.delete(unquotePosix(remove[1] ?? ""));
+				return { stdout: "", stderr: "", exitCode: 0 };
+			}
+			if (command.startsWith("find ")) return sweeping(command);
+			return moving(command);
+		},
+	};
 }
 
 /** The remote's shell running the deployer's `mv` fallback on the mock remote's files. */
@@ -377,7 +544,7 @@ describe("checkRemoteAgent", () => {
 		const client = makeMockClient({
 			"which lasterm-agent": { stdout: "/usr/local/bin/lasterm-agent\n", stderr: "", exitCode: 0 },
 		});
-		const result = await checkRemoteAgent(client);
+		const result = await checkRemoteAgent(client, "linux");
 		expect(result).toBe("/usr/local/bin/lasterm-agent");
 	});
 
@@ -390,7 +557,7 @@ describe("checkRemoteAgent", () => {
 				exitCode: 0,
 			},
 		});
-		const result = await checkRemoteAgent(client);
+		const result = await checkRemoteAgent(client, "windows");
 		expect(result).toBe("C:\\Users\\user\\AppData\\Local\\lasterm\\lasterm-agent.exe");
 	});
 
@@ -404,13 +571,13 @@ describe("checkRemoteAgent", () => {
 				exitCode: 0,
 			},
 		});
-		const result = await checkRemoteAgent(client);
+		const result = await checkRemoteAgent(client, "linux");
 		expect(result).toBe("/home/user/.local/bin/lasterm-agent");
 	});
 
 	it("returns null when agent is not found anywhere", async () => {
 		const client = makeMockClient({});
-		const result = await checkRemoteAgent(client);
+		const result = await checkRemoteAgent(client, "linux");
 		expect(result).toBeNull();
 	});
 
@@ -422,8 +589,76 @@ describe("checkRemoteAgent", () => {
 				exitCode: 0,
 			},
 		});
-		const result = await checkRemoteAgent(client);
+		const result = await checkRemoteAgent(client, "linux");
 		expect(result).toBe("/usr/bin/lasterm-agent");
+	});
+});
+
+describe("OS-specific discovery edges", () => {
+	it("E5 accepts the first where line with brackets", async () => {
+		const path = "C:\\Profiles[1]\\lasterm-agent.exe";
+		const client = makeMockClient({
+			"where lasterm-agent": {
+				stdout: `${path}\r\nC:\\ok\\lasterm-agent.exe\r\n`,
+				stderr: "",
+				exitCode: 0,
+			},
+		});
+		expect(await checkRemoteAgent(client, "windows")).toBe(path);
+	});
+
+	it.each(["C:\\a!b\\lasterm-agent.exe"])(
+		"E5 skips refused where line %s without known-folder probes",
+		async (unsafe) => {
+			const client = makeMockClient({
+				"where lasterm-agent": {
+					stdout: `${unsafe}\r\n  C:\\ok\\lasterm-agent.exe  \r\n`,
+					stderr: "",
+					exitCode: 0,
+				},
+			});
+			expect(await checkRemoteAgent(client, "windows")).toBe("C:\\ok\\lasterm-agent.exe");
+			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+				"where lasterm-agent",
+			]);
+		},
+	);
+
+	it.each(["C:\\%TEMP%\\agent.exe", "C:\\!TEMP!\\agent.exe", "/c/Users/u/agent.exe"])(
+		"E5 probes known folders when every where line is refused: %s",
+		async (unsafe) => {
+			const path = "C:\\Program Files\\lasterm\\lasterm-agent.exe";
+			const client = makeMockClient({
+				"where lasterm-agent": {
+					stdout: `${unsafe}\r\n  C:\\also!refused.exe  \r\n`,
+					stderr: "",
+					exitCode: 0,
+				},
+				[folderCommand("ProgramFiles")]: folderOutput("C:\\Program Files"),
+				[`if exist "${path}" echo ok`]: { stdout: "ok", stderr: "", exitCode: 0 },
+			});
+			expect(await checkRemoteAgent(client, "windows")).toBe(path);
+			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+				"where lasterm-agent",
+				folderCommand("LocalApplicationData"),
+				folderCommand("ProgramFiles"),
+				`if exist "${path}" echo ok`,
+			]);
+		},
+	);
+
+	it.each(["linux", "darwin"] as const)("E6 probes only POSIX paths on %s", async (os) => {
+		const client = makeMockClient({});
+		expect(await checkRemoteAgent(client, os)).toBeNull();
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+			"which lasterm-agent",
+			...[
+				"$HOME/.local/bin/lasterm-agent",
+				"/usr/local/bin/lasterm-agent",
+				"/usr/bin/lasterm-agent",
+				"/opt/lasterm/lasterm-agent",
+			].map((path) => `test -x "${path}" && echo "${path}"`),
+		]);
 	});
 });
 
@@ -686,13 +921,25 @@ describe("uploadAgentBinary", () => {
 		},
 	);
 
-	it("rejects when sftp channel open fails", async () => {
-		const sftp = makeMockSftp();
-		const client = makeSftpClient(sftp, new Error("SFTP not available"));
+	it("names both attempts when SFTP cannot be opened and the exec channel fails too", async () => {
+		const local = join(cacheDir, "binary");
+		writeFileSync(local, "agent");
+		const client = makeExecClient(
+			() => ({ stdout: "", stderr: "", exitCode: 0 }),
+			() => ({ stdout: "", stderr: "cat: write error: No space left on device\n", exitCode: 1 }),
+			new Error("SFTP not available"),
+		);
 
 		await expect(
-			uploadAgentBinary(client, "/local/binary", "/remote/lasterm-agent", "linux"),
-		).rejects.toThrow("SFTP not available");
+			uploadAgentBinary(client, local, "/remote/lasterm-agent", "linux"),
+		).rejects.toThrow(
+			"Could not upload the agent: SFTP could not be opened (SFTP not available), and the upload " +
+				"over the SSH command channel failed too: Could not upload the agent to /remote/" +
+				".lasterm-agent.",
+		);
+		await expect(
+			uploadAgentBinary(client, local, "/remote/lasterm-agent", "linux"),
+		).rejects.toThrow(/\.partial: exit 1: cat: write error: No space left on device$/);
 	});
 
 	it("continues when another writer creates the directory after mkdir fails", async () => {
@@ -704,7 +951,7 @@ describe("uploadAgentBinary", () => {
 		});
 		await expect(
 			uploadAgentBinary(makeSftpClient(sftp), "/local/binary", "/remote/.local/bin/agent", "linux"),
-		).resolves.toBeUndefined();
+		).resolves.toBe("sftp");
 		expect(
 			vi.mocked(sftp.stat).mock.calls.filter(([path]) => path === "/remote/.local/bin"),
 		).toHaveLength(2);
@@ -753,7 +1000,7 @@ describe("uploadAgentBinary", () => {
 		const sftp = makeMockSftp({ mkdirError: new Error("Permission denied") });
 		await expect(
 			uploadAgentBinary(makeSftpClient(sftp), "local", "/remote/bin/agent", "linux"),
-		).resolves.toBeUndefined();
+		).resolves.toBe("sftp");
 		expect(sftp.fastPut).toHaveBeenCalledOnce();
 	});
 
@@ -793,7 +1040,7 @@ describe("uploadAgentBinary", () => {
 				...(failed ? { fastPutError: transferError } : {}),
 			});
 			const upload = uploadAgentBinary(makeSftpClient(sftp), "local", target, os);
-			if (!failed) await expect(upload).resolves.toBeUndefined();
+			if (!failed) await expect(upload).resolves.toBe("sftp");
 			else if (os === "windows") await expect(upload).rejects.toBe(transferError);
 			else await expect(upload).rejects.toMatchObject({ cause: transferError });
 			expect(sftp.stat).not.toHaveBeenCalled();
@@ -872,6 +1119,412 @@ describe("uploadAgentBinary", () => {
 		).rejects.toThrow("disk full");
 
 		expect(sftp.end).toHaveBeenCalled();
+	});
+});
+
+// ---------- uploadAgentBinary — without SFTP (#722) ---------------------------
+
+/**
+ * An exec channel over a local child process, as Win32-OpenSSH runs a
+ * command: its stdin, stdout, stderr and exit code, nothing else.
+ */
+class ChildChannel extends Duplex {
+	readonly stderr: NodeJS.ReadableStream;
+
+	constructor(private readonly child: ReturnType<typeof spawn>) {
+		super({ emitClose: false });
+		if (!child.stdin || !child.stdout || !child.stderr) throw new Error("no pipes");
+		this.stderr = child.stderr;
+		child.stdin.on("error", () => {});
+		child.stdout.on("data", (chunk: Buffer) => this.push(chunk));
+		child.on("close", (code) => {
+			this.emit("exit", code);
+			this.push(null);
+			setImmediate(() => this.emit("close", code));
+		});
+	}
+
+	override _read(): void {}
+
+	override _write(chunk: Buffer, _encoding: BufferEncoding, callback: () => void): void {
+		this.child.stdin?.write(chunk, callback);
+	}
+
+	override _final(callback: () => void): void {
+		this.child.stdin?.end();
+		callback();
+	}
+
+	close(): void {
+		this.child.kill();
+	}
+}
+
+/**
+ * A client whose exec runs commands on this Windows machine the way
+ * Win32-OpenSSH does: through cmd.exe by default, or through a PowerShell
+ * `DefaultShell` (#714), and which offers no SFTP.
+ */
+function localWindowsClient(
+	shell: "cmd.exe" | "powershell.exe",
+	env: NodeJS.ProcessEnv = process.env,
+): SshClient {
+	return {
+		exec: vi.fn((command: string, cb: (err: Error | undefined, stream: unknown) => void) => {
+			const child =
+				shell === "cmd.exe"
+					? spawn("cmd.exe", ["/c", command], { windowsVerbatimArguments: true, env })
+					: spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-c", command], { env });
+			cb(undefined, new ChildChannel(child));
+		}),
+		sftp: vi.fn((cb: (err: Error) => void) => cb(new Error("Unable to start subsystem: sftp"))),
+	} as unknown as SshClient;
+}
+
+describe("uploadAgentBinary over the SSH command channel (#722)", () => {
+	const refused = { offered: false, reason: "Unable to start subsystem: sftp" } as const;
+	const target = "/home/u/.local/bin/lasterm-agent";
+
+	function localAgent(bytes: Buffer = randomBytes(64 * 1024)): { path: string; bytes: Buffer } {
+		const path = join(cacheDir, "agent-binary");
+		writeFileSync(path, bytes);
+		return { path, bytes };
+	}
+
+	function posixRemote(transform?: (input: Buffer) => Buffer) {
+		const files = new Map<string, RemoteFile & { bytes?: Buffer }>([
+			[target, { content: "old agent", bytes: Buffer.from("old agent"), mode: 0o755 }],
+		]);
+		const remote = posixExecRemote(files, transform);
+		const client = makeExecClient(remote.onExec, remote.onUpload);
+		const commands = () => vi.mocked(client.exec).mock.calls.map(([command]) => command);
+		return { files, client, commands };
+	}
+
+	it("sends a POSIX agent when the probe found no SFTP: checked, made executable, renamed into place", async () => {
+		const agent = localAgent();
+		const { files, client, commands } = posixRemote();
+
+		expect(await uploadAgentBinary(client, agent.path, target, "linux", refused)).toBe("exec");
+
+		expect([...files.keys()]).toEqual([target]);
+		expect(files.get(target)?.bytes?.equals(agent.bytes)).toBe(true);
+		expect(files.get(target)?.mode).toBe(0o755);
+		expect(client.sftp).not.toHaveBeenCalled();
+		const sent = commands();
+		const temp = /&& cat > (\S+) &&/.exec(sent[1] ?? "")?.[1] ?? "";
+		expect(temp).toMatch(/^\/home\/u\/\.local\/bin\/\.lasterm-agent\.[0-9a-f]{16}\.partial$/);
+		expect(sent).toEqual([
+			expect.stringMatching(/^find \/home\/u\/\.local\/bin -maxdepth 1 /),
+			posixUploadCommand(temp),
+			`sha256sum '${temp}'`,
+			`chmod 755 -- ${temp}`,
+			`test ! -d ${target} && mv -f -- ${temp} ${target}`,
+		]);
+	});
+
+	it("waits for a probe still running", async () => {
+		const agent = localAgent();
+		const { files, client } = posixRemote();
+		let answer: (support: typeof refused) => void = () => {};
+		const probe = new Promise<typeof refused>((resolve) => {
+			answer = resolve;
+		});
+
+		const upload = uploadAgentBinary(client, agent.path, target, "linux", probe);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(client.exec).not.toHaveBeenCalled();
+		answer(refused);
+
+		expect(await upload).toBe("exec");
+		expect(files.get(target)?.bytes?.equals(agent.bytes)).toBe(true);
+		expect(client.sftp).not.toHaveBeenCalled();
+	});
+
+	it("tries SFTP first when nobody probed, and falls back when it cannot be opened", async () => {
+		const agent = localAgent();
+		const { files, client } = posixRemote();
+
+		expect(await uploadAgentBinary(client, agent.path, target, "linux")).toBe("exec");
+
+		expect(client.sftp).toHaveBeenCalledTimes(1);
+		expect(files.get(target)?.bytes?.equals(agent.bytes)).toBe(true);
+	});
+
+	it.each([
+		[
+			"bytes that did not all arrive",
+			(input: Buffer) => input.subarray(0, input.length - 1),
+			`${64 * 1024 - 1} of ${64 * 1024} bytes arrived`,
+		],
+		[
+			"bytes whose SHA-256 is not the local binary's",
+			(input: Buffer) => Buffer.concat([input.subarray(1), Buffer.from([(input[0] ?? 0) ^ 1])]),
+			"its SHA-256 is not the local binary's",
+		],
+	] as const)(
+		"refuses %s, removes them, and leaves the agent as it was",
+		async (_name, transform, said) => {
+			const agent = localAgent();
+			const { files, client, commands } = posixRemote(transform);
+
+			const error = await uploadAgentBinary(client, agent.path, target, "linux", refused).catch(
+				(error: unknown) => error,
+			);
+
+			expect((error as Error).message).toMatch(
+				new RegExp(
+					"^Could not upload the agent: the server does not offer SFTP \\(Unable to start subsystem: sftp\\), " +
+						"and the upload over the SSH command channel failed too: Could not upload the agent to " +
+						`\\S+\\.partial: ${said.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+				),
+			);
+			expect([...files]).toEqual([
+				[target, { content: "old agent", bytes: Buffer.from("old agent"), mode: 0o755 }],
+			]);
+			expect(commands().some((command) => command.startsWith("rm -f -- "))).toBe(true);
+			expect(commands().some((command) => command.includes(" mv -f "))).toBe(false);
+		},
+	);
+
+	it("refuses bytes it cannot check", async () => {
+		const agent = localAgent();
+		const files = new Map<string, RemoteFile & { bytes?: Buffer }>();
+		const remote = posixExecRemote(files);
+		const client = makeExecClient(
+			(command) =>
+				command.startsWith("sha256sum ")
+					? { stdout: "", stderr: "sha256sum: not found", exitCode: 127 }
+					: remote.onExec(command),
+			remote.onUpload,
+		);
+
+		await expect(uploadAgentBinary(client, agent.path, target, "linux", refused)).rejects.toThrow(
+			/\.partial: its SHA-256 could not be computed there: exit 127: sha256sum: not found$/,
+		);
+		expect([...files.keys()]).toEqual([]);
+	});
+
+	it("keeps SFTP where the probe found it offered", async () => {
+		const files = new Map<string, RemoteFile>();
+		const sftp = makeMockSftp({ files });
+		const client = makeSftpClient(sftp);
+
+		expect(
+			await uploadAgentBinary(client, "/local/binary", target, "linux", { offered: true }),
+		).toBe("sftp");
+
+		expect(sftp.fastPut).toHaveBeenCalledTimes(1);
+		expect([...files]).toEqual([[target, { content: "/local/binary", mode: 0o755 }]]);
+	});
+
+	it("writes a Windows agent in place, then checks its SHA-256, without SFTP", async () => {
+		const agent = localAgent();
+		const windowsTarget = "C:\\Users\\u\\AppData\\Local\\lasterm\\lasterm-agent.exe";
+		let stored: Buffer | undefined;
+		const hashCommand = (() => {
+			const recorder = makeMockClient({});
+			void getRemoteSha256(recorder, windowsTarget, "windows");
+			return vi.mocked(recorder.exec).mock.calls[0]?.[0] ?? "";
+		})();
+		const client = makeExecClient(
+			(command) =>
+				command === hashCommand && stored !== undefined
+					? {
+							stdout: `${createHash("sha256").update(stored).digest("hex").toUpperCase()}\r\n`,
+							stderr: "",
+							exitCode: 0,
+						}
+					: { stdout: "", stderr: "", exitCode: 1 },
+			(command, input) => {
+				expect(command).toBe(windowsUploadCommand(windowsTarget));
+				stored = input;
+				return { stdout: String(input.length), stderr: "", exitCode: 0 };
+			},
+		);
+
+		expect(await uploadAgentBinary(client, agent.path, windowsTarget, "windows", refused)).toBe(
+			"exec",
+		);
+
+		expect(stored?.equals(agent.bytes)).toBe(true);
+		expect(client.sftp).not.toHaveBeenCalled();
+		expect(vi.mocked(client.exec).mock.calls.map(([command]) => command)).toEqual([
+			windowsUploadCommand(windowsTarget),
+			hashCommand,
+		]);
+	});
+
+	it("says what PowerShell said when the Windows write fails, without its CLIXML", async () => {
+		const agent = localAgent();
+		const client = makeExecClient(
+			() => ({ stdout: "", stderr: "", exitCode: 1 }),
+			() => ({
+				stdout: "",
+				stderr:
+					'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' +
+					'<S S="Error">Exception calling "Create" with "1" argument(s): "Access to the path is denied."_x000D__x000A_</S>' +
+					'<S S="Error">At line:1 char:1_x000D__x000A_</S></Objs>',
+				exitCode: 1,
+			}),
+		);
+
+		await expect(
+			uploadAgentBinary(
+				client,
+				agent.path,
+				"C:\\Program Files\\lasterm\\a.exe",
+				"windows",
+				refused,
+			),
+		).rejects.toThrow(
+			'Could not upload the agent to C:\\Program Files\\lasterm\\a.exe: exit 1: Exception calling "Create" with "1" argument(s): "Access to the path is denied." At line:1 char:1',
+		);
+	});
+
+	it.each([
+		"C:\\Users\\Jean Dupont\\AppData\\Local\\lasterm\\lasterm-agent.exe",
+		'C:\\Users\\O\'Brien "x"\\AppData\\Local\\lasterm\\lasterm-agent.exe',
+		"C:\\Users\\a%PATH%b\\AppData\\Local\\lasterm\\lasterm-agent.exe",
+		"C:\\Users\\$env:USERNAME`$(whoami)\\lasterm\\lasterm-agent.exe",
+		"C:\\Users\\Zoë 日本\\AppData\\Local\\lasterm\\lasterm-agent.exe",
+	])("passes the Windows path %s to the write script as Base64 data", (path) => {
+		const command = windowsUploadCommand(path);
+		expect(command.startsWith(ENCODED_POWERSHELL)).toBe(true);
+		// Nothing cmd.exe or PowerShell would read as anything but a word.
+		expect(command.slice(ENCODED_POWERSHELL.length)).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+		const encodedPath = Buffer.from(path, "utf8").toString("base64");
+		expect(decodePowerShell(command)).toBe(
+			[
+				"$ErrorActionPreference='Stop'",
+				`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'))`,
+				"$d=[IO.Path]::GetDirectoryName($p)",
+				"if($d){[void][IO.Directory]::CreateDirectory($d)}",
+				"$i=[Console]::OpenStandardInput()",
+				"$o=[IO.File]::Create($p)",
+				"try{$i.CopyTo($o);$n=$o.Length}finally{$o.Dispose()}",
+				"[Console]::Out.Write($n)",
+			].join(";"),
+		);
+		const inner = decodePowerShell(command).match(/FromBase64String\('([^']*)'\)/)?.[1] ?? "";
+		expect(Buffer.from(inner, "base64").toString("utf8")).toBe(path);
+	});
+
+	it("quotes the POSIX temporary path for the shell", () => {
+		expect(
+			posixUploadCommand("/home/Jean Dupont/.local/bin/.lasterm-agent.0123456789abcdef.partial"),
+		).toBe(
+			"mkdir -p -- '/home/Jean Dupont/.local/bin' && umask 077 && " +
+				"cat > '/home/Jean Dupont/.local/bin/.lasterm-agent.0123456789abcdef.partial' && " +
+				"wc -c < '/home/Jean Dupont/.local/bin/.lasterm-agent.0123456789abcdef.partial'",
+		);
+		expect(posixUploadCommand("/home/o'b/.x.partial")).toBe(
+			"mkdir -p -- '/home/o'\\''b' && umask 077 && cat > '/home/o'\\''b/.x.partial' && wc -c < '/home/o'\\''b/.x.partial'",
+		);
+	});
+
+	/** PowerShell 7's own modules, when it is installed: what a pwsh parent puts first on PSModulePath. */
+	function powerShell7Modules(): string | null {
+		const home = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSHOME"], {
+			encoding: "utf8",
+		});
+		if (home.status !== 0) return null;
+		const modules = join(home.stdout.trim(), "Modules");
+		return existsSync(join(modules, "Microsoft.PowerShell.Utility")) ? modules : null;
+	}
+
+	// The command as a Windows host runs it: through cmd.exe, Win32-OpenSSH's
+	// default, and through a PowerShell DefaultShell (#714). A temporary
+	// directory with spaces, a quote, `%`, `$`, braces and non-ASCII in its name,
+	// and a level that does not exist yet.
+	it.runIf(process.platform === "win32").each(["cmd.exe", "powershell.exe"] as const)(
+		"writes and checks a Windows agent through %s",
+		{ timeout: 60_000 },
+		async (shell) => {
+			const agent = localAgent(
+				Buffer.concat([Buffer.from([...Array(256).keys()]), randomBytes(3 * 1024 * 1024)]),
+			);
+			const dir = join(cacheDir, "Zoë O'Brien %PATH% $x {y} 日本");
+			const windowsTarget = join(dir, "lasterm", "lasterm-agent.exe");
+			mkdirSync(dir);
+			const client = localWindowsClient(shell);
+
+			expect(await uploadAgentBinary(client, agent.path, windowsTarget, "windows", refused)).toBe(
+				"exec",
+			);
+
+			expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
+			expect(client.sftp).not.toHaveBeenCalled();
+		},
+	);
+
+	// Started from PowerShell 7, as under a pwsh DefaultShell (#714), Windows
+	// PowerShell finds 7's Microsoft.PowerShell.Utility first and does not know
+	// Get-FileHash: the check must not need it.
+	it.runIf(process.platform === "win32")(
+		"checks a Windows agent with PowerShell 7's modules first on PSModulePath",
+		{ timeout: 60_000 },
+		async (context) => {
+			const modules = powerShell7Modules();
+			if (modules === null) context.skip();
+			const env: NodeJS.ProcessEnv = {};
+			for (const [name, value] of Object.entries(process.env)) {
+				if (name.toLowerCase() !== "psmodulepath") env[name] = value;
+			}
+			env.PSModulePath = `${modules};${process.env.PSModulePath ?? ""}`;
+			const agent = localAgent();
+			const windowsTarget = join(cacheDir, "pwsh parent", "lasterm-agent.exe");
+			const client = localWindowsClient("cmd.exe", env);
+
+			expect(await uploadAgentBinary(client, agent.path, windowsTarget, "windows", refused)).toBe(
+				"exec",
+			);
+
+			expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
+		},
+	);
+});
+
+describe("probeSftp", () => {
+	it("says SFTP is offered once the subsystem answers, and closes it", async () => {
+		const sftp = makeMockSftp();
+		const client = makeSftpClient(sftp);
+		expect(await probeSftp(client)).toEqual({ offered: true });
+		expect(sftp.end).toHaveBeenCalledTimes(1);
+	});
+
+	it("says what refused it", async () => {
+		const client = makeSftpClient(makeMockSftp(), new Error("Unable to start subsystem: sftp"));
+		expect(await probeSftp(client)).toEqual({
+			offered: false,
+			reason: "Unable to start subsystem: sftp",
+		});
+	});
+
+	it("takes no answer for a refusal, and closes a session that answers too late", async () => {
+		const sftp = makeMockSftp();
+		let late: (err: Error | undefined, session: SFTPWrapper) => void = () => {};
+		const client = {
+			sftp: vi.fn((cb: typeof late) => {
+				late = cb;
+			}),
+		} as unknown as SshClient;
+
+		expect(await probeSftp(client, 20)).toEqual({
+			offered: false,
+			reason: "no answer within 0.02 s",
+		});
+		late(undefined, sftp);
+		expect(sftp.end).toHaveBeenCalledTimes(1);
+	});
+
+	it("says why when the connection is already gone", async () => {
+		const client = {
+			sftp: vi.fn(() => {
+				throw new Error("Not connected");
+			}),
+		} as unknown as SshClient;
+		expect(await probeSftp(client)).toEqual({ offered: false, reason: "Not connected" });
 	});
 });
 
@@ -1350,7 +2003,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect((error as DeployError).code).toBe("AGENT_NOT_AVAILABLE");
 	});
 
-	it("deploys binary when os/arch auto-detected (host record has nulls)", async () => {
+	it("E7 deploys binary when os/arch auto-detected (host record has nulls)", async () => {
 		writeCachedAgentBinary("linux", "arm64");
 
 		const sftp = makeMockSftp();
@@ -1388,6 +2041,10 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		);
 
 		const result = await deployAgentIfNeeded(client, { os: null, arch: null }, makeOptions());
+		const commands = vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd);
+		expect(commands[0]).toBe("uname -sm");
+		expect(commands.filter((cmd) => cmd === "uname -sm")).toHaveLength(1);
+		expect(commands[1]).toBe("which lasterm-agent");
 
 		expect(result.deployed).toBe(true);
 		expect(result.remoteMatchesHubVersionCache).toBe(false);
@@ -1395,7 +2052,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect(result.arch).toBe("arm64");
 	});
 
-	it("throws when OS/arch cannot be detected and they are unknown", async () => {
+	it("E7 throws when OS/arch cannot be detected and they are unknown", async () => {
 		const client = makeMockClient({
 			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
@@ -1426,6 +2083,11 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		await expect(
 			deployAgentIfNeeded(client, { os: null, arch: null }, makeOptions()),
 		).rejects.toThrow("Cannot detect remote OS/arch");
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+			"uname -sm",
+			"echo %PROCESSOR_ARCHITECTURE%",
+		]);
+		expect(client.sftp).not.toHaveBeenCalled();
 	});
 
 	it("names a system no agent is built for instead of calling it undetectable (#401)", async () => {
@@ -1461,53 +2123,227 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		).rejects.toThrow("No Lasterm agent is built for this system (Linux armv7l)");
 	});
 
-	it("uses windows path for windows host", async () => {
-		const binaryName = agentCacheName("windows", "x64");
-		writeCachedAgentBinary("windows", "x64");
-
+	it.each([
+		["E1 fresh Windows install", "C:\\Users\\u\\AppData\\Local"],
+		["E2 non-ASCII profile", "C:\\Users\\Rémi\\AppData\\Local"],
+		["E8 drive-root folder", "C:\\"],
+		["ASCII apostrophe profile", "C:\\Users\\O'Brien\\AppData\\Local"],
+		...["‘", "’", "‚", "‛", "[", "]", "`"].map((character) => [
+			`literal profile ${character}`,
+			`C:\\Users\\a${character}b\\AppData\\Local`,
+		]),
+	])("%s", async (_edge, folder) => {
+		const local = writeCachedAgentBinary("windows", "x64");
 		const sftp = makeMockSftp();
-		const sftpImpl = (cb: (err: Error | undefined, sftp: SFTPWrapper) => void): void => {
-			cb(undefined, sftp);
-		};
 		const client = makeMockClient(
 			{
-				"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-				"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-				'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
-					stdout: "",
-					stderr: "",
-					exitCode: 1,
-				},
-				'test -x "/usr/local/bin/lasterm-agent" && echo "/usr/local/bin/lasterm-agent"': {
-					stdout: "",
-					stderr: "",
-					exitCode: 1,
-				},
-				'test -x "/usr/bin/lasterm-agent" && echo "/usr/bin/lasterm-agent"': {
-					stdout: "",
-					stderr: "",
-					exitCode: 1,
-				},
-				'test -x "/opt/lasterm/lasterm-agent" && echo "/opt/lasterm/lasterm-agent"': {
-					stdout: "",
-					stderr: "",
-					exitCode: 1,
-				},
+				[folderCommand("LocalApplicationData")]: folderOutput(folder),
 			},
-			sftpImpl,
+			(cb) => cb(undefined, sftp),
 		);
-
 		const result = await deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions());
-
+		const path = `${folder.endsWith("\\") ? folder : `${folder}\\`}lasterm\\lasterm-agent.exe`;
+		expect(result.remotePath).toBe(path);
 		expect(result.deployed).toBe(true);
-		expect(result.remoteMatchesHubVersionCache).toBe(false);
-		expect(result.remotePath).toBe("%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe");
-		expect(sftp.fastPut).toHaveBeenCalledWith(
-			join(cacheDir, binaryName),
-			"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
+		expect(sftp.mkdir).toHaveBeenCalledExactlyOnceWith(
+			path.slice(0, path.lastIndexOf("\\")),
 			expect.any(Function),
 		);
+		expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(local, path, expect.any(Function));
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+			"where lasterm-agent",
+			folderCommand("LocalApplicationData"),
+			`if exist "${path}" echo ok`,
+			folderCommand("ProgramFiles"),
+		]);
 	});
+
+	it.each([
+		["non-zero exit", { stdout: "", stderr: " denied ", exitCode: 2 }, "exit 2: denied"] as const,
+		...[
+			"",
+			"YQ",
+			"YQ==junk",
+			"____",
+			"//8=",
+			"YR==",
+			"YQ==\nYQ==",
+			Buffer.from("C:\\u").toString("base64").replace(/=+$/, ""),
+			Buffer.from("C:\\ÿÿ").toString("base64").replaceAll("/", "_").replaceAll("+", "-"),
+			"QzpcdR==",
+			`${Buffer.from("C:\\u").toString("base64")}#`,
+			Buffer.concat([Buffer.from("C:\\"), Buffer.from([0xff])]).toString("base64"),
+		].map(
+			(stdout) =>
+				[
+					`invalid encoding ${stdout}`,
+					{ stdout, stderr: "", exitCode: 0 },
+					"unexpected output",
+				] as const,
+		),
+		...["", "C:\\a\nb", "C:\\a\u007fb"].map(
+			(path) =>
+				[`invalid path ${JSON.stringify(path)}`, folderOutput(path), "unexpected output"] as const,
+		),
+		...(
+			[
+				["C:\\Users\\a%[\\AppData\\Local", "contains a character cmd.exe expands"],
+				["C:\\Users\\a!’\\AppData\\Local", "contains a character cmd.exe expands"],
+				['C:\\Users\\a"[\\AppData\\Local', "contains a double quote"],
+				["%LOCALAPPDATA%", "contains a character cmd.exe expands"],
+				["C:\\!TEMP!", "contains a character cmd.exe expands"],
+				["C:\\%TEMP%", "contains a character cmd.exe expands"],
+				["C:\\Users\\a!b\\AppData\\Local", "contains a character cmd.exe expands"],
+				["C:\\Users\\a%b\\AppData\\Local", "contains a character cmd.exe expands"],
+				['C:\\a"b', "contains a double quote"],
+				["C:/Users/u/AppData/Local", "not a drive path with backslashes"],
+				["Users\\u", "not a drive path with backslashes"],
+				["relative", "not a drive path with backslashes"],
+				['relative%"', "contains a character cmd.exe expands"],
+				['relative"', "contains a double quote"],
+				['C:\\Users\\a%"\\AppData\\Local', "contains a character cmd.exe expands"],
+				["\\\\server\\share", "not a drive path with backslashes"],
+				["\\\\server\\share\\u", "not a drive path with backslashes"],
+			] as const
+		).map(
+			([path, why]) =>
+				[
+					`unsupported path ${path}`,
+					folderOutput(path),
+					`unsupported path ${path} (${why})`,
+				] as const,
+		),
+	])("E3 rejects %s before SFTP", async (_name, output, reason) => {
+		writeCachedAgentBinary("windows", "x64");
+		const client = makeMockClient({ [folderCommand("LocalApplicationData")]: output });
+		const error = await deployAgentIfNeeded(
+			client,
+			{ os: "windows", arch: "x64" },
+			makeOptions(),
+		).catch((error: unknown) => error);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toBe(
+			`Could not determine the LocalAppData directory of the Windows host: ${reason}`,
+		);
+		expect(client.sftp).not.toHaveBeenCalled();
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+			"where lasterm-agent",
+			folderCommand("LocalApplicationData"),
+			folderCommand("ProgramFiles"),
+			folderCommand("LocalApplicationData"),
+		]);
+	});
+
+	it.each([true, false])(
+		"retries a failed LocalAppData lookup once (second succeeds: %s)",
+		async (succeeds) => {
+			const local = writeCachedAgentBinary("windows", "x64");
+			const folder = "C:\\Users\\u\\AppData\\Local";
+			const path = `${folder}\\lasterm\\lasterm-agent.exe`;
+			const responses = {
+				[folderCommand("LocalApplicationData")]: { stdout: "", stderr: "first", exitCode: 1 },
+			};
+			const sftp = makeMockSftp();
+			const openSftp = vi.fn((cb: (err: Error | undefined, sftp: SFTPWrapper) => void) =>
+				cb(undefined, sftp),
+			);
+			const client = makeMockClient(responses, openSftp);
+			const exec = vi.mocked(client.exec).getMockImplementation();
+			if (!exec) throw new Error("Missing mock exec implementation");
+			let lookups = 0;
+			vi.mocked(client.exec).mockImplementation((cmd, cb) => {
+				if (cmd === folderCommand("LocalApplicationData") && ++lookups === 2) {
+					responses[cmd] = succeeds
+						? folderOutput(folder)
+						: { stdout: "", stderr: "second", exitCode: 2 };
+				}
+				return exec(cmd, cb);
+			});
+			const deployment = deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions());
+			if (succeeds) {
+				expect((await deployment).remotePath).toBe(path);
+				expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(local, path, expect.any(Function));
+			} else {
+				const error = await deployment.catch((error: unknown) => error);
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).toBe(
+					"Could not determine the LocalAppData directory of the Windows host: exit 2: second",
+				);
+				expect(openSftp).not.toHaveBeenCalled();
+			}
+			expect(lookups).toBe(2);
+		},
+	);
+
+	it("E3 preserves an sshExec rejection before SFTP", async () => {
+		writeCachedAgentBinary("windows", "x64");
+		const client = makeMockClient({});
+		vi.mocked(client.exec).mockImplementation((_cmd, cb) => {
+			(cb as (err: Error) => void)(new Error("Connection reset"));
+			return client;
+		});
+		await expect(
+			deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions()),
+		).rejects.toThrow("LocalAppData directory of the Windows host: Connection reset");
+		expect(client.sftp).not.toHaveBeenCalled();
+	});
+
+	it("E3 preserves an sshExec timeout before SFTP", async () => {
+		writeCachedAgentBinary("windows", "x64");
+		const client = makeMockClient({});
+		vi.mocked(client.exec).mockImplementation((cmd, cb) => {
+			if (cmd === folderCommand("LocalApplicationData")) {
+				(cb as SshExecCallback)(undefined, new MockSshStream());
+			} else {
+				(cb as (err: Error) => void)(new Error("unavailable"));
+			}
+			return client;
+		});
+		vi.useFakeTimers();
+		try {
+			const rejection = expect(
+				deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions()),
+			).rejects.toThrow(
+				`LocalAppData directory of the Windows host: SSH exec timed out after 10000ms: ${folderCommand("LocalApplicationData")}`,
+			);
+			await vi.advanceTimersByTimeAsync(20000);
+			await rejection;
+			expect(client.sftp).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each(["Rémi", "O'Brien", "a`b[1]\\O’Brien'x"])(
+		"E4 hashes the agent at the resolved LocalAppData candidate for %s",
+		async (profile) => {
+			const folder = `C:\\Users\\${profile}\\AppData\\Local\\`;
+			const path = `${folder}lasterm\\lasterm-agent.exe`;
+			const hash = "a".repeat(64);
+			const encodedPath = Buffer.from(path, "utf8").toString("base64");
+			const script = expectedHashScript(encodedPath);
+			const hashCommand = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+			const client = makeMockClient({
+				[folderCommand("LocalApplicationData")]: folderOutput(folder),
+				[`if exist "${path}" echo ok`]: { stdout: "ok\r\n", stderr: "", exitCode: 0 },
+				[hashCommand]: { stdout: hash, stderr: "", exitCode: 0 },
+			});
+			const result = await deployAgentIfNeeded(
+				client,
+				{ os: "windows", arch: "x64" },
+				makeOptions({ pinnedSha256: hash }),
+			);
+			expect(result.remotePath).toBe(path);
+			expect(vi.mocked(client.exec).mock.calls[3]?.[0]).toBe(hashCommand);
+			expect(client.sftp).not.toHaveBeenCalled();
+			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+				"where lasterm-agent",
+				folderCommand("LocalApplicationData"),
+				`if exist "${path}" echo ok`,
+				hashCommand,
+			]);
+		},
+	);
 });
 
 // ---------- getBinaryCacheDir ------------------------------------------------
@@ -1569,17 +2405,23 @@ describe("getRemoteSha256", () => {
 		expect(result).toBe(hash);
 	});
 
-	it("parses PowerShell Get-FileHash output on Windows", async () => {
-		const hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	it("passes the Windows path as Base64 data inside an encoded literal-path hash script", async () => {
+		const path = "C:\\Users\\a`b[1]\\O’Brien'x\\lasterm\\lasterm-agent.exe";
+		const encodedPath = Buffer.from(path, "utf8").toString("base64");
+		const script = expectedHashScript(encodedPath);
+		const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+		const command = `${prefix}${Buffer.from(script, "utf16le").toString("base64")}`;
+		const hash = "abcdef01".repeat(8);
 		const client = makeMockClient({
-			"powershell -c": {
-				stdout: `${hash}\n`,
-				stderr: "",
-				exitCode: 0,
-			},
+			[command]: { stdout: `${hash.toUpperCase()} trailing output\r\n`, stderr: "", exitCode: 0 },
 		});
-		const result = await getRemoteSha256(client, "C:\\lasterm\\lasterm-agent.exe", "windows");
-		expect(result).toBe(hash);
+		expect(await getRemoteSha256(client, path, "windows")).toBe(hash);
+		const sent = vi.mocked(client.exec).mock.calls[0]?.[0] ?? "";
+		expect(sent).toBe(command);
+		const decodedScript = Buffer.from(sent.slice(prefix.length), "base64").toString("utf16le");
+		expect(decodedScript).toBe(script);
+		const inner = decodedScript.match(/FromBase64String\('([^']*)'\)/)?.[1] ?? "";
+		expect(Buffer.from(inner, "base64").toString("utf8")).toBe(path);
 	});
 
 	it("returns null when command exits with non-zero", async () => {

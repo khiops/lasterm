@@ -90,17 +90,21 @@ export class StateBroadcaster {
 		hostId: string,
 	): Pick<
 		SessionStateMessage,
-		"outdatedAgent" | "otherOwnerChannels" | "connectedThroughRemoteDaemon"
+		"outdatedAgent" | "otherOwnerChannels" | "connectedThroughRemoteDaemon" | "sftpUnavailable"
 	> {
 		const agent = this.ctx.agents.get(hostId);
 		const connectedThroughRemoteDaemon =
 			agent instanceof SshAgent && agent.connected && agent.usedRemoteDaemon;
+		// A fact of the server its connection reached, said for as long as that
+		// connection is the host's (#722).
+		const sftpUnavailable = agent instanceof SshAgent && agent.sftpSupport?.offered === false;
 		const outdatedAgent = this.outdatedAgentOn(hostId);
 		const otherOwnerChannels = this.otherOwnerChannelsOn(hostId);
 		return {
 			...(connectedThroughRemoteDaemon && { connectedThroughRemoteDaemon: true }),
 			...(outdatedAgent !== null && { outdatedAgent }),
 			...(otherOwnerChannels !== null && { otherOwnerChannels }),
+			...(sftpUnavailable && { sftpUnavailable: true }),
 		};
 	}
 

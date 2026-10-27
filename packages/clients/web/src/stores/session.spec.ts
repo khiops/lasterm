@@ -745,3 +745,29 @@ describe("daemon connection facts", () => {
 		expect(hosts.isConnectedThroughRemoteDaemon("box")).toBe(false);
 	});
 });
+
+describe("a server that offers no SFTP (#722)", () => {
+	it("is remembered from SESSION_STATE and STATE_SYNC, and forgotten when they stop saying it", async () => {
+		await useSessionStore().connect();
+		const hosts = useHostsStore();
+		const ws = wsHarness.instances[0];
+		const state = {
+			type: "SESSION_STATE",
+			sessionId: "s",
+			hostId: "router",
+			status: "active",
+		} as const;
+		ws?.emit({ ...state, sftpUnavailable: true });
+		expect(hosts.isSftpUnavailable("router")).toBe(true);
+		ws?.emit(state);
+		expect(hosts.isSftpUnavailable("router")).toBe(false);
+		ws?.emit({ ...state, sftpUnavailable: true });
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [{ sessionId: "s2", hostId: "nas", status: "active", sftpUnavailable: true }],
+			channels: [],
+		});
+		expect(hosts.isSftpUnavailable("router")).toBe(false);
+		expect(hosts.isSftpUnavailable("nas")).toBe(true);
+	});
+});

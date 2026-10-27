@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.3](https://github.com/khiops/lasterm/compare/v0.14.2...v0.14.3) (2026-10-27)
+
+
+### Bug Fixes
+
+* **root:** strip node.exe's signature before building the Windows hub ([#719](https://github.com/khiops/lasterm/issues/719)) ([5794256](https://github.com/khiops/lasterm/commit/5794256921ce7d18ea98b4803eea76d955d5dcea)), closes [#718](https://github.com/khiops/lasterm/issues/718)
+
+## [0.14.2](https://github.com/khiops/lasterm/compare/v0.14.1...v0.14.2) (2026-10-27)
+
+
+### Bug Fixes
+
+* **hub:** create every missing directory before the agent upload ([#712](https://github.com/khiops/lasterm/issues/712)) ([00cfc5f](https://github.com/khiops/lasterm/commit/00cfc5f0990b4cbd2dda282500f2ca325a987317))
+* **hub:** deploy the Windows agent to the host's real LocalAppData ([#716](https://github.com/khiops/lasterm/issues/716)) ([70bc085](https://github.com/khiops/lasterm/commit/70bc0850552f264da737d0ff379906c8102d620d))
+
 ## [0.14.1](https://github.com/khiops/lasterm/compare/v0.14.0...v0.14.1) (2026-10-26)
 
 

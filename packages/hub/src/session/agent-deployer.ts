@@ -1,9 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { createReadStream, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { HostArch, HostOs } from "@lasterm/shared";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
-import type { SFTPWrapper, Client as SshClient } from "ssh2";
+import type { ClientChannel, SFTPWrapper, Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
 import { detectSea } from "../sea-addon-loader.js";
 import {
@@ -109,6 +109,12 @@ export interface DeployOptions {
 	fetchAgentBinary?: AgentBinaryFetcher;
 	detectSea?: () => boolean;
 	hubVersion?: string;
+	/**
+	 * Whether the server offers SFTP, as the connection's probe found (#722), or
+	 * the probe still running. An upload waits for it; without it, SFTP is tried
+	 * first.
+	 */
+	sftp?: SftpSupport | Promise<SftpSupport>;
 }
 
 export interface DeployResult {
@@ -132,10 +138,82 @@ const COMMON_AGENT_PATHS_UNIX = [
 	"/opt/lasterm/lasterm-agent",
 ];
 
-const COMMON_AGENT_PATHS_WINDOWS = [
-	"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
-	"%ProgramFiles%\\lasterm\\lasterm-agent.exe",
+type KnownFolder = "LocalApplicationData" | "ProgramFiles";
+type FolderResult = { path: string } | { reason: string };
+type FolderResolver = (folder: KnownFolder) => Promise<FolderResult>;
+
+const COMMON_AGENT_PATHS_WINDOWS: readonly [KnownFolder, string][] = [
+	["LocalApplicationData", "lasterm\\lasterm-agent.exe"],
+	["ProgramFiles", "lasterm\\lasterm-agent.exe"],
 ];
+
+/**
+ * A Windows path the deployer may use: drive-absolute, with no `%` or `!` (cmd.exe expands them
+ * in the probe and the launch; SFTP does not), no `"` (it would end cmd.exe's quoting) and no
+ * control character. PowerShell receives the path only as data, in getRemoteSha256. Accepting
+ * the refused characters is #714.
+ */
+function isWindowsPath(path: string): boolean {
+	return /^[A-Za-z]:\\/.test(path) && !/[%!"\p{Cc}]/u.test(path);
+}
+
+function joinWindowsPath(folder: string, relative: string): string {
+	return `${folder}${folder.endsWith("\\") ? "" : "\\"}${relative}`;
+}
+
+/**
+ * Ask the Windows host where a known folder is. PowerShell prints it as Base64 of its UTF-8
+ * bytes, so a non-ASCII profile survives the console code page. Never throws.
+ */
+async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promise<FolderResult> {
+	try {
+		const { stdout, stderr, exitCode } = await sshExec(
+			client,
+			`powershell -NoProfile -NonInteractive -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Environment]::GetFolderPath('${folder}')))"`,
+		);
+		if (exitCode !== 0) return { reason: `exit ${exitCode}: ${stderr.trim()}` };
+		const encoded = stdout.trim();
+		if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
+			return { reason: "unexpected output" };
+		}
+		const bytes = Buffer.from(encoded, "base64");
+		if (bytes.toString("base64") !== encoded) return { reason: "unexpected output" };
+		let path: string;
+		try {
+			path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		} catch {
+			return { reason: "unexpected output" };
+		}
+		if (!path || /\p{Cc}/u.test(path)) return { reason: "unexpected output" };
+		if (!isWindowsPath(path)) {
+			const why = /[%!]/.test(path)
+				? "contains a character cmd.exe expands"
+				: path.includes('"')
+					? "contains a double quote"
+					: "not a drive path with backslashes";
+			return { reason: `unsupported path ${path} (${why})` };
+		}
+		return { path: path.replace(/\\+$/, "") + (/^[A-Za-z]:\\+$/.test(path) ? "\\" : "") };
+	} catch (error) {
+		return { reason: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/** Known-folder lookups for one deployment: one in flight per folder; only a success is kept. */
+function knownFolderResolver(client: SshClient): FolderResolver {
+	const results = new Map<KnownFolder, Promise<FolderResult>>();
+	return (folder) => {
+		let result = results.get(folder);
+		if (!result) {
+			result = resolveKnownFolder(client, folder).then((resolved) => {
+				if (!("path" in resolved)) results.delete(folder);
+				return resolved;
+			});
+			results.set(folder, result);
+		}
+		return result;
+	};
+}
 
 const STRICT_SEMVER = /^\d+\.\d+\.\d+$/;
 
@@ -193,55 +271,58 @@ async function resolveLocalAgentBinary(
  * Check if lasterm-agent exists on the remote host.
  * Returns the remote path if found, null otherwise.
  */
-export async function checkRemoteAgent(client: SshClient): Promise<string | null> {
-	// 1. Try which (Linux/macOS)
+export async function checkRemoteAgent(
+	client: SshClient,
+	os: HostOs,
+	resolveFolder: FolderResolver = knownFolderResolver(client),
+): Promise<string | null> {
 	try {
-		const { stdout, exitCode } = await sshExec(client, "which lasterm-agent");
+		const { stdout, exitCode } = await sshExec(
+			client,
+			os === "windows" ? "where lasterm-agent" : "which lasterm-agent",
+		);
 		if (exitCode === 0) {
-			const p = stdout.trim();
-			if (p) return p;
+			const path =
+				os === "windows"
+					? stdout
+							.trim()
+							.split(/\r?\n/)
+							.map((line) => line.trim())
+							.find((line) => line && isWindowsPath(line))
+					: stdout.trim();
+			if (path) return path;
 		}
 	} catch {
-		// ignore — fall through
+		// Continue with the common paths.
 	}
 
-	// 2. Try where (Windows)
-	try {
-		const { stdout, exitCode } = await sshExec(client, "where lasterm-agent");
-		if (exitCode === 0) {
-			const firstLine = stdout.split(/\r?\n/)[0]?.trim();
-			if (firstLine) return firstLine;
+	if (os === "windows") {
+		// `if exist` is a cmd.exe built-in; this fallback is for cmd.exe sessions only.
+		for (const [folder, relative] of COMMON_AGENT_PATHS_WINDOWS) {
+			const resolved = await resolveFolder(folder);
+			if (!("path" in resolved)) continue;
+			const path = joinWindowsPath(resolved.path, relative);
+			if (!isWindowsPath(path)) continue;
+			try {
+				const { stdout, exitCode } = await sshExec(client, `if exist "${path}" echo ok`);
+				if (exitCode === 0 && stdout.trim() === "ok") return path;
+			} catch {
+				// Continue with the next candidate.
+			}
 		}
-	} catch {
-		// ignore — fall through
-	}
-
-	// 3. Try common Unix paths via test -x
-	for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
-		try {
-			const { stdout: resolved, exitCode } = await sshExec(
-				client,
-				`test -x "${rawPath}" && echo "${rawPath}"`,
-			);
-			if (exitCode === 0 && resolved.trim()) return resolved.trim();
-		} catch {
-			// ignore
-		}
-	}
-
-	// 4. Try common Windows paths
-	// NOTE: `if exist` is a cmd.exe built-in and will fail if the remote shell
-	// is PowerShell. The `where` check above (step 2) already covers the common
-	// case; this loop is a best-effort fallback for cmd.exe sessions only.
-	for (const rawPath of COMMON_AGENT_PATHS_WINDOWS) {
-		try {
-			const { stdout, exitCode } = await sshExec(client, `if exist "${rawPath}" echo ok`);
-			if (exitCode === 0 && stdout.trim() === "ok") return rawPath;
-		} catch {
-			// ignore
+	} else {
+		for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
+			try {
+				const { stdout, exitCode } = await sshExec(
+					client,
+					`test -x "${rawPath}" && echo "${rawPath}"`,
+				);
+				if (exitCode === 0 && stdout.trim()) return stdout.trim();
+			} catch {
+				// Continue with the next candidate.
+			}
 		}
 	}
-
 	return null;
 }
 
@@ -314,6 +395,56 @@ function openSftp(client: SshClient): Promise<SFTPWrapper> {
 			if (err) reject(err);
 			else resolve(sftp);
 		});
+	});
+}
+
+/** Whether a server offers the SFTP subsystem, and if not, what said so. */
+export type SftpSupport =
+	| { readonly offered: true }
+	| { readonly offered: false; readonly reason: string };
+
+/** How long the probe waits for the server's SFTP to answer before taking it as absent. */
+export const SFTP_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Ask once whether the server offers SFTP: open the subsystem, and close it as
+ * soon as it answers (#722). Never rejects.
+ *
+ * A server without it (`Subsystem sftp` removed, a dropbear without
+ * sftp-server, some appliances) refuses the request, and the agent then
+ * travels over an exec channel instead. ssh2 hands back no channel whose
+ * subsystem was refused, so that one stays open, idle, until the connection
+ * ends; nothing asks for SFTP again on that connection.
+ */
+export function probeSftp(
+	client: SshClient,
+	timeoutMs: number = SFTP_PROBE_TIMEOUT_MS,
+): Promise<SftpSupport> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const settle = (support: SftpSupport): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(support);
+		};
+		const timer = setTimeout(
+			() => settle({ offered: false, reason: `no answer within ${timeoutMs / 1000} s` }),
+			timeoutMs,
+		);
+		try {
+			client.sftp((err, sftp) => {
+				if (err) {
+					settle({ offered: false, reason: err.message });
+					return;
+				}
+				// The probe only asks; an upload opens its own session.
+				sftp.end();
+				settle({ offered: true });
+			});
+		} catch (err) {
+			settle({ offered: false, reason: err instanceof Error ? err.message : String(err) });
+		}
 	});
 }
 
@@ -501,8 +632,12 @@ async function sweepStaleUploads(client: SshClient, remotePath: string): Promise
 	}
 }
 
+/** How the agent reached the remote: SFTP, or an exec channel's stdin (#722). */
+export type AgentUploadTransport = "sftp" | "exec";
+
 /**
- * Upload the agent binary to the remote host via SFTP.
+ * Upload the agent binary to the remote host: over SFTP where the server
+ * offers it, over an exec channel otherwise (#722).
  *
  * On a POSIX remote the binary is written beside the target under a
  * temporary name, made executable, and only then renamed over it (#555). A
@@ -518,14 +653,55 @@ async function sweepStaleUploads(client: SshClient, remotePath: string): Promise
  * exits with its connection, so nothing is running from the file, and the
  * rename would not help anyway: Windows refuses to replace a running
  * executable, and the `mv` fallback is a POSIX shell's.
+ *
+ * SFTP stays the first choice. The exec channel is used when the connection's
+ * probe found no SFTP (`sftp`), or when SFTP cannot be opened; it carries the
+ * same steps, and checks the bytes that arrived against the local binary's
+ * SHA-256 before anything is made executable or moved into place. When both
+ * fail, the error names both.
  */
 export async function uploadAgentBinary(
 	client: SshClient,
 	localPath: string,
 	remotePath: string,
 	os: HostOs,
+	sftp?: SftpSupport | Promise<SftpSupport>,
+): Promise<AgentUploadTransport> {
+	const support = await sftp;
+	// Null once SFTP carried the upload; otherwise why it could not.
+	const sftpFailure =
+		support?.offered === false
+			? `the server does not offer SFTP (${support.reason})`
+			: await openSftp(client).then(
+					(session) => uploadOverSftp(client, session, localPath, remotePath, os).then(() => null),
+					(error: unknown) => `SFTP could not be opened (${describeError(error)})`,
+				);
+	if (sftpFailure === null) return "sftp";
+	console.error(
+		`[lasterm-ssh] agent upload: ${sftpFailure}; sending it over the SSH command channel`,
+	);
+	try {
+		await uploadOverExec(client, localPath, remotePath, os);
+	} catch (error) {
+		throw new Error(
+			`Could not upload the agent: ${sftpFailure}, and the upload over the SSH command channel failed too: ${describeError(error)}`,
+			{ cause: error },
+		);
+	}
+	return "exec";
+}
+
+function describeError(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function uploadOverSftp(
+	client: SshClient,
+	sftp: SFTPWrapper,
+	localPath: string,
+	remotePath: string,
+	os: HostOs,
 ): Promise<void> {
-	const sftp = await openSftp(client);
 	try {
 		const parentDir = remotePath.includes("/")
 			? remotePath.slice(0, remotePath.lastIndexOf("/"))
@@ -573,6 +749,237 @@ export async function uploadAgentBinary(
 }
 
 /**
+ * How long an upload over an exec channel may go without moving a byte before
+ * it is given up. Not a bound on the whole upload, which takes what the link
+ * needs: a lost connection closes the channel, and that ends it too.
+ */
+const EXEC_UPLOAD_STALL_MS = 60_000;
+
+/**
+ * A PowerShell script as a command line that cmd.exe and a PowerShell
+ * `DefaultShell` both pass on unchanged: `-EncodedCommand` takes Base64 of its
+ * UTF-16LE text (#714).
+ */
+function encodedPowerShell(script: string): string {
+	return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+}
+
+/**
+ * The PowerShell statement that sets `$p` to `path`, which travels as Base64 of
+ * its UTF-8 bytes: quotes, `%`, `$`, spaces and non-ASCII reach it as data.
+ */
+function powerShellPathVariable(path: string): string {
+	const encodedPath = Buffer.from(path, "utf8").toString("base64");
+	return `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'))`;
+}
+
+/**
+ * The command that writes what arrives on its stdin to `temp` (beside the
+ * agent, whose directory it creates first), readable by its owner only, and
+ * prints how many bytes it wrote. `cat` copies bytes as they are.
+ */
+export function posixUploadCommand(temp: string): string {
+	const cut = temp.lastIndexOf("/");
+	const dir = cut === -1 ? "." : temp.slice(0, cut) || "/";
+	const file = quotePosix(temp);
+	return `mkdir -p -- ${quotePosix(dir)} && umask 077 && cat > ${file} && wc -c < ${file}`;
+}
+
+/**
+ * The command that writes what arrives on its stdin to `remotePath` on a
+ * Windows host, creating its missing directories (#712), and prints how many
+ * bytes it wrote. It runs under cmd.exe and under a PowerShell `DefaultShell`
+ * alike, and the path reaches it only as Base64.
+ */
+export function windowsUploadCommand(remotePath: string): string {
+	return encodedPowerShell(
+		[
+			"$ErrorActionPreference='Stop'",
+			powerShellPathVariable(remotePath),
+			"$d=[IO.Path]::GetDirectoryName($p)",
+			"if($d){[void][IO.Directory]::CreateDirectory($d)}",
+			"$i=[Console]::OpenStandardInput()",
+			"$o=[IO.File]::Create($p)",
+			"try{$i.CopyTo($o);$n=$o.Length}finally{$o.Dispose()}",
+			"[Console]::Out.Write($n)",
+		].join(";"),
+	);
+}
+
+/** What a remote command said on stderr, without PowerShell's CLIXML wrapping, and short. */
+function readableStderr(stderr: string): string {
+	let text = stderr;
+	if (text.trimStart().startsWith("#< CLIXML")) {
+		text = [...text.matchAll(/<S S="Error">(.*?)<\/S>/g)]
+			.map((match) => (match[1] ?? "").replace(/_x000D__x000A_/g, " "))
+			.join("");
+	}
+	text = text.replace(/\s+/g, " ").trim();
+	return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+function exitFailure(exitCode: number | null, stderr: string): Error {
+	const said = readableStderr(stderr);
+	const how =
+		exitCode === null
+			? "the channel closed before the command said how it ended"
+			: `exit ${exitCode}`;
+	return new Error(said === "" ? how : `${how}: ${said}`);
+}
+
+/**
+ * Run `command` with the local file on its stdin, and say how it ended: its
+ * exit code, or null when the channel closed without one (a lost connection).
+ */
+function execWithFileOnStdin(
+	client: SshClient,
+	command: string,
+	localPath: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+	return new Promise((resolve, reject) => {
+		const onChannel = (err: Error | undefined, stream: ClientChannel): void => {
+			if (err) {
+				reject(err);
+				return;
+			}
+			const stdout: Buffer[] = [];
+			const stderr: Buffer[] = [];
+			let exitCode: number | null = null;
+			let settled = false;
+			let stall: ReturnType<typeof setTimeout> | undefined;
+			const file = createReadStream(localPath);
+			const finish = (): void => {
+				settled = true;
+				clearTimeout(stall);
+				file.unpipe(stream);
+				file.destroy();
+			};
+			// Said at once: a host that stopped answering may never confirm the close.
+			const giveUp = (error: Error): void => {
+				if (settled) return;
+				finish();
+				stream.close();
+				reject(error);
+			};
+			const moved = (): void => {
+				if (settled) return;
+				clearTimeout(stall);
+				stall = setTimeout(
+					() =>
+						giveUp(
+							new Error(
+								`nothing moved for ${EXEC_UPLOAD_STALL_MS / 1000} s, so the upload was given up`,
+							),
+						),
+					EXEC_UPLOAD_STALL_MS,
+				);
+			};
+			moved();
+			stream.on("data", (chunk: Buffer) => {
+				moved();
+				stdout.push(chunk);
+			});
+			stream.stderr.on("data", (chunk: Buffer) => {
+				moved();
+				stderr.push(chunk);
+			});
+			stream.on("exit", (code: unknown) => {
+				if (typeof code === "number") exitCode = code;
+			});
+			// What ended it is said by the close that always follows.
+			stream.on("error", () => {});
+			stream.on("close", (code: unknown) => {
+				if (settled) return;
+				finish();
+				resolve({
+					stdout: Buffer.concat(stdout).toString("utf8"),
+					stderr: Buffer.concat(stderr).toString("utf8"),
+					exitCode: exitCode ?? (typeof code === "number" ? code : null),
+				});
+			});
+			file.on("data", moved);
+			file.on("end", moved);
+			file.on("error", giveUp);
+			file.pipe(stream);
+		};
+		try {
+			client.exec(command, onChannel);
+		} catch (error) {
+			reject(error);
+		}
+	});
+}
+
+/** Remove a remote file over exec, whatever happens: this only ever cleans up after a failure. */
+async function execUnlinkQuietly(client: SshClient, remotePath: string): Promise<void> {
+	try {
+		await sshExec(client, `rm -f -- ${quotePosix(remotePath)}`);
+	} catch {
+		// Left for sweepStaleUploads.
+	}
+}
+
+/**
+ * Stream the binary to `remotePath` over the exec channel, then check that
+ * every byte arrived (`wc -c`, or the length PowerShell wrote) and that their
+ * SHA-256 is the local binary's, before anything runs them.
+ */
+async function writeOverExec(
+	client: SshClient,
+	localPath: string,
+	command: string,
+	remotePath: string,
+	os: HostOs,
+): Promise<void> {
+	const size = statSync(localPath).size;
+	const { stdout, stderr, exitCode } = await execWithFileOnStdin(client, command, localPath);
+	if (exitCode !== 0) throw exitFailure(exitCode, stderr);
+	const counted = /^\s*(\d+)\s*$/.exec(stdout)?.[1];
+	if (counted === undefined) throw new Error("the remote did not say how many bytes it wrote");
+	if (Number(counted) !== size) throw new Error(`${counted} of ${size} bytes arrived`);
+	const localSha = getLocalSha256(localPath);
+	const hashed = await hashRemoteFile(client, remotePath, os);
+	if (!("sha256" in hashed)) {
+		throw new Error(`its SHA-256 could not be computed there: ${hashed.reason}`);
+	}
+	if (hashed.sha256 !== localSha) throw new Error("its SHA-256 is not the local binary's");
+}
+
+/** The exec channel's version of `uploadOverSftp`: the same steps, the bytes on stdin. */
+async function uploadOverExec(
+	client: SshClient,
+	localPath: string,
+	remotePath: string,
+	os: HostOs,
+): Promise<void> {
+	if (os === "windows") {
+		try {
+			await writeOverExec(client, localPath, windowsUploadCommand(remotePath), remotePath, os);
+		} catch (err) {
+			throw new Error(`Could not upload the agent to ${remotePath}: ${describeError(err)}`, {
+				cause: err,
+			});
+		}
+		return;
+	}
+
+	await sweepStaleUploads(client, remotePath);
+	const temp = uploadTempPath(remotePath);
+	let step = `upload the agent to ${temp}`;
+	try {
+		await writeOverExec(client, localPath, posixUploadCommand(temp), temp, os);
+		step = `make ${temp} executable`;
+		const { stderr, exitCode } = await sshExec(client, `chmod 755 -- ${quotePosix(temp)}`);
+		if (exitCode !== 0) throw exitFailure(exitCode, stderr);
+		step = `move the agent into place at ${remotePath}`;
+		await execRename(client, temp, remotePath);
+	} catch (err) {
+		await execUnlinkQuietly(client, temp);
+		throw new Error(`Could not ${step}: ${describeError(err)}`, { cause: err });
+	}
+}
+
+/**
  * Resolve the remote home directory by running echo $HOME via SSH.
  * Falls back to "~" if the command fails or returns the literal $HOME.
  */
@@ -593,25 +1000,24 @@ async function resolveRemoteHome(client: SshClient): Promise<string> {
  * Determine the remote install path for the agent binary.
  * Expands ~ using the actual remote home directory.
  */
-async function resolveRemotePath(client: SshClient, os: HostOs): Promise<string> {
+async function resolveRemotePath(
+	client: SshClient,
+	os: HostOs,
+	resolveFolder: FolderResolver,
+): Promise<string> {
 	if (os === "windows") {
-		return "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe";
+		const folder = await resolveFolder("LocalApplicationData");
+		if (!("path" in folder)) {
+			throw new Error(
+				`Could not determine the LocalAppData directory of the Windows host: ${folder.reason}`,
+			);
+		}
+		return joinWindowsPath(folder.path, "lasterm\\lasterm-agent.exe");
 	}
 	const home = await resolveRemoteHome(client);
 	return `${home}/.local/bin/lasterm-agent`;
 }
 
-/**
- * Full auto-deploy flow.
- *
- * 1. Check if lasterm-agent is already on the remote host.
- * 2. If not found, detect OS/arch (or use known values from host record).
- * 3. Locate the correct pre-built binary in the local binary cache.
- * 4. Upload via SFTP.
- *
- * Auto-deploy is best-effort — callers should catch errors and fall back
- * to attempting lasterm-agent --stdio directly.
- */
 /**
  * Full auto-deploy flow with SHA256 integrity verification and TOFU support.
  *
@@ -642,22 +1048,20 @@ export async function deployAgentIfNeeded(
 	} = options;
 	const hubVersion = options.hubVersion ?? HUB_VERSION;
 
-	// 1. Check if agent is already present on the remote host
-	const existingPath = await checkRemoteAgent(client);
+	let os = host.os;
+	let arch = host.arch;
+	if (!os || !arch) {
+		const read = await readRemoteSystem(client);
+		const detected = read?.parsed;
+		if (!detected) throw noAgentTargetError(read);
+		os = detected.os;
+		arch = detected.arch;
+	}
+	const resolveFolder = knownFolderResolver(client);
+	const existingPath = await checkRemoteAgent(client, os, resolveFolder);
 
 	if (existingPath) {
 		// --- Branch A: agent already exists ---
-
-		// 1a. Detect OS/arch if not known (needed for SHA256 + binary name)
-		let os = host.os;
-		let arch = host.arch;
-		if (!os || !arch) {
-			const read = await readRemoteSystem(client);
-			const detected = read?.parsed;
-			if (!detected) throw noAgentTargetError(read);
-			os = detected.os;
-			arch = detected.arch;
-		}
 
 		// 1b. Compute remote SHA256
 		const remoteSha = await getRemoteSha256(client, existingPath, os);
@@ -682,7 +1086,7 @@ export async function deployAgentIfNeeded(
 			// A daemon may be running from existingPath; the upload goes beside it
 			// and is renamed over it, so the daemon keeps running the old version
 			// until someone replaces it (#456, #555).
-			await uploadAgentBinary(client, localBinary, existingPath, os);
+			await uploadAgentBinary(client, localBinary, existingPath, os, options.sftp);
 			onAgentUpdated?.(hostId);
 			// Refresh the pin to the newly uploaded binary's hash so the next
 			// reconnect without local cache doesn't trigger another mismatch prompt.
@@ -762,17 +1166,6 @@ export async function deployAgentIfNeeded(
 
 	// --- Branch B: agent not found — fresh deploy ---
 
-	// 2. Detect OS/arch if not already known from the host record
-	let os = host.os;
-	let arch = host.arch;
-	if (!os || !arch) {
-		const read = await readRemoteSystem(client);
-		const detected = read?.parsed;
-		if (!detected) throw noAgentTargetError(read);
-		os = detected.os;
-		arch = detected.arch;
-	}
-
 	// 3. Locate the binary in the local cache
 	const localBinary = await resolveLocalAgentBinary(os, arch, options, hubVersion);
 	if (localBinary === null) {
@@ -784,10 +1177,10 @@ export async function deployAgentIfNeeded(
 	}
 
 	// 4. Determine remote install path (expands ~ using remote $HOME)
-	const remotePath = await resolveRemotePath(client, os);
+	const remotePath = await resolveRemotePath(client, os, resolveFolder);
 
-	// 5. Upload via SFTP (fastPut handles large binaries efficiently)
-	await uploadAgentBinary(client, localBinary, remotePath, os);
+	// 5. Upload: SFTP where the server offers it, else over an exec channel (#722)
+	await uploadAgentBinary(client, localBinary, remotePath, os, options.sftp);
 
 	return { deployed: true, remoteMatchesHubVersionCache: false, remotePath, os, arch };
 }
@@ -799,35 +1192,60 @@ export function getBinaryCacheDir(): string {
 
 /**
  * Compute the SHA256 hash of a remote file by running sha256sum (Linux/macOS)
- * or PowerShell's Get-FileHash (Windows) over SSH.
+ * or .NET's SHA256 under PowerShell (Windows) over SSH.
  * Returns the lowercase hex digest, or null on failure.
+ *
+ * Not Get-FileHash: Windows PowerShell autoloads it from the first
+ * Microsoft.PowerShell.Utility on PSModulePath, and with PowerShell 7's first,
+ * as a pwsh parent leaves it (a pwsh `DefaultShell`, #714, or the GitHub
+ * Windows runner), it does not know the command (#722).
  */
 export async function getRemoteSha256(
 	client: SshClient,
 	remotePath: string,
 	os: HostOs,
 ): Promise<string | null> {
+	const hashed = await hashRemoteFile(client, remotePath, os);
+	return "sha256" in hashed ? hashed.sha256 : null;
+}
+
+/** The PowerShell script that prints the lowercase SHA-256 of `path`, with .NET alone. */
+export function windowsHashScript(path: string): string {
+	return [
+		"$ErrorActionPreference='Stop'",
+		powerShellPathVariable(path),
+		"$s=[IO.File]::OpenRead($p)",
+		"try{$h=[Security.Cryptography.SHA256]::Create().ComputeHash($s)}finally{$s.Dispose()}",
+		"[BitConverter]::ToString($h).Replace('-','').ToLower()",
+	].join(";");
+}
+
+/** `getRemoteSha256`, saying why when there is no hash: what the command said, or its error. */
+async function hashRemoteFile(
+	client: SshClient,
+	remotePath: string,
+	os: HostOs,
+): Promise<{ sha256: string } | { reason: string }> {
 	try {
-		const escapedPath =
-			os === "windows" ? remotePath.replace(/'/g, "''") : remotePath.replace(/'/g, "'\\''");
+		const escapedPath = remotePath.replace(/'/g, "'\\''");
 		let cmd: string;
 		if (os === "windows") {
-			cmd = `powershell -c "(Get-FileHash '${escapedPath}' -Algorithm SHA256).Hash.ToLower()"`;
+			cmd = encodedPowerShell(windowsHashScript(remotePath));
 		} else if (os === "darwin") {
 			// macOS ships shasum (not sha256sum); same output format: "hash  filename"
 			cmd = `shasum -a 256 '${escapedPath}'`;
 		} else {
 			cmd = `sha256sum '${escapedPath}'`;
 		}
-		const { stdout, exitCode } = await sshExec(client, cmd);
-		if (exitCode !== 0) return null;
+		const { stdout, stderr, exitCode } = await sshExec(client, cmd);
+		if (exitCode !== 0) return { reason: exitFailure(exitCode, stderr).message };
 		const trimmed = stdout.trim();
 		// sha256sum: "hash  filename" — take first 64 hex chars
 		// PowerShell: just the hash on one line
-		const match = trimmed.match(/^([a-f0-9]{64})/i);
-		return match?.[1]?.toLowerCase() ?? null;
-	} catch {
-		return null;
+		const sha256 = trimmed.match(/^([a-f0-9]{64})/i)?.[1]?.toLowerCase();
+		return sha256 !== undefined ? { sha256 } : { reason: "it printed no SHA-256" };
+	} catch (error) {
+		return { reason: describeError(error) };
 	}
 }
 

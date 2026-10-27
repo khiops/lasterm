@@ -246,10 +246,12 @@ export class SessionManager {
 						throw new Error("This host's agent is being stopped.");
 					}
 					agents.set(hostId, agent);
+					// The session went active before this agent was the host's: what
+					// only it knows is said again now (#79, #722).
 					if (
 						agent instanceof SshAgent &&
 						agent.connected &&
-						agent.usedRemoteDaemon &&
+						(agent.usedRemoteDaemon || agent.sftpSupport?.offered === false) &&
 						sessions.get(hostId)?.status === "active"
 					) {
 						this.broadcaster.announceSessionState(hostId);

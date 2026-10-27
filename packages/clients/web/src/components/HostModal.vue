@@ -297,6 +297,10 @@
 									{{ otherOwnerChannels }} terminal{{ otherOwnerChannels === 1 ? "" : "s" }}
 									there. This one leaves them alone.
 								</p>
+								<p v-if="sftpUnavailable" class="field-hint auth-note">
+									This server does not offer SFTP; Lasterm sends its agent over the SSH
+									command channel.
+								</p>
 								<div v-if="outdatedAgent" class="outdated-agent">
 									<p class="outdated-agent__text">
 										This host is served by agent {{ outdatedAgent.running }}; this
@@ -639,6 +643,11 @@ const replaceMessage = ref<string | null>(null);
  */
 const otherOwnerChannels = computed(() =>
 	props.editHost === null ? null : hostsStore.getOtherOwnerChannels(props.editHost.id),
+);
+
+/** Whether this host's SSH server refused SFTP (#722): a note, not an error. */
+const sftpUnavailable = computed(
+	() => props.editHost !== null && hostsStore.isSftpUnavailable(props.editHost.id),
 );
 
 /**

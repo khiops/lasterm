@@ -380,7 +380,13 @@ daemon still running the old binary keeps it, and the host reports that daemon a
 replaces it (#456, #555); the notice then says the new agent is installed and waits for that. A
 temporary a crash left behind is removed by a later upload to the same directory once the remote's own
 clock says it is an hour old: another hub may be uploading there, and its file is always younger (#127,
-#559). A Windows host is written in place: its agent runs on stdio and exits with its connection.
+#559). A Windows host gets the same temporary, and PowerShell moves it into place (#725). Its agent runs on
+stdio and lives as long as its connection, so another hub's session on the same account may be running it,
+and Windows will not overwrite, delete or rename over a running executable, though it renames one: the
+current file is renamed aside (`lasterm-agent.exe.old-<16 hex>`), the upload takes its name, and the running
+agent keeps its image. A move refused by another process holding the file is tried again for about two
+seconds. The same script then deletes every file set aside that nothing runs any more, and every temporary an
+hour old by the remote's clock.
 
 Where the SSH server offers no SFTP (`Subsystem sftp` removed, a dropbear without sftp-server, some
 appliances), the agent travels over an exec channel instead (#722). Each connection asks for the SFTP
@@ -388,8 +394,8 @@ subsystem once, as soon as it is up, and the host's status carries a refusal as 
 (`sftp_unavailable`, PROTOCOL.md § 4.7), before any terminal is asked for. The binary is then streamed on
 the channel's stdin: on a POSIX host to `cat` into the same hidden temporary file (`umask 077`), on Windows
 to a PowerShell `-EncodedCommand` script that receives the path as Base64, creates the missing directories
-and copies stdin into the file, under cmd.exe and a PowerShell `DefaultShell` alike. The byte count and the
-SHA-256 of what arrived are checked against the local binary before the same chmod and rename steps. SFTP
+and copies stdin into the temporary, under cmd.exe and a PowerShell `DefaultShell` alike. The byte count and the
+SHA-256 of what arrived are checked against the local binary before the same steps move it into place. SFTP
 stays the first choice; it is also skipped when it cannot be opened, and an upload that fails both ways
 names both.
 

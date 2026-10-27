@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -6,6 +5,7 @@ import path, { join, resolve } from "node:path";
 import type { SshKeyEntry } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import ssh2 from "ssh2";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import { sanitizeFilename } from "./upload-utils.js";
 
 /** Maximum file size considered when scanning for keys (1 MB). */
@@ -80,7 +80,7 @@ function buildKeyEntry(name: string, filePath: string): SshKeyEntry | null {
 	const { key } = parseResult;
 	const algorithm = mapAlgorithm(key.type);
 	const bits = deriveBits(key);
-	const fingerprint = `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`;
+	const fingerprint = fingerprintOf(key.getPublicSSH());
 	return { name, type: "key", algorithm, bits, fingerprint, encrypted: false, mtime };
 }
 
@@ -251,7 +251,7 @@ export function registerSshKeyRoutes(server: FastifyInstance, sshDir?: string): 
 		}
 		const algorithm = mapAlgorithm(parsed.type);
 		const bits = deriveBits(parsed);
-		const fingerprint = `SHA256:${createHash("sha256").update(parsed.getPublicSSH()).digest("base64")}`;
+		const fingerprint = fingerprintOf(parsed.getPublicSSH());
 		const mtime = statSync(safeTarget).mtime.toISOString();
 		return { name: sanitized, algorithm, bits, fingerprint, encrypted: false, mtime };
 	});

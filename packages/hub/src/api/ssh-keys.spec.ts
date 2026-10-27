@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path, { join } from "node:path";
 import type { FastifyInstance } from "fastify";
+import { utils } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 
@@ -82,6 +84,15 @@ function generateEd25519Key(): Buffer {
 		if (!(ssh2mod.utils.parseKey(key) instanceof Error)) return key;
 	}
 	throw new Error("ssh2 produced no parseable ED25519 key in 20 attempts");
+}
+
+function expectedFingerprint(privateKey: Buffer): string {
+	const parsed = utils.parseKey(privateKey);
+	if (parsed instanceof Error || Array.isArray(parsed)) throw new Error("invalid fixture key");
+	// E7: a 32-byte SHA-256 digest always has exactly one Base64 padding character.
+	const base64 = createHash("sha256").update(parsed.getPublicSSH()).digest("base64");
+	expect(base64).toMatch(/[^=]=$/);
+	return `SHA256:${base64.slice(0, -1)}`;
 }
 
 // --- Test suite -------------------------------------------------------------
@@ -166,7 +177,7 @@ describe("SSH key endpoints", () => {
 			expect(entry?.type).toBe("key");
 			expect(entry?.algorithm).toBe("ED25519");
 			expect(entry?.bits).toBe(256);
-			expect(entry?.fingerprint).toMatch(/^SHA256:/);
+			expect(entry?.fingerprint).toBe(expectedFingerprint(keyBuf));
 		});
 
 		it("lists subdirectories with item count", async () => {
@@ -303,7 +314,7 @@ describe("SSH key endpoints", () => {
 			expect(body.name).toBe("id_ed25519");
 			expect(body.algorithm).toBe("ED25519");
 			expect(body.bits).toBe(256);
-			expect(body.fingerprint).toMatch(/^SHA256:/);
+			expect(body.fingerprint).toBe(expectedFingerprint(keyBuf));
 			expect(body.encrypted).toBe(false);
 		});
 

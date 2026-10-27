@@ -1,5 +1,6 @@
 import { sshAddress, targetRoute } from "../ssh-route.js";
 import { openJumpRoute } from "./jump-connection.js";
+
 /**
  * SshConnectionManager — SSH-specific connection logic:
  *   - auth prompt request/response
@@ -8,7 +9,6 @@ import { openJumpRoute } from "./jump-connection.js";
  *   - test connectivity
  */
 
-import { createHash } from "node:crypto";
 import type {
 	AgentBinaryVerifyMessage,
 	AuthPromptMessage,
@@ -20,6 +20,7 @@ import type {
 } from "@lasterm/shared";
 import { Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import { findHostKeyRevocation } from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
@@ -923,7 +924,7 @@ export function attemptSshTest(
 		// same, so that no connection the hub opens goes without it (#607).
 		...SSH_KEEPALIVE,
 		hostVerifier: ((key: Buffer) => {
-			const fingerprint = `SHA256:${createHash("sha256").update(key).digest("base64")}`;
+			const fingerprint = fingerprintOf(key);
 			revoked = findHostKeyRevocation(fingerprint, names, connectConfig.port ?? 22);
 			if (revoked) return false;
 			if (trusted.has(fingerprint)) return true;

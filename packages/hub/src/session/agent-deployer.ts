@@ -1192,8 +1192,13 @@ export function getBinaryCacheDir(): string {
 
 /**
  * Compute the SHA256 hash of a remote file by running sha256sum (Linux/macOS)
- * or PowerShell's Get-FileHash (Windows) over SSH.
+ * or .NET's SHA256 under PowerShell (Windows) over SSH.
  * Returns the lowercase hex digest, or null on failure.
+ *
+ * Not Get-FileHash: Windows PowerShell autoloads it from the first
+ * Microsoft.PowerShell.Utility on PSModulePath, and with PowerShell 7's first,
+ * as a pwsh parent leaves it (a pwsh `DefaultShell`, #714, or the GitHub
+ * Windows runner), it does not know the command (#722).
  */
 export async function getRemoteSha256(
 	client: SshClient,
@@ -1202,6 +1207,17 @@ export async function getRemoteSha256(
 ): Promise<string | null> {
 	const hashed = await hashRemoteFile(client, remotePath, os);
 	return "sha256" in hashed ? hashed.sha256 : null;
+}
+
+/** The PowerShell script that prints the lowercase SHA-256 of `path`, with .NET alone. */
+export function windowsHashScript(path: string): string {
+	return [
+		"$ErrorActionPreference='Stop'",
+		powerShellPathVariable(path),
+		"$s=[IO.File]::OpenRead($p)",
+		"try{$h=[Security.Cryptography.SHA256]::Create().ComputeHash($s)}finally{$s.Dispose()}",
+		"[BitConverter]::ToString($h).Replace('-','').ToLower()",
+	].join(";");
 }
 
 /** `getRemoteSha256`, saying why when there is no hash: what the command said, or its error. */
@@ -1214,9 +1230,7 @@ async function hashRemoteFile(
 		const escapedPath = remotePath.replace(/'/g, "'\\''");
 		let cmd: string;
 		if (os === "windows") {
-			cmd = encodedPowerShell(
-				`${powerShellPathVariable(remotePath)};(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`,
-			);
+			cmd = encodedPowerShell(windowsHashScript(remotePath));
 		} else if (os === "darwin") {
 			// macOS ships shasum (not sha256sum); same output format: "hash  filename"
 			cmd = `shasum -a 256 '${escapedPath}'`;

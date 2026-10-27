@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Duplex, PassThrough } from "node:stream";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
@@ -202,6 +202,20 @@ function makeSftpClient(
 }
 
 const ENCODED_POWERSHELL = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+
+/**
+ * The Windows hash script, written out: the path as Base64 data, then .NET's
+ * SHA256, with no module to autoload (#722).
+ */
+function expectedHashScript(encodedPath: string): string {
+	return (
+		"$ErrorActionPreference='Stop';" +
+		`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));` +
+		"$s=[IO.File]::OpenRead($p);" +
+		"try{$h=[Security.Cryptography.SHA256]::Create().ComputeHash($s)}finally{$s.Dispose()};" +
+		"[BitConverter]::ToString($h).Replace('-','').ToLower()"
+	);
+}
 
 /** The PowerShell script inside an encoded command line. */
 function decodePowerShell(command: string): string {
@@ -1151,13 +1165,16 @@ class ChildChannel extends Duplex {
  * Win32-OpenSSH does: through cmd.exe by default, or through a PowerShell
  * `DefaultShell` (#714), and which offers no SFTP.
  */
-function localWindowsClient(shell: "cmd.exe" | "powershell.exe"): SshClient {
+function localWindowsClient(
+	shell: "cmd.exe" | "powershell.exe",
+	env: NodeJS.ProcessEnv = process.env,
+): SshClient {
 	return {
 		exec: vi.fn((command: string, cb: (err: Error | undefined, stream: unknown) => void) => {
 			const child =
 				shell === "cmd.exe"
-					? spawn("cmd.exe", ["/c", command], { windowsVerbatimArguments: true })
-					: spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-c", command]);
+					? spawn("cmd.exe", ["/c", command], { windowsVerbatimArguments: true, env })
+					: spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-c", command], { env });
 			cb(undefined, new ChildChannel(child));
 		}),
 		sftp: vi.fn((cb: (err: Error) => void) => cb(new Error("Unable to start subsystem: sftp"))),
@@ -1406,6 +1423,16 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 		);
 	});
 
+	/** PowerShell 7's own modules, when it is installed: what a pwsh parent puts first on PSModulePath. */
+	function powerShell7Modules(): string | null {
+		const home = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSHOME"], {
+			encoding: "utf8",
+		});
+		if (home.status !== 0) return null;
+		const modules = join(home.stdout.trim(), "Modules");
+		return existsSync(join(modules, "Microsoft.PowerShell.Utility")) ? modules : null;
+	}
+
 	// The command as a Windows host runs it: through cmd.exe, Win32-OpenSSH's
 	// default, and through a PowerShell DefaultShell (#714). A temporary
 	// directory with spaces, a quote, `%`, `$`, braces and non-ASCII in its name,
@@ -1428,6 +1455,32 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 
 			expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
 			expect(client.sftp).not.toHaveBeenCalled();
+		},
+	);
+
+	// Started from PowerShell 7, as under a pwsh DefaultShell (#714), Windows
+	// PowerShell finds 7's Microsoft.PowerShell.Utility first and does not know
+	// Get-FileHash: the check must not need it.
+	it.runIf(process.platform === "win32")(
+		"checks a Windows agent with PowerShell 7's modules first on PSModulePath",
+		{ timeout: 60_000 },
+		async (context) => {
+			const modules = powerShell7Modules();
+			if (modules === null) context.skip();
+			const env: NodeJS.ProcessEnv = {};
+			for (const [name, value] of Object.entries(process.env)) {
+				if (name.toLowerCase() !== "psmodulepath") env[name] = value;
+			}
+			env.PSModulePath = `${modules};${process.env.PSModulePath ?? ""}`;
+			const agent = localAgent();
+			const windowsTarget = join(cacheDir, "pwsh parent", "lasterm-agent.exe");
+			const client = localWindowsClient("cmd.exe", env);
+
+			expect(await uploadAgentBinary(client, agent.path, windowsTarget, "windows", refused)).toBe(
+				"exec",
+			);
+
+			expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
 		},
 	);
 });
@@ -2268,7 +2321,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 			const path = `${folder}lasterm\\lasterm-agent.exe`;
 			const hash = "a".repeat(64);
 			const encodedPath = Buffer.from(path, "utf8").toString("base64");
-			const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`;
+			const script = expectedHashScript(encodedPath);
 			const hashCommand = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 			const client = makeMockClient({
 				[folderCommand("LocalApplicationData")]: folderOutput(folder),
@@ -2355,7 +2408,7 @@ describe("getRemoteSha256", () => {
 	it("passes the Windows path as Base64 data inside an encoded literal-path hash script", async () => {
 		const path = "C:\\Users\\a`b[1]\\O’Brien'x\\lasterm\\lasterm-agent.exe";
 		const encodedPath = Buffer.from(path, "utf8").toString("base64");
-		const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`;
+		const script = expectedHashScript(encodedPath);
 		const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand ";
 		const command = `${prefix}${Buffer.from(script, "utf16le").toString("base64")}`;
 		const hash = "abcdef01".repeat(8);

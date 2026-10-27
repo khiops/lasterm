@@ -382,10 +382,21 @@ temporary a crash left behind is removed by a later upload to the same directory
 clock says it is an hour old: another hub may be uploading there, and its file is always younger (#127,
 #559). A Windows host is written in place: its agent runs on stdio and exits with its connection.
 
+Where the SSH server offers no SFTP (`Subsystem sftp` removed, a dropbear without sftp-server, some
+appliances), the agent travels over an exec channel instead (#722). Each connection asks for the SFTP
+subsystem once, as soon as it is up, and the host's status carries a refusal as a note
+(`sftp_unavailable`, PROTOCOL.md § 4.7), before any terminal is asked for. The binary is then streamed on
+the channel's stdin: on a POSIX host to `cat` into the same hidden temporary file (`umask 077`), on Windows
+to a PowerShell `-EncodedCommand` script that receives the path as Base64, creates the missing directories
+and copies stdin into the file, under cmd.exe and a PowerShell `DefaultShell` alike. The byte count and the
+SHA-256 of what arrived are checked against the local binary before the same chmod and rename steps. SFTP
+stays the first choice; it is also skipped when it cannot be opened, and an upload that fails both ways
+names both.
+
 Two properties follow:
 - **The remote host never needs outbound internet** — the *hub* fetches on its behalf, and the binary
-  travels hub → remote over the existing SSH/SFTP channel. Deploying to a remote host is inherently online
-  (it is an SSH connection), so the fetch always has connectivity.
+  travels hub → remote over the existing SSH connection (SFTP, or an exec channel without it). Deploying
+  to a remote host is inherently online (it is an SSH connection), so the fetch always has connectivity.
 - **Bundling every target triple in every installer is unnecessary** (and would bloat installers and defeat
   the fetch-on-demand design), so it is not done.
 

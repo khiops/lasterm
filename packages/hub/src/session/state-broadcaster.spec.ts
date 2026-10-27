@@ -1,7 +1,9 @@
-import type { ProtocolMessage } from "@lasterm/shared";
+import type { Host, ProtocolMessage } from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
+import type { SftpSupport } from "./agent-deployer.js";
 import type { SharedSessionContext } from "./session-context.js";
+import { SshAgent } from "./ssh-agent.js";
 import { StateBroadcaster } from "./state-broadcaster.js";
 
 // ─── Which agent is serving a host ───────────────────────────────────────────
@@ -80,6 +82,55 @@ describe("StateBroadcaster — the agent serving a host", () => {
 			running: "0.0.1-from-an-older-hub",
 			expected: HUB_VERSION,
 		});
+	});
+});
+
+// ─── A server without SFTP ───────────────────────────────────────────────────
+//
+// The hub asks once connected whether the server offers SFTP, and sends its
+// agent over the SSH command channel when it does not (#722). That is a note on
+// the host, not an error: said in its state, and only when SFTP was refused.
+
+function makeSftpBroadcaster(support: SftpSupport | null) {
+	const sent: ProtocolMessage[] = [];
+	const agent = new SshAgent({ id: HOST, type: "ssh", sshHost: "example.test" } as Host);
+	agent.sftpSupport = support;
+	const ctx = {
+		agents: new Map([[HOST, agent]]),
+		sessions: new Map([[HOST, { id: SESSION, hostId: HOST, status: "active" }]]),
+		channels: new Map(),
+		clients: new Map([["c1", { id: "c1", send: (m: ProtocolMessage) => sent.push(m) }]]),
+		metaDal: { updateSessionStatus: vi.fn(), listKilledChannels: () => [] },
+		titleDebounceTimers: new Map(),
+		processTitleDebounceTimers: new Map(),
+		bellTimestamps: new Map(),
+		notificationTimestamps: new Map(),
+		userDisconnectedHosts: new Set(),
+	} as unknown as SharedSessionContext;
+	return { sent, broadcaster: new StateBroadcaster(ctx) };
+}
+
+describe("StateBroadcaster — a server that offers no SFTP (#722)", () => {
+	it("says so in the session's state and in the state a client gets on connect", () => {
+		const { sent, broadcaster } = makeSftpBroadcaster({
+			offered: false,
+			reason: "Unable to start subsystem: sftp",
+		});
+		broadcaster.updateSessionStatus(HOST, SESSION, "active");
+
+		expect(sent.find((m) => m.type === "SESSION_STATE")).toMatchObject({ sftpUnavailable: true });
+		expect(broadcaster.getStateSnapshot().sessions[0]?.sftpUnavailable).toBe(true);
+	});
+
+	it.each([
+		["offered", { offered: true }],
+		["not asked yet", null],
+	] as const)("says nothing when SFTP was %s", (_name, support) => {
+		const { sent, broadcaster } = makeSftpBroadcaster(support);
+		broadcaster.updateSessionStatus(HOST, SESSION, "active");
+
+		expect(sent.find((m) => m.type === "SESSION_STATE")).not.toHaveProperty("sftpUnavailable");
+		expect(broadcaster.getStateSnapshot().sessions[0]).not.toHaveProperty("sftpUnavailable");
 	});
 });
 

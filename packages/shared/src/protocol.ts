@@ -476,6 +476,13 @@ export interface SessionStateMessage {
 	 */
 	outdatedAgent?: { running: string; expected: string };
 	/**
+	 * Set only when the SSH server of the connection serving this host refused
+	 * the SFTP subsystem, as the hub asked once connected (#722). Not an error:
+	 * the hub sends its agent over the SSH command channel instead, and a client
+	 * says so as a note on the host.
+	 */
+	sftpUnavailable?: boolean;
+	/**
 	 * Set only while the host's user has disconnected it (#648): the hub does
 	 * not reach for it again until someone acts on it. Absent from every
 	 * SESSION_STATE sent once they have.
@@ -558,6 +565,8 @@ export interface StateSyncMessage {
 		outdatedAgent?: { running: string; expected: string };
 		/** Set only when other hubs hold channels there. See SessionStateMessage. */
 		otherOwnerChannels?: number;
+		/** Set only when the server refused SFTP. See SessionStateMessage. */
+		sftpUnavailable?: boolean;
 	}>;
 	/**
 	 * The hosts their user disconnected, sessions or not: a host whose

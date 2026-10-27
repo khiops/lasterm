@@ -144,7 +144,10 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 		conn.on("authentication", (ctx) => ctx.accept());
 		conn.on("ready", () => {
 			conn.on("session", (accept) => {
-				accept().on("exec", (acceptExec, _reject, info) => {
+				const session = accept();
+				// An ordinary OpenSSH host: it offers the SFTP the hub asks about once connected (#722).
+				session.on("sftp", (acceptSftp) => acceptSftp());
+				session.on("exec", (acceptExec, _reject, info) => {
 					const stream = acceptExec() as Stream;
 					if (!daemon) {
 						serveAgent(stream);

@@ -10,11 +10,24 @@ const { privateKey } = generateKeyPairSync("rsa", {
 });
 const codes = utils.sftp.STATUS_CODE;
 
-export async function startSftpServer(): Promise<{
+/**
+ * A real ssh2 server on loopback, password-authenticated, whose exec runs
+ * `/bin/sh -c` with the channel on its stdin, and whose SFTP acts on the
+ * filesystem. With `sftp: false` it refuses the subsystem, as a server whose
+ * `sshd_config` has no `Subsystem sftp` does (#722).
+ */
+export async function startSftpServer(options: { sftp?: boolean } = {}): Promise<{
 	port: number;
 	password: string;
+	/** Every command an exec request asked for, in order. */
+	execCommands: string[];
+	/** How many times a client asked for the SFTP subsystem, granted or refused. */
+	sftpRequests: () => number;
 	close: () => Promise<void>;
 }> {
+	const offersSftp = options.sftp ?? true;
+	const execCommands: string[] = [];
+	let sftpRequests = 0;
 	const password = randomBytes(32).toString("hex");
 	const expectedPassword = Buffer.from(password);
 	const clients = new Set<Connection>();
@@ -41,16 +54,26 @@ export async function startSftpServer(): Promise<{
 			client.on("session", (accept) => {
 				const session = accept();
 				session.on("exec", (acceptExec, _reject, info) => {
+					execCommands.push(info.command);
 					const stream = acceptExec();
 					const child = spawn("/bin/sh", ["-c", info.command]);
+					// A command that exits without reading all of it closes its stdin under the pipe.
+					child.stdin.on("error", () => {});
+					stream.pipe(child.stdin);
 					child.stdout.pipe(stream, { end: false });
 					child.stderr.pipe(stream.stderr, { end: false });
 					child.on("close", (code) => {
+						stream.unpipe(child.stdin);
 						stream.exit(code ?? 1);
 						stream.end();
 					});
 				});
-				session.on("sftp", (acceptSftp) => {
+				session.on("sftp", (acceptSftp, rejectSftp) => {
+					sftpRequests++;
+					if (!offersSftp) {
+						rejectSftp();
+						return;
+					}
 					const sftp = acceptSftp();
 					const status = (id: number, error?: unknown) => {
 						// OpenSSH errno_to_portable: https://github.com/openssh/openssh-portable/blob/master/sftp-server.c
@@ -160,6 +183,8 @@ export async function startSftpServer(): Promise<{
 	return {
 		password,
 		port: (server.address() as { port: number }).port,
+		execCommands,
+		sftpRequests: () => sftpRequests,
 		close: async () => {
 			for (const client of clients) client.end();
 			await new Promise<void>((resolve) => server.close(() => resolve()));

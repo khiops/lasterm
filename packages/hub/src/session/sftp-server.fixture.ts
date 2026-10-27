@@ -10,24 +10,43 @@ const { privateKey } = generateKeyPairSync("rsa", {
 });
 const codes = utils.sftp.STATUS_CODE;
 
+export interface SftpServerOptions {
+	sftp?: boolean;
+	closeOnRequest?: {
+		type: "STAT" | "MKDIR" | "OPEN" | "WRITE" | "SETSTAT";
+		occurrence?: number;
+		connection?: boolean;
+	};
+}
+
 /**
  * A real ssh2 server on loopback, password-authenticated, whose exec runs
  * `/bin/sh -c` with the channel on its stdin, and whose SFTP acts on the
  * filesystem. With `sftp: false` it refuses the subsystem, as a server whose
  * `sshd_config` has no `Subsystem sftp` does (#722).
  */
-export async function startSftpServer(options: { sftp?: boolean } = {}): Promise<{
+export async function startSftpServer(options: SftpServerOptions = {}): Promise<{
 	port: number;
 	password: string;
 	/** Every command an exec request asked for, in order. */
 	execCommands: string[];
 	/** How many times a client asked for the SFTP subsystem, granted or refused. */
 	sftpRequests: () => number;
+	closeFirings: () => number;
+	firedRequest: () => string | undefined;
+	sftpClosed: Promise<void>;
 	close: () => Promise<void>;
 }> {
 	const offersSftp = options.sftp ?? true;
 	const execCommands: string[] = [];
 	let sftpRequests = 0;
+	let closeFirings = 0;
+	let firedRequest: string | undefined;
+	let matchingRequests = 0;
+	let channelClosed!: () => void;
+	const sftpClosed = new Promise<void>((resolve) => {
+		channelClosed = resolve;
+	});
 	const password = randomBytes(32).toString("hex");
 	const expectedPassword = Buffer.from(password);
 	const clients = new Set<Connection>();
@@ -75,6 +94,17 @@ export async function startSftpServer(options: { sftp?: boolean } = {}): Promise
 						return;
 					}
 					const sftp = acceptSftp();
+					sftp.once("close", channelClosed);
+					const intercept = (type: string): boolean => {
+						const close = options.closeOnRequest;
+						if (!close || type !== close.type || closeFirings !== 0) return false;
+						if (++matchingRequests !== (close.occurrence ?? 1)) return false;
+						closeFirings++;
+						firedRequest = type;
+						if (close.connection) client.end();
+						else sftp.end();
+						return true;
+					};
 					const status = (id: number, error?: unknown) => {
 						// OpenSSH errno_to_portable: https://github.com/openssh/openssh-portable/blob/master/sftp-server.c
 						const errno = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -97,9 +127,13 @@ export async function startSftpServer(options: { sftp?: boolean } = {}): Promise
 							(error) => status(id, error),
 						);
 					};
-					sftp.on("MKDIR", (id, path) => run(id, () => fs.mkdir(path)));
+					sftp.on("MKDIR", (id, path) => {
+						if (intercept("MKDIR")) return;
+						run(id, () => fs.mkdir(path));
+					});
 					for (const event of ["STAT", "LSTAT"] as const) {
 						sftp.on(event, (id: number, path: string) => {
+							if (intercept(event)) return;
 							void (event === "STAT" ? fs.stat(path) : fs.lstat(path)).then(
 								(stat) =>
 									sftp.attrs(id, {
@@ -115,6 +149,7 @@ export async function startSftpServer(options: { sftp?: boolean } = {}): Promise
 						});
 					}
 					sftp.on("OPEN", (id, path, flags) => {
+						if (intercept("OPEN")) return;
 						const mode = utils.sftp.flagsToString(flags);
 						if (mode === null) {
 							sftp.status(id, codes.BAD_MESSAGE, "Bad message");
@@ -134,26 +169,28 @@ export async function startSftpServer(options: { sftp?: boolean } = {}): Promise
 						if (!result) throw Object.assign(new Error("Bad handle"), { code: "EBADF" });
 						return result;
 					};
-					sftp.on("WRITE", (id, handle, offset, data) =>
+					sftp.on("WRITE", (id, handle, offset, data) => {
+						if (intercept("WRITE")) return;
 						run(id, async () => {
 							let written = 0;
 							while (written < data.length)
 								written += (
 									await file(handle).write(data, written, data.length - written, offset + written)
 								).bytesWritten;
-						}),
-					);
+						});
+					});
 					sftp.on("CLOSE", (id, handle) =>
 						run(id, async () => {
 							await file(handle).close();
 							handles.delete(handle.toString());
 						}),
 					);
-					sftp.on("SETSTAT", (id, path, attrs) =>
+					sftp.on("SETSTAT", (id, path, attrs) => {
+						if (intercept("SETSTAT")) return;
 						run(id, async () => {
 							if (attrs.mode !== undefined) await fs.chmod(path, attrs.mode);
-						}),
-					);
+						});
+					});
 					sftp.on("REMOVE", (id, path) => run(id, () => fs.unlink(path)));
 					for (const event of [
 						"READ",
@@ -185,6 +222,9 @@ export async function startSftpServer(options: { sftp?: boolean } = {}): Promise
 		port: (server.address() as { port: number }).port,
 		execCommands,
 		sftpRequests: () => sftpRequests,
+		closeFirings: () => closeFirings,
+		firedRequest: () => firedRequest,
+		sftpClosed,
 		close: async () => {
 			for (const client of clients) client.end();
 			await new Promise<void>((resolve) => server.close(() => resolve()));

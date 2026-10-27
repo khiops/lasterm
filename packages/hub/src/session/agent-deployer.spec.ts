@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Duplex, PassThrough } from "node:stream";
-import type { SFTPWrapper, Client as SshClient } from "ssh2";
+import type { ClientChannel, SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -121,7 +121,7 @@ function moveRemoteFile(files: Map<string, RemoteFile>, from: string, to: string
 function makeMockSftp(opts: MockSftpOptions = {}): SFTPWrapper {
 	const files = opts.files ?? new Map<string, RemoteFile>();
 	const directories = opts.directories ?? new Set<string>();
-	return {
+	return Object.assign(new EventEmitter(), {
 		stat: vi.fn(
 			(
 				path: string,
@@ -173,7 +173,7 @@ function makeMockSftp(opts: MockSftpOptions = {}): SFTPWrapper {
 			cb(files.delete(path) ? undefined : new Error("No such file"));
 		}),
 		end: vi.fn(),
-	} as unknown as SFTPWrapper;
+	}) as unknown as SFTPWrapper;
 }
 
 /**
@@ -735,6 +735,103 @@ describe("detectRemoteOsArch", () => {
 
 describe("uploadAgentBinary", () => {
 	const target = "/remote/.local/bin/lasterm-agent";
+
+	it.each(["end", "close"] as const)("E7 skips chmod and cleanup after %s", async (event) => {
+		const sftp = makeMockSftp();
+		vi.mocked(sftp.fastPut).mockImplementation((_local, _remote, callback) => {
+			callback(undefined);
+			sftp.emit(event);
+		});
+		await expect(
+			uploadAgentBinary(makeSftpClient(sftp), "/local/binary", target, "linux"),
+		).rejects.toThrow(/Could not make .* executable: .*SFTP channel closed/);
+		expect(sftp.chmod).not.toHaveBeenCalled();
+		expect(sftp.unlink).not.toHaveBeenCalled();
+		expect(sftp.end).toHaveBeenCalledOnce();
+	});
+
+	it.each(["C:\\agent\\binary.exe", "relative/agent.exe"])(
+		"E7 skips parent mkdir and fastPut when already closed: %s",
+		async (path) => {
+			const sftp = makeMockSftp();
+			const client = makeSftpClient(sftp);
+			vi.mocked(client.sftp).mockImplementation((callback) => {
+				callback(undefined, sftp);
+				sftp.emit("close");
+				return client;
+			});
+			await expect(uploadAgentBinary(client, "/local/binary", path, "windows")).rejects.toThrow(
+				/Could not create the directory .*SFTP channel closed/,
+			);
+			expect(sftp.mkdir).not.toHaveBeenCalled();
+			expect(sftp.fastPut).not.toHaveBeenCalled();
+		},
+	);
+
+	it("E7 skips rename when chmod closes the session", async () => {
+		const sftp = makeMockSftp();
+		vi.mocked(sftp.chmod).mockImplementation((_path, _mode, callback) => {
+			callback(undefined);
+			sftp.emit("close");
+		});
+		await expect(
+			uploadAgentBinary(makeSftpClient(sftp), "/local/binary", target, "linux"),
+		).rejects.toThrow(/Could not move the agent into place.*SFTP channel closed/);
+		expect(sftp.ext_openssh_rename).not.toHaveBeenCalled();
+	});
+
+	it("E8 settles an unanswered rename on close", async () => {
+		const files = remoteWithOldAgent();
+		const sftp = makeMockSftp({ files });
+		vi.mocked(sftp.ext_openssh_rename).mockImplementation(() => {
+			queueMicrotask(() => sftp.emit("close"));
+		});
+		await expect(
+			uploadAgentBinary(makeSftpClient(sftp), "/local/binary", target, "linux"),
+		).rejects.toThrow(/Could not move the agent into place.*SFTP channel closed/);
+		expect(sftp.unlink).not.toHaveBeenCalled();
+		expect(files.get(target)?.content).toBe("old agent");
+	});
+
+	it("E9 completes the exec rename after the SFTP channel closes", async () => {
+		const sftp = makeMockSftp({ posixRename: false });
+		const client = makeSftpClient(sftp);
+		const originalExec = vi.mocked(client.exec).getMockImplementation();
+		let renamed = false;
+		vi.mocked(client.exec).mockImplementation((command, callback) => {
+			if (!command.includes("mv -f")) return originalExec?.(command, callback) ?? client;
+			const stream = new MockSshStream();
+			callback(undefined, stream as unknown as ClientChannel);
+			sftp.emit("close");
+			setImmediate(() => {
+				renamed = true;
+				stream.emit("close", 0);
+			});
+			return client;
+		});
+		expect(await uploadAgentBinary(client, "/local/binary", target, "linux")).toBe("sftp");
+		expect(renamed).toBe(true);
+	});
+
+	it("X1 keeps the exec rename error after the SFTP channel closes", async () => {
+		const sftp = makeMockSftp({ posixRename: false });
+		const client = makeSftpClient(sftp);
+		const originalExec = vi.mocked(client.exec).getMockImplementation();
+		vi.mocked(client.exec).mockImplementation((command, callback) => {
+			if (!command.includes("mv -f")) return originalExec?.(command, callback) ?? client;
+			const stream = new MockSshStream();
+			callback(undefined, stream as unknown as ClientChannel);
+			sftp.emit("close");
+			setImmediate(() => {
+				stream.stderr.emit("data", Buffer.from("mv: cannot move"));
+				stream.emit("close", 1);
+			});
+			return client;
+		});
+		const upload = uploadAgentBinary(client, "/local/binary", target, "linux");
+		await expect(upload).rejects.toThrow(/Could not move the agent into place.*mv: cannot move/);
+		await expect(upload).rejects.not.toThrow("SFTP channel closed");
+	});
 
 	/** A remote with an agent already at the target, as an upgrade finds it. */
 	function remoteWithOldAgent(): Map<string, RemoteFile> {

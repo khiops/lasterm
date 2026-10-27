@@ -938,9 +938,11 @@ async function writeOverExec(
 	if (counted === undefined) throw new Error("the remote did not say how many bytes it wrote");
 	if (Number(counted) !== size) throw new Error(`${counted} of ${size} bytes arrived`);
 	const localSha = getLocalSha256(localPath);
-	const remoteSha = await getRemoteSha256(client, remotePath, os);
-	if (remoteSha === null) throw new Error("its SHA-256 could not be computed there");
-	if (remoteSha !== localSha) throw new Error("its SHA-256 is not the local binary's");
+	const hashed = await hashRemoteFile(client, remotePath, os);
+	if (!("sha256" in hashed)) {
+		throw new Error(`its SHA-256 could not be computed there: ${hashed.reason}`);
+	}
+	if (hashed.sha256 !== localSha) throw new Error("its SHA-256 is not the local binary's");
 }
 
 /** The exec channel's version of `uploadOverSftp`: the same steps, the bytes on stdin. */
@@ -1198,6 +1200,16 @@ export async function getRemoteSha256(
 	remotePath: string,
 	os: HostOs,
 ): Promise<string | null> {
+	const hashed = await hashRemoteFile(client, remotePath, os);
+	return "sha256" in hashed ? hashed.sha256 : null;
+}
+
+/** `getRemoteSha256`, saying why when there is no hash: what the command said, or its error. */
+async function hashRemoteFile(
+	client: SshClient,
+	remotePath: string,
+	os: HostOs,
+): Promise<{ sha256: string } | { reason: string }> {
 	try {
 		const escapedPath = remotePath.replace(/'/g, "'\\''");
 		let cmd: string;
@@ -1211,15 +1223,15 @@ export async function getRemoteSha256(
 		} else {
 			cmd = `sha256sum '${escapedPath}'`;
 		}
-		const { stdout, exitCode } = await sshExec(client, cmd);
-		if (exitCode !== 0) return null;
+		const { stdout, stderr, exitCode } = await sshExec(client, cmd);
+		if (exitCode !== 0) return { reason: exitFailure(exitCode, stderr).message };
 		const trimmed = stdout.trim();
 		// sha256sum: "hash  filename" — take first 64 hex chars
 		// PowerShell: just the hash on one line
-		const match = trimmed.match(/^([a-f0-9]{64})/i);
-		return match?.[1]?.toLowerCase() ?? null;
-	} catch {
-		return null;
+		const sha256 = trimmed.match(/^([a-f0-9]{64})/i)?.[1]?.toLowerCase();
+		return sha256 !== undefined ? { sha256 } : { reason: "it printed no SHA-256" };
+	} catch (error) {
+		return { reason: describeError(error) };
 	}
 }
 

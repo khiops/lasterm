@@ -1283,7 +1283,7 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 		);
 
 		await expect(uploadAgentBinary(client, agent.path, target, "linux", refused)).rejects.toThrow(
-			/\.partial: its SHA-256 could not be computed there$/,
+			/\.partial: its SHA-256 could not be computed there: exit 127: sha256sum: not found$/,
 		);
 		expect([...files.keys()]).toEqual([]);
 	});

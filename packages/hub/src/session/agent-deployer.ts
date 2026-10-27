@@ -385,17 +385,81 @@ function noAgentTargetError(read: RemoteSystem | null): Error {
 	);
 }
 
+type SftpSession = {
+	readonly channel: SFTPWrapper;
+	ended: boolean;
+	readonly endedSignal: Promise<void>;
+};
+
 /**
- * Open an SFTP channel from the SSH client.
- * Returns the SFTPWrapper, which must be explicitly closed after use.
+ * openSftp attaches end/close listeners before resolving its session, which
+ * guards upload requests against channel loss. The caller must end its channel.
  */
-function openSftp(client: SshClient): Promise<SFTPWrapper> {
+function openSftp(client: SshClient): Promise<SftpSession> {
 	return new Promise((resolve, reject) => {
-		client.sftp((err, sftp) => {
-			if (err) reject(err);
-			else resolve(sftp);
+		client.sftp((err, channel) => {
+			if (err) {
+				reject(err);
+				return;
+			}
+			let signalEnd!: () => void;
+			const session: SftpSession = {
+				channel,
+				ended: false,
+				endedSignal: new Promise<void>((resolve) => {
+					signalEnd = resolve;
+				}),
+			};
+			const ended = () => {
+				session.ended = true;
+				signalEnd();
+			};
+			channel.on("end", ended);
+			channel.on("close", ended);
+			resolve(session);
 		});
 	});
+}
+
+function sftpClosed(cause?: unknown): Error {
+	return new Error("the SFTP channel closed", { cause });
+}
+
+async function sftpRequest<T>(
+	session: SftpSession,
+	request: (done: (error: Error | undefined | null, value: T) => void) => void,
+	advisory = false,
+): Promise<T> {
+	if (session.ended) throw sftpClosed();
+	let requestError: unknown;
+	const result = new Promise<T>((resolve, reject) => {
+		try {
+			request((error, value) => {
+				requestError = error;
+				if (session.ended) {
+					reject(sftpClosed(error));
+				} else if (error && !advisory) {
+					reject(error);
+				} else resolve(value);
+			});
+		} catch (error) {
+			requestError = error;
+			reject(error);
+		}
+	});
+	try {
+		const value = await Promise.race([
+			result,
+			session.endedSignal.then(() => {
+				throw sftpClosed(requestError);
+			}),
+		]);
+		if (session.ended && advisory) throw sftpClosed(requestError);
+		return value;
+	} catch (error) {
+		if (session.ended) throw sftpClosed(requestError ?? error);
+		throw error;
+	}
 }
 
 /** Whether a server offers the SFTP subsystem, and if not, what said so. */
@@ -450,9 +514,11 @@ export function probeSftp(
 
 /**
  * mkdir -p via SFTP for an absolute POSIX parent, advisory: creates its missing levels, each a
- * literal prefix of it, and returns an error naming every level it could not create. Never throws.
+ * literal prefix of it, and returns an error naming every level it could not create.
+ * sftpMkdir rejects when its session ends or ssh2 throws synchronously.
  */
-async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error | undefined> {
+async function sftpMkdir(sftp: SftpSession, remotePath: string): Promise<Error | undefined> {
+	if (sftp.ended) throw sftpClosed();
 	const separator = remotePath.includes("/") ? "/" : "\\";
 	const levels: string[] = [];
 	for (let end = 1; end <= remotePath.length; end++) {
@@ -462,9 +528,13 @@ async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error |
 		levels.push(level);
 	}
 	const isDirectory = (path: string): Promise<boolean> =>
-		new Promise((resolve) => {
-			sftp.stat(path, (error, attrs) => resolve(!error && attrs.isDirectory()));
-		});
+		sftpRequest(
+			sftp,
+			(done) => {
+				sftp.channel.stat(path, (error, attrs) => done(error, !error && attrs.isDirectory()));
+			},
+			true,
+		);
 	let existing = levels.length - 1;
 	for (const level of [...levels].reverse()) {
 		if (await isDirectory(level)) break;
@@ -472,9 +542,13 @@ async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error |
 	}
 	const failures: { level: string; error: Error }[] = [];
 	for (const level of levels.slice(existing + 1)) {
-		const error = await new Promise<Error | undefined>((resolve) => {
-			sftp.mkdir(level, (error) => resolve(error ?? undefined));
-		});
+		const error = await sftpRequest<Error | undefined>(
+			sftp,
+			(done) => {
+				sftp.channel.mkdir(level, (error) => done(error, error ?? undefined));
+			},
+			true,
+		);
 		if (error && !(await isDirectory(level))) failures.push({ level, error });
 	}
 	if (failures.length === 0) return undefined;
@@ -492,10 +566,14 @@ async function sftpMkdir(sftp: SFTPWrapper, remotePath: string): Promise<Error |
 }
 
 /** One mkdir of a Windows or relative parent, its error ignored: SFTP does not expand these paths (#711). */
-function sftpMkdirOnce(sftp: SFTPWrapper, remotePath: string): Promise<void> {
-	return new Promise((resolve) => {
-		sftp.mkdir(remotePath, () => resolve());
-	});
+function sftpMkdirOnce(sftp: SftpSession, remotePath: string): Promise<void> {
+	return sftpRequest(
+		sftp,
+		(done) => {
+			sftp.channel.mkdir(remotePath, (error) => done(error, undefined));
+		},
+		true,
+	);
 }
 
 /** The transfer error, joined with the directory walk's error when there is one, so neither is lost. */
@@ -512,34 +590,24 @@ function transferFailure(walkError: Error | undefined, transferError: unknown): 
 }
 
 /** Upload a local file to a remote path via SFTP fastPut (streaming — handles large files). */
-function sftpFastPut(sftp: SFTPWrapper, localPath: string, remotePath: string): Promise<void> {
-	return new Promise((resolve, reject) => {
-		sftp.fastPut(localPath, remotePath, (err) => {
-			if (err) reject(err);
-			else resolve();
-		});
+function sftpFastPut(sftp: SftpSession, localPath: string, remotePath: string): Promise<void> {
+	return sftpRequest(sftp, (done) => {
+		sftp.channel.fastPut(localPath, remotePath, (error) => done(error, undefined));
 	});
 }
 
 /** chmod a remote file via SFTP. */
-function sftpChmod(sftp: SFTPWrapper, remotePath: string, mode: number): Promise<void> {
-	return new Promise((resolve, reject) => {
-		sftp.chmod(remotePath, mode, (err) => {
-			if (err) reject(err);
-			else resolve();
-		});
+function sftpChmod(sftp: SftpSession, remotePath: string, mode: number): Promise<void> {
+	return sftpRequest(sftp, (done) => {
+		sftp.channel.chmod(remotePath, mode, (error) => done(error, undefined));
 	});
 }
 
 /** Remove a remote file via SFTP, whatever happens: this only ever cleans up after a failure. */
-function sftpUnlinkQuietly(sftp: SFTPWrapper, remotePath: string): Promise<void> {
-	return new Promise((resolve) => {
-		try {
-			sftp.unlink(remotePath, () => resolve());
-		} catch {
-			resolve();
-		}
-	});
+function sftpUnlinkQuietly(sftp: SftpSession, remotePath: string): Promise<void> {
+	return sftpRequest<void>(sftp, (done) => {
+		sftp.channel.unlink(remotePath, (error) => done(error, undefined));
+	}).catch(() => {});
 }
 
 /**
@@ -550,15 +618,13 @@ function sftpUnlinkQuietly(sftp: SFTPWrapper, remotePath: string): Promise<void>
  * Resolves false when the server does not offer the extension, which ssh2
  * says by throwing before it sends anything.
  */
-function sftpPosixRename(sftp: SFTPWrapper, from: string, to: string): Promise<boolean> {
-	return new Promise((resolve, reject) => {
+function sftpPosixRename(sftp: SftpSession, from: string, to: string): Promise<boolean> {
+	return sftpRequest(sftp, (done) => {
 		try {
-			sftp.ext_openssh_rename(from, to, (err) => {
-				if (err) reject(err);
-				else resolve(true);
-			});
-		} catch {
-			resolve(false);
+			sftp.channel.ext_openssh_rename(from, to, (error) => done(error, true));
+		} catch (error) {
+			if (sftp.ended) throw error;
+			done(undefined, false);
 		}
 	});
 }
@@ -645,8 +711,10 @@ export type AgentUploadTransport = "sftp" | "exec";
  * running executable for writing (ETXTBSY, which SFTP only calls "Failure"),
  * while a rename leaves the running process its own inode and gives the next
  * launch the new file. The target is only ever replaced by a whole, executable
- * file; on any failure the temporary is removed and the target is as it was.
- * A temporary a crash left behind is removed by a later upload, once it is old
+ * file. uploadOverSftp attempts temporary cleanup while its channel is usable;
+ * a lost channel or connection may leave it for sweepStaleUploads. If the channel
+ * is lost during rename, the target is the previous file or the complete new one.
+ * A temporary left behind is removed by a later upload, once it is old
  * enough that nobody can still be writing it (`sweepStaleUploads`).
  *
  * A Windows remote is written in place, as before. Its agent runs on stdio and
@@ -697,7 +765,7 @@ function describeError(error: unknown): string {
 
 async function uploadOverSftp(
 	client: SshClient,
-	sftp: SFTPWrapper,
+	sftp: SftpSession,
 	localPath: string,
 	remotePath: string,
 	os: HostOs,
@@ -712,16 +780,28 @@ async function uploadOverSftp(
 		// paths (#711). Its error is reported only if the transfer then fails.
 		const walkParent = os !== "windows" && parentDir.startsWith("/");
 		let walkError: Error | undefined;
-		if (walkParent) walkError = await sftpMkdir(sftp, parentDir);
-		else if (parentDir && parentDir !== ".") await sftpMkdirOnce(sftp, parentDir);
+		try {
+			if (walkParent) walkError = await sftpMkdir(sftp, parentDir);
+			else if (parentDir && parentDir !== ".") await sftpMkdirOnce(sftp, parentDir);
+		} catch (error) {
+			throw new Error(
+				`Could not create the directory ${parentDir}: ${sftp.ended ? "the SFTP channel closed" : describeError(error)}`,
+				{ cause: error },
+			);
+		}
 
 		if (os === "windows") {
-			// Upload binary using fastPut (streaming — handles large binaries ~120 MB)
-			await sftpFastPut(sftp, localPath, remotePath).catch((error) => {
-				throw transferFailure(walkError, error);
-			});
-			// Make executable (chmod 755) — no-op on Windows but harmless
-			await sftpChmod(sftp, remotePath, 0o755);
+			let step = `upload the agent to ${remotePath}`;
+			try {
+				await sftpFastPut(sftp, localPath, remotePath).catch((error) => {
+					throw transferFailure(walkError, error);
+				});
+				step = `make ${remotePath} executable`;
+				await sftpChmod(sftp, remotePath, 0o755);
+			} catch (error) {
+				if (!sftp.ended) throw error;
+				throw new Error(`Could not ${step}: the SFTP channel closed`, { cause: error });
+			}
 			return;
 		}
 
@@ -740,11 +820,11 @@ async function uploadOverSftp(
 			}
 		} catch (err) {
 			await sftpUnlinkQuietly(sftp, temp);
-			const message = err instanceof Error ? err.message : String(err);
+			const message = describeError(err);
 			throw new Error(`Could not ${step}: ${message}`, { cause: err });
 		}
 	} finally {
-		sftp.end();
+		sftp.channel.end();
 	}
 }
 

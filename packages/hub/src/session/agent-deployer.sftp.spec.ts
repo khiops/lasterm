@@ -2,13 +2,13 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Client } from "ssh2";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { probeSftp, uploadAgentBinary } from "./agent-deployer.js";
-import { startSftpServer } from "./sftp-server.fixture.js";
+import { type SftpServerOptions, startSftpServer } from "./sftp-server.fixture.js";
 
 /** A real ssh2 server on loopback, a client connected to it, and a home directory on disk. */
-function useServer(options: { sftp: boolean }) {
+function useServer(options: SftpServerOptions) {
 	const state: {
 		root: string;
 		home: string;
@@ -16,6 +16,7 @@ function useServer(options: { sftp: boolean }) {
 		target: string;
 		server: Awaited<ReturnType<typeof startSftpServer>> | undefined;
 		client: Client | undefined;
+		connectionClosed?: Promise<void>;
 	} = { root: "", home: "", local: "", target: "", server: undefined, client: undefined };
 	beforeEach(async () => {
 		state.root = makeTempDir("lasterm-sftp-");
@@ -28,6 +29,7 @@ function useServer(options: { sftp: boolean }) {
 		state.server = started;
 		const connection = new Client();
 		state.client = connection;
+		state.connectionClosed = new Promise<void>((resolve) => connection.once("close", resolve));
 		await new Promise<void>((resolve, reject) => {
 			connection.once("ready", resolve).once("error", reject);
 			connection.connect({
@@ -41,9 +43,8 @@ function useServer(options: { sftp: boolean }) {
 	afterEach(async () => {
 		const client = state.client;
 		if (client) {
-			const closed = new Promise<void>((resolve) => client.once("close", resolve));
 			client.destroy();
-			await closed;
+			await state.connectionClosed;
 		}
 		await state.server?.close();
 		await chmod(state.home, 0o700);
@@ -213,3 +214,53 @@ describe.skipIf(process.platform === "win32")(
 		);
 	},
 );
+
+for (const edge of [
+	{ id: "E1", type: "SETSTAT", step: "make .* executable", sentinel: true },
+	{ id: "E2", type: "OPEN", step: "upload the agent to", sentinel: true },
+	{ id: "E3", type: "WRITE", step: "upload the agent to", sentinel: true },
+	{ id: "E4", type: "STAT", step: "create the directory", sentinel: false },
+	{ id: "E5", type: "MKDIR", step: "create the directory", sentinel: false },
+	{ id: "E6", type: "SETSTAT", step: "make .* executable", sentinel: true, connection: true },
+] as const) {
+	describe.skipIf(process.platform === "win32")(`${edge.id} closes on ${edge.type}`, () => {
+		const { state, connected, started } = useServer({
+			closeOnRequest: { type: edge.type, connection: "connection" in edge && edge.connection },
+		});
+		it("rejects the upload at the interrupted step", async () => {
+			if (edge.sentinel) {
+				await mkdir(dirname(state.target), { recursive: true });
+				await writeFile(state.target, "sentinel agent bytes");
+			}
+			if (edge.type === "WRITE") await writeFile(state.local, agentBytes());
+			await expect(
+				uploadAgentBinary(connected(), state.local, state.target, "linux"),
+			).rejects.toThrow(new RegExp(`Could not ${edge.step}.*SFTP channel closed`));
+			expect(started().closeFirings()).toBe(1);
+			expect(started().firedRequest()).toBe(edge.type);
+			if (edge.sentinel) expect(await readFile(state.target, "utf8")).toBe("sentinel agent bytes");
+		}, 10_000);
+	});
+}
+
+describe.skipIf(process.platform === "win32")("E10 successful SFTP teardown", () => {
+	const { state, connected, started } = useServer({});
+	it("does not reject after the upload has finished", async () => {
+		const unhandled: unknown[] = [];
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		const onUnhandled = (error: unknown) => {
+			unhandled.push(error);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			expect(await uploadAgentBinary(connected(), state.local, state.target, "linux")).toBe("sftp");
+			await started().sftpClosed;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(unhandled).toEqual([]);
+			expect(logged).not.toHaveBeenCalled();
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			logged.mockRestore();
+		}
+	}, 10_000);
+});

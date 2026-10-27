@@ -96,7 +96,7 @@ function createHelloDaemon(
 }
 
 function makeMockSftp(): SFTPWrapper {
-	return {
+	return Object.assign(new EventEmitter(), {
 		stat: vi.fn(
 			(
 				_path: string,
@@ -123,7 +123,7 @@ function makeMockSftp(): SFTPWrapper {
 			cb(undefined);
 		}),
 		end: vi.fn(),
-	} as unknown as SFTPWrapper;
+	}) as unknown as SFTPWrapper;
 }
 
 function makeDeployingSshClient(): SshClient {

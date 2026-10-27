@@ -448,6 +448,8 @@ function getTooltip(host: Host): string {
 	if (host.hostGroup) parts.push(`Group: ${host.hostGroup}`);
 	// Offline on purpose: said, since its dot is only hollow (#648).
 	if (hostsStore.getHostStatus(host.id) === "disconnected") parts.push("Disconnected");
+	// A note, not an error: the agent went over the SSH command channel (#722).
+	if (hostsStore.isSftpUnavailable(host.id)) parts.push("No SFTP: agent sent over SSH commands");
 
 	// Channel count
 	const channelCount = getChannelCount(host.id);

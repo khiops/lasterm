@@ -252,6 +252,29 @@ export const useHostsStore = defineStore("hosts", () => {
 		_connectedThroughRemoteDaemon.value = new Map(hostIds.map((id) => [id, true]));
 	}
 
+	/**
+	 * Hosts whose SSH server refused SFTP, as the hub reports it: present while
+	 * it does (#722). Not an error: the hub sends its agent over the SSH command
+	 * channel there, and the host only says so.
+	 */
+	const _sftpUnavailable = ref<Map<string, true>>(new Map());
+
+	function isSftpUnavailable(hostId: string): boolean {
+		return _sftpUnavailable.value.has(hostId);
+	}
+
+	function rememberSftpUnavailable(hostId: string, unavailable: boolean | undefined): void {
+		if ((unavailable === true) === _sftpUnavailable.value.has(hostId)) return;
+		const next = new Map(_sftpUnavailable.value);
+		if (unavailable === true) next.set(hostId, true);
+		else next.delete(hostId);
+		_sftpUnavailable.value = next;
+	}
+
+	function setSftpUnavailable(hostIds: readonly string[]): void {
+		_sftpUnavailable.value = new Map(hostIds.map((id) => [id, true]));
+	}
+
 	function stopKeepingAgent(
 		hostId: string,
 		body: StopKeepingAgentBody,
@@ -573,6 +596,9 @@ export const useHostsStore = defineStore("hosts", () => {
 		isConnectedThroughRemoteDaemon,
 		rememberConnectedThroughRemoteDaemon,
 		setConnectedThroughRemoteDaemon,
+		isSftpUnavailable,
+		rememberSftpUnavailable,
+		setSftpUnavailable,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
 		getOtherOwnerChannels,

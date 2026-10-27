@@ -699,7 +699,8 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     status: "starting" | "active" | "detached" | "disconnected" | "closed",
     outdated_agent?: { running: string, expected: string },  // as in SESSION_STATE
     other_owner_channels?: number,                            // as in SESSION_STATE
-    connected_through_remote_daemon?: boolean                  // as in SESSION_STATE
+    connected_through_remote_daemon?: boolean,                 // as in SESSION_STATE
+    sftp_unavailable?: true                                    // as in SESSION_STATE
   }>,
   channels: Array<{
     channel_id: string,
@@ -744,6 +745,12 @@ absent from `channels` has ended, or is unknown.
   // (§ 3.16, #127). Informational: replacing the agent would end them too. Sent
   // again with the same status once the count is known.
   other_owner_channels?: number,
+  // Only when the SSH server the host's connection reached refused the SFTP
+  // subsystem, which the hub asks once per connection, as soon as it is up (#722).
+  // A note, not an error: the hub sends its agent over an exec channel there
+  // (SPEC.md § 3.5). Said from the first SESSION_STATE of that connection, and
+  // absent once another connection serves the host.
+  sftp_unavailable?: true,
   // Only while the host's user has disconnected it (POST /api/hosts/:id/disconnect,
   // § 6, #648): the hub does not reach for it again until someone acts on it. Every
   // SESSION_STATE of that host carries it until then, and none after: a client takes

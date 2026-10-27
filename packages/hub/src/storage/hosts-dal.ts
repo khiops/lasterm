@@ -8,6 +8,7 @@ import type {
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
+import { normalizeFingerprint } from "../ssh/fingerprint.js";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import type { CreateHostInput } from "./meta-types.js";
@@ -99,10 +100,12 @@ function rowToHost(row: HostRow): Host {
 	if (row.custom_command != null) host.customCommand = row.custom_command;
 	if (row.agent_sha256 != null) host.agentSha256 = row.agent_sha256;
 	// ssh_fingerprint is always set (null = not yet seen)
-	host.sshFingerprint = row.ssh_fingerprint;
+	host.sshFingerprint =
+		row.ssh_fingerprint === null ? null : normalizeFingerprint(row.ssh_fingerprint);
 	if (row.ssh_proxy_host_id != null) host.sshProxyHostId = row.ssh_proxy_host_id;
 	if (row.ssh_proxy_spec != null) host.sshProxySpec = row.ssh_proxy_spec;
-	if (row.ssh_proxy_fingerprint != null) host.sshProxyFingerprint = row.ssh_proxy_fingerprint;
+	if (row.ssh_proxy_fingerprint != null)
+		host.sshProxyFingerprint = normalizeFingerprint(row.ssh_proxy_fingerprint);
 	if (row.ssh_remote_daemon != null) host.sshRemoteDaemon = row.ssh_remote_daemon === 1;
 	return host;
 }

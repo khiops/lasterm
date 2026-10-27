@@ -1,10 +1,11 @@
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HelloMessage, Host } from "@lasterm/shared";
 import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
 
@@ -1007,7 +1008,7 @@ describe("SshAgent — TOFU host key verification", () => {
 				vi.stubEnv("USERPROFILE", home);
 				const agent = new SshAgent(makeHost(port));
 				agents.push(agent);
-				const fingerprint = `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`;
+				const fingerprint = fingerprintOf(key.getPublicSSH());
 				const start = agent.start(
 					trust === "session" ? null : fingerprint,
 					trust === "session" ? fingerprint : undefined,

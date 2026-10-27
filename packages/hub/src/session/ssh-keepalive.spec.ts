@@ -9,7 +9,7 @@
  * host that lost power, or a network cut, looks like from the hub.
  */
 
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { writeFileSync } from "node:fs";
 import net from "node:net";
@@ -25,6 +25,7 @@ import ssh2, { Client, type ConnectConfig, Server, type Server as SshServer } fr
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
@@ -66,7 +67,7 @@ const HOST_FINGERPRINT = (() => {
 	const parsed = ssh2.utils.parseKey(HOST_KEY);
 	if (parsed instanceof Error) throw parsed;
 	const key = Array.isArray(parsed) ? parsed[0] : parsed;
-	return `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`;
+	return fingerprintOf(key.getPublicSSH());
 })();
 
 const HELLO: HelloMessage = {

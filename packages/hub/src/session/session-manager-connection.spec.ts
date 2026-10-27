@@ -62,7 +62,7 @@ const HOST_FINGERPRINT = (() => {
 	const parsed = ssh2.utils.parseKey(HOST_KEY);
 	if (parsed instanceof Error) throw parsed;
 	const key = Array.isArray(parsed) ? parsed[0] : parsed;
-	return `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`;
+	return `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
 })();
 
 afterAll(async () => {
@@ -234,7 +234,9 @@ afterEach(async () => {
 });
 
 async function hubWith(
-	options: { daemon: boolean; pinned?: boolean; windowId?: string } = { daemon: false },
+	options: { daemon: boolean; pinned?: boolean; windowId?: string; legacyPin?: string } = {
+		daemon: false,
+	},
 ): Promise<Harness> {
 	const remote = await mockHost(options.daemon);
 	const dbManager = openTestDatabases();
@@ -256,6 +258,11 @@ async function hubWith(
 			HOST_FINGERPRINT,
 			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
 		);
+
+	if (options.legacyPin !== undefined)
+		dbManager.meta
+			.prepare("UPDATE hosts SET ssh_fingerprint = ? WHERE id = ?")
+			.run(options.legacyPin, host.id);
 
 	const heard: ProtocolMessage[] = [];
 	const window: WsClient = {
@@ -352,6 +359,58 @@ function sessionOf(h: Harness): SessionState | undefined {
 // ─── Connect ─────────────────────────────────────────────────────────────────
 
 describe("Connect (#648)", { timeout: 20_000 }, () => {
+	it("accepts a padded legacy pin from the database without HOST_VERIFY", async () => {
+		const h = await hubWith({ daemon: false, legacyPin: `${HOST_FINGERPRINT}=` });
+		await connected(h);
+		expect(h.heard.some((m) => m.type === "HOST_VERIFY")).toBe(false);
+	});
+
+	it("reports canonical fingerprints for a different legacy pinned key", async () => {
+		const parsed = ssh2.utils.parseKey(rsaPem());
+		if (parsed instanceof Error || Array.isArray(parsed)) throw new Error("invalid key");
+		const old = `SHA256:${createHash("sha256").update(parsed.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
+		const h = await hubWith({ daemon: false, legacyPin: `${old}=` });
+		h.window.send = (msg) => {
+			h.heard.push(msg);
+			if (msg.type === "HOST_VERIFY") {
+				expect(msg).toMatchObject({
+					fingerprint: HOST_FINGERPRINT,
+					oldFingerprint: old,
+				});
+				queueMicrotask(() =>
+					h.sm.handleHostVerifyResponse((msg as HostVerifyMessage).promptId, "reject", h.window.id),
+				);
+			}
+		};
+		const outcome = h.sm.connectHost(h.host.id, { clientId: h.window.id });
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		await expect(outcome.done).resolves.toBe(false);
+		expect(h.heard.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
+	});
+
+	it("prompts and writes an unpadded pin on first connection", async () => {
+		const h = await hubWith({ daemon: false, pinned: false });
+		const write = vi.spyOn(h.ctx.metaDal, "updateHostFingerprint");
+		h.window.send = (msg) => {
+			h.heard.push(msg);
+			if (msg.type === "HOST_VERIFY") {
+				expect(msg).toMatchObject({ fingerprint: HOST_FINGERPRINT, firstConnect: true });
+				queueMicrotask(() =>
+					h.sm.handleHostVerifyResponse(
+						(msg as HostVerifyMessage).promptId,
+						"trust_permanent",
+						h.window.id,
+					),
+				);
+			}
+		};
+		await connected(h);
+		expect(h.heard.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
+		expect(write).toHaveBeenCalledWith(h.host.id, HOST_FINGERPRINT, expect.any(String));
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint).toBe(HOST_FINGERPRINT);
+		write.mockRestore();
+	});
+
 	it("refuses a pinned revoked key without prompting or changing the pin", async () => {
 		const h = await hubWith({ daemon: false });
 		const home = makeTempDir("lasterm-revoked-session-");

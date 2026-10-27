@@ -29,10 +29,13 @@
  *     in hand.
  */
 
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fingerprintOf, normalizeFingerprint } from "./fingerprint.js";
+
+export { fingerprintOf, normalizeFingerprint } from "./fingerprint.js";
 
 /** The files a user's own trust lives in, in the order OpenSSH reads them. */
 export const USER_KNOWN_HOSTS_FILES = ["known_hosts", "known_hosts2"] as const;
@@ -53,21 +56,6 @@ export interface KnownHostsMatch {
 export interface KnownHostsSource {
 	file: string;
 	contents: string;
-}
-
-/**
- * The fingerprint of a key blob, spelled as OpenSSH spells it.
- *
- * Base64 without the padding: `ssh -v` prints `SHA256:94Lb…w6nY`, and a
- * comparison against a padded `…w6nY=` fails on a key that is the same.
- */
-export function fingerprintOf(keyBlob: Buffer): string {
-	return `SHA256:${createHash("sha256").update(keyBlob).digest("base64").replace(/=+$/, "")}`;
-}
-
-/** The same spelling, for a fingerprint that came from somewhere else. */
-export function normalizeFingerprint(fingerprint: string): string {
-	return fingerprint.replace(/=+$/, "");
 }
 
 /** Whether a host name matches one `known_hosts` pattern. */

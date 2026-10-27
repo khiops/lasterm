@@ -9,7 +9,7 @@ import { sshAddress, targetRoute } from "../ssh-route.js";
  * is seen, and fails, as it would against a host on a private network.
  */
 
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { writeFileSync } from "node:fs";
 import net from "node:net";
@@ -26,6 +26,7 @@ import ssh2, { Server } from "ssh2";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
+import { fingerprintOf } from "../ssh/fingerprint.js";
 import { openTestDatabases } from "../storage/db.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
@@ -66,7 +67,7 @@ const HOST_FINGERPRINT = (() => {
 	const parsed = ssh2.utils.parseKey(HOST_KEY);
 	if (parsed instanceof Error) throw parsed;
 	const key = Array.isArray(parsed) ? parsed[0] : parsed;
-	return `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64")}`;
+	return fingerprintOf(key.getPublicSSH());
 })();
 
 const HELLO: HelloMessage = {

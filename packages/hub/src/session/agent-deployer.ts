@@ -132,10 +132,82 @@ const COMMON_AGENT_PATHS_UNIX = [
 	"/opt/lasterm/lasterm-agent",
 ];
 
-const COMMON_AGENT_PATHS_WINDOWS = [
-	"%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe",
-	"%ProgramFiles%\\lasterm\\lasterm-agent.exe",
+type KnownFolder = "LocalApplicationData" | "ProgramFiles";
+type FolderResult = { path: string } | { reason: string };
+type FolderResolver = (folder: KnownFolder) => Promise<FolderResult>;
+
+const COMMON_AGENT_PATHS_WINDOWS: readonly [KnownFolder, string][] = [
+	["LocalApplicationData", "lasterm\\lasterm-agent.exe"],
+	["ProgramFiles", "lasterm\\lasterm-agent.exe"],
 ];
+
+/**
+ * A Windows path the deployer may use: drive-absolute, with no `%` or `!` (cmd.exe expands them
+ * in the probe and the launch; SFTP does not), no `"` (it would end cmd.exe's quoting) and no
+ * control character. PowerShell receives the path only as data, in getRemoteSha256. Accepting
+ * the refused characters is #714.
+ */
+function isWindowsPath(path: string): boolean {
+	return /^[A-Za-z]:\\/.test(path) && !/[%!"\p{Cc}]/u.test(path);
+}
+
+function joinWindowsPath(folder: string, relative: string): string {
+	return `${folder}${folder.endsWith("\\") ? "" : "\\"}${relative}`;
+}
+
+/**
+ * Ask the Windows host where a known folder is. PowerShell prints it as Base64 of its UTF-8
+ * bytes, so a non-ASCII profile survives the console code page. Never throws.
+ */
+async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promise<FolderResult> {
+	try {
+		const { stdout, stderr, exitCode } = await sshExec(
+			client,
+			`powershell -NoProfile -NonInteractive -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Environment]::GetFolderPath('${folder}')))"`,
+		);
+		if (exitCode !== 0) return { reason: `exit ${exitCode}: ${stderr.trim()}` };
+		const encoded = stdout.trim();
+		if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
+			return { reason: "unexpected output" };
+		}
+		const bytes = Buffer.from(encoded, "base64");
+		if (bytes.toString("base64") !== encoded) return { reason: "unexpected output" };
+		let path: string;
+		try {
+			path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		} catch {
+			return { reason: "unexpected output" };
+		}
+		if (!path || /\p{Cc}/u.test(path)) return { reason: "unexpected output" };
+		if (!isWindowsPath(path)) {
+			const why = /[%!]/.test(path)
+				? "contains a character cmd.exe expands"
+				: path.includes('"')
+					? "contains a double quote"
+					: "not a drive path with backslashes";
+			return { reason: `unsupported path ${path} (${why})` };
+		}
+		return { path: path.replace(/\\+$/, "") + (/^[A-Za-z]:\\+$/.test(path) ? "\\" : "") };
+	} catch (error) {
+		return { reason: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/** Known-folder lookups for one deployment: one in flight per folder; only a success is kept. */
+function knownFolderResolver(client: SshClient): FolderResolver {
+	const results = new Map<KnownFolder, Promise<FolderResult>>();
+	return (folder) => {
+		let result = results.get(folder);
+		if (!result) {
+			result = resolveKnownFolder(client, folder).then((resolved) => {
+				if (!("path" in resolved)) results.delete(folder);
+				return resolved;
+			});
+			results.set(folder, result);
+		}
+		return result;
+	};
+}
 
 const STRICT_SEMVER = /^\d+\.\d+\.\d+$/;
 
@@ -193,55 +265,58 @@ async function resolveLocalAgentBinary(
  * Check if lasterm-agent exists on the remote host.
  * Returns the remote path if found, null otherwise.
  */
-export async function checkRemoteAgent(client: SshClient): Promise<string | null> {
-	// 1. Try which (Linux/macOS)
+export async function checkRemoteAgent(
+	client: SshClient,
+	os: HostOs,
+	resolveFolder: FolderResolver = knownFolderResolver(client),
+): Promise<string | null> {
 	try {
-		const { stdout, exitCode } = await sshExec(client, "which lasterm-agent");
+		const { stdout, exitCode } = await sshExec(
+			client,
+			os === "windows" ? "where lasterm-agent" : "which lasterm-agent",
+		);
 		if (exitCode === 0) {
-			const p = stdout.trim();
-			if (p) return p;
+			const path =
+				os === "windows"
+					? stdout
+							.trim()
+							.split(/\r?\n/)
+							.map((line) => line.trim())
+							.find((line) => line && isWindowsPath(line))
+					: stdout.trim();
+			if (path) return path;
 		}
 	} catch {
-		// ignore — fall through
+		// Continue with the common paths.
 	}
 
-	// 2. Try where (Windows)
-	try {
-		const { stdout, exitCode } = await sshExec(client, "where lasterm-agent");
-		if (exitCode === 0) {
-			const firstLine = stdout.split(/\r?\n/)[0]?.trim();
-			if (firstLine) return firstLine;
+	if (os === "windows") {
+		// `if exist` is a cmd.exe built-in; this fallback is for cmd.exe sessions only.
+		for (const [folder, relative] of COMMON_AGENT_PATHS_WINDOWS) {
+			const resolved = await resolveFolder(folder);
+			if (!("path" in resolved)) continue;
+			const path = joinWindowsPath(resolved.path, relative);
+			if (!isWindowsPath(path)) continue;
+			try {
+				const { stdout, exitCode } = await sshExec(client, `if exist "${path}" echo ok`);
+				if (exitCode === 0 && stdout.trim() === "ok") return path;
+			} catch {
+				// Continue with the next candidate.
+			}
 		}
-	} catch {
-		// ignore — fall through
-	}
-
-	// 3. Try common Unix paths via test -x
-	for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
-		try {
-			const { stdout: resolved, exitCode } = await sshExec(
-				client,
-				`test -x "${rawPath}" && echo "${rawPath}"`,
-			);
-			if (exitCode === 0 && resolved.trim()) return resolved.trim();
-		} catch {
-			// ignore
-		}
-	}
-
-	// 4. Try common Windows paths
-	// NOTE: `if exist` is a cmd.exe built-in and will fail if the remote shell
-	// is PowerShell. The `where` check above (step 2) already covers the common
-	// case; this loop is a best-effort fallback for cmd.exe sessions only.
-	for (const rawPath of COMMON_AGENT_PATHS_WINDOWS) {
-		try {
-			const { stdout, exitCode } = await sshExec(client, `if exist "${rawPath}" echo ok`);
-			if (exitCode === 0 && stdout.trim() === "ok") return rawPath;
-		} catch {
-			// ignore
+	} else {
+		for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
+			try {
+				const { stdout, exitCode } = await sshExec(
+					client,
+					`test -x "${rawPath}" && echo "${rawPath}"`,
+				);
+				if (exitCode === 0 && stdout.trim()) return stdout.trim();
+			} catch {
+				// Continue with the next candidate.
+			}
 		}
 	}
-
 	return null;
 }
 
@@ -593,25 +668,24 @@ async function resolveRemoteHome(client: SshClient): Promise<string> {
  * Determine the remote install path for the agent binary.
  * Expands ~ using the actual remote home directory.
  */
-async function resolveRemotePath(client: SshClient, os: HostOs): Promise<string> {
+async function resolveRemotePath(
+	client: SshClient,
+	os: HostOs,
+	resolveFolder: FolderResolver,
+): Promise<string> {
 	if (os === "windows") {
-		return "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe";
+		const folder = await resolveFolder("LocalApplicationData");
+		if (!("path" in folder)) {
+			throw new Error(
+				`Could not determine the LocalAppData directory of the Windows host: ${folder.reason}`,
+			);
+		}
+		return joinWindowsPath(folder.path, "lasterm\\lasterm-agent.exe");
 	}
 	const home = await resolveRemoteHome(client);
 	return `${home}/.local/bin/lasterm-agent`;
 }
 
-/**
- * Full auto-deploy flow.
- *
- * 1. Check if lasterm-agent is already on the remote host.
- * 2. If not found, detect OS/arch (or use known values from host record).
- * 3. Locate the correct pre-built binary in the local binary cache.
- * 4. Upload via SFTP.
- *
- * Auto-deploy is best-effort — callers should catch errors and fall back
- * to attempting lasterm-agent --stdio directly.
- */
 /**
  * Full auto-deploy flow with SHA256 integrity verification and TOFU support.
  *
@@ -642,22 +716,20 @@ export async function deployAgentIfNeeded(
 	} = options;
 	const hubVersion = options.hubVersion ?? HUB_VERSION;
 
-	// 1. Check if agent is already present on the remote host
-	const existingPath = await checkRemoteAgent(client);
+	let os = host.os;
+	let arch = host.arch;
+	if (!os || !arch) {
+		const read = await readRemoteSystem(client);
+		const detected = read?.parsed;
+		if (!detected) throw noAgentTargetError(read);
+		os = detected.os;
+		arch = detected.arch;
+	}
+	const resolveFolder = knownFolderResolver(client);
+	const existingPath = await checkRemoteAgent(client, os, resolveFolder);
 
 	if (existingPath) {
 		// --- Branch A: agent already exists ---
-
-		// 1a. Detect OS/arch if not known (needed for SHA256 + binary name)
-		let os = host.os;
-		let arch = host.arch;
-		if (!os || !arch) {
-			const read = await readRemoteSystem(client);
-			const detected = read?.parsed;
-			if (!detected) throw noAgentTargetError(read);
-			os = detected.os;
-			arch = detected.arch;
-		}
 
 		// 1b. Compute remote SHA256
 		const remoteSha = await getRemoteSha256(client, existingPath, os);
@@ -762,17 +834,6 @@ export async function deployAgentIfNeeded(
 
 	// --- Branch B: agent not found — fresh deploy ---
 
-	// 2. Detect OS/arch if not already known from the host record
-	let os = host.os;
-	let arch = host.arch;
-	if (!os || !arch) {
-		const read = await readRemoteSystem(client);
-		const detected = read?.parsed;
-		if (!detected) throw noAgentTargetError(read);
-		os = detected.os;
-		arch = detected.arch;
-	}
-
 	// 3. Locate the binary in the local cache
 	const localBinary = await resolveLocalAgentBinary(os, arch, options, hubVersion);
 	if (localBinary === null) {
@@ -784,7 +845,7 @@ export async function deployAgentIfNeeded(
 	}
 
 	// 4. Determine remote install path (expands ~ using remote $HOME)
-	const remotePath = await resolveRemotePath(client, os);
+	const remotePath = await resolveRemotePath(client, os, resolveFolder);
 
 	// 5. Upload via SFTP (fastPut handles large binaries efficiently)
 	await uploadAgentBinary(client, localBinary, remotePath, os);
@@ -808,11 +869,12 @@ export async function getRemoteSha256(
 	os: HostOs,
 ): Promise<string | null> {
 	try {
-		const escapedPath =
-			os === "windows" ? remotePath.replace(/'/g, "''") : remotePath.replace(/'/g, "'\\''");
+		const escapedPath = remotePath.replace(/'/g, "'\\''");
 		let cmd: string;
 		if (os === "windows") {
-			cmd = `powershell -c "(Get-FileHash '${escapedPath}' -Algorithm SHA256).Hash.ToLower()"`;
+			const encodedPath = Buffer.from(remotePath, "utf8").toString("base64");
+			const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`;
+			cmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 		} else if (os === "darwin") {
 			// macOS ships shasum (not sha256sum); same output format: "hash  filename"
 			cmd = `shasum -a 256 '${escapedPath}'`;

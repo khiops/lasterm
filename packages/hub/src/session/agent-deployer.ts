@@ -143,10 +143,11 @@ const COMMON_AGENT_PATHS_WINDOWS: readonly [KnownFolder, string][] = [
 
 /**
  * A path the deployer may hand to SFTP, PowerShell and cmd.exe alike: drive-absolute, and free of
- * `%` and `!`, which cmd.exe expands and SFTP does not (#711).
+ * `%` and `!`, which cmd.exe expands and SFTP does not, and of the quotes and `[` `]` that the
+ * PowerShell hash command reads as syntax (#711). Lifting these limits is #714.
  */
 function isWindowsPath(path: string): boolean {
-	return /^[A-Za-z]:\\/.test(path) && !/[%!"\p{Cc}]/u.test(path);
+	return /^[A-Za-z]:\\/.test(path) && !/[%!"\u2018-\u201B[\]\p{Cc}]/u.test(path);
 }
 
 function joinWindowsPath(folder: string, relative: string): string {
@@ -182,7 +183,9 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 				? "contains a character cmd.exe expands"
 				: path.includes('"')
 					? "contains a double quote"
-					: "not a drive path with backslashes";
+					: /[\u2018-\u201B[\]]/.test(path)
+						? "contains a character PowerShell reads as a quote or a wildcard"
+						: "not a drive path with backslashes";
 			return { reason: `unsupported path ${path} (${why})` };
 		}
 		return { path: path.replace(/\\+$/, "") + (/^[A-Za-z]:\\+$/.test(path) ? "\\" : "") };
@@ -191,13 +194,16 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 	}
 }
 
-/** Resolves each known folder at most once for one deployment. */
+/** Known-folder lookups for one deployment: one in flight per folder; only a success is kept. */
 function knownFolderResolver(client: SshClient): FolderResolver {
 	const results = new Map<KnownFolder, Promise<FolderResult>>();
 	return (folder) => {
 		let result = results.get(folder);
 		if (!result) {
-			result = resolveKnownFolder(client, folder);
+			result = resolveKnownFolder(client, folder).then((resolved) => {
+				if (!("path" in resolved)) results.delete(folder);
+				return resolved;
+			});
 			results.set(folder, result);
 		}
 		return result;

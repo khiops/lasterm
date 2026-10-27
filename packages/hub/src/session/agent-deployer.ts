@@ -142,12 +142,13 @@ const COMMON_AGENT_PATHS_WINDOWS: readonly [KnownFolder, string][] = [
 ];
 
 /**
- * A path the deployer may hand to SFTP, PowerShell and cmd.exe alike: drive-absolute, and free of
- * `%` and `!`, which cmd.exe expands and SFTP does not, and of the quotes and `[` `]` that the
- * PowerShell hash command reads as syntax (#711). Lifting these limits is #714.
+ * A Windows path the deployer may use: drive-absolute, with no `%` or `!` (cmd.exe expands them
+ * in the probe and the launch; SFTP does not), no `"` (it would end cmd.exe's quoting) and no
+ * control character. PowerShell receives the path only as data, in getRemoteSha256. Accepting
+ * the refused characters is #714.
  */
 function isWindowsPath(path: string): boolean {
-	return /^[A-Za-z]:\\/.test(path) && !/[%!"\u2018-\u201B[\]\p{Cc}]/u.test(path);
+	return /^[A-Za-z]:\\/.test(path) && !/[%!"\p{Cc}]/u.test(path);
 }
 
 function joinWindowsPath(folder: string, relative: string): string {
@@ -183,9 +184,7 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 				? "contains a character cmd.exe expands"
 				: path.includes('"')
 					? "contains a double quote"
-					: /[\u2018-\u201B[\]]/.test(path)
-						? "contains a character PowerShell reads as a quote or a wildcard"
-						: "not a drive path with backslashes";
+					: "not a drive path with backslashes";
 			return { reason: `unsupported path ${path} (${why})` };
 		}
 		return { path: path.replace(/\\+$/, "") + (/^[A-Za-z]:\\+$/.test(path) ? "\\" : "") };
@@ -870,11 +869,12 @@ export async function getRemoteSha256(
 	os: HostOs,
 ): Promise<string | null> {
 	try {
-		const escapedPath =
-			os === "windows" ? remotePath.replace(/'/g, "''") : remotePath.replace(/'/g, "'\\''");
+		const escapedPath = remotePath.replace(/'/g, "'\\''");
 		let cmd: string;
 		if (os === "windows") {
-			cmd = `powershell -c "(Get-FileHash '${escapedPath}' -Algorithm SHA256).Hash.ToLower()"`;
+			const encodedPath = Buffer.from(remotePath, "utf8").toString("base64");
+			const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`;
+			cmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 		} else if (os === "darwin") {
 			// macOS ships shasum (not sha256sum); same output format: "hash  filename"
 			cmd = `shasum -a 256 '${escapedPath}'`;

@@ -436,7 +436,19 @@ describe("checkRemoteAgent", () => {
 });
 
 describe("OS-specific discovery edges", () => {
-	it.each(["C:\\a!b\\lasterm-agent.exe", "C:\\Profiles[1]\\lasterm-agent.exe"])(
+	it("E5 accepts the first where line with brackets", async () => {
+		const path = "C:\\Profiles[1]\\lasterm-agent.exe";
+		const client = makeMockClient({
+			"where lasterm-agent": {
+				stdout: `${path}\r\nC:\\ok\\lasterm-agent.exe\r\n`,
+				stderr: "",
+				exitCode: 0,
+			},
+		});
+		expect(await checkRemoteAgent(client, "windows")).toBe(path);
+	});
+
+	it.each(["C:\\a!b\\lasterm-agent.exe"])(
 		"E5 skips refused where line %s without known-folder probes",
 		async (unsafe) => {
 			const client = makeMockClient({
@@ -1539,6 +1551,10 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		["E2 non-ASCII profile", "C:\\Users\\Rémi\\AppData\\Local"],
 		["E8 drive-root folder", "C:\\"],
 		["ASCII apostrophe profile", "C:\\Users\\O'Brien\\AppData\\Local"],
+		...["‘", "’", "‚", "‛", "[", "]", "`"].map((character) => [
+			`literal profile ${character}`,
+			`C:\\Users\\a${character}b\\AppData\\Local`,
+		]),
 	])("%s", async (_edge, folder) => {
 		const local = writeCachedAgentBinary("windows", "x64");
 		const sftp = makeMockSftp();
@@ -1594,30 +1610,6 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		),
 		...(
 			[
-				[
-					"C:\\Users\\O’Brien\\AppData\\Local",
-					"contains a character PowerShell reads as a quote or a wildcard",
-				],
-				[
-					"C:\\Users\\‘x\\AppData\\Local",
-					"contains a character PowerShell reads as a quote or a wildcard",
-				],
-				[
-					"C:\\Users\\‚x\\AppData\\Local",
-					"contains a character PowerShell reads as a quote or a wildcard",
-				],
-				[
-					"C:\\Users\\‛x\\AppData\\Local",
-					"contains a character PowerShell reads as a quote or a wildcard",
-				],
-				[
-					"C:\\Profiles[1\\AppData\\Local",
-					"contains a character PowerShell reads as a quote or a wildcard",
-				],
-				[
-					"C:\\Profiles1]\\AppData\\Local",
-					"contains a character PowerShell reads as a quote or a wildcard",
-				],
 				["C:\\Users\\a%[\\AppData\\Local", "contains a character cmd.exe expands"],
 				["C:\\Users\\a!’\\AppData\\Local", "contains a character cmd.exe expands"],
 				['C:\\Users\\a"[\\AppData\\Local', "contains a double quote"],
@@ -1630,6 +1622,9 @@ describe("deployAgentIfNeeded — agent already present", () => {
 				["C:/Users/u/AppData/Local", "not a drive path with backslashes"],
 				["Users\\u", "not a drive path with backslashes"],
 				["relative", "not a drive path with backslashes"],
+				['relative%"', "contains a character cmd.exe expands"],
+				['relative"', "contains a double quote"],
+				['C:\\Users\\a%"\\AppData\\Local', "contains a character cmd.exe expands"],
 				["\\\\server\\share", "not a drive path with backslashes"],
 				["\\\\server\\share\\u", "not a drive path with backslashes"],
 			] as const
@@ -1742,13 +1737,15 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		}
 	});
 
-	it.each(["Rémi", "O'Brien"])(
+	it.each(["Rémi", "O'Brien", "a`b[1]\\O’Brien'x"])(
 		"E4 hashes the agent at the resolved LocalAppData candidate for %s",
 		async (profile) => {
 			const folder = `C:\\Users\\${profile}\\AppData\\Local\\`;
 			const path = `${folder}lasterm\\lasterm-agent.exe`;
 			const hash = "a".repeat(64);
-			const hashCommand = `powershell -c "(Get-FileHash '${path.replace(/'/g, "''")}' -Algorithm SHA256).Hash.ToLower()"`;
+			const encodedPath = Buffer.from(path, "utf8").toString("base64");
+			const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`;
+			const hashCommand = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 			const client = makeMockClient({
 				[folderCommand("LocalApplicationData")]: folderOutput(folder),
 				[`if exist "${path}" echo ok`]: { stdout: "ok\r\n", stderr: "", exitCode: 0 },
@@ -1760,6 +1757,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 				makeOptions({ pinnedSha256: hash }),
 			);
 			expect(result.remotePath).toBe(path);
+			expect(vi.mocked(client.exec).mock.calls[3]?.[0]).toBe(hashCommand);
 			expect(client.sftp).not.toHaveBeenCalled();
 			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
 				"where lasterm-agent",
@@ -1830,17 +1828,23 @@ describe("getRemoteSha256", () => {
 		expect(result).toBe(hash);
 	});
 
-	it("parses PowerShell Get-FileHash output on Windows", async () => {
-		const hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	it("passes the Windows path as Base64 data inside an encoded literal-path hash script", async () => {
+		const path = "C:\\Users\\a`b[1]\\O’Brien'x\\lasterm\\lasterm-agent.exe";
+		const encodedPath = Buffer.from(path, "utf8").toString("base64");
+		const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()`;
+		const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+		const command = `${prefix}${Buffer.from(script, "utf16le").toString("base64")}`;
+		const hash = "abcdef01".repeat(8);
 		const client = makeMockClient({
-			"powershell -c": {
-				stdout: `${hash}\n`,
-				stderr: "",
-				exitCode: 0,
-			},
+			[command]: { stdout: `${hash.toUpperCase()} trailing output\r\n`, stderr: "", exitCode: 0 },
 		});
-		const result = await getRemoteSha256(client, "C:\\lasterm\\lasterm-agent.exe", "windows");
-		expect(result).toBe(hash);
+		expect(await getRemoteSha256(client, path, "windows")).toBe(hash);
+		const sent = vi.mocked(client.exec).mock.calls[0]?.[0] ?? "";
+		expect(sent).toBe(command);
+		const decodedScript = Buffer.from(sent.slice(prefix.length), "base64").toString("utf16le");
+		expect(decodedScript).toBe(script);
+		const inner = decodedScript.match(/FromBase64String\('([^']*)'\)/)?.[1] ?? "";
+		expect(Buffer.from(inner, "base64").toString("utf8")).toBe(path);
 	});
 
 	it("returns null when command exits with non-zero", async () => {

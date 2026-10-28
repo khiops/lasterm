@@ -15,7 +15,9 @@ order, after `Version <version>` and before the link to the GitHub release.
 `README.md` is excluded. Released files stay: editing an old fragment does not
 add it to a later release, and deleting or renaming one makes the release's
 listing check fail. Keep each change short: the entire What's new must fit in
-1,500 characters. A new listing language needs a line in every fragment added
+1,500 characters. The "Store What's new" CI job checks the next release's
+total on every pull request; when it fails, merge or shorten fragments not yet
+released (#773). A new listing language needs a line in every fragment added
 after it and a What's new frame in `FRAME` of `scripts/store-listing.ts`; without
 the frame the listing check refuses that language.
 

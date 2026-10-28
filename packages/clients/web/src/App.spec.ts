@@ -292,3 +292,46 @@ describe("the keyboard among tabs, panes and zones", () => {
 		expect(flat(body(/function onOpenChannelFromList\(/))).toContain("onSelectChannel(channelId);");
 	});
 });
+
+// The rail's Create, Rename and Delete group dialogs, refused (#734): each
+// stays open and says why beside its buttons, and closes once the hub did it.
+// What the reason is — the hub's, or that it did not answer — is tested in
+// utils/hub-answer.spec.ts; how the dialog shows it, in GroupActionDialog.spec.ts.
+describe("the host-group dialogs when the hub refuses", () => {
+	const flat = (text: string): string => text.replace(/\s+/g, " ");
+
+	it("hands each dialog the refusal", () => {
+		const dialogs = flat(SOURCE).match(/<GroupActionDialog [^>]*>/g) ?? [];
+		const hostGroupDialogs = dialogs.filter((tag) => !tag.includes("CreateChannelGroup"));
+		expect(hostGroupDialogs).toHaveLength(3);
+		for (const tag of hostGroupDialogs) expect(tag).toContain(':error="hostGroupDialogError"');
+	});
+
+	it.each([
+		[
+			/async function onCreateGroupConfirmed\(/,
+			"hostGroupDialogError.value = await whyRefused(hostsStore.createHostGroup(name.trim())); if (hostGroupDialogError.value !== null) return; createGroupDialogVisible.value = false;",
+		],
+		[
+			/async function onRenameGroupConfirmed\(/,
+			"hostGroupDialogError.value = await whyRefused(hostsStore.renameHostGroup(id, newName.trim())); if (hostGroupDialogError.value !== null) return; renameGroupId.value = null;",
+		],
+		[
+			/async function onDeleteGroupConfirmed\(/,
+			"hostGroupDialogError.value = await whyRefused(hostsStore.deleteHostGroup(id)); if (hostGroupDialogError.value !== null) return; deleteGroupId.value = null;",
+		],
+	])("keeps the dialog open on a refusal, and closes it once done: %s", (signature, kept) => {
+		const handler = flat(body(signature));
+		expect(handler).toContain(kept);
+		// Closed only after the answer, never before it.
+		expect(handler.indexOf("whyRefused(")).toBeLessThan(handler.search(/= (false|null);/));
+	});
+
+	it.each([
+		/function onAddGroupFromRail\(/,
+		/function onRenameGroup\(/,
+		/function onDeleteGroup\(/,
+	])("opens each dialog without the last refusal: %s", (signature) => {
+		expect(body(signature)).toContain("hostGroupDialogError.value = null;");
+	});
+});

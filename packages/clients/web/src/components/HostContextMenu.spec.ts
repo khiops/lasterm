@@ -7,9 +7,10 @@
  */
 import type { Host, SessionStatus } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { useToastStore } from "../stores/toast.js";
 import HostContextMenu from "./HostContextMenu.vue";
 
 const STAMP = "2026-09-29T00:00:00.000Z";
@@ -174,5 +175,113 @@ describe("stop-agent visibility", () => {
 		useHostsStore().rememberConnectedThroughRemoteDaemon("local", true);
 		await openMenu("local");
 		expect(offered()).not.toContain("stop-agent");
+	});
+});
+
+// A menu closes when an item is chosen, so a toast says why the hub refused it.
+describe("the host menu's Duplicate and Move to Group, refused (#734)", () => {
+	const refused = (message: string) =>
+		({ ok: false, status: 409, code: "CONFLICT", message }) as const;
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	const toasts = () => useToastStore().messages.map(({ level, text }) => ({ level, text }));
+
+	function item(selector: string, text: string): HTMLElement {
+		const found = [...document.body.querySelectorAll<HTMLElement>(selector)].find(
+			(el) => el.textContent?.trim() === text,
+		);
+		if (!found) throw new Error(`no item ${text}`);
+		return found;
+	}
+
+	/** Choose a group in the Move to Group submenu, and let its request settle. */
+	async function moveTo(name: string): Promise<void> {
+		document.body
+			.querySelector(".ctx-menu .has-submenu")
+			?.dispatchEvent(new MouseEvent("mouseenter"));
+		await nextTick();
+		item(".ctx-submenu .ctx-item", name).click();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	async function duplicate(): Promise<void> {
+		item(".ctx-menu .ctx-item", "Duplicate").click();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	function spies() {
+		const store = useHostsStore();
+		store.hostGroups = [
+			{ id: "g1", name: "Prod", sortOrder: 0, createdAt: STAMP, updatedAt: STAMP },
+		];
+		return {
+			duplicateHost: vi.spyOn(store, "duplicateHost"),
+			moveHostToGroup: vi.spyOn(store, "moveHostToGroup"),
+			fetchHosts: vi.spyOn(store, "fetchHosts").mockResolvedValue(),
+		};
+	}
+
+	it("says why a duplicate was refused, and closes", async () => {
+		const { duplicateHost, fetchHosts } = spies();
+		duplicateHost.mockResolvedValueOnce(refused("Host not found or cannot be duplicated"));
+		await openMenu("pi");
+
+		await duplicate();
+
+		expect(duplicateHost).toHaveBeenCalledWith("pi");
+		expect(toasts()).toEqual([{ level: "error", text: "Host not found or cannot be duplicated" }]);
+		expect(fetchHosts).not.toHaveBeenCalled();
+		expect(emitted).toContainEqual(["close", "pi"]);
+	});
+
+	it("says so when the hub does not answer a duplicate", async () => {
+		const { duplicateHost } = spies();
+		duplicateHost.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		await openMenu("pi");
+
+		await duplicate();
+
+		expect(toasts()).toEqual([
+			{ level: "error", text: "Could not reach the hub: Failed to fetch" },
+		]);
+		expect(emitted).toContainEqual(["close", "pi"]);
+	});
+
+	it("says nothing of a duplicate that went through, and reloads the hosts", async () => {
+		const { duplicateHost, fetchHosts } = spies();
+		duplicateHost.mockResolvedValueOnce({ ok: true, host: host("pi2", "ssh") });
+		await openMenu("pi");
+
+		await duplicate();
+
+		expect(toasts()).toEqual([]);
+		expect(fetchHosts).toHaveBeenCalledOnce();
+	});
+
+	it("says why a move was refused, or that the hub did not answer, and nothing once it went through", async () => {
+		const { moveHostToGroup } = spies();
+		moveHostToGroup
+			.mockResolvedValueOnce(refused("Host not found"))
+			.mockRejectedValueOnce(new TypeError("Failed to fetch"))
+			.mockResolvedValueOnce({ ok: true });
+
+		await openMenu("pi");
+		await moveTo("Prod");
+		expect(moveHostToGroup).toHaveBeenLastCalledWith("pi", "g1");
+		expect(toasts().map((t) => t.text)).toEqual(["Host not found"]);
+		expect(emitted).toContainEqual(["close", "pi"]);
+
+		await moveTo("Ungrouped");
+		expect(moveHostToGroup).toHaveBeenLastCalledWith("pi", null);
+		expect(toasts().map((t) => t.text)).toEqual([
+			"Host not found",
+			"Could not reach the hub: Failed to fetch",
+		]);
+
+		await moveTo("Prod");
+		expect(toasts()).toHaveLength(2);
 	});
 });

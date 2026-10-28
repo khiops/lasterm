@@ -119,6 +119,7 @@
 			input-label="NEW NAME"
 			:input-value="renameGroupCurrentName"
 			input-placeholder="Group name"
+			:error="hostGroupDialogError"
 			@close="renameGroupId = null"
 			@confirm="onRenameGroupConfirmed"
 		/>
@@ -131,6 +132,7 @@
 			:message="`Delete group '${deleteGroupCurrentName}'? Hosts will move to Ungrouped.`"
 			confirm-label="Delete"
 			:confirm-danger="true"
+			:error="hostGroupDialogError"
 			@close="deleteGroupId = null"
 			@confirm="onDeleteGroupConfirmed"
 		/>
@@ -143,6 +145,7 @@
 			confirm-label="Create"
 			input-label="GROUP NAME"
 			input-placeholder="Enter group name"
+			:error="hostGroupDialogError"
 			@close="createGroupDialogVisible = false"
 			@confirm="onCreateGroupConfirmed"
 		/>
@@ -446,6 +449,7 @@ import {
 	type HostConnectionQuestion,
 	hostConnectionFailure,
 } from './utils/host-connection.js';
+import { hubUnreachable, whyRefused } from './utils/hub-answer.js';
 import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
 import { hubFetch } from './utils/hub-fetch.js';
 import {
@@ -696,6 +700,9 @@ const renameGroupId = ref<string | null>(null);
 const renameGroupCurrentName = ref<string>('');
 const deleteGroupId = ref<string | null>(null);
 const deleteGroupCurrentName = ref<string>('');
+// Why the hub refused the open host-group dialog's confirm (#734): the dialog
+// stays open and says it. One at a time is open; opening one clears it.
+const hostGroupDialogError = ref<string | null>(null);
 // Channel-group create dialog + sidebar context menu
 const sidebarContextMenu = ref<{ x: number; y: number } | null>(null);
 const createChannelGroupDialogVisible = ref(false);
@@ -1581,13 +1588,15 @@ function onRailContextMenu(payload: { x: number; y: number }): void {
 
 function onAddGroupFromRail(): void {
 	railContextMenu.value = null;
+	hostGroupDialogError.value = null;
 	createGroupDialogVisible.value = true;
 }
 
 async function onCreateGroupConfirmed(name?: string): Promise<void> {
-	createGroupDialogVisible.value = false;
 	if (!name?.trim()) return;
-	await hostsStore.createHostGroup(name.trim());
+	hostGroupDialogError.value = await whyRefused(hostsStore.createHostGroup(name.trim()));
+	if (hostGroupDialogError.value !== null) return;
+	createGroupDialogVisible.value = false;
 	await hostsStore.fetchHosts();
 }
 
@@ -1612,7 +1621,7 @@ async function onConnectHost(hostId: string): Promise<void> {
 		const answer = await hostsStore.connectHost(hostId);
 		if (!answer.ok) toastStore.show('error', hostConnectionFailure(answer));
 	} catch (err) {
-		toastStore.show('error', `Could not reach the hub: ${err instanceof Error ? err.message : String(err)}`);
+		toastStore.show('error', hubUnreachable(err));
 	}
 }
 
@@ -1635,7 +1644,7 @@ async function onStopAgent(hostId: string): Promise<void> {
 			}
 		}
 	} catch (err) {
-		toastStore.show('error', `Could not reach the hub: ${err instanceof Error ? err.message : String(err)}`);
+		toastStore.show('error', hubUnreachable(err));
 	}
 }
 
@@ -1659,7 +1668,7 @@ async function closeHostConnection(hostId: string, action: HostConnectionAction)
 		});
 		if (result.kind === 'failed') toastStore.show('error', result.message);
 	} catch (err) {
-		toastStore.show('error', `Could not reach the hub: ${err instanceof Error ? err.message : String(err)}`);
+		toastStore.show('error', hubUnreachable(err));
 	}
 }
 
@@ -1671,29 +1680,34 @@ function onNewGroupForHost(hostId: string): void {
 function onRenameGroup(groupId: string): void {
 	const group = hostsStore.hostGroups.find((g) => g.id === groupId) ?? null;
 	if (!group) return;
+	hostGroupDialogError.value = null;
 	renameGroupId.value = groupId;
 	renameGroupCurrentName.value = group.name;
 }
 
-function onRenameGroupConfirmed(newName?: string): void {
+async function onRenameGroupConfirmed(newName?: string): Promise<void> {
 	const id = renameGroupId.value;
-	renameGroupId.value = null;
 	if (!id || !newName?.trim()) return;
-	void hostsStore.renameHostGroup(id, newName.trim());
+	hostGroupDialogError.value = await whyRefused(hostsStore.renameHostGroup(id, newName.trim()));
+	if (hostGroupDialogError.value !== null) return;
+	renameGroupId.value = null;
 }
 
 function onDeleteGroup(groupId: string): void {
 	const group = hostsStore.hostGroups.find((g) => g.id === groupId) ?? null;
 	if (!group) return;
+	hostGroupDialogError.value = null;
 	deleteGroupId.value = groupId;
 	deleteGroupCurrentName.value = group.name;
 }
 
-function onDeleteGroupConfirmed(): void {
+async function onDeleteGroupConfirmed(): Promise<void> {
 	const id = deleteGroupId.value;
-	deleteGroupId.value = null;
 	if (!id) return;
-	void hostsStore.deleteHostGroup(id).then(() => hostsStore.fetchHosts());
+	hostGroupDialogError.value = await whyRefused(hostsStore.deleteHostGroup(id));
+	if (hostGroupDialogError.value !== null) return;
+	deleteGroupId.value = null;
+	await hostsStore.fetchHosts();
 }
 
 // ─── Channel-group handlers ─────────────────────────────────────

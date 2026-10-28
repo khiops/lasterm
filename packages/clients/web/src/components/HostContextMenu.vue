@@ -96,6 +96,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { toastRefusal } from "../utils/hub-answer.js";
 
 const props = defineProps<{
 	visible: boolean;
@@ -195,9 +196,10 @@ function onDisconnect(): void {
 	emit("close");
 }
 
+// A menu has no place to say why the hub refused: a toast does (#734).
+
 async function onDuplicate(): Promise<void> {
-	if (host.value) {
-		await hostsStore.duplicateHost(host.value.id);
+	if (host.value && (await toastRefusal(hostsStore.duplicateHost(host.value.id)))) {
 		await hostsStore.fetchHosts();
 	}
 	emit("close");
@@ -205,7 +207,7 @@ async function onDuplicate(): Promise<void> {
 
 async function moveToGroup(groupId: string | null): Promise<void> {
 	if (!host.value) return;
-	await hostsStore.moveHostToGroup(host.value.id, groupId);
+	await toastRefusal(hostsStore.moveHostToGroup(host.value.id, groupId));
 	showGroupSubmenu.value = false;
 	emit("close");
 }

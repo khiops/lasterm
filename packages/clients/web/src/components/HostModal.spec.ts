@@ -546,6 +546,68 @@ describe("HostModal when the hub refuses a save (#703)", () => {
 	});
 });
 
+describe("HostModal when the hub cannot read the SSH config (#734)", () => {
+	/** The hub's answers to its SSH config, in turn; anything else it is not asked. */
+	function sshConfigAnswers(...answers: Array<Response | Error>) {
+		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			if (!String(input).includes("/api/ssh-config")) throw new Error(`unexpected ${input}`);
+			const next = answers.shift();
+			if (next === undefined) throw new Error("no more SSH config answers");
+			if (next instanceof Error) throw next;
+			return next;
+		});
+	}
+
+	function json(status: number, body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status,
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
+	async function chooseSshConfig(): Promise<void> {
+		const tab = Array.from(document.body.querySelectorAll<HTMLButtonElement>(".source-tab")).find(
+			(button) => button.textContent?.includes("From SSH config"),
+		);
+		if (!tab) throw new Error("no SSH config source");
+		tab.click();
+		await settle();
+		await nextTick();
+	}
+
+	const alert = (): HTMLElement | null => el(".ssh-config-error[role='alert']");
+
+	it("says the hub's reason in the dialog, and clears it once a retry reads it", async () => {
+		sshConfigAnswers(
+			json(500, { error: { code: "INTERNAL", message: "EACCES: permission denied" } }),
+			json(200, { entries: [{ name: "pi", hostname: "pi.test" }], has_include: false }),
+		);
+		const { onClose } = mountModal(null);
+
+		await chooseSshConfig();
+
+		expect(alert()?.textContent?.trim()).toBe("EACCES: permission denied");
+		expect(onClose).not.toHaveBeenCalled();
+
+		await chooseSshConfig();
+
+		expect(alert()).toBeNull();
+		const options = Array.from(document.body.querySelectorAll<HTMLOptionElement>("option")).map(
+			(option) => option.value,
+		);
+		expect(options).toContain("pi");
+	});
+
+	it("says so when the hub does not answer, with no unhandled rejection", async () => {
+		sshConfigAnswers(new TypeError("Failed to fetch"));
+		mountModal(null);
+
+		await chooseSshConfig();
+
+		expect(alert()?.textContent?.trim()).toBe("Could not reach the hub: Failed to fetch");
+	});
+});
+
 describe("live daemon edit guard", () => {
 	it.each([true, false])(
 		"disables the daemon select only for a daemon connection: %s",

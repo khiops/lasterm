@@ -1,6 +1,7 @@
 import type { Host } from "@lasterm/shared";
 import { computed, ref } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { toastRefusal } from "../utils/hub-answer.js";
 
 const COLLAPSED_KEY = "lasterm:collapsed-host-groups";
 
@@ -103,7 +104,8 @@ export function useHostGroups() {
 		const insertIdx = toIdx > fromIdx ? toIdx - 1 : toIdx;
 		newOrder.splice(insertIdx, 0, fromId);
 
-		void hostsStore.reorderHostGroups(newOrder);
+		// An order the hub refuses is taken back, and a toast says why (#734).
+		void toastRefusal(hostsStore.reorderHostGroups(newOrder));
 	}
 
 	return {

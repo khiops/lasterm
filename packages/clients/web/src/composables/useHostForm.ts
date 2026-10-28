@@ -129,6 +129,11 @@ export function useHostForm(editHost?: Host) {
 	const lastCompletedTestPlatformOs = ref<string | undefined>(undefined);
 	const testing = ref(false);
 	const saving = ref(false);
+	/**
+	 * Why the last save did not go through, as the hub said it, or that it did
+	 * not answer (#703). The form keeps what was typed; the next save clears it.
+	 */
+	const saveError = ref<string | null>(null);
 	let latestTestConnection = 0;
 
 	// A completed test only describes the connection details it tested. Clear
@@ -308,17 +313,22 @@ export function useHostForm(editHost?: Host) {
 	async function save(extraBody?: Record<string, unknown>): Promise<Host | null> {
 		if (!canSave.value) return null;
 		saving.value = true;
+		saveError.value = null;
 		try {
-			// Inline group creation: create the group first, then assign by ID
-			let groupId: string | null = form.value.hostGroup || null;
+			// Inline group creation: create the group first, then assign by ID.
+			// A refused group stops the save: the host would land outside it.
 			if (showNewGroup.value && newGroupName.value.trim()) {
 				const created = await hostsStore.createHostGroup(newGroupName.value.trim());
-				if (created) {
-					groupId = created.id;
-					showNewGroup.value = false;
-					newGroupName.value = "";
+				if (!created.ok) {
+					saveError.value = created.message;
+					return null;
 				}
+				// Chosen in the form, so a save the hub then refuses keeps it.
+				form.value.hostGroup = created.group.id;
+				showNewGroup.value = false;
+				newGroupName.value = "";
 			}
+			const groupId: string | null = form.value.hostGroup || null;
 
 			const body: Record<string, unknown> = {
 				label: form.value.label.trim(),
@@ -362,10 +372,18 @@ export function useHostForm(editHost?: Host) {
 				...extraBody,
 			};
 
-			if (isEdit && editHost) {
-				return await hostsStore.updateHost(editHost.id, body);
+			const answer =
+				isEdit && editHost
+					? await hostsStore.updateHost(editHost.id, body)
+					: await hostsStore.createHost(body);
+			if (!answer.ok) {
+				saveError.value = answer.message;
+				return null;
 			}
-			return await hostsStore.createHost(body);
+			return answer.host;
+		} catch (error) {
+			saveError.value = `Could not reach the hub: ${error instanceof Error ? error.message : String(error)}`;
+			return null;
 		} finally {
 			saving.value = false;
 		}
@@ -449,6 +467,7 @@ export function useHostForm(editHost?: Host) {
 		testResult,
 		testing,
 		saving,
+		saveError,
 		sshRemoteDaemonUnavailable,
 		connectedThroughRemoteDaemon,
 		labelError,

@@ -215,3 +215,111 @@ describe("stop-keeping store", () => {
 		expect(store.hosts.find((h) => h.id === "pi")?.sshRemoteDaemon).toBe(false);
 	});
 });
+
+describe("a host's save, refused (#703)", () => {
+	/** The hub's answer to the next request: a refusal in its own words, or a body. */
+	function answerOnce(status: number, body: unknown): void {
+		fetchStub.mockImplementationOnce(
+			async () =>
+				new Response(body === undefined ? null : JSON.stringify(body), {
+					status,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+	}
+
+	it("hands back the hub's code and message for a label already taken", async () => {
+		const store = load();
+		await store.fetchHosts();
+		answerOnce(409, {
+			error: { code: "CONFLICT", message: "Host with this label already exists" },
+		});
+
+		const answer = await store.updateHost("pi", { label: "NAS" });
+
+		expect(answer).toEqual({
+			ok: false,
+			status: 409,
+			code: "CONFLICT",
+			message: "Host with this label already exists",
+		});
+		expect(store.hosts.find((h) => h.id === "pi")?.label).toBe("Pi");
+	});
+
+	it("hands back why a host reached through its daemon cannot become Windows (#674)", async () => {
+		const store = load();
+		answerOnce(409, {
+			error: {
+				code: "DAEMON_CONNECTED",
+				message: "Use Stop keeping an agent here to stop the connected daemon.",
+			},
+		});
+
+		const answer = await store.updateHost("pi", { os: "windows" });
+
+		expect(answer).toMatchObject({
+			ok: false,
+			code: "DAEMON_CONNECTED",
+			message: "Use Stop keeping an agent here to stop the connected daemon.",
+		});
+	});
+
+	it("says the status when the hub gave no reason", async () => {
+		const store = load();
+		answerOnce(502, undefined);
+
+		expect(await store.updateHost("pi", { label: "pi2" })).toEqual({
+			ok: false,
+			status: 502,
+			code: null,
+			message: "The hub answered 502.",
+		});
+	});
+
+	it("adds no host the hub refused", async () => {
+		const store = load();
+		await store.fetchHosts();
+		answerOnce(400, {
+			error: { code: "VALIDATION_ERROR", message: "Label must be 1-64 characters" },
+		});
+
+		const answer = await store.createHost({ label: "" });
+
+		expect(answer).toMatchObject({ ok: false, message: "Label must be 1-64 characters" });
+		expect(store.hosts).toHaveLength(3);
+	});
+
+	it("hands back a refused group's reason", async () => {
+		const store = load();
+		answerOnce(409, {
+			error: { code: "CONFLICT", message: "Host group with this name already exists" },
+		});
+
+		expect(await store.createHostGroup("Prod")).toMatchObject({
+			ok: false,
+			code: "CONFLICT",
+			message: "Host group with this name already exists",
+		});
+		expect(store.hostGroups).toEqual([]);
+	});
+
+	it("hands back the host it stored, and keeps it in the list", async () => {
+		const store = load();
+		await store.fetchHosts();
+		answerOnce(200, hostRow("pi", "pi2"));
+
+		const answer = await store.updateHost("pi", { label: "pi2" });
+
+		expect(answer).toMatchObject({ ok: true, host: { id: "pi", label: "pi2", sortOrder: 0 } });
+		expect(store.hosts.find((h) => h.id === "pi")?.label).toBe("pi2");
+	});
+
+	it("throws when the hub does not answer, for the dialog to say so", async () => {
+		const store = load();
+		fetchStub.mockImplementationOnce(async () => {
+			throw new TypeError("Failed to fetch");
+		});
+
+		await expect(store.updateHost("pi", { label: "pi2" })).rejects.toThrow("Failed to fetch");
+	});
+});

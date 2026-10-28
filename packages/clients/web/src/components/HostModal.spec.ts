@@ -442,6 +442,110 @@ describe("HostModal remote daemon choice", () => {
 	});
 });
 
+describe("HostModal when the hub refuses a save (#703)", () => {
+	/** The hub's refusal, as it sends one. */
+	function refusal(code: string, message: string): Response {
+		return new Response(JSON.stringify({ error: { code, message } }), {
+			status: 409,
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
+	/** The SSH host as the hub answers its update, snake_case as on the wire. */
+	function stored(label: string): Response {
+		return new Response(
+			JSON.stringify({
+				id: SSH.id,
+				type: "ssh",
+				label,
+				ssh_host: "192.168.1.20",
+				ssh_auth: "agent",
+				icon_type: "auto",
+				trust_remote_hints: "apply",
+				sort_order: 0,
+				os: "linux",
+				arch: "arm64",
+				created_at: STAMP,
+				updated_at: STAMP,
+			}),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		);
+	}
+
+	function type(selector: string, value: string): void {
+		const input = el<HTMLInputElement>(selector);
+		if (!input) throw new Error(`no ${selector}`);
+		input.value = value;
+		input.dispatchEvent(new Event("input"));
+	}
+
+	async function clickSave(): Promise<void> {
+		el<HTMLButtonElement>(".dialog-actions .btn-primary")?.click();
+		await settle();
+	}
+
+	const alert = (): HTMLElement | null => el(".dialog-actions [role='alert']");
+
+	it("shows the hub's reason beside Save, keeps the dialog and the edit, and clears it once saved", async () => {
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(refusal("CONFLICT", "Host with this label already exists"))
+			.mockResolvedValueOnce(stored("pi-2"));
+		const { onSaved, onClose } = mountModal(SSH);
+		expect(alert()).toBeNull();
+		type("input[placeholder='prod-server']", "pi-2");
+		await nextTick();
+
+		await clickSave();
+
+		expect(alert()?.textContent).toBe("Host with this label already exists");
+		expect(onSaved).not.toHaveBeenCalled();
+		expect(onClose).not.toHaveBeenCalled();
+		expect(el<HTMLInputElement>("input[placeholder='prod-server']")?.value).toBe("pi-2");
+		expect(el<HTMLButtonElement>(".dialog-actions .btn-primary")?.disabled).toBe(false);
+
+		await clickSave();
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		expect(alert()).toBeNull();
+		expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ id: SSH.id, label: "pi-2" }));
+		expect(onClose).toHaveBeenCalled();
+	});
+
+	it("says why a host reached through its daemon cannot become Windows (#674)", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			refusal("DAEMON_CONNECTED", "Use Stop keeping an agent here to stop the connected daemon."),
+		);
+		const { onClose } = mountModal(SSH);
+		useHostsStore().rememberConnectedThroughRemoteDaemon(SSH.id, true);
+		const os = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+			(select) => Array.from(select.options).some((option) => option.value === "darwin"),
+		);
+		if (!os) throw new Error("no OS select");
+		os.value = "windows";
+		os.dispatchEvent(new Event("change"));
+		await nextTick();
+
+		await clickSave();
+
+		expect(alert()?.textContent).toBe(
+			"Use Stop keeping an agent here to stop the connected daemon.",
+		);
+		expect(onClose).not.toHaveBeenCalled();
+		expect(os.value).toBe("windows");
+	});
+
+	it("says so when the hub does not answer", async () => {
+		vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		const { onClose } = mountModal(SSH);
+
+		await clickSave();
+
+		expect(alert()?.textContent).toBe("Could not reach the hub: Failed to fetch");
+		expect(onClose).not.toHaveBeenCalled();
+	});
+});
+
 describe("live daemon edit guard", () => {
 	it.each([true, false])(
 		"disables the daemon select only for a daemon connection: %s",

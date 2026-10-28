@@ -1,10 +1,15 @@
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fingerprintOf } from "../ssh/fingerprint.js";
+import { sshAddress, targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { DatabaseManager } from "./db.js";
 import { openDatabases, openTestDatabases, restrictDatabaseFiles } from "./db.js";
+import { MetaDAL } from "./meta.js";
 
 describe("openTestDatabases", () => {
 	let dbs: DatabaseManager;
@@ -52,12 +57,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 21 after migration", () => {
+	it("meta.db: schema_version is 22 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(21);
+		expect(row.v).toBe(22);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -96,7 +101,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 21)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 22)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -111,8 +116,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(21);
-		expect(v2).toBe(21);
+		expect(v1).toBe(22);
+		expect(v2).toBe(22);
 	});
 
 	it("close() does not throw", () => {
@@ -245,10 +250,10 @@ describe("meta.db and its baseline", () => {
 			(column) => column.name,
 		);
 
-	it("comes out new at version 21, with the final schema", () => {
+	it("comes out new at version 22, with the final schema", () => {
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
 			"cache_index",
@@ -302,14 +307,17 @@ describe("meta.db and its baseline", () => {
 		expect(columns(dbs.meta, "pairing_codes")).toContain("code_hash");
 	});
 
-	it("leaves a database already at version 21 as it is", () => {
+	it("does not run the baseline on a database already at version 21", () => {
 		// What the migrations before the baseline left: version 21, with a table
-		// and a column the baseline no longer has.
+		// and a column the baseline no longer has. Only 022 runs on it.
 		const before = new Database(join(dir, "meta.db"));
 		before.exec(`
 			CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
 			INSERT INTO schema_version VALUES (21, '2026-10-01 00:00:00');
-			CREATE TABLE hosts (id TEXT PRIMARY KEY, label TEXT, keep_alive_seconds INTEGER DEFAULT 60);
+			CREATE TABLE hosts (
+				id TEXT PRIMARY KEY, label TEXT, keep_alive_seconds INTEGER DEFAULT 60,
+				ssh_fingerprint TEXT, ssh_proxy_fingerprint TEXT
+			);
 			INSERT INTO hosts (id, label) VALUES ('H1', 'here');
 			CREATE TABLE workspaces (id TEXT PRIMARY KEY);
 		`);
@@ -317,11 +325,159 @@ describe("meta.db and its baseline", () => {
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
 		expect(tables(dbs.meta)).toEqual(["hosts", "schema_version", "workspaces"]);
-		expect(columns(dbs.meta, "hosts")).toEqual(["id", "label", "keep_alive_seconds"]);
-		expect(dbs.meta.prepare("SELECT * FROM hosts").all()).toEqual([
-			{ id: "H1", label: "here", keep_alive_seconds: 60 },
+		expect(columns(dbs.meta, "hosts")).toEqual([
+			"id",
+			"label",
+			"keep_alive_seconds",
+			"ssh_fingerprint",
+			"ssh_proxy_fingerprint",
 		]);
+		expect(dbs.meta.prepare("SELECT * FROM hosts").all()).toEqual([
+			{
+				id: "H1",
+				label: "here",
+				keep_alive_seconds: 60,
+				ssh_fingerprint: null,
+				ssh_proxy_fingerprint: null,
+			},
+		]);
+	});
+});
+
+// ─── Migration 022: unpadded SSH pins (#717) ─────────────────────────────────
+//
+// 0.14.3 pinned a host key with the base64 padding, and #717 came after it: from
+// then on the hub spells a key without it and compares pins as they are. A pin
+// kept from 0.14.3 must come out as the key the hub now computes, or every
+// pinned host would report a changed key.
+
+describe("meta.db migration 022: SSH pins without padding", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-022-");
+	});
+
+	afterEach(async () => {
+		dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+	/** A key's fingerprint as 0.14.3 wrote it, padding and all. */
+	const padded = (keyBlob: Buffer) =>
+		`SHA256:${createHash("sha256").update(keyBlob).digest("base64")}`;
+	const versions = (db: Database.Database) =>
+		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
+	const pins = (db: Database.Database) =>
+		db
+			.prepare(
+				"SELECT id, ssh_fingerprint, ssh_proxy_fingerprint, agent_sha256, updated_at FROM hosts ORDER BY id",
+			)
+			.all();
+
+	const target = Buffer.from("the target's host key");
+	const jump = Buffer.from("the spec jump's host key");
+	const bastion = Buffer.from("the saved bastion's host key");
+	const agentSha256 = createHash("sha256").update("an agent binary").digest("hex");
+	const at = "2026-10-01T00:00:00.000Z";
+
+	/** A database as 0.14.3 left it: version 21, its pins padded. */
+	function databaseAt21(): void {
+		const before = new Database(join(dir, "meta.db"));
+		before.exec(migration("021-baseline.sql"));
+		const insert = before.prepare(
+			`INSERT INTO hosts (id, type, label, ssh_host, ssh_fingerprint, ssh_proxy_host_id,
+				ssh_proxy_spec, ssh_proxy_fingerprint, agent_sha256, created_at, updated_at)
+			VALUES (?, 'ssh', ?, ?, ?, ?, ?, ?, ?, '${at}', '${at}')`,
+		);
+		insert.run("B", "bastion", "bastion.test", padded(bastion), null, null, null, null);
+		insert.run(
+			"T",
+			"target",
+			"target.test",
+			padded(target),
+			null,
+			"me@jump.test:22",
+			padded(jump),
+			agentSha256,
+		);
+		insert.run("V", "via bastion", "inner.test", padded(target), "B", null, null, null);
+		// Never pinned, and two values that are not 0.14.3's spelling of a key.
+		insert.run("N", "never", "never.test", null, null, null, null, null);
+		insert.run("O", "odd", "odd.test", "SHA256:not-a-key=", null, null, "SHA256:+/=", null);
+		expect(versions(before)).toEqual([{ version: 21 }]);
+		expect(padded(target)).toMatch(/^SHA256:[A-Za-z0-9+/]{43}=$/);
+		before.close();
+	}
+
+	it("takes the padding off a 0.14.3 pin, which the hub then reads as the same key", () => {
+		databaseAt21();
+
+		dbs = openDatabases(dir);
+		const dal = new MetaDAL(dbs.meta);
+		const routeOf = (id: string) => {
+			const host = dal.getHost(id);
+			if (!host) throw new Error(`no host ${id}`);
+			return targetRoute(host, (other) => sshAddress(dal.getHost(other)));
+		};
+
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		// What a connection reads, and compares with fingerprintOf(key) as it is.
+		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
+		expect(dal.getHostFingerprint("B", routeOf("B"))).toBe(fingerprintOf(bastion));
+		expect(dal.getHostFingerprint("V", routeOf("V"))).toBe(fingerprintOf(target));
+		expect(dal.getHost("T")?.sshProxyFingerprint).toBe(fingerprintOf(jump));
+		// Nothing else moves: not a value in another form, not the agent's hex
+		// hash, not the time a host was last edited.
+		const row = (id: string, pin: string | null, jumpPin: string | null, sha: string | null) => ({
+			id,
+			ssh_fingerprint: pin,
+			ssh_proxy_fingerprint: jumpPin,
+			agent_sha256: sha,
+			updated_at: at,
+		});
+		expect(pins(dbs.meta)).toEqual([
+			row("B", fingerprintOf(bastion), null, null),
+			row("N", null, null, null),
+			row("O", "SHA256:not-a-key=", "SHA256:+/=", null),
+			row("T", fingerprintOf(target), fingerprintOf(jump), agentSha256),
+			row("V", fingerprintOf(target), null, null),
+		]);
+	});
+
+	it("comes out new at version 22", () => {
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(pins(dbs.meta)).toEqual([]);
+	});
+
+	it("changes nothing when it runs again", () => {
+		databaseAt21();
+		dbs = openDatabases(dir);
+		const migrated = pins(dbs.meta);
+		dbs.close();
+
+		// The runner does not run it twice...
+		dbs = openDatabases(dir);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(pins(dbs.meta)).toEqual(migrated);
+
+		// ...and its statements find nothing left to change if they do run.
+		const updates = migration("022-unpadded-ssh-pins.sql").replace(
+			/INSERT INTO schema_version[^;]*;/,
+			"",
+		);
+		const changes = dbs.meta.prepare("SELECT total_changes()").pluck();
+		const before = changes.get();
+		dbs.meta.exec(updates);
+		expect(changes.get()).toBe(before);
+		expect(pins(dbs.meta)).toEqual(migrated);
 	});
 });

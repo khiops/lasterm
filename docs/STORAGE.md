@@ -438,7 +438,7 @@ first public release on. The baseline (§ 9.3), made before it, is the one excep
 packages/hub/src/storage/migrations/
 ├── meta/
 │   ├── 021-baseline.sql
-│   ├── 022-add-xxx.sql
+│   ├── 022-unpadded-ssh-pins.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -461,6 +461,12 @@ removed because nothing read them (the SSH keepalive is fixed, SPEC.md § 5.5, a
 bounds of its own, § 7), and the `workspaces` table, which nothing used. A database the
 migrations built keeps them until someone drops them by hand; the hub neither reads nor writes
 them. `spool.db` was not squashed: it still has its one migration.
+
+### 9.4 meta.db migrations after the baseline
+
+| Migration | What it does |
+|-----------|--------------|
+| `022-unpadded-ssh-pins.sql` | Takes the base64 padding off the SSH pins a hub before #717 wrote, 0.14.3 included: `hosts.ssh_fingerprint` and `hosts.ssh_proxy_fingerprint`, when one is `SHA256:` and 43 base64 characters followed by `=`. The hub spells a key as OpenSSH prints it and compares pins as they are, so without it every host pinned before would report a changed key. Any other value is left as it is. A hub before #717, run again on the database, would see each of these pins, and each one pinned since, as a changed key. |
 
 ## 10. Backup & Restore
 

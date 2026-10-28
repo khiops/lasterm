@@ -362,11 +362,12 @@ account the agent runs as (its token's default owner). The first instance is cre
 `FILE_FLAG_FIRST_PIPE_INSTANCE`, so the daemon refuses a pipe name that another server already
 holds rather than adding an instance to it. Tests pin the DACL, the owner and that refusal.
 
-**Authentication.** Filesystem permissions are the first boundary. The second is the token: a
-daemon that has an `auth.json`, which the local one reads from the same configuration directory as
-the hub, refuses a connection whose first frame is not an AUTH carrying that token, and closes it
-after 5 s without one. One whose `auth.json` is missing beside a `meta.db`, unreadable or malformed
-refuses every connection. A remote daemon is sent an empty token, since the hub's token never
+**Authentication.** Filesystem permissions are the first boundary. Every daemon refuses a connection
+whose first frame is not an AUTH carrying a hub key, and closes it after 5 s without one (§ 3.6).
+The second boundary is the token: a daemon that has an `auth.json`, which the local one reads from
+the same configuration directory as the hub, also refuses an AUTH that does not carry that token.
+One whose `auth.json` is missing beside a `meta.db`, unreadable or malformed refuses every
+connection. A remote daemon is sent an empty token, since the hub's token never
 leaves its machine, so its boundary is the socket's directory alone (§ 3.4, PROTOCOL.md § 3.1b).
 
 **Connection model:**
@@ -409,9 +410,9 @@ forced (PROTOCOL.md § 3.17).
 itself. Whoever reaches the socket already is that OS user, and could read `hub-key` from the state
 directory, or replace the agent binary. A remote host that is compromised learns the key of every hub
 that reaches it, which lets it claim those hubs' channels on daemons it can already reach, and
-nothing more; the same key sent to several remote hosts also lets them recognise the same hub. A hub
-that presents no key is the owner `legacy`, which keeps the behaviour from before #127 among such
-hubs: the last one wins.
+nothing more; the same key sent to several remote hosts also lets them recognise the same hub. A
+connection that does not open with an AUTH carrying a key owns nothing: the daemon refuses it with
+an `ERROR` and closes it, before it is told of any channel (PROTOCOL.md § 3.1b).
 
 **Identities that were rejected.** The TLS key: rotating it (#193) would orphan every channel. The
 primary token: every hub reading the same `auth.json` shares it, and replacing it (§ 2.1) would orphan

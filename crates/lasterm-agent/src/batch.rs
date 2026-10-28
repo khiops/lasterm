@@ -253,7 +253,7 @@ mod tests {
 
     fn output(channel_id: &str, seq: u64, data: &[u8]) -> ChannelEvent {
         ChannelEvent::Output(OutputEvent {
-            owner: OwnerId::legacy(),
+            owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             seq,
             data: data.to_vec(),
@@ -263,7 +263,7 @@ mod tests {
 
     fn event(channel_id: &str, frame: &[u8]) -> ChannelEvent {
         ChannelEvent::Frame(EventFrame {
-            owner: OwnerId::legacy(),
+            owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             frame: frame.to_vec(),
             ends_channel: false,
@@ -273,7 +273,7 @@ mod tests {
 
     fn exit(channel_id: &str) -> ChannelEvent {
         ChannelEvent::Frame(EventFrame {
-            owner: OwnerId::legacy(),
+            owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             frame: b"exit".to_vec(),
             ends_channel: true,

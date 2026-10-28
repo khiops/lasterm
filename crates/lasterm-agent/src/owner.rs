@@ -2,19 +2,19 @@
 //!
 //! A daemon serves several hubs at once, and every channel has exactly one
 //! owner: the hub whose connection spawned it. A hub names itself with the key
-//! it sends in AUTH; the agent keeps only the SHA-256 of that key, and a hub
-//! that sends none belongs to the one `legacy` owner.
+//! it sends in AUTH; the agent keeps only the SHA-256 of that key. In stdio
+//! mode, the single connection is the one `stdio` owner.
 
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// The owner a connection without a hub key belongs to. No SHA-256 in hex is
-/// six characters long, so it names no hub key.
-const LEGACY: &str = "legacy";
+/// The owner of everything a stdio agent spawns. No SHA-256 in hex is five
+/// characters long, so it names no hub key.
+const STDIO: &str = "stdio";
 
 /// Who a channel belongs to: the lowercase hex SHA-256 of a hub's key, or
-/// `legacy`.
+/// `stdio`.
 ///
 /// Equality is constant-time. It is cheap to clone: every item a channel sends
 /// towards the hub carries one.
@@ -22,10 +22,11 @@ const LEGACY: &str = "legacy";
 pub(crate) struct OwnerId(Arc<str>);
 
 impl OwnerId {
-    /// The owner shared by every connection that presents no hub key: today's
-    /// hubs, and the single connection of stdio mode.
-    pub(crate) fn legacy() -> Self {
-        Self(Arc::from(LEGACY))
+    /// The owner of stdio mode. Its single connection is the pipes of the
+    /// process that started the agent: it sends no AUTH, no other hub shares
+    /// the agent, and it owns everything it spawns.
+    pub(crate) fn stdio() -> Self {
+        Self(Arc::from(STDIO))
     }
 
     /// The owner a hub key names. The key itself is never kept.
@@ -39,15 +40,6 @@ impl OwnerId {
             );
         }
         Self(Arc::from(hex))
-    }
-
-    /// The owner an AUTH frame names: its key's, or `legacy` without one. An
-    /// empty key names nothing, so it counts as none.
-    pub(crate) fn from_auth(hub_key: Option<&str>) -> Self {
-        match hub_key {
-            Some(key) if !key.is_empty() => Self::from_hub_key(key),
-            _ => Self::legacy(),
-        }
     }
 
     /// What a log line may show of an owner: at most its first 8 characters.
@@ -111,18 +103,19 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_without_a_key_is_legacy() {
-        assert_eq!(OwnerId::from_auth(None), OwnerId::legacy());
-        assert_eq!(OwnerId::from_auth(Some("")), OwnerId::legacy());
-        assert_eq!(OwnerId::legacy().as_str(), "legacy");
+    fn two_keys_are_two_owners_and_one_key_is_one() {
+        let a = OwnerId::from_hub_key("hub-a-key");
+        assert_eq!(a, OwnerId::from_hub_key("hub-a-key"));
+        assert_ne!(a, OwnerId::from_hub_key("hub-b-key"));
+        assert_ne!(a, OwnerId::stdio());
     }
 
+    /// The stdio owner is no hub's, not even that of a key spelling its name.
     #[test]
-    fn two_keys_are_two_owners_and_one_key_is_one() {
-        let a = OwnerId::from_auth(Some("hub-a-key"));
-        assert_eq!(a, OwnerId::from_auth(Some("hub-a-key")));
-        assert_ne!(a, OwnerId::from_auth(Some("hub-b-key")));
-        assert_ne!(a, OwnerId::legacy());
+    fn the_stdio_owner_is_no_hubs() {
+        assert_eq!(OwnerId::stdio().as_str(), "stdio");
+        assert_ne!(OwnerId::stdio(), OwnerId::from_hub_key("stdio"));
+        assert_ne!(OwnerId::stdio(), OwnerId::from_hub_key(""));
     }
 
     #[test]
@@ -130,7 +123,7 @@ mod tests {
         let owner = OwnerId::from_hub_key("abc");
         assert_eq!(owner.short(), "ba7816bf");
         assert_eq!(format!("{owner:?}"), "OwnerId(ba7816bf)");
-        assert_eq!(OwnerId::legacy().short(), "legacy");
+        assert_eq!(OwnerId::stdio().short(), "stdio");
     }
 
     #[test]

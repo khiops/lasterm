@@ -209,7 +209,7 @@ The chords themselves are not configurable yet (#632); Ctrl+/ lists them all.
 |-----|------|---------|-------------|
 | socket_path | string | auto-detect | UDS / named pipe path for daemon IPC |
 
-The agent's log level and format come from `[logging]` (SPEC.md § 6.2); a `log_level` under `[agent]` is not read. Neither are `buffer_per_channel` and `buffer_global`: no Rust agent ever applied them (SPEC.md § 3.2). A file that still sets them loads as before.
+The agent's log level and format come from `[logging]` (SPEC.md § 6.2); a `log_level` under `[agent]` is not read. Neither are `buffer_per_channel` and `buffer_global`: nothing applies them, and the output a daemon keeps for an away hub is bounded by constants (SPEC.md § 3.2). A file that still sets them loads as before.
 
 ---
 

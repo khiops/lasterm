@@ -148,7 +148,7 @@ The first frame the hub sends on a daemon connection, after HELLO.
 {
   type: "AUTH",
   token: string,      // checked against the daemon's auth.json, when it has one
-  hub_key?: string    // names the hub; 64 lowercase hex characters (#127)
+  hub_key: string     // names the hub; 64 lowercase hex characters (#127)
 }
 ```
 
@@ -158,9 +158,7 @@ SSH is never given it.
 
 **Hub key.** Each hub has a key, created once in its state directory as `hub-key` (SPEC.md § 7,
 SECURITY.md § 3.6). An agent with `hub-identity` takes the lowercase hex SHA-256 of the key's string
-as the connection's **owner**, keeps only that, and compares it in constant time. A connection that
-presents no key belongs to the owner `legacy`, which keeps the behaviour from before #127 among such
-connections: the last one wins.
+as the connection's **owner**, keeps only that, and compares it in constant time.
 
 **When the hub sends it:**
 
@@ -171,18 +169,21 @@ connections: the last one wins.
 | Remote (over SSH) | no | nothing, as before |
 | stdio | — | nothing: a stdio agent is a child of one connection |
 
-An agent with `hub-identity` reads the first frame after HELLO even when it has no `auth.json`: an
-AUTH sets the owner from `hub_key`; any other frame from a hub that sends none makes the connection
-`legacy`, and is processed normally, once the channel state is sent. What the hub sends right behind
-its AUTH is kept and processed after the state too. How long the agent waits for that first frame:
+An agent with `hub-identity` requires AUTH as the first frame after HELLO, with or without an
+`auth.json`, and takes the owner from its `hub_key`. What the hub sends right behind its AUTH is kept
+and processed once the channel state is sent. A connection is refused, sent one `ERROR` without a
+`channel_id`, and closed, when:
 
-| Daemon | Nothing arrives in time |
-|--------|-------------------------|
-| With a token | 5 s, then the connection is closed, as before #127 |
-| Without a token | 2 s, then the connection is `legacy` and gets its channel state. A hub from before #127 sends nothing to such a daemon and waits 5 s for the state; this is what still serves it |
+| What came | `ERROR` code |
+|-----------|--------------|
+| Nothing within 5 s | `AUTH_REQUIRED` |
+| A first frame that is not AUTH, or an AUTH without `hub_key` | `AUTH_REQUIRED` |
+| An AUTH whose token does not match the daemon's `auth.json` | `AUTH_INVALID` |
+| An AUTH with an empty `hub_key` | `AUTH_INVALID` |
 
-A daemon whose `auth.json` is missing beside a `meta.db`, unreadable or malformed refuses every
-AUTH, one with an empty token included. An empty `hub_key` counts as none.
+Nothing else of a refused connection is acted on, and it is told nothing of the channels. A daemon
+whose `auth.json` is missing beside a `meta.db`, unreadable or malformed refuses every AUTH, one with
+an empty token included.
 
 **What the owner decides.** SPAWN makes the connection's owner the channel's owner, for good. INPUT,
 RESIZE, DESTROY, ATTACH and SNAPSHOT_REQ on a channel another owner holds behave exactly as for an
@@ -208,7 +209,8 @@ and the stale one is dropped quietly.
   env: Record<string, string>,  // set after env_unset: the scopes', the launch profile's, the request's
   cols: number,         // terminal columns; defaults to 80
   rows: number,         // terminal rows; defaults to 24
-  env_mode?: "inherit" | "minimal",  // what the environment starts from; absent or unknown = inherit
+  env_mode: "inherit" | "minimal",  // what the environment starts from; unknown = inherit.
+                        // Required: a SPAWN without it does not decode (INVALID_MESSAGE)
   env_unset?: string[], // removed before env is applied: what a scope set to null
   login_shell?: boolean // start the shell as a login shell (Unix agents, known shells)
 }
@@ -1640,6 +1642,8 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `VERSION_MISMATCH` | Hub | Agent protocol version too new |
 | `DISPLACED` | Agent | A newer connection took this one's place, and this one ends. With `hub-identity`, only ever a newer connection of the same hub (§ 3.1b) |
 | `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; `other_owner_channels` carries how many, and the message says it too (§ 3.17) |
+| `AUTH_REQUIRED` | Agent | A daemon connection did not open with an AUTH carrying `hub_key` within 5 s; the connection is closed (§ 3.1b) |
+| `AUTH_INVALID` | Agent | The AUTH that opened a daemon connection carried a token the daemon refuses, or an empty `hub_key`; the connection is closed (§ 3.1b) |
 
 ### Pairing Code Format
 

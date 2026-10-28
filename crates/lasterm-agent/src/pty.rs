@@ -541,7 +541,7 @@ mod tests {
         let mut mgr = PtyManager::new();
         let (id, pid) = mgr
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 None,
                 test_shell(),
                 &[],
@@ -567,7 +567,7 @@ mod tests {
         let fixed_id = "test-channel-01".to_string();
         let (id, _) = mgr
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 Some(fixed_id.clone()),
                 test_shell(),
                 &[],
@@ -582,7 +582,7 @@ mod tests {
 
         let err = mgr
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 Some(fixed_id.clone()),
                 test_shell(),
                 &[],
@@ -608,7 +608,7 @@ mod tests {
 
         let error = manager
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 Some("post-shutdown-spawn".to_owned()),
                 test_shell(),
                 &[],
@@ -631,7 +631,7 @@ mod tests {
     async fn test_destroy_all() {
         let mut mgr = PtyManager::new();
         mgr.spawn(
-            OwnerId::legacy(),
+            OwnerId::stdio(),
             None,
             test_shell(),
             &[],
@@ -643,7 +643,7 @@ mod tests {
         .await
         .unwrap();
         mgr.spawn(
-            OwnerId::legacy(),
+            OwnerId::stdio(),
             None,
             test_shell(),
             &[],
@@ -667,7 +667,7 @@ mod tests {
         let channel_id = "signal-failure-shutdown".to_string();
         let (spawned_channel_id, pid) = manager
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 Some(channel_id.clone()),
                 test_shell(),
                 // No args: an idle shell on a PTY blocks reading input, which is
@@ -765,16 +765,7 @@ mod tests {
         let mut manager = PtyManager::new();
         let args = vec!["-c".to_string(), command.to_string()];
         let (channel_id, _) = manager
-            .spawn(
-                OwnerId::legacy(),
-                None,
-                "/bin/sh",
-                &args,
-                None,
-                None,
-                80,
-                24,
-            )
+            .spawn(OwnerId::stdio(), None, "/bin/sh", &args, None, None, 80, 24)
             .await
             .expect("spawn terminal");
         let mut reader = manager.reader_for(&channel_id).expect("terminal reader");
@@ -1010,7 +1001,7 @@ mod tests {
             ];
             let (channel_id, shell_pid) = manager
                 .spawn(
-                    OwnerId::legacy(),
+                    OwnerId::stdio(),
                     Some(channel_id),
                     "/bin/sh",
                     &args,
@@ -1072,7 +1063,7 @@ mod tests {
                 HubToAgent::Destroy {
                     channel_id: channel_id.clone(),
                 },
-                &OwnerId::legacy(),
+                &OwnerId::stdio(),
                 Arc::clone(&manager),
                 frame_tx,
                 channel_events,
@@ -1091,7 +1082,7 @@ mod tests {
             let mut manager = PtyManager::new();
             let (channel_id, pid) = manager
                 .spawn(
-                    OwnerId::legacy(),
+                    OwnerId::stdio(),
                     Some("unconfirmed-shutdown".to_string()),
                     "/bin/sh",
                     &["-c".to_string(), "sleep 30".to_string()],
@@ -1131,7 +1122,7 @@ mod tests {
                 let mut guard = manager.lock().await;
                 let (_channel_id, pid) = guard
                     .spawn(
-                        OwnerId::legacy(),
+                        OwnerId::stdio(),
                         Some(format!("many-teardown-{number}")),
                         "/bin/sh",
                         &["-c".to_string(), "sleep 30".to_string()],

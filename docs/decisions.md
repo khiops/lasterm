@@ -54,7 +54,7 @@ heading, with a pointer to the section that replaced it. A section without one i
 - **Days, not a size.** The hub's logs move aside at 10 MB (`hub.jsonl.old`), and doing the same here was the first design. It was dropped: a rename can be refused (on Windows, by anything holding the file without sharing deletion), and a daemon that keeps appending meanwhile grows the full file again, the very failure being fixed. A new day's file is a new name, which nothing holds; no file is ever renamed.
 - **A count, not an age.** The `[logging] agent_files_kept` most recent files are kept, 7 by default (a week of activity covers "it started on Monday"), `0` keeping all, as OpenRGB's `file_count_limit`. Days without activity have no file, so a quiet daemon keeps a longer history in as many files. The cap counts files, not bytes: at INFO the daemon logs its lifecycle and little else, and it is the level that bounds a day.
 - **Pruned by the daemon**, when it starts and when a new day's file starts, by the date in the names: only `agent-daemon.YYYY-MM-DD.jsonl` regular files. `tracing-appender`'s own `max_log_files` is not used: it goes by creation time, counts any file with the prefix and the suffix, and reports on stderr. A file that cannot be deleted is a warning in the log, tried again at the next occasion; the warning written from inside a write goes through a short-lived thread, so the log never re-enters itself.
-- **The old file** `agent-daemon.jsonl` counts as one more file, dated by its last write, so it goes once as many newer days have their own file as are kept. It is not renamed: a daemon from before may still be appending to it while it is replaced.
+- **The old file** `agent-daemon.jsonl` is left alone, as anything in `logs/` that is not a daily file. Only daemons that were never released wrote it, so the pruning that once dated it by its last write went before the first release.
 - **A setting, passed at launch.** Settings › Agents › Agent logs writes it (`PUT /api/config/logging`). The hub reads it when it starts a daemon, local or remote, and passes `--log-files-kept`; one already running keeps its count. A remote binary is asked first (`--help`), as for `--idle-timeout`: a build of main deploys the last release's agent, which would refuse the option and never listen. The local agent ships with the hub and gets it unasked.
 
 ---
@@ -173,7 +173,7 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 
 - Before, the last connection won: it saw every channel, and received the output queued while nobody was connected. Channels live in a hub's `meta.db`, so the daemon now keeps them apart by who spawned them.
 - The owner is the SHA-256 of a per-hub key, `hub-key` in the state directory, created once and sent in the AUTH of every daemon connection. The daemon keeps only the hash and compares it in constant time. A malformed key stops the hub rather than being replaced: a new key is a new owner, and the old one's channels would be out of reach with nothing to say why.
-- Another owner's channel answers exactly as an unknown one does. Each owner has its own queue while it is away, and a new connection displaces only its own hub's previous one. A connection that presents no key is `legacy`, and the last one wins among those.
+- Another owner's channel answers exactly as an unknown one does. Each owner has its own queue while it is away, and a new connection displaces only its own hub's previous one. A connection that does not open with an AUTH carrying a key is refused with an `ERROR` and closed: before the first release, every hub sends one, so the daemon keeps no owner for keyless hubs. Stdio mode, one connection with no AUTH, has a single owner of its own, `stdio`.
 - STOP, sent over the hub's own connection, refuses while other hubs hold channels there unless it is forced; the host shows how many.
 - Rejected as the identity: the TLS key, whose rotation (#193) would orphan every channel, and the primary token, which every hub reading the same `auth.json` shares and which a remote daemon is never given: its AUTH carries an empty token and the key.
 - Not a boundary against the account itself (SECURITY.md § 3.6). Quit still stops a shared local agent, and with it the other hub's local terminals (#142).
@@ -302,7 +302,7 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 - ConPTY pipes: no SECURITY_ATTRIBUTES (non-inheritable) — inheritable handles cause cmd.exe to inherit agent stdout
 - PSEUDOCONSOLE_INHERIT_CURSOR: skip initial cursor position query (prevents DSR deadlock)
 - DSR response: pre-emptive \x1b[1;1R sent immediately + detection in output stream
-- Agent CLI: --stdio (default), --daemon, --socket, --buffer-per-channel, --buffer-global flags
+- Agent CLI: --stdio (default), --daemon, --socket flags. The Node agent's --buffer-per-channel and --buffer-global were never applied by the Rust agent, and are gone before the first release
 - OS-assigned port by default; an explicit port may retry on EADDRINUSE and the actual port is written to runtime.json
 - Desktop reads runtime.json only (no hardcoded-port fallback)
 

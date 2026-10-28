@@ -146,6 +146,30 @@ jobs:
         working-directory: crates/lasterm-tls-identity
         run: cargo clippy --all-targets -- -D warnings
 
+  # The next release's Store What's new, built from the news fragments added
+  # since the last tag, must fit the Store's 1,500 characters in every listing
+  # language (#773). The release checks it too, but only once it is cut; this
+  # says so on the pull request that pushes it over. 99.99.99 stands for the
+  # next version: its frame is longer than any real one, so the check errs on
+  # the safe side. Exit 3 means no fragment was added yet.
+  store-news:
+    name: Store What's new
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+      - name: Next release's What's new fits the Store
+        run: |
+          status=0
+          node scripts/store-listing.ts 99.99.99 > /dev/null || status=$?
+          [ "$status" -eq 0 ] || [ "$status" -eq 3 ] || exit "$status"
+
   licenses:
     name: License compliance
     runs-on: ubuntu-latest

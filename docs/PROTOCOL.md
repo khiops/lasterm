@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-09-29
+> Last updated: 2026-10-28
 
 ## 1. Framing
 
@@ -200,16 +200,22 @@ hub, `DISPLACED` means a newer connection of its own took over, and the stale on
   channel_id?: string,  // hub-provided ID for warm restart; if omitted, agent generates one
   shell?: string,       // "/bin/bash"; only a shell the terminal has of its own, on a restart too (#583);
                         // absent: the agent's user's default shell (SHELL on Unix, COMSPEC on Windows)
+  args?: string[],      // the shell's arguments; absent when there are none
   cwd?: string,         // only a directory the terminal has of its own, on a restart too (#581);
                         // absent: the agent's user's home (HOME on Unix, USERPROFILE on Windows),
                         // or where the agent runs when that is not a directory
-  env: Record<string, string>,  // set after env_unset: the scopes', the launch profile's, the request's
-  cols: number,         // terminal columns; defaults to 80
-  rows: number,         // terminal rows; defaults to 24
+  env?: Record<string, string>,  // set after env_unset: the scopes', the launch profile's, the request's
+  cols: number,         // terminal columns; the hub sends 80 when its client gave none
+  rows: number,         // terminal rows; the hub sends 24 when its client gave none
   env_mode: "inherit" | "minimal",  // what the environment starts from; unknown = inherit.
                         // Required: a SPAWN without it does not decode (INVALID_MESSAGE)
   env_unset?: string[], // removed before env is applied: what a scope set to null
-  login_shell?: boolean // start the shell as a login shell (Unix agents, known shells)
+  login_shell?: boolean, // start the shell as a login shell (Unix agents, known shells)
+  direct_process?: boolean,   // a launch profile's `process` mode; the agent ignores it
+  elevated?: boolean,         // run the shell elevated; the hub asks it of a local agent only
+  elevation_method?: string,  // "sudo", "doas", "pkexec", "gsudo" or "custom"
+  custom_command?: string,    // the elevation command, for "custom"
+  elevation_secret?: string   // the password an elevated SPAWN needs (§ 4.10)
 }
 
 // Agent → Hub (success)
@@ -554,6 +560,21 @@ asked over that hub's own authenticated connection. Stdio and daemon agents both
 values can be secrets: neither side stores or logs them, at any level. The hub sends it for
 `GET /api/hosts/:id/agent-environment` (§ 6).
 
+### 3.19 LOG (Agent → Hub)
+
+```typescript
+{
+  type: "LOG",
+  channel_id: string,   // empty when the line is about no channel, e.g. a SPAWN that failed
+  level: string,        // "trace", "debug", "info", "warn" or "error"
+  msg: string
+}
+```
+
+A diagnostic about a channel: a SPAWN that failed, at `error`, or a PTY that closed, at `debug`.
+The hub writes it to that channel's log when it keeps one, else to its own log under the channel's
+id, and reads any other level as `info`. It never reaches a client.
+
 ## 4. Message Types — Hub ↔ UI (WS)
 
 ### 4.1 AUTH
@@ -566,6 +587,9 @@ values can be secrets: neither side stores or logs them, at any level. The hub s
 { type: "AUTH_OK", client_id: string }
 { type: "AUTH_FAIL", message: string }
 ```
+
+A first frame that is not AUTH is also answered `AUTH_FAIL`, and the socket closed. A socket that
+sends no AUTH within 10 s is closed with code `4001`, reason `AUTH_TIMEOUT`.
 
 `AUTH_FAIL` is a verdict on the token: a client that receives it discards the token and pairs
 again. When the hub cannot read its token store it has no verdict, so it sends no `AUTH_FAIL` and
@@ -594,7 +618,11 @@ sends a frame or disconnects.
   snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
   tail: Uint8Array[],          // output since last snapshot
   write_lock_holder: string | null,
-  cached: boolean              // true = from local cache, agent unreachable
+  cached: boolean,             // true = from local cache, agent unreachable
+  truncated?: true,            // output after the snapshot was too much to send, and is left out
+  dynamic_title?: string,      // the title the terminal set (OSC 0/2), when it set one
+  process_title?: string,      // its foreground process, when known
+  display_title: string        // the title a tab shows
 }
 
 // UI → Hub
@@ -613,8 +641,8 @@ and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
 ### 4.3 INPUT / OUTPUT / RESIZE
 
 Same as agent messages (section 3.4–3.6).
-Hub verifies write-lock on INPUT. Rejects with ERROR if not holder.
-Hub broadcasts RESIZE to other attached clients.
+Hub verifies write-lock on INPUT. Rejects with ERROR (`WRITE_LOCK_DENIED`) if not holder.
+Hub passes RESIZE on to the agent and stores the size; it sends it to no other client.
 
 ### 4.4 SPAWN / SPAWN_OK
 
@@ -624,8 +652,14 @@ Hub broadcasts RESIZE to other attached clients.
   type: "SPAWN",
   host_id: string,
   shell?: string,     // default: the launch profile's, else the host's first profile's, else none: the agent's default (§ 3.2)
-  cwd?: string,       // default: none sent; the agent starts the shell in its user's home (§ 3.2)
-  env?: Record<string, string>,  // merged with system env (max 100 entries)
+  args?: string[],    // default: taken with the shell, as above
+  cwd?: string,       // default: the launch profile's, else none: the agent starts the shell in its user's home (§ 3.2)
+  env?: Record<string, string>,  // set over the scopes' and the launch profile's (max 256 entries)
+  cols?: number,      // 1 to 500; default 80
+  rows?: number,      // 1 to 500; default 24
+  launch_profile_id?: string,  // the launch profile to start; the request's own fields win
+  direct_process?: boolean,    // default: the launch profile's `mode` is `process`
+  elevated?: boolean, // default: the launch profile's; ignored on an SSH host
   group_id?: string,  // optional channel group to place new channel in
   reuse_channel_id?: string,  // bring this ended terminal back under its own id (Restart)
   automatic?: boolean  // nobody asked for it: "When a terminal ends", or its host's return (#648)
@@ -842,9 +876,10 @@ socket for a missing one.
   type: "HOST_VERIFY",
   host_id: string,
   fingerprint: string,         // "SHA256:<base64>", unpadded as OpenSSH prints it
-  algorithm: string,           // "ssh-ed25519", "ssh-rsa"
+  algorithm: string,           // the fingerprint's hash: "SHA256"
   old_fingerprint?: string,    // set when stored key differs — MITM warning
-  prompt_id: string,           // correlation ID; must be echoed in response for mismatch prompts
+  prompt_id: string,           // correlation ID, echoed in the response
+  delivery_epoch: number,      // as on AUTH_PROMPT (§ 4.10); not echoed
   first_connect?: boolean,     // no key pinned for this host yet
   hostname?: string,           // the address that presented the key
   known_hosts?: {              // what this machine's OpenSSH already says about the key (SECURITY.md § 3.3)
@@ -859,9 +894,13 @@ socket for a missing one.
   type: "HOST_VERIFY_RESPONSE",
   host_id: string,
   action: "trust_permanent" | "trust_once" | "reject",
-  prompt_id?: string           // must match HOST_VERIFY.prompt_id when responding to a mismatch
+  prompt_id: string            // echoes HOST_VERIFY's prompt_id
 }
 ```
+
+The hub answers a response without a `prompt_id`, or with another `action`, with an
+`INVALID_INPUT` error. It ignores a response from any client but the one the prompt was last sent
+to.
 
 ### 4.10 AUTH_PROMPT / AUTH_PROMPT_RESPONSE (SSH Credentials)
 
@@ -892,6 +931,15 @@ Used when the hub needs to obtain a secret from the user interactively during SS
 The hub answers a response without a valid `prompt_id` or `delivery_epoch` with an `INVALID_INPUT`
 error. It ignores a response from any client but the one the prompt was last sent to, and one whose
 `delivery_epoch` is not the prompt's latest.
+
+```typescript
+// Hub → UI: dismiss a prompt the hub no longer waits on
+{ type: "PROMPT_CANCEL", prompt_id: string }
+```
+
+The hub sends PROMPT_CANCEL for an AUTH_PROMPT, a HOST_VERIFY (§ 4.9) or an AGENT_BINARY_VERIFY
+(§ 4.15) to the client it asked: when it asks another client instead, which gets the prompt again
+with a higher `delivery_epoch`, and when the connection the prompt was for is given up.
 
 **Security note:** The hub writes none of these secrets to disk. A password is used for the SSH
 handshake and dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min
@@ -992,22 +1040,86 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
 
 **Error codes:**
 
+An unknown or refused token is not an ERROR: it is `AUTH_FAIL` (§ 4.1).
+
 | Code | Meaning |
 |------|---------|
-| `AUTH_REQUIRED` | No AUTH sent yet |
-| `AUTH_INVALID` | Bad token |
-| `CHANNEL_NOT_FOUND` | Unknown channel ID |
+| `MALFORMED_MESSAGE` | The frame does not decode as MessagePack |
+| `INVALID_INPUT` | A field the hub checks is refused: an id that is not a ULID, `cols` or `rows`, `shell`, `cwd`, `env`, INPUT over 64 KiB, a prompt's answer |
+| `CHANNEL_NOT_FOUND` | ATTACH on a terminal the hub has no record of (§ 4.2) |
 | `CHANNEL_DEAD` | ATTACH on a terminal that has ended (§ 4.2) |
 | `CHANNEL_NOT_REUSABLE` | SPAWN with `reuse_channel_id` refused; `channel_id` names that terminal (§ 4.4) |
-| `NOT_ATTACHED` | Op requires ATTACH first |
-| `WRITE_LOCK_HELD` | INPUT rejected, not the writer |
-| `HOST_NOT_FOUND` | Unknown host ID |
+| `WRITE_LOCK_DENIED` | INPUT from a client that does not hold the write lock; carries `channel_id` |
+| `HOST_NOT_FOUND` | SPAWN on a host this hub does not list; carries `host_id` |
 | `HOST_BUSY` | SPAWN refused while Replace holds the host, at `SessionManager.spawnOnHost` or, for one already under way, before its frame is written: "This host's agent is being stopped." |
 | `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started, or, for a SPAWN marked `automatic`, its user disconnected it (#648). Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
-| `SSH_FAILED` | SSH connection failed |
-| `AGENT_ERROR` | Agent returned error |
-| `FRAME_TOO_LARGE` | Payload > 10 MB |
-| `PROTOCOL_ERROR` | Malformed message |
+| `HUB_QUITTING` | SPAWN refused: the hub is quitting |
+| `SSH_CONNECT_FAILED` | The SSH connection a SPAWN needed failed |
+| `SSH_HOST_KEY_REJECTED` | The user rejected the host's key (§ 4.9) |
+| `SSH_HOST_KEY_REVOKED` | The host's key is marked `@revoked` in a `known_hosts` file; carries `host_id` |
+| `SSH_JUMP_UNUSABLE` | The host's jump cannot be used (SECURITY.md § 3.3b); carries `host_id` |
+| `AGENT_BINARY_REJECTED` | The user refused the agent binary found on the host (§ 4.15); carries `host_id` |
+| `AGENT_BINARY_UNTRUSTED` | The agent binary found on the host cannot be checked; carries `host_id` |
+| `AGENT_NOT_AVAILABLE` | The hub has no agent binary for the host, and could not fetch one; carries `host_id` |
+| `AGENT_VERSION_MISMATCH` | The agent the hub deployed reports another version than the hub's. Sent to every client, with `host_id` |
+| `ELEVATION_CANCELLED` | The user cancelled the password an elevated SPAWN needs (§ 4.10) |
+| `INVALID_CUSTOM_COMMAND` | The custom elevation command is not one the hub runs |
+| `SPAWN_FAILED` | A SPAWN failed for another reason, the agent's ten seconds running out included |
+| A SPAWN_ERR code | The agent refused the SPAWN: its code is passed on (Agent Error Codes, § 6) |
+
+### 4.15 AGENT_BINARY_VERIFY (Remote Agent Binary)
+
+```typescript
+// Hub → UI: an agent binary on an SSH host that no one here has approved
+{
+  type: "AGENT_BINARY_VERIFY",
+  prompt_id: string,
+  delivery_epoch: number,      // as on AUTH_PROMPT (§ 4.10); not echoed
+  host_id: string,
+  hostname: string,
+  remote_path: string,
+  remote_sha256: string,
+  os: "linux" | "darwin" | "windows",
+  arch: "x64" | "arm64",
+  mismatch: boolean,           // true: it is not the binary pinned for this host
+  pinned_sha256?: string       // the pinned hash, when mismatch
+}
+
+// UI → Hub
+{
+  type: "AGENT_BINARY_VERIFY_RESPONSE",
+  prompt_id: string,
+  action: "trust_permanent" | "trust_once" | "reject"
+}
+```
+
+`trust_permanent` pins the hash on the host, `trust_once` trusts it for this hub run, and `reject`
+ends the connection with `AGENT_BINARY_REJECTED` (§ 4.14). The response is checked and routed as
+HOST_VERIFY_RESPONSE's is (§ 4.9).
+
+### 4.16 AGENT_SYNCED (Hub → UI)
+
+```typescript
+{ type: "AGENT_SYNCED", host_id: string, hostname: string, message: string }
+```
+
+Sent to every client when the hub has replaced the agent binary on an SSH host with its own. A
+daemon already running there still answers until it is replaced (§ 4.7, `outdated_agent`).
+
+### 4.17 CONFIG_CHANGED (Hub → UI)
+
+```typescript
+{
+  type: "CONFIG_CHANGED",
+  scope: "ui" | "appearance" | "global" | "host" | "channel",
+  host_id?: string,     // scope "host"
+  channel_id?: string   // scope "channel"
+}
+```
+
+Sent to every client once configuration is written, so each reads that scope again (#479):
+`PUT /api/config/ui` (`ui`), `PUT /api/config/appearance` and every theme write (`appearance`),
+`PUT /api/config/global` (`global`), and `PATCH` of a host's or a channel's profile (§ 6).
 
 ## 5. Protocol Sequences
 
@@ -1213,10 +1325,10 @@ What the callers do with the answers:
 | POST | `/api/hosts` | ● | CreateHost → `Host` (201) |
 | PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204 |
 | GET | `/api/hosts/:id` | ● | `Host` |
-| PUT | `/api/hosts/:id` | ● | UpdateHost → `Host` (partial update, deep merge) |
+| PUT | `/api/hosts/:id` | ● | UpdateHost → `Host` (partial update: each field sent replaces the stored one). 409 `CONFLICT` for a label in use |
 | DELETE | `/api/hosts/:id` | ● | 204 |
 | POST | `/api/hosts/:id/duplicate` | ● | → `Host` (201). The copy takes a free `<label>-copy`, `-copy-2`… label and the host's settings, jump, elevation and OS included, and goes into its group right after it, renumbering that group's `sort_order` (#746). Its pinned host key, jump key and agent hash are not copied: its first connection treats them as a new host's. 400 `VALIDATION_ERROR` for the local host or an unknown id |
-| PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → 200 |
+| PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → `{ ok: true }`. 404 for an unknown channel, 400 `VALIDATION_ERROR` for one of another host |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
 | POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). Once the stop is confirmed, every terminal this hub held there is reported dead with `end_reason: "stopped"` (§ 4.7, #599). The daemon gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. One the STOP cannot reach is stopped with its own `--stop`. 409 `HOST_BUSY` while another Replace holds the host (`SessionManager.replaceAgent`). A displaced or hub-closed connection is not replaced: `requestDaemonStop` classifies it as unconfirmed, and Replace answers 409 `AGENT_NOT_REPLACED`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host |
 | GET | `/api/hosts/:id/agent-environment` | ● | `?mode=inherit\|minimal` (default `inherit`) → `{ mode, os, env }`: the variables a terminal on this host would start with in that mode, before any profile changes them, asked live of the agent over ENV_QUERY (§ 3.18) and answered with `Cache-Control: no-store` (#576). Never stored, never logged, names included. 409 `HOST_NOT_CONNECTED` when no agent of this host is connected to this hub, 504 `AGENT_TIMEOUT` after 5 s without an answer, 400 `VALIDATION_ERROR` for another mode, 404 for an unknown host |
@@ -1225,7 +1337,7 @@ What the callers do with the answers:
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`. The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
-| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type, sort_order? }` → 204 |
+| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204 |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
@@ -1279,8 +1391,19 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config` |
-| POST | `/api/hosts/import` | ● | `{ entries: SshConfigImport[] }` → `Host[]` (201) |
+| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`. 404 `NOT_FOUND` when there is none |
+| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
+
+#### SSH Keys
+
+The private keys in `~/.ssh` of the hub's user, or in a directory below it named by `dir`. A `dir`
+that leaves `~/.ssh` answers 400 `INVALID_PATH`.
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| GET | `/api/ssh-keys` | ● | `?dir=` → `{ path, entries }`, each `{ name, type: "directory" \| "key", items?, algorithm?, bits?, fingerprint?, encrypted?, mtime? }`. Public keys, `config`, `known_hosts` and `authorized_keys` are left out |
+| POST | `/api/ssh-keys` | ● | multipart: the key file, and a `dir` field → `{ name, algorithm?, bits?, fingerprint?, encrypted?, mtime? }`, stored mode 600. 400 `NO_FILE`, `INVALID_FILENAME` or `INVALID_KEY`; 413 `FILE_TOO_LARGE` over 100 KB; 409 `DUPLICATE` |
+| DELETE | `/api/ssh-keys` | ● | `?name=&dir=` → 204. 400 `MISSING_PARAM` without `name`, 404 `NOT_FOUND` |
 
 #### Sessions
 
@@ -1294,31 +1417,31 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/channels` | ● | `Channel[]` (query: `?host_id=X`). A dead channel the hub ended itself carries `end_reason`: `"killed"` or `"stopped"` (§ 4.7, #592) |
-| GET | `/api/channels/:id` | ● | `Channel`, with `end_reason` as in the list |
-| PATCH | `/api/channels/:id` | ● | Partial update (e.g. title) → `Channel` |
-| POST | `/api/channels/:id/restart` | ● | Restart dead channel → 200; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise |
-| DELETE | `/api/channels/:id` | ● | 204. A live channel is ended, and stored `dead` with `end_reason: "killed"` |
-| DELETE | `/api/channels/dead` | ● | Remove all dead channels → `{ purged }` |
+| GET | `/api/channels` | ● | `Channel[]`, each with `display_title` and `host_id` (query: `?host_id=X` or `?session_id=Y`). A dead channel the hub ended itself carries `end_reason`: `"killed"` or `"stopped"` (§ 4.7, #592) |
+| GET | `/api/channels/:id` | ● | `Channel`, with `display_title`, and `end_reason` as in the list |
+| PATCH | `/api/channels/:id` | ● | At least one of `{ title?, group_id?, icon?, shell?, args?, cwd?, direct_process? }`, and no other key → `Channel`. A `null` clears `title`, `group_id`, `icon`, `shell` or `cwd` |
+| POST | `/api/channels/:id/restart` | ● | Restart dead channel → `{ channel_id }`; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise; 500 `RESTART_ERROR` when the restart threw |
+| DELETE | `/api/channels/:id` | ● | `{ ok: true }`. A live channel is ended, and stored `dead` with `end_reason: "killed"`. A dead one is removed with its output: `{ ok: true, purged: true }` |
+| DELETE | `/api/channels/dead` | ● | Remove all dead channels, or a host's with `{ host_id }` → `{ ok: true, purged }` |
 
 #### Channel Groups (tab groups)
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/groups` | ● | `Group[]` |
+| GET | `/api/groups` | ● | `Group[]` (query: `?host_id=X`, required: 400 `VALIDATION_ERROR` without it) |
 | POST | `/api/groups` | ● | CreateGroup → `Group` (201) |
-| PUT | `/api/groups/order` | ● | `{ group_ids }` → 204 |
-| PATCH | `/api/groups/:id` | ● | UpdateGroup → `Group` |
-| DELETE | `/api/groups/:id` | ● | 204 |
+| PUT | `/api/groups/order` | ● | `{ host_id, group_ids }` → `{ ok: true }`. 400 `VALIDATION_ERROR` for a group of another host |
+| PATCH | `/api/groups/:id` | ● | UpdateGroup → `{ ok: true }` |
+| DELETE | `/api/groups/:id` | ● | `{ ok: true }` |
 
 #### Host Groups
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/host-groups` | ● | `HostGroup[]`, or a page with `?limit=&offset=` (see Pagination) |
-| POST | `/api/host-groups` | ● | CreateHostGroup → `HostGroup` (201) |
-| PUT | `/api/host-groups/order` | ● | `{ group_ids }` → 204 |
-| PUT | `/api/host-groups/:id` | ● | UpdateHostGroup → `HostGroup` |
+| POST | `/api/host-groups` | ● | CreateHostGroup → `HostGroup` (201). 409 `CONFLICT` for a name in use |
+| PUT | `/api/host-groups/order` | ● | `{ group_ids }`, every host group once → `{ ok: true }` |
+| PUT | `/api/host-groups/:id` | ● | UpdateHostGroup → `HostGroup`. 409 `CONFLICT` for a name in use |
 | DELETE | `/api/host-groups/:id` | ● | 204 |
 
 #### Launch Profiles
@@ -1330,7 +1453,8 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 | PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 |
 | GET | `/api/launch-profiles/:id` | ● | `LaunchProfile` |
 | PUT | `/api/launch-profiles/:id` | ● | UpdateLaunchProfile → `LaunchProfile` |
-| DELETE | `/api/launch-profiles/:id` | ● | 204 |
+| DELETE | `/api/launch-profiles/:id` | ● | 204. 400 `LAST_PROFILE` for the only one left |
+| POST | `/api/launch-profiles/import-windows-terminal` | ● | — → `{ imported, skipped, profiles }`, from Windows Terminal's `settings.json`. 501 `NOT_SUPPORTED` on a hub not on Windows, 404 `NOT_FOUND` when there is no such file |
 
 #### Configuration
 
@@ -1338,25 +1462,28 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 |--------|------|------|--------------|
 | GET | `/api/config/defaults` | ● | Layer 1 built-in defaults |
 | GET | `/api/config/ui` | ● | UI behavioral config |
-| GET | `/api/config/resolved` | ● | Merged config (query: `?host_id=X&channel_id=Y&session_id=Z`) |
-| GET | `/api/config/cascade` | ● | Full 4-layer cascade (query: `?host_id=X&channel_id=Y`) |
+| GET | `/api/config/cascade` | ● | Full 4-layer cascade, the merged result included (query: `?host_id=X&channel_id=Y`) |
 | PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }`. A `null` inside `terminal.env` is a removal, written `false` in `config.toml` (which has no null) and read back as `null` |
 | PUT | `/api/config/ui` | ● | `{ <section>: { <key>: value } }` → `{ ok }` |
 | PUT | `/api/config/appearance` | ● | `{ theme?, autoSwitch?, ... }` → `{ ok }` |
 | GET | `/api/config/elevation` | ● | Current elevation config |
-| PUT | `/api/config/elevation` | ● | `{ methodLinux?, methodDarwin?, ... }` → `{ ok }` |
+| PUT | `/api/config/elevation` | ● | `{ methodLinux?, methodDarwin?, ... }` → `{ ok }`. A method the OS does not have, or an empty custom command, 400 `INVALID_VALUE` |
+| GET | `/api/config/ssh` | ● | `{ trustKnownHosts, remoteDaemon }`, the `[ssh]` section |
+| PUT | `/api/config/ssh` | ● | `{ trustKnownHosts?, remoteDaemon? }`, booleans → the section, as saved. Any other key or value 400 `VALIDATION_ERROR` |
 | GET | `/api/config/logging` | ● | What Settings edits of `[logging]`: `{ agentFilesKept }`, the log files an agent daemon keeps (STORAGE.md § 12.1) |
 | PUT | `/api/config/logging` | ● | `{ agentFilesKept }` → `{ agentFilesKept }`, as saved. A whole number from 0 (all) to 3650, else 400 `INVALID_VALUE`; any other key 400 `VALIDATION_ERROR`. Reaches each agent daemon when it next starts |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
-| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576) |
+| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR` |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |
-| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` — merge into channel Layer 4 profile, as for a host |
+| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, as for a host |
 
 #### Fonts
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/fonts` | ● | `FontFamily[]` — the imported fonts in the config dir's `fonts/`; returned public font URLs carry the per-boot asset token |
+| POST | `/api/fonts` | ● | multipart, one font file → `FontFamily[]`. 400 `NO_FILE`, `INVALID_FILENAME`, `UNSUPPORTED_TYPE` or `INVALID_FILE_TYPE`; 413 `FILE_TOO_LARGE` over 10 MB; 409 `DUPLICATE` for a file name in use |
+| DELETE | `/api/fonts/:family` | ● | 204: removes every file of that family. 404 `FONT_FAMILY_NOT_FOUND` |
 | GET | `/api/fonts/system` | ● | `SystemFontFamily[]` — `.ttf`/`.otf` fonts installed where the hub runs (#100), with `monospace` and each face's `localNames` for `local()`. Scanned from the OS font directories at most every five minutes |
 
 #### Themes
@@ -1365,17 +1492,17 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 |--------|------|------|--------------|
 | GET | `/api/themes` | ● | `Theme[]` (built-in + user) |
 | GET | `/api/themes/:name` | ● | `Theme` |
-| POST | `/api/themes` | ● | CreateTheme → `Theme` (201) |
-| PUT | `/api/themes/:name` | ● | UpdateTheme → `Theme` |
-| DELETE | `/api/themes/:name` | ● | 204 |
+| POST | `/api/themes` | ● | CreateTheme → `{ name }` (201). 409 `THEME_EXISTS` |
+| PUT | `/api/themes/:name` | ● | UpdateTheme → `{ name }` |
+| DELETE | `/api/themes/:name` | ● | 204. 409 `BUNDLED_THEME` for a theme the hub ships |
 
 #### Wallpapers
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/wallpapers` | ● | `WallpaperFile[]` — user wallpaper filenames; clients build signed public URLs |
-| POST | `/api/wallpapers` | ● | multipart upload → `{ filename }` (201) |
-| DELETE | `/api/wallpapers/:filename` | ● | 204 |
+| GET | `/api/wallpapers` | ● | `{ wallpapers: string[] }` — user wallpaper filenames; clients build signed public URLs |
+| POST | `/api/wallpapers` | ● | multipart upload → `{ filename }` |
+| DELETE | `/api/wallpapers/:filename` | ● | `{ ok: true }`. 404 `NOT_FOUND` |
 
 #### Asset Token
 
@@ -1396,8 +1523,8 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| POST | `/api/pair` | ● | — → `{ code, expires_at }` (201); max 3 active codes |
-| POST | `/api/pair/verify` | ○ | `{ code }` → `{ token }` |
+| POST | `/api/pair` | ● | — → `{ code, expires_at }` (201); max 3 active codes, then 429 `RATE_LIMIT` |
+| POST | `/api/pair/verify` | ○ | `{ code }` → `{ token }`. 400 `INVALID_FORMAT`, 404 `CODE_NOT_FOUND`, 409 `CODE_USED`, 410 `CODE_EXPIRED`, 429 `RATE_LIMIT` for too many attempts from one address |
 
 #### Auth Tokens
 
@@ -1433,21 +1560,21 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
   ssh_host?: string,                  // required if type=ssh, "hostname" or "ip"
   ssh_port?: number,                  // default 22, range 1-65535
   ssh_user?: string,                  // SSH username
-  ssh_auth?: 'agent' | 'key' | 'password',  // required if type=ssh
+  ssh_auth?: 'agent' | 'key' | 'password',
   ssh_key_path?: string,              // required if ssh_auth=key
   ssh_config_host?: string,           // Host alias from ~/.ssh/config
   ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
   ssh_proxy_spec?: string | null,     // or a jump as user@host:port; never both
   ssh_remote_daemon?: boolean | null, // keep an agent running there (#79); null follows [ssh] remote_daemon
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'
-  icon_value?: string,                // emoji char or image path
-  color?: string,                     // hex "#rrggbb" or null for auto
+  icon_value?: string | null,         // emoji char, or for 'image' a data:image/png|jpeg|gif|webp;base64 URI of at most 65536 chars
+  color?: string | null,              // hex "#rrggbb" or null for auto
   default_shell?: string,
   default_cwd?: string,
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
-  host_group_id?: string,             // host group ID
+  host_group_id?: string | null,      // host group ID
   profile_json?: string | object,     // host-level terminal profile (Layer 3)
-  elevation_method?: string,          // e.g. "sudo", "doas", "pkexec", "gsudo"
+  elevation_method?: 'sudo' | 'doas' | 'pkexec' | 'gsudo' | 'custom' | null,
   custom_command?: string,            // the elevation command, when elevation_method is "custom"
   os?: 'linux' | 'darwin' | 'windows' | null,
   arch?: 'x64' | 'arm64' | null
@@ -1458,39 +1585,38 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 A field these routes do not know is ignored.
 
-**CreateGroup:** (tab channel groups)
+**CreateGroup:** (tab channel groups; no other key)
 ```typescript
 {
-  name: string,                 // required, 1-64 chars
-  sort_order?: number           // default 0
+  host_id: string,              // required, the host the group is for
+  name: string                  // required, 1-128 chars, not only whitespace
 }
 ```
 
-**UpdateGroup:**
+**UpdateGroup:** (no other key)
 ```typescript
 {
-  name?: string,
-  sort_order?: number,
-  collapsed?: boolean
+  name: string                  // required, 1-128 chars, not only whitespace
 }
 ```
 
 **CreateHostGroup:**
 ```typescript
 {
-  name: string,                 // required, 1-64 chars
-  sort_order?: number
+  name: string,                 // required, 1-32 chars once trimmed: letters, digits, space, - and _; unique
+  color?: string | null         // hex "#rrggbb"
 }
 ```
 
 **UpdateHostGroup:**
 ```typescript
 {
-  name?: string,
-  sort_order?: number,
-  collapsed?: boolean
+  name?: string,                // as for CreateHostGroup
+  color?: string | null         // null clears it
 }
 ```
+
+A host group answers `{ id, name, sort_order, color, created_at, updated_at }`.
 
 **CreateLaunchProfile:**
 ```typescript
@@ -1615,12 +1741,23 @@ All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED
 
 **Error responses:**
 ```typescript
-// Most legacy non-2xx responses return:
+// Most non-2xx responses return, as the agent manager's do:
 {
-  error: string,                // machine-readable code (e.g., "NOT_FOUND", "VALIDATION_ERROR")
-  message: string               // human-readable description
+  error: {
+    code: string,               // machine-readable (e.g., "NOT_FOUND", "VALIDATION_ERROR")
+    message: string             // human-readable description
+  }
+}
+
+// The bearer check (401, 503) and the routes that end the hub return the older flat shape:
+{
+  error: string,                // "AUTH_REQUIRED", "AUTH_INVALID", "AUTH_UNAVAILABLE", ...
+  message: string
 }
 ```
+
+A body that a route's JSON schema refuses (`POST /api/groups`, `PATCH /api/channels/:id`, ...)
+gets Fastify's own 400: `{ statusCode, code: "FST_ERR_VALIDATION", error: "Bad Request", message }`.
 
 ### Agent Error Codes
 
@@ -1633,9 +1770,10 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `PTY_SPAWN_FAILED` | Agent | The PTY could not be spawned, for any other reason |
 | `CHANNEL_EXISTS` | Agent | SPAWN named a `channel_id` the agent already holds |
 | `ELEVATION_PASSWORD_REQUIRED` | Agent | An elevated SPAWN needs a password; the hub asks for one (AUTH_PROMPT) and sends the SPAWN again |
+| `ELEVATION_CUSTOM_CMD_MISSING` | Agent | An elevated SPAWN with `elevation_method: "custom"` and no `custom_command` |
+| `ELEVATION_FAILED` | Agent | The elevation command could not be prepared |
 | `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT/RESIZE for unknown channel_id (DESTROY and SNAPSHOT_REQ answer nothing); also for a channel another hub owns, which is never told apart from an unknown one, byte for byte |
-| `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
-| `VERSION_MISMATCH` | Hub | Agent protocol version too new |
+| `INVALID_MESSAGE` | Agent | A frame it cannot decode, an unknown type included, or STOP to a stdio agent (§ 3.17, § 7) |
 | `DISPLACED` | Agent | A newer connection of the same hub took this one's place, and this one ends (§ 3.1b) |
 | `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; `other_owner_channels` carries how many, and the message says it too (§ 3.17) |
 | `AUTH_REQUIRED` | Agent | A daemon connection did not open with an AUTH carrying `hub_key` within 5 s; the connection is closed (§ 3.1b) |
@@ -1652,12 +1790,18 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 
 ## 7. Version Negotiation
 
-HELLO includes `version: 1`. Hub checks:
+HELLO includes `version: 1`. The hub accepts only its own protocol version
+(`AgentConnection.handleData`, strict equality with `PROTOCOL_VERSION`):
 
 | Agent | Hub | Result |
 |:-----:|:---:|--------|
 | 1 | 1 | Compatible |
-| 1 | 2 | Hub downgrades to v1 |
-| 2 | 1 | Hub sends ERROR, closes |
+| any other | 1 | Hub closes the connection, sending nothing; the agent is not used |
 
-Unknown message types MUST be ignored (forward compatibility).
+There is no downgrade. The agent's own version is a separate check: a deployed agent whose
+`agent_version` is not the hub's is refused with `AGENT_VERSION_MISMATCH` (§ 4.14), and a remote
+daemon left by an older hub is reported `outdated_agent` (§ 4.7).
+
+An agent skips a frame it cannot decode, an unknown type included, and answers
+`ERROR { code: "INVALID_MESSAGE" }`. The hub ignores a message type it does not know, from an
+agent or a client.

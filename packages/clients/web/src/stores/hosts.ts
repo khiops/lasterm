@@ -309,6 +309,29 @@ export const useHostsStore = defineStore("hosts", () => {
 		_sftpUnavailable.value = new Map(hostIds.map((id) => [id, true]));
 	}
 
+	/**
+	 * Hosts meant to keep an agent running whose SSH server refused the socket
+	 * forwarding that reaches it, as the hub reports it (#765). The hub runs
+	 * their agent over the connection instead, so their terminals end with it.
+	 */
+	const _socketForwardingRefused = ref<Map<string, true>>(new Map());
+
+	function isSocketForwardingRefused(hostId: string): boolean {
+		return _socketForwardingRefused.value.has(hostId);
+	}
+
+	function rememberSocketForwardingRefused(hostId: string, refused: boolean | undefined): void {
+		if ((refused === true) === _socketForwardingRefused.value.has(hostId)) return;
+		const next = new Map(_socketForwardingRefused.value);
+		if (refused === true) next.set(hostId, true);
+		else next.delete(hostId);
+		_socketForwardingRefused.value = next;
+	}
+
+	function setSocketForwardingRefused(hostIds: readonly string[]): void {
+		_socketForwardingRefused.value = new Map(hostIds.map((id) => [id, true]));
+	}
+
 	function stopKeepingAgent(
 		hostId: string,
 		body: StopKeepingAgentBody,
@@ -708,6 +731,9 @@ export const useHostsStore = defineStore("hosts", () => {
 		isSftpUnavailable,
 		rememberSftpUnavailable,
 		setSftpUnavailable,
+		isSocketForwardingRefused,
+		rememberSocketForwardingRefused,
+		setSocketForwardingRefused,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
 		getOtherOwnerChannels,

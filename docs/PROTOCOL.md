@@ -742,7 +742,8 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     outdated_agent?: { running: string, expected: string },  // as in SESSION_STATE
     other_owner_channels?: number,                            // as in SESSION_STATE
     connected_through_remote_daemon?: boolean,                 // as in SESSION_STATE
-    sftp_unavailable?: true                                    // as in SESSION_STATE
+    sftp_unavailable?: true,                                   // as in SESSION_STATE
+    socket_forwarding_refused?: true                           // as in SESSION_STATE
   }>,
   channels: Array<{
     channel_id: string,
@@ -793,6 +794,13 @@ absent from `channels` has ended, or is unknown.
   // (SPEC.md § 3.5). Said from the first SESSION_STATE of that connection, and
   // absent once another connection serves the host.
   sftp_unavailable?: true,
+  // Only when the host keeps a daemon (#79) and the hub saw its SSH server refuse the
+  // socket forwarding a daemon is reached through (#765): the hub runs the agent on
+  // stdio there, so the host's terminals end with its connection (SPEC.md § 3). A note,
+  // not an error. Remembered in the hub's memory for the route it was seen on, so said
+  // with or without a connection, until that route changes, a person's Connect or
+  // Reconnect of the host asks the server again, or the hub restarts.
+  socket_forwarding_refused?: true,
   // Only while the host's user has disconnected it (POST /api/hosts/:id/disconnect,
   // § 6, #648): the hub does not reach for it again until someone acts on it. Every
   // SESSION_STATE of that host carries it until then, and none after: a client takes

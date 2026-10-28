@@ -305,6 +305,18 @@
 									This server does not offer SFTP; Lasterm sends its agent over the SSH
 									command channel.
 								</p>
+								<p v-if="socketForwardingRefused" class="field-hint auth-note">
+									This host's SSH server refuses socket forwarding
+									(<code>AllowStreamLocalForwarding</code> or <code>DisableForwarding</code>
+									in its <code>sshd_config</code>), which keeping an agent running needs. Its
+									terminals run over the connection and end with it. Once it is allowed, use
+									Connect or Reconnect in the host's menu. See
+									<a
+										href="https://github.com/khiops/lasterm/blob/main/docs/SSH_SERVER.md#keeping-the-agent-running-79"
+										target="_blank"
+										rel="noopener noreferrer"
+									>Configuring an SSH server for Lasterm</a>.
+								</p>
 								<div v-if="outdatedAgent" class="outdated-agent">
 									<p class="outdated-agent__text">
 										This host is served by agent {{ outdatedAgent.running }}; this
@@ -654,6 +666,14 @@ const otherOwnerChannels = computed(() =>
 /** Whether this host's SSH server refused SFTP (#722): a note, not an error. */
 const sftpUnavailable = computed(
 	() => props.editHost !== null && hostsStore.isSftpUnavailable(props.editHost.id),
+);
+
+/**
+ * Whether this host's SSH server refused the socket forwarding its agent
+ * would be reached through (#765): its terminals end with the connection.
+ */
+const socketForwardingRefused = computed(
+	() => props.editHost !== null && hostsStore.isSocketForwardingRefused(props.editHost.id),
 );
 
 /**

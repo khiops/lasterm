@@ -20,7 +20,11 @@ import {
 import { HelloSeeker } from "./hello-seeker.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
-import { attachRemoteDaemon, describeRemoteDaemonPlacement } from "./remote-daemon.js";
+import {
+	attachRemoteDaemon,
+	describeRemoteDaemonPlacement,
+	SocketForwardingRefused,
+} from "./remote-daemon.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 import { shellStartAllowance } from "./ssh-exec.js";
@@ -251,6 +255,12 @@ export interface SshAgentDeployOptions {
 	 * (#555, #559).
 	 */
 	onAgentUpdated?: (hostId: string, installed: { besideRunningDaemon: boolean }) => void;
+	/**
+	 * Called when the host's SSH server refused the socket forwarding its
+	 * daemon is reached through, with the host as this connection reached it.
+	 * The connection runs its agent on stdio instead (#765).
+	 */
+	onSocketForwardingRefused?: (host: Host) => void;
 }
 
 /**
@@ -297,6 +307,13 @@ export class SshAgent extends AgentConnection {
 	 * connection started never does.
 	 */
 	usedRemoteDaemon = false;
+
+	/**
+	 * Whether this connection meant to reach a daemon and the host's SSH server
+	 * refused the socket forwarding that takes (#765). Its agent then runs on
+	 * stdio, as on a host that keeps none.
+	 */
+	socketForwardingRefused = false;
 
 	/**
 	 * Where the agent this connection reached lives on the remote, once the
@@ -378,6 +395,7 @@ export class SshAgent extends AgentConnection {
 		this.remoteMatchesHubVersionCache = false;
 		this.reachedRunningDaemon = false;
 		this.sftpSupport = null;
+		this.socketForwardingRefused = false;
 		if (!this.host.sshHost) {
 			throw new Error("Host has no sshHost configured");
 		}
@@ -655,14 +673,17 @@ export class SshAgent extends AgentConnection {
 							onStream: (stream: ClientChannel) => void,
 							onError: (err: Error) => void,
 						): void => {
-							if (daemonPath === undefined) {
+							const execStdio = (why: (err: Error) => Error = (err) => err): void => {
 								client.exec(agentPath, (err, stream) => {
 									if (err) {
-										onError(err);
+										onError(why(err));
 										return;
 									}
 									onStream(stream);
 								});
+							};
+							if (daemonPath === undefined) {
+								execStdio();
 								return;
 							}
 							attachRemoteDaemon({
@@ -688,6 +709,24 @@ export class SshAgent extends AgentConnection {
 									onStream(attachment.stream as unknown as ClientChannel);
 								})
 								.catch((err: unknown) => {
+									if (err instanceof SocketForwardingRefused) {
+										// No daemon can be reached here, however long one waits
+										// (#765): the agent runs on stdio, as on a host that keeps
+										// none, and its terminals end with this connection.
+										this.socketForwardingRefused = true;
+										this.deployOptions?.onSocketForwardingRefused?.(this.host);
+										console.error(
+											`[lasterm-ssh] ${err.message} The agent runs on stdio on this connection, and its terminals end with it.`,
+										);
+										seeker = new HelloSeeker();
+										execStdio(
+											(execErr) =>
+												new Error(
+													`${err.message} Running the agent on stdio failed too: ${execErr.message}`,
+												),
+										);
+										return;
+									}
 									onError(err instanceof Error ? err : new Error(String(err)));
 								});
 						};

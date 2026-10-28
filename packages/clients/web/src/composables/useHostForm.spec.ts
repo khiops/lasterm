@@ -936,7 +936,7 @@ describe("a save the hub refuses (#703)", () => {
 	});
 });
 
-describe("the SSH config the hub cannot read (#734)", () => {
+describe("the hub's SSH config, read or refused (#734, #757)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
@@ -978,6 +978,38 @@ describe("the SSH config the hub cannot read (#734)", () => {
 		await expect(loadSshConfig()).resolves.toBeUndefined();
 		expect(sshConfigError.value).toBe("Could not reach the hub: Failed to fetch");
 		expect(loadingSshConfig.value).toBe(false);
+	});
+
+	it("reads the hub's snake_case entries: a chosen entry's key path is filled in (#757)", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			answer(200, {
+				entries: [
+					{
+						name: "pi",
+						hostname: "pi.test",
+						port: 2222,
+						user: "olivier",
+						identity_file: "~/.ssh/id_pi",
+						proxy_jump: null,
+						is_git_host: false,
+					},
+				],
+				has_include: false,
+			}),
+		);
+		const { loadSshConfig, applySshConfigEntry, form } = useHostForm();
+		form.value.sshAuth = "agent";
+
+		await loadSshConfig();
+		applySshConfigEntry("pi");
+
+		expect(form.value).toMatchObject({
+			sshHost: "pi.test",
+			sshPort: 2222,
+			sshUser: "olivier",
+			sshAuth: "key",
+			sshKeyPath: "~/.ssh/id_pi",
+		});
 	});
 
 	it("takes no SSH config file as an empty list, not an error", async () => {

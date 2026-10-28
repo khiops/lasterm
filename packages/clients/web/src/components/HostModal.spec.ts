@@ -546,7 +546,7 @@ describe("HostModal when the hub refuses a save (#703)", () => {
 	});
 });
 
-describe("HostModal when the hub cannot read the SSH config (#734)", () => {
+describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 	/** The hub's answers to its SSH config, in turn; anything else it is not asked. */
 	function sshConfigAnswers(...answers: Array<Response | Error>) {
 		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -605,6 +605,45 @@ describe("HostModal when the hub cannot read the SSH config (#734)", () => {
 		await chooseSshConfig();
 
 		expect(alert()?.textContent?.trim()).toBe("Could not reach the hub: Failed to fetch");
+	});
+
+	it("reads its snake_case entries: git hosts left out, the chosen one's key path filled in (#757)", async () => {
+		const entry = (name: string, fields: Record<string, unknown>) => ({
+			name,
+			hostname: `${name}.test`,
+			port: 22,
+			user: null,
+			identity_file: null,
+			proxy_jump: null,
+			is_git_host: false,
+			...fields,
+		});
+		sshConfigAnswers(
+			json(200, {
+				entries: [
+					entry("pi", { identity_file: "~/.ssh/id_pi" }),
+					entry("github", { hostname: "github.com", user: "git", is_git_host: true }),
+				],
+				has_include: false,
+			}),
+		);
+		mountModal(null);
+
+		await chooseSshConfig();
+
+		const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+			(candidate) => Array.from(candidate.options).some((option) => option.value === "pi"),
+		);
+		if (!select) throw new Error("no SSH host select");
+		expect(Array.from(select.options).map((option) => option.value)).toEqual(["", "pi"]);
+
+		select.value = "pi";
+		select.dispatchEvent(new Event("change"));
+		await nextTick();
+
+		expect(el<HTMLInputElement>("input[placeholder='~/.ssh/id_ed25519']")?.value).toBe(
+			"~/.ssh/id_pi",
+		);
 	});
 });
 

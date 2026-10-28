@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_xpty::{CommandBuilder, ExitStatus, PtyProcess};
 use tokio::task::JoinHandle;
 
+use crate::input::{InputQueue, INPUT_QUEUE_BYTES};
 use crate::owner::OwnerId;
 
 const CHANNEL_TEARDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -15,6 +16,9 @@ pub(crate) struct PtyChannelState {
     /// The hub whose connection spawned this channel. Set at SPAWN, never
     /// changed: only a getter reads it (#127).
     owner: OwnerId,
+    /// What the hub typed and the terminal has not taken yet. Its writer ends
+    /// when the channel is removed (#740).
+    pub(crate) input: InputQueue,
 }
 
 impl PtyChannelState {
@@ -27,6 +31,8 @@ pub struct PtyManager {
     pub(crate) channels: HashMap<String, PtyChannelState>,
     shutting_down: bool,
     teardown_wait_timeout: Duration,
+    /// The most input a channel's queue holds (#740).
+    input_bound: usize,
     #[cfg(test)]
     fail_next_teardown_signal: bool,
     #[cfg(test)]
@@ -165,6 +171,7 @@ impl PtyManager {
             channels: HashMap::new(),
             shutting_down: false,
             teardown_wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
+            input_bound: INPUT_QUEUE_BYTES,
             #[cfg(test)]
             fail_next_teardown_signal: false,
             #[cfg(test)]
@@ -180,6 +187,16 @@ impl PtyManager {
     pub(crate) fn with_teardown_wait_timeout(teardown_wait_timeout: Duration) -> Self {
         Self {
             teardown_wait_timeout,
+            ..Self::new()
+        }
+    }
+
+    /// Construct a manager whose channels queue at most `input_bound` bytes of
+    /// input each, so that a test fills a queue with little input.
+    #[cfg(test)]
+    pub(crate) fn with_input_bound(input_bound: usize) -> Self {
+        Self {
+            input_bound,
             ..Self::new()
         }
     }
@@ -266,12 +283,14 @@ impl PtyManager {
         let pid = process.pid();
         let kill_tree_scope = process.kill_tree_scope();
         tracing::debug!(channel_id = %id, ?kill_tree_scope, "PTY kill-tree scope");
+        let input = InputQueue::start(&id, process.writer(), self.input_bound);
         self.channels.insert(
             id.clone(),
             PtyChannelState {
                 process,
                 seq: 0,
                 owner,
+                input,
             },
         );
         Ok((id, pid))

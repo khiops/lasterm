@@ -147,6 +147,13 @@ shim is needed at all.
   it over SFTP; see §3.5. No npm package is involved, and nothing needs Node on the
   remote host — the agent is a static Rust binary.
 - The hub runs `lasterm-agent --stdio` over SSH once the binary is in place, or `--daemon` for a host that keeps one.
+  On a Windows host, which runs a command through cmd.exe or through PowerShell when its OpenSSH
+  `DefaultShell` says so, the hub sends one command that both run the same way (#714): a PowerShell
+  `-EncodedCommand` script that receives the agent's path and arguments as Base64 and starts it with
+  `Process.Start`, without redirection. The agent inherits the channel's stdin and stdout, so no
+  frame passes through PowerShell, which would re-encode native output it read. PowerShell starts in
+  about a second, after the account's profile when it is the `DefaultShell` (sshd passes no
+  `-NoProfile`), so a Windows agent has 15 s to say HELLO instead of 5.
 - If no build exists for the remote's OS and architecture, the fetch fails with a named
   target rather than deploying something that cannot run.
 
@@ -398,6 +405,23 @@ and copies stdin into the temporary, under cmd.exe and a PowerShell `DefaultShel
 SHA-256 of what arrived are checked against the local binary before the same steps move it into place. SFTP
 stays the first choice; it is also skipped when it cannot be opened, and an upload that fails both ways
 names both.
+
+**Windows hosts under either shell (#714).** Win32-OpenSSH runs an exec request as
+`cmd.exe /c "<command>"`, or as `powershell.exe -c "<command>"` when its `DefaultShell` names
+PowerShell, and the hub does not know which. Every command it sends there works under both:
+- the architecture: `echo %PROCESSOR_ARCHITECTURE%`, which cmd.exe answers, then, when the answer is
+  not one (PowerShell prints `%PROCESSOR_ARCHITECTURE%` as it is), PowerShell's
+  `$env:PROCESSOR_ARCHITECTURE`;
+- an agent already there: `where.exe lasterm-agent`, spelt out because PowerShell takes `where` for
+  `Where-Object`, then a PowerShell script that looks in LocalAppData, then Program Files
+  (`lasterm\lasterm-agent.exe`), and prints the path it found as Base64;
+- the install folder, the hash, the upload over an exec channel, the move into place and the launch:
+  PowerShell, the path given and returned as Base64 data, with .NET calls only.
+
+No path reaches either shell as text, so a Windows path is accepted whatever characters a file name
+may hold, `%`, `!`, `$`, quotes and non-ASCII included, drive-absolute (`C:\…`) or UNC
+(`\\server\share\…`, as a known folder redirected to a network share is). A path the hub refuses holds
+a `"`, which no file name does, or a control character, or is neither form.
 
 Two properties follow:
 - **The remote host never needs outbound internet** — the *hub* fetches on its behalf, and the binary

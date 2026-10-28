@@ -140,7 +140,6 @@ const COMMON_AGENT_PATHS_UNIX = [
 
 type KnownFolder = "LocalApplicationData" | "ProgramFiles";
 type FolderResult = { path: string } | { reason: string };
-type FolderResolver = (folder: KnownFolder) => Promise<FolderResult>;
 
 const COMMON_AGENT_PATHS_WINDOWS: readonly [KnownFolder, string][] = [
 	["LocalApplicationData", "lasterm\\lasterm-agent.exe"],
@@ -148,13 +147,13 @@ const COMMON_AGENT_PATHS_WINDOWS: readonly [KnownFolder, string][] = [
 ];
 
 /**
- * A Windows path the deployer may use: drive-absolute, with no `%` or `!` (cmd.exe expands them
- * in the probe and the launch; SFTP does not), no `"` (it would end cmd.exe's quoting) and no
- * control character. PowerShell receives the path only as data, in getRemoteSha256. Accepting
- * the refused characters is #714.
+ * A Windows path the deployer may use: drive-absolute (`C:\…`) or UNC (`\\server\share…`, as a
+ * known folder redirected to a network share is), with no `"`, which no Windows file name holds,
+ * and no control character. Every command takes the path as Base64 data, and SFTP takes it as
+ * it is, so `%`, `!`, `$`, quotes and spaces mean nothing to cmd.exe or PowerShell (#714).
  */
 function isWindowsPath(path: string): boolean {
-	return /^[A-Za-z]:\\/.test(path) && !/[%!"\p{Cc}]/u.test(path);
+	return /^(?:[A-Za-z]:\\|\\\\[^\\/.?][^\\/]*\\[^\\/])/.test(path) && !/["\p{Cc}]/u.test(path);
 }
 
 function joinWindowsPath(folder: string, relative: string): string {
@@ -162,9 +161,23 @@ function joinWindowsPath(folder: string, relative: string): string {
 }
 
 /**
- * Ask the Windows host where a known folder is. PowerShell prints it as Base64 of its UTF-8
- * bytes, so a non-ASCII profile survives the console code page. Never throws.
+ * What a Windows command printed as Base64 of a path's UTF-8 bytes, decoded: a path survives the
+ * console code page that way. Null for anything else, or an empty path.
  */
+function decodeBase64Path(stdout: string): string | null {
+	const encoded = stdout.trim();
+	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) return null;
+	const bytes = Buffer.from(encoded, "base64");
+	if (bytes.toString("base64") !== encoded) return null;
+	try {
+		const path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return path === "" || /\p{Cc}/u.test(path) ? null : path;
+	} catch {
+		return null;
+	}
+}
+
+/** Ask the Windows host where a known folder is. Never throws. */
 async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promise<FolderResult> {
 	try {
 		const { stdout, stderr, exitCode } = await sshExec(
@@ -172,25 +185,12 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 			`powershell -NoProfile -NonInteractive -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Environment]::GetFolderPath('${folder}')))"`,
 		);
 		if (exitCode !== 0) return { reason: `exit ${exitCode}: ${stderr.trim()}` };
-		const encoded = stdout.trim();
-		if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
-			return { reason: "unexpected output" };
-		}
-		const bytes = Buffer.from(encoded, "base64");
-		if (bytes.toString("base64") !== encoded) return { reason: "unexpected output" };
-		let path: string;
-		try {
-			path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-		} catch {
-			return { reason: "unexpected output" };
-		}
-		if (!path || /\p{Cc}/u.test(path)) return { reason: "unexpected output" };
+		const path = decodeBase64Path(stdout);
+		if (path === null) return { reason: "unexpected output" };
 		if (!isWindowsPath(path)) {
-			const why = /[%!]/.test(path)
-				? "contains a character cmd.exe expands"
-				: path.includes('"')
-					? "contains a double quote"
-					: "not a drive path with backslashes";
+			const why = path.includes('"')
+				? "contains a double quote"
+				: "not a drive or UNC path with backslashes";
 			return { reason: `unsupported path ${path} (${why})` };
 		}
 		return { path: path.replace(/\\+$/, "") + (/^[A-Za-z]:\\+$/.test(path) ? "\\" : "") };
@@ -199,20 +199,21 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 	}
 }
 
-/** Known-folder lookups for one deployment: one in flight per folder; only a success is kept. */
-function knownFolderResolver(client: SshClient): FolderResolver {
-	const results = new Map<KnownFolder, Promise<FolderResult>>();
-	return (folder) => {
-		let result = results.get(folder);
-		if (!result) {
-			result = resolveKnownFolder(client, folder).then((resolved) => {
-				if (!("path" in resolved)) results.delete(folder);
-				return resolved;
-			});
-			results.set(folder, result);
-		}
-		return result;
-	};
+/**
+ * The PowerShell script that prints where the agent is in the first known folder holding it
+ * (`COMMON_AGENT_PATHS_WINDOWS`), as Base64 of the path's UTF-8 bytes, and nothing when none
+ * does. One PowerShell for every folder, and only .NET: under a pwsh parent, Windows PowerShell
+ * may not load its own utility module (#722).
+ */
+export function windowsFindAgentScript(): string {
+	return [
+		...COMMON_AGENT_PATHS_WINDOWS.map(
+			([folder, relative]) =>
+				`try{$d=[Environment]::GetFolderPath('${folder}');if($d){$f=[IO.Path]::Combine($d,'${relative}');if([IO.File]::Exists($f)){[Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($f)));exit 0}}}catch{}`,
+		),
+		// A caught failure as the last statement would make it exit 1 (#725).
+		"exit 0",
+	].join(";");
 }
 
 const STRICT_SEMVER = /^\d+\.\d+\.\d+$/;
@@ -270,16 +271,16 @@ async function resolveLocalAgentBinary(
 /**
  * Check if lasterm-agent exists on the remote host.
  * Returns the remote path if found, null otherwise.
+ *
+ * On Windows the commands run under cmd.exe or a PowerShell `DefaultShell` alike (#714):
+ * `where.exe`, spelt out, since PowerShell takes a bare `where` for `Where-Object`; then
+ * `windowsFindAgentScript` for the known folders.
  */
-export async function checkRemoteAgent(
-	client: SshClient,
-	os: HostOs,
-	resolveFolder: FolderResolver = knownFolderResolver(client),
-): Promise<string | null> {
+export async function checkRemoteAgent(client: SshClient, os: HostOs): Promise<string | null> {
 	try {
 		const { stdout, exitCode } = await sshExec(
 			client,
-			os === "windows" ? "where lasterm-agent" : "which lasterm-agent",
+			os === "windows" ? "where.exe lasterm-agent" : "which lasterm-agent",
 		);
 		if (exitCode === 0) {
 			const path =
@@ -297,18 +298,15 @@ export async function checkRemoteAgent(
 	}
 
 	if (os === "windows") {
-		// `if exist` is a cmd.exe built-in; this fallback is for cmd.exe sessions only.
-		for (const [folder, relative] of COMMON_AGENT_PATHS_WINDOWS) {
-			const resolved = await resolveFolder(folder);
-			if (!("path" in resolved)) continue;
-			const path = joinWindowsPath(resolved.path, relative);
-			if (!isWindowsPath(path)) continue;
-			try {
-				const { stdout, exitCode } = await sshExec(client, `if exist "${path}" echo ok`);
-				if (exitCode === 0 && stdout.trim() === "ok") return path;
-			} catch {
-				// Continue with the next candidate.
-			}
+		try {
+			const { stdout, exitCode } = await sshExec(
+				client,
+				encodedPowerShell(windowsFindAgentScript()),
+			);
+			const path = exitCode === 0 ? decodeBase64Path(stdout) : null;
+			if (path !== null && isWindowsPath(path)) return path;
+		} catch {
+			// Not found, as far as anyone can tell.
 		}
 	} else {
 		for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
@@ -334,6 +332,19 @@ export interface RemoteSystem {
 }
 
 /**
+ * The commands that print PROCESSOR_ARCHITECTURE on a Windows host, in turn
+ * until one is understood. cmd.exe runs the first, as it always has. A
+ * PowerShell `DefaultShell` prints `%PROCESSOR_ARCHITECTURE%` as it is, and the
+ * second asks PowerShell, under either shell (#714). Not `cmd /c echo …`:
+ * through Win32-OpenSSH's `cmd.exe /c "<command>"`, the inner cmd.exe also
+ * prints the closing quote.
+ */
+export const WINDOWS_ARCH_COMMANDS: readonly string[] = [
+	"echo %PROCESSOR_ARCHITECTURE%",
+	encodedPowerShell("[Console]::Out.Write($env:PROCESSOR_ARCHITECTURE)"),
+];
+
+/**
  * Read the remote system: `uname -sm` (Linux / macOS) first, then the Windows
  * PROCESSOR_ARCHITECTURE. `null` when the remote answered neither. A system it
  * did name but no agent is built for keeps its name, so that a refusal can say
@@ -355,13 +366,15 @@ export async function readRemoteSystem(
 		// ignore — Windows does not have uname
 	}
 
-	try {
-		const { stdout, exitCode } = await sshExec(client, "echo %PROCESSOR_ARCHITECTURE%", timeoutMs);
-		const arch = stdout.trim();
-		const parsed = exitCode === 0 ? parseWindowsArchOutput(arch) : null;
-		if (parsed) return { system: `Windows ${arch}`, parsed };
-	} catch {
-		// ignore
+	for (const command of WINDOWS_ARCH_COMMANDS) {
+		try {
+			const { stdout, exitCode } = await sshExec(client, command, timeoutMs);
+			const arch = stdout.trim();
+			const parsed = exitCode === 0 ? parseWindowsArchOutput(arch) : null;
+			if (parsed) return { system: `Windows ${arch}`, parsed };
+		} catch {
+			// ignore
+		}
 	}
 
 	return unix === null ? null : { system: unix, parsed: null };
@@ -845,13 +858,55 @@ function encodedPowerShell(script: string): string {
 }
 
 /**
- * The PowerShell statement that sets `$p` (or `$<name>`) to `path`, which
- * travels as Base64 of its UTF-8 bytes: quotes, `%`, `$`, spaces and non-ASCII
- * reach it as data.
+ * The PowerShell statement that sets `$p` (or `$<name>`) to `path`, or any
+ * other text, which travels as Base64 of its UTF-8 bytes: quotes, `%`, `!`,
+ * `$`, spaces and non-ASCII reach it as data.
  */
 function powerShellPathVariable(path: string, name = "p"): string {
 	const encodedPath = Buffer.from(path, "utf8").toString("base64");
 	return `$${name}=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'))`;
+}
+
+/**
+ * One argument as a Windows command line carries it, for `CommandLineToArgvW`,
+ * the MSVC runtime and Rust's `std::env::args` to read back as it was:
+ * quoted when it holds a space or a quote, a quote escaped, and the
+ * backslashes before a quote or the closing one doubled.
+ */
+function quoteWindowsArgument(arg: string): string {
+	if (arg !== "" && !/[\s"]/.test(arg)) return arg;
+	return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
+}
+
+/**
+ * The PowerShell script that runs `program` with `args` on a Windows host,
+ * waits for it, and exits with its exit code (#714).
+ *
+ * The program inherits the shell's stdin, stdout and stderr and uses them
+ * itself: `Process.Start` without redirection hands them on, so no byte that
+ * flows passes through PowerShell, which would read native output as text and
+ * write it out again re-encoded. The program and its arguments travel as Base64
+ * data. Only .NET is called, no cmdlet (#722).
+ */
+function windowsLaunchScript(program: string, args: readonly string[]): string {
+	return [
+		"$ErrorActionPreference='Stop'",
+		powerShellPathVariable(program),
+		powerShellPathVariable(args.map(quoteWindowsArgument).join(" "), "a"),
+		"$c=[Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{FileName=$p;Arguments=$a;UseShellExecute=$false})",
+		"$c.WaitForExit()",
+		"exit $c.ExitCode",
+	].join(";");
+}
+
+/**
+ * The command line that runs `program` with `args` on a Windows host, under
+ * cmd.exe and a PowerShell `DefaultShell` alike: how the hub starts the agent
+ * there (#714). A quoted path followed by arguments, as cmd.exe runs it, is a
+ * parse error to PowerShell, and cmd.exe expands `%` in it.
+ */
+export function windowsLaunchCommand(program: string, args: readonly string[]): string {
+	return encodedPowerShell(windowsLaunchScript(program, args));
 }
 
 /**
@@ -1149,13 +1204,9 @@ async function resolveRemoteHome(client: SshClient): Promise<string> {
  * Determine the remote install path for the agent binary.
  * Expands ~ using the actual remote home directory.
  */
-async function resolveRemotePath(
-	client: SshClient,
-	os: HostOs,
-	resolveFolder: FolderResolver,
-): Promise<string> {
+async function resolveRemotePath(client: SshClient, os: HostOs): Promise<string> {
 	if (os === "windows") {
-		const folder = await resolveFolder("LocalApplicationData");
+		const folder = await resolveKnownFolder(client, "LocalApplicationData");
 		if (!("path" in folder)) {
 			throw new Error(
 				`Could not determine the LocalAppData directory of the Windows host: ${folder.reason}`,
@@ -1206,8 +1257,7 @@ export async function deployAgentIfNeeded(
 		os = detected.os;
 		arch = detected.arch;
 	}
-	const resolveFolder = knownFolderResolver(client);
-	const existingPath = await checkRemoteAgent(client, os, resolveFolder);
+	const existingPath = await checkRemoteAgent(client, os);
 
 	if (existingPath) {
 		// --- Branch A: agent already exists ---
@@ -1327,7 +1377,7 @@ export async function deployAgentIfNeeded(
 	}
 
 	// 4. Determine remote install path (expands ~ using remote $HOME)
-	const remotePath = await resolveRemotePath(client, os, resolveFolder);
+	const remotePath = await resolveRemotePath(client, os);
 
 	// 5. Upload: SFTP where the server offers it, else over an exec channel (#722)
 	await uploadAgentBinary(client, localBinary, remotePath, os, options.sftp);

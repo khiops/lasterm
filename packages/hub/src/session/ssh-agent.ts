@@ -15,6 +15,7 @@ import {
 	deployAgentIfNeeded,
 	probeSftp,
 	type SftpSupport,
+	windowsLaunchCommand,
 } from "./agent-deployer.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
@@ -24,6 +25,13 @@ import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ss
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 
 const HELLO_TIMEOUT_MS = 5_000;
+/**
+ * The same on a Windows host, where a PowerShell starts the agent (#714): one
+ * starts in about a second, and longer on a busy server, and under a PowerShell
+ * `DefaultShell` the account's profile loads first, since sshd passes no
+ * `-NoProfile`. That came to six seconds on a development machine.
+ */
+const WINDOWS_HELLO_TIMEOUT_MS = 15_000;
 /** Reaching the agent at all: an exec, or a daemon launched and polled for. */
 const TRANSPORT_TIMEOUT_MS = 20_000;
 /** How the agent logs. The file count only concerns a daemon (#646). */
@@ -62,31 +70,24 @@ function quotePosixShellArg(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function quoteWindowsCmdArg(value: string): string {
-	return `"${value.replace(/"/g, '^"')}"`;
-}
-
-function quoteRemoteShellArg(value: string, os: HostOs | null): string {
-	if (os === "windows") return quoteWindowsCmdArg(value);
-	return quotePosixShellArg(value);
-}
-
+/**
+ * The command that starts the agent on stdio. A Windows host runs it under
+ * cmd.exe or a PowerShell `DefaultShell`, and the command must not care which
+ * (#714): there, PowerShell starts the agent, the path and arguments as data,
+ * and hands it the channel's own stdin and stdout.
+ */
 function buildAgentCommand(
 	agentPath: string,
 	os: HostOs | null,
 	loggingConfig: AgentLoggingConfig,
 	includeLoggingArgs: boolean,
 ): string {
-	const args = [quoteRemoteShellArg(agentPath, os), "--stdio"];
+	const args = ["--stdio"];
 	if (includeLoggingArgs) {
-		args.push(
-			"--log-level",
-			quoteRemoteShellArg(loggingConfig.logLevel, os),
-			"--format",
-			quoteRemoteShellArg(loggingConfig.logFormat, os),
-		);
+		args.push("--log-level", loggingConfig.logLevel, "--format", loggingConfig.logFormat);
 	}
-	return args.join(" ");
+	if (os === "windows") return windowsLaunchCommand(agentPath, args);
+	return [agentPath, ...args].map(quotePosixShellArg).join(" ");
 }
 
 function buildAgentCommandForDeployResult(
@@ -338,7 +339,7 @@ export class SshAgent extends AgentConnection {
 	/**
 	 * Connect to the remote host over SSH, exec `lasterm-agent --stdio`,
 	 * and wait for the HELLO handshake.
-	 * Rejects if HELLO is not received within 5 seconds.
+	 * Rejects if HELLO is not received within 5 seconds (15 on a Windows host).
 	 *
 	 * @param storedFingerprint - The trusted fingerprint from the DB (null = first connect / TOFU).
 	 *   When provided and the server key doesn't match, the connection is rejected and
@@ -590,7 +591,9 @@ export class SshAgent extends AgentConnection {
 						});
 					};
 					// Attach stream handler — called after deploy (or immediately if no deploy needed).
-					const runAgent = (agentPath: string, daemonPath?: string): void => {
+					const runAgent = (agentPath: string, os: HostOs | null, daemonPath?: string): void => {
+						const helloTimeoutMs =
+							(os ?? this.host.os) === "windows" ? WINDOWS_HELLO_TIMEOUT_MS : HELLO_TIMEOUT_MS;
 						// The HELLO clock starts once there is a stream to say it on. Not
 						// earlier: TOFU binary verification prompts (up to 30s) must not
 						// race it, and neither may a daemon being launched, which has its
@@ -608,7 +611,7 @@ export class SshAgent extends AgentConnection {
 							helloTimeout = setTimeout(() => {
 								this.cleanup();
 								rejectOnce(new Error("Agent HELLO timeout"));
-							}, HELLO_TIMEOUT_MS);
+							}, helloTimeoutMs);
 						};
 
 						// Either the agent is this connection's child, and dies with it,
@@ -739,6 +742,7 @@ export class SshAgent extends AgentConnection {
 								this.remoteAgentPath = result.remotePath;
 								runAgent(
 									buildAgentCommandForDeployResult(result, this.loggingConfig),
+									result.os,
 									this.daemonBinary(result.remotePath, result.os),
 								);
 							})
@@ -787,6 +791,7 @@ export class SshAgent extends AgentConnection {
 							try {
 								runAgent(
 									buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false),
+									this.host.os,
 									this.daemonBinary("lasterm-agent", this.host.os),
 								);
 							} catch (err) {

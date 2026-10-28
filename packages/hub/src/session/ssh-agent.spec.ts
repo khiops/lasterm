@@ -7,6 +7,7 @@ import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { windowsLaunchCommand } from "./agent-deployer.js";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
 
 // ─── Mock agent-deployer.js for Fix B deploy-fallback tests ─────────────────
@@ -340,7 +341,7 @@ describe("SshAgent", () => {
 	);
 
 	it(
-		"quotes deployed Windows remote agent command with cmd.exe conventions",
+		"starts a deployed Windows agent through PowerShell, its path and arguments as data (#714)",
 		async () => {
 			const { deployAgentIfNeeded } = await import("./agent-deployer.js");
 			vi.mocked(deployAgentIfNeeded).mockResolvedValueOnce({
@@ -372,10 +373,20 @@ describe("SshAgent", () => {
 
 			await agent.start(fp);
 
+			// One command for cmd.exe and a PowerShell DefaultShell alike: nothing
+			// either shell reads but words.
 			expect(command).toBe(
-				'"C:\\Users\\Rémi\\AppData\\Local\\lasterm\\lasterm-agent.exe" --stdio --log-level "debug" --format "text"',
+				windowsLaunchCommand("C:\\Users\\Rémi\\AppData\\Local\\lasterm\\lasterm-agent.exe", [
+					"--stdio",
+					"--log-level",
+					"debug",
+					"--format",
+					"text",
+				]),
 			);
-			expect(command).not.toContain("'");
+			expect(command).toMatch(
+				/^powershell -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/]+={0,2}$/,
+			);
 		},
 		TEST_TIMEOUT,
 	);
@@ -666,7 +677,7 @@ describe("SshAgent", () => {
 		const { hello } = await agent.start(fp);
 
 		expect(hello.type).toBe("HELLO");
-		expect(commands.some((c) => c.includes("--stdio"))).toBe(true);
+		expect(commands).toEqual([windowsLaunchCommand("lasterm-agent", ["--stdio"])]);
 		expect(commands.some((c) => c.includes("--daemon"))).toBe(false);
 	}, 15_000);
 
@@ -778,6 +789,28 @@ describe("SshAgent", () => {
 		// SshAgent uses 5 s HELLO timeout — give 6 s for the test.
 		await expect(agent.start(fp)).rejects.toThrow("Agent HELLO timeout");
 	}, 6_000);
+
+	// A PowerShell starts a Windows agent, after the account's profile when the
+	// DefaultShell is PowerShell: six seconds on a development machine (#714).
+	it("waits past 5 s for the HELLO of a Windows agent, which a PowerShell starts (#714)", async () => {
+		const { server, port } = await createMockSshServer((stream) => {
+			setTimeout(() => {
+				try {
+					stream.write(makeHelloFrame());
+				} catch {
+					// The connection is gone: the assertion below says so.
+				}
+			}, 6_000);
+		});
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port, { os: "windows" });
+		const agent = new SshAgent(makeHost(port, { os: "windows" }));
+		agents.push(agent);
+
+		const { hello } = await agent.start(fp);
+		expect(hello.type).toBe("HELLO");
+	}, 15_000);
 
 	it(
 		"close() terminates the SSH channel and connection",

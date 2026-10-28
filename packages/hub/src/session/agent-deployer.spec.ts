@@ -6,10 +6,12 @@ import {
 	copyFile,
 	copyFileSync,
 	existsSync,
+	linkSync,
 	mkdir,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	symlinkSync,
 	unlink,
 	utimesSync,
@@ -17,6 +19,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { Duplex, PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
+import { encodeFrame, FrameReader, type ProtocolMessage } from "@lasterm/shared";
 import type { ClientChannel, SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
@@ -36,10 +40,16 @@ import {
 	readRemoteSystem,
 	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
+	WINDOWS_ARCH_COMMANDS,
+	windowsFindAgentScript,
+	windowsLaunchCommand,
 	windowsReplaceScript,
 	windowsUploadCommand,
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
+
+/** What cmd.exe answers, then what asks PowerShell, for a Windows host's architecture (#714). */
+const [ECHO_ARCH, POWERSHELL_ARCH] = WINDOWS_ARCH_COMMANDS as [string, string];
 
 // ---------- Mock SSH helpers --------------------------------------------------
 
@@ -92,6 +102,11 @@ function folderCommand(folder: "LocalApplicationData" | "ProgramFiles"): string 
 
 function folderOutput(path: string): ExecResult {
 	return { stdout: Buffer.from(path, "utf8").toString("base64"), stderr: "", exitCode: 0 };
+}
+
+/** The command that looks for the agent in the Windows known folders (#714). */
+function findAgentCommand(): string {
+	return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(windowsFindAgentScript(), "utf16le").toString("base64")}`;
 }
 
 // ---------- Mock SFTP helpers -------------------------------------------------
@@ -563,7 +578,7 @@ function makeAgentNotFoundClient(sftp: SFTPWrapper): SshClient {
 	return makeMockClient(
 		{
 			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
@@ -604,7 +619,7 @@ describe("checkRemoteAgent", () => {
 	it("returns path when where succeeds (Windows)", async () => {
 		const client = makeMockClient({
 			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where lasterm-agent": {
+			"where.exe lasterm-agent": {
 				stdout: "C:\\Users\\user\\AppData\\Local\\lasterm\\lasterm-agent.exe\n",
 				stderr: "",
 				exitCode: 0,
@@ -617,7 +632,7 @@ describe("checkRemoteAgent", () => {
 	it("falls through to common Unix paths when which/where fail", async () => {
 		const client = makeMockClient({
 			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 				stdout: "/home/user/.local/bin/lasterm-agent\n",
 				stderr: "",
@@ -651,7 +666,7 @@ describe("OS-specific discovery edges", () => {
 	it("E5 accepts the first where line with brackets", async () => {
 		const path = "C:\\Profiles[1]\\lasterm-agent.exe";
 		const client = makeMockClient({
-			"where lasterm-agent": {
+			"where.exe lasterm-agent": {
 				stdout: `${path}\r\nC:\\ok\\lasterm-agent.exe\r\n`,
 				stderr: "",
 				exitCode: 0,
@@ -660,45 +675,78 @@ describe("OS-specific discovery edges", () => {
 		expect(await checkRemoteAgent(client, "windows")).toBe(path);
 	});
 
-	it.each(["C:\\a!b\\lasterm-agent.exe"])(
-		"E5 skips refused where line %s without known-folder probes",
+	it.each([
+		"/c/Users/u/agent.exe",
+		"lasterm\\lasterm-agent.exe",
+		"\\\\?\\C:\\lasterm\\lasterm-agent.exe",
+		"\\\\.\\pipe\\lasterm-agent.exe",
+	])("E5 skips refused where line %s without known-folder probes", async (unsafe) => {
+		const client = makeMockClient({
+			"where.exe lasterm-agent": {
+				stdout: `${unsafe}\r\n  C:\\ok\\lasterm-agent.exe  \r\n`,
+				stderr: "",
+				exitCode: 0,
+			},
+		});
+		expect(await checkRemoteAgent(client, "windows")).toBe("C:\\ok\\lasterm-agent.exe");
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+			"where.exe lasterm-agent",
+		]);
+	});
+
+	// Nothing reads these as shell text any more: the hash, the upload and the
+	// launch take the path as Base64 data (#714).
+	it.each([
+		"C:\\a!b\\lasterm-agent.exe",
+		"C:\\%TEMP%\\agent.exe",
+		"C:\\Users\\!x! %PATH% $y\\lasterm-agent.exe",
+		"\\\\server\\share\\lasterm\\lasterm-agent.exe",
+	])("E5 accepts the where line %s", async (path) => {
+		const client = makeMockClient({
+			"where.exe lasterm-agent": { stdout: `${path}\r\n`, stderr: "", exitCode: 0 },
+		});
+		expect(await checkRemoteAgent(client, "windows")).toBe(path);
+	});
+
+	it.each(["/c/Users/u/agent.exe", 'C:\\"quoted"\\agent.exe'])(
+		"E5 looks in the known folders when every where line is refused: %s",
 		async (unsafe) => {
+			const path = "C:\\Program Files\\lasterm\\lasterm-agent.exe";
 			const client = makeMockClient({
-				"where lasterm-agent": {
-					stdout: `${unsafe}\r\n  C:\\ok\\lasterm-agent.exe  \r\n`,
+				"where.exe lasterm-agent": {
+					stdout: `${unsafe}\r\n  relative.exe  \r\n`,
 					stderr: "",
 					exitCode: 0,
 				},
+				[findAgentCommand()]: folderOutput(path),
 			});
-			expect(await checkRemoteAgent(client, "windows")).toBe("C:\\ok\\lasterm-agent.exe");
+			expect(await checkRemoteAgent(client, "windows")).toBe(path);
 			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
-				"where lasterm-agent",
+				"where.exe lasterm-agent",
+				findAgentCommand(),
 			]);
 		},
 	);
 
-	it.each(["C:\\%TEMP%\\agent.exe", "C:\\!TEMP!\\agent.exe", "/c/Users/u/agent.exe"])(
-		"E5 probes known folders when every where line is refused: %s",
-		async (unsafe) => {
-			const path = "C:\\Program Files\\lasterm\\lasterm-agent.exe";
-			const client = makeMockClient({
-				"where lasterm-agent": {
-					stdout: `${unsafe}\r\n  C:\\also!refused.exe  \r\n`,
-					stderr: "",
-					exitCode: 0,
-				},
-				[folderCommand("ProgramFiles")]: folderOutput("C:\\Program Files"),
-				[`if exist "${path}" echo ok`]: { stdout: "ok", stderr: "", exitCode: 0 },
-			});
-			expect(await checkRemoteAgent(client, "windows")).toBe(path);
-			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
-				"where lasterm-agent",
-				folderCommand("LocalApplicationData"),
-				folderCommand("ProgramFiles"),
-				`if exist "${path}" echo ok`,
-			]);
-		},
-	);
+	it.each([
+		["nothing", { stdout: "", stderr: "", exitCode: 0 }],
+		["a failure", { stdout: "", stderr: "boom", exitCode: 1 }],
+		["a path it cannot use", folderOutput("lasterm\\lasterm-agent.exe")],
+		["something else", { stdout: "C:\\x\\lasterm-agent.exe", stderr: "", exitCode: 0 }],
+	] as const)("E5 finds no agent when the known folders answer %s", async (_name, answer) => {
+		const client = makeMockClient({ [findAgentCommand()]: answer });
+		expect(await checkRemoteAgent(client, "windows")).toBeNull();
+	});
+
+	it("E5 looks in the known folders, LocalAppData first, with .NET alone and no path as text", () => {
+		const script = windowsFindAgentScript();
+		expect(script.indexOf("GetFolderPath('LocalApplicationData')")).toBeGreaterThan(-1);
+		expect(script.indexOf("GetFolderPath('LocalApplicationData')")).toBeLessThan(
+			script.indexOf("GetFolderPath('ProgramFiles')"),
+		);
+		expect(script).toMatch(/;exit 0$/);
+		expect(script).not.toMatch(/Get-ChildItem|Test-Path|Join-Path|Get-Item/);
+	});
 
 	it.each(["linux", "darwin"] as const)("E6 probes only POSIX paths on %s", async (os) => {
 		const client = makeMockClient({});
@@ -737,7 +785,7 @@ describe("detectRemoteOsArch", () => {
 	it("falls back to PROCESSOR_ARCHITECTURE for Windows x64", async () => {
 		const client = makeMockClient({
 			"uname -sm": { stdout: "", stderr: "not found", exitCode: 1 },
-			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "AMD64\n", stderr: "", exitCode: 0 },
+			[ECHO_ARCH]: { stdout: "AMD64\n", stderr: "", exitCode: 0 },
 		});
 		const result = await detectRemoteOsArch(client);
 		expect(result).toEqual({ os: "windows", arch: "x64" });
@@ -746,16 +794,36 @@ describe("detectRemoteOsArch", () => {
 	it("falls back to PROCESSOR_ARCHITECTURE for Windows arm64", async () => {
 		const client = makeMockClient({
 			"uname -sm": { stdout: "", stderr: "", exitCode: 1 },
-			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "ARM64\n", stderr: "", exitCode: 0 },
+			[ECHO_ARCH]: { stdout: "ARM64\n", stderr: "", exitCode: 0 },
 		});
 		const result = await detectRemoteOsArch(client);
 		expect(result).toEqual({ os: "windows", arch: "arm64" });
 	});
 
+	it("asks PowerShell when the shell is PowerShell, which echoes %PROCESSOR_ARCHITECTURE% as it is (#714)", async () => {
+		const client = makeMockClient({
+			"uname -sm": { stdout: "", stderr: "not recognized", exitCode: 1 },
+			[ECHO_ARCH]: { stdout: "%PROCESSOR_ARCHITECTURE%\r\n", stderr: "", exitCode: 0 },
+			[POWERSHELL_ARCH]: { stdout: "AMD64", stderr: "", exitCode: 0 },
+		});
+		expect(await readRemoteSystem(client)).toEqual({
+			system: "Windows AMD64",
+			parsed: { os: "windows", arch: "x64" },
+		});
+		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+			"uname -sm",
+			"echo %PROCESSOR_ARCHITECTURE%",
+			POWERSHELL_ARCH,
+		]);
+		expect(POWERSHELL_ARCH).toMatch(
+			/^powershell -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/]+={0,2}$/,
+		);
+	});
+
 	it("returns null when both detection methods fail", async () => {
 		const client = makeMockClient({
 			"uname -sm": { stdout: "", stderr: "", exitCode: 1 },
-			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "", stderr: "", exitCode: 1 },
+			[ECHO_ARCH]: { stdout: "", stderr: "", exitCode: 1 },
 		});
 		const result = await detectRemoteOsArch(client);
 		expect(result).toBeNull();
@@ -764,7 +832,7 @@ describe("detectRemoteOsArch", () => {
 	it("keeps the name of a system no agent is built for (#401)", async () => {
 		const client = makeMockClient({
 			"uname -sm": { stdout: "Linux armv7l\n", stderr: "", exitCode: 0 },
-			"echo %PROCESSOR_ARCHITECTURE%": {
+			[ECHO_ARCH]: {
 				stdout: "%PROCESSOR_ARCHITECTURE%\n",
 				stderr: "",
 				exitCode: 0,
@@ -777,7 +845,7 @@ describe("detectRemoteOsArch", () => {
 	it("returns null when uname output is unrecognized", async () => {
 		const client = makeMockClient({
 			"uname -sm": { stdout: "FreeBSD amd64\n", stderr: "", exitCode: 0 },
-			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "", stderr: "", exitCode: 1 },
+			[ECHO_ARCH]: { stdout: "", stderr: "", exitCode: 1 },
 		});
 		const result = await detectRemoteOsArch(client);
 		expect(result).toBeNull();
@@ -1361,15 +1429,30 @@ class ChildChannel extends Duplex {
 		callback();
 	}
 
+	/** Ends the shell and what it started, as sshd's job object does. */
 	close(): void {
-		this.child.kill();
+		killTree(this.child);
 	}
 }
 
 /**
+ * End `child` and every process it started, while it still runs: a child's
+ * kill alone leaves what it started running, with the test's pipes open.
+ */
+function killTree(child: ReturnType<typeof spawn>): void {
+	if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
+	spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], {
+		stdio: "ignore",
+		windowsHide: true,
+	});
+}
+
+/**
  * A client whose exec runs commands on this Windows machine the way
- * Win32-OpenSSH does: through cmd.exe by default, or through a PowerShell
- * `DefaultShell` (#714), and which offers no SFTP.
+ * Win32-OpenSSH does: `cmd.exe /c "<command>"` by default, or
+ * `powershell.exe -c <command>` for a PowerShell `DefaultShell` (#714), and
+ * which offers no SFTP. Hidden: a shell started from a process without a
+ * console would otherwise open a window for itself and what it starts.
  */
 function localWindowsClient(
 	shell: "cmd.exe" | "powershell.exe",
@@ -1380,8 +1463,15 @@ function localWindowsClient(
 		exec: vi.fn((command: string, cb: (err: Error | undefined, stream: unknown) => void) => {
 			const child =
 				shell === "cmd.exe"
-					? spawn("cmd.exe", ["/c", command], { windowsVerbatimArguments: true, env })
-					: spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-c", command], { env });
+					? spawn("cmd.exe", ["/c", `"${command}"`], {
+							windowsVerbatimArguments: true,
+							windowsHide: true,
+							env,
+						})
+					: spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-c", command], {
+							windowsHide: true,
+							env,
+						});
 			cb(undefined, new ChildChannel(child));
 		}),
 		sftp: vi.fn((cb: (err: Error | undefined, sftp?: SFTPWrapper) => void) =>
@@ -1416,7 +1506,7 @@ function localSftp(): SFTPWrapper {
  */
 async function runningExecutable(path: string): Promise<ReturnType<typeof spawn>> {
 	copyFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "PING.EXE"), path);
-	const child = spawn(path, ["-n", "120", "127.0.0.1"], { stdio: "ignore" });
+	const child = spawn(path, ["-n", "120", "127.0.0.1"], { stdio: "ignore", windowsHide: true });
 	await new Promise<void>((resolve, reject) => {
 		child.once("spawn", resolve);
 		child.once("error", reject);
@@ -1697,6 +1787,7 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 	function powerShell7Modules(): string | null {
 		const home = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSHOME"], {
 			encoding: "utf8",
+			windowsHide: true,
 		});
 		if (home.status !== 0) return null;
 		const modules = join(home.stdout.trim(), "Modules");
@@ -1860,6 +1951,263 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 				);
 			} finally {
 				await stop(running);
+			}
+		},
+	);
+});
+
+// ---------- Windows hosts, under cmd.exe or a PowerShell DefaultShell (#714) --
+
+/** A profile folder name nothing on the way may read as anything but a name. */
+const AWKWARD_NAME = "Zoë O'Brien %PATH% !x! $x {y} [1] & ^ ; 日本";
+
+/** The repository this spec belongs to. */
+const REPOSITORY = fileURLToPath(new URL("../../../../", import.meta.url));
+
+/**
+ * The agent this checkout built (`scripts/build-agent.ps1`), or the one
+ * LASTERM_TEST_AGENT_BINARY names; null when there is none, and the specs that
+ * need it skip. It is copied before it runs, never run where it was built.
+ */
+function builtWindowsAgent(): string | null {
+	const named = process.env.LASTERM_TEST_AGENT_BINARY;
+	if (named) return named;
+	const built = join(REPOSITORY, "dist", "sea", "lasterm-agent.exe");
+	return existsSync(built) ? built : null;
+}
+
+/**
+ * This environment, with `profile` as USERPROFILE, which LocalAppData follows,
+ * and a PATH of Windows' own folders, where no lasterm-agent is.
+ */
+function windowsProfileEnv(profile: string): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const [name, value] of Object.entries(process.env)) {
+		if (!/^(path|userprofile)$/i.test(name)) env[name] = value;
+	}
+	const root = process.env.SystemRoot ?? "C:\\Windows";
+	env.Path = [
+		join(root, "System32"),
+		root,
+		join(root, "System32", "WindowsPowerShell", "v1.0"),
+	].join(";");
+	env.USERPROFILE = profile;
+	return env;
+}
+
+/** Run `command` through the client's shell, and hand back its channel. */
+function execChannel(client: SshClient, command: string): ChildChannel {
+	let channel: ChildChannel | undefined;
+	client.exec(command, (err, stream) => {
+		if (err) throw err;
+		channel = stream as unknown as ChildChannel;
+	});
+	if (channel === undefined) throw new Error("no channel");
+	return channel;
+}
+
+/** What a channel says on stdout, as it arrives, and how it ended. */
+function listen(channel: ChildChannel): {
+	bytes: () => Buffer;
+	until: (enough: (bytes: Buffer) => boolean, ms: number) => Promise<Buffer>;
+	exited: Promise<number | null>;
+} {
+	const chunks: Buffer[] = [];
+	const waiting = new Set<() => void>();
+	channel.on("data", (chunk: Buffer) => {
+		chunks.push(chunk);
+		for (const wake of [...waiting]) wake();
+	});
+	const exited = new Promise<number | null>((resolve) => {
+		channel.once("exit", (code: number | null) => resolve(code));
+	});
+	const bytes = () => Buffer.concat(chunks);
+	const until = (enough: (bytes: Buffer) => boolean, ms: number) =>
+		new Promise<Buffer>((resolve, reject) => {
+			const wake = () => {
+				if (!enough(bytes())) return;
+				waiting.delete(wake);
+				clearTimeout(timer);
+				resolve(bytes());
+			};
+			const timer = setTimeout(() => {
+				waiting.delete(wake);
+				reject(new Error(`not enough after ${ms} ms: ${bytes().length} bytes`));
+			}, ms);
+			waiting.add(wake);
+			wake();
+		});
+	return { bytes, until, exited };
+}
+
+/** Within `ms`, or the promise's rejection says it did not. */
+function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+	return Promise.race([
+		promise,
+		new Promise<T>((_, reject) =>
+			setTimeout(() => reject(new Error(`${what}: over ${ms} ms`)), ms),
+		),
+	]);
+}
+
+/**
+ * A HEARTBEAT whose `ts` the agent echoes, built to carry what a text layer
+ * would change: CR, LF, CR LF, ^Z, NUL and every byte from 0x80 up, in its
+ * payload and, padded to `payloadLength`, in its length prefix too.
+ */
+function awkwardHeartbeat(payloadLength?: number): { ts: string; frame: Buffer } {
+	let ts = "\r\n\u001a\u0000\r\r\n\n";
+	for (let c = 0x80; c <= 0xff; c++) ts += String.fromCharCode(c);
+	ts += "日本\u{1F600}";
+	if (payloadLength !== undefined) {
+		let pad = 0;
+		for (let i = 0; i < 6; i++) {
+			pad +=
+				payloadLength - (encodeFrame({ type: "HEARTBEAT", ts: ts + "x".repeat(pad) }).length - 4);
+		}
+		ts += "x".repeat(pad);
+	}
+	return { ts, frame: Buffer.from(encodeFrame({ type: "HEARTBEAT", ts })) };
+}
+
+describe("Windows hosts under cmd.exe and a PowerShell DefaultShell (#714)", () => {
+	const shells = ["cmd.exe", "powershell.exe"] as const;
+	const programFilesAgent = join(
+		process.env.ProgramFiles ?? "C:\\Program Files",
+		"lasterm",
+		"lasterm-agent.exe",
+	);
+
+	it.runIf(process.platform === "win32").each(shells)(
+		"detects the system through %s",
+		{ timeout: 60_000 },
+		async (shell) => {
+			const client = localWindowsClient(shell, windowsProfileEnv(cacheDir));
+
+			const read = await readRemoteSystem(client);
+
+			expect(read?.parsed?.os).toBe("windows");
+			expect(["x64", "arm64"]).toContain(read?.parsed?.arch);
+			expect(read?.system).toMatch(/^Windows (AMD64|ARM64)$/);
+		},
+	);
+
+	// The reopen condition of #714, on this machine: the platform detected, the
+	// agent deployed, found again, and started, with a profile whose name holds
+	// what cmd.exe and PowerShell would expand, through either shell. Not where
+	// an agent is installed in Program Files: the known-folder search would find
+	// it, and the deploy replace it.
+	it.runIf(process.platform === "win32" && !existsSync(programFilesAgent)).each(shells)(
+		"deploys the agent into a profile named like variables through %s, finds it there, and starts it",
+		{ timeout: 120_000 },
+		async (shell) => {
+			const agentBinary = builtWindowsAgent();
+			const bytes =
+				agentBinary === null
+					? Buffer.concat([Buffer.from([...Array(256).keys()]), randomBytes(64 * 1024)])
+					: readFileSync(agentBinary);
+			const local = writeCachedAgentBinary("windows", "x64", bytes);
+			const profile = join(cacheDir, AWKWARD_NAME);
+			mkdirSync(join(profile, "AppData", "Local"), { recursive: true });
+			const client = localWindowsClient(shell, windowsProfileEnv(profile));
+			const host = { os: "windows", arch: "x64" } as const;
+			const options = makeOptions({ sftp: { offered: false, reason: "none here" } });
+			const target = join(profile, "AppData", "Local", "lasterm", "lasterm-agent.exe");
+
+			const deployed = await deployAgentIfNeeded(client, host, options);
+
+			expect(deployed.deployed).toBe(true);
+			// The same file, however the folder was spelt (a short 8.3 TEMP, say).
+			expect(realpathSync.native(deployed.remotePath)).toBe(realpathSync.native(target));
+			expect(readFileSync(target).equals(readFileSync(local))).toBe(true);
+
+			const found = await deployAgentIfNeeded(client, host, options);
+
+			expect(found).toMatchObject({
+				deployed: false,
+				remoteMatchesHubVersionCache: true,
+				remotePath: deployed.remotePath,
+			});
+
+			if (agentBinary === null) return;
+			const channel = execChannel(client, windowsLaunchCommand(found.remotePath, ["--stdio"]));
+			try {
+				// Decoded before `listen` looks at what arrived.
+				const reader = new FrameReader();
+				const frames: ProtocolMessage[] = [];
+				channel.on("data", (chunk: Buffer) => {
+					for (const message of reader.push(chunk)) frames.push(message);
+				});
+				const out = listen(channel);
+				await out.until(() => frames.length > 0, 30_000);
+				expect(frames.shift()?.type).toBe("HELLO");
+
+				for (const payloadLength of [undefined, 0x0a0d, 0x0d0a1a, 0x8080, 0xff0a]) {
+					const { ts, frame } = awkwardHeartbeat(payloadLength);
+					channel.write(frame);
+					await out.until(() => frames.length > 0, 15_000);
+					expect(frames.shift()).toEqual({ type: "HEARTBEAT_ACK", ts });
+				}
+
+				channel.end();
+				expect(await within(out.exited, 15_000, "the agent's exit")).toBe(0);
+			} finally {
+				channel.close();
+			}
+		},
+	);
+
+	// Without the agent, which CI's TypeScript job does not build: a program
+	// that prints its arguments, then copies stdin to stdout, from a folder with
+	// an awkward name. What PowerShell starts gets every argument as it was
+	// given and every byte as it was sent, both ways.
+	it.runIf(process.platform === "win32").each(shells)(
+		"hands a program its arguments and every byte both ways through %s",
+		{ timeout: 60_000 },
+		async (shell) => {
+			const dir = join(cacheDir, AWKWARD_NAME);
+			mkdirSync(dir, { recursive: true });
+			const program = join(dir, "echo.exe");
+			try {
+				linkSync(process.execPath, program);
+			} catch {
+				copyFileSync(process.execPath, program);
+			}
+			const echo =
+				'process.stdout.write(JSON.stringify(process.argv.slice(1))+"\\n");process.stdin.pipe(process.stdout)';
+			const given = [
+				"--stdio",
+				"two words",
+				'a "quoted" one',
+				"trailing\\",
+				'back\\"slash',
+				"%PATH% !x! $x `y` 'z' & | < > ^",
+				"Zoë 日本",
+				"",
+			];
+			const sent = Buffer.concat([
+				Buffer.from("\r\n\n\r\u001a\u0000"),
+				Buffer.from([...Array(256).keys()]),
+				randomBytes(512 * 1024),
+				Buffer.from([0x0d]),
+			]);
+			const channel = execChannel(
+				localWindowsClient(shell),
+				windowsLaunchCommand(program, ["-e", echo, "--", ...given]),
+			);
+			try {
+				const out = listen(channel);
+				const firstLine = (bytes: Buffer) => bytes.indexOf(0x0a);
+				const head = await out.until((bytes) => firstLine(bytes) !== -1, 30_000);
+				expect(JSON.parse(head.subarray(0, firstLine(head)).toString("utf8"))).toEqual(given);
+
+				channel.end(sent);
+				expect(await within(out.exited, 30_000, "the program's exit")).toBe(0);
+				const echoed = out.bytes().subarray(firstLine(out.bytes()) + 1);
+				expect(echoed.length).toBe(sent.length);
+				expect(echoed.equals(sent)).toBe(true);
+			} finally {
+				channel.close();
 			}
 		},
 	);
@@ -2393,7 +2741,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		const client = makeMockClient(
 			{
 				"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-				"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 				'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",
@@ -2435,7 +2783,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 	it("E7 throws when OS/arch cannot be detected and they are unknown", async () => {
 		const client = makeMockClient({
 			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
@@ -2457,7 +2805,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 				exitCode: 1,
 			},
 			"uname -sm": { stdout: "", stderr: "", exitCode: 1 },
-			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "", stderr: "", exitCode: 1 },
+			[ECHO_ARCH]: { stdout: "", stderr: "", exitCode: 1 },
 		});
 
 		await expect(
@@ -2465,7 +2813,8 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		).rejects.toThrow("Cannot detect remote OS/arch");
 		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
 			"uname -sm",
-			"echo %PROCESSOR_ARCHITECTURE%",
+			ECHO_ARCH,
+			POWERSHELL_ARCH,
 		]);
 		expect(client.sftp).not.toHaveBeenCalled();
 	});
@@ -2473,7 +2822,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 	it("names a system no agent is built for instead of calling it undetectable (#401)", async () => {
 		const client = makeMockClient({
 			"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-			"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+			"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 			'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 				stdout: "",
 				stderr: "",
@@ -2495,7 +2844,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 				exitCode: 1,
 			},
 			"uname -sm": { stdout: "Linux armv7l\n", stderr: "", exitCode: 0 },
-			"echo %PROCESSOR_ARCHITECTURE%": { stdout: "", stderr: "", exitCode: 1 },
+			[ECHO_ARCH]: { stdout: "", stderr: "", exitCode: 1 },
 		});
 
 		await expect(
@@ -2508,10 +2857,14 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		["E2 non-ASCII profile", "C:\\Users\\Rémi\\AppData\\Local"],
 		["E8 drive-root folder", "C:\\"],
 		["ASCII apostrophe profile", "C:\\Users\\O'Brien\\AppData\\Local"],
-		...["‘", "’", "‚", "‛", "[", "]", "`"].map((character) => [
+		...["‘", "’", "‚", "‛", "[", "]", "`", "%", "!", "$", "^", "&"].map((character) => [
 			`literal profile ${character}`,
 			`C:\\Users\\a${character}b\\AppData\\Local`,
 		]),
+		// Accepted since #714: nothing expands them any more.
+		["profile named like a variable", "C:\\Users\\%USERNAME%!x!\\AppData\\Local"],
+		["folder redirected to a share", "\\\\server\\share\\u\\AppData\\Local"],
+		["share root", "\\\\server\\share\\"],
 	])("%s", async (_edge, folder) => {
 		const local = writeCachedAgentBinary("windows", "x64");
 		const sftp = makeMockSftp();
@@ -2532,14 +2885,13 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		expect(temp.startsWith(`${dir}\\.lasterm-agent.exe.`)).toBe(true);
 		expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(local, temp, expect.any(Function));
 		const commands = vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd);
-		expect(commands.slice(0, 4)).toEqual([
-			"where lasterm-agent",
+		expect(commands.slice(0, 3)).toEqual([
+			"where.exe lasterm-agent",
+			findAgentCommand(),
 			folderCommand("LocalApplicationData"),
-			`if exist "${path}" echo ok`,
-			folderCommand("ProgramFiles"),
 		]);
-		expect(commands).toHaveLength(5);
-		expect(replacePaths(commands[4] ?? "")).toMatchObject({ target: path, temp });
+		expect(commands).toHaveLength(4);
+		expect(replacePaths(commands[3] ?? "")).toMatchObject({ target: path, temp });
 	});
 
 	it.each([
@@ -2571,23 +2923,22 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		),
 		...(
 			[
-				["C:\\Users\\a%[\\AppData\\Local", "contains a character cmd.exe expands"],
-				["C:\\Users\\a!’\\AppData\\Local", "contains a character cmd.exe expands"],
 				['C:\\Users\\a"[\\AppData\\Local', "contains a double quote"],
-				["%LOCALAPPDATA%", "contains a character cmd.exe expands"],
-				["C:\\!TEMP!", "contains a character cmd.exe expands"],
-				["C:\\%TEMP%", "contains a character cmd.exe expands"],
-				["C:\\Users\\a!b\\AppData\\Local", "contains a character cmd.exe expands"],
-				["C:\\Users\\a%b\\AppData\\Local", "contains a character cmd.exe expands"],
+				["%LOCALAPPDATA%", "not a drive or UNC path with backslashes"],
 				['C:\\a"b', "contains a double quote"],
-				["C:/Users/u/AppData/Local", "not a drive path with backslashes"],
-				["Users\\u", "not a drive path with backslashes"],
-				["relative", "not a drive path with backslashes"],
-				['relative%"', "contains a character cmd.exe expands"],
+				["C:/Users/u/AppData/Local", "not a drive or UNC path with backslashes"],
+				["Users\\u", "not a drive or UNC path with backslashes"],
+				["relative", "not a drive or UNC path with backslashes"],
+				['relative%"', "contains a double quote"],
 				['relative"', "contains a double quote"],
-				['C:\\Users\\a%"\\AppData\\Local', "contains a character cmd.exe expands"],
-				["\\\\server\\share", "not a drive path with backslashes"],
-				["\\\\server\\share\\u", "not a drive path with backslashes"],
+				['C:\\Users\\a%"\\AppData\\Local', "contains a double quote"],
+				['\\\\server\\share\\a"b', "contains a double quote"],
+				["\\\\server", "not a drive or UNC path with backslashes"],
+				["\\\\server\\", "not a drive or UNC path with backslashes"],
+				["\\\\\\server\\share", "not a drive or UNC path with backslashes"],
+				["//server/share/u", "not a drive or UNC path with backslashes"],
+				["\\\\?\\C:\\Users\\u", "not a drive or UNC path with backslashes"],
+				["\\\\.\\C:\\Users\\u", "not a drive or UNC path with backslashes"],
 			] as const
 		).map(
 			([path, why]) =>
@@ -2611,58 +2962,36 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		);
 		expect(client.sftp).not.toHaveBeenCalled();
 		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
-			"where lasterm-agent",
-			folderCommand("LocalApplicationData"),
-			folderCommand("ProgramFiles"),
+			"where.exe lasterm-agent",
+			findAgentCommand(),
 			folderCommand("LocalApplicationData"),
 		]);
 	});
 
-	it.each([true, false])(
-		"retries a failed LocalAppData lookup once (second succeeds: %s)",
-		async (succeeds) => {
-			const local = writeCachedAgentBinary("windows", "x64");
-			const folder = "C:\\Users\\u\\AppData\\Local";
-			const path = `${folder}\\lasterm\\lasterm-agent.exe`;
-			const responses = {
-				[folderCommand("LocalApplicationData")]: { stdout: "", stderr: "first", exitCode: 1 },
+	it("deploys when the known-folder search fails, looking up LocalAppData once", async () => {
+		const local = writeCachedAgentBinary("windows", "x64");
+		const folder = "C:\\Users\\u\\AppData\\Local";
+		const sftp = makeMockSftp();
+		const client = makeMockClient(
+			{
+				[findAgentCommand()]: { stdout: "", stderr: "boom", exitCode: 1 },
+				[folderCommand("LocalApplicationData")]: folderOutput(folder),
 				[ENCODED_POWERSHELL]: { stdout: "", stderr: "", exitCode: 0 },
-			};
-			const sftp = makeMockSftp();
-			const openSftp = vi.fn((cb: (err: Error | undefined, sftp: SFTPWrapper) => void) =>
-				cb(undefined, sftp),
-			);
-			const client = makeMockClient(responses, openSftp);
-			const exec = vi.mocked(client.exec).getMockImplementation();
-			if (!exec) throw new Error("Missing mock exec implementation");
-			let lookups = 0;
-			vi.mocked(client.exec).mockImplementation((cmd, cb) => {
-				if (cmd === folderCommand("LocalApplicationData") && ++lookups === 2) {
-					responses[cmd] = succeeds
-						? folderOutput(folder)
-						: { stdout: "", stderr: "second", exitCode: 2 };
-				}
-				return exec(cmd, cb);
-			});
-			const deployment = deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions());
-			if (succeeds) {
-				expect((await deployment).remotePath).toBe(path);
-				expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(
-					local,
-					expect.stringMatching(/\\\.lasterm-agent\.exe\.[0-9a-f]{16}\.partial$/),
-					expect.any(Function),
-				);
-			} else {
-				const error = await deployment.catch((error: unknown) => error);
-				expect(error).toBeInstanceOf(Error);
-				expect((error as Error).message).toBe(
-					"Could not determine the LocalAppData directory of the Windows host: exit 2: second",
-				);
-				expect(openSftp).not.toHaveBeenCalled();
-			}
-			expect(lookups).toBe(2);
-		},
-	);
+			},
+			(cb) => cb(undefined, sftp),
+		);
+
+		const result = await deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions());
+
+		expect(result.remotePath).toBe(`${folder}\\lasterm\\lasterm-agent.exe`);
+		expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(
+			local,
+			expect.stringMatching(/\\\.lasterm-agent\.exe\.[0-9a-f]{16}\.partial$/),
+			expect.any(Function),
+		);
+		const commands = vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd);
+		expect(commands.filter((cmd) => cmd === folderCommand("LocalApplicationData"))).toHaveLength(1);
+	});
 
 	it("E3 preserves an sshExec rejection before SFTP", async () => {
 		writeCachedAgentBinary("windows", "x64");
@@ -2703,18 +3032,16 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		}
 	});
 
-	it.each(["Rémi", "O'Brien", "a`b[1]\\O’Brien'x"])(
-		"E4 hashes the agent at the resolved LocalAppData candidate for %s",
+	it.each(["Rémi", "O'Brien", "a`b[1]\\O’Brien'x", "%USERNAME% !x! $y", "\\\\server\\share\\u"])(
+		"E4 hashes the agent found in a known folder for %s",
 		async (profile) => {
-			const folder = `C:\\Users\\${profile}\\AppData\\Local\\`;
-			const path = `${folder}lasterm\\lasterm-agent.exe`;
+			const path = `${profile.startsWith("\\\\") ? profile : `C:\\Users\\${profile}`}\\AppData\\Local\\lasterm\\lasterm-agent.exe`;
 			const hash = "a".repeat(64);
 			const encodedPath = Buffer.from(path, "utf8").toString("base64");
 			const script = expectedHashScript(encodedPath);
 			const hashCommand = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 			const client = makeMockClient({
-				[folderCommand("LocalApplicationData")]: folderOutput(folder),
-				[`if exist "${path}" echo ok`]: { stdout: "ok\r\n", stderr: "", exitCode: 0 },
+				[findAgentCommand()]: folderOutput(path),
 				[hashCommand]: { stdout: hash, stderr: "", exitCode: 0 },
 			});
 			const result = await deployAgentIfNeeded(
@@ -2723,12 +3050,10 @@ describe("deployAgentIfNeeded — agent already present", () => {
 				makeOptions({ pinnedSha256: hash }),
 			);
 			expect(result.remotePath).toBe(path);
-			expect(vi.mocked(client.exec).mock.calls[3]?.[0]).toBe(hashCommand);
 			expect(client.sftp).not.toHaveBeenCalled();
 			expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
-				"where lasterm-agent",
-				folderCommand("LocalApplicationData"),
-				`if exist "${path}" echo ok`,
+				"where.exe lasterm-agent",
+				findAgentCommand(),
 				hashCommand,
 			]);
 		},
@@ -2867,7 +3192,7 @@ describe("deploy + verify integration", () => {
 		const clientFirst = makeMockClient(
 			{
 				"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-				"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+				"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 				'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 					stdout: "",
 					stderr: "",

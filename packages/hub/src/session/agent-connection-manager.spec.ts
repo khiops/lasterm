@@ -129,7 +129,7 @@ function makeMockSftp(): SFTPWrapper {
 function makeDeployingSshClient(): SshClient {
 	const responses: Record<string, ExecResult> = {
 		"which lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
-		"where lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
+		"where.exe lasterm-agent": { stdout: "", stderr: "", exitCode: 1 },
 		'test -x "$HOME/.local/bin/lasterm-agent" && echo "$HOME/.local/bin/lasterm-agent"': {
 			stdout: "",
 			stderr: "",

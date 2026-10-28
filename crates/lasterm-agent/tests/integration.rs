@@ -432,18 +432,9 @@ async fn stopping_one_sibling_socket_leaves_the_other_daemon_running() {
 
 #[tokio::test]
 async fn contradictory_stop_modes_are_rejected() {
-    for mode in [
-        "--daemon",
-        "--stdio",
-        "--buffer-per-channel",
-        "--buffer-global",
-    ] {
-        let mut args = vec![mode, "--stop"];
-        if mode.starts_with("--buffer-") {
-            args.insert(1, "1");
-        }
+    for mode in ["--daemon", "--stdio"] {
         let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
-            .args(args)
+            .args([mode, "--stop"])
             .output()
             .await
             .expect("run contradictory CLI modes");
@@ -667,6 +658,7 @@ async fn test_spawn_ok() {
         ("shell", sv(test_shell().0)),
         ("cols", iv(80)),
         ("rows", iv(24)),
+        ("env_mode", sv("inherit")),
     ]);
     write_frame(&mut stdin, &spawn_msg).await;
 
@@ -697,6 +689,7 @@ async fn test_spawn_nonexistent_shell() {
         ("shell", sv("/nonexistent/shell")),
         ("cols", iv(80)),
         ("rows", iv(24)),
+        ("env_mode", sv("inherit")),
     ]);
     write_frame(&mut stdin, &spawn_msg).await;
 
@@ -764,6 +757,7 @@ async fn test_full_lifecycle() {
         ),
         ("cols", iv(80)),
         ("rows", iv(24)),
+        ("env_mode", sv("inherit")),
     ]);
     write_frame(&mut stdin, &spawn_msg).await;
 
@@ -844,6 +838,7 @@ async fn a_channel_delivers_all_its_output_before_its_exit() {
             ),
             ("cols", iv(80)),
             ("rows", iv(24)),
+            ("env_mode", sv("inherit")),
         ]);
         write_frame(&mut stdin, &spawn_msg).await;
 
@@ -969,6 +964,7 @@ async fn test_conpty_no_stdout_leak() {
         ("shell", sv("cmd.exe")),
         ("cols", iv(80)),
         ("rows", iv(24)),
+        ("env_mode", sv("inherit")),
     ]);
     write_frame(&mut stdin, &spawn_msg).await;
 
@@ -1051,6 +1047,7 @@ async fn test_spawn_ok_precedes_channel_exit() {
         ),
         ("cols", iv(80)),
         ("rows", iv(24)),
+        ("env_mode", sv("inherit")),
     ]);
     write_frame(&mut stdin, &spawn_msg).await;
 
@@ -1161,6 +1158,7 @@ async fn a_hub_that_stops_reading_stdout_holds_its_terminal_back() {
             ),
             ("cols", iv(80)),
             ("rows", iv(24)),
+            ("env_mode", sv("inherit")),
         ]),
     )
     .await;

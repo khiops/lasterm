@@ -95,7 +95,6 @@ Universal PTY manager. Runs locally (a detached daemon) or remotely (via SSH). S
 - Output while a hub is away (`away.rs`): the hub's own queue keeps each of its channels' newest output, up to 1 MiB per channel and 16 MiB for all of them. Past a channel's bound its oldest output goes; past the hub's, the oldest output of whichever channel holds the most. One busy terminal therefore never pushes out another's output, and a channel's last frame, its CHANNEL_EXIT once it ended, is always kept. Nothing is held back meanwhile: an away hub's terminals run on. The screen comes back through the snapshot of the next ATTACH, since the screen model has read everything; what was dropped is the output in between, which the hub's spool and a client's scrollback never receive. Details below.
 - CLI: `lasterm-agent --stdio` (the default), `lasterm-agent --daemon [--socket <path>] [--idle-timeout <seconds>] [--log-files-kept <count>]`, and `lasterm-agent --stop [--socket <path>]`; all take `--log-level` and `--format` (§ 6.2).
 - Daemon log: one file per UTC day with something logged, `logs/agent-daemon.YYYY-MM-DD.jsonl` in the state directory, never renamed. `--log-files-kept` (7 by default, 0 keeps all) says how many are kept; older ones are deleted when the daemon starts and when a new day's file starts (STORAGE.md § 12.1, #646).
-- `--buffer-per-channel <bytes>` and `--buffer-global <bytes>` are accepted and ignored. No Rust agent has ever read them: they sized the Node agent's `OutputBuffer`, removed with that agent. The hub no longer passes them, but hubs from before still do, and they can meet a newer agent: a development hub runs whatever `target/release` holds, and a single executable with no agent beside it runs the first one on `PATH`. A daemon that rejected the flags would exit before it listens (#484), and the hub would open no local terminal. So the agent keeps accepting them, hidden from `--help`. Nor does it ever read them: the away queue's bounds are constants, which such a hub's 1 MB and 20 MB would otherwise replace without anyone asking.
 
 **Process model (local — daemon):**
 ```
@@ -112,7 +111,7 @@ hub: connectOrLaunch(socketPath, config, binaryPath)
 
 The hub no longer runs a local agent on stdio. A local session always goes through the daemon; when none can be reached, the SPAWN fails.
 
-The daemon serves several hubs at once, one connection each (#127). Every channel belongs to the hub whose connection spawned it, named by the `hub_key` of its AUTH; a hub that sends none is the owner `legacy`. A new connection displaces only the same hub's previous one, which is told `DISPLACED` and closed: that is how a connection a hub left half-open stops locking it out. Among `legacy` connections the last one wins, as every connection did before. A channel's output and events go to its owner's current connection, never to another hub's; while its owner has none, they wait in that owner's own queue (each channel's newest output, 1 MiB per channel and 16 MiB in all), which goes out as soon as the owner connects again, before anything it is answered. Another hub's channel answers every request as an unknown one does (PROTOCOL.md § 3.1b).
+The daemon serves several hubs at once, one connection each (#127). Every channel belongs to the hub whose connection spawned it, named by the `hub_key` of its AUTH. A connection that does not open with an AUTH carrying a key is refused: it gets an `ERROR` (`AUTH_REQUIRED`, or `AUTH_INVALID` for a refused token or an empty key) and is closed. A new connection displaces only the same hub's previous one, which is told `DISPLACED` and closed: that is how a connection a hub left half-open stops locking it out. A channel's output and events go to its owner's current connection, never to another hub's; while its owner has none, they wait in that owner's own queue (each channel's newest output, 1 MiB per channel and 16 MiB in all), which goes out as soon as the owner connects again, before anything it is answered. Another hub's channel answers every request as an unknown one does (PROTOCOL.md § 3.1b).
 
 **Process model (remote):**
 ```
@@ -1010,7 +1009,7 @@ The `[agent]` section configures the local daemon agent. These settings are defi
 |-----|------|---------|-------------|
 | `socket_path` | string | Platform-dependent (see SECURITY.md) | UDS/named pipe path for daemon communication |
 
-`buffer_per_channel` and `buffer_global` are no longer read: no Rust agent ever applied them (§ 3.2). A config.toml that still sets them loads as before.
+`buffer_per_channel` and `buffer_global` are not read: nothing applies them, and the away queue's bounds are constants (§ 3.2). A config.toml that still sets them loads as before.
 
 ### 6.2 Logging Config (`[logging]` section in config.toml)
 

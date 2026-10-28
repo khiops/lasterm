@@ -27,16 +27,9 @@ use crate::pty::{DestroyAllSummary, PtyManager};
 const BIND_RETRY_MAX: u32 = 3;
 #[cfg(unix)]
 const BIND_RETRY_DELAY_MS: u64 = 300;
-/// How long a daemon with a token waits for AUTH before dropping a connection.
+/// How long a daemon waits for AUTH before dropping a connection. A hub sends
+/// it as soon as it reads HELLO, one round trip, well within it.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a daemon without a token waits for the frame after HELLO.
-///
-/// A hub from before #127 sends nothing to a daemon without a token: it waits
-/// for the channel state, and gives up after 5 s. Past this wait such a
-/// connection is taken for one of them, as `legacy`, with time to spare. A
-/// current hub sends AUTH as soon as it reads HELLO, one round trip, well
-/// within it.
-const LEGACY_FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
 static CONNECTION_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The daemon's end of its shutdown channel. The accept loop waits on it, and
@@ -708,21 +701,57 @@ async fn read_messages<R: AsyncRead + Unpin>(
     Ok(())
 }
 
-/// Read the frame that follows HELLO and say whose connection this is.
+/// Why a connection was refused: the ERROR it is sent before it is closed.
+#[derive(Debug, PartialEq, Eq)]
+struct Refusal {
+    code: &'static str,
+    message: String,
+}
+
+impl Refusal {
+    /// The connection did not open with an AUTH carrying a hub key.
+    fn auth_required(detail: Option<&str>) -> Self {
+        let message = "a daemon connection must open with AUTH, carrying a hub key";
+        Self {
+            code: error_codes::AUTH_REQUIRED,
+            message: match detail {
+                Some(detail) => format!("{message}: {detail}"),
+                None => message.to_string(),
+            },
+        }
+    }
+
+    /// The AUTH it opened with names no hub, or carries a token refused.
+    fn auth_invalid(message: &str) -> Self {
+        Self {
+            code: error_codes::AUTH_INVALID,
+            message: message.to_string(),
+        }
+    }
+
+    fn frame(&self) -> AgentToHub {
+        AgentToHub::Error {
+            code: self.code.to_string(),
+            message: self.message.clone(),
+            channel_id: None,
+            other_owner_channels: None,
+        }
+    }
+}
+
+/// Read the AUTH that follows HELLO and say whose connection this is.
 ///
-/// - `Ok(Some(owner))`: accepted. With AUTH, the owner comes from its
-///   `hub_key`, or is `legacy` without one. What the hub sent after its AUTH
-///   stays in `pending`, to be processed once the connection is registered.
-/// - `Ok(None)`: refused. A token is configured, and the first frame is not
-///   AUTH or carries another token.
-/// - `Err`: the connection ended, or sent nothing in time while a token is
-///   configured.
+/// - `Ok(Ok(owner))`: accepted. The owner is named by the AUTH's `hub_key`.
+///   What the hub sent after its AUTH stays in `pending`, to be processed once
+///   the connection is registered.
+/// - `Ok(Err(refusal))`: refused. The first frame is not an AUTH with a hub
+///   key, or did not come within `AUTH_TIMEOUT`; or the key is empty; or a
+///   token is configured and the AUTH carries another.
+/// - `Err`: the connection ended, or sent a frame that cannot be read.
 ///
-/// Without a token (a first run, or a remote machine with no hub of its own),
-/// the frame is read all the same: it is where a hub names itself (#127). A
-/// first frame that is not AUTH comes from a hub from before #127, which is
-/// `legacy`, and that frame stays in `pending` to be processed normally; so
-/// does a connection that sends nothing within `LEGACY_FIRST_FRAME_WAIT`.
+/// Every hub opens a daemon connection with AUTH and its key (#127), with or
+/// without a token: a daemon with no token (a first run, or a remote machine
+/// with no hub of its own) still needs to know whose connection it is.
 ///
 /// No key is logged, ever.
 async fn handshake<R: AsyncRead + Unpin>(
@@ -730,40 +759,22 @@ async fn handshake<R: AsyncRead + Unpin>(
     frames: &mut FrameReader,
     pending: &mut VecDeque<HubToAgent>,
     expected_token: Option<&str>,
-    legacy_wait: Duration,
-) -> std::io::Result<Option<OwnerId>> {
-    let wait = match expected_token {
-        Some(_) => AUTH_TIMEOUT,
-        None => legacy_wait,
-    };
-    match tokio::time::timeout(wait, read_messages(reader, frames, pending)).await {
+) -> std::io::Result<Result<OwnerId, Refusal>> {
+    match tokio::time::timeout(AUTH_TIMEOUT, read_messages(reader, frames, pending)).await {
         Ok(read) => read?,
         Err(_elapsed) => {
-            return match expected_token {
-                Some(_) => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "AUTH frame not received within 5s",
-                )),
-                // A hub from before #127 talking to a daemon without a token
-                // sends nothing until it has the channel state.
-                None => Ok(Some(OwnerId::legacy())),
-            };
+            return Ok(Err(Refusal::auth_required(Some("none came within 5 s"))));
         }
     }
 
-    if !matches!(pending.front(), Some(HubToAgent::Auth { .. })) {
-        return Ok(match expected_token {
-            Some(_) => {
-                tracing::warn!(
-                    "expected AUTH message as first frame, got a different message type"
-                );
-                None
-            }
-            None => Some(OwnerId::legacy()),
-        });
-    }
-    let Some(HubToAgent::Auth { token, hub_key }) = pending.pop_front() else {
-        unreachable!("the first pending message was just seen to be AUTH");
+    let (token, hub_key) = match pending.pop_front() {
+        Some(HubToAgent::Auth { token, hub_key }) => (token, hub_key),
+        // What the frame reader makes of a frame it cannot decode, such as an
+        // AUTH without a hub key.
+        Some(HubToAgent::Error { code, message, .. }) if code == error_codes::INVALID_MESSAGE => {
+            return Ok(Err(Refusal::auth_required(Some(&message))));
+        }
+        _ => return Ok(Err(Refusal::auth_required(None))),
     };
     if let Some(expected) = expected_token {
         // An empty expected token marks an auth.json that is missing beside a
@@ -771,10 +782,13 @@ async fn handshake<R: AsyncRead + Unpin>(
         // empty token, which is what a hub sends to a daemon it holds no
         // token for (#127).
         if expected.is_empty() || !ct_eq(expected.as_bytes(), token.as_bytes()) {
-            return Ok(None);
+            return Ok(Err(Refusal::auth_invalid("the AUTH token was refused")));
         }
     }
-    Ok(Some(OwnerId::from_auth(hub_key.as_deref())))
+    if hub_key.is_empty() {
+        return Ok(Err(Refusal::auth_invalid("the AUTH hub key is empty")));
+    }
+    Ok(Ok(OwnerId::from_hub_key(&hub_key)))
 }
 
 // ── Windows secure pipe ───────────────────────────────────────────────────────
@@ -949,16 +963,19 @@ where
         &mut frames,
         &mut pending,
         daemon.expected_token.as_deref(),
-        LEGACY_FIRST_FRAME_WAIT,
     )
     .await
     {
-        Ok(Some(owner)) => owner,
-        Ok(None) => {
+        Ok(Ok(owner)) => owner,
+        Ok(Err(refusal)) => {
             tracing::warn!(
                 connection_id,
-                "auth handshake failed: token mismatch — dropping connection"
+                code = refusal.code,
+                "auth handshake refused — dropping connection"
             );
+            // Said before the connection closes: the writer sends what is
+            // queued before it ends, which is once `frame_tx` is dropped here.
+            let _ = send_encoded(&frame_tx, &refusal.frame());
             return;
         }
         Err(e) => {
@@ -1016,7 +1033,7 @@ where
     tracing::debug!(connection_id, "CHANNEL_STATE_END sent");
 
     // --- Step 4: read loop with displacement cancellation. What the handshake
-    // read beyond AUTH, or a first frame that was not AUTH, goes first. ---
+    // read beyond AUTH goes first. ---
     let mut cancel_rx = cancel.subscribe();
     let mut buf = vec![0u8; 8192];
     'connection: loop {
@@ -1507,11 +1524,11 @@ mod tests {
         ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-        // A hub with no key, as today's: both connections are `legacy`, the
-        // same hub, so the second replaces the first.
+        // Both connections carry the same key: one hub, so the second
+        // replaces the first.
         let auth = crate::framing::encode_frame(&crate::protocol::HubToAgent::Auth {
             token: String::new(),
-            hub_key: None,
+            hub_key: "displaced-hub-key".to_string(),
         })
         .unwrap();
 
@@ -1681,7 +1698,7 @@ mod tests {
         // AUTH, as a hub sends it after HELLO, even to a daemon without a token.
         let auth = crate::framing::encode_frame(&crate::protocol::HubToAgent::Auth {
             token: String::new(),
-            hub_key: None,
+            hub_key: "state-end-hub-key".to_string(),
         })
         .unwrap();
         stream.write_all(&auth).await.unwrap();
@@ -1944,6 +1961,15 @@ mod tests {
                 .await
                 .expect("connect to daemon");
             let quoted_pid_path = shell_quote(&pid_path.to_string_lossy());
+            // This daemon has no token: a hub sends an empty one, and its key.
+            let auth = HubToAgent::Auth {
+                token: String::new(),
+                hub_key: "shutdown-hub-key".to_string(),
+            };
+            stream
+                .write_all(&encode_frame(&auth).expect("encode AUTH"))
+                .await
+                .expect("send AUTH");
             let spawn = HubToAgent::Spawn {
                 request_id: format!("request-{channel_id}"),
                 channel_id: Some(channel_id.to_string()),
@@ -1961,7 +1987,7 @@ mod tests {
                 elevation_secret: None,
                 elevation_method: None,
                 custom_command: None,
-                env_mode: None,
+                env_mode: "inherit".to_string(),
                 env_unset: None,
                 login_shell: None,
             };
@@ -2430,11 +2456,30 @@ mod tests {
         (client, handler)
     }
 
-    fn auth(token: &str, hub_key: Option<&str>) -> HubToAgent {
+    fn auth(token: &str, hub_key: &str) -> HubToAgent {
         HubToAgent::Auth {
             token: token.to_string(),
-            hub_key: hub_key.map(str::to_owned),
+            hub_key: hub_key.to_string(),
         }
+    }
+
+    /// Every frame the daemon writes to `client` until it closes the
+    /// connection, decoded.
+    async fn frames_until_closed(client: &mut tokio::io::DuplexStream) -> Vec<serde_json::Value> {
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut bytes))
+            .await
+            .expect("the daemon closes the connection")
+            .expect("read the connection");
+        let mut frames = Vec::new();
+        let mut rest = bytes.as_slice();
+        while rest.len() >= 4 {
+            let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            frames.push(rmp_serde::from_slice(&rest[4..4 + len]).expect("decode a frame"));
+            rest = &rest[4 + len..];
+        }
+        assert!(rest.is_empty(), "the connection ends on a whole frame");
+        frames
     }
 
     async fn current_connection(daemon: &DaemonShared, owner: &OwnerId) -> Option<u64> {
@@ -2458,16 +2503,17 @@ mod tests {
         .expect("the connection registers");
     }
 
-    /// A peer that fails AUTH neither displaces the active hub nor becomes it (#127).
+    /// A peer that fails AUTH neither displaces the active hub nor becomes it
+    /// (#127), even with that hub's key.
     #[tokio::test]
     async fn failed_auth_leaves_the_active_hub_in_place() {
         let daemon = in_memory_daemon(Some(HUB_TOKEN));
-        let legacy = OwnerId::legacy();
-        let incumbent = incumbent(&daemon, &legacy, 7).await;
+        let hub = OwnerId::from_hub_key("hub-key");
+        let incumbent = incumbent(&daemon, &hub, 7).await;
 
         let wrong = auth(
             "000000def456abc123def456abc123def456abc123def456abc123def456abc1",
-            None,
+            "hub-key",
         );
         let (_client, handler) = connect_in_memory(&daemon, &wrong, 42).await;
         tokio::time::timeout(Duration::from_secs(5), handler)
@@ -2477,23 +2523,55 @@ mod tests {
 
         // Mutation caught: registering at accept time made this peer the
         // active connection and cancelled the incumbent before AUTH was read.
-        assert_eq!(current_connection(&daemon, &legacy).await, Some(7));
+        assert_eq!(current_connection(&daemon, &hub).await, Some(7));
         assert!(
             !*incumbent.cancelled.borrow(),
             "the incumbent hub must not be displaced by a peer that failed AUTH"
         );
     }
 
+    /// A refused connection is told why, then closed, and learns nothing of
+    /// the channels: HELLO, one ERROR, the end.
+    #[tokio::test]
+    async fn a_refused_connection_is_told_why_and_closed() {
+        let wrong = auth(
+            "000000def456abc123def456abc123def456abc123def456abc123def456abc1",
+            "hub-key",
+        );
+        let cases = [
+            (Some(HUB_TOKEN), heartbeat("first"), "AUTH_REQUIRED"),
+            (None, heartbeat("first"), "AUTH_REQUIRED"),
+            (Some(HUB_TOKEN), wrong, "AUTH_INVALID"),
+            (None, auth("", ""), "AUTH_INVALID"),
+        ];
+        for (connection_id, (token, first, code)) in (1..).zip(cases) {
+            let daemon = in_memory_daemon(token);
+            let (mut client, handler) = connect_in_memory(&daemon, &first, connection_id).await;
+            let frames = frames_until_closed(&mut client).await;
+            let types: Vec<&str> = frames
+                .iter()
+                .map(|frame| frame["type"].as_str().unwrap_or(""))
+                .collect();
+            assert_eq!(types, ["HELLO", "ERROR"], "{code}: {frames:?}");
+            assert_eq!(frames[1]["code"], code, "{frames:?}");
+            assert!(frames[1].get("channel_id").is_none(), "{frames:?}");
+            tokio::time::timeout(Duration::from_secs(5), handler)
+                .await
+                .expect("a refused peer's handler ends")
+                .expect("handler does not panic");
+            assert!(daemon.routes.lock().await.connections.is_empty());
+        }
+    }
+
     /// An authenticated connection of the same hub takes over from the
-    /// previous one, and tells it so. Without a key, every hub is the same
-    /// one: `legacy`, which keeps today's last-wins rule.
+    /// previous one, and tells it so.
     #[tokio::test]
     async fn authenticated_hub_displaces_the_previous_one() {
         let daemon = in_memory_daemon(Some(HUB_TOKEN));
-        let legacy = OwnerId::legacy();
-        let mut incumbent = incumbent(&daemon, &legacy, 7).await;
+        let hub = OwnerId::from_hub_key("hub-key");
+        let mut incumbent = incumbent(&daemon, &hub, 7).await;
 
-        let (client, handler) = connect_in_memory(&daemon, &auth(HUB_TOKEN, None), 42).await;
+        let (client, handler) = connect_in_memory(&daemon, &auth(HUB_TOKEN, "hub-key"), 42).await;
         tokio::time::timeout(
             Duration::from_secs(5),
             incumbent.cancelled.wait_for(|cancelled| *cancelled),
@@ -2501,7 +2579,7 @@ mod tests {
         .await
         .expect("the previous connection is displaced once the new one authenticates")
         .expect("the daemon keeps the connection's cancel sender");
-        assert_eq!(current_connection(&daemon, &legacy).await, Some(42));
+        assert_eq!(current_connection(&daemon, &hub).await, Some(42));
         let notice = incumbent
             .frames
             .try_recv()
@@ -2522,7 +2600,7 @@ mod tests {
         let mut incumbent = incumbent(&daemon, &first, 7).await;
 
         let (client, handler) =
-            connect_in_memory(&daemon, &auth(HUB_TOKEN, Some("second-hub-key")), 42).await;
+            connect_in_memory(&daemon, &auth(HUB_TOKEN, "second-hub-key"), 42).await;
         registered(&daemon, &second, 42).await;
 
         assert_eq!(current_connection(&daemon, &first).await, Some(7));
@@ -2539,19 +2617,23 @@ mod tests {
     async fn handshake_over(
         bytes: Vec<u8>,
         expected_token: Option<&str>,
-    ) -> (std::io::Result<Option<OwnerId>>, VecDeque<HubToAgent>) {
+    ) -> (
+        std::io::Result<Result<OwnerId, Refusal>>,
+        VecDeque<HubToAgent>,
+    ) {
         let mut stream = std::io::Cursor::new(bytes);
         let mut frames = FrameReader::new();
         let mut pending = VecDeque::new();
-        let result = handshake(
-            &mut stream,
-            &mut frames,
-            &mut pending,
-            expected_token,
-            LEGACY_FIRST_FRAME_WAIT,
-        )
-        .await;
+        let result = handshake(&mut stream, &mut frames, &mut pending, expected_token).await;
         (result, pending)
+    }
+
+    /// The code a handshake refused with; panics if it accepted.
+    fn refused(result: std::io::Result<Result<OwnerId, Refusal>>) -> &'static str {
+        match result.expect("a refusal is not an IO error") {
+            Ok(owner) => panic!("accepted as {owner:?}"),
+            Err(refusal) => refusal.code,
+        }
     }
 
     fn frame(msg: &HubToAgent) -> Vec<u8> {
@@ -2565,23 +2647,18 @@ mod tests {
     /// The right token is accepted, and the key names the owner.
     #[tokio::test]
     async fn handshake_accepts_the_right_token_and_takes_the_owner_from_the_key() {
-        let (result, _) =
-            handshake_over(frame(&auth(HUB_TOKEN, Some("hub-key"))), Some(HUB_TOKEN)).await;
+        let (result, _) = handshake_over(frame(&auth(HUB_TOKEN, "hub-key")), Some(HUB_TOKEN)).await;
         assert_eq!(
             result.expect("no IO error"),
-            Some(OwnerId::from_hub_key("hub-key"))
+            Ok(OwnerId::from_hub_key("hub-key"))
         );
-
-        let (result, _) = handshake_over(frame(&auth(HUB_TOKEN, None)), Some(HUB_TOKEN)).await;
-        assert_eq!(result.expect("no IO error"), Some(OwnerId::legacy()));
     }
 
     #[tokio::test]
     async fn handshake_refuses_a_wrong_token() {
         let wrong = "000000def456abc123def456abc123def456abc123def456abc123def456abc1";
-        let (result, _) =
-            handshake_over(frame(&auth(wrong, Some("hub-key"))), Some(HUB_TOKEN)).await;
-        assert_eq!(result.expect("a mismatch is not an IO error"), None);
+        let (result, _) = handshake_over(frame(&auth(wrong, "hub-key")), Some(HUB_TOKEN)).await;
+        assert_eq!(refused(result), "AUTH_INVALID");
     }
 
     /// An empty stream is an error, token or not.
@@ -2594,11 +2671,37 @@ mod tests {
         assert!(handshake_over(Vec::new(), None).await.0.is_err());
     }
 
-    /// With a token configured, the first frame must be AUTH.
+    /// The first frame must be AUTH, token or not: it is where a hub names
+    /// itself (#127). What came behind a refused first frame is not acted on.
     #[tokio::test]
-    async fn handshake_refuses_another_first_frame_when_a_token_is_set() {
-        let (result, _) = handshake_over(frame(&heartbeat("t")), Some("anytoken")).await;
-        assert_eq!(result.expect("not an IO error"), None);
+    async fn handshake_refuses_another_first_frame_token_or_not() {
+        for token in [Some("anytoken"), None] {
+            let (result, _) = handshake_over(frame(&heartbeat("t")), token).await;
+            assert_eq!(refused(result), "AUTH_REQUIRED", "{token:?}");
+        }
+    }
+
+    /// An AUTH without a hub key does not decode, and is refused as one that
+    /// is not AUTH. One with an empty key names no hub, and is refused too.
+    #[tokio::test]
+    async fn handshake_refuses_an_auth_without_a_hub_key() {
+        let keyless = rmp_serde::to_vec_named(&serde_json::json!({ "type": "AUTH", "token": "" }))
+            .expect("encode a keyless AUTH");
+        let mut bytes = (keyless.len() as u32).to_le_bytes().to_vec();
+        bytes.extend(keyless);
+        let (result, _) = handshake_over(bytes, None).await;
+        match result.expect("not an IO error") {
+            Err(Refusal { code, message }) => {
+                assert_eq!(code, "AUTH_REQUIRED");
+                assert!(message.contains("hub_key"), "{message}");
+            }
+            Ok(owner) => panic!("accepted as {owner:?}"),
+        }
+
+        let (result, _) = handshake_over(frame(&auth("", "")), None).await;
+        assert_eq!(refused(result), "AUTH_INVALID");
+        let (result, _) = handshake_over(frame(&auth(HUB_TOKEN, "")), Some(HUB_TOKEN)).await;
+        assert_eq!(refused(result), "AUTH_INVALID");
     }
 
     /// An auth.json that is missing beside a meta.db, unreadable or malformed
@@ -2607,96 +2710,47 @@ mod tests {
     /// match it, and open a daemon that meant to refuse everyone.
     #[tokio::test]
     async fn a_daemon_that_refuses_everyone_refuses_an_empty_token() {
-        let (result, _) = handshake_over(frame(&auth("", Some("hub-key"))), Some("")).await;
-        assert_eq!(result.expect("not an IO error"), None);
+        let (result, _) = handshake_over(frame(&auth("", "hub-key")), Some("")).await;
+        assert_eq!(refused(result), "AUTH_INVALID");
     }
 
     /// Without a token, AUTH is read all the same, for the key it carries.
     /// A hub sends an empty token to a daemon it holds none for.
     #[tokio::test]
     async fn without_a_token_the_owner_still_comes_from_the_key() {
-        let (result, _) = handshake_over(frame(&auth("", Some("hub-key"))), None).await;
+        let (result, _) = handshake_over(frame(&auth("", "hub-key")), None).await;
         assert_eq!(
             result.expect("no IO error"),
-            Some(OwnerId::from_hub_key("hub-key"))
+            Ok(OwnerId::from_hub_key("hub-key"))
         );
     }
 
-    /// A hub from before #127 talking to a daemon without a token may start
-    /// with any request: it is `legacy`, and nothing it sent is lost, what
-    /// came in the same read included.
-    #[tokio::test]
-    async fn without_a_token_another_first_frame_is_legacy_and_kept() {
-        let mut bytes = frame(&heartbeat("first"));
-        bytes.extend(frame(&heartbeat("second")));
-        let (result, pending) = handshake_over(bytes, None).await;
-        assert_eq!(result.expect("no IO error"), Some(OwnerId::legacy()));
-        let kept: Vec<&str> = pending
-            .iter()
-            .map(|msg| match msg {
-                HubToAgent::Heartbeat { ts } => ts.as_str(),
-                other => panic!("unexpected {other:?}"),
-            })
-            .collect();
-        assert_eq!(kept, ["first", "second"]);
-    }
-
-    /// What a hub sends right behind its AUTH is not lost either.
+    /// What a hub sends right behind its AUTH is not lost.
     #[tokio::test]
     async fn a_request_sent_with_auth_is_kept_for_the_connection() {
-        let mut bytes = frame(&auth(HUB_TOKEN, Some("hub-key")));
+        let mut bytes = frame(&auth(HUB_TOKEN, "hub-key"));
         bytes.extend(frame(&heartbeat("right-behind")));
         let (result, pending) = handshake_over(bytes, Some(HUB_TOKEN)).await;
-        assert!(result.expect("no IO error").is_some());
+        assert!(result.expect("no IO error").is_ok());
         assert!(matches!(
             pending.front(),
             Some(HubToAgent::Heartbeat { ts }) if ts == "right-behind"
         ));
     }
 
-    /// A hub from before #127 sends nothing to a daemon without a token: it
-    /// waits for the channel state, for 5 s. Taking it for `legacy` after a
-    /// shorter wait is what lets it still connect.
+    /// A peer that sends nothing is refused once `AUTH_TIMEOUT` has passed,
+    /// token or not.
     #[tokio::test(start_paused = true)]
-    async fn without_a_token_a_silent_hub_is_legacy_after_a_wait() {
-        let (_client, mut server) = tokio::io::duplex(1024);
-        let mut frames = FrameReader::new();
-        let mut pending = VecDeque::new();
-        let started = tokio::time::Instant::now();
-        let result = handshake(
-            &mut server,
-            &mut frames,
-            &mut pending,
-            None,
-            LEGACY_FIRST_FRAME_WAIT,
-        )
-        .await;
-        assert_eq!(result.expect("no IO error"), Some(OwnerId::legacy()));
-        assert_eq!(started.elapsed(), LEGACY_FIRST_FRAME_WAIT);
-        assert!(
-            LEGACY_FIRST_FRAME_WAIT < Duration::from_secs(5),
-            "an old hub gives up on the channel state after 5 s"
-        );
-    }
-
-    /// With a token, silence ends the connection, as it always did.
-    #[tokio::test(start_paused = true)]
-    async fn with_a_token_a_silent_peer_is_dropped() {
-        let (_client, mut server) = tokio::io::duplex(1024);
-        let mut frames = FrameReader::new();
-        let mut pending = VecDeque::new();
-        let result = handshake(
-            &mut server,
-            &mut frames,
-            &mut pending,
-            Some(HUB_TOKEN),
-            LEGACY_FIRST_FRAME_WAIT,
-        )
-        .await;
-        assert_eq!(
-            result.expect_err("a silent peer is dropped").kind(),
-            std::io::ErrorKind::TimedOut
-        );
+    async fn a_silent_peer_is_refused_after_the_auth_timeout() {
+        for token in [Some(HUB_TOKEN), None] {
+            let (_client, mut server) = tokio::io::duplex(1024);
+            let mut frames = FrameReader::new();
+            let mut pending = VecDeque::new();
+            let started = tokio::time::Instant::now();
+            let result = handshake(&mut server, &mut frames, &mut pending, token).await;
+            assert_eq!(refused(result), "AUTH_REQUIRED", "{token:?}");
+            assert_eq!(started.elapsed(), AUTH_TIMEOUT, "{token:?}");
+        }
     }
 
     /// read_auth_token returns None for a non-existent file.
@@ -2839,21 +2893,27 @@ mod tests {
         // Step 2: Send AUTH with wrong token
         let wrong = HubToAgent::Auth {
             token: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            hub_key: None,
+            hub_key: "rejected-hub-key".to_string(),
         };
         let frame = encode_frame(&wrong).unwrap();
         stream.write_all(&frame).await.unwrap();
 
-        // Step 3: Daemon should close the connection — we should get EOF
-        let mut buf2 = vec![0u8; 64];
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf2)).await;
-        match result {
-            Ok(Ok(0)) => {}  // EOF — expected
-            Ok(Err(_)) => {} // IO error — also acceptable
-            Ok(Ok(_n)) => panic!("daemon must not send data after wrong auth"),
-            Err(_) => panic!("timeout waiting for connection close after wrong auth"),
-        }
+        // Step 3: the daemon says why, and closes the connection: one ERROR,
+        // then EOF, and nothing about its channels.
+        let mut rest = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut rest),
+        )
+        .await
+        .expect("the daemon closes the connection after a wrong AUTH")
+        .expect("read up to the end of the connection");
+        assert!(rest.len() >= 4, "the refusal is said before the end");
+        let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+        assert_eq!(rest.len(), 4 + len, "nothing but the refusal is sent");
+        let refusal: serde_json::Value = rmp_serde::from_slice(&rest[4..]).unwrap();
+        assert_eq!(refusal["type"], "ERROR");
+        assert_eq!(refusal["code"], "AUTH_INVALID");
 
         daemon_handle.abort();
         let _ = tokio::fs::remove_dir_all(&config_dir_path).await;
@@ -2917,7 +2977,7 @@ mod tests {
         // Step 2: Send correct AUTH
         let auth_msg = HubToAgent::Auth {
             token: token.to_string(),
-            hub_key: None,
+            hub_key: "accepted-hub-key".to_string(),
         };
         let frame = encode_frame(&auth_msg).unwrap();
         stream.write_all(&frame).await.unwrap();
@@ -3206,6 +3266,8 @@ mod tests {
         use crate::protocol::HubToAgent;
 
         const DEADLINE: Duration = Duration::from_secs(10);
+        /// The key of the hub a test needs only one of.
+        const THE_HUB_KEY: &str = "the-hub-key";
 
         #[cfg(unix)]
         type HubStream = UnixStream;
@@ -3271,32 +3333,31 @@ mod tests {
                 }
             }
 
-            /// Connect as a hub without a key does, and read up to
+            /// Connect as `THE_HUB_KEY`'s hub, and read up to
             /// CHANNEL_STATE_END. A connection becomes its hub's current one
             /// before the channels are enumerated, so past this point it is
             /// the one routed to.
             async fn connect(&self) -> Hub {
-                self.connect_as(None).await.0
+                self.connect_as(THE_HUB_KEY).await.0
             }
 
-            /// Connect as the hub `hub_key` names (or a hub without one),
-            /// sending AUTH after HELLO as a hub does. Returns the connection
-            /// and every frame read up to CHANNEL_STATE_END, that one included.
-            async fn connect_as(&self, hub_key: Option<&str>) -> (Hub, Vec<rmpv::Value>) {
-                let mut hub = self.open_silently().await;
+            /// Connect as the hub `hub_key` names, sending AUTH after HELLO as
+            /// a hub does. Returns the connection and every frame read up to
+            /// CHANNEL_STATE_END, that one included.
+            async fn connect_as(&self, hub_key: &str) -> (Hub, Vec<rmpv::Value>) {
+                let mut hub = self.open_unauthenticated().await;
                 // This daemon has no token: a hub sends an empty one (#127).
                 hub.send(&HubToAgent::Auth {
                     token: String::new(),
-                    hub_key: hub_key.map(str::to_owned),
+                    hub_key: hub_key.to_string(),
                 })
                 .await;
                 let state = hub.read_until("CHANNEL_STATE_END").await;
                 (hub, state)
             }
 
-            /// Connect and send nothing, as a hub from before #127 does to a
-            /// daemon without a token.
-            async fn open_silently(&self) -> Hub {
+            /// Connect and send nothing yet: not even AUTH.
+            async fn open_unauthenticated(&self) -> Hub {
                 Hub {
                     stream: self.open().await,
                     received: Vec::new(),
@@ -3498,7 +3559,7 @@ mod tests {
                 elevation_secret: None,
                 elevation_method: None,
                 custom_command: None,
-                env_mode: None,
+                env_mode: "inherit".to_string(),
                 env_unset: None,
                 login_shell: None,
             }
@@ -3636,7 +3697,7 @@ mod tests {
                     elevation_secret: None,
                     elevation_method: None,
                     custom_command: None,
-                    env_mode: None,
+                    env_mode: "inherit".to_string(),
                     env_unset: None,
                     login_shell: None,
                 }
@@ -3731,8 +3792,8 @@ mod tests {
             #[tokio::test]
             async fn each_hub_gets_its_own_terminals_and_nothing_of_another_hubs() {
                 let daemon = TestDaemon::start("own").await;
-                let (mut a, mut seen_by_a) = daemon.connect_as(Some(KEY_A)).await;
-                let (mut b, mut seen_by_b) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut a, mut seen_by_a) = daemon.connect_as(KEY_A).await;
+                let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
 
                 seen_by_a.extend(spawned(&mut a, interactive("own-ch-a")).await);
                 seen_by_b.extend(spawned(&mut b, interactive("own-ch-b")).await);
@@ -3746,9 +3807,9 @@ mod tests {
                 assert_eq!(mentions(&seen_by_b, "own-ch-a"), Vec::<String>::new());
 
                 // Coming back, each hub is told of its own terminal only.
-                let (_a2, a2_state) = daemon.connect_as(Some(KEY_A)).await;
+                let (_a2, a2_state) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&a2_state), (vec!["own-ch-a".to_string()], 1));
-                let (_b2, b2_state) = daemon.connect_as(Some(KEY_B)).await;
+                let (_b2, b2_state) = daemon.connect_as(KEY_B).await;
                 assert_eq!(state(&b2_state), (vec!["own-ch-b".to_string()], 1));
 
                 daemon.stop().await;
@@ -3760,8 +3821,8 @@ mod tests {
             #[tokio::test]
             async fn a_hub_that_leaves_costs_another_hub_nothing() {
                 let daemon = TestDaemon::start("leaves").await;
-                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
-                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
                 spawned(&mut a, interactive("leaves-ch-a")).await;
                 spawned(&mut b, interactive("leaves-ch-b")).await;
 
@@ -3788,7 +3849,7 @@ mod tests {
                     "OUTPUT seqs must only grow: {seqs:?}"
                 );
 
-                let (mut a2, a2_state) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a2, a2_state) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&a2_state).0, vec!["leaves-ch-a".to_string()]);
                 print(&mut a2, "leaves-ch-a", "still-running").await;
 
@@ -3801,8 +3862,8 @@ mod tests {
             #[tokio::test]
             async fn a_hub_that_comes_back_gets_what_its_terminal_printed_meanwhile() {
                 let daemon = TestDaemon::start("back").await;
-                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
-                let (mut b, mut seen_by_b) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
                 // Waits for a line, prints a second later, then waits again.
                 let command = if cfg!(windows) {
                     "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& set /p done="
@@ -3815,7 +3876,7 @@ mod tests {
                 drop(a);
                 tokio::time::sleep(Duration::from_millis(2500)).await;
 
-                let (mut a2, mut seen_by_a2) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a2, mut seen_by_a2) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
                 a2.send(&HubToAgent::Attach {
                     channel_id: "back-ch-a".to_string(),
@@ -3848,12 +3909,12 @@ mod tests {
             #[tokio::test]
             async fn a_ghost_connection_is_replaced_by_its_own_hub_only() {
                 let daemon = TestDaemon::start("ghost").await;
-                let (mut ghost, _) = daemon.connect_as(Some(KEY_A)).await;
-                let (mut b, mut seen_by_b) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut ghost, _) = daemon.connect_as(KEY_A).await;
+                let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
                 spawned(&mut ghost, interactive("ghost-ch-a")).await;
                 seen_by_b.extend(spawned(&mut b, interactive("ghost-ch-b")).await);
 
-                let (mut a2, a2_state) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a2, a2_state) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&a2_state).0, vec!["ghost-ch-a".to_string()]);
 
                 let ghost_saw = ghost.frames_until_closed().await;
@@ -3903,9 +3964,9 @@ mod tests {
                 const HELD: &str = "isolated-ch-a";
                 const NONE: &str = "isolated-ch-x";
                 let daemon = TestDaemon::start("isolation").await;
-                let (mut a, mut seen_by_a) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a, mut seen_by_a) = daemon.connect_as(KEY_A).await;
                 seen_by_a.extend(spawned(&mut a, interactive(HELD)).await);
-                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
 
                 type Request = fn(&str) -> HubToAgent;
                 let requests: [(&str, Request); 5] = [
@@ -4004,7 +4065,7 @@ mod tests {
             #[tokio::test]
             async fn an_exit_while_its_hub_was_away_reaches_it_before_any_reply() {
                 let daemon = TestDaemon::start("flush").await;
-                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
                 // Waits for a line, then ends a second later: its hub is gone.
                 let command = if cfg!(windows) {
                     "set /p line=& ping -n 2 127.0.0.1 >nul & exit 5"
@@ -4017,7 +4078,7 @@ mod tests {
                 drop(a);
                 tokio::time::sleep(Duration::from_secs(3)).await;
 
-                let (mut a2, mut seen) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a2, mut seen) = daemon.connect_as(KEY_A).await;
                 seen.extend(spawned(&mut a2, interactive("flush-restarted")).await);
                 let exit = seen
                     .iter()
@@ -4047,8 +4108,8 @@ mod tests {
             #[tokio::test]
             async fn stop_is_refused_while_another_hub_holds_terminals_unless_forced() {
                 let daemon = TestDaemon::start("stop-refused").await;
-                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
-                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
                 spawned(&mut b, interactive("stop-ch-b")).await;
 
                 a.send(&stop(false)).await;
@@ -4078,7 +4139,7 @@ mod tests {
             #[tokio::test]
             async fn stop_ends_a_daemon_whose_terminals_are_all_its_callers() {
                 let daemon = TestDaemon::start("stop-own").await;
-                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
                 spawned(&mut a, interactive("stop-ch-a")).await;
 
                 a.send(&stop(false)).await;
@@ -4088,52 +4149,29 @@ mod tests {
                 assert_eq!(summary.confirmed_shell_exits, 1);
             }
 
-            /// Connections without a key are one hub, `legacy`, which keeps
-            /// today's rule among its own: the last one wins. A hub with a
-            /// key is not part of it.
+            /// A connection that opens with a request rather than AUTH, on a
+            /// daemon without a token, is refused: told why, closed, and shown
+            /// nothing of the channels there. The hub holding them goes on.
             #[tokio::test]
-            async fn legacy_connections_replace_each_other_and_no_one_else() {
-                let daemon = TestDaemon::start("legacy").await;
-                let (mut keyed, mut seen_by_keyed) = daemon.connect_as(Some(KEY_A)).await;
-                seen_by_keyed.extend(spawned(&mut keyed, interactive("legacy-keyed")).await);
-                let (mut first, _) = daemon.connect_as(None).await;
-                spawned(&mut first, interactive("legacy-held")).await;
+            async fn a_connection_that_does_not_open_with_auth_is_refused() {
+                let daemon = TestDaemon::start("no-auth").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("no-auth-held")).await;
 
-                let (mut second, second_state) = daemon.connect_as(None).await;
-                assert_eq!(state(&second_state), (vec!["legacy-held".to_string()], 1));
-                let first_saw = first.frames_until_closed().await;
-                assert!(errors(&first_saw).contains(&"DISPLACED".to_string()));
-                print(&mut second, "legacy-held", "legacy-last-wins").await;
+                let mut stranger = daemon.open_unauthenticated().await;
+                stranger
+                    .send(&HubToAgent::Attach {
+                        channel_id: "no-auth-held".to_string(),
+                    })
+                    .await;
+                let frames = stranger.frames_until_closed().await;
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert_eq!(types, ["HELLO", "ERROR"], "{frames:?}");
+                assert_eq!(errors(&frames), ["AUTH_REQUIRED"]);
+                assert_eq!(mentions(&frames, "no-auth-held"), Vec::<String>::new());
 
-                seen_by_keyed.extend(print(&mut keyed, "legacy-keyed", "keyed-untouched").await);
-                assert_eq!(errors(&seen_by_keyed), Vec::<String>::new());
-                assert_eq!(
-                    mentions(&seen_by_keyed, "legacy-held"),
-                    Vec::<String>::new()
-                );
-
-                daemon.stop().await;
-            }
-
-            /// A hub from before #127 sends nothing to a daemon without a
-            /// token: it waits for the channel state, and gives up after 5 s.
-            /// It gets that state in time, as `legacy`.
-            #[tokio::test]
-            async fn a_hub_that_sends_nothing_first_is_legacy_and_gets_its_state_in_time() {
-                let daemon = TestDaemon::start("silent").await;
-                let (mut first, _) = daemon.connect_as(None).await;
-                spawned(&mut first, interactive("silent-held")).await;
-
-                let started = std::time::Instant::now();
-                let mut silent = daemon.open_silently().await;
-                let frames = silent.read_until("CHANNEL_STATE_END").await;
-                assert!(
-                    started.elapsed() < Duration::from_secs(4),
-                    "an old hub gives up after 5 s; the state took {:?}",
-                    started.elapsed()
-                );
-                assert_eq!(state(&frames), (vec!["silent-held".to_string()], 0));
-                print(&mut silent, "silent-held", "old-hub-types").await;
+                let seen_by_a = print(&mut a, "no-auth-held", "still-held").await;
+                assert_eq!(errors(&seen_by_a), Vec::<String>::new());
 
                 daemon.stop().await;
             }
@@ -4142,23 +4180,21 @@ mod tests {
             #[tokio::test]
             async fn channel_state_end_counts_the_channels_other_hubs_hold() {
                 let daemon = TestDaemon::start("count").await;
-                let (mut a, _) = daemon.connect_as(Some(KEY_A)).await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
                 spawned(&mut a, interactive("count-a-1")).await;
                 spawned(&mut a, interactive("count-a-2")).await;
-                let (mut b, _) = daemon.connect_as(Some(KEY_B)).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
                 spawned(&mut b, interactive("count-b-1")).await;
 
-                let (_a2, a_state) = daemon.connect_as(Some(KEY_A)).await;
+                let (_a2, a_state) = daemon.connect_as(KEY_A).await;
                 assert_eq!(
                     state(&a_state),
                     (vec!["count-a-1".to_string(), "count-a-2".to_string()], 1)
                 );
-                let (_b2, b_state) = daemon.connect_as(Some(KEY_B)).await;
+                let (_b2, b_state) = daemon.connect_as(KEY_B).await;
                 assert_eq!(state(&b_state), (vec!["count-b-1".to_string()], 2));
-                let (_c, c_state) = daemon.connect_as(Some("hub-c-key")).await;
+                let (_c, c_state) = daemon.connect_as("hub-c-key").await;
                 assert_eq!(state(&c_state), (Vec::<String>::new(), 3));
-                let (_legacy, legacy_state) = daemon.connect_as(None).await;
-                assert_eq!(state(&legacy_state), (Vec::<String>::new(), 3));
 
                 daemon.stop().await;
             }

@@ -123,16 +123,13 @@ pub enum AgentToHub {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubToAgent {
-    /// AUTH handshake: the first message after HELLO. When the agent has a
-    /// token configured in auth.json, a missing or mismatched one closes the
-    /// connection. `hub_key` names the hub, and so the owner of every channel
-    /// the connection spawns (#127); without one the connection is `legacy`.
+    /// AUTH handshake: the first message a daemon reads, after its HELLO. When
+    /// the agent has a token configured in auth.json, a mismatched one refuses
+    /// the connection. `hub_key` names the hub, and so the owner of every
+    /// channel the connection spawns (#127). A connection that opens with
+    /// anything else, or with an AUTH without a key, is refused.
     #[serde(rename = "AUTH")]
-    Auth {
-        token: String,
-        #[serde(default)]
-        hub_key: Option<String>,
-    },
+    Auth { token: String, hub_key: String },
     #[serde(rename = "SPAWN")]
     Spawn {
         request_id: String,
@@ -163,10 +160,9 @@ pub enum HubToAgent {
         elevation_method: Option<String>,
         #[serde(default)]
         custom_command: Option<String>,
-        /// `inherit` (the default) or `minimal`: what the environment starts
-        /// from (#576). Hubs from before it do not send it.
-        #[serde(default)]
-        env_mode: Option<String>,
+        /// `inherit` or `minimal`: what the environment starts from (#576).
+        /// Any other value is `inherit`.
+        env_mode: String,
         /// Variables to remove from that start, before `env` is applied: what
         /// a profile set to `null`.
         #[serde(default)]
@@ -239,6 +235,12 @@ pub mod error_codes {
     pub const INVALID_MESSAGE: &str = "INVALID_MESSAGE";
     pub const CHANNEL_NOT_FOUND: &str = "CHANNEL_NOT_FOUND";
     pub const CHANNEL_EXISTS: &str = "CHANNEL_EXISTS";
+    /// A daemon connection that did not open with an AUTH carrying a hub key,
+    /// in time. The connection is closed.
+    pub const AUTH_REQUIRED: &str = "AUTH_REQUIRED";
+    /// The AUTH that opened a daemon connection was refused: its token does
+    /// not match, or its hub key is empty. The connection is closed.
+    pub const AUTH_INVALID: &str = "AUTH_INVALID";
     /// A newer connection of the same hub has replaced this one, which is
     /// ending.
     ///
@@ -307,28 +309,36 @@ mod tests {
         assert_eq!(decoded["msg"], "spawn failed: no such file");
     }
 
-    fn hub_frame(value: serde_json::Value) -> HubToAgent {
+    fn decode_hub_frame(value: serde_json::Value) -> Result<HubToAgent, rmp_serde::decode::Error> {
         let bytes = rmp_serde::to_vec_named(&value).expect("encode a hub frame");
-        rmp_serde::from_slice(&bytes).expect("decode a hub frame")
+        rmp_serde::from_slice(&bytes)
     }
 
-    /// Today's hubs send AUTH without a key: it still decodes, as no key.
+    fn hub_frame(value: serde_json::Value) -> HubToAgent {
+        decode_hub_frame(value).expect("decode a hub frame")
+    }
+
+    /// Every hub sends its key in AUTH (#127), with the token or an empty one.
+    /// An AUTH without a key does not decode.
     #[test]
-    fn auth_reads_a_hub_key_and_does_without_one() {
-        match hub_frame(serde_json::json!({ "type": "AUTH", "token": "t" })) {
+    fn auth_reads_the_token_and_the_hub_key_and_requires_the_key() {
+        match hub_frame(serde_json::json!({ "type": "AUTH", "token": "t", "hub_key": "k" })) {
             HubToAgent::Auth { token, hub_key } => {
                 assert_eq!(token, "t");
-                assert_eq!(hub_key, None);
+                assert_eq!(hub_key, "k");
             }
             other => panic!("expected AUTH, got {other:?}"),
         }
         match hub_frame(serde_json::json!({ "type": "AUTH", "token": "", "hub_key": "k" })) {
             HubToAgent::Auth { token, hub_key } => {
                 assert_eq!(token, "");
-                assert_eq!(hub_key.as_deref(), Some("k"));
+                assert_eq!(hub_key, "k");
             }
             other => panic!("expected AUTH, got {other:?}"),
         }
+        let error = decode_hub_frame(serde_json::json!({ "type": "AUTH", "token": "t" }))
+            .expect_err("an AUTH without a hub key must not decode");
+        assert!(error.to_string().contains("hub_key"), "{error}");
     }
 
     #[test]
@@ -387,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_reads_the_environment_fields_and_does_without_them() {
+    fn spawn_reads_the_environment_fields_and_requires_the_mode() {
         match hub_frame(serde_json::json!({
             "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24,
             "env_mode": "minimal", "env_unset": ["NO_COLOR", "PAGER"], "login_shell": true,
@@ -398,28 +408,34 @@ mod tests {
                 login_shell,
                 ..
             } => {
-                assert_eq!(env_mode.as_deref(), Some("minimal"));
+                assert_eq!(env_mode, "minimal");
                 assert_eq!(env_unset, Some(vec!["NO_COLOR".into(), "PAGER".into()]));
                 assert_eq!(login_shell, Some(true));
             }
             other => panic!("expected SPAWN, got {other:?}"),
         }
-        // A hub from before #576 sends none of them.
-        match hub_frame(
-            serde_json::json!({ "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24 }),
-        ) {
+        // The hub leaves out an empty `env_unset` and a `login_shell` that is
+        // false, never the mode.
+        match hub_frame(serde_json::json!({
+            "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24, "env_mode": "inherit",
+        })) {
             HubToAgent::Spawn {
                 env_mode,
                 env_unset,
                 login_shell,
                 ..
             } => {
-                assert_eq!(env_mode, None);
+                assert_eq!(env_mode, "inherit");
                 assert_eq!(env_unset, None);
                 assert_eq!(login_shell, None);
             }
             other => panic!("expected SPAWN, got {other:?}"),
         }
+        let error = decode_hub_frame(
+            serde_json::json!({ "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24 }),
+        )
+        .expect_err("a SPAWN without env_mode must not decode");
+        assert!(error.to_string().contains("env_mode"), "{error}");
     }
 
     #[test]

@@ -549,11 +549,7 @@ fast as it runs.
   A remote agent older than the hub, which does not know the option, is started without it and
   keeps its log as it always did.
 - **Deleted:** when the daemon starts, and when a new day's file starts. Only regular files named
-  `agent-daemon.YYYY-MM-DD.jsonl` are deleted, and `agent-daemon.jsonl` (below); nothing else in
-  `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
+  `agent-daemon.YYYY-MM-DD.jsonl` are deleted; nothing else in `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
   deletion) is said in a warning in the log, and tried again on the next of those occasions.
 - **Never renamed.** Nothing moves a file aside: a rename that is refused would leave the daemon
   appending to a full file, which is the growth this replaced.
-- **`agent-daemon.jsonl`**, the single file daemons before #646 appended to for as long as they
-  ran, counts as one more file, dated by its last write. It goes once as many newer days have their
-  own file as are kept, or never with `0`. Nothing renames or rewrites it before then.

@@ -129,7 +129,7 @@ fn spawn_shell(channel_id: &str, shell: &str, args: Option<Vec<String>>) -> HubT
         elevation_secret: None,
         elevation_method: None,
         custom_command: None,
-        env_mode: None,
+        env_mode: "inherit".to_string(),
         env_unset: None,
         login_shell: None,
     }
@@ -283,7 +283,7 @@ impl TestHub {
         // This daemon has no token: a hub sends an empty one (#127).
         hub.send(&HubToAgent::Auth {
             token: String::new(),
-            hub_key: Some(key.to_string()),
+            hub_key: key.to_string(),
         })
         .await;
         hub.read_through(|frame| frame_type(frame) == "CHANNEL_STATE_END")

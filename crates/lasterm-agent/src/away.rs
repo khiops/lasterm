@@ -14,9 +14,7 @@
 //! agent's screen model has read everything the terminal printed, dropped or
 //! not. What is lost is the output in between, scrolled past.
 //!
-//! The bounds are constants. The `--buffer-per-channel` and `--buffer-global`
-//! flags, which hubs from before still pass with values sized for the Node
-//! agent, stay ignored: reading them would change these bounds on such a hub.
+//! The bounds are constants: nothing configures them.
 
 use std::collections::{HashMap, VecDeque};
 

@@ -24,6 +24,7 @@
 					</div>
 				</div>
 				<div class="dialog-actions">
+					<span v-if="error" class="action-error" role="alert">{{ error }}</span>
 					<button class="btn btn-secondary" @click="$emit('close')">
 						Cancel
 					</button>
@@ -53,10 +54,16 @@ const props = withDefaults(
 		inputLabel?: string;
 		inputValue?: string;
 		inputPlaceholder?: string;
+		/**
+		 * Why the last confirm did not go through, as the hub said it (#734).
+		 * The parent keeps the dialog open while it is set.
+		 */
+		error?: string | null;
 	}>(),
 	{
 		confirmLabel: "Confirm",
 		confirmDanger: false,
+		error: null,
 	},
 );
 
@@ -188,10 +195,20 @@ function onConfirm(): void {
 
 .dialog-actions {
 	display: flex;
+	align-items: center;
 	gap: 8px;
 	justify-content: flex-end;
 	padding: 12px 20px 16px;
 	border-top: 1px solid var(--nt-border);
+}
+
+/* Why the hub refused the last confirm (#734), beside the buttons that retry it. */
+.action-error {
+	flex: 1;
+	min-width: 0;
+	font-size: 12px;
+	color: var(--nt-red, #e06c75);
+	overflow-wrap: anywhere;
 }
 
 .btn {

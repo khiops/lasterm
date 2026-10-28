@@ -8,6 +8,7 @@ import {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
+import { type HubAnswer, type HubRefusal, hubRefusal, toastRefusal } from "../utils/hub-answer.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
@@ -35,41 +36,11 @@ export interface HostConnectionAnswer {
 	};
 }
 
-/**
- * Why the hub refused a request, as it said it (#703): its code when it gave
- * one, and its message, or the status when it sent none.
- */
-export interface HubRefusal {
-	readonly ok: false;
-	readonly status: number;
-	readonly code: string | null;
-	readonly message: string;
-}
-
-/** What the hub answered a host's create or update: the host it stored, or its refusal. */
+/** What the hub answered a host's create, update or duplicate: the host it stored, or its refusal. */
 export type HostSaveAnswer = { readonly ok: true; readonly host: Host } | HubRefusal;
 
 /** What the hub answered a new host group: the group it stored, or its refusal. */
 export type HostGroupCreateAnswer = { readonly ok: true; readonly group: HostGroup } | HubRefusal;
-
-/** Read the hub's `{ error: { code, message } }` from a refused answer. */
-export async function hubRefusal(res: Response): Promise<HubRefusal> {
-	let error: { code?: unknown; message?: unknown } | undefined;
-	try {
-		error = ((await res.json()) as { error?: { code?: unknown; message?: unknown } }).error;
-	} catch {
-		// No body, or not JSON: the status says it.
-	}
-	return {
-		ok: false,
-		status: res.status,
-		code: typeof error?.code === "string" ? error.code : null,
-		message:
-			typeof error?.message === "string" && error.message !== ""
-				? error.message
-				: `The hub answered ${res.status}.`,
-	};
-}
 
 export interface StopKeepingAgentBody {
 	end_terminals?: boolean;
@@ -156,12 +127,16 @@ export const useHostsStore = defineStore("hosts", () => {
 	 */
 	const sortedHosts = computed(() => hosts.value);
 
-	async function fetchHostGroups(): Promise<void> {
-		if (authStore.token === null) return;
+	/**
+	 * Load the host groups. A refusal comes back with the hub's reason (#734):
+	 * without its groups, the rail cannot show the hosts in them. A hub that
+	 * does not answer throws.
+	 */
+	async function fetchHostGroups(): Promise<HubAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups`, {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
-		if (!res.ok) return;
+		if (!res.ok) return hubRefusal(res);
 		const raw = (await res.json()) as Array<{
 			id: string;
 			name: string;
@@ -178,6 +153,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			createdAt: g.created_at,
 			updatedAt: g.updated_at,
 		}));
+		return { ok: true };
 	}
 
 	async function fetchHosts(): Promise<void> {
@@ -201,9 +177,10 @@ export const useHostsStore = defineStore("hosts", () => {
 					? remembered
 					: (data[0]?.id ?? null);
 			}
-			// Populate groups on first load
+			// Populate groups on first load. Nobody asked for them but the rail,
+			// so a toast says why they did not come (#734).
 			if (hostGroups.value.length === 0) {
-				await fetchHostGroups();
+				await toastRefusal(fetchHostGroups());
 			}
 		} catch (err) {
 			error.value = err instanceof Error ? err.message : String(err);
@@ -419,22 +396,45 @@ export const useHostsStore = defineStore("hosts", () => {
 		return sessionStatusToHostStatus(_sessionStatuses.value.get(hostId));
 	}
 
-	async function reorderHosts(groupId: string | null, hostIds: string[]): Promise<void> {
-		await hubFetch(`${hubBaseUrl()}/api/hosts/order`, {
-			method: "PUT",
-			headers: {
-				Authorization: `Bearer ${authStore.token}`,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({ group_id: groupId, host_ids: hostIds }),
+	/**
+	 * Put a group's hosts in this order, shown at once. An order the hub
+	 * refuses, or does not answer, is taken back (#734): the hosts it moved get
+	 * their place and group again. A refusal comes back with the hub's reason;
+	 * a hub that does not answer throws.
+	 */
+	async function reorderHosts(groupId: string | null, hostIds: string[]): Promise<HubAnswer> {
+		const position = new Map(hostIds.map((id, i) => [id, i]));
+		const before = new Map(
+			hosts.value
+				.filter((h) => position.has(h.id))
+				.map((h) => [h.id, { sortOrder: h.sortOrder, hostGroupId: h.hostGroupId ?? null }]),
+		);
+		hosts.value = hosts.value.map((h) => {
+			const sortOrder = position.get(h.id);
+			return sortOrder === undefined ? h : { ...h, sortOrder, hostGroupId: groupId };
 		});
-		// Update local state optimistically
-		for (let i = 0; i < hostIds.length; i++) {
-			const host = hosts.value.find((h) => h.id === hostIds[i]);
-			if (host) {
-				host.sortOrder = i;
-				host.hostGroupId = groupId ?? null;
-			}
+		// Only these hosts' place and group, so what changed meanwhile stays.
+		const takeBack = (): void => {
+			hosts.value = hosts.value.map((h) => {
+				const was = before.get(h.id);
+				return was === undefined ? h : { ...h, ...was };
+			});
+		};
+		try {
+			const res = await hubFetch(`${hubBaseUrl()}/api/hosts/order`, {
+				method: "PUT",
+				headers: {
+					Authorization: `Bearer ${authStore.token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ group_id: groupId, host_ids: hostIds }),
+			});
+			if (res.ok) return { ok: true };
+			takeBack();
+			return hubRefusal(res);
+		} catch (error) {
+			takeBack();
+			throw error;
 		}
 	}
 
@@ -477,28 +477,36 @@ export const useHostsStore = defineStore("hosts", () => {
 		return { ok: true, host: updated };
 	}
 
-	async function deleteHost(id: string): Promise<boolean> {
+	/**
+	 * Delete a host. A refusal comes back with the hub's reason, such as an
+	 * agent being stopped there (#734); a hub that does not answer throws.
+	 */
+	async function deleteHost(id: string): Promise<HubAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${id}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
-		if (!res.ok) return false;
+		if (!res.ok) return hubRefusal(res);
 		hosts.value = hosts.value.filter((h) => h.id !== id);
 		if (selectedHostId.value === id) {
 			selectedHostId.value = hosts.value[0]?.id ?? null;
 		}
-		return true;
+		return { ok: true };
 	}
 
-	async function duplicateHost(id: string): Promise<Host | null> {
+	/**
+	 * Add a copy of a host. A refusal comes back with the hub's reason (#734);
+	 * a hub that does not answer throws.
+	 */
+	async function duplicateHost(id: string): Promise<HostSaveAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${id}/duplicate`, {
 			method: "POST",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
-		if (!res.ok) return null;
+		if (!res.ok) return hubRefusal(res);
 		const host = toCamelCase(await res.json()) as Host;
 		hosts.value = [...hosts.value, host];
-		return host;
+		return { ok: true, host };
 	}
 
 	/** Returns the DB-backed HostGroup entities sorted by sortOrder. */
@@ -550,8 +558,11 @@ export const useHostsStore = defineStore("hosts", () => {
 		return { ok: true, group };
 	}
 
-	async function renameHostGroup(id: string, name: string): Promise<void> {
-		if (authStore.token === null) return;
+	/**
+	 * Rename a host group. A refusal comes back with the hub's reason, such as
+	 * a name already taken (#734); a hub that does not answer throws.
+	 */
+	async function renameHostGroup(id: string, name: string): Promise<HubAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/${id}`, {
 			method: "PUT",
 			headers: {
@@ -560,21 +571,25 @@ export const useHostsStore = defineStore("hosts", () => {
 			},
 			body: JSON.stringify({ name }),
 		});
-		if (!res.ok) return;
+		if (!res.ok) return hubRefusal(res);
 		const idx = hostGroups.value.findIndex((g) => g.id === id);
 		if (idx >= 0) {
 			const existing = hostGroups.value[idx];
 			if (existing) hostGroups.value[idx] = { ...existing, name };
 		}
+		return { ok: true };
 	}
 
-	async function deleteHostGroup(id: string): Promise<void> {
-		if (authStore.token === null) return;
+	/**
+	 * Delete a host group; its hosts become ungrouped. A refusal comes back
+	 * with the hub's reason (#734); a hub that does not answer throws.
+	 */
+	async function deleteHostGroup(id: string): Promise<HubAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/${id}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
-		if (!res.ok) return;
+		if (!res.ok) return hubRefusal(res);
 		hostGroups.value = hostGroups.value.filter((g) => g.id !== id);
 		// Clear hostGroupId on any hosts that belonged to the deleted group
 		for (const host of hosts.value) {
@@ -582,10 +597,15 @@ export const useHostsStore = defineStore("hosts", () => {
 				host.hostGroupId = null;
 			}
 		}
+		return { ok: true };
 	}
 
-	async function reorderHostGroups(groupIds: string[]): Promise<void> {
-		if (authStore.token === null) return;
+	/**
+	 * Put the host groups in this order, shown at once and taken back when the
+	 * hub refuses it or does not answer. A refusal comes back with the hub's
+	 * reason, for the rail to say why (#734); a hub that does not answer throws.
+	 */
+	async function reorderHostGroups(groupIds: string[]): Promise<HubAnswer> {
 		// Optimistic update
 		const original = [...hostGroups.value];
 		const reordered: HostGroup[] = [];
@@ -599,22 +619,31 @@ export const useHostsStore = defineStore("hosts", () => {
 		}
 		hostGroups.value = reordered;
 
-		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/order`, {
-			method: "PUT",
-			headers: {
-				Authorization: `Bearer ${authStore.token}`,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({ group_ids: groupIds }),
-		});
-		if (!res.ok) {
+		try {
+			const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/order`, {
+				method: "PUT",
+				headers: {
+					Authorization: `Bearer ${authStore.token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ group_ids: groupIds }),
+			});
+			if (res.ok) return { ok: true };
 			// Rollback on failure
 			hostGroups.value = original;
+			return hubRefusal(res);
+		} catch (error) {
+			hostGroups.value = original;
+			throw error;
 		}
 	}
 
-	async function moveHostToGroup(hostId: string, groupId: string | null): Promise<void> {
-		if (authStore.token === null) return;
+	/**
+	 * Move a host into a group, or out of any with null. A refusal comes back
+	 * with the hub's reason, such as a host deleted meanwhile (#734); a hub
+	 * that does not answer throws.
+	 */
+	async function moveHostToGroup(hostId: string, groupId: string | null): Promise<HubAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}`, {
 			method: "PUT",
 			headers: {
@@ -623,11 +652,12 @@ export const useHostsStore = defineStore("hosts", () => {
 			},
 			body: JSON.stringify({ host_group_id: groupId }),
 		});
-		if (!res.ok) return;
+		if (!res.ok) return hubRefusal(res);
 		const host = hosts.value.find((h) => h.id === hostId);
 		if (host) {
 			host.hostGroupId = groupId;
 		}
+		return { ok: true };
 	}
 
 	return {

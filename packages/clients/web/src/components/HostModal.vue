@@ -82,6 +82,10 @@
 						<span v-else class="field-hint">
 							Loading SSH config...
 						</span>
+						<!-- Why the hub could not read it (#734); choosing this source again retries. -->
+						<span v-if="sshConfigError" class="field-error ssh-config-error" role="alert">
+							{{ sshConfigError }}
+						</span>
 						<button
 							v-if="!loadingSshConfig"
 							class="btn-link batch-import-link"
@@ -604,6 +608,7 @@ import { useHostsStore } from "../stores/hosts.js";
 import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
 import { useAuthStore } from "../stores/auth.js";
 import { hubFetch } from "../utils/hub-fetch.js";
+import { hubUnreachable } from "../utils/hub-answer.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { type ReplaceAgentResponse, replaceAgentWithConsent } from "../utils/replace-agent.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
@@ -682,7 +687,7 @@ async function onReplaceAgent(): Promise<void> {
 			confirm: (question) => window.confirm(question),
 		});
 	} catch (error) {
-		replaceMessage.value = `Could not reach the hub: ${error instanceof Error ? error.message : String(error)}`;
+		replaceMessage.value = hubUnreachable(error);
 	} finally {
 		replacingAgent.value = false;
 	}
@@ -708,6 +713,7 @@ const {
 	sshConfigHasInclude,
 	selectedSshConfigHost,
 	loadingSshConfig,
+	sshConfigError,
 	testResult,
 	testing,
 	saving,

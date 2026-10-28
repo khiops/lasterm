@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sshExec } from "./ssh-exec.js";
+import { SHELL_START_CEILING_MS, shellStartAllowance, sshExec } from "./ssh-exec.js";
 
 // ─── Mock SSH stream ──────────────────────────────────────────────────────────
 
@@ -104,12 +104,96 @@ describe("sshExec", () => {
 	it("rejects on timeout and clears the timer", async () => {
 		const stream = new MockSshStream();
 		const client = makeMockClient(stream);
+		// The connection's first command: its shell started at once.
+		const first = sshExec(client, "true");
+		stream.simulateOutput("", "", 0);
+		await first;
 
 		const promise = sshExec(client, "hanging-cmd", 500);
 		// Advance timers past the timeout without resolving the stream
 		vi.advanceTimersByTime(600);
 
 		await expect(promise).rejects.toThrow("SSH exec timed out after 500ms: hanging-cmd");
+	});
+
+	// A PowerShell DefaultShell loads the account's profile before every
+	// command (#749): the first command pays it with the rest, and says what it
+	// costs.
+	describe("the shell's start-up (#749)", () => {
+		/** A client whose every command answers once `ms` have passed. */
+		function slowShell(ms: number): SshClient {
+			return {
+				exec: vi.fn((_command: string, cb: (err: Error | undefined, stream: unknown) => void) => {
+					const stream = new MockSshStream();
+					cb(undefined, stream);
+					setTimeout(() => stream.simulateOutput("ok", "", 0), ms);
+				}),
+			} as unknown as SshClient;
+		}
+
+		it("lets the first command of a connection take its bound and the ceiling", async () => {
+			const client = slowShell(SHELL_START_CEILING_MS + 400);
+			expect(shellStartAllowance(client)).toBeNull();
+
+			const first = sshExec(client, "first", 500);
+			vi.advanceTimersByTime(SHELL_START_CEILING_MS + 400);
+
+			await expect(first).resolves.toMatchObject({ stdout: "ok" });
+			expect(shellStartAllowance(client)).toBe(SHELL_START_CEILING_MS);
+		});
+
+		it("gives every later command what the first one took on top of its bound", async () => {
+			const client = slowShell(7_000);
+			const first = sshExec(client, "first");
+			vi.advanceTimersByTime(7_000);
+			await first;
+			expect(shellStartAllowance(client)).toBe(7_000);
+
+			// A 5 s bound alone would not do: the shell takes 7.
+			const second = sshExec(client, "second", 5_000);
+			vi.advanceTimersByTime(7_000);
+			await expect(second).resolves.toMatchObject({ exitCode: 0 });
+			// Another connection measures its own.
+			expect(shellStartAllowance(slowShell(7_000))).toBeNull();
+		});
+
+		it("bounds a later command by its own bound and the shell's start-up", async () => {
+			const client = slowShell(3_000);
+			const first = sshExec(client, "first");
+			vi.advanceTimersByTime(3_000);
+			await first;
+
+			const stream = new MockSshStream();
+			vi.mocked(client.exec).mockImplementationOnce(((
+				_command: string,
+				cb: (err: Error | undefined, stream: unknown) => void,
+			) => cb(undefined, stream)) as never);
+			const hanging = sshExec(client, "hanging", 1_000);
+			vi.advanceTimersByTime(3_999);
+			stream.emit("data", Buffer.from("not yet"));
+			vi.advanceTimersByTime(1);
+
+			await expect(hanging).rejects.toThrow("SSH exec timed out after 4000ms: hanging");
+		});
+
+		it("gives later commands the ceiling when the first one never ended", async () => {
+			const stream = new MockSshStream();
+			const client = makeMockClient(stream);
+
+			const first = sshExec(client, "first", 1_000);
+			vi.advanceTimersByTime(1_000 + SHELL_START_CEILING_MS);
+
+			await expect(first).rejects.toThrow(
+				`SSH exec timed out after ${1_000 + SHELL_START_CEILING_MS}ms: first`,
+			);
+			expect(shellStartAllowance(client)).toBe(SHELL_START_CEILING_MS);
+		});
+
+		it("measures nothing from a command the server refused to start", async () => {
+			const client = makeMockClient(null, new Error("channel open failed"));
+			await expect(sshExec(client, "first")).rejects.toThrow("channel open failed");
+			expect(shellStartAllowance(client)).toBeNull();
+		});
 	});
 
 	it("concatenates multiple data chunks into a single stdout string", async () => {

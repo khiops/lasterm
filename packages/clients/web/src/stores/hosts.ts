@@ -507,6 +507,16 @@ export const useHostsStore = defineStore("hosts", () => {
 	}
 
 	/**
+	 * The name of the host group a host is in, found by its `hostGroupId`, or
+	 * null when it is in none (#731).
+	 */
+	function getHostGroupName(host: Host): string | null {
+		const id = host.hostGroupId;
+		if (!id) return null;
+		return hostGroups.value.find((g) => g.id === id)?.name ?? null;
+	}
+
+	/**
 	 * Add a host group. A refusal comes back with the hub's reason, such as a
 	 * name already taken (#703); a hub that does not answer throws.
 	 */
@@ -657,6 +667,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		deleteHost,
 		duplicateHost,
 		getHostGroups,
+		getHostGroupName,
 		createHostGroup,
 		renameHostGroup,
 		deleteHostGroup,

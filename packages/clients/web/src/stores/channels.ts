@@ -4,6 +4,7 @@ import {
 	type ChannelEndReason,
 	type ChannelGroup,
 	ErrorCode,
+	generateId,
 	type SessionStatus,
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
@@ -1023,12 +1024,21 @@ export const useChannelsStore = defineStore("channels", () => {
 				}),
 			);
 
-			// The socket says nothing of which SPAWN an answer is for. A terminal
-			// brought back is answered under its own id, and every answer names its
-			// host: one for another spawn is not this one's. Several panes bring
-			// their terminals back at once when their host returns (#605), and each
-			// took the first answer to come for its own.
-			const notOurs = (msg: { hostId?: string; channelId?: string }): boolean =>
+			// The socket carries every ERROR the hub has for this window: another
+			// pane's ATTACH refused, a write lock denied. Most name no host, and
+			// this SPAWN took the first of them for its own failure (#777). So it
+			// names itself, and a hub whose AUTH_OK says it echoes the name puts it
+			// on everything that answers this SPAWN: from that hub, an answer
+			// without it, or with another, is not this one's.
+			const requestId = generateId();
+			const hubEchoes = sessionStore.hubEchoesSpawnRequestId;
+			// A hub older than that names no answer. A terminal brought back is
+			// answered under its own id, and every answer names its host: one for
+			// another spawn is not this one's. Several panes bring their terminals
+			// back at once when their host returns (#605), and each took the first
+			// answer to come for its own.
+			const notOurs = (msg: { hostId?: string; channelId?: string; requestId?: string }): boolean =>
+				((hubEchoes || msg.requestId !== undefined) && msg.requestId !== requestId) ||
 				(msg.hostId !== undefined && msg.hostId !== hostId) ||
 				(opts?.reuseChannelId !== undefined &&
 					msg.channelId !== undefined &&
@@ -1092,6 +1102,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			sessionStore.wsClient.send({
 				type: "SPAWN",
 				hostId,
+				requestId,
 				...(autoGroupId !== undefined ? { groupId: autoGroupId } : {}),
 				...(opts?.cols !== undefined && opts?.rows !== undefined
 					? { cols: opts.cols, rows: opts.rows }

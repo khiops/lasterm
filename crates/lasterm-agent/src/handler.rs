@@ -586,36 +586,46 @@ pub(crate) async fn handle_message(
             };
             if let Some(tx) = tx_opt {
                 let (reply_tx, reply_rx) = oneshot::channel::<SnapshotInfo>();
-                if tx.send(ChannelCommand::Snapshot(reply_tx)).is_ok() {
-                    if let Ok(info) = reply_rx.await {
-                        let last_seq = {
-                            let mgr = pty_manager.lock().await;
-                            match mgr.channels.get(&channel_id) {
-                                Some(channel) => channel.seq,
-                                None => 0,
-                            }
-                        };
-                        let msg = AgentToHub::AttachOk {
-                            channel_id: channel_id.clone(),
-                            request_id,
-                            snapshot: SnapshotData {
-                                serialized: info.serialized,
-                                cols: info.cols,
-                                rows: info.rows,
-                                cursor_x: info.cursor_x,
-                                cursor_y: info.cursor_y,
-                            },
-                            last_seq,
-                        };
-                        send_frame(&frame_tx, &msg)?;
-                    } else {
+                // The reader serves the snapshot while it reads its PTY. Once that
+                // has closed it serves none: the request finds it gone, or reached
+                // it as it went and is dropped. Either way the ATTACH is answered,
+                // as for a terminal the agent no longer has, which it is about to
+                // be: the hub never waits out its timeout for it (#777).
+                let snapshot = if tx.send(ChannelCommand::Snapshot(reply_tx)).is_ok() {
+                    let snapshot = reply_rx.await.ok();
+                    if snapshot.is_none() {
                         tracing::warn!(
                             "ATTACH: reader task dropped reply sender for channel: {}",
                             channel_id
                         );
                     }
+                    snapshot
                 } else {
                     tracing::warn!("ATTACH: reader task gone for channel: {}", channel_id);
+                    None
+                };
+                if let Some(info) = snapshot {
+                    let last_seq = {
+                        let mgr = pty_manager.lock().await;
+                        match mgr.channels.get(&channel_id) {
+                            Some(channel) => channel.seq,
+                            None => 0,
+                        }
+                    };
+                    let msg = AgentToHub::AttachOk {
+                        channel_id: channel_id.clone(),
+                        request_id,
+                        snapshot: SnapshotData {
+                            serialized: info.serialized,
+                            cols: info.cols,
+                            rows: info.rows,
+                            cursor_x: info.cursor_x,
+                            cursor_y: info.cursor_y,
+                        },
+                        last_seq,
+                    };
+                    send_frame(&frame_tx, &msg)?;
+                } else {
                     send_frame(
                         &frame_tx,
                         &AgentToHub::Error {
@@ -1177,6 +1187,12 @@ fn spawn_reader_task(
             }
         }
 
+        // It serves no snapshot or resize any more. Its queue goes now, not
+        // once the wait on its workload below is over, however long that is:
+        // a snapshot request that reached it as its PTY closed is dropped at
+        // once, and its ATTACH answered (#777).
+        drop(cmd_rx);
+
         // PTY EOF: clean up cmd sender entry — but only this reader's own. A
         // restart registers the replacement under the same channel id, and
         // removing that one would leave the new terminal deaf to resizes and
@@ -1517,18 +1533,18 @@ mod stdio_tests {
         assert_eq!(unnamed, input);
     }
 
-    /// The ATTACH_OK of a live terminal echoes the request id too.
-    #[tokio::test]
-    async fn attach_ok_echoes_the_attach_request_id() {
-        use crate::protocol::HubToAgent;
-        let manager = Arc::new(Mutex::new(PtyManager::new()));
-        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+    /// Start a terminal under `channel_id`, as a SPAWN does.
+    async fn start_terminal(
+        channel_id: &str,
+        manager: &Arc<Mutex<PtyManager>>,
+        senders: &SnapshotSenders,
+    ) {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
         let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
         let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         handle_spawn(
             "spawn-1".into(),
-            Some("attached".into()),
+            Some(channel_id.into()),
             Some(shell.into()),
             Vec::new(),
             None,
@@ -1545,16 +1561,25 @@ mod stdio_tests {
             None,
             None,
             OwnerId::stdio(),
-            Arc::clone(&manager),
+            Arc::clone(manager),
             frame_tx,
             channel_events,
-            Arc::clone(&senders),
+            Arc::clone(senders),
         )
         .await
         .expect("SPAWN is answered");
         let spawned: serde_json::Value =
             rmp_serde::from_slice(&frame_rx.recv().await.expect("an answer").frame[4..]).unwrap();
         assert_eq!(spawned["type"], "SPAWN_OK", "{spawned}");
+    }
+
+    /// The ATTACH_OK of a live terminal echoes the request id too.
+    #[tokio::test]
+    async fn attach_ok_echoes_the_attach_request_id() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        start_terminal("attached", &manager, &senders).await;
 
         let attached = answers(
             HubToAgent::Attach {
@@ -1573,6 +1598,58 @@ mod stdio_tests {
         assert_eq!(attached[0]["type"], "ATTACH_OK");
         assert_eq!(attached[0]["channel_id"], "attached");
         assert_eq!(attached[0]["request_id"], "attach-2");
+    }
+
+    /// A terminal whose reader lets go of the snapshot an ATTACH asks for, as
+    /// one does when its PTY closes with the request in its queue, or whose
+    /// reader is gone already. The ATTACH is answered all the same, at once,
+    /// with the ERROR that carries its request id: the hub does not wait out
+    /// its five seconds for it (#777).
+    #[tokio::test]
+    async fn an_attach_is_answered_when_no_snapshot_comes() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        start_terminal("closing", &manager, &senders).await;
+
+        // A reader that takes the request and drops it, and one already gone.
+        let (dropping, mut queue) = mpsc::unbounded_channel::<ChannelCommand>();
+        tokio::spawn(async move {
+            while let Some(command) = queue.recv().await {
+                drop(command);
+            }
+        });
+        let (gone, _) = mpsc::unbounded_channel::<ChannelCommand>();
+
+        let mut answered = Vec::new();
+        for (reader, request_id) in [(dropping, "attach-3"), (gone, "attach-4")] {
+            senders.lock().await.insert("closing".into(), reader);
+            let frames = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                answers(
+                    HubToAgent::Attach {
+                        channel_id: "closing".into(),
+                        request_id: Some(request_id.into()),
+                    },
+                    &manager,
+                    &senders,
+                ),
+            )
+            .await
+            .expect("the ATTACH is handled at once");
+            answered.push((frames, request_id));
+        }
+        if let Some(process) = manager.lock().await.remove("closing") {
+            let _ = process.kill_tree();
+        }
+
+        for (frames, request_id) in &answered {
+            assert_eq!(frames.len(), 1, "{request_id}: {frames:?}");
+            assert_eq!(frames[0]["type"], "ERROR");
+            assert_eq!(frames[0]["code"], "CHANNEL_NOT_FOUND");
+            assert_eq!(frames[0]["channel_id"], "closing");
+            assert_eq!(frames[0]["request_id"], *request_id);
+        }
     }
 
     /// Only a daemon says it tells hubs apart.

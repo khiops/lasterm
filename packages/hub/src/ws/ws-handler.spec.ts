@@ -610,3 +610,79 @@ describe("ws-handler SPAWN: a host gone while the terminal started", () => {
 		});
 	});
 });
+
+// ─── A SPAWN's answers carry its request id (#777) ──────────────────────────
+
+describe("ws-handler SPAWN: answered under its request id", () => {
+	const HOST = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+	const REQUEST = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+
+	function spawn(
+		msg: Record<string, unknown>,
+		outcome: Promise<string | null> = Promise.resolve(null),
+	): { sent: () => ProtocolMessage[]; handleSpawn: ReturnType<typeof vi.fn> } {
+		const client = { id: "client-1", send: vi.fn(), attachedChannels: new Set<string>() };
+		const handleSpawn = vi.fn().mockReturnValue(outcome);
+		const ctx = {
+			clientId: "client-1",
+			client,
+			log: { debug: vi.fn(), error: vi.fn() } as never,
+			sessionManager: { handleSpawn } as never,
+			writeLockManager: { attach: vi.fn() } as never,
+		} as unknown as WsHandlerContext;
+		handleSpawnMessage({ type: "SPAWN", ...msg } as never, ctx);
+		return {
+			sent: () => client.send.mock.calls.map(([sent]) => sent as ProtocolMessage),
+			handleSpawn,
+		};
+	}
+
+	it("refuses a field with the SPAWN's request id", () => {
+		const { sent, handleSpawn } = spawn({ hostId: "not-a-ulid", requestId: REQUEST });
+
+		expect(sent()).toEqual([
+			{ type: "ERROR", code: "INVALID_INPUT", message: "Invalid hostId", requestId: REQUEST },
+		]);
+		expect(handleSpawn).not.toHaveBeenCalled();
+	});
+
+	it("reports a failure with it, the host's absence included", async () => {
+		const failed = spawn(
+			{ hostId: HOST, requestId: REQUEST },
+			Promise.reject(new Error("Agent SPAWN timeout")),
+		);
+		const away = spawn(
+			{ hostId: HOST, requestId: REQUEST },
+			Promise.reject(new HostUnreachableError(HOST, "raspberrypi", "disconnected")),
+		);
+		await vi.waitFor(() => expect([...failed.sent(), ...away.sent()]).toHaveLength(2));
+
+		expect(failed.sent()[0]).toMatchObject({ code: "SPAWN_FAILED", requestId: REQUEST });
+		expect(away.sent()[0]).toMatchObject({ code: "HOST_UNREACHABLE", requestId: REQUEST });
+	});
+
+	it("refuses a request id that is not a ULID, without echoing it", () => {
+		const { sent, handleSpawn } = spawn({ hostId: HOST, requestId: "x".repeat(4096) });
+
+		expect(sent()).toEqual([
+			{ type: "ERROR", code: "INVALID_INPUT", message: "Invalid requestId" },
+		]);
+		expect(handleSpawn).not.toHaveBeenCalled();
+	});
+
+	it("passes it on to the session manager, which answers the rest", () => {
+		const { handleSpawn } = spawn({ hostId: HOST, requestId: REQUEST });
+
+		expect(handleSpawn).toHaveBeenCalledWith(
+			"client-1",
+			expect.objectContaining({ requestId: REQUEST }),
+		);
+	});
+
+	it("names none when the SPAWN named none", () => {
+		const { sent } = spawn({ hostId: "not-a-ulid" });
+
+		expect(sent()).toEqual([{ type: "ERROR", code: "INVALID_INPUT", message: "Invalid hostId" }]);
+		expect(sent()[0]).not.toHaveProperty("requestId");
+	});
+});

@@ -1618,30 +1618,43 @@ export class SessionManager {
 			return true;
 		}
 
-		const agentAttach: AgentAttachMessage = { type: "ATTACH", channelId };
+		// The agent echoes the request id in what answers this ATTACH, and only
+		// there: an ERROR naming the same channel for another reason, an INPUT
+		// dropped or sent to a terminal it no longer has, is not the answer
+		// (#767). An agent older than that answers without it, and its ATTACH_OK
+		// is matched by channel, under the second key (agent-connection-manager).
+		const requestId = generateId();
+		const agentAttach: AgentAttachMessage = { type: "ATTACH", channelId, requestId };
 		const askedAt = this.lifecycle.askingAgent();
 		agent.send(agentAttach);
 
-		const pendingKey = `attach:${channelId}`;
+		const byChannel = `attach:${channelId}`;
 		try {
 			const agentResponse = await new Promise<AgentAttachOkMessage>((resolve, reject) => {
+				const settle = (): void => {
+					clearTimeout(timer);
+					this.ctx.pendingRequests.delete(requestId);
+					// Another ATTACH on this channel may have taken the key since.
+					if (this.ctx.pendingRequests.get(byChannel) === answer) {
+						this.ctx.pendingRequests.delete(byChannel);
+					}
+				};
 				const timer = setTimeout(() => {
-					this.ctx.pendingRequests.delete(pendingKey);
+					settle();
 					reject(new Error("Agent ATTACH timeout"));
 				}, ATTACH_TIMEOUT_MS);
 
-				this.ctx.pendingRequests.set(pendingKey, (incoming: ProtocolMessage) => {
+				const answer = (incoming: ProtocolMessage): void => {
 					if (incoming.type === "ATTACH_OK") {
-						const attachOkMsg = incoming as AgentAttachOkMessage;
-						clearTimeout(timer);
-						this.ctx.pendingRequests.delete(pendingKey);
-						resolve(attachOkMsg);
+						settle();
+						resolve(incoming as AgentAttachOkMessage);
 					} else if (incoming.type === "ERROR") {
-						clearTimeout(timer);
-						this.ctx.pendingRequests.delete(pendingKey);
+						settle();
 						reject(incoming);
 					}
-				});
+				};
+				this.ctx.pendingRequests.set(requestId, answer);
+				this.ctx.pendingRequests.set(byChannel, answer);
 			});
 
 			this.lifecycle.storeSnapshot(channelId, agentResponse.snapshot, agentResponse.lastSeq);

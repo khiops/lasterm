@@ -273,12 +273,13 @@ Re-attach to existing channel (after reconnect).
 
 ```typescript
 // Hub → Agent
-{ type: "ATTACH", channel_id: string }
+{ type: "ATTACH", channel_id: string, request_id?: string }
 
 // Agent → Hub
 {
   type: "ATTACH_OK",
   channel_id: string,
+  request_id?: string,  // the ATTACH's, echoed
   snapshot: {
     serialized: string,
     cols: number,
@@ -289,6 +290,19 @@ Re-attach to existing channel (after reconnect).
   last_seq: number
 }
 ```
+
+An ATTACH the agent cannot answer, for a channel it does not have or cannot see (§ 3.1b), gets
+`ERROR { code: "CHANNEL_NOT_FOUND", channel_id, request_id }`. The hub names every ATTACH with a
+`request_id`, and the agent echoes it in the ATTACH_OK or the ERROR that answers it, and in nothing
+else. That is how the hub tells the answer from an ERROR about the same channel for another reason:
+an INPUT or a RESIZE to a terminal the agent does not have gets the same `CHANNEL_NOT_FOUND` with
+the same `channel_id`, and an INPUT can get `INPUT_DROPPED` (§ 3.4), while an ATTACH waits (#767).
+An ERROR without the ATTACH's `request_id` never answers it, and is handled as itself.
+
+`request_id` is optional both ways. An agent older than it answers without one: the hub matches its
+ATTACH_OK by `channel_id`, which only an ATTACH can produce, and an ATTACH such an agent refuses
+goes unanswered until the hub stops waiting (5 s), when the hub answers its client from the spool
+(§ 4.2). A hub older than it sends none, and is answered without one, as before.
 
 ### 3.4 INPUT (Hub → Agent)
 
@@ -304,7 +318,9 @@ The agent queues each channel's INPUT and writes it to the PTY in order, apart f
 other messages: a terminal that takes no input holds up nothing else (#740). A channel's queue holds at
 most 1 MiB. An INPUT that would take it past that is dropped whole, and so is every INPUT to that channel
 after it until its terminal has taken what is queued. The first one dropped is answered with
-`ERROR { code: "INPUT_DROPPED", channel_id }`; the rest of that gap is dropped without one.
+`ERROR { code: "INPUT_DROPPED", channel_id }`; the rest of that gap is dropped without one. The hub
+relays each one to the clients attached to that channel as `INPUT_DROPPED` (§ 4.12), and the pane
+says in its terminal that what was typed was dropped because the terminal is not taking input.
 
 ### 3.5 OUTPUT (Agent → Hub)
 
@@ -382,9 +398,14 @@ daemon's connection ends when the daemon does.
   code: string,
   message: string,
   channel_id?: string,
-  other_owner_channels?: number   // OTHER_HUBS_HOLD_CHANNELS only (§ 3.17)
+  other_owner_channels?: number,  // OTHER_HUBS_HOLD_CHANNELS only (§ 3.17)
+  request_id?: string             // on the ERROR that answers an ATTACH only: its request_id (§ 3.3)
 }
 ```
+
+Of the ERRORs that carry a `channel_id`, only one carrying an ATTACH's `request_id` answers a
+request (§ 3.3). The others speak of that channel and answer nothing the hub waits on: the hub
+relays `INPUT_DROPPED` to that channel's clients (§ 3.4) and does nothing with the rest.
 
 ### 3.12 TITLE_CHANGE (Agent → Hub)
 
@@ -929,7 +950,7 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
 
 ### 4.12 Terminal Event Relay (Hub → UI)
 
-These messages originate from the agent (see §3.12–3.15, above) and are relayed by the hub to all UI clients attached to the affected channel.
+These messages originate from the agent (see §3.12–3.15, above, and § 3.4) and are relayed by the hub to all UI clients attached to the affected channel.
 
 ```typescript
 // Terminal title changed (OSC 0/2)
@@ -943,7 +964,15 @@ These messages originate from the agent (see §3.12–3.15, above) and are relay
 
 // OSC 9 desktop notification
 { type: "NOTIFICATION",   channel_id: string, message: string }
+
+// Input typed into this terminal was dropped: it takes no input (§ 3.4, #767)
+{ type: "INPUT_DROPPED",  channel_id: string }
 ```
+
+`INPUT_DROPPED` is the agent's `ERROR { code: "INPUT_DROPPED" }`, relayed once per gap as the agent
+says it, under a type of its own: a client waiting on an answer to its own request takes an ERROR for
+that answer, and this one answers nothing. The pane writes a dimmed line of its own in the terminal,
+saying that what was typed was dropped because the terminal is not taking input.
 
 ### 4.13 Agent Fetch Messages (Hub → UI)
 
@@ -1633,14 +1662,14 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `PTY_SPAWN_FAILED` | Agent | The PTY could not be spawned, for any other reason |
 | `CHANNEL_EXISTS` | Agent | SPAWN named a `channel_id` the agent already holds |
 | `ELEVATION_PASSWORD_REQUIRED` | Agent | An elevated SPAWN needs a password; the hub asks for one (AUTH_PROMPT) and sends the SPAWN again |
-| `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT/RESIZE for unknown channel_id (DESTROY and SNAPSHOT_REQ answer nothing); also for a channel another hub owns, which is never told apart from an unknown one, byte for byte |
+| `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT/RESIZE for unknown channel_id (DESTROY and SNAPSHOT_REQ answer nothing); also for a channel another hub owns, which is never told apart from an unknown one, byte for byte. Only the ATTACH's carries its `request_id` (§ 3.3) |
 | `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
 | `VERSION_MISMATCH` | Hub | Agent protocol version too new |
 | `DISPLACED` | Agent | A newer connection of the same hub took this one's place, and this one ends (§ 3.1b) |
 | `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; `other_owner_channels` carries how many, and the message says it too (§ 3.17) |
 | `AUTH_REQUIRED` | Agent | A daemon connection did not open with an AUTH carrying `hub_key` within 5 s; the connection is closed (§ 3.1b) |
 | `AUTH_INVALID` | Agent | The AUTH that opened a daemon connection carried a token the daemon refuses, or an empty `hub_key`; the connection is closed (§ 3.1b) |
-| `INPUT_DROPPED` | Agent | An INPUT was dropped: its terminal takes no input and the channel's input queue (1 MiB) is full. Every INPUT to that channel is dropped until the terminal has taken what is queued; said once per gap, with `channel_id` (§ 3.4) |
+| `INPUT_DROPPED` | Agent | An INPUT was dropped: its terminal takes no input and the channel's input queue (1 MiB) is full. Every INPUT to that channel is dropped until the terminal has taken what is queued; said once per gap, with `channel_id` (§ 3.4). The hub relays it to that channel's clients as `INPUT_DROPPED` (§ 4.12) |
 
 ### Pairing Code Format
 

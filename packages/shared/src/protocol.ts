@@ -149,12 +149,20 @@ export interface AgentSnapshotResMessage {
 export interface AgentAttachMessage {
 	type: "ATTACH";
 	channelId: string;
+	/**
+	 * Echoed in the ATTACH_OK or the ERROR that answers this ATTACH, and in
+	 * nothing else: an ERROR about the same channel for another reason, an
+	 * INPUT's, does not answer it (#767).
+	 */
+	requestId: string;
 }
 
 /** Agent → Hub: attach acknowledged, includes current snapshot */
 export interface AgentAttachOkMessage {
 	type: "ATTACH_OK";
 	channelId: string;
+	/** The ATTACH's, echoed. Absent from an agent older than it (#767). */
+	requestId?: string;
 	snapshot: SnapshotData;
 	lastSeq: number;
 }
@@ -192,6 +200,11 @@ export interface ErrorMessage {
 	message: string;
 	channelId?: string;
 	hostId?: string;
+	/**
+	 * Agent → Hub, on the ERROR that answers an ATTACH only: that ATTACH's
+	 * request id (#767). Absent from every other ERROR.
+	 */
+	requestId?: string;
 	/**
 	 * Agent → Hub, on `OTHER_HUBS_HOLD_CHANNELS` only: how many channels other
 	 * hubs hold on the daemon that refused a STOP (#127). Absent on every other
@@ -283,6 +296,16 @@ export interface AgentNotificationMessage {
 	type: "NOTIFICATION";
 	channelId: string;
 	message: string;
+}
+
+/**
+ * Hub → UI, to the clients attached to the channel: input typed into this
+ * terminal was dropped, since it takes no input. Relayed from the agent's
+ * `ERROR { code: INPUT_DROPPED }`, once per gap as the agent says it (#767).
+ */
+export interface InputDroppedMessage {
+	type: "INPUT_DROPPED";
+	channelId: string;
 }
 
 /** Agent → Hub: structured log line (forwarded to hub log sink) */
@@ -887,6 +910,7 @@ export type HubToUiMessage =
 	| AgentProcessTitleMessage
 	| AgentBellMessage
 	| AgentNotificationMessage
+	| InputDroppedMessage
 	| PongMessage
 	| HostVerifyMessage
 	| AuthPromptMessage
@@ -955,6 +979,7 @@ export type ProtocolMessage =
 	| AgentProcessTitleMessage
 	| AgentBellMessage
 	| AgentNotificationMessage
+	| InputDroppedMessage
 	| TestConnectMessage
 	| TestConnectOkMessage
 	| TestConnectFailMessage

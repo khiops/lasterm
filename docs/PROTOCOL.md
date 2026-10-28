@@ -305,6 +305,13 @@ an INPUT or a RESIZE to a terminal the agent does not have gets the same `CHANNE
 the same `channel_id`, and an INPUT can get `INPUT_DROPPED` (§ 3.4), while an ATTACH waits (#767).
 An ERROR without the ATTACH's `request_id` never answers it, and is handled as itself.
 
+The agent answers every ATTACH it receives, and at once. The snapshot comes from the channel's
+reader, which serves it while it reads the PTY. Once the PTY has closed, the channel is ending: an
+ATTACH whose request finds that reader gone, or reaches it as it stops and is dropped, gets the
+same `CHANNEL_NOT_FOUND` as one for a channel the agent no longer has, with its `request_id`. It
+does not wait for the channel's workload to exit, and the hub never waits out its 5 s for it
+(#777).
+
 `request_id` is optional both ways. An agent older than it answers without one: the hub matches its
 ATTACH_OK by `channel_id`, which only an ATTACH can produce, and an ATTACH such an agent refuses
 goes unanswered until the hub stops waiting (5 s), when the hub answers its client from the spool

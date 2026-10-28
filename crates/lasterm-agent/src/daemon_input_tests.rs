@@ -256,10 +256,17 @@ impl Stuck {
             most <= TEST_BOUND,
             "{most} bytes queued, over the bound of {TEST_BOUND}"
         );
+        // Full once the queue overflows, which the INPUT_DROPPED a test reads
+        // later proves. A Linux PTY may still take a chunk or two after that:
+        // the level is not exact.
+        assert!(
+            most >= TEST_BOUND / 2,
+            "the queue of a terminal that takes no input held {most} bytes at most"
+        );
         let queued = queued_bytes(daemon, &self.channel_id).await;
         assert!(
-            queued > TEST_BOUND - FRAME_BYTES,
-            "a terminal that takes no input left its queue at {queued} bytes, short of full"
+            queued > 0,
+            "the queue of a terminal that takes no input emptied"
         );
     }
 }
@@ -432,8 +439,14 @@ async fn destroy_ends_the_input_writer_and_frees_its_queue() {
 
     hub.send_within(&heartbeat("after-destroy"), SEND_WITHIN)
         .await;
-    hub.read_through(|frame| frame_type(frame) == "HEARTBEAT_ACK")
+    let frames = hub
+        .read_through(|frame| frame_type(frame) == "HEARTBEAT_ACK")
         .await;
+    assert_eq!(
+        drops_of(&frames, "doomed"),
+        1,
+        "its queue was full when it was destroyed"
+    );
     assert!(!daemon.pty_manager.lock().await.contains("doomed"));
 
     tear_down(&daemon, &dir).await;

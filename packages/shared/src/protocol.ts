@@ -224,9 +224,9 @@ export interface ChannelStateEndMessage {
 	/**
 	 * How many channels other hubs hold on this daemon. Informational: those
 	 * channels are not this hub's to act on, and the agent does not even say
-	 * which they are (#127).
+	 * which they are (#127). Every agent since 0.13.0 sends it.
 	 */
-	otherOwnerChannels?: number;
+	otherOwnerChannels: number;
 }
 
 /**

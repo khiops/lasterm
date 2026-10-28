@@ -342,10 +342,6 @@ describe("hub identity on the wire (#127)", () => {
 		});
 	});
 
-	it("reads a CHANNEL_STATE_END without it, as an agent before #127 sends it", () => {
-		expect(toCamelCase({ type: "CHANNEL_STATE_END" })).toEqual({ type: "CHANNEL_STATE_END" });
-	});
-
 	it("round-trips a STOP with its force flag", () => {
 		for (const force of [false, true]) {
 			const msg: ProtocolMessage = { type: "STOP", force };

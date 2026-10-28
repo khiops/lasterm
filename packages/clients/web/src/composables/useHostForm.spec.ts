@@ -1,5 +1,5 @@
 import type { Host } from "@lasterm/shared";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 
@@ -933,5 +933,63 @@ describe("a save the hub refuses (#703)", () => {
 		expect(createHostGroupSpy).toHaveBeenCalledOnce();
 		expect(updateHostSpy.mock.calls[1]?.[1]).toHaveProperty("host_group_id", "group-1");
 		expect(saveError.value).toBeNull();
+	});
+});
+
+describe("the SSH config the hub cannot read (#734)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function answer(status: number, body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status,
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
+	const entries = {
+		entries: [{ name: "pi", hostname: "pi.test" }],
+		has_include: false,
+	};
+
+	it("says the hub's reason rather than throwing, and clears it once read", async () => {
+		vi.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(
+				answer(500, { error: { code: "INTERNAL", message: "EACCES: permission denied" } }),
+			)
+			.mockResolvedValueOnce(answer(200, entries));
+		const { loadSshConfig, sshConfigError, sshConfigEntries, loadingSshConfig } = useHostForm();
+
+		await expect(loadSshConfig()).resolves.toBeUndefined();
+		expect(sshConfigError.value).toBe("EACCES: permission denied");
+		expect(loadingSshConfig.value).toBe(false);
+		expect(sshConfigEntries.value).toEqual([]);
+
+		await loadSshConfig();
+		expect(sshConfigError.value).toBeNull();
+		expect(sshConfigEntries.value.map((e) => e.name)).toEqual(["pi"]);
+	});
+
+	it("says so when the hub does not answer", async () => {
+		vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		const { loadSshConfig, sshConfigError, loadingSshConfig } = useHostForm();
+
+		await expect(loadSshConfig()).resolves.toBeUndefined();
+		expect(sshConfigError.value).toBe("Could not reach the hub: Failed to fetch");
+		expect(loadingSshConfig.value).toBe(false);
+	});
+
+	it("takes no SSH config file as an empty list, not an error", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			answer(404, {
+				error: { code: "NOT_FOUND", message: "No SSH config file found at ~/.ssh/config" },
+			}),
+		);
+		const { loadSshConfig, sshConfigError, sshConfigEntries } = useHostForm();
+
+		await loadSshConfig();
+		expect(sshConfigError.value).toBeNull();
+		expect(sshConfigEntries.value).toEqual([]);
 	});
 });

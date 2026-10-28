@@ -215,6 +215,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { shortcutLabel } from "../utils/app-shortcuts.js";
 import { gridMove } from "../utils/focus-zones.js";
+import { toastRefusal } from "../utils/hub-answer.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useChannelsStore } from "../stores/channels.js";
@@ -516,9 +517,17 @@ function onDrop(
 		targetHost.id,
 	);
 
-	hostsStore
-		.reorderHosts(group, orderedIds)
-		.then(() => hostsStore.fetchHosts());
+	// An order the hub refuses is taken back, and a toast says why (#734).
+	void toastRefusal(hostsStore.reorderHosts(group, orderedIds)).then((done) => {
+		if (done) void hostsStore.fetchHosts();
+	});
+}
+
+/** Move a dropped host into a group, or say why the hub did not (#734). */
+function moveDroppedHost(hostId: string, groupId: string | null): void {
+	void toastRefusal(hostsStore.moveHostToGroup(hostId, groupId)).then((done) => {
+		if (done) void hostsStore.fetchHosts();
+	});
 }
 
 function onHostDragEnd(): void {
@@ -560,9 +569,7 @@ function onUnifiedGroupDrop(event: DragEvent, targetGroupId: string): void {
 	// Host drag takes priority
 	const hostId = event.dataTransfer?.getData("text/x-lasterm-host");
 	if (hostId && !dragGroupId) {
-		hostsStore
-			.moveHostToGroup(hostId, targetGroupId)
-			.then(() => hostsStore.fetchHosts());
+		moveDroppedHost(hostId, targetGroupId);
 		dragHostId.value = null;
 		return;
 	}
@@ -603,9 +610,7 @@ function onGroupHeaderDrop(event: DragEvent, targetGroupId: string | null): void
 	if (dragGroupId) return; // ignore group drags
 	const hostId = event.dataTransfer?.getData("text/x-lasterm-host");
 	if (!hostId) return;
-	hostsStore
-		.moveHostToGroup(hostId, targetGroupId)
-		.then(() => hostsStore.fetchHosts());
+	moveDroppedHost(hostId, targetGroupId);
 	dragHostId.value = null;
 }
 

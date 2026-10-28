@@ -1,10 +1,10 @@
 //! The daemon's log: one file per day, and a number of them kept (#646).
 //!
-//! The daemon used to append to `<state>/logs/agent-daemon.jsonl` for as long
-//! as it ran, and nothing bounded it: a remote daemon left for months, as on a
-//! Raspberry Pi, grew it for as long. It now writes one file per day (UTC), as
-//! `tracing-appender`'s daily rotation names them:
-//! `agent-daemon.2026-09-29.jsonl`. A day with nothing to log has no file.
+//! A single file appended to for as long as the daemon runs would grow without
+//! bound: a remote daemon is left for months, as on a Raspberry Pi. The daemon
+//! writes one file per day (UTC) in `<state>/logs`, as `tracing-appender`'s
+//! daily rotation names them: `agent-daemon.2026-09-29.jsonl`. A day with
+//! nothing to log has no file.
 //!
 //! **No file is ever renamed.** Moving a file aside at a size, as the hub's
 //! logs do, has a failure that brings the growth back: a rename refused (on
@@ -17,17 +17,11 @@
 //! given (`[logging] agent_files_kept`) as `--log-files-kept`. Older files are
 //! deleted when the daemon starts and when a new day's file starts. A file that
 //! cannot be deleted is said in a warning, and tried again on the next of those
-//! occasions. Only `agent-daemon.YYYY-MM-DD.jsonl` files are deleted, and the
-//! file this replaced (below): anything else in the directory is not ours.
+//! occasions. Only `agent-daemon.YYYY-MM-DD.jsonl` files are deleted: anything
+//! else in the directory is not ours.
 //!
 //! The cap counts files, not bytes. What bounds one day's size is the level:
 //! at INFO the daemon logs its lifecycle and little else (CLAUDE.md, Logging).
-//!
-//! **The file before this, `agent-daemon.jsonl`**, which an earlier daemon
-//! grew, counts as one more file, dated by its last write. It goes once as many
-//! newer days have their own file as are kept, as a daily file of that day
-//! would. It is never renamed or rewritten, and a daemon from before this
-//! change may still be appending to it while it is replaced.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,9 +35,6 @@ use crate::platform_dirs::{lasterm_dir, DirKind};
 /// `agent-daemon.YYYY-MM-DD.jsonl`: the name the daily rotation gives a file.
 const FILE_PREFIX: &str = "agent-daemon";
 const FILE_SUFFIX: &str = "jsonl";
-
-/// The file the daemon wrote before one per day, never rotated.
-const LEGACY_FILE: &str = "agent-daemon.jsonl";
 
 /// Files kept when nothing says otherwise: a week of days with activity, which
 /// covers "it started on Monday". `0` keeps them all.
@@ -94,9 +85,9 @@ impl DaemonLog {
             .filename_prefix(FILE_PREFIX)
             .filename_suffix(FILE_SUFFIX)
             // No `max_log_files`: it keeps files by creation time and counts any
-            // name with the prefix and the suffix, `agent-daemon.jsonl` included,
-            // and it reports on stderr. The pruning below goes by the day in the
-            // name and says what it could not delete in the log.
+            // name with the prefix and the suffix, and it reports on stderr. The
+            // pruning below goes by the day in the name and says what it could
+            // not delete in the log.
             .build(dir)
             .map_err(io::Error::other)?;
         Ok(DaemonLog {
@@ -186,8 +177,6 @@ struct Candidate {
     name: String,
     /// `YYYY-MM-DD`, which sorts as the days do.
     day: String,
-    /// `agent-daemon.jsonl`, the file before one per day.
-    legacy: bool,
 }
 
 /// The day a daily file's name covers: `agent-daemon.YYYY-MM-DD.jsonl`.
@@ -205,25 +194,13 @@ fn day_in_name(name: &str) -> Option<&str> {
     shaped.then_some(day)
 }
 
-/// The UTC day of a moment, `YYYY-MM-DD`.
-fn day_of(moment: SystemTime) -> String {
-    let date = time::OffsetDateTime::from(moment).date();
-    format!(
-        "{:04}-{:02}-{:02}",
-        date.year(),
-        u8::from(date.month()),
-        date.day()
-    )
-}
-
 /// The files beyond the `keep` most recent, which the pruning deletes; `0`
-/// keeps them all. The most recent is the latest day; on the same day, the
-/// daily file is more recent than the one before it.
+/// keeps them all. The most recent is the latest day.
 fn beyond(mut candidates: Vec<Candidate>, keep: u32) -> Vec<String> {
     if keep == 0 {
         return Vec::new();
     }
-    candidates.sort_by(|a, b| (&b.day, !b.legacy).cmp(&(&a.day, !a.legacy)));
+    candidates.sort_by(|a, b| b.day.cmp(&a.day));
     candidates
         .into_iter()
         .skip(keep as usize)
@@ -232,9 +209,7 @@ fn beyond(mut candidates: Vec<Candidate>, keep: u32) -> Vec<String> {
 }
 
 /// What in `dir` the pruning may delete. Only regular files: a directory or a
-/// link bearing one of the names is not something the daemon wrote. The file
-/// before one per day is dated by its last write, and left alone when that
-/// cannot be read: nothing is deleted on a date it does not have.
+/// link bearing one of the names is not something the daemon wrote.
 fn candidates(dir: &Path) -> io::Result<Vec<Candidate>> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -249,16 +224,7 @@ fn candidates(dir: &Path) -> io::Result<Vec<Candidate>> {
             found.push(Candidate {
                 day: day.to_string(),
                 name,
-                legacy: false,
             });
-        } else if name == LEGACY_FILE {
-            if let Ok(written) = entry.metadata().and_then(|meta| meta.modified()) {
-                found.push(Candidate {
-                    day: day_of(written),
-                    name,
-                    legacy: true,
-                });
-            }
         }
     }
     Ok(found)
@@ -298,10 +264,20 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
-    use std::time::Duration;
     use tracing_subscriber::fmt::MakeWriter;
 
     static TEST_DIR_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// The UTC day of a moment, `YYYY-MM-DD`, as the daily rotation names it.
+    fn day_of(moment: SystemTime) -> String {
+        let date = time::OffsetDateTime::from(moment).date();
+        format!(
+            "{:04}-{:02}-{:02}",
+            date.year(),
+            u8::from(date.month()),
+            date.day()
+        )
+    }
 
     /// A directory of its own, removed when the test ends.
     struct TestDir(PathBuf);
@@ -346,7 +322,6 @@ mod tests {
         Candidate {
             name: daily(day),
             day: day.to_string(),
-            legacy: false,
         }
     }
 
@@ -406,32 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn the_file_before_one_per_day_counts_as_the_day_it_was_last_written() {
-        let legacy = |day: &str| Candidate {
-            name: LEGACY_FILE.to_string(),
-            day: day.to_string(),
-            legacy: true,
-        };
-        // Last written before every daily file: the oldest.
-        let found = vec![
-            candidate("2026-09-28"),
-            legacy("2026-09-20"),
-            candidate("2026-09-29"),
-        ];
-        assert_eq!(beyond(found, 2), [LEGACY_FILE]);
-        // Last written the same day as the first daily file: older than it.
-        let found = vec![candidate("2026-09-29"), legacy("2026-09-29")];
-        assert_eq!(beyond(found, 1), [LEGACY_FILE]);
-        // Written again since, by an older daemon: kept among the recent ones.
-        let found = vec![
-            candidate("2026-09-01"),
-            candidate("2026-09-02"),
-            legacy("2026-09-29"),
-        ];
-        assert_eq!(beyond(found, 2), [daily("2026-09-01")]);
-    }
-
-    #[test]
     fn pruning_deletes_only_the_old_daily_files() {
         let dir = TestDir::new("prune");
         for day in ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"] {
@@ -440,6 +389,7 @@ mod tests {
         // Not ours, or not a daily file: never deleted.
         for other in [
             "hub.jsonl",
+            "agent-daemon.jsonl",
             "agent-daemon.log",
             "notes.txt",
             "agent-daemon.2020-1-1.jsonl",
@@ -459,35 +409,13 @@ mod tests {
                 daily("2020-01-03"),
                 daily("2020-01-04"),
                 "agent-daemon.2020-1-1.jsonl".to_string(),
+                "agent-daemon.jsonl".to_string(),
                 "agent-daemon.log".to_string(),
                 "hub.jsonl".to_string(),
                 "notes.txt".to_string(),
             ]
         );
         assert!(prune_dir(&dir.0, 0, |_| panic!("0 keeps them all")).is_empty());
-    }
-
-    #[test]
-    fn the_file_before_one_per_day_goes_once_enough_newer_days_have_a_file() {
-        let dir = TestDir::new("legacy");
-        dir.touch(LEGACY_FILE);
-        let legacy = std::fs::File::options()
-            .write(true)
-            .open(dir.0.join(LEGACY_FILE))
-            .unwrap();
-        // Last written on 2026-09-20.
-        legacy
-            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(20_716 * 86_400 + 3_600))
-            .unwrap();
-        drop(legacy);
-        dir.touch(&daily("2026-09-28"));
-
-        assert!(prune_dir(&dir.0, 2, |path| std::fs::remove_file(path)).is_empty());
-        assert!(dir.names().contains(&LEGACY_FILE.to_string()), "kept");
-
-        dir.touch(&daily("2026-09-29"));
-        assert!(prune_dir(&dir.0, 2, |path| std::fs::remove_file(path)).is_empty());
-        assert_eq!(dir.names(), [daily("2026-09-28"), daily("2026-09-29")]);
     }
 
     #[test]

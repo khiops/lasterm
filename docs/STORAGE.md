@@ -84,22 +84,29 @@ CREATE TABLE hosts (
   default_shell TEXT,
   default_cwd   TEXT,
   created_at  TEXT NOT NULL,                             -- ISO 8601
-  updated_at  TEXT NOT NULL
+  updated_at  TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,                          -- order within its group
+  ssh_config_host TEXT DEFAULT NULL,                     -- the ~/.ssh/config alias it came from
+  ssh_user TEXT DEFAULT NULL,
+  host_group_id TEXT REFERENCES host_groups(id) ON DELETE SET NULL,
+  discovered_shells TEXT,                                -- JSON: the shells its agent reported
+  discovered_shells_at TEXT,
+  elevation_method TEXT
+    CHECK(elevation_method IS NULL OR elevation_method IN ('sudo','doas','pkexec','gsudo','custom')),
+  custom_command TEXT,                                   -- with elevation_method = 'custom'
+  os TEXT CHECK(os IS NULL OR os IN ('linux', 'darwin', 'windows')),
+  arch TEXT CHECK(arch IS NULL OR arch IN ('x64', 'arm64')),
+  ssh_fingerprint TEXT,                                  -- pinned host key, SHA256:<base64 unpadded>
+  agent_sha256 TEXT DEFAULT NULL,                        -- pinned SHA-256 of its agent binary
+  ssh_proxy_host_id TEXT REFERENCES hosts(id) ON DELETE SET NULL,  -- a jump this hub knows
+  ssh_proxy_spec TEXT,                                   -- or a jump as user@host:port
+  ssh_proxy_fingerprint TEXT,                            -- that spec jump's pinned key
+  ssh_remote_daemon INTEGER                              -- NULL follows [ssh] remote_daemon (#79)
 );
 ```
 
-Migration 006 added two columns that no longer back any setting:
-
-- `keep_alive_seconds INTEGER DEFAULT 60`, the "Keep Alive (s)" a host used to show. The SSH
-  keepalive is fixed (SPEC.md § 5.5).
-- `history_retention_days INTEGER DEFAULT 30`, the "History (days)" a host used to show. Spool
-  GC has bounds of its own (§ 7), and the 30 days could never have applied: every chunk older
-  than seven days is deleted.
-
-Nothing ever read either, so both settings were removed and the hub neither reads nor writes
-these columns. They stay, rather than being dropped by a migration: a hub older than those
-removals, opened on this database, carries on past a schema newer than its own (§ 9.1) and still
-names both columns when it creates a host.
+The columns keep the order the migrations before the baseline added them in (§ 9.3), which is
+why `created_at` is not last.
 
 ### 3.2 channel_groups
 
@@ -173,25 +180,14 @@ It is written with the `dead` status by the one statement that records a channel
 cleared there by any other status, and when a terminal is brought back under its own id: an end
 has a reason only until the terminal runs again. A `dead` told again without one keeps the
 reason already there; one given replaces it. It is NULL for a terminal that ended by itself or
-that the hub found gone, and for every terminal that had ended before migration 021 added the
-column: why those ended was never recorded. A value the hub does not know is read as none. The
+that the hub found gone, and for every terminal that had ended before the column existed: why
+those ended was never recorded. A value the hub does not know is read as none. The
 channel list carries it as `end_reason`, and STATE_SYNC names every dead channel `'killed'`
 (PROTOCOL.md § 4.6).
 
-### 3.5 workspaces
+### 3.5 Tab layouts
 
-Created by the first migration and used by nothing: no route reads or writes it, and a tab's
-layout is kept in the browser's `localStorage` (SPEC.md § 3.4).
-
-```sql
-CREATE TABLE workspaces (
-  id         TEXT PRIMARY KEY,                           -- ULID
-  name       TEXT NOT NULL UNIQUE,
-  layout_json TEXT NOT NULL,                             -- JSON: tree of tabs/panes/channels
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-```
+No table holds them: a tab's layout is kept in the browser's `localStorage` (SPEC.md § 3.4).
 
 ### 3.6 cache_index
 
@@ -221,8 +217,8 @@ CREATE TABLE pairing_codes (
 The code itself is never stored. `code_hash` is keyed with 32 random bytes the hub draws at each
 start and holds only in memory (SECURITY.md § 2.3), and verification looks a code up by its hash
 under the running hub's key, through the index `UNIQUE` gives the column. A code an earlier run
-issued can never match again, so the hub deletes the unredeemed ones as it starts. Migration 020
-replaced the table that stored the code in plain text, and dropped its rows (#521).
+issued can never match again, so the hub deletes the unredeemed ones as it starts. The code was
+stored in plain text until #521.
 
 ### 3.8 Schema version
 
@@ -232,8 +228,8 @@ CREATE TABLE schema_version (
   applied_at TEXT NOT NULL
 );
 
--- Initial version
-INSERT INTO schema_version VALUES (1, datetime('now'));
+-- The baseline's version (§ 9.3)
+INSERT INTO schema_version VALUES (21, datetime('now'));
 ```
 
 ## 4. Schema — spool.db
@@ -433,15 +429,16 @@ Each DB has a `schema_version` table. On startup:
 
 Nothing refuses a newer schema: a hub that was downgraded runs on the database a later one
 migrated. So a migration must not remove anything an older hub still uses, a column it names
-in a statement above all; an unused column is left in place instead (§ 3.1).
+in a statement above all; an unused column is left in place instead. This is the rule from the
+first public release on. The baseline (§ 9.3), made before it, is the one exception.
 
 ### 9.2 Migration Files
 
 ```
 packages/hub/src/storage/migrations/
 ├── meta/
-│   ├── 001-initial.sql
-│   ├── 002-add-xxx.sql
+│   ├── 021-baseline.sql
+│   ├── 022-add-xxx.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -449,6 +446,21 @@ packages/hub/src/storage/migrations/
 ```
 
 Each migration is a **SQL file**, run inside a transaction. Files are discovered by numeric prefix (`001-`, `002-`) sorted lexicographically. The runner reads `schema_version.version`, then applies all files with number > current version in order. Each file name format: `NNN-description.sql` where NNN is zero-padded 3-digit integer.
+
+### 9.3 The meta.db baseline
+
+Before the first public release, the 21 migrations of `meta.db` were squashed into one file,
+`021-baseline.sql`, which builds the schema they built and records version 21. It keeps that
+number so that the runner leaves a database they brought to 21 as it is, rather than take it
+for one ahead of every migration and skip each one that follows (§ 9.1). A new database comes
+out at 21 with the baseline's schema, and the next migration is `022`.
+
+The baseline left out what nothing read: the hosts' `host_group`, the free-text group that
+host groups replaced, `keep_alive_seconds` and `history_retention_days`, two host settings
+removed because nothing read them (the SSH keepalive is fixed, SPEC.md § 5.5, and spool GC has
+bounds of its own, § 7), and the `workspaces` table, which nothing used. A database the
+migrations built keeps them until someone drops them by hand; the hub neither reads nor writes
+them. `spool.db` was not squashed: it still has its one migration.
 
 ## 10. Backup & Restore
 
@@ -475,7 +487,7 @@ db.backup('backup/meta.db');
 
 ### 10.2 Workspace Export/Import
 
-Not built: there is no `lasterm workspace` command, and the `workspaces` table is unused (§ 3.5).
+Not built: there is no `lasterm workspace` command, and the hub keeps no layout (§ 3.5).
 Hosts can be imported from `~/.ssh/config` (`POST /api/hosts/import`, PROTOCOL.md § 6).
 
 ## 11. Data Lifecycle
@@ -537,11 +549,7 @@ fast as it runs.
   A remote agent older than the hub, which does not know the option, is started without it and
   keeps its log as it always did.
 - **Deleted:** when the daemon starts, and when a new day's file starts. Only regular files named
-  `agent-daemon.YYYY-MM-DD.jsonl` are deleted, and `agent-daemon.jsonl` (below); nothing else in
-  `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
+  `agent-daemon.YYYY-MM-DD.jsonl` are deleted; nothing else in `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
   deletion) is said in a warning in the log, and tried again on the next of those occasions.
 - **Never renamed.** Nothing moves a file aside: a rename that is refused would leave the daemon
   appending to a full file, which is the growth this replaced.
-- **`agent-daemon.jsonl`**, the single file daemons before #646 appended to for as long as they
-  ran, counts as one more file, dated by its last write. It goes once as many newer days have their
-  own file as are kept, or never with `0`. Nothing renames or rewrites it before then.

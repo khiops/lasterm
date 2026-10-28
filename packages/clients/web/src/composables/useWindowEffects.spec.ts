@@ -45,44 +45,41 @@ function deferred(): { promise: Promise<void>; reject: () => void; resolve: () =
 
 function displayedState(
 	mode: BackgroundMode,
-	windowEffect: WindowEffect = "auto",
+	windowEffect: WindowEffect = "mica",
 ): DisplayedEffectState {
 	return { mode, windowEffect };
 }
 
 describe("resolveWindowEffect", () => {
-	it("resolves auto and per-OS native effects", () => {
+	it("resolves the per-OS native effects", () => {
 		const win11: WindowEffectsPlatformInfo = { os: "windows", windowsBuild: 26_100 };
-		const win10: WindowEffectsPlatformInfo = { os: "windows", windowsBuild: 19_045 };
 		const macos: WindowEffectsPlatformInfo = { os: "macos", windowsBuild: null };
 		const linux: WindowEffectsPlatformInfo = { os: "linux", windowsBuild: null };
 
-		expect(resolveWindowEffect(displayedState("transparent", "auto"), win11)).toBe("mica");
-		// Windows 10 is offered see-through and nothing else, so that is what
-		// `auto` means there.
-		expect(resolveWindowEffect(displayedState("transparent", "auto"), win10)).toBeNull();
-		expect(resolveWindowEffect(displayedState("transparent", "auto"), macos)).toBe(
+		expect(resolveWindowEffect(displayedState("transparent", "mica"), win11)).toBe("mica");
+		expect(resolveWindowEffect(displayedState("transparent", "acrylic"), win11)).toBe("acrylic");
+		expect(resolveWindowEffect(displayedState("transparent", "vibrancy-under-window"), macos)).toBe(
 			"underWindowBackground",
 		);
-		expect(resolveWindowEffect(displayedState("transparent", "auto"), linux)).toBeNull();
+		expect(resolveWindowEffect(displayedState("transparent", "vibrancy-sidebar"), macos)).toBe(
+			"sidebar",
+		);
+		expect(resolveWindowEffect(displayedState("transparent", "mica"), linux)).toBeNull();
 	});
 
 	it("degrades invalid combinations and unknown values to none", () => {
 		const win10: WindowEffectsPlatformInfo = { os: "windows", windowsBuild: 19_045 };
 		const win11: WindowEffectsPlatformInfo = { os: "windows", windowsBuild: 26_100 };
 
+		// Windows 10 is offered see-through and nothing else.
 		expect(resolveWindowEffect(displayedState("transparent", "mica"), win10)).toBeNull();
-		// A value left by an older version, on a Windows that cannot pick it
-		// back: see-through, not an effect nobody can unpick.
-		expect(resolveWindowEffect(displayedState("transparent", "blur"), win10)).toBeNull();
 		expect(resolveWindowEffect(displayedState("transparent", "acrylic"), win10)).toBeNull();
-		expect(resolveWindowEffect(displayedState("transparent", "blur"), win11)).toBeNull();
-		expect(resolveWindowEffect(displayedState("solid", "auto"), win11)).toBeNull();
+		expect(resolveWindowEffect(displayedState("solid", "mica"), win11)).toBeNull();
 		expect(
 			resolveWindowEffect({ mode: "transparent", windowEffect: "shimmer" as WindowEffect }, win11),
 		).toBeNull();
 		expect(
-			resolveWindowEffect({ mode: "garbage" as BackgroundMode, windowEffect: "auto" }, win11),
+			resolveWindowEffect({ mode: "garbage" as BackgroundMode, windowEffect: "mica" }, win11),
 		).toBeNull();
 	});
 });
@@ -97,7 +94,7 @@ describe("useWindowEffects", () => {
 
 	it("clears mica immediately when switching to a cached solid scope (round-5 repro: no fallback timer needed)", async () => {
 		// Scope A: transparent+mica applied.
-		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "auto"));
+		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "mica"));
 		const platformInfo = ref<WindowEffectsPlatformInfo | null>({
 			os: "windows",
 			windowsBuild: 26_100,
@@ -126,7 +123,7 @@ describe("useWindowEffects", () => {
 		// (cascade fetch for B never completes — simulated by never resolving).
 		// useActiveWallpaper already shows B's solid cached state, so displayedEffectState
 		// reflects that immediately — no fallback timer needed, no IPC race.
-		displayed.value = displayedState("solid", "auto");
+		displayed.value = displayedState("solid", "mica");
 		await flushAsync();
 
 		// The contract: displayed solid → desired null → clearEffects called.
@@ -137,7 +134,7 @@ describe("useWindowEffects", () => {
 	// ── Proof test 2: last pane closed ────────────────────────────────────────────────────────────
 
 	it("clears an applied effect when the last pane closes (null/default displayed state)", async () => {
-		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "auto"));
+		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "mica"));
 		const platformInfo = ref<WindowEffectsPlatformInfo | null>({
 			os: "windows",
 			windowsBuild: 26_100,
@@ -163,7 +160,7 @@ describe("useWindowEffects", () => {
 		expect(calls).toEqual(["set:mica"]);
 
 		// Last pane closed: useActiveWallpaper reverts to DEFAULT_PROFILE (backgroundMode "image").
-		displayed.value = displayedState("image", "auto");
+		displayed.value = displayedState("image", "mica");
 		await flushAsync();
 
 		expect(calls).toEqual(["set:mica", "clear"]);
@@ -255,7 +252,7 @@ describe("useWindowEffects", () => {
 		// Generation token ensures the stale async body aborts when desired changes before
 		// the window handle resolves. Because the set never completed, appliedEffect stays
 		// null, so no clearEffects call is needed afterward.
-		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "auto"));
+		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "mica"));
 		const platformInfo = ref<WindowEffectsPlatformInfo | null>({
 			os: "windows",
 			windowsBuild: 26_100,
@@ -293,7 +290,7 @@ describe("useWindowEffects", () => {
 		// Async body is pending (getWindow #1 not yet resolved).
 
 		// displayedEffectState changes to solid → desiredEffect = null, generation bumped.
-		displayed.value = displayedState("solid", "auto");
+		displayed.value = displayedState("solid", "mica");
 		await flushAsync();
 		// Resolve the stale window handle — async body sees runGeneration !== generation → aborts.
 		resolveWindow(win);
@@ -469,7 +466,7 @@ describe("useWindowEffects", () => {
 	});
 
 	it("does not call into Tauri for platform paths that never applied an effect", async () => {
-		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "auto"));
+		const displayed = ref<DisplayedEffectState>(displayedState("transparent", "mica"));
 		const platformInfo = ref<WindowEffectsPlatformInfo | null>({
 			os: "linux",
 			windowsBuild: null,

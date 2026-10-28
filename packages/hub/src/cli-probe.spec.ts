@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cmdStop } from "./cli.js";
+import { identifyRecordedProcess } from "./cli.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:child_process")>();
@@ -9,40 +9,31 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 // ─── Asking who holds a pid, within a bound ──────────────────────────────────
 //
-// A runtime record without an owner token is stopped by signal, after checking
-// that the pid is a hub. On Windows the check is Windows PowerShell querying
-// WMI: 2.5 s idle, 47 s on a loaded CI runner, unbounded if WMI stalls — so
-// `stop` could hang, and a test of it timed out.
+// `status` asks who holds the pid of a hub whose port refuses. On Windows that
+// is Windows PowerShell querying WMI: 2.5 s idle, 47 s on a loaded CI runner,
+// unbounded if WMI stalls.
 
-describe("cmdStop — a probe that does not answer", () => {
+describe("identifyRecordedProcess — a probe that does not answer", () => {
+	const PID = 424_242;
+
 	beforeEach(() => {
 		vi.mocked(execFileSync).mockReset();
 	});
 
-	const legacyRuntime = () => ({
-		kind: "present" as const,
-		runtime: { pid: 424_242, port: 4100, started_at: "2026-06-18T00:00:00.000Z" },
-	});
-
-	it("refuses the signal, as for a command line it could not read", async () => {
+	it("does not know who holds the pid, as for a command line it could not read", () => {
 		vi.mocked(execFileSync).mockImplementation(() => {
 			throw Object.assign(new Error("spawnSync powershell ETIMEDOUT"), { code: "ETIMEDOUT" });
 		});
 
-		await expect(
-			cmdStop({ command: "stop" }, { loadRuntime: legacyRuntime, isPidAlive: () => true }),
-		).rejects.toThrow("Refusing to signal pid 424242: process command line could not be read");
+		expect(identifyRecordedProcess(PID)).toBe("unknown");
 	});
 
-	it("asks with a bound, and without flashing a console", async () => {
+	it("asks with a bound, and without flashing a console", () => {
 		vi.mocked(execFileSync).mockImplementation(() => {
-			throw new Error("not a hub");
+			throw new Error("no such process");
 		});
 
-		await cmdStop(
-			{ command: "stop" },
-			{ loadRuntime: legacyRuntime, isPidAlive: () => true },
-		).catch(() => undefined);
+		identifyRecordedProcess(PID);
 
 		const probe = vi
 			.mocked(execFileSync)

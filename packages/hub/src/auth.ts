@@ -232,10 +232,7 @@ function rowToRecord(row: Record<string, unknown>): AuthTokenRecord {
  * The primary token has no expiry (null) so it behaves like the legacy token.
  *
  * The row follows auth.json, which is where the primary token is retired
- * (SECURITY.md § 2.1), so it is never left revoked. `revokeToken` refuses it,
- * and a revocation an earlier version recorded is cleared here (#515). Kept, it
- * refused the desktop its own hub on every start, and replacing auth.json did
- * not lift it: the new token took over the revoked row.
+ * (SECURITY.md § 2.1): `revokeToken` refuses it (#515).
  */
 export function upsertPrimaryToken(db: Database.Database, plaintextToken: string): void {
 	const hash = hashToken(plaintextToken);
@@ -243,7 +240,7 @@ export function upsertPrimaryToken(db: Database.Database, plaintextToken: string
 	db.prepare(
 		`INSERT INTO auth_tokens (id, token_hash, label, created_at, expires_at, revoked_at, last_used_at)
 		 VALUES (?, ?, 'Primary', ?, NULL, NULL, NULL)
-		 ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, revoked_at = NULL`,
+		 ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash`,
 	).run(PRIMARY_TOKEN_ID, hash, now);
 }
 

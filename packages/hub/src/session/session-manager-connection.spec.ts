@@ -234,7 +234,7 @@ afterEach(async () => {
 });
 
 async function hubWith(
-	options: { daemon: boolean; pinned?: boolean; windowId?: string; legacyPin?: string } = {
+	options: { daemon: boolean; pinned?: boolean; windowId?: string; pin?: string } = {
 		daemon: false,
 	},
 ): Promise<Harness> {
@@ -259,10 +259,10 @@ async function hubWith(
 			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
 		);
 
-	if (options.legacyPin !== undefined)
+	if (options.pin !== undefined)
 		dbManager.meta
 			.prepare("UPDATE hosts SET ssh_fingerprint = ? WHERE id = ?")
-			.run(options.legacyPin, host.id);
+			.run(options.pin, host.id);
 
 	const heard: ProtocolMessage[] = [];
 	const window: WsClient = {
@@ -359,17 +359,11 @@ function sessionOf(h: Harness): SessionState | undefined {
 // ─── Connect ─────────────────────────────────────────────────────────────────
 
 describe("Connect (#648)", { timeout: 20_000 }, () => {
-	it("accepts a padded legacy pin from the database without HOST_VERIFY", async () => {
-		const h = await hubWith({ daemon: false, legacyPin: `${HOST_FINGERPRINT}=` });
-		await connected(h);
-		expect(h.heard.some((m) => m.type === "HOST_VERIFY")).toBe(false);
-	});
-
-	it("reports canonical fingerprints for a different legacy pinned key", async () => {
+	it("reports both fingerprints when the host presents another key than its pin", async () => {
 		const parsed = ssh2.utils.parseKey(rsaPem());
 		if (parsed instanceof Error || Array.isArray(parsed)) throw new Error("invalid key");
 		const old = `SHA256:${createHash("sha256").update(parsed.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
-		const h = await hubWith({ daemon: false, legacyPin: `${old}=` });
+		const h = await hubWith({ daemon: false, pin: old });
 		h.window.send = (msg) => {
 			h.heard.push(msg);
 			if (msg.type === "HOST_VERIFY") {

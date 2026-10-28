@@ -86,14 +86,6 @@ export function nearestHostRailColumns(width: number, size: HostRailBadgeSize): 
 }
 
 /**
- * The column count a width kept by an earlier rail holds (`[layout]
- * host_rail_width`). Those rails had Medium badges only.
- */
-export function hostRailColumnsFromLegacyWidth(width: number): number {
-	return hostRailColumnsForWidth(width, "medium");
-}
-
-/**
  * `items` cut into rows of `columns`, in order: read left to right, then down,
  * the rows give the items back as they came.
  */

@@ -92,7 +92,7 @@ describe("ensureLocalHost", () => {
 		expect(metaDal.listHosts()).toHaveLength(1);
 	});
 
-	it("uses the oldest of several local hosts, deletes none, and says so once (#658)", async () => {
+	it("uses the oldest of several local hosts, and deletes none (#658)", async () => {
 		// As the bug left a profile: the renamed host, then one labelled "local"
 		// created at the next start. Inserted in the other order, so that neither
 		// the label nor the insertion order is what picks.
@@ -108,15 +108,6 @@ describe("ensureLocalHost", () => {
 
 		expect(metaDal.getHost(newer.id)?.type).toBe("local");
 		expect(metaDal.listLocalHosts().map((host) => host.id)).toEqual([renamed.id, newer.id]);
-
-		const reports = log.mock.calls.filter(([, msg]) => String(msg).includes("several local hosts"));
-		expect(reports).toEqual([
-			[
-				"info",
-				"agent-connection-manager: several local hosts, using the oldest",
-				{ hostId: renamed.id, otherHostIds: [newer.id] },
-			],
-		]);
 	});
 
 	it("creates the local host under another label when a remote host holds 'local'", async () => {

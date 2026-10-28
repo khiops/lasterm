@@ -45,7 +45,6 @@ import {
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
-	hostRailColumnsFromLegacyWidth,
 	isAgentLogFilesKept,
 	isHostRailBadgeSize,
 	isHostRailColumns,
@@ -317,9 +316,6 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 	const channelsSection = parsed.channels;
 	if (channelsSection != null && typeof channelsSection === "object") {
 		const raw = channelsSection as Record<string, unknown>;
-		if (typeof raw.default_shell === "string") {
-			config.channels.defaultShell = raw.default_shell;
-		}
 		if (typeof raw.default_group_name === "string" && raw.default_group_name.length > 0) {
 			config.channels.defaultGroupName = raw.default_group_name;
 		}
@@ -393,8 +389,6 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		) {
 			config.search.highlightOnClose = raw.highlight_on_close;
 		}
-		// `scrollbar_markers` here is not a search setting: see
-		// `legacyScrollbarMarkers`, which carries it to [terminal] (#614).
 		if (typeof raw.history_size === "number" && raw.history_size >= 1) {
 			config.search.historySize = raw.history_size;
 		}
@@ -404,11 +398,8 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 	const layoutSection = parsed.layout;
 	if (layoutSection != null && typeof layoutSection === "object") {
 		const raw = layoutSection as Record<string, unknown>;
-		const legacyColumns = legacyHostRailColumns(parsed);
 		if (isHostRailColumns(raw.host_rail_columns)) {
 			config.layout.hostRailColumns = raw.host_rail_columns;
-		} else if (legacyColumns !== undefined) {
-			config.layout.hostRailColumns = legacyColumns;
 		}
 		if (isHostRailBadgeSize(raw.host_rail_badge_size)) {
 			config.layout.hostRailBadgeSize = raw.host_rail_badge_size;
@@ -824,64 +815,6 @@ export function envToToml(value: unknown): unknown {
 	return env;
 }
 
-// ─── [search] scrollbar_markers, carried over to [terminal] (#614) ───────────
-
-/**
- * The choice Settings wrote to `[search] scrollbar_markers` before it moved.
- *
- * Nothing ever read it: the terminals follow `[terminal] scrollbar_markers`,
- * the key Settings writes now. A choice made there is not lost for that. While
- * `[terminal]` says nothing about markers, this one stands as its global value,
- * and the first time Settings writes the terminal key it is removed.
- */
-export function legacyScrollbarMarkers(parsed: TOML.JsonMap): boolean | undefined {
-	const section = parsed.search;
-	if (section == null || typeof section !== "object") return undefined;
-	const value = (section as Record<string, unknown>).scrollbar_markers;
-	return typeof value === "boolean" ? value : undefined;
-}
-
-/** Whether a `config.toml` text still holds that choice. A malformed one does not. */
-function holdsLegacyScrollbarMarkers(toml: string): boolean {
-	try {
-		return legacyScrollbarMarkers(TOML.parse(toml)) !== undefined;
-	} catch {
-		return false;
-	}
-}
-
-// ─── [layout] host_rail_width, read as columns (#623) ────────────────────────
-
-/**
- * The columns held by the width the host rail kept before it had columns,
- * `[layout] host_rail_width` in pixels, of Medium badges.
- *
- * It stands while `host_rail_columns` is not set, and the first time the
- * columns are written it is removed.
- */
-export function legacyHostRailColumns(parsed: TOML.JsonMap): number | undefined {
-	const section = parsed.layout;
-	if (section == null || typeof section !== "object") return undefined;
-	const width = (section as Record<string, unknown>).host_rail_width;
-	return typeof width === "number" && width >= 0
-		? hostRailColumnsFromLegacyWidth(width)
-		: undefined;
-}
-
-/** Whether a `config.toml` text still holds that width. A malformed one does not. */
-function holdsLegacyHostRailWidth(toml: string): boolean {
-	try {
-		const section = TOML.parse(toml).layout;
-		return (
-			section != null &&
-			typeof section === "object" &&
-			(section as Record<string, unknown>).host_rail_width !== undefined
-		);
-	} catch {
-		return false;
-	}
-}
-
 // ─── ConfigResolver ──────────────────────────────────────────────────────────
 
 export class ConfigResolver {
@@ -965,10 +898,9 @@ export class ConfigResolver {
 
 		// ── [terminal] section ──────────────────────────────────────────────
 		const terminalSection = parsed.terminal;
-		const hasTerminal = terminalSection != null && typeof terminalSection === "object";
-		// Separate nested theme_overrides from flat keys
-		const flat: Record<string, unknown> = {};
-		if (hasTerminal) {
+		if (terminalSection != null && typeof terminalSection === "object") {
+			// Separate nested theme_overrides from flat keys
+			const flat: Record<string, unknown> = {};
 			for (const [key, val] of Object.entries(terminalSection as Record<string, unknown>)) {
 				if (key === "theme_overrides" && val !== null && typeof val === "object") {
 					flat.themeOverrides = val as Record<string, string>;
@@ -978,14 +910,6 @@ export class ConfigResolver {
 					flat[snakeToCamel(key)] = val;
 				}
 			}
-		}
-		// The markers choice Settings once wrote under [search] (#614), until
-		// [terminal] makes its own.
-		const legacyMarkers = legacyScrollbarMarkers(parsed);
-		if (legacyMarkers !== undefined && flat.scrollbarMarkers === undefined) {
-			flat.scrollbarMarkers = legacyMarkers;
-		}
-		if (hasTerminal || legacyMarkers !== undefined) {
 			this.fileConfig = flat as Partial<TerminalProfile>;
 		}
 
@@ -1151,15 +1075,9 @@ export class ConfigResolver {
 		if (!(TERMINAL_PROFILE_KEYS as readonly string[]).includes(key)) {
 			throw new Error(`Unknown terminal key: ${key}`);
 		}
-		this.editConfigFile((toml) => {
-			const next = setTomlKey(toml, "terminal", key, key === "env" ? envToToml(value) : value);
-			// The terminal key now speaks for the markers, set or removed: the old
-			// [search] one goes with this write, so that it is carried over once
-			// and never comes back when the terminal key is removed (#614).
-			return key === "scrollbarMarkers" && holdsLegacyScrollbarMarkers(next)
-				? setTomlKey(next, "search", "scrollbarMarkers", null)
-				: next;
-		});
+		this.editConfigFile((toml) =>
+			setTomlKey(toml, "terminal", key, key === "env" ? envToToml(value) : value),
+		);
 	}
 
 	/**
@@ -1188,15 +1106,7 @@ export class ConfigResolver {
 		if (!(UI_CONFIG_SECTIONS as readonly string[]).includes(section)) {
 			throw new Error(`Unknown UI section: ${section}`);
 		}
-		this.editConfigFile((toml) => {
-			const next = setTomlKey(toml, section, key, value);
-			// The columns now speak for the rail's width, set or removed: the old
-			// width in pixels goes with this write, so that it is carried over
-			// once and never comes back when the columns are removed (#623).
-			return section === "layout" && key === "hostRailColumns" && holdsLegacyHostRailWidth(next)
-				? setTomlKey(next, "layout", "hostRailWidth", null)
-				: next;
-		});
+		this.editConfigFile((toml) => setTomlKey(toml, section, key, value));
 	}
 
 	/**

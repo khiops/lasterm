@@ -17,7 +17,6 @@ import { buildDaemonSpawnPlan, DAEMON_LOG_ENV } from "./daemon-launch.js";
 import { STARTUP_UNWIND_TIMEOUT_MS, startHub } from "./hub-startup.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
-import { PreviousInstallationError } from "./previous-installation.js";
 import { openTestDatabases } from "./storage/db.js";
 import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 
@@ -43,54 +42,6 @@ afterEach(() => {
 	}
 });
 
-// The refusal has to belong to the operation that constructs a hub, not to the
-// `start` command handler: the daemon child re-enters through the CLI, `pnpm dev`
-// enters through `main.ts`, and both would otherwise take the new lock and serve
-// alongside a Termora hub that knows nothing about it.
-describe("startHub refuses beside a previous installation", () => {
-	it("throws instead of constructing, and takes no authority on the way out", async () => {
-		const acquireHubLock = vi.fn();
-		const getStateDir = vi.fn(() => "/nonexistent/state");
-		const openDatabases = vi.fn();
-		const createServer = vi.fn();
-
-		await expect(
-			startHub(
-				{ port: 4100 },
-				{
-					describePreviousInstallation: () => "Found a Termora installation.",
-					acquireHubLock,
-					getStateDir,
-					openDatabases,
-					createServer,
-				},
-			),
-		).rejects.toThrow(PreviousInstallationError);
-
-		// The whole point of the ordering: nothing was claimed, opened or created.
-		// If the check ever moves below the lock, this is what notices.
-		expect(acquireHubLock).not.toHaveBeenCalled();
-		expect(getStateDir).not.toHaveBeenCalled();
-		expect(openDatabases).not.toHaveBeenCalled();
-		expect(createServer).not.toHaveBeenCalled();
-	});
-
-	it("carries the description as the error message, since that text is the diagnosis", async () => {
-		const description = "Found a Termora installation. Lasterm will not run beside it:\n  /x/y";
-		await expect(
-			startHub({ port: 4100 }, { describePreviousInstallation: () => description }),
-		).rejects.toThrow(description);
-	});
-
-	it("consults the probe before anything else on every call", async () => {
-		const describePreviousInstallation = vi.fn(() => "Found a Termora installation.");
-		await expect(startHub({ port: 4100 }, { describePreviousInstallation })).rejects.toThrow(
-			PreviousInstallationError,
-		);
-		expect(describePreviousInstallation).toHaveBeenCalledTimes(1);
-	});
-});
-
 describe("startHub token restart sweep", () => {
 	it("leaves no readable runtime record when publication fails after TLS bind", async () => {
 		const stateRoot = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
@@ -101,7 +52,6 @@ describe("startHub token restart sweep", () => {
 				startHub(
 					{},
 					{
-						describePreviousInstallation: () => undefined,
 						getStateDir,
 						getConfigDir: () => getStateDir(),
 						acquireHubLock: () => null as never,
@@ -138,7 +88,6 @@ describe("startHub token restart sweep", () => {
 		await startHub(
 			{ port: 4100 },
 			{
-				describePreviousInstallation: () => undefined,
 				getStateDir: () => stateDir,
 				getConfigDir: () => stateDir,
 				acquireHubLock: () => null as never,
@@ -185,7 +134,6 @@ describe("startHub token restart sweep", () => {
 				},
 			},
 			{
-				describePreviousInstallation: () => undefined,
 				getStateDir: () => stateDir,
 				getConfigDir: () => stateDir,
 				acquireHubLock: () => null as never,
@@ -220,7 +168,6 @@ describe("startHub token restart sweep", () => {
 			await startHub(
 				{ port: 4100, shutdownWhenClosed: stdin },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => stateDir,
 					getConfigDir: () => stateDir,
 					acquireHubLock: () => null as never,
@@ -266,7 +213,6 @@ describe("startHub token restart sweep", () => {
 			startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => stateDir,
 					getConfigDir: () => stateDir,
 					acquireHubLock: () => null as never,
@@ -299,7 +245,6 @@ describe("startHub token restart sweep", () => {
 			startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => stateDir,
 					getConfigDir: () => stateDir,
 					acquireHubLock: () => null as never,
@@ -324,7 +269,6 @@ describe("startHub carries the hub key", () => {
 		return startHub(
 			{ port: 4100, logging: true },
 			{
-				describePreviousInstallation: () => undefined,
 				getStateDir: () => stateDir,
 				getConfigDir: () => stateDir,
 				acquireHubLock: () => null as never,
@@ -409,7 +353,6 @@ describe("startHub carries the directory it locked", () => {
 						},
 					},
 					{
-						describePreviousInstallation: () => undefined,
 						getConfigDir: () => join(root, "config"),
 						acquireHubLock: (dir) => {
 							locked.push(dir);
@@ -464,7 +407,6 @@ describe("startHub carries the directory it locked", () => {
 			await startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => name,
 					getConfigDir: () => name,
 					acquireHubLock: (dir) => {
@@ -534,7 +476,6 @@ describe("startHub bounds the unwind of a failed start", () => {
 					},
 				},
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => stateDir,
 					getConfigDir: () => stateDir,
 					acquireHubLock: () => null as never,
@@ -597,7 +538,6 @@ describe("startHub creates the configuration directory owner-only", () => {
 				await startHub(
 					{ port: 4100 },
 					{
-						describePreviousInstallation: () => undefined,
 						getStateDir: () => stateDir,
 						getConfigDir: () => configDir,
 						acquireHubLock: () => null as never,
@@ -636,7 +576,6 @@ describe("startHub creates the configuration directory owner-only", () => {
 					startHub(
 						{ port: 4100 },
 						{
-							describePreviousInstallation: () => undefined,
 							getStateDir: () => stateDir,
 							getConfigDir: () => configDir,
 							acquireHubLock: () => null as never,
@@ -686,7 +625,6 @@ describe("startHub holds the state directory to 0700", () => {
 				await startHub(
 					{ port: 4100 },
 					{
-						describePreviousInstallation: () => undefined,
 						getStateDir: () => stateDir,
 						getConfigDir: () => join(root, "config"),
 						acquireHubLock: () => {
@@ -741,7 +679,6 @@ describe("startHub records its security events whichever entry point started it"
 		await startHub(
 			{ port: 4100, ...options },
 			{
-				describePreviousInstallation: () => undefined,
 				getStateDir: () => stateDir,
 				getConfigDir: () => stateDir,
 				acquireHubLock: () => null as never,
@@ -806,7 +743,6 @@ describe("startHub and the daemon's log (#525)", () => {
 			await startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => stateDir,
 					getConfigDir: () => stateDir,
 					acquireHubLock: () => {
@@ -849,7 +785,6 @@ describe("startHub and the daemon's log (#525)", () => {
 			startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => "/nonexistent/state",
 					acquireHubLock: () => {
 						throw Object.assign(new Error("Hub already running"), {
@@ -944,7 +879,6 @@ describe("startHub and what its launch set in the environment (#540)", () => {
 			await startHub(
 				{ port: 4100 },
 				{
-					describePreviousInstallation: () => undefined,
 					getStateDir: () => stateDir,
 					getConfigDir: () => stateDir,
 					acquireHubLock: () => null as never,

@@ -71,10 +71,4 @@ describe("validateSshConfigImportEntries", () => {
 			validateSshConfigImportEntries({ entries: [{ name: "a", label: "a", sshRemoteDaemon }] }),
 		).toEqual({ error: "sshRemoteDaemon must be a boolean or null when provided" });
 	});
-
-	it("refuses a non-string host group", () => {
-		expect(
-			validateSshConfigImportEntries({ entries: [{ name: "a", label: "a", hostGroup: 42 }] }),
-		).toEqual({ error: "hostGroup must be a string when provided" });
-	});
 });

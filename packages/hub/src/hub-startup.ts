@@ -23,10 +23,6 @@ import { runLogGc } from "./logging/log-gc.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { openBrowser } from "./open-browser.js";
 import { shutdownWhenStdinCloses } from "./parent-stdin.js";
-import {
-	describePreviousInstallation,
-	PreviousInstallationError,
-} from "./previous-installation.js";
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
 import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 import { forgetStartEnvironment } from "./start-port.js";
@@ -70,7 +66,6 @@ const STANDARD_OUTPUT = {
 export interface HubStartupDependencies {
 	readonly getStateDir: typeof getStateDir;
 	readonly getConfigDir: typeof getConfigDir;
-	readonly describePreviousInstallation: typeof describePreviousInstallation;
 	readonly acquireHubLock: typeof acquireHubLock;
 	/** Returns whether the process's output is now checked against the daemon log's limit. */
 	readonly boundDaemonLog: () => boolean;
@@ -93,7 +88,6 @@ export interface HubStartupDependencies {
 const defaultDependencies: HubStartupDependencies = {
 	getStateDir,
 	getConfigDir,
-	describePreviousInstallation,
 	acquireHubLock,
 	boundDaemonLog: () => boundDaemonLog() !== undefined,
 	initAuth,
@@ -112,17 +106,17 @@ const defaultDependencies: HubStartupDependencies = {
 
 /**
  * How every shipped entry point constructs a hub: the launcher, the daemon child
- * and `main.ts` all arrive here, and none of them can skip the two authority
- * checks below, which is what makes them uniform.
+ * and `main.ts` all arrive here, and none of them can skip the authority check
+ * below, the hub lock, which is what makes them uniform.
  *
  * Not a security boundary, and the difference is worth being exact about. The
- * dependency table is injectable, so in-repository code can pass a probe that
- * says "no previous installation" or a lock that takes nothing; a caller inside
- * this process can therefore construct a hub without either check. That costs
- * nothing to concede: such a caller already runs at this process's privilege
- * and has cheaper ways to do anything the checks prevent. What the checks buy
- * is that no *shipped path* reaches a serving hub without them, and that a new
- * one added later inherits both by default rather than by memory.
+ * dependency table is injectable, so in-repository code can pass a lock that
+ * takes nothing; a caller inside this process can therefore construct a hub
+ * without the check. That costs nothing to concede: such a caller already runs
+ * at this process's privilege and has cheaper ways to do anything the check
+ * prevents. What the check buys is that no *shipped path* reaches a serving hub
+ * without it, and that a new one added later inherits it by default rather than
+ * by memory.
  *
  * The server primitives are held to that by lint rather than by memory: outside
  * the tests this is the only module that may import `server.ts`, and a spec
@@ -138,11 +132,6 @@ export async function startHub(
 	// now. Left in the environment, they would reach the agent this hub spawns,
 	// and every shell after it (#540).
 	forgetStartEnvironment(process.env);
-	// Before a directory is created, a port is bound or the lock is taken. The two
-	// generations share no lock, so this is the only thing standing between them.
-	const previous = dependencies.describePreviousInstallation();
-	if (previous !== undefined) throw new PreviousInstallationError(previous);
-
 	// Resolved once and carried from here on: the lock, the databases, the TLS
 	// identity and the runtime record must all be in the directory locked, and a
 	// second lookup after the awaits below could land elsewhere — a relative path

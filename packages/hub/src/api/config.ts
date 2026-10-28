@@ -43,7 +43,6 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 		keepEnded: (v) => typeof v === "boolean",
 	},
 	channels: {
-		defaultShell: (v) => typeof v === "string",
 		defaultGroupName: (v) => typeof v === "string",
 		autoGroup: (v) => v === "none" || v === "first",
 	},

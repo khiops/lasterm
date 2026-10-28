@@ -212,18 +212,6 @@ export class SecurityLog {
 	}
 
 	/**
-	 * A revocation the hub undid on its own: the primary token's, recorded by a
-	 * version that still allowed it (#515). `revokedAt` is when that revocation
-	 * was made, to set beside whatever else the log holds from that moment.
-	 */
-	tokenReinstated(event: { tokenId: string; revokedAt: string }): void {
-		this.write("token.reinstate", "token reinstated", {
-			tokenId: tokenId(event.tokenId),
-			revokedAt: isoTime(event.revokedAt),
-		});
-	}
-
-	/**
 	 * A request to revoke a credential, whatever became of it: `revoked`;
 	 * `not_found`, no token has that id or it was already revoked; `not_revocable`,
 	 * the primary token, which is retired by replacing auth.json instead (#515).

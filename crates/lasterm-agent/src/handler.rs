@@ -153,7 +153,7 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
     // Its one connection owns every channel: stdio has a single hub, which
     // needs no key to be told apart from others. Stdout is that connection,
     // and what waits to be written to it holds the terminals back (#553).
-    let owner = OwnerId::legacy();
+    let owner = OwnerId::stdio();
     let flows = Flows::default();
     flows.of(&owner).attach(STDIO_CONNECTION);
     let (channel_events, channel_events_rx) = ChannelEventSender::new(flows);
@@ -233,9 +233,10 @@ pub(crate) fn stdio_exit_status(summary: &DestroyAllSummary) -> i32 {
 
 /// Build the HELLO message sent to the hub at connection start.
 ///
-/// A daemon also says `hub-identity`: it reads the AUTH that follows HELLO
-/// even without a token, keeps each hub's channels to that hub, and
-/// understands STOP (#127). Stdio has one hub and nothing to tell apart.
+/// A daemon also says `hub-identity`: it requires the AUTH that follows HELLO,
+/// with or without a token, takes the hub from its key, keeps each hub's
+/// channels to that hub, and understands STOP (#127). Stdio has one hub and
+/// nothing to tell apart.
 pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
     let mut capabilities: Vec<String> = vec![
         "multiplex".into(),
@@ -288,7 +289,8 @@ async fn visible_to(
 /// `owner` is the hub the message came from. A channel is visible only to the
 /// hub that spawned it: INPUT, RESIZE, DESTROY, ATTACH and SNAPSHOT_REQ about
 /// another hub's channel are answered as for one that does not exist. In stdio
-/// mode the single connection is `legacy` and owns everything it spawns.
+/// mode the single connection is the `stdio` owner, and owns everything it
+/// spawns.
 pub(crate) async fn handle_message(
     msg: crate::protocol::HubToAgent,
     owner: &OwnerId,
@@ -365,7 +367,7 @@ pub(crate) async fn handle_message(
                 args.unwrap_or_default(),
                 cwd,
                 SpawnEnvironment {
-                    mode: EnvMode::parse(env_mode.as_deref()),
+                    mode: EnvMode::parse(Some(&env_mode)),
                     unset: env_unset.unwrap_or_default(),
                     env,
                     login_shell: login_shell.unwrap_or(false),
@@ -1292,7 +1294,7 @@ mod restart_identity_tests {
             .lock()
             .await
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 Some(channel_id.to_owned()),
                 test_shell(),
                 &[],
@@ -1379,7 +1381,7 @@ mod stdio_tests {
 
         handle_message(
             crate::protocol::HubToAgent::Stop { force: true },
-            &OwnerId::legacy(),
+            &OwnerId::stdio(),
             manager,
             frame_tx,
             channel_events,
@@ -1429,7 +1431,7 @@ mod stdio_tests {
                 request_id: "env-1".into(),
                 mode: Some("minimal".into()),
             },
-            &OwnerId::legacy(),
+            &OwnerId::stdio(),
             Arc::new(Mutex::new(PtyManager::new())),
             frame_tx,
             channel_events,
@@ -1663,7 +1665,7 @@ mod stdio_tests {
             None,
             None,
             None,
-            OwnerId::legacy(),
+            OwnerId::stdio(),
             Arc::clone(&manager),
             frame_tx,
             channel_events,
@@ -1732,7 +1734,7 @@ mod stdio_tests {
             None,
             None,
             None,
-            OwnerId::legacy(),
+            OwnerId::stdio(),
             Arc::clone(&manager),
             frame_tx,
             channel_events,
@@ -1782,7 +1784,7 @@ mod tests {
             .lock()
             .await
             .spawn(
-                OwnerId::legacy(),
+                OwnerId::stdio(),
                 Some(channel_id.to_owned()),
                 "/bin/sh",
                 &["-c".to_owned(), "sleep 30".to_owned()],
@@ -1810,7 +1812,7 @@ mod tests {
             crate::protocol::HubToAgent::Destroy {
                 channel_id: channel_id.to_owned(),
             },
-            &OwnerId::legacy(),
+            &OwnerId::stdio(),
             Arc::clone(&manager),
             frame_tx.clone(),
             channel_events.clone(),
@@ -1878,7 +1880,7 @@ mod tests {
             None,
             None,
             None,
-            OwnerId::legacy(),
+            OwnerId::stdio(),
             manager,
             frame_tx,
             channel_events,

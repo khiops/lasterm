@@ -962,6 +962,8 @@ function runtimeRecord(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
 		port: 456,
 		started_at: "2026-08-03T00:00:00.000Z",
 		instanceId: "target",
+		ownerToken: "a".repeat(64),
+		spki: "not-a-key",
 		...overrides,
 	};
 }

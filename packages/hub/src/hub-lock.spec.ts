@@ -77,9 +77,6 @@ describe.sequential("hub startup lock", () => {
 				{
 					getStateDir: () => stateDir,
 					getConfigDir: () => path.join(stateDir, "config"),
-					// This exercises the lock, not the previous-installation probe, whose real
-					// answer depends on whether the machine running the suite ever had Termora.
-					describePreviousInstallation: () => undefined,
 					acquireHubLock: (dir) =>
 						acquireHubLock(dir, { loadAddon: () => malformedAddon as never }),
 					openDatabases: (() => {
@@ -147,9 +144,6 @@ describe.sequential("hub startup lock", () => {
 				{
 					getStateDir: () => stateDir,
 					getConfigDir: () => path.join(stateDir, "config"),
-					// This exercises the lock, not the previous-installation probe, whose real
-					// answer depends on whether the machine running the suite ever had Termora.
-					describePreviousInstallation: () => undefined,
 					acquireHubLock: () => ({ path: path.join(stateDir, "hub.lock") }) as never,
 					initAuth: () => "token",
 					createOwnerToken: () => "owner",
@@ -451,10 +445,8 @@ function waitForListening(stateDir: string, child: ChildProcess): Promise<number
  * Both roots a spawned hub reads, from one temporary directory.
  *
  * One helper rather than two, because redirecting only the state root leaves the
- * child reading the real config home: a machine that once ran Termora then has a
- * previous installation in view, and `startHub` refuses before it ever reaches the
- * lock these tests are about. That is the refusal working, and a test must not be
- * able to ask for half of a hermetic environment.
+ * child reading the real config home, and a test must not be able to ask for half
+ * of a hermetic environment.
  */
 function hermeticRootsEnv(root: string): NodeJS.ProcessEnv {
 	const configRoot = path.join(root, "config");

@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.fixture.js";
@@ -388,83 +386,6 @@ describe("meta.db never holds a pairing code", () => {
 		} finally {
 			await hub?.close();
 			disk.close();
-			removeDataDir(dir);
-		}
-	});
-});
-
-// ─── Upgrading from plain-text codes (migration 020) ──────────────────────────
-
-const META_MIGRATIONS = fileURLToPath(new URL("../storage/migrations/meta", import.meta.url));
-
-/** Apply the meta migrations up to `version`, as the hub's runner does: a hub of that schema. */
-function migrateMetaTo(db: Database.Database, version: number): void {
-	const files = fs
-		.readdirSync(META_MIGRATIONS)
-		.filter((file) => /^\d{3}-.*\.sql$/.test(file))
-		.sort();
-	for (const file of files) {
-		const num = Number.parseInt(file.slice(0, 3), 10);
-		if (num > version) break;
-		db.transaction(() => {
-			db.exec(fs.readFileSync(path.join(META_MIGRATIONS, file), "utf-8"));
-			const { v } = db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as {
-				v: number | null;
-			};
-			if ((v ?? 0) < num) {
-				db.prepare(
-					"INSERT INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
-				).run(num);
-			}
-		})();
-	}
-}
-
-describe("an upgrade from a hub that stored pairing codes in plain text", () => {
-	it("drops the stored codes, so one still live no longer pairs, and new codes pair", async () => {
-		const LIVE = "31415926";
-		const REDEEMED = "27182818";
-		const dir = makeDataDir();
-		// meta.db as a hub before #521 left it: schema 19, one code live and one
-		// redeemed, both in plain text.
-		const before = new Database(path.join(dir, "meta.db"));
-		migrateMetaTo(before, 19);
-		const now = new Date();
-		const inAMinute = new Date(now.getTime() + 60_000).toISOString();
-		const insert = before.prepare(
-			"INSERT INTO pairing_codes (id, code, created_at, expires_at, used) VALUES (?, ?, ?, ?, ?)",
-		);
-		insert.run("01K5ZC0000000000000000PA1R", LIVE, now.toISOString(), inAMinute, 0);
-		insert.run("01K5ZC0000000000000000PA2R", REDEEMED, now.toISOString(), inAMinute, 1);
-		before.close();
-
-		const upgraded = openDatabases(dir);
-		let hub: FastifyInstance | undefined;
-		try {
-			const columns = upgraded.meta.prepare("PRAGMA table_info(pairing_codes)").all() as Array<{
-				name: string;
-			}>;
-			expect(columns.map((column) => column.name)).toEqual([
-				"id",
-				"code_hash",
-				"created_at",
-				"expires_at",
-				"used",
-				"used_at",
-				"used_by_ip",
-			]);
-			expect(upgraded.meta.prepare("SELECT * FROM pairing_codes").all()).toEqual([]);
-
-			hub = await startHub(upgraded);
-			const stale = await verifyCode(LIVE, hub);
-			expect(stale.statusCode).toBe(404);
-			expect(stale.json<{ error: { code: string } }>().error.code).toBe("CODE_NOT_FOUND");
-
-			const { code } = (await generateCode(hub)).json<{ code: string }>();
-			expect((await verifyCode(code, hub)).statusCode).toBe(200);
-		} finally {
-			await hub?.close();
-			upgraded.close();
 			removeDataDir(dir);
 		}
 	});

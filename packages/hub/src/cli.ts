@@ -38,6 +38,7 @@ import {
 	HUB_TLS_HANDSHAKE_TIMEOUT_CODE,
 	HUB_TLS_PIN_MISMATCH_CODE,
 	HubRuntimeUnusableError,
+	type HubTlsRuntime,
 } from "./hub-transport.js";
 import { detectSea } from "./sea-addon-loader.js";
 import {
@@ -96,10 +97,11 @@ export interface RuntimeInfo {
 	port: number;
 	started_at: string;
 	/** Unique per hub process; prevents a quit waiter mistaking a replacement for its target. */
-	instanceId?: string;
-	ownerToken?: string;
+	instanceId: string;
+	/** What `/api/shutdown` and `/api/quit` require: only the hub's own OS user can read it here. */
+	ownerToken: string;
 	/** Base64 DER SubjectPublicKeyInfo for the TLS identity serving this port. */
-	spki?: string;
+	spki: string;
 }
 
 const HUB_QUIT_OBSERVE_TIMEOUT_MS = 15_000;
@@ -153,19 +155,9 @@ function createRuntimeTempPath(runtimePath: string): string {
 	throw new Error(`Could not allocate a unique temp file beside ${runtimePath}`);
 }
 
-/**
- * Legacy records have no instanceId. They match only another legacy record with
- * every persisted identity field equal; a modern replacement can never match it.
- */
+/** Whether two records are the same hub process's: its instanceId is unique to it. */
 export function runtimeMatches(expected: RuntimeInfo, current: RuntimeInfo): boolean {
-	if (expected.instanceId !== undefined) return current.instanceId === expected.instanceId;
-	return (
-		current.instanceId === undefined &&
-		current.pid === expected.pid &&
-		current.port === expected.port &&
-		current.started_at === expected.started_at &&
-		current.ownerToken === expected.ownerToken
-	);
+	return current.instanceId === expected.instanceId;
 }
 
 /**
@@ -209,21 +201,11 @@ export function isPidAlive(pid: number): boolean {
 	}
 }
 
-function assertHubProcessIdentity(pid: number): void {
-	const command = readProcessCommandLine(pid);
-	if (command !== null && commandLooksLikeLastermHub(command)) return;
-
-	const detail =
-		command === null ? "process command line could not be read" : summarizeCommand(command);
-	throw new Error(`Refusing to signal pid ${pid}: ${detail}`);
-}
-
 /**
  * How a process's command line is asked for. On Windows that is Windows
  * PowerShell starting and querying WMI: 2.5 s on an idle machine, 47 s on a
  * loaded CI runner, and without a bound, for as long as WMI cares to take. A
- * probe that has not answered is a command line that could not be read, which
- * already refuses the signal: failing closed, sooner.
+ * probe that has not answered is a command line that could not be read.
  */
 const PROCESS_PROBE_OPTIONS = { encoding: "utf8", timeout: 10_000, windowsHide: true } as const;
 
@@ -258,21 +240,6 @@ function readProcessCommandLine(pid: number): string | null {
 	}
 }
 
-function commandLooksLikeLastermHub(command: string): boolean {
-	const normalized = command.toLowerCase();
-	return (
-		normalized.includes("lasterm-hub") ||
-		normalized.includes("lasterm_hub") ||
-		normalized.includes("@lasterm/hub") ||
-		normalized.includes("packages/hub/src") ||
-		normalized.includes("packages\\hub\\src")
-	);
-}
-
-function summarizeCommand(command: string): string {
-	return command.length > 160 ? `${command.slice(0, 157)}...` : command;
-}
-
 /**
  * What holds a recorded pid now: a process that may be a hub, one that cannot
  * be, or one whose command line could not be read (another user's process on
@@ -281,13 +248,10 @@ function summarizeCommand(command: string): string {
 export type RecordedProcess = "hub" | "other" | "unknown";
 
 /**
- * Tell a hub from a program that took its pid after it died (#540). This is the
- * probe `stop` runs before it signals a recorded pid, with the verdict the other
- * way round. `stop` signals only a command line that looks like a hub's, since a
- * wrong yes would kill another program. Here a wrong no would call a hub that is
- * stopping gone, so only a command line naming nothing of Lasterm counts as
- * another program. That also admits the entry points the stop check does not
- * know: `bin/lasterm.js start` and the daemon child `packages/hub/dist/main.js`.
+ * Tell a hub from a program that took its pid after it died (#540). A wrong no
+ * would call a hub that is stopping gone, so only a command line naming nothing
+ * of Lasterm counts as another program, whatever entry point started it:
+ * `bin/lasterm.js start` and the daemon child `packages/hub/dist/main.js` too.
  * `pnpm dev` runs `tsx src/main.ts`, named only by tsx's path under the checkout,
  * so it counts when that path says lasterm.
  *
@@ -410,7 +374,7 @@ function unansweredHubRequest(method: string, path: string, timeoutMs: number): 
 	);
 }
 
-function hubUrl(runtime: RuntimeInfo, path: string): URL {
+function hubUrl(runtime: HubTlsRuntime, path: string): URL {
 	// A port the record cannot mean is the record's fault, like a missing key.
 	// Left to the URL parser, it failed as though the connection had.
 	if (!Number.isInteger(runtime.port) || runtime.port < 1 || runtime.port > 65535) {
@@ -425,7 +389,7 @@ function hubUrl(runtime: RuntimeInfo, path: string): URL {
  * `responseTimeoutMs`, counted from the moment the peer proved the recorded key.
  */
 export async function requestHub(
-	runtime: RuntimeInfo,
+	runtime: HubTlsRuntime,
 	path: string,
 	init: HubRequestInit = {},
 ): Promise<Response> {
@@ -944,9 +908,6 @@ function printAgentStatusTable(
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
 export async function cmdStart(args: ParsedArgs): Promise<void> {
-	// A previous installation is refused by `startHub`, not here: the check belongs
-	// to the operation that constructs a hub, so the daemon child and `pnpm dev`
-	// cannot reach it by another door. This handler only renders the refusal.
 	const { resolveStartPort } = await import("./start-port.js");
 	const port = resolveStartPort(args.port, process.env.LASTERM_PORT);
 
@@ -1034,30 +995,19 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 	// server lifecycle, so this path cannot diverge from daemon startup.
 	const { startHub } = await import("./hub-startup.js");
 	const { BUILD_HASH } = await import("./build-version.js");
-	const { PreviousInstallationError } = await import("./previous-installation.js");
-	try {
-		await startHub({
-			...(port !== undefined ? { port } : {}),
-			openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
-			...(args.exitWithStdin ? { shutdownWhenClosed: process.stdin } : {}),
-			announce: ({ address, spki, configDir, stateDir }) => {
-				// This line is consumed by the desktop parent from the child's stdout.
-				// Unlike runtime.json, another process cannot replace that pipe, so it is
-				// the first-use anchor for the desktop's hub SPKI pin.
-				console.log(`lasterm hub listening on ${address} (spki: ${spki}) (build: ${BUILD_HASH})`);
-				console.log(`Config dir : ${configDir}`);
-				console.log(`State dir  : ${stateDir}`);
-			},
-		});
-	} catch (err) {
-		// A refusal is a diagnosis, not a crash: print what it found, not a stack.
-		if (err instanceof PreviousInstallationError) {
-			console.error(err.message);
-			process.exitCode = 1;
-			return;
-		}
-		throw err;
-	}
+	await startHub({
+		...(port !== undefined ? { port } : {}),
+		openBrowser: args.open === true || process.env.LASTERM_OPEN === "1",
+		...(args.exitWithStdin ? { shutdownWhenClosed: process.stdin } : {}),
+		announce: ({ address, spki, configDir, stateDir }) => {
+			// This line is consumed by the desktop parent from the child's stdout.
+			// Unlike runtime.json, another process cannot replace that pipe, so it is
+			// the first-use anchor for the desktop's hub SPKI pin.
+			console.log(`lasterm hub listening on ${address} (spki: ${spki}) (build: ${BUILD_HASH})`);
+			console.log(`Config dir : ${configDir}`);
+			console.log(`State dir  : ${stateDir}`);
+		},
+	});
 }
 
 export async function cmdStop(
@@ -1089,44 +1039,37 @@ export async function cmdStop(
 		return;
 	}
 
-	if (runtime.ownerToken) {
-		try {
-			const force = args.force === true ? "?force=1" : "";
-			const res = await requestHub(runtime, `/api/shutdown${force}`, {
-				method: "POST",
-				headers: {
-					"X-Lasterm-Owner": runtime.ownerToken,
-				},
-				signal: AbortSignal.timeout(2_000),
-			});
-			if (res.ok) {
-				console.log(`Requested graceful hub shutdown (pid ${runtime.pid})`);
-				return;
-			}
-			if (res.status === 409) {
-				const body = (await res.json().catch(() => ({}))) as { others?: number };
-				const others = typeof body.others === "number" ? body.others : "other";
-				console.error(
-					`Hub has ${others} other connected client(s); rerun with --force to stop anyway.`,
-				);
-				process.exit(1);
-			}
-			throw new Error(`HTTP ${res.status}`);
-		} catch (err) {
-			if (!alive(runtime.pid)) {
-				console.log(`Hub process stopped before shutdown confirmation (pid ${runtime.pid})`);
-				return;
-			}
-			const message = err instanceof Error ? err.message : String(err);
-			throw new Error(
-				`Graceful shutdown request failed; refusing SIGTERM fallback for owner-token hub: ${message}`,
-			);
+	try {
+		const force = args.force === true ? "?force=1" : "";
+		const res = await requestHub(runtime, `/api/shutdown${force}`, {
+			method: "POST",
+			headers: {
+				"X-Lasterm-Owner": runtime.ownerToken,
+			},
+			signal: AbortSignal.timeout(2_000),
+		});
+		if (res.ok) {
+			console.log(`Requested graceful hub shutdown (pid ${runtime.pid})`);
+			return;
 		}
+		if (res.status === 409) {
+			const body = (await res.json().catch(() => ({}))) as { others?: number };
+			const others = typeof body.others === "number" ? body.others : "other";
+			console.error(
+				`Hub has ${others} other connected client(s); rerun with --force to stop anyway.`,
+			);
+			process.exit(1);
+		}
+		throw new Error(`HTTP ${res.status}`);
+	} catch (err) {
+		if (!alive(runtime.pid)) {
+			console.log(`Hub process stopped before shutdown confirmation (pid ${runtime.pid})`);
+			return;
+		}
+		const message = err instanceof Error ? err.message : String(err);
+		// No signal instead: the owner token is the only way to stop a hub.
+		throw new Error(`Graceful shutdown request failed; the hub is still running: ${message}`);
 	}
-
-	assertHubProcessIdentity(runtime.pid);
-	process.kill(runtime.pid, "SIGTERM");
-	console.log(`Sent SIGTERM to hub (pid ${runtime.pid})`);
 }
 
 /** Stop the validated local agent and then the hub. Unlike `stop`, sessions do not survive. */
@@ -1135,7 +1078,7 @@ export async function cmdQuit(
 		loadRuntime?: () => RuntimeLoadResult;
 		isPidAlive?: (pid: number) => boolean;
 		fetch?: typeof fetch;
-		waitForHubQuit?: (target: Required<Pick<RuntimeInfo, "pid" | "instanceId">>) => Promise<void>;
+		waitForHubQuit?: (target: Pick<RuntimeInfo, "pid" | "instanceId">) => Promise<void>;
 		isInteractive?: () => boolean;
 		/** `null` when the hub refused without saying how many clients are connected. */
 		confirmQuit?: (others: number | null) => Promise<boolean>;
@@ -1160,12 +1103,6 @@ export async function cmdQuit(
 		deleteRuntime(runtime);
 		throw new Error("Hub process is gone");
 	}
-	if (!runtime.ownerToken) {
-		throw new Error("Hub runtime has no owner token; refusing unauthenticated quit");
-	}
-	if (!runtime.instanceId) {
-		throw new Error("Hub runtime has no instance identity; refusing an unobservable quit");
-	}
 	const target = { pid: runtime.pid, instanceId: runtime.instanceId };
 
 	// Sending the request commits the hub: it may latch, stop the agent and exit
@@ -1176,7 +1113,7 @@ export async function cmdQuit(
 		try {
 			const init = {
 				method: "POST",
-				headers: { "X-Lasterm-Owner": runtime.ownerToken as string },
+				headers: { "X-Lasterm-Owner": runtime.ownerToken },
 				signal: AbortSignal.timeout(HUB_QUIT_OBSERVE_TIMEOUT_MS),
 				// The answer comes after the stopper, which may take longer than an
 				// ordinary request; this keeps the bound quit already had.
@@ -1321,7 +1258,7 @@ async function confirmQuit(others: number | null): Promise<boolean> {
  * sufficient: a different runtime instance is an explicit non-success.
  */
 export async function waitForHubQuit(
-	target: Required<Pick<RuntimeInfo, "pid" | "instanceId">>,
+	target: Pick<RuntimeInfo, "pid" | "instanceId">,
 	options: {
 		loadRuntime?: () => RuntimeLoadResult;
 		isPidAlive?: (pid: number) => boolean;
@@ -1347,11 +1284,7 @@ export async function waitForHubQuit(
 				`Hub teardown could not be confirmed because runtime.json cannot be read: ${describeRuntimeReadFailure(current.error)}`,
 			);
 		}
-		if (
-			current.kind === "present" &&
-			current.runtime.instanceId !== undefined &&
-			current.runtime.instanceId !== target.instanceId
-		) {
+		if (current.kind === "present" && current.runtime.instanceId !== target.instanceId) {
 			throw new Error("Hub quit target exited, but runtime.json now belongs to a replacement hub");
 		}
 		if (current.kind === "absent" && !alive(target.pid)) {
@@ -1364,11 +1297,7 @@ export async function waitForHubQuit(
 					`Hub teardown could not be confirmed because runtime.json cannot be read: ${describeRuntimeReadFailure(current.error)}`,
 				);
 			}
-			if (
-				current.kind === "present" &&
-				current.runtime.instanceId !== undefined &&
-				current.runtime.instanceId !== target.instanceId
-			) {
+			if (current.kind === "present" && current.runtime.instanceId !== target.instanceId) {
 				throw new Error(
 					"Hub quit target exited, but runtime.json now belongs to a replacement hub",
 				);

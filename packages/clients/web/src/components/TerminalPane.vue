@@ -983,7 +983,7 @@ watch(
 );
 
 // Re-apply profile when the per-terminal resolved profile updates.
-// useResolvedProfile fetches /api/config/resolved?host_id=X&channel_id=Y and
+// useResolvedProfile fetches /api/config/cascade?host_id=X&channel_id=Y and
 // re-fetches on relevant ProfileChangeEvents so each terminal reacts to its own overrides.
 watch(
 	resolvedProfile,

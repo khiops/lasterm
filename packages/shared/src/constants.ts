@@ -77,9 +77,7 @@ export const ErrorCode = {
 	SHELL_NOT_FOUND: "SHELL_NOT_FOUND",
 	PERMISSION_DENIED: "PERMISSION_DENIED",
 	PTY_SPAWN_FAILED: "PTY_SPAWN_FAILED",
-	CHANNEL_LIMIT: "CHANNEL_LIMIT",
 	INVALID_MESSAGE: "INVALID_MESSAGE",
-	VERSION_MISMATCH: "VERSION_MISMATCH",
 	/** Agent: a newer connection of this same hub took this one's place. */
 	DISPLACED: "DISPLACED",
 	/** Agent: a STOP without `force`, refused while other hubs hold channels there (#127). */

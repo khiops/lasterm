@@ -75,7 +75,7 @@ TypeScript library used by hub, agent, and UI.
 - MessagePack codec: encode/decode with Uint8Array support
 - Frame encoder/decoder: 4-byte LE length prefix + MessagePack payload
 - Config types (theme, keybindings, profile)
-- Entity types (Host, Session, Channel, Workspace, ChannelGroup)
+- Entity types (Host, Session, Channel, ChannelGroup)
 - Constants (protocol version, default port, default config values)
 
 ### 3.2 Agent (`crates/lasterm-agent`)
@@ -568,13 +568,6 @@ LaunchProfile (reusable spawn template)
  ├── color?: string
  ├── profileOverrides?: Partial<TerminalProfile>
  ├── sortOrder: number
- ├── createdAt: string                 // ISO 8601
- └── updatedAt: string
-
-Workspace (layout persistence)
- ├── id: string (ULID)
- ├── name: string (unique)
- ├── layoutJson: string                // JSON-encoded TabLayout
  ├── createdAt: string                 // ISO 8601
  └── updatedAt: string
 
@@ -1202,7 +1195,7 @@ lasterm/
 │   │       ├── codec.ts     # MessagePack encode/decode + snake_case↔camelCase
 │   │       ├── framing.ts   # Length-prefixed frame encoder/decoder
 │   │       ├── config.ts    # Config types (TerminalProfile, TabLayout) + deep merge
-│   │       ├── entities.ts  # Host, Session, Channel, Workspace, ChannelGroup
+│   │       ├── entities.ts  # Host, Session, Channel, ChannelGroup
 │   │       ├── constants.ts # Protocol version, defaults, error codes
 │   │       ├── platform-dirs.ts # Where state, config and cache live (§ 7)
 │   │       ├── socket-path.ts # getSocketPath(override?) + probeSocket(path) for UDS

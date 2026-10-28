@@ -78,7 +78,7 @@ export function requestDaemonStop(
 				finish({
 					kind: "refused",
 					message,
-					otherOwnerChannels: countInRefusal(error, agent),
+					otherOwnerChannels: countInRefusal(error),
 				});
 				return;
 			}
@@ -112,14 +112,12 @@ export function requestDaemonStop(
 }
 
 /**
- * How many channels other hubs hold, from a refusal: its own
- * `other_owner_channels`, which the agent sends for exactly this, else the
- * count the daemon gave when this connection opened, which may be older but
- * is the daemon's own.
+ * How many channels other hubs hold, from a refusal's own
+ * `other_owner_channels`, which every agent sends with it (#552); null when
+ * it is not a count. Never read out of the message.
  */
-function countInRefusal(error: ErrorMessage, agent: AgentConnection): number | null {
-	if (isCount(error.otherOwnerChannels)) return error.otherOwnerChannels;
-	return agent.otherOwnerChannels ?? null;
+function countInRefusal(error: ErrorMessage): number | null {
+	return isCount(error.otherOwnerChannels) ? error.otherOwnerChannels : null;
 }
 
 /** A count the hub can show: a whole number, not negative. */

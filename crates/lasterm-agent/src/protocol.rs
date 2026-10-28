@@ -253,6 +253,11 @@ pub mod error_codes {
     /// A STOP without `force` was refused: other hubs hold channels on this
     /// agent, and stopping it would end them (#127).
     pub const OTHER_HUBS_HOLD_CHANNELS: &str = "OTHER_HUBS_HOLD_CHANNELS";
+    /// An INPUT was dropped: its terminal takes no input, and the input
+    /// queued for it is at its bound. Every INPUT to that channel is dropped
+    /// until the terminal has taken what is queued; this is said once, for
+    /// the first, with the channel's id (#740).
+    pub const INPUT_DROPPED: &str = "INPUT_DROPPED";
 }
 
 #[cfg(test)]

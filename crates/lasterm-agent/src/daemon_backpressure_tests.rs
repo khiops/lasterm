@@ -17,7 +17,7 @@ use crate::away::{AWAY_BYTES_PER_CHANNEL as AWAY_PER_CHANNEL, AWAY_BYTES_PER_HUB
 
 /// Marks far below the daemon's, so that a test needs little output to reach
 /// them.
-const TEST_MARKS: Marks = Marks {
+pub(super) const TEST_MARKS: Marks = Marks {
     high: 64 * 1024,
     low: 16 * 1024,
 };
@@ -65,16 +65,16 @@ const STREAM_BUFFER: usize = 16 * 1024;
 /// between a PTY and a hub that reads nothing (the marks, the stream, the PTY's
 /// own buffers, and up to 256 KiB in ConPTY's pump on Windows).
 const LINES: usize = 128 * 1024;
-const DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const DEADLINE: Duration = Duration::from_secs(60);
 /// How long a terminal is watched between two looks at its screen, while its
 /// hub reads nothing.
 const HOLD: Duration = Duration::from_millis(1000);
 
-const KEY_A: &str = "backpressure-hub-a";
+pub(super) const KEY_A: &str = "backpressure-hub-a";
 const KEY_B: &str = "backpressure-hub-b";
 
 /// A directory of its own for a test's files.
-fn scratch(label: &str) -> PathBuf {
+pub(super) fn scratch(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "lasterm-backpressure-{label}-{}",
         ulid::Ulid::generate().to_string().to_lowercase()
@@ -84,7 +84,7 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 /// A file of `LINES` numbered lines, 1 to LINES, seven digits each.
-fn numbered_file(dir: &Path) -> PathBuf {
+pub(super) fn numbered_file(dir: &Path) -> PathBuf {
     let path = dir.join("numbers.txt");
     let mut text = String::with_capacity(LINES * 8);
     for n in 1..=LINES {
@@ -95,7 +95,7 @@ fn numbered_file(dir: &Path) -> PathBuf {
 }
 
 /// SPAWN a shell running `command` and ending with it.
-fn spawn_running(channel_id: &str, command: &str) -> HubToAgent {
+pub(super) fn spawn_running(channel_id: &str, command: &str) -> HubToAgent {
     let (shell, run) = if cfg!(windows) {
         ("cmd.exe", "/C")
     } else {
@@ -109,7 +109,7 @@ fn spawn_running(channel_id: &str, command: &str) -> HubToAgent {
 }
 
 /// SPAWN an interactive shell, which waits for what it is typed.
-fn spawn_interactive(channel_id: &str) -> HubToAgent {
+pub(super) fn spawn_interactive(channel_id: &str) -> HubToAgent {
     let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
     spawn_shell(channel_id, shell, None)
 }
@@ -151,7 +151,7 @@ fn print_then_mark(numbers: &Path, done: &Path) -> String {
 
 /// SPAWN a shell that prints the numbered file in the background, then
 /// `done`, while the shell itself waits for a line and writes it to `typed`.
-fn print_meanwhile_read_a_line(
+pub(super) fn print_meanwhile_read_a_line(
     channel_id: &str,
     numbers: &Path,
     done: &Path,
@@ -180,7 +180,7 @@ fn print_meanwhile_read_a_line(
 }
 
 /// SPAWN a shell that waits for a line and writes it to `typed`.
-fn read_a_line(channel_id: &str, typed: &Path) -> HubToAgent {
+pub(super) fn read_a_line(channel_id: &str, typed: &Path) -> HubToAgent {
     if cfg!(windows) {
         let command = format!("set /p line= & echo !line!> {}", typed.display());
         let args = vec!["/V:ON".to_string(), "/C".to_string(), command];
@@ -204,7 +204,7 @@ fn prints(text: &str) -> Vec<u8> {
     }
 }
 
-fn input(channel_id: &str, data: Vec<u8>) -> HubToAgent {
+pub(super) fn input(channel_id: &str, data: Vec<u8>) -> HubToAgent {
     HubToAgent::Input {
         channel_id: channel_id.to_string(),
         data,
@@ -212,7 +212,7 @@ fn input(channel_id: &str, data: Vec<u8>) -> HubToAgent {
 }
 
 /// What a terminal shows of these bytes: its escape sequences left out.
-fn visible(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn visible(bytes: &[u8]) -> Vec<u8> {
     let mut shown = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -260,7 +260,7 @@ fn numbers_shown(output: &[u8]) -> Vec<usize> {
 }
 
 /// The hub's end of an in-memory connection to the daemon.
-struct TestHub {
+pub(super) struct TestHub {
     stream: DuplexStream,
     received: Vec<u8>,
     _handler: tokio::task::JoinHandle<()>,
@@ -268,7 +268,7 @@ struct TestHub {
 
 impl TestHub {
     /// Connect as the hub `key` names, and read up to CHANNEL_STATE_END.
-    async fn connect(daemon: &DaemonShared, key: &str, connection_id: u64) -> Self {
+    pub(super) async fn connect(daemon: &DaemonShared, key: &str, connection_id: u64) -> Self {
         let (client, server) = tokio::io::duplex(STREAM_BUFFER);
         let handler = tokio::spawn(handle_connection_inner(
             server,
@@ -291,9 +291,14 @@ impl TestHub {
         hub
     }
 
-    async fn send(&mut self, msg: &HubToAgent) {
+    pub(super) async fn send(&mut self, msg: &HubToAgent) {
+        self.send_within(msg, DEADLINE).await;
+    }
+
+    /// Send, and fail unless the daemon has read it within `limit`.
+    pub(super) async fn send_within(&mut self, msg: &HubToAgent, limit: Duration) {
         let frame = encode_frame(msg).expect("encode a hub frame");
-        tokio::time::timeout(DEADLINE, self.stream.write_all(&frame))
+        tokio::time::timeout(limit, self.stream.write_all(&frame))
             .await
             .expect("the daemon reads what its hub sends, however full its output is")
             .expect("write to the daemon");
@@ -301,7 +306,7 @@ impl TestHub {
 
     /// The next frame. Cancelling it loses nothing: a partial frame stays in
     /// `received`.
-    async fn next_frame(&mut self) -> rmpv::Value {
+    pub(super) async fn next_frame(&mut self) -> rmpv::Value {
         loop {
             if self.received.len() >= 4 {
                 let len = u32::from_le_bytes(self.received[..4].try_into().unwrap()) as usize;
@@ -325,7 +330,10 @@ impl TestHub {
 
     /// Read up to the first frame `last` accepts, and return every frame read,
     /// that one included.
-    async fn read_through(&mut self, last: impl Fn(&rmpv::Value) -> bool) -> Vec<rmpv::Value> {
+    pub(super) async fn read_through(
+        &mut self,
+        last: impl Fn(&rmpv::Value) -> bool,
+    ) -> Vec<rmpv::Value> {
         let mut frames = Vec::new();
         loop {
             let frame = tokio::time::timeout(DEADLINE, self.next_frame())
@@ -345,7 +353,7 @@ impl TestHub {
     }
 
     /// SPAWN, and read up to its SPAWN_OK.
-    async fn spawn(&mut self, spawn: HubToAgent) {
+    pub(super) async fn spawn(&mut self, spawn: HubToAgent) {
         let HubToAgent::Spawn {
             channel_id: Some(channel_id),
             ..
@@ -360,7 +368,7 @@ impl TestHub {
     }
 
     /// Have an interactive shell print `text`, and read until it has.
-    async fn print(&mut self, channel_id: &str, text: &str) {
+    pub(super) async fn print(&mut self, channel_id: &str, text: &str) {
         self.send(&input(channel_id, prints(text))).await;
         let mut printed = Vec::new();
         while !String::from_utf8_lossy(&visible(&printed)).contains(text) {
@@ -400,15 +408,15 @@ impl TestHub {
     }
 }
 
-fn frame_type(frame: &rmpv::Value) -> &str {
+pub(super) fn frame_type(frame: &rmpv::Value) -> &str {
     frame["type"].as_str().unwrap_or("")
 }
 
-fn is_about(frame: &rmpv::Value, kind: &str, channel_id: &str) -> bool {
+pub(super) fn is_about(frame: &rmpv::Value, kind: &str, channel_id: &str) -> bool {
     frame_type(frame) == kind && frame["channel_id"].as_str() == Some(channel_id)
 }
 
-fn output_data(frame: &rmpv::Value) -> &[u8] {
+pub(super) fn output_data(frame: &rmpv::Value) -> &[u8] {
     match &frame["data"] {
         rmpv::Value::Binary(data) => data,
         _ => &[],
@@ -442,7 +450,12 @@ async fn last_number_on_screen(daemon: &DaemonShared, channel_id: &str) -> usize
 /// reading that terminal, so that its screen stops moving short of the end and
 /// the program stays blocked, `done` never written; and it must hold no more
 /// than the high mark for that connection, give or take a read per terminal.
-async fn held_back(daemon: &DaemonShared, owner: &OwnerId, channel_id: &str, done: &Path) {
+pub(super) async fn held_back(
+    daemon: &DaemonShared,
+    owner: &OwnerId,
+    channel_id: &str,
+    done: &Path,
+) {
     let mut most = 0;
     let watch = |most: &mut usize| {
         *most = (*most).max(pending_bytes(daemon, owner));
@@ -517,7 +530,7 @@ fn assert_complete_and_in_order(output: &[u8]) {
     }
 }
 
-async fn wait_for_file(path: &Path) -> String {
+pub(super) async fn wait_for_file(path: &Path) -> String {
     tokio::time::timeout(DEADLINE, async {
         loop {
             if let Ok(text) = std::fs::read_to_string(path) {
@@ -532,7 +545,7 @@ async fn wait_for_file(path: &Path) -> String {
     .unwrap_or_else(|_| panic!("{} was not written within {DEADLINE:?}", path.display()))
 }
 
-async fn tear_down(daemon: &DaemonShared, dir: &Path) {
+pub(super) async fn tear_down(daemon: &DaemonShared, dir: &Path) {
     daemon.pty_manager.lock().await.destroy_all().await;
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -599,13 +612,13 @@ async fn a_hub_that_stops_reading_holds_back_no_other_hub() {
 }
 
 /// A line typed and Enter.
-fn typed_line(text: &str) -> Vec<u8> {
+pub(super) fn typed_line(text: &str) -> Vec<u8> {
     let enter = if cfg!(windows) { "\r" } else { "\n" };
     format!("{text}{enter}").into_bytes()
 }
 
 /// Read whatever comes until `path` is written, and return what it holds.
-async fn read_until_written(hub: &mut TestHub, path: &Path) -> String {
+pub(super) async fn read_until_written(hub: &mut TestHub, path: &Path) -> String {
     tokio::time::timeout(DEADLINE, async {
         loop {
             if let Ok(text) = std::fs::read_to_string(path) {

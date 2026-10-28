@@ -89,7 +89,7 @@ function createHelloDaemon(
 					}),
 				),
 			);
-			socket.write(Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END" })));
+			socket.write(Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })));
 		});
 		server.listen(socketPath, () => resolve({ server, connections }));
 	});
@@ -203,7 +203,6 @@ function makeHarness(): {
 		notificationTimestamps: new Map(),
 		elevationCache: new Map(),
 		passphraseCache: new Map(),
-		agentCapabilities: new Map(),
 		titleDebounceTimers: new Map(),
 		processTitleDebounceTimers: new Map(),
 		getWriteLockHolder: null,
@@ -467,7 +466,7 @@ describe("AgentConnectionManager HELLO version check", () => {
 		const connected = await connectAgent("0.1.0");
 		expect(connected.deployedThisSession).toBe(false);
 		expect(connected.remoteMatchesHubVersionCache).toBe(false);
-		const { ctx, broadcaster, lifecycle, manager } = makeHarness();
+		const { broadcaster, lifecycle, manager } = makeHarness();
 
 		expect(() => {
 			manager.wireAgentEvents(HOST_ID, SESSION_ID, connected);
@@ -476,14 +475,13 @@ describe("AgentConnectionManager HELLO version check", () => {
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("Agent version mismatch"));
 		expect(lifecycle.closeSession).not.toHaveBeenCalled();
 		expect(broadcaster.broadcastToAllClients).not.toHaveBeenCalled();
-		expect(ctx.agentCapabilities.get(HOST_ID)).toEqual(["multiplex", "resize", "snapshot"]);
 	});
 
 	it("aborts with AGENT_VERSION_MISMATCH when the mismatch follows this session's deploy", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const connected = await connectAgent("0.1.0");
 		connected.deployedThisSession = true;
-		const { ctx, broadcaster, lifecycle, manager } = makeHarness();
+		const { broadcaster, lifecycle, manager } = makeHarness();
 
 		const error = (() => {
 			try {
@@ -505,7 +503,6 @@ describe("AgentConnectionManager HELLO version check", () => {
 			}),
 		);
 		expect(warn).not.toHaveBeenCalled();
-		expect(ctx.agentCapabilities.has(HOST_ID)).toBe(false);
 		expect(connected.connected).toBe(false);
 	});
 
@@ -533,14 +530,15 @@ describe("AgentConnectionManager HELLO version check", () => {
 		expect(broadcaster.broadcastToAllClients).not.toHaveBeenCalled();
 		expect(ctx.agents.get(HOST_ID)).toBe(connected);
 		expect(connected.connected).toBe(true);
-		expect(ctx.agentCapabilities.get(HOST_ID)).toEqual(["multiplex", "resize", "snapshot"]);
+		// What the host reports as outdated, and offers to replace (#456).
+		expect(connected.helloMessage?.agentVersion).toBe("0.1.0");
 	});
 
 	it("aborts with AGENT_VERSION_MISMATCH when a non-deployed remote agent matches the hub-version cache", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const connected = await connectAgent("0.1.0");
 		connected.remoteMatchesHubVersionCache = true;
-		const { ctx, broadcaster, lifecycle, manager } = makeHarness();
+		const { broadcaster, lifecycle, manager } = makeHarness();
 
 		const error = (() => {
 			try {
@@ -563,7 +561,6 @@ describe("AgentConnectionManager HELLO version check", () => {
 			}),
 		);
 		expect(warn).not.toHaveBeenCalled();
-		expect(ctx.agentCapabilities.has(HOST_ID)).toBe(false);
 		expect(connected.connected).toBe(false);
 	});
 
@@ -587,7 +584,7 @@ describe("AgentConnectionManager HELLO version check", () => {
 
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const connected = await connectAgent("0.1.0");
-		const { ctx, broadcaster, lifecycle, manager } = makeHarness();
+		const { broadcaster, lifecycle, manager } = makeHarness();
 
 		// Mutation oracle: the old host-global deploy marker makes this second,
 		// non-deploying connection consume stale HOST_ID=true and abort incorrectly.
@@ -599,7 +596,6 @@ describe("AgentConnectionManager HELLO version check", () => {
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("Agent version mismatch"));
 		expect(lifecycle.closeSession).not.toHaveBeenCalled();
 		expect(broadcaster.broadcastToAllClients).not.toHaveBeenCalled();
-		expect(ctx.agentCapabilities.get(HOST_ID)).toEqual(["multiplex", "resize", "snapshot"]);
 	});
 });
 

@@ -74,37 +74,25 @@ describe("requestDaemonStop (#127)", () => {
 		});
 	});
 
-	it("falls back on the count the daemon gave at connection, never on a number in the message", async () => {
+	it("knows no count when the refusal's is not one, whatever the connection or the message said", async () => {
+		// Every agent sends the field with its refusal: the connection's own
+		// count, older, is not read in its place, nor a number in the words.
 		for (const field of [-1, 2.5, "5", null, undefined]) {
 			const daemon = new FakeDaemonConnection();
 			daemon.otherOwnerChannels = 4;
 			daemon.answer({
 				type: "ERROR",
 				code: "OTHER_HUBS_HOLD_CHANNELS",
-				message: "3 channels belong to other hubs",
+				message: "3 channels belong to other hubs; nothing was stopped",
 				otherOwnerChannels: field,
 			});
 
-			expect(await requestDaemonStop(asAgent(daemon), { force: false })).toMatchObject({
+			expect(await requestDaemonStop(asAgent(daemon), { force: false })).toEqual({
 				kind: "refused",
-				otherOwnerChannels: 4,
+				message: "3 channels belong to other hubs; nothing was stopped",
+				otherOwnerChannels: null,
 			});
 		}
-	});
-
-	it("knows no count when neither the refusal nor the connection gave one", async () => {
-		const daemon = new FakeDaemonConnection();
-		daemon.answer({
-			type: "ERROR",
-			code: "OTHER_HUBS_HOLD_CHANNELS",
-			message: "3 channels belong to other hubs; nothing was stopped",
-		});
-
-		expect(await requestDaemonStop(asAgent(daemon), { force: false })).toEqual({
-			kind: "refused",
-			message: "3 channels belong to other hubs; nothing was stopped",
-			otherOwnerChannels: null,
-		});
 	});
 
 	it("is not answered by a channel's error", async () => {

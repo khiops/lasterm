@@ -12,6 +12,7 @@ use crate::expand::expand_vars;
 use crate::flow::{Flow, Flows, InTransit, Queued};
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
+use crate::input::Offer;
 use crate::owner::OwnerId;
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
 use crate::pty::{
@@ -271,6 +272,21 @@ fn channel_not_found(channel_id: String) -> AgentToHub {
     }
 }
 
+/// The ERROR that says a channel's input is being dropped: its terminal has not
+/// taken what is queued for it, and its queue is full (#740). Sent once per
+/// gap, not once per INPUT dropped.
+fn input_dropped(channel_id: String) -> AgentToHub {
+    AgentToHub::Error {
+        code: error_codes::INPUT_DROPPED.into(),
+        message: format!(
+            "input to channel {channel_id} dropped: its terminal takes no input and its \
+             queue is full; input is dropped until the terminal has taken what is queued"
+        ),
+        channel_id: Some(channel_id),
+        other_owner_channels: None,
+    }
+}
+
 /// Whether `owner` may see this channel: it is registered, and it holds it.
 async fn visible_to(
     pty_manager: &Arc<Mutex<PtyManager>>,
@@ -407,16 +423,31 @@ pub(crate) async fn handle_message(
         }
 
         HubToAgent::Input { channel_id, data } => {
-            // Get writer before dropping lock to avoid holding across await
-            let writer_opt = {
+            // Queued for the channel's own writer, never written here: a
+            // terminal that takes no input must not hold up the requests that
+            // follow on this connection, other channels' included (#740).
+            let offered = {
                 let mgr = pty_manager.lock().await;
                 mgr.owned_by(&channel_id, owner)
-                    .map(|channel| channel.process.writer())
+                    .map(|channel| channel.input.offer(data))
             };
-            if let Some(mut writer) = writer_opt {
-                writer.write_all(&data).await?;
-            } else {
-                send_frame(&frame_tx, &channel_not_found(channel_id))?;
+            match offered {
+                None => send_frame(&frame_tx, &channel_not_found(channel_id))?,
+                Some(Offer::Overflowed) => {
+                    tracing::warn!(
+                        channel_id = %channel_id,
+                        owner = owner.short(),
+                        "terminal takes no input: its input is dropped until it takes what is queued"
+                    );
+                    send_frame(&frame_tx, &input_dropped(channel_id))?;
+                }
+                Some(Offer::Dropped) => {
+                    tracing::debug!(channel_id = %channel_id, "INPUT dropped: queue still full");
+                }
+                Some(Offer::Closed) => {
+                    tracing::debug!(channel_id = %channel_id, "INPUT dropped: terminal gone");
+                }
+                Some(Offer::Queued) => {}
             }
         }
 

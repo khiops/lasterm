@@ -272,8 +272,6 @@ export interface SharedSessionContext {
 	elevationCache: Map<string, { secret: string; expiresAt: number }>;
 	/** Per-host cached passphrase (opt-in "remember for session"). Cleared on hub restart. */
 	passphraseCache: Map<string, { secret: string; expiresAt: number }>;
-	/** hostId → capabilities string[] reported in the agent HELLO message */
-	agentCapabilities: Map<string, string[]>;
 	/** channelId → pending title debounce timer for DB writes */
 	titleDebounceTimers: Map<string, ReturnType<typeof setTimeout>>;
 	/** channelId → pending process title debounce timer for DB writes */

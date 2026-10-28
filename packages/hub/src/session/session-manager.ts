@@ -286,7 +286,6 @@ export class SessionManager {
 			notificationTimestamps: new Map(),
 			elevationCache: new Map(),
 			passphraseCache: new Map(),
-			agentCapabilities: new Map(),
 			titleDebounceTimers: new Map(),
 			processTitleDebounceTimers: new Map(),
 			// P1/P2/P3 state machine — replaces acquiringSessions + sessionWaiters
@@ -510,7 +509,6 @@ export class SessionManager {
 		}
 		this.ctx.pendingPrompts.clear();
 		this.ctx.elevationCache.clear();
-		this.ctx.agentCapabilities.clear();
 		this.ctx.scheduler.shutdown();
 		this.ctx.chunker.shutdown();
 		this.gc.stop();
@@ -1817,10 +1815,6 @@ export class SessionManager {
 		return this.ctx.pendingRequests;
 	}
 
-	get agentCapabilities(): SharedSessionContext["agentCapabilities"] {
-		return this.ctx.agentCapabilities;
-	}
-
 	get elevationCache(): SharedSessionContext["elevationCache"] {
 		return this.ctx.elevationCache;
 	}
@@ -2283,7 +2277,6 @@ export class SessionManager {
 	private releaseAgent(hostId: string, agent: AgentConnection): void {
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
-			this.ctx.agentCapabilities.delete(hostId);
 			if (!this.isQuitting()) this.broadcaster.announceSessionState(hostId);
 		}
 	}

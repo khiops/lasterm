@@ -61,7 +61,7 @@ function createMockDaemon(socketPath: string): Promise<{
 			});
 			socket.write(Buffer.from(hello));
 
-			const end = encodeFrame({ type: "CHANNEL_STATE_END" });
+			const end = encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 });
 			socket.write(Buffer.from(end));
 		});
 

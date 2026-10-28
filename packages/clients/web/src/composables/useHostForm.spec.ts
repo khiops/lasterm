@@ -6,8 +6,13 @@ import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 const daemonConnection = vi.hoisted(() => ({ connected: false }));
 const knownHosts = vi.hoisted(() => [] as Host[]);
 const testWsClient = vi.hoisted(() => ({ on: vi.fn(), send: vi.fn() }));
-const createHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
-const updateHostSpy = vi.fn().mockResolvedValue({ id: "test-id", label: "test" });
+const createHostSpy = vi
+	.fn()
+	.mockResolvedValue({ ok: true, host: { id: "test-id", label: "test" } });
+const updateHostSpy = vi
+	.fn()
+	.mockResolvedValue({ ok: true, host: { id: "test-id", label: "test" } });
+const createHostGroupSpy = vi.fn();
 
 vi.mock("../stores/hosts.js", () => ({
 	useHostsStore: () => ({
@@ -15,6 +20,7 @@ vi.mock("../stores/hosts.js", () => ({
 		isConnectedThroughRemoteDaemon: () => daemonConnection.connected,
 		createHost: createHostSpy,
 		updateHost: updateHostSpy,
+		createHostGroup: createHostGroupSpy,
 	}),
 }));
 
@@ -834,5 +840,98 @@ describe("daemon PUT guard", () => {
 		expect(body).toHaveProperty("ssh_host", "pi.test");
 		if (connected) expect(body).not.toHaveProperty("ssh_remote_daemon");
 		else expect(body).toHaveProperty("ssh_remote_daemon", false);
+	});
+});
+
+describe("a save the hub refuses (#703)", () => {
+	const host: Host = {
+		id: "pi",
+		label: "pi",
+		type: "ssh",
+		sshHost: "pi.test",
+		sshAuth: "agent",
+		iconType: "auto",
+		trustRemoteHints: "apply",
+		sortOrder: 0,
+		os: "linux",
+		arch: null,
+		createdAt: "",
+		updatedAt: "",
+	};
+
+	beforeEach(() => {
+		daemonConnection.connected = false;
+		updateHostSpy.mockClear();
+		createHostSpy.mockClear();
+		createHostGroupSpy.mockReset();
+	});
+
+	it("keeps the hub's reason and what was typed, until a save goes through", async () => {
+		updateHostSpy.mockResolvedValueOnce({
+			ok: false,
+			status: 409,
+			code: "CONFLICT",
+			message: "Host with this label already exists",
+		});
+		const { form, save, saveError, saving } = useHostForm(host);
+		form.value.label = "nas";
+
+		expect(await save()).toBeNull();
+		expect(saveError.value).toBe("Host with this label already exists");
+		expect(saving.value).toBe(false);
+		expect(form.value.label).toBe("nas");
+
+		form.value.label = "pi-2";
+		expect(await save()).toEqual({ id: "test-id", label: "test" });
+		expect(saveError.value).toBeNull();
+	});
+
+	it("says so when the hub does not answer", async () => {
+		updateHostSpy.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		const { save, saveError, saving } = useHostForm(host);
+
+		expect(await save()).toBeNull();
+		expect(saveError.value).toBe("Could not reach the hub: Failed to fetch");
+		expect(saving.value).toBe(false);
+	});
+
+	it("stops at a refused new group, rather than saving the host outside it", async () => {
+		createHostGroupSpy.mockResolvedValueOnce({
+			ok: false,
+			status: 409,
+			code: "CONFLICT",
+			message: "Host group with this name already exists",
+		});
+		const { save, saveError, showNewGroup, newGroupName } = useHostForm(host);
+		showNewGroup.value = true;
+		newGroupName.value = "Prod";
+
+		expect(await save()).toBeNull();
+		expect(saveError.value).toBe("Host group with this name already exists");
+		expect(updateHostSpy).not.toHaveBeenCalled();
+		expect(newGroupName.value).toBe("Prod");
+	});
+
+	it("keeps a new group chosen when the host's save is then refused", async () => {
+		createHostGroupSpy.mockResolvedValueOnce({ ok: true, group: { id: "group-1", name: "Prod" } });
+		updateHostSpy.mockResolvedValueOnce({
+			ok: false,
+			status: 409,
+			code: "DAEMON_CONNECTED",
+			message: "Use Stop keeping an agent here to stop the connected daemon.",
+		});
+		const { form, save, saveError, showNewGroup, newGroupName } = useHostForm(host);
+		showNewGroup.value = true;
+		newGroupName.value = "Prod";
+		form.value.os = "windows";
+
+		expect(await save()).toBeNull();
+		expect(saveError.value).toBe("Use Stop keeping an agent here to stop the connected daemon.");
+		expect(form.value.hostGroup).toBe("group-1");
+
+		await save();
+		expect(createHostGroupSpy).toHaveBeenCalledOnce();
+		expect(updateHostSpy.mock.calls[1]?.[1]).toHaveProperty("host_group_id", "group-1");
+		expect(saveError.value).toBeNull();
 	});
 });

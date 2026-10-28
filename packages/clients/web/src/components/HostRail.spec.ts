@@ -285,6 +285,24 @@ describe("HostRail group headers", () => {
 	});
 });
 
+describe("HostRail tooltip (#731)", () => {
+	const groupLine = (id: string): string | undefined =>
+		badge(id)
+			.getAttribute("title")
+			?.split("\n")
+			.find((line) => line.startsWith("Group:"));
+
+	it("names the group a host is in, by its groupId, and follows a rename", async () => {
+		const { hostsStore } = mountRail();
+		expect(groupLine("a")).toBe("Group: Prod");
+		expect(groupLine("u1")).toBeUndefined();
+
+		hostsStore.hostGroups = [group("prod", "Live", 0)];
+		await nextTick();
+		expect(groupLine("a")).toBe("Group: Live");
+	});
+});
+
 describe("HostRail drag and drop", () => {
 	it("in a grid, marks the drop with a vertical bar before the target", async () => {
 		mountRail({ columns: 3 });

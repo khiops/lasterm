@@ -70,6 +70,15 @@ export class LastermAgent extends AgentConnection {
 		this.hubLogger?.log("debug", msg, { connId: this.connId, ...extra });
 	}
 
+	protected describeAgent(): string {
+		return "The local agent";
+	}
+
+	protected logWarning(message: string): void {
+		if (this.hubLogger === undefined) super.logWarning(message);
+		else this.hubLogger.log("warn", message, { connId: this.connId });
+	}
+
 	/** Send a framed protocol message to the agent. */
 	send(msg: ProtocolMessage): void {
 		if (!this.connected) return;

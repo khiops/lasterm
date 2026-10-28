@@ -20,7 +20,7 @@ function makeHost(overrides: Partial<Host> = {}): Host {
 		iconType: "auto",
 		trustRemoteHints: "apply",
 		sortOrder: 0,
-		hostGroup: "production",
+		hostGroupId: "01TESTGROUP",
 		createdAt: "2026-01-01T00:00:00Z",
 		updatedAt: "2026-01-01T00:00:00Z",
 		...overrides,
@@ -111,21 +111,42 @@ describe("getVisualProfile", () => {
 describe("resolveBannerTokens", () => {
 	it("replaces {host}, {ip}, {user}, {group}", () => {
 		const host = makeHost();
-		const result = resolveBannerTokens("{host} @ {ip} as {user} in {group}", host);
+		const result = resolveBannerTokens("{host} @ {ip} as {user} in {group}", host, "production");
 		expect(result).toBe("prod-server @ 10.0.1.5 as deploy in production");
 	});
 
-	it("renders literal {group} when hostGroup is null", () => {
-		const host = makeHost({ hostGroup: null });
-		const result = resolveBannerTokens("Group: {group}", host);
+	it("renders literal {group} when the host is in no group", () => {
+		const host = makeHost({ hostGroupId: null });
+		const result = resolveBannerTokens("Group: {group}", host, null);
 		expect(result).toBe("Group: {group}");
 	});
 
 	it("renders 'localhost' when sshHost is undefined", () => {
 		const { sshHost: _, ...rest } = makeHost();
 		const host = rest as Host;
-		const result = resolveBannerTokens("IP: {ip}", host);
+		const result = resolveBannerTokens("IP: {ip}", host, null);
 		expect(result).toBe("IP: localhost");
+	});
+});
+
+describe("useVisualProfile banner {group} (#731)", () => {
+	const bannered = makeHost({
+		profileJson: JSON.stringify({
+			visualProfile: { banner: { enabled: true, text: "{host} in {group}" } },
+		}),
+	});
+
+	it("names the group the host is in, and follows its rename", () => {
+		const groupName = ref<string | null>("production");
+		const { bannerText } = useVisualProfile(ref(bannered), groupName);
+		expect(bannerText.value).toBe("prod-server in production");
+		groupName.value = "live";
+		expect(bannerText.value).toBe("prod-server in live");
+	});
+
+	it("keeps {group} as written for a host in no group", () => {
+		const { bannerText } = useVisualProfile(ref(bannered), ref(null));
+		expect(bannerText.value).toBe("prod-server in {group}");
 	});
 });
 
@@ -148,6 +169,7 @@ describe("useVisualProfile border (#663)", () => {
 	it("draws a border with no colour of its own in the host's colour", () => {
 		const { borderStyle } = useVisualProfile(
 			ref(withBorder({ style: "subtle", color: "" }, { color: "#123456" })),
+			ref(null),
 		);
 		expect(borderStyle.value).toEqual({ borderLeft: "2px solid #123456" });
 	});
@@ -156,7 +178,7 @@ describe("useVisualProfile border (#663)", () => {
 		const host = withBorder({ style: "strong" });
 		const expected = `3px solid ${getHostColor(host)}`;
 		expect(getHostColor(host)).toBe(getColorFromLabel("prod-server"));
-		const { borderStyle } = useVisualProfile(ref(host));
+		const { borderStyle } = useVisualProfile(ref(host), ref(null));
 		expect(borderStyle.value).toEqual({
 			borderLeft: expected,
 			borderRight: expected,
@@ -167,13 +189,14 @@ describe("useVisualProfile border (#663)", () => {
 	it("draws a colour of its own over the host's", () => {
 		const { borderStyle } = useVisualProfile(
 			ref(withBorder({ style: "subtle", color: "#abcdef" }, { color: "#123456" })),
+			ref(null),
 		);
 		expect(borderStyle.value).toEqual({ borderLeft: "2px solid #abcdef" });
 	});
 
 	it("draws nothing without a host, or with no border", () => {
-		expect(useVisualProfile(ref<Host | null>(null)).borderStyle.value).toEqual({});
-		const none = useVisualProfile(ref(withBorder({ style: "none", color: "#abcdef" })));
+		expect(useVisualProfile(ref<Host | null>(null), ref(null)).borderStyle.value).toEqual({});
+		const none = useVisualProfile(ref(withBorder({ style: "none", color: "#abcdef" })), ref(null));
 		expect(none.borderStyle.value).toEqual({});
 	});
 });

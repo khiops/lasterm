@@ -445,7 +445,8 @@ function getTooltip(host: Host): string {
 		parts.push(
 			`${host.sshUser ?? ""}@${host.sshHost}:${host.sshPort ?? 22}`,
 		);
-	if (host.hostGroup) parts.push(`Group: ${host.hostGroup}`);
+	const groupName = hostsStore.getHostGroupName(host);
+	if (groupName !== null) parts.push(`Group: ${groupName}`);
 	// Offline on purpose: said, since its dot is only hollow (#648).
 	if (hostsStore.getHostStatus(host.id) === "disconnected") parts.push("Disconnected");
 	// A note, not an error: the agent went over the SSH command channel (#722).

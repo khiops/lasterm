@@ -42,13 +42,18 @@ export function getVisualProfile(host: Host | undefined | null): VisualProfile {
 	return { ...DEFAULT_VISUAL_PROFILE };
 }
 
-/** Replace banner tokens with host values. Unresolvable tokens stay as literal. */
-export function resolveBannerTokens(text: string, host: Host): string {
+/**
+ * Replace banner tokens with host values. Unresolvable tokens stay as literal.
+ *
+ * `{group}` is the name of the host group the host is in, which the caller
+ * looks up by its `hostGroupId` (#731), so renaming the group renames it here.
+ */
+export function resolveBannerTokens(text: string, host: Host, groupName: string | null): string {
 	return text
 		.replace(/\{host\}/g, host.label ?? "")
 		.replace(/\{ip\}/g, host.sshHost ?? "localhost")
 		.replace(/\{user\}/g, host.sshUser ?? "")
-		.replace(/\{group\}/g, host.hostGroup ?? "{group}");
+		.replace(/\{group\}/g, groupName ?? "{group}");
 }
 
 /** Validate a hex color. Returns true for valid #rrggbb format. */
@@ -62,14 +67,18 @@ export function clampOpacity(opacity: number): number {
 }
 
 /**
- * Composable: reactive visual profile for a host.
+ * Composable: reactive visual profile for a host. `groupName` is the name of
+ * the host group it is in, for the banner's `{group}`.
  */
-export function useVisualProfile(host: Ref<Host | undefined | null>) {
+export function useVisualProfile(
+	host: Ref<Host | undefined | null>,
+	groupName: Ref<string | null>,
+) {
 	const profile = computed(() => getVisualProfile(host.value));
 
 	const bannerText = computed(() => {
 		if (!profile.value.banner.enabled || !host.value) return "";
-		const resolved = resolveBannerTokens(profile.value.banner.text, host.value);
+		const resolved = resolveBannerTokens(profile.value.banner.text, host.value, groupName.value);
 		return resolved.trim() ? resolved : "";
 	});
 

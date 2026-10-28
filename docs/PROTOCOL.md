@@ -58,6 +58,8 @@ Hub ──── ssh2 session ──── Agent
 - Agent reads frames from stdin, writes frames to stdout
 - stderr reserved for log output (not parsed by hub)
 - SSH close = agent gone → hub enters reconnect loop
+- A hub that stops reading stdout holds back the agent's terminals, as a daemon's connection does
+  (§ 2.1b)
 - Only remote agents run on stdio. The local agent is always a daemon (§ 2.1b)
 
 ### 2.1b Hub ↔ Agent (UDS — daemon mode)
@@ -82,11 +84,16 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
   LOG) go to the hub connected when they are sent, whichever connection spawned the terminal (#549);
   with `hub-identity`, to the current connection of the hub that owns the terminal (§ 3.1b).
   Replies (SPAWN_OK, ATTACH_OK, SNAPSHOT_RES, ERROR) go to the connection that asked.
-- Agent queues output and events while no hub is connected (up to 1000 frames, oldest dropped);
-  with `hub-identity`, each hub has its own queue, flushed only to that hub's next connection, as
-  soon as it has authenticated: before its channel state and before any reply. A CHANNEL_EXIT
-  queued while the hub was away therefore never follows the SPAWN_OK of a terminal restarted under
-  the same id
+- Agent queues output and events while no hub is connected: each channel's newest, up to 1 MiB per
+  channel and 16 MiB per hub, the oldest dropped first and a channel's CHANNEL_EXIT always kept
+  (SPEC.md § 3.2). With `hub-identity`, each hub has its own queue, flushed only to that hub's next
+  connection, as soon as it has authenticated: before its channel state and before any reply. A
+  CHANNEL_EXIT queued while the hub was away therefore never follows the SPAWN_OK of a terminal
+  restarted under the same id
+- A connected hub that does not read holds back its own terminals: once 1 MiB of their output waits
+  for its connection, the agent stops reading them until it drains to 256 KiB, and their programs
+  block (SPEC.md § 3.2, #553). Nothing is dropped. INPUT and every request are still acted on, and
+  replies are never held back, though each goes out behind the output already queued
 - On reconnect: agent sends HELLO, reads the hub's AUTH, then enumerates channel state (see section 3.16)
 
 ### 2.2 Hub ↔ UI (WebSocket)

@@ -1075,3 +1075,133 @@ async fn test_spawn_ok_precedes_channel_exit() {
 
     agent.kill().await.ok();
 }
+
+/// The numbers a terminal shows, in order: every run of exactly seven digits
+/// outside its escape sequences.
+fn seven_digit_numbers(output: &[u8]) -> Vec<usize> {
+    let mut shown = Vec::with_capacity(output.len());
+    let mut i = 0;
+    while i < output.len() {
+        if output[i] != 0x1b {
+            shown.push(output[i]);
+            i += 1;
+            continue;
+        }
+        match output.get(i + 1) {
+            Some(b'[') => {
+                i += 2;
+                while i < output.len() && !(0x40..=0x7e).contains(&output[i]) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            Some(b']') => {
+                i += 2;
+                while i < output.len() && output[i] != 0x07 && output[i] != 0x1b {
+                    i += 1;
+                }
+                i += if output.get(i) == Some(&0x1b) { 2 } else { 1 };
+            }
+            _ => i += 2,
+        }
+    }
+    shown
+        .split(|b| !b.is_ascii_digit())
+        .filter(|run| run.len() == 7)
+        .map(|run| std::str::from_utf8(run).unwrap().parse().unwrap())
+        .collect()
+}
+
+/// A hub that stops reading the agent's stdout holds back its terminal: the
+/// program writing to it blocks, where the agent used to read on into memory
+/// for as long as the program printed. Once the hub reads again, everything
+/// the program printed arrives, once and in order (#553).
+#[tokio::test]
+async fn a_hub_that_stops_reading_stdout_holds_its_terminal_back() {
+    // 8 bytes a line, 2 MiB: well over what the agent holds before it stops
+    // reading (1 MiB), the stdout pipe and the PTY's own buffers together (up
+    // to 256 KiB more in ConPTY's pump on Windows).
+    const LINES: usize = 256 * 1024;
+    // Longer than an agent reading on takes to see all of it through ConPTY,
+    // the slowest of the PTYs.
+    const HOLD: Duration = Duration::from_secs(5);
+    let dir = std::env::temp_dir().join(format!(
+        "lasterm-stdio-held-back-{}",
+        ulid::Ulid::generate().to_string().to_lowercase()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let numbers = dir.join("numbers.txt");
+    let done = dir.join("done");
+    let text: String = (1..=LINES).map(|n| format!("{n:07}\n")).collect();
+    std::fs::write(&numbers, text).unwrap();
+    let command = if cfg!(windows) {
+        format!("type {} & echo done> {}", numbers.display(), done.display())
+    } else {
+        format!(
+            "cat '{}'; echo done > '{}'",
+            numbers.display(),
+            done.display()
+        )
+    };
+
+    let mut agent = spawn_agent().await;
+    let mut stdout = agent.stdout.take().unwrap();
+    let mut stdin = agent.stdin.take().unwrap();
+    let _hello = read_frame_timeout(&mut stdout, 5).await;
+    write_frame(
+        &mut stdin,
+        &msgmap(vec![
+            ("type", sv("SPAWN")),
+            ("request_id", sv("req-held-back")),
+            ("channel_id", sv("held-back")),
+            ("shell", sv(test_shell().0)),
+            (
+                "args",
+                rmpv::Value::Array(vec![sv(test_shell().1), sv(&command)]),
+            ),
+            ("cols", iv(80)),
+            ("rows", iv(24)),
+        ]),
+    )
+    .await;
+    let spawned = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(spawned["type"].as_str(), Some("SPAWN_OK"), "{spawned:?}");
+
+    // Read nothing for a while: the program must stay blocked.
+    tokio::time::sleep(HOLD).await;
+    assert!(
+        !done.exists(),
+        "the program wrote everything to its terminal while nobody read the agent's \
+         stdout: the agent kept reading that terminal into memory"
+    );
+
+    let mut printed = Vec::new();
+    loop {
+        let frame = read_frame_timeout(&mut stdout, 60).await;
+        if frame["channel_id"].as_str() != Some("held-back") {
+            continue;
+        }
+        match (frame["type"].as_str(), &frame["data"]) {
+            (Some("OUTPUT"), rmpv::Value::Binary(data)) => printed.extend_from_slice(data),
+            (Some("CHANNEL_EXIT"), _) => break,
+            _ => {}
+        }
+    }
+    let shown = seven_digit_numbers(&printed);
+    assert!(
+        shown == (1..=LINES).collect::<Vec<_>>(),
+        "{} numbers of {LINES} arrived, or out of order; the last is {:?}",
+        shown.len(),
+        shown.last()
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !done.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the program finished once the hub read again");
+
+    agent.kill().await.ok();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,7 +1,20 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	chmod,
+	copyFile,
+	copyFileSync,
+	existsSync,
+	mkdir,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	symlinkSync,
+	unlink,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { Duplex, PassThrough } from "node:stream";
 import type { ClientChannel, SFTPWrapper, Client as SshClient } from "ssh2";
@@ -23,6 +36,7 @@ import {
 	readRemoteSystem,
 	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
+	windowsReplaceScript,
 	windowsUploadCommand,
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
@@ -414,6 +428,45 @@ function shellSweeping(files: Map<string, RemoteFile>): (command: string) => Exe
 			if (path.slice(0, cut) !== dir || !name.test(path.slice(cut + 1))) continue;
 			if ((file.ageMinutes ?? 0) > minutes) files.delete(path);
 		}
+		return { stdout: "", stderr: "", exitCode: 0 };
+	};
+}
+
+/** The paths a Windows replace script names (#725), or null for any other command. */
+function replacePaths(command: string): { target: string; temp: string; aside: string } | null {
+	if (!command.startsWith(ENCODED_POWERSHELL)) return null;
+	const script = decodePowerShell(command);
+	if (!script.includes("[IO.File]::Move")) return null;
+	const path = (name: string): string => {
+		const encoded = new RegExp(
+			`\\$${name}=\\[Text\\.Encoding\\]::UTF8\\.GetString\\(\\[Convert\\]::FromBase64String\\('([^']*)'\\)\\)`,
+		).exec(script)?.[1];
+		if (encoded === undefined) throw new Error(`no $${name} in the replace script`);
+		return Buffer.from(encoded, "base64").toString("utf8");
+	};
+	return { target: path("p"), temp: path("t"), aside: path("o") };
+}
+
+/**
+ * A Windows host's PowerShell moving the upload into place on the mock
+ * remote's files (#725): the target set aside, the upload renamed to it, and
+ * the file set aside deleted unless an agent runs from it. Answers anything
+ * else as a failure.
+ */
+function windowsReplacing(
+	files: Map<string, RemoteFile>,
+	running: ReadonlySet<string> = new Set(),
+): (command: string) => ExecResult {
+	return (command) => {
+		const paths = replacePaths(command);
+		if (paths === null) return { stdout: "", stderr: "not a replace", exitCode: 1 };
+		const { target, temp, aside } = paths;
+		const had = moveRemoteFile(files, target, aside);
+		if (!moveRemoteFile(files, temp, target)) {
+			if (had) moveRemoteFile(files, aside, target);
+			return { stdout: "", stderr: "Could not find file", exitCode: 1 };
+		}
+		if (had && !running.has(target)) files.delete(aside);
 		return { stdout: "", stderr: "", exitCode: 0 };
 	};
 }
@@ -1132,13 +1185,15 @@ describe("uploadAgentBinary", () => {
 	] as const)("sends only one advisory mkdir for %s", async (target, parent, os) => {
 		for (const failed of [false, true]) {
 			const transferError = new Error("Transfer refused");
+			const files = new Map<string, RemoteFile>();
 			const sftp = makeMockSftp({
+				files,
 				mkdirError: new Error("Permission denied"),
 				...(failed ? { fastPutError: transferError } : {}),
 			});
-			const upload = uploadAgentBinary(makeSftpClient(sftp), "local", target, os);
+			const client = makeSftpClient(sftp, undefined, windowsReplacing(files));
+			const upload = uploadAgentBinary(client, "local", target, os);
 			if (!failed) await expect(upload).resolves.toBe("sftp");
-			else if (os === "windows") await expect(upload).rejects.toBe(transferError);
 			else await expect(upload).rejects.toMatchObject({ cause: transferError });
 			expect(sftp.stat).not.toHaveBeenCalled();
 			expect(vi.mocked(sftp.mkdir).mock.calls).toEqual([[parent, expect.any(Function)]]);
@@ -1185,26 +1240,62 @@ describe("uploadAgentBinary", () => {
 		expect(sftp.mkdir).not.toHaveBeenCalled();
 	});
 
-	// A Windows agent runs on stdio and exits with its connection, so nothing
-	// runs from the file; and Windows would refuse to rename over a running
-	// executable anyway. It is written in place, as it always was.
-	it("writes a Windows agent in place, with no temporary and no rename", async () => {
-		const windowsTarget = "%LOCALAPPDATA%\\lasterm\\lasterm-agent.exe";
+	// A Windows agent runs on stdio and lives as long as its connection, so
+	// another hub's session on the same account may be running it. Windows will
+	// not open it for writing (SFTP says only "Failure"), but lets it be renamed:
+	// the upload goes beside it, and PowerShell sets the running file aside and
+	// moves the upload into place (#725).
+	it("uploads a Windows agent beside the target, then moves it into place with the running one set aside", async () => {
+		const windowsTarget = "C:\\Users\\u\\AppData\\Local\\lasterm\\lasterm-agent.exe";
 		const files = new Map([[windowsTarget, { content: "old agent", mode: 0o644 }]]);
-		const sftp = makeMockSftp({ files });
-		const client = makeSftpClient(sftp);
+		const busy = new Set([windowsTarget]);
+		const sftp = makeMockSftp({ files, busy });
+		const client = makeSftpClient(sftp, undefined, windowsReplacing(files, busy));
 
-		await uploadAgentBinary(client, "C:\\local\\lasterm-agent.exe", windowsTarget, "windows");
+		expect(
+			await uploadAgentBinary(client, "C:\\local\\lasterm-agent.exe", windowsTarget, "windows"),
+		).toBe("sftp");
 
-		expect(vi.mocked(sftp.fastPut).mock.calls).toEqual([
-			["C:\\local\\lasterm-agent.exe", windowsTarget, expect.any(Function)],
-		]);
-		expect(sftp.chmod).toHaveBeenCalledWith(windowsTarget, 0o755, expect.any(Function));
+		const temp = uploadedTo(sftp);
+		expect(temp).toMatch(
+			/^C:\\Users\\u\\AppData\\Local\\lasterm\\\.lasterm-agent\.exe\.[0-9a-f]{16}\.partial$/,
+		);
+		expect(sftp.chmod).toHaveBeenCalledWith(temp, 0o755, expect.any(Function));
 		expect(sftp.ext_openssh_rename).not.toHaveBeenCalled();
-		expect(client.exec).not.toHaveBeenCalled();
+		const commands = vi.mocked(client.exec).mock.calls.map(([command]) => command);
+		expect(commands).toHaveLength(1);
+		const paths = replacePaths(commands[0] ?? "");
+		expect(paths?.target).toBe(windowsTarget);
+		expect(paths?.temp).toBe(temp);
+		expect(paths?.aside).toMatch(/^C:\\Users\\.*\\lasterm-agent\.exe\.old-[0-9a-f]{16}$/);
+		// The upload is the target; the running agent's file, set aside, stays.
 		expect([...files]).toEqual([
+			[paths?.aside, { content: "old agent", mode: 0o644 }],
 			[windowsTarget, { content: "C:\\local\\lasterm-agent.exe", mode: 0o755 }],
 		]);
+		expect(sftp.end).toHaveBeenCalled();
+	});
+
+	it("says what PowerShell said when a Windows agent cannot be moved into place, and removes the upload", async () => {
+		const windowsTarget = "C:\\lasterm\\lasterm-agent.exe";
+		const files = new Map([[windowsTarget, { content: "old agent", mode: 0o755 }]]);
+		const sftp = makeMockSftp({ files });
+		const client = makeSftpClient(sftp, undefined, () => ({
+			stdout: "",
+			stderr:
+				'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' +
+				'<S S="Error">Exception calling "Move" with "2" argument(s): "Access to the path is denied."_x000D__x000A_</S></Objs>',
+			exitCode: 1,
+		}));
+
+		await expect(
+			uploadAgentBinary(client, "C:\\local\\agent.exe", windowsTarget, "windows"),
+		).rejects.toThrow(
+			'Could not move the agent into place at C:\\lasterm\\lasterm-agent.exe: exit 1: Exception calling "Move" with "2" argument(s): "Access to the path is denied."',
+		);
+
+		expect(sftp.unlink).toHaveBeenCalledWith(uploadedTo(sftp), expect.any(Function));
+		expect([...files]).toEqual([[windowsTarget, { content: "old agent", mode: 0o755 }]]);
 	});
 
 	it("calls sftp.end() even when a Windows upload fails", async () => {
@@ -1215,7 +1306,25 @@ describe("uploadAgentBinary", () => {
 			uploadAgentBinary(client, "C:\\local\\agent.exe", "C:\\lasterm\\agent.exe", "windows"),
 		).rejects.toThrow("disk full");
 
+		expect(sftp.unlink).toHaveBeenCalledWith(uploadedTo(sftp), expect.any(Function));
+		expect(client.exec).not.toHaveBeenCalled();
 		expect(sftp.end).toHaveBeenCalled();
+	});
+
+	it.each([
+		"C:\\Users\\Jean Dupont\\AppData\\Local\\lasterm\\lasterm-agent.exe",
+		'C:\\Users\\O\'Brien "x"\\AppData\\Local\\lasterm\\lasterm-agent.exe',
+		"C:\\Users\\$env:USERNAME`$(whoami)\\lasterm\\lasterm-agent.exe",
+		"C:\\Users\\Zoë 日本\\AppData\\Local\\lasterm\\lasterm-agent.exe",
+	])("passes the Windows path %s to the replace script as Base64 data", (path) => {
+		const temp = `${path.slice(0, path.lastIndexOf("\\") + 1)}.lasterm-agent.exe.0123456789abcdef.partial`;
+		const aside = `${path}.old-fedcba9876543210`;
+		const command = `${ENCODED_POWERSHELL}${Buffer.from(windowsReplaceScript(temp, path, aside), "utf16le").toString("base64")}`;
+		expect(replacePaths(command)).toEqual({ target: path, temp, aside });
+		const script = windowsReplaceScript(temp, path, aside);
+		for (const literal of [path, temp, aside]) expect(script).not.toContain(literal);
+		// No cmdlet: under a pwsh parent, Windows PowerShell may not load its utility module (#722).
+		expect(script).not.toMatch(/Start-Sleep|Get-ChildItem|Remove-Item|Move-Item/);
 	});
 });
 
@@ -1265,6 +1374,7 @@ class ChildChannel extends Duplex {
 function localWindowsClient(
 	shell: "cmd.exe" | "powershell.exe",
 	env: NodeJS.ProcessEnv = process.env,
+	sftp?: SFTPWrapper,
 ): SshClient {
 	return {
 		exec: vi.fn((command: string, cb: (err: Error | undefined, stream: unknown) => void) => {
@@ -1274,8 +1384,51 @@ function localWindowsClient(
 					: spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-c", command], { env });
 			cb(undefined, new ChildChannel(child));
 		}),
-		sftp: vi.fn((cb: (err: Error) => void) => cb(new Error("Unable to start subsystem: sftp"))),
+		sftp: vi.fn((cb: (err: Error | undefined, sftp?: SFTPWrapper) => void) =>
+			sftp === undefined ? cb(new Error("Unable to start subsystem: sftp")) : cb(undefined, sftp),
+		),
 	} as unknown as SshClient;
+}
+
+/** An SFTP session on this machine's files, as Win32-OpenSSH's sftp-server serves them. */
+function localSftp(): SFTPWrapper {
+	const done =
+		(cb: (err: Error | undefined) => void) =>
+		(err: NodeJS.ErrnoException | null): void =>
+			cb(err ?? undefined);
+	return Object.assign(new EventEmitter(), {
+		mkdir: vi.fn((path: string, cb: (err: Error | undefined) => void) => mkdir(path, done(cb))),
+		fastPut: vi.fn((local: string, remote: string, cb: (err: Error | undefined) => void) =>
+			copyFile(local, remote, done(cb)),
+		),
+		chmod: vi.fn((path: string, mode: number, cb: (err: Error | undefined) => void) =>
+			chmod(path, mode, done(cb)),
+		),
+		unlink: vi.fn((path: string, cb: (err: Error | undefined) => void) => unlink(path, done(cb))),
+		end: vi.fn(),
+	}) as unknown as SFTPWrapper;
+}
+
+/**
+ * A running agent's file on this Windows machine: a copy of PING.EXE at
+ * `path`, run from there until the test kills it. Windows treats it as it
+ * treats a running agent: no write, no delete, no rename over it.
+ */
+async function runningExecutable(path: string): Promise<ReturnType<typeof spawn>> {
+	copyFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "PING.EXE"), path);
+	const child = spawn(path, ["-n", "120", "127.0.0.1"], { stdio: "ignore" });
+	await new Promise<void>((resolve, reject) => {
+		child.once("spawn", resolve);
+		child.once("error", reject);
+	});
+	return child;
+}
+
+async function stop(child: ReturnType<typeof spawn>): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	const exited = new Promise((resolve) => child.once("exit", resolve));
+	child.kill();
+	await exited;
 }
 
 describe("uploadAgentBinary over the SSH command channel (#722)", () => {
@@ -1415,27 +1568,39 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 		expect([...files]).toEqual([[target, { content: "/local/binary", mode: 0o755 }]]);
 	});
 
-	it("writes a Windows agent in place, then checks its SHA-256, without SFTP", async () => {
+	it("writes a Windows agent beside the target, checks its SHA-256, then moves it into place, without SFTP", async () => {
 		const agent = localAgent();
 		const windowsTarget = "C:\\Users\\u\\AppData\\Local\\lasterm\\lasterm-agent.exe";
+		const files = new Map<string, RemoteFile>([
+			[windowsTarget, { content: "old agent", mode: 0o755 }],
+		]);
+		const replacing = windowsReplacing(files);
 		let stored: Buffer | undefined;
-		const hashCommand = (() => {
+		let temp = "";
+		const hashCommand = (path: string): string => {
 			const recorder = makeMockClient({});
-			void getRemoteSha256(recorder, windowsTarget, "windows");
+			void getRemoteSha256(recorder, path, "windows");
 			return vi.mocked(recorder.exec).mock.calls[0]?.[0] ?? "";
-		})();
+		};
 		const client = makeExecClient(
-			(command) =>
-				command === hashCommand && stored !== undefined
-					? {
-							stdout: `${createHash("sha256").update(stored).digest("hex").toUpperCase()}\r\n`,
-							stderr: "",
-							exitCode: 0,
-						}
-					: { stdout: "", stderr: "", exitCode: 1 },
+			(command) => {
+				if (command === hashCommand(temp) && stored !== undefined) {
+					return {
+						stdout: `${createHash("sha256").update(stored).digest("hex").toUpperCase()}\r\n`,
+						stderr: "",
+						exitCode: 0,
+					};
+				}
+				return replacing(command);
+			},
 			(command, input) => {
-				expect(command).toBe(windowsUploadCommand(windowsTarget));
+				temp = Buffer.from(
+					decodePowerShell(command).match(/FromBase64String\('([^']*)'\)/)?.[1] ?? "",
+					"base64",
+				).toString("utf8");
+				expect(command).toBe(windowsUploadCommand(temp));
 				stored = input;
+				files.set(temp, { content: "new agent", mode: 0o644 });
 				return { stdout: String(input.length), stderr: "", exitCode: 0 };
 			},
 		);
@@ -1444,12 +1609,16 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 			"exec",
 		);
 
+		expect(temp).toMatch(
+			/^C:\\Users\\u\\AppData\\Local\\lasterm\\\.lasterm-agent\.exe\.[0-9a-f]{16}\.partial$/,
+		);
 		expect(stored?.equals(agent.bytes)).toBe(true);
 		expect(client.sftp).not.toHaveBeenCalled();
-		expect(vi.mocked(client.exec).mock.calls.map(([command]) => command)).toEqual([
-			windowsUploadCommand(windowsTarget),
-			hashCommand,
-		]);
+		const commands = vi.mocked(client.exec).mock.calls.map(([command]) => command);
+		expect(commands.slice(0, 2)).toEqual([windowsUploadCommand(temp), hashCommand(temp)]);
+		expect(commands).toHaveLength(3);
+		expect(replacePaths(commands[2] ?? "")).toMatchObject({ target: windowsTarget, temp });
+		expect([...files]).toEqual([[windowsTarget, { content: "new agent", mode: 0o644 }]]);
 	});
 
 	it("says what PowerShell said when the Windows write fails, without its CLIXML", async () => {
@@ -1475,8 +1644,12 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 				refused,
 			),
 		).rejects.toThrow(
-			'Could not upload the agent to C:\\Program Files\\lasterm\\a.exe: exit 1: Exception calling "Create" with "1" argument(s): "Access to the path is denied." At line:1 char:1',
+			/^Could not upload the agent: .* failed too: Could not upload the agent to C:\\Program Files\\lasterm\\\.a\.exe\.[0-9a-f]{16}\.partial: exit 1: Exception calling "Create" with "1" argument\(s\): "Access to the path is denied\." At line:1 char:1$/,
 		);
+		// The upload, whatever it left, is deleted, by PowerShell.
+		const commands = vi.mocked(client.exec).mock.calls.map(([command]) => command);
+		expect(commands).toHaveLength(2);
+		expect(decodePowerShell(commands[1] ?? "")).toMatch(/\[IO\.File\]::Delete\(\$p\)$/);
 	});
 
 	it.each([
@@ -1578,6 +1751,116 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 			);
 
 			expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
+		},
+	);
+
+	// The usual case, and the one a domain controller found: one running agent,
+	// nothing else beside it. The sweep's last act is the deletion of the file
+	// set aside, which fails while it runs; PowerShell exits 1 after such a
+	// caught failure unless told otherwise, and the deploy was reported failed
+	// though the upload was in place (#725).
+	it.runIf(process.platform === "win32").each(["exec", "sftp"] as const)(
+		"replaces a running Windows agent alone in its directory over %s, and says it succeeded",
+		{ timeout: 60_000 },
+		async (transport) => {
+			const dir = join(cacheDir, "lasterm");
+			mkdirSync(dir);
+			const windowsTarget = join(dir, "lasterm-agent.exe");
+			const running = await runningExecutable(windowsTarget);
+			try {
+				const client = localWindowsClient(
+					"cmd.exe",
+					process.env,
+					transport === "sftp" ? localSftp() : undefined,
+				);
+				const support = transport === "sftp" ? { offered: true as const } : refused;
+				const agent = localAgent();
+
+				expect(await uploadAgentBinary(client, agent.path, windowsTarget, "windows", support)).toBe(
+					transport,
+				);
+
+				expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
+				expect(running.exitCode).toBeNull();
+				expect(readdirSync(dir)).toEqual([
+					"lasterm-agent.exe",
+					expect.stringMatching(/^lasterm-agent\.exe\.old-[0-9a-f]{16}$/),
+				]);
+			} finally {
+				await stop(running);
+			}
+		},
+	);
+
+	// Another hub's session on the same account runs the agent from the target
+	// (#725). Over SFTP and over the command channel alike, the upload takes the
+	// target's name, the running agent keeps going from the file set aside, and
+	// a later upload deletes that file once nothing runs it. What earlier
+	// uploads left goes too, and only that.
+	it.runIf(process.platform === "win32").each([
+		["cmd.exe", "exec"],
+		["powershell.exe", "exec"],
+		["cmd.exe", "sftp"],
+	] as const)(
+		"replaces a running Windows agent through %s over %s, and sweeps what earlier uploads left",
+		{ timeout: 60_000 },
+		async (shell, transport) => {
+			const dir = join(cacheDir, "Zoë O'Brien %PATH% $x {y} 日本", "lasterm");
+			mkdirSync(dir, { recursive: true });
+			const windowsTarget = join(dir, "lasterm-agent.exe");
+			const leftover = (name: string, ageMinutes: number): string => {
+				const path = join(dir, name);
+				writeFileSync(path, "left over");
+				const when = new Date(Date.now() - ageMinutes * 60_000);
+				utimesSync(path, when, when);
+				return path;
+			};
+			const setAsideEarlier = leftover("lasterm-agent.exe.old-0123456789abcdef", 0);
+			const crashedUpload = leftover(
+				".lasterm-agent.exe.0123456789abcdef.partial",
+				STALE_UPLOAD_MINUTES + 5,
+			);
+			const kept = [
+				leftover(".lasterm-agent.exe.fedcba9876543210.partial", STALE_UPLOAD_MINUTES - 5),
+				leftover("lasterm-agent.exe.old-not-hex", 24 * 60),
+				leftover("other-agent.exe.old-0123456789abcdef", 24 * 60),
+				leftover(".lasterm-agent.exe.0123456789abcdef.partial.keep", 24 * 60),
+			];
+			const running = await runningExecutable(windowsTarget);
+			try {
+				const client = localWindowsClient(
+					shell,
+					process.env,
+					transport === "sftp" ? localSftp() : undefined,
+				);
+				const support = transport === "sftp" ? { offered: true as const } : refused;
+
+				const first = localAgent();
+				expect(await uploadAgentBinary(client, first.path, windowsTarget, "windows", support)).toBe(
+					transport,
+				);
+
+				expect(readFileSync(windowsTarget).equals(first.bytes)).toBe(true);
+				expect(running.exitCode).toBeNull();
+				const setAside = readdirSync(dir).filter((name) =>
+					/^lasterm-agent\.exe\.old-[0-9a-f]{16}$/.test(name),
+				);
+				expect(setAside).toHaveLength(1);
+				expect(existsSync(setAsideEarlier)).toBe(false);
+				expect(existsSync(crashedUpload)).toBe(false);
+				for (const path of kept) expect(existsSync(path), `${path} was removed`).toBe(true);
+
+				await stop(running);
+				const second = localAgent();
+				await uploadAgentBinary(client, second.path, windowsTarget, "windows", support);
+
+				expect(readFileSync(windowsTarget).equals(second.bytes)).toBe(true);
+				expect(readdirSync(dir).sort()).toEqual(
+					["lasterm-agent.exe", ...kept.map((path) => path.slice(dir.length + 1))].sort(),
+				);
+			} finally {
+				await stop(running);
+			}
 		},
 	);
 });
@@ -2235,24 +2518,28 @@ describe("deployAgentIfNeeded — agent already present", () => {
 		const client = makeMockClient(
 			{
 				[folderCommand("LocalApplicationData")]: folderOutput(folder),
+				[ENCODED_POWERSHELL]: { stdout: "", stderr: "", exitCode: 0 },
 			},
 			(cb) => cb(undefined, sftp),
 		);
 		const result = await deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions());
 		const path = `${folder.endsWith("\\") ? folder : `${folder}\\`}lasterm\\lasterm-agent.exe`;
+		const dir = path.slice(0, path.lastIndexOf("\\"));
 		expect(result.remotePath).toBe(path);
 		expect(result.deployed).toBe(true);
-		expect(sftp.mkdir).toHaveBeenCalledExactlyOnceWith(
-			path.slice(0, path.lastIndexOf("\\")),
-			expect.any(Function),
-		);
-		expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(local, path, expect.any(Function));
-		expect(vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd)).toEqual([
+		expect(sftp.mkdir).toHaveBeenCalledExactlyOnceWith(dir, expect.any(Function));
+		const temp = uploadedTo(sftp);
+		expect(temp.startsWith(`${dir}\\.lasterm-agent.exe.`)).toBe(true);
+		expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(local, temp, expect.any(Function));
+		const commands = vi.mocked(client.exec).mock.calls.map(([cmd]) => cmd);
+		expect(commands.slice(0, 4)).toEqual([
 			"where lasterm-agent",
 			folderCommand("LocalApplicationData"),
 			`if exist "${path}" echo ok`,
 			folderCommand("ProgramFiles"),
 		]);
+		expect(commands).toHaveLength(5);
+		expect(replacePaths(commands[4] ?? "")).toMatchObject({ target: path, temp });
 	});
 
 	it.each([
@@ -2339,6 +2626,7 @@ describe("deployAgentIfNeeded — agent already present", () => {
 			const path = `${folder}\\lasterm\\lasterm-agent.exe`;
 			const responses = {
 				[folderCommand("LocalApplicationData")]: { stdout: "", stderr: "first", exitCode: 1 },
+				[ENCODED_POWERSHELL]: { stdout: "", stderr: "", exitCode: 0 },
 			};
 			const sftp = makeMockSftp();
 			const openSftp = vi.fn((cb: (err: Error | undefined, sftp: SFTPWrapper) => void) =>
@@ -2359,7 +2647,11 @@ describe("deployAgentIfNeeded — agent already present", () => {
 			const deployment = deployAgentIfNeeded(client, { os: "windows", arch: "x64" }, makeOptions());
 			if (succeeds) {
 				expect((await deployment).remotePath).toBe(path);
-				expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(local, path, expect.any(Function));
+				expect(sftp.fastPut).toHaveBeenCalledExactlyOnceWith(
+					local,
+					expect.stringMatching(/\\\.lasterm-agent\.exe\.[0-9a-f]{16}\.partial$/),
+					expect.any(Function),
+				);
 			} else {
 				const error = await deployment.catch((error: unknown) => error);
 				expect(error).toBeInstanceOf(Error);

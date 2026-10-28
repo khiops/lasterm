@@ -646,15 +646,24 @@ async function execRename(client: SshClient, from: string, to: string): Promise<
 	}
 }
 
+/** Where the file name starts in `remotePath`: after its last separator, `\` counting on Windows. */
+function fileNameStart(remotePath: string, os: HostOs): number {
+	const cut =
+		os === "windows"
+			? Math.max(remotePath.lastIndexOf("/"), remotePath.lastIndexOf("\\"))
+			: remotePath.lastIndexOf("/");
+	return cut + 1;
+}
+
 /**
  * A name for the upload beside `remotePath`: same directory, so the rename
  * stays on one filesystem, and hidden and unique, so nothing takes it for the
  * agent and two uploads never share one.
  */
-function uploadTempPath(remotePath: string): string {
-	const cut = remotePath.lastIndexOf("/");
-	const dir = remotePath.slice(0, cut + 1);
-	const name = remotePath.slice(cut + 1);
+function uploadTempPath(remotePath: string, os: HostOs): string {
+	const start = fileNameStart(remotePath, os);
+	const dir = remotePath.slice(0, start);
+	const name = remotePath.slice(start);
 	return `${dir}.${name}.${randomBytes(8).toString("hex")}.partial`;
 }
 
@@ -678,7 +687,8 @@ export const STALE_UPLOAD_MINUTES = 60;
  * disagrees with the remote's cannot misjudge it.
  *
  * Best-effort: a remote that cannot run this keeps its leftovers, and the
- * upload goes ahead all the same.
+ * upload goes ahead all the same. POSIX only: a Windows host sweeps the same
+ * way once the upload is in place (`windowsReplaceScript`).
  */
 async function sweepStaleUploads(client: SshClient, remotePath: string): Promise<void> {
 	const cut = remotePath.lastIndexOf("/");
@@ -717,10 +727,13 @@ export type AgentUploadTransport = "sftp" | "exec";
  * A temporary left behind is removed by a later upload, once it is old
  * enough that nobody can still be writing it (`sweepStaleUploads`).
  *
- * A Windows remote is written in place, as before. Its agent runs on stdio and
- * exits with its connection, so nothing is running from the file, and the
- * rename would not help anyway: Windows refuses to replace a running
- * executable, and the `mv` fallback is a POSIX shell's.
+ * A Windows remote gets the same temporary, and PowerShell moves it into place
+ * (`windowsReplaceScript`, #725). Its agent runs on stdio and lives as long as
+ * its connection, so another hub's session on the same account may be running
+ * it. Windows refuses to open a running executable for writing, or to delete
+ * it or rename anything over it, but lets it be renamed: the running file is
+ * set aside, and the new one takes its name. The file set aside is deleted
+ * once nothing runs it, by that upload or a later one.
  *
  * SFTP stays the first choice. The exec channel is used when the connection's
  * probe found no SFTP (`sftp`), or when SFTP cannot be opened; it carries the
@@ -790,23 +803,9 @@ async function uploadOverSftp(
 			);
 		}
 
-		if (os === "windows") {
-			let step = `upload the agent to ${remotePath}`;
-			try {
-				await sftpFastPut(sftp, localPath, remotePath).catch((error) => {
-					throw transferFailure(walkError, error);
-				});
-				step = `make ${remotePath} executable`;
-				await sftpChmod(sftp, remotePath, 0o755);
-			} catch (error) {
-				if (!sftp.ended) throw error;
-				throw new Error(`Could not ${step}: the SFTP channel closed`, { cause: error });
-			}
-			return;
-		}
-
-		await sweepStaleUploads(client, remotePath);
-		const temp = uploadTempPath(remotePath);
+		// On Windows, moving the upload into place sweeps too.
+		if (os !== "windows") await sweepStaleUploads(client, remotePath);
+		const temp = uploadTempPath(remotePath, os);
 		let step = `upload the agent to ${temp}`;
 		try {
 			await sftpFastPut(sftp, localPath, temp).catch((error) => {
@@ -815,7 +814,8 @@ async function uploadOverSftp(
 			step = `make ${temp} executable`;
 			await sftpChmod(sftp, temp, 0o755);
 			step = `move the agent into place at ${remotePath}`;
-			if (!(await sftpPosixRename(sftp, temp, remotePath))) {
+			if (os === "windows") await execWindowsReplace(client, temp, remotePath);
+			else if (!(await sftpPosixRename(sftp, temp, remotePath))) {
 				await execRename(client, temp, remotePath);
 			}
 		} catch (err) {
@@ -845,12 +845,13 @@ function encodedPowerShell(script: string): string {
 }
 
 /**
- * The PowerShell statement that sets `$p` to `path`, which travels as Base64 of
- * its UTF-8 bytes: quotes, `%`, `$`, spaces and non-ASCII reach it as data.
+ * The PowerShell statement that sets `$p` (or `$<name>`) to `path`, which
+ * travels as Base64 of its UTF-8 bytes: quotes, `%`, `$`, spaces and non-ASCII
+ * reach it as data.
  */
-function powerShellPathVariable(path: string): string {
+function powerShellPathVariable(path: string, name = "p"): string {
 	const encodedPath = Buffer.from(path, "utf8").toString("base64");
-	return `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'))`;
+	return `$${name}=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'))`;
 }
 
 /**
@@ -884,6 +885,66 @@ export function windowsUploadCommand(remotePath: string): string {
 			"[Console]::Out.Write($n)",
 		].join(";"),
 	);
+}
+
+/**
+ * The PowerShell script that moves the upload `temp` into place at `target` on
+ * a Windows host (#725), then removes what earlier uploads left beside it.
+ *
+ * An agent may be running from `target`, for another hub's session on the
+ * same account. Windows will not delete a running executable, nor rename
+ * another file over it, but it renames it: the current file goes to `aside`,
+ * the upload takes its name, and the running agent keeps its image. If the
+ * upload cannot take the name, the current file goes back. In between, for
+ * the length of one rename, nothing is at `target`.
+ *
+ * A move refused because another process has the file open (a sharing or
+ * lock violation, as from an antivirus scan or another hub hashing it) is
+ * tried again for about two seconds. Only .NET is called, no cmdlet: under a
+ * pwsh parent, Windows PowerShell may not load its own utility module (#722).
+ *
+ * Then, best-effort: every `<agent>.old-*` that nothing runs any more, and
+ * every upload temporary older than `STALE_UPLOAD_MINUTES` by the remote's
+ * clock, as `sweepStaleUploads` does on POSIX. Deleting a file set aside fails
+ * while it still runs, and it is left for a later upload. The script exits 0
+ * explicitly: PowerShell would otherwise exit 1 when that caught failure is
+ * the last thing it did, which is the usual case of a single running agent.
+ */
+export function windowsReplaceScript(temp: string, target: string, aside: string): string {
+	return [
+		"$ErrorActionPreference='Stop'",
+		powerShellPathVariable(target),
+		powerShellPathVariable(temp, "t"),
+		powerShellPathVariable(aside, "o"),
+		"function m($s,$d){for($i=1;;$i++){try{[IO.File]::Move($s,$d);return}catch [IO.IOException]{if($i -ge 10 -or (32,33 -notcontains ($_.Exception.GetBaseException().HResult -band 0xFFFF))){throw};[Threading.Thread]::Sleep(200)}}}",
+		"$a=[IO.File]::Exists($p)",
+		"if($a){m $p $o}",
+		"try{m $t $p}catch{$e=$_;if($a){try{m $o $p}catch{}};throw $e}",
+		`try{$d=[IO.Path]::GetDirectoryName($p);$n=[regex]::Escape([IO.Path]::GetFileName($p));$c=[DateTime]::UtcNow.AddMinutes(-${STALE_UPLOAD_MINUTES});foreach($f in [IO.Directory]::GetFiles($d)){$b=[IO.Path]::GetFileName($f);if(($b -match('^'+$n+'\\.old-[0-9a-f]{16}$')) -or (($b -match('^\\.'+$n+'\\.[0-9a-f]{16}\\.partial$')) -and ([IO.File]::GetLastWriteTimeUtc($f) -lt $c))){try{[IO.File]::Delete($f)}catch{}}}}catch{}`,
+		// Reached only once the upload is in place. Without it, a deletion the
+		// sweep caught as its last statement (the file set aside still runs)
+		// makes Windows PowerShell exit 1 though nothing failed.
+		"exit 0",
+	].join(";");
+}
+
+/** How long PowerShell may take to move the agent into place, retries included. */
+const WINDOWS_REPLACE_TIMEOUT_MS = 30_000;
+
+/** Run `windowsReplaceScript` on the remote, with a fresh name for the file set aside. */
+async function execWindowsReplace(client: SshClient, temp: string, target: string): Promise<void> {
+	const aside = `${target}.old-${randomBytes(8).toString("hex")}`;
+	const { stderr, exitCode } = await sshExec(
+		client,
+		encodedPowerShell(windowsReplaceScript(temp, target, aside)),
+		WINDOWS_REPLACE_TIMEOUT_MS,
+	);
+	if (exitCode !== 0) throw exitFailure(exitCode, stderr);
+}
+
+/** The PowerShell script that deletes `path` if it can: cleanup after a failure. */
+function windowsDeleteScript(path: string): string {
+	return [powerShellPathVariable(path), "[IO.File]::Delete($p)"].join(";");
 }
 
 /** What a remote command said on stderr, without PowerShell's CLIXML wrapping, and short. */
@@ -991,9 +1052,14 @@ function execWithFileOnStdin(
 }
 
 /** Remove a remote file over exec, whatever happens: this only ever cleans up after a failure. */
-async function execUnlinkQuietly(client: SshClient, remotePath: string): Promise<void> {
+async function execUnlinkQuietly(client: SshClient, remotePath: string, os: HostOs): Promise<void> {
 	try {
-		await sshExec(client, `rm -f -- ${quotePosix(remotePath)}`);
+		await sshExec(
+			client,
+			os === "windows"
+				? encodedPowerShell(windowsDeleteScript(remotePath))
+				: `rm -f -- ${quotePosix(remotePath)}`,
+		);
 	} catch {
 		// Left for sweepStaleUploads.
 	}
@@ -1033,18 +1099,21 @@ async function uploadOverExec(
 	os: HostOs,
 ): Promise<void> {
 	if (os === "windows") {
+		const temp = uploadTempPath(remotePath, os);
+		let step = `upload the agent to ${temp}`;
 		try {
-			await writeOverExec(client, localPath, windowsUploadCommand(remotePath), remotePath, os);
+			await writeOverExec(client, localPath, windowsUploadCommand(temp), temp, os);
+			step = `move the agent into place at ${remotePath}`;
+			await execWindowsReplace(client, temp, remotePath);
 		} catch (err) {
-			throw new Error(`Could not upload the agent to ${remotePath}: ${describeError(err)}`, {
-				cause: err,
-			});
+			await execUnlinkQuietly(client, temp, os);
+			throw new Error(`Could not ${step}: ${describeError(err)}`, { cause: err });
 		}
 		return;
 	}
 
 	await sweepStaleUploads(client, remotePath);
-	const temp = uploadTempPath(remotePath);
+	const temp = uploadTempPath(remotePath, os);
 	let step = `upload the agent to ${temp}`;
 	try {
 		await writeOverExec(client, localPath, posixUploadCommand(temp), temp, os);
@@ -1054,7 +1123,7 @@ async function uploadOverExec(
 		step = `move the agent into place at ${remotePath}`;
 		await execRename(client, temp, remotePath);
 	} catch (err) {
-		await execUnlinkQuietly(client, temp);
+		await execUnlinkQuietly(client, temp, os);
 		throw new Error(`Could not ${step}: ${describeError(err)}`, { cause: err });
 	}
 }
@@ -1163,9 +1232,10 @@ export async function deployAgentIfNeeded(
 				};
 			}
 			// Mismatch (or remoteSha unavailable) — re-upload from trusted local copy.
-			// A daemon may be running from existingPath; the upload goes beside it
-			// and is renamed over it, so the daemon keeps running the old version
-			// until someone replaces it (#456, #555).
+			// An agent may be running from existingPath; the upload goes beside it
+			// and is renamed over it (on Windows, the running file is renamed
+			// aside first), so that agent keeps running the old version until
+			// someone replaces it (#456, #555, #725).
 			await uploadAgentBinary(client, localBinary, existingPath, os, options.sftp);
 			onAgentUpdated?.(hostId);
 			// Refresh the pin to the newly uploaded binary's hash so the next

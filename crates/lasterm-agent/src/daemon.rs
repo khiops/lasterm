@@ -4205,3 +4205,7 @@ mod tests {
 #[cfg(test)]
 #[path = "daemon_backpressure_tests.rs"]
 mod backpressure_tests;
+
+#[cfg(test)]
+#[path = "daemon_input_tests.rs"]
+mod input_tests;

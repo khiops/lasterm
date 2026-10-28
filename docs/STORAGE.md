@@ -419,10 +419,12 @@ Each DB has a `schema_version` table. On startup:
 ```
 1. Open DB
 2. Read schema_version.version
-3. If version < CURRENT_VERSION:
+3. If version is from 1 to the first migration's number less one (a baseline, § 9.3):
+   a. Refuse to start, naming the file and its version
+4. If version < CURRENT_VERSION:
    a. Run migration scripts in order (v1→v2, v2→v3, ...)
    b. Update schema_version
-4. If version > CURRENT_VERSION:
+5. If version > CURRENT_VERSION:
    a. Log "[storage] DB schema version ahead of latest migration - skipping"
    b. Open it as it is
 ```
@@ -454,6 +456,12 @@ Before the first public release, the 21 migrations of `meta.db` were squashed in
 number so that the runner leaves a database they brought to 21 as it is, rather than take it
 for one ahead of every migration and skip each one that follows (§ 9.1). A new database comes
 out at 21 with the baseline's schema, and the next migration is `022`.
+
+A database those migrations left at a version from 1 to 20 cannot be brought up to date: the
+migrations it lacks are gone, and the baseline applied over it would stop on a table it already
+has. The hub refuses it before it applies anything, and stops, naming the file and its version,
+which predates the first public release: move it aside to start fresh (#747). `spool.db`, whose
+first migration is `001`, is never refused this way.
 
 The baseline left out what nothing read: the hosts' `host_group`, the free-text group that
 host groups replaced, `keep_alive_seconds` and `history_retention_days`, two host settings

@@ -1188,7 +1188,7 @@ describe("DELETE /api/groups/:id", () => {
 	});
 });
 
-describe("PUT /api/groups/reorder", () => {
+describe("PUT /api/groups/order", () => {
 	it("returns 400 with invalid host_id ULID", async () => {
 		const res = await server.inject({
 			method: "PUT",

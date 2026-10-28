@@ -347,10 +347,6 @@ export const useSessionStore = defineStore("session", () => {
 					agentVerifyStore.handleDeployError(msg.message, msg.hostId);
 					return;
 				}
-				if (msg.code === "AGENT_UPDATED") {
-					// Legacy hub frame. Modern hubs send AGENT_SYNCED on a non-error channel.
-					return;
-				}
 				if (msg.code === "AGENT_BINARY_REJECTED") {
 					// User chose to reject the binary — no toast needed.
 					return;

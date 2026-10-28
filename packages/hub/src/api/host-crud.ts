@@ -106,26 +106,23 @@ export function registerHostCrudRoutes(
 	});
 
 	// PUT /api/hosts/order — reorder hosts within a group
-	// Alias: PUT /api/hosts/reorder (kept for backward compatibility)
-	// MUST be registered before /:id to avoid "order"/"reorder" matching as a host ID param.
-	for (const url of ["/api/hosts/order", "/api/hosts/reorder"]) {
-		server.put<{ Body: { group_id: string | null; host_ids: string[] } }>(
-			url,
-			async (request, reply) => {
-				const { group_id, host_ids } = request.body;
-				if (!Array.isArray(host_ids) || host_ids.length === 0) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message: "host_ids must be a non-empty array",
-						},
-					});
-				}
-				metaDal.reorderHosts(group_id ?? null, host_ids);
-				return reply.code(204).send();
-			},
-		);
-	}
+	// MUST be registered before /:id to avoid "order" matching as a host ID param.
+	server.put<{ Body: { group_id: string | null; host_ids: string[] } }>(
+		"/api/hosts/order",
+		async (request, reply) => {
+			const { group_id, host_ids } = request.body;
+			if (!Array.isArray(host_ids) || host_ids.length === 0) {
+				return reply.code(400).send({
+					error: {
+						code: "VALIDATION_ERROR",
+						message: "host_ids must be a non-empty array",
+					},
+				});
+			}
+			metaDal.reorderHosts(group_id ?? null, host_ids);
+			return reply.code(204).send();
+		},
+	);
 
 	// GET /api/hosts/:id
 	server.get<{ Params: { id: string } }>("/api/hosts/:id", async (request, reply) => {

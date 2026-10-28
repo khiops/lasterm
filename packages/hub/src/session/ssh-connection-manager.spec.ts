@@ -101,6 +101,18 @@ function onlyPromptId(ctx: Pick<SharedSessionContext, "pendingPrompts">): string
 	return promptId;
 }
 
+/** What an answer to the pending prompt echoes: its promptId and deliveryEpoch. */
+function onlyPrompt(ctx: Pick<SharedSessionContext, "pendingPrompts">): {
+	promptId: string;
+	deliveryEpoch: number;
+} {
+	const [promptId, pending] = [...ctx.pendingPrompts.entries()][0] ?? [];
+	if (!promptId || pending?.deliveryEpoch === undefined) {
+		throw new Error("expected a pending prompt");
+	}
+	return { promptId, deliveryEpoch: pending.deliveryEpoch };
+}
+
 describe("SshConnectionManager — passphrase cache", () => {
 	it("buildPromptAuth returns cached passphrase immediately (no send)", async () => {
 		const ctx = makeCtx();
@@ -133,7 +145,7 @@ describe("SshConnectionManager — passphrase cache", () => {
 		);
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
 
-		mgr.handleAuthPromptResponse("c2", hostId, null);
+		mgr.handleAuthPromptResponse("c2", { hostId, secret: null, ...onlyPrompt(ctx) });
 		await promise;
 	});
 
@@ -152,7 +164,7 @@ describe("SshConnectionManager — passphrase cache", () => {
 			expect.objectContaining({ type: "AUTH_PROMPT", hostId, promptType: "password" }),
 		);
 
-		mgr.handleAuthPromptResponse("c3", hostId, null);
+		mgr.handleAuthPromptResponse("c3", { hostId, secret: null, ...onlyPrompt(ctx) });
 		await promise;
 	});
 
@@ -165,7 +177,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		const promptAuth = mgr.buildPromptAuth(client);
 		const promise = promptAuth(hostId, "password", "test");
 
-		mgr.handleAuthPromptResponse("c3b", hostId, "ssh-password", true);
+		mgr.handleAuthPromptResponse("c3b", {
+			hostId,
+			secret: "ssh-password",
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
 		await expect(promise).resolves.toBe("ssh-password");
 
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
@@ -180,7 +197,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		const promptAuth = mgr.buildPromptAuth(client);
 		const promise = promptAuth(hostId, "passphrase", "test");
 
-		mgr.handleAuthPromptResponse("c4", hostId, "my-passphrase", true);
+		mgr.handleAuthPromptResponse("c4", {
+			hostId,
+			secret: "my-passphrase",
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
 		await expect(promise).resolves.toBe("my-passphrase");
 
 		expect(ctx.passphraseCache.has(hostId)).toBe(true);
@@ -199,7 +221,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		const promptAuth = mgr.buildPromptAuth(client);
 		const promise = promptAuth(hostId, "passphrase", "test");
 
-		mgr.handleAuthPromptResponse("c4b", hostId, "pass", true);
+		mgr.handleAuthPromptResponse("c4b", {
+			hostId,
+			secret: "pass",
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
 		await promise;
 
 		const { expiresAt } = ctx.passphraseCache.get(hostId)!;
@@ -217,7 +244,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		const promptAuth = mgr.buildPromptAuth(client);
 		const promise = promptAuth(hostId, "passphrase", "test");
 
-		mgr.handleAuthPromptResponse("c5", hostId, "my-passphrase", false);
+		mgr.handleAuthPromptResponse("c5", {
+			hostId,
+			secret: "my-passphrase",
+			rememberSession: false,
+			...onlyPrompt(ctx),
+		});
 		await promise;
 
 		expect(ctx.passphraseCache.has(hostId)).toBe(true);
@@ -236,7 +268,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		const promptAuth = mgr.buildPromptAuth(client);
 		const promise = promptAuth(hostId, "passphrase", "test");
 
-		mgr.handleAuthPromptResponse("c6", hostId, null, true);
+		mgr.handleAuthPromptResponse("c6", {
+			hostId,
+			secret: null,
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
 		await promise;
 
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
@@ -252,7 +289,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		void promptAuth(hostId, "passphrase", "test");
 		const promptId = onlyPromptId(ctx);
 
-		mgr.handleAuthPromptResponse("c7-attacker", hostId, "stolen", true);
+		mgr.handleAuthPromptResponse("c7-attacker", {
+			hostId,
+			secret: "stolen",
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
 
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
@@ -268,7 +310,7 @@ describe("SshConnectionManager — passphrase cache", () => {
 		const promptAuth = mgr.buildPromptAuth(client);
 		const promise = promptAuth(hostId, "passphrase", "test");
 
-		mgr.handleAuthPromptResponse("c8", hostId, "pass");
+		mgr.handleAuthPromptResponse("c8", { hostId, secret: "pass", ...onlyPrompt(ctx) });
 		await promise;
 
 		// Real session passphrases keep the short retry cache even without rememberSession.
@@ -305,7 +347,13 @@ describe("SshConnectionManager — passphrase cache", () => {
 		await Promise.resolve();
 		const promptId = onlyPromptId(ctx);
 
-		mgr.handleAuthPromptResponse("c-test-cache", hostId, "test-secret", true, promptId);
+		mgr.handleAuthPromptResponse("c-test-cache", {
+			hostId,
+			secret: "test-secret",
+			rememberSession: true,
+			promptId,
+			deliveryEpoch: 1,
+		});
 		await testPromise;
 
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
@@ -349,7 +397,12 @@ describe("SshConnectionManager — passphrase cache", () => {
 		expect(client.send).toHaveBeenCalledWith(
 			expect.objectContaining({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" }),
 		);
-		mgr.handleAuthPromptResponse("c-test-cache-read", hostId, null, false, promptId);
+		mgr.handleAuthPromptResponse("c-test-cache-read", {
+			hostId,
+			secret: null,
+			promptId,
+			deliveryEpoch: 1,
+		});
 		await testPromise;
 
 		expect(ctx.passphraseCache.get(hostId)?.secret).toBe("cached-session-passphrase");
@@ -605,11 +658,21 @@ describe("SshConnectionManager — reconnect PromptContext routing", () => {
 		expect(followerPrompt.promptId).toBe(promptId);
 		expect(followerPrompt.deliveryEpoch).toBe(2);
 
-		mgr.handleAuthPromptResponse("client-a-old", hostId, "stale-secret", false, promptId, 1);
+		mgr.handleAuthPromptResponse("client-a-old", {
+			hostId,
+			secret: "stale-secret",
+			promptId,
+			deliveryEpoch: 1,
+		});
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
 
-		mgr.handleAuthPromptResponse("client-b-follower", hostId, "fresh-secret", false, promptId, 2);
+		mgr.handleAuthPromptResponse("client-b-follower", {
+			hostId,
+			secret: "fresh-secret",
+			promptId,
+			deliveryEpoch: 2,
+		});
 		await expect(promptPromise).resolves.toBe("fresh-secret");
 		expect(ctx.pendingPrompts.has(promptId)).toBe(false);
 		expect(ctx.passphraseCache.get(hostId)?.secret).toBe("fresh-secret");
@@ -808,7 +871,12 @@ describe("SshConnectionManager — auth prompt timeout de-wedges host", () => {
 		expect(settled).not.toHaveBeenCalled();
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
 
-		mgr.handleAuthPromptResponse(client.id, hostId, "late but mine", false, promptId);
+		mgr.handleAuthPromptResponse(client.id, {
+			hostId,
+			secret: "late but mine",
+			promptId,
+			deliveryEpoch: 1,
+		});
 		await expect(promptPromise).resolves.toBe("late but mine");
 	});
 
@@ -845,7 +913,11 @@ describe("SshConnectionManager — auth prompt timeout de-wedges host", () => {
 		const promptId = onlyPromptId(ctx);
 
 		// Respond before the timer fires.
-		mgr.handleAuthPromptResponse("c-timeout-answered", hostId, "the-secret");
+		mgr.handleAuthPromptResponse("c-timeout-answered", {
+			hostId,
+			secret: "the-secret",
+			...onlyPrompt(ctx),
+		});
 
 		// Advance well past the timeout — the timer is already cleared, so no second resolve.
 		await vi.advanceTimersByTimeAsync(200_000);
@@ -1488,12 +1560,22 @@ describe("SEC: cross-client prompt clobber prevention — buildPromptAuth", () =
 		expect(ctx.pendingPrompts.has(promptIdA)).toBe(true);
 		const promptIdB = promptIds.find((id) => id !== promptIdA)!;
 
-		mgr.handleAuthPromptResponse("client-B", hostId, null, false, promptIdB);
+		mgr.handleAuthPromptResponse("client-B", {
+			hostId,
+			secret: null,
+			promptId: promptIdB,
+			deliveryEpoch: 1,
+		});
 		await expect(promiseB).resolves.toBeNull();
 
 		// A's prompt must still be pending after B's prompt resolves.
 		expect(ctx.pendingPrompts.has(promptIdA)).toBe(true);
-		mgr.handleAuthPromptResponse("client-A", hostId, "secret-A", false, promptIdA);
+		mgr.handleAuthPromptResponse("client-A", {
+			hostId,
+			secret: "secret-A",
+			promptId: promptIdA,
+			deliveryEpoch: 1,
+		});
 		await expect(promiseA).resolves.toBe("secret-A");
 	});
 
@@ -1515,11 +1597,21 @@ describe("SEC: cross-client prompt clobber prevention — buildPromptAuth", () =
 		expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
 		expect(ctx.pendingPrompts.has(secondPromptId)).toBe(true);
 
-		mgr.handleAuthPromptResponse("client-A", hostId, "second", false, secondPromptId);
+		mgr.handleAuthPromptResponse("client-A", {
+			hostId,
+			secret: "second",
+			promptId: secondPromptId,
+			deliveryEpoch: 1,
+		});
 		await expect(secondPromise).resolves.toBe("second");
 		expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
 
-		mgr.handleAuthPromptResponse("client-A", hostId, null, false, firstPromptId);
+		mgr.handleAuthPromptResponse("client-A", {
+			hostId,
+			secret: null,
+			promptId: firstPromptId,
+			deliveryEpoch: 1,
+		});
 		await expect(firstPromise).resolves.toBeNull();
 	});
 
@@ -1543,27 +1635,39 @@ describe("SEC: cross-client prompt clobber prevention — buildPromptAuth", () =
 		const roguePromise = promptAuthRogue(hostId, "passphrase", "Enter passphrase");
 		const roguePromptId = [...ctx.pendingPrompts.keys()].find((id) => id !== promptId)!;
 
-		mgr.handleAuthPromptResponse("rogue-client", hostId, "rogue-secret", false, promptId);
+		mgr.handleAuthPromptResponse("rogue-client", {
+			hostId,
+			secret: "rogue-secret",
+			promptId,
+			deliveryEpoch: 1,
+		});
 
 		// INVARIANT: follower's prompt is NOT resolved by rogue.
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
 
-		mgr.handleAuthPromptResponse("rogue-client", hostId, null, false, roguePromptId);
+		mgr.handleAuthPromptResponse("rogue-client", {
+			hostId,
+			secret: null,
+			promptId: roguePromptId,
+			deliveryEpoch: 1,
+		});
 		await roguePromise;
-		mgr.handleAuthPromptResponse("follower-client", hostId, "follower-secret", false, promptId);
+		mgr.handleAuthPromptResponse("follower-client", {
+			hostId,
+			secret: "follower-secret",
+			promptId,
+			deliveryEpoch: 1,
+		});
 		await expect(promptPromise).resolves.toBe("follower-secret");
 	});
 });
 
-// ─── handleAuthPromptResponse: promptId path + back-compat scan ─────────────
+// ─── handleAuthPromptResponse: routed by promptId ───────────────────────────
 //
-// After migration, handleAuthPromptResponse has three routes:
-//   1. promptId present → routes via respondCtx() (new clients / PromptContext path)
-//   2. promptId absent → scans promptContexts for in-flight passphrase by hostId
-//
-// Route 1 and 2 preserve the passphrase cache write (60s / 15min).
+// Every response names its prompt by promptId and deliveryEpoch, and goes
+// through respondCtx(). An accepted session passphrase is cached (60s / 15min).
 
-describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new clients)", () => {
+describe("SshConnectionManager — handleAuthPromptResponse: promptId route", () => {
 	// ctx needs the full PromptCtxSlice for respond() to work.
 	function makePromptCtx(): Pick<
 		SharedSessionContext,
@@ -1630,15 +1734,13 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new
 		const promptId = (sentMessages[0] as Record<string, unknown>).promptId as string;
 		expect(promptId).toBeTruthy();
 
-		// Respond via handleAuthPromptResponse WITH promptId (new wire path).
-		mgr.handleAuthPromptResponse(
-			ownerClientId,
+		// Respond with the promptId and deliveryEpoch the prompt was sent with.
+		mgr.handleAuthPromptResponse(ownerClientId, {
 			hostId,
-			"my-passphrase",
-			false,
+			secret: "my-passphrase",
 			promptId,
-			undefined,
-		);
+			deliveryEpoch: 1,
+		});
 
 		const result = await resultPromise;
 		expect(result).toBe("my-passphrase");
@@ -1683,7 +1785,13 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new
 
 		const promptId = (sentMessages[0] as Record<string, unknown>).promptId as string;
 		const before = Date.now();
-		mgr.handleAuthPromptResponse(ownerClientId, hostId, "long-pass", true, promptId, undefined);
+		mgr.handleAuthPromptResponse(ownerClientId, {
+			hostId,
+			secret: "long-pass",
+			rememberSession: true,
+			promptId,
+			deliveryEpoch: 1,
+		});
 		await resultPromise;
 
 		const ttl = ctx.passphraseCache.get(hostId)!.expiresAt - before;
@@ -1728,7 +1836,12 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new
 		const promptId = (sentMessages[0] as Record<string, unknown>).promptId as string;
 
 		// Attacker uses the wrong clientId.
-		mgr.handleAuthPromptResponse("attacker", hostId, "stolen", false, promptId, undefined);
+		mgr.handleAuthPromptResponse("attacker", {
+			hostId,
+			secret: "stolen",
+			promptId,
+			deliveryEpoch: 1,
+		});
 
 		// Pending entry must remain (SEC-003: respondCtx rejected).
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
@@ -1776,14 +1889,13 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new
 		if (elevationPromise === null) throw new Error("expected elevation prompt");
 
 		const elevationPrompt = sentMessages[0] as Record<string, unknown>;
-		mgr.handleAuthPromptResponse(
-			ownerClientId,
+		mgr.handleAuthPromptResponse(ownerClientId, {
 			hostId,
-			"sudo-secret",
-			true,
-			elevationPrompt.promptId as string,
-			elevationPrompt.deliveryEpoch as number,
-		);
+			secret: "sudo-secret",
+			rememberSession: true,
+			promptId: elevationPrompt.promptId as string,
+			deliveryEpoch: elevationPrompt.deliveryEpoch as number,
+		});
 
 		await expect(elevationPromise).resolves.toBe("sudo-secret");
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
@@ -1807,14 +1919,13 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new
 		if (passphrasePromise === null) throw new Error("expected passphrase prompt");
 
 		const passphrasePrompt = sentMessages[0] as Record<string, unknown>;
-		mgr.handleAuthPromptResponse(
-			ownerClientId,
+		mgr.handleAuthPromptResponse(ownerClientId, {
 			hostId,
-			"ssh-pass",
-			false,
-			passphrasePrompt.promptId as string,
-			passphrasePrompt.deliveryEpoch as number,
-		);
+			secret: "ssh-pass",
+			rememberSession: false,
+			promptId: passphrasePrompt.promptId as string,
+			deliveryEpoch: passphrasePrompt.deliveryEpoch as number,
+		});
 
 		await expect(passphrasePromise).resolves.toBe("ssh-pass");
 		expect(ctx.passphraseCache.get(hostId)?.secret).toBe("ssh-pass");
@@ -1853,298 +1964,15 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route (new
 		if (resultPromise === null) throw new Error("expected password prompt");
 
 		const prompt = sentMessages[0] as Record<string, unknown>;
-		mgr.handleAuthPromptResponse(
-			ownerClientId,
+		mgr.handleAuthPromptResponse(ownerClientId, {
 			hostId,
-			"ssh-password",
-			true,
-			prompt.promptId as string,
-			prompt.deliveryEpoch as number,
-		);
+			secret: "ssh-password",
+			rememberSession: true,
+			promptId: prompt.promptId as string,
+			deliveryEpoch: prompt.deliveryEpoch as number,
+		});
 
 		await expect(resultPromise).resolves.toBe("ssh-password");
 		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-	});
-});
-
-describe("SshConnectionManager — handleAuthPromptResponse: back-compat scan (no promptId)", () => {
-	function makePromptCtx(): Pick<
-		SharedSessionContext,
-		| "passphraseCache"
-		| "promptContexts"
-		| "promptIndex"
-		| "pendingPrompts"
-		| "clients"
-		| "acquisitions"
-	> {
-		return {
-			passphraseCache: new Map(),
-			promptContexts: new Map<string, PromptContext>(),
-			promptIndex: new Map<string, string>(),
-			pendingPrompts: new Map() as SharedSessionContext["pendingPrompts"],
-			clients: new Map(),
-			acquisitions: new Map() as SharedSessionContext["acquisitions"],
-		};
-	}
-
-	afterEach(() => {
-		vi.useRealTimers();
-	});
-
-	it("E1: no promptId → scans promptContexts by hostId/type and resolves in-flight passphrase", async () => {
-		// Mutation oracle: removing the back-compat scan causes the route to fall
-		// through and resolve nothing — the promise hangs.
-		const ctx = makePromptCtx();
-		const mgr = new SshConnectionManager(
-			ctx as SharedSessionContext,
-			null as never,
-			null as never,
-			null as never,
-		);
-		const hostId = "host-e1";
-		const ownerClientId = "c-e1";
-
-		ctx.clients.set(ownerClientId, makeClient(ownerClientId));
-
-		// Open a passphrase PromptContext (as buildPromptAuth does with acqId).
-		const contextId = "acq-e1";
-		openContext(ctx as SharedSessionContext, "session", hostId, ownerClientId, contextId);
-
-		const sentMessages: unknown[] = [];
-		const send = (_cid: string, msg: Record<string, unknown>) => sentMessages.push(msg);
-
-		const resultPromise = promptCtx(
-			ctx as SharedSessionContext,
-			contextId,
-			"passphrase",
-			{
-				type: "AUTH_PROMPT",
-				hostId,
-				promptType: "passphrase",
-				message: "Passphrase:",
-				promptId: "",
-			},
-			send,
-		)!;
-
-		// Respond WITHOUT promptId (back-compat wire format from old PWA clients).
-		mgr.handleAuthPromptResponse(ownerClientId, hostId, "secret-pass", false);
-
-		const result = await resultPromise;
-		expect(result).toBe("secret-pass");
-
-		// Cache is written (60s TTL).
-		expect(ctx.passphraseCache.get(hostId)?.secret).toBe("secret-pass");
-	});
-
-	it("E2: no promptId + rememberSession=true stores 15-min cache via scan path", async () => {
-		const ctx = makePromptCtx();
-		const mgr = new SshConnectionManager(
-			ctx as SharedSessionContext,
-			null as never,
-			null as never,
-			null as never,
-		);
-		const hostId = "host-e2";
-		const ownerClientId = "c-e2";
-
-		ctx.clients.set(ownerClientId, makeClient(ownerClientId));
-
-		const contextId = "acq-e2";
-		openContext(ctx as SharedSessionContext, "session", hostId, ownerClientId, contextId);
-
-		const send = (_cid: string, msg: Record<string, unknown>) => void msg;
-
-		const resultPromise = promptCtx(
-			ctx as SharedSessionContext,
-			contextId,
-			"passphrase",
-			{
-				type: "AUTH_PROMPT",
-				hostId,
-				promptType: "passphrase",
-				message: "Passphrase:",
-				promptId: "",
-			},
-			send,
-		)!;
-
-		const before = Date.now();
-		mgr.handleAuthPromptResponse(ownerClientId, hostId, "session-pass", true);
-		await resultPromise;
-
-		const ttl = ctx.passphraseCache.get(hostId)!.expiresAt - before;
-		expect(ttl).toBeGreaterThanOrEqual(15 * 60 * 1000 - 100);
-		expect(ttl).toBeLessThanOrEqual(15 * 60 * 1000 + 200);
-	});
-
-	it("E3: no promptId + no in-flight PromptContext is a no-op and does not cache", () => {
-		const ctx = makePromptCtx();
-		const mgr = new SshConnectionManager(
-			ctx as SharedSessionContext,
-			null as never,
-			null as never,
-			null as never,
-		);
-		const hostId = "host-e3";
-
-		mgr.handleAuthPromptResponse("c-e3", hostId, "legacy-secret", false);
-
-		expect(ctx.pendingPrompts.size).toBe(0);
-		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-	});
-
-	it("E4: no promptId elevation response resolves without writing passphraseCache", async () => {
-		const ctx = makePromptCtx();
-		const mgr = new SshConnectionManager(
-			ctx as SharedSessionContext,
-			null as never,
-			null as never,
-			null as never,
-		);
-		const hostId = "host-e4";
-		const ownerClientId = "c-e4";
-
-		ctx.clients.set(ownerClientId, makeClient(ownerClientId));
-
-		const elevationContext = openContext(
-			ctx as SharedSessionContext,
-			"elevation",
-			hostId,
-			ownerClientId,
-		);
-		const send = (_cid: string, msg: Record<string, unknown>) => void msg;
-		const resultPromise = promptCtx(
-			ctx as SharedSessionContext,
-			elevationContext.id,
-			"elevation",
-			{
-				type: "AUTH_PROMPT",
-				hostId,
-				promptType: "elevation",
-				message: "Enter sudo password",
-				promptId: "",
-			},
-			send,
-		);
-		if (resultPromise === null) throw new Error("expected elevation prompt");
-
-		mgr.handleAuthPromptResponse(ownerClientId, hostId, "sudo-secret", true);
-
-		await expect(resultPromise).resolves.toBe("sudo-secret");
-		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-	});
-
-	it("KIND-D7 no promptId response is rejected when two same-host prompts match", async () => {
-		// Mutation oracle: first-match fallback resolves one of these prompts and
-		// writes a cache entry instead of rejecting the ambiguous response.
-		const ctx = makePromptCtx();
-		const mgr = new SshConnectionManager(
-			ctx as SharedSessionContext,
-			null as never,
-			null as never,
-			null as never,
-		);
-		const hostId = "host-e-d7-ambiguous";
-		const ownerClientId = "c-e-d7";
-
-		ctx.clients.set(ownerClientId, makeClient(ownerClientId));
-
-		const contextA = openContext(
-			ctx as SharedSessionContext,
-			"session",
-			hostId,
-			ownerClientId,
-			"acq-e-d7-a",
-		);
-		const contextB = openContext(
-			ctx as SharedSessionContext,
-			"session",
-			hostId,
-			ownerClientId,
-			"acq-e-d7-b",
-		);
-		const send = (_cid: string, msg: Record<string, unknown>) => void msg;
-		const promiseA = promptCtx(
-			ctx as SharedSessionContext,
-			contextA.id,
-			"passphrase",
-			{
-				type: "AUTH_PROMPT",
-				hostId,
-				promptType: "passphrase",
-				message: "Passphrase A:",
-				promptId: "",
-			},
-			send,
-		);
-		const promiseB = promptCtx(
-			ctx as SharedSessionContext,
-			contextB.id,
-			"passphrase",
-			{
-				type: "AUTH_PROMPT",
-				hostId,
-				promptType: "passphrase",
-				message: "Passphrase B:",
-				promptId: "",
-			},
-			send,
-		);
-		if (promiseA === null || promiseB === null) throw new Error("expected passphrase prompts");
-		const promptIds = [...ctx.pendingPrompts.keys()];
-		expect(promptIds).toHaveLength(2);
-
-		mgr.handleAuthPromptResponse(ownerClientId, hostId, "ambiguous-secret", true);
-
-		expect(ctx.pendingPrompts.size).toBe(2);
-		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-
-		clearContext(ctx as SharedSessionContext, contextA.id);
-		clearContext(ctx as SharedSessionContext, contextB.id);
-		await Promise.all([expect(promiseA).resolves.toBeNull(), expect(promiseB).resolves.toBeNull()]);
-	});
-
-	it("KIND-D7 no promptId response cannot resolve a prompt routed to another client", async () => {
-		// Mutation oracle: hostId-only fallback lets client-b answer client-a's
-		// operation-owned prompt.
-		const ctx = makePromptCtx();
-		const mgr = new SshConnectionManager(
-			ctx as SharedSessionContext,
-			null as never,
-			null as never,
-			null as never,
-		);
-		const hostId = "host-e-d7-owner";
-		const ownerClientId = "c-e-d7-owner";
-
-		ctx.clients.set(ownerClientId, makeClient(ownerClientId));
-		ctx.clients.set("c-e-d7-other", makeClient("c-e-d7-other"));
-
-		const context = openContext(ctx as SharedSessionContext, "test", hostId, ownerClientId);
-		const send = (_cid: string, msg: Record<string, unknown>) => void msg;
-		const resultPromise = promptCtx(
-			ctx as SharedSessionContext,
-			context.id,
-			"passphrase",
-			{
-				type: "AUTH_PROMPT",
-				hostId,
-				promptType: "passphrase",
-				message: "Passphrase:",
-				promptId: "",
-			},
-			send,
-		);
-		if (resultPromise === null) throw new Error("expected test prompt");
-		const promptId = onlyPromptId(ctx);
-
-		mgr.handleAuthPromptResponse("c-e-d7-other", hostId, "stolen", true);
-
-		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
-		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-
-		clearContext(ctx as SharedSessionContext, context.id);
-		await expect(resultPromise).resolves.toBeNull();
 	});
 });

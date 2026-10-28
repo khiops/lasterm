@@ -211,10 +211,10 @@ describe("Invariant 3: respond() accepts only from the CURRENT routeClientId", (
 		return expect(promise).resolves.toBe("my-secret");
 	});
 
-	it("respond from the correct route with undefined epoch is accepted (back-compat: web does not echo deliveryEpoch yet)", () => {
-		// Back-compat: HOST_VERIFY_RESPONSE carries no deliveryEpoch until the web client
-		// is updated to echo it. respond() must accept undefined epoch from the correct
-		// route owner while still enforcing the SEC-003 clientId check.
+	it("respond from the correct route with undefined epoch is accepted (HOST_VERIFY_RESPONSE carries none)", () => {
+		// HOST_VERIFY_RESPONSE and AGENT_BINARY_VERIFY_RESPONSE carry no deliveryEpoch
+		// yet. respond() must accept undefined epoch from the correct route owner
+		// while still enforcing the SEC-003 clientId check.
 		//
 		// Mutation oracle: if undefined epoch triggers the Guard D rejection path,
 		// this call returns false and the promise never resolves — the test fails.
@@ -230,7 +230,7 @@ describe("Invariant 3: respond() accepts only from the CURRENT routeClientId", (
 
 		const promise = PC.prompt(ctx, context.id, "host_verify", { type: "HOST_VERIFY" }, spySend);
 		expect(capturedPromptId).toBeDefined();
-		// Pass undefined epoch — back-compat path.
+		// Pass undefined epoch, as a HOST_VERIFY_RESPONSE does.
 		const accepted = PC.respond(ctx, capturedPromptId!, "client-a", undefined, "trust_once");
 		expect(accepted).toBe(true);
 		return expect(promise).resolves.toBe("trust_once");

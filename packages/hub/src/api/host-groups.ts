@@ -94,10 +94,10 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 	);
 
 	// PUT /api/host-groups/order — reorder host groups
-	// Alias: PUT /api/host-groups/reorder (kept for backward compatibility)
 	// MUST be registered BEFORE /:id to avoid param collision.
-	for (const url of ["/api/host-groups/order", "/api/host-groups/reorder"]) {
-		server.put<{ Body: { group_ids?: unknown } }>(url, async (request, reply) => {
+	server.put<{ Body: { group_ids?: unknown } }>(
+		"/api/host-groups/order",
+		async (request, reply) => {
 			// A3: runtime body validation
 			if (!request.body || typeof request.body !== "object") {
 				return reply.code(400).send({
@@ -162,8 +162,8 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 
 			metaDal.reorderHostGroups(group_ids as string[]);
 			return reply.code(200).send({ ok: true });
-		});
-	}
+		},
+	);
 
 	// PUT /api/host-groups/:id
 	server.put<{ Params: { id: string }; Body: { name?: unknown; color?: unknown } }>(

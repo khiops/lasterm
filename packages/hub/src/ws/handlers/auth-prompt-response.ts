@@ -20,15 +20,14 @@ export function handleAuthPromptResponse(
 		});
 		return;
 	}
-	if (msg.promptId !== undefined && !isValidUlid(msg.promptId)) {
+	if (!isValidUlid(msg.promptId)) {
 		client.send({ type: "ERROR", code: "INVALID_INPUT", message: "Invalid promptId" });
 		return;
 	}
 	if (
-		msg.deliveryEpoch !== undefined &&
-		(typeof msg.deliveryEpoch !== "number" ||
-			!Number.isFinite(msg.deliveryEpoch) ||
-			msg.deliveryEpoch < 0)
+		typeof msg.deliveryEpoch !== "number" ||
+		!Number.isFinite(msg.deliveryEpoch) ||
+		msg.deliveryEpoch < 0
 	) {
 		client.send({
 			type: "ERROR",
@@ -38,12 +37,5 @@ export function handleAuthPromptResponse(
 		return;
 	}
 
-	sessionManager.handleAuthPromptResponse(
-		clientId,
-		msg.hostId,
-		msg.secret,
-		msg.rememberSession,
-		msg.promptId,
-		msg.deliveryEpoch,
-	);
+	sessionManager.handleAuthPromptResponse(clientId, msg);
 }

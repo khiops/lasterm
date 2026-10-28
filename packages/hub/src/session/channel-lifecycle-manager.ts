@@ -1418,13 +1418,12 @@ export class ChannelLifecycleManager {
 				trackElevationContext(this.ctx, elevationCtxId, owner);
 			}
 
-			// Base payload — promptCtx() merges the real promptId + deliveryEpoch at send time.
-			const promptMsgBase: AuthPromptMessage = {
+			// promptCtx() adds the promptId and deliveryEpoch at send time.
+			const promptMsgBase: Omit<AuthPromptMessage, "promptId" | "deliveryEpoch"> = {
 				type: "AUTH_PROMPT",
 				hostId,
 				promptType,
 				message,
-				promptId: "", // placeholder; overwritten by prompt()
 			};
 
 			// send callback: resolve the owner client at send time and throw on

@@ -4,7 +4,7 @@ import { usePromptQueue } from "./usePromptQueue.js";
 interface TestPrompt {
 	hostId: string;
 	label: string;
-	promptId?: string;
+	promptId: string;
 }
 
 describe("usePromptQueue", () => {
@@ -22,21 +22,6 @@ describe("usePromptQueue", () => {
 
 		expect(queue.currentPrompt.value).toMatchObject({ label: "first", promptId: "pid-1" });
 		expect(queue.pendingPrompts.value.map((prompt) => prompt.promptId)).toEqual(["pid-1", "pid-2"]);
-	});
-
-	it("uses a fallback key when promptId is absent", () => {
-		const queue = usePromptQueue<TestPrompt>({
-			getFallbackKey: (prompt) => prompt.hostId,
-		});
-
-		expect(queue.enqueue({ hostId: "host-1", label: "first" })).toBe(true);
-		expect(queue.enqueue({ hostId: "host-1", label: "same host" })).toBe(false);
-		expect(queue.enqueue({ hostId: "host-2", label: "second host" })).toBe(true);
-
-		expect(queue.pendingPrompts.value.map((prompt) => prompt.label)).toEqual([
-			"first",
-			"second host",
-		]);
 	});
 
 	it("computes the head prompt and resolveHead advances the queue", () => {
@@ -87,7 +72,7 @@ describe("usePromptQueue", () => {
 		expect(handled).toEqual(["first"]);
 	});
 
-	it("withHeadPrompt allows omitted promptId for legacy callers", () => {
+	it("withHeadPrompt acts on the head when no promptId is given", () => {
 		const queue = usePromptQueue<TestPrompt>();
 		const handled: string[] = [];
 

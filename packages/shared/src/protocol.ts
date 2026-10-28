@@ -730,21 +730,14 @@ export interface AuthPromptMessage {
 	hostId: string;
 	promptType: "password" | "passphrase" | "elevation";
 	message: string;
+	/** Correlation ID for this prompt, echoed in AUTH_PROMPT_RESPONSE. */
+	promptId: string;
 	/**
-	 * Correlation ID for this specific prompt instance.
-	 * OPTIONAL for back-compat: cached web PWAs that do not yet echo it are
-	 * still accepted. Will become required in a future release once all clients
-	 * are updated (bump PROTOCOL_VERSION at that point).
-	 * Note: HOST_VERIFY and AGENT_BINARY_VERIFY carry promptId as required
-	 * because those message types were introduced with promptId from day one.
+	 * Rises each time the hub sends this prompt again, to another client when
+	 * the one it was asked of has gone. Echoed in AUTH_PROMPT_RESPONSE, so an
+	 * answer to an earlier sending is ignored.
 	 */
-	promptId?: string;
-	/**
-	 * Monotonic epoch (ms since hub start) at which this prompt was issued.
-	 * Lets the client detect and discard stale prompts after reconnect.
-	 * OPTIONAL — same back-compat reason as promptId above.
-	 */
-	deliveryEpoch?: number;
+	deliveryEpoch: number;
 }
 
 /** UI → Hub: user provides the secret (or cancels) */
@@ -754,18 +747,10 @@ export interface AuthPromptResponseMessage {
 	secret: string | null; // null = user cancelled
 	/** Opt-in: cache secret in hub memory for this session (15 min TTL). */
 	rememberSession?: boolean;
-	/**
-	 * Echo of promptId from the corresponding AUTH_PROMPT, when present.
-	 * OPTIONAL for back-compat: old clients that did not receive a promptId
-	 * will not echo one. Hub should fall back to hostId-keyed routing when absent.
-	 */
-	promptId?: string;
-	/**
-	 * Echo of deliveryEpoch from the corresponding AUTH_PROMPT, when present.
-	 * Allows the hub to detect and discard responses to stale/cancelled prompts.
-	 * OPTIONAL — same back-compat reason as promptId above.
-	 */
-	deliveryEpoch?: number;
+	/** The promptId of the AUTH_PROMPT this answers. */
+	promptId: string;
+	/** The deliveryEpoch of the AUTH_PROMPT this answers. */
+	deliveryEpoch: number;
 }
 
 /**

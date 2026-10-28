@@ -887,14 +887,13 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 			await vi.waitFor(() => expect(sent).toHaveLength(1));
 			const prompt = sent[0] as AuthPromptMessage;
 			expect(prompt).toMatchObject({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" });
-			manager.handleAuthPromptResponse(
-				client.id,
+			manager.handleAuthPromptResponse(client.id, {
 				hostId,
-				passphrase,
-				true,
-				prompt.promptId,
-				prompt.deliveryEpoch,
-			);
+				secret: passphrase,
+				rememberSession: true,
+				promptId: prompt.promptId,
+				deliveryEpoch: prompt.deliveryEpoch,
+			});
 			expect((await asked).passphrase).toBe(passphrase);
 			// Remembered: the next connection takes it from the cache, unasked.
 			expect((await connect()).passphrase).toBe(passphrase);

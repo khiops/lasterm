@@ -575,8 +575,8 @@ describe("SshAgent", () => {
 		const launch = commands.find((c) => c.includes("--daemon"));
 		expect(launch).toBeDefined();
 		expect(launch).toContain("--socket /home/pi/.local/state/lasterm/agent.sock");
-		// The daemon log's file count it was built with (#646), for a binary that knows it.
-		expect(launch).toContain('set -- "$@" --log-files-kept 12; fi');
+		// The daemon log's file count it was built with (#646).
+		expect(launch).toMatch(/ --log-files-kept 12 && /);
 		// This connection started it, from the binary on disk now.
 		expect(agent.reachedRunningDaemon).toBe(false);
 	}, 15_000);
@@ -729,6 +729,7 @@ describe("SshAgent", () => {
 				env: {},
 				cols: 80,
 				rows: 24,
+				envMode: "inherit",
 			});
 
 			const spawnOk = await spawnOkPromise;

@@ -62,7 +62,8 @@ export interface AgentSpawnMessage {
 	elevationSecret?: string;
 	elevationMethod?: string;
 	customCommand?: string;
-	envMode?: EnvMode;
+	/** Required: an agent answers a SPAWN without it with INVALID_MESSAGE. */
+	envMode: EnvMode;
 	/** Removed from the base before `env` is applied: what a profile set to `null`. */
 	envUnset?: string[];
 	/** A login shell: a Unix agent adds `-l` for a shell known to take it. */
@@ -70,8 +71,8 @@ export interface AgentSpawnMessage {
 }
 
 /**
- * Hub → Agent (`env-modes`): the variables a terminal would start with in
- * `mode`, before the profile changes anything.
+ * Hub → Agent: the variables a terminal would start with in `mode`, before
+ * the profile changes anything.
  */
 export interface AgentEnvQueryMessage {
 	type: "ENV_QUERY";
@@ -221,29 +222,30 @@ export interface AgentChannelStateMessage {
 export interface ChannelStateEndMessage {
 	type: "CHANNEL_STATE_END";
 	/**
-	 * How many channels other hubs hold on this daemon, from an agent that
-	 * advertises `hub-identity`. Informational: those channels are not this
-	 * hub's to act on, and the agent does not even say which they are (#127).
+	 * How many channels other hubs hold on this daemon. Informational: those
+	 * channels are not this hub's to act on, and the agent does not even say
+	 * which they are (#127).
 	 */
 	otherOwnerChannels?: number;
 }
 
 /**
- * Hub → Agent (daemon mode): the first frame after HELLO.
+ * Hub → Agent (daemon mode): the first frame after HELLO, which a daemon
+ * requires before it acts on anything else.
  *
  * `token` is checked against the daemon's `auth.json` when it has one.
  * `hubKey` names the hub, so the daemon can give each hub its own channels;
- * it is this hub's secret and is never logged on either side (#127). An agent
- * without the `hub-identity` capability ignores it.
+ * it is this hub's secret and is never logged on either side (#127). A daemon
+ * refuses an AUTH without it, or with an empty one.
  */
 export interface AgentAuthMessage {
 	type: "AUTH";
 	token: string;
-	hubKey?: string;
+	hubKey: string;
 }
 
 /**
- * Hub → Agent (daemon mode, `hub-identity`): stop the daemon.
+ * Hub → Agent (daemon mode): stop the daemon.
  *
  * Without `force`, a daemon still holding channels of other hubs refuses with
  * `ERROR { code: OTHER_HUBS_HOLD_CHANNELS }` and stops nothing. Otherwise it

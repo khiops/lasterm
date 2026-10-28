@@ -40,7 +40,6 @@ import type {
 } from "@lasterm/shared";
 import {
 	DEFAULT_AGENT_CONFIG,
-	ENV_MODES_CAPABILITY,
 	ErrorCode,
 	generateId,
 	validateCustomCommand,
@@ -57,7 +56,7 @@ import {
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
-import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
+import type { AgentConnection } from "./agent-connection.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
@@ -137,8 +136,6 @@ export type AgentEnvironmentOutcome =
 	| { readonly kind: "ok"; readonly env: Record<string, string>; readonly os: string }
 	/** No agent of this host is connected to this hub. */
 	| { readonly kind: "not-connected" }
-	/** The agent does not advertise `env-modes`. */
-	| { readonly kind: "too-old" }
 	/** The agent did not answer in time. */
 	| { readonly kind: "timeout" };
 
@@ -1268,18 +1265,6 @@ export class SessionManager {
 					}
 				}
 
-				if (resolvedElevated) {
-					const caps = this.ctx.agentCapabilities.get(hostId) ?? [];
-					if (!caps.includes("launch-profiles")) {
-						this.ctx.hubLogger?.log(
-							"warn",
-							"ERR-05: agent does not advertise launch-profiles capability, spawning without elevation",
-							{ hostId },
-						);
-						resolvedElevated = false;
-					}
-				}
-
 				// A terminal brought back has scope settings of its own: its channel
 				// profile is read with its host's, as a restart reads them.
 				const terminalProfile = this.ctx.configResolver
@@ -1911,9 +1896,6 @@ export class SessionManager {
 	): Promise<AgentEnvironmentOutcome> {
 		const agent = this.ctx.agents.get(hostId);
 		if (!agent?.connected) return { kind: "not-connected" };
-		if (agent.helloMessage?.capabilities?.includes(ENV_MODES_CAPABILITY) !== true) {
-			return { kind: "too-old" };
-		}
 		const requestId = generateId();
 		return new Promise<AgentEnvironmentOutcome>((resolve) => {
 			let settled = false;
@@ -2003,40 +1985,36 @@ export class SessionManager {
 					terminals: ended,
 				};
 			}
-			if (!hasHubIdentity(agent) && !options.force) {
-				return error(
-					409,
-					ErrorCode.OTHER_HUBS_MAY_BE_AFFECTED,
-					"Other hubs' terminals may end. Send force: true to continue.",
-				);
+			const stop = await requestDaemonStop(agent, {
+				force: options.force,
+				isHubQuitting: () => this.isQuitting(),
+				onStopped: () => {
+					agent.closedByHub = true;
+					this.releaseAgent(hostId, agent);
+				},
+			});
+			if (stop.kind === "refused") {
+				return {
+					kind: "error",
+					status: 409,
+					code: ErrorCode.OTHER_HUBS_HOLD_CHANNELS,
+					message: stop.message,
+					...(stop.otherOwnerChannels !== null && {
+						otherOwnerChannels: stop.otherOwnerChannels,
+					}),
+				};
 			}
-			let stopped = false;
-			let legacy = !hasHubIdentity(agent);
-			if (!legacy) {
-				const stop = await requestDaemonStop(agent, {
-					force: options.force,
-					isHubQuitting: () => this.isQuitting(),
-					onStopped: () => {
-						agent.closedByHub = true;
-						this.releaseAgent(hostId, agent);
-					},
-				});
-				if (stop.kind === "refused") {
-					return {
-						kind: "error",
-						status: 409,
-						code: ErrorCode.OTHER_HUBS_HOLD_CHANNELS,
-						message: stop.message,
-						...(stop.otherOwnerChannels !== null && {
-							otherOwnerChannels: stop.otherOwnerChannels,
-						}),
-					};
-				}
-				stopped = stop.kind === "stopped";
-				legacy = stop.kind === "unsent" && options.force;
-			}
-			if (legacy && agent.remoteAgentPath !== null && !this.isQuitting()) {
-				stopped = await this.stopKeepingLegacyAgent(hostId, agent);
+			let stopped = stop.kind === "stopped";
+			// A STOP with no connection to say it on cannot be refused, so it
+			// cannot say whether other hubs hold terminals there: only a forced
+			// request goes on to the agent's own `--stop`, over SSH.
+			if (
+				stop.kind === "unsent" &&
+				options.force &&
+				agent.remoteAgentPath !== null &&
+				!this.isQuitting()
+			) {
+				stopped = await this.stopKeepingWithStopCommand(hostId, agent);
 			}
 			if (this.isQuitting()) return error(409, "HUB_QUITTING", "The hub is quitting.");
 			let updated: Host | undefined;
@@ -2093,7 +2071,12 @@ export class SessionManager {
 		}
 	}
 
-	private async stopKeepingLegacyAgent(hostId: string, agent: SshAgent): Promise<boolean> {
+	/**
+	 * Stop-keeping's way to stop a daemon its STOP could not reach: the agent's
+	 * own `--stop`, run over the SSH connection. True once the daemon is
+	 * confirmed gone.
+	 */
+	private async stopKeepingWithStopCommand(hostId: string, agent: SshAgent): Promise<boolean> {
 		let onClose: () => void = () => {};
 		let displaced = false;
 		const onMessage = (msg: ProtocolMessage): void => {
@@ -2147,10 +2130,10 @@ export class SessionManager {
 	 * ask for a password again — and the agent is dropped afterwards, so the
 	 * next attach connects fresh and deploys the matching binary.
 	 *
-	 * An agent that serves several hubs (#127) is asked over the protocol, and
-	 * refuses while other hubs hold terminals there unless `force` says to end
-	 * those too. One that does not is stopped with its own `--stop`, as before,
-	 * which knows nothing of other hubs; so is any agent the STOP cannot reach.
+	 * The daemon is asked over the protocol (#127), and refuses while other
+	 * hubs hold terminals there unless `force` says to end those too. One the
+	 * STOP cannot reach is stopped with its own `--stop`, which knows nothing
+	 * of other hubs.
 	 */
 	async replaceAgent(
 		hostId: string,
@@ -2204,56 +2187,53 @@ export class SessionManager {
 		agent: SshAgent,
 		options: { readonly force?: boolean },
 	): Promise<ReplaceAgentOutcome> {
-		if (hasHubIdentity(agent)) {
-			const stop = await requestDaemonStop(agent, {
-				force: options.force === true,
-				isHubQuitting: () => this.isQuitting(),
-				// Let go first: a stop that was asked for is not a dropped link to
-				// dial again, which is what the close handling would otherwise read,
-				// and the security log records the disconnect as this hub's doing.
-				onStopped: () => {
-					agent.closedByHub = true;
-					this.releaseAgent(hostId, agent);
-				},
-			});
-			switch (stop.kind) {
-				case "displaced":
-				case "closed_by_hub":
-					return {
-						replaced: false,
-						message: "The connection ended without confirming the agent stopped.",
-					};
-				case "stopped":
-					return {
-						replaced: true,
-						message:
-							"The agent was stopped. The next terminal on this host starts the current one.",
-					};
-				case "refused":
-					return {
-						replaced: false,
-						code: ErrorCode.OTHER_HUBS_HOLD_CHANNELS,
-						message: stop.message,
-						...(stop.otherOwnerChannels !== null && {
-							otherOwnerChannels: stop.otherOwnerChannels,
-						}),
-					};
-				case "error":
-					return {
-						replaced: false,
-						message: `The agent would not stop (${stop.code}: ${stop.message}). Nothing was changed.`,
-					};
-				case "timeout":
-					return {
-						replaced: false,
-						message:
-							"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
-					};
-				case "unsent":
-					// No connection to say it on: the out-of-band stop below still
-					// has the SSH connection, which is what it runs over.
-					break;
-			}
+		const stop = await requestDaemonStop(agent, {
+			force: options.force === true,
+			isHubQuitting: () => this.isQuitting(),
+			// Let go first: a stop that was asked for is not a dropped link to
+			// dial again, which is what the close handling would otherwise read,
+			// and the security log records the disconnect as this hub's doing.
+			onStopped: () => {
+				agent.closedByHub = true;
+				this.releaseAgent(hostId, agent);
+			},
+		});
+		switch (stop.kind) {
+			case "displaced":
+			case "closed_by_hub":
+				return {
+					replaced: false,
+					message: "The connection ended without confirming the agent stopped.",
+				};
+			case "stopped":
+				return {
+					replaced: true,
+					message: "The agent was stopped. The next terminal on this host starts the current one.",
+				};
+			case "refused":
+				return {
+					replaced: false,
+					code: ErrorCode.OTHER_HUBS_HOLD_CHANNELS,
+					message: stop.message,
+					...(stop.otherOwnerChannels !== null && {
+						otherOwnerChannels: stop.otherOwnerChannels,
+					}),
+				};
+			case "error":
+				return {
+					replaced: false,
+					message: `The agent would not stop (${stop.code}: ${stop.message}). Nothing was changed.`,
+				};
+			case "timeout":
+				return {
+					replaced: false,
+					message:
+						"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
+				};
+			case "unsent":
+				// No connection to say it on: the out-of-band stop below still
+				// has the SSH connection, which is what it runs over.
+				break;
 		}
 
 		const remotePath = agent.remoteAgentPath;
@@ -2267,13 +2247,13 @@ export class SessionManager {
 			return { replaced: false, message: "The host could not say where its agent's socket is." };
 		}
 
-		const stop = await agent.execOnHost(
+		const stopCommand = await agent.execOnHost(
 			remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
 		);
-		if (stop.exitCode !== 0) {
+		if (stopCommand.exitCode !== 0) {
 			return {
 				replaced: false,
-				message: `The agent would not stop (exit ${stop.exitCode}). Nothing was changed.`,
+				message: `The agent would not stop (exit ${stopCommand.exitCode}). Nothing was changed.`,
 			};
 		}
 

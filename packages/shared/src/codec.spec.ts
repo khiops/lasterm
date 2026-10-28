@@ -143,7 +143,9 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 			env: { TERM: "xterm-256color", LANG: "en_US.UTF-8" },
 			cols: 80,
 			rows: 24,
+			envMode: "minimal",
 		};
+		expect(toSnakeCase(msg)).toMatchObject({ env_mode: "minimal" });
 		const decoded = decodeMessage(encodeMessage(msg));
 		expect(decoded).toEqual(msg);
 	});
@@ -304,8 +306,8 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 });
 
 // The fields #127 adds to the hub <-> agent protocol. The agent reads the wire
-// names with serde, so a camelCase key reaching it would be a field it ignores:
-// a hub key it never sees, and a hub it files under the legacy owner.
+// names with serde, so a camelCase key reaching it would be a field it does not
+// know: an AUTH without the hub key it requires, which it refuses.
 describe("hub identity on the wire (#127)", () => {
 	it("sends the hub key of an agent AUTH as hub_key", () => {
 		const msg: ProtocolMessage = { type: "AUTH", token: "a".repeat(64), hubKey: "b".repeat(64) };

@@ -80,14 +80,12 @@ export const ErrorCode = {
 	CHANNEL_LIMIT: "CHANNEL_LIMIT",
 	INVALID_MESSAGE: "INVALID_MESSAGE",
 	VERSION_MISMATCH: "VERSION_MISMATCH",
-	/** Agent: a newer connection took this one's place; with `hub-identity`, one of this same hub. */
+	/** Agent: a newer connection of this same hub took this one's place. */
 	DISPLACED: "DISPLACED",
 	/** Agent: a STOP without `force`, refused while other hubs hold channels there (#127). */
 	OTHER_HUBS_HOLD_CHANNELS: "OTHER_HUBS_HOLD_CHANNELS",
 	/** REST stop-keeping: the connected agent did not reach a remote daemon. */
 	NO_DAEMON_CONNECTION: "NO_DAEMON_CONNECTION",
-	/** REST stop-keeping: legacy agents need force consent before --stop. */
-	OTHER_HUBS_MAY_BE_AFFECTED: "OTHER_HUBS_MAY_BE_AFFECTED",
 	/** REST PUT host: use stop-keeping before revoking a connected daemon policy. */
 	DAEMON_CONNECTED: "DAEMON_CONNECTED",
 	/** REST: the host has no agent connected to this hub, so there is nobody to ask (#576), including POST /api/hosts/:id/agent/stop-keeping. */
@@ -109,25 +107,8 @@ export const ErrorCode = {
 	TERMINALS_WOULD_END: "TERMINALS_WOULD_END",
 	/** REST, connect, reconnect, disconnect and POST /api/hosts/:id/agent/stop-keeping: the host is the local one, which has no connection to act on (#648). */
 	NOT_SSH_HOST: "NOT_SSH_HOST",
-	/** REST: the host's agent predates what was asked of it — here `env-modes` (#576). */
-	AGENT_TOO_OLD: "AGENT_TOO_OLD",
 	/** REST: the host's agent did not answer in time (#576). */
 	AGENT_TIMEOUT: "AGENT_TIMEOUT",
 } as const;
-
-/**
- * HELLO capability: the daemon serves several hubs at once, each owning its
- * own channels, told apart by the `hubKey` of their AUTH (#127). Its absence
- * means an agent that serves one hub at a time, the last to connect.
- */
-export const HUB_IDENTITY_CAPABILITY = "hub-identity";
-
-/**
- * HELLO capability: the agent builds each terminal's environment itself,
- * reading SPAWN's `envMode`, `envUnset` and `loginShell`, and answers
- * ENV_QUERY (#576). An agent without it inherits its own environment whatever
- * the mode, and is asked nothing about it.
- */
-export const ENV_MODES_CAPABILITY = "env-modes";
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];

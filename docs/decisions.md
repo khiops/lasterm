@@ -807,6 +807,9 @@ daemon again and adopts it.
 
 ## [backfill] Custom fonts & config cascade wiring (2026-03-04)
 
+**Status:** one point superseded: `/api/config/resolved` no longer exists. `GET /api/config/cascade`
+replaced it (e65e3fa), and the config store fetches it in `loadProfile()`, after authentication.
+
 - Cross-platform font stack: Consolas → Liberation Mono → Courier New → monospace (no embedding, licensing)
 - User fonts: drop .woff2/.woff/.ttf/.otf in ~/.config/lasterm/fonts/, auto-discovered
 - Font serving: second @fastify/static at signed /public/fonts/ URLs (decorateReply: false for multi-static)

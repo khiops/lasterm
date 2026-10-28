@@ -216,14 +216,6 @@ export interface Channel {
 	updatedAt: string;
 }
 
-export interface Workspace {
-	id: string;
-	name: string;
-	layoutJson: string; // JSON string of TabLayout
-	createdAt: string;
-	updatedAt: string;
-}
-
 export interface CacheIndex {
 	channelId: string;
 	lastSnapshotChunkId?: string;

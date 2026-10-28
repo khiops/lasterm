@@ -593,7 +593,6 @@ All incoming messages (from agent or UI) must be validated:
 | Host label | 1-64 chars, alphanumeric + dash/underscore |
 | SSH host | Valid hostname or IP, no shell metacharacters |
 | SSH port | 1-65535 |
-| Workspace name | 1-64 chars, alphanumeric + dash/underscore/space |
 | Config TOML | Parse-validated before saving |
 | Pairing code | Exactly 8 digits |
 

@@ -149,6 +149,51 @@ describe("useHostGroups", () => {
 		expect(sections.value[1]?.hosts).toHaveLength(1);
 	});
 
+	it("keeps the grouped hosts in reach while the groups are not loaded (#758)", async () => {
+		mockHostGroups.value = [];
+		mockHosts.value = [
+			makeHost({ id: "local", label: "Local", type: "local" }),
+			makeHost({ id: "a1", label: "A1", hostGroupId: "ga" }),
+			makeHost({ id: "a2", label: "A2", hostGroupId: "ga" }),
+			makeHost({ id: "b1", label: "B1", hostGroupId: "gb" }),
+			makeHost({ id: "u1", label: "U1", hostGroupId: null }),
+		];
+
+		const { sections } = useHostGroups();
+
+		// Apart from the ungrouped hosts, which they are not, each group's together.
+		expect(sections.value.map((s) => [s.type, s.hosts.map((h) => h.id)])).toEqual([
+			["unknown-group", ["a1", "a2", "b1"]],
+			["ungrouped", ["u1"]],
+		]);
+	});
+
+	it("puts a host whose group is not among those loaded after the known groups (#758)", async () => {
+		mockHostGroups.value = [makeGroup({ id: "g1", name: "Prod", sortOrder: 0 })];
+		mockHosts.value = [
+			makeHost({ id: "p1", label: "P1", hostGroupId: "g1" }),
+			makeHost({ id: "n1", label: "N1", hostGroupId: "made-elsewhere" }),
+			makeHost({ id: "u1", label: "U1" }),
+		];
+
+		const { sections } = useHostGroups();
+
+		expect(sections.value.map((s) => [s.type, s.hosts.map((h) => h.id)])).toEqual([
+			["group", ["p1"]],
+			["unknown-group", ["n1"]],
+			["ungrouped", ["u1"]],
+		]);
+
+		// Once the group is loaded, its host is in it.
+		mockHostGroups.value = [
+			makeGroup({ id: "g1", name: "Prod", sortOrder: 0 }),
+			makeGroup({ id: "made-elsewhere", name: "Lab", sortOrder: 1 }),
+		];
+		await nextTick();
+		expect(sections.value.map((s) => s.type)).toEqual(["group", "group", "ungrouped"]);
+		expect(sections.value[1]?.hosts.map((h) => h.id)).toEqual(["n1"]);
+	});
+
 	it("handles empty host list", async () => {
 		mockHosts.value = [];
 		mockHostGroups.value = [];

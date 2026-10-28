@@ -82,6 +82,12 @@ export const ErrorCode = {
 	VERSION_MISMATCH: "VERSION_MISMATCH",
 	/** Agent: a newer connection of this same hub took this one's place. */
 	DISPLACED: "DISPLACED",
+	/**
+	 * Agent, with `channelId`: input to that terminal is being dropped, since it
+	 * takes no input and its queue is full. Once per gap (#740); the hub tells
+	 * the windows showing it with INPUT_DROPPED (#767).
+	 */
+	INPUT_DROPPED: "INPUT_DROPPED",
 	/** Agent: a STOP without `force`, refused while other hubs hold channels there (#127). */
 	OTHER_HUBS_HOLD_CHANNELS: "OTHER_HUBS_HOLD_CHANNELS",
 	/** REST stop-keeping: the connected agent did not reach a remote daemon. */

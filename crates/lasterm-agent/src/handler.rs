@@ -263,12 +263,17 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
 /// The ERROR a request about a channel gets when the caller cannot see it: it
 /// does not exist, or another hub holds it (#127). Both read the same, byte
 /// for byte, so that a hub cannot learn what another one runs.
-fn channel_not_found(channel_id: String) -> AgentToHub {
+///
+/// `request_id` is the ATTACH's, when this answers one: an INPUT or a RESIZE
+/// gets the same code about the same channel, and only the id tells the hub
+/// which request this answers (#767).
+fn channel_not_found(channel_id: String, request_id: Option<String>) -> AgentToHub {
     AgentToHub::Error {
         code: error_codes::CHANNEL_NOT_FOUND.into(),
         message: format!("channel {} not found", channel_id),
         channel_id: Some(channel_id),
         other_owner_channels: None,
+        request_id,
     }
 }
 
@@ -284,6 +289,7 @@ fn input_dropped(channel_id: String) -> AgentToHub {
         ),
         channel_id: Some(channel_id),
         other_owner_channels: None,
+        request_id: None,
     }
 }
 
@@ -343,7 +349,7 @@ pub(crate) async fn handle_message(
         HubToAgent::SnapshotReq { channel_id } => {
             format!("SNAPSHOT_REQ ch={}", &channel_id[..8.min(channel_id.len())])
         }
-        HubToAgent::Attach { channel_id } => {
+        HubToAgent::Attach { channel_id, .. } => {
             format!("ATTACH ch={}", &channel_id[..8.min(channel_id.len())])
         }
         HubToAgent::Auth { .. } => "AUTH".to_string(),
@@ -432,7 +438,7 @@ pub(crate) async fn handle_message(
                     .map(|channel| channel.input.offer(data))
             };
             match offered {
-                None => send_frame(&frame_tx, &channel_not_found(channel_id))?,
+                None => send_frame(&frame_tx, &channel_not_found(channel_id, None))?,
                 Some(Offer::Overflowed) => {
                     tracing::warn!(
                         channel_id = %channel_id,
@@ -478,7 +484,7 @@ pub(crate) async fn handle_message(
                     let _ = tx.send(ChannelCommand::Resize(cols, rows));
                 }
             } else {
-                send_frame(&frame_tx, &channel_not_found(channel_id))?;
+                send_frame(&frame_tx, &channel_not_found(channel_id, None))?;
             }
         }
 
@@ -565,7 +571,13 @@ pub(crate) async fn handle_message(
             }
         }
 
-        HubToAgent::Attach { channel_id } => {
+        HubToAgent::Attach {
+            channel_id,
+            request_id,
+        } => {
+            // Whatever answers this ATTACH echoes its request id, and nothing
+            // else does: the hub tells it apart from an ERROR about the same
+            // channel for another reason, an INPUT's (#767).
             let tx_opt = if visible_to(&pty_manager, &channel_id, owner).await {
                 let senders = cmd_senders.lock().await;
                 senders.get(&channel_id).cloned()
@@ -585,6 +597,7 @@ pub(crate) async fn handle_message(
                         };
                         let msg = AgentToHub::AttachOk {
                             channel_id: channel_id.clone(),
+                            request_id,
                             snapshot: SnapshotData {
                                 serialized: info.serialized,
                                 cols: info.cols,
@@ -610,12 +623,13 @@ pub(crate) async fn handle_message(
                             message: format!("channel {} not found or dead", channel_id),
                             channel_id: Some(channel_id),
                             other_owner_channels: None,
+                            request_id,
                         },
                     )?;
                 }
             } else {
                 tracing::warn!("ATTACH for unknown channel: {}", channel_id);
-                send_frame(&frame_tx, &channel_not_found(channel_id))?;
+                send_frame(&frame_tx, &channel_not_found(channel_id, request_id))?;
             }
         }
 
@@ -636,6 +650,7 @@ pub(crate) async fn handle_message(
                     message: "STOP applies to an agent daemon; this agent runs on stdio and ends when its input closes".into(),
                     channel_id: None,
                     other_owner_channels: None,
+                    request_id: None,
                 },
             )?;
         }
@@ -654,6 +669,7 @@ pub(crate) async fn handle_message(
                         message,
                         channel_id,
                         other_owner_channels: None,
+                        request_id: None,
                     },
                 )?;
             } else {
@@ -1425,6 +1441,138 @@ mod stdio_tests {
         let answer: serde_json::Value = rmp_serde::from_slice(&frame.frame[4..]).unwrap();
         assert_eq!(answer["type"], "ERROR");
         assert_eq!(answer["code"], "INVALID_MESSAGE");
+    }
+
+    /// The frames `msg` is answered with, decoded.
+    async fn answers(
+        msg: crate::protocol::HubToAgent,
+        manager: &Arc<Mutex<PtyManager>>,
+        senders: &SnapshotSenders,
+    ) -> Vec<serde_json::Value> {
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
+        handle_message(
+            msg,
+            &OwnerId::stdio(),
+            Arc::clone(manager),
+            frame_tx,
+            channel_events,
+            Arc::clone(senders),
+        )
+        .await
+        .expect("the message is handled");
+        let mut frames = Vec::new();
+        while let Ok(frame) = frame_rx.try_recv() {
+            frames.push(rmp_serde::from_slice(&frame.frame[4..]).unwrap());
+        }
+        frames
+    }
+
+    /// INPUT and ATTACH to a terminal the agent does not have get the same
+    /// code about the same channel. Only the ATTACH's carries its request id,
+    /// which is how the hub tells the two apart (#767).
+    #[tokio::test]
+    async fn only_the_answer_to_an_attach_carries_its_request_id() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+
+        let attach = answers(
+            HubToAgent::Attach {
+                channel_id: "gone".into(),
+                request_id: Some("attach-1".into()),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let input = answers(
+            HubToAgent::Input {
+                channel_id: "gone".into(),
+                data: b"x".to_vec(),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let unnamed = answers(
+            HubToAgent::Attach {
+                channel_id: "gone".into(),
+                request_id: None,
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+
+        for frames in [&attach, &input, &unnamed] {
+            assert_eq!(frames.len(), 1, "{frames:?}");
+            assert_eq!(frames[0]["type"], "ERROR");
+            assert_eq!(frames[0]["code"], "CHANNEL_NOT_FOUND");
+            assert_eq!(frames[0]["channel_id"], "gone");
+        }
+        assert_eq!(attach[0]["request_id"], "attach-1");
+        assert!(input[0].get("request_id").is_none(), "{input:?}");
+        // A hub that names no ATTACH gets the ERROR it always did.
+        assert_eq!(unnamed, input);
+    }
+
+    /// The ATTACH_OK of a live terminal echoes the request id too.
+    #[tokio::test]
+    async fn attach_ok_echoes_the_attach_request_id() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        handle_spawn(
+            "spawn-1".into(),
+            Some("attached".into()),
+            Some(shell.into()),
+            Vec::new(),
+            None,
+            SpawnEnvironment {
+                mode: EnvMode::Inherit,
+                unset: Vec::new(),
+                env: None,
+                login_shell: false,
+            },
+            80,
+            24,
+            None,
+            None,
+            None,
+            None,
+            OwnerId::stdio(),
+            Arc::clone(&manager),
+            frame_tx,
+            channel_events,
+            Arc::clone(&senders),
+        )
+        .await
+        .expect("SPAWN is answered");
+        let spawned: serde_json::Value =
+            rmp_serde::from_slice(&frame_rx.recv().await.expect("an answer").frame[4..]).unwrap();
+        assert_eq!(spawned["type"], "SPAWN_OK", "{spawned}");
+
+        let attached = answers(
+            HubToAgent::Attach {
+                channel_id: "attached".into(),
+                request_id: Some("attach-2".into()),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        if let Some(process) = manager.lock().await.remove("attached") {
+            let _ = process.kill_tree();
+        }
+
+        assert_eq!(attached.len(), 1, "{attached:?}");
+        assert_eq!(attached[0]["type"], "ATTACH_OK");
+        assert_eq!(attached[0]["channel_id"], "attached");
+        assert_eq!(attached[0]["request_id"], "attach-2");
     }
 
     /// Only a daemon says it tells hubs apart.

@@ -17,6 +17,7 @@ import type {
 	ChannelExitMessage,
 	ErrorMessage,
 	HelloMessage,
+	InputDroppedMessage,
 	LogConfig,
 	OutputMessage,
 	ProtocolMessage,
@@ -345,15 +346,17 @@ export class AgentConnectionManager {
 				return;
 			}
 
-			// Dispatch pending attach responses (ATTACH_OK uses channelId, not requestId)
-			if (msg.type === "ATTACH_OK" || msg.type === "ERROR") {
-				const cid = (msg as { channelId?: string }).channelId;
-				if (cid) {
-					const handler = this.ctx.pendingRequests.get(`attach:${cid}`);
-					if (handler) {
-						handler(msg);
-						return;
-					}
+			// What answers an ATTACH carries its request id, and went to it above.
+			// An agent older than that sends an ATTACH_OK without one, which can
+			// answer nothing else: its channel says which ATTACH. An ERROR without
+			// one never does. It names its channel for another reason, an INPUT
+			// dropped or sent to a terminal the agent no longer has, and it goes
+			// on to be handled as itself (#767).
+			if (msg.type === "ATTACH_OK" && rid === undefined) {
+				const handler = this.ctx.pendingRequests.get(`attach:${msg.channelId}`);
+				if (handler) {
+					handler(msg);
+					return;
 				}
 			}
 
@@ -420,6 +423,21 @@ export class AgentConnectionManager {
 				) {
 					this.broadcaster.broadcastToChannel(notifMsg.channelId, notifMsg);
 				}
+			} else if (
+				msg.type === "ERROR" &&
+				msg.code === ErrorCode.INPUT_DROPPED &&
+				msg.channelId !== undefined
+			) {
+				// The windows showing that terminal say so in it: what was typed
+				// went nowhere. Once per gap, as the agent says it (#740, #767).
+				this.ctx.hubLogger?.log("debug", "agent-connection-manager: input dropped", {
+					hostId,
+					channelId: msg.channelId,
+				});
+				this.broadcaster.broadcastToChannel(msg.channelId, {
+					type: "INPUT_DROPPED",
+					channelId: msg.channelId,
+				} satisfies InputDroppedMessage);
 			} else if ((msg as { type: string }).type === "LOG") {
 				const logMsg = msg as unknown as AgentLogMessage;
 				// Validate level before casting

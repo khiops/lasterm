@@ -37,6 +37,7 @@ export function useTerminal(
 	/** Whether search matches are marked in the scrollbar gutter (profile). */
 	let scrollbarMarkers = true;
 	let outputUnsubscribe: (() => void) | null = null;
+	let inputDroppedUnsubscribe: (() => void) | null = null;
 	let themeUnsubscribe: (() => void) | null = null;
 
 	/**
@@ -74,6 +75,13 @@ export function useTerminal(
 	function applyScrollbarWidth(term: Terminal): void {
 		const width = terminalScrollbarWidth(useThemeStore().appearance.scrollbar, scrollbarMarkers);
 		term.options.overviewRuler = { ...term.options.overviewRuler, width };
+	}
+
+	/** A line of Lasterm's own in the terminal, dimmed, on a line of its own. */
+	function writeNotice(text: string): void {
+		const dim = "\u001b[2m";
+		const plain = "\u001b[0m";
+		terminal.value?.write(`\r\n${dim}── ${text} ──${plain}\r\n`);
 	}
 
 	function sendResize(cols: number, rows: number): void {
@@ -160,6 +168,16 @@ export function useTerminal(
 				resizeTimer = null;
 				sendResize(cols, rows);
 			}, 50);
+		});
+
+		// What was typed went nowhere: the terminal takes no input, and its agent
+		// drops what it cannot queue. Said here, once per gap as the agent says
+		// it, rather than left to look like keys that did nothing (#767).
+		inputDroppedUnsubscribe?.();
+		inputDroppedUnsubscribe = wsClient.on("INPUT_DROPPED", (msg) => {
+			if (msg.type === "INPUT_DROPPED" && msg.channelId === channelId) {
+				writeNotice("what you typed was dropped: this terminal is not taking input");
+			}
 		});
 
 		// Container resize → refit terminal
@@ -367,11 +385,7 @@ export function useTerminal(
 			// A terminal cannot be handed a piece of a stream, so it was not: the
 			// screen above is the last coherent one, and what followed is gone.
 			// Saying so beats a pane that looks current and is not.
-			const dim = "\u001b[2m";
-			const plain = "\u001b[0m";
-			terminal.value?.write(
-				`\r\n${dim}── output between this screen and now was dropped ──${plain}\r\n`,
-			);
+			writeNotice("output between this screen and now was dropped");
 		}
 		return {
 			writeLockHolder: result.writeLockHolder,
@@ -477,6 +491,8 @@ export function useTerminal(
 		themeUnsubscribe = null;
 		outputUnsubscribe?.();
 		outputUnsubscribe = null;
+		inputDroppedUnsubscribe?.();
+		inputDroppedUnsubscribe = null;
 		if (onScrollbarChanged) {
 			window.removeEventListener("nt:scrollbar-changed", onScrollbarChanged);
 			onScrollbarChanged = null;

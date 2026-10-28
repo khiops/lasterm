@@ -735,6 +735,7 @@ impl Refusal {
             message: self.message.clone(),
             channel_id: None,
             other_owner_channels: None,
+            request_id: None,
         }
     }
 }
@@ -1156,6 +1157,7 @@ fn stop_refusal(others: u32) -> AgentToHub {
         ),
         channel_id: None,
         other_owner_channels: Some(others),
+        request_id: None,
     }
 }
 
@@ -1295,6 +1297,7 @@ async fn register_active(
             ),
             channel_id: None,
             other_owner_channels: None,
+            request_id: None,
         };
         let _ = send_encoded(&old.frame_tx, &notice);
         old.cancel.send_replace(true);
@@ -3589,6 +3592,7 @@ mod tests {
             let mut hub = daemon.connect().await;
             hub.send(&HubToAgent::Attach {
                 channel_id: channel_id.to_string(),
+                request_id: None,
             })
             .await;
             hub.read_until("ATTACH_OK").await;
@@ -3880,6 +3884,7 @@ mod tests {
                 assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
                 a2.send(&HubToAgent::Attach {
                     channel_id: "back-ch-a".to_string(),
+                    request_id: None,
                 })
                 .await;
                 seen_by_a2.extend(
@@ -3976,8 +3981,11 @@ mod tests {
                         cols: 100,
                         rows: 40,
                     }),
+                    // Named, as a hub names it: the id echoed tells nothing
+                    // apart either (#767).
                     ("ATTACH", |id| HubToAgent::Attach {
                         channel_id: id.to_string(),
+                        request_id: Some("attach-request".to_string()),
                     }),
                     ("SNAPSHOT_REQ", |id| HubToAgent::SnapshotReq {
                         channel_id: id.to_string(),
@@ -4162,6 +4170,7 @@ mod tests {
                 stranger
                     .send(&HubToAgent::Attach {
                         channel_id: "no-auth-held".to_string(),
+                        request_id: None,
                     })
                     .await;
                 let frames = stranger.frames_until_closed().await;

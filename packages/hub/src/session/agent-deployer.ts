@@ -17,7 +17,12 @@ import {
 import type { OsDetectResult } from "./os-detect.js";
 import { parseUnameOutput, parseWindowsArchOutput } from "./os-detect.js";
 import { quotePosix } from "./remote-daemon.js";
-import { sshExec } from "./ssh-exec.js";
+import {
+	onShellStartMeasured,
+	SHELL_START_CEILING_MS,
+	shellStartAllowance,
+	sshExec,
+} from "./ssh-exec.js";
 
 export type { OsDetectResult };
 
@@ -510,7 +515,10 @@ export type SftpSupport =
 	| { readonly offered: true }
 	| { readonly offered: false; readonly reason: string };
 
-/** How long the probe waits for the server's SFTP to answer before taking it as absent. */
+/**
+ * How long the probe waits for the server's SFTP to answer before taking it as
+ * absent, on top of what the remote shell's start-up costs (#764).
+ */
 export const SFTP_PROBE_TIMEOUT_MS = 10_000;
 
 /**
@@ -522,23 +530,41 @@ export const SFTP_PROBE_TIMEOUT_MS = 10_000;
  * travels over an exec channel instead. ssh2 hands back no channel whose
  * subsystem was refused, so that one stays open, idle, until the connection
  * ends; nothing asks for SFTP again on that connection.
+ *
+ * The server may start its SFTP through the account's shell, which pays the
+ * shell's start-up first, as every command does (#749). So the wait is
+ * `timeoutMs` plus that start-up, as `sshExec` bounds a command (#764): what
+ * the connection's first command measured, or, until it has, up to
+ * `SHELL_START_CEILING_MS`. The probe runs beside that first command, and its
+ * bound shrinks to the measured one as soon as it is known.
  */
 export function probeSftp(
 	client: SshClient,
 	timeoutMs: number = SFTP_PROBE_TIMEOUT_MS,
 ): Promise<SftpSupport> {
 	return new Promise((resolve) => {
+		const started = Date.now();
 		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let stopListening = (): void => {};
 		const settle = (support: SftpSupport): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			stopListening();
 			resolve(support);
 		};
-		const timer = setTimeout(
-			() => settle({ offered: false, reason: `no answer within ${timeoutMs / 1000} s` }),
-			timeoutMs,
-		);
+		const bound = (allowanceMs: number): void => {
+			clearTimeout(timer);
+			const boundMs = timeoutMs + allowanceMs;
+			timer = setTimeout(
+				() => settle({ offered: false, reason: `no answer within ${boundMs / 1000} s` }),
+				Math.max(0, started + boundMs - Date.now()),
+			);
+		};
+		const allowanceMs = shellStartAllowance(client);
+		bound(allowanceMs ?? SHELL_START_CEILING_MS);
+		if (allowanceMs === null) stopListening = onShellStartMeasured(client, bound);
 		try {
 			client.sftp((err, sftp) => {
 				if (err) {

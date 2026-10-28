@@ -71,7 +71,7 @@ describe("hubFetch desktop transport", () => {
 			value: { invoke, transformCallback: () => 1 },
 		});
 
-		await expect(hubFetch("https://127.0.0.1:9999/api/channels/purge-dead")).rejects.toThrow(
+		await expect(hubFetch("https://127.0.0.1:9999/api/channels/dead")).rejects.toThrow(
 			"different hub endpoint",
 		);
 		expect(invoke).toHaveBeenCalledWith(
@@ -451,7 +451,7 @@ describe("hubFetch desktop transport", () => {
 		});
 
 		await expect(
-			hubFetch("https://127.0.0.1:4242/api/channels/purge-dead", { method: "POST", body }),
+			hubFetch("https://127.0.0.1:4242/api/upload", { method: "POST", body }),
 		).rejects.toThrow("first body pull rejected");
 		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: "33" }, undefined);
 		expect(invoke).not.toHaveBeenCalledWith(

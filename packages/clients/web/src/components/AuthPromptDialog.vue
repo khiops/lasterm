@@ -57,7 +57,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { useAuthPromptStore } from "../stores/auth-prompt.js";
 
 const authPromptStore = useAuthPromptStore();
-const prompt = computed(() => authPromptStore.pendingPrompt);
+const prompt = computed(() => authPromptStore.currentPrompt);
 
 const inputValue = ref("");
 const inputRef = ref<HTMLInputElement | null>(null);

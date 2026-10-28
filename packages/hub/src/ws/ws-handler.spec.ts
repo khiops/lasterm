@@ -296,6 +296,8 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 			type: "AUTH_PROMPT_RESPONSE",
 			hostId: VALID_ULID,
 			secret: "my-password",
+			promptId: VALID_PROMPT_ID,
+			deliveryEpoch: 1,
 		};
 
 		const encoded = encodeMessage(msg);
@@ -310,6 +312,8 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 			type: "AUTH_PROMPT_RESPONSE",
 			hostId: VALID_ULID,
 			secret: null,
+			promptId: VALID_PROMPT_ID,
+			deliveryEpoch: 1,
 		};
 
 		const encoded = encodeMessage(msg);
@@ -342,14 +346,7 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 
 		expect(client.send).not.toHaveBeenCalled();
 		expect(sessionManager.handleAuthPromptResponse).toHaveBeenCalledOnce();
-		expect(sessionManager.handleAuthPromptResponse).toHaveBeenCalledWith(
-			"client-1",
-			VALID_ULID,
-			"hunter2",
-			true,
-			VALID_PROMPT_ID,
-			2,
-		);
+		expect(sessionManager.handleAuthPromptResponse).toHaveBeenCalledWith("client-1", msg);
 	});
 
 	it("rejects invalid promptId before dispatching", () => {
@@ -359,6 +356,7 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 			hostId: VALID_ULID,
 			secret: "hunter2",
 			promptId: "not-a-ulid",
+			deliveryEpoch: 1,
 		};
 
 		handleAuthPromptResponseMessage(msg, ctx);
@@ -377,6 +375,7 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 			type: "AUTH_PROMPT_RESPONSE",
 			hostId: VALID_ULID,
 			secret: "hunter2",
+			promptId: VALID_PROMPT_ID,
 			deliveryEpoch: Number.NaN,
 		};
 
@@ -390,26 +389,35 @@ describe("ws-handler AUTH_PROMPT_RESPONSE routing", () => {
 		});
 	});
 
-	it("forwards responses without promptId for back-compat clients", () => {
+	it("rejects a response without promptId or deliveryEpoch before dispatching", () => {
 		const { ctx, client, sessionManager } = makeAuthPromptResponseContext();
-		const msg: AuthPromptResponseMessage = {
+		const withoutPromptId = {
 			type: "AUTH_PROMPT_RESPONSE",
 			hostId: VALID_ULID,
 			secret: null,
-		};
+			deliveryEpoch: 1,
+		} as unknown as AuthPromptResponseMessage;
+		const withoutEpoch = {
+			type: "AUTH_PROMPT_RESPONSE",
+			hostId: VALID_ULID,
+			secret: null,
+			promptId: VALID_PROMPT_ID,
+		} as unknown as AuthPromptResponseMessage;
 
-		handleAuthPromptResponseMessage(msg, ctx);
+		handleAuthPromptResponseMessage(withoutPromptId, ctx);
+		handleAuthPromptResponseMessage(withoutEpoch, ctx);
 
-		expect(client.send).not.toHaveBeenCalled();
-		expect(sessionManager.handleAuthPromptResponse).toHaveBeenCalledOnce();
-		expect(sessionManager.handleAuthPromptResponse).toHaveBeenCalledWith(
-			"client-1",
-			VALID_ULID,
-			null,
-			undefined,
-			undefined,
-			undefined,
-		);
+		expect(sessionManager.handleAuthPromptResponse).not.toHaveBeenCalled();
+		expect(client.send).toHaveBeenNthCalledWith(1, {
+			type: "ERROR",
+			code: "INVALID_INPUT",
+			message: "Invalid promptId",
+		});
+		expect(client.send).toHaveBeenNthCalledWith(2, {
+			type: "ERROR",
+			code: "INVALID_INPUT",
+			message: "deliveryEpoch must be a finite non-negative number",
+		});
 	});
 });
 

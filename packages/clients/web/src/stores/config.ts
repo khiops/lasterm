@@ -114,7 +114,6 @@ interface UiConfig {
 
 /** The UI sections `saveUiSettings` writes. */
 interface SavedUiSections {
-	panes: PanesConfig;
 	layout: LayoutConfig;
 	keyboard: KeyboardConfig;
 }
@@ -243,9 +242,8 @@ export const useConfigStore = defineStore("config", () => {
 	/**
 	 * Write settings of one UI section to the hub, and take them here at once.
 	 *
-	 * For a choice made outside Settings' schema — the old "don't ask again"
-	 * about deleting an ended terminal, carried over (#574); the panels' sizes;
-	 * the host rail's columns and badge size (#623); the key hints (#639). The
+	 * For a choice made outside Settings' schema — the panels' sizes; the host
+	 * rail's columns and badge size (#623); the key hints (#639). The
 	 * hub announces the change, so every other window reads it again; this one
 	 * does not wait for that to act on it. A write the hub refused is undone by
 	 * reading back what it holds.

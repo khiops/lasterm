@@ -22,24 +22,21 @@ describe("useAuthPromptStore", () => {
 
 	// --- basic single-prompt behaviour ---
 
-	it("handleAuthPrompt sets currentPrompt and pendingPrompt alias", () => {
+	it("handleAuthPrompt sets currentPrompt", () => {
 		const store = useAuthPromptStore();
-		expect(store.pendingPrompt).toBeNull();
 		expect(store.currentPrompt).toBeNull();
 
-		store.handleAuthPrompt("host-1", "password", "Enter SSH password");
+		store.handleAuthPrompt("host-1", "password", "Enter SSH password", "pid-1", 1);
 		expect(store.currentPrompt).toMatchObject({
 			hostId: "host-1",
 			promptType: "password",
 			message: "Enter SSH password",
 		});
-		// Legacy alias must mirror currentPrompt
-		expect(store.pendingPrompt).toBe(store.currentPrompt);
 	});
 
 	it("handleAuthPrompt sets currentPrompt for passphrase type", () => {
 		const store = useAuthPromptStore();
-		store.handleAuthPrompt("host-2", "passphrase", "Enter key passphrase");
+		store.handleAuthPrompt("host-2", "passphrase", "Enter key passphrase", "pid-1", 1);
 		expect(store.currentPrompt).toMatchObject({
 			hostId: "host-2",
 			promptType: "passphrase",
@@ -51,7 +48,7 @@ describe("useAuthPromptStore", () => {
 		const store = useAuthPromptStore();
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
-		store.handleAuthPrompt("host-1", "password", "Enter SSH password");
+		store.handleAuthPrompt("host-1", "password", "Enter SSH password", "pid-1", 1);
 
 		store.respond("mysecret");
 
@@ -60,6 +57,8 @@ describe("useAuthPromptStore", () => {
 			hostId: "host-1",
 			secret: "mysecret",
 			rememberSession: false,
+			promptId: "pid-1",
+			deliveryEpoch: 1,
 		});
 		expect(store.currentPrompt).toBeNull();
 	});
@@ -68,7 +67,7 @@ describe("useAuthPromptStore", () => {
 		const store = useAuthPromptStore();
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
-		store.handleAuthPrompt("host-1", "passphrase", "Enter passphrase");
+		store.handleAuthPrompt("host-1", "passphrase", "Enter passphrase", "pid-1", 1);
 		store.rememberSession = true;
 
 		store.respond("my-passphrase");
@@ -78,6 +77,8 @@ describe("useAuthPromptStore", () => {
 			hostId: "host-1",
 			secret: "my-passphrase",
 			rememberSession: true,
+			promptId: "pid-1",
+			deliveryEpoch: 1,
 		});
 		expect(store.currentPrompt).toBeNull();
 		// rememberSession is reset after respond
@@ -88,7 +89,7 @@ describe("useAuthPromptStore", () => {
 		const store = useAuthPromptStore();
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
-		store.handleAuthPrompt("host-1", "password", "Enter SSH password");
+		store.handleAuthPrompt("host-1", "password", "Enter SSH password", "pid-1", 1);
 
 		store.dismiss();
 
@@ -97,6 +98,8 @@ describe("useAuthPromptStore", () => {
 			hostId: "host-1",
 			secret: null,
 			rememberSession: false,
+			promptId: "pid-1",
+			deliveryEpoch: 1,
 		});
 		expect(store.currentPrompt).toBeNull();
 	});
@@ -114,7 +117,7 @@ describe("useAuthPromptStore", () => {
 
 	it("respond without wsClient set does not throw", () => {
 		const store = useAuthPromptStore();
-		store.handleAuthPrompt("host-1", "password", "Enter SSH password");
+		store.handleAuthPrompt("host-1", "password", "Enter SSH password", "pid-1", 1);
 
 		expect(() => store.respond("secret")).not.toThrow();
 		expect(store.currentPrompt).toBeNull();
@@ -122,7 +125,7 @@ describe("useAuthPromptStore", () => {
 
 	// --- promptId + deliveryEpoch echo ---
 
-	it("echoes promptId and deliveryEpoch in the response when present", () => {
+	it("echoes promptId and deliveryEpoch in the response", () => {
 		const store = useAuthPromptStore();
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
@@ -140,26 +143,12 @@ describe("useAuthPromptStore", () => {
 		});
 	});
 
-	it("omits promptId and deliveryEpoch from response when not present (back-compat)", () => {
-		const store = useAuthPromptStore();
-		const wsClient = makeMockWsClient();
-		store.setWsClient(wsClient);
-		// No promptId or epoch — old-style prompt
-		store.handleAuthPrompt("host-1", "password", "Enter password");
-
-		store.respond("pass");
-
-		const sent = (wsClient.send as ReturnType<typeof vi.fn>).mock.calls[0]![0];
-		expect(sent).not.toHaveProperty("promptId");
-		expect(sent).not.toHaveProperty("deliveryEpoch");
-	});
-
 	// --- queue behaviour ---
 
 	it("two prompts with different promptIds are both queued (no overwrite)", () => {
 		const store = useAuthPromptStore();
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		// Only first prompt is current
 		expect(store.currentPrompt?.promptId).toBe("pid-1");
@@ -170,8 +159,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		store.respond("first-secret");
 
@@ -184,8 +173,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-a", "passphrase", "msg-a", "pid-a");
-		store.handleAuthPrompt("host-b", "passphrase", "msg-b", "pid-b");
+		store.handleAuthPrompt("host-a", "passphrase", "msg-a", "pid-a", 1);
+		store.handleAuthPrompt("host-b", "passphrase", "msg-b", "pid-b", 1);
 
 		store.rememberSession = true;
 		expect(store.currentPrompt?.rememberSession).toBe(true);
@@ -202,9 +191,10 @@ describe("useAuthPromptStore", () => {
 			secret: "second-passphrase",
 			rememberSession: false,
 			promptId: "pid-b",
+			deliveryEpoch: 1,
 		});
 
-		store.handleAuthPrompt("host-c", "passphrase", "msg-c", "pid-c");
+		store.handleAuthPrompt("host-c", "passphrase", "msg-c", "pid-c", 1);
 		store.rememberSession = true;
 		store.respond("third-passphrase", "pid-c");
 
@@ -214,6 +204,7 @@ describe("useAuthPromptStore", () => {
 			secret: "third-passphrase",
 			rememberSession: true,
 			promptId: "pid-c",
+			deliveryEpoch: 1,
 		});
 	});
 
@@ -222,8 +213,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		store.respond("s");
 
@@ -237,8 +228,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		store.handlePromptCancel("pid-1");
 		store.respond("stale-secret", "pid-1");
@@ -258,8 +249,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		store.handlePromptCancel("pid-1");
 		store.dismiss("pid-1");
@@ -278,8 +269,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		store.handlePromptCancel("pid-1");
 		store.respond("second-secret", "pid-2");
@@ -290,27 +281,18 @@ describe("useAuthPromptStore", () => {
 			secret: "second-secret",
 			rememberSession: false,
 			promptId: "pid-2",
+			deliveryEpoch: 1,
 		});
 		expect(store.currentPrompt).toBeNull();
 	});
 
 	it("duplicate promptId is not enqueued twice", () => {
 		const store = useAuthPromptStore();
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-dup");
-		store.handleAuthPrompt("host-1", "password", "msg-1-repeat", "pid-dup");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-dup", 1);
+		store.handleAuthPrompt("host-1", "password", "msg-1-repeat", "pid-dup", 1);
 
 		store.respond("x");
 		// After responding the queue should be empty (only one entry was added)
-		expect(store.currentPrompt).toBeNull();
-	});
-
-	it("fallback key uses hostId when promptId is absent (no overwrite within same host)", () => {
-		const store = useAuthPromptStore();
-		// Same host, no promptId — second enqueue is deduplicated
-		store.handleAuthPrompt("host-1", "password", "msg-1");
-		store.handleAuthPrompt("host-1", "password", "msg-2");
-
-		store.respond("x");
 		expect(store.currentPrompt).toBeNull();
 	});
 
@@ -321,8 +303,8 @@ describe("useAuthPromptStore", () => {
 		const wsClient = makeMockWsClient();
 		store.setWsClient(wsClient);
 
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		// Cancel the first (currently shown) prompt
 		store.handlePromptCancel("pid-1");
@@ -334,8 +316,8 @@ describe("useAuthPromptStore", () => {
 
 	it("handlePromptCancel removes a queued (non-current) prompt by promptId", () => {
 		const store = useAuthPromptStore();
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
-		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
+		store.handleAuthPrompt("host-2", "passphrase", "msg-2", "pid-2", 1);
 
 		// Cancel the second (background) prompt
 		store.handlePromptCancel("pid-2");
@@ -351,7 +333,7 @@ describe("useAuthPromptStore", () => {
 
 	it("handlePromptCancel for unknown promptId is a no-op", () => {
 		const store = useAuthPromptStore();
-		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1");
+		store.handleAuthPrompt("host-1", "password", "msg-1", "pid-1", 1);
 
 		store.handlePromptCancel("pid-unknown");
 

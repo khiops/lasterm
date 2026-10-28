@@ -25,7 +25,6 @@ describe("useHostVerifyStore", () => {
 	it("starts with no pending prompt", () => {
 		const store = useHostVerifyStore();
 		expect(store.currentPrompt).toBeNull();
-		expect(store.pendingPrompt).toBeNull();
 	});
 
 	it("handleHostVerify enqueues a prompt and surfaces it as currentPrompt", () => {
@@ -39,7 +38,6 @@ describe("useHostVerifyStore", () => {
 			algorithm: "ED25519",
 			promptId: "pid-1",
 		});
-		expect(store.pendingPrompt).toBe(store.currentPrompt);
 	});
 
 	it("handleHostVerify sets firstConnect flag when passed", () => {

@@ -942,7 +942,13 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			return m;
 		});
 		expect(auth.hostId).toBe("jump");
-		f.mgr.handleAuthPromptResponse("c1", "jump", "password", true, auth.promptId);
+		f.mgr.handleAuthPromptResponse("c1", {
+			hostId: "jump",
+			secret: "password",
+			rememberSession: true,
+			promptId: auth.promptId,
+			deliveryEpoch: auth.deliveryEpoch,
+		});
 		const prompt = await hostVerifyPrompt(f.client);
 		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
 		await done;
@@ -960,7 +966,12 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			expect(m).toBeDefined();
 			return m;
 		});
-		f.mgr.handleAuthPromptResponse("c1", "jump", null, false, auth.promptId);
+		f.mgr.handleAuthPromptResponse("c1", {
+			hostId: "jump",
+			secret: null,
+			promptId: auth.promptId,
+			deliveryEpoch: auth.deliveryEpoch,
+		});
 		await done;
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
 		expect(f.routes).toEqual([]);

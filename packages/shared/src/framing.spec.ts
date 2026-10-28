@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeFrame, FrameReader } from "./framing.js";
+import { encodeFrame, FrameReader, FrameTooLargeError } from "./framing.js";
 import type { OutputMessage, ProtocolMessage } from "./protocol.js";
 
 function makeOutput(channelId: string, seq: number): OutputMessage {
@@ -172,5 +172,19 @@ describe("FrameReader — frame size limit", () => {
 
 		const reader = new FrameReader();
 		expect(() => reader.push(fakeHeader)).toThrow(RangeError);
+	});
+
+	it("says which length it refused, as a FrameTooLargeError (#763)", () => {
+		const reader = new FrameReader();
+		const error = (() => {
+			try {
+				reader.push(Buffer.from([0xff, 0xff, 0xff, 0xff]));
+			} catch (thrown) {
+				return thrown;
+			}
+			return undefined;
+		})();
+		expect(error).toBeInstanceOf(FrameTooLargeError);
+		expect((error as FrameTooLargeError).payloadLength).toBe(0xffff_ffff);
 	});
 });

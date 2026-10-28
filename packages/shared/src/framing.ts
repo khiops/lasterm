@@ -32,6 +32,21 @@ export function encodeFrame(message: ProtocolMessage): Uint8Array {
 }
 
 /**
+ * A length prefix past `MAX_FRAME_SIZE`: what follows is not a frame of this
+ * protocol. Its message holds the length and the limit, and no byte of the
+ * stream beyond the prefix (#763).
+ */
+export class FrameTooLargeError extends RangeError {
+	readonly payloadLength: number;
+
+	constructor(payloadLength: number) {
+		super(`Incoming frame too large: ${payloadLength} bytes (max ${MAX_FRAME_SIZE})`);
+		this.name = "FrameTooLargeError";
+		this.payloadLength = payloadLength;
+	}
+}
+
+/**
  * FrameReader accumulates bytes from a streaming source and yields complete
  * decoded messages. Handles partial reads and multiple messages per push.
  *
@@ -48,7 +63,8 @@ export class FrameReader {
 	 * Push incoming bytes. Returns all fully-decoded messages that could be
 	 * assembled from the accumulated buffer.
 	 *
-	 * @throws RangeError if a frame length header exceeds MAX_FRAME_SIZE.
+	 * @throws FrameTooLargeError if a frame length header exceeds MAX_FRAME_SIZE,
+	 *   and whatever `decodeMessage` throws on a payload that does not decode.
 	 */
 	push(data: Buffer): ProtocolMessage[] {
 		this.buffer = Buffer.concat([this.buffer, data]);
@@ -62,11 +78,7 @@ export class FrameReader {
 
 			const payloadLength = this.buffer.readUInt32LE(0);
 
-			if (payloadLength > MAX_FRAME_SIZE) {
-				throw new RangeError(
-					`Incoming frame too large: ${payloadLength} bytes (max ${MAX_FRAME_SIZE})`,
-				);
-			}
+			if (payloadLength > MAX_FRAME_SIZE) throw new FrameTooLargeError(payloadLength);
 
 			const totalLength = LENGTH_PREFIX_BYTES + payloadLength;
 

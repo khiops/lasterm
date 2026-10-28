@@ -316,7 +316,9 @@ ChannelGroup (organizational, per host)
 **Port:** the `--port` flag, else `LASTERM_PORT`, gives an explicit port; otherwise the OS assigns
 a free one, and the hub writes the port it took to `runtime.json` in the state dir (SPEC.md § 3).
 Both entry points resolve it through `resolveStartPort` (`packages/hub/src/start-port.ts`). An
-explicit port that is taken moves up to 99 ports higher (`zero_conf`).
+explicit port that is taken, or that the system refuses as reserved (EACCES: Windows' excluded
+ranges, #573), moves up to 99 ports higher (`zero_conf`, `listenFromPort` beside it). A privileged
+port refused on POSIX does not move: the start fails and says why.
 
 ## Common Pitfalls
 

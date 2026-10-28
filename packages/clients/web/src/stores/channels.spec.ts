@@ -1811,6 +1811,170 @@ describe("useChannelsStore — several terminals brought back at once (#605)", (
 });
 
 // ---------------------------------------------------------------------------
+// spawnChannel — answered by its own answers only (#777)
+// ---------------------------------------------------------------------------
+//
+// A window's socket carries every ERROR the hub has for it: another pane's
+// ATTACH refused, a write lock denied, an input refused. Most name no host, and
+// a SPAWN waiting on its answer took the first of them for its own failure.
+
+describe("useChannelsStore — a SPAWN answered by its own answers only (#777)", () => {
+	function socket(): {
+		emit: (msg: Record<string, unknown>) => void;
+		/** The request ids of the SPAWNs sent, in order. */
+		spawns: () => unknown[];
+	} {
+		const listeners = new Map<string, ((msg: unknown) => void)[]>();
+		const send = vi.fn();
+		const sessionStore = useSessionStore();
+		// @ts-expect-error — overwrite reactive wsClient for test
+		sessionStore.wsClient = {
+			on: vi.fn((type: string, cb: (msg: unknown) => void) => {
+				listeners.set(type, [...(listeners.get(type) ?? []), cb]);
+				return () => {
+					listeners.set(
+						type,
+						(listeners.get(type) ?? []).filter((c) => c !== cb),
+					);
+				};
+			}),
+			send,
+		};
+		return {
+			emit: (msg) => {
+				for (const cb of listeners.get(msg.type as string) ?? []) cb(msg);
+			},
+			spawns: () =>
+				send.mock.calls
+					.map(([msg]) => msg as Record<string, unknown>)
+					.filter((msg) => msg.type === "SPAWN")
+					.map((msg) => msg.requestId),
+		};
+	}
+
+	/** ERRORs the hub sends a window about other things than a SPAWN. */
+	const OTHERS = [
+		{
+			type: "ERROR",
+			code: "CHANNEL_DEAD",
+			message: "This terminal has ended.",
+			channelId: "another-pane",
+		},
+		{ type: "ERROR", code: "WRITE_LOCK_DENIED", message: "Not the write-lock holder" },
+		{ type: "ERROR", code: "INVALID_INPUT", message: "Invalid channelId" },
+	];
+
+	beforeEach(() => {
+		localStorageMap.set("lasterm_token", "test-token");
+		mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+	});
+
+	describe("from a hub that names its answers", () => {
+		beforeEach(() => {
+			useSessionStore().hubEchoesSpawnRequestId = true;
+		});
+
+		it("names each SPAWN it sends", () => {
+			const hub = socket();
+			const store = useChannelsStore();
+
+			void store.spawnChannel("host-1", { select: false }).catch(() => {});
+			void store.spawnChannel("host-1", { select: false }).catch(() => {});
+
+			const [first, second] = hub.spawns();
+			expect(first).toEqual(expect.any(String));
+			expect(second).toEqual(expect.any(String));
+			expect(first).not.toBe(second);
+		});
+
+		it("is not failed by an ERROR about something else, which names no host", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			const spawned = store.spawnChannel("host-1", { select: false });
+			const settled = vi.fn();
+			void spawned.then(settled, settled);
+
+			for (const other of OTHERS) hub.emit(other);
+			await Promise.resolve();
+			expect(settled).not.toHaveBeenCalled();
+
+			hub.emit({
+				type: "SPAWN_OK",
+				channelId: "ch-1",
+				hostId: "host-1",
+				requestId: hub.spawns()[0],
+			});
+			await expect(spawned).resolves.toBe("ch-1");
+		});
+
+		it("is failed by its own ERROR, which names no host either", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			const spawned = store.spawnChannel("host-1", { select: false });
+
+			hub.emit({
+				type: "ERROR",
+				code: "SPAWN_FAILED",
+				message: "Agent SPAWN timeout",
+				requestId: hub.spawns()[0],
+			});
+
+			await expect(spawned).rejects.toMatchObject({ code: "SPAWN_FAILED" });
+		});
+
+		it("takes neither the answer nor the refusal of another SPAWN on its host", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			const a = store.spawnChannel("host-1", { select: false });
+			const b = store.spawnChannel("host-1", { select: false });
+			const c = store.spawnChannel("host-1", { select: false });
+			const settledA = vi.fn();
+			void a.then(settledA, settledA);
+			const [idA, idB, idC] = hub.spawns();
+
+			hub.emit({ type: "SPAWN_OK", channelId: "ch-b", hostId: "host-1", requestId: idB });
+			await expect(b).resolves.toBe("ch-b");
+			hub.emit({
+				type: "ERROR",
+				code: "SHELL_NOT_FOUND",
+				message: "No such shell",
+				requestId: idC,
+			});
+			await expect(c).rejects.toMatchObject({ code: "SHELL_NOT_FOUND" });
+			await Promise.resolve();
+			expect(settledA).not.toHaveBeenCalled();
+
+			hub.emit({ type: "SPAWN_OK", channelId: "ch-a", hostId: "host-1", requestId: idA });
+			await expect(a).resolves.toBe("ch-a");
+		});
+	});
+
+	// A browser can be served by one hub and talk to another of another version.
+	// One older than request ids names no answer, and they are matched as before.
+	describe("from a hub that names none", () => {
+		it("still takes its answer", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			const spawned = store.spawnChannel("host-1", { select: false });
+
+			hub.emit({ type: "SPAWN_OK", channelId: "ch-1", hostId: "host-1" });
+
+			await expect(spawned).resolves.toBe("ch-1");
+		});
+
+		it("still fails on an ERROR that names no host", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			const spawned = store.spawnChannel("host-1", { select: false });
+
+			hub.emit({ type: "ERROR", code: "SSH_CONNECT_FAILED", message: "Connection refused" });
+
+			await expect(spawned).rejects.toMatchObject({ code: "SSH_CONNECT_FAILED" });
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
 // The host in view: the rail's, and nothing else's (#594)
 // ---------------------------------------------------------------------------
 //

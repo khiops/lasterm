@@ -201,8 +201,10 @@ export interface ErrorMessage {
 	channelId?: string;
 	hostId?: string;
 	/**
-	 * Agent → Hub, on the ERROR that answers an ATTACH only: that ATTACH's
-	 * request id (#767). Absent from every other ERROR.
+	 * The request this ERROR answers, and none other. Agent → Hub, on the ERROR
+	 * that answers an ATTACH only: that ATTACH's request id (#767). Hub → UI, on
+	 * every ERROR that answers a SPAWN naming one: that SPAWN's (#777). Absent
+	 * from every other ERROR.
 	 */
 	requestId?: string;
 	/**
@@ -330,6 +332,12 @@ export interface AuthMessage {
 export interface AuthOkMessage {
 	type: "AUTH_OK";
 	clientId: string;
+	/**
+	 * This hub echoes a SPAWN's `requestId` in the SPAWN_OK and in every ERROR
+	 * that answers it, so an ERROR without it answers something else (#777).
+	 * Absent from a hub older than that: its answers name no SPAWN.
+	 */
+	echoesSpawnRequestId?: boolean;
 }
 
 /** Hub → UI: authentication failed */
@@ -342,6 +350,13 @@ export interface AuthFailMessage {
 export interface UiSpawnMessage {
 	type: "SPAWN";
 	hostId: string;
+	/**
+	 * A ULID naming this SPAWN, echoed in the SPAWN_OK and in every ERROR that
+	 * answers it (#777). The client's socket carries every ERROR the hub has
+	 * for it, most of them naming no host, and only this tells its answer from
+	 * the rest. Optional: a client older than it sends none.
+	 */
+	requestId?: string;
 	shell?: string;
 	args?: string[];
 	cwd?: string;
@@ -378,6 +393,8 @@ export interface UiSpawnOkMessage {
 	channelId: string;
 	hostId: string;
 	sessionId: string;
+	/** The SPAWN's, echoed; absent when it named none (#777). */
+	requestId?: string;
 }
 
 /** UI → Hub: attach this client to an existing channel */

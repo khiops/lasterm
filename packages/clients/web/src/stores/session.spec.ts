@@ -203,6 +203,39 @@ describe("useSessionStore — connect()", () => {
 	});
 });
 
+describe("useSessionStore — whether the hub names its answers to a SPAWN (#777)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = true;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("learns it from each AUTH_OK, a reconnect to an older hub included", async () => {
+		const sessionStore = useSessionStore();
+		const connected = sessionStore.connect();
+		await vi.advanceTimersByTimeAsync(0);
+		const ws = wsHarness.instances[0];
+		ws?.emit({ type: "AUTH_OK", clientId: "client-1", echoesSpawnRequestId: true });
+		await connected;
+		expect(sessionStore.hubEchoesSpawnRequestId).toBe(true);
+
+		// The socket comes back to a hub from before request ids.
+		ws?.emitReconnect();
+		await vi.advanceTimersByTimeAsync(0);
+		ws?.emit({ type: "AUTH_OK", clientId: "client-2" });
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(sessionStore.hubEchoesSpawnRequestId).toBe(false);
+	});
+});
+
 describe("useSessionStore — reconnect", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();

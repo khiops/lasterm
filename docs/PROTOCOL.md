@@ -612,9 +612,12 @@ id, and reads any other level as `info`. It never reaches a client.
 { type: "AUTH", token: string }
 
 // Hub → UI
-{ type: "AUTH_OK", client_id: string }
+{ type: "AUTH_OK", client_id: string, echoes_spawn_request_id?: true }
 { type: "AUTH_FAIL", message: string }
 ```
+
+`echoes_spawn_request_id` says that this hub echoes a SPAWN's `request_id` in everything that
+answers it (§ 4.4, #777). A hub older than it leaves it out.
 
 A first frame that is not AUTH is also answered `AUTH_FAIL`, and the socket closed. A socket that
 sends no AUTH within 10 s is closed with code `4001`, reason `AUTH_TIMEOUT`.
@@ -679,6 +682,7 @@ Hub passes RESIZE on to the agent and stores the size; it sends it to no other c
 {
   type: "SPAWN",
   host_id: string,
+  request_id?: string, // a ULID naming this SPAWN, echoed in what answers it (below)
   shell?: string,     // default: the launch profile's, else the host's first profile's, else none: the agent's default (§ 3.2)
   args?: string[],    // default: taken with the shell, as above
   cwd?: string,       // default: the launch profile's, else none: the agent starts the shell in its user's home (§ 3.2)
@@ -694,8 +698,20 @@ Hub passes RESIZE on to the agent and stores the size; it sends it to no other c
 }
 
 // Hub → UI
-{ type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string }
+{ type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string }
 ```
+
+A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
+answers it, the refusal of a field it carries included, and in nothing else (#777). A window's
+socket carries every ERROR the hub has for it: another pane's ATTACH refused, a write lock denied,
+an input refused. Most name no host, and only the id tells the SPAWN's answer from them. A
+`request_id` that is not a ULID is refused with `INVALID_INPUT`, without it.
+
+`request_id` is optional both ways. A client that sends none is answered without one, as before.
+A client of a hub whose `AUTH_OK` says `echoes_spawn_request_id` takes an answer as its SPAWN's
+only if it carries that SPAWN's id. One of an older hub, which names no answer, matches them as
+before: an answer naming another host, or another terminal than the one it brings back, is not
+its own, and the first other one is. The web sends one with every SPAWN.
 
 A SPAWN with `reuse_channel_id` is refused with `ERROR { code: "CHANNEL_NOT_REUSABLE",
 channel_id }`, and starts nothing, when that terminal is not one this hub knows, belongs to
@@ -1078,7 +1094,8 @@ Broadcast to all authenticated UI clients for agent-manager fetch jobs accepted 
   message: string,
   channel_id?: string,
   host_id?: string,
-  host_status?: "starting" | "active" | "detached" | "disconnected" | "closed"  // on HOST_UNREACHABLE only: the host's session, as SESSION_STATE says it (§ 4.7)
+  host_status?: "starting" | "active" | "detached" | "disconnected" | "closed",  // on HOST_UNREACHABLE only: the host's session, as SESSION_STATE says it (§ 4.7)
+  request_id?: string  // on an ERROR that answers a SPAWN naming itself only: its request_id (§ 4.4)
 }
 ```
 

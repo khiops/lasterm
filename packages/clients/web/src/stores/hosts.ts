@@ -8,7 +8,13 @@ import {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
-import { type HubAnswer, type HubRefusal, hubRefusal, toastRefusal } from "../utils/hub-answer.js";
+import {
+	type HubAnswer,
+	type HubRefusal,
+	hubRefusal,
+	hubUnreachable,
+	toastRefusal,
+} from "../utils/hub-answer.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
@@ -156,19 +162,31 @@ export const useHostsStore = defineStore("hosts", () => {
 		return { ok: true };
 	}
 
+	/**
+	 * Load the hosts. Why they did not load, as the hub said it or that it did
+	 * not answer, goes in `error` for the rail to show with a retry (#758). It
+	 * stays there until a load succeeds, so a retry under way still says it.
+	 */
 	async function fetchHosts(): Promise<void> {
 		if (authStore.token === null) return;
 		loading.value = true;
-		error.value = null;
 		try {
-			const res = await hubFetch(`${hubBaseUrl()}/api/hosts`, {
-				headers: { Authorization: `Bearer ${authStore.token}` },
-			});
+			let res: Response;
+			try {
+				res = await hubFetch(`${hubBaseUrl()}/api/hosts`, {
+					headers: { Authorization: `Bearer ${authStore.token}` },
+				});
+			} catch (err) {
+				error.value = hubUnreachable(err);
+				return;
+			}
 			if (!res.ok) {
-				throw new Error(`GET /api/hosts failed: ${res.status}`);
+				error.value = (await hubRefusal(res)).message;
+				return;
 			}
 			const data = toCamelCase(await res.json()) as Host[];
 			hosts.value = data;
+			error.value = null;
 			// Nothing selected yet: the host this tab showed before it reloaded, if
 			// the hub still has it, else the first one.
 			if (selectedHostId.value === null && data.length > 0) {
@@ -177,9 +195,12 @@ export const useHostsStore = defineStore("hosts", () => {
 					? remembered
 					: (data[0]?.id ?? null);
 			}
-			// Populate groups on first load. Nobody asked for them but the rail,
-			// so a toast says why they did not come (#734).
-			if (hostGroups.value.length === 0) {
+			// Populate groups on first load, and again while a host is in one this
+			// window does not know: not loaded yet, or made elsewhere since (#758).
+			// Nobody asked for them but the rail, so a toast says why they did not
+			// come (#734).
+			const known = new Set(hostGroups.value.map((g) => g.id));
+			if (known.size === 0 || data.some((h) => h.hostGroupId && !known.has(h.hostGroupId))) {
 				await toastRefusal(fetchHostGroups());
 			}
 		} catch (err) {

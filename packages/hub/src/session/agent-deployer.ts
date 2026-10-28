@@ -906,7 +906,9 @@ export function windowsUploadCommand(remotePath: string): string {
  * Then, best-effort: every `<agent>.old-*` that nothing runs any more, and
  * every upload temporary older than `STALE_UPLOAD_MINUTES` by the remote's
  * clock, as `sweepStaleUploads` does on POSIX. Deleting a file set aside fails
- * while it still runs, and it is left for a later upload.
+ * while it still runs, and it is left for a later upload. The script exits 0
+ * explicitly: PowerShell would otherwise exit 1 when that caught failure is
+ * the last thing it did, which is the usual case of a single running agent.
  */
 export function windowsReplaceScript(temp: string, target: string, aside: string): string {
 	return [
@@ -919,6 +921,10 @@ export function windowsReplaceScript(temp: string, target: string, aside: string
 		"if($a){m $p $o}",
 		"try{m $t $p}catch{$e=$_;if($a){try{m $o $p}catch{}};throw $e}",
 		`try{$d=[IO.Path]::GetDirectoryName($p);$n=[regex]::Escape([IO.Path]::GetFileName($p));$c=[DateTime]::UtcNow.AddMinutes(-${STALE_UPLOAD_MINUTES});foreach($f in [IO.Directory]::GetFiles($d)){$b=[IO.Path]::GetFileName($f);if(($b -match('^'+$n+'\\.old-[0-9a-f]{16}$')) -or (($b -match('^\\.'+$n+'\\.[0-9a-f]{16}\\.partial$')) -and ([IO.File]::GetLastWriteTimeUtc($f) -lt $c))){try{[IO.File]::Delete($f)}catch{}}}}catch{}`,
+		// Reached only once the upload is in place. Without it, a deletion the
+		// sweep caught as its last statement (the file set aside still runs)
+		// makes Windows PowerShell exit 1 though nothing failed.
+		"exit 0",
 	].join(";");
 }
 

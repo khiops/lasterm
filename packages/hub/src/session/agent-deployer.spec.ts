@@ -1754,6 +1754,44 @@ describe("uploadAgentBinary over the SSH command channel (#722)", () => {
 		},
 	);
 
+	// The usual case, and the one a domain controller found: one running agent,
+	// nothing else beside it. The sweep's last act is the deletion of the file
+	// set aside, which fails while it runs; PowerShell exits 1 after such a
+	// caught failure unless told otherwise, and the deploy was reported failed
+	// though the upload was in place (#725).
+	it.runIf(process.platform === "win32").each(["exec", "sftp"] as const)(
+		"replaces a running Windows agent alone in its directory over %s, and says it succeeded",
+		{ timeout: 60_000 },
+		async (transport) => {
+			const dir = join(cacheDir, "lasterm");
+			mkdirSync(dir);
+			const windowsTarget = join(dir, "lasterm-agent.exe");
+			const running = await runningExecutable(windowsTarget);
+			try {
+				const client = localWindowsClient(
+					"cmd.exe",
+					process.env,
+					transport === "sftp" ? localSftp() : undefined,
+				);
+				const support = transport === "sftp" ? { offered: true as const } : refused;
+				const agent = localAgent();
+
+				expect(await uploadAgentBinary(client, agent.path, windowsTarget, "windows", support)).toBe(
+					transport,
+				);
+
+				expect(readFileSync(windowsTarget).equals(agent.bytes)).toBe(true);
+				expect(running.exitCode).toBeNull();
+				expect(readdirSync(dir)).toEqual([
+					"lasterm-agent.exe",
+					expect.stringMatching(/^lasterm-agent\.exe\.old-[0-9a-f]{16}$/),
+				]);
+			} finally {
+				await stop(running);
+			}
+		},
+	);
+
 	// Another hub's session on the same account runs the agent from the target
 	// (#725). Over SFTP and over the command channel alike, the upload takes the
 	// target's name, the running agent keeps going from the file set aside, and

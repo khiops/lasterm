@@ -402,6 +402,32 @@ describe("SSH key endpoints", () => {
 			const { join } = await import("node:path");
 			expect(existsSync(join(sshDir, "evil_key"))).toBe(true);
 		});
+
+		// The client sends `dir` before the file: @fastify/multipart only hands the
+		// route the fields that precede it (#768).
+		it("stores the key in the subfolder that dir names", async () => {
+			const keyBuf = generateEd25519Key();
+			const { payload, headers } = buildMultipart("id_ed25519", keyBuf, { dir: "work" });
+
+			server = await makeServer();
+			const res = await server.inject({ method: "POST", url: "/api/ssh-keys", headers, payload });
+			expect(res.statusCode, res.body).toBe(200);
+			expect(existsSync(join(sshDir, "work", "id_ed25519"))).toBe(true);
+			expect(existsSync(join(sshDir, "id_ed25519"))).toBe(false);
+		});
+
+		it("rejects a dir that leaves the key folder", async () => {
+			const keyBuf = generateEd25519Key();
+			const sibling = `${path.basename(sshDir)}-escape`;
+			const { payload, headers } = buildMultipart("id_ed25519", keyBuf, { dir: `../${sibling}` });
+
+			server = await makeServer();
+			const res = await server.inject({ method: "POST", url: "/api/ssh-keys", headers, payload });
+			expect(res.statusCode, res.body).toBe(400);
+			expect(res.json().error.code).toBe("INVALID_PATH");
+			expect(existsSync(join(sshDir, "..", sibling))).toBe(false);
+			expect(existsSync(join(sshDir, "id_ed25519"))).toBe(false);
+		});
 	});
 
 	// --- DELETE /api/ssh-keys ------------------------------------------------

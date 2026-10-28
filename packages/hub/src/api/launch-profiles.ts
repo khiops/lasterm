@@ -214,12 +214,8 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 	);
 
 	// PUT /api/launch-profiles/order — reorder launch profiles
-	// Alias: POST /api/launch-profiles/reorder (kept for backward compatibility)
 	// MUST be before /:id to avoid param collision.
-	const reorderHandler = async (
-		request: { body: { ids: string[] } },
-		reply: { code: (n: number) => { send: (v: unknown) => unknown } },
-	) => {
+	server.put<{ Body: { ids: string[] } }>("/api/launch-profiles/order", async (request, reply) => {
 		const { ids } = request.body;
 		if (!Array.isArray(ids)) {
 			return reply.code(400).send({
@@ -228,11 +224,7 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 		}
 		metaDal.reorderLaunchProfiles(ids);
 		return reply.code(204).send(null);
-	};
-
-	server.put<{ Body: { ids: string[] } }>("/api/launch-profiles/order", reorderHandler);
-	// Backward-compat alias — original method was POST
-	server.post<{ Body: { ids: string[] } }>("/api/launch-profiles/reorder", reorderHandler);
+	});
 
 	// POST /api/launch-profiles
 	server.post<{ Body: CreateLaunchProfileBody }>("/api/launch-profiles", async (request, reply) => {

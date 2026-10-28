@@ -7741,9 +7741,9 @@ mod tests {
         use std::net::TcpListener;
 
         // This is deliberately a raw, harmless one-shot listener rather than
-        // the purge endpoint. With the old clean-EOF behavior it accepts the
-        // request; an aborted first pull must fail before the hub receives an
-        // empty request, so the listener observes no connection at all.
+        // a hub, so the path names no route. With the old clean-EOF behavior it
+        // accepts the request; an aborted first pull must fail before the hub
+        // receives an empty request, so the listener observes no connection at all.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let received = std::thread::spawn(move || {
@@ -7789,7 +7789,7 @@ mod tests {
             .timeout(Duration::from_secs(2))
             .build()
             .unwrap()
-            .post(format!("http://{address}/api/channels/purge-dead"))
+            .post(format!("http://{address}/api/upload"))
             .body(reqwest::blocking::Body::new(HubUploadReader {
                 receiver,
                 current: std::io::Cursor::new(Vec::new()),

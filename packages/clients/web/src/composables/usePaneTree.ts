@@ -37,29 +37,9 @@ export const MAX_PANE_COUNT = 4;
 /** The name of a tab with no terminal in it, only empty panes. */
 export const EMPTY_TAB_LABEL = "New tab";
 
-// ---------------------------------------------------------------------------
-// Migration helpers (used by useLayout persistence layer)
-// ---------------------------------------------------------------------------
-
-/** Ensure all terminal nodes have a paneId (backward compat with old persisted state). */
-export function ensurePaneIds(node: PaneNode): PaneNode {
-	if (node.type === "terminal") {
-		return node.paneId ? node : { ...node, paneId: generateId() };
-	}
-	if (node.type === "vacant") return node;
-	return { ...node, first: ensurePaneIds(node.first), second: ensurePaneIds(node.second) };
-}
-
 function countLeaves(node: PaneNode): number {
 	if (node.type !== "split") return 1;
 	return countLeaves(node.first) + countLeaves(node.second);
-}
-
-export function truncateToMaxPanes(node: PaneNode, max: number): PaneNode {
-	if (countLeaves(node) <= max) return node;
-	// Too many panes — reset to the first leaf
-	if (node.type === "split") return truncateToMaxPanes(node.first, max);
-	return node;
 }
 
 // ---------------------------------------------------------------------------

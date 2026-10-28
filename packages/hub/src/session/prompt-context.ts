@@ -254,11 +254,10 @@ export function respond(
 		return false;
 	}
 
-	// Guard D: enforce epoch match only when the caller provides a defined epoch.
-	// Back-compat: the web client does not echo deliveryEpoch yet (that lands in a
-	// later step when @lasterm/web echoes promptId+deliveryEpoch). Until then, callers
-	// that cannot supply an epoch pass undefined and we skip the epoch check while
-	// still enforcing the SEC-003 clientId check above.
+	// Guard D: enforce epoch match when the caller provides an epoch.
+	// AUTH_PROMPT_RESPONSE always echoes one. HOST_VERIFY_RESPONSE and
+	// AGENT_BINARY_VERIFY_RESPONSE carry none yet, so their callers pass undefined
+	// and only the SEC-003 clientId check above applies to them.
 	if (deliveryEpoch !== undefined && deliveryEpoch !== inFlight.deliveryEpoch) {
 		return false;
 	}

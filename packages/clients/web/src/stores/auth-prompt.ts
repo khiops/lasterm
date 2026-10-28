@@ -7,12 +7,12 @@ export interface AuthPromptRequest {
 	hostId: string;
 	promptType: "password" | "passphrase" | "elevation";
 	message: string;
-	/** Per-prompt passphrase cache opt-in. Missing means false for back-compat. */
-	rememberSession?: boolean;
+	/** Per-prompt passphrase cache opt-in. */
+	rememberSession: boolean;
 	/** Correlation ID — echoed back in AUTH_PROMPT_RESPONSE. */
-	promptId?: string;
+	promptId: string;
 	/** Delivery epoch from hub — echoed back for stale-response guard. */
-	deliveryEpoch?: number;
+	deliveryEpoch: number;
 }
 
 /**
@@ -28,7 +28,6 @@ export interface AuthPromptRequest {
 export const useAuthPromptStore = defineStore("authPrompt", () => {
 	const { currentPrompt, enqueue, handlePromptCancel, resolveHead, withHeadPrompt } =
 		usePromptQueue<AuthPromptRequest>({
-			getFallbackKey: (prompt) => prompt.hostId,
 			stalePromptWarning: "[auth-prompt] ignoring stale prompt action",
 		});
 	let _wsClient: IWsClient | null = null;
@@ -42,9 +41,6 @@ export const useAuthPromptStore = defineStore("authPrompt", () => {
 		},
 	});
 
-	// Legacy alias: components that bind `pendingPrompt` keep working
-	const pendingPrompt = currentPrompt;
-
 	function setWsClient(client: IWsClient): void {
 		_wsClient = client;
 	}
@@ -53,17 +49,10 @@ export const useAuthPromptStore = defineStore("authPrompt", () => {
 		hostId: string,
 		promptType: "password" | "passphrase" | "elevation",
 		message: string,
-		promptId?: string,
-		deliveryEpoch?: number,
+		promptId: string,
+		deliveryEpoch: number,
 	): void {
-		enqueue({
-			hostId,
-			promptType,
-			message,
-			rememberSession: false,
-			...(promptId !== undefined ? { promptId } : {}),
-			...(deliveryEpoch !== undefined ? { deliveryEpoch } : {}),
-		});
+		enqueue({ hostId, promptType, message, rememberSession: false, promptId, deliveryEpoch });
 	}
 
 	function respond(secret: string | null, promptId?: string): void {
@@ -74,9 +63,9 @@ export const useAuthPromptStore = defineStore("authPrompt", () => {
 					type: "AUTH_PROMPT_RESPONSE",
 					hostId: req.hostId,
 					secret,
-					rememberSession: req.rememberSession ?? false,
-					...(req.promptId !== undefined ? { promptId: req.promptId } : {}),
-					...(req.deliveryEpoch !== undefined ? { deliveryEpoch: req.deliveryEpoch } : {}),
+					rememberSession: req.rememberSession,
+					promptId: req.promptId,
+					deliveryEpoch: req.deliveryEpoch,
 				});
 				resolveHead();
 			},
@@ -89,7 +78,6 @@ export const useAuthPromptStore = defineStore("authPrompt", () => {
 	}
 
 	return {
-		pendingPrompt,
 		currentPrompt,
 		rememberSession,
 		setWsClient,

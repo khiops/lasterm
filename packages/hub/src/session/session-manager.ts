@@ -22,6 +22,8 @@ import type {
 	AgentEnvQueryMessage,
 	AgentSpawnMessage,
 	AgentSyncedMessage,
+	AuthPromptMessage,
+	AuthPromptResponseMessage,
 	ChannelEndReason,
 	ElevationMethod,
 	EnvMode,
@@ -1401,15 +1403,14 @@ export class SessionManager {
 					const elevSend = (routeClientId: string, msg: Record<string, unknown>) => {
 						const target = this.ctx.clients.get(routeClientId);
 						if (!target) throw new Error("prompt route client disconnected");
-						target.send(msg as unknown as import("@lasterm/shared").AuthPromptMessage);
+						target.send(msg as unknown as AuthPromptMessage);
 					};
 					const hostname = host.sshHost ?? host.label ?? hostId;
-					const elevPayload: import("@lasterm/shared").AuthPromptMessage = {
+					const elevPayload: Omit<AuthPromptMessage, "promptId" | "deliveryEpoch"> = {
 						type: "AUTH_PROMPT",
 						hostId,
 						promptType: "elevation",
 						message: `Enter password for elevated shell on ${hostname}`,
-						promptId: "",
 					};
 					const elevPromise = promptCtx(
 						this.ctx,
@@ -1769,20 +1770,9 @@ export class SessionManager {
 
 	handleAuthPromptResponse(
 		clientId: string,
-		hostId: string,
-		secret: string | null,
-		rememberSession?: boolean,
-		promptId?: string,
-		deliveryEpoch?: number,
+		response: Omit<AuthPromptResponseMessage, "type">,
 	): void {
-		this.sshMgr.handleAuthPromptResponse(
-			clientId,
-			hostId,
-			secret,
-			rememberSession,
-			promptId,
-			deliveryEpoch,
-		);
+		this.sshMgr.handleAuthPromptResponse(clientId, response);
 	}
 
 	handleHostVerifyResponse(

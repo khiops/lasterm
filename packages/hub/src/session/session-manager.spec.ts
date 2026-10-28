@@ -288,6 +288,15 @@ async function flushImmediate(): Promise<void> {
 	await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+/** What an answer to the last AUTH_PROMPT a client received echoes. */
+function echoOf(received: ProtocolMessage[]): { promptId: string; deliveryEpoch: number } {
+	const prompt = received.filter((m) => m.type === "AUTH_PROMPT").at(-1) as
+		| AuthPromptMessage
+		| undefined;
+	if (!prompt) throw new Error("expected an AUTH_PROMPT");
+	return { promptId: prompt.promptId, deliveryEpoch: prompt.deliveryEpoch };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 /**
@@ -1180,13 +1189,7 @@ describe("SessionManager", () => {
 
 		expect(channelId).toBe("ssh-ch-1");
 		expect(received.some((m) => m.type === "SPAWN_OK")).toBe(true);
-		expect(
-			received.some(
-				(m) =>
-					m.type === "ERROR" && (m as ProtocolMessage & { code?: string }).code === "AGENT_UPDATED",
-			),
-		).toBe(false);
-		expect(JSON.stringify(received)).not.toContain("Remote agent on localhost was updated");
+		expect(received.some((m) => m.type === "ERROR")).toBe(false);
 		expect(JSON.stringify(received)).not.toContain("SHA256 mismatch");
 
 		const synced = received.find((m) => m.type === "AGENT_SYNCED");
@@ -2787,7 +2790,11 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 		const resolvePromise = sshMgr.buildPromptAuth(client)("host-01", "password", "test");
 
 		// Respond with a secret
-		sm.handleAuthPromptResponse("client-1", "host-01", "my-secret");
+		sm.handleAuthPromptResponse("client-1", {
+			hostId: "host-01",
+			secret: "my-secret",
+			...echoOf(received),
+		});
 
 		const result = await resolvePromise;
 		expect(result).toBe("my-secret");
@@ -2804,7 +2811,11 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 		).sshMgr;
 		const resolvePromise = sshMgr.buildPromptAuth(client)("host-02", "password", "test");
 
-		sm.handleAuthPromptResponse("client-1", "host-02", null);
+		sm.handleAuthPromptResponse("client-1", {
+			hostId: "host-02",
+			secret: null,
+			...echoOf(received),
+		});
 
 		const result = await resolvePromise;
 		expect(result).toBeFalsy();
@@ -2836,17 +2847,26 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 			expect(settled).not.toHaveBeenCalled();
 			expect(ctx.pendingPrompts.has(promptId)).toBe(true);
 
-			sm.handleAuthPromptResponse("client-1", "host-03", "answered at last", false, promptId);
+			sm.handleAuthPromptResponse("client-1", {
+				hostId: "host-03",
+				secret: "answered at last",
+				...echoOf(received),
+			});
 			await expect(answer).resolves.toBe("answered at last");
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	it("handleAuthPromptResponse is a no-op for unknown hostId", () => {
+	it("handleAuthPromptResponse is a no-op for a prompt it does not know", () => {
 		// Should not throw
 		expect(() => {
-			sm.handleAuthPromptResponse("client-1", "no-such-host", "secret");
+			sm.handleAuthPromptResponse("client-1", {
+				hostId: "no-such-host",
+				secret: "secret",
+				promptId: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+				deliveryEpoch: 1,
+			});
 		}).not.toThrow();
 	});
 
@@ -2862,14 +2882,22 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
 		const promptId = [...ctx.pendingPrompts.keys()][0]!;
 
-		// Attacker sends a response from a different clientId
-		sm.handleAuthPromptResponse("attacker-client", "host-sec", "injected-secret");
+		// Attacker answers the same prompt from a different clientId
+		sm.handleAuthPromptResponse("attacker-client", {
+			hostId: "host-sec",
+			secret: "injected-secret",
+			...echoOf(received),
+		});
 
 		// Prompt must still be pending and secret must not be resolved
 		expect(ctx.pendingPrompts.has(promptId)).toBe(true);
 		expect(ctx.passphraseCache.has("host-sec")).toBe(false);
 
-		sm.handleAuthPromptResponse("legitimate-client", "host-sec", null, false, promptId);
+		sm.handleAuthPromptResponse("legitimate-client", {
+			hostId: "host-sec",
+			secret: null,
+			...echoOf(received),
+		});
 		await promptPromise;
 	});
 
@@ -2896,7 +2924,11 @@ describe("SessionManager — handleAuthPromptResponse", () => {
 		expect(sentPrompt.hostId).toBe("01ARZ3NDEKTSV4RRFFQ69G5FAV");
 
 		// Respond via handleAuthPromptResponse
-		sm.handleAuthPromptResponse("c1", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "hunter2");
+		sm.handleAuthPromptResponse("c1", {
+			hostId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			secret: "hunter2",
+			...echoOf(received),
+		});
 
 		return expect(promptPromise).resolves.toBe("hunter2");
 	});
@@ -3070,7 +3102,11 @@ describe("handleTestConnect", () => {
 		expect(prompt.hostId).toBe("temp-host-5");
 
 		// Cancel the prompt (null = user cancelled)
-		sm.handleAuthPromptResponse("c-tc-4", "temp-host-5", null);
+		sm.handleAuthPromptResponse("c-tc-4", {
+			hostId: "temp-host-5",
+			secret: null,
+			...echoOf(received),
+		});
 		await promise;
 
 		// Should have received TEST_CONNECT_FAIL after cancellation
@@ -3643,7 +3679,12 @@ describe("SessionManager — elevation support", () => {
 					const promptMsg = msg as AuthPromptMessage;
 					// Respond on next microtask so the pending entry is registered first
 					Promise.resolve().then(() => {
-						sm.handleAuthPromptResponse(id, promptMsg.hostId, responseSecret);
+						sm.handleAuthPromptResponse(id, {
+							hostId: promptMsg.hostId,
+							secret: responseSecret,
+							promptId: promptMsg.promptId,
+							deliveryEpoch: promptMsg.deliveryEpoch,
+						});
 					});
 				}
 			},
@@ -3839,14 +3880,11 @@ describe("SessionManager — elevation support", () => {
 
 		await expect(spawnPromise).resolves.toBeNull();
 
-		sm.handleAuthPromptResponse(
-			"c-d4-close-elevation",
-			localHostId,
-			"late-elevation-secret",
-			false,
-			promptId,
-			(prompt as unknown as { deliveryEpoch?: number }).deliveryEpoch,
-		);
+		sm.handleAuthPromptResponse("c-d4-close-elevation", {
+			hostId: localHostId,
+			secret: "late-elevation-secret",
+			...echoOf(received),
+		});
 
 		expect(ctx.elevationCache.size).toBe(0);
 		expect(ctx.passphraseCache.size).toBe(0);
@@ -4027,11 +4065,12 @@ describe("SessionManager — elevation support", () => {
 				if (msg.type === "AUTH_PROMPT") {
 					const promptMsg = msg as AuthPromptMessage;
 					Promise.resolve().then(() => {
-						sm.handleAuthPromptResponse(
-							"c-restart03",
-							promptMsg.hostId,
-							spawnDone ? null : "initial-pass",
-						);
+						sm.handleAuthPromptResponse("c-restart03", {
+							hostId: promptMsg.hostId,
+							secret: spawnDone ? null : "initial-pass",
+							promptId: promptMsg.promptId,
+							deliveryEpoch: promptMsg.deliveryEpoch,
+						});
 					});
 				}
 			},
@@ -4647,11 +4686,21 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 			expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
 			expect(ctx.pendingPrompts.has(secondPromptId)).toBe(true);
 
-			sm.handleAuthPromptResponse(sameClient.id, hostId, "second", false, secondPromptId);
+			sm.handleAuthPromptResponse(sameClient.id, {
+				hostId,
+				secret: "second",
+				promptId: secondPromptId,
+				deliveryEpoch: 1,
+			});
 			await expect(p2).resolves.toBe("second");
 			expect(ctx.pendingPrompts.has(firstPromptId)).toBe(true);
 
-			sm.handleAuthPromptResponse(sameClient.id, hostId, "first", false, firstPromptId);
+			sm.handleAuthPromptResponse(sameClient.id, {
+				hostId,
+				secret: "first",
+				promptId: firstPromptId,
+				deliveryEpoch: 1,
+			});
 			await expect(p1).resolves.toBe("first");
 		} finally {
 			vi.useRealTimers();
@@ -6421,10 +6470,14 @@ describe("SessionManager — Fix C2: onReconnectAgent abort-safe on closeSession
 		// INVARIANT 3: prompt registries are clear for this reconnect path.
 		expect(ctx.pendingPrompts.size).toBe(0);
 
-		// Simulate a late response arriving after the session was closed.
-		// Without the fix, handleAuthPromptResponse would find the stale entry
-		// and cache the secret in passphraseCache.
-		sm.handleAuthPromptResponse("c-c2-1", hostId, "should-not-be-cached");
+		// Simulate a late response arriving after the session was closed, for a
+		// prompt that no longer exists.
+		sm.handleAuthPromptResponse("c-c2-1", {
+			hostId,
+			secret: "should-not-be-cached",
+			promptId: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+			deliveryEpoch: 1,
+		});
 
 		// INVARIANT 4: passphraseCache must NOT contain the secret for the closed host.
 		// Mutation oracle: without the fix, passphraseCache.has(hostId) === true here.
@@ -6533,12 +6586,18 @@ describe("SessionManager — Fix C3: closeSession clears reconnect PromptContext
 			{ type: "AUTH_PROMPT", hostId, promptType: "passphrase", message: "test", promptId: "" },
 			() => {},
 		)!;
+		const [promptId] = [...ctx.pendingPrompts.keys()];
 
 		await sm.closeSession(sessionId);
 		await promptPromise;
 
 		// Simulate a late client response arriving after close.
-		sm.handleAuthPromptResponse("c-c3b-1", hostId, "should-not-be-cached-secret");
+		sm.handleAuthPromptResponse("c-c3b-1", {
+			hostId,
+			secret: "should-not-be-cached-secret",
+			promptId: promptId!,
+			deliveryEpoch: 1,
+		});
 
 		// INVARIANT: passphraseCache must NOT contain the secret for the closed host.
 		// Mutation oracle: without owner-context cleanup, the secret would be cached.

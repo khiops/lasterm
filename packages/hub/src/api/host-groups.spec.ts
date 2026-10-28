@@ -369,9 +369,9 @@ describe("DELETE /api/host-groups/:id", () => {
 	});
 });
 
-// ─── PUT /api/host-groups/reorder ────────────────────────────────────────────
+// ─── PUT /api/host-groups/order ──────────────────────────────────────────────
 
-describe("PUT /api/host-groups/reorder", () => {
+describe("PUT /api/host-groups/order", () => {
 	it("reorders groups and persists new sort_order", async () => {
 		const alpha = await server
 			.inject({ method: "POST", url: "/api/host-groups", payload: { name: "Alpha" } })
@@ -496,9 +496,9 @@ describe("PUT /api/hosts/:id with host_group_id", () => {
 	});
 });
 
-// ─── PUT /api/hosts/reorder with group_id ────────────────────────────────────
+// ─── PUT /api/hosts/order with group_id ──────────────────────────────────────
 
-describe("PUT /api/hosts/reorder", () => {
+describe("PUT /api/hosts/order", () => {
 	it("accepts group_id (not group) in the request body", async () => {
 		const hostRes = await server.inject({
 			method: "POST",
@@ -520,43 +520,6 @@ describe("PUT /api/hosts/reorder", () => {
 			method: "PUT",
 			url: "/api/hosts/order",
 			payload: { group_id: null, host_ids: [] },
-		});
-		expect(res.statusCode).toBe(400);
-		const body = res.json<{ error: { code: string } }>();
-		expect(body.error.code).toBe("VALIDATION_ERROR");
-	});
-});
-
-// ─── PUT /api/host-groups/reorder alias ──────────────────────────────────────
-
-describe("PUT /api/host-groups/reorder (backward-compat alias)", () => {
-	it("reorders via /reorder alias and persists sort_order", async () => {
-		const x = await server
-			.inject({ method: "POST", url: "/api/host-groups", payload: { name: "X-Alias" } })
-			.then((r) => r.json<{ id: string }>());
-		const y = await server
-			.inject({ method: "POST", url: "/api/host-groups", payload: { name: "Y-Alias" } })
-			.then((r) => r.json<{ id: string }>());
-
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/host-groups/reorder",
-			payload: { group_ids: [y.id, x.id] },
-		});
-		expect(res.statusCode).toBe(200);
-		expect(res.json<{ ok: boolean }>().ok).toBe(true);
-
-		// Verify persisted order via GET
-		const listRes = await server.inject({ method: "GET", url: "/api/host-groups" });
-		const groups = listRes.json<Array<{ id: string; name: string }>>();
-		expect(groups.map((g) => g.name)).toEqual(["Y-Alias", "X-Alias"]);
-	});
-
-	it("returns 400 when group_ids is an empty array (alias)", async () => {
-		const res = await server.inject({
-			method: "PUT",
-			url: "/api/host-groups/reorder",
-			payload: { group_ids: [] },
 		});
 		expect(res.statusCode).toBe(400);
 		const body = res.json<{ error: { code: string } }>();

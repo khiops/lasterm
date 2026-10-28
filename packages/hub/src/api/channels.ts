@@ -42,12 +42,8 @@ export function registerChannelRoutes(
 	);
 
 	// DELETE /api/channels/dead — bulk delete all dead channels (optionally scoped to a host)
-	// Alias: POST /api/channels/purge-dead (kept for backward compatibility)
 	// MUST be registered before /:id routes to avoid matching as a channel ID param.
-	const purgeDeadHandler = async (
-		request: { body?: { host_id?: string } },
-		reply: { code: (n: number) => { send: (v: unknown) => unknown } },
-	) => {
+	server.delete<{ Body: { host_id?: string } }>("/api/channels/dead", async (request, reply) => {
 		const { host_id } = request.body ?? {};
 
 		let deadChannelIds: string[];
@@ -66,11 +62,7 @@ export function registerChannelRoutes(
 		}
 
 		return reply.code(200).send({ ok: true, purged: deadChannelIds.length });
-	};
-
-	server.delete<{ Body: { host_id?: string } }>("/api/channels/dead", purgeDeadHandler);
-	// Backward-compat alias — original method was POST
-	server.post<{ Body: { host_id?: string } }>("/api/channels/purge-dead", purgeDeadHandler);
+	});
 
 	// GET /api/channels/:id
 	server.get<{ Params: { id: string } }>("/api/channels/:id", async (request, reply) => {

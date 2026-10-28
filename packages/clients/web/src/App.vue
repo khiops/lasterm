@@ -439,7 +439,7 @@ import { useThemeStore } from './stores/theme.js';
 import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
-import { endedPrefs, endedToDelete, migrateLegacyDeadTabChoice } from './utils/exit-action.js';
+import { endedPrefs, endedToDelete } from './utils/exit-action.js';
 import {
 	closeConnectionWithConsent,
 	type HostConnectionAction,
@@ -825,23 +825,6 @@ const confirmDialog = ref({
 });
 
 /**
- * "Delete this dead terminal?" is no longer asked: closing an ended terminal
- * follows "Keep ended terminals in the sidebar" (#574). This browser's old
- * "don't ask again" becomes that setting, once, after the UI config is read.
- */
-async function migrateDeadTabChoice(): Promise<void> {
-	try {
-		await migrateLegacyDeadTabChoice(
-			localStorage,
-			endedPrefs(configStore.uiConfig.panes),
-			(values) => configStore.saveUiSettings('panes', values),
-		);
-	} catch (err) {
-		console.warn('[App] could not carry over the old dead-terminal choice:', err);
-	}
-}
-
-/**
  * Check if a confirmation should be skipped based on localStorage preferences.
  */
 function shouldSkipConfirm(action: string): boolean {
@@ -1026,7 +1009,6 @@ onMounted(async () => {
 			// Load resolved profile + UI behaviour config now that auth is established
 			await configStore.loadProfile();
 			await configStore.loadUiConfig();
-			void migrateDeadTabChoice();
 			// Auto-switch watcher fires here (immediate: true) — if enabled,
 			// it applies the OS-preferred theme. Otherwise the saved theme.
 			await themeStore.reloadAppearance();
@@ -1081,12 +1063,8 @@ function onCloseModalCancel(): void {
 
 async function syncShutdownCallerClientId(clientId: string | null): Promise<void> {
 	if (!isTauriRuntime()) return;
-	try {
-		const { invoke } = await import('@tauri-apps/api/core');
-		await invoke('set_shutdown_caller_client_id', { clientId });
-	} catch {
-		// Older desktop shells do not have this command; the server guard still applies.
-	}
+	const { invoke } = await import('@tauri-apps/api/core');
+	await invoke('set_shutdown_caller_client_id', { clientId });
 }
 
 
@@ -1830,7 +1808,6 @@ async function onAuthenticated(): Promise<void> {
 		await configStore.loadFonts();
 		await configStore.loadProfile();
 		await configStore.loadUiConfig();
-		void migrateDeadTabChoice();
 		// Auto-switch watcher fires here — if enabled, OS preference wins.
 		await themeStore.reloadAppearance();
 		await hostsStore.fetchHosts();

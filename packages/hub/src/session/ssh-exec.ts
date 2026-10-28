@@ -1,4 +1,4 @@
-import type { Client as SshClient } from "ssh2";
+import type { ClientChannel, Client as SshClient } from "ssh2";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -17,6 +17,9 @@ export const SHELL_START_CEILING_MS = 30_000;
 /** How long the first command of each connection took, its shell's start-up included (#749). */
 const shellStarts = new WeakMap<SshClient, number>();
 
+/** Who waits on each connection for its first command to measure the shell (#764). */
+const shellStartListeners = new WeakMap<SshClient, Set<(allowanceMs: number) => void>>();
+
 /**
  * What the remote shell's start-up adds to each bound on this connection, as
  * its first command measured it, up to `SHELL_START_CEILING_MS`; null until
@@ -24,6 +27,26 @@ const shellStarts = new WeakMap<SshClient, number>();
  */
 export function shellStartAllowance(client: SshClient): number | null {
 	return shellStarts.get(client) ?? null;
+}
+
+/**
+ * Hear `shellStartAllowance` once the first command of this connection has
+ * measured it, for a wait that began before (#764). Not called when it is
+ * already known: the caller reads it. Returns how to stop listening.
+ */
+export function onShellStartMeasured(
+	client: SshClient,
+	listener: (allowanceMs: number) => void,
+): () => void {
+	let listeners = shellStartListeners.get(client);
+	if (listeners === undefined) {
+		listeners = new Set();
+		shellStartListeners.set(client, listeners);
+	}
+	listeners.add(listener);
+	return () => {
+		shellStartListeners.get(client)?.delete(listener);
+	};
 }
 
 /**
@@ -38,6 +61,11 @@ export function shellStartAllowance(client: SshClient): number | null {
  * profile gets the time it needs, measured rather than assumed, since nothing
  * says which shell the server runs.
  *
+ * A command that times out has its channel closed (#764), rather than left
+ * open until the connection ends: the server closes the command's input and
+ * output, and a command still reading or writing them ends. A channel the
+ * server opens only after the timeout is closed as soon as it opens.
+ *
  * Uses ssh2 Client.exec() (not child_process.exec) - no shell injection risk.
  * Commands are sent verbatim over the SSH channel to the remote host.
  */
@@ -50,17 +78,22 @@ export function sshExec(
 	const started = Date.now();
 	// The first command of the connection to end says what the shell costs.
 	const measure = (): void => {
-		if (!shellStarts.has(client)) {
-			shellStarts.set(client, Math.min(Date.now() - started, SHELL_START_CEILING_MS));
-		}
+		if (shellStarts.has(client)) return;
+		const allowanceMs = Math.min(Date.now() - started, SHELL_START_CEILING_MS);
+		shellStarts.set(client, allowanceMs);
+		const listeners = shellStartListeners.get(client);
+		shellStartListeners.delete(client);
+		for (const listener of listeners ?? []) listener(allowanceMs);
 	};
 	return new Promise((resolve, reject) => {
 		let settled = false;
+		let channel: ClientChannel | null = null;
 
 		const timer = setTimeout(() => {
 			if (settled) return;
 			settled = true;
 			measure();
+			if (channel !== null) closeChannel(channel);
 			reject(new Error(`SSH exec timed out after ${boundMs}ms: ${command}`));
 		}, boundMs);
 
@@ -72,6 +105,13 @@ export function sshExec(
 				reject(err);
 				return;
 			}
+			if (settled) {
+				// Nothing reads it: an error on its way out has nowhere else to go.
+				stream.on("error", () => {});
+				closeChannel(stream);
+				return;
+			}
+			channel = stream;
 
 			const stdoutChunks: Buffer[] = [];
 			const stderrChunks: Buffer[] = [];
@@ -104,4 +144,13 @@ export function sshExec(
 			});
 		});
 	});
+}
+
+/** Ask the server to close a command's channel (#764). */
+function closeChannel(channel: ClientChannel): void {
+	try {
+		channel.close();
+	} catch {
+		// The connection is already gone, and the channel with it.
+	}
 }

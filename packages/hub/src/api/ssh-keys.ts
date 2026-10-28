@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync }
 import { chmod, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path, { join, resolve } from "node:path";
+import type { MultipartFields } from "@fastify/multipart";
 import type { SshKeyEntry } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import ssh2 from "ssh2";
@@ -107,6 +108,22 @@ function containedPath(base: string, ...parts: string[]): string | null {
 	return containedPathWith(path, base, ...parts);
 }
 
+/**
+ * The upload's `dir` field: "" when it is absent, null when it is not one text field.
+ *
+ * It comes from the file part's `fields`, which holds the fields sent before the file:
+ * @fastify/multipart fills `request.body` only with `attachFieldsToBody`, which the hub
+ * does not set, so `dir` read from there was always missing (#768).
+ */
+function uploadDir(fields: MultipartFields): string | null {
+	const field = fields.dir;
+	if (field === undefined) return "";
+	if (Array.isArray(field) || field.type !== "field" || typeof field.value !== "string") {
+		return null;
+	}
+	return field.value;
+}
+
 export function registerSshKeyRoutes(server: FastifyInstance, sshDir?: string): void {
 	const dir = sshDir ?? join(homedir(), ".ssh");
 
@@ -195,10 +212,11 @@ export function registerSshKeyRoutes(server: FastifyInstance, sshDir?: string): 
 				.code(400)
 				.send({ error: { code: "INVALID_FILENAME", message: "Invalid filename" } });
 		}
-		let relDir = "";
-		const fields = (request.body as Record<string, { value?: string }> | null) ?? {};
-		if (fields.dir?.value) {
-			relDir = fields.dir.value;
+		const relDir = uploadDir(file.fields);
+		if (relDir === null) {
+			return reply
+				.code(400)
+				.send({ error: { code: "INVALID_PATH", message: "dir must be a single text field" } });
 		}
 		const buffer = await file.toBuffer();
 		if (buffer.byteLength > MAX_KEY_UPLOAD_SIZE) {

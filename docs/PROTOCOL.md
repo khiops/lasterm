@@ -1410,7 +1410,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/ssh-keys` | ● | `?dir=` → `{ path, entries }`, each `{ name, type: "directory" \| "key", items?, algorithm?, bits?, fingerprint?, encrypted?, mtime? }`. Public keys, `config`, `known_hosts` and `authorized_keys` are left out |
-| POST | `/api/ssh-keys` | ● | multipart: the key file, and a `dir` field → `{ name, algorithm?, bits?, fingerprint?, encrypted?, mtime? }`, stored mode 600. 400 `NO_FILE`, `INVALID_FILENAME` or `INVALID_KEY`; 413 `FILE_TOO_LARGE` over 100 KB; 409 `DUPLICATE` |
+| POST | `/api/ssh-keys` | ● | multipart: an optional `dir` field, then the key file (`dir` must come first) → `{ name, algorithm?, bits?, fingerprint?, encrypted?, mtime? }`, stored mode 600. 400 `NO_FILE`, `INVALID_FILENAME` or `INVALID_KEY`; 413 `FILE_TOO_LARGE` over 100 KB; 409 `DUPLICATE` |
 | DELETE | `/api/ssh-keys` | ● | `?name=&dir=` → 204. 400 `MISSING_PARAM` without `name`, 404 `NOT_FOUND` |
 
 #### Sessions

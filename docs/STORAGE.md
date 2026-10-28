@@ -85,7 +85,7 @@ CREATE TABLE hosts (
   default_cwd   TEXT,
   created_at  TEXT NOT NULL,                             -- ISO 8601
   updated_at  TEXT NOT NULL,
-  sort_order INTEGER DEFAULT 0,                          -- order within its group
+  sort_order INTEGER DEFAULT 0,                          -- order within its group; ties by creation
   ssh_config_host TEXT DEFAULT NULL,                     -- the ~/.ssh/config alias it came from
   ssh_user TEXT DEFAULT NULL,
   host_group_id TEXT REFERENCES host_groups(id) ON DELETE SET NULL,

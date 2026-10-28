@@ -24,6 +24,10 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    # Its slowest run took under half a minute; more room than that, since it
+    # creates tags and releases through the API (#741). The release build is
+    # release.yml's, and its jobs carry their own timeouts.
+    timeout-minutes: 10
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}

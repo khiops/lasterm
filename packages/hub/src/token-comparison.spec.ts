@@ -102,12 +102,7 @@ const EQUALITY =
  * Plain equalities that weigh no guess, by file and text, each with the reason.
  * Timing only leaks to whoever supplies one side; here the hub supplies both.
  */
-const NO_GUESS_COMPARED = new Map([
-	[
-		"cli.ts: current.ownerToken === expected.ownerToken",
-		"runtimeMatches: two runtime records the hub wrote itself, to tell whether runtime.json is still this hub's",
-	],
-]);
+const NO_GUESS_COMPARED = new Map<string, string>([]);
 
 function lastName(operand: string): string {
 	return operand.split(/\??\./).pop() ?? operand;

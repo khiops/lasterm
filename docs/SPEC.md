@@ -267,7 +267,7 @@ palette's Keyboard Shortcuts row and Settings › Keybindings open it too (decis
 **State management:**
 - Pinia store for: hosts, sessions, channels, config, write-locks
 - Reactive: WS messages update store → Vue reactivity updates UI
-- Persistent: the tabs and their splits are kept in the browser's `localStorage` (`useLayout`). The hub has a `workspaces` table that nothing uses (STORAGE.md § 3.5)
+- Persistent: the tabs and their splits are kept in the browser's `localStorage` (`useLayout`). The hub keeps no layout (STORAGE.md § 3.5)
 
 **Client and hub versions (browser):** the hub is the source of truth for the UI it
 serves (#132). A tab loaded before a hub upgrade keeps running the old JavaScript
@@ -444,8 +444,7 @@ Host (permanent config)
  ├── defaultCwd?: string
  ├── elevationMethod?: 'sudo'|'doas'|'pkexec'|'gsudo'|'custom' | null
  ├── customCommand?: string | null     // used when elevationMethod = 'custom'
- ├── hostGroup?: string | null         // display group name
- ├── hostGroupId?: string | null       // FK → HostGroup (future)
+ ├── hostGroupId?: string | null       // FK → HostGroup
  ├── sortOrder: number
  ├── discoveredShells?: string[]       // shells found on remote at last connect
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
@@ -946,7 +945,7 @@ Terminal background profile keys cascade through the same four layers:
 | TOML key | Profile key | Values | Default | Notes |
 |----------|-------------|--------|---------|-------|
 | `background_mode` | `backgroundMode` | `image`, `solid`, `transparent` | `image` | `image` keeps existing wallpaper behavior; `image` with no wallpaper renders solid. In browser clients, `transparent` renders solid. |
-| `window_effect` | `windowEffect` | `none`, `auto`, `mica`, `blur`, `acrylic`, `vibrancy-under-window`, `vibrancy-sidebar`, `vibrancy-hud` | `none` | Desktop-only native effect, used only when `backgroundMode` resolves to `transparent`. A Windows material (`mica`, `acrylic`) needs an opaque main window, since DWM paints its materials for a window and skips one carrying per-pixel alpha; every other value needs the transparent one. Which of the two a window is, is settled when it is created, so moving between them takes effect at the next launch and the client says so; moving between materials applies at once. The picker offers `none`, `mica` and `acrylic` on Windows 11 and the vibrancy variants on macOS; `auto` and `blur` still resolve for profiles that carry them. |
+| `window_effect` | `windowEffect` | `none`, `mica`, `acrylic`, `vibrancy-under-window`, `vibrancy-sidebar`, `vibrancy-hud` | `none` | Desktop-only native effect, used only when `backgroundMode` resolves to `transparent`. A Windows material (`mica`, `acrylic`) needs an opaque main window, since DWM paints its materials for a window and skips one carrying per-pixel alpha; every other value needs the transparent one. Which of the two a window is, is settled when it is created, so moving between them takes effect at the next launch and the client says so; moving between materials applies at once. The picker offers `none`, `mica` and `acrylic` on Windows 11 and the vibrancy variants on macOS; any other value resolves to `none`. |
 
 The environment a terminal is spawned with cascades through the same layers, and is the one profile key **merged rather than replaced**:
 
@@ -1175,7 +1174,7 @@ lasterm/
 │   │       ├── logging/     # hub.jsonl, channel logs, the security log
 │   │       ├── storage/     # SQLite DAL (meta.db + spool.db)
 │   │       │   └── migrations/
-│   │       │       ├── meta/    # 001-initial.sql, ...
+│   │       │       ├── meta/    # 021-baseline.sql, ... (STORAGE.md § 9.3)
 │   │       │       └── spool/   # 001-initial.sql, ...
 │   │       ├── config.ts    # Config resolver (4-layer cascade)
 │   │       └── auth.ts      # Token auth + pairing

@@ -18,34 +18,6 @@ describe("HostsDAL — agent SHA256 pinning", () => {
 		dbs.close();
 	});
 
-	it("normalizes legacy SSH pins on read without rewriting rows and preserves NULL shapes", () => {
-		const host = dal.createHost({ type: "ssh", label: "legacy", sshHost: "example.test" });
-		dbs.meta
-			.prepare("UPDATE hosts SET ssh_fingerprint = ?, ssh_proxy_fingerprint = ? WHERE id = ?")
-			.run("SHA256:target=", "SHA256:jump=", host.id);
-		expect(dal.getHost(host.id)).toMatchObject({
-			sshFingerprint: "SHA256:target",
-			sshProxyFingerprint: "SHA256:jump",
-		});
-		expect(
-			dal.getHostFingerprint(
-				host.id,
-				targetRoute(host, () => undefined),
-			),
-		).toBe("SHA256:target");
-		expect(
-			dbs.meta
-				.prepare("SELECT ssh_fingerprint, ssh_proxy_fingerprint FROM hosts WHERE id = ?")
-				.get(host.id),
-		).toEqual({ ssh_fingerprint: "SHA256:target=", ssh_proxy_fingerprint: "SHA256:jump=" });
-		dbs.meta
-			.prepare("UPDATE hosts SET ssh_fingerprint = NULL, ssh_proxy_fingerprint = NULL WHERE id = ?")
-			.run(host.id);
-		const fresh = dal.getHost(host.id);
-		expect(fresh?.sshFingerprint).toBeNull();
-		expect(fresh).not.toHaveProperty("sshProxyFingerprint");
-	});
-
 	it("stores and retrieves agent SHA256", () => {
 		const host = dal.createHost({ type: "ssh", label: "Remote Server" });
 		const sha256 = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";

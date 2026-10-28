@@ -1445,7 +1445,6 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
   default_shell?: string,
   default_cwd?: string,
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
-  host_group?: string,                // group name (legacy)
   host_group_id?: string,             // host group ID
   profile_json?: string | object,     // host-level terminal profile (Layer 3)
   elevation_method?: string,          // e.g. "sudo", "doas", "pkexec", "gsudo"
@@ -1457,10 +1456,7 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 **UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge).
 
-A field these routes do not know is ignored. That includes `keep_alive_seconds` and
-`history_retention_days`, which clients from before their removal still send: nothing ever read
-either, since the SSH keepalive is fixed (SPEC.md § 5.5) and spool GC has bounds of its own
-(STORAGE.md § 7). Host responses no longer carry them.
+A field these routes do not know is ignored.
 
 **CreateGroup:** (tab channel groups)
 ```typescript

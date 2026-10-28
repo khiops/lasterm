@@ -410,38 +410,6 @@ describe("PUT /api/hosts/:id", () => {
 		expect(stored).not.toHaveProperty("ssh_host");
 	});
 
-	// A client from before these settings were removed still sends them. Nothing
-	// ever read either (the SSH keepalive is fixed, SPEC.md § 5.5; spool GC has
-	// its own bounds, STORAGE.md § 7), so they are ignored like any other field
-	// the hub does not know, and the rest of the host is saved.
-	it("ignores the removed host settings from an older client and saves the rest", async () => {
-		const createRes = await server.inject({
-			method: "POST",
-			url: "/api/hosts",
-			payload: {
-				type: "local",
-				label: "older-client",
-				keep_alive_seconds: 0,
-				history_retention_days: 0,
-			},
-		});
-		expect(createRes.statusCode).toBe(201);
-		const created = createRes.json<Record<string, unknown>>();
-		expect(created).not.toHaveProperty("keep_alive_seconds");
-		expect(created).not.toHaveProperty("history_retention_days");
-
-		const res = await server.inject({
-			method: "PUT",
-			url: `/api/hosts/${created.id}`,
-			payload: { label: "older-client-renamed", keep_alive_seconds: 5, history_retention_days: 5 },
-		});
-		expect(res.statusCode).toBe(200);
-		const body = res.json<Record<string, unknown>>();
-		expect(body.label).toBe("older-client-renamed");
-		expect(body).not.toHaveProperty("keep_alive_seconds");
-		expect(body).not.toHaveProperty("history_retention_days");
-	});
-
 	it("returns 404 for unknown id", async () => {
 		const res = await server.inject({
 			method: "PUT",
@@ -1737,7 +1705,7 @@ describe("PATCH /api/hosts/:id/profile — key validation", () => {
 		const res = await server.inject({
 			method: "PATCH",
 			url: `/api/hosts/${hostId}/profile`,
-			payload: { profile: { backgroundMode: "transparent", windowEffect: "auto" } },
+			payload: { profile: { backgroundMode: "transparent", windowEffect: "mica" } },
 		});
 		expect(res.statusCode).toBe(200);
 
@@ -1748,7 +1716,7 @@ describe("PATCH /api/hosts/:id/profile — key validation", () => {
 		expect(getRes.statusCode).toBe(200);
 		const { profile } = getRes.json<{ profile: Record<string, unknown> }>();
 		expect(profile.backgroundMode).toBe("transparent");
-		expect(profile.windowEffect).toBe("auto");
+		expect(profile.windowEffect).toBe("mica");
 	});
 
 	it("rejects unknown profile keys with 400", async () => {

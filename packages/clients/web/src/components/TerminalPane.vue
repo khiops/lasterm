@@ -874,12 +874,10 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 					}
 				}
 				const p = resolvedProfile.value;
-				const sound = p.bellSound;
-				// Backward compat: boolean true → "system", false/undefined → "mute"
-				const resolved = typeof sound === 'boolean' ? (sound ? 'system' : 'mute') : (sound ?? 'mute');
-				if (resolved === 'mute') return;
+				const sound = p.bellSound ?? 'mute';
+				if (sound === 'mute') return;
 				playBellSound({
-					sound: resolved,
+					sound,
 					...(p.bellCustomFile && { customSoundFile: p.bellCustomFile }),
 				});
 			});

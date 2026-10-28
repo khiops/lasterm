@@ -33,8 +33,6 @@ import {
 	extractLogConfig,
 	extractSshConfig,
 	extractUiConfig,
-	legacyHostRailColumns,
-	legacyScrollbarMarkers,
 	loadGcConfig,
 	loadTlsConfig,
 	loadUiConfig,
@@ -280,13 +278,13 @@ describe("ConfigResolver.resolve", () => {
 
 		metaDal.createSession({ id: "ses-01", hostId: host.id, status: "starting" });
 		metaDal.createChannel({ id: "ch-01", sessionId: "ses-01", status: "born" });
-		metaDal.updateChannelProfile("ch-01", JSON.stringify({ fontSize: 24, bellSound: true }));
+		metaDal.updateChannelProfile("ch-01", JSON.stringify({ fontSize: 24, bellSound: "system" }));
 
 		const resolver = new ConfigResolver(metaDal);
 		const result = resolver.resolve(host.id, "ch-01");
 
 		expect(result.fontSize).toBe(24); // channel wins
-		expect(result.bellSound).toBe(true);
+		expect(result.bellSound).toBe("system");
 	});
 
 	it("full cascade order: layer 4 is final winner", () => {
@@ -347,13 +345,13 @@ describe("ConfigResolver.resolve", () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
-			'[terminal]\nbackground_mode = "solid"\nwindow_effect = "blur"\n',
+			'[terminal]\nbackground_mode = "solid"\nwindow_effect = "acrylic"\n',
 		);
 
 		const host = metaDal.createHost({ type: "local", label: "cascade-bg-test" });
 		metaDal.updateHostProfile(
 			host.id,
-			JSON.stringify({ backgroundMode: "transparent", windowEffect: "auto" }),
+			JSON.stringify({ backgroundMode: "transparent", windowEffect: "mica" }),
 		);
 
 		metaDal.createSession({ id: "ses-bg", hostId: host.id, status: "starting" });
@@ -377,7 +375,7 @@ describe("ConfigResolver.resolve", () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
-			'[terminal]\nbackground_mode = "transparent"\nwindow_effect = "auto"\n',
+			'[terminal]\nbackground_mode = "transparent"\nwindow_effect = "mica"\n',
 		);
 
 		const host = metaDal.createHost({ type: "local", label: "malformed-bg-test" });
@@ -392,7 +390,7 @@ describe("ConfigResolver.resolve", () => {
 		const resolved = resolver.resolve(host.id, "ch-bg-bad");
 
 		expect(resolved.backgroundMode).toBe("transparent");
-		expect(resolved.windowEffect).toBe("auto");
+		expect(resolved.windowEffect).toBe("mica");
 	});
 });
 
@@ -976,11 +974,6 @@ describe("extractUiConfig — channels section", () => {
 		expect(config.channels).toEqual(DEFAULT_CHANNELS_CONFIG);
 	});
 
-	it("parses default_shell", () => {
-		const config = extractUiConfig({ channels: { default_shell: "/bin/zsh" } });
-		expect(config.channels.defaultShell).toBe("/bin/zsh");
-	});
-
 	it("parses auto_group = first", () => {
 		const config = extractUiConfig({ channels: { auto_group: "first" } });
 		expect(config.channels.autoGroup).toBe("first");
@@ -1287,97 +1280,6 @@ describe("ConfigResolver.uiConfig — search", () => {
 	});
 });
 
-// ─── [search] scrollbar_markers, carried over to [terminal] (#614) ───────────
-//
-// Settings wrote the markers choice under [search], where no terminal read it.
-// It writes [terminal] now. A choice already in a config.toml is taken as the
-// global terminal value while [terminal] says nothing, and dropped the first
-// time Settings writes the terminal key.
-
-describe("[search] scrollbar_markers carried over to [terminal]", () => {
-	let dbs: DatabaseManager;
-	let metaDal: MetaDAL;
-	let dir: string;
-
-	beforeEach(() => {
-		dbs = openTestDatabases();
-		metaDal = new MetaDAL(dbs.meta);
-		dir = makeTempDir("lasterm-legacy-markers-");
-	});
-
-	afterEach(async () => {
-		dbs.close();
-		await removeTempDir(dir);
-	});
-
-	function loaded(toml: string): ConfigResolver {
-		writeFileSync(join(dir, "config.toml"), toml);
-		const resolver = new ConfigResolver(metaDal);
-		resolver.loadFromFile(dir);
-		return resolver;
-	}
-
-	it("reads it only from a boolean under [search]", () => {
-		expect(legacyScrollbarMarkers({ search: { scrollbar_markers: false } })).toBe(false);
-		expect(legacyScrollbarMarkers({ search: { scrollbar_markers: "no" } })).toBeUndefined();
-		expect(legacyScrollbarMarkers({ terminal: { scrollbar_markers: false } })).toBeUndefined();
-		expect(legacyScrollbarMarkers({})).toBeUndefined();
-	});
-
-	it("is the global terminal value while [terminal] says nothing", () => {
-		const resolver = loaded('[search]\nposition = "bottom-bar"\nscrollbar_markers = false\n');
-
-		expect(resolver.resolve().scrollbarMarkers).toBe(false);
-		expect(resolver.getGlobalTerminalOverrides()).toEqual({ scrollbarMarkers: false });
-		expect(resolver.getCascade().terminal.global).toEqual({ scrollbarMarkers: false });
-	});
-
-	it("gives way to [terminal] scrollbar_markers, and to a host's", () => {
-		const resolver = loaded(
-			"[terminal]\nscrollbar_markers = true\n\n[search]\nscrollbar_markers = false\n",
-		);
-		expect(resolver.resolve().scrollbarMarkers).toBe(true);
-
-		const legacyOnly = loaded(
-			"[terminal]\nfont_size = 13\n\n[search]\nscrollbar_markers = false\n",
-		);
-		expect(legacyOnly.getGlobalTerminalOverrides()).toEqual({
-			fontSize: 13,
-			scrollbarMarkers: false,
-		});
-		vi.spyOn(metaDal, "getHostProfile").mockReturnValue(JSON.stringify({ scrollbarMarkers: true }));
-		expect(legacyOnly.resolve("host-1").scrollbarMarkers).toBe(true);
-	});
-
-	it("is dropped when Settings writes the terminal key, and never comes back", async () => {
-		const resolver = loaded(
-			'# mine\n[search]\nposition = "bottom-bar" # where I want it\nscrollbar_markers = false\n',
-		);
-
-		await resolver.saveGlobalTerminal("scrollbarMarkers", true);
-
-		const written = readFileSync(join(dir, "config.toml"), "utf8");
-		expect(written).not.toMatch(/\[search\][^[]*scrollbar_markers/);
-		expect(written).toContain('position = "bottom-bar" # where I want it');
-		expect(written).toContain("# mine");
-		expect(resolver.resolve().scrollbarMarkers).toBe(true);
-
-		// With the terminal key removed, the default holds, not the old choice.
-		await resolver.saveGlobalTerminal("scrollbarMarkers", null);
-		expect(resolver.resolve().scrollbarMarkers).toBe(DEFAULT_PROFILE.scrollbarMarkers);
-	});
-
-	it("leaves a config.toml without it as it was, [search] included", async () => {
-		const resolver = loaded("[terminal]\nfont_size = 13\n");
-
-		await resolver.saveGlobalTerminal("scrollbarMarkers", false);
-
-		const written = readFileSync(join(dir, "config.toml"), "utf8");
-		expect(written).not.toContain("[search]");
-		expect(resolver.resolve().scrollbarMarkers).toBe(false);
-	});
-});
-
 // ─── [layout] host rail: columns and badge size (#623) ───────────────────────
 
 describe("extractUiConfig — layout section", () => {
@@ -1455,89 +1357,6 @@ describe("[keyboard] key_hints written from Settings", () => {
 		);
 		expect(resolver.uiConfig.keyboard.keyHints).toBe(false);
 		expect(resolver.getGlobalUiOverrides().keyboard).toEqual({ keyHints: false });
-	});
-});
-
-// The rail kept its width in pixels before it had columns. A width already in
-// a config.toml is read as the columns it holds while host_rail_columns is not
-// set, and dropped the first time the columns are written.
-
-describe("[layout] host_rail_width read as columns", () => {
-	let dbs: DatabaseManager;
-	let metaDal: MetaDAL;
-	let dir: string;
-
-	beforeEach(() => {
-		dbs = openTestDatabases();
-		metaDal = new MetaDAL(dbs.meta);
-		dir = makeTempDir("lasterm-legacy-rail-width-");
-	});
-
-	afterEach(async () => {
-		dbs.close();
-		await removeTempDir(dir);
-	});
-
-	function loaded(toml: string): ConfigResolver {
-		writeFileSync(join(dir, "config.toml"), toml);
-		const resolver = new ConfigResolver(metaDal);
-		resolver.loadFromFile(dir);
-		return resolver;
-	}
-
-	it("reads the Medium columns a width holds", () => {
-		expect(legacyHostRailColumns({ layout: { host_rail_width: 48 } })).toBe(1);
-		expect(legacyHostRailColumns({ layout: { host_rail_width: 90 } })).toBe(2);
-		expect(legacyHostRailColumns({ layout: { host_rail_width: 120 } })).toBe(2);
-		expect(legacyHostRailColumns({ layout: { host_rail_width: "wide" } })).toBeUndefined();
-		expect(legacyHostRailColumns({ layout: { host_rail_width: -1 } })).toBeUndefined();
-		expect(legacyHostRailColumns({})).toBeUndefined();
-	});
-
-	it("is the columns while host_rail_columns is not set", () => {
-		const resolver = loaded("[layout]\nhost_rail_width = 96\nsidebar_width = 220\n");
-		expect(resolver.uiConfig.layout.hostRailColumns).toBe(2);
-		expect(resolver.getGlobalUiOverrides().layout).toEqual({
-			hostRailColumns: 2,
-			sidebarWidth: 220,
-		});
-	});
-
-	it("gives way to host_rail_columns", () => {
-		const resolver = loaded("[layout]\nhost_rail_width = 96\nhost_rail_columns = 4\n");
-		expect(resolver.uiConfig.layout.hostRailColumns).toBe(4);
-	});
-
-	it("is dropped when the columns are written, and never comes back", async () => {
-		const resolver = loaded(
-			"# mine\n[layout]\nhost_rail_width = 96\nsidebar_width = 220 # where I want it\n",
-		);
-
-		await resolver.saveGlobalUi("layout", "hostRailColumns", 3);
-
-		const written = readFileSync(join(dir, "config.toml"), "utf8");
-		expect(written).not.toContain("host_rail_width");
-		expect(written).toContain("host_rail_columns = 3");
-		expect(written).toContain("sidebar_width = 220 # where I want it");
-		expect(written).toContain("# mine");
-		expect(resolver.uiConfig.layout.hostRailColumns).toBe(3);
-
-		// With the columns removed, the default holds, not the old width.
-		await resolver.saveGlobalUi("layout", "hostRailColumns", null);
-		expect(resolver.uiConfig.layout.hostRailColumns).toBe(1);
-	});
-
-	it("stays when something else in [layout] is written", async () => {
-		const resolver = loaded("[layout]\nhost_rail_width = 96\n");
-
-		await resolver.saveGlobalUi("layout", "hostRailBadgeSize", "large");
-
-		const written = readFileSync(join(dir, "config.toml"), "utf8");
-		expect(written).toContain("host_rail_width = 96");
-		expect(resolver.uiConfig.layout).toMatchObject({
-			hostRailColumns: 2,
-			hostRailBadgeSize: "large",
-		});
 	});
 });
 
@@ -1726,7 +1545,7 @@ describe("ConfigResolver.getCascade", () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "config.toml"),
-			'[terminal]\nbackground_mode = "solid"\nwindow_effect = "blur"\n',
+			'[terminal]\nbackground_mode = "solid"\nwindow_effect = "acrylic"\n',
 		);
 		const resolver = new ConfigResolver(metaDal);
 		resolver.loadFromFile(dir);
@@ -1734,7 +1553,7 @@ describe("ConfigResolver.getCascade", () => {
 		const host = metaDal.createHost({ type: "local", label: "cascade-bg-host" });
 		metaDal.updateHostProfile(
 			host.id,
-			JSON.stringify({ backgroundMode: "transparent", windowEffect: "auto" }),
+			JSON.stringify({ backgroundMode: "transparent", windowEffect: "mica" }),
 		);
 
 		const sessionId = generateId();
@@ -1753,11 +1572,11 @@ describe("ConfigResolver.getCascade", () => {
 		});
 		expect(cascade.terminal.global).toEqual({
 			backgroundMode: "solid",
-			windowEffect: "blur",
+			windowEffect: "acrylic",
 		});
 		expect(cascade.terminal.host).toEqual({
 			backgroundMode: "transparent",
-			windowEffect: "auto",
+			windowEffect: "mica",
 		});
 		expect(cascade.terminal.channel).toEqual({
 			backgroundMode: "image",
@@ -2109,7 +1928,7 @@ describe("PUT /api/config/global", () => {
 		const res = await server.inject({
 			method: "PUT",
 			url: "/api/config/global",
-			payload: { terminal: { backgroundMode: "solid", windowEffect: "auto" } },
+			payload: { terminal: { backgroundMode: "solid", windowEffect: "mica" } },
 		});
 		expect(res.statusCode).toBe(200);
 		expect(res.json()).toEqual({ ok: true });
@@ -2122,7 +1941,7 @@ describe("PUT /api/config/global", () => {
 		const body = cascade.json<CascadeResponse>();
 		expect(body.terminal.global).toMatchObject({
 			backgroundMode: "solid",
-			windowEffect: "auto",
+			windowEffect: "mica",
 		});
 	});
 

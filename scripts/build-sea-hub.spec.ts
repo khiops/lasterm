@@ -157,7 +157,7 @@ describe("bundle includes ssh2 inline", () => {
 describe("migrations are embedded inline", () => {
 	it("meta migration SQL content appears in the bundle", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		// 001-initial.sql creates the `hosts` table — that DDL must be present.
+		// 021-baseline.sql creates the `hosts` table — that DDL must be present.
 		expect(content).toContain("CREATE TABLE hosts");
 	});
 
@@ -169,7 +169,9 @@ describe("migrations are embedded inline", () => {
 
 	it("migration filenames are embedded in the manifest", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		// The manifest JSON contains the filename property for each migration.
+		// The manifest JSON contains the filename property for each migration,
+		// whose number the runner compares with schema_version.
+		expect(content).toContain("021-baseline.sql");
 		expect(content).toContain("001-initial.sql");
 	});
 

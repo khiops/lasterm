@@ -135,7 +135,7 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 - The values lean towards tolerance. A live server answers each request as it reads it, and at most a channel window (about 2 MB) is queued ahead of it, so only a saturated link slower than about 50 KB/s could lose a connection that was alive. On stdio that would end its terminals.
 - A constant, not a setting. No other SSH timing is one, and a per-host value could only weaken this: "0 = off" brings back a host that shows connected while gone, and anything longer delays a restart that is waiting for it.
 - The hosts' "Keep Alive (s)", which nothing ever read, is removed rather than wired (#611). Read as the interval, every stored 60 would have meant three to four minutes before a vanished host is noticed; read as a silence window, it would mean what no other SSH client means by it. "History (days)" went the same way (#612): spool GC's bounds are global and delete every chunk older than seven days, so its 30 days never applied, and a per-host bound would add a lookup across the two databases to GC for a privacy case nobody has asked for.
-- The host routes ignore both fields, since clients from before still send them and a 400 would stop those saving a host. The columns stay: a downgraded hub opens a newer database as it is and still names them in its `INSERT` (STORAGE.md § 3.1, § 9.1).
+- The host routes ignore both fields, as any field they do not know. The columns stayed while a downgraded hub could still name them in its `INSERT` (STORAGE.md § 9.1), and went with the `meta.db` baseline before the first public release (STORAGE.md § 9.3).
 
 ---
 
@@ -450,8 +450,7 @@ time, so a reconnect needs no prompt; it is no longer used once and dropped. The
 - host_groups table is global (not per-workspace) — same as current behavior
 - ON DELETE SET NULL on FK — deleting group moves hosts to ungrouped
 - Collapsed state stays localStorage (per-device UI pref, not worth syncing)
-- Migration 007 creates table + FK column; migrateHostGroupData() auto-migrates existing host_group strings at startup
-- Old host_group TEXT column stays (SQLite can't drop columns) — becomes unused
+- Migration 007 creates table + FK column; migrateHostGroupData() auto-migrated existing host_group strings at startup. Both went before the first public release, with the host_group column, which the baseline schema no longer has (STORAGE.md § 9.3)
 - DAL methods named listHostGroupEntities/getHostGroupEntity/deleteHostGroupEntity to avoid collision with existing string-based methods (legacy cleanup deferred)
 - API: /api/host-groups CRUD + /reorder replaces old /api/hosts/groups/:name routes
 - PUT /api/hosts/reorder body changed from group (name string) to group_id (ULID)
@@ -574,7 +573,7 @@ Ctrl+K is left to the shell. The rest still holds.
 ## UX-03 — Host Management (2026-03-07)
 
 - Migration 006: 6 new columns with defaults, backfill sort_order per-group using rowid
-- listHosts ordering: local first, then COALESCE(host_group, '~') ASC, sort_order ASC
+- listHosts ordering: local first, then sort_order ASC (it also sorted by the host_group string, until that column went before the first public release)
 - Label regex updated to allow dots: /^[a-zA-Z0-9._-]+$/ per INV-02
 - SSH config parser: manual (no dependency), supports Host/HostName/Port/User/IdentityFile/ProxyJump
 - Batch import: atomic transaction, 409 with conflicting_labels array on conflict
@@ -608,7 +607,7 @@ Ctrl+K is left to the shell. The rest still holds.
 - Scope toggle visible only when countPanes > 1
 - shallowRef for handle registry
 - Search history: localStorage lasterm:search-history, MRU order, dedup by query+regex
-- SearchConfig: position, highlightOnClose (clear/fade/persist), historySize. It also had a scrollbarMarkers, which Settings wrote and no terminal read; removed in #614, the TerminalProfile key being the setting (a `[search] scrollbar_markers` still in config.toml is read as its global value until that key is set)
+- SearchConfig: position, highlightOnClose (clear/fade/persist), historySize. It also had a scrollbarMarkers, which Settings wrote and no terminal read; removed in #614, the TerminalProfile key being the setting. A `[search] scrollbar_markers` left in config.toml is no longer read: that carry-over went before the first public release
 - Hub [search] section parser with DEFAULT_SEARCH_CONFIG
 - highlightOnClose=fade uses 300ms setTimeout before clearDecorations
 - getDecorationColors always returns matchOverviewRuler (transparent when disabled)

@@ -58,9 +58,6 @@ export class AgentConnectionManager {
 
 	private readonly daemonAttachPromises = new Map<string, Promise<LastermAgent>>();
 
-	/** Whether this run has said that the profile holds several local hosts (#658). */
-	private severalLocalHostsReported = false;
-
 	constructor(
 		private readonly ctx: SharedSessionContext,
 		private readonly broadcaster: StateBroadcaster,
@@ -76,18 +73,8 @@ export class AgentConnectionManager {
 	 * here deletes the others.
 	 */
 	async ensureLocalHost(): Promise<string> {
-		const [oldest, ...others] = this.ctx.metaDal.listLocalHosts();
-		if (oldest) {
-			if (others.length > 0 && !this.severalLocalHostsReported) {
-				this.severalLocalHostsReported = true;
-				this.ctx.hubLogger?.log(
-					"info",
-					"agent-connection-manager: several local hosts, using the oldest",
-					{ hostId: oldest.id, otherHostIds: others.map((host) => host.id) },
-				);
-			}
-			return oldest.id;
-		}
+		const [oldest] = this.ctx.metaDal.listLocalHosts();
+		if (oldest) return oldest.id;
 		// Labels are unique, and with the local host gone a remote one may
 		// have taken "local".
 		let label = "local";

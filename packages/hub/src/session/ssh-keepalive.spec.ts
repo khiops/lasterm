@@ -337,7 +337,6 @@ describe("a host that stops answering, without closing, is lost (#607)", {
 		const ctx = {
 			agents: new Map([[HOST_ID, agent]]),
 			sessions: new Map([[HOST_ID, { id: SESSION_ID, hostId: HOST_ID, status: "active" }]]),
-			agentCapabilities: new Map(),
 			pendingRequests: new Map(),
 			reconnectTimers: new Map(),
 			reconnectAbortControllers: new Map(),

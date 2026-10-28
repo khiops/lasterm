@@ -1,0 +1,103 @@
+# apt-get install from .deb files kept in the Actions cache, so that a run reaches
+# the Ubuntu mirror only when the cache misses (#728). The runner's mirror,
+# azure.archive.ubuntu.com, once served about 40 kB/s for a whole afternoon: the
+# webview job's 62 MB outlasted its timeout three times, and the aarch64 cross
+# tools took 17 minutes instead of one.
+#
+# The cache holds the .deb files, not the files they unpack, and apt-get installs
+# them: dpkg records every package and runs its maintainer scripts and triggers
+# (ldconfig, the fontconfig cache, the GLib schemas and GIO modules WebKitGTK
+# loads). Restoring unpacked files would skip all of that.
+#
+# Which files apt downloads depends on what the runner image already has, so the
+# key covers the image's installed packages (/var/lib/dpkg/status) as well as the
+# list: a new image with other versions misses once, and downloads afresh.
+name: Install apt packages through the cache
+description: apt-get install from cached .deb files, reaching the mirror only on a cache miss.
+inputs:
+  packages:
+    description: Package names for apt-get install, separated by spaces.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Key the package cache
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        digest="$({ printf '%s\n' "$PACKAGES"; cat /var/lib/dpkg/status; } | sha256sum | cut -c1-16)"
+        echo "key=apt-debs-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
+        # One directory per key: a second use in the same job must not
+        # restore into, and then install, the first one's files.
+        echo "dir=$RUNNER_TEMP/apt-debs-$digest" >> "$GITHUB_OUTPUT"
+    - name: Restore the .deb files
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}
+    - name: Install the packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        DEBS: ${{ steps.key.outputs.dir }}
+        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        read -ra packages <<< "$PACKAGES"
+
+        # The cached files and nothing else: --no-download makes apt fail rather
+        # than fetch a package they lack, so a cache hit never waits on the mirror.
+        # It also drops a file named on the command line unless apt's own
+        # archive directory holds it, hence the copy.
+        install_debs() {
+          local debs=("$DEBS"/*.deb)
+          echo "Installing ${#debs[@]} .deb files from $DEBS"
+          sudo cp "${debs[@]}" /var/cache/apt/archives/
+          sudo apt-get install -y --no-download "${debs[@]}"
+        }
+
+        if [[ "$CACHE_HIT" == true ]]; then
+          install_debs && exit 0
+          echo "::warning title=apt cache::The cached .deb files did not install; downloading them again."
+        fi
+
+        # Bounded and named: a mirror that crawls fails here, saying so, instead
+        # of eating the job's whole timeout. Acquire:: covers a stalled
+        # connection, `timeout` a slow one.
+        fetch() {
+          local limit="$1" status=0
+          shift
+          timeout "$limit" sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@" || status=$?
+          if ((status == 124)); then
+            echo "::error title=Ubuntu mirror too slow::apt-get $1 did not finish within $limit: the Ubuntu mirror is slow. Re-run the job (#728)."
+          fi
+          return "$status"
+        }
+        fetch 2m update
+        sudo apt-get clean
+        fetch 4m install -y --download-only "${packages[@]}"
+
+        rm -rf "$DEBS"
+        mkdir -p "$DEBS"
+        downloaded=(/var/cache/apt/archives/*.deb)
+        if ((${#downloaded[@]} == 0)); then
+          echo "The image already has every package."
+          exit 0
+        fi
+        cp "${downloaded[@]}" "$DEBS/"
+        install_debs
+        # After a hit that did not install, the key exists already.
+        if [[ "$CACHE_HIT" != true ]]; then
+          echo "save=true" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Save the .deb files
+      if: steps.install.outputs.save == 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}

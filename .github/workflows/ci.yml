@@ -41,10 +41,13 @@ jobs:
       # launch a real renderer rather than silently falling back to a unit test.
       # The package is webkit2gtk-driver on this runner; other distributions
       # call it webkitgtk-webdriver. Both provide the WebKitWebDriver executable.
+      # The action installs them from cached .deb files; only a cache miss
+      # downloads, and a slow mirror then fails within minutes (#728).
       - name: Install Tauri and WebDriver dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
       - run: ./scripts/build-web.sh

@@ -306,6 +306,12 @@ Re-attach to existing channel (after reconnect).
 }
 ```
 
+The agent queues each channel's INPUT and writes it to the PTY in order, apart from the connection's
+other messages: a terminal that takes no input holds up nothing else (#740). A channel's queue holds at
+most 1 MiB. An INPUT that would take it past that is dropped whole, and so is every INPUT to that channel
+after it until its terminal has taken what is queued. The first one dropped is answered with
+`ERROR { code: "INPUT_DROPPED", channel_id }`; the rest of that gap is dropped without one.
+
 ### 3.5 OUTPUT (Agent → Hub)
 
 ```typescript
@@ -1772,6 +1778,7 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; `other_owner_channels` carries how many, and the message says it too (§ 3.17) |
 | `AUTH_REQUIRED` | Agent | A daemon connection did not open with an AUTH carrying `hub_key` within 5 s; the connection is closed (§ 3.1b) |
 | `AUTH_INVALID` | Agent | The AUTH that opened a daemon connection carried a token the daemon refuses, or an empty `hub_key`; the connection is closed (§ 3.1b) |
+| `INPUT_DROPPED` | Agent | An INPUT was dropped: its terminal takes no input and the channel's input queue (1 MiB) is full. Every INPUT to that channel is dropped until the terminal has taken what is queued; said once per gap, with `channel_id` (§ 3.4) |
 
 ### Pairing Code Format
 

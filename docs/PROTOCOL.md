@@ -137,7 +137,7 @@ First message, sent immediately on start.
 The hub records `available_shells` and `default_shell` on the host, and seeds a launch profile
 for each shell.
 
-**Capabilities.** The hub records and logs the list, and gates nothing on it: every agent it can meet has all five, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all five, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -533,8 +533,8 @@ The hub's `requestDaemonStop` does not count DISPLACED or a hub-issued close as 
 a close while the hub is quitting is also unconfirmed. Replace's response is defined in § 6.
 
 The hub sends it to every daemon. It takes the count from the refusal's `other_owner_channels`
-when that is a whole number of zero or more; failing that, from the `other_owner_channels` of the
-connection's CHANNEL_STATE_END. It never reads a count out of the message. When no protocol
+when that is a whole number of zero or more, and knows none otherwise. It never reads a count out
+of the message. When no protocol
 connection can carry the STOP, the hub runs the agent's own `--stop` instead: the out-of-band path,
 which knows nothing of owners. See `POST /api/hosts/:id/agent/replace` (§ 6).
 

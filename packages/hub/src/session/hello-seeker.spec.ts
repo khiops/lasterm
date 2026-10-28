@@ -11,7 +11,7 @@ const HELLO = Buffer.from(
 		availableShells: ["powershell.exe", "cmd.exe"],
 	}),
 );
-const NEXT = Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END" }));
+const NEXT = Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 }));
 
 /** Push `chunks` in turn; what the seeker said after the last one. */
 function seek(seeker: HelloSeeker, ...chunks: Buffer[]) {

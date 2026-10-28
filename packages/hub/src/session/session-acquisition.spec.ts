@@ -422,7 +422,6 @@ describe("B2 regression: stale agent close does not evict a newer agent", () => 
 		// Mutation oracle: replacing `if (ctx.agents.get(hostId) === agent) { delete }`
 		// with unconditional `ctx.agents.delete(hostId)` would delete agentB here.
 		const agents = new Map<string, object>();
-		const agentCapabilities = new Map<string, string[]>();
 
 		const hostId = "host-b2";
 		const agentA = { id: "agent-a" };
@@ -430,7 +429,6 @@ describe("B2 regression: stale agent close does not evict a newer agent", () => 
 
 		// agentB is the current agent for this host.
 		agents.set(hostId, agentB);
-		agentCapabilities.set(hostId, ["spawn"]);
 
 		// Simulate the identity-guarded handler that wireAgentEvents installs.
 		// (Mirrors the fixed code in agent-connection-manager.ts wireAgentEvents.)
@@ -438,7 +436,6 @@ describe("B2 regression: stale agent close does not evict a newer agent", () => 
 			const isCurrentAgent = agents.get(hostId) === agentA;
 			if (isCurrentAgent) {
 				agents.delete(hostId);
-				agentCapabilities.delete(hostId);
 			}
 		}
 
@@ -447,25 +444,21 @@ describe("B2 regression: stale agent close does not evict a newer agent", () => 
 
 		// INVARIANT: agentB must still be present.
 		expect(agents.get(hostId)).toBe(agentB);
-		expect(agentCapabilities.has(hostId)).toBe(true);
 	});
 
 	it("identity guard DOES delete the current agent when it is the one that closed", () => {
 		// Confirm the guard is not over-broad: if the SAME agent closes, it must be removed.
 		const agents = new Map<string, object>();
-		const agentCapabilities = new Map<string, string[]>();
 
 		const hostId = "host-b2b";
 		const agentA = { id: "agent-a" };
 
 		agents.set(hostId, agentA);
-		agentCapabilities.set(hostId, ["spawn"]);
 
 		function onAgentAClose() {
 			const isCurrentAgent = agents.get(hostId) === agentA;
 			if (isCurrentAgent) {
 				agents.delete(hostId);
-				agentCapabilities.delete(hostId);
 			}
 		}
 
@@ -473,7 +466,6 @@ describe("B2 regression: stale agent close does not evict a newer agent", () => 
 
 		// agentA was the current agent — must be cleaned up.
 		expect(agents.has(hostId)).toBe(false);
-		expect(agentCapabilities.has(hostId)).toBe(false);
 	});
 });
 

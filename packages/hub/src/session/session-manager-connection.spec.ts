@@ -10,7 +10,7 @@ import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type net from "node:net";
 import { join } from "node:path";
 import {
@@ -188,7 +188,9 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 						),
 					);
 				}
-				stream.write(Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END" })));
+				stream.write(
+					Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })),
+				);
 			});
 		});
 	});
@@ -234,7 +236,14 @@ afterEach(async () => {
 });
 
 async function hubWith(
-	options: { daemon: boolean; pinned?: boolean; windowId?: string; pin?: string } = {
+	options: {
+		daemon: boolean;
+		pinned?: boolean;
+		windowId?: string;
+		pin?: string;
+		/** The pin as 0.14.3 wrote it, padded, then migration 022 as an upgrade runs it. */
+		pinnedBy0143?: boolean;
+	} = {
 		daemon: false,
 	},
 ): Promise<Harness> {
@@ -263,6 +272,16 @@ async function hubWith(
 		dbManager.meta
 			.prepare("UPDATE hosts SET ssh_fingerprint = ? WHERE id = ?")
 			.run(options.pin, host.id);
+	if (options.pinnedBy0143) {
+		dbManager.meta
+			.prepare("UPDATE hosts SET ssh_fingerprint = ? WHERE id = ?")
+			.run(`${HOST_FINGERPRINT}=`, host.id);
+		const migration = readFileSync(
+			new URL("../storage/migrations/meta/022-unpadded-ssh-pins.sql", import.meta.url),
+			"utf-8",
+		);
+		dbManager.meta.exec(migration.replace(/INSERT INTO schema_version[^;]*;/, ""));
+	}
 
 	const heard: ProtocolMessage[] = [];
 	const window: WsClient = {
@@ -359,6 +378,13 @@ function sessionOf(h: Harness): SessionState | undefined {
 // ─── Connect ─────────────────────────────────────────────────────────────────
 
 describe("Connect (#648)", { timeout: 20_000 }, () => {
+	it("connects without a prompt to a host 0.14.3 pinned, once migration 022 ran (#717)", async () => {
+		const h = await hubWith({ daemon: false, pinnedBy0143: true });
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint).toBe(HOST_FINGERPRINT);
+		await connected(h);
+		expect(h.heard.some((m) => m.type === "HOST_VERIFY")).toBe(false);
+	});
+
 	it("reports both fingerprints when the host presents another key than its pin", async () => {
 		const parsed = ssh2.utils.parseKey(rsaPem());
 		if (parsed instanceof Error || Array.isArray(parsed)) throw new Error("invalid key");

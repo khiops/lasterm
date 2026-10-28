@@ -508,6 +508,13 @@ export interface SessionStateMessage {
 	 */
 	sftpUnavailable?: boolean;
 	/**
+	 * Set only when the host keeps a daemon (#79) and this hub saw its SSH
+	 * server refuse the socket forwarding a daemon is reached through (#765).
+	 * The hub runs the agent on stdio there, so the host's terminals end with
+	 * its connection, and a client says so as a note on the host.
+	 */
+	socketForwardingRefused?: boolean;
+	/**
 	 * Set only while the host's user has disconnected it (#648): the hub does
 	 * not reach for it again until someone acts on it. Absent from every
 	 * SESSION_STATE sent once they have.
@@ -592,6 +599,8 @@ export interface StateSyncMessage {
 		otherOwnerChannels?: number;
 		/** Set only when the server refused SFTP. See SessionStateMessage. */
 		sftpUnavailable?: boolean;
+		/** Set only when the server refused socket forwarding. See SessionStateMessage. */
+		socketForwardingRefused?: boolean;
 	}>;
 	/**
 	 * The hosts their user disconnected, sessions or not: a host whose

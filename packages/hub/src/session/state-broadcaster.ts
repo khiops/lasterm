@@ -20,6 +20,7 @@ import type {
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, resolveChannelDisplayName } from "@lasterm/shared";
 import { HUB_VERSION } from "../build-version.js";
+import { socketForwardingRefusedOn } from "./remote-daemon.js";
 import type { SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import { SshAgent } from "./ssh-agent.js";
@@ -90,7 +91,11 @@ export class StateBroadcaster {
 		hostId: string,
 	): Pick<
 		SessionStateMessage,
-		"outdatedAgent" | "otherOwnerChannels" | "connectedThroughRemoteDaemon" | "sftpUnavailable"
+		| "outdatedAgent"
+		| "otherOwnerChannels"
+		| "connectedThroughRemoteDaemon"
+		| "sftpUnavailable"
+		| "socketForwardingRefused"
 	> {
 		const agent = this.ctx.agents.get(hostId);
 		const connectedThroughRemoteDaemon =
@@ -98,6 +103,16 @@ export class StateBroadcaster {
 		// A fact of the server its connection reached, said for as long as that
 		// connection is the host's (#722).
 		const sftpUnavailable = agent instanceof SshAgent && agent.sftpSupport?.offered === false;
+		// A fact the hub remembers of the host's server, connected or not:
+		// what the next connection does follows it (#765).
+		const refusals = this.ctx.socketForwardingRefusals;
+		const socketForwardingRefused =
+			refusals.has(hostId) &&
+			socketForwardingRefusedOn(
+				this.ctx.metaDal.getHost(hostId),
+				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+				refusals,
+			);
 		const outdatedAgent = this.outdatedAgentOn(hostId);
 		const otherOwnerChannels = this.otherOwnerChannelsOn(hostId);
 		return {
@@ -105,6 +120,7 @@ export class StateBroadcaster {
 			...(outdatedAgent !== null && { outdatedAgent }),
 			...(otherOwnerChannels !== null && { otherOwnerChannels }),
 			...(sftpUnavailable && { sftpUnavailable: true }),
+			...(socketForwardingRefused && { socketForwardingRefused: true }),
 		};
 	}
 

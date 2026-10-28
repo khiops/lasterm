@@ -92,7 +92,9 @@ import {
 } from "./quit-fence.js";
 import {
 	hostKeepsDaemon,
+	hostTriesDaemon,
 	REMOTE_STATE_DIR_COMMAND,
+	rememberSocketForwardingRefused,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
 } from "./remote-daemon.js";
@@ -246,11 +248,13 @@ export class SessionManager {
 					}
 					agents.set(hostId, agent);
 					// The session went active before this agent was the host's: what
-					// only it knows is said again now (#79, #722).
+					// only it knows is said again now (#79, #722, #765).
 					if (
 						agent instanceof SshAgent &&
 						agent.connected &&
-						(agent.usedRemoteDaemon || agent.sftpSupport?.offered === false) &&
+						(agent.usedRemoteDaemon ||
+							agent.sftpSupport?.offered === false ||
+							agent.socketForwardingRefused) &&
 						sessions.get(hostId)?.status === "active"
 					) {
 						this.broadcaster.announceSessionState(hostId);
@@ -272,6 +276,7 @@ export class SessionManager {
 			restartTracking: new Map(),
 			stoppingAgents: new Set(),
 			userDisconnectedHosts: new Set(),
+			socketForwardingRefusals: new Map(),
 			startingChannels: new Set(),
 			channelClock: 0,
 			pendingRequests: new Map(),
@@ -392,7 +397,11 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					agentLaunchConfig(ctx),
-					hostKeepsDaemon(host, ctx.configResolver?.sshConfig?.remoteDaemon === true),
+					hostTriesDaemon(
+						host,
+						ctx.configResolver?.sshConfig?.remoteDaemon === true,
+						ctx.socketForwardingRefusals,
+					),
 				);
 
 				const hostKey = targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id)));
@@ -714,6 +723,9 @@ export class SessionManager {
 			...(approvedAgentSha !== undefined ? { approvedSha256: approvedAgentSha } : {}),
 			onAgentPinned: (hid, sha256) => {
 				this.ctx.metaDal.updateHostAgentSha256(hid, sha256);
+			},
+			onSocketForwardingRefused: (reached) => {
+				rememberSocketForwardingRefused(this.ctx.socketForwardingRefusals, reached);
 			},
 			onAgentUpdated: (hid, { besideRunningDaemon }) => {
 				this.ctx.hubLogger?.log(
@@ -2306,6 +2318,7 @@ export class SessionManager {
 		}
 		// Said by the `starting` that follows at once, with the flag gone.
 		this.userActsOnHost(hostId, false);
+		this.askServerAgain(hostId);
 		return {
 			kind: "connecting",
 			ended: 0,
@@ -2335,6 +2348,7 @@ export class SessionManager {
 			return { kind: "terminals-would-end", terminals: ending };
 		}
 		this.userActsOnHost(hostId, false);
+		this.askServerAgain(hostId);
 		const agent = this.ctx.agents.get(hostId);
 		if (agent?.connected === true) {
 			if (terminalsOutliveConnection(facts)) this.dropConnection(hostId, agent);
@@ -2414,9 +2428,12 @@ export class SessionManager {
 							connected: agent.connected,
 							usedRemoteDaemon: agent instanceof SshAgent && agent.usedRemoteDaemon,
 						},
-			hostKeepsDaemon: hostKeepsDaemon(
+			// A host whose server refused the forwarding runs its agent on stdio
+			// (#765): its terminals end with the connection, daemon or not.
+			hostKeepsDaemon: hostTriesDaemon(
 				host,
 				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+				this.ctx.socketForwardingRefusals,
 			),
 			liveTerminals,
 		};
@@ -2430,6 +2447,16 @@ export class SessionManager {
 	private userActsOnHost(hostId: string, announce: boolean): void {
 		if (!this.ctx.userDisconnectedHosts.delete(hostId)) return;
 		if (announce) this.broadcaster.announceSessionState(hostId);
+	}
+
+	/**
+	 * A person's Connect or Reconnect: the connection it opens tries the
+	 * host's daemon again, since the server may allow socket forwarding now
+	 * (#765). Nothing else forgets a refusal, short of a change to the route it
+	 * was seen on: a terminal opened there goes straight to stdio.
+	 */
+	private askServerAgain(hostId: string): void {
+		this.ctx.socketForwardingRefusals.delete(hostId);
 	}
 
 	/**
@@ -2630,9 +2657,12 @@ export class SessionManager {
 		// Only where something may still be holding the terminal. On stdio the
 		// agent died with its connection, so dialling out would reach a machine
 		// nobody asked for — and ask for a password — to find nothing.
-		const keepsDaemon = hostKeepsDaemon(
+		// Nor where the server refused the forwarding a daemon is reached
+		// through (#765): its agent ran on stdio too.
+		const keepsDaemon = hostTriesDaemon(
 			this.ctx.metaDal.getHost(hostId),
 			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+			this.ctx.socketForwardingRefusals,
 		);
 		if (!keepsDaemon) return false;
 
@@ -2736,7 +2766,11 @@ export class SessionManager {
 			promptAuth,
 			deployOpts,
 			agentLaunchConfig(this.ctx),
-			hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
+			hostTriesDaemon(
+				host,
+				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+				this.ctx.socketForwardingRefusals,
+			),
 		);
 
 		console.error(`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);
@@ -2901,7 +2935,11 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					agentLaunchConfig(this.ctx),
-					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
+					hostTriesDaemon(
+						host,
+						this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+						this.ctx.socketForwardingRefusals,
+					),
 				);
 				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);
 				console.error(

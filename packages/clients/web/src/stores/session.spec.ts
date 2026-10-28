@@ -757,3 +757,31 @@ describe("a server that offers no SFTP (#722)", () => {
 		expect(hosts.isSftpUnavailable("nas")).toBe(true);
 	});
 });
+
+describe("a server that refuses socket forwarding (#765)", () => {
+	it("is remembered from SESSION_STATE and STATE_SYNC, and forgotten when they stop saying it", async () => {
+		await useSessionStore().connect();
+		const hosts = useHostsStore();
+		const ws = wsHarness.instances[0];
+		const state = {
+			type: "SESSION_STATE",
+			sessionId: "s",
+			hostId: "pi",
+			status: "active",
+		} as const;
+		ws?.emit({ ...state, socketForwardingRefused: true });
+		expect(hosts.isSocketForwardingRefused("pi")).toBe(true);
+		ws?.emit(state);
+		expect(hosts.isSocketForwardingRefused("pi")).toBe(false);
+		ws?.emit({ ...state, socketForwardingRefused: true });
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [
+				{ sessionId: "s2", hostId: "nas", status: "active", socketForwardingRefused: true },
+			],
+			channels: [],
+		});
+		expect(hosts.isSocketForwardingRefused("pi")).toBe(false);
+		expect(hosts.isSocketForwardingRefused("nas")).toBe(true);
+	});
+});

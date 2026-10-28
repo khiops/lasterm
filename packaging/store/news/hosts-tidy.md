@@ -1,0 +1,2 @@
+en: Hosts: a refusal from the hub is now explained instead of ignored, a host list that fails to load offers Retry, a duplicate stays in its group, the group shows in tooltips and banners, and SSH keys from your config or an upload land where expected.
+fr: Hôtes : un refus du hub est désormais expliqué au lieu d'être ignoré, une liste d'hôtes qui ne se charge pas propose de réessayer, une copie reste dans son groupe, le groupe apparaît dans l'info-bulle et le bandeau, et les clés SSH de votre configuration ou téléversées arrivent au bon endroit.

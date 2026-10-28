@@ -188,7 +188,9 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 						),
 					);
 				}
-				stream.write(Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END" })));
+				stream.write(
+					Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })),
+				);
 			});
 		});
 	});

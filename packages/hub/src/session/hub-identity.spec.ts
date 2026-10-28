@@ -94,9 +94,7 @@ function startFakeDaemon(options: {
 				socket.write(
 					encodeFrame({
 						type: "CHANNEL_STATE_END",
-						...(options.otherOwnerChannels !== undefined && {
-							otherOwnerChannels: options.otherOwnerChannels,
-						}),
+						otherOwnerChannels: options.otherOwnerChannels ?? 0,
 					}),
 				);
 			}

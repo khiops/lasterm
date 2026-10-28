@@ -212,12 +212,14 @@ export class HostsDAL {
 	listHosts(limit?: number, offset?: number): Host[] {
 		// Local hosts first, and among several the oldest first (#658): a client
 		// shows the first as the local host, which is the one the hub uses.
-		// Then by sort_order: a client groups them by host_group_id itself.
+		// Then by sort_order, and among equal ones the order of creation: a
+		// client groups them by host_group_id itself, keeping this order.
 		const order = `ORDER BY
 				CASE WHEN type = 'local' THEN 0 ELSE 1 END,
 				CASE WHEN type = 'local' THEN created_at END ASC,
 				CASE WHEN type = 'local' THEN rowid END ASC,
-				sort_order ASC`;
+				sort_order ASC,
+				rowid ASC`;
 		const sql =
 			limit !== undefined
 				? `SELECT * FROM hosts ${order} LIMIT ? OFFSET ?`
@@ -408,41 +410,82 @@ export class HostsDAL {
 		txn();
 	}
 
+	/**
+	 * Copy a host's settings under a free label, into the original's group,
+	 * right after it in that group's order (#746). What the hub learned and
+	 * pinned on its own is not a setting: the copy trusts no host key, no jump
+	 * key and no agent binary until it connects, and finds its shells again.
+	 */
 	duplicateHost(id: string): Host | null {
-		const original = this.getHost(id);
-		if (!original) return null;
-		if (original.type === "local") return null; // cannot duplicate local host
+		return this.db.transaction(() => {
+			const original = this.getHost(id);
+			if (!original) return null;
+			if (original.type === "local") return null; // cannot duplicate local host
 
-		// Find unique label: "label-copy", "label-copy-2", etc.
-		let suffix = "-copy";
-		let attempt = 1;
-		while (this.getHostByLabel(original.label + suffix)) {
-			attempt++;
-			suffix = `-copy-${attempt}`;
-		}
+			// Find unique label: "label-copy", "label-copy-2", etc.
+			let suffix = "-copy";
+			let attempt = 1;
+			while (this.getHostByLabel(original.label + suffix)) {
+				attempt++;
+				suffix = `-copy-${attempt}`;
+			}
 
-		return this.createHost({
-			type: original.type,
-			label: original.label + suffix,
-			...(original.sshHost !== undefined && { sshHost: original.sshHost }),
-			...(original.sshPort !== undefined && { sshPort: original.sshPort }),
-			...(original.sshAuth !== undefined && { sshAuth: original.sshAuth }),
-			...(original.sshKeyPath !== undefined && { sshKeyPath: original.sshKeyPath }),
-			...(original.iconType !== undefined && { iconType: original.iconType }),
-			...(original.iconValue !== undefined && { iconValue: original.iconValue }),
-			...(original.color !== undefined && { color: original.color }),
-			...(original.profileJson !== undefined && { profileJson: original.profileJson }),
-			...(original.trustRemoteHints !== undefined && {
-				trustRemoteHints: original.trustRemoteHints,
-			}),
-			...(original.defaultShell !== undefined && { defaultShell: original.defaultShell }),
-			...(original.defaultCwd !== undefined && { defaultCwd: original.defaultCwd }),
-			...(original.sshConfigHost != null && { sshConfigHost: original.sshConfigHost }),
-			...(original.sshUser != null && { sshUser: original.sshUser }),
-			...(original.sshRemoteDaemon !== undefined && {
-				sshRemoteDaemon: original.sshRemoteDaemon,
-			}),
-		});
+			// The group's hosts in the order the rail shows them, the order
+			// PUT /api/hosts/order writes. Hosts that were never moved all sit at
+			// 0, so the copy cannot just take the original's place plus one: the
+			// whole group is renumbered as that endpoint leaves it.
+			const groupId = original.hostGroupId ?? null;
+			const group = this.db
+				.prepare(
+					`SELECT id, sort_order FROM hosts
+					WHERE host_group_id IS ? AND type <> 'local'
+					ORDER BY sort_order ASC, rowid ASC`,
+				)
+				.all(groupId) as Array<{ id: string; sort_order: number }>;
+			const at = group.findIndex((host) => host.id === original.id) + 1;
+
+			const copy = this.createHost({
+				type: original.type,
+				label: original.label + suffix,
+				hostGroupId: groupId,
+				sortOrder: at,
+				...(original.sshHost !== undefined && { sshHost: original.sshHost }),
+				...(original.sshPort !== undefined && { sshPort: original.sshPort }),
+				...(original.sshAuth !== undefined && { sshAuth: original.sshAuth }),
+				...(original.sshKeyPath !== undefined && { sshKeyPath: original.sshKeyPath }),
+				...(original.iconType !== undefined && { iconType: original.iconType }),
+				...(original.iconValue !== undefined && { iconValue: original.iconValue }),
+				...(original.color !== undefined && { color: original.color }),
+				...(original.profileJson !== undefined && { profileJson: original.profileJson }),
+				...(original.trustRemoteHints !== undefined && {
+					trustRemoteHints: original.trustRemoteHints,
+				}),
+				...(original.defaultShell !== undefined && { defaultShell: original.defaultShell }),
+				...(original.defaultCwd !== undefined && { defaultCwd: original.defaultCwd }),
+				...(original.sshConfigHost != null && { sshConfigHost: original.sshConfigHost }),
+				...(original.sshUser != null && { sshUser: original.sshUser }),
+				...(original.sshRemoteDaemon !== undefined && {
+					sshRemoteDaemon: original.sshRemoteDaemon,
+				}),
+				// The jump is part of the route: without it the copy would dial the
+				// same address directly, which can be another machine.
+				...(original.sshProxyHostId != null && { sshProxyHostId: original.sshProxyHostId }),
+				...(original.sshProxySpec != null && { sshProxySpec: original.sshProxySpec }),
+				...(original.elevationMethod != null && { elevationMethod: original.elevationMethod }),
+				...(original.customCommand != null && { customCommand: original.customCommand }),
+				// The machine is the same one: null still means auto-detect.
+				os: original.os,
+				arch: original.arch,
+			});
+
+			const now = new Date().toISOString();
+			const move = this.db.prepare("UPDATE hosts SET sort_order = ?, updated_at = ? WHERE id = ?");
+			group.forEach((host, i) => {
+				const position = i < at ? i : i + 1;
+				if (host.sort_order !== position) move.run(position, now, host.id);
+			});
+			return copy;
+		})();
 	}
 
 	// ─── Host Groups (first-class) ───────────────────────────────────────────

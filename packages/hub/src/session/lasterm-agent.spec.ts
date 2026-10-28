@@ -328,6 +328,110 @@ describe("LastermAgent", () => {
 		);
 	});
 
+	// A frame that does not decode used to throw out of the socket's "data"
+	// listener, past everything, and end the hub with every terminal it held
+	// (#763). It ends that connection, and only that one.
+	describe("a malformed frame from the agent (#763)", () => {
+		/** What the agent types into a terminal: it must reach no log and no error. */
+		const TYPED = "typed-by-the-user";
+
+		/** `payload` behind its length prefix. */
+		function frameOf(payload: Buffer): Buffer {
+			const prefix = Buffer.alloc(4);
+			prefix.writeUInt32LE(payload.length, 0);
+			return Buffer.concat([prefix, payload]);
+		}
+
+		const MALFORMED = [
+			[
+				"a length prefix past the frame size limit",
+				Buffer.from([0xff, 0xff, 0xff, 0xff]),
+				"a length prefix of 4294967295 bytes, past the 10485760-byte limit",
+			],
+			[
+				"a payload that is not MessagePack",
+				frameOf(Buffer.concat([Buffer.from([0xc1]), Buffer.from(TYPED)])),
+				"a payload that is not a protocol message",
+			],
+			[
+				"a payload that is no message",
+				frameOf(Buffer.from([0xc0])),
+				"a payload that is not a protocol message",
+			],
+		] as const;
+
+		it.each(MALFORMED)(
+			"closes that connection alone on %s, and says so at WARN without its bytes",
+			async (_what, bytes, reason) => {
+				daemon = await createMockDaemon(socketPath);
+				const log = { log: vi.fn() };
+				agent = await LastermAgent.connectLocal(socketPath, log as never);
+				const other = await LastermAgent.connectLocal(socketPath);
+				try {
+					await agent.waitForChannelState();
+					await other.waitForChannelState();
+					const errors: Error[] = [];
+					agent.on("error", (error: Error) => errors.push(error));
+					const closed = new Promise<void>((resolve) => agent?.once("close", () => resolve()));
+
+					daemon.connections[0]?.write(bytes);
+					await closed;
+
+					const message = `The local agent sent a malformed frame: ${reason}`;
+					expect(errors.map((error) => error.message)).toEqual([message]);
+					expect(agent.connected).toBe(false);
+					const warnings = log.log.mock.calls.filter(([level]) => level === "warn");
+					expect(warnings).toEqual([
+						["warn", `${message}; closing the connection`, { connId: expect.any(Number) }],
+					]);
+					expect(JSON.stringify(log.log.mock.calls)).not.toContain(TYPED);
+
+					// The other connection to the same agent is untouched.
+					expect(other.connected).toBe(true);
+					const ack = new Promise<ProtocolMessage>((resolve) => {
+						other.on("message", (msg: ProtocolMessage) => {
+							if (msg.type === "HEARTBEAT_ACK") resolve(msg);
+						});
+					});
+					daemon.connections[1]?.write(
+						Buffer.from(encodeFrame({ type: "HEARTBEAT_ACK", ts: "still here" })),
+					);
+					expect(await ack).toEqual({ type: "HEARTBEAT_ACK", ts: "still here" });
+				} finally {
+					await other.close();
+				}
+			},
+			TEST_TIMEOUT,
+		);
+
+		it(
+			"fails the connection with that error when the frame comes with HELLO",
+			async () => {
+				await new Promise<void>((resolve) => {
+					const server = net.createServer((socket) => {
+						socket.on("error", () => {});
+						const hello = encodeFrame({
+							type: "HELLO",
+							version: PROTOCOL_VERSION,
+							agentVersion: "0.1.0",
+							capabilities: [],
+						});
+						socket.write(
+							Buffer.concat([Buffer.from(hello), Buffer.from([0xff, 0xff, 0xff, 0xff])]),
+						);
+					});
+					daemon = { server, connections: [] };
+					server.listen(socketPath, () => resolve());
+				});
+
+				await expect(LastermAgent.connectLocal(socketPath)).rejects.toThrow(
+					"The local agent sent a malformed frame: a length prefix of 4294967295 bytes, past the 10485760-byte limit",
+				);
+			},
+			TEST_TIMEOUT,
+		);
+	});
+
 	describe("waitForChannelState", () => {
 		describe("Given agent sends AGENT_CHANNEL_STATE + CHANNEL_STATE_END", () => {
 			it(

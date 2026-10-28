@@ -3,7 +3,9 @@ import {
 	type AgentChannelStateMessage,
 	type ChannelStateEndMessage,
 	FrameReader,
+	FrameTooLargeError,
 	type HelloMessage,
+	MAX_FRAME_SIZE,
 	PROTOCOL_VERSION,
 	type ProtocolMessage,
 } from "@lasterm/shared";
@@ -15,7 +17,8 @@ import {
  *   "ready"   — emitted once when the HELLO handshake completes
  *   "message" — emitted for every decoded ProtocolMessage
  *   "close"   — emitted when the transport closes (exit code or undefined)
- *   "error"   — emitted on transport / decode errors
+ *   "error"   — emitted on transport errors, and on a frame that does not
+ *               decode, which closes the connection (#763)
  */
 export abstract class AgentConnection extends EventEmitter {
 	protected reader = new FrameReader();
@@ -136,10 +139,43 @@ export abstract class AgentConnection extends EventEmitter {
 	/** Whether the underlying transport is still active. */
 	abstract get connected(): boolean;
 
-	/** Feed raw bytes from the agent into the frame decoder. */
+	/**
+	 * The error that closed this connection when the agent sent what is not a
+	 * frame of the protocol (#763); null until it does. Nothing it sends after
+	 * is read.
+	 */
+	malformedFrame: Error | null = null;
+
+	/** The agent, as an error names it: "The agent on pi", "The local agent". */
+	protected abstract describeAgent(): string;
+
+	/** Say at WARN why this connection ends. */
+	protected logWarning(message: string): void {
+		console.warn(message);
+	}
+
+	/**
+	 * Feed raw bytes from the agent into the frame decoder.
+	 *
+	 * Never throws: it runs in a stream's "data" listener, and a throw from
+	 * there reaches no handler of the hub's and can end it, with every
+	 * terminal it holds, for one agent's bad output (#763). A frame that does
+	 * not decode closes this connection instead, and only it.
+	 */
 	protected handleData(data: Buffer): void {
-		const messages = this.reader.push(data);
+		if (this.malformedFrame !== null) return;
+		let messages: ProtocolMessage[];
+		try {
+			messages = this.reader.push(data);
+		} catch (err) {
+			this.closeOnMalformedFrame(err);
+			return;
+		}
 		for (const msg of messages) {
+			if (!isMessage(msg)) {
+				this.closeOnMalformedFrame(msg);
+				return;
+			}
 			if (msg.type === "HELLO" && !this.ready) {
 				if (msg.version !== PROTOCOL_VERSION) {
 					this.emit(
@@ -158,4 +194,33 @@ export abstract class AgentConnection extends EventEmitter {
 			this.emit("message", msg);
 		}
 	}
+
+	/**
+	 * Close this connection on what the agent sent that is not a frame of the
+	 * protocol: `cause` is what the frame reader threw, or what a frame decoded
+	 * to. The error and the log line say which, by its length or its kind, and
+	 * never hold a byte of it: the bytes may be a terminal's.
+	 */
+	private closeOnMalformedFrame(cause: unknown): void {
+		const what =
+			cause instanceof FrameTooLargeError
+				? `a length prefix of ${cause.payloadLength} bytes, past the ${MAX_FRAME_SIZE}-byte limit`
+				: "a payload that is not a protocol message";
+		const error = new Error(`${this.describeAgent()} sent a malformed frame: ${what}`);
+		this.malformedFrame = error;
+		this.logWarning(`${error.message}; closing the connection`);
+		// Whoever drives this connection hears it. Emitted with no listener, an
+		// "error" would throw, the very thing this is here to prevent.
+		if (this.listenerCount("error") > 0) this.emit("error", error);
+		void this.close();
+	}
+}
+
+/** Whether a decoded payload is a message: an object with a type, as every message is. */
+function isMessage(value: unknown): value is ProtocolMessage {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { type?: unknown }).type === "string"
+	);
 }

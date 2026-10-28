@@ -30,6 +30,7 @@
 				</div>
 
 				<div class="dialog-actions">
+					<span v-if="deleteError" class="action-error" role="alert">{{ deleteError }}</span>
 					<button class="btn btn-secondary" @click="$emit('close')">
 						Cancel
 					</button>
@@ -52,6 +53,7 @@
 import { computed, ref, watch } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
+import { whyRefused } from "../utils/hub-answer.js";
 
 const props = defineProps<{
 	visible: boolean;
@@ -66,6 +68,8 @@ const emit = defineEmits<{
 const hostsStore = useHostsStore();
 const channelsStore = useChannelsStore();
 const confirmText = ref("");
+/** Why the hub did not delete the host, or that it did not answer (#734). */
+const deleteError = ref<string | null>(null);
 
 const host = computed(() =>
 	hostsStore.hosts.find((h) => h.id === props.hostId) ?? null,
@@ -87,20 +91,21 @@ const hasActiveSessions = computed(() => {
 	return status === "live" || status === "reconnecting";
 });
 
-// Reset confirm text when modal opens/closes or host changes
+// Reset confirm text and the last refusal when modal opens/closes or host changes
 watch(
 	() => [props.visible, props.hostId],
 	() => {
 		confirmText.value = "";
+		deleteError.value = null;
 	},
 );
 
+/** Delete the host, or stay open and say why the hub did not. */
 async function onDelete(): Promise<void> {
-	const ok = await hostsStore.deleteHost(props.hostId);
-	if (ok) {
-		emit("deleted");
-		emit("close");
-	}
+	deleteError.value = await whyRefused(hostsStore.deleteHost(props.hostId));
+	if (deleteError.value !== null) return;
+	emit("deleted");
+	emit("close");
 }
 </script>
 
@@ -189,10 +194,20 @@ async function onDelete(): Promise<void> {
 
 .dialog-actions {
 	display: flex;
+	align-items: center;
 	gap: 8px;
 	justify-content: flex-end;
 	padding: 12px 20px 16px;
 	border-top: 1px solid var(--nt-border);
+}
+
+/* Why the hub did not delete the host (#734), beside the buttons that retry it. */
+.action-error {
+	flex: 1;
+	min-width: 0;
+	font-size: 12px;
+	color: var(--nt-red, #e06c75);
+	overflow-wrap: anywhere;
 }
 
 .btn {

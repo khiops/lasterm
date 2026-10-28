@@ -11,6 +11,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { useToastStore } from "../stores/toast.js";
 import { shortcutLabel } from "../utils/app-shortcuts.js";
 import HostRail from "./HostRail.vue";
 import SOURCE from "./HostRail.vue?raw";
@@ -58,9 +59,9 @@ function mountRail(options: { columns?: number; badgeSize?: HostRailBadgeSize } 
 	const hostsStore = useHostsStore();
 	hostsStore.hosts = HOSTS.map((h) => ({ ...h }));
 	hostsStore.hostGroups = [group("prod", "Prod", 0)];
-	vi.spyOn(hostsStore, "fetchHosts").mockResolvedValue();
-	const reorderHosts = vi.spyOn(hostsStore, "reorderHosts").mockResolvedValue();
-	const moveHostToGroup = vi.spyOn(hostsStore, "moveHostToGroup").mockResolvedValue();
+	const fetchHosts = vi.spyOn(hostsStore, "fetchHosts").mockResolvedValue();
+	const reorderHosts = vi.spyOn(hostsStore, "reorderHosts").mockResolvedValue({ ok: true });
+	const moveHostToGroup = vi.spyOn(hostsStore, "moveHostToGroup").mockResolvedValue({ ok: true });
 
 	root = document.createElement("div");
 	document.body.appendChild(root);
@@ -69,7 +70,7 @@ function mountRail(options: { columns?: number; badgeSize?: HostRailBadgeSize } 
 	});
 	app.use(pinia);
 	app.mount(root);
-	return { hostsStore, reorderHosts, moveHostToGroup };
+	return { hostsStore, fetchHosts, reorderHosts, moveHostToGroup };
 }
 
 let pinia: ReturnType<typeof createPinia>;
@@ -357,6 +358,66 @@ describe("HostRail drag and drop", () => {
 		expect(badge("local").querySelector(".drop-mark")).toBeNull();
 		fire(badge("local"), "drop", data);
 		expect(reorderHosts).not.toHaveBeenCalled();
+	});
+});
+
+// A drop has no place of its own to say why the hub refused it: a toast does.
+// That a refused order is taken back is the store's (stores/hosts.spec.ts).
+describe("HostRail drops the hub refuses (#734)", () => {
+	const toasts = (): string[] => useToastStore().messages.map((m) => m.text);
+	const settled = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+	const refused = (message: string) =>
+		({ ok: false, status: 400, code: "VALIDATION_ERROR", message }) as const;
+
+	it("says why a reorder was refused, and reloads nothing", async () => {
+		const { reorderHosts, fetchHosts } = mountRail({ columns: 3 });
+		fetchHosts.mockClear();
+		reorderHosts.mockResolvedValueOnce(refused("host_ids must be a non-empty array"));
+
+		fire(badge("b"), "drop", await dragOver("e", badge("b")));
+		await settled();
+
+		expect(toasts()).toEqual(["host_ids must be a non-empty array"]);
+		expect(fetchHosts).not.toHaveBeenCalled();
+	});
+
+	it("says so when the hub does not answer a reorder", async () => {
+		const { reorderHosts } = mountRail({ columns: 3 });
+		reorderHosts.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+		fire(badge("b"), "drop", await dragOver("e", badge("b")));
+		await settled();
+
+		expect(toasts()).toEqual(["Could not reach the hub: Failed to fetch"]);
+	});
+
+	it("says why a host dropped on a group header was not moved, or that the hub did not answer", async () => {
+		const { moveHostToGroup, fetchHosts } = mountRail({ columns: 3 });
+		fetchHosts.mockClear();
+		moveHostToGroup
+			.mockResolvedValueOnce(refused("Host not found"))
+			.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+		fire(header("Prod"), "drop", await dragOver("u2", header("Prod")));
+		await settled();
+		fire(header("Prod"), "drop", await dragOver("u1", header("Prod")));
+		await settled();
+
+		expect(toasts()).toEqual(["Host not found", "Could not reach the hub: Failed to fetch"]);
+		expect(fetchHosts).not.toHaveBeenCalled();
+	});
+
+	it("says nothing of a drop that went through, and reloads the hosts", async () => {
+		const { fetchHosts } = mountRail({ columns: 3 });
+		fetchHosts.mockClear();
+
+		fire(badge("b"), "drop", await dragOver("e", badge("b")));
+		await settled();
+		fire(header("Prod"), "drop", await dragOver("u2", header("Prod")));
+		await settled();
+
+		expect(toasts()).toEqual([]);
+		expect(fetchHosts).toHaveBeenCalledTimes(2);
 	});
 });
 

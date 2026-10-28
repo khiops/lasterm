@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type SecurityFields, SecurityLog } from "./logging/security-log.js";
-import { createServer } from "./server.fixture.js";
+import { createServer, startServer } from "./server.fixture.js";
 import { addCorsOrigins, addStartupCorsOrigins } from "./server.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -549,5 +549,39 @@ describe("Hub Server — security headers", () => {
 
 		expect(response.statusCode).toBe(200);
 		expect(response.headers["cross-origin-resource-policy"]).toBe("same-origin");
+	});
+});
+
+describe("Hub Server — listening", () => {
+	/** A server whose `listen` refuses `refused` with EACCES, as Windows does a reserved port. */
+	function refusingServer(refused: number) {
+		const listen = vi.fn(async ({ port }: { host: string; port: number }) => {
+			if (port === refused) {
+				throw Object.assign(new Error(`listen EACCES: 127.0.0.1:${port}`), { code: "EACCES" });
+			}
+			return `https://127.0.0.1:${port === 0 ? 50_123 : port}`;
+		});
+		const info = vi.fn();
+		return { server: { listen, log: { info } } as unknown as FastifyInstance, listen, info };
+	}
+
+	it("moves an explicit port past one the system refuses, and logs where it went (#573)", async () => {
+		const { server, listen, info } = refusingServer(4100);
+		await expect(startServer(server, { port: 4100 })).resolves.toBe("https://127.0.0.1:4101");
+		expect(listen.mock.calls.map(([options]) => options)).toEqual([
+			{ host: "127.0.0.1", port: 4100 },
+			{ host: "127.0.0.1", port: 4101 },
+		]);
+		expect(info).toHaveBeenCalledWith(
+			{ basePort: 4100, port: 4101 },
+			"hub: port unavailable, using zero_conf port",
+		);
+	});
+
+	it("leaves the port to the system when none is asked for, without the fallback", async () => {
+		const { server, listen, info } = refusingServer(0);
+		await expect(startServer(server)).rejects.toMatchObject({ code: "EACCES" });
+		expect(listen.mock.calls.map(([options]) => options)).toEqual([{ host: "127.0.0.1", port: 0 }]);
+		expect(info).not.toHaveBeenCalled();
 	});
 });

@@ -484,7 +484,7 @@ again, which is now roughly every two and a quarter years rather than every rest
   written to spool.db as a chunk (`output-chunker.ts`, STORAGE.md § 5.1). Nothing else bounds it:
   the hub applies no backpressure, never pausing an agent's stream, and does not check how much a
   WebSocket client has yet to read
-- Terminal output (daemon agent): while a hub has no connection, up to 1000 frames per hub, about 8 MiB at most, oldest dropped (SPEC.md § 3.2). While a hub is connected, nothing bounds what waits for it to read (#553)
+- Terminal output (agent): while a hub is connected, about 1 MiB waits for it to read; past that, the agent stops reading that hub's terminals until it drains, and their programs block (#553). While a hub has no connection (daemon), each of its channels keeps its newest 1 MiB, and all of them 16 MiB, oldest dropped (SPEC.md § 3.2)
 - Snapshots: kept in cache, limited by GC policy
 - A host's environment (#576): asked of its agent over the hub's authenticated connection
   (`ENV_QUERY`, PROTOCOL.md § 3.18) when the settings page shows it, handed to that request's

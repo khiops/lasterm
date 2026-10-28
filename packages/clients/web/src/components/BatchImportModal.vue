@@ -158,30 +158,7 @@ import type { SshConfigEntry } from "@lasterm/shared";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { useAuthStore } from "../stores/auth.js";
-
-/** Wire format from GET /api/ssh-config (snake_case keys). */
-interface SshConfigWire {
-	name: string;
-	hostname: string | null;
-	port: number;
-	user: string | null;
-	identity_file: string | null;
-	proxy_jump: string | null;
-	is_git_host: boolean;
-}
-
-/** Convert snake_case wire entry to camelCase SshConfigEntry. */
-function fromWire(w: SshConfigWire): SshConfigEntry {
-	return {
-		name: w.name,
-		hostname: w.hostname,
-		port: w.port,
-		user: w.user,
-		identityFile: w.identity_file,
-		proxyJump: w.proxy_jump,
-		isGitHost: w.is_git_host,
-	};
-}
+import { type SshConfigWireAnswer, sshConfigEntryFromWire } from "../utils/ssh-config.js";
 
 const props = defineProps<{
 	show: boolean;
@@ -275,11 +252,8 @@ async function fetchSshConfig(): Promise<void> {
 			}
 			throw new Error(`Failed to load SSH config (${res.status})`);
 		}
-		const data = (await res.json()) as {
-			entries: SshConfigWire[];
-			has_include: boolean;
-		};
-		entries.value = data.entries.map(fromWire);
+		const data = (await res.json()) as SshConfigWireAnswer;
+		entries.value = data.entries.map(sshConfigEntryFromWire);
 		hasIncludeDirective.value = data.has_include;
 
 		// Default: check all non-git hosts, uncheck git hosts

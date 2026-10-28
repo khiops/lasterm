@@ -651,5 +651,57 @@ describe("host and group actions, refused (#734)", () => {
 			expect(store.hostGroups.map((g) => g.name)).toEqual(["Prod"]);
 			expect(toasts()).toEqual([]);
 		});
+
+		it("loads them again for a host in a group this window does not know (#758)", async () => {
+			const store = load();
+			store.hostGroups = [prod];
+			answerOnce(200, [{ ...hostRows[1], host_group_id: "g2" }]);
+			answerOnce(200, [
+				{ id: "g1", name: "Prod", sort_order: 0, created_at: STAMP, updated_at: STAMP },
+				{ id: "g2", name: "Lab", sort_order: 1, created_at: STAMP, updated_at: STAMP },
+			]);
+
+			await store.fetchHosts();
+
+			expect(store.hostGroups.map((g) => g.name)).toEqual(["Prod", "Lab"]);
+		});
+	});
+});
+
+describe("the hosts, not loaded (#758)", () => {
+	it("says the hub's reason, and keeps the hosts loaded before", async () => {
+		const store = load();
+		await store.fetchHosts();
+		answerOnce(500, { error: { code: "INTERNAL", message: "database is locked" } });
+
+		await store.fetchHosts();
+
+		expect(store.error).toBe("database is locked");
+		expect(store.hosts.map((h) => h.id)).toEqual(["local", "pi", "nas"]);
+		expect(store.loading).toBe(false);
+	});
+
+	it("says so when the hub does not answer", async () => {
+		const store = load();
+		noAnswerOnce();
+
+		await store.fetchHosts();
+
+		expect(store.error).toBe("Could not reach the hub: Failed to fetch");
+	});
+
+	it("keeps saying it while a retry is under way, and clears it once they load", async () => {
+		const store = load();
+		answerOnce(502, undefined);
+		await store.fetchHosts();
+		expect(store.error).toBe("The hub answered 502.");
+
+		const retry = store.fetchHosts();
+		expect(store.loading).toBe(true);
+		expect(store.error).toBe("The hub answered 502.");
+		await retry;
+
+		expect(store.error).toBeNull();
+		expect(store.hosts.map((h) => h.id)).toEqual(["local", "pi", "nas"]);
 	});
 });

@@ -88,6 +88,16 @@ describe("railSections", () => {
 		expect(out[2]?.hosts.map((h) => h.id)).toEqual(["web-1"]);
 	});
 
+	it("lists the hosts of a group this window does not know under Unknown group (#758)", () => {
+		const out = railSections(local, [
+			{ type: "group", id: "home", name: "Home", hosts: [pi], collapsed: false },
+			{ type: "unknown-group", hosts: [web1, web2] },
+			{ type: "ungrouped", hosts: [vps] },
+		]);
+		expect(out.map((s) => s.name)).toEqual(["Local", "Home", "Unknown group", "Ungrouped"]);
+		expect(out[2]?.hosts.map((h) => h.id)).toEqual(["web-1", "web-2"]);
+	});
+
 	it("leaves out a group with no host, and a missing local host", () => {
 		const out = railSections(null, [
 			{ type: "group", id: "empty", name: "Empty", hosts: [], collapsed: false },

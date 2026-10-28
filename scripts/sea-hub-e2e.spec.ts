@@ -20,7 +20,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -347,7 +347,15 @@ describe("lasterm-hub executable", () => {
 
 				beforeAll(async () => {
 					sandbox = createSandbox();
-					hub = await startHub(sandbox);
+					// Started under the usual umask, which the child inherits: under it,
+					// SQLite alone creates a database 0644, and the mode check below
+					// would pass for a hub that leaves the mode to SQLite.
+					const umask = process.platform === "win32" ? undefined : process.umask(0o022);
+					try {
+						hub = await startHub(sandbox);
+					} finally {
+						if (umask !== undefined) process.umask(umask);
+					}
 				}, READY_TIMEOUT_MS + 10_000);
 
 				afterAll(async () => {
@@ -456,6 +464,22 @@ describe("lasterm-hub executable", () => {
 					expect(existsSync(join(sandbox!.stateDir, "meta.db"))).toBe(true);
 					expect(existsSync(join(sandbox!.stateDir, "spool.db"))).toBe(true);
 				});
+
+				// Mutation caught: an executable that opens its databases with
+				// anything but storage/db.ts, as it did until #745. Windows has no such
+				// mode, and relies on the profile's ACL (STORAGE.md § 2).
+				it.skipIf(process.platform === "win32")(
+					"creates its databases owner-only, 0600, with their WAL files (#536)",
+					() => {
+						const walFiles = ["meta.db", "spool.db"]
+							.flatMap((name) => [`${name}-wal`, `${name}-shm`])
+							.filter((name) => existsSync(join(sandbox!.stateDir, name)));
+						for (const name of ["meta.db", "spool.db", ...walFiles]) {
+							const mode = (statSync(join(sandbox!.stateDir, name)).mode & 0o777).toString(8);
+							expect([name, mode]).toEqual([name, "600"]);
+						}
+					},
+				);
 
 				// Last: the cases above need it running. Mutation caught: a hub that
 				// ignores --exit-with-stdin, and would outlive a desktop that quit.

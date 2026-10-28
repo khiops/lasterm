@@ -1,19 +1,7 @@
-import {
-	closeSync,
-	constants,
-	fchmodSync,
-	fstatSync,
-	openSync,
-	readdirSync,
-	readFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { closeSync, constants, fchmodSync, fstatSync, openSync } from "node:fs";
+import { join } from "node:path";
 import Database from "better-sqlite3";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const MIGRATIONS_DIR = join(__dirname, "migrations");
+import { type MigrationFile, readMigrationFiles } from "./migration-files.js";
 
 /** The files SQLite keeps beside a database in WAL mode. */
 const WAL_FILE_SUFFIXES = ["-wal", "-shm"] as const;
@@ -115,7 +103,7 @@ function applySpoolPragmas(db: Database.Database): void {
 	}
 }
 
-function runMigrations(db: Database.Database, migrationsDir: string): void {
+function runMigrations(db: Database.Database, migrations: readonly MigrationFile[]): void {
 	const hasSchemaVersion =
 		db
 			.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")
@@ -129,31 +117,19 @@ function runMigrations(db: Database.Database, migrationsDir: string): void {
 		currentVersion = row.v ?? 0;
 	}
 
-	let files: string[];
-	try {
-		files = readdirSync(migrationsDir)
-			.filter((f) => /^\d{3}-.*\.sql$/.test(f))
-			.sort();
-	} catch {
-		// No migrations directory — nothing to apply
-		return;
-	}
-
 	const parseNum = (filename: string): number => Number.parseInt(filename.slice(0, 3), 10);
 
-	const lastFile = files[files.length - 1];
-	const latestMigration = files.length > 0 && lastFile !== undefined ? parseNum(lastFile) : 0;
+	const last = migrations[migrations.length - 1];
+	const latestMigration = last !== undefined ? parseNum(last.file) : 0;
 
 	if (currentVersion > latestMigration && latestMigration > 0) {
 		process.stderr.write("[storage] DB schema version ahead of latest migration - skipping\n");
 		return;
 	}
 
-	for (const file of files) {
+	for (const { file, sql } of migrations) {
 		const num = parseNum(file);
 		if (num <= currentVersion) continue;
-
-		const sql = readFileSync(join(migrationsDir, file), "utf-8");
 
 		const applyMigration = db.transaction(() => {
 			db.exec(sql);
@@ -187,8 +163,8 @@ export function openDatabases(dataDir: string): DatabaseManager {
 	applyCommonPragmas(spoolDb);
 	spoolDb.pragma("wal_autocheckpoint = 2000");
 
-	runMigrations(metaDb, join(MIGRATIONS_DIR, "meta"));
-	runMigrations(spoolDb, join(MIGRATIONS_DIR, "spool"));
+	runMigrations(metaDb, readMigrationFiles("meta"));
+	runMigrations(spoolDb, readMigrationFiles("spool"));
 
 	return {
 		meta: metaDb,
@@ -210,8 +186,8 @@ export function openTestDatabases(): DatabaseManager {
 	applyCommonPragmas(spoolDb);
 	spoolDb.pragma("wal_autocheckpoint = 2000");
 
-	runMigrations(metaDb, join(MIGRATIONS_DIR, "meta"));
-	runMigrations(spoolDb, join(MIGRATIONS_DIR, "spool"));
+	runMigrations(metaDb, readMigrationFiles("meta"));
+	runMigrations(spoolDb, readMigrationFiles("spool"));
 
 	return {
 		meta: metaDb,

@@ -18,7 +18,8 @@
  * - ssh2: inlined — pure JS.
  * - Sourcemaps: disabled — SEA doesn't support source-mapped stack traces.
  * - Minify: disabled — easier debugging, size is not critical.
- * - Migrations: embedded inline — SQL files bundled as strings via plugin.
+ * - Migrations: embedded inline — the SQL files, as strings, in a module that
+ *   replaces storage/migration-files.ts; storage/db.ts itself is bundled as is.
  * - Static web UI: embedded at SEA packaging step, not here.
  *
  * Prerequisites:
@@ -33,6 +34,11 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type BuildOptions, build, buildSync, type Plugin } from "esbuild";
+import {
+	type MigrationFile,
+	type MigrationSet,
+	readMigrationFiles,
+} from "../packages/hub/src/storage/migration-files.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -77,7 +83,6 @@ function resolveHubVersion(): string {
 }
 
 const SEA_VERSION = resolveHubVersion();
-const MIGRATIONS_BASE = join(ROOT, "packages", "hub", "src", "storage", "migrations");
 const OUT_DIR = join(ROOT, "dist", "sea");
 const OUT_FILE = join(OUT_DIR, "lasterm-hub.cjs");
 const SEA_SQLITE_BOOTSTRAP_ENTRY = join(ROOT, "scripts", "sea-sqlite-bootstrap.ts");
@@ -85,130 +90,43 @@ const SEA_SQLITE_BOOTSTRAP_ENTRY = join(ROOT, "scripts", "sea-sqlite-bootstrap.t
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin: migrations embed
 //
-// Intercepts the loading of packages/hub/src/storage/db.ts and replaces the
-// filesystem-based migration runner with one that uses SQL strings bundled
-// inline at build time.
+// The hub reads its SQL migrations from disk, through one module,
+// packages/hub/src/storage/migration-files.ts. The executable has no
+// migrations/ directory, so this plugin puts a module in that one's place that
+// returns the same files, read with the hub's own readMigrationFiles at build
+// time.
 //
-// This preserves the same openDatabases / openTestDatabases exports so no
-// other hub code needs to change.
+// Only that module is replaced. The executable opens its databases with
+// storage/db.ts itself: owner-only files (#536), the WAL checkpoint on close and
+// the migration runner are the ones the hub specs cover. Until #745 this plugin
+// replaced db.ts as a whole, with a copy that had none of the first two.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function readMigrationsDir(subdir: string): Array<{ file: string; sql: string }> {
-	const dir = join(MIGRATIONS_BASE, subdir);
-	let files: string[];
-	try {
-		files = readdirSync(dir)
-			.filter((f) => /^\d{3}-.*\.sql$/.test(f))
-			.sort();
-	} catch {
-		return [];
-	}
-	return files.map((file) => ({
-		file,
-		sql: readFileSync(join(dir, file), "utf-8"),
-	}));
+const MIGRATION_FILES_MODULE = /packages[\\/]hub[\\/]src[\\/]storage[\\/]migration-files\.(ts|js)$/;
+
+/** The module the executable bundles in place of migration-files.ts. */
+function embeddedMigrationFilesModule(): string {
+	const migrations = {
+		meta: readMigrationFiles("meta"),
+		spool: readMigrationFiles("spool"),
+	} satisfies Record<MigrationSet, MigrationFile[]>;
+	return [
+		"// Embedded when the executable was built, by scripts/build-sea-hub.ts.",
+		`const migrations = ${JSON.stringify(migrations)};`,
+		"export function readMigrationFiles(set) {",
+		"  return migrations[set] ?? [];",
+		"}",
+	].join("\n");
 }
 
 function migrationsEmbedPlugin(): Plugin {
 	return {
 		name: "migrations-embed",
 		setup(buildContext) {
-			buildContext.onLoad(
-				{ filter: /packages[\\/]hub[\\/]src[\\/]storage[\\/]db\.(ts|js)$/ },
-				() => {
-					const metaMigrations = readMigrationsDir("meta");
-					const spoolMigrations = readMigrationsDir("spool");
-
-					const metaJson = JSON.stringify(metaMigrations);
-					const spoolJson = JSON.stringify(spoolMigrations);
-
-					// Replacement module — preserves the same exports as db.ts
-					// but sources SQL from the inline manifests rather than the
-					// filesystem. This makes the bundle work in SEA mode where
-					// the migrations/ directory is not present on disk.
-					const lines = [
-						'"use strict";',
-						'import Database from "better-sqlite3";',
-						'import { join } from "node:path";',
-						"",
-						"// Embedded migration manifests (generated at build time)",
-						`const __metaMigrations = ${metaJson};`,
-						`const __spoolMigrations = ${spoolJson};`,
-						"",
-						"function applyCommonPragmas(db) {",
-						'  db.pragma("journal_mode = WAL");',
-						'  db.pragma("synchronous = NORMAL");',
-						'  db.pragma("foreign_keys = ON");',
-						'  db.pragma("busy_timeout = 5000");',
-						'  db.pragma("cache_size = -8000");',
-						"}",
-						"",
-						"function applySpoolPragmas(db) {",
-						'  const cur = db.pragma("auto_vacuum", { simple: true });',
-						"  if (cur !== 2) {",
-						'    db.pragma("auto_vacuum = INCREMENTAL");',
-						"  }",
-						"}",
-						"",
-						"function runMigrationsFromManifest(db, migrations) {",
-						"  const hasSV = db.prepare(\"SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'\").get() !== undefined;",
-						"  let currentVersion = 0;",
-						"  if (hasSV) {",
-						'    const row = db.prepare("SELECT MAX(version) as v FROM schema_version").get();',
-						"    currentVersion = row.v ?? 0;",
-						"  }",
-						"  const parseNum = (f) => Number.parseInt(f.slice(0, 3), 10);",
-						"  const last = migrations[migrations.length - 1];",
-						"  const latest = migrations.length > 0 && last ? parseNum(last.file) : 0;",
-						"  if (currentVersion > latest && latest > 0) {",
-						'    console.warn("[storage] DB schema version ahead of latest migration - skipping");',
-						"    return;",
-						"  }",
-						"  for (const { file, sql } of migrations) {",
-						"    const num = parseNum(file);",
-						"    if (num <= currentVersion) continue;",
-						"    const apply = db.transaction(() => {",
-						"      db.exec(sql);",
-						'      const va = db.prepare("SELECT MAX(version) as v FROM schema_version").get();',
-						"      if ((va.v ?? 0) < num) {",
-						"        db.prepare(\"INSERT INTO schema_version (version, applied_at) VALUES (?, datetime('now'))\").run(num);",
-						"      }",
-						"    });",
-						"    apply();",
-						'    console.info("[storage] Applied migration " + file);',
-						"  }",
-						"}",
-						"",
-						"export function openDatabases(dataDir) {",
-						'  const metaDb = new Database(join(dataDir, "meta.db"));',
-						"  applyCommonPragmas(metaDb);",
-						'  metaDb.pragma("wal_autocheckpoint = 1000");',
-						'  const spoolDb = new Database(join(dataDir, "spool.db"));',
-						"  applySpoolPragmas(spoolDb);",
-						"  applyCommonPragmas(spoolDb);",
-						'  spoolDb.pragma("wal_autocheckpoint = 2000");',
-						"  runMigrationsFromManifest(metaDb, __metaMigrations);",
-						"  runMigrationsFromManifest(spoolDb, __spoolMigrations);",
-						"  return { meta: metaDb, spool: spoolDb, close() { metaDb.close(); spoolDb.close(); } };",
-						"}",
-						"",
-						"export function openTestDatabases() {",
-						'  const metaDb = new Database(":memory:");',
-						"  applyCommonPragmas(metaDb);",
-						'  metaDb.pragma("wal_autocheckpoint = 1000");',
-						'  const spoolDb = new Database(":memory:");',
-						"  applySpoolPragmas(spoolDb);",
-						"  applyCommonPragmas(spoolDb);",
-						'  spoolDb.pragma("wal_autocheckpoint = 2000");',
-						"  runMigrationsFromManifest(metaDb, __metaMigrations);",
-						"  runMigrationsFromManifest(spoolDb, __spoolMigrations);",
-						"  return { meta: metaDb, spool: spoolDb, close() { metaDb.close(); spoolDb.close(); } };",
-						"}",
-					];
-
-					return { contents: lines.join("\n"), loader: "js" };
-				},
-			);
+			buildContext.onLoad({ filter: MIGRATION_FILES_MODULE }, () => ({
+				contents: embeddedMigrationFilesModule(),
+				loader: "js",
+			}));
 		},
 	};
 }

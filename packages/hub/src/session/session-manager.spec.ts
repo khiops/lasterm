@@ -508,6 +508,82 @@ describe("SessionManager", () => {
 		);
 	});
 
+	// ─── A SPAWN that names itself is answered under its name (#777) ─────────
+	//
+	// The window's socket carries every ERROR the hub has for it, and most name
+	// no host: only the request id tells a SPAWN's answer from the rest.
+
+	describe("a SPAWN that names itself (#777)", () => {
+		const NAMED = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+
+		it("is answered SPAWN_OK under its name, and its window attached all the same", async () => {
+			const received: ProtocolMessage[] = [];
+			const client = makeClient("c1", received);
+			sm.addClient(client);
+
+			const channelId = await sm.handleSpawn("c1", {
+				type: "SPAWN",
+				hostId: "local",
+				requestId: NAMED,
+			});
+
+			expect(received).toContainEqual(
+				expect.objectContaining({ type: "SPAWN_OK", channelId, requestId: NAMED }),
+			);
+			expect(channelId).not.toBeNull();
+			expect(client.attachedChannels.has(channelId as string)).toBe(true);
+		});
+
+		it("is refused under its name", async () => {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+
+			received.length = 0;
+			await sm.handleSpawn("c1", {
+				type: "SPAWN",
+				hostId: "local",
+				reuseChannelId: "local-ch-1",
+				requestId: NAMED,
+			});
+
+			expect(received).toEqual([
+				expect.objectContaining({
+					type: "ERROR",
+					code: "CHANNEL_NOT_REUSABLE",
+					channelId: "local-ch-1",
+					requestId: NAMED,
+				}),
+			]);
+		});
+
+		it("names no other message sent to its window meanwhile", async () => {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local", requestId: NAMED });
+
+			const named = received.filter((msg) => "requestId" in msg);
+			expect(named.map((msg) => msg.type)).toEqual(["SPAWN_OK"]);
+		});
+
+		it("names nothing when the SPAWN named nothing", async () => {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			await sm.handleSpawn("c1", {
+				type: "SPAWN",
+				hostId: "local",
+				reuseChannelId: "local-ch-1",
+			});
+
+			expect(received.filter((msg) => "requestId" in msg)).toEqual([]);
+			expect(received).toContainEqual(
+				expect.objectContaining({ type: "ERROR", code: "CHANNEL_NOT_REUSABLE" }),
+			);
+		});
+	});
+
 	it("N concurrent LOCAL SPAWNs share one daemon connection and one channel-state handshake", async () => {
 		const localHostId = await sm.ensureLocalHost();
 		vi.mocked(_connectOrLaunchForMock).mockClear();

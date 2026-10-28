@@ -311,11 +311,14 @@ jobs:
       - run: rustup toolchain install
       - run: rustup target add ${{ matrix.triple }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # From cached .deb files, as the webview job's dependencies (#728): on a
+      # slow mirror this step once took 17 minutes, and the job has no timeout.
       - name: Install aarch64 cross-compile tools
         if: matrix.triple == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-aarch64-linux-gnu
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy

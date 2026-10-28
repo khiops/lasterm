@@ -10,6 +10,7 @@ mod framing;
 mod handler;
 mod headless;
 mod identity;
+mod input;
 mod logging;
 mod owner;
 mod platform_dirs;

@@ -10,6 +10,7 @@ import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { DatabaseManager } from "./db.js";
 import { openDatabases, openTestDatabases, restrictDatabaseFiles } from "./db.js";
 import { MetaDAL } from "./meta.js";
+import { describeOpenDatabases } from "./open-databases.fixture.js";
 
 describe("openTestDatabases", () => {
 	let dbs: DatabaseManager;
@@ -137,6 +138,10 @@ describe("openTestDatabases", () => {
 		expect(val).toBe(2000);
 	});
 });
+
+// The cases the executable's bundle of this module runs too
+// (scripts/build-sea-hub.spec.ts, #745).
+describeOpenDatabases("storage/db.ts", () => openDatabases);
 
 // STORAGE.md § 2 says owner-only, and until #536 nothing made it so: SQLite
 // creates a database 0644 under the usual umask of 022. Windows has no such

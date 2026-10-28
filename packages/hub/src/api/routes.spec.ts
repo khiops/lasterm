@@ -482,6 +482,60 @@ describe("DELETE /api/hosts/:id", () => {
 	});
 });
 
+describe("POST /api/hosts/:id/duplicate", () => {
+	it("puts the copy in the original's group, right after it (#746)", async () => {
+		const group = (
+			await server.inject({ method: "POST", url: "/api/host-groups", payload: { name: "prod" } })
+		).json<{ id: string }>();
+		const ids: string[] = [];
+		for (const label of ["a", "b", "c"]) {
+			const res = await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "ssh", label, ssh_host: `${label}.example.test`, host_group_id: group.id },
+			});
+			ids.push(res.json<{ id: string }>().id);
+		}
+
+		const res = await server.inject({ method: "POST", url: `/api/hosts/${ids[1]}/duplicate` });
+
+		expect(res.statusCode).toBe(201);
+		expect(res.json()).toMatchObject({
+			label: "b-copy",
+			ssh_host: "b.example.test",
+			host_group_id: group.id,
+			sort_order: 2,
+		});
+		const hosts = (await server.inject({ method: "GET", url: "/api/hosts" })).json<
+			Array<{ label: string; host_group_id?: string; sort_order: number }>
+		>();
+		expect(
+			hosts
+				.filter((host) => host.host_group_id === group.id)
+				.map((host) => [host.label, host.sort_order]),
+		).toEqual([
+			["a", 0],
+			["b", 1],
+			["b-copy", 2],
+			["c", 3],
+		]);
+	});
+
+	it("refuses the local host and an unknown id", async () => {
+		const hosts = (await server.inject({ method: "GET", url: "/api/hosts" })).json<
+			Array<{ id: string; type: string }>
+		>();
+		const local = hosts.find((host) => host.type === "local");
+		expect(local).toBeDefined();
+
+		for (const id of [local?.id, "nonexistent"]) {
+			const res = await server.inject({ method: "POST", url: `/api/hosts/${id}/duplicate` });
+			expect(res.statusCode).toBe(400);
+			expect(res.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_ERROR");
+		}
+	});
+});
+
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
 describe("POST /api/hosts/:id/agent/replace", () => {

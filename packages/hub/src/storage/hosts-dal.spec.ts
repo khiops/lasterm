@@ -271,3 +271,120 @@ describe("HostsDAL — route-bound pins", () => {
 		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
 	});
 });
+
+describe("HostsDAL — duplicateHost (#746)", () => {
+	let dbs: DatabaseManager;
+	let dal: HostsDAL;
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		dal = new HostsDAL(dbs.meta);
+	});
+	afterEach(() => dbs.close());
+	const create = (label: string, fields: Partial<CreateHostInput> = {}) =>
+		dal.createHost({ type: "ssh", sshHost: label, label, ...fields });
+	// A group's hosts as the rail shows them: in the hub's order, by sort_order.
+	const order = (groupId: string | null) =>
+		dal
+			.listHosts()
+			.filter((host) => host.type !== "local" && (host.hostGroupId ?? null) === groupId)
+			.sort((a, b) => a.sortOrder - b.sortOrder)
+			.map((host) => [host.label, host.sortOrder]);
+
+	it("puts the copy in the original's group, right after hosts that never moved", () => {
+		const group = dal.createHostGroup("prod");
+		const other = dal.createHostGroup("staging");
+		create("a", { hostGroupId: group.id });
+		const b = create("b", { hostGroupId: group.id });
+		create("c", { hostGroupId: group.id });
+		create("elsewhere", { hostGroupId: other.id });
+		create("loose");
+
+		const copy = dal.duplicateHost(b.id);
+
+		expect(copy?.hostGroupId).toBe(group.id);
+		expect(order(group.id)).toEqual([
+			["a", 0],
+			["b", 1],
+			["b-copy", 2],
+			["c", 3],
+		]);
+		expect(order(other.id)).toEqual([["elsewhere", 0]]);
+		expect(order(null)).toEqual([["loose", 0]]);
+	});
+
+	it("keeps the order PUT /api/hosts/order wrote", () => {
+		const group = dal.createHostGroup("prod");
+		const a = create("a", { hostGroupId: group.id });
+		const b = create("b", { hostGroupId: group.id });
+		const c = create("c", { hostGroupId: group.id });
+		dal.reorderHosts(group.id, [c.id, a.id, b.id]);
+
+		dal.duplicateHost(a.id);
+		dal.duplicateHost(b.id);
+
+		expect(order(group.id)).toEqual([
+			["c", 0],
+			["a", 1],
+			["a-copy", 2],
+			["b", 3],
+			["b-copy", 4],
+		]);
+	});
+
+	it("leaves an ungrouped copy ungrouped, right after the original", () => {
+		const local = dal.createHost({ type: "local", label: "local" });
+		const x = create("x");
+		create("y");
+
+		const copy = dal.duplicateHost(x.id);
+
+		expect(copy?.hostGroupId).toBeUndefined();
+		expect(order(null)).toEqual([
+			["x", 0],
+			["x-copy", 1],
+			["y", 2],
+		]);
+		expect(dal.getHost(local.id)).toEqual(local);
+	});
+
+	it("copies the jump, elevation and OS the user set", () => {
+		const bastion = create("bastion");
+		const viaHost = create("via-host", {
+			sshProxyHostId: bastion.id,
+			elevationMethod: "custom",
+			customCommand: "run0 --",
+			os: "linux",
+			arch: "arm64",
+		});
+		const viaSpec = create("via-spec", { sshProxySpec: "alice@jump:2222", os: "windows" });
+
+		const hostCopy = dal.duplicateHost(viaHost.id);
+		const specCopy = dal.duplicateHost(viaSpec.id);
+
+		expect(hostCopy).toMatchObject({
+			sshProxyHostId: bastion.id,
+			elevationMethod: "custom",
+			customCommand: "run0 --",
+			os: "linux",
+			arch: "arm64",
+		});
+		expect(hostCopy?.sshProxySpec).toBeUndefined();
+		expect(specCopy).toMatchObject({ sshProxySpec: "alice@jump:2222", os: "windows", arch: null });
+		expect(specCopy?.sshProxyHostId).toBeUndefined();
+	});
+
+	it("copies none of the keys and binaries the original trusts", () => {
+		const original = create("pinned", { sshProxySpec: "jump" });
+		const route = targetRoute(dal.getHost(original.id)!, (id) => sshAddress(dal.getHost(id)));
+		expect(dal.updateHostFingerprint(original.id, "target-pin", route)).toBe(true);
+		expect(dal.updateHostProxyFingerprint(original.id, "jump-pin", route)).toBe(true);
+		dal.updateHostAgentSha256(original.id, "a".repeat(64));
+
+		const copy = dal.duplicateHost(original.id);
+
+		expect(copy?.sshProxySpec).toBe("jump");
+		expect(copy?.sshFingerprint).toBeNull();
+		expect(copy?.sshProxyFingerprint).toBeUndefined();
+		expect(copy?.agentSha256).toBeUndefined();
+	});
+});

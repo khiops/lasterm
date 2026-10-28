@@ -2521,10 +2521,11 @@ describe("probeSftp", () => {
 		(client as unknown as { exec: unknown }).exec = slowShell(0, null).exec;
 		await sshExec(client, "true");
 
-		expect(await probeSftp(client, 20)).toEqual({
-			offered: false,
-			reason: "no answer within 0.02 s",
-		});
+		// The bound is 20 ms plus what the first command measured, a few ms on a
+		// loaded runner: the message names the bound, whatever it came to.
+		const support = await probeSftp(client, 20);
+		expect(support.offered).toBe(false);
+		expect(support.offered === false && support.reason).toMatch(/^no answer within \d+(\.\d+)? s$/);
 		late(undefined, sftp);
 		expect(sftp.end).toHaveBeenCalledTimes(1);
 	});

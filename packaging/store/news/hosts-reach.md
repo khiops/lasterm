@@ -1,0 +1,2 @@
+en: More SSH hosts connect: servers without SFTP or socket forwarding, Windows hosts whose OpenSSH shell is PowerShell or whose profile prints a banner or loads slowly, profile paths with % or ! or on a network share, and Windows hosts where another Lasterm's agent is running.
+fr: Plus d'hôtes SSH se connectent : serveurs sans SFTP ni transfert de socket, hôtes Windows dont le shell OpenSSH est PowerShell ou dont le profil affiche un message ou se charge lentement, chemins de profil avec % ou ! ou sur un partage réseau, et hôtes Windows où tourne l'agent d'un autre Lasterm.

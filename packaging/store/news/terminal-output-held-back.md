@@ -1,2 +1,0 @@
-en: A terminal that prints fast no longer makes the agent's memory grow while Lasterm cannot keep up: it waits, as a real terminal does. While Lasterm is away, one busy terminal no longer pushes out the others' output.
-fr: Un terminal qui affiche beaucoup ne fait plus grossir la mémoire de l'agent quand Lasterm ne suit pas : il attend, comme un vrai terminal. Pendant une absence de Lasterm, un terminal très actif n'efface plus la sortie des autres.

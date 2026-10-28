@@ -9,6 +9,7 @@ use crate::batch::{
 };
 use crate::environment::{self, EnvMode, Platform};
 use crate::expand::expand_vars;
+use crate::flow::{Flow, Flows, InTransit, Queued};
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
 use crate::owner::OwnerId;
@@ -28,10 +29,53 @@ pub(crate) enum ChannelCommand {
     Resize(u16, u16),
 }
 
-/// Per-channel sender for ChannelCommand.
+/// A frame on its way to a connection's writer. A terminal's output and
+/// events carry their charge against their hub's connection, released once
+/// the writer has written them, or when they are dropped (#553). Replies carry
+/// none: nothing ever holds them back.
+pub(crate) struct Outgoing {
+    pub(crate) frame: Vec<u8>,
+    _charge: Option<Queued>,
+}
+
+impl Outgoing {
+    /// A reply, or anything else no terminal printed.
+    pub(crate) fn reply(frame: Vec<u8>) -> Self {
+        Self {
+            frame,
+            _charge: None,
+        }
+    }
+
+    /// A terminal's frame, queued for `connection` and charged to it.
+    pub(crate) fn charged(frame: Vec<u8>, charge: Option<InTransit>, connection: u64) -> Self {
+        let len = frame.len();
+        Self {
+            _charge: charge.map(|charge| charge.queue_for(connection, len)),
+            frame,
+        }
+    }
+
+    /// A frame queued with a charge already made for its connection.
+    pub(crate) fn queued(frame: Vec<u8>, charge: Queued) -> Self {
+        Self {
+            frame,
+            _charge: Some(charge),
+        }
+    }
+
+    /// The frame alone; its charge is released.
+    pub(crate) fn into_frame(self) -> Vec<u8> {
+        self.frame
+    }
+}
+
 /// Frame sender — encodes messages to bytes, delivers to writer task.
 /// Using a channel as the write abstraction allows sharing across stdio and daemon modes.
-pub(crate) type FrameSender = mpsc::UnboundedSender<Vec<u8>>;
+pub(crate) type FrameSender = mpsc::UnboundedSender<Outgoing>;
+
+/// The one connection of stdio mode, as its hub's flow knows it.
+const STDIO_CONNECTION: u64 = 0;
 
 /// Per-channel sender for ChannelCommand.
 pub(crate) type SnapshotSenders =
@@ -81,15 +125,16 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
     // 1. Build a FrameSender — frames go to a channel, writer task drains to stdout
     let stdout_raw = tokio::io::stdout();
     let stdout = Arc::new(Mutex::new(stdout_raw));
-    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Outgoing>();
 
-    // 2. Spawn stdout writer task
+    // 2. Spawn stdout writer task. A frame's charge is released once it is
+    // written, which is what lets the terminals be read again (#553).
     {
         let stdout_w = Arc::clone(&stdout);
         tokio::spawn(async move {
-            while let Some(frame) = frame_rx.recv().await {
+            while let Some(out) = frame_rx.recv().await {
                 let mut w = stdout_w.lock().await;
-                let _ = w.write_all(&frame).await;
+                let _ = w.write_all(&out.frame).await;
                 let _ = w.flush().await;
             }
         });
@@ -104,8 +149,14 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
     // 5. Per-channel command senders (for snapshot requests and resize forwarding)
     let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
 
-    // 6. Batch channels: every channel's output and events, in one pipeline
-    let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+    // 6. Batch channels: every channel's output and events, in one pipeline.
+    // Its one connection owns every channel: stdio has a single hub, which
+    // needs no key to be told apart from others. Stdout is that connection,
+    // and what waits to be written to it holds the terminals back (#553).
+    let owner = OwnerId::legacy();
+    let flows = Flows::default();
+    flows.of(&owner).attach(STDIO_CONNECTION);
+    let (channel_events, channel_events_rx) = ChannelEventSender::new(flows);
     let (batched_tx, mut batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
 
     // 7. Spawn batch loop
@@ -116,16 +167,18 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
         let ftx = frame_tx.clone();
         tokio::spawn(async move {
             while let Some(event) = batched_rx.recv().await {
-                if let Ok(frame) = event.into_frame() {
-                    let _ = ftx.send(frame);
+                if let Ok(routed) = event.into_routed() {
+                    let _ = ftx.send(Outgoing::charged(
+                        routed.frame,
+                        routed.charge,
+                        STDIO_CONNECTION,
+                    ));
                 }
             }
         });
     }
 
-    // 9. stdin read loop. Its one connection owns every channel: stdio has a
-    // single hub, which needs no key to be told apart from others.
-    let owner = OwnerId::legacy();
+    // 9. stdin read loop.
     let mut stdin = tokio::io::stdin();
     let mut reader = FrameReader::new();
     let mut buf = vec![0u8; 8192];
@@ -915,6 +968,13 @@ fn spawn_reader_task(
         let mut rbuf = vec![0u8; 4096];
         let mut seq: u64 = 0;
         let mut mirror = mirror;
+        // What this terminal's output counts against: its hub's connection.
+        // While that is full, the PTY is not read, and the program writing to
+        // it blocks once the PTY's own buffer is full, as on a terminal nobody
+        // reads (#553). Snapshots, resizes and titles are still served: only
+        // the read waits.
+        let flow = channel_events.flow(&owner);
+        let mut held_back = flow.full();
 
         // Spawn a dedicated title-polling task so it never blocks PTY I/O.
         // The task sends the new title whenever it changes; the main loop
@@ -940,8 +1000,8 @@ fn spawn_reader_task(
 
         loop {
             tokio::select! {
-                // PTY output
-                read_result = pty_reader.read(&mut rbuf) => {
+                // PTY output, unless its hub's connection is full
+                read_result = pty_reader.read(&mut rbuf), if !held_back => {
                     match read_result {
                         Ok(0) | Err(_) => {
                             let reason = match &read_result {
@@ -956,7 +1016,9 @@ fn spawn_reader_task(
                                 level: "debug".to_string(),
                                 msg: "PTY closed".to_string(),
                             };
-                            send_channel_event(&channel_events, &owner, &channel_id, &log_msg);
+                            send_channel_event(
+                                &channel_events, &flow, &owner, &channel_id, &log_msg,
+                            );
                             break;
                         }
                         Ok(n) => {
@@ -979,10 +1041,11 @@ fn spawn_reader_task(
                             mirror.process(&data);
 
                             // Send to batch loop for OUTPUT frames
-                            let _ = channel_events.send(ChannelEvent::Output(OutputEvent {
+                            channel_events.send(ChannelEvent::Output(OutputEvent {
                                 owner: owner.clone(),
                                 channel_id: channel_id.clone(),
                                 seq,
+                                charge: flow.read(data.len()),
                                 data,
                             }));
 
@@ -993,7 +1056,9 @@ fn spawn_reader_task(
                                     title,
                                     display_title: None,
                                 };
-                                send_channel_event(&channel_events, &owner, &channel_id, &msg);
+                                send_channel_event(
+                                    &channel_events, &flow, &owner, &channel_id, &msg,
+                                );
                             }
 
                             // Emit bell if detected
@@ -1001,7 +1066,9 @@ fn spawn_reader_task(
                                 let msg = AgentToHub::Bell {
                                     channel_id: channel_id.clone(),
                                 };
-                                send_channel_event(&channel_events, &owner, &channel_id, &msg);
+                                send_channel_event(
+                                    &channel_events, &flow, &owner, &channel_id, &msg,
+                                );
                             }
 
                             // Emit notification if detected
@@ -1010,10 +1077,26 @@ fn spawn_reader_task(
                                     channel_id: channel_id.clone(),
                                     message,
                                 };
-                                send_channel_event(&channel_events, &owner, &channel_id, &msg);
+                                send_channel_event(
+                                    &channel_events, &flow, &owner, &channel_id, &msg,
+                                );
+                            }
+
+                            if flow.full() {
+                                held_back = true;
+                                tracing::debug!(
+                                    channel_id = %channel_id,
+                                    pending = flow.pending(),
+                                    "output held back until the hub's connection drains"
+                                );
                             }
                         }
                     }
+                }
+
+                // The hub's connection drained: read again
+                _ = flow.drained(), if held_back => {
+                    held_back = false;
                 }
 
                 // Command from main task (snapshot request or resize)
@@ -1040,7 +1123,7 @@ fn spawn_reader_task(
                         title,
                         display_title: None,
                     };
-                    send_channel_event(&channel_events, &owner, &channel_id, &msg);
+                    send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
                 }
             }
         }
@@ -1085,23 +1168,26 @@ fn spawn_reader_task(
             exit_code,
             signal,
         };
-        send_channel_event(&channel_events, &owner, &channel_id, &msg);
+        send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
     });
 }
 
 /// Send a frame about a channel down the pipeline its output takes, not to the
 /// connection that spawned it. It reaches the connection its owner has when it
-/// is sent, after the output the channel sent before it (#549, #127).
+/// is sent, after the output the channel sent before it (#549, #127). It is
+/// charged to the owner's flow as output is, and never waits for it (#553).
 fn send_channel_event(
     channel_events: &ChannelEventSender,
+    flow: &Arc<Flow>,
     owner: &OwnerId,
     channel_id: &str,
     msg: &AgentToHub,
 ) {
     if let Ok(frame) = encode_frame(msg) {
-        let _ = channel_events.send(ChannelEvent::Frame(EventFrame {
+        channel_events.send(ChannelEvent::Frame(EventFrame {
             owner: owner.clone(),
             channel_id: channel_id.to_owned(),
+            charge: flow.read(frame.len()),
             frame,
             ends_channel: matches!(msg, AgentToHub::ChannelExit { .. }),
         }));
@@ -1148,7 +1234,7 @@ fn strip_dsr(data: &[u8]) -> Vec<u8> {
 pub(crate) fn send_frame(tx: &FrameSender, msg: &AgentToHub) -> std::io::Result<()> {
     let frame = encode_frame(msg)?;
     // SendError means receiver dropped — treat as EOF, not a hard error
-    let _ = tx.send(frame);
+    let _ = tx.send(Outgoing::reply(frame));
     Ok(())
 }
 
@@ -1289,7 +1375,7 @@ mod stdio_tests {
     async fn stdio_answers_stop_with_an_error() {
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
 
         handle_message(
             crate::protocol::HubToAgent::Stop { force: true },
@@ -1303,7 +1389,7 @@ mod stdio_tests {
         .expect("STOP is answered");
 
         let frame = frame_rx.try_recv().expect("an answer");
-        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame.frame[4..]).unwrap();
         assert_eq!(answer["type"], "ERROR");
         assert_eq!(answer["code"], "INVALID_MESSAGE");
     }
@@ -1336,7 +1422,7 @@ mod stdio_tests {
     #[tokio::test]
     async fn env_query_answers_with_the_base_for_that_mode_and_the_identity() {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
 
         handle_message(
             crate::protocol::HubToAgent::EnvQuery {
@@ -1353,7 +1439,7 @@ mod stdio_tests {
         .expect("ENV_QUERY is answered");
 
         let frame = frame_rx.try_recv().expect("an answer");
-        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame.frame[4..]).unwrap();
         assert_eq!(answer["type"], "ENV");
         assert_eq!(answer["request_id"], "env-1");
         assert_eq!(answer["os"], environment::os_name());
@@ -1557,7 +1643,7 @@ mod stdio_tests {
         let _subscriber = tracing::dispatcher::set_default(&dispatch);
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
 
         let result = handle_spawn(
             "log-privacy".into(),
@@ -1594,7 +1680,7 @@ mod stdio_tests {
         std::fs::remove_dir_all(&dir).unwrap();
         result.expect("SPAWN is answered");
         let frame = frame_rx.recv().await.expect("an answer");
-        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame.frame[4..]).unwrap();
         assert_eq!(answer["type"], "SPAWN_OK", "{answer}");
 
         let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
@@ -1626,7 +1712,7 @@ mod stdio_tests {
         );
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
 
         handle_spawn(
             "env-e2e".into(),
@@ -1655,7 +1741,7 @@ mod stdio_tests {
         .await
         .expect("SPAWN is answered");
         let frame = frame_rx.recv().await.expect("an answer");
-        let answer: serde_json::Value = rmp_serde::from_slice(&frame[4..]).unwrap();
+        let answer: serde_json::Value = rmp_serde::from_slice(&frame.frame[4..]).unwrap();
         assert_eq!(answer["type"], "SPAWN_OK", "{answer}");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -1717,7 +1803,7 @@ mod tests {
         spawn_channel(&manager, channel_id).await;
         manager.lock().await.fail_next_teardown_signal();
         let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
         let senders = Arc::new(Mutex::new(HashMap::new()));
 
         handle_message(
@@ -1771,7 +1857,7 @@ mod tests {
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         manager.lock().await.sweep_next_reader_lookup();
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
         let senders = Arc::new(Mutex::new(HashMap::new()));
 
         handle_spawn(
@@ -1811,7 +1897,7 @@ mod tests {
             message: "terminal channel was gone before its reader could be registered".into(),
         })
         .expect("expected spawn error frame must encode");
-        assert_eq!(frame, expected);
+        assert_eq!(frame.frame, expected);
 
         // Mutation caught: removing the `None` response arm leaves the frame
         // receiver empty after a shutdown sweep wins this registration race.

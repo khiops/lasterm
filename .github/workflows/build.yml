@@ -27,10 +27,14 @@ on:
 permissions:
   contents: read
 
+# Every job has a timeout of about two to three times its slowest successful run
+# up to October 2026, and at least five minutes, so a hung step frees its runner
+# instead of holding it for GitHub's six-hour default (#741).
 jobs:
   matrix:
     name: Load Build Matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       agent: ${{ steps.filter.outputs.agent }}
       hub: ${{ steps.filter.outputs.hub }}
@@ -204,6 +208,7 @@ jobs:
     name: Build Web UI
     needs: [matrix]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -250,6 +255,7 @@ jobs:
     name: Lint
     if: ${{ !inputs.release }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -278,6 +284,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -302,6 +309,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.agent) }}
     runs-on: ${{ matrix.runner }}
+    # Twice the slowest run, 20 minutes, which a slow apt mirror made (#728).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -310,9 +319,21 @@ jobs:
       # The compiler and its components come from rust-toolchain.toml (#248).
       - run: rustup toolchain install
       - run: rustup target add ${{ matrix.triple }}
+      # Saved from main only (#741). A pull request's cache serves only that pull
+      # request, while every pull request restores main's, and saving one from
+      # each kept the repository over its 10 GB cache limit. A called workflow
+      # sees its caller's github.ref: main for a release from release-please,
+      # the tag for a tag push, whose cache would serve that tag alone.
+      #
+      # The triple keeps the two Linux rows apart: they share the job id and
+      # runner OS the key is made of, so they raced for one key and only the
+      # first to finish was kept.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.triple }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # From cached .deb files, as the webview job's dependencies (#728): on a
-      # slow mirror this step once took 17 minutes, and the job has no timeout.
+      # slow mirror this step once took 17 minutes.
       - name: Install aarch64 cross-compile tools
         if: matrix.triple == 'aarch64-unknown-linux-gnu'
         timeout-minutes: 8
@@ -374,6 +395,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -489,6 +511,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -502,9 +525,11 @@ jobs:
           cache: "pnpm"
       # The compiler and its components come from rust-toolchain.toml (#248).
       - run: rustup toolchain install
+      # Saved from main only, as build-agent's (#741).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
       - name: Align desktop versions with the release
@@ -694,6 +719,7 @@ jobs:
     if: needs.matrix.outputs.artifacts == 'true'
     needs: [matrix, build-agent, build-hub, build-desktop]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

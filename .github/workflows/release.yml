@@ -62,10 +62,14 @@ concurrency:
   group: lasterm-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+# Every job that runs its own steps has a timeout of about two to three times
+# its slowest successful run up to October 2026, and at least five minutes, as
+# in build.yml (#741). The build job's are build.yml's own.
 jobs:
   matrix:
     name: Freeze Release Inputs
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:
@@ -132,6 +136,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [matrix]
     permissions:
       contents: write
@@ -315,6 +320,9 @@ jobs:
     name: Publish Release
     needs: [matrix, create-release, build]
     runs-on: ubuntu-latest
+    # Above the slowest run's half minute: each asset may wait 60 s to be
+    # reported uploaded, below.
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -497,6 +505,9 @@ jobs:
     needs: [matrix, publish-release]
     if: vars.STORE_PRODUCT_ID != '' && needs.matrix.outputs.msix == 'true'
     runs-on: windows-latest
+    # Not sized from a run: this job has never run (#618). Generous, so that a
+    # slow Partner Center upload is not cut halfway through a submission.
+    timeout-minutes: 60
     permissions:
       contents: read
     # One Store job runs at a time. GitHub keeps one waiting job per group,

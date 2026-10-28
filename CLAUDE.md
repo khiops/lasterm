@@ -304,7 +304,6 @@ need the agent to outlive a quit that also has to free its binaries for an updat
 
 Host (permanent) → Session (runtime) → Channel (PTY instance)
 ChannelGroup (organizational, per host)
-Workspace (layout persistence)
 
 ## Config Cascade (4 layers, deep merge, last wins)
 

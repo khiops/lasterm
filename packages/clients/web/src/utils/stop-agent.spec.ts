@@ -27,7 +27,7 @@ function refusal(code: string, status = 409): StopKeepingAgentAnswer {
 		body: { error: { code, message: "hub reason", terminals: 2, other_owner_channels: 3 } },
 	};
 }
-const codes = ["TERMINALS_WOULD_END", "OTHER_HUBS_HOLD_CHANNELS", "OTHER_HUBS_MAY_BE_AFFECTED"];
+const codes = ["TERMINALS_WOULD_END", "OTHER_HUBS_HOLD_CHANNELS"];
 
 describe("stopAgentWithConsent", () => {
 	it("posts an empty body and returns the outcome", async () => {
@@ -61,41 +61,31 @@ describe("stopAgentWithConsent", () => {
 		expect(question.title).toBe("Stop the agent on pi?");
 		if (code === "TERMINALS_WOULD_END") expect(question.message).toBe("Its 2 terminals here end.");
 		if (code === "OTHER_HUBS_HOLD_CHANNELS") expect(question.message).toContain("3 terminals");
-		if (code === "OTHER_HUBS_MAY_BE_AFFECTED")
-			expect(question.message).toBe(
-				"This agent cannot tell whether other Lasterm hubs use it; their terminals there would end too.",
-			);
 	});
 
-	it.each(["OTHER_HUBS_HOLD_CHANNELS", "OTHER_HUBS_MAY_BE_AFFECTED"])(
-		"retains terminal consent before %s",
-		async (code) => {
-			const post = vi
-				.fn()
-				.mockResolvedValueOnce(refusal("TERMINALS_WOULD_END"))
-				.mockResolvedValueOnce(refusal(code))
-				.mockResolvedValueOnce(done);
-			await stopAgentWithConsent("pi", { post, confirm: () => true });
-			expect(post.mock.calls).toEqual([
-				[{}],
-				[{ end_terminals: true }],
-				[{ end_terminals: true, force: true }],
-			]);
-		},
-	);
+	it("retains terminal consent before OTHER_HUBS_HOLD_CHANNELS", async () => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("TERMINALS_WOULD_END"))
+			.mockResolvedValueOnce(refusal("OTHER_HUBS_HOLD_CHANNELS"))
+			.mockResolvedValueOnce(done);
+		await stopAgentWithConsent("pi", { post, confirm: () => true });
+		expect(post.mock.calls).toEqual([
+			[{}],
+			[{ end_terminals: true }],
+			[{ end_terminals: true, force: true }],
+		]);
+	});
 
-	it.each(["OTHER_HUBS_HOLD_CHANNELS", "OTHER_HUBS_MAY_BE_AFFECTED"])(
-		"declines %s after terminal consent",
-		async (code) => {
-			const post = vi
-				.fn()
-				.mockResolvedValueOnce(refusal("TERMINALS_WOULD_END"))
-				.mockResolvedValueOnce(refusal(code));
-			const confirm = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-			expect(await stopAgentWithConsent("pi", { post, confirm })).toEqual({ kind: "declined" });
-			expect(post).toHaveBeenCalledTimes(2);
-		},
-	);
+	it("declines OTHER_HUBS_HOLD_CHANNELS after terminal consent", async () => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("TERMINALS_WOULD_END"))
+			.mockResolvedValueOnce(refusal("OTHER_HUBS_HOLD_CHANNELS"));
+		const confirm = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+		expect(await stopAgentWithConsent("pi", { post, confirm })).toEqual({ kind: "declined" });
+		expect(post).toHaveBeenCalledTimes(2);
+	});
 
 	it.each(["HOST_BUSY", "HOST_NOT_CONNECTED", "NO_DAEMON_CONNECTION", "OTHER_ERROR"])(
 		"returns %s without retry",

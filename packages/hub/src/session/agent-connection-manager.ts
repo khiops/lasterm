@@ -24,7 +24,7 @@ import type {
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, ErrorCode, generateId, getSocketPath } from "@lasterm/shared";
 import { HUB_VERSION } from "../build-version.js";
-import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
+import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch } from "./agent-launcher.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
@@ -345,7 +345,7 @@ export class AgentConnectionManager {
 			// connection sends will be read from here on, so it is dropped rather
 			// than left writing into a socket that answers nothing (#127).
 			if (msg.type === "ERROR" && (msg as { code?: string }).code === ErrorCode.DISPLACED) {
-				this.dropDisplacedConnection(hostId, sessionId, agent, msg as ErrorMessage);
+				this.dropDisplacedConnection(hostId, sessionId, agent);
 				return;
 			}
 
@@ -513,42 +513,18 @@ export class AgentConnectionManager {
 	/**
 	 * Let go of a connection the daemon says a newer one has replaced.
 	 *
-	 * Either way this connection is finished: it is dropped, and no longer the
-	 * way to reach this host if it still was. What differs is what the message
-	 * means, and so how loudly it is said (#127).
-	 *
-	 * An agent with `hub-identity` serves several hubs, and replaces only a
-	 * connection of the same hub: this hub opened a newer one itself, which is
-	 * the one to use from now on. That is housekeeping, not news.
-	 *
-	 * An agent without it serves one hub at a time and has taken up with
-	 * someone else, possibly another hub: the terminals this connection drove
-	 * now answer elsewhere, and that is said where a person can find it.
+	 * This connection is finished: it is dropped, and no longer the way to
+	 * reach this host if it still was. A daemon serves several hubs and
+	 * replaces only a connection of the same hub (#127): this hub opened a
+	 * newer one itself, which is the one to use from now on. That is
+	 * housekeeping, not news.
 	 */
-	private dropDisplacedConnection(
-		hostId: string,
-		sessionId: string,
-		agent: AgentConnection,
-		msg: ErrorMessage,
-	): void {
-		if (hasHubIdentity(agent)) {
-			this.ctx.hubLogger?.log(
-				"debug",
-				"agent-connection-manager: replaced by a newer connection of this hub",
-				{ hostId, sessionId },
-			);
-		} else {
-			this.ctx.hubLogger?.log("warn", "agent-connection-manager: displaced by another hub", {
-				hostId,
-				sessionId,
-				message: msg.message,
-			});
-			console.error(
-				`[lasterm] another connection has taken over the agent on ${hostId}: ${
-					msg.message ?? "no detail"
-				}`,
-			);
-		}
+	private dropDisplacedConnection(hostId: string, sessionId: string, agent: AgentConnection): void {
+		this.ctx.hubLogger?.log(
+			"debug",
+			"agent-connection-manager: replaced by a newer connection of this hub",
+			{ hostId, sessionId },
+		);
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
 			this.ctx.agentCapabilities.delete(hostId);
@@ -656,11 +632,9 @@ export class AgentConnectionManager {
 			// own on a daemon that serves several (#127).
 			// What it lists is what it held when asked (#599).
 			const askedAt = this.lifecycle.askingAgent();
-			const auth = daemonAuthFrame(agent, {
-				token: this.ctx.primaryToken || null,
-				hubKey: this.ctx.hubKey,
-			});
-			if (auth !== null) agent.send(auth);
+			agent.send(
+				daemonAuthFrame({ token: this.ctx.primaryToken || null, hubKey: this.ctx.hubKey }),
+			);
 
 			this.ctx.hubLogger?.log("debug", "agent-connection-manager: waiting for channel state", {
 				hostId,

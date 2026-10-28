@@ -96,6 +96,7 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 						type: "ERROR",
 						code: "OTHER_HUBS_HOLD_CHANNELS",
 						message: `${this.othersHold} terminals opened by other hubs are running here; nothing was stopped`,
+						otherOwnerChannels: this.othersHold,
 					}),
 				);
 				return;
@@ -133,12 +134,13 @@ type FakeSshAgent = SshAgent & {
 	execOnHost: ReturnType<typeof vi.fn>;
 };
 
-const hello = (capabilities: string[]): HelloMessage => ({
+/** What a daemon says it can do. */
+const DAEMON_HELLO: HelloMessage = {
 	type: "HELLO",
 	version: 1,
 	agentVersion: "0.1.0",
-	capabilities,
-});
+	capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes", "hub-identity"],
+};
 
 let dbs: DatabaseManager;
 let sm: SessionManager;
@@ -170,9 +172,9 @@ afterEach(async () => {
 });
 
 /** The agent this hub reaches the host through, already connected. */
-function connectedAgent(capabilities: string[], othersHold = 0): FakeSshAgent {
+function connectedAgent(othersHold = 0): FakeSshAgent {
 	const agent = new SshAgent({ id: hostId } as never) as FakeSshAgent;
-	agent.helloMessage = hello(capabilities);
+	agent.helloMessage = DAEMON_HELLO;
 	agent.othersHold = othersHold;
 	(sm.agents as unknown as Map<string, unknown>).set(hostId, agent);
 	return agent;
@@ -250,7 +252,7 @@ function endsOf(heard: ProtocolMessage[], channelId: string): ProtocolMessage[] 
 // restart them must not bring them back on the new one (#580).
 describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it (#580)", () => {
 	it("says of each terminal that ends as the agent stops that the hub ended it", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		const agent = connectedAgent();
 		const { channelId, heard } = liveTerminalOn(agent);
 		agent.exitsOnStop = [channelId];
 
@@ -269,7 +271,7 @@ describe("POST /api/hosts/:id/agent/replace, and the terminals that end with it 
 	});
 
 	it("says nothing of the kind of a terminal that ends after a refused replace", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"], 2);
+		const agent = connectedAgent(2);
 		const { channelId, heard } = liveTerminalOn(agent);
 
 		expect((await replace()).statusCode).toBe(409);
@@ -312,7 +314,7 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 	}
 
 	it("ends every terminal the agent held, stopped, once the STOP is confirmed", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		const agent = connectedAgent();
 		const { channelIds, heard } = liveTerminalsOn(agent, 2);
 
 		const res = await replace();
@@ -321,9 +323,12 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 		expectEveryOneStopped(channelIds, heard);
 	});
 
-	it("does the same when the agent is stopped with its own --stop", async () => {
-		const agent = connectedAgent(["multiplex"]);
+	it("does the same when a STOP it cannot send leaves the agent to its own --stop", async () => {
+		const agent = connectedAgent();
 		const { channelIds, heard } = liveTerminalsOn(agent, 2);
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type === "STOP") throw new Error("SSH agent not connected");
+		});
 
 		const res = await replace();
 
@@ -334,7 +339,7 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 
 	// On stdio the agent is not stopped, and nothing it runs ends.
 	it("ends nothing when the agent is not stopped", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		const agent = connectedAgent();
 		agent.usedRemoteDaemon = false;
 		const { channelIds, heard } = liveTerminalsOn(agent, 1);
 
@@ -349,7 +354,7 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 
 describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)", () => {
 	it("answers 409 with the count, and a forced retry sends STOP { force: true }", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"], 2);
+		const agent = connectedAgent(2);
 
 		const refused = await replace();
 
@@ -385,7 +390,7 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 	});
 
 	it("stops at once when no other hub holds anything there", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"]);
+		const agent = connectedAgent();
 
 		const res = await replace();
 
@@ -393,13 +398,15 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(agent.sent).toEqual([{ type: "STOP", force: false }]);
 	});
 
-	it("uses the agent's --stop for an agent without hub-identity, as before", async () => {
-		const agent = connectedAgent(["multiplex"]);
+	it("falls back to the agent's --stop when the STOP cannot be written", async () => {
+		const agent = connectedAgent(2);
+		agent.send.mockImplementation(() => {
+			throw new Error("SSH agent not connected");
+		});
 
 		const res = await replace();
 
 		expect(res.statusCode).toBe(200);
-		expect(agent.sent).toEqual([]);
 		expect(agent.execOnHost.mock.calls).toEqual([
 			[REMOTE_STATE_DIR_COMMAND],
 			[
@@ -412,20 +419,8 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(sm.agents.has(hostId)).toBe(false);
 	});
 
-	it("falls back to --stop when the STOP cannot be written", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"], 2);
-		agent.send.mockImplementation(() => {
-			throw new Error("SSH agent not connected");
-		});
-
-		const res = await replace();
-
-		expect(res.statusCode).toBe(200);
-		expect(agent.execOnHost).toHaveBeenCalledTimes(2);
-	});
-
 	it("refuses a force that is not a boolean, and asks the agent nothing", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"], 2);
+		const agent = connectedAgent(2);
 
 		const res = await replace({ force: "yes" });
 
@@ -444,7 +439,7 @@ describe("GET /api/hosts/:id/agent-environment (#576)", () => {
 	}
 
 	it("asks the agent, for the mode requested, and answers with what it says", async () => {
-		const agent = connectedAgent(["multiplex", "env-modes"]);
+		const agent = connectedAgent();
 		agent.environments = {
 			inherit: { HOME: "/home/pi", EDITOR: "vi", TERM: "xterm-256color" },
 			minimal: { HOME: "/home/pi", TERM: "xterm-256color" },
@@ -475,18 +470,8 @@ describe("GET /api/hosts/:id/agent-environment (#576)", () => {
 		expect(res.json()).toMatchObject({ error: { code: "HOST_NOT_CONNECTED" } });
 	});
 
-	it("answers 409 AGENT_TOO_OLD for an agent without env-modes, and asks it nothing", async () => {
-		const agent = connectedAgent(["multiplex", "hub-identity"]);
-
-		const res = await environment("inherit");
-
-		expect(res.statusCode).toBe(409);
-		expect(res.json()).toMatchObject({ error: { code: "AGENT_TOO_OLD" } });
-		expect(agent.sent).toEqual([]);
-	});
-
 	it("refuses a mode it does not know, and asks the agent nothing", async () => {
-		const agent = connectedAgent(["env-modes"]);
+		const agent = connectedAgent();
 
 		const res = await environment("clean");
 
@@ -507,13 +492,13 @@ describe("GET /api/hosts/:id/agent-environment (#576)", () => {
 
 describe("SessionManager.queryAgentEnvironment", () => {
 	it("gives up on an agent that does not answer", async () => {
-		connectedAgent(["env-modes"]);
+		connectedAgent();
 
 		expect(await sm.queryAgentEnvironment(hostId, "inherit", 20)).toEqual({ kind: "timeout" });
 	});
 
 	it("says not connected when the connection ends before the answer", async () => {
-		const agent = connectedAgent(["env-modes"]);
+		const agent = connectedAgent();
 		const asked = sm.queryAgentEnvironment(hostId, "inherit", 5_000);
 
 		agent.emit("close");
@@ -523,7 +508,7 @@ describe("SessionManager.queryAgentEnvironment", () => {
 
 	// Another request's answer is not this one's.
 	it("reads only the answer to its own request", async () => {
-		const agent = connectedAgent(["env-modes"]);
+		const agent = connectedAgent();
 		const asked = sm.queryAgentEnvironment(hostId, "inherit", 5_000);
 		const query = agent.sent.find((msg) => msg.type === "ENV_QUERY");
 		if (query?.type !== "ENV_QUERY") throw new Error("expected an ENV_QUERY");
@@ -565,7 +550,7 @@ describe("#674 reconnect timer after ATTACH", () => {
 		try {
 			const meta = new MetaDAL(dbs.meta);
 			meta.updateHost(hostId, { sshRemoteDaemon: true });
-			const old = connectedAgent(["hub-identity"]);
+			const old = connectedAgent();
 			const { channelId, ctx } = liveTerminalOn(old);
 			old.connected = false;
 			old.emit("close");
@@ -588,7 +573,7 @@ describe("#674 reconnect timer after ATTACH", () => {
 
 describe("#674 in-flight stop fences", () => {
 	it("refuses an in-flight SPAWN after Replace marks the host", async () => {
-		const old = connectedAgent(["hub-identity"]);
+		const old = connectedAgent();
 		const { ctx, heard } = liveTerminalOn(old);
 		ctx.agents.delete(hostId);
 		let release!: () => void;
@@ -607,7 +592,6 @@ describe("#674 in-flight stop fences", () => {
 		const spawn = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
 		await waiting;
 		const agent = sm.agents.get(hostId) as FakeSshAgent;
-		agent.helloMessage = hello(["hub-identity"]);
 		let stopped!: () => void;
 		const stopSent = new Promise<void>((resolve) => {
 			stopped = resolve;
@@ -649,7 +633,7 @@ describe("#674 in-flight stop fences", () => {
 		async ({ kind, superseded }) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 			try {
-				const old = connectedAgent(["hub-identity"]);
+				const old = connectedAgent();
 				const { ctx } = liveTerminalOn(old);
 				old.connected = false;
 				ctx.agents.delete(hostId);
@@ -695,7 +679,7 @@ describe("#674 in-flight stop fences", () => {
 });
 
 async function heldReplace() {
-	const agent = connectedAgent(["hub-identity"]);
+	const agent = connectedAgent();
 	const terminal = liveTerminalOn(agent);
 	let sent!: () => void;
 	const stopSent = new Promise<void>((resolve) => {
@@ -968,9 +952,9 @@ describe("POST stop-keeping", () => {
 		return server.inject({ method: "POST", url: `/api/hosts/${id}/agent/stop-keeping`, payload });
 	}
 
-	function fixture(capabilities = ["hub-identity"], count = 2) {
-		const agent = connectedAgent(capabilities);
-		const live = liveTerminalsOn(agent, count);
+	function fixture() {
+		const agent = connectedAgent();
+		const live = liveTerminalsOn(agent, 2);
 		const dal = new MetaDAL(dbs.meta);
 		dal.updateHost(hostId, { sshRemoteDaemon: true });
 		return { agent, dal, ...live };
@@ -1059,33 +1043,35 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.sent).toContainEqual({ type: "STOP", force: true });
 	});
 
-	it("requires other-hub consent before any legacy command", async () => {
-		const f = fixture([]);
-		const response = await stop({ end_terminals: true });
-		expect(response.statusCode).toBe(409);
-		expect(response.json()).toMatchObject({ error: { code: "OTHER_HUBS_MAY_BE_AFFECTED" } });
-		unchanged(f);
-		expect(f.agent.send).not.toHaveBeenCalled();
-		expect(f.agent.execOnHost).not.toHaveBeenCalled();
-	});
+	// A STOP with no connection to say it on: only a forced request goes on to
+	// the agent's own --stop, over SSH.
+	function stopCannotBeSent(f: ReturnType<typeof fixture>): void {
+		f.agent.send.mockImplementation(() => {
+			throw new Error("transport unavailable");
+		});
+	}
 
-	it.each(["exit-zero", "daemon-close"])("legacy stop confirms on %s", async (mode) => {
-		const f = fixture([]);
-		if (mode === "daemon-close") {
-			f.agent.execOnHost.mockImplementation(async (command: string) => {
-				if (command === REMOTE_STATE_DIR_COMMAND) return { stdout: "/state", exitCode: 0 };
-				f.agent.connected = false;
-				f.agent.emit("close");
-				return { stdout: "", exitCode: 1 };
-			});
-		}
-		const response = await stop({ end_terminals: true, force: true });
-		expect(response.statusCode).toBe(200);
-		expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
-		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
-		expect(f.agent.send).not.toHaveBeenCalled();
-		for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
-	});
+	it.each(["exit-zero", "daemon-close"])(
+		"--stop after an unsent STOP confirms on %s",
+		async (mode) => {
+			const f = fixture();
+			stopCannotBeSent(f);
+			if (mode === "daemon-close") {
+				f.agent.execOnHost.mockImplementation(async (command: string) => {
+					if (command === REMOTE_STATE_DIR_COMMAND) return { stdout: "/state", exitCode: 0 };
+					f.agent.connected = false;
+					f.agent.emit("close");
+					return { stdout: "", exitCode: 1 };
+				});
+			}
+			const response = await stop({ end_terminals: true, force: true });
+			expect(response.statusCode).toBe(200);
+			expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+			expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+			expect(f.agent.sent).toEqual([]);
+			for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
+		},
+	);
 
 	it.each(["timeout", "error", "displaced", "closed_by_hub", "unsent"])(
 		"unconfirmed STOP %s disables and disconnects",
@@ -1128,10 +1114,11 @@ describe("POST stop-keeping", () => {
 		"exec-timeout",
 		"nonzero",
 		"hub-close",
-	])("legacy %s is unconfirmed", async (mode) => {
+	])("--stop after an unsent STOP: %s is unconfirmed", async (mode) => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		try {
-			const f = fixture([]);
+			const f = fixture();
+			stopCannotBeSent(f);
 			if (mode === "missing-path") f.agent.remoteAgentPath = null;
 			f.agent.execOnHost.mockImplementation(async (command: string) => {
 				if (command === REMOTE_STATE_DIR_COMMAND) {

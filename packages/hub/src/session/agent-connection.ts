@@ -4,22 +4,9 @@ import {
 	type ChannelStateEndMessage,
 	FrameReader,
 	type HelloMessage,
-	HUB_IDENTITY_CAPABILITY,
 	PROTOCOL_VERSION,
 	type ProtocolMessage,
 } from "@lasterm/shared";
-
-/**
- * Whether the agent at the other end of this connection serves several hubs,
- * each with its own channels, told apart by their hub keys (#127).
- *
- * Read from the connection's own HELLO, not from the host's last one: the
- * answer belongs to that process. Without it the agent serves one hub at a
- * time, the last to connect, and the hub keeps its behaviour from before.
- */
-export function hasHubIdentity(agent: Pick<AgentConnection, "helloMessage">): boolean {
-	return agent.helloMessage?.capabilities?.includes(HUB_IDENTITY_CAPABILITY) === true;
-}
 
 /**
  * Abstract base class for communicating with a lasterm agent (local or remote SSH).
@@ -63,8 +50,8 @@ export abstract class AgentConnection extends EventEmitter {
 
 	/**
 	 * How many channels other hubs hold on this daemon, as its CHANNEL_STATE_END
-	 * said (#127). Undefined until then, and from an agent that does not count
-	 * them. Informational only: this hub never acts on those channels.
+	 * said (#127). Undefined until then. Informational only: this hub never
+	 * acts on those channels.
 	 */
 	otherOwnerChannels: number | undefined;
 

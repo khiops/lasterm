@@ -830,15 +830,17 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 			scheduler,
 			chunker,
 			lifecycle: new ChannelLifecycleManager(ctx, broadcaster),
+			/** The daemon connection that reports: what it is sent is all it does. */
+			agent: { send: vi.fn() } as never,
 		};
 	}
 
 	it("kills a channel the agent does not report, even from an older session", () => {
-		const { ctx, statusCalls, scheduler, chunker, lifecycle } = makeHarness([
+		const { ctx, statusCalls, scheduler, chunker, lifecycle, agent } = makeHarness([
 			{ id: "ch-gone", sessionId: OLD_SESSION, status: "orphan" },
 		]);
 
-		lifecycle.reconcileChannelState(HOST, []);
+		lifecycle.reconcileChannelState(HOST, [], agent);
 
 		expect(statusCalls).toEqual([{ channelId: "ch-gone", sessionId: OLD_SESSION, status: "dead" }]);
 		// And it is forgotten, not merely labelled: a channel left in the live map
@@ -850,13 +852,15 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 	});
 
 	it("adopts a channel the agent is still holding into the session that found it", () => {
-		const { ctx, statusCalls, lifecycle } = makeHarness([
+		const { ctx, statusCalls, lifecycle, agent } = makeHarness([
 			{ id: "ch-kept", sessionId: OLD_SESSION, status: "orphan" },
 		]);
 
-		lifecycle.reconcileChannelState(HOST, [
-			{ type: "AGENT_CHANNEL_STATE", channelId: "ch-kept", alive: true } as never,
-		]);
+		lifecycle.reconcileChannelState(
+			HOST,
+			[{ type: "AGENT_CHANNEL_STATE", channelId: "ch-kept", alive: true } as never],
+			agent,
+		);
 
 		expect(statusCalls).toEqual([
 			{ channelId: "ch-kept", sessionId: CURRENT_SESSION, status: "live" },
@@ -865,21 +869,21 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 	});
 
 	it("leaves another host's channels alone", () => {
-		const { statusCalls, lifecycle } = makeHarness([
+		const { statusCalls, lifecycle, agent } = makeHarness([
 			{ id: "ch-elsewhere", sessionId: OLD_SESSION, status: "orphan", hostId: "host-2" },
 		]);
 
-		lifecycle.reconcileChannelState(HOST, []);
+		lifecycle.reconcileChannelState(HOST, [], agent);
 
 		expect(statusCalls).toEqual([]);
 	});
 
 	it("says nothing about a channel that is already dead, but forgets it too", () => {
-		const { ctx, statusCalls, scheduler, lifecycle } = makeHarness([
+		const { ctx, statusCalls, scheduler, lifecycle, agent } = makeHarness([
 			{ id: "ch-dead", sessionId: OLD_SESSION, status: "dead" },
 		]);
 
-		lifecycle.reconcileChannelState(HOST, []);
+		lifecycle.reconcileChannelState(HOST, [], agent);
 
 		expect(statusCalls).toEqual([]);
 		// The one already marked dead is the one an earlier judgement left behind,
@@ -889,13 +893,15 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 	});
 
 	it("keeps holding the channel the agent does report", () => {
-		const { ctx, scheduler, lifecycle } = makeHarness([
+		const { ctx, scheduler, lifecycle, agent } = makeHarness([
 			{ id: "ch-kept", sessionId: OLD_SESSION, status: "orphan" },
 		]);
 
-		lifecycle.reconcileChannelState(HOST, [
-			{ type: "AGENT_CHANNEL_STATE", channelId: "ch-kept", alive: true } as never,
-		]);
+		lifecycle.reconcileChannelState(
+			HOST,
+			[{ type: "AGENT_CHANNEL_STATE", channelId: "ch-kept", alive: true } as never],
+			agent,
+		);
 
 		expect(ctx.channels.has("ch-kept")).toBe(true);
 		expect(scheduler.untrackChannel).not.toHaveBeenCalled();
@@ -910,35 +916,35 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 		const ASKED_AT = 10;
 
 		it("is left to its start, not ended", () => {
-			const { ctx, statusCalls, lifecycle } = makeHarness([
+			const { ctx, statusCalls, lifecycle, agent } = makeHarness([
 				{ id: "ch-respawned", sessionId: CURRENT_SESSION, status: "live", startedAt: ASKED_AT + 1 },
 			]);
 
-			lifecycle.reconcileChannelState(HOST, [], undefined, ASKED_AT);
+			lifecycle.reconcileChannelState(HOST, [], agent, ASKED_AT);
 
 			expect(statusCalls).toEqual([]);
 			expect(ctx.channels.get("ch-respawned")?.status).toBe("live");
 		});
 
 		it("is left to its start while that start is under way", () => {
-			const { ctx, statusCalls, lifecycle } = makeHarness([
+			const { ctx, statusCalls, lifecycle, agent } = makeHarness([
 				{ id: "ch-restarting", sessionId: CURRENT_SESSION, status: "dead" },
 			]);
 			ctx.startingChannels.add("ch-restarting");
 
-			lifecycle.reconcileChannelState(HOST, [], undefined, ASKED_AT);
+			lifecycle.reconcileChannelState(HOST, [], agent, ASKED_AT);
 
 			expect(statusCalls).toEqual([]);
 			expect(ctx.channels.has("ch-restarting")).toBe(true);
 		});
 
 		it("does not spare one that started before it was asked", () => {
-			const { ctx, statusCalls, lifecycle } = makeHarness([
+			const { ctx, statusCalls, lifecycle, agent } = makeHarness([
 				{ id: "ch-before", sessionId: CURRENT_SESSION, status: "live", startedAt: ASKED_AT - 1 },
 				{ id: "ch-restored", sessionId: OLD_SESSION, status: "orphan" },
 			]);
 
-			lifecycle.reconcileChannelState(HOST, [], undefined, ASKED_AT);
+			lifecycle.reconcileChannelState(HOST, [], agent, ASKED_AT);
 
 			expect(statusCalls).toEqual([
 				{ channelId: "ch-before", sessionId: CURRENT_SESSION, status: "dead" },
@@ -948,14 +954,11 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 		});
 	});
 
-	// With hub-identity the daemon lists only this hub's channels, so one this
-	// hub does not know is its own orphan: nothing else will ever claim it.
-	describe("orphans, from an agent with hub-identity (#127)", () => {
-		function reportingAgent(capabilities: string[]) {
-			return {
-				helloMessage: { type: "HELLO", version: 1, agentVersion: "0.1.0", capabilities },
-				send: vi.fn(),
-			};
+	// A daemon lists only this hub's channels, so one this hub does not know is
+	// its own orphan: nothing else will ever claim it.
+	describe("orphans, from a daemon (#127)", () => {
+		function reportingAgent() {
+			return { send: vi.fn() };
 		}
 		const reported = (...ids: string[]) =>
 			ids.map((channelId) => ({ type: "AGENT_CHANNEL_STATE", channelId, alive: true }) as never);
@@ -964,7 +967,7 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 
 		it("destroys one this hub neither tracks nor records", () => {
 			const { lifecycle } = makeHarness([]);
-			const agent = reportingAgent(["hub-identity"]);
+			const agent = reportingAgent();
 
 			lifecycle.reconcileChannelState(HOST, reported("ch-lost-spawn"), agent as never);
 
@@ -973,7 +976,7 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 
 		it("destroys one this hub has recorded as dead: ending it is this hub's call", () => {
 			const { lifecycle } = makeHarness([], { "ch-closed": { status: "dead" } });
-			const agent = reportingAgent(["hub-identity"]);
+			const agent = reportingAgent();
 
 			lifecycle.reconcileChannelState(HOST, reported("ch-closed"), agent as never);
 
@@ -984,7 +987,7 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 			const { lifecycle } = makeHarness([
 				{ id: "ch-other-entry", sessionId: OLD_SESSION, status: "live", hostId: "host-2" },
 			]);
-			const agent = reportingAgent(["hub-identity"]);
+			const agent = reportingAgent();
 
 			lifecycle.reconcileChannelState(HOST, reported("ch-other-entry"), agent as never);
 
@@ -993,18 +996,9 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 
 		it("leaves one recorded as still alive alone, even untracked", () => {
 			const { lifecycle } = makeHarness([], { "ch-recorded": { status: "orphan" } });
-			const agent = reportingAgent(["hub-identity"]);
+			const agent = reportingAgent();
 
 			lifecycle.reconcileChannelState(HOST, reported("ch-recorded"), agent as never);
-
-			expect(destroyed(agent)).toEqual([]);
-		});
-
-		it("destroys nothing for an agent without it, whose list may be another hub's", () => {
-			const { lifecycle } = makeHarness([]);
-			const agent = reportingAgent(["multiplex"]);
-
-			lifecycle.reconcileChannelState(HOST, reported("ch-someone-elses"), agent as never);
 
 			expect(destroyed(agent)).toEqual([]);
 		});
@@ -1076,6 +1070,7 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 		const states = [{ type: "AGENT_CHANNEL_STATE", channelId: "ch-1", alive: true }];
 		const agent = {
 			usedRemoteDaemon: true,
+			send: vi.fn(),
 			waitForChannelState: vi.fn().mockResolvedValue(states),
 		};
 
@@ -1089,6 +1084,7 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 		const { ctx, lifecycle, reconcile } = harness();
 		const agent = {
 			usedRemoteDaemon: true,
+			send: vi.fn(),
 			waitForChannelState: vi.fn(() => {
 				// A terminal that starts while the list is on its way.
 				ctx.channelClock++;
@@ -1104,13 +1100,12 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 	describe("a daemon that serves several hubs (#127)", () => {
 		const HUB_KEY = "5e".repeat(32);
 
-		function remoteDaemon(capabilities: string[]) {
+		function remoteDaemon() {
 			const order: string[] = [];
 			return {
 				order,
 				agent: {
 					usedRemoteDaemon: true,
-					helloMessage: { type: "HELLO", version: 1, agentVersion: "0.1.0", capabilities },
 					otherOwnerChannels: undefined as number | undefined,
 					send: vi.fn((msg: ProtocolMessage) => order.push(`send ${msg.type}`)),
 					waitForChannelState: vi.fn(() => {
@@ -1131,7 +1126,7 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 
 		it("introduces this hub before asking what it holds, and never hands it the hub's token", async () => {
 			const { lifecycle } = identityHarness();
-			const { agent, order } = remoteDaemon(["multiplex", "hub-identity"]);
+			const { agent, order } = remoteDaemon();
 
 			await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never);
 
@@ -1140,18 +1135,9 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 			expect(agent.send).toHaveBeenCalledWith({ type: "AUTH", token: "", hubKey: HUB_KEY });
 		});
 
-		it("sends a daemon without it nothing new, as before", async () => {
-			const { lifecycle } = identityHarness();
-			const { agent } = remoteDaemon(["multiplex"]);
-
-			await lifecycle.adoptWhatTheDaemonHolds("host-1", agent as never);
-
-			expect(agent.send).not.toHaveBeenCalled();
-		});
-
 		it("says again what the session is once the daemon has counted other hubs' terminals", async () => {
 			const { lifecycle, ctx, announceSessionState } = identityHarness();
-			const { agent } = remoteDaemon(["multiplex", "hub-identity"]);
+			const { agent } = remoteDaemon();
 			agent.waitForChannelState.mockImplementation(() => {
 				agent.otherOwnerChannels = 2;
 				return Promise.resolve([]);
@@ -1178,6 +1164,7 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 		const { lifecycle, reconcile } = harness();
 		const agent = {
 			usedRemoteDaemon: true,
+			send: vi.fn(),
 			waitForChannelState: vi.fn().mockRejectedValue(new Error("AUTH required")),
 		};
 
@@ -1201,7 +1188,7 @@ describe("#674 SPAWN send fences", () => {
 			const agent = { connected: true, send: vi.fn() };
 			const result = await manager.sendSpawnAndWait({
 				agent: agent as never,
-				spawnMsg: { type: "SPAWN", requestId: "request", cols: 80, rows: 24 },
+				spawnMsg: { type: "SPAWN", requestId: "request", cols: 80, rows: 24, envMode: "inherit" },
 				clientId: client.id,
 				hostId: "host",
 				session: { id: "session" },

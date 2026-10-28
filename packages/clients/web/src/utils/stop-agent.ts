@@ -36,14 +36,6 @@ export async function stopAgentWithConsent(
 			const count = error.other_owner_channels;
 			message = `${count ?? "Unknown"} terminal${count === 1 ? "" : "s"} opened by other Lasterm hubs would end too.`;
 			consent = { force: true };
-		} else if (
-			answer.status === 409 &&
-			error?.code === "OTHER_HUBS_MAY_BE_AFFECTED" &&
-			!body.force
-		) {
-			message =
-				"This agent cannot tell whether other Lasterm hubs use it; their terminals there would end too.";
-			consent = { force: true };
 		} else {
 			return { kind: "failed", message: error?.message ?? `The hub answered ${answer.status}.` };
 		}

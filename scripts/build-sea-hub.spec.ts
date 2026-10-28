@@ -14,11 +14,15 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compileFunction } from "node:vm";
 import type { BuildOptions } from "esbuild";
 import { build } from "esbuild";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { readMigrationFiles } from "../packages/hub/src/storage/migration-files.js";
+import { describeOpenDatabases } from "../packages/hub/src/storage/open-databases.fixture.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -177,9 +181,9 @@ describe("migrations are embedded inline", () => {
 
 	it("bundle does not contain readdirSync or readFileSync calls for migrations", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		// The migrations plugin replaces the original db.ts which used
-		// readdirSync + readFileSync. Any remaining use in the bundle must
-		// NOT be referencing the MIGRATIONS_DIR path.
+		// The migrations plugin replaces storage/migration-files.ts, which reads
+		// them with readdirSync + readFileSync. Any remaining use in the bundle
+		// must NOT be referencing the migrations directory.
 		expect(content).not.toContain("/migrations/meta");
 		expect(content).not.toContain("/migrations/spool");
 	});
@@ -194,7 +198,68 @@ describe("migrations are embedded inline", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 7: hub sea-addon-loader is a no-op when not in SEA mode
+// Test 7: the executable opens its databases with storage/db.ts itself (#745)
+// ────────────────────────────────────────────────────────────────────────────
+
+const STORAGE_SOURCE = join(ROOT, "packages", "hub", "src", "storage");
+
+/**
+ * A hub module as the executable bundles it, with the build's own options and
+ * plugins, then loaded. Left out: the prelude and the call to main(), which
+ * belong to the CLI entry, and better-sqlite3, loaded from the hub's
+ * dependencies, since the executable loads its addon its own way, which the
+ * started executable covers (sea-hub-e2e.spec.ts).
+ */
+async function bundleAsTheExecutable<T>(source: string): Promise<T> {
+	const { buildOptions } = await import("./build-sea-hub.js");
+	const result = await build({
+		...buildOptions,
+		entryPoints: [source],
+		write: false,
+		banner: {},
+		footer: {},
+		external: ["better-sqlite3"],
+		logLevel: "silent",
+	});
+	const code = result.outputFiles?.[0]?.text;
+	if (code === undefined) throw new Error(`bundling ${source} produced no output`);
+	const module = { exports: {} };
+	compileFunction(code, ["module", "exports", "require"], { filename: `${source}.bundled.cjs` })(
+		module,
+		module.exports,
+		createRequire(source),
+	);
+	return module.exports as T;
+}
+
+describe("the executable's database module is storage/db.ts (#745)", () => {
+	let db: typeof import("../packages/hub/src/storage/db.js") | undefined;
+
+	beforeAll(async () => {
+		db = await bundleAsTheExecutable(join(STORAGE_SOURCE, "db.ts"));
+	}, 60_000);
+
+	// Mutation caught: a module in db.ts's place, as the build had until #745.
+	it("bundles db.ts whole, with the exports it has", async () => {
+		const source = await import("../packages/hub/src/storage/db.js");
+		expect(Object.keys(db!).sort()).toEqual(Object.keys(source).sort());
+	});
+
+	it("reads the migrations embedded when it was built, the files the hub reads from disk", async () => {
+		const embedded = await bundleAsTheExecutable<
+			typeof import("../packages/hub/src/storage/migration-files.js")
+		>(join(STORAGE_SOURCE, "migration-files.ts"));
+		for (const set of ["meta", "spool"] as const) {
+			expect(readMigrationFiles(set).length, set).toBeGreaterThan(0);
+			expect(embedded.readMigrationFiles(set), set).toEqual(readMigrationFiles(set));
+		}
+	});
+
+	describeOpenDatabases("db.ts as the executable bundles it", () => db!.openDatabases);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test 8: hub sea-addon-loader is a no-op when not in SEA mode
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("hub sea-addon-loader in non-SEA mode", () => {
@@ -216,7 +281,7 @@ describe("hub sea-addon-loader in non-SEA mode", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 8: hub sea-addon-loader extraction logic
+// Test 9: hub sea-addon-loader extraction logic
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("hub sea-addon-loader extraction logic", () => {

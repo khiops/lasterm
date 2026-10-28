@@ -35,8 +35,6 @@ export function agentEnvironmentMessage(status: number, code: string | undefined
 	switch (code) {
 		case "HOST_NOT_CONNECTED":
 			return "This host is not connected, so its variables cannot be shown. Open a terminal on it, then come back here. Changes can still be made by name.";
-		case "AGENT_TOO_OLD":
-			return "The agent on this host is too old to report its variables. Replace it (Settings › Agents) to see them. Changes can still be made by name.";
 		case "AGENT_TIMEOUT":
 			return "The agent on this host did not answer in time. Changes can still be made by name.";
 		default:

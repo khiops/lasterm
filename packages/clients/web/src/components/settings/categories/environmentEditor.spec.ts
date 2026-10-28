@@ -204,11 +204,11 @@ describe("the environment editor", () => {
 		]);
 	});
 
-	it("says so of an agent too old to answer", async () => {
+	it("says so of an agent that did not answer in time", async () => {
 		settings.cascade = cascade({ host: {} });
 		vi.stubGlobal(
 			"fetch",
-			hub(() => answer(409, { error: { code: "AGENT_TOO_OLD" } })),
+			hub(() => answer(504, { error: { code: "AGENT_TIMEOUT" } })),
 		);
 
 		const { editor, unmount } = mountEditor(ref<Scope>("host"));
@@ -217,7 +217,7 @@ describe("the environment editor", () => {
 
 		expect(editor.agent.value).toEqual({
 			status: "unavailable",
-			message: expect.stringContaining("too old"),
+			message: expect.stringContaining("did not answer in time"),
 		});
 	});
 

@@ -192,8 +192,9 @@ async function uploadFiles(files: File[]): Promise<void> {
 	for (const file of files) {
 		try {
 			const fd = new FormData();
-			fd.append("file", file);
+			// Before the file: the hub only reads the fields that precede it (#768).
 			if (currentDir.value) fd.append("dir", currentDir.value);
+			fd.append("file", file);
 			const resp = await hubFetch(`${hubBaseUrl()}/api/ssh-keys`, {
 				method: "POST",
 				headers: authHeader(),

@@ -2,6 +2,7 @@ import type { Host, ProtocolMessage } from "@lasterm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import type { SftpSupport } from "./agent-deployer.js";
+import { rememberSocketForwardingRefused } from "./remote-daemon.js";
 import type { SharedSessionContext } from "./session-context.js";
 import { SshAgent } from "./ssh-agent.js";
 import { StateBroadcaster } from "./state-broadcaster.js";
@@ -34,6 +35,7 @@ function makeBroadcaster(agentVersion: string | undefined) {
 		bellTimestamps: new Map(),
 		notificationTimestamps: new Map(),
 		userDisconnectedHosts: new Set(),
+		socketForwardingRefusals: new Map(),
 	} as unknown as SharedSessionContext;
 
 	return { sent, broadcaster: new StateBroadcaster(ctx) };
@@ -106,6 +108,7 @@ function makeSftpBroadcaster(support: SftpSupport | null) {
 		bellTimestamps: new Map(),
 		notificationTimestamps: new Map(),
 		userDisconnectedHosts: new Set(),
+		socketForwardingRefusals: new Map(),
 	} as unknown as SharedSessionContext;
 	return { sent, broadcaster: new StateBroadcaster(ctx) };
 }
@@ -131,6 +134,68 @@ describe("StateBroadcaster — a server that offers no SFTP (#722)", () => {
 
 		expect(sent.find((m) => m.type === "SESSION_STATE")).not.toHaveProperty("sftpUnavailable");
 		expect(broadcaster.getStateSnapshot().sessions[0]).not.toHaveProperty("sftpUnavailable");
+	});
+});
+
+// ─── A server that refuses socket forwarding (#765) ──────────────────────────
+
+describe("StateBroadcaster — a server that refuses socket forwarding (#765)", () => {
+	const pi = {
+		id: HOST,
+		type: "ssh",
+		sshHost: "pi.example",
+		os: "linux",
+		sshRemoteDaemon: true,
+	} as Host;
+
+	function makeRefusalBroadcaster(stored: Host, seenOn: Host | null) {
+		const sent: ProtocolMessage[] = [];
+		const socketForwardingRefusals = new Map<string, string>();
+		if (seenOn !== null) rememberSocketForwardingRefused(socketForwardingRefusals, seenOn);
+		const ctx = {
+			agents: new Map(),
+			sessions: new Map([[HOST, { id: SESSION, hostId: HOST, status: "active" }]]),
+			channels: new Map(),
+			clients: new Map([["c1", { id: "c1", send: (m: ProtocolMessage) => sent.push(m) }]]),
+			metaDal: {
+				updateSessionStatus: vi.fn(),
+				listKilledChannels: () => [],
+				getHost: () => stored,
+			},
+			titleDebounceTimers: new Map(),
+			processTitleDebounceTimers: new Map(),
+			bellTimestamps: new Map(),
+			notificationTimestamps: new Map(),
+			userDisconnectedHosts: new Set(),
+			socketForwardingRefusals,
+		} as unknown as SharedSessionContext;
+		return { sent, broadcaster: new StateBroadcaster(ctx) };
+	}
+
+	it("says so in the session's state and in the state a client gets on connect", () => {
+		const { sent, broadcaster } = makeRefusalBroadcaster(pi, pi);
+		broadcaster.updateSessionStatus(HOST, SESSION, "active");
+
+		expect(sent.find((m) => m.type === "SESSION_STATE")).toMatchObject({
+			socketForwardingRefused: true,
+		});
+		expect(broadcaster.getStateSnapshot().sessions[0]?.socketForwardingRefused).toBe(true);
+	});
+
+	it.each([
+		["never refused", pi, null],
+		["refused on the route the host had before", pi, { ...pi, sshHost: "old.example" }],
+		["refused for a host that keeps no daemon now", { ...pi, sshRemoteDaemon: false }, pi],
+	] as const)("says nothing when %s", (_name, stored, seenOn) => {
+		const { sent, broadcaster } = makeRefusalBroadcaster(stored as Host, seenOn as Host | null);
+		broadcaster.updateSessionStatus(HOST, SESSION, "active");
+
+		expect(sent.find((m) => m.type === "SESSION_STATE")).not.toHaveProperty(
+			"socketForwardingRefused",
+		);
+		expect(broadcaster.getStateSnapshot().sessions[0]).not.toHaveProperty(
+			"socketForwardingRefused",
+		);
 	});
 });
 
@@ -174,6 +239,7 @@ function makeRenameBroadcaster(inMemory: boolean) {
 		bellTimestamps: new Map(),
 		notificationTimestamps: new Map(),
 		userDisconnectedHosts: new Set(),
+		socketForwardingRefusals: new Map(),
 	} as unknown as SharedSessionContext;
 
 	return { sent, broadcaster: new StateBroadcaster(ctx) };

@@ -9,9 +9,11 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
+import type { Host } from "@lasterm/shared";
 import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 import {
@@ -19,13 +21,21 @@ import {
 	DETACH_SCRIPT,
 	describeRemoteDaemonPlacement,
 	hostKeepsDaemon,
+	hostTriesDaemon,
 	IDLE_TIMEOUT_SECONDS,
 	newRemoteDaemonScopeUnit,
 	parseRemoteDaemonPlacement,
+	parseRemoteSocketState,
 	quotePosix,
+	rememberSocketForwardingRefused,
 	remoteDaemonLaunchCommand,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
+	remoteSocketStateCommand,
+	SOCKET_FORWARDING_REFUSED_MESSAGE,
+	type SocketForwardingRefusals,
+	SocketForwardingRefused,
+	socketForwardingRefusedOn,
 } from "./remote-daemon.js";
 
 const conn = {} as Client;
@@ -778,5 +788,349 @@ describe("attachRemoteDaemon — saying why", () => {
 				sleep: async () => {},
 			}),
 		).rejects.toThrow(`${dir}/agent-daemon.log`);
+	});
+});
+
+// ─── A server that refuses socket forwarding (#765) ──────────────────────────
+
+describe("attachRemoteDaemon — a server that refuses socket forwarding (#765)", () => {
+	const dir = "/home/pi/.local/state/lasterm";
+	const socket = `${dir}/agent.sock`;
+	/**
+	 * What OpenSSH answers for `AllowStreamLocalForwarding no`, and for a
+	 * socket nobody listens on alike: CONNECT_FAILED, "open failed".
+	 */
+	const openFailed = (): Error =>
+		Object.assign(new Error("(SSH) Channel open failure: open failed"), { reason: 2 });
+
+	/**
+	 * A remote whose probe sees the daemon listening once it is launched, until
+	 * a `--stop` says `stopped`; `stopSays` is what each `--stop` prints.
+	 * `probe: false` is a remote that cannot say, and `binds: false` one whose
+	 * daemon never listens.
+	 */
+	function remote(
+		options: { listening?: boolean; stopSays?: string[]; probe?: boolean; binds?: boolean } = {},
+	) {
+		let listening = options.listening ?? false;
+		const stopSays = [...(options.stopSays ?? ["stopped"])];
+		const commands: string[] = [];
+		const exec = async (_c: Client, command: string) => {
+			commands.push(command);
+			if (command.includes("/proc/net/unix")) {
+				if (options.probe === false) return { stdout: "", exitCode: 127 };
+				return { stdout: `lasterm-socket: ${listening ? "listening" : "silent"}\n`, exitCode: 0 };
+			}
+			if (command.includes("--daemon")) {
+				if (options.binds !== false) listening = true;
+				return { stdout: "", exitCode: 0 };
+			}
+			if (command.includes("--stop")) {
+				const said = stopSays.shift() ?? "stopped";
+				if (said === "stopped") listening = false;
+				return { stdout: `${said}\n`, exitCode: said === "stopped" ? 0 : 1 };
+			}
+			return stateDirReply(dir);
+		};
+		return {
+			exec,
+			commands,
+			listening: () => listening,
+			stops: () => commands.filter((c) => c.includes("--stop")),
+		};
+	}
+
+	/** What the attempt was rejected with, which must be a refusal. */
+	async function refusal(attempt: Promise<unknown>): Promise<SocketForwardingRefused> {
+		const err = await attempt.then(
+			() => new Error("reached a daemon that cannot be reached"),
+			(caught: unknown) => caught,
+		);
+		expect(err).toBeInstanceOf(SocketForwardingRefused);
+		return err as SocketForwardingRefused;
+	}
+
+	it("starts nothing when the server prohibits the channel type outright", async () => {
+		const host = remote();
+		const err = await refusal(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw Object.assign(new Error("(SSH) Channel open failure: "), { reason: 1 });
+				},
+				sleep: async () => {},
+			}),
+		);
+
+		expect(err.daemon).toEqual({ kind: "none" });
+		expect(err.message).toBe(SOCKET_FORWARDING_REFUSED_MESSAGE);
+		expect(host.commands.some((c) => c.includes("--daemon"))).toBe(false);
+		expect(host.stops()).toEqual([]);
+	});
+
+	it("leaves a daemon that already listens alone", async () => {
+		// Another connection, through another key or from another address, may
+		// reach it and hold terminals there: stopping it is not this one's call.
+		const host = remote({ listening: true });
+		const err = await refusal(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw openFailed();
+				},
+				sleep: async () => {},
+			}),
+		);
+
+		expect(err.daemon).toEqual({ kind: "already-running" });
+		expect(host.commands.some((c) => c.includes("--daemon"))).toBe(false);
+		expect(host.stops()).toEqual([]);
+		expect(host.listening()).toBe(true);
+	});
+
+	it("stops the daemon it started once it listens and the channel still fails", async () => {
+		const host = remote();
+		let clock = 0;
+		const err = await refusal(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw openFailed();
+				},
+				now: () => clock,
+				sleep: async (ms) => {
+					clock += ms;
+				},
+			}),
+		);
+
+		expect(err.daemon).toEqual({ kind: "stopped" });
+		expect(err.message).toBe(
+			"This host's SSH server refuses socket forwarding (AllowStreamLocalForwarding or " +
+				"DisableForwarding in its sshd_config); the remote daemon needs it, see " +
+				"docs/SSH_SERVER.md. The daemon this connection started there is stopped.",
+		);
+		expect(host.stops()).toEqual([`/usr/bin/lasterm-agent --stop --socket ${socket}`]);
+		expect(host.listening()).toBe(false);
+		// Said at the first poll that saw it listening, not at the deadline.
+		expect(clock).toBeLessThan(1_000);
+	});
+
+	it("asks again when its stop came before the daemon published its record", async () => {
+		const host = remote({ stopSays: ["no record", "stopped"] });
+		const err = await refusal(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw openFailed();
+				},
+				sleep: async () => {},
+			}),
+		);
+
+		expect(err.daemon).toEqual({ kind: "stopped" });
+		expect(host.stops()).toHaveLength(2);
+	});
+
+	it("says what --stop said when the daemon could not be stopped", async () => {
+		const host = remote({ stopSays: ["still running at the bound"] });
+		const err = await refusal(
+			attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw openFailed();
+				},
+				sleep: async () => {},
+			}),
+		);
+
+		expect(err.daemon).toEqual({ kind: "not-stopped", said: "still running at the bound" });
+		expect(err.message).toMatch(
+			/could not be stopped \(still running at the bound\); it ends by itself after 30 minutes/,
+		);
+	});
+
+	it("waits for a daemon that does not listen yet, and stops nothing", async () => {
+		const host = remote({ binds: false });
+		let opens = 0;
+		const attachment = await attachRemoteDaemon({
+			conn,
+			agentPath: "/usr/bin/lasterm-agent",
+			exec: host.exec,
+			open: async () => {
+				opens += 1;
+				if (opens < 4) throw openFailed();
+				return new PassThrough();
+			},
+			sleep: async () => {},
+		});
+
+		expect(attachment.started).toBe(true);
+		expect(host.stops()).toEqual([]);
+	});
+
+	it("names the server as a cause it cannot rule out only when the host cannot say", async () => {
+		const failure = async (probe: boolean): Promise<string> => {
+			let clock = 0;
+			const host = remote({ probe, binds: false });
+			const err = await attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw openFailed();
+				},
+				now: () => {
+					clock += 1_000;
+					return clock;
+				},
+				sleep: async () => {},
+			}).then(
+				() => new Error("reached a daemon that never listened"),
+				(caught: unknown) => caught as Error,
+			);
+			return err.message;
+		};
+
+		expect(await failure(false)).toMatch(
+			/did not answer.*could not say whether it listens.*docs\/SSH_SERVER\.md/,
+		);
+		const probed = await failure(true);
+		expect(probed).toMatch(/did not answer/);
+		expect(probed).not.toMatch(/SSH_SERVER/);
+	});
+});
+
+describe("remoteSocketStateCommand", () => {
+	it("reads the probe's last answer, and nothing else", () => {
+		expect(parseRemoteSocketState("lasterm-socket: listening\n")).toBe("listening");
+		expect(parseRemoteSocketState("Welcome!\nlasterm-socket: silent\r\n")).toBe("silent");
+		expect(parseRemoteSocketState("lasterm-socket: unknown\n")).toBe("unknown");
+		expect(parseRemoteSocketState("sh: awk: not found\n")).toBe("unknown");
+		expect(parseRemoteSocketState("lasterm-socket: maybe\n")).toBe("unknown");
+	});
+
+	it("passes the path in the environment, quoted", () => {
+		const command = remoteSocketStateCommand("/home/o'brien/.local/state/lasterm/agent.sock");
+		expect(command).toContain("LASTERM_SOCKET='/home/o'\\''brien/.local/state/lasterm/agent.sock'");
+		expect(command).toContain("/proc/net/unix");
+	});
+});
+
+describe.skipIf(!onPosix)("remoteSocketStateCommand in a shell", () => {
+	const table = [
+		"Num       RefCount Protocol Flags    Type St Inode Path",
+		"0000000000000000: 00000002 00000000 00010000 0001 01 23456 /run/user/1000/bus",
+		// A connection the daemon accepted: its path, without the listening flag.
+		"0000000000000000: 00000003 00000000 00000000 0001 03 23457 /home/pi/.local/state/lasterm/agent.sock",
+		"0000000000000000: 00000002 00000000 00010000 0001 01 23458 /home/pi/my state/lasterm/agent.sock",
+		"",
+	].join("\n");
+
+	function probe(socket: string, file: string): string {
+		return execFileSync("/bin/sh", ["-c", remoteSocketStateCommand(socket, file)], {
+			encoding: "utf8",
+		});
+	}
+
+	it("tells a listener from an accepted connection, a space in the path included", () => {
+		const root = mkdtempSync(path.join(os.tmpdir(), "socket-table-"));
+		try {
+			const file = path.join(root, "unix");
+			writeFileSync(file, table);
+			expect(parseRemoteSocketState(probe("/run/user/1000/bus", file))).toBe("listening");
+			expect(parseRemoteSocketState(probe("/home/pi/my state/lasterm/agent.sock", file))).toBe(
+				"listening",
+			);
+			expect(parseRemoteSocketState(probe("/home/pi/.local/state/lasterm/agent.sock", file))).toBe(
+				"silent",
+			);
+			expect(parseRemoteSocketState(probe("/bus", file))).toBe("silent");
+			expect(parseRemoteSocketState(probe("/bus", path.join(root, "missing")))).toBe("unknown");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(!existsSync("/proc/net/unix"))(
+		"sees a socket listen, and stop listening, in this kernel's table",
+		async () => {
+			const root = mkdtempSync(path.join(os.tmpdir(), "socket-probe-"));
+			const socket = path.join(root, "agent.sock");
+			const server = net.createServer((accepted) => accepted.end());
+			try {
+				await new Promise<void>((resolve) => server.listen(socket, resolve));
+				// A connection it accepted carries the same path; it is not a listener.
+				const client = net.connect(socket);
+				await new Promise((resolve) => client.once("connect", resolve));
+				expect(parseRemoteSocketState(probe(socket, "/proc/net/unix"))).toBe("listening");
+				client.destroy();
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+				expect(parseRemoteSocketState(probe(socket, "/proc/net/unix"))).toBe("silent");
+			} finally {
+				if (server.listening) server.close();
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+});
+
+describe("remembering a refused forwarding (#765)", () => {
+	const host = (overrides: Partial<Host> = {}): Host =>
+		({
+			id: "pi",
+			type: "ssh",
+			sshHost: "pi.example",
+			sshUser: "pi",
+			sshPort: 22,
+			sshAuth: "key",
+			sshKeyPath: "~/.ssh/id_ed25519",
+			sshRemoteDaemon: true,
+			os: "linux",
+			...overrides,
+		}) as Host;
+
+	it("keeps the next connection off the daemon, for the route it was seen on", () => {
+		const refusals: SocketForwardingRefusals = new Map();
+		expect(hostTriesDaemon(host(), false, refusals)).toBe(true);
+
+		rememberSocketForwardingRefused(refusals, host());
+
+		expect(hostTriesDaemon(host(), false, refusals)).toBe(false);
+		expect(socketForwardingRefusedOn(host(), false, refusals)).toBe(true);
+	});
+
+	it.each([
+		["another address", { sshHost: "pi.lan" }],
+		["another account", { sshUser: "olivier" }],
+		["another port", { sshPort: 2222 }],
+		["another key", { sshKeyPath: "~/.ssh/other" }],
+		["another jump", { sshProxySpec: "bastion.example" }],
+		["its own answer about a daemon changed", { sshRemoteDaemon: null }],
+	] as const)("tries the daemon again through %s", (_what, change) => {
+		const refusals: SocketForwardingRefusals = new Map();
+		rememberSocketForwardingRefused(refusals, host());
+
+		expect(hostTriesDaemon(host(change), true, refusals)).toBe(true);
+		expect(socketForwardingRefusedOn(host(change), true, refusals)).toBe(false);
+	});
+
+	it("says nothing of a host that keeps no daemon", () => {
+		const refusals: SocketForwardingRefusals = new Map();
+		rememberSocketForwardingRefused(refusals, host({ sshRemoteDaemon: null }));
+
+		expect(socketForwardingRefusedOn(host({ sshRemoteDaemon: null }), false, refusals)).toBe(false);
+		expect(socketForwardingRefusedOn(host({ sshRemoteDaemon: null }), true, refusals)).toBe(true);
+		expect(socketForwardingRefusedOn(undefined, true, refusals)).toBe(false);
 	});
 });

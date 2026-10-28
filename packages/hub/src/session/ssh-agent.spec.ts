@@ -180,6 +180,81 @@ function createMockSshServerWithSocket(
 	});
 }
 
+/**
+ * A mock SSH server whose sshd refuses socket forwarding, as OpenSSH does for
+ * `AllowStreamLocalForwarding no` or `DisableForwarding yes`: every
+ * `direct-streamlocal` channel fails with CONNECT_FAILED, the answer it also
+ * gives for a socket nobody listens on (#765). `outright` answers as a server
+ * that prohibits the channel type, which ssh2 does with no handler for it.
+ *
+ * Its commands act as a host's would: the probe of `/proc/net/unix` sees the
+ * daemon listening once launched, until `--stop` stops it, and `--stdio` runs
+ * an agent unless `refusesStdio`.
+ */
+function createForwardingRefusingServer(
+	options: { outright?: boolean; alreadyListening?: boolean; refusesStdio?: boolean } = {},
+): {
+	server: Promise<{ server: SshServer; port: number }>;
+	commands: string[];
+	listening: () => boolean;
+} {
+	const commands: string[] = [];
+	let listening = options.alreadyListening === true;
+	const server = new Promise<{ server: SshServer; port: number }>((resolve) => {
+		const srv = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+			client.on("error", () => {});
+			client.on("authentication", (ctx) => ctx.accept());
+			client.on("ready", () => {
+				client.on("session", (accept) => {
+					const session = accept();
+					session.on("exec", (acceptExec, rejectExec, info) => {
+						const command = info.command;
+						commands.push(command);
+						if (command.includes("--stdio") && options.refusesStdio) {
+							rejectExec();
+							return;
+						}
+						const stream = acceptExec() as unknown as NodeJS.ReadWriteStream & {
+							exit: (code: number) => void;
+						};
+						if (command.includes("--stdio")) {
+							stream.write(makeHelloFrame());
+							return;
+						}
+						if (command.includes("XDG_STATE_HOME")) {
+							stream.write("/home/pi/.local/state/lasterm");
+						} else if (command.includes("/proc/net/unix")) {
+							stream.write(`lasterm-socket: ${listening ? "listening" : "silent"}\n`);
+						} else if (command.includes("--daemon")) {
+							listening = true;
+							stream.write("lasterm-daemon-placement: session no-systemd-run\n");
+						} else if (command.includes("--stop")) {
+							listening = false;
+							stream.write("stopped\n");
+						}
+						stream.exit(0);
+						stream.end();
+					});
+				});
+				if (options.outright) return;
+				(
+					client as unknown as {
+						on: (
+							event: "openssh.streamlocal",
+							cb: (accept: unknown, reject: () => void) => void,
+						) => void;
+					}
+				).on("openssh.streamlocal", (_accept, reject) => reject());
+			});
+		});
+		srv.on("error", () => {});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve({ server: srv, port: (srv.address() as { port: number }).port });
+		});
+	});
+	return { server, commands, listening: () => listening };
+}
+
 /** Build a minimal Host object for a mock SSH server on localhost. */
 
 /**
@@ -681,6 +756,93 @@ describe("SshAgent", () => {
 		expect(commands).toEqual([windowsLaunchCommand("lasterm-agent", ["--stdio"])]);
 		expect(commands.some((c) => c.includes("--daemon"))).toBe(false);
 	}, 15_000);
+
+	// A host whose sshd refuses socket forwarding (#765): the daemon cannot be
+	// reached, however long the hub waits for it.
+	describe("on a server that refuses socket forwarding", () => {
+		const socket = "/home/pi/.local/state/lasterm/agent.sock";
+
+		async function reach(
+			server: Promise<{ server: SshServer; port: number }>,
+		): Promise<{ agent: SshAgent; refused: ReturnType<typeof vi.fn>; start: Promise<unknown> }> {
+			const { server: srv, port } = await server;
+			servers.push(srv);
+			const fp = await getServerFingerprint(port);
+			const refused = vi.fn();
+			const agent = new SshAgent(
+				makeHost(port),
+				undefined,
+				{ binaryCache: "/tmp/fake-cache", onSocketForwardingRefused: refused },
+				undefined,
+				true,
+			);
+			agents.push(agent);
+			return { agent, refused, start: agent.start(fp) };
+		}
+
+		it("stops the daemon it started, runs the agent on stdio, and says why", async () => {
+			const remote = createForwardingRefusingServer();
+			const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				const { agent, refused, start } = await reach(remote.server);
+				const { hello } = (await start) as { hello: HelloMessage };
+
+				expect(hello.type).toBe("HELLO");
+				expect(agent.socketForwardingRefused).toBe(true);
+				expect(agent.usedRemoteDaemon).toBe(false);
+				expect(refused).toHaveBeenCalledWith(expect.objectContaining({ id: makeHost(0).id }));
+				// Started, seen listening, stopped through its own --stop, then stdio.
+				const launch = remote.commands.findIndex((c) => c.includes("--daemon"));
+				const stop = remote.commands.indexOf(`lasterm-agent --stop --socket ${socket}`);
+				const stdio = remote.commands.indexOf("lasterm-agent --stdio");
+				expect(launch).toBeGreaterThanOrEqual(0);
+				expect(stop).toBeGreaterThan(launch);
+				expect(stdio).toBeGreaterThan(stop);
+				expect(remote.listening()).toBe(false);
+				const said = logged.mock.calls.map((call) => String(call[0])).join("\n");
+				expect(said).toMatch(
+					/refuses socket forwarding \(AllowStreamLocalForwarding or DisableForwarding.*docs\/SSH_SERVER\.md\. The daemon this connection started there is stopped\./,
+				);
+			} finally {
+				logged.mockRestore();
+			}
+		}, 15_000);
+
+		it("starts nothing where the server refuses the channel type outright", async () => {
+			const remote = createForwardingRefusingServer({ outright: true });
+			const { agent, start } = await reach(remote.server);
+			await start;
+
+			expect(agent.socketForwardingRefused).toBe(true);
+			expect(remote.commands.some((c) => c.includes("--daemon"))).toBe(false);
+			expect(remote.commands.some((c) => c.includes("--stop"))).toBe(false);
+			expect(remote.commands).toContain("lasterm-agent --stdio");
+		}, 15_000);
+
+		it("leaves a daemon that was already listening alone", async () => {
+			// Another connection, through another key or from another address,
+			// may reach it and hold terminals there.
+			const remote = createForwardingRefusingServer({ alreadyListening: true });
+			const { agent, start } = await reach(remote.server);
+			await start;
+
+			expect(agent.socketForwardingRefused).toBe(true);
+			expect(remote.commands.some((c) => c.includes("--daemon"))).toBe(false);
+			expect(remote.commands.some((c) => c.includes("--stop"))).toBe(false);
+			expect(remote.listening()).toBe(true);
+			expect(remote.commands).toContain("lasterm-agent --stdio");
+		}, 15_000);
+
+		it("says the forwarding was refused when stdio is refused too", async () => {
+			const remote = createForwardingRefusingServer({ refusesStdio: true });
+			const { start } = await reach(remote.server);
+
+			await expect(start).rejects.toThrow(
+				/refuses socket forwarding .* The daemon this connection started there is stopped\. Running the agent on stdio failed too/,
+			);
+			expect(remote.listening()).toBe(false);
+		}, 15_000);
+	});
 
 	it(
 		"SPAWN → SPAWN_OK flows correctly through SSH",

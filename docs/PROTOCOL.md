@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-09-29
+> Last updated: 2026-10-28
 
 ## 1. Framing
 
@@ -553,6 +553,21 @@ of the environment a SPAWN builds (§ 3.2). Agent-wide, not scoped to the connec
 asked over that hub's own authenticated connection. Stdio and daemon agents both answer it. The
 values can be secrets: neither side stores or logs them, at any level. The hub sends it for
 `GET /api/hosts/:id/agent-environment` (§ 6).
+
+### 3.19 LOG (Agent → Hub)
+
+```typescript
+{
+  type: "LOG",
+  channel_id: string,   // empty when the line is about no channel, e.g. a SPAWN that failed
+  level: string,        // "trace", "debug", "info", "warn" or "error"
+  msg: string
+}
+```
+
+A diagnostic about a channel: a SPAWN that failed, at `error`, or a PTY that closed, at `debug`.
+The hub writes it to that channel's log when it keeps one, else to its own log under the channel's
+id, and reads any other level as `info`. It never reaches a client.
 
 ## 4. Message Types — Hub ↔ UI (WS)
 
@@ -1749,9 +1764,10 @@ Complete list of codes returned in SPAWN_ERR and ERROR messages:
 | `PTY_SPAWN_FAILED` | Agent | The PTY could not be spawned, for any other reason |
 | `CHANNEL_EXISTS` | Agent | SPAWN named a `channel_id` the agent already holds |
 | `ELEVATION_PASSWORD_REQUIRED` | Agent | An elevated SPAWN needs a password; the hub asks for one (AUTH_PROMPT) and sends the SPAWN again |
+| `ELEVATION_CUSTOM_CMD_MISSING` | Agent | An elevated SPAWN with `elevation_method: "custom"` and no `custom_command` |
+| `ELEVATION_FAILED` | Agent | The elevation command could not be prepared |
 | `CHANNEL_NOT_FOUND` | Agent | ATTACH/INPUT/RESIZE for unknown channel_id (DESTROY and SNAPSHOT_REQ answer nothing); also for a channel another hub owns, which is never told apart from an unknown one, byte for byte |
-| `INVALID_MESSAGE` | Both | Unrecognized or malformed message |
-| `VERSION_MISMATCH` | Hub | Agent protocol version too new |
+| `INVALID_MESSAGE` | Agent | A frame it cannot decode, an unknown type included, or STOP to a stdio agent (§ 3.17, § 7) |
 | `DISPLACED` | Agent | A newer connection of the same hub took this one's place, and this one ends (§ 3.1b) |
 | `OTHER_HUBS_HOLD_CHANNELS` | Agent | STOP without `force`, refused while other hubs hold channels; `other_owner_channels` carries how many, and the message says it too (§ 3.17) |
 | `AUTH_REQUIRED` | Agent | A daemon connection did not open with an AUTH carrying `hub_key` within 5 s; the connection is closed (§ 3.1b) |

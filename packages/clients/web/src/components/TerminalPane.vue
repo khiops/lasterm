@@ -430,7 +430,14 @@ const paneHost = computed(() => {
 	return hostsStore.hosts.find((h) => h.id === hostId);
 });
 
-const { profile: visualProfile, bannerText, borderStyle, tintStyle } = useVisualProfile(paneHost);
+const paneHostGroupName = computed(() =>
+	paneHost.value ? hostsStore.getHostGroupName(paneHost.value) : null,
+);
+
+const { profile: visualProfile, bannerText, borderStyle, tintStyle } = useVisualProfile(
+	paneHost,
+	paneHostGroupName,
+);
 
 // ---------------------------------------------------------------------------
 // Write-lock awareness

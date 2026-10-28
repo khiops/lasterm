@@ -149,7 +149,6 @@ export class AgentConnectionManager {
 		} satisfies ErrorMessage);
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
-			this.ctx.agentCapabilities.delete(hostId);
 		}
 		agent.close();
 		this.lifecycle.closeSession(hostId, sessionId);
@@ -201,9 +200,6 @@ export class AgentConnectionManager {
 					console.error("[lasterm-ssh] seedShellProfiles failed:", err);
 				});
 			}
-		}
-		if (Array.isArray(helloMsg.capabilities)) {
-			this.ctx.agentCapabilities.set(hostId, helloMsg.capabilities);
 		}
 		return null;
 	}
@@ -498,8 +494,6 @@ export class AgentConnectionManager {
 			const isCurrentAgent = this.ctx.agents.get(hostId) === agent;
 			if (isCurrentAgent) {
 				this.ctx.agents.delete(hostId);
-				// agentCapabilities is keyed to the same agent generation — clear it too.
-				this.ctx.agentCapabilities.delete(hostId);
 			}
 
 			// Guard: stale close events from replaced agents produce no further side effects.
@@ -545,7 +539,6 @@ export class AgentConnectionManager {
 		);
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
-			this.ctx.agentCapabilities.delete(hostId);
 			if (this.ctx.quitState !== "QUITTING") this.broadcaster.announceSessionState(hostId);
 		}
 		agent.close();
@@ -591,7 +584,6 @@ export class AgentConnectionManager {
 				sessionId,
 			});
 			this.ctx.agents.delete(hostId);
-			this.ctx.agentCapabilities.delete(hostId);
 			existing.close();
 		}
 
@@ -675,7 +667,6 @@ export class AgentConnectionManager {
 			if (agent !== null) {
 				if (this.ctx.agents.get(hostId) === agent) {
 					this.ctx.agents.delete(hostId);
-					this.ctx.agentCapabilities.delete(hostId);
 				}
 				agent.close();
 			}

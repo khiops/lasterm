@@ -17,19 +17,25 @@ import {
 	type SftpSupport,
 	windowsLaunchCommand,
 } from "./agent-deployer.js";
+import { HelloSeeker } from "./hello-seeker.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
 import { attachRemoteDaemon, describeRemoteDaemonPlacement } from "./remote-daemon.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
+import { shellStartAllowance } from "./ssh-exec.js";
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 
+/**
+ * How long the agent has to say HELLO once its command runs, on top of what
+ * the remote shell's start-up costs on this connection, as its first command
+ * measured it (`shellStartAllowance`, #749): under a PowerShell `DefaultShell`
+ * the account's profile loads before every command, the agent's included.
+ */
 const HELLO_TIMEOUT_MS = 5_000;
 /**
  * The same on a Windows host, where a PowerShell starts the agent (#714): one
- * starts in about a second, and longer on a busy server, and under a PowerShell
- * `DefaultShell` the account's profile loads first, since sshd passes no
- * `-NoProfile`. That came to six seconds on a development machine.
+ * starts in about a second, and longer on a busy server.
  */
 const WINDOWS_HELLO_TIMEOUT_MS = 15_000;
 /** Reaching the agent at all: an exec, or a daemon launched and polled for. */
@@ -88,6 +94,16 @@ function buildAgentCommand(
 	}
 	if (os === "windows") return windowsLaunchCommand(agentPath, args);
 	return [agentPath, ...args].map(quotePosixShellArg).join(" ");
+}
+
+/**
+ * Why a stdio agent's HELLO did not come: what the remote shell printed before
+ * the agent started, and where that comes from (#749).
+ */
+function shellPreludeReason(bytes: number, user: string, os: HostOs | null): string {
+	const startup =
+		os === "windows" ? `the PowerShell profile of ${user}` : `the shell startup files of ${user}`;
+	return `the remote shell printed ${bytes} bytes before the agent started; check ${startup}`;
 }
 
 function buildAgentCommandForDeployResult(
@@ -339,7 +355,10 @@ export class SshAgent extends AgentConnection {
 	/**
 	 * Connect to the remote host over SSH, exec `lasterm-agent --stdio`,
 	 * and wait for the HELLO handshake.
-	 * Rejects if HELLO is not received within 5 seconds (15 on a Windows host).
+	 * Rejects if HELLO is not received within 5 seconds (15 on a Windows host),
+	 * plus what the remote shell's start-up costs on this connection (#749).
+	 * What the shell prints before a stdio agent starts is skipped, up to
+	 * `MAX_SHELL_PRELUDE_BYTES`, and named when HELLO does not come.
 	 *
 	 * @param storedFingerprint - The trusted fingerprint from the DB (null = first connect / TOFU).
 	 *   When provided and the server key doesn't match, the connection is rejected and
@@ -592,8 +611,22 @@ export class SshAgent extends AgentConnection {
 					};
 					// Attach stream handler — called after deploy (or immediately if no deploy needed).
 					const runAgent = (agentPath: string, os: HostOs | null, daemonPath?: string): void => {
+						const hostOs = os ?? this.host.os;
 						const helloTimeoutMs =
-							(os ?? this.host.os) === "windows" ? WINDOWS_HELLO_TIMEOUT_MS : HELLO_TIMEOUT_MS;
+							(hostOs === "windows" ? WINDOWS_HELLO_TIMEOUT_MS : HELLO_TIMEOUT_MS) +
+							(shellStartAllowance(client) ?? 0);
+						// A stdio agent is the command of the account's shell, which may
+						// print before it starts (#749): its frames start at HELLO, and
+						// what came before is skipped. Null once HELLO is found, and for a
+						// daemon, whose stream carries frames alone.
+						let seeker: HelloSeeker | null = daemonPath === undefined ? new HelloSeeker() : null;
+						/** `what`, with what the shell printed before the agent, if it did. */
+						const beforeHello = (what: string): Error =>
+							new Error(
+								seeker !== null && seeker.bytes > 0
+									? `${what}: ${shellPreludeReason(seeker.bytes, username, hostOs)}`
+									: what,
+							);
 						// The HELLO clock starts once there is a stream to say it on. Not
 						// earlier: TOFU binary verification prompts (up to 30s) must not
 						// race it, and neither may a daemon being launched, which has its
@@ -610,7 +643,7 @@ export class SshAgent extends AgentConnection {
 							clearTimeout(helloTimeout);
 							helloTimeout = setTimeout(() => {
 								this.cleanup();
-								rejectOnce(new Error("Agent HELLO timeout"));
+								rejectOnce(beforeHello("Agent HELLO timeout"));
 							}, helloTimeoutMs);
 						};
 
@@ -666,8 +699,29 @@ export class SshAgent extends AgentConnection {
 								this.channel = stream;
 								this.channelOpen = true;
 
+								// Set once the shell printed too much: nothing after it is read.
+								let givenUp = false;
 								stream.on("data", (data: Buffer) => {
-									this.handleData(data);
+									if (givenUp) return;
+									if (seeker === null) {
+										this.handleData(data);
+										return;
+									}
+									const seek = seeker.push(data);
+									if (seek.found) {
+										seeker = null;
+										if (seek.prelude > 0) {
+											console.error(
+												`[lasterm-ssh] skipped ${seek.prelude} bytes the remote shell printed before the agent's HELLO`,
+											);
+										}
+										this.handleData(seek.frames);
+									} else if (seek.given) {
+										givenUp = true;
+										clearTimeout(helloTimeout);
+										rejectOnce(beforeHello("Agent HELLO not found"));
+										this.cleanup();
+									}
 								});
 
 								stream.on("close", () => {
@@ -680,7 +734,7 @@ export class SshAgent extends AgentConnection {
 									// command exited (e.g. binary missing / immediate failure). Reject so
 									// start() fails fast instead of hanging. rejectOnce is settled-once, so
 									// this is a no-op once HELLO has already resolved the normal path.
-									rejectOnce(new Error("Agent channel closed before HELLO"));
+									rejectOnce(beforeHello("Agent channel closed before HELLO"));
 								});
 
 								stream.on("error", (streamErr: Error) => {

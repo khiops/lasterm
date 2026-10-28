@@ -25,7 +25,7 @@ import type { ClientChannel, SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
-import type { DeployOptions } from "./agent-deployer.js";
+import type { DeployOptions, SftpSupport } from "./agent-deployer.js";
 import {
 	AgentBinaryDecisionNeeded,
 	checkRemoteAgent,
@@ -38,6 +38,7 @@ import {
 	posixUploadCommand,
 	probeSftp,
 	readRemoteSystem,
+	SFTP_PROBE_TIMEOUT_MS,
 	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
 	WINDOWS_ARCH_COMMANDS,
@@ -50,7 +51,7 @@ import {
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
 import { HelloSeeker } from "./hello-seeker.js";
-import { shellStartAllowance } from "./ssh-exec.js";
+import { SHELL_START_CEILING_MS, shellStartAllowance, sshExec } from "./ssh-exec.js";
 
 /** What cmd.exe answers, then what asks PowerShell, for a Windows host's architecture (#714). */
 const [ECHO_ARCH, POWERSHELL_ARCH] = WINDOWS_ARCH_COMMANDS as [string, string];
@@ -250,6 +251,27 @@ function makeSftpClient(
 		}),
 		sftp: vi.fn((cb: (err: Error | undefined, sftp: SFTPWrapper) => void) => {
 			cb(sftpError, sftp);
+		}),
+	} as unknown as SshClient;
+}
+
+/**
+ * A client whose every command ends once its shell has started, `shellMs` in,
+ * and whose SFTP answers `sftpMs` in, or never when null (#764).
+ */
+function slowShell(shellMs: number, sftpMs: number | null): SshClient {
+	return {
+		exec: vi.fn((_command: string, cb: SshExecCallback) => {
+			const stream = new MockSshStream();
+			cb(undefined, stream);
+			const end = (): void => {
+				stream.emit("close", 0);
+			};
+			if (shellMs === 0) end();
+			else setTimeout(end, shellMs);
+		}),
+		sftp: vi.fn((cb: (err: Error | undefined, sftp: SFTPWrapper) => void) => {
+			if (sftpMs !== null) setTimeout(() => cb(undefined, makeMockSftp()), sftpMs);
 		}),
 	} as unknown as SshClient;
 }
@@ -2495,6 +2517,9 @@ describe("probeSftp", () => {
 				late = cb;
 			}),
 		} as unknown as SshClient;
+		// Its shell starts at once, as its first command measured.
+		(client as unknown as { exec: unknown }).exec = slowShell(0, null).exec;
+		await sshExec(client, "true");
 
 		expect(await probeSftp(client, 20)).toEqual({
 			offered: false,
@@ -2511,6 +2536,67 @@ describe("probeSftp", () => {
 			}),
 		} as unknown as SshClient;
 		expect(await probeSftp(client)).toEqual({ offered: false, reason: "Not connected" });
+	});
+
+	// The server may run its SFTP through the account's shell, which takes its
+	// start-up first: the probe's bound grows with it as every command's does
+	// (#749), or a slow profile made the agent travel over exec beside a working
+	// SFTP (#764).
+	describe("the shell's start-up (#764)", () => {
+		beforeEach(() => {
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("waits past its bound for an SFTP behind a shell slower than that, as the first command measured it", async () => {
+			const client = slowShell(12_000, 15_000);
+			const probe = probeSftp(client);
+			const first = sshExec(client, "uname -sm");
+
+			await vi.advanceTimersByTimeAsync(15_000);
+
+			await expect(first).resolves.toMatchObject({ exitCode: 0 });
+			expect(await probe).toEqual({ offered: true });
+		});
+
+		it("gives up at its bound and the shell's start-up once the first command measured it", async () => {
+			const client = slowShell(1_500, null);
+			let answer: SftpSupport | undefined;
+			const probe = probeSftp(client).then((support) => {
+				answer = support;
+				return support;
+			});
+			const first = sshExec(client, "uname -sm");
+			await vi.advanceTimersByTimeAsync(1_500);
+			await expect(first).resolves.toMatchObject({ exitCode: 0 });
+
+			await vi.advanceTimersByTimeAsync(SFTP_PROBE_TIMEOUT_MS - 1);
+			expect(answer).toBeUndefined();
+			await vi.advanceTimersByTimeAsync(1);
+
+			expect(await probe).toEqual({ offered: false, reason: "no answer within 11.5 s" });
+		});
+
+		it("waits up to the shell's ceiling while no command has measured it", async () => {
+			const client = slowShell(0, null);
+			let answer: SftpSupport | undefined;
+			const probe = probeSftp(client).then((support) => {
+				answer = support;
+				return support;
+			});
+
+			await vi.advanceTimersByTimeAsync(SFTP_PROBE_TIMEOUT_MS + SHELL_START_CEILING_MS - 1);
+			expect(answer).toBeUndefined();
+			await vi.advanceTimersByTimeAsync(1);
+
+			expect(await probe).toEqual({
+				offered: false,
+				reason: `no answer within ${(SFTP_PROBE_TIMEOUT_MS + SHELL_START_CEILING_MS) / 1000} s`,
+			});
+		});
 	});
 });
 

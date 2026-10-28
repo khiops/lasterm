@@ -7,6 +7,8 @@ import { SHELL_START_CEILING_MS, shellStartAllowance, sshExec } from "./ssh-exec
 
 class MockSshStream extends EventEmitter {
 	readonly stderr = new EventEmitter();
+	/** ssh2's `Channel.close()`: asks the server to close the channel. */
+	readonly close = vi.fn();
 
 	simulateOutput(stdout: string, stderr: string, exitCode: number): void {
 		if (stdout) this.emit("data", Buffer.from(stdout));
@@ -114,6 +116,47 @@ describe("sshExec", () => {
 		vi.advanceTimersByTime(600);
 
 		await expect(promise).rejects.toThrow("SSH exec timed out after 500ms: hanging-cmd");
+	});
+
+	// A command given up on is not left running on the remote host, its channel
+	// open until the connection ends (#764).
+	it("closes the channel of a command it gave up on", async () => {
+		const stream = new MockSshStream();
+		const client = makeMockClient(stream);
+		const first = sshExec(client, "true");
+		stream.simulateOutput("", "", 0);
+		await first;
+		expect(stream.close).not.toHaveBeenCalled();
+
+		const hanging = new MockSshStream();
+		vi.mocked(client.exec).mockImplementationOnce(((
+			_command: string,
+			cb: (err: Error | undefined, stream: unknown) => void,
+		) => cb(undefined, hanging)) as never);
+		const promise = sshExec(client, "hanging-cmd", 500);
+		vi.advanceTimersByTime(499);
+		expect(hanging.close).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+
+		await expect(promise).rejects.toThrow("SSH exec timed out after 500ms: hanging-cmd");
+		expect(hanging.close).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes a channel the server opens only once the command was given up on", async () => {
+		const stream = new MockSshStream();
+		let open: (err: Error | undefined, stream: MockSshStream) => void = () => {};
+		const client = {
+			exec: vi.fn((_command: string, cb: typeof open) => {
+				open = cb;
+			}),
+		} as unknown as SshClient;
+
+		const promise = sshExec(client, "late-cmd", 500);
+		vi.advanceTimersByTime(500 + SHELL_START_CEILING_MS);
+		await expect(promise).rejects.toThrow("SSH exec timed out");
+
+		open(undefined, stream);
+		expect(stream.close).toHaveBeenCalledTimes(1);
 	});
 
 	// A PowerShell DefaultShell loads the account's profile before every

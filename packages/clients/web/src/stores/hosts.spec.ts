@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "./auth.js";
 import { SELECTED_HOST_KEY, useHostsStore } from "./hosts.js";
+import { useToastStore } from "./toast.js";
 
 function hostRow(id: string, label: string, type = "ssh"): Record<string, unknown> {
 	return {
@@ -216,18 +217,25 @@ describe("stop-keeping store", () => {
 	});
 });
 
-describe("a host's save, refused (#703)", () => {
-	/** The hub's answer to the next request: a refusal in its own words, or a body. */
-	function answerOnce(status: number, body: unknown): void {
-		fetchStub.mockImplementationOnce(
-			async () =>
-				new Response(body === undefined ? null : JSON.stringify(body), {
-					status,
-					headers: { "Content-Type": "application/json" },
-				}),
-		);
-	}
+/** The hub's answer to the next request: a refusal in its own words, or a body. */
+function answerOnce(status: number, body: unknown): void {
+	fetchStub.mockImplementationOnce(
+		async () =>
+			new Response(body === undefined ? null : JSON.stringify(body), {
+				status,
+				headers: { "Content-Type": "application/json" },
+			}),
+	);
+}
 
+/** No answer to the next request: the hub is gone. */
+function noAnswerOnce(): void {
+	fetchStub.mockImplementationOnce(async () => {
+		throw new TypeError("Failed to fetch");
+	});
+}
+
+describe("a host's save, refused (#703)", () => {
 	it("hands back the hub's code and message for a label already taken", async () => {
 		const store = load();
 		await store.fetchHosts();
@@ -344,5 +352,304 @@ describe("the name of a host's group (#731)", () => {
 		expect(store.getHostGroupName({ id: "a", hostGroupId: null } as never)).toBeNull();
 		expect(store.getHostGroupName({ id: "b" } as never)).toBeNull();
 		expect(store.getHostGroupName({ id: "c", hostGroupId: "gone" } as never)).toBeNull();
+	});
+});
+
+describe("host and group actions, refused (#734)", () => {
+	const STAMP = "2026-01-01T00:00:00Z";
+	const prod = { id: "g1", name: "Prod", sortOrder: 0, createdAt: STAMP, updatedAt: STAMP };
+	const lab = { id: "g2", name: "Lab", sortOrder: 1, createdAt: STAMP, updatedAt: STAMP };
+
+	const ids = (store: ReturnType<typeof useHostsStore>): string[] => store.hosts.map((h) => h.id);
+	const place = (store: ReturnType<typeof useHostsStore>, id: string) => {
+		const host = store.hosts.find((h) => h.id === id);
+		return { sortOrder: host?.sortOrder, hostGroupId: host?.hostGroupId ?? null };
+	};
+
+	describe("deleteHost", () => {
+		it("hands back the hub's reason, and keeps the host", async () => {
+			const store = load();
+			await store.fetchHosts();
+			answerOnce(409, {
+				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+			});
+
+			expect(await store.deleteHost("pi")).toEqual({
+				ok: false,
+				status: 409,
+				code: "HOST_BUSY",
+				message: "This host's agent is being stopped.",
+			});
+			expect(ids(store)).toEqual(["local", "pi", "nas"]);
+		});
+
+		it("removes the host once the hub deleted it", async () => {
+			const store = load();
+			await store.fetchHosts();
+			answerOnce(204, undefined);
+
+			expect(await store.deleteHost("pi")).toEqual({ ok: true });
+			expect(ids(store)).toEqual(["local", "nas"]);
+		});
+
+		it("throws when the hub does not answer, for the dialog to say so", async () => {
+			const store = load();
+			await store.fetchHosts();
+			noAnswerOnce();
+
+			await expect(store.deleteHost("pi")).rejects.toThrow("Failed to fetch");
+			expect(ids(store)).toEqual(["local", "pi", "nas"]);
+		});
+	});
+
+	describe("duplicateHost", () => {
+		it("hands back the hub's reason, and adds nothing", async () => {
+			const store = load();
+			await store.fetchHosts();
+			answerOnce(400, {
+				error: { code: "VALIDATION_ERROR", message: "Host not found or cannot be duplicated" },
+			});
+
+			expect(await store.duplicateHost("pi")).toMatchObject({
+				ok: false,
+				message: "Host not found or cannot be duplicated",
+			});
+			expect(ids(store)).toEqual(["local", "pi", "nas"]);
+		});
+
+		it("hands back the copy and adds it", async () => {
+			const store = load();
+			await store.fetchHosts();
+			answerOnce(201, hostRow("pi2", "Pi (copy)"));
+
+			expect(await store.duplicateHost("pi")).toMatchObject({
+				ok: true,
+				host: { id: "pi2", label: "Pi (copy)" },
+			});
+			expect(ids(store)).toEqual(["local", "pi", "nas", "pi2"]);
+		});
+	});
+
+	describe("moveHostToGroup", () => {
+		it("hands back the hub's reason, and leaves the host where it was", async () => {
+			const store = load();
+			await store.fetchHosts();
+			answerOnce(404, { error: { code: "NOT_FOUND", message: "Host not found" } });
+
+			expect(await store.moveHostToGroup("pi", "g1")).toMatchObject({
+				ok: false,
+				message: "Host not found",
+			});
+			expect(place(store, "pi").hostGroupId).toBeNull();
+		});
+
+		it("moves the host once the hub stored it", async () => {
+			const store = load();
+			await store.fetchHosts();
+			answerOnce(200, { ...hostRow("pi", "Pi"), host_group_id: "g1" });
+
+			expect(await store.moveHostToGroup("pi", "g1")).toEqual({ ok: true });
+			expect(place(store, "pi").hostGroupId).toBe("g1");
+		});
+	});
+
+	describe("renameHostGroup and deleteHostGroup", () => {
+		it("hand back the hub's reason, and keep the group as it was", async () => {
+			const store = load();
+			store.hostGroups = [{ ...prod }];
+			answerOnce(409, {
+				error: { code: "CONFLICT", message: "Host group with this name already exists" },
+			});
+			expect(await store.renameHostGroup("g1", "Lab")).toMatchObject({
+				ok: false,
+				code: "CONFLICT",
+				message: "Host group with this name already exists",
+			});
+			expect(store.hostGroups).toEqual([prod]);
+
+			answerOnce(404, { error: { code: "NOT_FOUND", message: "Host group not found" } });
+			expect(await store.deleteHostGroup("g1")).toMatchObject({
+				ok: false,
+				message: "Host group not found",
+			});
+			expect(store.hostGroups).toEqual([prod]);
+		});
+
+		it("rename and delete once the hub did", async () => {
+			const store = load();
+			store.hostGroups = [{ ...prod }];
+			answerOnce(200, { id: "g1", name: "Live" });
+			expect(await store.renameHostGroup("g1", "Live")).toEqual({ ok: true });
+			expect(store.hostGroups[0]?.name).toBe("Live");
+
+			answerOnce(204, undefined);
+			expect(await store.deleteHostGroup("g1")).toEqual({ ok: true });
+			expect(store.hostGroups).toEqual([]);
+		});
+
+		it("throw when the hub does not answer", async () => {
+			const store = load();
+			store.hostGroups = [{ ...prod }];
+			noAnswerOnce();
+			await expect(store.renameHostGroup("g1", "Live")).rejects.toThrow("Failed to fetch");
+			noAnswerOnce();
+			await expect(store.deleteHostGroup("g1")).rejects.toThrow("Failed to fetch");
+			expect(store.hostGroups).toEqual([prod]);
+		});
+	});
+
+	describe("reorderHosts", () => {
+		/** Ungrouped pi (0) and nas (1), to drag nas before pi. */
+		async function loaded(): Promise<ReturnType<typeof useHostsStore>> {
+			hostRows = [
+				hostRow("local", "This machine", "local"),
+				{ ...hostRow("pi", "Pi"), sort_order: 0 },
+				{ ...hostRow("nas", "NAS"), sort_order: 1 },
+			];
+			const store = load();
+			await store.fetchHosts();
+			return store;
+		}
+
+		/** The hub's answer to the next request, held until the spec gives it. */
+		function heldAnswer(): (res: Response) => void {
+			let give: (res: Response) => void = () => {};
+			fetchStub.mockImplementationOnce(() => new Promise<Response>((resolve) => (give = resolve)));
+			return (res) => give(res);
+		}
+
+		it("shows the new order at once, and keeps it once the hub stored it", async () => {
+			const store = await loaded();
+			const give = heldAnswer();
+
+			const answer = store.reorderHosts(null, ["nas", "pi"]);
+			expect(place(store, "nas").sortOrder).toBe(0);
+			expect(place(store, "pi").sortOrder).toBe(1);
+
+			give(new Response(null, { status: 204 }));
+			expect(await answer).toEqual({ ok: true });
+			expect(place(store, "nas").sortOrder).toBe(0);
+			expect(place(store, "pi").sortOrder).toBe(1);
+		});
+
+		it("takes back an order the hub refused, and hands back why", async () => {
+			const store = await loaded();
+			answerOnce(400, {
+				error: { code: "VALIDATION_ERROR", message: "host_ids must be a non-empty array" },
+			});
+
+			expect(await store.reorderHosts("g1", ["nas", "pi"])).toMatchObject({
+				ok: false,
+				message: "host_ids must be a non-empty array",
+			});
+			expect(place(store, "pi")).toEqual({ sortOrder: 0, hostGroupId: null });
+			expect(place(store, "nas")).toEqual({ sortOrder: 1, hostGroupId: null });
+		});
+
+		it("takes it back when the hub does not answer, and throws", async () => {
+			const store = await loaded();
+			noAnswerOnce();
+
+			await expect(store.reorderHosts(null, ["nas", "pi"])).rejects.toThrow("Failed to fetch");
+			expect(place(store, "pi").sortOrder).toBe(0);
+			expect(place(store, "nas").sortOrder).toBe(1);
+		});
+
+		it("takes back only the place and group, keeping what changed meanwhile", async () => {
+			const store = await loaded();
+			const give = heldAnswer();
+
+			const answer = store.reorderHosts(null, ["nas", "pi"]);
+			const pi = store.hosts.find((h) => h.id === "pi");
+			if (pi) store.replaceCachedHost({ ...pi, label: "Pi 5" });
+			give(new Response(null, { status: 503 }));
+
+			expect(await answer).toMatchObject({ ok: false, message: "The hub answered 503." });
+			expect(store.hosts.find((h) => h.id === "pi")).toMatchObject({ label: "Pi 5", sortOrder: 0 });
+		});
+	});
+
+	describe("reorderHostGroups", () => {
+		it("takes back an order the hub refused, and hands back why", async () => {
+			const store = load();
+			store.hostGroups = [{ ...prod }, { ...lab }];
+			answerOnce(400, {
+				error: { code: "VALIDATION_ERROR", message: "group_ids must include every host group" },
+			});
+
+			expect(await store.reorderHostGroups(["g2", "g1"])).toMatchObject({
+				ok: false,
+				message: "group_ids must include every host group",
+			});
+			expect(store.hostGroups.map((g) => g.id)).toEqual(["g1", "g2"]);
+		});
+
+		it("takes it back when the hub does not answer, and throws", async () => {
+			const store = load();
+			store.hostGroups = [{ ...prod }, { ...lab }];
+			noAnswerOnce();
+
+			await expect(store.reorderHostGroups(["g2", "g1"])).rejects.toThrow("Failed to fetch");
+			expect(store.hostGroups.map((g) => g.id)).toEqual(["g1", "g2"]);
+		});
+
+		it("keeps the new order once the hub stored it", async () => {
+			const store = load();
+			store.hostGroups = [{ ...prod }, { ...lab }];
+			answerOnce(200, { ok: true });
+
+			expect(await store.reorderHostGroups(["g2", "g1"])).toEqual({ ok: true });
+			expect(store.hostGroups.map((g) => g.id)).toEqual(["g2", "g1"]);
+		});
+	});
+
+	describe("fetchHostGroups", () => {
+		const toasts = (): string[] => useToastStore().messages.map((m) => m.text);
+
+		it("hands back the hub's reason", async () => {
+			const store = load();
+			answerOnce(500, { error: { code: "INTERNAL", message: "database is locked" } });
+
+			expect(await store.fetchHostGroups()).toMatchObject({
+				ok: false,
+				status: 500,
+				message: "database is locked",
+			});
+		});
+
+		it("says in a toast why the rail's groups did not load, and still loads the hosts", async () => {
+			const store = load();
+			answerOnce(200, hostRows);
+			answerOnce(500, { error: { code: "INTERNAL", message: "database is locked" } });
+
+			await store.fetchHosts();
+
+			expect(ids(store)).toEqual(["local", "pi", "nas"]);
+			expect(toasts()).toEqual(["database is locked"]);
+		});
+
+		it("says so when the hub does not answer for the groups", async () => {
+			const store = load();
+			answerOnce(200, hostRows);
+			noAnswerOnce();
+
+			await store.fetchHosts();
+
+			expect(ids(store)).toEqual(["local", "pi", "nas"]);
+			expect(toasts()).toEqual(["Could not reach the hub: Failed to fetch"]);
+		});
+
+		it("says nothing when they load", async () => {
+			const store = load();
+			answerOnce(200, hostRows);
+			answerOnce(200, [
+				{ id: "g1", name: "Prod", sort_order: 0, created_at: STAMP, updated_at: STAMP },
+			]);
+
+			await store.fetchHosts();
+
+			expect(store.hostGroups.map((g) => g.name)).toEqual(["Prod"]);
+			expect(toasts()).toEqual([]);
+		});
 	});
 });

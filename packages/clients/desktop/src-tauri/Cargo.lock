@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "lasterm-desktop"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "base64 0.23.1",
  "dirs",

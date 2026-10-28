@@ -447,13 +447,28 @@ async fn held_back(daemon: &DaemonShared, owner: &OwnerId, channel_id: &str, don
     let watch = |most: &mut usize| {
         *most = (*most).max(pending_bytes(daemon, owner));
     };
-    // Until the daemon holds the high mark for this hub: its terminals are
-    // held back from then on. The stream's buffer is smaller than the gap
-    // between the marks, so the writer filling it cannot resume them.
+    // The terminals stop at the high mark. The writer may still move up to
+    // the stream's buffer onto the stream afterwards, so what the daemon is
+    // seen to hold can settle that much lower. The buffer is smaller than the
+    // gap between the marks: filling it cannot resume them.
     const { assert!(STREAM_BUFFER < TEST_MARKS.high - TEST_MARKS.low) };
+    let stopped_at = TEST_MARKS.high - STREAM_BUFFER;
+    // Until what the daemon holds has reached that and stopped moving: a
+    // terminal that prints, however slowly, keeps it moving. On Linux the
+    // whole climb takes less than a look, on Windows ConPTY takes its time.
+    const STEADY: Duration = Duration::from_millis(500);
     let settle = tokio::time::Instant::now() + DEADLINE;
-    while most < TEST_MARKS.high && !done.exists() && tokio::time::Instant::now() < settle {
-        watch(&mut most);
+    let mut last = usize::MAX;
+    let mut steady_since = tokio::time::Instant::now();
+    while !done.exists() && tokio::time::Instant::now() < settle {
+        let now = pending_bytes(daemon, owner);
+        most = most.max(now);
+        if now != last {
+            last = now;
+            steady_since = tokio::time::Instant::now();
+        } else if now >= stopped_at && steady_since.elapsed() >= STEADY {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let before = last_number_on_screen(daemon, channel_id).await;
@@ -479,7 +494,7 @@ async fn held_back(daemon: &DaemonShared, owner: &OwnerId, channel_id: &str, don
         "the daemon held {most} bytes for a hub that reads nothing"
     );
     assert!(
-        most >= TEST_MARKS.high,
+        most >= stopped_at,
         "the daemon held at most {most} bytes, short of the high mark: the terminal never filled it"
     );
 }

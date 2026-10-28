@@ -33,9 +33,15 @@ jobs:
           cache: "pnpm"
       # The compiler and its components come from rust-toolchain.toml (#248).
       - run: rustup toolchain install
+      # Every rust-cache here and in build.yml is saved from main only (#741): a
+      # pull request's cache serves only that pull request, while every pull
+      # request restores main's, and saving one from each kept the repository
+      # over its 10 GB cache limit. The jobs here need no key of their own:
+      # rust-cache already keys each one on its job id and runner OS.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # These are the upstream Tauri v2 Linux build dependencies. Keep the
       # WebKit driver and Xvfb alongside them: the next step requires both to
       # launch a real renderer rather than silently falling back to a unit test.
@@ -83,6 +89,9 @@ jobs:
   lint-desktop-windows:
     name: Clippy (desktop, Windows)
     runs-on: windows-latest
+    # Each timeout here is about two to three times the job's slowest
+    # successful run up to October 2026, as in build.yml (#741).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The compiler and its components come from rust-toolchain.toml (#248).
@@ -90,6 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Tauri resolves externalBin while compiling. Clippy neither executes nor
       # packages the sidecars, so empty files are sufficient for that lookup.
       - name: Prepare Tauri sidecar placeholders
@@ -117,6 +127,7 @@ jobs:
   lint-tls-identity-windows:
     name: Clippy (tls identity, Windows)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -128,6 +139,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: crates/lasterm-tls-identity
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # napi's Windows build script locates libnode.dll through PATH. setup-node
       # puts the selected Node installation, including that DLL, on PATH.
       - name: Clippy
@@ -137,6 +149,7 @@ jobs:
   licenses:
     name: License compliance
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust dependency licenses (cargo-deny, root workspace)

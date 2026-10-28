@@ -9,6 +9,7 @@ import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { windowsLaunchCommand } from "./agent-deployer.js";
 import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
+import { sshExec } from "./ssh-exec.js";
 
 // ─── Mock agent-deployer.js for Fix B deploy-fallback tests ─────────────────
 // The mock is hoisted but defaults to letting the real module through. Tests
@@ -812,6 +813,153 @@ describe("SshAgent", () => {
 		const { hello } = await agent.start(fp);
 		expect(hello.type).toBe("HELLO");
 	}, 15_000);
+
+	// ─── What the remote shell prints before the agent (#749) ────────────────
+	// A PowerShell DefaultShell runs the account's profile before every command,
+	// the agent's included, and cmd.exe its AutoRun: whatever they print reaches
+	// the hub ahead of the agent's first frame.
+
+	/** What a chatty profile prints: text, a prompt module's escapes, and bytes that look like a frame's start. */
+	const PROFILE_PRELUDE = Buffer.concat([
+		Buffer.from("Loading personal and system profiles took 6012ms.\r\n"),
+		Buffer.from("\u001b]0;posh\u0007\u001b[32mWelcome, Zoë\u001b[0m\r\n"),
+		// A length prefix of 5, then a msgpack map that is no HELLO; then one
+		// whose length runs over the real frame.
+		Buffer.from([5, 0, 0, 0, 0x81, 0xa1, 0x61, 0xa1, 0x62, 0x40, 0, 0, 0]),
+	]);
+
+	it("skips what the remote shell printed before the agent's HELLO (#749)", async () => {
+		const hello = makeHelloFrame();
+		const after = Buffer.from(encodeFrame({ type: "HEARTBEAT_ACK", ts: "after" }));
+		const { server, port } = await createMockSshServer((stream) => {
+			// In pieces, as a pipe hands them on: the profile's bytes, then HELLO
+			// cut in two, the second half with the frame after it.
+			stream.write(PROFILE_PRELUDE);
+			setTimeout(() => stream.write(hello.subarray(0, 3)), 50);
+			setTimeout(() => stream.write(Buffer.concat([hello.subarray(3), after])), 100);
+		});
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port, { os: "windows" });
+		const agent = new SshAgent(makeHost(port, { os: "windows" }));
+		agents.push(agent);
+		const messages: ProtocolMessage[] = [];
+		agent.on("message", (message: ProtocolMessage) => messages.push(message));
+
+		const { hello: received } = await agent.start(fp);
+
+		expect(received).toEqual(HELLO_MSG);
+		await vi.waitFor(() => expect(messages.map((m) => m.type)).toEqual(["HELLO", "HEARTBEAT_ACK"]));
+		expect(messages[1]).toEqual({ type: "HEARTBEAT_ACK", ts: "after" });
+	}, 15_000);
+
+	it.each([
+		["windows", "check the PowerShell profile of zoë"],
+		["linux", "check the shell startup files of zoë"],
+	] as const)(
+		"names the shell and the account when a %s host prints past the limit, never saying HELLO (#749)",
+		async (os, check) => {
+			const { server, port } = await createMockSshServer((stream) => {
+				const line = Buffer.from(`${"profile output ".repeat(7)}\r\n`);
+				const chunk = Buffer.concat(Array.from({ length: 64 }, () => line));
+				for (let i = 0; i < 24; i++) stream.write(chunk);
+			});
+			servers.push(server);
+
+			const fp = await getServerFingerprint(port, { os });
+			const agent = new SshAgent(makeHost(port, { os, sshUser: "zoë" }));
+			agents.push(agent);
+
+			const error = await agent.start(fp).catch((error: unknown) => error);
+
+			expect((error as Error).message).toMatch(
+				new RegExp(
+					`^Agent HELLO not found: the remote shell printed \\d+ bytes before the agent started; ${check}$`,
+				),
+			);
+			const bytes = Number(/printed (\d+) bytes/.exec((error as Error).message)?.[1]);
+			expect(bytes).toBeGreaterThan(128 * 1024);
+		},
+		15_000,
+	);
+
+	it("says what the shell printed when the channel closes before HELLO (#749)", async () => {
+		const { server, port } = await createMockSshServer((stream) => {
+			const channel = stream as NodeJS.ReadWriteStream & { exit: (code: number) => void };
+			stream.write("Welcome!\r\n");
+			setTimeout(() => {
+				channel.exit(1);
+				stream.end();
+			}, 50);
+		});
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port, { os: "windows" });
+		const agent = new SshAgent(makeHost(port, { os: "windows", sshUser: "zoe" }));
+		agents.push(agent);
+
+		await expect(agent.start(fp)).rejects.toThrow(
+			"Agent channel closed before HELLO: the remote shell printed 10 bytes before the agent started; check the PowerShell profile of zoe",
+		);
+	}, 15_000);
+
+	it("says what the shell printed when HELLO does not come in time (#749)", async () => {
+		const { server, port } = await createMockSshServer((stream) => {
+			stream.write(PROFILE_PRELUDE);
+		});
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port);
+		const agent = new SshAgent(makeHost(port, { sshUser: "zoe" }));
+		agents.push(agent);
+
+		await expect(agent.start(fp)).rejects.toThrow(
+			`Agent HELLO timeout: the remote shell printed ${PROFILE_PRELUDE.length} bytes before the agent started; check the shell startup files of zoe`,
+		);
+	}, 10_000);
+
+	// Every command pays the shell's start-up, the agent's too: the deploy's
+	// first command measured it, and the HELLO wait adds it (#749).
+	it("waits for HELLO as long again as the deploy's first command took (#749)", async () => {
+		const { deployAgentIfNeeded } = await import("./agent-deployer.js");
+		vi.mocked(deployAgentIfNeeded).mockImplementationOnce(async (client) => {
+			await sshExec(client, "first command");
+			return {
+				deployed: false,
+				remoteMatchesHubVersionCache: false,
+				remotePath: "lasterm-agent",
+				os: "linux",
+				arch: "x64",
+			};
+		});
+		const { server, port } = await createMockSshServer((stream, command) => {
+			const channel = stream as NodeJS.ReadWriteStream & { exit: (code: number) => void };
+			if (command === "first command") {
+				// A shell that takes three seconds to start.
+				setTimeout(() => {
+					channel.exit(0);
+					stream.end();
+				}, 3_000);
+				return;
+			}
+			// The agent says HELLO past 5 s, within 5 s and the shell's three.
+			setTimeout(() => {
+				try {
+					stream.write(makeHelloFrame());
+				} catch {
+					// The connection is gone: the assertion below says so.
+				}
+			}, 6_500);
+		});
+		servers.push(server);
+
+		const fp = await getServerFingerprint(port);
+		const agent = new SshAgent(makeHost(port), undefined, { binaryCache: "/tmp/fake-cache" });
+		agents.push(agent);
+
+		const { hello } = await agent.start(fp);
+		expect(hello.type).toBe("HELLO");
+	}, 20_000);
 
 	it(
 		"close() terminates the SSH channel and connection",

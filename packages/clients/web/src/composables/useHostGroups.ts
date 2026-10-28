@@ -18,7 +18,18 @@ export interface UngroupedSection {
 	hosts: Host[];
 }
 
-export type HostSection = HostGroupSection | UngroupedSection;
+/**
+ * Hosts in a group this window does not know, most often because the groups
+ * could not be loaded (#758). They were in no section at all, so out of reach
+ * until a reload. They stay apart from the ungrouped hosts, which they are
+ * not: a reorder there would take them out of their group.
+ */
+export interface UnknownGroupSection {
+	type: "unknown-group";
+	hosts: Host[];
+}
+
+export type HostSection = HostGroupSection | UnknownGroupSection | UngroupedSection;
 
 function loadCollapsedGroups(): Set<string> {
 	try {
@@ -60,6 +71,7 @@ export function useHostGroups() {
 			const hosts = (byGroupId.get(group.id) ?? [])
 				.slice()
 				.sort((a, b) => a.sortOrder - b.sortOrder);
+			byGroupId.delete(group.id);
 			result.push({
 				type: "group",
 				id: group.id,
@@ -67,6 +79,13 @@ export function useHostGroups() {
 				hosts,
 				collapsed: collapsedGroups.value.has(group.id),
 			});
+		}
+
+		// What is left is in groups this window does not know (#758), after the
+		// known ones: each group's hosts together, in the hub's order.
+		const unknown = [...byGroupId.values()].flat();
+		if (unknown.length > 0) {
+			result.push({ type: "unknown-group", hosts: unknown });
 		}
 
 		// Ungrouped at the bottom

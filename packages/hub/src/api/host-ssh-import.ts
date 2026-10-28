@@ -46,14 +46,9 @@ export function validateSshConfigImportEntries(body: unknown): SshConfigImportVa
 		) {
 			return { error: "sshRemoteDaemon must be a boolean or null when provided" };
 		}
-		const hostGroup = value.hostGroup;
-		if (hostGroup !== undefined && typeof hostGroup !== "string") {
-			return { error: "hostGroup must be a string when provided" };
-		}
 		entries.push({
 			name: value.name,
 			label: value.label,
-			...(hostGroup !== undefined && { hostGroup }),
 			...(sshRemoteDaemon !== undefined && { sshRemoteDaemon }),
 		});
 	}
@@ -178,7 +173,6 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 					// Kept as written for now; the pass below links it to a host of
 					// this list when one turns out to be that bastion.
 					...(sshEntry.proxyJump != null ? { sshProxySpec: sshEntry.proxyJump } : {}),
-					...(entry.hostGroup !== undefined && { hostGroup: entry.hostGroup }),
 					...(entry.sshRemoteDaemon !== undefined && {
 						sshRemoteDaemon: entry.sshRemoteDaemon,
 					}),

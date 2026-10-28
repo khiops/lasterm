@@ -21,9 +21,7 @@ export function normalizeSettingsBackgroundMode(value: unknown): BackgroundMode 
 
 export function normalizeSettingsWindowEffect(value: unknown): WindowEffect {
 	if (
-		value === "auto" ||
 		value === "mica" ||
-		value === "blur" ||
 		value === "acrylic" ||
 		value === "vibrancy-under-window" ||
 		value === "vibrancy-sidebar" ||

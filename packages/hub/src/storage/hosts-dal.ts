@@ -8,7 +8,6 @@ import type {
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
 import type Database from "better-sqlite3";
-import { normalizeFingerprint } from "../ssh/fingerprint.js";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import type { CreateHostInput } from "./meta-types.js";
@@ -30,7 +29,6 @@ interface HostRow {
 	trust_remote_hints: string;
 	default_shell: string | null;
 	default_cwd: string | null;
-	host_group: string | null;
 	host_group_id: string | null;
 	sort_order: number;
 	ssh_config_host: string | null;
@@ -84,7 +82,6 @@ function rowToHost(row: HostRow): Host {
 	if (row.profile_json != null) host.profileJson = row.profile_json;
 	if (row.default_shell != null) host.defaultShell = row.default_shell;
 	if (row.default_cwd != null) host.defaultCwd = row.default_cwd;
-	if (row.host_group != null) host.hostGroup = row.host_group;
 	if (row.host_group_id != null) host.hostGroupId = row.host_group_id;
 	if (row.ssh_config_host != null) host.sshConfigHost = row.ssh_config_host;
 	if (row.ssh_user != null) host.sshUser = row.ssh_user;
@@ -100,12 +97,10 @@ function rowToHost(row: HostRow): Host {
 	if (row.custom_command != null) host.customCommand = row.custom_command;
 	if (row.agent_sha256 != null) host.agentSha256 = row.agent_sha256;
 	// ssh_fingerprint is always set (null = not yet seen)
-	host.sshFingerprint =
-		row.ssh_fingerprint === null ? null : normalizeFingerprint(row.ssh_fingerprint);
+	host.sshFingerprint = row.ssh_fingerprint;
 	if (row.ssh_proxy_host_id != null) host.sshProxyHostId = row.ssh_proxy_host_id;
 	if (row.ssh_proxy_spec != null) host.sshProxySpec = row.ssh_proxy_spec;
-	if (row.ssh_proxy_fingerprint != null)
-		host.sshProxyFingerprint = normalizeFingerprint(row.ssh_proxy_fingerprint);
+	if (row.ssh_proxy_fingerprint != null) host.sshProxyFingerprint = row.ssh_proxy_fingerprint;
 	if (row.ssh_remote_daemon != null) host.sshRemoteDaemon = row.ssh_remote_daemon === 1;
 	return host;
 }
@@ -138,7 +133,7 @@ export class HostsDAL {
 				id, type, label, ssh_host, ssh_port, ssh_auth, ssh_key_path,
 				icon_type, icon_value, color, profile_json, trust_remote_hints,
 				default_shell, default_cwd,
-				host_group, host_group_id, sort_order, ssh_config_host, ssh_user,
+				host_group_id, sort_order, ssh_config_host, ssh_user,
 				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon,
 				elevation_method, custom_command,
 				os, arch,
@@ -147,7 +142,7 @@ export class HostsDAL {
 				?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?,
 				?, ?,
-				?, ?, ?, ?, ?,
+				?, ?, ?, ?,
 				?, ?, ?,
 				?, ?,
 				?, ?,
@@ -169,7 +164,6 @@ export class HostsDAL {
 				input.trustRemoteHints ?? "apply",
 				input.defaultShell ?? null,
 				input.defaultCwd ?? null,
-				input.hostGroup ?? null,
 				input.hostGroupId ?? null,
 				input.sortOrder ?? 0,
 				input.sshConfigHost ?? null,
@@ -218,12 +212,11 @@ export class HostsDAL {
 	listHosts(limit?: number, offset?: number): Host[] {
 		// Local hosts first, and among several the oldest first (#658): a client
 		// shows the first as the local host, which is the one the hub uses.
-		// '~' sorts after all alphanumeric chars in ASCII, placing ungrouped hosts last.
+		// Then by sort_order: a client groups them by host_group_id itself.
 		const order = `ORDER BY
 				CASE WHEN type = 'local' THEN 0 ELSE 1 END,
 				CASE WHEN type = 'local' THEN created_at END ASC,
 				CASE WHEN type = 'local' THEN rowid END ASC,
-				COALESCE(host_group, '~') ASC,
 				sort_order ASC`;
 		const sql =
 			limit !== undefined
@@ -265,7 +258,6 @@ export class HostsDAL {
 				trustRemoteHints: "trust_remote_hints",
 				defaultShell: "default_shell",
 				defaultCwd: "default_cwd",
-				hostGroup: "host_group",
 				hostGroupId: "host_group_id",
 				sortOrder: "sort_order",
 				sshConfigHost: "ssh_config_host",
@@ -445,7 +437,6 @@ export class HostsDAL {
 			}),
 			...(original.defaultShell !== undefined && { defaultShell: original.defaultShell }),
 			...(original.defaultCwd !== undefined && { defaultCwd: original.defaultCwd }),
-			...(original.hostGroup != null && { hostGroup: original.hostGroup }),
 			...(original.sshConfigHost != null && { sshConfigHost: original.sshConfigHost }),
 			...(original.sshUser != null && { sshUser: original.sshUser }),
 			...(original.sshRemoteDaemon !== undefined && {
@@ -539,47 +530,6 @@ export class HostsDAL {
 					.prepare("UPDATE host_groups SET sort_order = ?, updated_at = ? WHERE id = ?")
 					.run(i, now, groupIds[i]);
 			}
-		});
-		txn();
-	}
-
-	migrateHostGroupData(): void {
-		const txn = this.db.transaction(() => {
-			// Find distinct legacy host_group strings
-			const distinctGroups = this.db
-				.prepare(
-					"SELECT DISTINCT host_group FROM hosts WHERE host_group IS NOT NULL AND host_group != ''",
-				)
-				.all() as Array<{ host_group: string }>;
-
-			const now = new Date().toISOString();
-			for (const { host_group } of distinctGroups) {
-				// Check if an entity already exists for this name
-				const existing = this.db
-					.prepare("SELECT id FROM host_groups WHERE name = ?")
-					.get(host_group) as { id: string } | undefined;
-				if (!existing) {
-					const newId = generateId();
-					const maxRow = this.db
-						.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort FROM host_groups")
-						.get() as { next_sort: number };
-					this.db
-						.prepare(
-							`INSERT INTO host_groups (id, name, sort_order, color, created_at, updated_at)
-							VALUES (?, ?, ?, NULL, ?, ?)`,
-						)
-						.run(newId, host_group, maxRow.next_sort, now, now);
-				}
-			}
-
-			// Update host_group_id for all hosts that have a legacy host_group
-			this.db
-				.prepare(
-					`UPDATE hosts
-					SET host_group_id = (SELECT id FROM host_groups WHERE name = hosts.host_group)
-					WHERE host_group IS NOT NULL AND host_group != '' AND host_group_id IS NULL`,
-				)
-				.run();
 		});
 		txn();
 	}

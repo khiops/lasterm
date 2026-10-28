@@ -110,8 +110,6 @@ export interface PanesConfig {
 }
 
 export interface ChannelsConfig {
-	/** Default shell for new channels. Default: system shell */
-	defaultShell?: string;
 	/** Name for the ungrouped channels bucket. Default: "General" */
 	defaultGroupName?: string;
 	/** Auto-assign new channels to a group. Default: "none" */
@@ -163,10 +161,6 @@ export interface KeyboardConfig {
 	 * rail, the list or the tab bar. Global only. Default: true
 	 */
 	keyHints?: boolean;
-}
-
-export interface HostsDefaultsConfig {
-	defaultShell?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +421,7 @@ export const TABS_CONFIG_KEYS = [
 
 export const PANES_CONFIG_KEYS = ["maxPanes", "keepEnded"] as const;
 
-export const CHANNELS_CONFIG_KEYS = ["defaultShell", "defaultGroupName", "autoGroup"] as const;
+export const CHANNELS_CONFIG_KEYS = ["defaultGroupName", "autoGroup"] as const;
 
 export const STARTUP_CONFIG_KEYS = ["autoOpenWelcome"] as const;
 

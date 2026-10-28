@@ -8,8 +8,8 @@
 //! - **Material** — created opaque, with the webview's own background cleared,
 //!   so DWM paints Mica or Acrylic behind the page. Windows draws these
 //!   materials for a window, and skips a window that carries per-pixel alpha:
-//!   asking for both is how mica, acrylic and blur ended up indistinguishable
-//!   and none of them see-through (#62).
+//!   asking for both is how the materials ended up indistinguishable and none
+//!   of them see-through (#62).
 //!
 //! `transparent` is fixed when a window is created, so moving between the two
 //! rebuilds the main window rather than restarting the app.
@@ -28,10 +28,7 @@ pub const EFFECT_NONE: &str = "none";
 
 /// Whether an effect is one of the Windows materials DWM paints for a window.
 fn is_windows_material(effect: &str) -> bool {
-    matches!(
-        effect,
-        "mica" | "micaDark" | "micaLight" | "tabbed" | "acrylic"
-    )
+    matches!(effect, "mica" | "acrylic")
 }
 
 /// The surface an effect needs on this platform.
@@ -71,20 +68,13 @@ mod tests {
 
     #[test]
     fn windows_materials_need_a_window_dwm_will_paint() {
-        for effect in ["mica", "micaDark", "micaLight", "tabbed", "acrylic"] {
+        for effect in ["mica", "acrylic"] {
             assert_eq!(
                 surface_for(effect, true),
                 WindowSurface::Material,
                 "{effect}"
             );
         }
-    }
-
-    // Blur is the legacy accent, drawn into the window rather than behind it,
-    // and it is the one effect that still composes with per-pixel alpha.
-    #[test]
-    fn blur_stays_on_the_alpha_surface() {
-        assert_eq!(surface_for("blur", true), WindowSurface::Alpha);
     }
 
     #[test]
@@ -103,7 +93,7 @@ mod tests {
     #[test]
     fn one_material_for_another_lands_at_once() {
         assert!(!needs_restart("mica", "acrylic", true));
-        assert!(!needs_restart("acrylic", "tabbed", true));
+        assert!(!needs_restart("acrylic", "mica", true));
     }
 
     // Nothing moves the window off its surface there, so nothing waits.

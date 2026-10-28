@@ -185,10 +185,6 @@ export class MetaDAL {
 		this.hosts.reorderHostGroups(groupIds);
 	}
 
-	migrateHostGroupData(): void {
-		this.hosts.migrateHostGroupData();
-	}
-
 	getHostProfile(id: string): string | null {
 		return this.hosts.getHostProfile(id);
 	}

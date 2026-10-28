@@ -1,1 +1,0 @@
-ALTER TABLE channels ADD COLUMN process_title TEXT DEFAULT NULL;

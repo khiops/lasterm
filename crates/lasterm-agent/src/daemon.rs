@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::batch::{batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender};
+use crate::away::AwayQueue;
+use crate::batch::{batch_loop, BatchedEvent, ChannelEventSender};
+use crate::flow::{Flows, InTransit, Marks};
 use crate::framing::{encode_frame, FrameReader};
-use crate::handler::{handle_message, FrameSender, SnapshotSenders};
+use crate::handler::{handle_message, FrameSender, Outgoing, SnapshotSenders};
 use crate::owner::{ct_eq, OwnerId};
 use crate::platform_dirs::{lasterm_dir, DirKind};
 use crate::protocol::{error_codes, AgentToHub, HubToAgent};
@@ -25,8 +27,6 @@ use crate::pty::{DestroyAllSummary, PtyManager};
 const BIND_RETRY_MAX: u32 = 3;
 #[cfg(unix)]
 const BIND_RETRY_DELAY_MS: u64 = 300;
-/// How many frames each hub's queue keeps while that hub has no connection.
-const MAX_FRAME_QUEUE: usize = 1000;
 /// How long a daemon with a token waits for AUTH before dropping a connection.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a daemon without a token waits for the frame after HELLO.
@@ -141,31 +141,54 @@ struct ActiveConnection {
 
 /// Where each hub's frames go: its current connection, or while it has none,
 /// its own queue. One hub's frames never reach another (#127).
+///
+/// A hub's flow follows its current connection: what that connection has yet
+/// to write holds the hub's terminals back, and nothing else does (#553).
 #[derive(Default)]
 struct HubRoutes {
     connections: HashMap<OwnerId, ActiveConnection>,
-    queues: HashMap<OwnerId, VecDeque<Vec<u8>>>,
+    queues: HashMap<OwnerId, AwayQueue>,
+    flows: Flows,
 }
 
 type Routes = Arc<Mutex<HubRoutes>>;
 
 impl HubRoutes {
-    /// Send a frame to `owner`'s connection, or keep it for the next one.
-    fn route(&mut self, owner: &OwnerId, frame: Vec<u8>) {
+    fn new(flows: Flows) -> Self {
+        Self {
+            connections: HashMap::new(),
+            queues: HashMap::new(),
+            flows,
+        }
+    }
+
+    /// Send a frame of `channel_id` to `owner`'s connection, charged to it
+    /// until written, or keep it for the next one. A kept frame is charged to
+    /// nothing: the away queue has bounds of its own, and a terminal whose hub
+    /// is away runs on.
+    fn route(
+        &mut self,
+        owner: &OwnerId,
+        channel_id: &str,
+        frame: Vec<u8>,
+        charge: Option<InTransit>,
+    ) {
         let frame = match self.connections.get(owner) {
-            Some(active) => match active.frame_tx.send(frame) {
-                Ok(()) => return,
-                // Its writer is gone while it is still registered: the hub
-                // went away and the read loop has not seen it yet.
-                Err(mpsc::error::SendError(frame)) => frame,
-            },
+            Some(active) => {
+                let out = Outgoing::charged(frame, charge, active.connection_id);
+                match active.frame_tx.send(out) {
+                    Ok(()) => return,
+                    // Its writer is gone while it is still registered: the hub
+                    // went away and the read loop has not seen it yet.
+                    Err(mpsc::error::SendError(out)) => out.into_frame(),
+                }
+            }
             None => frame,
         };
-        let queue = self.queues.entry(owner.clone()).or_default();
-        if queue.len() >= MAX_FRAME_QUEUE {
-            queue.pop_front();
-        }
-        queue.push_back(frame);
+        self.queues
+            .entry(owner.clone())
+            .or_default()
+            .push(channel_id, frame);
     }
 }
 
@@ -203,11 +226,21 @@ impl DaemonShared {
                 "no auth token found — connections accepted without authentication (first-run)"
             );
         }
+        Self::with_pipeline(expected_token, pty_manager, shutdown, Marks::DEFAULT)
+    }
 
-        let (channel_events, channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+    /// Start the pipeline, holding a hub's terminals back at `marks`.
+    fn with_pipeline(
+        expected_token: Option<String>,
+        pty_manager: Arc<Mutex<PtyManager>>,
+        shutdown: ShutdownReceiver,
+        marks: Marks,
+    ) -> Self {
+        let flows = Flows::new(marks);
+        let (channel_events, channel_events_rx) = ChannelEventSender::new(flows.clone());
         let (batched_tx, batched_rx) = mpsc::unbounded_channel::<BatchedEvent>();
         tokio::spawn(batch_loop(channel_events_rx, batched_tx));
-        let routes: Routes = Arc::new(Mutex::new(HubRoutes::default()));
+        let routes: Routes = Arc::new(Mutex::new(HubRoutes::new(flows)));
         spawn_output_router(batched_rx, Arc::clone(&routes));
 
         Self {
@@ -233,7 +266,9 @@ impl DaemonShared {
 /// the acknowledgement of its STOP.
 async fn disconnect_all(routes: &Routes) {
     let mut routes = routes.lock().await;
-    for (_, active) in routes.connections.drain() {
+    let ended: Vec<(OwnerId, ActiveConnection)> = routes.connections.drain().collect();
+    for (owner, active) in ended {
+        routes.flows.of(&owner).detach(active.connection_id);
         active.cancel.send_replace(true);
     }
 }
@@ -854,10 +889,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut read_half, mut write_half) = tokio::io::split(stream);
-    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Outgoing>();
     let (cancel, _) = watch::channel(false);
 
-    // Spawn writer task — drains frame_rx to the write half
+    // Spawn writer task — drains frame_rx to the write half. A terminal's
+    // frame stays charged to its hub until written: a hub that stops reading
+    // holds its terminals back here, and only them (#553).
     let mut cancel_rx = cancel.subscribe();
     tokio::spawn(async move {
         loop {
@@ -869,8 +906,8 @@ where
                     // cancellation, and a writer that stopped here would drop
                     // the only thing that explains the EOF the other end is
                     // about to read (#127).
-                    while let Ok(data) = frame_rx.try_recv() {
-                        if write_half.write_all(&data).await.is_err() {
+                    while let Ok(out) = frame_rx.try_recv() {
+                        if write_half.write_all(&out.frame).await.is_err() {
                             break;
                         }
                         if write_half.flush().await.is_err() {
@@ -882,8 +919,8 @@ where
                 }
                 frame = frame_rx.recv() => {
                     match frame {
-                        Some(data) => {
-                            if write_half.write_all(&data).await.is_err() {
+                        Some(out) => {
+                            if write_half.write_all(&out.frame).await.is_err() {
                                 break;
                             }
                             if write_half.flush().await.is_err() {
@@ -1245,15 +1282,23 @@ async fn register_active(
         let _ = send_encoded(&old.frame_tx, &notice);
         old.cancel.send_replace(true);
     }
+    // From now on, this connection's queue is what holds the hub's terminals
+    // back. Whatever the replaced one still holds, stuck on a socket nobody
+    // reads, no longer does (#553).
+    let flow = routes.flows.of(owner);
+    flow.attach(connection_id);
     if let Some(queued) = routes.queues.remove(owner) {
+        let (frames, dropped_bytes) = queued.drain();
         tracing::debug!(
             connection_id,
             owner = owner.short(),
-            queued = queued.len(),
+            queued = frames.len(),
+            dropped_bytes,
             "sending what this hub's terminals said while it was away"
         );
-        for frame in queued {
-            let _ = frame_tx.send(frame);
+        for frame in frames {
+            let charge = flow.queue(connection_id, frame.len());
+            let _ = frame_tx.send(Outgoing::queued(frame, charge));
         }
     }
     routes.connections.insert(
@@ -1275,15 +1320,20 @@ async fn clear_active_if_ours(routes: &Routes, owner: &OwnerId, our_cancel: &Can
         .get(owner)
         .is_some_and(|active| active.cancel.same_channel(our_cancel))
     {
-        routes.connections.remove(owner);
+        if let Some(active) = routes.connections.remove(owner) {
+            routes.flows.of(owner).detach(active.connection_id);
+        }
     }
 }
 
 /// Encode a message and push the frame bytes into the frame channel.
-fn send_encoded(tx: &FrameSender, msg: &AgentToHub) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+fn send_encoded(
+    tx: &FrameSender,
+    msg: &AgentToHub,
+) -> Result<(), mpsc::error::SendError<Outgoing>> {
     match encode_frame(msg) {
-        Ok(frame) => tx.send(frame),
-        Err(_) => Err(mpsc::error::SendError(vec![])),
+        Ok(frame) => tx.send(Outgoing::reply(frame)),
+        Err(_) => Err(mpsc::error::SendError(Outgoing::reply(vec![]))),
     }
 }
 
@@ -1292,14 +1342,19 @@ fn send_encoded(tx: &FrameSender, msg: &AgentToHub) -> Result<(), mpsc::error::S
 /// Drains what the batch loop hands on — every channel's output, and its exit,
 /// title, bell, notification and log frames — and forwards each to the current
 /// connection of the hub that owns the channel, whichever connection spawned it
-/// (#549). While that hub has none, its own queue keeps up to MAX_FRAME_QUEUE
-/// frames, dropping the oldest; `register_active` sends them on (#127).
+/// (#549), charged to that connection until written (#553). While that hub has
+/// none, its own away queue keeps each channel's newest output, within bounds
+/// (`away.rs`); `register_active` sends it on (#127).
 fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, routes: Routes) {
     tokio::spawn(async move {
         while let Some(event) = batched_rx.recv().await {
-            let owner = event.owner().clone();
-            if let Ok(frame) = event.into_frame() {
-                routes.lock().await.route(&owner, frame);
+            if let Ok(routed) = event.into_routed() {
+                routes.lock().await.route(
+                    &routed.owner,
+                    &routed.channel_id,
+                    routed.frame,
+                    routed.charge,
+                );
             }
         }
     });
@@ -2329,12 +2384,13 @@ mod tests {
     /// A daemon's shared state with no listener, for connections over
     /// in-memory streams.
     fn in_memory_daemon(expected_token: Option<&str>) -> DaemonShared {
-        let (channel_events, _nobody_reads) = mpsc::unbounded_channel::<ChannelEvent>();
+        let flows = Flows::default();
+        let (channel_events, _nobody_reads) = ChannelEventSender::new(flows.clone());
         DaemonShared {
             pty_manager: Arc::new(Mutex::new(PtyManager::new())),
             cmd_senders: Arc::new(Mutex::new(HashMap::new())),
             channel_events,
-            routes: Arc::new(Mutex::new(HubRoutes::default())),
+            routes: Arc::new(Mutex::new(HubRoutes::new(flows))),
             expected_token: expected_token.map(str::to_owned),
             shutdown: shutdown_channel().1,
         }
@@ -2344,12 +2400,12 @@ mod tests {
     /// what cancels it, and what it would write to its hub.
     struct Incumbent {
         cancelled: watch::Receiver<bool>,
-        frames: mpsc::UnboundedReceiver<Vec<u8>>,
+        frames: mpsc::UnboundedReceiver<Outgoing>,
     }
 
     async fn incumbent(daemon: &DaemonShared, owner: &OwnerId, connection_id: u64) -> Incumbent {
         let (cancel, cancelled) = watch::channel(false);
-        let (frame_tx, frames) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (frame_tx, frames) = mpsc::unbounded_channel::<Outgoing>();
         register_active(&daemon.routes, owner, connection_id, &cancel, &frame_tx).await;
         Incumbent { cancelled, frames }
     }
@@ -2450,7 +2506,7 @@ mod tests {
             .frames
             .try_recv()
             .expect("told why before being cut");
-        assert!(notice.windows(9).any(|w| w == b"DISPLACED"));
+        assert!(notice.frame.windows(9).any(|w| w == b"DISPLACED"));
 
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(5), handler).await;
@@ -4109,3 +4165,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "daemon_backpressure_tests.rs"]
+mod backpressure_tests;

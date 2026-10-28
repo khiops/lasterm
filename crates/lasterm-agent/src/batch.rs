@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::flow::{Flow, Flows, InTransit};
 use crate::framing::encode_frame;
 use crate::handler::iso_now;
 use crate::owner::OwnerId;
@@ -13,6 +15,8 @@ pub struct OutputEvent {
     pub channel_id: String,
     pub seq: u64,
     pub data: Vec<u8>,
+    /// What these bytes count against their hub's connection (#553).
+    pub charge: InTransit,
 }
 
 /// A frame about a channel other than its output (CHANNEL_EXIT, TITLE_CHANGE,
@@ -24,6 +28,8 @@ pub struct EventFrame {
     pub frame: Vec<u8>,
     /// The channel's last frame: its CHANNEL_EXIT. Nothing of it follows.
     pub ends_channel: bool,
+    /// What this frame counts against its hub's connection (#553).
+    pub charge: InTransit,
 }
 
 /// What a channel's reader task sends towards the hub.
@@ -38,8 +44,31 @@ pub enum ChannelEvent {
     Frame(EventFrame),
 }
 
-/// Sender half of the pipeline every channel reader writes to.
-pub type ChannelEventSender = mpsc::UnboundedSender<ChannelEvent>;
+/// Sender half of the pipeline every channel reader writes to, and the flow
+/// of each hub its readers charge what they read to (#553).
+#[derive(Clone)]
+pub struct ChannelEventSender {
+    tx: mpsc::UnboundedSender<ChannelEvent>,
+    flows: Flows,
+}
+
+impl ChannelEventSender {
+    pub(crate) fn new(flows: Flows) -> (Self, mpsc::UnboundedReceiver<ChannelEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx, flows }, rx)
+    }
+
+    /// The flow `owner`'s terminals charge their output to.
+    pub(crate) fn flow(&self, owner: &OwnerId) -> Arc<Flow> {
+        self.flows.of(owner)
+    }
+
+    /// Hand an event on. Nothing to do once the pipeline is gone: the agent
+    /// is ending, and the event's charge goes with it.
+    pub fn send(&self, event: ChannelEvent) {
+        let _ = self.tx.send(event);
+    }
+}
 
 /// Batched output ready to be encoded and sent to the hub.
 pub struct BatchedOutput {
@@ -48,6 +77,8 @@ pub struct BatchedOutput {
     /// The seq of the last OutputEvent merged into this batch.
     pub seq: u64,
     pub data: Vec<u8>,
+    /// The charges of the OutputEvents merged into this batch.
+    pub charge: Option<InTransit>,
 }
 
 /// What leaves the batch loop, in the order the hub must receive it.
@@ -57,27 +88,39 @@ pub enum BatchedEvent {
 }
 
 impl BatchedEvent {
-    /// The hub this goes to.
-    pub fn owner(&self) -> &OwnerId {
+    /// The frame to write to the hub, with its channel and its charge. OUTPUT
+    /// is stamped with the time it leaves; an event was encoded by the reader
+    /// that saw it.
+    pub fn into_routed(self) -> std::io::Result<RoutedFrame> {
         match self {
-            BatchedEvent::Output(b) => &b.owner,
-            BatchedEvent::Frame(event) => &event.owner,
-        }
-    }
-
-    /// The frame to write to the hub. OUTPUT is stamped with the time it
-    /// leaves; an event was encoded by the reader that saw it.
-    pub fn into_frame(self) -> std::io::Result<Vec<u8>> {
-        match self {
-            BatchedEvent::Output(b) => encode_frame(&AgentToHub::Output {
+            BatchedEvent::Output(b) => Ok(RoutedFrame {
+                frame: encode_frame(&AgentToHub::Output {
+                    channel_id: b.channel_id.clone(),
+                    seq: b.seq,
+                    ts: iso_now(),
+                    data: b.data,
+                })?,
+                owner: b.owner,
                 channel_id: b.channel_id,
-                seq: b.seq,
-                ts: iso_now(),
-                data: b.data,
+                charge: b.charge,
             }),
-            BatchedEvent::Frame(event) => Ok(event.frame),
+            BatchedEvent::Frame(event) => Ok(RoutedFrame {
+                owner: event.owner,
+                channel_id: event.channel_id,
+                frame: event.frame,
+                charge: Some(event.charge),
+            }),
         }
     }
+}
+
+/// A frame on its way to the hub that owns its channel.
+pub struct RoutedFrame {
+    pub owner: OwnerId,
+    pub channel_id: String,
+    pub frame: Vec<u8>,
+    /// What it counts against that hub's connection until it is written.
+    pub charge: Option<InTransit>,
 }
 
 const BATCH_INTERVAL_MS: u64 = 16;
@@ -87,6 +130,7 @@ struct ChannelBuffer {
     owner: OwnerId,
     data: Vec<u8>,
     last_seq: u64,
+    charge: Option<InTransit>,
 }
 
 impl ChannelBuffer {
@@ -100,6 +144,7 @@ impl ChannelBuffer {
             channel_id: channel_id.to_owned(),
             seq: self.last_seq,
             data: std::mem::take(&mut self.data),
+            charge: self.charge.take(),
         })
     }
 }
@@ -121,6 +166,7 @@ impl Batcher {
                             owner: e.owner.clone(),
                             data: Vec::new(),
                             last_seq: 0,
+                            charge: None,
                         });
                 // A restart reuses its channel's id. Whatever the previous
                 // workload left goes out under its own owner first.
@@ -132,6 +178,10 @@ impl Batcher {
                 }
                 buf.data.extend_from_slice(&e.data);
                 buf.last_seq = e.seq;
+                match &mut buf.charge {
+                    Some(charge) => charge.absorb(e.charge),
+                    None => buf.charge = Some(e.charge),
+                }
                 if buf.data.len() >= BATCH_MAX_BYTES {
                     if let Some(batch) = buf.take(&e.channel_id) {
                         let _ = tx.send(BatchedEvent::Output(batch));
@@ -196,12 +246,18 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
+    /// A charge on a flow nothing waits on.
+    fn charge(bytes: usize) -> InTransit {
+        Flow::new(crate::flow::Marks::DEFAULT).read(bytes)
+    }
+
     fn output(channel_id: &str, seq: u64, data: &[u8]) -> ChannelEvent {
         ChannelEvent::Output(OutputEvent {
             owner: OwnerId::legacy(),
             channel_id: channel_id.into(),
             seq,
             data: data.to_vec(),
+            charge: charge(data.len()),
         })
     }
 
@@ -211,6 +267,7 @@ mod tests {
             channel_id: channel_id.into(),
             frame: frame.to_vec(),
             ends_channel: false,
+            charge: charge(frame.len()),
         })
     }
 
@@ -220,6 +277,7 @@ mod tests {
             channel_id: channel_id.into(),
             frame: b"exit".to_vec(),
             ends_channel: true,
+            charge: charge(4),
         })
     }
 
@@ -349,6 +407,7 @@ mod tests {
                 channel_id: "reused".into(),
                 seq: 1,
                 data: data.to_vec(),
+                charge: charge(data.len()),
             })
         };
 

@@ -803,7 +803,7 @@ mod tests {
         use tokio::sync::{mpsc, Mutex};
 
         use super::*;
-        use crate::batch::ChannelEvent;
+        use crate::batch::ChannelEventSender;
         use crate::handler::{handle_message, SnapshotSenders};
         use crate::protocol::HubToAgent;
 
@@ -1060,7 +1060,8 @@ mod tests {
                 spawn_background_workload(&mut guard, "destroy-message-tree".to_string()).await
             };
             let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
-            let (channel_events, _channel_events_rx) = mpsc::unbounded_channel::<ChannelEvent>();
+            let (channel_events, _channel_events_rx) =
+                ChannelEventSender::new(crate::flow::Flows::default());
             let cmd_senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
 
             // There is deliberately no reader task here, so this test cannot

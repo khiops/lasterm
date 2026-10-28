@@ -1118,9 +1118,13 @@ fn seven_digit_numbers(output: &[u8]) -> Vec<usize> {
 /// the program printed arrives, once and in order (#553).
 #[tokio::test]
 async fn a_hub_that_stops_reading_stdout_holds_its_terminal_back() {
-    // 8 bytes a line, 3 MiB: more than twice what the agent holds before it
-    // stops reading (1 MiB), the stdout pipe and the PTY's own buffers together.
-    const LINES: usize = 384 * 1024;
+    // 8 bytes a line, 2 MiB: well over what the agent holds before it stops
+    // reading (1 MiB), the stdout pipe and the PTY's own buffers together (up
+    // to 256 KiB more in ConPTY's pump on Windows).
+    const LINES: usize = 256 * 1024;
+    // Longer than an agent reading on takes to see all of it through ConPTY,
+    // the slowest of the PTYs.
+    const HOLD: Duration = Duration::from_secs(5);
     let dir = std::env::temp_dir().join(format!(
         "lasterm-stdio-held-back-{}",
         ulid::Ulid::generate().to_string().to_lowercase()
@@ -1164,7 +1168,7 @@ async fn a_hub_that_stops_reading_stdout_holds_its_terminal_back() {
     assert_eq!(spawned["type"].as_str(), Some("SPAWN_OK"), "{spawned:?}");
 
     // Read nothing for a while: the program must stay blocked.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(HOLD).await;
     assert!(
         !done.exists(),
         "the program wrote everything to its terminal while nobody read the agent's \

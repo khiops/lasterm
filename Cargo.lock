@@ -109,11 +109,12 @@ dependencies = [
 [[package]]
 name = "async-xpty"
 version = "0.1.0"
-source = "git+https://github.com/khiops/async-xpty?rev=4836ce2d9548fe6591bdcde6cbde234e7ba3e046#4836ce2d9548fe6591bdcde6cbde234e7ba3e046"
+source = "git+https://github.com/khiops/async-xpty?rev=9635174f5f5fe80c0ba8b9ac6c9497cfd20cc865#9635174f5f5fe80c0ba8b9ac6c9497cfd20cc865"
 dependencies = [
  "libc",
  "nix",
  "tokio",
+ "tokio-util",
  "windows-sys 0.59.0",
 ]
 
@@ -1264,6 +1265,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

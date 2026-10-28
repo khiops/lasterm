@@ -85,7 +85,7 @@ CREATE TABLE hosts (
   default_cwd   TEXT,
   created_at  TEXT NOT NULL,                             -- ISO 8601
   updated_at  TEXT NOT NULL,
-  sort_order INTEGER DEFAULT 0,                          -- order within its group
+  sort_order INTEGER DEFAULT 0,                          -- order within its group; ties by creation
   ssh_config_host TEXT DEFAULT NULL,                     -- the ~/.ssh/config alias it came from
   ssh_user TEXT DEFAULT NULL,
   host_group_id TEXT REFERENCES host_groups(id) ON DELETE SET NULL,
@@ -419,10 +419,12 @@ Each DB has a `schema_version` table. On startup:
 ```
 1. Open DB
 2. Read schema_version.version
-3. If version < CURRENT_VERSION:
+3. If version is from 1 to the first migration's number less one (a baseline, § 9.3):
+   a. Refuse to start, naming the file and its version
+4. If version < CURRENT_VERSION:
    a. Run migration scripts in order (v1→v2, v2→v3, ...)
    b. Update schema_version
-4. If version > CURRENT_VERSION:
+5. If version > CURRENT_VERSION:
    a. Log "[storage] DB schema version ahead of latest migration - skipping"
    b. Open it as it is
 ```
@@ -454,6 +456,12 @@ Before the first public release, the 21 migrations of `meta.db` were squashed in
 number so that the runner leaves a database they brought to 21 as it is, rather than take it
 for one ahead of every migration and skip each one that follows (§ 9.1). A new database comes
 out at 21 with the baseline's schema, and the next migration is `022`.
+
+A database those migrations left at a version from 1 to 20 cannot be brought up to date: the
+migrations it lacks are gone, and the baseline applied over it would stop on a table it already
+has. The hub refuses it before it applies anything, and stops, naming the file and its version,
+which predates the first public release: move it aside to start fresh (#747). `spool.db`, whose
+first migration is `001`, is never refused this way.
 
 The baseline left out what nothing read: the hosts' `host_group`, the free-text group that
 host groups replaced, `keep_alive_seconds` and `history_retention_days`, two host settings
@@ -546,8 +554,6 @@ fast as it runs.
 - **Kept:** the `agent_files_kept` most recent files, by the date in their name. The hub passes
   the number to every daemon it starts, local or remote, as `--log-files-kept`. A change in
   Settings reaches a daemon when it next starts; one already running keeps the number it was given.
-  A remote agent older than the hub, which does not know the option, is started without it and
-  keeps its log as it always did.
 - **Deleted:** when the daemon starts, and when a new day's file starts. Only regular files named
   `agent-daemon.YYYY-MM-DD.jsonl` are deleted; nothing else in `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
   deletion) is said in a warning in the log, and tried again on the next of those occasions.

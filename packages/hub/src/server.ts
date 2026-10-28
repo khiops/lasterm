@@ -150,7 +150,8 @@ interface ServerBaseOptions {
 	/**
 	 * This hub's key, sent to every agent daemon in its AUTH so the daemon can
 	 * give this hub its own channels (#127). startHub always passes it; a server
-	 * built without one is a legacy hub to the daemon. Never logged.
+	 * built without one, as tests do, sends an empty key, which every daemon
+	 * refuses. Never logged.
 	 */
 	hubKey?: string;
 	ownerToken?: string; // shutdown-only owner token from runtime.json

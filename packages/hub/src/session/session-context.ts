@@ -292,7 +292,8 @@ export interface SharedSessionContext {
 	/**
 	 * This hub's key, from `hub-key` in its state directory: sent in the AUTH of
 	 * every daemon connection so the daemon gives this hub its own channels
-	 * (#127). Null for a manager built without one, as tests do. Never logged.
+	 * (#127). Null for a manager built without one, as tests do: its AUTH then
+	 * carries an empty key, which every daemon refuses. Never logged.
 	 */
 	hubKey: string | null;
 	/**

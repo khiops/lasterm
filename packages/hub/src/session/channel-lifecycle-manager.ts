@@ -21,7 +21,7 @@ import type {
 	UiSpawnOkMessage,
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@lasterm/shared";
-import { type AgentConnection, hasHubIdentity } from "./agent-connection.js";
+import type { AgentConnection } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
 import { HostUnreachableError, hostAwayDuringSpawn } from "./host-reachability.js";
 import {
@@ -1236,11 +1236,10 @@ export class ChannelLifecycleManager {
 			// already the way to this host, so a pane can start one before the
 			// list arrives, which is then not in it (#599).
 			const askedAt = this.askingAgent();
-			// A daemon that serves several hubs waits for this before it says
-			// what it holds, since what it says depends on who is asking (#127).
-			// It never gets this hub's token: see daemonAuthFrame.
-			const auth = daemonAuthFrame(agent, { token: null, hubKey: this.ctx.hubKey });
-			if (auth !== null) agent.send(auth);
+			// A daemon waits for this before it says what it holds, since what
+			// it says depends on who is asking (#127). It never gets this hub's
+			// token: see daemonAuthFrame.
+			agent.send(daemonAuthFrame({ token: null, hubKey: this.ctx.hubKey }));
 			this.reconcileChannelState(hostId, await agent.waitForChannelState(), agent, askedAt);
 			// The session was announced active before the daemon had said what
 			// other hubs hold there; say it now that it has.
@@ -1263,10 +1262,9 @@ export class ChannelLifecycleManager {
 	/**
 	 * Judge this host's channels against what the daemon reports holding.
 	 *
-	 * `agent` is the connection that reported them. When it has `hub-identity`,
-	 * everything it listed belongs to this hub (#127), so one this hub does not
-	 * know is its own orphan and is destroyed. Without that capability the
-	 * list may hold other hubs' channels, and anything unknown is left alone.
+	 * `agent` is the connection that reported them. A daemon lists only the
+	 * channels of the hub asking (#127), so one this hub does not know is its
+	 * own orphan and is destroyed.
 	 *
 	 * `askedAt` is when the list was asked for (`askingAgent`). The whole of
 	 * this judgement is made here, as the list arrives, before any pane can
@@ -1278,12 +1276,10 @@ export class ChannelLifecycleManager {
 	reconcileChannelState(
 		hostId: string,
 		states: AgentChannelStateMessage[],
-		agent?: AgentConnection,
+		agent: AgentConnection,
 		askedAt?: number,
 	): void {
-		if (agent !== undefined && hasHubIdentity(agent)) {
-			this.destroyOrphans(hostId, states, agent);
-		}
+		this.destroyOrphans(hostId, states, agent);
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
 
 		for (const [channelId, channelState] of this.ctx.channels) {
@@ -1331,10 +1327,9 @@ export class ChannelLifecycleManager {
 	/**
 	 * Destroy what a daemon holds for this hub that this hub does not know.
 	 *
-	 * Only an agent with `hub-identity` reaches here, and it reports only this
-	 * hub's channels, so nothing else will ever claim one this hub does not
-	 * know: a SPAWN whose answer was lost, a terminal closed while the daemon
-	 * was out of reach. Left alone, each keeps a shell running that nothing
+	 * A daemon reports only this hub's channels, so nothing else will ever
+	 * claim one this hub does not know: a SPAWN whose answer was lost, a
+	 * terminal closed while the daemon was out of reach. Left alone, each keeps a shell running that nothing
 	 * can see, until the daemon itself stops.
 	 *
 	 * Known means tracked here, whatever host it is filed under — two host

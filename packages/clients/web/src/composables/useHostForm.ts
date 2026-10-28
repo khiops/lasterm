@@ -21,6 +21,7 @@ export function proxyFields(
 }
 
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
+import { hubRefusal, hubUnreachable } from "../utils/hub-answer.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { getInitials } from "./useHostIcon.js";
@@ -120,6 +121,8 @@ export function useHostForm(editHost?: Host) {
 	const sshConfigHasInclude = ref(false);
 	const selectedSshConfigHost = ref<string>("");
 	const loadingSshConfig = ref(false);
+	/** Why the SSH config could not be read, as the hub said it, or that it did not answer (#734). */
+	const sshConfigError = ref<string | null>(null);
 
 	const testResult = ref<{
 		ok: boolean;
@@ -184,8 +187,14 @@ export function useHostForm(editHost?: Host) {
 		return true;
 	});
 
+	/**
+	 * Read the hub's SSH config for the host picker. No config file (404) is
+	 * an empty list; any other failure is said in `sshConfigError`, never
+	 * thrown (#734).
+	 */
 	async function loadSshConfig(): Promise<void> {
 		loadingSshConfig.value = true;
+		sshConfigError.value = null;
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/ssh-config`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
@@ -195,7 +204,8 @@ export function useHostForm(editHost?: Host) {
 					sshConfigEntries.value = [];
 					return;
 				}
-				throw new Error("Failed to load SSH config");
+				sshConfigError.value = (await hubRefusal(res)).message;
+				return;
 			}
 			const data = (await res.json()) as {
 				entries: SshConfigEntry[];
@@ -203,6 +213,8 @@ export function useHostForm(editHost?: Host) {
 			};
 			sshConfigEntries.value = data.entries;
 			sshConfigHasInclude.value = data.has_include;
+		} catch (error) {
+			sshConfigError.value = hubUnreachable(error);
 		} finally {
 			loadingSshConfig.value = false;
 		}
@@ -382,7 +394,7 @@ export function useHostForm(editHost?: Host) {
 			}
 			return answer.host;
 		} catch (error) {
-			saveError.value = `Could not reach the hub: ${error instanceof Error ? error.message : String(error)}`;
+			saveError.value = hubUnreachable(error);
 			return null;
 		} finally {
 			saving.value = false;
@@ -464,6 +476,7 @@ export function useHostForm(editHost?: Host) {
 		sshConfigHasInclude,
 		selectedSshConfigHost,
 		loadingSshConfig,
+		sshConfigError,
 		testResult,
 		testing,
 		saving,

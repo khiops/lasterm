@@ -210,7 +210,7 @@ describe("attachRemoteDaemon", () => {
 		});
 
 		const launch = commands.find((c) => c.includes("--daemon"));
-		expect(launch).toContain('set -- "$@" --log-files-kept 0; fi');
+		expect(launch).toMatch(/ --log-files-kept 0 && /);
 	});
 
 	it("says where it started the daemon, from what the launch printed", async () => {
@@ -290,38 +290,25 @@ describe("attachRemoteDaemon", () => {
 	});
 });
 
-// ─── A binary older than the hub (the Pi, on 2026-09-23) ─────────────────────
+// ─── The daemon's options ────────────────────────────────────────────────────
 //
-// A build of main carries the last release's version and deploys that release's
-// agent. The daemon launch passed `--idle-timeout`, added since: the 0.11.0
-// agent on the Pi answered "unexpected argument", exited, and the hub waited
-// for a socket that never came, then said only "Agent HELLO timeout".
+// A hub deploys the released agent of its version, a build of main the last
+// release's, and every agent it can deploy knows `--idle-timeout` (0.12) and
+// `--log-files-kept` (0.14): both are passed, and the binary is not asked first.
 
-describe("remoteDaemonLaunchCommand — an agent older than the hub", () => {
+describe("remoteDaemonLaunchCommand — the daemon's options", () => {
 	const paths = remoteDaemonPaths("/home/pi/.local/state/lasterm");
 
-	it("asks the binary whether it knows --idle-timeout before passing it", () => {
-		const cmd = remoteDaemonLaunchCommand({ agentPath: "/usr/bin/lasterm-agent", paths });
-		expect(cmd).toContain("/usr/bin/lasterm-agent --help");
-		expect(cmd).toContain("grep -q -- '--idle-timeout'");
-		expect(cmd).toContain(`--format jsonl --idle-timeout ${IDLE_TIMEOUT_SECONDS}; else set --`);
-		expect(cmd).toMatch(/--format jsonl; fi/);
-	});
-
-	it("asks it about --log-files-kept too, and appends it to what was set (#646)", () => {
+	it("passes --idle-timeout and --log-files-kept without asking the binary", () => {
 		const cmd = remoteDaemonLaunchCommand({
 			agentPath: "/usr/bin/lasterm-agent",
 			paths,
 			logFilesKept: 30,
 		});
+		expect(cmd).not.toContain("--help");
 		expect(cmd).toContain(
-			"/usr/bin/lasterm-agent --help 2> /dev/null | grep -q -- '--log-files-kept'; " +
-				'then set -- "$@" --log-files-kept 30; fi',
+			`--format jsonl --idle-timeout ${IDLE_TIMEOUT_SECONDS} --log-files-kept 30 && detach=`,
 		);
-		// Once the argv is set, and before the daemon is started with it.
-		const asked = cmd.indexOf("grep -q -- '--log-files-kept'");
-		expect(asked).toBeGreaterThan(cmd.indexOf("grep -q -- '--idle-timeout'"));
-		expect(asked).toBeLessThan(cmd.indexOf("detach="));
 	});
 
 	it("keeps seven files unless told otherwise, and passes a whole count, 0 included", () => {
@@ -330,7 +317,7 @@ describe("remoteDaemonLaunchCommand — an agent older than the hub", () => {
 				agentPath: "/usr/bin/lasterm-agent",
 				paths,
 				...(logFilesKept !== undefined && { logFilesKept }),
-			}).match(/--log-files-kept (\S+); fi/)?.[1];
+			}).match(/--log-files-kept (\S+) && /)?.[1];
 		expect(count()).toBe("7");
 		expect(count(0)).toBe("0");
 		expect(count(2.7)).toBe("2");
@@ -530,7 +517,6 @@ function toolOnThisMachine(name: string): string | null {
 
 function launchIn(
 	options: {
-		help?: string;
 		systemd?: FakeSystemd;
 		/** Part of the directory name, to put odd characters in every path. */
 		label?: string;
@@ -545,7 +531,7 @@ function launchIn(
 		const bin = path.join(root, "bin");
 		mkdirSync(bin);
 		// What the launch needs besides systemd's tools. `/bin/sh` it names itself.
-		for (const tool of ["mkdir", "chmod", "grep", "setsid", "nohup", "id"]) {
+		for (const tool of ["mkdir", "chmod", "setsid", "nohup", "id"]) {
 			const real = toolOnThisMachine(tool);
 			if (real !== null) symlinkSync(real, path.join(bin, tool));
 		}
@@ -576,7 +562,6 @@ function launchIn(
 		writeFileSync(
 			agent,
 			`#!/bin/sh
-if [ "$1" = "--help" ]; then printf '%s\\n' ${quotePosix(options.help ?? "      --idle-timeout <SECONDS>")}; exit 0; fi
 printf 'started\\n' >> ${quotePosix(starts)}
 printf '%s\\n' "$@" > ${quotePosix(argv)}
 `,
@@ -620,44 +605,15 @@ printf '%s\\n' "$@" > ${quotePosix(argv)}
 
 const systemdReady: FakeSystemd = { systemdRun: "works", linger: "yes", userManager: true };
 
-/** What `--help` prints in an agent that knows both options the launch asks about. */
-const HELP_WITH_FILES_KEPT = "      --idle-timeout <SECONDS>\n      --log-files-kept <COUNT>";
-
 describe.skipIf(!onPosix)("remoteDaemonLaunchCommand in a shell", () => {
-	it("starts an agent that does not know the option without it", () => {
-		const { argv } = launchIn({
-			help: "Usage: lasterm-agent [OPTIONS]  --daemon  --socket <SOCKET>",
-		});
-		expect(argv).toContain("--daemon");
-		expect(argv).not.toContain("--idle-timeout");
-	});
-
-	it("passes it to an agent that does", () => {
-		const { argv } = launchIn({ help: "      --idle-timeout <SECONDS>" });
-		expect(argv).toContain("--idle-timeout");
-		expect(argv).toContain(String(IDLE_TIMEOUT_SECONDS));
-	});
-
-	it("passes --log-files-kept, last, to an agent that knows it (#646)", () => {
-		const { argv } = launchIn({ help: HELP_WITH_FILES_KEPT, logFilesKept: 30 });
+	it("passes --idle-timeout, then --log-files-kept, last (#646)", () => {
+		const { argv } = launchIn({ logFilesKept: 30 });
 		expect(argv.slice(-4)).toEqual([
 			"--idle-timeout",
 			String(IDLE_TIMEOUT_SECONDS),
 			"--log-files-kept",
 			"30",
 		]);
-	});
-
-	it("starts an agent that does not know --log-files-kept without it", () => {
-		const { argv } = launchIn({ logFilesKept: 30 });
-		expect(argv).toContain("--idle-timeout");
-		expect(argv).not.toContain("--log-files-kept");
-	});
-
-	it("passes --log-files-kept to an agent that knows only it", () => {
-		const { argv } = launchIn({ help: "      --log-files-kept <COUNT>" });
-		expect(argv).not.toContain("--idle-timeout");
-		expect(argv.slice(-2)).toEqual(["--log-files-kept", "7"]);
 	});
 
 	it("with no systemd, starts it in the session, as before", () => {
@@ -676,6 +632,8 @@ describe.skipIf(!onPosix)("remoteDaemonLaunchCommand in a shell", () => {
 			"jsonl",
 			"--idle-timeout",
 			String(IDLE_TIMEOUT_SECONDS),
+			"--log-files-kept",
+			"7",
 		]);
 		expect(launch.starts).toBe(1);
 	});
@@ -767,7 +725,6 @@ describe.skipIf(zsh === null)("remoteDaemonLaunchCommand in zsh", () => {
 		for (const systemd of [systemdReady, undefined]) {
 			const { argv } = launchIn({
 				shell: [zsh ?? "", "-f"],
-				help: HELP_WITH_FILES_KEPT,
 				logFilesKept: 12,
 				...(systemd && { systemd }),
 			});

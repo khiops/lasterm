@@ -236,9 +236,6 @@ export async function connectOrLaunch(
  * in error messages when the socket never becomes available.
  */
 function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig): string {
-	// `--log-files-kept` unasked: the local agent ships with this hub, beside it
-	// or in the same build. A remote one may be older, and is asked first
-	// (`remoteDaemonLaunchCommand`).
 	const daemonArgs = [
 		"--daemon",
 		"--socket",

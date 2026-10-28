@@ -369,11 +369,9 @@ connection. A remote daemon is sent an empty token, since the hub's token never
 leaves its machine, so its boundary is the socket's directory alone (§ 3.4, PROTOCOL.md § 3.1b).
 
 **Connection model:**
-- An agent with the `hub-identity` capability serves several hubs at once, and every channel has
-  exactly one owner, the hub that spawned it. A new connection replaces only the same hub's previous
-  one (§ 3.6, PROTOCOL.md § 3.1b)
-- An agent without it serves one hub at a time: the newest authenticated connection displaces the
-  previous one, which is told so with `DISPLACED`
+- A daemon serves several hubs at once, and every channel has exactly one owner, the hub that
+  spawned it. A new connection replaces only the same hub's previous one, which is told so with
+  `DISPLACED` (§ 3.6, PROTOCOL.md § 3.1b)
 - Stale socket detection: a daemon removes a socket file nobody answers on before it binds, and
   refuses to take one that another daemon still serves (#454)
 

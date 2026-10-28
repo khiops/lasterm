@@ -1,15 +1,25 @@
 import type { UiSpawnMessage } from "@lasterm/shared";
 import { isValidDimensions, isValidEnv, isValidUlid, validateShell } from "@lasterm/shared";
 import { HostUnreachableError } from "../../session/host-reachability.js";
+import { answeringSpawn } from "../../session/session-manager.js";
 import type { WsHandlerContext } from "./types.js";
 
 export function handleSpawn(msg: UiSpawnMessage, ctx: WsHandlerContext): void {
-	const { client, clientId, log, sessionManager, writeLockManager } = ctx;
+	const { clientId, log, sessionManager, writeLockManager } = ctx;
 
 	log.debug(
 		{ hostId: msg.hostId, clientId, shell: msg.shell, cols: msg.cols, rows: msg.rows },
 		"spawn-handler: received SPAWN",
 	);
+
+	// Checked first, and refused without it: an id that is not one is not echoed.
+	if (msg.requestId !== undefined && !isValidUlid(msg.requestId)) {
+		ctx.client.send({ type: "ERROR", code: "INVALID_INPUT", message: "Invalid requestId" });
+		return;
+	}
+	// Everything that answers this SPAWN, here and in SessionManager.handleSpawn,
+	// carries its request id (#777).
+	const client = answeringSpawn(ctx.client, msg.requestId);
 
 	if (!isValidUlid(msg.hostId)) {
 		client.send({ type: "ERROR", code: "INVALID_INPUT", message: "Invalid hostId" });

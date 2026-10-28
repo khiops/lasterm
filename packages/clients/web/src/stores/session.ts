@@ -32,6 +32,13 @@ export const useSessionStore = defineStore("session", () => {
 	const authenticated = ref(false);
 	/** Set to true when AUTH_FAIL is received — triggers pairing screen. */
 	const authFailed = ref(false);
+	/**
+	 * Whether the hub this socket authenticated with echoes a SPAWN's request
+	 * id in every answer to it, as its AUTH_OK says (#777). A SPAWN then takes
+	 * an ERROR without its id as about something else; from an older hub, whose
+	 * answers name none, it matches them as before.
+	 */
+	const hubEchoesSpawnRequestId = ref(false);
 	/** Incremented each time the WS reconnects and re-authenticates successfully. */
 	const reconnectCount = ref(0);
 	/** Lifecycle unsubscribers — called in disconnect() to clean up. */
@@ -199,6 +206,7 @@ export const useSessionStore = defineStore("session", () => {
 					unsubOk();
 					unsubFail();
 					authStore.setClientId(msg.clientId);
+					hubEchoesSpawnRequestId.value = msg.echoesSpawnRequestId === true;
 					authenticated.value = true;
 					authFailed.value = false;
 					resolve();
@@ -606,6 +614,7 @@ export const useSessionStore = defineStore("session", () => {
 		connected,
 		authenticated,
 		authFailed,
+		hubEchoesSpawnRequestId,
 		currentChannelId,
 		reconnectCount,
 		connect,

@@ -128,6 +128,26 @@ export interface WsClient {
 	attachedChannels: Set<string>;
 }
 
+/**
+ * `client` as a SPAWN naming itself `requestId` is answered through it: the
+ * SPAWN_OK and every ERROR sent through it carry that id (#777).
+ *
+ * A window's socket carries every ERROR the hub has for it, an ATTACH refused
+ * or a write lock denied among them, and most name no host: the id is what
+ * tells the SPAWN's answer from the rest. Everything that answers one goes
+ * through the client its SPAWN is handled with, so this marks all of them,
+ * however deep in the spawn they are sent. Prompts go through it untouched.
+ */
+export function answeringSpawn(client: WsClient, requestId: string | undefined): WsClient {
+	if (requestId === undefined) return client;
+	return {
+		id: client.id,
+		attachedChannels: client.attachedChannels,
+		send: (msg) =>
+			client.send(msg.type === "ERROR" || msg.type === "SPAWN_OK" ? { ...msg, requestId } : msg),
+	};
+}
+
 const ATTACH_TIMEOUT_MS = 5_000;
 const AGENT_CLOSE_TIMEOUT_MS = 2_000;
 /** How long an agent has to say what its environment is (#576). */
@@ -767,11 +787,12 @@ export class SessionManager {
 
 	async handleSpawn(clientId: string, msg: UiSpawnMessage): Promise<string | null> {
 		this.ctx.hubLogger?.log("debug", "handleSpawn: start", { clientId, hostId: msg.hostId });
-		const client = this.ctx.clients.get(clientId);
-		if (!client) {
+		const connected = this.ctx.clients.get(clientId);
+		if (!connected) {
 			this.ctx.hubLogger?.log("debug", "handleSpawn: client not found", { clientId });
 			return null;
 		}
+		const client = answeringSpawn(connected, msg.requestId);
 		let spawnFence: QuitFence;
 		try {
 			spawnFence = captureQuitFence(this.ctx);

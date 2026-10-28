@@ -140,6 +140,16 @@ describe("WebSocket authentication against the token store", () => {
 			expect(failures()).toEqual([]);
 		});
 
+		// A client takes an ERROR without its SPAWN's request id as about
+		// something else only from a hub that says it echoes one (#777).
+		it("says in AUTH_OK that it echoes a SPAWN's request id", async () => {
+			const { observed } = await connect(TEST_TOKEN);
+
+			expect(observed.messages.find((msg) => msg.type === "AUTH_OK")).toMatchObject({
+				echoesSpawnRequestId: true,
+			});
+		});
+
 		it("still answers AUTH_FAIL to a token the store does not know", async () => {
 			const ws = await server.injectWS("/ws");
 			const observed = observe(ws);

@@ -42,6 +42,9 @@ pub enum AgentToHub {
     #[serde(rename = "ATTACH_OK")]
     AttachOk {
         channel_id: String,
+        /// The ATTACH's, echoed; absent when it had none (#767).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         snapshot: SnapshotData,
         last_seq: u64,
     },
@@ -96,6 +99,11 @@ pub enum AgentToHub {
         /// hold. Absent from every other ERROR, which stays as it was on the wire.
         #[serde(skip_serializing_if = "Option::is_none")]
         other_owner_channels: Option<u32>,
+        /// On the ERROR that answers an ATTACH only: that ATTACH's request id,
+        /// so that the hub tells it from an ERROR about the same channel for
+        /// another reason, an INPUT's (#767). Absent from every other ERROR.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     #[serde(rename = "LOG")]
     Log {
@@ -194,8 +202,15 @@ pub enum HubToAgent {
     },
     #[serde(rename = "SNAPSHOT_REQ")]
     SnapshotReq { channel_id: String },
+    /// `request_id` is echoed in the ATTACH_OK or the ERROR that answers it
+    /// (#767). Optional: a hub older than it, sharing this daemon, sends none
+    /// and is answered without one.
     #[serde(rename = "ATTACH")]
-    Attach { channel_id: String },
+    Attach {
+        channel_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     #[serde(rename = "DESTROY")]
     Destroy { channel_id: String },
     #[serde(rename = "HEARTBEAT")]
@@ -346,6 +361,28 @@ mod tests {
         assert!(error.to_string().contains("hub_key"), "{error}");
     }
 
+    /// A hub names its ATTACH so that the answer can say which it is (#767);
+    /// one older than that names none, and still decodes.
+    #[test]
+    fn attach_reads_its_request_id_when_there_is_one() {
+        match hub_frame(serde_json::json!({
+            "type": "ATTACH", "channel_id": "ch-1", "request_id": "r-1",
+        })) {
+            HubToAgent::Attach {
+                channel_id,
+                request_id,
+            } => {
+                assert_eq!(channel_id, "ch-1");
+                assert_eq!(request_id.as_deref(), Some("r-1"));
+            }
+            other => panic!("expected ATTACH, got {other:?}"),
+        }
+        match hub_frame(serde_json::json!({ "type": "ATTACH", "channel_id": "ch-1" })) {
+            HubToAgent::Attach { request_id, .. } => assert_eq!(request_id, None),
+            other => panic!("expected ATTACH, got {other:?}"),
+        }
+    }
+
     #[test]
     fn stop_reads_its_force_flag() {
         assert!(matches!(
@@ -367,6 +404,7 @@ mod tests {
             message: "channel ch-1 not found".into(),
             channel_id: Some("ch-1".into()),
             other_owner_channels: None,
+            request_id: None,
         })
         .unwrap();
         // The map an ERROR was before this field, key for key, in order.
@@ -393,6 +431,7 @@ mod tests {
             message: "2 terminals on this agent belong to other hubs".into(),
             channel_id: None,
             other_owner_channels: Some(2),
+            request_id: None,
         })
         .unwrap();
         let decoded: serde_json::Value = rmp_serde::from_slice(&refusal).unwrap();

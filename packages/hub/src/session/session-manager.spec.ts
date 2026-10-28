@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
+	AgentAttachMessage,
 	AgentSpawnMessage,
 	AuthPromptMessage,
 	ChannelCreatedMessage,
@@ -97,7 +98,7 @@ vi.mock("./agent-launcher.js", () => {
 					});
 				});
 			} else if (msg.type === "ATTACH") {
-				const attachMsg = msg as unknown as { channelId: string };
+				const attachMsg = msg as unknown as { channelId: string; requestId: string };
 				if (nextLocalAttachNotFoundChannelId === attachMsg.channelId) {
 					nextLocalAttachNotFoundChannelId = null;
 					setImmediate(() => {
@@ -106,6 +107,7 @@ vi.mock("./agent-launcher.js", () => {
 							code: "CHANNEL_NOT_FOUND",
 							message: `channel ${attachMsg.channelId} not found`,
 							channelId: attachMsg.channelId,
+							requestId: attachMsg.requestId,
 						});
 					});
 					return;
@@ -114,6 +116,7 @@ vi.mock("./agent-launcher.js", () => {
 					this.emit("message", {
 						type: "ATTACH_OK",
 						channelId: attachMsg.channelId,
+						requestId: attachMsg.requestId,
 						snapshot: {
 							serialized: "<mock-snapshot>",
 							cols: 80,
@@ -187,11 +190,12 @@ class MockSshAgent {
 				});
 			});
 		} else if (msg.type === "ATTACH") {
-			const attachMsg = msg as unknown as { channelId: string };
+			const attachMsg = msg as unknown as { channelId: string; requestId: string };
 			setImmediate(() => {
 				this._emit("message", {
 					type: "ATTACH_OK",
 					channelId: attachMsg.channelId,
+					requestId: attachMsg.requestId,
 					snapshot: {
 						serialized: "<mock-snapshot>",
 						cols: 80,
@@ -1447,6 +1451,146 @@ describe("SessionManager", () => {
 		const { MetaDAL } = await import("../storage/meta.js");
 		const dal = new MetaDAL(dbManager.meta);
 		expect(dal.getChannel(channelId)?.status).toBe("dead");
+	});
+
+	// ─── An ATTACH is answered by its own reply only (#767) ──────────────────
+	//
+	// While the hub waits on an ATTACH, the agent can speak of the same
+	// terminal for another reason: the input typed into it was dropped, or an
+	// INPUT reached it while it was gone. Neither answers the ATTACH, which
+	// used to take the first ERROR naming its channel for its own.
+	describe("an ATTACH waiting on its agent (#767)", () => {
+		type Emitter = { emit: (event: string, message: ProtocolMessage) => void };
+
+		/** A live terminal, and another window's ATTACH on it that its agent has not answered. */
+		async function attachWaiting() {
+			sm.addClient(makeClient("c-typing", []));
+			const channelId = await sm.handleSpawn("c-typing", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			const answer = agent.send.getMockImplementation() as
+				| ((msg: ProtocolMessage) => void)
+				| undefined;
+			const asked: AgentAttachMessage[] = [];
+			agent.send.mockImplementation((msg: ProtocolMessage) => {
+				if (msg.type === "ATTACH") asked.push(msg as AgentAttachMessage);
+				else answer?.(msg);
+			});
+
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-pane", received));
+			const attached = sm.handleAttach("c-pane", channelId);
+			await vi.waitFor(() => expect(asked).toHaveLength(1));
+			const [attach] = asked;
+			if (attach === undefined) throw new Error("expected an ATTACH");
+			return { channelId, agent: agent as unknown as Emitter, attach, attached, received };
+		}
+
+		function attachOk(channelId: string, requestId?: string): ProtocolMessage {
+			return {
+				type: "ATTACH_OK",
+				channelId,
+				...(requestId !== undefined && { requestId }),
+				snapshot: { serialized: "<live>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+				lastSeq: 0,
+			};
+		}
+
+		function channels(): Map<string, unknown> {
+			return (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx
+				.channels;
+		}
+
+		it("still attaches when the agent says the terminal's input was dropped", async () => {
+			const { channelId, agent, attach, attached, received } = await attachWaiting();
+
+			agent.emit("message", {
+				type: "ERROR",
+				code: "INPUT_DROPPED",
+				message: `input to channel ${channelId} dropped`,
+				channelId,
+			});
+			agent.emit("message", attachOk(channelId, attach.requestId));
+
+			expect(await attached).toBe(true);
+			expect(received).toContainEqual(
+				expect.objectContaining({ type: "ATTACH_OK", channelId, cached: false }),
+			);
+		});
+
+		it("still attaches, and keeps the terminal, when an INPUT is answered that it is not found", async () => {
+			const { channelId, agent, attach, attached, received } = await attachWaiting();
+
+			// What an INPUT gets that reached the agent before the terminal did.
+			agent.emit("message", {
+				type: "ERROR",
+				code: "CHANNEL_NOT_FOUND",
+				message: `channel ${channelId} not found`,
+				channelId,
+			});
+			agent.emit("message", attachOk(channelId, attach.requestId));
+
+			expect(await attached).toBe(true);
+			expect(received).toContainEqual(
+				expect.objectContaining({ type: "ATTACH_OK", channelId, cached: false }),
+			);
+			expect(received).not.toContainEqual(
+				expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD" }),
+			);
+			expect(channels().has(channelId)).toBe(true);
+		});
+
+		it("is answered by the error that carries its request id", async () => {
+			const { channelId, agent, attach, attached, received } = await attachWaiting();
+			expect(attach.requestId).toEqual(expect.any(String));
+
+			agent.emit("message", {
+				type: "ERROR",
+				code: "CHANNEL_NOT_FOUND",
+				message: `channel ${channelId} not found`,
+				channelId,
+				requestId: attach.requestId,
+			});
+
+			expect(await attached).toBe(false);
+			expect(received).toContainEqual(
+				expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId }),
+			);
+			expect(channels().has(channelId)).toBe(false);
+		});
+
+		// An agent from before request ids answers without one; an ATTACH_OK can
+		// answer nothing but an ATTACH, so its channel says which.
+		it("still attaches to an agent that does not echo the request id", async () => {
+			const { channelId, agent, attached, received } = await attachWaiting();
+
+			agent.emit("message", attachOk(channelId));
+
+			expect(await attached).toBe(true);
+			expect(received).toContainEqual(
+				expect.objectContaining({ type: "ATTACH_OK", channelId, cached: false }),
+			);
+		});
+
+		it("tells the windows showing the terminal that its input was dropped", async () => {
+			const { channelId, agent, attach, attached, received } = await attachWaiting();
+			agent.emit("message", attachOk(channelId, attach.requestId));
+			await attached;
+			const elsewhere: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-elsewhere", elsewhere));
+			received.length = 0;
+
+			agent.emit("message", {
+				type: "ERROR",
+				code: "INPUT_DROPPED",
+				message: `input to channel ${channelId} dropped`,
+				channelId,
+			});
+
+			expect(received).toEqual([{ type: "INPUT_DROPPED", channelId }]);
+			expect(elsewhere).toEqual([]);
+		});
 	});
 
 	it("handleAttach on orphan channel with reachable SSH agent: sends ATTACH to agent, stores snapshot, ATTACH_OK with snapshot+tail", async () => {
@@ -6642,7 +6786,7 @@ describe("SessionManager — Reconnect in a pane, after a restart (#556)", () =>
 			});
 			const attach = agent.send;
 			agent.send = vi.fn((msg: ProtocolMessage) => {
-				const { channelId } = msg as unknown as { channelId: string };
+				const { channelId, requestId } = msg as unknown as { channelId: string; requestId: string };
 				if (msg.type !== "ATTACH" || holds.includes(channelId)) {
 					attach(msg);
 					return;
@@ -6653,6 +6797,7 @@ describe("SessionManager — Reconnect in a pane, after a restart (#556)", () =>
 						code: "CHANNEL_NOT_FOUND",
 						message: `channel ${channelId} not found`,
 						channelId,
+						requestId,
 					});
 				});
 			});
@@ -7343,6 +7488,7 @@ describe("SessionManager — an answer about a terminal started again since (#59
 							? {
 									type: "ATTACH_OK",
 									channelId,
+									requestId,
 									snapshot: { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
 									lastSeq: 0,
 								}
@@ -7351,6 +7497,7 @@ describe("SessionManager — an answer about a terminal started again since (#59
 									code: "CHANNEL_NOT_FOUND",
 									message: `channel ${channelId} not found`,
 									channelId,
+									requestId,
 								},
 					);
 				}

@@ -2,9 +2,6 @@
 
 // PROTOCOL_VERSION is checked by AgentConnection.handleData with strict equality
 // (hub closes the connection if the Rust agent version does not match).
-// The AUTH_PROMPT/AUTH_PROMPT_RESPONSE promptId + deliveryEpoch fields and
-// PROMPT_CANCEL are additive optional additions — not a breaking wire change.
-// Do NOT bump until promptId becomes required (would reject un-updated Rust agents).
 export const PROTOCOL_VERSION = 1;
 export const MAX_FRAME_SIZE = 10 * 1024 * 1024; // 10 MB
 export const DEFAULT_PORT = 4100;

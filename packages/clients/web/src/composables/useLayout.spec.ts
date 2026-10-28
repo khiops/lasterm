@@ -1397,73 +1397,39 @@ describe("purgeOrphanedTabs (layout-aware)", () => {
 	});
 });
 
-// -- localStorage migration -------------------------------------------------------
+// -- localStorage persistence ------------------------------------------------------
 
-describe("localStorage migration (old format)", () => {
-	it("migrates old Tab { channelId, label } format to new { id } format", () => {
-		// Write old format to localStorage
-		const oldState = {
-			tabs: [
-				{ channelId: "ch-A", label: "Tab A" },
-				{ channelId: "ch-B", label: "Tab B" },
-			],
-			activeTabIndex: 1,
-			layouts: {
-				"ch-A": { type: "terminal", channelId: "ch-A", paneId: "p1" },
-				"ch-B": { type: "terminal", channelId: "ch-B", paneId: "p2" },
-			},
-		};
-		localStorage.setItem("lasterm:layout", JSON.stringify(oldState));
-
-		// Create a new layout instance — it should migrate
-		let migratedLayout: ReturnType<typeof useLayout> | undefined;
-		const migratedScope = effectScope();
-		migratedScope.run(() => {
-			migratedLayout = useLayout();
+describe("layout saved in localStorage", () => {
+	/** A layout instance read from what is in localStorage now. */
+	function reloaded(): { layout: ReturnType<typeof useLayout>; stop: () => void } {
+		const reloadScope = effectScope();
+		let fresh: ReturnType<typeof useLayout> | undefined;
+		reloadScope.run(() => {
+			fresh = useLayout();
 		});
+		if (!fresh) throw new Error("useLayout did not run");
+		return { layout: fresh, stop: () => reloadScope.stop() };
+	}
 
-		expect(migratedLayout).toBeDefined();
-		if (!migratedLayout) {
-			migratedScope.stop();
-			return;
+	// Max Panes goes up to 8 in Settings: a tab split past the default 4 comes
+	// back whole, not cut down to its first pane.
+	it("brings back a tab with more panes than the default limit", async () => {
+		const [tabId] = openTabs("A");
+		if (!tabId) throw new Error("expected a tab");
+		for (let i = 0; i < 5; i++) {
+			expect(layout.splitPane("ch-A", "vertical", 6)).toBe("split");
 		}
+		const saved = layout.layouts.value[tabId];
+		expect(saved ? countPanes(saved) : 0).toBe(6);
+		await nextTick();
 
-		// Should have 2 tabs with new id field
-		expect(migratedLayout.tabs.value).toHaveLength(2);
-		expect(migratedLayout.tabs.value[0]).toHaveProperty("id");
-		expect(migratedLayout.tabs.value[0]).not.toHaveProperty("channelId");
-		expect(migratedLayout.tabs.value[1]).toHaveProperty("id");
-
-		// Active tab index preserved
-		expect(migratedLayout.activeTabIndex.value).toBe(1);
-
-		// Layouts keyed by new tab ids
-		const tab0Id = migratedLayout.tabs.value[0]?.id;
-		const tab1Id = migratedLayout.tabs.value[1]?.id;
-		expect(tab0Id).toBeTruthy();
-		expect(tab1Id).toBeTruthy();
-		if (!tab0Id || !tab1Id) {
-			migratedScope.stop();
-			return;
+		const fresh = reloaded();
+		try {
+			expect(fresh.layout.layouts.value[tabId]).toEqual(saved);
+			expect(fresh.layout.activePaneIds.value[tabId]).toBe(layout.activePaneIds.value[tabId]);
+		} finally {
+			fresh.stop();
 		}
-
-		const root0 = migratedLayout.layouts.value[tab0Id];
-		expect(root0?.type).toBe("terminal");
-		if (root0?.type === "terminal") {
-			expect(root0.channelId).toBe("ch-A");
-		}
-
-		const root1 = migratedLayout.layouts.value[tab1Id];
-		expect(root1?.type).toBe("terminal");
-		if (root1?.type === "terminal") {
-			expect(root1.channelId).toBe("ch-B");
-		}
-
-		// activePaneIds should be populated
-		expect(migratedLayout.activePaneIds.value[tab0Id]).toBeTruthy();
-		expect(migratedLayout.activePaneIds.value[tab1Id]).toBeTruthy();
-
-		migratedScope.stop();
 	});
 });
 

@@ -1,13 +1,6 @@
-import { generateId } from "@lasterm/shared";
 import { ref, watch } from "vue";
 import type { PaneNode } from "./usePaneTree.js";
-import {
-	ensurePaneIds,
-	findFirstLeafPaneId,
-	MAX_PANE_COUNT,
-	truncateToMaxPanes,
-	usePaneTree,
-} from "./usePaneTree.js";
+import { usePaneTree } from "./usePaneTree.js";
 import type { Tab } from "./useTabManager.js";
 import { useTabManager } from "./useTabManager.js";
 
@@ -47,57 +40,7 @@ function loadFromStorage(): PersistedState | null {
 	try {
 		const raw = localStorage.getItem(LAYOUT_KEY);
 		if (raw === null) return null;
-		const parsed = JSON.parse(raw) as Record<string, unknown>;
-
-		// Migration: old Tab { channelId, label } → new Tab { id }
-		const rawTabs = parsed.tabs as Array<Record<string, unknown>> | undefined;
-		if (rawTabs && rawTabs.length > 0 && rawTabs[0]?.channelId !== undefined) {
-			// Old format — migrate
-			const newTabs: Tab[] = [];
-			const newLayouts: Record<string, PaneNode | null> = {};
-			const newActivePaneIds: Record<string, string> = {};
-			const oldLayouts = (parsed.layouts as Record<string, PaneNode | null> | undefined) ?? {};
-
-			for (const oldTab of rawTabs) {
-				const oldChannelId = oldTab.channelId as string;
-				const newId = generateId();
-				newTabs.push({ id: newId });
-				let tree = oldLayouts[oldChannelId] ?? null;
-				if (tree !== null) {
-					tree = ensurePaneIds(tree);
-					tree = truncateToMaxPanes(tree, MAX_PANE_COUNT);
-					newLayouts[newId] = tree;
-					const paneId = findFirstLeafPaneId(tree);
-					if (paneId) newActivePaneIds[newId] = paneId;
-				} else {
-					newLayouts[newId] = null;
-				}
-			}
-
-			return {
-				tabs: newTabs,
-				activeTabIndex: (parsed.activeTabIndex as number | undefined) ?? 0,
-				layouts: newLayouts,
-				activePaneIds: newActivePaneIds,
-			};
-		}
-
-		// New format
-		const state = parsed as unknown as PersistedState;
-		// Migrate old layouts that lack paneId; enforce max pane count (INV-10)
-		for (const key of Object.keys(state.layouts)) {
-			let tree = state.layouts[key];
-			if (tree !== null && tree !== undefined) {
-				tree = ensurePaneIds(tree);
-				tree = truncateToMaxPanes(tree, MAX_PANE_COUNT);
-				state.layouts[key] = tree;
-			}
-		}
-		// Ensure activePaneIds is present
-		if (!state.activePaneIds) {
-			state.activePaneIds = {};
-		}
-		return state;
+		return JSON.parse(raw) as PersistedState;
 	} catch {
 		return null;
 	}

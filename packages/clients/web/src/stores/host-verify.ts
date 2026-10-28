@@ -31,9 +31,6 @@ export const useHostVerifyStore = defineStore("hostVerify", () => {
 		});
 	let _wsClient: IWsClient | null = null;
 
-	// Legacy alias: components that bind `pendingPrompt` keep working
-	const pendingPrompt = currentPrompt;
-
 	function setWsClient(client: IWsClient): void {
 		_wsClient = client;
 	}
@@ -93,7 +90,6 @@ export const useHostVerifyStore = defineStore("hostVerify", () => {
 	}
 
 	return {
-		pendingPrompt,
 		currentPrompt,
 		setWsClient,
 		handleHostVerify,

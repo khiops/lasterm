@@ -1,5 +1,5 @@
 import type { TerminalProfile } from "@lasterm/shared";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	ALWAYS_SCOPES,
 	type AlwaysChoice,
@@ -19,8 +19,6 @@ import {
 	endHold,
 	type FoundEnd,
 	heldBackMessage,
-	LEGACY_DEAD_TAB_KEY,
-	migrateLegacyDeadTabChoice,
 	overlayChoice,
 	reactToEnd,
 	settingReadFor,
@@ -881,68 +879,5 @@ describe("endedToDelete: closing a pane or a tab over ended terminals", () => {
 	it("deletes them unless they are kept", () => {
 		expect(endedToDelete(["a", "b"], false)).toEqual(["a", "b"]);
 		expect(endedToDelete(["a", "b"], true)).toEqual([]);
-	});
-});
-
-// ─── The question this replaces ──────────────────────────────────────────────
-
-describe("migrateLegacyDeadTabChoice", () => {
-	function storage(entries: Record<string, string>) {
-		const map = new Map(Object.entries(entries));
-		return {
-			map,
-			get length() {
-				return map.size;
-			},
-			key: (i: number) => [...map.keys()][i] ?? null,
-			getItem: (k: string) => map.get(k) ?? null,
-			removeItem: (k: string) => void map.delete(k),
-		};
-	}
-
-	// "Don't ask again" meant "close and delete".
-	it("carries a silenced question over as keep = false, then forgets it", async () => {
-		const store = storage({ [LEGACY_DEAD_TAB_KEY]: "true", "lasterm:skipConfirmKill": "true" });
-		const save = vi.fn(async () => true);
-		await expect(migrateLegacyDeadTabChoice(store, ask, save)).resolves.toEqual({
-			keepEnded: false,
-		});
-		expect(save).toHaveBeenCalledWith({ keepEnded: false });
-		expect(store.map.has(LEGACY_DEAD_TAB_KEY)).toBe(false);
-		// The other questions keep their answers.
-		expect(store.map.get("lasterm:skipConfirmKill")).toBe("true");
-	});
-
-	it("takes the per-host answer too, and forgets every one", async () => {
-		const store = storage({
-			[`${LEGACY_DEAD_TAB_KEY}:host-a`]: "true",
-			[`${LEGACY_DEAD_TAB_KEY}:host-b`]: "true",
-		});
-		const save = vi.fn(async () => true);
-		await migrateLegacyDeadTabChoice(store, ask, save);
-		expect(save).toHaveBeenCalledWith({ keepEnded: false });
-		expect(store.map.size).toBe(0);
-	});
-
-	it("leaves a keep set since in place", async () => {
-		const store = storage({ [LEGACY_DEAD_TAB_KEY]: "true" });
-		const save = vi.fn(async () => true);
-		await expect(
-			migrateLegacyDeadTabChoice(store, { whenEnded: "ask", keepEnded: true }, save),
-		).resolves.toBeNull();
-		expect(save).not.toHaveBeenCalled();
-		expect(store.map.size).toBe(0);
-	});
-
-	it("writes nothing when nothing was silenced", async () => {
-		const save = vi.fn(async () => true);
-		await expect(migrateLegacyDeadTabChoice(storage({}), ask, save)).resolves.toBeNull();
-		expect(save).not.toHaveBeenCalled();
-	});
-
-	it("keeps the old answer when the write fails, to try again on the next start", async () => {
-		const store = storage({ [LEGACY_DEAD_TAB_KEY]: "true" });
-		await expect(migrateLegacyDeadTabChoice(store, ask, async () => false)).resolves.toBeNull();
-		expect(store.map.get(LEGACY_DEAD_TAB_KEY)).toBe("true");
 	});
 });

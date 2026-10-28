@@ -104,7 +104,7 @@ import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 
 const store = useHostVerifyStore();
-const prompt = computed(() => store.pendingPrompt);
+const prompt = computed(() => store.currentPrompt);
 
 const copiedOld = ref(false);
 const copiedNew = ref(false);

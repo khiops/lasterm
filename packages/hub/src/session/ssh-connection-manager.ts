@@ -12,6 +12,7 @@ import { openJumpRoute } from "./jump-connection.js";
 import type {
 	AgentBinaryVerifyMessage,
 	AuthPromptMessage,
+	AuthPromptResponseMessage,
 	HostArch,
 	HostOs,
 	HostVerifyMessage,
@@ -113,32 +114,6 @@ export class SshConnectionManager {
 		});
 	}
 
-	private _resolveLegacyAuthPromptId(clientId: string, hostId: string): string | null {
-		const matches: string[] = [];
-		for (const [, context] of this.ctx.promptContexts) {
-			if (context.state !== "OPEN") continue;
-			if (context.hostId !== hostId) continue;
-			if (context.routeClientId !== clientId) continue;
-
-			for (const promptId of context.prompts) {
-				const promptEntry = this.ctx.pendingPrompts.get(promptId);
-				if (promptEntry?.hostId !== hostId) continue;
-				if (promptEntry.type !== "passphrase" && promptEntry.type !== "elevation") continue;
-				matches.push(promptId);
-			}
-		}
-
-		if (matches.length === 1) return matches[0] ?? null;
-
-		this.ctx.hubLogger?.log("warn", "ssh-connection: AUTH_PROMPT_RESPONSE ignored", {
-			hostId,
-			clientId,
-			reason: matches.length === 0 ? "no_matching_prompt" : "ambiguous_prompt",
-			matchCount: matches.length,
-		});
-		return null;
-	}
-
 	private _getOrOpenSessionPromptContext(
 		contextId: string | undefined,
 		hostId: string,
@@ -200,13 +175,12 @@ export class SshConnectionManager {
 			if (!context) return null;
 			const clearOnSettle = acqId === undefined;
 
-			// Base payload — prompt() will merge the real promptId + deliveryEpoch at send time.
-			const promptMsgBase: AuthPromptMessage = {
+			// prompt() adds the promptId and deliveryEpoch at send time.
+			const promptMsgBase: Omit<AuthPromptMessage, "promptId" | "deliveryEpoch"> = {
 				type: "AUTH_PROMPT",
 				hostId,
 				promptType,
 				message,
-				promptId: "", // placeholder; prompt() overwrites with the real promptId
 			};
 
 			// send callback: resolve the client from ctx at send time so retargeted
@@ -245,38 +219,16 @@ export class SshConnectionManager {
 
 	handleAuthPromptResponse(
 		clientId: string,
-		hostId: string,
-		secret: string | null,
-		rememberSession?: boolean,
-		promptId?: string,
-		deliveryEpoch?: number,
+		response: Omit<AuthPromptResponseMessage, "type">,
 	): void {
-		// ── promptId path (new web clients that echo promptId) ───────────────────
-		// respond() enforces SEC-003 (clientId === routeClientId) and optionally
-		// epoch. On accept we cache only real session passphrase prompts.
-		if (promptId !== undefined) {
-			// Read the pending prompt before respond() clears it; cache eligibility
-			// depends on the prompt's owning context kind and wire promptType.
-			const pp = this.ctx.pendingPrompts.get(promptId);
-			const accepted = respondCtx(this.ctx, promptId, clientId, deliveryEpoch, secret);
-			if (accepted) this._cacheAcceptedPassphrase(pp, hostId, secret, rememberSession);
-			return;
-		}
-
-		// ── Back-compat path (old clients without promptId) ──────────────────────
-		// Resolve only an exact single in-flight passphrase/elevation prompt for this
-		// host that is addressable by this route client.
-		const resolvedPromptId = this._resolveLegacyAuthPromptId(clientId, hostId);
-
-		if (resolvedPromptId !== null) {
-			// Route via PromptContext ops (SEC-003 enforced inside respond()).
-			const pp = this.ctx.pendingPrompts.get(resolvedPromptId);
-			const accepted = respondCtx(this.ctx, resolvedPromptId, clientId, undefined, secret);
-			if (accepted) this._cacheAcceptedPassphrase(pp, hostId, secret, rememberSession);
-			return;
-		}
-
-		return;
+		const { hostId, secret, rememberSession, promptId, deliveryEpoch } = response;
+		// respond() enforces SEC-003 (clientId === routeClientId) and the epoch.
+		// On accept we cache only real session passphrase prompts. Read the pending
+		// prompt before respond() clears it; cache eligibility depends on the
+		// prompt's owning context kind and wire promptType.
+		const pp = this.ctx.pendingPrompts.get(promptId);
+		const accepted = respondCtx(this.ctx, promptId, clientId, deliveryEpoch, secret);
+		if (accepted) this._cacheAcceptedPassphrase(pp, hostId, secret, rememberSession);
 	}
 
 	// ─── Host key mismatch ────────────────────────────────────────────────────
@@ -667,12 +619,11 @@ export class SshConnectionManager {
 
 		// Build a promptAuth that uses the "test" PromptContext instead of the legacy path.
 		const promptAuth: AuthPromptFn = async (hostId, promptType, message) => {
-			const promptMsgBase: AuthPromptMessage = {
+			const promptMsgBase: Omit<AuthPromptMessage, "promptId" | "deliveryEpoch"> = {
 				type: "AUTH_PROMPT",
 				hostId,
 				promptType,
 				message,
-				promptId: "",
 			};
 
 			const result = await promptCtx(

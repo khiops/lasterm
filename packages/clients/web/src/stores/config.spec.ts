@@ -90,11 +90,18 @@ describe("saveUiSettings", () => {
 	it("writes the values to the UI config, and takes them at once", async () => {
 		mocks.hubFetch.mockResolvedValue(new Response("{}", { status: 200 }));
 		const store = useConfigStore();
-		store.uiConfig = { onChannelDead: "readonly", panes: { maxPanes: 4 } };
+		store.uiConfig = {
+			onChannelDead: "readonly",
+			layout: { hostRailColumns: 2, hostRailBadgeSize: "medium", sidebarWidth: 200 },
+		};
 
-		const saving = store.saveUiSettings("panes", { keepEnded: true });
+		const saving = store.saveUiSettings("layout", { hostRailBadgeSize: "large" });
 		// Acted on before the hub answers.
-		expect(store.uiConfig.panes).toEqual({ maxPanes: 4, keepEnded: true });
+		expect(store.uiConfig.layout).toEqual({
+			hostRailColumns: 2,
+			hostRailBadgeSize: "large",
+			sidebarWidth: 200,
+		});
 		await expect(saving).resolves.toBe(true);
 
 		expect(mocks.hubFetch).toHaveBeenCalledTimes(1);
@@ -102,20 +109,20 @@ describe("saveUiSettings", () => {
 		expect(url).toBe("/api/config/ui");
 		expect(init?.method).toBe("PUT");
 		expect(JSON.parse(String(init?.body))).toEqual({
-			panes: { keepEnded: true },
+			layout: { hostRailBadgeSize: "large" },
 		});
 	});
 
 	it("reads back what the hub holds when it refuses the write", async () => {
 		mocks.hubFetch.mockResolvedValueOnce(new Response("{}", { status: 400 })).mockResolvedValueOnce(
-			new Response(JSON.stringify({ onChannelDead: "readonly", panes: { keepEnded: false } }), {
+			new Response(JSON.stringify({ onChannelDead: "readonly", keyboard: { keyHints: false } }), {
 				status: 200,
 			}),
 		);
 		const store = useConfigStore();
 
-		await expect(store.saveUiSettings("panes", { keepEnded: true })).resolves.toBe(false);
-		expect(store.uiConfig.panes?.keepEnded).toBe(false);
+		await expect(store.saveUiSettings("keyboard", { keyHints: true })).resolves.toBe(false);
+		expect(store.uiConfig.keyboard?.keyHints).toBe(false);
 	});
 });
 

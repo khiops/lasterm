@@ -260,17 +260,6 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decodeMessage(encodeMessage(msg))).toEqual(msg);
 	});
 
-	it("round-trips an AUTH_PROMPT message without optional fields (back-compat)", () => {
-		const msg: ProtocolMessage = {
-			type: "AUTH_PROMPT",
-			hostId: "host-1",
-			promptType: "passphrase",
-			message: "Enter passphrase for key:",
-		};
-		const decoded = decodeMessage(encodeMessage(msg));
-		expect(decoded).toEqual(msg);
-	});
-
 	it("round-trips an AUTH_PROMPT message with promptId and deliveryEpoch", () => {
 		const msg: ProtocolMessage = {
 			type: "AUTH_PROMPT",
@@ -302,16 +291,6 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decoded.deliveryEpoch).toBe(1_700_000_000_000);
 		expect(decoded.secret).toBe("my-passphrase");
 		expect(decoded.rememberSession).toBe(true);
-	});
-
-	it("round-trips an AUTH_PROMPT_RESPONSE without optional fields (back-compat)", () => {
-		const msg: ProtocolMessage = {
-			type: "AUTH_PROMPT_RESPONSE",
-			hostId: "host-1",
-			secret: null,
-		};
-		const decoded = decodeMessage(encodeMessage(msg));
-		expect(decoded).toEqual(msg);
 	});
 
 	it("round-trips a PROMPT_CANCEL message", () => {

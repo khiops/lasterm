@@ -149,20 +149,6 @@ describe("useSessionStore — agent sync messages", () => {
 		expect(toastStore.messages[0]?.text).not.toContain("SHA256 mismatch");
 	});
 
-	it("does not surface legacy AGENT_UPDATED error frames as error toasts", async () => {
-		const sessionStore = useSessionStore();
-		await sessionStore.connect();
-
-		const toastStore = useToastStore();
-		wsHarness.instances[0]?.emit({
-			type: "ERROR",
-			code: "AGENT_UPDATED",
-			message: "Legacy agent update notice",
-		});
-
-		expect(toastStore.messages).toHaveLength(0);
-	});
-
 	it("clears connected when the transport fails", async () => {
 		const sessionStore = useSessionStore();
 		await sessionStore.connect();

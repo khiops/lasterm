@@ -866,7 +866,8 @@ Used when the hub needs to obtain a secret from the user interactively during SS
   host_id: string,
   prompt_type: "password" | "passphrase" | "elevation",
   message: string,   // human-readable prompt text (e.g. "Enter password for user@host")
-  prompt_id?: string // correlation ID, echoed in the response
+  prompt_id: string, // correlation ID, echoed in the response
+  delivery_epoch: number // rises each time the prompt is sent again to another client
 }
 
 // UI → Hub
@@ -875,9 +876,14 @@ Used when the hub needs to obtain a secret from the user interactively during SS
   host_id: string,
   secret: string | null,   // null = user cancelled
   remember_session?: boolean,  // a key's passphrase: keep it in the hub's memory for 15 min
-  prompt_id?: string       // echoes AUTH_PROMPT's prompt_id, when it had one
+  prompt_id: string,       // echoes AUTH_PROMPT's prompt_id
+  delivery_epoch: number   // echoes AUTH_PROMPT's delivery_epoch
 }
 ```
+
+The hub answers a response without a valid `prompt_id` or `delivery_epoch` with an `INVALID_INPUT`
+error. It ignores a response from any client but the one the prompt was last sent to, and one whose
+`delivery_epoch` is not the prompt's latest.
 
 **Security note:** The hub writes none of these secrets to disk. A password is used for the SSH
 handshake and dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min
@@ -1197,7 +1203,7 @@ What the callers do with the answers:
 |--------|------|------|--------------|
 | GET | `/api/hosts` | ● | `Host[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/hosts` | ● | CreateHost → `Host` (201) |
-| PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204 (alias: `/api/hosts/reorder`) |
+| PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204 |
 | GET | `/api/hosts/:id` | ● | `Host` |
 | PUT | `/api/hosts/:id` | ● | UpdateHost → `Host` (partial update, deep merge) |
 | DELETE | `/api/hosts/:id` | ● | 204 |
@@ -1284,7 +1290,7 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 | PATCH | `/api/channels/:id` | ● | Partial update (e.g. title) → `Channel` |
 | POST | `/api/channels/:id/restart` | ● | Restart dead channel → 200; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise |
 | DELETE | `/api/channels/:id` | ● | 204. A live channel is ended, and stored `dead` with `end_reason: "killed"` |
-| DELETE | `/api/channels/dead` | ● | Remove all dead channels → `{ purged }` (alias: `POST /api/channels/purge-dead`) |
+| DELETE | `/api/channels/dead` | ● | Remove all dead channels → `{ purged }` |
 
 #### Channel Groups (tab groups)
 
@@ -1292,7 +1298,7 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 |--------|------|------|--------------|
 | GET | `/api/groups` | ● | `Group[]` |
 | POST | `/api/groups` | ● | CreateGroup → `Group` (201) |
-| PUT | `/api/groups/order` | ● | `{ group_ids }` → 204 (alias: `/api/groups/reorder`) |
+| PUT | `/api/groups/order` | ● | `{ group_ids }` → 204 |
 | PATCH | `/api/groups/:id` | ● | UpdateGroup → `Group` |
 | DELETE | `/api/groups/:id` | ● | 204 |
 
@@ -1302,7 +1308,7 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 |--------|------|------|--------------|
 | GET | `/api/host-groups` | ● | `HostGroup[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/host-groups` | ● | CreateHostGroup → `HostGroup` (201) |
-| PUT | `/api/host-groups/order` | ● | `{ group_ids }` → 204 (alias: `/api/host-groups/reorder`) |
+| PUT | `/api/host-groups/order` | ● | `{ group_ids }` → 204 |
 | PUT | `/api/host-groups/:id` | ● | UpdateHostGroup → `HostGroup` |
 | DELETE | `/api/host-groups/:id` | ● | 204 |
 
@@ -1312,7 +1318,7 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 |--------|------|------|--------------|
 | GET | `/api/launch-profiles` | ● | `LaunchProfile[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/launch-profiles` | ● | CreateLaunchProfile → `LaunchProfile` (201) |
-| PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 (alias: `POST /api/launch-profiles/reorder`) |
+| PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 |
 | GET | `/api/launch-profiles/:id` | ● | `LaunchProfile` |
 | PUT | `/api/launch-profiles/:id` | ● | UpdateLaunchProfile → `LaunchProfile` |
 | DELETE | `/api/launch-profiles/:id` | ● | 204 |

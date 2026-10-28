@@ -1,23 +1,17 @@
 import { computed, type Ref, ref } from "vue";
 
-export interface UsePromptQueueOptions<TEntry extends { promptId?: string }> {
-	getFallbackKey?: (entry: TEntry) => string | undefined;
+export interface UsePromptQueueOptions {
 	stalePromptWarning?: string;
 }
 
-export function usePromptQueue<TEntry extends { promptId?: string }>(
-	options: UsePromptQueueOptions<TEntry> = {},
+export function usePromptQueue<TEntry extends { promptId: string }>(
+	options: UsePromptQueueOptions = {},
 ) {
 	const pendingPrompts = ref<TEntry[]>([]) as Ref<TEntry[]>;
 	const currentPrompt = computed(() => pendingPrompts.value[0] ?? null);
 
-	function entryKey(entry: TEntry): string | undefined {
-		return entry.promptId ?? options.getFallbackKey?.(entry);
-	}
-
 	function enqueue(entry: TEntry): boolean {
-		const key = entryKey(entry);
-		if (pendingPrompts.value.some((pending) => entryKey(pending) === key)) return false;
+		if (pendingPrompts.value.some((pending) => pending.promptId === entry.promptId)) return false;
 		pendingPrompts.value = [...pendingPrompts.value, entry];
 		return true;
 	}
@@ -41,7 +35,7 @@ export function usePromptQueue<TEntry extends { promptId?: string }>(
 		const head = currentPrompt.value;
 		if (!head) return false;
 		const currentPromptId = head.promptId;
-		if (promptId === undefined || currentPromptId === undefined || currentPromptId === promptId) {
+		if (promptId === undefined || currentPromptId === promptId) {
 			fn(head);
 			return true;
 		}

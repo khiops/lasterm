@@ -786,27 +786,6 @@ describe("useChannelsStore — spawnChannel agent sync handling", () => {
 		await expect(spawn).resolves.toBe("ch-new");
 		expect(send).toHaveBeenCalledOnce();
 	});
-
-	it("ignores legacy AGENT_UPDATED error frames while waiting for SPAWN_OK", async () => {
-		const sentMessages: unknown[] = [];
-		const store = useChannelsStore();
-		const sessionStore = useSessionStore();
-		const { emit, on, send } = setupManualWsClient(sentMessages);
-		// @ts-expect-error — overwrite reactive wsClient for test
-		sessionStore.wsClient = { on, send };
-
-		const spawn = store.spawnChannel("host-1");
-
-		emit("ERROR", {
-			type: "ERROR",
-			code: "AGENT_UPDATED",
-			message: "Legacy agent update notice",
-		});
-		emit("SPAWN_OK", { type: "SPAWN_OK", channelId: "ch-new" });
-
-		await expect(spawn).resolves.toBe("ch-new");
-		expect(send).toHaveBeenCalledOnce();
-	});
 });
 
 // ---------------------------------------------------------------------------

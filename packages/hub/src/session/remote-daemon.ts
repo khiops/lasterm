@@ -24,11 +24,16 @@
  * Windows remotes are not served by this: their daemon listens on a named pipe,
  * and OpenSSH has no channel type that carries one. They stay on stdio, and
  * their terminals still end with the connection.
+ *
+ * Nor are hosts whose SSH server refuses socket forwarding
+ * (`AllowStreamLocalForwarding no`, `DisableForwarding yes`, a key's
+ * `restrict`): `SocketForwardingRefused` says so, and the connection runs its
+ * agent on stdio instead (#765).
  */
 
 import { randomBytes } from "node:crypto";
 import type { Duplex } from "node:stream";
-import { DEFAULT_AGENT_LOG_FILES_KEPT } from "@lasterm/shared";
+import { DEFAULT_AGENT_LOG_FILES_KEPT, type Host } from "@lasterm/shared";
 import type { Client } from "ssh2";
 
 /**
@@ -48,6 +53,73 @@ export function hostKeepsDaemon(
 	if (host === undefined) return false;
 	if (host.os === "windows") return false;
 	return host.sshRemoteDaemon ?? globalDefault;
+}
+
+/**
+ * The hosts whose SSH server this hub saw refuse socket forwarding, each with
+ * the route it was seen on (`socketForwardingRoute`). In memory only: a hub
+ * that restarts tries again (#765).
+ */
+export type SocketForwardingRefusals = Map<string, string>;
+
+/**
+ * What a refusal of socket forwarding was seen through: the server, the
+ * account, the key, the jump, and the host's own answer about a daemon. sshd
+ * can refuse it for one account (`Match User`), one client address
+ * (`Match Address`) or one key (`restrict` in `authorized_keys`), so a change
+ * to any of them is worth trying again.
+ */
+export function socketForwardingRoute(host: Host): string {
+	return JSON.stringify([
+		host.sshHost ?? null,
+		host.sshUser ?? null,
+		host.sshPort ?? null,
+		host.sshAuth ?? null,
+		host.sshKeyPath ?? null,
+		host.sshConfigHost ?? null,
+		host.sshProxyHostId ?? null,
+		host.sshProxySpec ?? null,
+		host.sshRemoteDaemon ?? null,
+	]);
+}
+
+/** Remember that this host's SSH server refused socket forwarding. */
+export function rememberSocketForwardingRefused(
+	refusals: SocketForwardingRefusals,
+	host: Host,
+): void {
+	refusals.set(host.id, socketForwardingRoute(host));
+}
+
+/**
+ * Whether this host is meant to keep a daemon, and this hub saw its SSH server
+ * refuse the socket forwarding that reaches one, on the route it still has.
+ */
+export function socketForwardingRefusedOn(
+	host: Host | undefined,
+	globalDefault: boolean,
+	refusals: ReadonlyMap<string, string>,
+): boolean {
+	if (host === undefined || !hostKeepsDaemon(host, globalDefault)) return false;
+	return refusals.get(host.id) === socketForwardingRoute(host);
+}
+
+/**
+ * Whether reaching this host goes through its daemon: it keeps one, and its
+ * SSH server has not refused the forwarding a daemon is reached through. A
+ * refused host runs its agent on stdio from the next connection on, without
+ * starting a daemon only to stop it, and its terminals end with the
+ * connection, which is what everything that asks this says (#765).
+ */
+export function hostTriesDaemon(
+	host: Host | undefined,
+	globalDefault: boolean,
+	refusals: ReadonlyMap<string, string>,
+): boolean {
+	return (
+		hostKeepsDaemon(host, globalDefault) &&
+		!socketForwardingRefusedOn(host, globalDefault, refusals)
+	);
 }
 
 /** Where a remote daemon keeps its socket and its log, under one directory. */
@@ -320,10 +392,129 @@ export function openRemoteSocket(conn: Client, socketPath: string): Promise<Dupl
 	});
 }
 
+/**
+ * Channel open failure reasons (RFC 4254 § 5.1) that refuse a channel type
+ * outright, whatever listens on the socket: a server that prohibits it (1), or
+ * one that has no such channel type (3).
+ *
+ * OpenSSH says neither. For `AllowStreamLocalForwarding no`,
+ * `DisableForwarding yes` or a key's `no-port-forwarding`, sshd answers
+ * CONNECT_FAILED (2), "open failed": exactly what it answers for a socket
+ * nobody listens on (`server_request_direct_streamlocal` and
+ * `server_input_channel_open` in serverloop.c). Telling those two apart takes
+ * asking the remote, `remoteSocketStateCommand`.
+ */
+const REFUSED_OUTRIGHT_REASONS: ReadonlySet<unknown> = new Set([1, 3]);
+
+function refusedOutright(err: unknown): boolean {
+	return (
+		typeof err === "object" &&
+		err !== null &&
+		REFUSED_OUTRIGHT_REASONS.has((err as { reason?: unknown }).reason)
+	);
+}
+
+/** What the socket probe prints, before its answer. */
+const SOCKET_STATE_MARKER = "lasterm-socket:";
+
+/**
+ * Whether anything listens on a socket of the remote: `unknown` where the
+ * remote cannot say (no `/proc/net/unix`, no awk, an answer cut short).
+ */
+export type RemoteSocketState = "listening" | "silent" | "unknown";
+
+/**
+ * The command that says whether anything listens on `socket`, from the
+ * kernel's own table of UNIX sockets. Each line of `/proc/net/unix` ends with
+ * the socket's path, and its fourth field, the flags, is `00010000`
+ * (`__SO_ACCEPTCON`) for one that listens. The connections a listener
+ * accepted carry its path too, with other flags, so only a listener counts.
+ *
+ * Nothing here connects to the socket: a connection would be a client the
+ * daemon has to deal with. The path travels in the environment, which awk
+ * reads as it is, where `-v` would interpret its backslashes.
+ *
+ * `table` is for tests.
+ */
+export function remoteSocketStateCommand(socket: string, table = "/proc/net/unix"): string {
+	const program =
+		'BEGIN { p = " " ENVIRON["LASTERM_SOCKET"]; s = "silent" } ' +
+		'$4 == "00010000" && length($0) > length(p) && substr($0, length($0) - length(p) + 1) == p { s = "listening" } ' +
+		`END { print "${SOCKET_STATE_MARKER} " s }`;
+	const file = quotePosix(table);
+	return (
+		`if [ -r ${file} ]; then LASTERM_SOCKET=${quotePosix(socket)} awk ${quotePosix(program)} ${file}; ` +
+		`else echo '${SOCKET_STATE_MARKER} unknown'; fi`
+	);
+}
+
+/** The probe's answer, from what it printed: the last marker line wins. */
+export function parseRemoteSocketState(stdout: string): RemoteSocketState {
+	const last = stdout
+		.split(/\r?\n/)
+		.filter((line) => line.startsWith(SOCKET_STATE_MARKER))
+		.at(-1);
+	const state = last?.slice(SOCKET_STATE_MARKER.length).trim();
+	return state === "listening" || state === "silent" ? state : "unknown";
+}
+
+/** What the hub says when a host's SSH server refuses socket forwarding (#765). */
+export const SOCKET_FORWARDING_REFUSED_MESSAGE =
+	"This host's SSH server refuses socket forwarding (AllowStreamLocalForwarding or " +
+	"DisableForwarding in its sshd_config); the remote daemon needs it, see docs/SSH_SERVER.md.";
+
+/** What became of the daemon when the socket forwarding was refused. */
+export type RefusedDaemon =
+	/** None was started: the server refused the channel type before any launch. */
+	| { kind: "none" }
+	/** One was already listening, which this connection cannot reach. Left alone. */
+	| { kind: "already-running" }
+	/** This connection started one and stopped it, through its `--stop`. */
+	| { kind: "stopped" }
+	/** This connection started one, and its `--stop` said this. */
+	| { kind: "not-stopped"; said: string };
+
+/**
+ * The host's SSH server will not carry a channel to the daemon's socket. The
+ * daemon cannot be reached however long one waits, so nothing waits: the
+ * caller runs the agent on stdio instead (#765).
+ */
+export class SocketForwardingRefused extends Error {
+	constructor(
+		readonly paths: RemoteDaemonPaths,
+		readonly daemon: RefusedDaemon,
+	) {
+		super(`${SOCKET_FORWARDING_REFUSED_MESSAGE}${describeRefusedDaemon(daemon, paths)}`);
+		this.name = "SocketForwardingRefused";
+	}
+}
+
+function describeRefusedDaemon(daemon: RefusedDaemon, paths: RemoteDaemonPaths): string {
+	switch (daemon.kind) {
+		case "none":
+			return "";
+		case "already-running":
+			return ` A daemon already listens on ${paths.socket}; it is left as it is.`;
+		case "stopped":
+			return " The daemon this connection started there is stopped.";
+		case "not-stopped":
+			return (
+				` The daemon this connection started there could not be stopped (${daemon.said}); ` +
+				`it ends by itself after ${IDLE_TIMEOUT_SECONDS / 60} minutes with nothing to do.`
+			);
+	}
+}
+
 /** How long to keep trying the socket after starting the daemon. */
 const READY_DEADLINE_MS = 5_000;
 /** How long to wait between those attempts. */
 const READY_POLL_MS = 150;
+/**
+ * How many times to ask a daemon this connection started to stop. It
+ * publishes the record `--stop` goes by just after it starts listening, so a
+ * stop sent in between finds none.
+ */
+const STOP_ATTEMPTS = 4;
 
 export interface AttachRemoteDaemonOptions {
 	conn: Client;
@@ -359,6 +550,12 @@ export interface RemoteDaemonAttachment {
  * The order matters more than it looks: see the note at the top of this file
  * about `bind_with_retry`. Starting first would take the socket from a daemon
  * that is holding someone's terminals.
+ *
+ * A server that refuses socket forwarding rejects with
+ * `SocketForwardingRefused`, as soon as that is known (#765): the channel
+ * fails while the remote's own table shows the socket listening. A daemon this
+ * call started is stopped first; one that was there before is left alone,
+ * since it may hold terminals another connection reaches.
  */
 export async function attachRemoteDaemon(
 	options: AttachRemoteDaemonOptions,
@@ -377,7 +574,19 @@ export async function attachRemoteDaemon(
 		);
 	}
 	const paths = remoteDaemonPaths(stateDir);
+	const socketState = async (): Promise<RemoteSocketState> => {
+		try {
+			return parseRemoteSocketState(
+				(await exec(options.conn, remoteSocketStateCommand(paths.socket))).stdout,
+			);
+		} catch {
+			return "unknown";
+		}
+	};
 
+	// What listened before anything was started. Only `silent` makes the
+	// daemon found listening later this call's own, and so one it may stop.
+	let before: RemoteSocketState;
 	try {
 		return {
 			stream: await open(options.conn, paths.socket),
@@ -385,8 +594,23 @@ export async function attachRemoteDaemon(
 			started: false,
 			placement: null,
 		};
-	} catch {
-		// Nothing listening yet — the ordinary case on a first connect.
+	} catch (err) {
+		if (refusedOutright(err)) throw new SocketForwardingRefused(paths, { kind: "none" });
+		// Nothing listening yet, the ordinary case on a first connect, or a
+		// server that refuses the channel in the same words.
+		before = await socketState();
+	}
+	if (before === "listening") {
+		try {
+			return {
+				stream: await open(options.conn, paths.socket),
+				paths,
+				started: false,
+				placement: null,
+			};
+		} catch {
+			throw new SocketForwardingRefused(paths, { kind: "already-running" });
+		}
 	}
 
 	const launch = await exec(
@@ -416,12 +640,57 @@ export async function attachRemoteDaemon(
 		} catch (err) {
 			lastError = err;
 		}
+		// Listening first, then the channel still refused: the server's doing,
+		// not a daemon still starting. The other order would race its bind.
+		if (before !== "unknown" && (await socketState()) === "listening") {
+			try {
+				return { stream: await open(options.conn, paths.socket), paths, started: true, placement };
+			} catch {
+				const said = await stopStartedDaemon(exec, options.conn, options.agentPath, paths, sleep);
+				throw new SocketForwardingRefused(
+					paths,
+					said === null ? { kind: "stopped" } : { kind: "not-stopped", said },
+				);
+			}
+		}
 	}
 	throw new Error(
 		`The remote agent daemon did not answer on ${paths.socket} within ${READY_DEADLINE_MS}ms. ` +
 			`Its log is at ${paths.log}. Last error: ${String(lastError)}` +
-			(await logTail(exec, options.conn, paths.log)),
+			(await logTail(exec, options.conn, paths.log)) +
+			// The remote could not say whether the daemon listens: the one cause
+			// this message cannot rule out is the server's.
+			(before === "unknown"
+				? " The host could not say whether it listens: if its SSH server refuses socket " +
+					"forwarding (AllowStreamLocalForwarding or DisableForwarding), see docs/SSH_SERVER.md."
+				: ""),
 	);
+}
+
+/**
+ * Stop the daemon this connection started, through its own `--stop`: null
+ * once it says it stopped, else what it said.
+ */
+async function stopStartedDaemon(
+	exec: (client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>,
+	conn: Client,
+	agentPath: string,
+	paths: RemoteDaemonPaths,
+	sleep: (ms: number) => Promise<void>,
+): Promise<string | null> {
+	let said = "";
+	for (let attempt = 0; attempt < STOP_ATTEMPTS; attempt++) {
+		if (attempt > 0) await sleep(READY_POLL_MS);
+		try {
+			const stop = await exec(conn, remoteDaemonStopCommand(agentPath, paths));
+			if (stop.exitCode === 0) return null;
+			said = stop.stdout.trim().split(/\r?\n/).at(-1)?.trim() || `exit ${stop.exitCode}`;
+		} catch (err) {
+			return err instanceof Error ? err.message : String(err);
+		}
+		if (said !== "no record") return said;
+	}
+	return said;
 }
 
 /**

@@ -343,6 +343,7 @@ describe("a host that stops answering, without closing, is lost (#607)", {
 			reconnectAbortControllers: new Map(),
 			stoppingAgents: new Set(),
 			userDisconnectedHosts: new Set(),
+			socketForwardingRefusals: new Map(),
 			quitState: "RUNNING",
 			quitEpoch: 0,
 			metaDal: { getHost: () => host, updateSessionStatus: vi.fn() },

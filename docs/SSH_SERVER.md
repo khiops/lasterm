@@ -37,8 +37,23 @@ requires SFTP; a host without it shows a note in its status.
 
 A POSIX host that keeps its agent running as a daemon is reached through a `direct-streamlocal`
 channel to the daemon's Unix socket. That needs `AllowStreamLocalForwarding` set to `yes` (the
-default) or `local`, and not `DisableForwarding yes`. Without it the hub starts the daemon but cannot
-reach it, and the connection fails after 5 s with the socket's path.
+default) or `local`, not `DisableForwarding yes`, and no `restrict` or `no-port-forwarding` on the
+account's key in `authorized_keys`.
+
+Without it, the host still works, on stdio (#765). The hub stops the daemon it started to find
+out, through the daemon's own `--stop`, and runs the agent over the connection, so its terminals end
+with it. The host's status says why: "Socket forwarding refused" in its tooltip, and a note in its
+dialog. The hub remembers this for the host until it restarts, until the host's address, account,
+port, key, jump or daemon setting changes, or until someone uses Connect or Reconnect in the host's
+menu. Until then it starts no daemon there, not even for a terminal opened there. After allowing the
+forwarding and reloading sshd, use Reconnect.
+
+OpenSSH refuses the channel with the same answer it gives for a socket nobody listens on, so the hub
+asks the host which it is: whether `/proc/net/unix` lists the socket as listening. A host without
+that file or without `awk` cannot say. There the connection still fails after 5 s, naming the
+socket, the daemon's log and this page, and the daemon stays up until its 30-minute idle timeout. A
+daemon that was already listening before the hub tried is left running, since another connection,
+through another key or from another address, may reach it.
 
 Windows hosts stay on stdio: no SSH channel carries a named pipe, so their terminals end with the
 connection. A relay over an exec channel, planned in

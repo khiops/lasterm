@@ -452,6 +452,9 @@ function getTooltip(host: Host): string {
 	if (hostsStore.getHostStatus(host.id) === "disconnected") parts.push("Disconnected");
 	// A note, not an error: the agent went over the SSH command channel (#722).
 	if (hostsStore.isSftpUnavailable(host.id)) parts.push("No SFTP: agent sent over SSH commands");
+	// Meant to keep an agent running, and its SSH server will not let it (#765).
+	if (hostsStore.isSocketForwardingRefused(host.id))
+		parts.push("Socket forwarding refused: terminals end with the connection");
 
 	// Channel count
 	const channelCount = getChannelCount(host.id);

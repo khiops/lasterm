@@ -236,6 +236,14 @@ export interface SharedSessionContext {
 	 */
 	userDisconnectedHosts: Set<string>;
 	/**
+	 * Hosts whose SSH server refused the socket forwarding a remote daemon is
+	 * reached through (#765), each with the route it was seen on. The hub does
+	 * not try that host's daemon again, which would start one only to stop it,
+	 * until the route changes or a person's Connect or Reconnect asks it to. Kept in
+	 * memory only: a hub that restarts tries again.
+	 */
+	socketForwardingRefusals: import("./remote-daemon.js").SocketForwardingRefusals;
+	/**
 	 * Dead channels a SPAWN is bringing back under their own id, from the
 	 * moment it was accepted until the hub has its answer. A second one naming
 	 * the same channel meanwhile is refused: two windows following "When a

@@ -82,6 +82,9 @@ interface MockHost {
 	/** The terminals its daemon holds, reported alive on every connection. */
 	held: string[];
 	stops: boolean[];
+	/** Daemons launched, and stopped through `--stop`, where it refuses socket forwarding. */
+	daemonLaunches: number;
+	daemonStops: number;
 	close: () => Promise<void>;
 }
 
@@ -126,8 +129,12 @@ function serveAgent(stream: Stream, remote?: MockHost): void {
  * An SSH server that lets anyone in. Its agent runs on stdio for any command,
  * or, `daemon`, is a daemon already running: its state directory is where the
  * hub looks, and its socket says what it holds.
+ *
+ * `refusesForwarding` is an sshd with `AllowStreamLocalForwarding no` (#765):
+ * every socket channel fails as one to an empty socket does, while the
+ * daemon a launch starts listens until its `--stop`, and `--stdio` runs.
  */
-function mockHost(daemon: boolean): Promise<MockHost> {
+function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost> {
 	const ends: Array<() => void> = [];
 	const result: MockHost = {
 		port: 0,
@@ -135,7 +142,31 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 		socketOpens: 0,
 		held: [],
 		stops: [],
+		daemonLaunches: 0,
+		daemonStops: 0,
 		close: async () => {},
+	};
+	let listening = false;
+	/** What a host that refuses the forwarding answers. */
+	const answerRefusing = (stream: Stream, command: string): void => {
+		if (command.includes("--stdio")) {
+			serveAgent(stream);
+			return;
+		}
+		if (command.includes("XDG_STATE_HOME")) {
+			stream.write("/home/pi/.local/state/lasterm");
+		} else if (command.includes("/proc/net/unix")) {
+			stream.write(`lasterm-socket: ${listening ? "listening" : "silent"}\n`);
+		} else if (command.includes("--daemon")) {
+			result.daemonLaunches++;
+			listening = true;
+		} else if (command.includes("--stop")) {
+			result.daemonStops++;
+			listening = false;
+			stream.write("stopped\n");
+		}
+		stream.exit?.(0);
+		stream.end();
 	};
 	const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
 		result.connections++;
@@ -149,6 +180,10 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 				session.on("sftp", (acceptSftp) => acceptSftp());
 				session.on("exec", (acceptExec, _reject, info) => {
 					const stream = acceptExec() as Stream;
+					if (refusesForwarding) {
+						answerRefusing(stream, info.command);
+						return;
+					}
 					if (!daemon) {
 						serveAgent(stream);
 						return;
@@ -168,7 +203,7 @@ function mockHost(daemon: boolean): Promise<MockHost> {
 					) => void;
 				}
 			).on("openssh.streamlocal", (accept, reject) => {
-				if (!daemon) {
+				if (!daemon || refusesForwarding) {
 					reject();
 					return;
 				}
@@ -234,11 +269,17 @@ afterEach(async () => {
 });
 
 async function hubWith(
-	options: { daemon: boolean; pinned?: boolean; windowId?: string; pin?: string } = {
+	options: {
+		daemon: boolean;
+		pinned?: boolean;
+		windowId?: string;
+		pin?: string;
+		refusesForwarding?: boolean;
+	} = {
 		daemon: false,
 	},
 ): Promise<Harness> {
-	const remote = await mockHost(options.daemon);
+	const remote = await mockHost(options.daemon, options.refusesForwarding);
 	const dbManager = openTestDatabases();
 	const sm = new SessionManager(dbManager);
 	const internals = sm as unknown as { ctx: SharedSessionContext; sshMgr: SshConnectionManager };
@@ -340,10 +381,15 @@ function terminalsOn(h: Harness, count: number): string[] {
 	return ids;
 }
 
-function sessionStates(h: Harness): Array<{ status: string; disconnectedByUser?: boolean }> {
+function sessionStates(
+	h: Harness,
+): Array<{ status: string; disconnectedByUser?: boolean; socketForwardingRefused?: boolean }> {
 	return h.heard
 		.filter((m) => m.type === "SESSION_STATE" && m.hostId === h.host.id)
-		.map((m) => m as { status: string; disconnectedByUser?: boolean });
+		.map(
+			(m) =>
+				m as { status: string; disconnectedByUser?: boolean; socketForwardingRefused?: boolean },
+		);
 }
 
 function endsOf(h: Harness, channelId: string): ProtocolMessage[] {
@@ -571,6 +617,58 @@ describe("Reconnect (#648)", { timeout: 20_000 }, () => {
 			expect(endsOf(h, id)).toEqual([expect.objectContaining({ endReason: "stopped" })]);
 		}
 		expect(sessionOf(h)?.status).toBe("active");
+	});
+});
+
+// ─── A server that refuses socket forwarding ─────────────────────────────────
+
+describe("a host whose SSH server refuses socket forwarding (#765)", { timeout: 30_000 }, () => {
+	it("runs on stdio and says so, and tries no daemon again until a person asks", async () => {
+		const h = await hubWith({ daemon: true, refusesForwarding: true });
+
+		const first = await connected(h);
+
+		expect(first.usedRemoteDaemon).toBe(false);
+		expect(first.socketForwardingRefused).toBe(true);
+		// The daemon it started to find that out is stopped.
+		expect(h.remote.daemonLaunches).toBe(1);
+		expect(h.remote.daemonStops).toBe(1);
+		expect(sessionStates(h).at(-1)).toMatchObject({
+			status: "active",
+			socketForwardingRefused: true,
+		});
+		expect(h.sm.getStateSnapshot().sessions).toEqual([
+			expect.objectContaining({ hostId: h.host.id, socketForwardingRefused: true }),
+		]);
+		// Its terminals end with the connection: a Disconnect says how many.
+		terminalsOn(h, 2);
+		expect(h.sm.disconnectHost(h.host.id)).toEqual({ kind: "terminals-would-end", terminals: 2 });
+		h.sm.disconnectHost(h.host.id, { force: true });
+
+		// A terminal opened there connects straight to stdio: no daemon started
+		// only to be stopped, and the host still says why.
+		await expect(
+			h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id }),
+		).resolves.not.toBeNull();
+		expect(h.remote.connections).toBe(2);
+		expect(agentOf(h)?.usedRemoteDaemon).toBe(false);
+		expect(h.remote.daemonLaunches).toBe(1);
+		expect(sessionStates(h).at(-1)).toMatchObject({
+			status: "active",
+			socketForwardingRefused: true,
+		});
+
+		// A person's Reconnect asks the server again, and so does a Connect.
+		const outcome = h.sm.reconnectHost(h.host.id, { clientId: h.window.id, force: true });
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		await expect(outcome.done).resolves.toBe(true);
+		expect(h.remote.daemonLaunches).toBe(2);
+		expect(h.remote.daemonStops).toBe(2);
+		expect(agentOf(h)?.socketForwardingRefused).toBe(true);
+		h.sm.disconnectHost(h.host.id, { force: true });
+		await connected(h);
+		expect(h.remote.daemonLaunches).toBe(3);
+		expect(h.remote.daemonStops).toBe(3);
 	});
 });
 

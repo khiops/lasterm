@@ -52,7 +52,7 @@ function createMockDaemon(
 				socket.write(Buffer.from(stateMsg));
 			}
 
-			const end = encodeFrame({ type: "CHANNEL_STATE_END" });
+			const end = encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 });
 			socket.write(Buffer.from(end));
 		});
 
@@ -235,7 +235,9 @@ describe("Daemon integration", () => {
 						),
 					);
 
-					socket.write(Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END" })));
+					socket.write(
+						Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })),
+					);
 
 					// On second connection, send buffered OUTPUT after a small delay
 					// (simulates real agent flushing buffer after handshake completes)

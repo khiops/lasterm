@@ -119,6 +119,18 @@ function runMigrations(db: Database.Database, migrations: readonly MigrationFile
 
 	const parseNum = (filename: string): number => Number.parseInt(filename.slice(0, 3), 10);
 
+	// A first migration numbered above 1 is a baseline (STORAGE.md § 9.3): the
+	// migrations that led up to it are gone, and applied over a database they left
+	// halfway, it fails on a table that database already has. Only meta.db has one,
+	// 021, made before the first public release (#747).
+	const first = migrations[0];
+	const baseline = first !== undefined ? parseNum(first.file) : 0;
+	if (currentVersion > 0 && currentVersion < baseline) {
+		throw new Error(
+			`${db.name} is at schema version ${currentVersion}, which predates the first public release: this hub's migrations start at version ${baseline} and cannot upgrade it. Move it aside to start fresh.`,
+		);
+	}
+
 	const last = migrations[migrations.length - 1];
 	const latestMigration = last !== undefined ? parseNum(last.file) : 0;
 
@@ -147,54 +159,57 @@ function runMigrations(db: Database.Database, migrations: readonly MigrationFile
 	}
 }
 
+/**
+ * Open both databases, set them up and bring them up to date. A failure closes
+ * whichever is open before it is thrown: a database refused for its version
+ * (#747) is then left with no connection on it, and on the last close SQLite
+ * takes its `-wal` and `-shm` files away, so it can be moved aside as one file.
+ */
+function openBoth(metaFile: string, spoolFile: string): DatabaseManager {
+	const metaDb = new Database(metaFile);
+	let spoolDb: Database.Database | undefined;
+	try {
+		applyCommonPragmas(metaDb);
+		metaDb.pragma("wal_autocheckpoint = 1000");
+
+		spoolDb = new Database(spoolFile);
+		applySpoolPragmas(spoolDb);
+		applyCommonPragmas(spoolDb);
+		spoolDb.pragma("wal_autocheckpoint = 2000");
+
+		runMigrations(metaDb, readMigrationFiles("meta"));
+		runMigrations(spoolDb, readMigrationFiles("spool"));
+	} catch (error) {
+		for (const db of [metaDb, spoolDb]) {
+			try {
+				if (db?.open) db.close();
+			} catch {
+				// The error that stopped the open is the one to report.
+			}
+		}
+		throw error;
+	}
+
+	const spool = spoolDb;
+	return {
+		meta: metaDb,
+		spool,
+		close() {
+			checkpointAndClose(metaDb);
+			checkpointAndClose(spool);
+		},
+	};
+}
+
 export function openDatabases(dataDir: string): DatabaseManager {
 	const metaPath = join(dataDir, "meta.db");
 	const spoolPath = join(dataDir, "spool.db");
 	// Both before either opens, so a refusal leaves no connection behind.
 	restrictDatabaseFiles(metaPath);
 	restrictDatabaseFiles(spoolPath);
-
-	const metaDb = new Database(metaPath);
-	applyCommonPragmas(metaDb);
-	metaDb.pragma("wal_autocheckpoint = 1000");
-
-	const spoolDb = new Database(spoolPath);
-	applySpoolPragmas(spoolDb);
-	applyCommonPragmas(spoolDb);
-	spoolDb.pragma("wal_autocheckpoint = 2000");
-
-	runMigrations(metaDb, readMigrationFiles("meta"));
-	runMigrations(spoolDb, readMigrationFiles("spool"));
-
-	return {
-		meta: metaDb,
-		spool: spoolDb,
-		close() {
-			checkpointAndClose(metaDb);
-			checkpointAndClose(spoolDb);
-		},
-	};
+	return openBoth(metaPath, spoolPath);
 }
 
 export function openTestDatabases(): DatabaseManager {
-	const metaDb = new Database(":memory:");
-	applyCommonPragmas(metaDb);
-	metaDb.pragma("wal_autocheckpoint = 1000");
-
-	const spoolDb = new Database(":memory:");
-	applySpoolPragmas(spoolDb);
-	applyCommonPragmas(spoolDb);
-	spoolDb.pragma("wal_autocheckpoint = 2000");
-
-	runMigrations(metaDb, readMigrationFiles("meta"));
-	runMigrations(spoolDb, readMigrationFiles("spool"));
-
-	return {
-		meta: metaDb,
-		spool: spoolDb,
-		close() {
-			checkpointAndClose(metaDb);
-			checkpointAndClose(spoolDb);
-		},
-	};
+	return openBoth(":memory:", ":memory:");
 }

@@ -20,7 +20,6 @@ import {
 	findHostKeyRevocation,
 	findKnownHostKeys,
 	judgeAgainstKnownHosts,
-	normalizeFingerprint,
 	readUserKnownHosts,
 } from "../ssh/known-hosts.js";
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
@@ -156,7 +155,6 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 
 		const hostVerifier = ((key: Buffer) => {
 			presented = fingerprintOf(key);
-			const offered = normalizeFingerprint(presented);
 			const revoked = findHostKeyRevocation(presented, options.knownHostsNames, options.jump.port);
 			if (revoked) {
 				keyRefused = true;
@@ -170,7 +168,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 
 			const pinned = options.pinnedFingerprint;
 			if (pinned) {
-				keyRefused = normalizeFingerprint(pinned) !== offered;
+				keyRefused = pinned !== presented;
 				return !keyRefused;
 			}
 

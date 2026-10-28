@@ -59,7 +59,6 @@ import { seedShellProfiles } from "./shell-discovery.js";
 import type { QuitResult } from "./shutdown.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
-import { migrateLegacyShellDefaults } from "./storage/migrate-launch-profiles.js";
 import { ThemeManager } from "./theme-manager.js";
 import { registerWebUiDirectory } from "./web-ui-files.js";
 import { registerWsRoutes } from "./ws/ws-handler.js";
@@ -330,15 +329,6 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			if (previous && previous.tokenHash !== hashToken(primaryToken)) {
 				server.security.tokenRotated({ tokenId: PRIMARY_TOKEN_ID });
 			}
-			// Nothing revokes the primary row any more, so a revoked one was left by a
-			// version before #515 or a hand edit, and the upsert has just cleared it.
-			// Undoing a revocation is recorded, never silent.
-			if (previous?.revokedAt) {
-				server.security.tokenReinstated({
-					tokenId: PRIMARY_TOKEN_ID,
-					revokedAt: previous.revokedAt,
-				});
-			}
 		}
 
 		// Every REST request carries the bearer, so a record of each success would
@@ -507,8 +497,6 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			activeSessionManager.setHubKey(options.hubKey);
 		}
 		const metaDal = new MetaDAL(options.dbManager.meta);
-		metaDal.migrateHostGroupData();
-		migrateLegacyShellDefaults(metaDal, configResolver);
 
 		// First-run: ensure the built-in local host exists. It is known by its
 		// type: the user may have renamed it (#658).

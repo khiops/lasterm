@@ -1402,11 +1402,7 @@ fn apply_window_effect<R: tauri::Runtime>(
 
     let native = match effect {
         "mica" => Some(Effect::Mica),
-        "micaDark" => Some(Effect::MicaDark),
-        "micaLight" => Some(Effect::MicaLight),
-        "tabbed" => Some(Effect::Tabbed),
         "acrylic" => Some(Effect::Acrylic),
-        "blur" => Some(Effect::Blur),
         "underWindowBackground" => Some(Effect::UnderWindowBackground),
         "sidebar" => Some(Effect::Sidebar),
         "hudWindow" => Some(Effect::HudWindow),

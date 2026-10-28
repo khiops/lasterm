@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
-	chmodSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
@@ -17,7 +16,7 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from "n
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	classifyHubFailure,
 	cmdAgentFetch,
@@ -53,7 +52,6 @@ import {
 	HUB_TLS_PIN_MISMATCH_CODE,
 } from "./hub-transport.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
-import { describePreviousInstallation } from "./previous-installation.js";
 import { createServer as createHubServer, startServer } from "./server.fixture.js";
 import {
 	AGENT_TARGET_TRIPLES,
@@ -735,114 +733,6 @@ describe("path helpers", () => {
 		}
 	});
 
-	// The rename moved every namespace at once, so a Termora install and this one
-	// cannot contend for the same lock: both hubs could serve terminals while
-	// quitting one leaves the other alive. Starting must refuse, not coexist.
-	describe.skipIf(process.platform === "win32")("previous-installation refusal", () => {
-		let root: string;
-		let origConfig: string | undefined;
-		let origState: string | undefined;
-
-		beforeEach(() => {
-			root = mkdtempSync(path.join(os.tmpdir(), "lasterm-previous-"));
-			origConfig = process.env.XDG_CONFIG_HOME;
-			origState = process.env.XDG_STATE_HOME;
-			process.env.XDG_CONFIG_HOME = path.join(root, "config");
-			process.env.XDG_STATE_HOME = path.join(root, "state");
-		});
-
-		afterEach(() => {
-			restoreEnv("XDG_CONFIG_HOME", origConfig);
-			restoreEnv("XDG_STATE_HOME", origState);
-			rmSync(root, { recursive: true, force: true });
-		});
-
-		it("says nothing when there is no previous installation", () => {
-			expect(describePreviousInstallation()).toBeUndefined();
-		});
-
-		it("names a previous config directory and refuses", () => {
-			mkdirSync(path.join(root, "config", "termora"), { recursive: true });
-			const message = describePreviousInstallation();
-			expect(message).toContain(path.join(root, "config", "termora"));
-			expect(message).toContain("Refusing to start");
-			expect(message).toContain("auth token");
-		});
-
-		it("names a previous state directory", () => {
-			mkdirSync(path.join(root, "state", "termora"), { recursive: true });
-			expect(describePreviousInstallation()).toContain(path.join(root, "state", "termora"));
-		});
-
-		it("reports the recorded pid as in use, and claims no more than that", () => {
-			const stateDir = path.join(root, "state", "termora");
-			mkdirSync(stateDir, { recursive: true });
-			writeFileSync(
-				path.join(stateDir, "runtime.json"),
-				JSON.stringify({ pid: process.pid, port: 4100 }),
-			);
-			const message = describePreviousInstallation();
-			expect(message).toContain(`pid ${process.pid}`);
-			// The record is an ordinary file in a directory the old hub owned, so a
-			// stale or edited one can name any live pid. Liveness is all the probe
-			// establishes, and the text must not hand the operator a signal to send.
-			expect(message).not.toContain(`kill ${process.pid}`);
-			expect(message).toContain("verify which process it is");
-		});
-
-		it.each([
-			["a process group", 0],
-			["every process the user owns", -1],
-			["a fractional pid", 12.5],
-		])("ignores a recorded pid naming %s", (_case, pid) => {
-			const stateDir = path.join(root, "state", "termora");
-			mkdirSync(stateDir, { recursive: true });
-			writeFileSync(path.join(stateDir, "runtime.json"), JSON.stringify({ pid, port: 4100 }));
-			const message = describePreviousInstallation();
-			expect(message).toContain(stateDir);
-			// `process.kill` accepts 0 and negatives and aims at whole groups, so an
-			// unvalidated record turns a liveness probe into a broadcast.
-			expect(message).not.toContain("in use");
-		});
-
-		it("refuses rather than passing when a directory cannot be examined", () => {
-			const configDir = path.join(root, "config", "termora");
-			mkdirSync(configDir, { recursive: true });
-			// Unsearchable parent: the path exists, and `existsSync` would answer false
-			// for it — turning a permission error into permission to run.
-			chmodSync(path.join(root, "config"), 0o000);
-			try {
-				const message = describePreviousInstallation();
-				expect(message).toBeDefined();
-				expect(message).toContain("cannot be examined");
-			} finally {
-				chmodSync(path.join(root, "config"), 0o755);
-			}
-		});
-
-		it("does not claim a hub is running when the recorded pid is gone", () => {
-			const stateDir = path.join(root, "state", "termora");
-			mkdirSync(stateDir, { recursive: true });
-			// A pid that cannot exist: the record is stale, so the directory is named
-			// but nothing is asserted about a live process.
-			writeFileSync(
-				path.join(stateDir, "runtime.json"),
-				JSON.stringify({ pid: 2 ** 30, port: 4100 }),
-			);
-			const message = describePreviousInstallation();
-			expect(message).toContain(stateDir);
-			expect(message).not.toContain("is running");
-		});
-
-		it("leaves the previous installation untouched", () => {
-			const configDir = path.join(root, "config", "termora");
-			mkdirSync(configDir, { recursive: true });
-			writeFileSync(path.join(configDir, "config.toml"), "port = 4100\n");
-			describePreviousInstallation();
-			expect(existsSync(path.join(configDir, "config.toml"))).toBe(true);
-		});
-	});
-
 	it.skipIf(process.platform === "win32")("getConfigDir uses XDG_CONFIG_HOME when set", () => {
 		const orig = process.env.XDG_CONFIG_HOME;
 		try {
@@ -932,15 +822,16 @@ describe("runtime state", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"deletes a matching legacy record, whose identity is its complete legacy fields",
+		"deletes the record its instanceId names, whatever else changed",
 		() => {
 			const originalStateRoot = process.env.XDG_STATE_HOME;
 			process.env.XDG_STATE_HOME = makeTempDir();
-			const { ownerToken: _ownerToken, ...legacy } = runtimeRecord();
+			const own = runtimeRecord({ instanceId: "own" });
 			try {
-				persistRuntime(legacy);
-				expect(runtimeMatches(legacy, legacy)).toBe(true);
-				expect(deleteRuntime(legacy)).toBe(true);
+				persistRuntime(own);
+				expect(runtimeMatches(own, { ...own, port: own.port + 1 })).toBe(true);
+				expect(runtimeMatches(own, { ...own, instanceId: "other" })).toBe(false);
+				expect(deleteRuntime(own)).toBe(true);
 				expect(loadRuntime()).toEqual({ kind: "absent" });
 			} finally {
 				restoreEnv("XDG_STATE_HOME", originalStateRoot);
@@ -960,12 +851,7 @@ describe("runtime state", () => {
 							? { kind: "absent" as const }
 							: {
 									kind: "present" as const,
-									runtime: {
-										pid: 456,
-										port: 4100,
-										started_at: "2026-08-03T00:00:00.000Z",
-										instanceId: "replacement",
-									},
+									runtime: runtimeRecord({ pid: 456, port: 4100, instanceId: "replacement" }),
 								};
 					},
 					isPidAlive: () => false,
@@ -981,12 +867,7 @@ describe("runtime state", () => {
 				{
 					loadRuntime: () => ({
 						kind: "present",
-						runtime: {
-							pid: 456,
-							port: 4100,
-							started_at: "2026-08-03T00:00:00.000Z",
-							instanceId: "replacement",
-						},
+						runtime: runtimeRecord({ pid: 456, port: 4100, instanceId: "replacement" }),
 					}),
 					isPidAlive: () => false,
 				},
@@ -1001,12 +882,7 @@ describe("runtime state", () => {
 				{
 					loadRuntime: () => ({
 						kind: "present",
-						runtime: {
-							pid: 123,
-							port: 4100,
-							started_at: "2026-08-03T00:00:00.000Z",
-							instanceId: "target",
-						},
+						runtime: runtimeRecord({ pid: 123, port: 4100, instanceId: "target" }),
 					}),
 					isPidAlive: () => true,
 					timeoutMs: 0,
@@ -1021,13 +897,7 @@ describe("runtime state", () => {
 			cmdQuit({
 				loadRuntime: () => ({
 					kind: "present",
-					runtime: {
-						pid: 123,
-						port: 4100,
-						started_at: "2026-08-03T00:00:00.000Z",
-						instanceId: "target",
-						ownerToken: "a".repeat(64),
-					},
+					runtime: runtimeRecord({ pid: 123, port: 4100, instanceId: "target" }),
 				}),
 				isPidAlive: () => true,
 				fetch: (async () => {
@@ -1052,13 +922,7 @@ describe("runtime state", () => {
 			cmdQuit({
 				loadRuntime: () => ({
 					kind: "present",
-					runtime: {
-						pid: 123,
-						port: 4100,
-						started_at: "2026-08-03T00:00:00.000Z",
-						instanceId: "target",
-						ownerToken: "a".repeat(64),
-					},
+					runtime: runtimeRecord({ pid: 123, port: 4100, instanceId: "target" }),
 				}),
 				isPidAlive: () => true,
 				fetch: (async () => new Response("{trunc", { status: 409 })) as typeof fetch,
@@ -1081,13 +945,7 @@ describe("runtime state", () => {
 			cmdQuit({
 				loadRuntime: () => ({
 					kind: "present",
-					runtime: {
-						pid: 123,
-						port: 4100,
-						started_at: "2026-08-03T00:00:00.000Z",
-						instanceId: "target",
-						ownerToken: "a".repeat(64),
-					},
+					runtime: runtimeRecord({ pid: 123, port: 4100, instanceId: "target" }),
 				}),
 				isPidAlive: () => true,
 				fetch: (async () => new Response("null", { status: 409 })) as typeof fetch,
@@ -1107,13 +965,7 @@ describe("runtime state", () => {
 			cmdQuit({
 				loadRuntime: () => ({
 					kind: "present",
-					runtime: {
-						pid: 123,
-						port: 4100,
-						started_at: "2026-08-03T00:00:00.000Z",
-						instanceId: "target",
-						ownerToken: "a".repeat(64),
-					},
+					runtime: runtimeRecord({ pid: 123, port: 4100, instanceId: "target" }),
 				}),
 				isPidAlive: () => true,
 				fetch: (async () => {
@@ -1471,12 +1323,7 @@ describe("runtime state", () => {
 			const stateRoot = makeTempDir();
 			process.env.XDG_STATE_HOME = stateRoot;
 			try {
-				persistRuntime({
-					pid: 123,
-					port: 456,
-					started_at: "2026-06-18T00:00:00.000Z",
-					ownerToken: "b".repeat(64),
-				});
+				persistRuntime(runtimeRecord({ ownerToken: "b".repeat(64) }));
 
 				const runtimePath = path.join(getStateDir(), "runtime.json");
 				const runtime = loadRuntime();
@@ -1542,7 +1389,7 @@ describe("runtime state", () => {
 		},
 	);
 
-	it("cmdStop fails closed on owner-token shutdown errors without signaling the pid", async () => {
+	it("cmdStop fails closed on shutdown errors without signaling the pid", async () => {
 		const { root, restore } = useTempStateRoot();
 		let child: ReturnType<typeof spawn> | undefined;
 		let childDone: Promise<void> | undefined;
@@ -1554,51 +1401,11 @@ describe("runtime state", () => {
 			if (child.pid === undefined) throw new Error("child pid missing");
 			const port = await getUnusedPort();
 			expect(getStateDir()).toBe(path.join(root, "lasterm"));
-			persistRuntime({
-				pid: child.pid,
-				port,
-				started_at: "2026-06-18T00:00:00.000Z",
-				ownerToken: "c".repeat(64),
-			});
+			persistRuntime(runtimeRecord({ pid: child.pid, port, ownerToken: "c".repeat(64) }));
 
 			await expect(cmdStop({ command: "stop" })).rejects.toThrow(
-				/refusing SIGTERM fallback for owner-token hub/,
+				/Graceful shutdown request failed; the hub is still running/,
 			);
-
-			expect(existsSync(path.join(getStateDir(), "runtime.json"))).toBe(true);
-			expect(isChildAlive(child)).toBe(true);
-		} finally {
-			restore();
-			if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-				child.kill("SIGKILL");
-			}
-			if (childDone !== undefined) await childDone;
-		}
-	});
-
-	// On Windows the identity check reads the command line through a PowerShell
-	// CIM query: about 2.3 s alone on a warm machine, and 11 s once on a
-	// windows-latest runner under the full suite, past the 5 s default.
-	it("cmdStop validates legacy process identity before signaling the pid", {
-		timeout: 30_000,
-	}, async () => {
-		const { root, restore } = useTempStateRoot();
-		let child: ReturnType<typeof spawn> | undefined;
-		let childDone: Promise<void> | undefined;
-		try {
-			child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-				stdio: "ignore",
-			});
-			childDone = waitForExit(child);
-			if (child.pid === undefined) throw new Error("child pid missing");
-			expect(getStateDir()).toBe(path.join(root, "lasterm"));
-			persistRuntime({
-				pid: child.pid,
-				port: await getUnusedPort(),
-				started_at: "2026-06-18T00:00:00.000Z",
-			});
-
-			await expect(cmdStop({ command: "stop" })).rejects.toThrow(/Refusing to signal pid/);
 
 			expect(existsSync(path.join(getStateDir(), "runtime.json"))).toBe(true);
 			expect(isChildAlive(child)).toBe(true);
@@ -1709,12 +1516,14 @@ describe("cmdStatus against the hub a runtime record names", () => {
 		}
 	}
 
-	function record(port: number, spki: string | undefined): RuntimeInfo {
+	function record(port: number, spki: string): RuntimeInfo {
 		return {
 			pid: process.pid,
 			port,
 			started_at: "2026-08-03T00:00:00.000Z",
-			...(spki !== undefined ? { spki } : {}),
+			instanceId: "test",
+			ownerToken: "test",
+			spki,
 		};
 	}
 
@@ -1844,10 +1653,7 @@ describe("cmdStatus against the hub a runtime record names", () => {
 
 	it("names a record without a usable key or port as a configuration refusal", async () => {
 		const tls = getTestTlsMaterial();
-		for (const runtime of [
-			record(await getUnusedPort(), undefined),
-			record(70_000, tls.pinned.spki),
-		]) {
+		for (const runtime of [record(await getUnusedPort(), ""), record(70_000, tls.pinned.spki)]) {
 			const { code, output } = await status(runtime);
 			expect(code).toBe(1);
 			expect(JSON.parse(output[0] ?? "")).toMatchObject({ running: "unknown", refused: "config" });
@@ -1997,6 +1803,8 @@ describe("a hub that proves its key and never answers", () => {
 			pid: process.pid,
 			port: address.port,
 			started_at: "2026-08-03T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
 			spki: tls.pinned.spki,
 		};
 		return { runtime, firstRequest };
@@ -2108,6 +1916,8 @@ describe("a hub that proves its key and never answers", () => {
 			pid: process.pid,
 			port,
 			started_at: "2026-08-03T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
 			spki,
 		});
 		const post = (runtime: RuntimeInfo) =>
@@ -2206,6 +2016,8 @@ describe("a large answer through requestHub", () => {
 			pid: process.pid,
 			port: Number(new URL(await startServer(server)).port),
 			started_at: "2026-08-03T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
 			spki: getTestTlsMaterial().server.spki,
 		};
 		return { runtime, connectionHeaders, closed };
@@ -2271,12 +2083,17 @@ function restoreEnv(name: string, saved: string | undefined): void {
 	else process.env[name] = saved;
 }
 
-function runtimeRecord(overrides: Partial<import("./cli.js").RuntimeInfo> = {}) {
+/** A record as a hub writes it. Its key is no key: a request it pins is refused. */
+function runtimeRecord(
+	overrides: Partial<import("./cli.js").RuntimeInfo> = {},
+): import("./cli.js").RuntimeInfo {
 	return {
 		pid: 123,
 		port: 456,
 		started_at: "2026-08-03T00:00:00.000Z",
+		instanceId: "instance",
 		ownerToken: "a".repeat(64),
+		spki: "not-a-key",
 		...overrides,
 	};
 }

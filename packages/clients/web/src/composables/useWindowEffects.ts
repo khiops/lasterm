@@ -11,7 +11,6 @@ export interface WindowEffectsPlatformInfo {
 
 export type NativeWindowEffect =
 	| "mica"
-	| "blur"
 	| "acrylic"
 	| "underWindowBackground"
 	| "sidebar"
@@ -32,9 +31,7 @@ export type WindowEffectsAdapter = () => Promise<WindowEffectsWindow | null>;
 const WINDOWS_11_BUILD = 22_000;
 const KNOWN_WINDOW_EFFECTS = new Set<WindowEffect>([
 	"none",
-	"auto",
 	"mica",
-	"blur",
 	"acrylic",
 	"vibrancy-under-window",
 	"vibrancy-sidebar",
@@ -72,16 +69,15 @@ export function resolveWindowEffect(
 		// What the picker offers is what the window gets. Windows 10 is offered
 		// nothing but see-through: Mica does not exist there, and Blur — the
 		// legacy accent — was dropped for dragging and resizing badly while
-		// looking like a material it is not (#62). Resolving `auto`, or a value
-		// left in a config from an older version, onto an effect no one can pick
-		// or unpick leaves someone with a window they cannot explain.
+		// looking like a material it is not (#62). An effect no one can pick or
+		// unpick leaves someone with a window they cannot explain.
 		if (!isWindows11(currentPlatformInfo)) return null;
-		if (effect === "auto" || effect === "mica") return "mica";
+		if (effect === "mica") return "mica";
 		if (effect === "acrylic") return "acrylic";
 		return null;
 	}
 
-	if (effect === "auto" || effect === "vibrancy-under-window") return "underWindowBackground";
+	if (effect === "vibrancy-under-window") return "underWindowBackground";
 	if (effect === "vibrancy-sidebar") return "sidebar";
 	if (effect === "vibrancy-hud") return "hudWindow";
 	return null;

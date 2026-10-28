@@ -5,7 +5,6 @@ import {
 	HOST_RAIL_BADGE_SIZES,
 	HOST_RAIL_MAX_COLUMNS,
 	hostRailColumnsForWidth,
-	hostRailColumnsFromLegacyWidth,
 	hostRailWidth,
 	isHostRailBadgeSize,
 	isHostRailColumns,
@@ -106,20 +105,6 @@ describe("nearestHostRailColumns — where a released edge snaps", () => {
 	it("keeps to 1 to 5 columns", () => {
 		expect(nearestHostRailColumns(10, "medium")).toBe(1);
 		expect(nearestHostRailColumns(900, "medium")).toBe(5);
-	});
-});
-
-describe("hostRailColumnsFromLegacyWidth — a width kept by an earlier rail", () => {
-	it("becomes the Medium columns it holds", () => {
-		expect(hostRailColumnsFromLegacyWidth(48)).toBe(1);
-		expect(hostRailColumnsFromLegacyWidth(89)).toBe(1);
-		expect(hostRailColumnsFromLegacyWidth(90)).toBe(2);
-		// The old cap.
-		expect(hostRailColumnsFromLegacyWidth(120)).toBe(2);
-	});
-
-	it("gives one column for a width too small to hold one", () => {
-		expect(hostRailColumnsFromLegacyWidth(0)).toBe(1);
 	});
 });
 

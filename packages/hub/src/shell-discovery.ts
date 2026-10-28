@@ -190,13 +190,12 @@ export function parseEtcShells(): string[] {
 /**
  * Detect available shells and seed the `launch_profiles` table.
  *
- * Idempotent: does nothing when profiles already exist (same guard as
- * `migrateLegacyShellDefaults`).
+ * Idempotent: does nothing when profiles already exist.
  *
  * Returns the number of profiles created (0 if already seeded).
  */
 export async function seedShellProfiles(metaDal: MetaDAL): Promise<ShellDiscoveryResult> {
-	// Idempotency guard — consistent with migrateLegacyShellDefaults
+	// Idempotency guard
 	if (metaDal.countLaunchProfiles() > 0) {
 		return { profilesCreated: 0, profiles: [] };
 	}

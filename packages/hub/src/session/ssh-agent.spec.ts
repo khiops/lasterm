@@ -1123,6 +1123,171 @@ describe("SshAgent", () => {
 		expect(hello.type).toBe("HELLO");
 	}, 20_000);
 
+	// ─── A malformed frame from the agent (#763) ───────────────────────────────
+	// A frame that does not decode used to throw out of the channel's "data"
+	// listener, into ssh2's dispatch or past it, which could end the hub. It
+	// ends that connection, and only that one.
+
+	describe("a malformed frame from the agent (#763)", () => {
+		/** What the agent types into a terminal: it must reach no log and no error. */
+		const TYPED = "typed-by-the-user";
+
+		/** `payload` behind its length prefix. */
+		function frameOf(payload: Buffer): Buffer {
+			const prefix = Buffer.alloc(4);
+			prefix.writeUInt32LE(payload.length, 0);
+			return Buffer.concat([prefix, payload]);
+		}
+
+		const MALFORMED = [
+			[
+				"a length prefix past the frame size limit",
+				Buffer.from([0xff, 0xff, 0xff, 0xff]),
+				"a length prefix of 4294967295 bytes, past the 10485760-byte limit",
+			],
+			[
+				"a payload that is not MessagePack",
+				frameOf(Buffer.concat([Buffer.from([0xc1]), Buffer.from(TYPED)])),
+				"a payload that is not a protocol message",
+			],
+		] as const;
+
+		/** Start an agent, and wait for it to end with the error it emits. */
+		function ending(agent: SshAgent): Promise<Error[]> {
+			const errors: Error[] = [];
+			agent.on("error", (error: Error) => errors.push(error));
+			return new Promise((resolve) => agent.once("close", () => resolve(errors)));
+		}
+
+		/** The other connection still reads what its agent says. */
+		async function stillReads(agent: SshAgent, stream: NodeJS.ReadWriteStream): Promise<void> {
+			expect(agent.connected).toBe(true);
+			const ack = new Promise<ProtocolMessage>((resolve) => {
+				agent.on("message", (msg: ProtocolMessage) => {
+					if (msg.type === "HEARTBEAT_ACK") resolve(msg);
+				});
+			});
+			stream.write(Buffer.from(encodeFrame({ type: "HEARTBEAT_ACK", ts: "still here" })));
+			expect(await ack).toEqual({ type: "HEARTBEAT_ACK", ts: "still here" });
+		}
+
+		it.each(MALFORMED)(
+			"closes that stdio connection alone on %s, and says so at WARN without its bytes",
+			async (_what, bytes, reason) => {
+				const streams: NodeJS.ReadWriteStream[] = [];
+				const { server, port } = await createMockSshServer((stream) => {
+					streams.push(stream);
+					stream.write(makeHelloFrame());
+				});
+				servers.push(server);
+				const fp = await getServerFingerprint(port);
+				const agent = new SshAgent(makeHost(port));
+				const other = new SshAgent(makeHost(port, { label: "other-host" }));
+				agents.push(agent, other);
+				await agent.start(fp);
+				await other.start(fp);
+				const warn = vi.spyOn(console, "warn");
+				try {
+					const ended = ending(agent);
+					streams[0]?.write(bytes);
+					const errors = await ended;
+
+					const message = `The agent on test-host sent a malformed frame: ${reason}`;
+					expect(errors.map((error) => error.message)).toEqual([message]);
+					expect(agent.connected).toBe(false);
+					expect(warn.mock.calls).toEqual([[`[lasterm-ssh] ${message}; closing the connection`]]);
+					await stillReads(other, streams[1] as NodeJS.ReadWriteStream);
+				} finally {
+					warn.mockRestore();
+				}
+			},
+			TEST_TIMEOUT,
+		);
+
+		it.each(MALFORMED)(
+			"fails start() with that error when %s comes with HELLO",
+			async (_what, bytes, reason) => {
+				const { server, port } = await createMockSshServer((stream) => {
+					stream.write(Buffer.concat([makeHelloFrame(), bytes]));
+				});
+				servers.push(server);
+				const fp = await getServerFingerprint(port);
+				const agent = new SshAgent(makeHost(port));
+				agents.push(agent);
+
+				await expect(agent.start(fp)).rejects.toThrow(
+					`The agent on test-host sent a malformed frame: ${reason}`,
+				);
+			},
+			TEST_TIMEOUT,
+		);
+
+		it.each(MALFORMED)(
+			"closes that connection to a remote daemon's socket alone on %s",
+			async (_what, bytes, reason) => {
+				const { deployAgentIfNeeded } = await import("./agent-deployer.js");
+				vi.mocked(deployAgentIfNeeded).mockResolvedValue({
+					deployed: false,
+					remoteMatchesHubVersionCache: false,
+					remotePath: "/home/pi/.local/bin/lasterm-agent",
+					os: "linux",
+					arch: "arm64",
+				});
+				const sockets: NodeJS.ReadWriteStream[] = [];
+				const { server, port } = await createMockSshServerWithSocket(
+					(stream, command) => {
+						if (command.includes("XDG_STATE_HOME")) {
+							stream.write("/home/pi/.local/state/lasterm");
+						}
+						(stream as unknown as { exit: (code: number) => void }).exit(0);
+						stream.end();
+					},
+					() => true,
+					(stream) => {
+						sockets.push(stream);
+						stream.write(makeHelloFrame());
+					},
+				);
+				servers.push(server);
+				const fp = await getServerFingerprint(port);
+				const daemonAgent = (label: string): SshAgent =>
+					new SshAgent(
+						makeHost(port, { label }),
+						undefined,
+						{ binaryCache: "/tmp/fake-cache" },
+						undefined,
+						true,
+					);
+				const agent = daemonAgent("test-host");
+				const other = daemonAgent("other-host");
+				agents.push(agent, other);
+				try {
+					await agent.start(fp);
+					await other.start(fp);
+					expect(agent.usedRemoteDaemon).toBe(true);
+
+					const ended = ending(agent);
+					sockets[0]?.write(bytes);
+					const errors = await ended;
+
+					expect(errors.map((error) => error.message)).toEqual([
+						`The agent on test-host sent a malformed frame: ${reason}`,
+					]);
+					await stillReads(other, sockets[1] as NodeJS.ReadWriteStream);
+				} finally {
+					vi.mocked(deployAgentIfNeeded).mockResolvedValue({
+						deployed: false,
+						remoteMatchesHubVersionCache: false,
+						remotePath: "lasterm-agent",
+						os: null,
+						arch: null,
+					});
+				}
+			},
+			15_000,
+		);
+	});
+
 	it(
 		"close() terminates the SSH channel and connection",
 		async () => {

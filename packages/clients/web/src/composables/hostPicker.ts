@@ -18,7 +18,8 @@ export interface RailSection {
 
 /**
  * The rail's order: the local host first, then each group in its order, then
- * the hosts in none, under "Ungrouped". Sections with no host are left out.
+ * the hosts of a group this window does not know (#758), then the hosts in
+ * none, under "Ungrouped". Sections with no host are left out.
  */
 export function railSections(
 	localHost: Host | null,
@@ -28,11 +29,17 @@ export function railSections(
 	if (localHost !== null) out.push({ id: "local", name: "Local", hosts: [localHost] });
 	for (const section of sections) {
 		if (section.hosts.length === 0) continue;
-		out.push(
-			section.type === "group"
-				? { id: `group:${section.id}`, name: section.name, hosts: section.hosts }
-				: { id: "ungrouped", name: "Ungrouped", hosts: section.hosts },
-		);
+		switch (section.type) {
+			case "group":
+				out.push({ id: `group:${section.id}`, name: section.name, hosts: section.hosts });
+				break;
+			case "unknown-group":
+				out.push({ id: "unknown-group", name: "Unknown group", hosts: section.hosts });
+				break;
+			case "ungrouped":
+				out.push({ id: "ungrouped", name: "Ungrouped", hosts: section.hosts });
+				break;
+		}
 	}
 	return out;
 }

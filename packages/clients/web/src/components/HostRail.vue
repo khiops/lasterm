@@ -11,6 +11,26 @@
 			@contextmenu.prevent="onRailContextMenu"
 			@focusout="onBadgesFocusOut"
 		>
+			<!-- The hosts did not load (#758): said where they would be, with a
+			     retry, the reason on hover. Hosts loaded before stay below it. -->
+			<div
+				v-if="hostsStore.error !== null"
+				class="rail-load-error"
+				role="alert"
+				:title="hostsStore.error"
+			>
+				<span>Hosts not loaded</span>
+				<span class="visually-hidden">{{ hostsStore.error }}</span>
+				<button
+					type="button"
+					class="rail-load-error-retry"
+					:disabled="hostsStore.loading"
+					@click="void hostsStore.fetchHosts()"
+				>
+					Retry
+				</button>
+			</div>
+
 			<!-- Rows, read left to right then down: the local host alone first,
 			     then each section's hosts, `columns` to a row (#623). -->
 			<template v-for="row in rows" :key="row.key">
@@ -142,6 +162,19 @@
 					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
 				</div>
 
+				<!-- Hosts in a group this window does not know, kept in reach (#758).
+				     No chevron, no drag, no drop: there is no group here to act on. -->
+				<div
+					v-else-if="row.kind === 'unknown-group'"
+					class="group-header unknown-group-header"
+					:title="UNKNOWN_GROUP_TOOLTIP"
+				>
+					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
+					<span class="group-label">Unknown group</span>
+					<span v-if="grid" class="group-count">{{ row.section.hosts.length }}</span>
+					<span v-if="grid" class="group-hairline" aria-hidden="true"></span>
+				</div>
+
 				<div v-else class="rail-separator"></div>
 			</template>
 		</div>
@@ -224,6 +257,7 @@ import {
 	type HostGroupSection,
 	type HostSection,
 	type UngroupedSection,
+	type UnknownGroupSection,
 } from "../composables/useHostGroups.js";
 import {
 	getInitials,
@@ -288,8 +322,12 @@ const railStyle = computed(() => {
 type RailRow =
 	| { kind: "hosts"; key: string; hosts: Host[]; section: HostSection | null }
 	| { kind: "group"; key: string; section: HostGroupSection }
+	| { kind: "unknown-group"; key: string; section: UnknownGroupSection }
 	| { kind: "ungrouped"; key: string; section: UngroupedSection }
 	| { kind: "separator"; key: string };
+
+const UNKNOWN_GROUP_TOOLTIP =
+	"Hosts in a group this window could not load. The hub still has them in it.";
 
 const rows = computed<RailRow[]>(() => {
 	const result: RailRow[] = [];
@@ -301,16 +339,20 @@ const rows = computed<RailRow[]>(() => {
 	for (const section of sections.value) {
 		if (section.type === "group") {
 			result.push({ kind: "group", key: `group:${section.id}`, section });
+		} else if (section.type === "unknown-group") {
+			result.push({ kind: "unknown-group", key: "group:unknown-group", section });
 		} else {
 			result.push({ kind: "ungrouped", key: "group:ungrouped", section });
 		}
-		if (section.type === "ungrouped" || !section.collapsed) {
+		if (section.type !== "group" || !section.collapsed) {
 			for (const hosts of chunkIntoRows(section.hosts, props.columns)) {
 				result.push({ kind: "hosts", key: `hosts:${hosts[0]?.id}`, hosts, section });
 			}
 		}
 		if (section.type === "group") {
 			result.push({ kind: "separator", key: `separator:${section.id}` });
+		} else if (section.type === "unknown-group") {
+			result.push({ kind: "separator", key: "separator:unknown-group" });
 		}
 	}
 	return result;
@@ -471,6 +513,17 @@ function getTooltip(host: Host): string {
 
 // ── Host DnD: the local host neither moves nor takes a drop ──────────────
 
+/**
+ * Whether a badge of this section takes a drop, which reorders the section
+ * and puts each of its hosts in the section's group. Not the local host's,
+ * and not the hosts of a group this window does not know (#758): with no group
+ * to give them, a reorder would take each one out of its own. They can still
+ * be dragged into a known group, or out of any.
+ */
+function takesDrop(section: HostSection | null): section is HostGroupSection | UngroupedSection {
+	return section !== null && section.type !== "unknown-group";
+}
+
 function onDragStart(event: DragEvent, host: Host, section: HostSection | null): void {
 	if (section === null) return;
 	dragHostId.value = host.id;
@@ -481,7 +534,7 @@ function onDragStart(event: DragEvent, host: Host, section: HostSection | null):
 }
 
 function onDragOver(event: DragEvent, hostId: string, section: HostSection | null): void {
-	if (section === null || !dragHostId.value || dragHostId.value === hostId) {
+	if (!takesDrop(section) || !dragHostId.value || dragHostId.value === hostId) {
 		dropTargetHostId.value = null;
 		return;
 	}
@@ -511,7 +564,7 @@ function onDrop(
 	dropTargetHostId.value = null;
 	const moved = dragHostId.value;
 	dragHostId.value = null;
-	if (section === null || moved === null || moved === targetHost.id) return;
+	if (!takesDrop(section) || moved === null || moved === targetHost.id) return;
 
 	const group = section.type === "group" ? section.id : null;
 	const orderedIds = moveBefore(
@@ -878,6 +931,67 @@ onMounted(() => {
 .ungrouped-header:hover,
 .ungrouped-header.drop-target {
 	opacity: 1;
+}
+
+/* A group this window does not know (#758): no chevron, no drag, no drop. */
+.unknown-group-header {
+	cursor: default;
+	font-style: italic;
+}
+
+/* The hosts did not load (#758): in the headers' small type and the theme's
+   error colour, with its retry under it. */
+.rail-load-error {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	margin: 0 var(--rail-padding);
+	font-size: 9px;
+	line-height: 12px;
+	text-transform: uppercase;
+	text-align: center;
+	color: var(--nt-red, #e06c75);
+	overflow-wrap: anywhere;
+}
+
+.rail-load-error-retry {
+	padding: 2px 4px;
+	border: 1px solid var(--nt-tab-hover);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--nt-text-secondary);
+	font: inherit;
+	text-transform: inherit;
+	cursor: pointer;
+}
+
+.rail-load-error-retry:hover:not(:disabled) {
+	border-color: var(--nt-accent);
+	color: var(--nt-accent);
+}
+
+.rail-load-error-retry:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: 2px;
+}
+
+.rail-load-error-retry:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+/* The reason, for a screen reader; the rail is too narrow to print it. */
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
 }
 
 .group-hairline {

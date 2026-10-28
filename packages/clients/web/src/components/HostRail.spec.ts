@@ -421,6 +421,84 @@ describe("HostRail drops the hub refuses (#734)", () => {
 	});
 });
 
+describe("HostRail when the hosts did not load (#758)", () => {
+	const alert = (): HTMLElement | null => root.querySelector(".rail-load-error[role='alert']");
+	const retry = (): HTMLButtonElement => {
+		const button = alert()?.querySelector("button");
+		if (!button) throw new Error("no retry");
+		return button;
+	};
+
+	it("says so where the hosts would be, the hub's reason on hover, with a retry", async () => {
+		const { hostsStore, fetchHosts } = mountRail();
+		hostsStore.hosts = [];
+		hostsStore.error = "database is locked";
+		await nextTick();
+
+		expect(alert()?.textContent).toContain("Hosts not loaded");
+		expect(alert()?.textContent).toContain("database is locked");
+		expect(alert()?.title).toBe("database is locked");
+
+		fetchHosts.mockClear();
+		retry().click();
+		expect(fetchHosts).toHaveBeenCalledOnce();
+
+		hostsStore.error = null;
+		await nextTick();
+		expect(alert()).toBeNull();
+	});
+
+	it("keeps the hosts loaded before under it, and takes no second retry while one runs", async () => {
+		const { hostsStore } = mountRail();
+		hostsStore.error = "Could not reach the hub: Failed to fetch";
+		hostsStore.loading = true;
+		await nextTick();
+
+		const first = root.querySelector(".rail-hosts")?.firstElementChild;
+		expect(first?.classList.contains("rail-load-error")).toBe(true);
+		expect(hostRows().flat()).toContain("a");
+		expect(retry().disabled).toBe(true);
+	});
+});
+
+describe("HostRail while the groups are not loaded (#758)", () => {
+	function mountWithoutGroups() {
+		const mounted = mountRail({ columns: 3 });
+		mounted.hostsStore.hostGroups = [];
+		return mounted;
+	}
+
+	it("keeps their hosts in reach under Unknown group, apart from the ungrouped ones", async () => {
+		const { hostsStore } = mountWithoutGroups();
+		await nextTick();
+
+		expect(header("Unknown group").title).toContain("could not load");
+		expect(hostRows()).toEqual([["local"], ["a", "b", "c"], ["d", "e"], ["u1", "u2"]]);
+		badge("c").click();
+		expect(hostsStore.selectedHostId).toBe("c");
+	});
+
+	it("takes no drop on their badges, which would take them out of their group", async () => {
+		const { reorderHosts } = mountWithoutGroups();
+		await nextTick();
+
+		for (const from of ["e", "u1"]) {
+			const data = await dragOver(from, badge("b"));
+			expect(badge("b").querySelector(".drop-mark")).toBeNull();
+			fire(badge("b"), "drop", data);
+		}
+		expect(reorderHosts).not.toHaveBeenCalled();
+	});
+
+	it("still lets one be dragged out of its group", async () => {
+		const { moveHostToGroup } = mountWithoutGroups();
+		await nextTick();
+
+		fire(header("Ungrouped"), "drop", await dragOver("a", header("Ungrouped")));
+		expect(moveHostToGroup).toHaveBeenCalledExactlyOnceWith("a", null);
+	});
+});
+
 describe("HostRail footer", () => {
 	/** The footer's buttons, row by row, by what they open. */
 	function footerRows(): string[][] {

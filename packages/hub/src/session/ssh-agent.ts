@@ -740,10 +740,19 @@ export class SshAgent extends AgentConnection {
 
 								// Set once the shell printed too much: nothing after it is read.
 								let givenUp = false;
+								// A malformed frame closes the connection (#763); before
+								// HELLO has resolved start(), it is also why start() fails.
+								const feed = (frames: Buffer): void => {
+									this.handleData(frames);
+									if (this.malformedFrame !== null) {
+										clearTimeout(helloTimeout);
+										rejectOnce(this.malformedFrame);
+									}
+								};
 								stream.on("data", (data: Buffer) => {
 									if (givenUp) return;
 									if (seeker === null) {
-										this.handleData(data);
+										feed(data);
 										return;
 									}
 									const seek = seeker.push(data);
@@ -754,7 +763,7 @@ export class SshAgent extends AgentConnection {
 												`[lasterm-ssh] skipped ${seek.prelude} bytes the remote shell printed before the agent's HELLO`,
 											);
 										}
-										this.handleData(seek.frames);
+										feed(seek.frames);
 									} else if (seek.given) {
 										givenUp = true;
 										clearTimeout(helloTimeout);
@@ -930,6 +939,14 @@ export class SshAgent extends AgentConnection {
 
 	get connected(): boolean {
 		return this.client !== null && this.channelOpen;
+	}
+
+	protected describeAgent(): string {
+		return `The agent on ${this.host.label || this.host.sshHost || this.host.id}`;
+	}
+
+	protected logWarning(message: string): void {
+		console.warn(`[lasterm-ssh] ${message}`);
 	}
 
 	/**

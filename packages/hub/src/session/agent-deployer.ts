@@ -161,11 +161,33 @@ function joinWindowsPath(folder: string, relative: string): string {
 }
 
 /**
- * What a Windows command printed as Base64 of a path's UTF-8 bytes, decoded: a path survives the
+ * What every command the hub runs on a Windows host prints just before its answer (#749).
+ *
+ * Win32-OpenSSH runs a command through the account's shell, and that shell may print first:
+ * under a PowerShell `DefaultShell`, the account's profile runs before every command, since sshd
+ * passes no `-NoProfile`; under cmd.exe, its AutoRun does (`chcp 65001` prints "Active code
+ * page"). So the answer is what follows the last marker. Nothing an answer holds (Base64, digits,
+ * hexadecimal, an architecture's name) contains a `-`, so no answer can hold the marker; and a
+ * profile that printed it would still come before the command's own.
+ */
+export const WINDOWS_REPLY_MARKER = "lasterm-reply-4d9b1f";
+
+/** What a Windows command answered after `WINDOWS_REPLY_MARKER`, trimmed; null without one. */
+function windowsReply(stdout: string): string | null {
+	const at = stdout.lastIndexOf(WINDOWS_REPLY_MARKER);
+	return at === -1 ? null : stdout.slice(at + WINDOWS_REPLY_MARKER.length).trim();
+}
+
+/** The PowerShell statement that prints `WINDOWS_REPLY_MARKER`, a line feed, then `expression`. */
+function powerShellReply(expression: string): string {
+	return `[Console]::Out.Write('${WINDOWS_REPLY_MARKER}'+[char]10+(${expression}))`;
+}
+
+/**
+ * A path a Windows command printed as Base64 of its UTF-8 bytes, decoded: a path survives the
  * console code page that way. Null for anything else, or an empty path.
  */
-function decodeBase64Path(stdout: string): string | null {
-	const encoded = stdout.trim();
+function decodeBase64Path(encoded: string): string | null {
 	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) return null;
 	const bytes = Buffer.from(encoded, "base64");
 	if (bytes.toString("base64") !== encoded) return null;
@@ -177,15 +199,22 @@ function decodeBase64Path(stdout: string): string | null {
 	}
 }
 
+/** The command that prints where a known folder is on a Windows host, as Base64 after the marker. */
+export function windowsKnownFolderCommand(folder: KnownFolder): string {
+	return encodedPowerShell(
+		powerShellReply(
+			`[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Environment]::GetFolderPath('${folder}')))`,
+		),
+	);
+}
+
 /** Ask the Windows host where a known folder is. Never throws. */
 async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promise<FolderResult> {
 	try {
-		const { stdout, stderr, exitCode } = await sshExec(
-			client,
-			`powershell -NoProfile -NonInteractive -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Environment]::GetFolderPath('${folder}')))"`,
-		);
+		const { stdout, stderr, exitCode } = await sshExec(client, windowsKnownFolderCommand(folder));
 		if (exitCode !== 0) return { reason: `exit ${exitCode}: ${stderr.trim()}` };
-		const path = decodeBase64Path(stdout);
+		const reply = windowsReply(stdout);
+		const path = reply === null ? null : decodeBase64Path(reply);
 		if (path === null) return { reason: "unexpected output" };
 		if (!isWindowsPath(path)) {
 			const why = path.includes('"')
@@ -200,17 +229,28 @@ async function resolveKnownFolder(client: SshClient, folder: KnownFolder): Promi
 }
 
 /**
- * The PowerShell script that prints where the agent is in the first known folder holding it
- * (`COMMON_AGENT_PATHS_WINDOWS`), as Base64 of the path's UTF-8 bytes, and nothing when none
- * does. One PowerShell for every folder, and only .NET: under a pwsh parent, Windows PowerShell
+ * The PowerShell script that prints, after `WINDOWS_REPLY_MARKER`, every place the agent is on a
+ * Windows host, in the order the hub prefers them, one per line as Base64 of the path's UTF-8
+ * bytes, and nothing after the marker when there is none.
+ *
+ * First what `where.exe lasterm-agent` finds: the current directory, then each PATH entry, each
+ * with every PATHEXT extension, the file name as the directory spells it. `where.exe` itself
+ * prints in the console's code page, which loses what it cannot represent (#749). Then the known
+ * folders (`COMMON_AGENT_PATHS_WINDOWS`). One command for all of it, since each one costs the
+ * shell's start-up, the profile included; and only .NET: under a pwsh parent, Windows PowerShell
  * may not load its own utility module (#722).
  */
 export function windowsFindAgentScript(): string {
+	const encoded = "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($f))+[char]10";
 	return [
+		"$o=''",
+		"$x=[Environment]::GetEnvironmentVariable('PATHEXT');if(-not $x){$x='.COM;.EXE;.BAT;.CMD'}",
+		`foreach($d in @([IO.Directory]::GetCurrentDirectory())+([Environment]::GetEnvironmentVariable('PATH') -split ';')){$d=$d.Trim().Trim([char]34);if(-not $d){continue};foreach($e in $x -split ';'){if(-not $e){continue};try{foreach($f in [IO.Directory]::GetFiles($d,'lasterm-agent'+$e.Trim())){$f=[IO.Path]::GetFullPath($f);$o+=${encoded}}}catch{}}}`,
 		...COMMON_AGENT_PATHS_WINDOWS.map(
 			([folder, relative]) =>
-				`try{$d=[Environment]::GetFolderPath('${folder}');if($d){$f=[IO.Path]::Combine($d,'${relative}');if([IO.File]::Exists($f)){[Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($f)));exit 0}}}catch{}`,
+				`try{$d=[Environment]::GetFolderPath('${folder}');if($d){$f=[IO.Path]::Combine($d,'${relative}');if([IO.File]::Exists($f)){$o+=${encoded}}}}catch{}`,
 		),
+		powerShellReply("$o"),
 		// A caught failure as the last statement would make it exit 1 (#725).
 		"exit 0",
 	].join(";");
@@ -272,53 +312,43 @@ async function resolveLocalAgentBinary(
  * Check if lasterm-agent exists on the remote host.
  * Returns the remote path if found, null otherwise.
  *
- * On Windows the commands run under cmd.exe or a PowerShell `DefaultShell` alike (#714):
- * `where.exe`, spelt out, since PowerShell takes a bare `where` for `Where-Object`; then
- * `windowsFindAgentScript` for the known folders.
+ * On Windows, one command that runs under cmd.exe or a PowerShell `DefaultShell` alike (#714)
+ * does what `where.exe` did, then looks in the known folders (`windowsFindAgentScript`), and the
+ * first place it names that the deployer can use is the agent's (#749).
  */
 export async function checkRemoteAgent(client: SshClient, os: HostOs): Promise<string | null> {
-	try {
-		const { stdout, exitCode } = await sshExec(
-			client,
-			os === "windows" ? "where.exe lasterm-agent" : "which lasterm-agent",
-		);
-		if (exitCode === 0) {
-			const path =
-				os === "windows"
-					? stdout
-							.trim()
-							.split(/\r?\n/)
-							.map((line) => line.trim())
-							.find((line) => line && isWindowsPath(line))
-					: stdout.trim();
-			if (path) return path;
-		}
-	} catch {
-		// Continue with the common paths.
-	}
-
 	if (os === "windows") {
 		try {
 			const { stdout, exitCode } = await sshExec(
 				client,
 				encodedPowerShell(windowsFindAgentScript()),
 			);
-			const path = exitCode === 0 ? decodeBase64Path(stdout) : null;
-			if (path !== null && isWindowsPath(path)) return path;
+			const found = exitCode === 0 ? windowsReply(stdout) : null;
+			for (const line of found?.split(/\s+/) ?? []) {
+				const path = decodeBase64Path(line);
+				if (path !== null && isWindowsPath(path)) return path;
+			}
 		} catch {
 			// Not found, as far as anyone can tell.
 		}
-	} else {
-		for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
-			try {
-				const { stdout, exitCode } = await sshExec(
-					client,
-					`test -x "${rawPath}" && echo "${rawPath}"`,
-				);
-				if (exitCode === 0 && stdout.trim()) return stdout.trim();
-			} catch {
-				// Continue with the next candidate.
-			}
+		return null;
+	}
+
+	try {
+		const { stdout, exitCode } = await sshExec(client, "which lasterm-agent");
+		if (exitCode === 0 && stdout.trim()) return stdout.trim();
+	} catch {
+		// Continue with the common paths.
+	}
+	for (const rawPath of COMMON_AGENT_PATHS_UNIX) {
+		try {
+			const { stdout, exitCode } = await sshExec(
+				client,
+				`test -x "${rawPath}" && echo "${rawPath}"`,
+			);
+			if (exitCode === 0 && stdout.trim()) return stdout.trim();
+		} catch {
+			// Continue with the next candidate.
 		}
 	}
 	return null;
@@ -332,16 +362,16 @@ export interface RemoteSystem {
 }
 
 /**
- * The commands that print PROCESSOR_ARCHITECTURE on a Windows host, in turn
- * until one is understood. cmd.exe runs the first, as it always has. A
- * PowerShell `DefaultShell` prints `%PROCESSOR_ARCHITECTURE%` as it is, and the
- * second asks PowerShell, under either shell (#714). Not `cmd /c echo …`:
- * through Win32-OpenSSH's `cmd.exe /c "<command>"`, the inner cmd.exe also
- * prints the closing quote.
+ * The commands that print PROCESSOR_ARCHITECTURE on a Windows host after
+ * `WINDOWS_REPLY_MARKER`, in turn until one is understood. cmd.exe runs the
+ * first, as it always has. A PowerShell `DefaultShell` prints
+ * `%PROCESSOR_ARCHITECTURE%` as it is, and the second asks PowerShell, under
+ * either shell (#714). Not `cmd /c echo …`: through Win32-OpenSSH's
+ * `cmd.exe /c "<command>"`, the inner cmd.exe also prints the closing quote.
  */
 export const WINDOWS_ARCH_COMMANDS: readonly string[] = [
-	"echo %PROCESSOR_ARCHITECTURE%",
-	encodedPowerShell("[Console]::Out.Write($env:PROCESSOR_ARCHITECTURE)"),
+	`echo ${WINDOWS_REPLY_MARKER}%PROCESSOR_ARCHITECTURE%`,
+	encodedPowerShell(powerShellReply("$env:PROCESSOR_ARCHITECTURE")),
 ];
 
 /**
@@ -369,8 +399,8 @@ export async function readRemoteSystem(
 	for (const command of WINDOWS_ARCH_COMMANDS) {
 		try {
 			const { stdout, exitCode } = await sshExec(client, command, timeoutMs);
-			const arch = stdout.trim();
-			const parsed = exitCode === 0 ? parseWindowsArchOutput(arch) : null;
+			const arch = windowsReply(stdout);
+			const parsed = exitCode === 0 && arch !== null ? parseWindowsArchOutput(arch) : null;
 			if (parsed) return { system: `Windows ${arch}`, parsed };
 		} catch {
 			// ignore
@@ -924,8 +954,8 @@ export function posixUploadCommand(temp: string): string {
 /**
  * The command that writes what arrives on its stdin to `remotePath` on a
  * Windows host, creating its missing directories (#712), and prints how many
- * bytes it wrote. It runs under cmd.exe and under a PowerShell `DefaultShell`
- * alike, and the path reaches it only as Base64.
+ * bytes it wrote, after `WINDOWS_REPLY_MARKER`. It runs under cmd.exe and under
+ * a PowerShell `DefaultShell` alike, and the path reaches it only as Base64.
  */
 export function windowsUploadCommand(remotePath: string): string {
 	return encodedPowerShell(
@@ -937,7 +967,7 @@ export function windowsUploadCommand(remotePath: string): string {
 			"$i=[Console]::OpenStandardInput()",
 			"$o=[IO.File]::Create($p)",
 			"try{$i.CopyTo($o);$n=$o.Length}finally{$o.Dispose()}",
-			"[Console]::Out.Write($n)",
+			powerShellReply("$n"),
 		].join(";"),
 	);
 }
@@ -1135,7 +1165,9 @@ async function writeOverExec(
 	const size = statSync(localPath).size;
 	const { stdout, stderr, exitCode } = await execWithFileOnStdin(client, command, localPath);
 	if (exitCode !== 0) throw exitFailure(exitCode, stderr);
-	const counted = /^\s*(\d+)\s*$/.exec(stdout)?.[1];
+	const counted = /^\s*(\d+)\s*$/.exec(
+		(os === "windows" ? windowsReply(stdout) : stdout) ?? "",
+	)?.[1];
 	if (counted === undefined) throw new Error("the remote did not say how many bytes it wrote");
 	if (Number(counted) !== size) throw new Error(`${counted} of ${size} bytes arrived`);
 	const localSha = getLocalSha256(localPath);
@@ -1409,14 +1441,17 @@ export async function getRemoteSha256(
 	return "sha256" in hashed ? hashed.sha256 : null;
 }
 
-/** The PowerShell script that prints the lowercase SHA-256 of `path`, with .NET alone. */
+/**
+ * The PowerShell script that prints the lowercase SHA-256 of `path` after
+ * `WINDOWS_REPLY_MARKER`, with .NET alone.
+ */
 export function windowsHashScript(path: string): string {
 	return [
 		"$ErrorActionPreference='Stop'",
 		powerShellPathVariable(path),
 		"$s=[IO.File]::OpenRead($p)",
 		"try{$h=[Security.Cryptography.SHA256]::Create().ComputeHash($s)}finally{$s.Dispose()}",
-		"[BitConverter]::ToString($h).Replace('-','').ToLower()",
+		powerShellReply("[BitConverter]::ToString($h).Replace('-','').ToLower()"),
 	].join(";");
 }
 
@@ -1439,9 +1474,9 @@ async function hashRemoteFile(
 		}
 		const { stdout, stderr, exitCode } = await sshExec(client, cmd);
 		if (exitCode !== 0) return { reason: exitFailure(exitCode, stderr).message };
-		const trimmed = stdout.trim();
 		// sha256sum: "hash  filename" — take first 64 hex chars
-		// PowerShell: just the hash on one line
+		// PowerShell: just the hash, after the marker
+		const trimmed = (os === "windows" ? windowsReply(stdout) : stdout.trim()) ?? "";
 		const sha256 = trimmed.match(/^([a-f0-9]{64})/i)?.[1]?.toLowerCase();
 		return sha256 !== undefined ? { sha256 } : { reason: "it printed no SHA-256" };
 	} catch (error) {

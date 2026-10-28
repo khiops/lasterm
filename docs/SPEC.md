@@ -151,8 +151,10 @@ shim is needed at all.
   `-EncodedCommand` script that receives the agent's path and arguments as Base64 and starts it with
   `Process.Start`, without redirection. The agent inherits the channel's stdin and stdout, so no
   frame passes through PowerShell, which would re-encode native output it read. PowerShell starts in
-  about a second, after the account's profile when it is the `DefaultShell` (sshd passes no
-  `-NoProfile`), so a Windows agent has 15 s to say HELLO instead of 5.
+  about a second, so a Windows agent has 15 s to say HELLO instead of 5. Either bound is extended by
+  what the shell's start-up costs on that connection (#749): the account's profile loads before every
+  command under a PowerShell `DefaultShell`, since sshd passes no `-NoProfile`. What the shell prints
+  before the agent starts is skipped (§3.5, "What a PowerShell profile may do").
 - If no build exists for the remote's OS and architecture, the fetch fails with a named
   target rather than deploying something that cannot run.
 
@@ -408,12 +410,14 @@ names both.
 **Windows hosts under either shell (#714).** Win32-OpenSSH runs an exec request as
 `cmd.exe /c "<command>"`, or as `powershell.exe -c "<command>"` when its `DefaultShell` names
 PowerShell, and the hub does not know which. Every command it sends there works under both:
-- the architecture: `echo %PROCESSOR_ARCHITECTURE%`, which cmd.exe answers, then, when the answer is
-  not one (PowerShell prints `%PROCESSOR_ARCHITECTURE%` as it is), PowerShell's
+- the architecture: `echo <marker>%PROCESSOR_ARCHITECTURE%`, which cmd.exe answers, then, when the
+  answer is not one (PowerShell prints `%PROCESSOR_ARCHITECTURE%` as it is), PowerShell's
   `$env:PROCESSOR_ARCHITECTURE`;
-- an agent already there: `where.exe lasterm-agent`, spelt out because PowerShell takes `where` for
-  `Where-Object`, then a PowerShell script that looks in LocalAppData, then Program Files
-  (`lasterm\lasterm-agent.exe`), and prints the path it found as Base64;
+- an agent already there: one PowerShell script that searches as `where.exe lasterm-agent` does (the
+  current directory, then each PATH entry, with every PATHEXT extension), then LocalAppData, then
+  Program Files (`lasterm\lasterm-agent.exe`), and prints every path it found as Base64 of its UTF-8
+  bytes. Not `where.exe` itself: it prints in the console's code page, which loses a non-ASCII PATH
+  entry (#749);
 - the install folder, the hash, the upload over an exec channel, the move into place and the launch:
   PowerShell, the path given and returned as Base64 data, with .NET calls only.
 
@@ -421,6 +425,30 @@ No path reaches either shell as text, so a Windows path is accepted whatever cha
 may hold, `%`, `!`, `$`, quotes and non-ASCII included, drive-absolute (`C:\…`) or UNC
 (`\\server\share\…`, as a known folder redirected to a network share is). A path the hub refuses holds
 a `"`, which no file name does, or a control character, or is neither form.
+
+**What a PowerShell profile may do (#749).** Under a PowerShell `DefaultShell`, the account's profile
+runs before every command the hub sends, the agent's included, and cmd.exe runs its AutoRun the same
+way. The hub copes with what a profile usually does:
+- **Print, before the command.** Every Windows command prints a marker line
+  (`lasterm-reply-4d9b1f`), then its answer, and the hub reads only what follows the last marker. The
+  agent's frames start at its HELLO: up to 64 KiB printed before it are skipped, and past that the
+  connection fails, saying how many bytes the shell printed and whose profile to look at. After HELLO,
+  framing is as strict as ever.
+- **Take its time.** The first command of a connection may take its own bound plus 30 s; what it took,
+  the shell's start-up included, up to those 30 s, is added to every later command's bound and to the
+  wait for HELLO on that connection (`shellStartAllowance`).
+
+What a profile must not do:
+- print after the command (from an exit handler, say), or more than 64 KiB before the agent starts;
+- read stdin: the upload over the exec channel and the agent's frames arrive there;
+- end the shell (`exit`) or fail it, or take longer than 30 s;
+- redefine `echo` or `powershell`, which the hub's commands call.
+
+SFTP has no such marker: by Win32-OpenSSH's source, sshd starts its SFTP server through the same
+shell, so a profile that prints would break it, and the agent then travels over the exec channel
+(#722). A profile that stays silent and fast, or a
+`DefaultShellCommandOption` of `-NoProfile`, avoids all of this; see
+[`SSH_SERVER.md`](SSH_SERVER.md).
 
 Two properties follow:
 - **The remote host never needs outbound internet** — the *hub* fetches on its behalf, and the binary

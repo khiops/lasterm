@@ -24,6 +24,7 @@ import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
 import { hubRefusal, hubUnreachable } from "../utils/hub-answer.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
+import { type SshConfigWireAnswer, sshConfigEntryFromWire } from "../utils/ssh-config.js";
 import { getInitials } from "./useHostIcon.js";
 
 /**
@@ -207,11 +208,10 @@ export function useHostForm(editHost?: Host) {
 				sshConfigError.value = (await hubRefusal(res)).message;
 				return;
 			}
-			const data = (await res.json()) as {
-				entries: SshConfigEntry[];
-				has_include: boolean;
-			};
-			sshConfigEntries.value = data.entries;
+			// Snake_case, as the hub sends it: read in camelCase, or an entry's
+			// identity file and git-host flag go unseen (#757).
+			const data = (await res.json()) as SshConfigWireAnswer;
+			sshConfigEntries.value = data.entries.map(sshConfigEntryFromWire);
 			sshConfigHasInclude.value = data.has_include;
 		} catch (error) {
 			sshConfigError.value = hubUnreachable(error);

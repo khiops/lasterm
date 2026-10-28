@@ -572,6 +572,7 @@
 				</div>
 
 				<div class="dialog-actions">
+					<span v-if="saveError" class="save-error" role="alert">{{ saveError }}</span>
 					<button class="btn btn-secondary" @click="$emit('close')">
 						Cancel
 					</button>
@@ -710,6 +711,7 @@ const {
 	testResult,
 	testing,
 	saving,
+	saveError,
 	sshRemoteDaemonUnavailable,
 	connectedThroughRemoteDaemon,
 	labelError,
@@ -906,10 +908,20 @@ async function onSave(): Promise<void> {
 
 .dialog-actions {
 	display: flex;
+	align-items: center;
 	gap: 8px;
 	justify-content: flex-end;
 	padding: 12px 20px 16px;
 	border-top: 1px solid var(--nt-border);
+}
+
+/* Why the hub refused the save (#703), beside the buttons that retry it. */
+.save-error {
+	flex: 1;
+	min-width: 0;
+	font-size: 12px;
+	color: var(--nt-red, #e06c75);
+	overflow-wrap: anywhere;
 }
 
 .field {

@@ -35,6 +35,42 @@ export interface HostConnectionAnswer {
 	};
 }
 
+/**
+ * Why the hub refused a request, as it said it (#703): its code when it gave
+ * one, and its message, or the status when it sent none.
+ */
+export interface HubRefusal {
+	readonly ok: false;
+	readonly status: number;
+	readonly code: string | null;
+	readonly message: string;
+}
+
+/** What the hub answered a host's create or update: the host it stored, or its refusal. */
+export type HostSaveAnswer = { readonly ok: true; readonly host: Host } | HubRefusal;
+
+/** What the hub answered a new host group: the group it stored, or its refusal. */
+export type HostGroupCreateAnswer = { readonly ok: true; readonly group: HostGroup } | HubRefusal;
+
+/** Read the hub's `{ error: { code, message } }` from a refused answer. */
+export async function hubRefusal(res: Response): Promise<HubRefusal> {
+	let error: { code?: unknown; message?: unknown } | undefined;
+	try {
+		error = ((await res.json()) as { error?: { code?: unknown; message?: unknown } }).error;
+	} catch {
+		// No body, or not JSON: the status says it.
+	}
+	return {
+		ok: false,
+		status: res.status,
+		code: typeof error?.code === "string" ? error.code : null,
+		message:
+			typeof error?.message === "string" && error.message !== ""
+				? error.message
+				: `The hub answered ${res.status}.`,
+	};
+}
+
 export interface StopKeepingAgentBody {
 	end_terminals?: boolean;
 	force?: boolean;
@@ -402,7 +438,11 @@ export const useHostsStore = defineStore("hosts", () => {
 		}
 	}
 
-	async function createHost(body: Record<string, unknown>): Promise<Host | null> {
+	/**
+	 * Add a host. A refusal comes back with the hub's reason rather than as
+	 * nothing, for the dialog to show (#703); a hub that does not answer throws.
+	 */
+	async function createHost(body: Record<string, unknown>): Promise<HostSaveAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/hosts`, {
 			method: "POST",
 			headers: {
@@ -411,13 +451,18 @@ export const useHostsStore = defineStore("hosts", () => {
 			},
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) return null;
+		if (!res.ok) return hubRefusal(res);
 		const host = toCamelCase(await res.json()) as Host;
 		hosts.value = [...hosts.value, host];
-		return host;
+		return { ok: true, host };
 	}
 
-	async function updateHost(id: string, body: Record<string, unknown>): Promise<Host | null> {
+	/**
+	 * Save a host's changes. A refusal comes back with the hub's reason, such as
+	 * a label already taken or an OS a connected daemon rules out (#703); a hub
+	 * that does not answer throws.
+	 */
+	async function updateHost(id: string, body: Record<string, unknown>): Promise<HostSaveAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${id}`, {
 			method: "PUT",
 			headers: {
@@ -426,10 +471,10 @@ export const useHostsStore = defineStore("hosts", () => {
 			},
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) return null;
+		if (!res.ok) return hubRefusal(res);
 		const updated = toCamelCase(await res.json()) as Host;
 		replaceCachedHost(updated);
-		return updated;
+		return { ok: true, host: updated };
 	}
 
 	async function deleteHost(id: string): Promise<boolean> {
@@ -461,8 +506,11 @@ export const useHostsStore = defineStore("hosts", () => {
 		return hostGroups.value;
 	}
 
-	async function createHostGroup(name: string): Promise<HostGroup | null> {
-		if (authStore.token === null) return null;
+	/**
+	 * Add a host group. A refusal comes back with the hub's reason, such as a
+	 * name already taken (#703); a hub that does not answer throws.
+	 */
+	async function createHostGroup(name: string): Promise<HostGroupCreateAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups`, {
 			method: "POST",
 			headers: {
@@ -471,7 +519,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			},
 			body: JSON.stringify({ name }),
 		});
-		if (!res.ok) return null;
+		if (!res.ok) return hubRefusal(res);
 		const raw = (await res.json()) as {
 			id: string;
 			name: string;
@@ -489,7 +537,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			updatedAt: raw.updated_at,
 		};
 		hostGroups.value = [...hostGroups.value, group];
-		return group;
+		return { ok: true, group };
 	}
 
 	async function renameHostGroup(id: string, name: string): Promise<void> {

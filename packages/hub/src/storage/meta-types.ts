@@ -27,7 +27,6 @@ export interface CreateHostInput {
 	trustRemoteHints?: "apply" | "ask" | "ignore";
 	defaultShell?: string;
 	defaultCwd?: string;
-	hostGroup?: string | null;
 	hostGroupId?: string | null;
 	sortOrder?: number;
 	sshConfigHost?: string | null;

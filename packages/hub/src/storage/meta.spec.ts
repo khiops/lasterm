@@ -286,7 +286,7 @@ describe("MetaDAL — Host Management fields", () => {
 		const host = dal.createHost({ type: "local", label: "defaults-test" });
 
 		expect(host.sortOrder).toBe(0);
-		expect(host.hostGroup).toBeUndefined();
+		expect(host.hostGroupId).toBeUndefined();
 		expect(host.sshConfigHost).toBeUndefined();
 		expect(host.sshUser).toBeUndefined();
 	});
@@ -296,58 +296,28 @@ describe("MetaDAL — Host Management fields", () => {
 			type: "ssh",
 			label: "explicit-fields",
 			sshHost: "10.0.0.5",
-			hostGroup: "production",
 			sortOrder: 3,
 			sshConfigHost: "prod-server",
 			sshUser: "deploy",
 		});
 
-		expect(host.hostGroup).toBe("production");
 		expect(host.sortOrder).toBe(3);
 		expect(host.sshConfigHost).toBe("prod-server");
 		expect(host.sshUser).toBe("deploy");
 	});
 
-	it("updateHost updates hostGroup", () => {
-		const host = dal.createHost({ type: "ssh", label: "group-test", sshHost: "10.0.0.6" });
-		expect(host.hostGroup).toBeUndefined();
+	it("listHosts orders local first, then by sortOrder", () => {
+		dal.createHost({ type: "ssh", label: "ssh-two", sshHost: "10.0.0.1", sortOrder: 2 });
+		dal.createHost({ type: "local", label: "my-local", sortOrder: 5 });
+		dal.createHost({ type: "ssh", label: "ssh-zero", sshHost: "10.0.0.2", sortOrder: 0 });
+		dal.createHost({ type: "ssh", label: "ssh-one", sshHost: "10.0.0.3", sortOrder: 1 });
 
-		const updated = dal.updateHost(host.id, { hostGroup: "staging" });
-		expect(updated.hostGroup).toBe("staging");
-	});
-
-	it("listHosts orders local first, then by group and sortOrder", () => {
-		// Create hosts: local, then two SSH in different groups
-		dal.createHost({ type: "local", label: "my-local" });
-		dal.createHost({
-			type: "ssh",
-			label: "ssh-beta",
-			sshHost: "10.0.0.1",
-			hostGroup: "beta",
-			sortOrder: 0,
-		});
-		dal.createHost({
-			type: "ssh",
-			label: "ssh-alpha",
-			sshHost: "10.0.0.2",
-			hostGroup: "alpha",
-			sortOrder: 0,
-		});
-		dal.createHost({
-			type: "ssh",
-			label: "ssh-no-group",
-			sshHost: "10.0.0.3",
-		});
-
-		const hosts = dal.listHosts();
-		expect(hosts).toHaveLength(4);
-		// 1. local first
-		expect(hosts[0]?.label).toBe("my-local");
-		// 2. SSH: group "alpha" before "beta" (alphabetical)
-		expect(hosts[1]?.label).toBe("ssh-alpha");
-		expect(hosts[2]?.label).toBe("ssh-beta");
-		// 3. SSH: NULL group sorts last (COALESCE to '~')
-		expect(hosts[3]?.label).toBe("ssh-no-group");
+		expect(dal.listHosts().map((h) => h.label)).toEqual([
+			"my-local",
+			"ssh-zero",
+			"ssh-one",
+			"ssh-two",
+		]);
 	});
 });
 
@@ -1414,7 +1384,6 @@ describe("MetaDAL — Host Group Operations", () => {
 			sshHost: "10.0.0.10",
 			sshPort: 2222,
 			color: "#ff0000",
-			hostGroup: "staging",
 		});
 
 		const copy = dal.duplicateHost(original.id);
@@ -1424,7 +1393,6 @@ describe("MetaDAL — Host Group Operations", () => {
 		expect(copy?.sshHost).toBe("10.0.0.10");
 		expect(copy?.sshPort).toBe(2222);
 		expect(copy?.color).toBe("#ff0000");
-		expect(copy?.hostGroup).toBe("staging");
 		expect(copy?.id).not.toBe(original.id);
 	});
 
@@ -1615,72 +1583,6 @@ describe("MetaDAL — host groups (first-class)", () => {
 	it("createHostGroup UNIQUE name constraint throws on duplicate", () => {
 		dal.createHostGroup("Unique");
 		expect(() => dal.createHostGroup("Unique")).toThrow();
-	});
-
-	it("migrateHostGroupData migrates legacy host_group strings to host_groups table", () => {
-		// Create hosts with legacy host_group string
-		const h1 = dal.createHost({
-			type: "ssh",
-			label: "migrate-a",
-			sshHost: "10.2.0.1",
-			hostGroup: "legacy-prod",
-		});
-		const h2 = dal.createHost({
-			type: "ssh",
-			label: "migrate-b",
-			sshHost: "10.2.0.2",
-			hostGroup: "legacy-prod",
-		});
-		const h3 = dal.createHost({
-			type: "ssh",
-			label: "migrate-c",
-			sshHost: "10.2.0.3",
-			hostGroup: "legacy-staging",
-		});
-		const h4 = dal.createHost({
-			type: "ssh",
-			label: "migrate-d",
-			sshHost: "10.2.0.4",
-			// no hostGroup
-		});
-
-		dal.migrateHostGroupData();
-
-		// host_groups table should have the two legacy names
-		const entities = dal.listHostGroupEntities();
-		const names = entities.map((g) => g.name).sort();
-		expect(names).toContain("legacy-prod");
-		expect(names).toContain("legacy-staging");
-
-		// hosts should have host_group_id set
-		const r1 = dal.getHost(h1.id);
-		const r2 = dal.getHost(h2.id);
-		const r3 = dal.getHost(h3.id);
-		const r4 = dal.getHost(h4.id);
-
-		const prodGroup = entities.find((g) => g.name === "legacy-prod");
-		const stagingGroup = entities.find((g) => g.name === "legacy-staging");
-
-		expect(r1?.hostGroupId).toBe(prodGroup?.id);
-		expect(r2?.hostGroupId).toBe(prodGroup?.id);
-		expect(r3?.hostGroupId).toBe(stagingGroup?.id);
-		expect(r4?.hostGroupId).toBeUndefined();
-	});
-
-	it("migrateHostGroupData is idempotent (safe to call twice)", () => {
-		dal.createHost({
-			type: "ssh",
-			label: "idem-host",
-			sshHost: "10.2.0.10",
-			hostGroup: "idem-group",
-		});
-
-		dal.migrateHostGroupData();
-		dal.migrateHostGroupData();
-
-		const entities = dal.listHostGroupEntities();
-		const idemGroups = entities.filter((g) => g.name === "idem-group");
-		expect(idemGroups).toHaveLength(1);
 	});
 
 	it("createHost with hostGroupId stores correctly", () => {

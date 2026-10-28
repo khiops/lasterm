@@ -7,9 +7,7 @@ import type { ChannelEndReason } from "./protocol.js";
 export type BackgroundMode = "image" | "solid" | "transparent";
 export type WindowEffect =
 	| "none"
-	| "auto"
 	| "mica"
-	| "blur"
 	| "acrylic"
 	| "vibrancy-under-window"
 	| "vibrancy-sidebar"
@@ -22,7 +20,7 @@ export interface TerminalProfile {
 	themeOverrides?: Record<string, string>;
 	cursorStyle?: "block" | "underline" | "bar";
 	scrollback?: number;
-	bellSound?: BellSound | boolean;
+	bellSound?: BellSound;
 	bellCustomFile?: string;
 	bellBadge?: boolean;
 	/** Show search match markers in the scrollbar overview ruler (default: true). */
@@ -109,7 +107,6 @@ export interface Host {
 	defaultCwd?: string;
 	elevationMethod?: ElevationMethod | null;
 	customCommand?: string | null;
-	hostGroup?: string | null;
 	hostGroupId?: string | null;
 	sortOrder: number;
 	sshConfigHost?: string | null;
@@ -247,7 +244,6 @@ export interface SshConfigEntry {
 export interface SshConfigImport {
 	name: string;
 	label: string;
-	hostGroup?: string;
 	/** An explicit answer for this imported host; null or absent keeps the global setting. */
 	sshRemoteDaemon?: boolean | null;
 }

@@ -22,7 +22,6 @@ export interface CreateHostBody {
 	default_shell?: string;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
-	host_group?: string | null;
 	host_group_id?: string | null;
 	ssh_config_host?: string | null;
 	ssh_user?: string | null;
@@ -51,7 +50,6 @@ export interface UpdateHostBody {
 	default_shell?: string;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
-	host_group?: string | null;
 	host_group_id?: string | null;
 	ssh_config_host?: string | null;
 	ssh_user?: string | null;

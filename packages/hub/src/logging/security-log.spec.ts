@@ -231,26 +231,6 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 		});
 	});
 
-	it("token reinstated: which credential, and when it had been revoked", () => {
-		const { log, records } = collect();
-		log.tokenReinstated({ tokenId: "primary", revokedAt: "2026-09-20T08:15:00.000Z" });
-		log.tokenReinstated({ tokenId: TOKEN, revokedAt: TOKEN });
-		expect(records).toEqual([
-			{
-				msg: "security: token reinstated",
-				fields: {
-					event: "token.reinstate",
-					tokenId: "primary",
-					revokedAt: "2026-09-20T08:15:00.000Z",
-				},
-			},
-			{
-				msg: "security: token reinstated",
-				fields: { event: "token.reinstate", tokenId: WITHHELD, revokedAt: WITHHELD },
-			},
-		]);
-	});
-
 	it("token revocation: which credential, which one asked, from where, and what became of the request", () => {
 		const { log, records } = collect();
 		log.tokenRevocation({

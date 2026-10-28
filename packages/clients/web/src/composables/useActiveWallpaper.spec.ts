@@ -302,7 +302,7 @@ describe("useActiveWallpaper", () => {
 		configStore._setProfile({
 			...DEFAULT_PROFILE,
 			backgroundMode: "image",
-			windowEffect: "auto",
+			windowEffect: "acrylic",
 			wallpaper: "global-wall.jpg",
 			wallpaperBlur: 2,
 			wallpaperDim: 45,

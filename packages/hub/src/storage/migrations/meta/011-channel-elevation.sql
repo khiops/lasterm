@@ -1,2 +1,0 @@
-ALTER TABLE channels ADD COLUMN elevated INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE channels ADD COLUMN elevation_method TEXT;

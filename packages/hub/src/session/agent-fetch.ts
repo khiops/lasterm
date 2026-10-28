@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -19,7 +19,6 @@ import {
 	diskError,
 	ensureCacheDir,
 	FetchError,
-	type ResolvedTarget,
 	removeFileIfPresent,
 	resolveTarget,
 	validateAgentVersion,
@@ -76,7 +75,6 @@ interface FetchTarget {
 }
 
 const DEFAULT_BASE_URL = "https://github.com/khiops/lasterm";
-const LEGACY_VERSION_CUTOFF = "0.4.0";
 
 const FETCH_HEADERS = {
 	"accept-encoding": "identity",
@@ -110,9 +108,6 @@ export async function fetchAgentBinary(options: FetchAgentBinaryOptions): Promis
 	ensureCacheDir(options.cacheDir);
 
 	const asset = await openAssetResponse({
-		baseUrl,
-		version: options.version,
-		target,
 		fetchImpl,
 		fetchTarget,
 		versionedAssetName,
@@ -185,9 +180,9 @@ function defaultFetchImpl(): AgentFetchImpl {
 }
 
 // Accept only a COMPLETE 200 OK asset response. A 2xx-but-not-200 (e.g. 206
-// Partial Content) or a Content-Range response would cache a truncated executable —
-// and for legacy versions, where the checksum is optional, that truncation would go
-// undetected. Reject such responses before any bytes are written.
+// Partial Content) or a Content-Range response would cache a truncated executable,
+// which the checksum would then refuse. Reject such responses before any bytes are
+// written.
 async function rejectPartialResponse(
 	response: Response,
 	request: TimedRequest,
@@ -204,9 +199,6 @@ async function rejectPartialResponse(
 }
 
 async function openAssetResponse(args: {
-	readonly baseUrl: string;
-	readonly version: string;
-	readonly target: ResolvedTarget;
 	readonly fetchImpl: AgentFetchImpl;
 	readonly fetchTarget: FetchTarget;
 	readonly versionedAssetName: string;
@@ -223,46 +215,6 @@ async function openAssetResponse(args: {
 			assetUrl: args.versionedAssetUrl,
 		};
 	}
-
-	// Any 404 is retried under the former basename, on no version condition at all.
-	// A condition would have to name the first version released after the rename —
-	// a number that does not exist yet when this ships — and reusing
-	// `isLegacyVersion` for it is worse than wrong: that predicate also decides
-	// whether a MISSING CHECKSUM is tolerated, so widening it to fix a naming
-	// question would quietly relax verification for every release it newly covered.
-	// Observing the 404 instead costs one request on a path that is already failing,
-	// and retires itself once nothing fetches a pre-rename release.
-	if (versioned.response.status === 404) {
-		await closeResponse(versioned.response);
-		versioned.request.clear();
-		const legacyAssetName = getLegacyAssetName(args.target.triple, args.version, args.target.ext);
-		const legacyAssetUrl = buildReleaseAssetUrl(args.baseUrl, args.version, legacyAssetName);
-		const legacy = await fetchResponse(legacyAssetUrl, args.fetchImpl, args.fetchTarget);
-		await rejectPartialResponse(legacy.response, legacy.request, legacyAssetUrl);
-		if (legacy.response.ok) {
-			return {
-				response: legacy.response,
-				request: legacy.request,
-				assetName: legacyAssetName,
-				assetUrl: legacyAssetUrl,
-			};
-		}
-		// Neither name is there. What the operator needs to hear about is the asset
-		// this build asks for, not the historical one that was also tried, so the
-		// retry must not hijack the diagnosis — unless it failed some other way,
-		// which is its own news and gets reported as itself.
-		return await throwHttpError({
-			response: legacy.response,
-			request: legacy.request,
-			tagUrl: args.tagUrl,
-			fetchImpl: args.fetchImpl,
-			fetchTarget: args.fetchTarget,
-			...(legacy.response.status === 404
-				? { url: args.versionedAssetUrl, assetName: args.versionedAssetName }
-				: { url: legacyAssetUrl, assetName: legacyAssetName }),
-		});
-	}
-
 	return await throwHttpError({
 		response: versioned.response,
 		request: versioned.request,
@@ -335,14 +287,7 @@ async function verifyChecksumAndPlace(args: {
 }): Promise<string> {
 	const manifest = await getChecksumManifest(args);
 	if (manifest === null) {
-		handleMissingChecksum(args.version, args.assetName, args.assetUrl, args.finalPath);
-		return verifyAndPlace(
-			args.tempPath,
-			args.assetName,
-			checksumManifestForTemp(args.tempPath, args.assetName),
-			args.cacheDir,
-			{ force: true },
-		);
+		throw missingChecksumError(args.version, args.assetName, args.assetUrl, args.finalPath);
 	}
 
 	try {
@@ -356,22 +301,8 @@ async function verifyChecksumAndPlace(args: {
 		if (!manifest.fromCache) writeManifestCache(manifest.manifestPath, manifest.text);
 		return finalPath;
 	} catch (error) {
-		if (
-			error instanceof FetchError &&
-			error.code === "CHECKSUM_MISSING" &&
-			isLegacyVersion(args.version)
-		) {
-			handleMissingChecksum(args.version, args.assetName, args.assetUrl, args.finalPath);
-			return verifyAndPlace(
-				args.tempPath,
-				args.assetName,
-				checksumManifestForTemp(args.tempPath, args.assetName),
-				args.cacheDir,
-				{ force: true },
-			);
-		}
 		if (error instanceof FetchError && error.code === "CHECKSUM_MISSING") {
-			handleMissingChecksum(args.version, args.assetName, args.assetUrl, args.finalPath);
+			throw missingChecksumError(args.version, args.assetName, args.assetUrl, args.finalPath);
 		}
 		if (
 			error instanceof FetchError &&
@@ -385,10 +316,6 @@ async function verifyChecksumAndPlace(args: {
 		}
 		throw error;
 	}
-}
-
-function checksumManifestForTemp(tempPath: string, assetName: string): string {
-	return `${createHash("sha256").update(readFileSync(tempPath)).digest("hex")}  ${assetName}\n`;
 }
 
 async function getChecksumManifest(args: {
@@ -435,19 +362,13 @@ async function getChecksumManifest(args: {
 	}
 }
 
-function handleMissingChecksum(
+function missingChecksumError(
 	version: string,
 	assetName: string,
 	assetUrl: string,
 	finalPath: string,
-): void {
-	if (isLegacyVersion(version)) {
-		console.warn(
-			`No SHA256SUMS-${version}.txt entry for ${assetName}; proceeding only because ${version} predates versioned Lasterm agent checksums. Manually verify ${assetUrl} before trusting ${finalPath}.`,
-		);
-		return;
-	}
-	throw new FetchError(
+): FetchError {
+	return new FetchError(
 		"CHECKSUM_MISSING",
 		`Missing SHA256SUMS-${version}.txt entry for ${assetName}. Publish SHA256SUMS-${version}.txt next to ${assetUrl}, or manually download, verify, chmod 755, and rename the binary to ${finalPath}.`,
 	);
@@ -721,21 +642,6 @@ function getVersionedAssetName(triple: string, version: string, ext: "" | ".exe"
 	return `lasterm-agent-${triple}-${version}${ext}`;
 }
 
-/**
- * The basename an already-published release actually carries, for a version that
- * predates the rename.
- *
- * `termora` here is not a product name — it is what is on GitHub. Every release up
- * to the rename published assets under it, so asking for the current name would
- * request a file that has never existed. Two shapes, because the versioned naming
- * arrived at 0.4.0 and the releases below it are still unversioned.
- */
-function getLegacyAssetName(triple: string, version: string, ext: "" | ".exe"): string {
-	return isLegacyVersion(version)
-		? `termora-agent-${triple}${ext}`
-		: `termora-agent-${triple}-${version}${ext}`;
-}
-
 function getChecksumManifestName(version: string): string {
 	return `SHA256SUMS-${version}.txt`;
 }
@@ -746,20 +652,6 @@ function buildReleaseAssetUrl(baseUrl: string, version: string, assetName: strin
 
 function buildReleaseTagUrl(baseUrl: string, version: string): string {
 	return `${baseUrl}/releases/tags/v${version}`;
-}
-
-function isLegacyVersion(version: string): boolean {
-	return compareSemver(version, LEGACY_VERSION_CUTOFF) < 0;
-}
-
-function compareSemver(left: string, right: string): number {
-	const leftParts = left.split(".").map((part) => Number.parseInt(part, 10));
-	const rightParts = right.split(".").map((part) => Number.parseInt(part, 10));
-	for (let index = 0; index < 3; index++) {
-		const diff = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
-		if (diff !== 0) return diff;
-	}
-	return 0;
 }
 
 function isRateLimited(response: Response): boolean {

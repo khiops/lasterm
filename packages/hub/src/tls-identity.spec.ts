@@ -127,10 +127,7 @@ describe("generated hub TLS identity", () => {
 
 		expect(new URL(address).protocol).toBe("https:");
 		expect(Number.isInteger(port)).toBe(true);
-		const response = await requestHub(
-			{ pid: process.pid, port, started_at: new Date().toISOString(), spki: identity.spki },
-			"/api/health",
-		);
+		const response = await requestHub({ port, spki: identity.spki }, "/api/health");
 		expect(response.ok).toBe(true);
 		expect(await response.json()).toMatchObject({ status: "ok" });
 
@@ -139,20 +136,13 @@ describe("generated hub TLS identity", () => {
 			["/test/reset-content", 205],
 			["/test/not-modified", 304],
 		] as const) {
-			const noContent = await requestHub(
-				{ pid: process.pid, port, started_at: new Date().toISOString(), spki: identity.spki },
-				path,
-			);
+			const noContent = await requestHub({ port, spki: identity.spki }, path);
 			expect(noContent.status).toBe(expectedStatus);
 			if (expectedStatus !== 304) expect(noContent.ok).toBe(true);
 			expect(await noContent.text()).toBe("");
 		}
 
-		const head = await requestHub(
-			{ pid: process.pid, port, started_at: new Date().toISOString(), spki: identity.spki },
-			"/api/health",
-			{ method: "HEAD" },
-		);
+		const head = await requestHub({ port, spki: identity.spki }, "/api/health", { method: "HEAD" });
 		expect(head.status).toBe(200);
 		expect(head.ok).toBe(true);
 		expect(await head.text()).toBe("");
@@ -176,9 +166,7 @@ describe("generated hub TLS identity", () => {
 
 		const response = await requestHub(
 			{
-				pid: process.pid,
 				port: listener.port,
-				started_at: new Date().toISOString(),
 				spki: tls.expired.spki,
 			},
 			"/expired",
@@ -201,9 +189,7 @@ describe("generated hub TLS identity", () => {
 		await expect(
 			requestHub(
 				{
-					pid: process.pid,
 					port: listener.port,
-					started_at: new Date().toISOString(),
 					spki: tls.pinned.spki,
 				},
 				"/sensitive",
@@ -222,12 +208,9 @@ describe("generated hub TLS identity", () => {
 	});
 
 	it("names an unusable runtime key and a deliberately refused endpoint separately", async () => {
-		await expect(
-			requestHub(
-				{ pid: process.pid, port: 1, started_at: new Date().toISOString(), spki: "not a key" },
-				"/",
-			),
-		).rejects.toThrow("runtime has no usable TLS SPKI");
+		await expect(requestHub({ port: 1, spki: "not a key" }, "/")).rejects.toThrow(
+			"runtime has no usable TLS SPKI",
+		);
 
 		const material = getTestTlsMaterial();
 		const originalConnect = tls.connect;
@@ -247,9 +230,7 @@ describe("generated hub TLS identity", () => {
 		try {
 			const error = await requestHub(
 				{
-					pid: process.pid,
 					port: 1,
-					started_at: new Date().toISOString(),
 					spki: material.pinned.spki,
 				},
 				"/",
@@ -281,9 +262,9 @@ describe("generated hub TLS identity", () => {
 			`${canonical.slice(0, 12)}\n${canonical.slice(12)}`,
 			canonical.slice(0, -1),
 		]) {
-			await expect(
-				requestHub({ pid: process.pid, port: 1, started_at: new Date().toISOString(), spki }, "/"),
-			).rejects.toThrow("runtime has no usable TLS SPKI");
+			await expect(requestHub({ port: 1, spki }, "/")).rejects.toThrow(
+				"runtime has no usable TLS SPKI",
+			);
 		}
 	});
 
@@ -308,9 +289,7 @@ describe("generated hub TLS identity", () => {
 			await expect(
 				requestHub(
 					{
-						pid: process.pid,
 						port: address.port,
-						started_at: new Date().toISOString(),
 						spki: tls.pinned.spki,
 					},
 					"/",

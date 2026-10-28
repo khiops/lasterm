@@ -1,7 +1,0 @@
-ALTER TABLE channels ADD COLUMN icon TEXT DEFAULT NULL;
-
-ALTER TABLE channels ADD COLUMN args TEXT NOT NULL DEFAULT '[]';
-
-ALTER TABLE channels ADD COLUMN direct_process INTEGER NOT NULL DEFAULT 0;
-
-INSERT INTO schema_version VALUES (4, datetime('now'));

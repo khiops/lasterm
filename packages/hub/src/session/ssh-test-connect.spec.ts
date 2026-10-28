@@ -6,8 +6,6 @@ import { generateId, type TestConnectMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import { sshAddress, targetRoute } from "../ssh-route.js";
-import { openTestDatabases } from "../storage/db.js";
-import { MetaDAL } from "../storage/meta.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
@@ -167,40 +165,6 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 	afterEach(() => {
 		server?.close();
 		server = undefined;
-	});
-
-	it("accepts a padded legacy database pin without a connection-test prompt", async () => {
-		const mock = await sshServer();
-		server = mock.server;
-		const dbs = openTestDatabases();
-		try {
-			const dal = new MetaDAL(dbs.meta);
-			const host = dal.createHost({
-				type: "ssh",
-				label: "legacy",
-				sshHost: "127.0.0.1",
-				sshPort: mock.port,
-				sshAuth: "key",
-				sshKeyPath: CLIENT_KEY_PATH,
-			});
-			const key = utils.parseKey(HOST_KEY);
-			if (key instanceof Error || Array.isArray(key)) throw new Error("invalid fixture key");
-			const canonical = `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
-			dbs.meta
-				.prepare("UPDATE hosts SET ssh_fingerprint = ? WHERE id = ?")
-				.run(`${canonical}=`, host.id);
-			const f = setup();
-			const ctx = f.ctx as unknown as SharedSessionContext;
-			ctx.metaDal = dal;
-			const mgr = new SshConnectionManager(ctx, null as never, null as never, null as never);
-			await mgr.handleTestConnect("c1", testMessage(host.id, mock.port));
-			expect(f.client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: host.id });
-			expect(f.client.send).not.toHaveBeenCalledWith(
-				expect.objectContaining({ type: "HOST_VERIFY" }),
-			);
-		} finally {
-			dbs.close();
-		}
 	});
 
 	it.each(["address", "saved-alias", "edited-alias", "pinned"])(
@@ -562,7 +526,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		Object.assign(ctx.metaDal, {
 			getHost: (id: string) => hosts.get(id),
 			getHostFingerprint: (id: string, expectedRoute: string | null) =>
-				expectedRoute !== null && id === "jump" && !options.unpinned ? `${fingerprint}=` : null,
+				expectedRoute !== null && id === "jump" && !options.unpinned ? fingerprint : null,
 			updateHostProxyFingerprint: updateHost,
 		});
 		Object.assign(ctx, {
@@ -763,18 +727,6 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		});
 		expect(f.routes).toEqual([]);
 		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
-		expect(f.updateHost).not.toHaveBeenCalled();
-		await ended(f);
-	});
-	it("accepts a padded spec jump pin without a jump prompt", async () => {
-		const f = await fixture({ spec: true });
-		f.hosts.get("saved-host")!.sshProxyFingerprint = `${fingerprint}=`;
-		const done = f.mgr.handleTestConnect("c1", f.msg);
-		const prompt = await hostVerifyPrompt(f.client);
-		expect(prompt.fingerprint).toBe(fingerprint);
-		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
-		await done;
-		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
 		expect(f.updateHost).not.toHaveBeenCalled();
 		await ended(f);
 	});

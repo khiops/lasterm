@@ -1,14 +1,5 @@
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -89,7 +80,6 @@ describe("openTestDatabases", () => {
 		expect(tableNames).toContain("channels");
 		expect(tableNames).toContain("channel_groups");
 		expect(tableNames).toContain("host_groups");
-		expect(tableNames).toContain("workspaces");
 		expect(tableNames).toContain("cache_index");
 		expect(tableNames).toContain("pairing_codes");
 		expect(tableNames).toContain("auth_tokens");
@@ -219,38 +209,19 @@ describe.skipIf(process.platform === "win32")("openDatabases: owner-only files (
 	});
 });
 
-// ─── Migration 021: why a terminal ended (#592) ──────────────────────────────
+// ─── The baseline (STORAGE.md § 9.3) ─────────────────────────────────────────
+//
+// One file, 021-baseline.sql, replaced migrations 001 to 021 before the first
+// public release. It keeps their last version, so a database they brought to
+// 21 is not touched, and a new one comes out at 21 with the schema they built,
+// less what nothing read.
 
-const META_MIGRATIONS = fileURLToPath(new URL("./migrations/meta", import.meta.url));
-
-/** Apply the meta migrations up to `version`, as the runner does: a hub of that schema. */
-function migrateMetaTo(db: Database.Database, version: number): void {
-	const files = readdirSync(META_MIGRATIONS)
-		.filter((file) => /^\d{3}-.*\.sql$/.test(file))
-		.sort();
-	for (const file of files) {
-		const num = Number.parseInt(file.slice(0, 3), 10);
-		if (num > version) break;
-		db.transaction(() => {
-			db.exec(readFileSync(join(META_MIGRATIONS, file), "utf-8"));
-			const { v } = db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as {
-				v: number | null;
-			};
-			if ((v ?? 0) < num) {
-				db.prepare(
-					"INSERT INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
-				).run(num);
-			}
-		})();
-	}
-}
-
-describe("an upgrade from a hub that did not store why a terminal ended", () => {
+describe("meta.db and its baseline", () => {
 	let dir: string;
 	let dbs: DatabaseManager | undefined;
 
 	beforeEach(() => {
-		dir = makeTempDir("lasterm-db-end-reason-");
+		dir = makeTempDir("lasterm-db-baseline-");
 	});
 
 	afterEach(async () => {
@@ -259,50 +230,98 @@ describe("an upgrade from a hub that did not store why a terminal ended", () => 
 		await removeTempDir(dir);
 	});
 
-	it("adds end_reason, with nothing recorded for the terminals that had already ended", () => {
-		// meta.db as a hub before #592 left it: schema 20, one terminal dead, one live.
-		const before = new Database(join(dir, "meta.db"));
-		migrateMetaTo(before, 20);
-		const now = new Date().toISOString();
-		before
-			.prepare(
-				"INSERT INTO hosts (id, type, label, created_at, updated_at) VALUES ('H1', 'local', 'here', ?, ?)",
-			)
-			.run(now, now);
-		before
-			.prepare(
-				"INSERT INTO sessions (id, host_id, status, created_at, updated_at) VALUES ('S1', 'H1', 'closed', ?, ?)",
-			)
-			.run(now, now);
-		const insert = before.prepare(
-			"INSERT INTO channels (id, session_id, shell, status, created_at, updated_at) VALUES (?, 'S1', '', ?, ?, ?)",
+	const versions = (db: Database.Database) =>
+		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
+	const tables = (db: Database.Database) =>
+		(
+			db
+				.prepare(
+					"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+				)
+				.all() as Array<{ name: string }>
+		).map((table) => table.name);
+	const columns = (db: Database.Database, table: string) =>
+		(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
+			(column) => column.name,
 		);
-		insert.run("C-DEAD", "dead", now, now);
-		insert.run("C-LIVE", "live", now, now);
-		const columnsBefore = before.prepare("PRAGMA table_info(channels)").all() as Array<{
-			name: string;
-		}>;
-		expect(columnsBefore.map((column) => column.name)).not.toContain("end_reason");
+
+	it("comes out new at version 21, with the final schema", () => {
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }]);
+		expect(tables(dbs.meta)).toEqual([
+			"auth_tokens",
+			"cache_index",
+			"channel_groups",
+			"channels",
+			"host_groups",
+			"host_launch_profiles",
+			"hosts",
+			"launch_profiles",
+			"pair_rate_limits",
+			"pairing_codes",
+			"schema_version",
+			"sessions",
+		]);
+		expect(columns(dbs.meta, "hosts")).toEqual([
+			"id",
+			"type",
+			"label",
+			"ssh_host",
+			"ssh_port",
+			"ssh_auth",
+			"ssh_key_path",
+			"icon_type",
+			"icon_value",
+			"color",
+			"profile_json",
+			"trust_remote_hints",
+			"default_shell",
+			"default_cwd",
+			"created_at",
+			"updated_at",
+			"sort_order",
+			"ssh_config_host",
+			"ssh_user",
+			"host_group_id",
+			"discovered_shells",
+			"discovered_shells_at",
+			"elevation_method",
+			"custom_command",
+			"os",
+			"arch",
+			"ssh_fingerprint",
+			"agent_sha256",
+			"ssh_proxy_host_id",
+			"ssh_proxy_spec",
+			"ssh_proxy_fingerprint",
+			"ssh_remote_daemon",
+		]);
+		expect(columns(dbs.meta, "channels")).toContain("end_reason");
+		expect(columns(dbs.meta, "auth_tokens")).toContain("swept_at");
+		expect(columns(dbs.meta, "pairing_codes")).toContain("code_hash");
+	});
+
+	it("leaves a database already at version 21 as it is", () => {
+		// What the migrations before the baseline left: version 21, with a table
+		// and a column the baseline no longer has.
+		const before = new Database(join(dir, "meta.db"));
+		before.exec(`
+			CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+			INSERT INTO schema_version VALUES (21, '2026-10-01 00:00:00');
+			CREATE TABLE hosts (id TEXT PRIMARY KEY, label TEXT, keep_alive_seconds INTEGER DEFAULT 60);
+			INSERT INTO hosts (id, label) VALUES ('H1', 'here');
+			CREATE TABLE workspaces (id TEXT PRIMARY KEY);
+		`);
 		before.close();
 
 		dbs = openDatabases(dir);
 
-		const columns = dbs.meta.prepare("PRAGMA table_info(channels)").all() as Array<{
-			name: string;
-			type: string;
-			notnull: number;
-		}>;
-		expect(columns.find((column) => column.name === "end_reason")).toMatchObject({
-			type: "TEXT",
-			notnull: 0,
-		});
-		expect(dbs.meta.prepare("SELECT id, end_reason FROM channels ORDER BY id").all()).toEqual([
-			{ id: "C-DEAD", end_reason: null },
-			{ id: "C-LIVE", end_reason: null },
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }]);
+		expect(tables(dbs.meta)).toEqual(["hosts", "schema_version", "workspaces"]);
+		expect(columns(dbs.meta, "hosts")).toEqual(["id", "label", "keep_alive_seconds"]);
+		expect(dbs.meta.prepare("SELECT * FROM hosts").all()).toEqual([
+			{ id: "H1", label: "here", keep_alive_seconds: 60 },
 		]);
-		const version = dbs.meta.prepare("SELECT MAX(version) AS v FROM schema_version").get() as {
-			v: number;
-		};
-		expect(version.v).toBe(21);
 	});
 });

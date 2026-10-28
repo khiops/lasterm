@@ -41,17 +41,6 @@ describe("wallpaper settings helpers", () => {
 		]);
 	});
 
-	// Blur is the legacy accent — it drags badly on 22621+ and looks like a
-	// material without being one, which is what made the picker read as broken.
-	it("offers no blur and no auto, which hid which material you would get", () => {
-		const values = windowEffectSettingsOptions({
-			os: "windows" as const,
-			windowsBuild: 26_100,
-		}).map((option) => option.value);
-		expect(values).not.toContain("blur");
-		expect(values).not.toContain("auto");
-	});
-
 	it("hides the effect picker entirely on Linux (every effect resolves to none there)", () => {
 		expect(shouldShowWindowEffectPicker(true, { os: "linux" as const, windowsBuild: null })).toBe(
 			false,

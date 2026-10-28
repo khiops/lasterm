@@ -1,11 +1,7 @@
-import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import { openTestDatabases } from "../storage/db.js";
-import { MetaDAL } from "../storage/meta.js";
 import {
 	type CreateHostBody,
 	MAX_ICON_IMAGE_LENGTH,
-	registerHostRoutes,
 	validateCreateHost,
 	validateHostColor,
 	validateIconImage,
@@ -137,42 +133,5 @@ describe("validateProfileJson", () => {
 
 	it("refuses a colour that is not #rrggbb", () => {
 		expect(validateProfileJson(withBorderColor("red"))).toBe("Invalid color value: red");
-	});
-});
-
-describe("GET /api/hosts SSH fingerprints", () => {
-	it("returns canonical legacy pins and preserves NULL shapes without rewriting rows", async () => {
-		const dbs = openTestDatabases();
-		const server = Fastify({ logger: false });
-		try {
-			const dal = new MetaDAL(dbs.meta);
-			const host = dal.createHost({ type: "ssh", label: "legacy", sshHost: "example.test" });
-			const fresh = dal.createHost({ type: "ssh", label: "fresh", sshHost: "fresh.test" });
-			dbs.meta
-				.prepare("UPDATE hosts SET ssh_fingerprint = ?, ssh_proxy_fingerprint = ? WHERE id = ?")
-				.run("SHA256:target=", "SHA256:jump=", host.id);
-			registerHostRoutes(server, dal, {
-				hostIsBeingStopped: () => false,
-				daemonPolicyWouldBeRevoked: () => false,
-			});
-			const res = await server.inject({ method: "GET", url: "/api/hosts" });
-			expect(res.statusCode).toBe(200);
-			const rows = res.json<Array<Record<string, unknown>>>();
-			expect(rows.find((row) => row.id === host.id)).toMatchObject({
-				ssh_fingerprint: "SHA256:target",
-				ssh_proxy_fingerprint: "SHA256:jump",
-			});
-			const freshRow = rows.find((row) => row.id === fresh.id);
-			expect(freshRow?.ssh_fingerprint).toBeNull();
-			expect(freshRow).not.toHaveProperty("ssh_proxy_fingerprint");
-			expect(
-				dbs.meta
-					.prepare("SELECT ssh_fingerprint, ssh_proxy_fingerprint FROM hosts WHERE id = ?")
-					.get(host.id),
-			).toEqual({ ssh_fingerprint: "SHA256:target=", ssh_proxy_fingerprint: "SHA256:jump=" });
-		} finally {
-			await server.close();
-			dbs.close();
-		}
 	});
 });

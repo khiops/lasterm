@@ -1323,20 +1323,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_generated_public_copy_is_not_adopted() {
-        let directory = test_dir("legacy-generated-copy");
-        let legacy_public_copy = directory.0.join("hub-tls-cert.pem");
-        let replacement =
-            generate_identity(&directory.0).expect("create generated certificate cache");
-        fs::write(&legacy_public_copy, &replacement.certificate_pem)
-            .expect("write legacy public copy");
-        fs::remove_file(directory.certificate_path()).expect("remove generated cache");
-        let restart =
-            generate_identity(&directory.0).expect("issue instead of adopting legacy public copy");
-        assert_ne!(restart.certificate_pem, replacement.certificate_pem);
-    }
-
-    #[test]
     fn valid_cache_followed_by_a_truncated_pem_block_is_replaced_once() {
         let directory = test_dir("trailing-truncated-pem");
         let original = generate_identity(&directory.0).expect("create valid certificate cache");

@@ -11,7 +11,7 @@ function makeProfile(overrides: Partial<TerminalProfile> = {}): TerminalProfile 
 		theme: "dark",
 		cursorStyle: "block",
 		scrollback: 5000,
-		bellSound: false,
+		bellSound: "mute",
 		scrollbarMarkers: true,
 		wallpaper: "",
 		wallpaperBlur: 0,

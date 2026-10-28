@@ -24,7 +24,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 				fontSize: 14,
 				cursorStyle: "block",
 				scrollback: 1000,
-				bellSound: true,
+				bellSound: "system",
 			},
 			global: {
 				fontFamily: "Consolas",
@@ -39,7 +39,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 				fontSize: 18,
 				cursorStyle: "block",
 				scrollback: 1000,
-				bellSound: true,
+				bellSound: "system",
 			},
 		},
 		ui: {
@@ -52,7 +52,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					confirmCloseOthers: true,
 				},
 				panes: { maxPanes: 4 },
-				channels: { defaultShell: "" },
+				channels: { defaultGroupName: "General" },
 				startup: { autoOpenWelcome: true },
 				title: {
 					source: "dynamic",
@@ -81,7 +81,7 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					confirmCloseOthers: true,
 				},
 				panes: { maxPanes: 4 },
-				channels: { defaultShell: "" },
+				channels: { defaultGroupName: "General" },
 				startup: { autoOpenWelcome: true },
 				title: {
 					source: "dynamic",
@@ -474,7 +474,7 @@ describe("useSettingsStore", () => {
 			mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
 
 			void store.updateSetting("global", "terminal", "backgroundMode", "transparent");
-			void store.updateSetting("host", "terminal", "windowEffect", "auto");
+			void store.updateSetting("host", "terminal", "windowEffect", "mica");
 			void store.updateSetting("channel", "terminal", "backgroundMode", "solid");
 			await vi.advanceTimersByTimeAsync(600);
 
@@ -502,7 +502,7 @@ describe("useSettingsStore", () => {
 			expect(patchHost).toBeDefined();
 			if (!patchHost) return;
 			expect(JSON.parse((patchHost[1] as RequestInit).body as string)).toEqual({
-				profile: { windowEffect: "auto" },
+				profile: { windowEffect: "mica" },
 			});
 			expect(patchChannel).toBeDefined();
 			if (!patchChannel) return;

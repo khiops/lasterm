@@ -57,6 +57,7 @@ import { registerSeaStaticServing } from "./sea-static-server.js";
 import { SessionManager } from "./session/session-manager.js";
 import { seedShellProfiles } from "./shell-discovery.js";
 import type { QuitResult } from "./shutdown.js";
+import { listenFromPort } from "./start-port.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
 import { ThemeManager } from "./theme-manager.js";
@@ -119,7 +120,7 @@ export function addCorsOrigins(...origins: string[]): void {
  * Add startup-only loopback origins once the server has bound.
  *
  * Returns the actual port from the listen address, which may differ from the
- * requested port due to zero_conf auto-increment on EADDRINUSE.
+ * requested port when zero_conf moved past a taken or reserved one.
  */
 export function addStartupCorsOrigins(address: string, requestedPort?: number): number {
 	const port = new URL(address).port;
@@ -731,26 +732,11 @@ export async function startServer(
 	}
 
 	const basePort = options.port;
-	const maxPort = basePort + 99; // explicit-port zero_conf: try up to 100 ports
-
-	for (let port = basePort; port <= maxPort; port++) {
-		try {
-			const address = await server.listen({ host, port });
-			if (port !== basePort) {
-				server.log.info({ basePort, port }, "hub: port unavailable, using zero_conf port");
-			}
-			return address;
-		} catch (err: unknown) {
-			const isAddrInUse =
-				err instanceof Error &&
-				"code" in err &&
-				(err as NodeJS.ErrnoException).code === "EADDRINUSE";
-			if (!isAddrInUse || port === maxPort) {
-				throw err;
-			}
-		}
+	const { address, port } = await listenFromPort(basePort, (port) => server.listen({ host, port }));
+	if (port !== basePort) {
+		server.log.info({ basePort, port }, "hub: port unavailable, using zero_conf port");
 	}
-	throw new Error(`No available port in range ${basePort}-${maxPort}`);
+	return address;
 }
 
 // ─── Static file helper ────────────────────────────────────────────────────────

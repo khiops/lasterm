@@ -207,7 +207,7 @@ describe.sequential("hub startup lock", () => {
 		const stateRoot = makeStateDir();
 		const stateDir = path.join(stateRoot, "lasterm");
 		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-		const squatter = await listen();
+		const squatter = await squatterBelowAFreePort();
 		const taken = (squatter.address() as net.AddressInfo).port;
 		const child = spawnMain({
 			...hermeticRootsEnv(stateRoot),
@@ -219,7 +219,7 @@ describe.sequential("hub startup lock", () => {
 		} finally {
 			child.kill("SIGTERM");
 			await waitForExit(child);
-			await new Promise<void>((resolve) => squatter.close(() => resolve()));
+			await close(squatter);
 		}
 	});
 
@@ -333,12 +333,40 @@ function makeStateDir(): string {
 	return dir;
 }
 
-function listen(): Promise<net.Server> {
+function listen(port = 0): Promise<net.Server> {
 	return new Promise((resolve, reject) => {
 		const server = net.createServer();
 		server.once("error", reject);
-		server.listen(0, "127.0.0.1", () => resolve(server));
+		server.listen(port, "127.0.0.1", () => resolve(server));
 	});
+}
+
+function close(server: net.Server): Promise<void> {
+	return new Promise((resolve) => server.close(() => resolve()));
+}
+
+/**
+ * A listener on a port the system assigned, with the port above it free to bind.
+ *
+ * A hub asked for the listener's port moves up to the next one. The system
+ * never assigns a port Windows reserves for Hyper-V, WSL or Docker, but the one
+ * above can be reserved, and refuses the hub with EACCES (#573). The hub moves
+ * past it, but a reserved range of 99 ports or more right above would refuse
+ * its whole window, and there are such ranges. A listener whose next port binds
+ * keeps the test about a taken port.
+ */
+async function squatterBelowAFreePort(): Promise<net.Server> {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const squatter = await listen();
+		const next = (squatter.address() as net.AddressInfo).port + 1;
+		const probe = next <= 65535 ? await listen(next).catch(() => undefined) : undefined;
+		if (probe !== undefined) {
+			await close(probe);
+			return squatter;
+		}
+		await close(squatter);
+	}
+	throw new Error("no port the system assigned had a free port above it");
 }
 
 function runMain(extraEnv: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> {

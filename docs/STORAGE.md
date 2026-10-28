@@ -546,8 +546,6 @@ fast as it runs.
 - **Kept:** the `agent_files_kept` most recent files, by the date in their name. The hub passes
   the number to every daemon it starts, local or remote, as `--log-files-kept`. A change in
   Settings reaches a daemon when it next starts; one already running keeps the number it was given.
-  A remote agent older than the hub, which does not know the option, is started without it and
-  keeps its log as it always did.
 - **Deleted:** when the daemon starts, and when a new day's file starts. Only regular files named
   `agent-daemon.YYYY-MM-DD.jsonl` are deleted; nothing else in `logs/`. A file that cannot be deleted (on Windows, one another program holds without sharing
   deletion) is said in a warning in the log, and tried again on the next of those occasions.

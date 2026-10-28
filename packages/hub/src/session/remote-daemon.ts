@@ -217,25 +217,13 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 	const unit = launch.scopeUnit ?? newRemoteDaemonScopeUnit();
 
 	const idle = Math.max(0, Math.trunc(launch.idleTimeoutSeconds ?? IDLE_TIMEOUT_SECONDS));
-	// The agent's argv, as the positional parameters, which both placements pass
-	// on unchanged. Set whole in each branch rather than through an unquoted
-	// `$idle`: zsh, a login shell the exec may well run in, does not split one.
-	const run = `${agent} --daemon --socket ${socket} --log-level ${level} --format ${format}`;
-	// The binary on the remote may be older than this hub: a build of main
-	// carries the version of the last release and deploys that release's agent,
-	// which rejects a flag added since and exits before it ever listens. Asking
-	// the binary first keeps the one option it can live without from costing
-	// the whole daemon.
-	const argv =
-		`if ${agent} --help 2> /dev/null | grep -q -- '--idle-timeout'; ` +
-		`then set -- ${run} --idle-timeout ${idle}; else set -- ${run}; fi`;
-	// The same question for the daemon log's file count, added after it (#646).
-	// Appended to what the line above set, and whole: `"$@"` is split by every
-	// shell, zsh included. An `if` without `else` succeeds when it does nothing.
 	const kept = Math.max(0, Math.trunc(launch.logFilesKept ?? DEFAULT_AGENT_LOG_FILES_KEPT));
-	const filesKept =
-		`if ${agent} --help 2> /dev/null | grep -q -- '--log-files-kept'; ` +
-		`then set -- "$@" --log-files-kept ${kept}; fi`;
+	// The agent's argv, as the positional parameters, which both placements pass
+	// on unchanged. Set whole, word by word, rather than through an unquoted
+	// variable: zsh, a login shell the exec may well run in, does not split one.
+	const argv =
+		`set -- ${agent} --daemon --socket ${socket} --log-level ${level} --format ${format} ` +
+		`--idle-timeout ${idle} --log-files-kept ${kept}`;
 	// `$detach` is the shell's copy of DETACH_SCRIPT, set below.
 	const detachCall = `/bin/sh -c "$detach" lasterm-agent ${log} "$@"`;
 	const scope = [
@@ -257,7 +245,6 @@ export function remoteDaemonLaunchCommand(launch: RemoteDaemonLaunch): string {
 		`mkdir -p ${dir}`,
 		`chmod 700 ${dir}`,
 		argv,
-		filesKept,
 		`detach=${quotePosix(DETACH_SCRIPT)}`,
 		place,
 		`case $placed in scope*) ;; *) ${detachCall} ;; esac`,

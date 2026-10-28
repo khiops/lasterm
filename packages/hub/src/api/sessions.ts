@@ -62,14 +62,6 @@ export function registerSessionRoutes(
 							message: "This host is not connected. Open a terminal on it to see its variables.",
 						},
 					});
-				case "too-old":
-					return reply.code(409).send({
-						error: {
-							code: ErrorCode.AGENT_TOO_OLD,
-							message:
-								"The agent on this host is too old to report its environment. Replace it with the one this hub carries.",
-						},
-					});
 				case "timeout":
 					return reply.code(504).send({
 						error: {

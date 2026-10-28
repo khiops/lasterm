@@ -243,22 +243,6 @@ describe("the hub's identity on the local daemon (#127)", () => {
 		expect(infoLines).toEqual([expect.objectContaining({ lvl: "info", hostId, count: 1 })]);
 	});
 
-	it("leaves an unknown terminal alone on an agent without hub-identity: it may be another hub's", async () => {
-		daemon = await startFakeDaemon({
-			capabilities: ["multiplex", "resize", "snapshot"],
-			holds: [
-				{ channelId: KNOWN_CHANNEL, alive: true },
-				{ channelId: ORPHAN_CHANNEL, alive: true },
-			],
-		});
-
-		await sm.startup();
-		await drain();
-
-		expect(daemon.received.filter((m) => m.type === "DESTROY")).toEqual([]);
-		expect(hubLog()).not.toContain("destroyed orphan terminals");
-	});
-
 	it("reports how many terminals other hubs hold there, with the session", async () => {
 		daemon = await startFakeDaemon({
 			capabilities: ["multiplex", "resize", "snapshot", "hub-identity"],

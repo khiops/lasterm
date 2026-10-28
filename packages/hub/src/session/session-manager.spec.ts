@@ -3643,15 +3643,6 @@ describe("SessionManager — elevation support", () => {
 		dbManager.close();
 	});
 
-	/** Access private agentCapabilities map for test setup. */
-	function setAgentCapabilities(hostId: string, caps: string[]): void {
-		(
-			sm as unknown as {
-				agentCapabilities: Map<string, string[]>;
-			}
-		).agentCapabilities.set(hostId, caps);
-	}
-
 	/** Access private elevationCache map for test inspection/setup. */
 	function getElevationCache(): Map<string, { secret: string; expiresAt: number }> {
 		return (
@@ -3729,23 +3720,6 @@ describe("SessionManager — elevation support", () => {
 		expect(spawnMsg?.elevationSecret).toBeUndefined();
 	});
 
-	it("SC-19: local host with elevated=true but agent lacks launch-profiles: stripped", async () => {
-		const localHostId = await sm.ensureLocalHost();
-
-		const received: ProtocolMessage[] = [];
-		const client = makeClient("c-sc19b", received);
-		sm.addClient(client);
-
-		// Agent does NOT have launch-profiles capability (pre-set, HELLO not emitted by mock)
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot"]);
-
-		await sm.handleSpawn("c-sc19b", { type: "SPAWN", hostId: localHostId, elevated: true });
-
-		// No AUTH_PROMPT sent (elevation stripped due to missing capability)
-		const authPrompts = received.filter((m) => m.type === "AUTH_PROMPT");
-		expect(authPrompts).toHaveLength(0);
-	});
-
 	it("SC-20: first spawn with elevated=true sends AUTH_PROMPT; second spawn uses cache", async () => {
 		const localHostId = await sm.ensureLocalHost();
 
@@ -3754,9 +3728,6 @@ describe("SessionManager — elevation support", () => {
 		// Use auto-respond client: first AUTH_PROMPT gets "hunter2" automatically.
 		const client = makeAutoRespondClient("c-sc20", received, "hunter2");
 		sm.addClient(client);
-
-		// Agent has launch-profiles capability
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		// ── First spawn: AUTH_PROMPT sent → auto-responded → spawn completes ─
 		await sm.handleSpawn("c-sc20", { type: "SPAWN", hostId: localHostId, elevated: true });
@@ -3788,8 +3759,6 @@ describe("SessionManager — elevation support", () => {
 		const client = makeAutoRespondClient("c-sc20b", received, "new-secret");
 		sm.addClient(client);
 
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
-
 		// Pre-seed the cache with an expired entry (composite key)
 		getElevationCache().set(`${localHostId}:c-sc20b`, {
 			secret: "old-secret",
@@ -3816,8 +3785,6 @@ describe("SessionManager — elevation support", () => {
 		// Auto-respond with null (user cancel)
 		const client = makeAutoRespondClient("c-sc20c", received, null);
 		sm.addClient(client);
-
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		// Spawn: AUTH_PROMPT auto-cancelled → handleSpawn returns null
 		const result = await sm.handleSpawn("c-sc20c", {
@@ -3848,7 +3815,6 @@ describe("SessionManager — elevation support", () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeClient("c-d4-close-elevation", received);
 		sm.addClient(client);
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		const spawnPromise = sm.handleSpawn("c-d4-close-elevation", {
 			type: "SPAWN",
@@ -3900,7 +3866,6 @@ describe("SessionManager — elevation support", () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeClient("c-d8-spawn-elevation", received);
 		sm.addClient(client);
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
 		const getClient = ctx.clients.get.bind(ctx.clients);
@@ -3938,7 +3903,6 @@ describe("SessionManager — elevation support", () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeAutoRespondClient("c-persist01", received, "s3cr3t");
 		sm.addClient(client);
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		const channelId = await sm.handleSpawn("c-persist01", {
 			type: "SPAWN",
@@ -3980,7 +3944,6 @@ describe("SessionManager — elevation support", () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeAutoRespondClient("c-restart01", received, "p@ss");
 		sm.addClient(client);
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		// Spawn an elevated channel (primes the cache)
 		const channelId = await sm.handleSpawn("c-restart01", {
@@ -4017,7 +3980,6 @@ describe("SessionManager — elevation support", () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeAutoRespondClient("c-restart02", received, "new-p@ss");
 		sm.addClient(client);
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		// Spawn elevated channel (auto-prompt fills cache)
 		const channelId = await sm.handleSpawn("c-restart02", {
@@ -4077,7 +4039,6 @@ describe("SessionManager — elevation support", () => {
 			attachedChannels: new Set(),
 		};
 		sm.addClient(client);
-		setAgentCapabilities(localHostId, ["multiplex", "snapshot", "launch-profiles"]);
 
 		// Spawn elevated channel successfully
 		const channelId = await sm.handleSpawn("c-restart03", {

@@ -1,6 +1,8 @@
 import type { Host, HostGroup } from "@lasterm/shared";
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick, ref } from "vue";
+import { useToastStore } from "../stores/toast.js";
 
 function makeHost(overrides: Partial<Host> & { id: string; label: string }): Host {
 	return {
@@ -69,7 +71,10 @@ describe("useHostGroups", () => {
 		mockHosts.value = [];
 		mockHostGroups.value = [];
 		localStorageMap.clear();
-		mockReorderHostGroups.mockClear();
+		// The toast store a refused reorder speaks through (#734) is the real one.
+		setActivePinia(createPinia());
+		mockReorderHostGroups.mockReset();
+		mockReorderHostGroups.mockResolvedValue({ ok: true });
 		mockMoveHostToGroup.mockClear();
 		mockFetchHosts.mockClear();
 	});
@@ -236,6 +241,40 @@ describe("useHostGroups", () => {
 		await nextTick();
 
 		expect(mockReorderHostGroups).toHaveBeenCalledWith(["g2", "g1", "g3"]);
+	});
+
+	// The store takes back an order the hub refused; a toast says why (#734).
+	it("reorderGroups says why the hub refused the order, or that it did not answer", async () => {
+		mockHostGroups.value = [
+			makeGroup({ id: "g1", name: "Alpha", sortOrder: 0 }),
+			makeGroup({ id: "g2", name: "Beta", sortOrder: 1 }),
+		];
+		mockReorderHostGroups
+			.mockResolvedValueOnce({
+				ok: false,
+				status: 400,
+				code: "VALIDATION_ERROR",
+				message: "group_ids must include every host group",
+			})
+			.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		const settled = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+		const toasts = (): string[] => useToastStore().messages.map((m) => m.text);
+
+		const { reorderGroups } = useHostGroups();
+		reorderGroups("g2", "g1");
+		await settled();
+		expect(toasts()).toEqual(["group_ids must include every host group"]);
+
+		reorderGroups("g2", "g1");
+		await settled();
+		expect(toasts()).toEqual([
+			"group_ids must include every host group",
+			"Could not reach the hub: Failed to fetch",
+		]);
+
+		reorderGroups("g2", "g1");
+		await settled();
+		expect(toasts()).toHaveLength(2);
 	});
 
 	it("section order follows hostGroups sortOrder from store", async () => {

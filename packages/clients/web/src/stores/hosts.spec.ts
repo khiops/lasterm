@@ -323,3 +323,26 @@ describe("a host's save, refused (#703)", () => {
 		await expect(store.updateHost("pi", { label: "pi2" })).rejects.toThrow("Failed to fetch");
 	});
 });
+
+describe("the name of a host's group (#731)", () => {
+	const STAMP = "2026-01-01T00:00:00Z";
+	const prod = { id: "g1", name: "Prod", sortOrder: 0, createdAt: STAMP, updatedAt: STAMP };
+
+	it("is the name of the group its groupId points at, and follows a rename", async () => {
+		const store = load();
+		store.hostGroups = [{ ...prod }];
+		const pi = { id: "pi", label: "Pi", type: "ssh", hostGroupId: "g1" } as never;
+		expect(store.getHostGroupName(pi)).toBe("Prod");
+
+		await store.renameHostGroup("g1", "Live");
+		expect(store.getHostGroupName(pi)).toBe("Live");
+	});
+
+	it("is null for a host in no group, or in one the list no longer has", () => {
+		const store = load();
+		store.hostGroups = [{ ...prod }];
+		expect(store.getHostGroupName({ id: "a", hostGroupId: null } as never)).toBeNull();
+		expect(store.getHostGroupName({ id: "b" } as never)).toBeNull();
+		expect(store.getHostGroupName({ id: "c", hostGroupId: "gone" } as never)).toBeNull();
+	});
+});

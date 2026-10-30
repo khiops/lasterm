@@ -347,8 +347,8 @@ channel_id → {
 
 It is written each time a snapshot is stored (`storeSnapshot`), and deleted with its channel.
 Nothing reads it: an ATTACH, cached or not, finds the latest snapshot in spool.db itself
-(`getLatestSnapshot`) and reads the tail after it, and GC goes by chunk age, size and the
-channel's status (§ 7), never by this table.
+(`getLatestSnapshot`) and reads the tail after it, and GC goes by chunk age, size, the
+channel's status and whether meta.db still has the channel (§ 7), never by this table.
 
 ## 7. Garbage Collection
 
@@ -375,8 +375,11 @@ Every 10 minutes, unless the previous pass is still running:
    highest seq it had when the pass judged it
 
 2. For each channel in spool.db:
-   a. Delete every snapshot older than its newest
-   b. Walk down from its newest chunk, counting sizes, the newest snapshot
+   a. If meta.db has no row for it, an orphan: a channel purged or deleted,
+      or one whose host was deleted. Delete every chunk it had when the pass
+      looked it up, and go on to the next channel
+   b. Delete every snapshot older than its newest
+   c. Walk down from its newest chunk, counting sizes, the newest snapshot
       first. The first chunk that is not a snapshot and is older than 7 days,
       or takes the channel past max_size_per_channel_mb, is the cut: it and
       every older chunk that is not a snapshot go
@@ -392,7 +395,8 @@ for, every terminal and request with it. So every step of a pass is bounded, and
 | Step | Bound |
 |------|-------|
 | A delete | One transaction of at most 256 chunks and about 1 MiB, by seq range on `idx_chunks_channel_seq`, from where the last one stopped |
-| A step of the walk (2b) | 512 chunks, their size read from the row header without loading the data |
+| Whether a channel is an orphan (2a) | One primary-key lookup in meta.db, and one seek for its highest seq |
+| A step of the walk (2c) | 512 chunks, their size read from the row header without loading the data |
 | The next channel | One seek on `idx_chunks_channel_seq` |
 | `incremental_vacuum` | 128 pages |
 
@@ -402,6 +406,21 @@ evicted and excluding snapshots from eviction: on a channel holding 65,000 snaps
 0.8 deletions a second, eight minutes of frozen hub out of every ten, and every pass deleted all of
 the channel's output while its snapshots kept growing the spool.
 
+**Purges.** Purging a dead channel (`DELETE /api/channels/:id`, `DELETE /api/channels/dead`) deletes
+its row in meta.db, then answers as it always did. Its chunks follow, deleted as step 2a deletes an
+orphan's and followed by step 3, without waiting for the next pass (`SpoolGarbageCollector.purge`).
+Passes and purges run one at a time, in the order asked: two side by side would each take a slice in
+the same turn of the event loop. So the answer comes before the output is gone. The channel is
+listed nowhere, and nothing reads its output any more: an ATTACH to a channel that is dead or
+unknown never reads the spool. The spool shrinks over the next seconds, or once the pass already
+running has ended. If the hub stops first, the next pass finds what is left
+orphaned (2a). A purge used to delete a channel's whole history in one statement, inside the
+request: up to 1.5 GB for one channel on a spool grown before #785 (#786).
+
+Deleting a host (`DELETE /api/hosts/:id`) deletes its sessions, channels and `cache_index` rows in
+meta.db, and nothing in spool.db: its channels' chunks are orphans, which the next pass deletes.
+Before #786 the size cap kept each one's newest snapshot for ever.
+
 A step may still be slow when it commits past `wal_autocheckpoint`: SQLite then checkpoints the WAL
 in that commit, two fsyncs included, whatever wrote it. Clearing a 1.5 GB backlog takes about
 twenty of them.
@@ -410,14 +429,21 @@ twenty of them.
 
 - Only the newest snapshot of a channel is ever read: an ATTACH answered from the spool replays it
   and the output after it (`buildAttachPayload`). No code reads an older snapshot, nor
-  `cache_index` (§ 6), so step 2a deletes every other one, and storing a snapshot deletes the
+  `cache_index` (§ 6), so step 2b deletes every other one, and storing a snapshot deletes the
   previous one (§ 5.2)
 - Step 2 never deletes the newest snapshot: not past the age limit, not alone over the cap. It
   counts in the channel's size, so output goes first
 - Output is kept, newest first, as long as it fits the cap and the age limit, whether or not it
   comes after the newest snapshot
-- Only step 1 empties a channel, and only a dead one. A chunk written after the pass judged it,
-  by a channel brought back under its own id, has a higher seq and is not deleted
+- Only steps 1 and 2a, and a purge, empty a channel: one dead past its retention, or one meta.db no
+  longer has. A chunk written after the pass judged it, by a channel brought back under its own id,
+  has a higher seq and is not deleted
+- There is no foreign key from spool.db to meta.db (§ 4.1). A channel is an orphan only if meta.db
+  has no row for it when looked up, in the same step that reads its highest seq; no list of known
+  ids is read beforehand, since a channel created during the pass would not be on it. The hub stores
+  a channel's row before it tracks its output (a spawn, a restart, a restore after a hub restart),
+  so a channel created during a pass has its row before its first chunk, and is never taken for an
+  orphan
 - A pass in progress when the hub stops ends before its next step
 - Run incremental_vacuum (not full VACUUM) to avoid blocking writes
 
@@ -450,6 +476,7 @@ A tab layout is not written here: the browser keeps it in `localStorage` (§ 3.5
 - **meta.db writes:** Wrap multi-table updates in transactions (e.g., create session + channel)
 - **spool.db writes:** Single INSERT per chunk, no transaction wrapping needed (WAL handles)
 - **Cross-DB:** No cross-DB transactions. Use cache_index updates as eventual consistency marker.
+  Deleting a channel or a host deletes rows in meta.db only; GC deletes the chunks left behind (§ 7.2).
 - **Reads:** No explicit transactions for reads (WAL provides snapshot isolation)
 
 ## 9. Migration Strategy
@@ -570,8 +597,13 @@ Channel created (BORN)
   │
   Channel dead for longer than dead_retention_hours
   │
-  └─ All its chunks deleted; its channel row and cache_index entry stay
-     until the channel is deleted
+  ├─ All its chunks deleted; its channel row and cache_index entry stay
+  │  until the channel is deleted
+  │
+  Channel purged, or its host deleted
+  │
+  └─ Its rows deleted from meta.db at once; its chunks right after a purge,
+     at the next GC pass after a host is deleted, in GC's bounded batches
 ```
 
 ## 12. Logs

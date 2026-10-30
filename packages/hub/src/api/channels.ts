@@ -2,13 +2,11 @@ import { type Channel, isValidUlid, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
-import type { SpoolDAL } from "../storage/spool.js";
 
 export function registerChannelRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
 	sessionManager: SessionManager,
-	spoolDal: SpoolDAL,
 ): void {
 	// GET /api/channels?host_id=X
 	// host_id filtering: look up sessions for that host, then get channels for those sessions
@@ -56,10 +54,9 @@ export function registerChannelRoutes(
 			deadChannelIds = allChannels.filter((c) => c.status === "dead").map((c) => c.id);
 		}
 
-		for (const id of deadChannelIds) {
-			spoolDal.deleteChunksForChannel(id);
-			metaDal.deleteChannel(id);
-		}
+		for (const id of deadChannelIds) metaDal.deleteChannel(id);
+		// Their output follows in bounded batches, after the answer (#786).
+		if (deadChannelIds.length > 0) void sessionManager.purgeChannelOutput(deadChannelIds);
 
 		return reply.code(200).send({ ok: true, purged: deadChannelIds.length });
 	});
@@ -256,10 +253,15 @@ export function registerChannelRoutes(
 			});
 		}
 
-		// Already dead — purge: delete chunks from spool + record from meta
+		// Already dead: purge. The row goes first, so nothing lists it or reads
+		// its output any more, and the purge deletes only the output of a
+		// channel meta.db no longer has. That output follows in the spool GC's
+		// bounded batches, after the answer: one statement over a channel's
+		// whole history froze the hub on a spool grown before #785 (#786). If
+		// the hub stops first, a GC pass finds it orphaned and deletes it.
 		if (channel.status === "dead") {
-			spoolDal.deleteChunksForChannel(id);
 			metaDal.deleteChannel(id);
+			void sessionManager.purgeChannelOutput([id]);
 			return reply.code(200).send({ ok: true, purged: true });
 		}
 

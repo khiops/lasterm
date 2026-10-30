@@ -14,7 +14,6 @@ import { SshAgent } from "../session/ssh-agent.js";
 import { SshConnectionManager } from "../session/ssh-connection-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
-import { SpoolDAL } from "../storage/spool.js";
 import { registerChannelRoutes } from "./channels.js";
 import { registerHostConnectionRoutes } from "./host-connection.js";
 import { registerHostRoutes } from "./hosts.js";
@@ -159,7 +158,7 @@ beforeEach(async () => {
 	registerSessionRoutes(server, metaDal, sm);
 	registerHostConnectionRoutes(server, metaDal, sm);
 	registerHostRoutes(server, metaDal, sm);
-	registerChannelRoutes(server, metaDal, sm, new SpoolDAL(dbs.spool));
+	registerChannelRoutes(server, metaDal, sm);
 	await server.ready();
 });
 

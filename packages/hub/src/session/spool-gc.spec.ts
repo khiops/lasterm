@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
-import type { MetaDAL } from "../storage/meta.js";
+import { MetaDAL } from "../storage/meta.js";
+import {
+	type ChunkKind as Kind,
+	type ChunkSeed as Seed,
+	seedChunks,
+	watchEventLoop as watchSpoolLoop,
+} from "../storage/spool.fixture.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import type { SharedSessionContext } from "./session-context.js";
@@ -12,27 +18,24 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 const DAY = 24 * 3600 * 1000;
 
-type Kind = "output" | "snapshot" | "resize";
-
-/** A chunk to seed: its kind, its stored size, and how long ago it was written. */
-interface Seed {
-	kind: Kind;
-	bytes: number;
-	ageMs?: number;
-}
-
 describe("SpoolGarbageCollector (#726)", () => {
 	let dbs: DatabaseManager;
 	let spoolDal: SpoolDAL;
 	let staleDead: string[];
-	let metaDal: Pick<MetaDAL, "listStaleDeadChannelIds">;
+	/** The channels meta.db has a row for: every one seeded, unless a case says otherwise. */
+	let known: Set<string>;
+	let metaDal: Pick<MetaDAL, "listStaleDeadChannelIds" | "hasChannel">;
 	let gc: SpoolGarbageCollector | undefined;
 
 	beforeEach(() => {
 		dbs = openTestDatabases();
 		spoolDal = new SpoolDAL(dbs.spool);
 		staleDead = [];
-		metaDal = { listStaleDeadChannelIds: vi.fn(() => staleDead) };
+		known = new Set();
+		metaDal = {
+			listStaleDeadChannelIds: vi.fn(() => staleDead),
+			hasChannel: vi.fn((id: string) => known.has(id)),
+		};
 	});
 
 	afterEach(() => {
@@ -55,21 +58,10 @@ describe("SpoolGarbageCollector (#726)", () => {
 		return gc;
 	}
 
-	/** Write chunks for a channel in one transaction, with consecutive seqs from `firstSeq`. */
+	/** Seed a channel meta.db has a row for. */
 	function seed(channelId: string, chunks: Seed[], firstSeq = 1): void {
-		const insert = dbs.spool.prepare(
-			`INSERT INTO chunks (id, channel_id, seq, ts, kind, codec, data_blob, uncompressed_len)
-			 VALUES (?, ?, ?, ?, ?, 'raw', ?, ?)`,
-		);
-		const now = Date.now();
-		dbs.spool.transaction(() => {
-			chunks.forEach((chunk, i) => {
-				const seq = firstSeq + i;
-				const blob = Buffer.alloc(chunk.bytes, seq % 251);
-				const ts = new Date(now - (chunk.ageMs ?? 0)).toISOString();
-				insert.run(`${channelId}-${seq}`, channelId, seq, ts, chunk.kind, blob, blob.length);
-			});
-		})();
+		known.add(channelId);
+		seedChunks(dbs.spool, channelId, chunks, firstSeq);
 	}
 
 	function rows(channelId: string): Array<{ seq: number; kind: Kind }> {
@@ -95,41 +87,9 @@ describe("SpoolGarbageCollector (#726)", () => {
 		return lifecycle.buildAttachPayload(channelId);
 	}
 
-	/**
-	 * Watch the event loop while a pass runs: the longest stretch between two
-	 * turns, and the most rows SQLite changed within one stretch.
-	 */
+	/** Watch the event loop while a pass runs. */
 	function watchEventLoop() {
-		const changes = () =>
-			(dbs.spool.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
-		let last = performance.now();
-		let lastChanges = changes();
-		let longestMs = 0;
-		let mostRows = 0;
-		let turns = 0;
-		let watching = true;
-		const sample = () => {
-			const now = performance.now();
-			const c = changes();
-			longestMs = Math.max(longestMs, now - last);
-			mostRows = Math.max(mostRows, c - lastChanges);
-			last = now;
-			lastChanges = c;
-		};
-		const turn = () => {
-			if (!watching) return;
-			sample();
-			turns++;
-			setImmediate(turn);
-		};
-		setImmediate(turn);
-		return {
-			stop() {
-				watching = false;
-				sample();
-				return { longestMs, mostRows, turns };
-			},
-		};
+		return watchSpoolLoop(dbs.spool);
 	}
 
 	// ── Snapshots ─────────────────────────────────────────────────────────────
@@ -253,6 +213,143 @@ describe("SpoolGarbageCollector (#726)", () => {
 		expect(batches).toBeGreaterThan(1);
 		expect(rows("dead")).toEqual([{ seq: 601, kind: "snapshot" }]);
 		expect(rows("alive")).toEqual([{ seq: 1, kind: "snapshot" }]);
+	});
+
+	// ── Channels meta.db no longer has (#786) ─────────────────────────────────
+
+	it("removes the output of a deleted host's channels, and nothing of another host's", async () => {
+		const meta = new MetaDAL(dbs.meta);
+		const channelsOf = (label: string): string[] => {
+			const host = meta.createHost({ type: "local", label });
+			const sessionId = `${label}-session`;
+			meta.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			return ["a", "b"].map((suffix) => {
+				const id = `${label}-${suffix}`;
+				meta.createChannel({ id, sessionId, status: "live", cols: 80, rows: 24 });
+				seedChunks(dbs.spool, id, [
+					...Array.from({ length: 300 }, (): Seed => ({ kind: "output", bytes: 100 })),
+					{ kind: "snapshot", bytes: 100 },
+				]);
+				return id;
+			});
+		};
+		const deleted = channelsOf("deleted");
+		const kept = channelsOf("kept");
+		// What DELETE /api/hosts/:id does: meta.db only, spool.db is another database.
+		const host = meta.getHostByLabel("deleted");
+		meta.deleteCascadeForHost(host?.id as string);
+		meta.deleteHost(host?.id as string);
+
+		gc = new SpoolGarbageCollector(spoolDal, meta, {
+			maxSizePerChannelMb: 10,
+			deadRetentionHours: 24,
+		});
+		const stats = await gc.collect();
+
+		// Before #786 the size cap kept each one's newest snapshot, for ever.
+		for (const id of deleted) expect(rows(id)).toEqual([]);
+		for (const id of kept) expect(rows(id)).toHaveLength(301);
+		expect(stats).toMatchObject({ completed: true, orphans: 2 });
+	});
+
+	it("never takes a channel meta.db has for an orphan, even one created during the pass", async () => {
+		// An orphan big enough to take several batches, and a channel created
+		// while the pass deletes it, whose id the walk reaches afterwards.
+		seedChunks(
+			dbs.spool,
+			"a-orphan",
+			Array.from({ length: 600 }, (): Seed => ({ kind: "output", bytes: 10 })),
+		);
+		seed("b-live", [
+			{ kind: "output", bytes: 10 },
+			{ kind: "snapshot", bytes: 10 },
+		]);
+		const deleteBatch = spoolDal.deleteChunkBatch.bind(spoolDal);
+		let created = false;
+		vi.spyOn(spoolDal, "deleteChunkBatch").mockImplementation((...args) => {
+			const result = deleteBatch(...args);
+			if (args[0] === "a-orphan" && !created) {
+				created = true;
+				// As the hub does it: the channel's row first, then its output.
+				seed("c-new", [
+					{ kind: "output", bytes: 10 },
+					{ kind: "snapshot", bytes: 10 },
+				]);
+			}
+			return result;
+		});
+
+		const stats = await makeGc({}, { sliceBudgetMs: 0 }).collect();
+
+		expect(created).toBe(true);
+		expect(rows("a-orphan")).toEqual([]);
+		expect(rows("b-live")).toHaveLength(2);
+		expect(rows("c-new")).toEqual([
+			{ seq: 1, kind: "output" },
+			{ seq: 2, kind: "snapshot" },
+		]);
+		expect(stats.orphans).toBe(1);
+	});
+
+	it("purges a deleted channel's output one bounded batch at a time", async () => {
+		seed(
+			"live",
+			Array.from({ length: 3_000 }, (): Seed => ({ kind: "output", bytes: 10 })),
+		);
+		seedChunks(
+			dbs.spool,
+			"purged",
+			Array.from(
+				{ length: 5_000 },
+				(_, i): Seed => ({
+					kind: i % 2 ? "output" : "snapshot",
+					bytes: 100,
+				}),
+			),
+		);
+
+		const watch = watchEventLoop();
+		// A channel meta.db still has is not the purge's to delete.
+		const stats = await makeGc({}, { sliceBudgetMs: 0 }).purge(["purged", "live"]);
+		const loop = watch.stop();
+
+		expect(rows("purged")).toEqual([]);
+		expect(rows("live")).toHaveLength(3_000);
+		expect(stats).toMatchObject({ completed: true, orphans: 1, deletedChunks: 5_000 });
+		expect(loop.mostRows).toBeLessThanOrEqual(256);
+		expect(dbs.spool.pragma("freelist_count", { simple: true })).toBe(0);
+	});
+
+	it("runs a purge after the pass already running, never beside it", async () => {
+		seedOwnersProfile();
+		const events: string[] = [];
+		vi.mocked(metaDal.hasChannel).mockImplementation((id) => {
+			if (id === "purged") events.push("purge");
+			return known.has(id);
+		});
+		vi.spyOn(spoolDal, "incrementalVacuum").mockImplementation(() => {
+			events.push("vacuum");
+			return 0;
+		});
+		const collector = makeGc({}, { sliceBudgetMs: 0 });
+
+		const pass = collector.collect();
+		const purge = collector.purge(["purged"]);
+		expect(collector.collect()).toBe(pass);
+		const [passStats, purgeStats] = await Promise.all([pass, purge]);
+
+		expect(passStats.completed).toBe(true);
+		expect(purgeStats.completed).toBe(true);
+		// The pass ends with its vacuum; only then does the purge take its first step.
+		expect(events).toEqual(["vacuum", "purge", "vacuum"]);
+	});
+
+	it("touches nothing once stopped, a purge asked for afterwards included", async () => {
+		const collector = makeGc();
+		collector.stop();
+		dbs.close();
+
+		await expect(collector.purge(["gone"])).resolves.toMatchObject({ completed: false });
 	});
 
 	// ── The freeze ────────────────────────────────────────────────────────────

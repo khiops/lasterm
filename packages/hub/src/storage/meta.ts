@@ -263,6 +263,10 @@ export class MetaDAL {
 		return this.channels.getChannel(id);
 	}
 
+	hasChannel(id: string): boolean {
+		return this.channels.hasChannel(id);
+	}
+
 	getChannelWithHost(
 		channelId: string,
 	): { channel: Channel; hostId: string; hostType: string } | null {

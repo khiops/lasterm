@@ -263,11 +263,6 @@ export class SpoolDAL {
 		return row.total;
 	}
 
-	/** Delete all chunks for a channel. Returns deleted count. */
-	deleteChunksForChannel(channelId: string): number {
-		return this.db.prepare("DELETE FROM chunks WHERE channel_id = ?").run(channelId).changes;
-	}
-
 	/**
 	 * Give up to `pages` free pages back to the file system, and say how many
 	 * are still free. A bounded step: `incremental_vacuum(0)` would free them

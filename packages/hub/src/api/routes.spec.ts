@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import {
+	type ChunkSeed,
+	countChunks,
+	seedChunks,
+	watchEventLoop,
+} from "../storage/spool.fixture.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import { validateCreateHost } from "./hosts.js";
 
@@ -974,6 +980,109 @@ describe("DELETE /api/channels/:id", () => {
 		expect(res.statusCode).toBe(200);
 		const body = res.json<{ ok: boolean }>();
 		expect(body.ok).toBe(true);
+	});
+});
+
+// A purge answers once the channel's row is gone, and its output follows in the
+// spool GC's bounded batches: one statement over a channel's whole history froze
+// the hub the way #726 did, on a spool grown before #785 (#786).
+describe("purging a dead channel's output (#786)", () => {
+	let purgeCounter = 0;
+
+	async function createChannels(
+		label: string,
+		statuses: Array<"live" | "dead">,
+	): Promise<{ hostId: string; channelIds: string[] }> {
+		const hostRes = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "local", label },
+		});
+		const hostId = hostRes.json<{ id: string }>().id;
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbs.meta);
+		purgeCounter++;
+		const n = String(purgeCounter).padStart(3, "0");
+		const sessionId = `01TSTPRGSESS00000000000${n}`;
+		dal.createSession({ id: sessionId, hostId, status: "active" });
+		const channelIds = statuses.map((status, i) => {
+			const id = `01TSTPRGCHAN0000000000${i}${n}`;
+			dal.createChannel({ id, sessionId, status: "live", cols: 80, rows: 24 });
+			if (status === "dead") dal.updateChannelStatus(id, "dead", 0);
+			return id;
+		});
+		return { hostId, channelIds };
+	}
+
+	it("answers as before, and deletes a big channel's output without holding the event loop", async () => {
+		const { channelIds } = await createChannels("purge-big", ["dead"]);
+		const id = channelIds[0] as string;
+		const rows = 100_000;
+		seedChunks(
+			dbs.spool,
+			id,
+			Array.from(
+				{ length: rows },
+				(_, i): ChunkSeed => ({
+					kind: i % 2 ? "output" : "snapshot",
+					bytes: 256,
+				}),
+			),
+		);
+
+		const watch = watchEventLoop(dbs.spool);
+		const res = await server.inject({ method: "DELETE", url: `/api/channels/${id}` });
+		expect(res.statusCode).toBe(200);
+		expect(res.json()).toEqual({ ok: true, purged: true });
+		// The row is gone with the answer: the channel is listed nowhere any more.
+		expect((await server.inject({ method: "GET", url: `/api/channels/${id}` })).statusCode).toBe(
+			404,
+		);
+		await vi.waitFor(() => expect(countChunks(dbs.spool, id)).toBe(0), {
+			timeout: 60_000,
+			interval: 10,
+		});
+		const loop = watch.stop();
+
+		// One statement deleted all 100,000 rows in a single stretch of about
+		// 300 ms before the fix; a stretch now deletes what fits in 25 ms.
+		expect(loop.mostRows).toBeLessThan(rows / 4);
+		// The GC's slice budget is 25 ms, which a stretch can pass by one step;
+		// the rest is room for a loaded machine.
+		expect(loop.longestMs).toBeLessThan(150);
+	});
+
+	it("purges a host's dead channels, and leaves its live one's output alone", async () => {
+		const { hostId, channelIds } = await createChannels("purge-bulk", ["dead", "dead", "live"]);
+		const [deadA, deadB, live] = channelIds as [string, string, string];
+		for (const id of channelIds) {
+			seedChunks(
+				dbs.spool,
+				id,
+				Array.from({ length: 600 }, (): ChunkSeed => ({ kind: "output", bytes: 64 })),
+			);
+		}
+
+		const res = await server.inject({
+			method: "DELETE",
+			url: "/api/channels/dead",
+			payload: { host_id: hostId },
+		});
+		expect(res.statusCode).toBe(200);
+		expect(res.json()).toEqual({ ok: true, purged: 2 });
+
+		await vi.waitFor(
+			() => {
+				expect(countChunks(dbs.spool, deadA)).toBe(0);
+				expect(countChunks(dbs.spool, deadB)).toBe(0);
+			},
+			{ timeout: 10_000, interval: 10 },
+		);
+		expect(countChunks(dbs.spool, live)).toBe(600);
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getChannel(deadA)).toBeUndefined();
+		expect(dal.getChannel(live)?.status).toBe("live");
 	});
 });
 

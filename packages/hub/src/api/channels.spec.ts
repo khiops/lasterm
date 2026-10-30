@@ -4,7 +4,6 @@ import type { SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
-import { SpoolDAL } from "../storage/spool.js";
 import { registerChannelRoutes } from "./channels.js";
 
 // ─── POST /api/channels/:id/restart while its host is away (#605) ────────────
@@ -22,7 +21,7 @@ describe("POST /api/channels/:id/restart", () => {
 		dbs = openTestDatabases();
 		sessionManager = new SessionManager(dbs);
 		server = Fastify({ logger: false });
-		registerChannelRoutes(server, new MetaDAL(dbs.meta), sessionManager, new SpoolDAL(dbs.spool));
+		registerChannelRoutes(server, new MetaDAL(dbs.meta), sessionManager);
 		await server.ready();
 	});
 

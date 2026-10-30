@@ -553,12 +553,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerLaunchProfileRoutes(server, metaDal);
 		registerSessionRoutes(server, metaDal, activeSessionManager);
 		registerHostConnectionRoutes(server, metaDal, activeSessionManager);
-		registerChannelRoutes(
-			server,
-			metaDal,
-			activeSessionManager,
-			activeSessionManager.getSpoolDal(),
-		);
+		registerChannelRoutes(server, metaDal, activeSessionManager);
 		registerGroupRoutes(server, metaDal);
 		registerConfigRoutes(server, metaDal, configResolver, activeSessionManager);
 		registerFontRoutes(server, configDir);

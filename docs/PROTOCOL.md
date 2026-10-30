@@ -1647,10 +1647,10 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
   type: 'local' | 'ssh',             // required
   label: string,                      // required, 1-64 chars, alphanumeric + dot/dash/underscore, unique
   ssh_host?: string,                  // required if type=ssh, "hostname" or "ip"
-  ssh_port?: number,                  // default 22, range 1-65535
-  ssh_user?: string,                  // SSH username
+  ssh_port?: number | null,           // range 1-65535; none or null is 22
+  ssh_user?: string | null,           // SSH username
   ssh_auth?: 'agent' | 'key' | 'password',
-  ssh_key_path?: string,              // required if ssh_auth=key
+  ssh_key_path?: string | null,       // required if ssh_auth=key
   ssh_config_host?: string,           // Host alias from ~/.ssh/config
   ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
   ssh_proxy_spec?: string | null,     // or a jump as user@host:port; never both
@@ -1658,7 +1658,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'
   icon_value?: string | null,         // emoji char, or for 'image' a data:image/png|jpeg|gif|webp;base64 URI of at most 65536 chars
   color?: string | null,              // hex "#rrggbb" or null for auto
-  default_shell?: string,
+  default_shell?: string | null,
   default_cwd?: string,
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
   host_group_id?: string | null,      // host group ID
@@ -1670,7 +1670,9 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 }
 ```
 
-**UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge).
+**UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge). A field
+left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
+to 22), `ssh_user`, `ssh_key_path`, `default_shell` or `color` (#792).
 
 A field these routes do not know is ignored.
 

@@ -15,9 +15,10 @@ export interface CreateHostInput {
 	type: "local" | "ssh";
 	label: string;
 	sshHost?: string;
-	sshPort?: number;
+	/** null stores none: the host is reached on 22. */
+	sshPort?: number | null;
 	sshAuth?: "agent" | "key" | "password";
-	sshKeyPath?: string;
+	sshKeyPath?: string | null;
 	iconType?: "auto" | "emoji" | "image";
 	/** null stores none, which is how a client clears it (#659). */
 	iconValue?: string | null;
@@ -25,7 +26,7 @@ export interface CreateHostInput {
 	color?: string | null;
 	profileJson?: string;
 	trustRemoteHints?: "apply" | "ask" | "ignore";
-	defaultShell?: string;
+	defaultShell?: string | null;
 	defaultCwd?: string;
 	hostGroupId?: string | null;
 	sortOrder?: number;

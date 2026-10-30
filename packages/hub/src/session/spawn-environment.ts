@@ -1,4 +1,4 @@
-import type { AgentSpawnMessage, EnvMode, Host } from "@lasterm/shared";
+import { type AgentSpawnMessage, type EnvMode, type Host, validateShell } from "@lasterm/shared";
 
 /**
  * What a SPAWN says about the environment its terminal starts with (#576).
@@ -74,10 +74,16 @@ export function resolveEnvironmentChanges(
  * The Default Shell the user chose for a host, when there is one (#794): the
  * shell a terminal opened without a shell or a launch profile starts. Empty or
  * blank is none, and the terminal starts as it did before there was one.
+ *
+ * It keeps the rule every shell a client names keeps, a SPAWN's and a launch
+ * profile's: an absolute path, not a command (`validateShell`). The hosts
+ * routes do not check it, so one that breaks the rule is not started either:
+ * the terminal starts as with none, and Edit Host says why.
  */
 export function chosenDefaultShell(host: Pick<Host, "defaultShell">): string | undefined {
 	const shell = host.defaultShell?.trim();
-	return shell === undefined || shell === "" ? undefined : shell;
+	if (shell === undefined || shell === "") return undefined;
+	return validateShell(shell) === null ? shell : undefined;
 }
 
 /**

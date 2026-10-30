@@ -445,7 +445,10 @@
 								<datalist v-if="detectedShells.length > 0" id="host-shell-options">
 									<option v-for="shell in detectedShells" :key="shell" :value="shell" />
 								</datalist>
-								<p class="field-hint auth-note">
+								<span v-if="defaultShellProblem" class="field-error">
+									New terminals ignore it: {{ defaultShellProblem }}.
+								</span>
+								<p v-else class="field-hint auth-note">
 									The shell a new terminal starts, unless you pick a launch profile.
 								</p>
 							</div>
@@ -623,7 +626,7 @@
 
 <script setup lang="ts">
 import { computed, ref, type PropType } from "vue";
-import type { Host, VisualProfile } from "@lasterm/shared";
+import { type Host, type VisualProfile, validateShell } from "@lasterm/shared";
 import { useHostForm } from "../composables/useHostForm.js";
 import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -778,6 +781,15 @@ const detectedShells = computed(() => storedHost.value?.discoveredShells ?? []);
 const defaultShellPlaceholder = computed(() => {
 	const detected = storedHost.value?.discoveredDefaultShell;
 	return detected ? `Detected: ${detected}` : "/bin/bash";
+});
+/**
+ * Why the hub would not start the Default Shell typed, when it would not: it
+ * starts only what a terminal could be asked for by name, an absolute path
+ * rather than a command (#794). Said, not refused: the field saves all the same.
+ */
+const defaultShellProblem = computed(() => {
+	const shell = form.value.defaultShell.trim();
+	return shell === "" ? null : validateShell(shell);
 });
 
 /**

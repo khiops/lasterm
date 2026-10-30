@@ -1217,6 +1217,14 @@ describe("SessionManager", () => {
 			expect((await started(hostId))?.shell).toBe("/bin/bash");
 		});
 
+		// What a SPAWN may not name, a Default Shell stored through the API does
+		// not start either.
+		it("takes a Default Shell no SPAWN could name for none", async () => {
+			const hostId = await connectedSshHost("pi-command", "/bin/sh;reboot");
+
+			expect((await started(hostId))?.shell).toBe("/bin/bash");
+		});
+
 		it("starts the Default Shell the user chose on the local host, over its first profile", async () => {
 			await localHost("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
 

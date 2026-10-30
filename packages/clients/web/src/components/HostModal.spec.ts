@@ -696,8 +696,12 @@ describe("HostModal Default Shell: what the host's agent detected (#794)", () =>
 		discoveredDefaultShell: "/bin/bash",
 	};
 
+	/** The field under its label, as someone reading the dialog finds it. */
 	function shellField(): HTMLInputElement {
-		const input = el<HTMLInputElement>("#host-default-shell");
+		const field = Array.from(document.body.querySelectorAll("#panel-terminal .field")).find(
+			(candidate) => candidate.querySelector(".field-label")?.textContent === "Default Shell",
+		);
+		const input = field?.querySelector<HTMLInputElement>("input");
 		if (!input) throw new Error("no Default Shell field");
 		return input;
 	}
@@ -732,6 +736,24 @@ describe("HostModal Default Shell: what the host's agent detected (#794)", () =>
 		expect(shellField().placeholder).toBe("/bin/bash");
 		expect(shellField().hasAttribute("list")).toBe(false);
 		expect(suggestions()).toEqual([]);
+	});
+
+	// The hub starts only an absolute path, as for any shell a terminal is
+	// asked for: one it would not start is said, not silently passed over.
+	it("says when the hub would not start the shell typed", async () => {
+		mountModal(DETECTED);
+		const panel = () => el("#panel-terminal")?.textContent ?? "";
+
+		shellField().value = "zsh";
+		shellField().dispatchEvent(new Event("input"));
+		await nextTick();
+		expect(panel()).toContain("New terminals ignore it: shell must be an absolute path.");
+
+		shellField().value = "/usr/bin/zsh";
+		shellField().dispatchEvent(new Event("input"));
+		await nextTick();
+		expect(panel()).not.toContain("New terminals ignore it");
+		expect(panel()).toContain("The shell a new terminal starts");
 	});
 
 	it("shows what a connection detects while the dialog is open", async () => {

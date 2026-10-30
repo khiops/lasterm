@@ -104,6 +104,15 @@ describe("chosenDefaultShell", () => {
 		expect(chosenDefaultShell({ defaultShell: "" })).toBeUndefined();
 		expect(chosenDefaultShell({ defaultShell: "  " })).toBeUndefined();
 	});
+
+	// The rule a SPAWN's shell and a launch profile's keep: the hosts routes do
+	// not check this one, so the hub does before it starts it.
+	it("is none when it is not a shell a client may name: a command, or not an absolute path", () => {
+		expect(chosenDefaultShell({ defaultShell: "zsh" })).toBeUndefined();
+		expect(chosenDefaultShell({ defaultShell: "/bin/sh;reboot" })).toBeUndefined();
+		expect(chosenDefaultShell({ defaultShell: "/bin/$(id)" })).toBeUndefined();
+		expect(chosenDefaultShell({ defaultShell: "/opt/../bin/sh" })).toBeUndefined();
+	});
 });
 
 describe("wantsLoginShell", () => {

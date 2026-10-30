@@ -1695,9 +1695,11 @@ own, which no route writes:
 ```
 
 `default_shell` is the user's Default Shell, and only a route writes it: a terminal opened with no
-shell and no launch profile starts it, with no arguments (§ 4.4). Empty, such a terminal starts
-the host's first profile, as before. `discovered_default_shell` is what Edit Host shows in the
-empty field (#794).
+shell and no launch profile starts it, with no arguments (§ 4.4). It is started only when it keeps
+the rule of a SPAWN's `shell`, an absolute path and not a command (SECURITY.md § 5.1); empty, or
+not keeping it, such a terminal starts the host's first profile, as before. Edit Host shows
+`discovered_default_shell` in the empty field, and says when the hub would not start what is
+typed (#794).
 
 **CreateGroup:** (tab channel groups; no other key)
 ```typescript

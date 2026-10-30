@@ -581,7 +581,7 @@ All incoming messages (from agent or UI) must be validated:
 | `host_id` | Must be a valid ULID, must exist |
 | `data` (Uint8Array) | Max 1 MB per message |
 | `cols`, `rows` | Positive integers, 1 ≤ cols ≤ 500, 1 ≤ rows ≤ 200 |
-| `shell` | Non-empty string, no null bytes |
+| `shell` | An absolute path (`/` or a drive letter), at most 4096 chars: no null bytes, no shell metacharacters, no `..` (`validateShell`) |
 | `cwd` | Non-empty string, no null bytes |
 | `env` | Object with string keys/values, max 100 entries |
 | Frame size | Max 10 MB total |
@@ -593,6 +593,7 @@ All incoming messages (from agent or UI) must be validated:
 | Host label | 1-64 chars, alphanumeric + dash/underscore |
 | SSH host | Valid hostname or IP, no shell metacharacters |
 | SSH port | 1-65535 |
+| Default Shell | Stored as sent; a terminal starts it only when it keeps the rule of a SPAWN's `shell` (§ 5.1), else as with none (#794) |
 | Config TOML | Parse-validated before saving |
 | Pairing code | Exactly 8 digits |
 

@@ -558,6 +558,16 @@ export class SessionManager {
 		this.ctx.hubKey = key;
 	}
 
+	/**
+	 * Name who is told once the hub changed a host on its own (#789): its OS
+	 * detected, its shells discovered, a key or an agent hash pinned, the local
+	 * host created again, a setting stored on it. Every such write goes through
+	 * this manager's DAL, which tells only of one that changed something.
+	 */
+	onHostChanged(listener: () => void): void {
+		this.metaDal.hosts.onHostChanged(listener);
+	}
+
 	getMetaDal(): SessionMetaDAL {
 		return this.metaDal;
 	}

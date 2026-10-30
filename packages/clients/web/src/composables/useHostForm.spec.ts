@@ -509,13 +509,16 @@ describe("useHostForm", () => {
 			expect(body).toMatchObject({ icon_type: "auto", icon_value: null });
 		});
 
-		it("sends back a colour and an icon left alone", async () => {
+		// Left out, the hub keeps them: what it stores is what the dialog showed.
+		it("leaves a colour and an icon left alone as the hub has them", async () => {
 			const host = storedHost({ color: "#ff8800", iconType: "emoji", iconValue: "🚀" });
 			const body = await savedBody(host);
-			expect(body).toMatchObject({ color: "#ff8800", icon_type: "emoji", icon_value: "🚀" });
+			expect(body).not.toHaveProperty("color");
+			expect(body).not.toHaveProperty("icon_type");
+			expect(body).not.toHaveProperty("icon_value");
 		});
 
-		it("sends back the stored custom elevation command when the field is left alone (#660)", async () => {
+		it("leaves the stored custom elevation command alone when the field is left alone (#660)", async () => {
 			for (const type of ["ssh", "local"] as const) {
 				const host = storedHost({
 					type,
@@ -528,10 +531,7 @@ describe("useHostForm", () => {
 				const body = await savedBody(host, (f) => {
 					f.label = "renamed";
 				});
-				expect(body).toMatchObject({
-					elevation_method: "custom",
-					custom_command: "/usr/local/bin/my-elevate",
-				});
+				expect(body).toEqual({ label: "renamed" });
 			}
 		});
 
@@ -544,12 +544,81 @@ describe("useHostForm", () => {
 		});
 
 		it.each([null, true, false])(
-			"saves a stored remote daemon choice unchanged: %j",
+			"leaves a stored remote daemon choice unchanged: %j",
 			async (sshRemoteDaemon) => {
 				const body = await savedBody(storedHost({ sshRemoteDaemon }));
-				expect(body).toHaveProperty("ssh_remote_daemon", sshRemoteDaemon);
+				expect(body).not.toHaveProperty("ssh_remote_daemon");
 			},
 		);
+
+		// ─── Only what the user changed (#789) ─────────────────────────────
+		//
+		// The form is the host as this window knew it when the dialog opened. A
+		// field sent back untouched wrote that old value over what the hub
+		// recorded since: an OS detected meanwhile went back to Auto-detect.
+
+		it("sends only the fields the user changed", async () => {
+			const host = storedHost({
+				os: "linux",
+				arch: "arm64",
+				color: "#ff8800",
+				sshUser: "pi",
+				sshRemoteDaemon: true,
+				elevationMethod: "sudo",
+				defaultShell: "/bin/bash",
+			});
+			const body = await savedBody(host, (form) => {
+				form.label = "renamed";
+				form.sshPort = 2222;
+			});
+			expect(body).toEqual({ label: "renamed", ssh_port: 2222 });
+		});
+
+		it("still sends a field the user changed, back to Auto-detect too", async () => {
+			const host = storedHost({ os: "linux", arch: "arm64" });
+			expect(
+				await savedBody(host, (form) => {
+					form.os = "windows";
+				}),
+			).toEqual({ os: "windows" });
+			expect(
+				await savedBody(host, (form) => {
+					form.os = null;
+					form.arch = null;
+				}),
+			).toEqual({ os: null, arch: null });
+		});
+
+		it("sends a field changed then put back as it was as nothing", async () => {
+			const body = await savedBody(storedHost({ os: "linux" }), (form) => {
+				form.os = "windows";
+				form.os = "linux";
+			});
+			expect(body).toEqual({});
+		});
+
+		// Each pair is one setting to the hub: half of it alone could pair with
+		// whatever another window stored meanwhile.
+		it("sends an icon's type and value together, and both halves of a jump", async () => {
+			knownHosts.push(
+				{ id: "jump-1", label: "jump-1" } as Host,
+				{
+					id: "jump-2",
+					label: "jump-2",
+				} as Host,
+			);
+			const host = storedHost({ iconType: "emoji", iconValue: "🚀", sshProxyHostId: "jump-1" });
+			const body = await savedBody(host, (form) => {
+				form.iconValue = "🔥";
+				form.sshProxy = "jump-2";
+			});
+			expect(body).toEqual({
+				icon_type: "emoji",
+				icon_value: "🔥",
+				ssh_proxy_host_id: "jump-2",
+				ssh_proxy_spec: null,
+			});
+		});
 
 		it("makes the setting unavailable for a Windows host", () => {
 			const { sshRemoteDaemonUnavailable } = useHostForm(
@@ -837,7 +906,6 @@ describe("daemon PUT guard", () => {
 		await save();
 		const body = updateHostSpy.mock.calls[0]?.[1];
 		expect(body).toHaveProperty("label", "updated");
-		expect(body).toHaveProperty("ssh_host", "pi.test");
 		if (connected) expect(body).not.toHaveProperty("ssh_remote_daemon");
 		else expect(body).toHaveProperty("ssh_remote_daemon", false);
 	});

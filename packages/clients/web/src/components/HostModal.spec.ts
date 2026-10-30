@@ -245,14 +245,8 @@ describe("HostModal for the local host (#656)", () => {
 		expect(String(url)).toBe(`/api/hosts/${LOCAL.id}`);
 		expect(init?.method).toBe("PUT");
 		const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-		expect(body).toMatchObject({
-			type: "local",
-			label: "local",
-			color: "#ff8800",
-			icon_type: "emoji",
-			icon_value: "🚀",
-		});
-		expect(Object.keys(body).filter((key) => key.startsWith("ssh_"))).toEqual([]);
+		// What was changed, and nothing else (#789).
+		expect(body).toEqual({ color: "#ff8800", icon_type: "emoji", icon_value: "🚀" });
 		expect(onSaved).toHaveBeenCalledWith(
 			expect.objectContaining({
 				id: LOCAL.id,
@@ -586,6 +580,111 @@ describe("HostModal open while another window changes the hosts (#783)", () => {
 		expect(save()?.disabled).toBe(true);
 		expect(label.value).toBe("pi-2");
 		expect(address.value).toBe("10.0.0.7");
+	});
+});
+
+describe("HostModal open while the hub detects the host's OS (#789)", () => {
+	/** The host as this window knew it when the dialog opened, and as the hub has it since. */
+	const UNDETECTED: Host = { ...SSH, os: null, arch: null };
+	const DETECTED: Host = { ...SSH, os: "linux", arch: "arm64" };
+
+	/** The hub: its lists as they are now, and every save it is sent, as sent. */
+	function hubWithDetectedOs(): Array<Record<string, unknown>> {
+		const saves: Array<Record<string, unknown>> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			let body: unknown = String(input).includes("/api/host-groups")
+				? []
+				: toSnakeCase([LOCAL, DETECTED]);
+			if (init?.method === "PUT") {
+				const sent = JSON.parse(String(init.body)) as Record<string, unknown>;
+				saves.push(sent);
+				body = { ...(toSnakeCase(DETECTED) as Record<string, unknown>), ...sent };
+			}
+			return new Response(JSON.stringify(body), {
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+		return saves;
+	}
+
+	function osSelect(): HTMLSelectElement {
+		const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+			(candidate) => Array.from(candidate.options).some((option) => option.value === "darwin"),
+		);
+		if (!select) throw new Error("no OS select");
+		return select;
+	}
+
+	function type(selector: string, value: string): void {
+		const input = el<HTMLInputElement>(selector);
+		if (!input) throw new Error(`no ${selector}`);
+		input.value = value;
+		input.dispatchEvent(new Event("input"));
+	}
+
+	async function clickSave(): Promise<void> {
+		el<HTMLButtonElement>(".dialog-actions .btn-primary")?.click();
+		await settle();
+	}
+
+	/** The dialog on the host as this window knows it, its OS not detected yet. */
+	function mountUndetected(): ReturnType<typeof mountModal> {
+		const mounted = mountModal(UNDETECTED);
+		useHostsStore().hosts = [{ ...LOCAL }, { ...UNDETECTED }];
+		useAuthStore().setToken("token");
+		return mounted;
+	}
+
+	/** The hub said the hosts changed, and this window has read them again. */
+	async function hubDetectedTheOs(): Promise<void> {
+		useHostsStore().hubChanged("hosts");
+		await vi.waitFor(() =>
+			expect(useHostsStore().hosts.find((host) => host.id === SSH.id)?.os).toBe("linux"),
+		);
+		await nextTick();
+	}
+
+	it("leaves the OS detected meanwhile to the hub when a save did not touch it", async () => {
+		const saves = hubWithDetectedOs();
+		const { onSaved } = mountUndetected();
+		type("input[placeholder='prod-server']", "pi-renamed");
+		await nextTick();
+
+		await hubDetectedTheOs();
+		await clickSave();
+
+		expect(saves).toEqual([{ label: "pi-renamed" }]);
+		expect(onSaved).toHaveBeenCalledWith(
+			expect.objectContaining({ label: "pi-renamed", os: "linux", arch: "arm64" }),
+		);
+	});
+
+	it("shows the OS detected meanwhile, keeping what was typed", async () => {
+		hubWithDetectedOs();
+		mountUndetected();
+		type("input[placeholder='prod-server']", "pi-renamed");
+		await nextTick();
+		expect(osSelect().value).not.toBe("linux");
+
+		await hubDetectedTheOs();
+
+		expect(osSelect().value).toBe("linux");
+		expect(el<HTMLInputElement>("input[placeholder='prod-server']")?.value).toBe("pi-renamed");
+	});
+
+	it("keeps an OS the user chose, and sends it, whatever the hub detected meanwhile", async () => {
+		const saves = hubWithDetectedOs();
+		mountUndetected();
+		const os = osSelect();
+		os.value = "windows";
+		os.dispatchEvent(new Event("change"));
+		await nextTick();
+
+		await hubDetectedTheOs();
+		expect(osSelect().value).toBe("windows");
+		await clickSave();
+
+		expect(saves).toEqual([{ os: "windows" }]);
 	});
 });
 

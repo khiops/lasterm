@@ -118,8 +118,27 @@ function rowToHostGroup(row: HostGroupRow): HostGroup {
 
 // ─── HostsDAL ────────────────────────────────────────────────────────────────
 
+/** A host as a client's list shows it, its last write's time aside. */
+function asShown(host: Host): string {
+	return JSON.stringify({ ...host, updatedAt: null });
+}
+
 export class HostsDAL {
+	/** Told once a write here changed a host: nobody, unless `onHostChanged` named someone. */
+	private hostChanged: () => void = () => {};
+
 	constructor(private db: Database.Database) {}
+
+	/**
+	 * Name who is told once a write here changed a host: created, edited, or
+	 * given what the hub learned of it — its OS, its shells, a key or an agent
+	 * hash it pinned (#789). A write that found the same again tells nobody. The
+	 * session manager's DAL tells every client, which then reads the hosts again;
+	 * the routes' DAL tells nobody, as the routes say their writes themselves.
+	 */
+	onHostChanged(listener: () => void): void {
+		this.hostChanged = listener;
+	}
 
 	// ─── Hosts ──────────────────────────────────────────────────────────────
 
@@ -179,6 +198,7 @@ export class HostsDAL {
 				now,
 			);
 
+		this.hostChanged();
 		return this.getHost(id) as Host;
 	}
 
@@ -238,7 +258,7 @@ export class HostsDAL {
 	}
 
 	updateHost(id: string, input: Partial<CreateHostInput>): Host {
-		return this.db.transaction(() => {
+		const { before, after } = this.db.transaction(() => {
 			const before = this.getHost(id);
 			if (!before) throw new Error(`Host not found: ${id}`);
 			const oldRoute = this.route(before);
@@ -311,22 +331,34 @@ export class HostsDAL {
 					)
 					.run(new Date().toISOString(), id);
 			}
-			return this.getHost(id) as Host;
+			return { before, after: this.getHost(id) as Host };
 		})();
+		// The hosts reached through this one lose their pin only when its address
+		// changes, which this comparison sees.
+		if (asShown(before) !== asShown(after)) this.hostChanged();
+		return after;
 	}
 
+	/** Found at every deploy: written, and said, only when it differs from what is stored. */
 	updateHostOsArch(id: string, os: HostOs, arch: HostArch): void {
 		const now = new Date().toISOString();
-		this.db
-			.prepare("UPDATE hosts SET os = ?, arch = ?, updated_at = ? WHERE id = ?")
-			.run(os, arch, now, id);
+		const { changes } = this.db
+			.prepare(
+				"UPDATE hosts SET os = ?, arch = ?, updated_at = ? WHERE id = ? AND (os IS NOT ? OR arch IS NOT ?)",
+			)
+			.run(os, arch, now, id, os, arch);
+		if (changes > 0) this.hostChanged();
 	}
 
+	/** Written, and said, only when it differs from what is stored. */
 	updateHostAgentSha256(id: string, sha256: string | null): void {
 		const now = new Date().toISOString();
-		this.db
-			.prepare("UPDATE hosts SET agent_sha256 = ?, updated_at = ? WHERE id = ?")
-			.run(sha256, now, id);
+		const { changes } = this.db
+			.prepare(
+				"UPDATE hosts SET agent_sha256 = ?, updated_at = ? WHERE id = ? AND agent_sha256 IS NOT ?",
+			)
+			.run(sha256, now, id, sha256);
+		if (changes > 0) this.hostChanged();
 	}
 
 	getHostAgentSha256(id: string): string | null {
@@ -364,20 +396,28 @@ export class HostsDAL {
 	): boolean {
 		return this.writePin(hostId, fingerprint, expectedRoute, "ssh_proxy_fingerprint");
 	}
+	/**
+	 * True when the key is this host's: pinned now, or already. Only a key not
+	 * pinned yet is written, and said.
+	 */
 	private writePin(
 		hostId: string,
 		fingerprint: string,
 		expectedRoute: string | null,
 		column: "ssh_fingerprint" | "ssh_proxy_fingerprint",
 	): boolean {
-		return this.db.transaction(() => {
+		const outcome = this.db.transaction((): "refused" | "same" | "pinned" => {
 			const host = this.getHost(hostId);
-			if (!host || expectedRoute === null || this.route(host) !== expectedRoute) return false;
+			if (!host || expectedRoute === null || this.route(host) !== expectedRoute) return "refused";
+			const pinned = column === "ssh_fingerprint" ? host.sshFingerprint : host.sshProxyFingerprint;
+			if (pinned === fingerprint) return "same";
 			this.db
 				.prepare(`UPDATE hosts SET ${column} = ?, updated_at = ? WHERE id = ?`)
 				.run(fingerprint, new Date().toISOString(), hostId);
-			return true;
+			return "pinned";
 		})();
+		if (outcome === "pinned") this.hostChanged();
+		return outcome !== "refused";
 	}
 	deleteHost(id: string): boolean {
 		return this.db.transaction(() => {
@@ -594,19 +634,36 @@ export class HostsDAL {
 		return result.changes > 0;
 	}
 
+	/**
+	 * Found at every connection, and stamped each time. Said only when the
+	 * shells, or the default one, differ from what is stored.
+	 */
 	updateHostDiscoveredShells(hostId: string, shells: string[], defaultShell?: string): void {
 		const now = new Date().toISOString();
+		const found = JSON.stringify(shells);
+		const stored = this.db
+			.prepare("SELECT discovered_shells, default_shell FROM hosts WHERE id = ?")
+			.get(hostId) as
+			| { discovered_shells: string | null; default_shell: string | null }
+			| undefined;
 		this.db
 			.prepare(
 				`UPDATE hosts
 				 SET discovered_shells = ?, discovered_shells_at = ?, updated_at = ?
 				 WHERE id = ?`,
 			)
-			.run(JSON.stringify(shells), now, now, hostId);
+			.run(found, now, now, hostId);
 		if (defaultShell !== undefined) {
 			this.db
 				.prepare("UPDATE hosts SET default_shell = ?, updated_at = ? WHERE id = ?")
 				.run(defaultShell, now, hostId);
+		}
+		if (
+			stored !== undefined &&
+			(stored.discovered_shells !== found ||
+				(defaultShell !== undefined && stored.default_shell !== defaultShell))
+		) {
+			this.hostChanged();
 		}
 	}
 }

@@ -9,6 +9,7 @@ import type {
 	UiSpawnMessage,
 } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { createHostsChangeAnnouncer, HOSTS_CHANGED_QUIET_MS } from "../api/hosts-changed.js";
 import type { ConfigResolver } from "../config.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
@@ -161,9 +162,12 @@ let mockSshAgentInstance: MockSshAgent | null = null;
 let nextSshStartError: Error | null = null;
 /** Set before a test to have the next start() report an agent re-uploaded, and beside what. */
 let nextSshStartCallsAgentUpdated: false | { besideRunningDaemon: boolean } = false;
+/** Set before a test to have the next start() detect the host's OS, as a deploy does. */
+let nextSshStartDetects: { os: "linux" | "windows"; arch: "x64" | "arm64" } | null = null;
 
 interface MockSshAgentDeployOptions {
 	onAgentUpdated?: (hostId: string, installed: { besideRunningDaemon: boolean }) => void;
+	onOsDetected?: (hostId: string, os: "linux" | "windows", arch: "x64" | "arm64") => void;
 }
 
 class MockSshAgent {
@@ -177,7 +181,17 @@ class MockSshAgent {
 			nextSshStartCallsAgentUpdated = false;
 			this.deployOptions?.onAgentUpdated?.(this.host.id, installed);
 		}
+		const detected = nextSshStartDetects;
+		if (detected !== null) {
+			nextSshStartDetects = null;
+			this.deployOptions?.onOsDetected?.(this.host.id, detected.os, detected.arch);
+		}
 	});
+
+	/** What the hub handed this connection to record what its deploy finds. */
+	get deployedWith(): MockSshAgentDeployOptions | undefined {
+		return this.deployOptions;
+	}
 	send = vi.fn((msg: ProtocolMessage) => {
 		if (msg.type === "SPAWN") {
 			const spawnMsg = msg as unknown as Record<string, string>;
@@ -324,6 +338,7 @@ describe("SessionManager", () => {
 		mockLocalAgents.length = 0;
 		mockSshAgentInstance = null;
 		nextSshStartCallsAgentUpdated = false;
+		nextSshStartDetects = null;
 		dbManager = openTestDatabases();
 		sm = new SessionManager(dbManager);
 		vi.mocked(_connectOrLaunchForMock).mockClear();
@@ -1463,6 +1478,61 @@ describe("SessionManager", () => {
 		// discoveredShells should remain null (not updated)
 		const updatedHost = dal.getHost(host.id);
 		expect(updatedHost?.discoveredShells).toBeUndefined();
+	});
+
+	// ─── What the hub records of a host, said to every window (#789) ───────
+
+	it("tells every window once a connection found the host's OS and shells, and not when found again", async () => {
+		// As createServer wires it: one message for a burst, to every client.
+		const hostsChange = createHostsChangeAnnouncer((message) => sm.broadcastToAllClients(message));
+		sm.onHostChanged(() => hostsChange.announce("hosts"));
+		const dal = new MetaDAL(dbManager.meta);
+		const host = dal.createHost({
+			type: "ssh",
+			label: "pi",
+			sshHost: "user@pi.local",
+			sshAuth: "key",
+			sshKeyPath: "/nonexistent/key",
+		});
+		const windows: ProtocolMessage[][] = [[], []];
+		windows.forEach((received, i) => {
+			sm.addClient(makeClient(`window-${i}`, received));
+		});
+		const hostsChanged = (received: ProtocolMessage[]) =>
+			received.filter((message) => message.type === "HOSTS_CHANGED");
+		const hello = {
+			type: "HELLO",
+			version: 1,
+			agentVersion: "0.1.0",
+			capabilities: ["multiplex", "resize", "snapshot", "launch-profiles"],
+			availableShells: ["/bin/bash", "/usr/bin/fish"],
+			defaultShell: "/bin/bash",
+		};
+
+		try {
+			nextSshStartDetects = { os: "linux", arch: "arm64" };
+			await sm.handleSpawn("window-0", { type: "SPAWN", hostId: host.id });
+			mockSshAgentInstance?._emit("message", hello);
+
+			for (const received of windows) {
+				await vi.waitFor(() =>
+					expect(hostsChanged(received)).toEqual([{ type: "HOSTS_CHANGED", scope: "hosts" }]),
+				);
+			}
+			expect(dal.getHost(host.id)).toMatchObject({
+				os: "linux",
+				arch: "arm64",
+				discoveredShells: ["/bin/bash", "/usr/bin/fish"],
+			});
+
+			// The next deploy finds the same machine: nothing changed, nothing said.
+			mockSshAgentInstance?.deployedWith?.onOsDetected?.(host.id, "linux", "arm64");
+			mockSshAgentInstance?._emit("message", hello);
+			await new Promise((resolve) => setTimeout(resolve, HOSTS_CHANGED_QUIET_MS * 3));
+			for (const received of windows) expect(hostsChanged(received)).toHaveLength(1);
+		} finally {
+			hostsChange.cancel();
+		}
 	});
 
 	// ─── ATTACH with Snapshot Restore ────────────────────────────

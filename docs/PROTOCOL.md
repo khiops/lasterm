@@ -1195,9 +1195,11 @@ each reads that list again (#783): `hosts` for `GET /api/hosts`, `groups` for
 `POST /api/hosts/:id/duplicate`, `POST /api/hosts/import`, `PATCH /api/hosts/:id/profile`, and a
 `POST /api/hosts/:id/agent/stop-keeping` answered 200 (`hosts`); `POST /api/host-groups`,
 `PUT /api/host-groups/order` and `PUT /api/host-groups/:id` (`groups`);
-`DELETE /api/host-groups/:id`, whose hosts are left in no group (`both`). A refused write, a read,
-and what the hub records of a host on its own (its OS once detected, its shells, a pinned key or
-agent hash) send nothing.
+`DELETE /api/host-groups/:id`, whose hosts are left in no group (`both`). What the hub records of a
+host on its own is a write too (#789), `hosts`: its OS and architecture once detected, the shells
+its agent found and its default one, a host or jump key pinned, an agent hash pinned, the local host
+created again, the No that Stop keeping an agent stores. A refused write, a read, and a record that
+finds what is already stored, as a connection does each time, send nothing.
 
 The hub sends one for a burst: once no such write has come for 100 ms, and no later than 1 s after
 the first, with the scopes of the burst merged. An import of twenty hosts, or twenty `POST`s in

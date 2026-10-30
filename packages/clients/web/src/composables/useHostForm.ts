@@ -1,6 +1,6 @@
 import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
-import { computed, ref, watch } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
 
@@ -69,42 +69,106 @@ export interface HostFormData {
 	arch: "x64" | "arm64" | null;
 }
 
+/** The form for a host as the hub has it, or for a new one. */
+function formOf(host?: Host): HostFormData {
+	return {
+		label: host?.label ?? "",
+		type: host?.type ?? "ssh",
+		sshHost: host?.sshHost ?? "",
+		sshPort: host?.sshPort ?? undefined,
+		sshUser: host?.sshUser ?? "",
+		sshAuth: host?.sshAuth ?? "key",
+		sshKeyPath: host?.sshKeyPath ?? "",
+		sshProxy: host?.sshProxyHostId ?? host?.sshProxySpec ?? "",
+		sshRemoteDaemon:
+			host === undefined
+				? "yes"
+				: host.sshRemoteDaemon == null
+					? ""
+					: host.sshRemoteDaemon
+						? "yes"
+						: "no",
+		iconType: host?.iconType ?? "auto",
+		iconValue: host?.iconValue ?? "",
+		color: host?.color ?? "",
+		hostGroup: host?.hostGroupId ?? "",
+		defaultShell: host?.defaultShell ?? "",
+		trustRemoteHints: host?.trustRemoteHints ?? "apply",
+		elevationMethod: host?.elevationMethod ?? "",
+		// Loaded, so that a save does not erase it: starting empty made every
+		// save erase it (#660). Emptying the field still clears it.
+		customCommand: host?.customCommand ?? "",
+		os: host?.os ?? null,
+		arch: host?.arch ?? null,
+	};
+}
+
+function setField<K extends keyof HostFormData>(
+	form: HostFormData,
+	key: K,
+	value: HostFormData[K],
+): void {
+	form[key] = value;
+}
+
+/** Sent together or not at all: each pair is one setting to the hub. */
+const LINKED_FIELDS = [
+	["icon_type", "icon_value"],
+	["ssh_proxy_host_id", "ssh_proxy_spec"],
+] as const;
+
+/**
+ * What a save of an edit sends: the fields of `body` that differ from
+ * `before`, the body the host as the hub last said it would make (#789). A
+ * field left out keeps what the hub has, which can be newer than what the
+ * dialog was opened on: an OS detected meanwhile, or another window's save.
+ */
+function changedFields(
+	before: Record<string, unknown>,
+	body: Record<string, unknown>,
+): Record<string, unknown> {
+	const changed = Object.fromEntries(
+		Object.entries(body).filter(([key, value]) => !(key in before) || before[key] !== value),
+	);
+	for (const pair of LINKED_FIELDS) {
+		if (!pair.some((key) => key in changed)) continue;
+		for (const key of pair) if (key in body) changed[key] = body[key];
+	}
+	return changed;
+}
+
 export function useHostForm(editHost?: Host) {
 	const hostsStore = useHostsStore();
 	const authStore = useAuthStore();
 
 	const isEdit = !!editHost;
 
-	const form = ref<HostFormData>({
-		label: editHost?.label ?? "",
-		type: editHost?.type ?? "ssh",
-		sshHost: editHost?.sshHost ?? "",
-		sshPort: editHost?.sshPort ?? undefined,
-		sshUser: editHost?.sshUser ?? "",
-		sshAuth: editHost?.sshAuth ?? "key",
-		sshKeyPath: editHost?.sshKeyPath ?? "",
-		sshProxy: editHost?.sshProxyHostId ?? editHost?.sshProxySpec ?? "",
-		sshRemoteDaemon:
-			editHost === undefined
-				? "yes"
-				: editHost.sshRemoteDaemon == null
-					? ""
-					: editHost.sshRemoteDaemon
-						? "yes"
-						: "no",
-		iconType: editHost?.iconType ?? "auto",
-		iconValue: editHost?.iconValue ?? "",
-		color: editHost?.color ?? "",
-		hostGroup: editHost?.hostGroupId ?? "",
-		defaultShell: editHost?.defaultShell ?? "",
-		trustRemoteHints: editHost?.trustRemoteHints ?? "apply",
-		elevationMethod: editHost?.elevationMethod ?? "",
-		// Loaded, so that a save sends it back as it was: starting empty made
-		// every save erase it (#660). Emptying the field still clears it.
-		customCommand: editHost?.customCommand ?? "",
-		os: editHost?.os ?? null,
-		arch: editHost?.arch ?? null,
-	});
+	const form = ref<HostFormData>(formOf(editHost));
+
+	/**
+	 * The host being edited as the hub last said it: as the dialog opened on
+	 * it, then as this window reads the hosts again (#789). A save sends only
+	 * what the user changed from it.
+	 */
+	const storedHost = shallowRef<Host | undefined>(editHost);
+
+	// The hub changed this host while the dialog is open: another window saved
+	// it, or the hub detected its OS. A field the user has not touched shows
+	// what the hub has now; one they changed keeps what they chose.
+	if (editHost) {
+		watch(
+			() => hostsStore.hosts.find((host) => host.id === editHost.id),
+			(current) => {
+				if (current === undefined) return;
+				const before = formOf(storedHost.value);
+				const now = formOf(current);
+				for (const key of Object.keys(now) as Array<keyof HostFormData>) {
+					if (form.value[key] === before[key]) setField(form.value, key, now[key]);
+				}
+				storedHost.value = current;
+			},
+		);
+	}
 
 	// INV-13: clear key path when switching away from key auth
 	watch(
@@ -322,6 +386,49 @@ export function useHostForm(editHost?: Host) {
 		}
 	}
 
+	/** The body the hub is sent for a host filled as `f`. */
+	function bodyOf(f: HostFormData): Record<string, unknown> {
+		return {
+			label: f.label.trim(),
+			type: f.type,
+			...(f.type === "ssh" && {
+				ssh_host: f.sshHost,
+				...(f.sshPort !== undefined && f.sshPort > 0 && { ssh_port: f.sshPort }),
+				...(f.sshUser && { ssh_user: f.sshUser }),
+				ssh_auth: f.sshAuth,
+				...(f.sshAuth === "key" && {
+					ssh_key_path: f.sshKeyPath,
+				}),
+				// One of the two, never both: an id names a host this hub knows,
+				// anything else is an address written the way ssh_config writes
+				// it. Empty clears whichever was set.
+				...formProxyFields(f.sshProxy),
+				// An unavailable setting is recorded as null for a new Windows host.
+				// On an existing one, leave the stored answer alone instead.
+				...(!connectedThroughRemoteDaemon.value && (!isEdit || !sshRemoteDaemonUnavailable.value)
+					? {
+							ssh_remote_daemon:
+								sshRemoteDaemonUnavailable.value || f.sshRemoteDaemon === ""
+									? null
+									: f.sshRemoteDaemon === "yes",
+						}
+					: {}),
+			}),
+			...iconFields(f.iconType, f.iconValue),
+			// null once reset: the colour then comes from the label (#659).
+			color: f.color || null,
+			host_group_id: f.hostGroup || null,
+			...(f.defaultShell && {
+				default_shell: f.defaultShell,
+			}),
+			trust_remote_hints: f.trustRemoteHints,
+			elevation_method: f.elevationMethod || null,
+			custom_command: f.customCommand || null,
+			os: f.os,
+			arch: f.arch,
+		};
+	}
+
 	async function save(extraBody?: Record<string, unknown>): Promise<Host | null> {
 		if (!canSave.value) return null;
 		saving.value = true;
@@ -340,54 +447,17 @@ export function useHostForm(editHost?: Host) {
 				showNewGroup.value = false;
 				newGroupName.value = "";
 			}
-			const groupId: string | null = form.value.hostGroup || null;
 
-			const body: Record<string, unknown> = {
-				label: form.value.label.trim(),
-				type: form.value.type,
-				...(form.value.type === "ssh" && {
-					ssh_host: form.value.sshHost,
-					...(form.value.sshPort !== undefined &&
-						form.value.sshPort > 0 && { ssh_port: form.value.sshPort }),
-					...(form.value.sshUser && { ssh_user: form.value.sshUser }),
-					ssh_auth: form.value.sshAuth,
-					...(form.value.sshAuth === "key" && {
-						ssh_key_path: form.value.sshKeyPath,
-					}),
-					// One of the two, never both: an id names a host this hub knows,
-					// anything else is an address written the way ssh_config writes
-					// it. Empty clears whichever was set.
-					...formProxyFields(),
-					// An unavailable setting is recorded as null for a new Windows host.
-					// On an existing one, leave the stored answer alone instead.
-					...(!connectedThroughRemoteDaemon.value && (!isEdit || !sshRemoteDaemonUnavailable.value)
-						? {
-								ssh_remote_daemon:
-									sshRemoteDaemonUnavailable.value || form.value.sshRemoteDaemon === ""
-										? null
-										: form.value.sshRemoteDaemon === "yes",
-							}
-						: {}),
-				}),
-				...iconFields(form.value.iconType, form.value.iconValue),
-				// null once reset: the colour then comes from the label (#659).
-				color: form.value.color || null,
-				host_group_id: groupId,
-				...(form.value.defaultShell && {
-					default_shell: form.value.defaultShell,
-				}),
-				trust_remote_hints: form.value.trustRemoteHints,
-				elevation_method: form.value.elevationMethod || null,
-				custom_command: form.value.customCommand || null,
-				os: form.value.os,
-				arch: form.value.arch,
-				...extraBody,
-			};
-
+			const body = bodyOf(form.value);
+			// An edit sends what the user changed, and nothing it would write back
+			// over what the hub recorded since (#789).
 			const answer =
 				isEdit && editHost
-					? await hostsStore.updateHost(editHost.id, body)
-					: await hostsStore.createHost(body);
+					? await hostsStore.updateHost(editHost.id, {
+							...changedFields(bodyOf(formOf(storedHost.value)), body),
+							...extraBody,
+						})
+					: await hostsStore.createHost({ ...body, ...extraBody });
 			if (!answer.ok) {
 				saveError.value = answer.message;
 				return null;
@@ -471,6 +541,7 @@ export function useHostForm(editHost?: Host) {
 	return {
 		form,
 		isEdit,
+		storedHost,
 		source,
 		sshConfigEntries,
 		sshConfigHasInclude,

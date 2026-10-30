@@ -187,7 +187,7 @@ The chords themselves are not configurable yet (#632); Ctrl+/ lists them all.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | dead_retention_hours | number | `24` | Hours to keep dead channel output before GC (0 = immediate) |
-| max_size_per_channel_mb | number | `10` | Max output storage per channel in MB |
+| max_size_per_channel_mb | number | `10` | Max storage per channel in MB, its last screen snapshot included; the oldest output goes first (STORAGE.md § 7) |
 
 ---
 

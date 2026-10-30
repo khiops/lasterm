@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-29
+> Last updated: 2026-10-30
 
 ## 1. Overview
 
@@ -288,15 +288,24 @@ Terminal output is written to spool.db in chunks:
 
 ### 5.2 Snapshot Chunks
 
-Periodic screen state captures:
+Periodic screen state captures (`SnapshotScheduler`):
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Interval | 3s idle OR 5s forced | Balance freshness vs write load |
+| Interval | 3s idle OR 5s forced, only after a change | Balance freshness vs write load |
 | Trigger: idle | No OUTPUT received for 3s → request snapshot | Capture stable state |
-| Trigger: forced | Every 5s regardless | Guarantee recent snapshot |
-| Trigger: detach | On client detach → request snapshot | Best state for reconnect |
+| Trigger: forced | Every 5s while the screen keeps changing | Guarantee recent snapshot |
+| Trigger: detach | On client detach → request snapshot, changed or not | Best state for reconnect |
 | Kind | `snapshot` | Distinct from output chunks |
+
+A change is OUTPUT or a resize since the last snapshot was asked for; a channel the hub starts
+tracking counts as changed, and so does one whose snapshot request timed out. The idle and forced
+triggers ask for nothing on a screen that has not changed: they used to ask every 5 s regardless,
+and one idle channel stored 64,509 snapshots of the same screen in five days (#726).
+
+**One snapshot per channel.** Storing a snapshot deletes the channel's previous one, in the same
+transaction (`SpoolDAL.insertSnapshot`): nothing reads any but the newest (§ 7.3). Only the
+previous one goes there; a backlog an earlier version left is cleared by GC (§ 7).
 
 **Snapshot chunk data:**
 ```json
@@ -351,32 +360,65 @@ The bounds are global: no host or channel setting changes them
 | Parameter | Default | Config key |
 |-----------|---------|-----------|
 | Max age of a chunk | 7 days | none (`GC_MAX_AGE_HOURS = 168`) |
-| Max size per channel | 10 MB | `[gc] max_size_per_channel_mb` |
+| Max size per channel, its snapshot included | 10 MB | `[gc] max_size_per_channel_mb` |
 | Retention of a dead channel | 24 hours | `[gc] dead_retention_hours` (0 = next run) |
 | GC interval | 10 minutes | none; the first run is 10 minutes after the hub starts |
+| Longest the GC holds the event loop at once | 25 ms, give or take one step | none (`SLICE_BUDGET_MS`) |
 
 ### 7.2 Algorithm
 
 ```
-Every 10 minutes:
+Every 10 minutes, unless the previous pass is still running:
 
-1. Delete every chunk older than 7 days, of any channel, live or dead,
-   EXCEPT each channel's latest snapshot
+1. Delete every chunk of each channel whose status is 'dead' and whose
+   updated_at (meta.db) is older than dead_retention_hours, up to the
+   highest seq it had when the pass judged it
 
-2. For each channel in spool.db over max_size_per_channel_mb:
-   delete its oldest output chunks (ORDER BY seq) until it is back under it.
-   Snapshots and resize chunks are never evicted here
+2. For each channel in spool.db:
+   a. Delete every snapshot older than its newest
+   b. Walk down from its newest chunk, counting sizes, the newest snapshot
+      first. The first chunk that is not a snapshot and is older than 7 days,
+      or takes the channel past max_size_per_channel_mb, is the cut: it and
+      every older chunk that is not a snapshot go
 
-3. Delete every chunk, the last snapshot included, of each channel whose
-   status is 'dead' and whose updated_at (meta.db) is older than dead_retention_hours
-
-4. Run PRAGMA incremental_vacuum on spool.db (free pages to OS)
+3. Run PRAGMA incremental_vacuum on spool.db, a bounded number of pages at a
+   time, until the free list is empty
 ```
+
+**Bounded steps.** better-sqlite3 is synchronous: whatever SQLite does, the hub's event loop waits
+for, every terminal and request with it. So every step of a pass is bounded, and the pass yields
+(`setImmediate`) once the next step could take its slice past the budget:
+
+| Step | Bound |
+|------|-------|
+| A delete | One transaction of at most 256 chunks and about 1 MiB, by seq range on `idx_chunks_channel_seq`, from where the last one stopped |
+| A step of the walk (2b) | 512 chunks, their size read from the row header without loading the data |
+| The next channel | One seek on `idx_chunks_channel_seq` |
+| `incremental_vacuum` | 128 pages |
+
+Nothing scans a channel's chunks to compute its size, and nothing deletes one row per scan. The
+version before #726 did both, recomputing `SUM(LENGTH(data_blob))` before each output chunk it
+evicted and excluding snapshots from eviction: on a channel holding 65,000 snapshots that was
+0.8 deletions a second, eight minutes of frozen hub out of every ten, and every pass deleted all of
+the channel's output while its snapshots kept growing the spool.
+
+A step may still be slow when it commits past `wal_autocheckpoint`: SQLite then checkpoints the WAL
+in that commit, two fsyncs included, whatever wrote it. Clearing a 1.5 GB backlog takes about
+twenty of them.
 
 ### 7.3 GC Safety
 
-- Steps 1 and 2 keep each channel's latest snapshot, which a reconnect replays from
-- Only step 3 empties a channel, and only a dead one
+- Only the newest snapshot of a channel is ever read: an ATTACH answered from the spool replays it
+  and the output after it (`buildAttachPayload`). No code reads an older snapshot, nor
+  `cache_index` (§ 6), so step 2a deletes every other one, and storing a snapshot deletes the
+  previous one (§ 5.2)
+- Step 2 never deletes the newest snapshot: not past the age limit, not alone over the cap. It
+  counts in the channel's size, so output goes first
+- Output is kept, newest first, as long as it fits the cap and the age limit, whether or not it
+  comes after the newest snapshot
+- Only step 1 empties a channel, and only a dead one. A chunk written after the pass judged it,
+  by a channel brought back under its own id, has a higher seq and is not deleted
+- A pass in progress when the hub stops ends before its next step
 - Run incremental_vacuum (not full VACUUM) to avoid blocking writes
 
 ## 8. Data Access Patterns
@@ -386,7 +428,7 @@ Every 10 minutes:
 | Operation | Frequency | Database | Table |
 |-----------|-----------|----------|-------|
 | OUTPUT chunk write | Continuous (10s–100s/sec) | spool.db | chunks |
-| Snapshot write | Every 3-5s per active channel | spool.db | chunks |
+| Snapshot write, replacing the previous | Every 3-5s per channel whose screen changes | spool.db | chunks |
 | Cache index update | Every snapshot write | meta.db | cache_index |
 | Session/channel status | On state change | meta.db | sessions, channels |
 | Host CRUD | Rare (user action) | meta.db | hosts |
@@ -510,7 +552,7 @@ Hosts can be imported from `~/.ssh/config` (`POST /api/hosts/import`, PROTOCOL.m
 Channel created (BORN)
   │
   ├─ Output flowing → chunks accumulate in spool.db
-  ├─ Snapshots taken periodically → snapshot chunks in spool.db
+  ├─ Snapshots taken while the screen changes → each replaces the last
   ├─ cache_index updated with every snapshot
   │
   Channel LIVE → ORPHAN → LIVE (reconnect cycle)
@@ -522,8 +564,9 @@ Channel created (BORN)
   │
   GC runs (every 10 min, § 7)
   │
-  ├─ Chunks older than 7 days deleted, latest snapshot kept
-  ├─ Oldest output evicted past max_size_per_channel_mb
+  ├─ Snapshots but the newest deleted
+  ├─ Output older than 7 days, or past max_size_per_channel_mb, deleted;
+  │  newest snapshot kept
   │
   Channel dead for longer than dead_retention_hours
   │

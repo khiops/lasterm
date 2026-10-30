@@ -157,6 +157,80 @@ describe("SnapshotScheduler", () => {
 		});
 	});
 
+	// ── 3b. Nothing changed, nothing asked (#726) ─────────────────────────────
+
+	describe("unchanged screen", () => {
+		const requests = () => agent.sent.filter((m) => m.type === "SNAPSHOT_REQ").length;
+
+		/** The agent answers every SNAPSHOT_REQ 10 ms later. */
+		function answerEveryRequest(): void {
+			vi.mocked(agent.send).mockImplementation((msg: ProtocolMessage) => {
+				agent.sent.push(msg);
+				if (msg.type === "SNAPSHOT_REQ") {
+					setTimeout(() => scheduler.onSnapshotResponse(msg.channelId), 10);
+				}
+			});
+		}
+
+		it("asks once for a terminal that prints nothing, then never again", () => {
+			answerEveryRequest();
+			scheduler.trackChannel(CHANNEL_ID);
+
+			vi.advanceTimersByTime(60_000);
+
+			// Every 5 s before: twelve snapshots of the same screen a minute.
+			expect(requests()).toBe(1);
+		});
+
+		it("asks again at the next tick once output comes", () => {
+			answerEveryRequest();
+			scheduler.trackChannel(CHANNEL_ID);
+			vi.advanceTimersByTime(3_001);
+			expect(requests()).toBe(1);
+
+			scheduler.onOutput(CHANNEL_ID);
+			vi.advanceTimersByTime(3_001);
+			expect(requests()).toBe(2);
+
+			vi.advanceTimersByTime(30_000);
+			expect(requests()).toBe(2);
+		});
+
+		it("counts a resize as a change", () => {
+			answerEveryRequest();
+			scheduler.trackChannel(CHANNEL_ID);
+			vi.advanceTimersByTime(3_001);
+
+			scheduler.onResize(CHANNEL_ID);
+			vi.advanceTimersByTime(3_001);
+			expect(requests()).toBe(2);
+
+			vi.advanceTimersByTime(30_000);
+			expect(requests()).toBe(2);
+		});
+
+		it("asks again when a snapshot never came back", () => {
+			scheduler.trackChannel(CHANNEL_ID);
+			vi.advanceTimersByTime(3_001); // asked at 3 s, never answered
+			expect(requests()).toBe(1);
+
+			vi.advanceTimersByTime(5_000); // the 5 s timeout frees it at 8 s
+			vi.advanceTimersByTime(2_000); // the forced tick at 10 s asks again
+
+			expect(requests()).toBe(2);
+		});
+
+		it("still asks on detach, changed or not", () => {
+			answerEveryRequest();
+			scheduler.trackChannel(CHANNEL_ID);
+			vi.advanceTimersByTime(3_001);
+
+			scheduler.onDetach(CHANNEL_ID);
+
+			expect(requests()).toBe(2);
+		});
+	});
+
 	// ── 4. onDetach — immediate snapshot ─────────────────────────────────────
 
 	describe("onDetach", () => {

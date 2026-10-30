@@ -728,6 +728,7 @@ const proxyHint = computed(() => {
 });
 const {
 	form,
+	storedHost,
 	source,
 	sshConfigEntries,
 	sshConfigHasInclude,
@@ -780,6 +781,9 @@ const visualProfile = ref<VisualProfile>((() => {
 	}
 	return { ...DEFAULT_VISUAL_PROFILE };
 })());
+
+/** The visual profile the dialog opened on: an edit that leaves it so sends no profile (#789). */
+const visualProfileOpened = JSON.stringify(visualProfile.value);
 
 // INV-05: reset to connection tab when opening for a new host, persist for edits.
 // The local host has no Connection tab: it opens on its identity, which is what
@@ -851,25 +855,34 @@ async function onSave(): Promise<void> {
 		return;
 	}
 
-	// Build profile_json by merging visualProfile into any existing profile
-	let existingProfile: Record<string, unknown> = {};
-	if (props.editHost?.profileJson) {
-		try {
-			existingProfile = JSON.parse(props.editHost.profileJson);
-		} catch {
-			// Invalid JSON — start fresh
-		}
-	}
-	const profileJson = JSON.stringify({
-		...existingProfile,
-		visualProfile: visualProfile.value,
-	});
-
-	const host = await save({ profile_json: profileJson });
+	const host = await save(profileChange());
 	if (host) {
 		emit("saved", host);
 		emit("close");
 	}
+}
+
+/**
+ * The profile to send: none for an edit that left its visual part alone, so a
+ * setting saved meanwhile elsewhere stays (#789). Otherwise the visual profile
+ * merged into the profile the hub last said the host has.
+ */
+function profileChange(): { profile_json?: string } {
+	if (props.editHost && JSON.stringify(visualProfile.value) === visualProfileOpened) return {};
+	let existingProfile: Record<string, unknown> = {};
+	if (storedHost.value?.profileJson) {
+		try {
+			existingProfile = JSON.parse(storedHost.value.profileJson);
+		} catch {
+			// Invalid JSON — start fresh
+		}
+	}
+	return {
+		profile_json: JSON.stringify({
+			...existingProfile,
+			visualProfile: visualProfile.value,
+		}),
+	};
 }
 </script>
 

@@ -557,6 +557,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		server.addHook("onClose", async () => {
 			hostsChange.cancel();
 		});
+		// And what the hub records of a host on its own, in the same bursts
+		// (#789). Not the local host created above: no client is connected yet,
+		// and each reads the hosts once it is.
+		activeSessionManager.onHostChanged(() => hostsChange.announce("hosts"));
 		registerHostRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
 		registerHostGroupRoutes(server, metaDal, hostsChange.announce);
 		registerLaunchProfileRoutes(server, metaDal);

@@ -388,3 +388,97 @@ describe("HostsDAL — duplicateHost (#746)", () => {
 		expect(copy?.agentSha256).toBeUndefined();
 	});
 });
+
+// ─── What the hub records of a host on its own, said (#789) ─────────────────
+//
+// The hub writes a host's OS, its shells, its pinned keys and agent hash as it
+// learns them, and creates the local host again when it is gone. A window
+// showing the hosts heard none of it: only the routes' writes were said.
+
+describe("HostsDAL — what the hub records of a host, said once it changed (#789)", () => {
+	let dbs: DatabaseManager;
+	let dal: HostsDAL;
+	let said: number;
+	let id: string;
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		dal = new HostsDAL(dbs.meta);
+		dal.onHostChanged(() => {
+			said++;
+		});
+		id = dal.createHost({ type: "ssh", label: "pi", sshHost: "pi.local", sshProxySpec: "jump" }).id;
+		said = 0;
+	});
+
+	afterEach(() => dbs.close());
+
+	const route = (hostId: string) =>
+		targetRoute(dal.getHost(hostId)!, (jumpId) => sshAddress(dal.getHost(jumpId)));
+
+	const recordings: Record<string, () => unknown> = {
+		"its OS detected": () => dal.updateHostOsArch(id, "linux", "arm64"),
+		"its agent's hash pinned": () => dal.updateHostAgentSha256(id, "a".repeat(64)),
+		"its host key pinned": () => dal.updateHostFingerprint(id, "SHA256:target", route(id)),
+		"its jump's key pinned": () => dal.updateHostProxyFingerprint(id, "SHA256:jump", route(id)),
+		"its shells discovered": () =>
+			dal.updateHostDiscoveredShells(id, ["/bin/bash", "/bin/zsh"], "/bin/zsh"),
+		"a setting the hub stores on it": () => dal.updateHost(id, { sshRemoteDaemon: false }),
+	};
+
+	it.each(Object.entries(recordings))(
+		"says %s once, and nothing when it finds the same again",
+		(_name, record) => {
+			record();
+			expect(said).toBe(1);
+
+			record();
+			expect(said).toBe(1);
+		},
+	);
+
+	it("says an OS found again different", () => {
+		dal.updateHostOsArch(id, "linux", "arm64");
+		dal.updateHostOsArch(id, "linux", "x64");
+
+		expect(said).toBe(2);
+		expect(dal.getHost(id)).toMatchObject({ os: "linux", arch: "x64" });
+	});
+
+	it("says shells found again different, or another default shell", () => {
+		dal.updateHostDiscoveredShells(id, ["/bin/bash"], "/bin/bash");
+		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"], "/bin/bash");
+		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"], "/usr/bin/fish");
+		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"]);
+
+		expect(said).toBe(3);
+		expect(dal.getHost(id)).toMatchObject({
+			discoveredShells: ["/bin/bash", "/usr/bin/fish"],
+			defaultShell: "/usr/bin/fish",
+		});
+	});
+
+	it("still answers that a key found again is this host's", () => {
+		expect(dal.updateHostFingerprint(id, "SHA256:target", route(id))).toBe(true);
+		expect(dal.updateHostFingerprint(id, "SHA256:target", route(id))).toBe(true);
+		expect(dal.updateHostProxyFingerprint(id, "SHA256:jump", route(id))).toBe(true);
+		expect(dal.updateHostProxyFingerprint(id, "SHA256:jump", route(id))).toBe(true);
+
+		expect(said).toBe(2);
+	});
+
+	it("says nothing of a key it did not pin, the host having moved meanwhile", () => {
+		const before = route(id);
+		dal.updateHost(id, { sshHost: "elsewhere.local" });
+		said = 0;
+
+		expect(dal.updateHostFingerprint(id, "SHA256:stale", before)).toBe(false);
+		expect(said).toBe(0);
+	});
+
+	it("says the local host created again", () => {
+		dal.createHost({ type: "local", label: "local" });
+
+		expect(said).toBe(1);
+	});
+});

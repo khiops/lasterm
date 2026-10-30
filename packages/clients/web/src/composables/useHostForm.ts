@@ -122,6 +122,11 @@ const LINKED_FIELDS = [
  * `before`, the body the host as the hub last said it would make (#789). A
  * field left out keeps what the hub has, which can be newer than what the
  * dialog was opened on: an OS detected meanwhile, or another window's save.
+ *
+ * A field `before` has and `body` no longer does was emptied: the SSH user,
+ * the default shell, the port, or the key path of a host that stopped signing
+ * in with a key. It is sent as null, which the hub clears; left out, the hub
+ * kept it, and once set it could never be removed (#792).
  */
 function changedFields(
 	before: Record<string, unknown>,
@@ -130,6 +135,7 @@ function changedFields(
 	const changed = Object.fromEntries(
 		Object.entries(body).filter(([key, value]) => !(key in before) || before[key] !== value),
 	);
+	for (const key of Object.keys(before)) if (!(key in body)) changed[key] = null;
 	for (const pair of LINKED_FIELDS) {
 		if (!pair.some((key) => key in changed)) continue;
 		for (const key of pair) if (key in body) changed[key] = body[key];
@@ -386,7 +392,11 @@ export function useHostForm(editHost?: Host) {
 		}
 	}
 
-	/** The body the hub is sent for a host filled as `f`. */
+	/**
+	 * The body the hub is sent for a host filled as `f`. An empty field is left
+	 * out: a new host stores none (no port is 22), and an edit sends it as null
+	 * to clear the stored one (`changedFields`).
+	 */
 	function bodyOf(f: HostFormData): Record<string, unknown> {
 		return {
 			label: f.label.trim(),

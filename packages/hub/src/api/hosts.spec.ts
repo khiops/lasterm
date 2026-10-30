@@ -6,6 +6,7 @@ import {
 	validateHostColor,
 	validateIconImage,
 	validateProfileJson,
+	validateSshPort,
 } from "./hosts.js";
 
 // The rules POST /api/hosts applies, asserted where they live so a broken one
@@ -110,6 +111,30 @@ describe("validateHostColor", () => {
 	it("refuses anything else, the empty string included", () => {
 		for (const color of ["notacolor", "", "#fff", "00ff00", "#00ff00 ", 0xff00, true]) {
 			expect(validateHostColor(color)).toBe("color must be in hex format #rrggbb");
+		}
+	});
+});
+
+// POST and PUT /api/hosts apply it.
+describe("validateSshPort", () => {
+	it("accepts a port", () => {
+		for (const port of [1, 22, 2222, 65535]) expect(validateSshPort(port)).toBeNull();
+	});
+
+	// No port is SSH's own, 22: how a new host starts, and an edit clears one (#792).
+	it("accepts none, null included", () => {
+		expect(validateSshPort(undefined)).toBeNull();
+		expect(validateSshPort(null)).toBeNull();
+		expect(
+			validateCreateHost(
+				body({ type: "ssh", label: "no-port", ssh_host: "10.0.0.1", ssh_port: null }),
+			),
+		).toBeNull();
+	});
+
+	it("refuses anything else, the empty string included", () => {
+		for (const port of ["", "22", 0, -22, 65536, 22.5, true]) {
+			expect(validateSshPort(port)).toBe("ssh_port must be an integer between 1 and 65535");
 		}
 	});
 });

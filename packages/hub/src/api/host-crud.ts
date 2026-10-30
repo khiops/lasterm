@@ -8,6 +8,7 @@ import {
 	validateHostColor,
 	validateIconImage,
 	validateProfileJson,
+	validateSshPort,
 } from "./hosts.js";
 import type { AnnounceHostsChange } from "./hosts-changed.js";
 import { parsePagination } from "./pagination.js";
@@ -180,13 +181,10 @@ export function registerHostCrudRoutes(
 				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: colorError } });
 			}
 
-			// Validate ssh_port if provided
-			if (body.ssh_port !== undefined) {
-				if (!Number.isInteger(body.ssh_port) || body.ssh_port < 1 || body.ssh_port > 65535) {
-					return reply.code(400).send({
-						error: { code: "VALIDATION_ERROR", message: "ssh_port must be between 1 and 65535" },
-					});
-				}
+			// A port, or null to clear it, back to 22 (#792)
+			const portError = validateSshPort(body.ssh_port);
+			if (portError) {
+				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: portError } });
 			}
 
 			// An icon value is checked against the type it will have once saved.

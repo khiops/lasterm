@@ -12,15 +12,16 @@ export interface CreateHostBody {
 	type: "local" | "ssh";
 	label: string;
 	ssh_host?: string;
-	ssh_port?: number;
+	/** null stores none: the host is reached on 22. */
+	ssh_port?: number | null;
 	ssh_auth?: "agent" | "key" | "password";
-	ssh_key_path?: string;
+	ssh_key_path?: string | null;
 	icon_type?: "auto" | "emoji" | "image";
 	/** null stores none (#659). */
 	icon_value?: string | null;
 	/** null stores none: the colour then comes from the label (#659). */
 	color?: string | null;
-	default_shell?: string;
+	default_shell?: string | null;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
 	host_group_id?: string | null;
@@ -40,15 +41,18 @@ export interface UpdateHostBody {
 	type?: "local" | "ssh";
 	label?: string;
 	ssh_host?: string;
-	ssh_port?: number;
+	/** null clears it, back to 22: the dialog's emptied Port (#792). */
+	ssh_port?: number | null;
 	ssh_auth?: "agent" | "key" | "password";
-	ssh_key_path?: string;
+	/** null clears it: the dialog leaves it out once the auth is not a key (#792). */
+	ssh_key_path?: string | null;
 	icon_type?: "auto" | "emoji" | "image";
 	/** null clears it: the dialog's Remove (#659). */
 	icon_value?: string | null;
 	/** null clears it, back to the colour the label gives: the dialog's Reset (#659). */
 	color?: string | null;
-	default_shell?: string;
+	/** null clears it, as `ssh_user` does: the dialog's emptied field (#792). */
+	default_shell?: string | null;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
 	host_group_id?: string | null;
@@ -72,6 +76,19 @@ export function validateHostColor(color: unknown): string | null {
 	if (color === undefined || color === null) return null;
 	if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) {
 		return "color must be in hex format #rrggbb";
+	}
+	return null;
+}
+
+/**
+ * A host's SSH port is an integer from 1 to 65535, or null for none: the host
+ * is then reached on 22. Refusing null left a port the user had emptied in
+ * Edit Host stored (#792).
+ */
+export function validateSshPort(port: unknown): string | null {
+	if (port === undefined || port === null) return null;
+	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+		return "ssh_port must be an integer between 1 and 65535";
 	}
 	return null;
 }
@@ -130,11 +147,8 @@ export function validateCreateHost(body: CreateHostBody): string | null {
 			return "ssh_key_path is required when ssh_auth is 'key'";
 		}
 	}
-	if (body.ssh_port !== undefined) {
-		if (!Number.isInteger(body.ssh_port) || body.ssh_port < 1 || body.ssh_port > 65535) {
-			return "ssh_port must be an integer between 1 and 65535";
-		}
-	}
+	const portError = validateSshPort(body.ssh_port);
+	if (portError) return portError;
 	const colorError = validateHostColor(body.color);
 	if (colorError) return colorError;
 	if (

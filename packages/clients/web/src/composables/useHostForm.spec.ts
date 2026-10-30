@@ -448,6 +448,21 @@ describe("useHostForm", () => {
 			const body = call[0];
 			expect(body).toHaveProperty("ssh_port", 2222);
 		});
+
+		// A new host has nothing to clear: only an edit sends an empty field (#792).
+		it("leaves an empty SSH user and default shell out of a new host", async () => {
+			const { form, save } = useHostForm();
+			form.value.label = "test-host";
+			form.value.sshHost = "10.0.0.1";
+			form.value.sshAuth = "agent";
+
+			await save();
+
+			const [body] = createHostSpy.mock.calls[0] as [Record<string, unknown>];
+			expect(body).not.toHaveProperty("ssh_user");
+			expect(body).not.toHaveProperty("default_shell");
+			expect(body).not.toHaveProperty("ssh_key_path");
+		});
 	});
 
 	describe("what a save of an existing host sends", () => {
@@ -541,6 +556,37 @@ describe("useHostForm", () => {
 				form.customCommand = "";
 			});
 			expect(body).toHaveProperty("custom_command", null);
+		});
+
+		// Left out, an emptied field kept what the hub had: once set, the SSH
+		// user or the default shell could never be removed (#792).
+		it.each([
+			["the SSH user", "sshUser", "ssh_user"],
+			["the default shell", "defaultShell", "default_shell"],
+		] as const)(
+			"sends %s, emptied, as null, which the hub clears (#792)",
+			async (_, field, wire) => {
+				const host = storedHost({ sshUser: "pi", defaultShell: "/bin/zsh" });
+				const body = await savedBody(host, (form) => {
+					form[field] = "";
+				});
+				expect(body).toEqual({ [wire]: null });
+			},
+		);
+
+		it("sends an emptied port as null: the host is then reached on 22, as a new one is (#792)", async () => {
+			const body = await savedBody(storedHost({ sshPort: 2222 }), (form) => {
+				form.sshPort = undefined;
+			});
+			expect(body).toEqual({ ssh_port: null });
+		});
+
+		it("clears the stored key path once the host no longer signs in with a key (#792)", async () => {
+			const host = storedHost({ sshAuth: "key", sshKeyPath: "~/.ssh/id_ed25519" });
+			const body = await savedBody(host, (form) => {
+				form.sshAuth = "agent";
+			});
+			expect(body).toEqual({ ssh_auth: "agent", ssh_key_path: null });
 		});
 
 		it.each([null, true, false])(

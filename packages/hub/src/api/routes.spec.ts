@@ -376,6 +376,68 @@ describe("PUT /api/hosts/:id", () => {
 		expect(stored.icon_type).toBe("auto");
 	});
 
+	// Edit Host sends an emptied field as null (#792).
+	it("clears an SSH user and a default shell given as null", async () => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: {
+					type: "ssh",
+					label: "clear-user",
+					ssh_host: "10.0.0.12",
+					ssh_user: "pi",
+					default_shell: "/bin/zsh",
+				},
+			})
+		).json<Record<string, unknown>>();
+
+		const cleared = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { ssh_user: null, default_shell: null },
+		});
+		expect(cleared.statusCode).toBe(200);
+		const row = dbs.meta
+			.prepare("SELECT ssh_user, default_shell FROM hosts WHERE id = ?")
+			.get(created.id);
+		expect(row).toEqual({ ssh_user: null, default_shell: null });
+	});
+
+	// validateSshPort is unit-tested in hosts.spec.ts; this proves the route
+	// consults it, and stores no port for a null one: 22, as a new host has (#792).
+	it("clears a port given as null, and refuses one that is not a port", async () => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "ssh", label: "clear-port", ssh_host: "10.0.0.13", ssh_port: 2222 },
+			})
+		).json<Record<string, unknown>>();
+
+		const refused = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { ssh_port: "" },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: "ssh_port must be an integer between 1 and 65535",
+			},
+		});
+
+		const cleared = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { ssh_port: null },
+		});
+		expect(cleared.statusCode).toBe(200);
+		const row = dbs.meta.prepare("SELECT ssh_port FROM hosts WHERE id = ?").get(created.id);
+		expect(row).toEqual({ ssh_port: null });
+	});
+
 	// The dialog's Appearance tab, for the host the hub creates itself (#656).
 	it("stores the colour and icon given to the built-in local host, which stays local", async () => {
 		const hosts = (await server.inject({ method: "GET", url: "/api/hosts" })).json<

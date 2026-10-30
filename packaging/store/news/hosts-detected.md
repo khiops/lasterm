@@ -1,2 +1,2 @@
-en: What Lasterm detects about a host, such as its operating system, now shows in every window, and saving the host no longer resets it.
-fr: Ce que Lasterm détecte d'un hôte, comme son système d'exploitation, apparaît désormais dans toutes les fenêtres, et enregistrer l'hôte ne l'efface plus.
+en: What Lasterm detects about a host, such as its operating system, now shows in every window, and saving the host no longer resets it. Emptying a host's SSH user or port now removes it instead of keeping the old one.
+fr: Ce que Lasterm détecte d'un hôte, comme son système d'exploitation, apparaît désormais dans toutes les fenêtres, et enregistrer l'hôte ne l'efface plus. Vider l'utilisateur SSH ou le port d'un hôte le retire désormais au lieu de garder l'ancien.

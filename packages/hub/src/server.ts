@@ -14,6 +14,7 @@ import { registerGroupRoutes } from "./api/groups.js";
 import { registerHostConnectionRoutes } from "./api/host-connection.js";
 import { registerHostGroupRoutes } from "./api/host-groups.js";
 import { registerHostRoutes } from "./api/hosts.js";
+import { createHostsChangeAnnouncer } from "./api/hosts-changed.js";
 import { registerLaunchProfileRoutes } from "./api/launch-profiles.js";
 import { registerLogRoutes } from "./api/logs.js";
 import { registerPairRoutes } from "./api/pair.js";
@@ -548,11 +549,19 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			options.authToken ? (options.dbManager.meta ?? null) : null,
 			options.authToken ? authConfig.tokenTtlDays : undefined,
 		);
-		registerHostRoutes(server, metaDal, activeSessionManager);
-		registerHostGroupRoutes(server, metaDal);
+		// Every client hears that the hosts or their groups changed, once for a
+		// burst of writes (#783).
+		const hostsChange = createHostsChangeAnnouncer((message) => {
+			activeSessionManager.broadcastToAllClients(message);
+		});
+		server.addHook("onClose", async () => {
+			hostsChange.cancel();
+		});
+		registerHostRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
+		registerHostGroupRoutes(server, metaDal, hostsChange.announce);
 		registerLaunchProfileRoutes(server, metaDal);
 		registerSessionRoutes(server, metaDal, activeSessionManager);
-		registerHostConnectionRoutes(server, metaDal, activeSessionManager);
+		registerHostConnectionRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
 		registerChannelRoutes(
 			server,
 			metaDal,
@@ -560,7 +569,13 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			activeSessionManager.getSpoolDal(),
 		);
 		registerGroupRoutes(server, metaDal);
-		registerConfigRoutes(server, metaDal, configResolver, activeSessionManager);
+		registerConfigRoutes(
+			server,
+			metaDal,
+			configResolver,
+			activeSessionManager,
+			hostsChange.announce,
+		);
 		registerFontRoutes(server, configDir);
 		registerWallpaperRoutes(server, configDir);
 		registerSshKeyRoutes(server);

@@ -1,6 +1,7 @@
 import type { HostGroup } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
+import type { AnnounceHostsChange } from "./hosts-changed.js";
 import { parsePagination } from "./pagination.js";
 
 const NAME_RE = /^[a-zA-Z0-9 _-]{1,32}$/;
@@ -17,7 +18,15 @@ function hostGroupToResponse(g: HostGroup) {
 	};
 }
 
-export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
+/**
+ * @param announce Tells every client the host groups changed, once a write is
+ * stored (#783); the hosts too when a deleted group leaves its hosts in none.
+ */
+export function registerHostGroupRoutes(
+	server: FastifyInstance,
+	metaDal: MetaDAL,
+	announce: AnnounceHostsChange = () => {},
+): void {
 	// GET /api/host-groups?limit=N&offset=M
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
 		"/api/host-groups",
@@ -80,6 +89,7 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 
 			try {
 				const group = metaDal.createHostGroup(n, (color as string | null | undefined) ?? null);
+				announce("groups");
 				return reply.code(201).send(hostGroupToResponse(group));
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -161,6 +171,7 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 			}
 
 			metaDal.reorderHostGroups(group_ids as string[]);
+			announce("groups");
 			return reply.code(200).send({ ok: true });
 		},
 	);
@@ -224,6 +235,7 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 						error: { code: "NOT_FOUND", message: "Host group not found" },
 					});
 				}
+				announce("groups");
 				return reply.code(200).send(hostGroupToResponse(updated));
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -245,6 +257,8 @@ export function registerHostGroupRoutes(server: FastifyInstance, metaDal: MetaDA
 				error: { code: "NOT_FOUND", message: "Host group not found" },
 			});
 		}
+		// Its hosts are now in no group (ON DELETE SET NULL): both lists changed.
+		announce("both");
 		return reply.code(204).send();
 	});
 }

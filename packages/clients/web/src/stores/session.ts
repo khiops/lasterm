@@ -117,6 +117,9 @@ export const useSessionStore = defineStore("session", () => {
 				// Re-fetch state after reconnect
 				const hostsStore2 = useHostsStore();
 				await hostsStore2.fetchHosts();
+				// A HOSTS_CHANGED sent while the socket was down reached nobody
+				// here: the groups are read again too, renamed or deleted meanwhile.
+				hostsStore2.hubChanged("groups");
 				const channelsStore2 = useChannelsStore();
 				if (channelsStore2.activeHostId) {
 					await channelsStore2.fetchChannels(channelsStore2.activeHostId);
@@ -157,6 +160,7 @@ export const useSessionStore = defineStore("session", () => {
 
 		const hostsStore = useHostsStore();
 		_registerSessionHandlers(hostsStore);
+		_registerHostsChangedHandler(hostsStore);
 
 		const channelsStore = useChannelsStore();
 		_registerChannelHandlers(channelsStore);
@@ -438,6 +442,18 @@ export const useSessionStore = defineStore("session", () => {
 				hostsStore.rememberSocketForwardingRefused(msg.hostId, msg.socketForwardingRefused);
 				hostsStore.rememberDisconnectedByUser(msg.hostId, msg.disconnectedByUser === true);
 			}
+		});
+	}
+
+	/**
+	 * Hosts or host groups written elsewhere — another window, another device,
+	 * the API — or by this window (#783). The hosts store reads them again, once
+	 * for a burst. A hub older than this message never sends it.
+	 */
+	function _registerHostsChangedHandler(hostsStore: ReturnType<typeof useHostsStore>): void {
+		wsClient.on("HOSTS_CHANGED", (msg) => {
+			if (msg.type !== "HOSTS_CHANGED") return;
+			hostsStore.hubChanged(msg.scope);
 		});
 	}
 

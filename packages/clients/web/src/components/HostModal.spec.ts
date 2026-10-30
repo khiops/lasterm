@@ -1,8 +1,9 @@
-import type { Host } from "@lasterm/shared";
+import { type Host, toSnakeCase } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import { getColorFromLabel } from "../composables/useHostIcon.js";
+import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
 import HostModal from "./HostModal.vue";
 
@@ -543,6 +544,48 @@ describe("HostModal when the hub refuses a save (#703)", () => {
 
 		expect(alert()?.textContent).toBe("Could not reach the hub: Failed to fetch");
 		expect(onClose).not.toHaveBeenCalled();
+	});
+});
+
+describe("HostModal open while another window changes the hosts (#783)", () => {
+	const OTHER: Host = { ...SSH, id: "01OTHERHOST0000000000000000", label: "pi-2" };
+
+	function type(selector: string, value: string): HTMLInputElement {
+		const input = el<HTMLInputElement>(selector);
+		if (!input) throw new Error(`no ${selector}`);
+		input.value = value;
+		input.dispatchEvent(new Event("input"));
+		return input;
+	}
+
+	it("keeps what was typed, and finds the name taken once another window took it", async () => {
+		mountModal(SSH);
+		useAuthStore().setToken("token");
+		const label = type("input[placeholder='prod-server']", "pi-2");
+		const address = type("input[placeholder='192.168.1.100']", "10.0.0.7");
+		await nextTick();
+		const labelError = () => label.parentElement?.querySelector(".field-error") ?? null;
+		const save = () => el<HTMLButtonElement>(".dialog-actions .btn-primary");
+		expect(labelError()).toBeNull();
+		expect(save()?.disabled).toBe(false);
+
+		// Another window names a new host pi-2, and the hub says the hosts changed.
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const body = String(input).includes("/api/host-groups")
+				? []
+				: toSnakeCase([LOCAL, SSH, OTHER]);
+			return new Response(JSON.stringify(body), {
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+		useHostsStore().hubChanged("hosts");
+
+		await vi.waitFor(() =>
+			expect(labelError()?.textContent?.trim()).toBe("Host name already exists"),
+		);
+		expect(save()?.disabled).toBe(true);
+		expect(label.value).toBe("pi-2");
+		expect(address.value).toBe("10.0.0.7");
 	});
 });
 

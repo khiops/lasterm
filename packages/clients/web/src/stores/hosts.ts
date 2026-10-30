@@ -2,6 +2,7 @@ import {
 	type Host,
 	type HostConnectionResponse,
 	type HostGroup,
+	type HostsChangedMessage,
 	type SessionStatus,
 	type StopKeepingAgentResponse,
 	toCamelCase,
@@ -15,7 +16,7 @@ import {
 	hubUnreachable,
 	toastRefusal,
 } from "../utils/hub-answer.js";
-import { hubFetch } from "../utils/hub-fetch.js";
+import { type HubFetchInit, hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
 import { useSessionStore } from "./session.js";
@@ -94,6 +95,13 @@ function sessionStatusToHostStatus(status: SessionStatus | undefined): HostStatu
  */
 export const SELECTED_HOST_KEY = "lasterm:selected-host";
 
+/**
+ * How long news that the hosts or their groups changed waits before this
+ * window reads them again (#783). Every piece of news arriving meanwhile is
+ * read with it: a burst is one read.
+ */
+export const HOSTS_CHANGED_READ_DELAY_MS = 150;
+
 function readSelectedHost(): string | null {
 	try {
 		return window.sessionStorage.getItem(SELECTED_HOST_KEY);
@@ -133,12 +141,20 @@ export const useHostsStore = defineStore("hosts", () => {
 	 */
 	const sortedHosts = computed(() => hosts.value);
 
+	/** A list read that is worth showing whenever it arrives. */
+	const always = (): boolean => true;
+
 	/**
 	 * Load the host groups. A refusal comes back with the hub's reason (#734):
 	 * without its groups, the rail cannot show the hosts in them. A hub that
 	 * does not answer throws.
 	 */
-	async function fetchHostGroups(): Promise<HubAnswer> {
+	function fetchHostGroups(): Promise<HubAnswer> {
+		return loadHostGroups(always);
+	}
+
+	/** Load the host groups, and show them if `current()` still says so once they arrive. */
+	async function loadHostGroups(current: () => boolean): Promise<HubAnswer> {
 		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups`, {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
@@ -151,6 +167,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			created_at: string;
 			updated_at: string;
 		}>;
+		if (!current()) return { ok: true };
 		hostGroups.value = raw.map((g) => ({
 			id: g.id,
 			name: g.name,
@@ -167,7 +184,16 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * not answer, goes in `error` for the rail to show with a retry (#758). It
 	 * stays there until a load succeeds, so a retry under way still says it.
 	 */
-	async function fetchHosts(): Promise<void> {
+	function fetchHosts(): Promise<void> {
+		return loadHosts(always);
+	}
+
+	/**
+	 * Load the hosts, and show them if `current()` still says so once they
+	 * arrive: a list read while this window was writing may predate its write,
+	 * and would put back what it just changed (#783).
+	 */
+	async function loadHosts(current: () => boolean): Promise<void> {
 		if (authStore.token === null) return;
 		loading.value = true;
 		try {
@@ -185,11 +211,15 @@ export const useHostsStore = defineStore("hosts", () => {
 				return;
 			}
 			const data = toCamelCase(await res.json()) as Host[];
+			if (!current()) return;
 			hosts.value = data;
 			error.value = null;
 			// Nothing selected yet: the host this tab showed before it reloaded, if
-			// the hub still has it, else the first one.
-			if (selectedHostId.value === null && data.length > 0) {
+			// the hub still has it, else the first one. The same when the host
+			// selected is gone, deleted from another window (#783); one still
+			// there stays selected.
+			const selected = selectedHostId.value;
+			if (selected === null || !data.some((h) => h.id === selected)) {
 				const remembered = readSelectedHost();
 				selectedHostId.value = data.some((h) => h.id === remembered)
 					? remembered
@@ -201,7 +231,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			// come (#734).
 			const known = new Set(hostGroups.value.map((g) => g.id));
 			if (known.size === 0 || data.some((h) => h.hostGroupId && !known.has(h.hostGroupId))) {
-				await toastRefusal(fetchHostGroups());
+				await toastRefusal(loadHostGroups(current));
 			}
 		} catch (err) {
 			error.value = err instanceof Error ? err.message : String(err);
@@ -212,6 +242,90 @@ export const useHostsStore = defineStore("hosts", () => {
 
 	function selectHost(hostId: string): void {
 		selectedHostId.value = hostId;
+	}
+
+	// ─── Changes made elsewhere (#783) ──────────────────────────────────────
+
+	/**
+	 * This window's own writes to the hosts and their groups: how many are
+	 * under way, and how many ever started. A list read meanwhile may predate
+	 * one, and showing it would undo, for a moment, what the write just did.
+	 */
+	let writesUnderWay = 0;
+	let writesStarted = 0;
+
+	/** Send one of this window's writes to the hosts or their groups, counted while under way. */
+	async function hubWrite(url: string, init: HubFetchInit): Promise<Response> {
+		writesUnderWay++;
+		writesStarted++;
+		try {
+			return await hubFetch(url, init);
+		} finally {
+			writesUnderWay--;
+		}
+	}
+
+	/** The lists the news received asks to read again, not read yet. */
+	let hostsToRead = false;
+	let groupsToRead = false;
+	let readTimer: ReturnType<typeof setTimeout> | null = null;
+	let reading = false;
+
+	/**
+	 * The hub said the hosts or their groups changed: another window, another
+	 * device, the API, or this window's own write. They are read again once
+	 * the news has stopped for a moment, so a burst is one read. What the user
+	 * holds stays: the host selected, and an open host dialog, whose fields
+	 * keep what was typed while its checks see the new list.
+	 */
+	function hubChanged(scope: HostsChangedMessage["scope"]): void {
+		if (scope !== "groups") hostsToRead = true;
+		if (scope !== "hosts") groupsToRead = true;
+		scheduleRead();
+	}
+
+	function scheduleRead(): void {
+		if (readTimer !== null || reading) return;
+		readTimer = setTimeout(() => {
+			readTimer = null;
+			void readChanged();
+		}, HOSTS_CHANGED_READ_DELAY_MS);
+	}
+
+	async function readChanged(): Promise<void> {
+		// A write of this window under way: its own news follows it.
+		if (writesUnderWay > 0) {
+			scheduleRead();
+			return;
+		}
+		const wantHosts = hostsToRead;
+		const wantGroups = groupsToRead;
+		hostsToRead = false;
+		groupsToRead = false;
+		const startedBefore = writesStarted;
+		const current = (): boolean => writesStarted === startedBefore && writesUnderWay === 0;
+		reading = true;
+		try {
+			// The groups first: the hosts then find theirs known. Neither throws:
+			// a refusal is said as for a first load, in a toast and in the rail.
+			if (wantGroups) await toastRefusal(loadHostGroups(current));
+			if (wantHosts) await loadHosts(current);
+		} finally {
+			reading = false;
+			// Overtaken by a write of this window: read again once it is done.
+			if (!current()) {
+				hostsToRead ||= wantHosts;
+				groupsToRead ||= wantGroups;
+			}
+			if (hostsToRead || groupsToRead) scheduleRead();
+		}
+	}
+
+	/** Keep a host this window stored, or replace it when a read of the list brought it first. */
+	function keepStoredHost(host: Host): void {
+		const idx = hosts.value.findIndex((h) => h.id === host.id);
+		if (idx >= 0) hosts.value[idx] = host;
+		else hosts.value = [...hosts.value, host];
 	}
 
 	/**
@@ -373,7 +487,9 @@ export const useHostsStore = defineStore("hosts", () => {
 		body: Record<string, unknown>,
 	): Promise<HostConnectionAnswer & StopKeepingAgentAnswer> {
 		const clientId = authStore.clientId;
-		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/${action}`, {
+		// Stop keeping an agent stores No on the host; the others change no host.
+		const send = action === "agent/stop-keeping" ? hubWrite : hubFetch;
+		const res = await send(`${hubBaseUrl()}/api/hosts/${hostId}/${action}`, {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -465,7 +581,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			});
 		};
 		try {
-			const res = await hubFetch(`${hubBaseUrl()}/api/hosts/order`, {
+			const res = await hubWrite(`${hubBaseUrl()}/api/hosts/order`, {
 				method: "PUT",
 				headers: {
 					Authorization: `Bearer ${authStore.token}`,
@@ -487,7 +603,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * nothing, for the dialog to show (#703); a hub that does not answer throws.
 	 */
 	async function createHost(body: Record<string, unknown>): Promise<HostSaveAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/hosts`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/hosts`, {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -497,7 +613,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		});
 		if (!res.ok) return hubRefusal(res);
 		const host = toCamelCase(await res.json()) as Host;
-		hosts.value = [...hosts.value, host];
+		keepStoredHost(host);
 		return { ok: true, host };
 	}
 
@@ -507,7 +623,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * that does not answer throws.
 	 */
 	async function updateHost(id: string, body: Record<string, unknown>): Promise<HostSaveAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${id}`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/hosts/${id}`, {
 			method: "PUT",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -526,7 +642,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * agent being stopped there (#734); a hub that does not answer throws.
 	 */
 	async function deleteHost(id: string): Promise<HubAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${id}`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/hosts/${id}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
@@ -543,13 +659,13 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * a hub that does not answer throws.
 	 */
 	async function duplicateHost(id: string): Promise<HostSaveAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${id}/duplicate`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/hosts/${id}/duplicate`, {
 			method: "POST",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
 		if (!res.ok) return hubRefusal(res);
 		const host = toCamelCase(await res.json()) as Host;
-		hosts.value = [...hosts.value, host];
+		keepStoredHost(host);
 		return { ok: true, host };
 	}
 
@@ -573,7 +689,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * name already taken (#703); a hub that does not answer throws.
 	 */
 	async function createHostGroup(name: string): Promise<HostGroupCreateAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/host-groups`, {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -598,7 +714,8 @@ export const useHostsStore = defineStore("hosts", () => {
 			createdAt: raw.created_at,
 			updatedAt: raw.updated_at,
 		};
-		hostGroups.value = [...hostGroups.value, group];
+		// A read of the list may have brought it first (#783).
+		hostGroups.value = [...hostGroups.value.filter((g) => g.id !== group.id), group];
 		return { ok: true, group };
 	}
 
@@ -607,7 +724,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * a name already taken (#734); a hub that does not answer throws.
 	 */
 	async function renameHostGroup(id: string, name: string): Promise<HubAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/${id}`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/host-groups/${id}`, {
 			method: "PUT",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -629,7 +746,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * with the hub's reason (#734); a hub that does not answer throws.
 	 */
 	async function deleteHostGroup(id: string): Promise<HubAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/${id}`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/host-groups/${id}`, {
 			method: "DELETE",
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
@@ -664,7 +781,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		hostGroups.value = reordered;
 
 		try {
-			const res = await hubFetch(`${hubBaseUrl()}/api/host-groups/order`, {
+			const res = await hubWrite(`${hubBaseUrl()}/api/host-groups/order`, {
 				method: "PUT",
 				headers: {
 					Authorization: `Bearer ${authStore.token}`,
@@ -688,7 +805,7 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * that does not answer throws.
 	 */
 	async function moveHostToGroup(hostId: string, groupId: string | null): Promise<HubAnswer> {
-		const res = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}`, {
+		const res = await hubWrite(`${hubBaseUrl()}/api/hosts/${hostId}`, {
 			method: "PUT",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
@@ -713,6 +830,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		error,
 		fetchHosts,
 		fetchHostGroups,
+		hubChanged,
 		selectHost,
 		updateSessionStatus,
 		isHostConnected,

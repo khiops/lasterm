@@ -6,6 +6,7 @@ import { registerHostCrudRoutes } from "./host-crud.js";
 import { registerHostProfileRoutes } from "./host-profiles.js";
 import { registerHostSshImportRoutes } from "./host-ssh-import.js";
 import { registerHostWelcomeRoutes } from "./host-welcome.js";
+import type { AnnounceHostsChange } from "./hosts-changed.js";
 
 export interface CreateHostBody {
 	type: "local" | "ssh";
@@ -196,13 +197,15 @@ export function validateProfileJson(profileJson: string | object | undefined): s
 	return null;
 }
 
+/** @param announce Tells every client the hosts changed (#783). */
 export function registerHostRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
 	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
+	announce: AnnounceHostsChange = () => {},
 ): void {
-	registerHostCrudRoutes(server, metaDal, sessionManager);
+	registerHostCrudRoutes(server, metaDal, sessionManager, announce);
 	registerHostWelcomeRoutes(server, metaDal);
-	registerHostSshImportRoutes(server, metaDal);
+	registerHostSshImportRoutes(server, metaDal, announce);
 	registerHostProfileRoutes(server, metaDal);
 }

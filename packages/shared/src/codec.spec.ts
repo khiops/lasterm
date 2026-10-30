@@ -262,6 +262,16 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decodeMessage(encodeMessage(msg))).toEqual(msg);
 	});
 
+	it.each(["hosts", "groups", "both"] as const)(
+		"round-trips a HOSTS_CHANGED of scope %s",
+		(scope) => {
+			const msg: ProtocolMessage = { type: "HOSTS_CHANGED", scope };
+
+			expect(toSnakeCase(msg)).toEqual({ type: "HOSTS_CHANGED", scope });
+			expect(decodeMessage(encodeMessage(msg))).toEqual(msg);
+		},
+	);
+
 	it("round-trips an AUTH_PROMPT message with promptId and deliveryEpoch", () => {
 		const msg: ProtocolMessage = {
 			type: "AUTH_PROMPT",

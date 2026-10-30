@@ -9,12 +9,19 @@ import {
 	validateIconImage,
 	validateProfileJson,
 } from "./hosts.js";
+import type { AnnounceHostsChange } from "./hosts-changed.js";
 import { parsePagination } from "./pagination.js";
 
+/**
+ * @param announce Tells every client the hosts changed, once a write is stored
+ * (#783): a host added, edited, moved, reordered or deleted in one window then
+ * shows in the others too.
+ */
 export function registerHostCrudRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
 	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
+	announce: AnnounceHostsChange = () => {},
 ): void {
 	// GET /api/hosts?limit=N&offset=M
 	server.get<{ Querystring: { limit?: string; offset?: string } }>(
@@ -102,6 +109,7 @@ export function registerHostCrudRoutes(
 			...(body.arch !== undefined && { arch: body.arch }),
 		});
 
+		announce("hosts");
 		return reply.code(201).send(toSnakeCase(host));
 	});
 
@@ -120,6 +128,7 @@ export function registerHostCrudRoutes(
 				});
 			}
 			metaDal.reorderHosts(group_id ?? null, host_ids);
+			announce("hosts");
 			return reply.code(204).send();
 		},
 	);
@@ -314,6 +323,7 @@ export function registerHostCrudRoutes(
 			}
 			const updated = metaDal.updateHost(request.params.id, updateInput);
 
+			announce("hosts");
 			return toSnakeCase(updated);
 		},
 	);
@@ -338,6 +348,7 @@ export function registerHostCrudRoutes(
 		if (!deleted) {
 			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
 		}
+		announce("hosts");
 		return reply.code(204).send();
 	});
 
@@ -352,6 +363,7 @@ export function registerHostCrudRoutes(
 				},
 			});
 		}
+		announce("hosts");
 		return reply.code(201).send(toSnakeCase(result));
 	});
 }

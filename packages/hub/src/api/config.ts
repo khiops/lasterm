@@ -17,6 +17,7 @@ import {
 import type { FastifyInstance } from "fastify";
 import type { ConfigResolver } from "../config.js";
 import type { MetaDAL } from "../storage/meta.js";
+import type { AnnounceHostsChange } from "./hosts-changed.js";
 
 interface ProfilePatchBody {
 	profile: Partial<TerminalProfile>;
@@ -81,6 +82,11 @@ export function registerConfigRoutes(
 		broadcastDisplayTitles(): void;
 		broadcastToAllClients(msg: ConfigChangedMessage): void;
 	},
+	/**
+	 * A host's profile is a column of the host, in the list every client holds
+	 * and reads it from: its write is a change of the hosts too (#783).
+	 */
+	announceHostsChange: AnnounceHostsChange = () => {},
 ): void {
 	/** Tell every client a scope changed, so each re-reads it (#479). */
 	const announce = (change: Omit<ConfigChangedMessage, "type">): void => {
@@ -285,6 +291,7 @@ export function registerConfigRoutes(
 			metaDal.updateHostProfile(id, JSON.stringify(merged));
 
 			announce({ scope: "host", hostId: id });
+			announceHostsChange("hosts");
 			return reply.code(200).send({ ok: true });
 		},
 	);

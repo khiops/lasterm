@@ -2,6 +2,7 @@ import { ErrorCode, type HostConnectionResponse, isValidUlid, toSnakeCase } from
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { HostConnectionOutcome, SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
+import type { AnnounceHostsChange } from "./hosts-changed.js";
 
 /** What a connect, reconnect or disconnect request asks for (#648). */
 export interface HostConnectionRequest {
@@ -92,6 +93,8 @@ export function registerHostConnectionRoutes(
 		SessionManager,
 		"connectHost" | "reconnectHost" | "disconnectHost" | "stopKeepingAgent"
 	>,
+	/** Stop keeping an agent stores No on the host: every client hears of it (#783). */
+	announce: AnnounceHostsChange = () => {},
 ): void {
 	server.post<{ Params: { id: string }; Body: unknown }>(
 		"/api/hosts/:id/agent/stop-keeping",
@@ -103,7 +106,10 @@ export function registerHostConnectionRoutes(
 			if ("error" in body)
 				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: body.error } });
 			const outcome = await sessionManager.stopKeepingAgent(request.params.id, body);
-			if (outcome.kind === "done") return reply.code(200).send(toSnakeCase(outcome.response));
+			if (outcome.kind === "done") {
+				announce("hosts");
+				return reply.code(200).send(toSnakeCase(outcome.response));
+			}
 			return reply.code(outcome.status).send({
 				error: {
 					code: outcome.code,

@@ -775,6 +775,20 @@ export interface ConfigChangedMessage {
 	channelId?: string;
 }
 
+/**
+ * Hub → UI: hosts or host groups were written, by some client or by the API.
+ *
+ * Every client reads that list again. The one that made the change already
+ * shows it, and reads the same list. Without this, a host created, edited or
+ * deleted in one window stayed unseen in every other until a reload (#783).
+ * The hub sends one for a burst of writes, an import among them.
+ */
+export interface HostsChangedMessage {
+	type: "HOSTS_CHANGED";
+	/** `hosts` for `GET /api/hosts`, `groups` for `GET /api/host-groups`, `both` for both. */
+	scope: "hosts" | "groups" | "both";
+}
+
 /** Hub → UI: request a secret from the user during SSH connection */
 export interface AuthPromptMessage {
 	type: "AUTH_PROMPT";
@@ -949,6 +963,7 @@ export type HubToUiMessage =
 	| AgentFetchErrorMessage
 	| AgentSyncedMessage
 	| ConfigChangedMessage
+	| HostsChangedMessage
 	| ErrorMessage;
 
 /** Master union of every distinct protocol message type */
@@ -1016,4 +1031,5 @@ export type ProtocolMessage =
 	| AgentFetchErrorMessage
 	| AgentSyncedMessage
 	| ConfigChangedMessage
+	| HostsChangedMessage
 	| ErrorMessage;

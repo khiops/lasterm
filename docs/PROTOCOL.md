@@ -1182,6 +1182,29 @@ Sent to every client once configuration is written, so each reads that scope aga
 `PUT /api/config/ui` (`ui`), `PUT /api/config/appearance` and every theme write (`appearance`),
 `PUT /api/config/global` (`global`), and `PATCH` of a host's or a channel's profile (§ 6).
 
+### 4.18 HOSTS_CHANGED (Hub → UI)
+
+```typescript
+{ type: "HOSTS_CHANGED", scope: "hosts" | "groups" | "both" }
+```
+
+Sent to every client once the hosts or the host groups are written, by any client or the API, so
+each reads that list again (#783): `hosts` for `GET /api/hosts`, `groups` for
+`GET /api/host-groups`, `both` for both. The writes: `POST /api/hosts`, `PUT /api/hosts/order`,
+`PUT` and `DELETE /api/hosts/:id` (a move to another group included),
+`POST /api/hosts/:id/duplicate`, `POST /api/hosts/import`, `PATCH /api/hosts/:id/profile`, and a
+`POST /api/hosts/:id/agent/stop-keeping` answered 200 (`hosts`); `POST /api/host-groups`,
+`PUT /api/host-groups/order` and `PUT /api/host-groups/:id` (`groups`);
+`DELETE /api/host-groups/:id`, whose hosts are left in no group (`both`). A refused write, a read,
+and what the hub records of a host on its own (its OS once detected, its shells, a pinned key or
+agent hash) send nothing.
+
+The hub sends one for a burst: once no such write has come for 100 ms, and no later than 1 s after
+the first, with the scopes of the burst merged. An import of twenty hosts, or twenty `POST`s in
+quick succession, is one message. The client that wrote receives it too, and reads the same list again; the web
+client waits 150 ms and reads once for every message in that time, and shows no list it read while
+one of its own writes was under way.
+
 ## 5. Protocol Sequences
 
 ### 5.1 Local Session
@@ -1379,6 +1402,9 @@ What the callers do with the answers:
   go, as `lasterm quit` does.
 
 #### Hosts
+
+A write to the hosts or their groups, here and under SSH Config Import and Host Groups, sends
+every client `HOSTS_CHANGED`; § 4.18 lists which.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
@@ -1865,4 +1891,8 @@ daemon left by an older hub is reported `outdated_agent` (§ 4.7).
 
 An agent skips a frame it cannot decode, an unknown type included, and answers
 `ERROR { code: "INVALID_MESSAGE" }`. The hub ignores a message type it does not know, from an
-agent or a client.
+agent or a client. A client ignores a message type it does not know, from the hub: its socket
+hands each message to the listeners of its type alone, and has none for a type added after it, so
+a hub can add one, as `HOSTS_CHANGED` (§ 4.18) was after 0.15.0. A client newer than its hub never
+receives that type, and reads the lists as before: at startup, after its own writes, and on a
+reconnect.

@@ -6,6 +6,7 @@ import { sshAgentAddress, windowsAgentPipeExists } from "../session/ssh-agent-ad
 import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";
 import type { MetaDAL } from "../storage/meta.js";
+import type { AnnounceHostsChange } from "./hosts-changed.js";
 
 type SshConfigImportValidation = { entries: SshConfigImport[] } | { error: string };
 type SshConfigImportRequestBodyFromUntrustedJson = unknown;
@@ -56,7 +57,15 @@ export function validateSshConfigImportEntries(body: unknown): SshConfigImportVa
 	return { entries };
 }
 
-export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
+/**
+ * @param announce Tells every client the hosts changed: once for the whole
+ * import, however many hosts it adds (#783).
+ */
+export function registerHostSshImportRoutes(
+	server: FastifyInstance,
+	metaDal: MetaDAL,
+	announce: AnnounceHostsChange = () => {},
+): void {
 	// GET /api/ssh-config — parse user's ~/.ssh/config
 	server.get("/api/ssh-config", async (_request, reply) => {
 		try {
@@ -180,6 +189,8 @@ export function registerHostSshImportRoutes(server: FastifyInstance, metaDal: Me
 			});
 
 			const hosts = metaDal.importHosts(inputs);
+			// Stored: said once for the whole list, the links below included.
+			announce("hosts");
 
 			// A bastion is usually a host of its own, imported in the same breath.
 			// Linking to it rather than keeping its address twice is what lets it

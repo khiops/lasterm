@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "./auth.js";
-import { SELECTED_HOST_KEY, useHostsStore } from "./hosts.js";
+import { HOSTS_CHANGED_READ_DELAY_MS, SELECTED_HOST_KEY, useHostsStore } from "./hosts.js";
 import { useToastStore } from "./toast.js";
 
 function hostRow(id: string, label: string, type = "ssh"): Record<string, unknown> {
@@ -703,5 +703,162 @@ describe("the hosts, not loaded (#758)", () => {
 
 		expect(store.error).toBeNull();
 		expect(store.hosts.map((h) => h.id)).toEqual(["local", "pi", "nas"]);
+	});
+});
+
+// ─── Changed elsewhere (#783) ────────────────────────────────────────────────
+//
+// A host or a group created, edited or deleted from another window appeared
+// here only after a reload. The hub now says so, and the store reads the lists
+// again: once for a burst, keeping what the user holds.
+
+describe("the hosts, changed elsewhere (#783)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** What the store read from the hub after its first `mark` requests: GETs only, by path. */
+	function readsSince(mark: number): string[] {
+		return fetchStub.mock.calls
+			.slice(mark)
+			.filter(([, init]) => (init?.method ?? "GET") === "GET")
+			.map(([url]) => String(url).replace(/^.*?(\/api\/)/, "$1"));
+	}
+
+	/** The next request waits until the test answers it. */
+	function holdNext(): (status: number, body: unknown) => void {
+		let answer: (response: Response) => void = () => {};
+		fetchStub.mockImplementationOnce(
+			() =>
+				new Promise<Response>((resolve) => {
+					answer = resolve;
+				}),
+		);
+		return (status, body) =>
+			answer(
+				new Response(body === undefined ? null : JSON.stringify(body), {
+					status,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+	}
+
+	it("shows the list as the hub now has it, and keeps the host selected", async () => {
+		const store = load();
+		await store.fetchHosts();
+		store.selectHost("pi");
+		hostRows = [...hostRows, hostRow("web", "web")];
+		const mark = fetchStub.mock.calls.length;
+
+		store.hubChanged("hosts");
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS - 1);
+		expect(readsSince(mark)).toEqual([]);
+		await vi.advanceTimersByTimeAsync(1);
+
+		expect(readsSince(mark)).toContain("/api/hosts");
+		expect(store.hosts.map((h) => h.id)).toEqual(["local", "pi", "nas", "web"]);
+		expect(store.selectedHostId).toBe("pi");
+	});
+
+	it("moves to the first host when the one selected was deleted elsewhere", async () => {
+		const store = load();
+		await store.fetchHosts();
+		store.selectHost("nas");
+		hostRows = hostRows.filter((row) => row.id !== "nas");
+
+		store.hubChanged("hosts");
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+
+		expect(store.hosts.map((h) => h.id)).toEqual(["local", "pi"]);
+		expect(store.selectedHostId).toBe("local");
+	});
+
+	it("reads a burst of news once", async () => {
+		const store = load();
+		await store.fetchHosts();
+		const mark = fetchStub.mock.calls.length;
+
+		for (let i = 0; i < 5; i++) {
+			store.hubChanged("hosts");
+			await vi.advanceTimersByTimeAsync(20);
+		}
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS * 2);
+
+		expect(readsSince(mark).filter((path) => path === "/api/hosts")).toHaveLength(1);
+	});
+
+	it("reads only the groups when only they changed, and the groups first when both did", async () => {
+		const store = load();
+		await store.fetchHosts();
+		let mark = fetchStub.mock.calls.length;
+
+		store.hubChanged("groups");
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+		expect(readsSince(mark)).toEqual(["/api/host-groups"]);
+
+		mark = fetchStub.mock.calls.length;
+		store.hubChanged("both");
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+		expect(readsSince(mark).slice(0, 2)).toEqual(["/api/host-groups", "/api/hosts"]);
+	});
+
+	it("shows no list read while this window's own write went through, and reads again after it", async () => {
+		const store = load();
+		await store.fetchHosts();
+		const mark = fetchStub.mock.calls.length;
+
+		// News arrives; its read leaves, and is held.
+		const answerRead = holdNext();
+		store.hubChanged("hosts");
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+		expect(readsSince(mark)).toEqual(["/api/hosts"]);
+
+		// Meanwhile this window drags NAS first, and the hub takes it.
+		const places = (): Record<string, number> =>
+			Object.fromEntries(store.hosts.map((h) => [h.id, h.sortOrder]));
+		const dragged = { nas: 0, local: 1, pi: 2 };
+		const before = hostRows;
+		answerOnce(204, undefined);
+		expect(await store.reorderHosts(null, ["nas", "local", "pi"])).toEqual({ ok: true });
+		expect(places()).toEqual(dragged);
+
+		// The read answers with the list from before the drag: not shown.
+		answerRead(200, before);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(places()).toEqual(dragged);
+
+		// It is read again: the hub's list now has the drag, and a host another
+		// window added meanwhile.
+		hostRows = [
+			...before.map((row) => ({ ...row, sort_order: dragged[row.id as keyof typeof dragged] })),
+			{ ...hostRow("web", "web"), sort_order: 3 },
+		];
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+		expect(readsSince(mark).filter((path) => path === "/api/hosts")).toHaveLength(2);
+		expect(places()).toEqual({ ...dragged, web: 3 });
+	});
+
+	it("waits for a write of this window under way, whose own news follows it", async () => {
+		const store = load();
+		await store.fetchHosts();
+		const answerWrite = holdNext();
+		const write = store.deleteHost("nas");
+		const mark = fetchStub.mock.calls.length;
+
+		store.hubChanged("hosts");
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS * 3);
+		expect(readsSince(mark)).toEqual([]);
+
+		hostRows = hostRows.filter((row) => row.id !== "nas");
+		answerWrite(204, undefined);
+		expect(await write).toEqual({ ok: true });
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+
+		expect(readsSince(mark)).toContain("/api/hosts");
+		expect(store.hosts.map((h) => h.id)).toEqual(["local", "pi"]);
 	});
 });

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { factsFromAttachOk, factsFromRefusal, paneCover } from "../utils/pane-cover.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
-import { useHostsStore } from "./hosts.js";
+import { HOSTS_CHANGED_READ_DELAY_MS, useHostsStore } from "./hosts.js";
 import { useSessionStore } from "./session.js";
 import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
@@ -24,10 +24,16 @@ const wsHarness = vi.hoisted(() => ({
 	instances: [] as MockWsInstance[],
 	/** Hold AUTH_OK back, the way a hub answering over the network does. */
 	deferAuth: false,
+	/** The hub's REST base, for the tests that answer its requests; the others make none. */
+	hubBaseUrl: null as string | null,
 }));
 
 vi.mock("../utils/hub-url.js", () => ({
 	hubWsUrl: () => "ws://lasterm.test",
+	hubBaseUrl: () => {
+		if (wsHarness.hubBaseUrl === null) throw new Error("no REST request in this test");
+		return wsHarness.hubBaseUrl;
+	},
 }));
 
 vi.mock("../services/ws-client.js", () => {
@@ -382,6 +388,95 @@ describe("useSessionStore — CONFIG_CHANGED for the appearance", () => {
 		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "appearance" });
 
 		expect(reload).toHaveBeenCalledOnce();
+	});
+});
+
+// ─── Hosts and groups written elsewhere (#783) ───────────────────────────────
+
+describe("useSessionStore — HOSTS_CHANGED", () => {
+	let hostRows: Record<string, unknown>[];
+	let reads: string[];
+
+	const row = (id: string, label: string, type = "ssh") => ({
+		id,
+		label,
+		type,
+		host_group_id: id === "local" ? null : "g1",
+		sort_order: 0,
+		created_at: "2026-01-01T00:00:00Z",
+		updated_at: "2026-01-01T00:00:00Z",
+	});
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		wsHarness.hubBaseUrl = "https://hub.lasterm.test";
+		setActivePinia(createPinia());
+		hostRows = [row("local", "local", "local"), row("pi", "pi")];
+		reads = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const path = new URL(String(input)).pathname;
+			reads.push(path);
+			const groups = [{ id: "g1", name: "lab", sort_order: 0, created_at: "", updated_at: "" }];
+			const body =
+				path === "/api/host-groups" ? groups : path === "/api/hosts" ? hostRows : undefined;
+			return new Response(body === undefined ? null : JSON.stringify(body), {
+				status: body === undefined ? 404 : 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+	});
+
+	afterEach(() => {
+		wsHarness.hubBaseUrl = null;
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
+
+	/** Connected, with the hosts and their groups loaded as at startup. */
+	async function connected() {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const hostsStore = useHostsStore();
+		await hostsStore.fetchHosts();
+		reads.length = 0;
+		return { ws: wsHarness.instances[0], hostsStore };
+	}
+
+	it("reads the hosts again once another client changed them", async () => {
+		const { ws, hostsStore } = await connected();
+		hostRows = [...hostRows, row("nas", "nas")];
+
+		ws?.emit({ type: "HOSTS_CHANGED", scope: "hosts" });
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+
+		expect(reads).toEqual(["/api/hosts"]);
+		expect(hostsStore.hosts.map((h) => h.label)).toEqual(["local", "pi", "nas"]);
+	});
+
+	it("reads them once for a burst of news", async () => {
+		const { ws } = await connected();
+
+		for (let i = 0; i < 10; i++) {
+			ws?.emit({ type: "HOSTS_CHANGED", scope: i % 2 === 0 ? "hosts" : "groups" });
+			await vi.advanceTimersByTimeAsync(10);
+		}
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS * 2);
+
+		expect(reads).toEqual(["/api/host-groups", "/api/hosts"]);
+	});
+
+	it("reads the groups again after a reconnect, news sent meanwhile having reached nobody", async () => {
+		const { ws } = await connected();
+
+		ws?.emitReconnect();
+		await vi.advanceTimersByTimeAsync(HOSTS_CHANGED_READ_DELAY_MS);
+
+		expect(reads).toContain("/api/hosts");
+		expect(reads).toContain("/api/host-groups");
 	});
 });
 

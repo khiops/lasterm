@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.1](https://github.com/khiops/lasterm/compare/v0.15.0...v0.15.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **hub:** delete orphaned spool output, and purge channels in the GC's batches ([#790](https://github.com/khiops/lasterm/issues/790)) ([ed647a6](https://github.com/khiops/lasterm/commit/ed647a6c5cf0b76bc7fdbf2444bf6c305c8f7515))
+* **hub:** stop the spool GC freezing the hub and the spool growing ([ab20305](https://github.com/khiops/lasterm/commit/ab20305f4e4a06faf2476f1360e81fea9cc925a0)), closes [#726](https://github.com/khiops/lasterm/issues/726)
+* **hub:** stop the spool GC freezing the hub and the spool growing ([#785](https://github.com/khiops/lasterm/issues/785)) ([ab20305](https://github.com/khiops/lasterm/commit/ab20305f4e4a06faf2476f1360e81fea9cc925a0))
+* **hub:** tell every client what the hub records of a host, and save only what Edit Host changed ([#791](https://github.com/khiops/lasterm/issues/791)) ([bd5c1af](https://github.com/khiops/lasterm/commit/bd5c1af78a8f6a4ae3f975f3cd5d91b5fa472605)), closes [#789](https://github.com/khiops/lasterm/issues/789)
+* **hub:** tell every client when hosts or host groups change ([#788](https://github.com/khiops/lasterm/issues/788)) ([50a5001](https://github.com/khiops/lasterm/commit/50a500144fbe2c78e5cc3190472e366e8534bf36)), closes [#783](https://github.com/khiops/lasterm/issues/783)
+* **web:** let Edit Host clear the SSH user, the port and the default shell ([#793](https://github.com/khiops/lasterm/issues/793)) ([2e4b148](https://github.com/khiops/lasterm/commit/2e4b148fa2e3473e0bf8270386b21b0ed86ea2b4)), closes [#792](https://github.com/khiops/lasterm/issues/792)
+
 ## [0.15.0](https://github.com/khiops/lasterm/compare/v0.14.3...v0.15.0) (2026-10-28)
 
 

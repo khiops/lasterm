@@ -454,7 +454,24 @@ describe("HostsDAL — what the hub records of a host, said once it changed (#78
 		expect(said).toBe(3);
 		expect(dal.getHost(id)).toMatchObject({
 			discoveredShells: ["/bin/bash", "/usr/bin/fish"],
+			discoveredDefaultShell: "/usr/bin/fish",
+		});
+		expect(dal.getHost(id)?.defaultShell).toBeUndefined();
+	});
+
+	// The agent's default is its own column (#794): a host whose user chose
+	// another one is not told it changed at every connection.
+	it("says nothing when the agent reports again the default it reported, the user's being another", () => {
+		dal.updateHost(id, { defaultShell: "/usr/bin/fish" });
+		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"], "/bin/bash");
+		said = 0;
+
+		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"], "/bin/bash");
+
+		expect(said).toBe(0);
+		expect(dal.getHost(id)).toMatchObject({
 			defaultShell: "/usr/bin/fish",
+			discoveredDefaultShell: "/bin/bash",
 		});
 	});
 

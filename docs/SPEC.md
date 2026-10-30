@@ -500,7 +500,7 @@ Host (permanent config)
  ├── color?: string                    // hex #rrggbb, auto from label hash if null
  ├── profileJson?: string              // JSON-encoded TerminalProfile (layer 3 overrides)
  ├── trustRemoteHints: 'apply' | 'ask' | 'ignore'
- ├── defaultShell?: string
+ ├── defaultShell?: string             // the user's; a terminal opened with no shell or profile starts it (#794)
  ├── defaultCwd?: string
  ├── elevationMethod?: 'sudo'|'doas'|'pkexec'|'gsudo'|'custom' | null
  ├── customCommand?: string | null     // used when elevationMethod = 'custom'
@@ -508,6 +508,7 @@ Host (permanent config)
  ├── sortOrder: number
  ├── discoveredShells?: string[]       // shells found on remote at last connect
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
+ ├── discoveredDefaultShell?: string   // the agent's default at last connect: SHELL, or COMSPEC (#794)
  ├── os: 'linux' | 'darwin' | 'windows' | null    // null = auto-detect on first connect
  ├── arch: 'x64' | 'arm64' | null                 // null = auto-detect on first connect
  ├── sshProxyHostId?: string | null    // jump host this hub knows (§ 4.5b)
@@ -1016,8 +1017,11 @@ scope there is no single agent to ask; the changes are edited by name.
 
 A terminal on an SSH host that runs the host's default shell, with no arguments, as a shell rather
 than a direct process, starts as a **login shell**: `ssh host` gives one, and it reads
-`~/.profile`, so `PATH` is right whatever the remote agent was started with. The hub asks for it
-(`login_shell`), a Unix agent adds `-l` for a shell known to take it. Local terminals are unchanged.
+`~/.profile`, so `PATH` is right whatever the remote agent was started with. The default shell is
+the Default Shell the user chose for the host, which a terminal opened with nothing named runs in
+the place of `ssh host`, or the one its agent reported, which `ssh host` itself starts (#794); a
+terminal with no shell named runs the agent's. The hub asks for it (`login_shell`), a Unix agent
+adds `-l` for a shell known to take it. Local terminals are unchanged.
 
 Native effect resolution:
 

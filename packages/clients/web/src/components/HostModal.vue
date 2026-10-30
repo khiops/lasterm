@@ -431,13 +431,23 @@
 							class="tab-panel"
 						>
 							<div class="field">
-								<label class="field-label">Default Shell</label>
+								<label class="field-label" for="host-default-shell">Default Shell</label>
 								<input
+									id="host-default-shell"
 									v-model="form.defaultShell"
+									:list="detectedShells.length > 0 ? 'host-shell-options' : undefined"
 									type="text"
 									class="field-input"
-									placeholder="/bin/bash"
+									:placeholder="defaultShellPlaceholder"
+									spellcheck="false"
+									autocapitalize="off"
 								/>
+								<datalist v-if="detectedShells.length > 0" id="host-shell-options">
+									<option v-for="shell in detectedShells" :key="shell" :value="shell" />
+								</datalist>
+								<p class="field-hint auth-note">
+									The shell a new terminal starts, unless you pick a launch profile.
+								</p>
 							</div>
 							<div class="field">
 								<label class="field-label">Elevation Method</label>
@@ -757,6 +767,18 @@ const {
 const testPlatform = computed(() =>
 	testResult.value?.platform ? describeTestPlatform(testResult.value.platform) : null,
 );
+
+/**
+ * The shells the host's agent reported at its last connection, offered as the
+ * Default Shell's suggestions, and the one it starts when told none, shown in
+ * the empty field (#794). Read from the host as the hub last said it, so a
+ * connection made while the dialog is open shows.
+ */
+const detectedShells = computed(() => storedHost.value?.discoveredShells ?? []);
+const defaultShellPlaceholder = computed(() => {
+	const detected = storedHost.value?.discoveredDefaultShell;
+	return detected ? `Detected: ${detected}` : "/bin/bash";
+});
 
 /**
  * The colour this host will show once saved, as its badge draws it: the one being

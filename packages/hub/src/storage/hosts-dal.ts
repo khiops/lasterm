@@ -35,6 +35,7 @@ interface HostRow {
 	ssh_user: string | null;
 	discovered_shells: string | null;
 	discovered_shells_at: string | null;
+	discovered_default_shell: string | null;
 	elevation_method: string | null;
 	custom_command: string | null;
 	os: string | null;
@@ -93,6 +94,9 @@ function rowToHost(row: HostRow): Host {
 		}
 	}
 	if (row.discovered_shells_at != null) host.discoveredShellsAt = row.discovered_shells_at;
+	if (row.discovered_default_shell != null) {
+		host.discoveredDefaultShell = row.discovered_default_shell;
+	}
 	if (row.elevation_method != null) host.elevationMethod = row.elevation_method as ElevationMethod;
 	if (row.custom_command != null) host.customCommand = row.custom_command;
 	if (row.agent_sha256 != null) host.agentSha256 = row.agent_sha256;
@@ -635,16 +639,20 @@ export class HostsDAL {
 	}
 
 	/**
-	 * Found at every connection, and stamped each time. Said only when the
-	 * shells, or the default one, differ from what is stored.
+	 * Found at every connection, and stamped each time: the shells the host's
+	 * agent reports, and the one it starts when told none. That one goes to
+	 * `discovered_default_shell`, never to `default_shell`, which is the
+	 * user's Default Shell: written there, it undid the user's choice at every
+	 * connection (#794). Said only when the shells, or the agent's default,
+	 * differ from what is stored.
 	 */
-	updateHostDiscoveredShells(hostId: string, shells: string[], defaultShell?: string): void {
+	updateHostDiscoveredShells(hostId: string, shells: string[], reportedDefault?: string): void {
 		const now = new Date().toISOString();
 		const found = JSON.stringify(shells);
 		const stored = this.db
-			.prepare("SELECT discovered_shells, default_shell FROM hosts WHERE id = ?")
+			.prepare("SELECT discovered_shells, discovered_default_shell FROM hosts WHERE id = ?")
 			.get(hostId) as
-			| { discovered_shells: string | null; default_shell: string | null }
+			| { discovered_shells: string | null; discovered_default_shell: string | null }
 			| undefined;
 		this.db
 			.prepare(
@@ -653,15 +661,15 @@ export class HostsDAL {
 				 WHERE id = ?`,
 			)
 			.run(found, now, now, hostId);
-		if (defaultShell !== undefined) {
+		if (reportedDefault !== undefined) {
 			this.db
-				.prepare("UPDATE hosts SET default_shell = ?, updated_at = ? WHERE id = ?")
-				.run(defaultShell, now, hostId);
+				.prepare("UPDATE hosts SET discovered_default_shell = ? WHERE id = ?")
+				.run(reportedDefault, hostId);
 		}
 		if (
 			stored !== undefined &&
 			(stored.discovered_shells !== found ||
-				(defaultShell !== undefined && stored.default_shell !== defaultShell))
+				(reportedDefault !== undefined && stored.discovered_default_shell !== reportedDefault))
 		) {
 			this.hostChanged();
 		}

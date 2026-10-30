@@ -688,6 +688,78 @@ describe("HostModal open while the hub detects the host's OS (#789)", () => {
 	});
 });
 
+describe("HostModal Default Shell: what the host's agent detected (#794)", () => {
+	/** The host once connected: the shells its agent reported, and the one it starts. */
+	const DETECTED: Host = {
+		...SSH,
+		discoveredShells: ["/bin/bash", "/usr/bin/fish"],
+		discoveredDefaultShell: "/bin/bash",
+	};
+
+	function shellField(): HTMLInputElement {
+		const input = el<HTMLInputElement>("#host-default-shell");
+		if (!input) throw new Error("no Default Shell field");
+		return input;
+	}
+
+	/** The suggestions the field offers, in order. */
+	function suggestions(): string[] {
+		const list = shellField().getAttribute("list");
+		if (list === null) return [];
+		return Array.from(
+			document.body.querySelectorAll<HTMLOptionElement>(`datalist#${list} option`),
+		).map((option) => option.value);
+	}
+
+	it("shows the detected default in the empty field, and offers the detected shells", () => {
+		mountModal(DETECTED);
+
+		expect(shellField().value).toBe("");
+		expect(shellField().placeholder).toBe("Detected: /bin/bash");
+		expect(suggestions()).toEqual(["/bin/bash", "/usr/bin/fish"]);
+	});
+
+	it("shows the Default Shell the user chose, the detected one still as the placeholder", () => {
+		mountModal({ ...DETECTED, defaultShell: "/usr/bin/fish" });
+
+		expect(shellField().value).toBe("/usr/bin/fish");
+		expect(shellField().placeholder).toBe("Detected: /bin/bash");
+	});
+
+	it("detects nothing and offers nothing for a host that never connected", () => {
+		mountModal(SSH);
+
+		expect(shellField().placeholder).toBe("/bin/bash");
+		expect(shellField().hasAttribute("list")).toBe(false);
+		expect(suggestions()).toEqual([]);
+	});
+
+	it("shows what a connection detects while the dialog is open", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			async (input) =>
+				new Response(
+					JSON.stringify(
+						String(input).includes("/api/host-groups") ? [] : toSnakeCase([LOCAL, DETECTED]),
+					),
+					{ headers: { "Content-Type": "application/json" } },
+				),
+		);
+		mountModal(SSH);
+		useAuthStore().setToken("token");
+
+		useHostsStore().hubChanged("hosts");
+		await vi.waitFor(() =>
+			expect(useHostsStore().hosts.find((host) => host.id === SSH.id)?.discoveredDefaultShell).toBe(
+				"/bin/bash",
+			),
+		);
+		await nextTick();
+
+		expect(shellField().placeholder).toBe("Detected: /bin/bash");
+		expect(suggestions()).toEqual(["/bin/bash", "/usr/bin/fish"]);
+	});
+});
+
 describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 	/** The hub's answers to its SSH config, in turn; anything else it is not asked. */
 	function sshConfigAnswers(...answers: Array<Response | Error>) {

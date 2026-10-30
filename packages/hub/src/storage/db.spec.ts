@@ -58,12 +58,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 22 after migration", () => {
+	it("meta.db: schema_version is 23 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(22);
+		expect(row.v).toBe(23);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -102,7 +102,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 22)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 23)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -117,8 +117,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(22);
-		expect(v2).toBe(22);
+		expect(v1).toBe(23);
+		expect(v2).toBe(23);
 	});
 
 	it("close() does not throw", () => {
@@ -255,10 +255,10 @@ describe("meta.db and its baseline", () => {
 			(column) => column.name,
 		);
 
-	it("comes out new at version 22, with the final schema", () => {
+	it("comes out new at version 23, with the final schema", () => {
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
 			"cache_index",
@@ -306,6 +306,7 @@ describe("meta.db and its baseline", () => {
 			"ssh_proxy_spec",
 			"ssh_proxy_fingerprint",
 			"ssh_remote_daemon",
+			"discovered_default_shell",
 		]);
 		expect(columns(dbs.meta, "channels")).toContain("end_reason");
 		expect(columns(dbs.meta, "auth_tokens")).toContain("swept_at");
@@ -314,13 +315,15 @@ describe("meta.db and its baseline", () => {
 
 	it("does not run the baseline on a database already at version 21", () => {
 		// What the migrations before the baseline left: version 21, with a table
-		// and a column the baseline no longer has. Only 022 runs on it.
+		// and a column the baseline no longer has. Only the migrations after it
+		// run on it.
 		const before = new Database(join(dir, "meta.db"));
 		before.exec(`
 			CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
 			INSERT INTO schema_version VALUES (21, '2026-10-01 00:00:00');
 			CREATE TABLE hosts (
 				id TEXT PRIMARY KEY, label TEXT, keep_alive_seconds INTEGER DEFAULT 60,
+				default_shell TEXT, discovered_shells TEXT,
 				ssh_fingerprint TEXT, ssh_proxy_fingerprint TEXT
 			);
 			INSERT INTO hosts (id, label) VALUES ('H1', 'here');
@@ -330,22 +333,28 @@ describe("meta.db and its baseline", () => {
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
 		expect(tables(dbs.meta)).toEqual(["hosts", "schema_version", "workspaces"]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
 			"label",
 			"keep_alive_seconds",
+			"default_shell",
+			"discovered_shells",
 			"ssh_fingerprint",
 			"ssh_proxy_fingerprint",
+			"discovered_default_shell",
 		]);
 		expect(dbs.meta.prepare("SELECT * FROM hosts").all()).toEqual([
 			{
 				id: "H1",
 				label: "here",
 				keep_alive_seconds: 60,
+				default_shell: null,
+				discovered_shells: null,
 				ssh_fingerprint: null,
 				ssh_proxy_fingerprint: null,
+				discovered_default_shell: null,
 			},
 		]);
 	});
@@ -432,7 +441,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			return targetRoute(host, (other) => sshAddress(dal.getHost(other)));
 		};
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
 		expect(dal.getHostFingerprint("B", routeOf("B"))).toBe(fingerprintOf(bastion));
@@ -456,10 +465,10 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 		]);
 	});
 
-	it("comes out new at version 22", () => {
+	it("comes out new at version 23", () => {
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
 
@@ -471,7 +480,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 
 		// The runner does not run it twice...
 		dbs = openDatabases(dir);
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }]);
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
 		// ...and its statements find nothing left to change if they do run.
@@ -484,5 +493,107 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 		dbs.meta.exec(updates);
 		expect(changes.get()).toBe(before);
 		expect(pins(dbs.meta)).toEqual(migrated);
+	});
+});
+
+// ─── Migration 023: the agent's default shell apart (#794) ───────────────────
+//
+// A hub before #794 wrote the default shell a host's agent reports into
+// default_shell, the user's Default Shell, at every connection. What a database
+// it left holds there is the agent's on every host that connected, and can only
+// be the user's on one that never did.
+
+describe("meta.db migration 023: the agent's default shell in a column of its own", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-023-");
+	});
+
+	afterEach(async () => {
+		dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+	const versions = (db: Database.Database) =>
+		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
+	const shells = (db: Database.Database) =>
+		db
+			.prepare(
+				"SELECT id, default_shell, discovered_default_shell, discovered_shells, updated_at FROM hosts ORDER BY id",
+			)
+			.all();
+
+	const at = "2026-10-01T00:00:00.000Z";
+	const cmd = "C:\\WINDOWS\\system32\\cmd.exe";
+	const piShells = JSON.stringify(["/bin/bash", "/usr/bin/fish"]);
+
+	/** A database as 0.15.1 left it: version 22, the agent's default written over the user's. */
+	function databaseAt22(): void {
+		const before = new Database(join(dir, "meta.db"));
+		before.exec(migration("021-baseline.sql"));
+		before.exec(migration("022-unpadded-ssh-pins.sql"));
+		const insert = before.prepare(
+			`INSERT INTO hosts (id, type, label, ssh_host, default_shell, discovered_shells,
+				created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, '${at}', '${at}')`,
+		);
+		// Connected: the agent's default, written at each connection.
+		insert.run("C", "ssh", "pi", "pi.test", "/bin/bash", piShells);
+		insert.run("L", "local", "local", null, cmd, JSON.stringify([cmd]));
+		// Never connected: what the user typed, or nothing.
+		insert.run("N", "ssh", "new", "new.test", "/usr/bin/fish", null);
+		insert.run("E", "ssh", "empty", "empty.test", null, null);
+		expect(versions(before)).toEqual([{ version: 21 }, { version: 22 }]);
+		before.close();
+	}
+
+	it("moves a connected host's value to the agent's column, and keeps a never-connected host's", () => {
+		databaseAt22();
+
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		const row = (
+			id: string,
+			chosen: string | null,
+			reported: string | null,
+			found: string | null,
+		) => ({
+			id,
+			default_shell: chosen,
+			discovered_default_shell: reported,
+			discovered_shells: found,
+			updated_at: at,
+		});
+		expect(shells(dbs.meta)).toEqual([
+			row("C", null, "/bin/bash", piShells),
+			row("E", null, null, null),
+			row("L", null, cmd, JSON.stringify([cmd])),
+			row("N", "/usr/bin/fish", null, null),
+		]);
+		// As the hub reads them: no Default Shell chosen where the agent's was.
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getHost("C")?.defaultShell).toBeUndefined();
+		expect(dal.getHost("C")?.discoveredDefaultShell).toBe("/bin/bash");
+		expect(dal.getHost("N")?.defaultShell).toBe("/usr/bin/fish");
+		expect(dal.getHost("N")?.discoveredDefaultShell).toBeUndefined();
+	});
+
+	it("is not run again over a Default Shell chosen since", () => {
+		databaseAt22();
+		dbs = openDatabases(dir);
+		dbs.meta.prepare("UPDATE hosts SET default_shell = '/usr/bin/fish' WHERE id = 'C'").run();
+		const chosen = shells(dbs.meta);
+		dbs.close();
+
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(shells(dbs.meta)).toEqual(chosen);
 	});
 });

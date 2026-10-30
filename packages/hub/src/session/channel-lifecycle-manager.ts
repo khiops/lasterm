@@ -1087,10 +1087,10 @@ export class ChannelLifecycleManager {
 		this.ctx.chunker.flush(channelId);
 		const maxSeq = this.ctx.spoolDal.getMaxSeq(channelId);
 		const snapshotSeq = Math.max(maxSeq, agentLastSeq) + 1;
-		const chunkId = this.ctx.spoolDal.insertChunk({
+		// Replaces the channel's previous snapshot: nothing reads an older one (#726).
+		const chunkId = this.ctx.spoolDal.insertSnapshot({
 			channelId,
 			seq: snapshotSeq,
-			kind: "snapshot",
 			dataBlob,
 			uncompressedLen: dataBlob.length,
 		});

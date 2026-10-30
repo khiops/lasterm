@@ -8,6 +8,13 @@ const SNAPSHOT_TIMEOUT_MS = 5_000; // 5s timeout — free slot if agent never re
 interface ChannelTimers {
 	lastOutputAt: number;
 	lastSnapshotAt: number;
+	/**
+	 * The screen may differ from the last snapshot asked for: output or a resize
+	 * came since. The timers ask only then. They used to ask every 5 s whatever
+	 * happened, and an idle terminal left a snapshot of the same screen in the
+	 * spool every 5 s, 64,509 of them in five days on one channel (#726).
+	 */
+	changed: boolean;
 	idleTimer: ReturnType<typeof setTimeout> | null;
 	forcedTimer: ReturnType<typeof setInterval> | null;
 }
@@ -38,6 +45,8 @@ export class SnapshotScheduler {
 		const state: ChannelTimers = {
 			lastOutputAt: now,
 			lastSnapshotAt: 0,
+			// Nothing says the stored snapshot, if any, is this screen.
+			changed: true,
 			idleTimer: null,
 			forcedTimer: null,
 		};
@@ -53,11 +62,20 @@ export class SnapshotScheduler {
 		if (!state) return;
 
 		state.lastOutputAt = Date.now();
+		state.changed = true;
 
 		if (state.idleTimer !== null) {
 			clearTimeout(state.idleTimer);
 		}
 		state.idleTimer = setTimeout(() => this._onIdleTimeout(channelId), SNAPSHOT_IDLE_MS);
+	}
+
+	/**
+	 * Called when a channel is resized. The agent resizes its screen whether or
+	 * not the program redraws, so it counts as a change, as output does.
+	 */
+	onResize(channelId: string): void {
+		this.onOutput(channelId);
 	}
 
 	/** Called when last client detaches — trigger immediate snapshot */
@@ -94,11 +112,11 @@ export class SnapshotScheduler {
 		const state = this.channels.get(channelId);
 		if (!state) return;
 		state.idleTimer = null;
-		this._requestSnapshot(channelId);
+		if (state.changed) this._requestSnapshot(channelId);
 	}
 
 	private _onForcedTimeout(channelId: string): void {
-		this._requestSnapshot(channelId);
+		if (this.channels.get(channelId)?.changed) this._requestSnapshot(channelId);
 	}
 
 	/**
@@ -135,6 +153,10 @@ export class SnapshotScheduler {
 		const agent = this.getAgent(channelId);
 		if (!agent?.connected) return;
 
+		// Asked for, the snapshot covers the screen as it is: only a change after
+		// this makes the next one worth taking. A deferred or unsent request
+		// leaves the flag set, so the next tick asks again.
+		if (state) state.changed = false;
 		this._inFlightSnapshots++;
 		agent.send({ type: "SNAPSHOT_REQ", channelId });
 
@@ -150,7 +172,10 @@ export class SnapshotScheduler {
 				if (this._inFlightSnapshots > 0) {
 					this._inFlightSnapshots--;
 				}
-				// Snapshot timeout — slot freed (agent may be busy or disconnected)
+				// Snapshot timeout — slot freed (agent may be busy or disconnected).
+				// No snapshot came, so the screen is still to be taken.
+				const timedOut = this.channels.get(channelId);
+				if (timedOut) timedOut.changed = true;
 			}, SNAPSHOT_TIMEOUT_MS),
 		);
 	}

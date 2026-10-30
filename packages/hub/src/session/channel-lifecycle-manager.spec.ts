@@ -1,5 +1,7 @@
 import type { AgentSpawnOkMessage, ChannelCreatedMessage, ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { openTestDatabases } from "../storage/db.js";
+import { SpoolDAL } from "../storage/spool.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { clearContext, clientDisconnect, respond } from "./prompt-context.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
@@ -1241,5 +1243,46 @@ describe("#674 SPAWN send fences", () => {
 		expect(ctx.pendingRequests.size).toBe(0);
 		expect(onOk).not.toHaveBeenCalled();
 		expect(onErr).not.toHaveBeenCalled();
+	});
+});
+
+describe("#726 storeSnapshot", () => {
+	it("keeps one snapshot per channel: each one stored replaces the last", () => {
+		const dbs = openTestDatabases();
+		try {
+			const spoolDal = new SpoolDAL(dbs.spool);
+			const updateCacheIndex = vi.fn();
+			const ctx = {
+				spoolDal,
+				chunker: { flush: vi.fn(), bumpSeq: vi.fn() },
+				metaDal: { updateCacheIndex },
+			} as unknown as SharedSessionContext;
+			const lifecycle = new ChannelLifecycleManager(ctx, {} as StateBroadcaster);
+			spoolDal.insertChunk({
+				channelId: "ch",
+				seq: 1,
+				kind: "output",
+				dataBlob: Buffer.from("ls\r\n"),
+				uncompressedLen: 4,
+			});
+
+			lifecycle.storeSnapshot("ch", { serialized: "one", cols: 80, rows: 24 }, 0);
+			const last = lifecycle.storeSnapshot("ch", { serialized: "two", cols: 80, rows: 24 }, 0);
+
+			const chunks = spoolDal.getChunksByChannel("ch");
+			expect(chunks.map((c) => [c.seq, c.kind])).toEqual([
+				[1, "output"],
+				[3, "snapshot"],
+			]);
+			expect(chunks[1]?.id).toBe(last);
+			expect(lifecycle.buildAttachPayload("ch").snapshot).toEqual({
+				serialized: "two",
+				cols: 80,
+				rows: 24,
+			});
+			expect(updateCacheIndex).toHaveBeenLastCalledWith("ch", last, 2);
+		} finally {
+			dbs.close();
+		}
 	});
 });

@@ -154,78 +154,56 @@ describe("SpoolDAL", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// deleteChunksOlderThan
+	// insertSnapshot / getLatestSnapshotSize (#726)
 	// -------------------------------------------------------------------------
 
-	it("deleteChunksOlderThan deletes old chunks and keeps new ones", () => {
+	it("insertSnapshot replaces the channel's previous snapshot and keeps its output", () => {
 		setup();
-		// Insert two chunks — then we'll delete based on timestamp
-		const id1 = dal.insertChunk(makeChunkInput("ch-09", 1, "output"));
-		const id2 = dal.insertChunk(makeChunkInput("ch-09", 2, "output"));
+		dal.insertChunk(makeChunkInput("ch-snap", 1, "output"));
+		dal.insertSnapshot({
+			channelId: "ch-snap",
+			seq: 2,
+			dataBlob: Buffer.from("a"),
+			uncompressedLen: 1,
+		});
+		dal.insertChunk(makeChunkInput("ch-snap", 3, "output"));
+		const id = dal.insertSnapshot({
+			channelId: "ch-snap",
+			seq: 4,
+			dataBlob: Buffer.from("b"),
+			uncompressedLen: 1,
+		});
+		dal.insertSnapshot({
+			channelId: "ch-other",
+			seq: 1,
+			dataBlob: Buffer.from("c"),
+			uncompressedLen: 1,
+		});
 
-		// Both exist initially
-		expect(dal.getChunk(id1)).toBeDefined();
-		expect(dal.getChunk(id2)).toBeDefined();
-
-		// Delete chunks older than a future timestamp — both get deleted
-		const future = new Date(Date.now() + 60_000).toISOString();
-		const deleted = dal.deleteChunksOlderThan(future);
-		expect(deleted).toBe(2);
-
-		expect(dal.getChunk(id1)).toBeUndefined();
-		expect(dal.getChunk(id2)).toBeUndefined();
+		expect(dal.getChunksByChannel("ch-snap").map((c) => [c.seq, c.kind])).toEqual([
+			[1, "output"],
+			[3, "output"],
+			[4, "snapshot"],
+		]);
+		expect(dal.getLatestSnapshot("ch-snap")?.id).toBe(id);
+		expect(dal.getLatestSnapshotSize("ch-snap")).toEqual({ seq: 4, bytes: 1 });
+		expect(dal.getLatestSnapshotSize("ch-other")).toEqual({ seq: 1, bytes: 1 });
+		expect(dal.getLatestSnapshotSize("ch-none")).toBeUndefined();
 	});
 
-	it("deleteChunksOlderThan keeps chunks newer than the cutoff", () => {
+	it("insertSnapshot deletes only the previous snapshot, leaving an older backlog to the GC", () => {
 		setup();
-		const id = dal.insertChunk(makeChunkInput("ch-10", 1, "output"));
+		for (let seq = 1; seq <= 5; seq++)
+			dal.insertChunk(makeChunkInput("ch-backlog", seq, "snapshot"));
 
-		// Delete chunks older than a past timestamp — nothing should be deleted
-		const past = new Date(Date.now() - 60_000).toISOString();
-		const deleted = dal.deleteChunksOlderThan(past);
-		expect(deleted).toBe(0);
+		dal.insertSnapshot({
+			channelId: "ch-backlog",
+			seq: 6,
+			dataBlob: Buffer.from("x"),
+			uncompressedLen: 1,
+		});
 
-		expect(dal.getChunk(id)).toBeDefined();
-	});
-
-	it("deleteChunksOlderThan preserves the last snapshot per channel regardless of age", () => {
-		setup();
-		// Insert output + two snapshots — all with old-enough timestamps so the
-		// future cutoff would normally delete them all.
-		const idOut = dal.insertChunk(makeChunkInput("ch-gc", 1, "output"));
-		const idSnap1 = dal.insertChunk(makeChunkInput("ch-gc", 2, "snapshot"));
-		const idSnap2 = dal.insertChunk(makeChunkInput("ch-gc", 3, "snapshot"));
-
-		// Sanity: all three exist before GC
-		expect(dal.getChunk(idOut)).toBeDefined();
-		expect(dal.getChunk(idSnap1)).toBeDefined();
-		expect(dal.getChunk(idSnap2)).toBeDefined();
-
-		// GC with a future cutoff — all chunks are "old"
-		const future = new Date(Date.now() + 60_000).toISOString();
-		const deleted = dal.deleteChunksOlderThan(future);
-
-		// Output chunk + first (non-last) snapshot deleted; last snapshot kept
-		expect(deleted).toBe(2);
-		expect(dal.getChunk(idOut)).toBeUndefined();
-		expect(dal.getChunk(idSnap1)).toBeUndefined();
-		// Last snapshot (highest seq) must survive
-		expect(dal.getChunk(idSnap2)).toBeDefined();
-	});
-
-	it("deleteChunksOlderThan preserves last snapshot independently per channel", () => {
-		setup();
-		// Two channels each with one snapshot — both snapshots must survive GC
-		const snapA = dal.insertChunk(makeChunkInput("ch-gcA", 1, "snapshot"));
-		const snapB = dal.insertChunk(makeChunkInput("ch-gcB", 1, "snapshot"));
-
-		const future = new Date(Date.now() + 60_000).toISOString();
-		const deleted = dal.deleteChunksOlderThan(future);
-
-		// No output chunks — nothing to delete (both snapshots are last for their channel)
-		expect(deleted).toBe(0);
-		expect(dal.getChunk(snapA)).toBeDefined();
-		expect(dal.getChunk(snapB)).toBeDefined();
+		expect(dal.getChunksByChannel("ch-backlog").map((c) => c.seq)).toEqual([1, 2, 3, 4, 6]);
 	});
 
 	// -------------------------------------------------------------------------
@@ -311,77 +289,125 @@ describe("SpoolDAL", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// listChannelIds
+	// nextChannelId
 	// -------------------------------------------------------------------------
 
-	it("listChannelIds returns distinct channel ids with chunks", () => {
+	it("nextChannelId walks the channels with chunks in id order", () => {
 		setup();
+		dal.insertChunk(makeChunkInput("ch-b", 1, "output"));
 		dal.insertChunk(makeChunkInput("ch-a", 1, "output"));
 		dal.insertChunk(makeChunkInput("ch-a", 2, "output"));
-		dal.insertChunk(makeChunkInput("ch-b", 1, "output"));
 
-		const ids = dal.listChannelIds();
-		expect(ids).toHaveLength(2);
-		expect(ids.sort()).toEqual(["ch-a", "ch-b"]);
-	});
-
-	it("listChannelIds returns empty array when no chunks exist", () => {
-		setup();
-		expect(dal.listChannelIds()).toEqual([]);
+		expect(dal.nextChannelId("")).toBe("ch-a");
+		expect(dal.nextChannelId("ch-a")).toBe("ch-b");
+		expect(dal.nextChannelId("ch-b")).toBeUndefined();
 	});
 
 	// -------------------------------------------------------------------------
-	// evictOldestChunks
+	// listChunkSizesBefore
 	// -------------------------------------------------------------------------
 
-	it("evictOldestChunks deletes oldest output chunks until under target", () => {
+	it("listChunkSizesBefore lists chunks below a seq, newest first, with their size", () => {
 		setup();
-		// Each "data-N" blob is 6 bytes; 3 output chunks = 18 bytes
-		dal.insertChunk(makeChunkInput("ch-ev", 1, "output"));
-		dal.insertChunk(makeChunkInput("ch-ev", 2, "output"));
-		dal.insertChunk(makeChunkInput("ch-ev", 3, "output"));
+		dal.insertChunk(makeChunkInput("ch-w", 1, "output")); // "data-1": 6 bytes
+		dal.insertChunk(makeChunkInput("ch-w", 2, "snapshot"));
+		dal.insertChunk({ ...makeChunkInput("ch-w", 3, "output"), dataBlob: Buffer.alloc(100) });
+		dal.insertChunk(makeChunkInput("ch-x", 1, "output"));
 
-		// Target 12 bytes → need to delete 1 chunk (18-6=12)
-		const deleted = dal.evictOldestChunks("ch-ev", 12);
-		expect(deleted).toBe(1);
-		expect(dal.getChannelSize("ch-ev")).toBe(12);
-
-		// Oldest (seq=1) deleted, seq 2 and 3 remain
-		const remaining = dal.getChunksByChannel("ch-ev");
-		expect(remaining.map((c) => c.seq)).toEqual([2, 3]);
+		const rows = dal.listChunkSizesBefore("ch-w", Number.MAX_SAFE_INTEGER, 2);
+		expect(rows.map((r) => [r.seq, r.kind, r.bytes])).toEqual([
+			[3, "output", 100],
+			[2, "snapshot", 6],
+		]);
+		expect(typeof rows[0]?.ts).toBe("string");
+		expect(dal.listChunkSizesBefore("ch-w", 2, 10).map((r) => r.seq)).toEqual([1]);
 	});
 
-	it("evictOldestChunks preserves snapshots even if over target", () => {
-		setup();
-		// 1 output (6 bytes) + 1 snapshot (6 bytes) = 12 bytes
-		dal.insertChunk(makeChunkInput("ch-ev2", 1, "output"));
-		dal.insertChunk(makeChunkInput("ch-ev2", 2, "snapshot"));
+	// -------------------------------------------------------------------------
+	// deleteChunkBatch
+	// -------------------------------------------------------------------------
 
-		// Target 6 bytes → evict output, but snapshot stays
-		const deleted = dal.evictOldestChunks("ch-ev2", 6);
-		expect(deleted).toBe(1);
-		// Only snapshot remains (6 bytes) — at target
-		expect(dal.getChannelSize("ch-ev2")).toBe(6);
-		expect(dal.getChunksByChannel("ch-ev2")).toHaveLength(1);
-		expect(dal.getChunksByChannel("ch-ev2")[0]?.kind).toBe("snapshot");
+	function seqs(channelId: string): number[] {
+		return dal.getChunksByChannel(channelId).map((c) => c.seq);
+	}
+
+	it("deleteChunkBatch deletes oldest first within its range, up to maxRows", () => {
+		setup();
+		for (let seq = 1; seq <= 6; seq++) dal.insertChunk(makeChunkInput("ch-d", seq, "output"));
+		dal.insertChunk(makeChunkInput("ch-other", 1, "output"));
+		const range = { afterSeq: Number.MIN_SAFE_INTEGER, throughSeq: 5, kinds: "all" } as const;
+
+		const first = dal.deleteChunkBatch("ch-d", range, { maxRows: 2, maxBytes: 1 << 20 });
+		expect(first).toEqual({ deleted: 2, bytes: 12, lastSeq: 2 });
+		expect(seqs("ch-d")).toEqual([3, 4, 5, 6]);
+
+		const second = dal.deleteChunkBatch(
+			"ch-d",
+			{ ...range, afterSeq: 2 },
+			{ maxRows: 10, maxBytes: 1 << 20 },
+		);
+		expect(second).toEqual({ deleted: 3, bytes: 18, lastSeq: 5 });
+		expect(seqs("ch-d")).toEqual([6]);
+
+		expect(
+			dal.deleteChunkBatch("ch-d", { ...range, afterSeq: 5 }, { maxRows: 10, maxBytes: 1 << 20 }),
+		).toEqual({ deleted: 0, bytes: 0, lastSeq: undefined });
+		expect(seqs("ch-other")).toEqual([1]);
 	});
 
-	it("evictOldestChunks stops when only snapshots remain even if still over target", () => {
+	it("deleteChunkBatch stops at the row that reaches maxBytes", () => {
 		setup();
-		// 2 snapshots = 12 bytes, no output
-		dal.insertChunk(makeChunkInput("ch-ev3", 1, "snapshot"));
-		dal.insertChunk(makeChunkInput("ch-ev3", 2, "snapshot"));
+		for (let seq = 1; seq <= 4; seq++) dal.insertChunk(makeChunkInput("ch-d", seq, "output"));
 
-		// Target 0 → can't delete snapshots
-		const deleted = dal.evictOldestChunks("ch-ev3", 0);
-		expect(deleted).toBe(0);
-		expect(dal.getChannelChunkCount("ch-ev3")).toBe(2);
+		const batch = dal.deleteChunkBatch(
+			"ch-d",
+			{ afterSeq: Number.MIN_SAFE_INTEGER, throughSeq: Number.MAX_SAFE_INTEGER, kinds: "all" },
+			{ maxRows: 10, maxBytes: 7 },
+		);
+
+		expect(batch).toEqual({ deleted: 2, bytes: 12, lastSeq: 2 });
+		expect(seqs("ch-d")).toEqual([3, 4]);
 	});
 
-	it("evictOldestChunks returns 0 when already under target", () => {
+	it("deleteChunkBatch deletes only snapshots, or only the rest, when asked", () => {
 		setup();
-		dal.insertChunk(makeChunkInput("ch-ev4", 1, "output")); // 6 bytes
-		const deleted = dal.evictOldestChunks("ch-ev4", 100);
-		expect(deleted).toBe(0);
+		dal.insertChunk(makeChunkInput("ch-k", 1, "output"));
+		dal.insertChunk(makeChunkInput("ch-k", 2, "snapshot"));
+		dal.insertChunk(makeChunkInput("ch-k", 3, "resize"));
+		dal.insertChunk(makeChunkInput("ch-k", 4, "snapshot"));
+		const all = { afterSeq: Number.MIN_SAFE_INTEGER, throughSeq: Number.MAX_SAFE_INTEGER };
+		const limits = { maxRows: 10, maxBytes: 1 << 20 };
+
+		expect(
+			dal.deleteChunkBatch("ch-k", { ...all, throughSeq: 3, kinds: "snapshots" }, limits),
+		).toEqual({
+			deleted: 1,
+			bytes: 6,
+			lastSeq: 2,
+		});
+		expect(seqs("ch-k")).toEqual([1, 3, 4]);
+
+		expect(dal.deleteChunkBatch("ch-k", { ...all, kinds: "others" }, limits).deleted).toBe(2);
+		expect(seqs("ch-k")).toEqual([4]);
+	});
+
+	// -------------------------------------------------------------------------
+	// incrementalVacuum
+	// -------------------------------------------------------------------------
+
+	it("incrementalVacuum frees a bounded number of pages and says how many are left", () => {
+		setup();
+		const blob = Buffer.alloc(64 * 1024);
+		for (let seq = 1; seq <= 16; seq++) {
+			dal.insertChunk({ ...makeChunkInput("ch-v", seq, "output"), dataBlob: blob });
+		}
+		dal.deleteChunksForChannel("ch-v");
+		const free = dbs.spool.pragma("freelist_count", { simple: true }) as number;
+		expect(free).toBeGreaterThan(20);
+
+		expect(dal.incrementalVacuum(10)).toBe(free - 10);
+		let left = free - 10;
+		while (left > 0) left = dal.incrementalVacuum(10);
+		expect(dbs.spool.pragma("freelist_count", { simple: true })).toBe(0);
 	});
 });

@@ -465,7 +465,7 @@ export class SessionManager {
 			}
 		};
 
-		this.gc = new SpoolGarbageCollector(spoolDal, metaDal, gcConfig);
+		this.gc = new SpoolGarbageCollector(spoolDal, metaDal, gcConfig, { logger: hubLogger ?? null });
 		this.gc.start();
 	}
 
@@ -1792,6 +1792,7 @@ export class SessionManager {
 		if (!agent) return;
 		const resizeMsg: ResizeMessage = { type: "RESIZE", channelId, cols, rows };
 		agent.send(resizeMsg);
+		this.ctx.scheduler.onResize(channelId);
 		channel.cols = cols;
 		channel.rows = rows;
 		this.ctx.metaDal.updateChannelDimensions(channelId, cols, rows);

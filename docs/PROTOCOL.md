@@ -134,8 +134,10 @@ First message, sent immediately on start.
 }
 ```
 
-The hub records `available_shells` and `default_shell` on the host, and seeds a launch profile
-for each shell.
+The hub records them on the host as `discovered_shells` and `discovered_default_shell` (§ 6), and
+seeds a launch profile for each shell, marking the default one's as the host's default profile.
+The agent's `default_shell` never goes to the host's `default_shell`, which is the user's choice
+(#794).
 
 **Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all five, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
@@ -683,8 +685,9 @@ Hub passes RESIZE on to the agent and stores the size; it sends it to no other c
   type: "SPAWN",
   host_id: string,
   request_id?: string, // a ULID naming this SPAWN, echoed in what answers it (below)
-  shell?: string,     // default: the launch profile's, else the host's first profile's, else none: the agent's default (§ 3.2)
-  args?: string[],    // default: taken with the shell, as above
+  shell?: string,     // default: the launch profile's, else the host's `default_shell` (#794), else the host's
+                      // first profile's, else none: the agent's default (§ 3.2)
+  args?: string[],    // default: taken with the shell, as above; none with the host's `default_shell`
   cwd?: string,       // default: the launch profile's, else none: the agent starts the shell in its user's home (§ 3.2)
   env?: Record<string, string>,  // set over the scopes' and the launch profile's (max 256 entries)
   cols?: number,      // 1 to 500; default 80
@@ -1683,6 +1686,28 @@ address, and key auth a key path, sent or stored: `{ ssh_auth: "key" }` with non
 ssh_key_path: null }` is not.
 
 A field these routes do not know is ignored.
+
+**Host:** what `GET /api/hosts` and the routes above answer: the CreateHost fields as stored,
+`id`, `sort_order`, `created_at` and `updated_at`, and what the hub records of the host on its
+own, which no route writes:
+
+```typescript
+{
+  discovered_shells?: string[],      // the shells its agent reported at the last connection (§ 3.1)
+  discovered_shells_at?: string,     // when, ISO 8601
+  discovered_default_shell?: string, // the one its agent starts when told none: SHELL, or COMSPEC (#794)
+  ssh_fingerprint: string | null,    // the host key pinned, null until one is
+  ssh_proxy_fingerprint?: string,    // the key pinned for a jump given as a spec
+  agent_sha256?: string              // the agent binary pinned
+}
+```
+
+`default_shell` is the user's Default Shell, and only a route writes it: a terminal opened with no
+shell and no launch profile starts it, with no arguments (§ 4.4). It is started only when it keeps
+the rule of a SPAWN's `shell`, an absolute path and not a command (SECURITY.md § 5.1); empty, or
+not keeping it, such a terminal starts the host's first profile, as before. Edit Host shows
+`discovered_default_shell` in the empty field, and says when the hub would not start what is
+typed (#794).
 
 **CreateGroup:** (tab channel groups; no other key)
 ```typescript

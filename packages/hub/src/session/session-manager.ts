@@ -110,6 +110,7 @@ import {
 } from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import {
+	chosenDefaultShell,
 	envNamesIgnoreCase,
 	resolveEnvironmentChanges,
 	spawnEnvironmentFields,
@@ -1281,7 +1282,15 @@ export class SessionManager {
 					}
 				}
 
+				// ── The host's Default Shell ──────────────────────────────────────────
+				// A terminal opened with no shell and no launch profile starts the
+				// shell the user chose for its host (#794), as it is, with no
+				// arguments. A profile named in the request still wins.
+				if (resolvedShell === undefined) resolvedShell = chosenDefaultShell(host);
+
 				// ── First-profile fallback ────────────────────────────────────────────
+				// With none chosen, as before: the first profile the host lists, an
+				// SSH host's default one first.
 				if (resolvedShell === undefined) {
 					const firstProfile =
 						host.type === "ssh"

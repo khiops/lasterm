@@ -81,7 +81,7 @@ CREATE TABLE hosts (
   profile_json TEXT,                                     -- JSON: layer 3 theme/config overrides
   trust_remote_hints TEXT NOT NULL DEFAULT 'apply'
               CHECK(trust_remote_hints IN ('apply', 'ask', 'ignore')),
-  default_shell TEXT,
+  default_shell TEXT,                                    -- the user's Default Shell, never the agent's
   default_cwd   TEXT,
   created_at  TEXT NOT NULL,                             -- ISO 8601
   updated_at  TEXT NOT NULL,
@@ -101,12 +101,13 @@ CREATE TABLE hosts (
   ssh_proxy_host_id TEXT REFERENCES hosts(id) ON DELETE SET NULL,  -- a jump this hub knows
   ssh_proxy_spec TEXT,                                   -- or a jump as user@host:port
   ssh_proxy_fingerprint TEXT,                            -- that spec jump's pinned key
-  ssh_remote_daemon INTEGER                              -- NULL follows [ssh] remote_daemon (#79)
+  ssh_remote_daemon INTEGER,                             -- NULL follows [ssh] remote_daemon (#79)
+  discovered_default_shell TEXT                          -- the default shell its agent reported (023)
 );
 ```
 
 The columns keep the order the migrations before the baseline added them in (§ 9.3), which is
-why `created_at` is not last.
+why `created_at` is not last, and the ones after it add theirs at the end (§ 9.4).
 
 ### 3.2 channel_groups
 
@@ -510,6 +511,7 @@ packages/hub/src/storage/migrations/
 ├── meta/
 │   ├── 021-baseline.sql
 │   ├── 022-unpadded-ssh-pins.sql
+│   ├── 023-discovered-default-shell.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -544,6 +546,7 @@ them. `spool.db` was not squashed: it still has its one migration.
 | Migration | What it does |
 |-----------|--------------|
 | `022-unpadded-ssh-pins.sql` | Takes the base64 padding off the SSH pins a hub before #717 wrote, 0.14.3 included: `hosts.ssh_fingerprint` and `hosts.ssh_proxy_fingerprint`, when one is `SHA256:` and 43 base64 characters followed by `=`. The hub spells a key as OpenSSH prints it and compares pins as they are, so without it every host pinned before would report a changed key. Any other value is left as it is. A hub before #717, run again on the database, would see each of these pins, and each one pinned since, as a changed key. |
+| `023-discovered-default-shell.sql` | Adds `hosts.discovered_default_shell`, where the default shell a host's agent reports in its HELLO goes from now on (#794). A hub before it wrote that shell into `default_shell` at every connection, over the Default Shell the user chose. What `default_shell` holds cannot say whose it is, so a host that has connected (`discovered_shells` set) has its value moved to the new column and `default_shell` emptied: each connection had written the agent's there, and one the user typed since the last would have been overwritten at the next. A host that never connected keeps it: no agent could have written it. A hub before #794, run again on the database, ignores the new column and writes the agent's default into `default_shell` again at the next connection. |
 
 ## 10. Backup & Restore
 

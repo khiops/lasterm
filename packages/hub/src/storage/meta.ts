@@ -193,8 +193,8 @@ export class MetaDAL {
 		return this.hosts.updateHostProfile(id, profileJson);
 	}
 
-	updateHostDiscoveredShells(hostId: string, shells: string[], defaultShell?: string): void {
-		this.hosts.updateHostDiscoveredShells(hostId, shells, defaultShell);
+	updateHostDiscoveredShells(hostId: string, shells: string[], reportedDefault?: string): void {
+		this.hosts.updateHostDiscoveredShells(hostId, shells, reportedDefault);
 	}
 
 	// ─── Groups ─────────────────────────────────────────────────────────────

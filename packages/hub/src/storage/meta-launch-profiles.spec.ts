@@ -416,20 +416,29 @@ describe("MetaDAL — Launch Profiles", () => {
 			expect(host?.discoveredShellsAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 		});
 
-		it("updates defaultShell when provided", () => {
+		it("records the agent's default shell apart, when provided", () => {
 			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash"], "/bin/bash");
 			const host = dal.getHost(localHostId);
-			expect(host?.defaultShell).toBe("/bin/bash");
+			expect(host?.discoveredDefaultShell).toBe("/bin/bash");
+			expect(host?.defaultShell).toBeUndefined();
 		});
 
-		it("does not update defaultShell when not provided", () => {
-			// Set a default_shell first
+		// The user's Default Shell lasted until the next connection (#794).
+		it("leaves the Default Shell the user chose as it is, whatever the agent reports", () => {
 			dal.updateHost(localHostId, { defaultShell: "/bin/zsh" });
-			// Update discovered shells without defaultShell
-			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash"]);
+
+			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash", "/bin/zsh"], "/bin/bash");
+
 			const host = dal.getHost(localHostId);
-			// defaultShell should remain /bin/zsh
 			expect(host?.defaultShell).toBe("/bin/zsh");
+			expect(host?.discoveredDefaultShell).toBe("/bin/bash");
+		});
+
+		it("keeps the agent's default shell when none is provided", () => {
+			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash"], "/bin/bash");
+			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash", "/bin/zsh"]);
+			const host = dal.getHost(localHostId);
+			expect(host?.discoveredDefaultShell).toBe("/bin/bash");
 		});
 	});
 

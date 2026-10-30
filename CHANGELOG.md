@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.15.0](https://github.com/khiops/lasterm/compare/v0.14.3...v0.15.0) (2026-10-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **hub:** the pre-release cleanup (#743, #751 and this change) drops hubs and agents of 0.12 and earlier, and daemon connections without AUTH and a hub key; a SPAWN without `env_mode`, an AUTH without `hub_key` and a CHANNEL_STATE_END without `other_owner_channels` are no longer understood.
+
+### Bug Fixes
+
+* **agent:** answer an ATTACH whose snapshot request is dropped ([a3dacb8](https://github.com/khiops/lasterm/commit/a3dacb8fcb70e538605e33efd8241cd483e7a938))
+* **agent:** give each terminal its own input queue, so one that takes no input holds up nothing else ([#761](https://github.com/khiops/lasterm/issues/761)) ([cd952a9](https://github.com/khiops/lasterm/commit/cd952a9a8b83ef9db9ec25edeaf41e43f91ad0a4)), closes [#740](https://github.com/khiops/lasterm/issues/740)
+* **agent:** hold back a hub's terminals while it does not read ([ebef416](https://github.com/khiops/lasterm/commit/ebef4167c3f22db9ad6a63255ac7b1c75f184807)), closes [#553](https://github.com/khiops/lasterm/issues/553)
+* **agent:** hold back a hub's terminals while it does not read ([#736](https://github.com/khiops/lasterm/issues/736)) ([ebef416](https://github.com/khiops/lasterm/commit/ebef4167c3f22db9ad6a63255ac7b1c75f184807))
+* **agent:** stop a held-back terminal's input writer from spinning a core ([e48a9f5](https://github.com/khiops/lasterm/commit/e48a9f5fe8467cde56a1c849bab6735aa49221ee))
+* **agent:** stop a held-back terminal's input writer from spinning a core ([#779](https://github.com/khiops/lasterm/issues/779)) ([e48a9f5](https://github.com/khiops/lasterm/commit/e48a9f5fe8467cde56a1c849bab6735aa49221ee))
+* **hub:** close a timed-out command's channel, and give the SFTP probe the shell's start-up ([#770](https://github.com/khiops/lasterm/issues/770)) ([d37912c](https://github.com/khiops/lasterm/commit/d37912ceb7d5632a8e4246b17ff57f5b6c5f0316)), closes [#764](https://github.com/khiops/lasterm/issues/764)
+* **hub:** close an agent's connection on a malformed frame instead of throwing ([#771](https://github.com/khiops/lasterm/issues/771)) ([c801173](https://github.com/khiops/lasterm/commit/c8011738c259fee5eb1eaa73698db2e0b611feb2)), closes [#763](https://github.com/khiops/lasterm/issues/763)
+* **hub:** let only a SPAWN's own answers settle it ([a3dacb8](https://github.com/khiops/lasterm/commit/a3dacb8fcb70e538605e33efd8241cd483e7a938)), closes [#777](https://github.com/khiops/lasterm/issues/777)
+* **hub:** let only a SPAWN's own answers settle it, and answer every ATTACH the agent receives ([#781](https://github.com/khiops/lasterm/issues/781)) ([a3dacb8](https://github.com/khiops/lasterm/commit/a3dacb8fcb70e538605e33efd8241cd483e7a938))
+* **hub:** let only an ATTACH's own reply answer it, and say when a terminal drops input ([#775](https://github.com/khiops/lasterm/issues/775)) ([0c6ecb2](https://github.com/khiops/lasterm/commit/0c6ecb2e25a7b6db02af78f95c3b044f3384a1cb)), closes [#767](https://github.com/khiops/lasterm/issues/767)
+* **hub:** move an explicit port past one Windows reserves, as past a taken one ([d39dfaf](https://github.com/khiops/lasterm/commit/d39dfafb6e7f83aee1b2dd684c887c5a3454a99c)), closes [#573](https://github.com/khiops/lasterm/issues/573)
+* **hub:** move an explicit port past one Windows reserves, as past a taken one ([#772](https://github.com/khiops/lasterm/issues/772)) ([d39dfaf](https://github.com/khiops/lasterm/commit/d39dfafb6e7f83aee1b2dd684c887c5a3454a99c))
+* **hub:** open the databases with db.ts in the executable, and refuse a meta.db from before the baseline ([#756](https://github.com/khiops/lasterm/issues/756)) ([f08889c](https://github.com/khiops/lasterm/commit/f08889c2427e0be7004732b0493e43e76e6af183))
+* **hub:** open the databases with db.ts in the single executable ([f08889c](https://github.com/khiops/lasterm/commit/f08889c2427e0be7004732b0493e43e76e6af183)), closes [#745](https://github.com/khiops/lasterm/issues/745)
+* **hub:** put a duplicated host in its original's group, right after it ([#752](https://github.com/khiops/lasterm/issues/752)) ([86618c4](https://github.com/khiops/lasterm/commit/86618c4a8c3513d79ea6b4c127ff003b79e2f3e5)), closes [#746](https://github.com/khiops/lasterm/issues/746)
+* **hub:** reach a Windows host whose OpenSSH shell is PowerShell ([#738](https://github.com/khiops/lasterm/issues/738)) ([d4af267](https://github.com/khiops/lasterm/commit/d4af2671d369a3f1b971b8021177e53c31cd5acf)), closes [#714](https://github.com/khiops/lasterm/issues/714)
+* **hub:** read Windows replies past what a PowerShell profile prints ([e37d9a0](https://github.com/khiops/lasterm/commit/e37d9a08facc7760da4df34e4805777d6f20783a)), closes [#749](https://github.com/khiops/lasterm/issues/749)
+* **hub:** read Windows replies past what a PowerShell profile prints ([#762](https://github.com/khiops/lasterm/issues/762)) ([e37d9a0](https://github.com/khiops/lasterm/commit/e37d9a08facc7760da4df34e4805777d6f20783a))
+* **hub:** refuse a meta.db from before the migration baseline ([f08889c](https://github.com/khiops/lasterm/commit/f08889c2427e0be7004732b0493e43e76e6af183)), closes [#747](https://github.com/khiops/lasterm/issues/747)
+* **hub:** replace a running Windows agent instead of writing over it ([#729](https://github.com/khiops/lasterm/issues/729)) ([39ee0e9](https://github.com/khiops/lasterm/commit/39ee0e9997f2fed70cc50275b0ccb642f015ef89))
+* **hub:** run on stdio, and say why, where the SSH server refuses socket forwarding ([#778](https://github.com/khiops/lasterm/issues/778)) ([2dd41e1](https://github.com/khiops/lasterm/commit/2dd41e1a6750e4541a2140cacec0efac9cd7b766)), closes [#765](https://github.com/khiops/lasterm/issues/765)
+* **hub:** send the agent over an exec channel where the server offers no SFTP ([#723](https://github.com/khiops/lasterm/issues/723)) ([c94f0f7](https://github.com/khiops/lasterm/commit/c94f0f7c4ad3a469a81d5bdd5f623c511b484641))
+* **hub:** spell SHA-256 fingerprints as OpenSSH does ([#717](https://github.com/khiops/lasterm/issues/717)) ([c64517b](https://github.com/khiops/lasterm/commit/c64517bc6114cbd909d45d8edae6daae74684152)), closes [#715](https://github.com/khiops/lasterm/issues/715)
+* **hub:** stop the agent upload waiting on a closed SFTP channel ([#727](https://github.com/khiops/lasterm/issues/727)) ([89a7ade](https://github.com/khiops/lasterm/commit/89a7ade78d52e2d25d2376b9b0b2b8f5c5aac2bf)), closes [#710](https://github.com/khiops/lasterm/issues/710)
+* **hub:** store an uploaded SSH key in the folder the picker shows ([#774](https://github.com/khiops/lasterm/issues/774)) ([a3b9231](https://github.com/khiops/lasterm/commit/a3b9231f9567cdb013e22bc47e281fbd7a513d8f)), closes [#768](https://github.com/khiops/lasterm/issues/768)
+* **hub:** take the padding off SSH pins a 0.14.3 hub stored ([#759](https://github.com/khiops/lasterm/issues/759)) ([85e3d79](https://github.com/khiops/lasterm/commit/85e3d798dd1518ecd541ce1628022ce95e833b29))
+* **root:** fit the 0.15.0 Store What's new, and check it on every pull request ([#780](https://github.com/khiops/lasterm/issues/780)) ([7ccedba](https://github.com/khiops/lasterm/commit/7ccedba91a7b64d3f1dbbe81069b69ac7fced50c))
+* **root:** install CI's apt packages from cached .deb files ([#735](https://github.com/khiops/lasterm/issues/735)) ([e7a411a](https://github.com/khiops/lasterm/commit/e7a411a2dc434c413b9a7f5b440d5992b584dca2))
+* **root:** save rust-cache from main only and give every CI job a timeout ([#744](https://github.com/khiops/lasterm/issues/744)) ([c12a65f](https://github.com/khiops/lasterm/commit/c12a65f9c93f5a65b68d573de1a8f0b20121c082)), closes [#741](https://github.com/khiops/lasterm/issues/741)
+* **web:** host dialog reads SSH config entries, and the rail says when hosts or groups did not load ([#757](https://github.com/khiops/lasterm/issues/757), [#758](https://github.com/khiops/lasterm/issues/758)) ([#766](https://github.com/khiops/lasterm/issues/766)) ([c8282bc](https://github.com/khiops/lasterm/commit/c8282bc9446dae7b7512254a391951c8c0fdc6a1))
+* **web:** name a host's group by its id in the banner and the rail tooltip ([#737](https://github.com/khiops/lasterm/issues/737)) ([a0f5bdf](https://github.com/khiops/lasterm/commit/a0f5bdf36104731cb030993379e3486791c258a3)), closes [#731](https://github.com/khiops/lasterm/issues/731)
+* **web:** read the hub's SSH config entries in camelCase in the host dialog ([#757](https://github.com/khiops/lasterm/issues/757)) ([c8282bc](https://github.com/khiops/lasterm/commit/c8282bc9446dae7b7512254a391951c8c0fdc6a1))
+* **web:** say in the rail that the hosts did not load, and keep hosts of unknown groups ([#758](https://github.com/khiops/lasterm/issues/758)) ([c8282bc](https://github.com/khiops/lasterm/commit/c8282bc9446dae7b7512254a391951c8c0fdc6a1))
+* **web:** say why the hub refused a host or group action ([#734](https://github.com/khiops/lasterm/issues/734)) ([da9635a](https://github.com/khiops/lasterm/commit/da9635a612ec423c8e21c6998aedb4e4b1865055))
+* **web:** say why the hub refused a host or group action ([#734](https://github.com/khiops/lasterm/issues/734)) ([#753](https://github.com/khiops/lasterm/issues/753)) ([da9635a](https://github.com/khiops/lasterm/commit/da9635a612ec423c8e21c6998aedb4e4b1865055))
+* **web:** say why the hub refused a host's save ([#730](https://github.com/khiops/lasterm/issues/730)) ([9f0f26b](https://github.com/khiops/lasterm/commit/9f0f26bf697fea450df8f5e3fb0019a543a2a9b8)), closes [#703](https://github.com/khiops/lasterm/issues/703)
+
+
+### Refactoring
+
+* **agent:** remove compatibility code no release needs ([#743](https://github.com/khiops/lasterm/issues/743)) ([2c8bdb8](https://github.com/khiops/lasterm/commit/2c8bdb82d3b19bb6a5fcfdc4f1a355ff93a87f9c))
+* **hub:** drop what the pre-release cleanup left behind ([#760](https://github.com/khiops/lasterm/issues/760)) ([ca870a3](https://github.com/khiops/lasterm/commit/ca870a31fa26dc457c95c12e7af52b7b0cafd9dd))
+* **hub:** remove hub-agent compatibility code no release needs ([#751](https://github.com/khiops/lasterm/issues/751)) ([9f76df1](https://github.com/khiops/lasterm/commit/9f76df1ca3be010d19473d243ad6849b97622418))
+* **web:** remove web-hub compatibility code no release needs ([#739](https://github.com/khiops/lasterm/issues/739)) ([dd83bc3](https://github.com/khiops/lasterm/commit/dd83bc36c51856552ef820ce1217bbdc0338a3ec))
+
+
+### Tests
+
+* **agent:** hold the stdio test long enough to fail without backpressure ([ebef416](https://github.com/khiops/lasterm/commit/ebef4167c3f22db9ad6a63255ac7b1c75f184807))
+* **hub:** let the SFTP probe's timeout message name the bound it came to ([#782](https://github.com/khiops/lasterm/issues/782)) ([33f9e8b](https://github.com/khiops/lasterm/commit/33f9e8bd7040ec734ca4b97a045e2d74bb175947))
+
+
+### Documentation
+
+* **root:** make PROTOCOL.md match the code ([#754](https://github.com/khiops/lasterm/issues/754)) ([5cdccab](https://github.com/khiops/lasterm/commit/5cdccabb85e3b205218a23525ab561358b4ff76e)), closes [#732](https://github.com/khiops/lasterm/issues/732)
+
 ## [0.14.3](https://github.com/khiops/lasterm/compare/v0.14.2...v0.14.3) (2026-10-27)
 
 

@@ -267,28 +267,6 @@ describe("SpoolDAL", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// deleteChunksForChannel
-	// -------------------------------------------------------------------------
-
-	it("deleteChunksForChannel removes all chunks and returns count", () => {
-		setup();
-		dal.insertChunk(makeChunkInput("ch-del", 1, "output"));
-		dal.insertChunk(makeChunkInput("ch-del", 2, "snapshot"));
-		dal.insertChunk(makeChunkInput("ch-other2", 1, "output"));
-
-		const deleted = dal.deleteChunksForChannel("ch-del");
-		expect(deleted).toBe(2);
-		expect(dal.getChannelChunkCount("ch-del")).toBe(0);
-		// Other channel unaffected
-		expect(dal.getChannelChunkCount("ch-other2")).toBe(1);
-	});
-
-	it("deleteChunksForChannel returns 0 for unknown channel", () => {
-		setup();
-		expect(dal.deleteChunksForChannel("ch-nope")).toBe(0);
-	});
-
-	// -------------------------------------------------------------------------
 	// nextChannelId
 	// -------------------------------------------------------------------------
 
@@ -401,7 +379,7 @@ describe("SpoolDAL", () => {
 		for (let seq = 1; seq <= 16; seq++) {
 			dal.insertChunk({ ...makeChunkInput("ch-v", seq, "output"), dataBlob: blob });
 		}
-		dal.deleteChunksForChannel("ch-v");
+		dbs.spool.prepare("DELETE FROM chunks WHERE channel_id = ?").run("ch-v");
 		const free = dbs.spool.pragma("freelist_count", { simple: true }) as number;
 		expect(free).toBeGreaterThan(20);
 

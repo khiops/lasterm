@@ -116,7 +116,7 @@ import {
 	spawnEnvMode,
 	wantsLoginShell,
 } from "./spawn-environment.js";
-import { SpoolGarbageCollector } from "./spool-gc.js";
+import { type GcPassStats, SpoolGarbageCollector } from "./spool-gc.js";
 import type { SshAgentDeployOptions } from "./ssh-agent.js";
 import { SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
@@ -572,8 +572,12 @@ export class SessionManager {
 		return this.metaDal;
 	}
 
-	getSpoolDal(): SpoolDAL {
-		return this.ctx.spoolDal;
+	/**
+	 * Delete the output of channels just deleted from meta.db, in the spool
+	 * GC's bounded batches (#786). Resolves once it is gone; never rejects.
+	 */
+	purgeChannelOutput(channelIds: readonly string[]): Promise<GcPassStats> {
+		return this.gc.purge(channelIds);
 	}
 
 	// ─── Client registry ──────────────────────────────────────────────────────

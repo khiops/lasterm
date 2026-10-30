@@ -126,6 +126,11 @@ export class ChannelsDAL {
 		return row ? rowToChannel(row) : undefined;
 	}
 
+	/** Whether meta.db has a row for this channel: one primary-key lookup. */
+	hasChannel(id: string): boolean {
+		return this.db.prepare("SELECT 1 FROM channels WHERE id = ?").get(id) !== undefined;
+	}
+
 	/** Look up a channel along with its host info (needed for respawn). */
 	getChannelWithHost(
 		channelId: string,

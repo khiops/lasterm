@@ -1,4 +1,4 @@
-import { ELEVATION_METHODS_ALL } from "@lasterm/shared";
+import { ELEVATION_METHODS_ALL, type Host } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -115,60 +115,206 @@ export function validateIconImage(
 	return null;
 }
 
-export function validateCreateHost(body: CreateHostBody): string | null {
-	if (!body.label || body.label.trim().length === 0) {
+/** A host's label: what the rail and `lasterm` name it by. */
+export function validateHostLabel(label: unknown): string | null {
+	if (typeof label !== "string" || label.trim().length === 0) {
 		return "Label is required";
 	}
-	if (body.label.length > 64) {
+	if (label.length > 64) {
 		return "Label must be 64 characters or fewer";
 	}
-	if (!/^[a-zA-Z0-9._-]+$/.test(body.label)) {
+	if (!/^[a-zA-Z0-9._-]+$/.test(label)) {
 		return "Label must contain only alphanumeric characters, dots, dashes, and underscores";
 	}
+	return null;
+}
+
+/** The address of an SSH host, as a client gives it. */
+function validateSshHostAddress(sshHost: unknown): string | null {
+	if (typeof sshHost !== "string" || sshHost === "" || sshHost.includes("\0")) {
+		return "ssh_host is required for SSH hosts and must not contain null bytes";
+	}
+	if (!/^[a-zA-Z0-9@._:-]+$/.test(sshHost)) {
+		return "ssh_host must contain only valid hostname characters";
+	}
+	return null;
+}
+
+/**
+ * The fields a host keeps as text, each cleared by null (#659, #792). JSON
+ * carries any value, and the column took a number or a boolean as text, or
+ * failed the write on an object (#795).
+ */
+const HOST_TEXT_FIELDS = [
+	"ssh_host",
+	"ssh_key_path",
+	"ssh_user",
+	"ssh_config_host",
+	"ssh_proxy_host_id",
+	"ssh_proxy_spec",
+	"icon_value",
+	"default_shell",
+	"default_cwd",
+	"host_group_id",
+	"profile_json",
+	"custom_command",
+] as const;
+
+/**
+ * The fields a host keeps as one of a few values. null clears the nullable
+ * ones; the others always hold one, and their column's CHECK answered
+ * anything else with a 500 (#795).
+ */
+const HOST_CHOICES: ReadonlyArray<{
+	field: string;
+	values: readonly string[];
+	nullable: boolean;
+	message: string;
+}> = [
+	{
+		field: "ssh_auth",
+		values: ["agent", "key", "password"],
+		nullable: true,
+		message: "ssh_auth must be 'agent', 'key', or 'password'",
+	},
+	{
+		field: "icon_type",
+		values: ["auto", "emoji", "image"],
+		nullable: false,
+		message: "icon_type must be 'auto', 'emoji', or 'image'",
+	},
+	{
+		field: "trust_remote_hints",
+		values: ["apply", "ask", "ignore"],
+		nullable: false,
+		message: "trust_remote_hints must be 'apply', 'ask', or 'ignore'",
+	},
+	{
+		field: "elevation_method",
+		values: ELEVATION_METHODS_ALL,
+		nullable: true,
+		message: `elevation_method must be one of: ${ELEVATION_METHODS_ALL.join(", ")}`,
+	},
+	{
+		field: "os",
+		values: ["linux", "darwin", "windows"],
+		nullable: true,
+		message: "os must be 'linux', 'darwin', or 'windows'",
+	},
+	{
+		field: "arch",
+		values: ["x64", "arm64"],
+		nullable: true,
+		message: "arch must be 'x64' or 'arm64'",
+	},
+];
+
+/**
+ * The rule each field a client sends keeps on its own, whatever the rest of
+ * the host: POST checks the fields of the host it creates, PUT those an edit
+ * changes (#795). What a field needs from the others is `validateSshSignIn`'s.
+ */
+function validateHostFields(fields: Record<string, unknown>): string | null {
+	for (const field of HOST_TEXT_FIELDS) {
+		const value = fields[field];
+		if (value !== undefined && value !== null && typeof value !== "string") {
+			return `${field} must be a string or null`;
+		}
+	}
+	for (const { field, values, nullable, message } of HOST_CHOICES) {
+		const value = fields[field];
+		if (value === undefined || (nullable && value === null)) continue;
+		if (typeof value !== "string" || !values.includes(value)) return message;
+	}
+	const daemon = fields.ssh_remote_daemon;
+	if (daemon !== undefined && daemon !== null && typeof daemon !== "boolean") {
+		return "ssh_remote_daemon must be boolean or null";
+	}
+	return validateSshPort(fields.ssh_port) ?? validateHostColor(fields.color);
+}
+
+/** How an SSH host is reached and signs in, its fields already checked one by one. */
+interface SshSignIn {
+	type: unknown;
+	ssh_host: string | null | undefined;
+	ssh_auth: string | null | undefined;
+	ssh_key_path: string | null | undefined;
+}
+
+/**
+ * What an SSH host needs to sign in: an address, and the key file when it
+ * signs in with a key. POST checks the host it creates, PUT the host as an
+ * edit will leave it (#795).
+ */
+function validateSshSignIn(host: SshSignIn): string | null {
+	if (host.type !== "ssh") return null;
+	if (!host.ssh_host) {
+		return "ssh_host is required for SSH hosts and must not contain null bytes";
+	}
+	// Left out, none is stored, as an import does; sent as null, it is refused
+	// as POST always did.
+	if (host.ssh_auth === null) return "ssh_auth must be 'agent', 'key', or 'password'";
+	if (host.ssh_auth === "key" && !host.ssh_key_path?.trim()) {
+		return "ssh_key_path is required when ssh_auth is 'key'";
+	}
+	return null;
+}
+
+export function validateCreateHost(body: CreateHostBody): string | null {
+	const labelError = validateHostLabel(body.label);
+	if (labelError) return labelError;
 	if (body.type !== "local" && body.type !== "ssh") {
 		return "type must be 'local' or 'ssh'";
 	}
+	const fieldsError = validateHostFields(body as unknown as Record<string, unknown>);
+	if (fieldsError) return fieldsError;
 	if (body.type === "ssh") {
-		if (!body.ssh_host || body.ssh_host.includes("\0")) {
-			return "ssh_host is required for SSH hosts and must not contain null bytes";
-		}
-		if (!/^[a-zA-Z0-9@._:-]+$/.test(body.ssh_host)) {
-			return "ssh_host must contain only valid hostname characters";
-		}
-		if (
-			body.ssh_auth !== undefined &&
-			body.ssh_auth !== "agent" &&
-			body.ssh_auth !== "key" &&
-			body.ssh_auth !== "password"
-		) {
-			return "ssh_auth must be 'agent', 'key', or 'password'";
-		}
-		if (body.ssh_auth === "key" && (!body.ssh_key_path || body.ssh_key_path.trim().length === 0)) {
-			return "ssh_key_path is required when ssh_auth is 'key'";
-		}
+		const addressError = validateSshHostAddress(body.ssh_host);
+		if (addressError) return addressError;
 	}
-	const portError = validateSshPort(body.ssh_port);
-	if (portError) return portError;
-	const colorError = validateHostColor(body.color);
-	if (colorError) return colorError;
-	if (
-		body.elevation_method !== undefined &&
-		body.elevation_method !== null &&
-		!(ELEVATION_METHODS_ALL as readonly string[]).includes(body.elevation_method)
-	) {
-		return `elevation_method must be one of: ${ELEVATION_METHODS_ALL.join(", ")}`;
+	return validateSshSignIn({
+		type: body.type,
+		ssh_host: body.ssh_host,
+		ssh_auth: body.ssh_auth,
+		ssh_key_path: body.ssh_key_path,
+	});
+}
+
+/** What an SSH host signs in with: an edit of one is checked on the whole host. */
+const SIGN_IN_FIELDS = ["type", "ssh_host", "ssh_auth", "ssh_key_path"] as const;
+
+/**
+ * POST's rules, for an edit of `stored`. Each field the body brings keeps its
+ * own. An edit of the type, the address or the sign-in is checked on the host
+ * as it will be once saved, the body's values over the stored ones: key auth
+ * needs a key path, given or kept (#795). An edit that changes none of them
+ * leaves the sign-in as it was, so a host stored before this check can still
+ * be renamed or moved.
+ */
+export function validateUpdateHost(stored: Host, body: UpdateHostBody): string | null {
+	const fields = body as unknown as Record<string, unknown>;
+	if (body.label !== undefined) {
+		const labelError = validateHostLabel(body.label);
+		if (labelError) return labelError;
 	}
-	if (
-		body.os !== undefined &&
-		body.os !== null &&
-		!["linux", "darwin", "windows"].includes(body.os)
-	) {
-		return "os must be 'linux', 'darwin', or 'windows'";
+	if (body.type !== undefined && body.type !== "local" && body.type !== "ssh") {
+		return "type must be 'local' or 'ssh'";
 	}
-	if (body.arch !== undefined && body.arch !== null && !["x64", "arm64"].includes(body.arch)) {
-		return "arch must be 'x64' or 'arm64'";
+	const fieldsError = validateHostFields(fields);
+	if (fieldsError) return fieldsError;
+
+	const host: SshSignIn = {
+		type: body.type ?? stored.type,
+		ssh_host: body.ssh_host !== undefined ? body.ssh_host : stored.sshHost,
+		ssh_auth: body.ssh_auth !== undefined ? body.ssh_auth : stored.sshAuth,
+		ssh_key_path: body.ssh_key_path !== undefined ? body.ssh_key_path : stored.sshKeyPath,
+	};
+	if (host.type === "ssh" && body.ssh_host != null) {
+		const addressError = validateSshHostAddress(body.ssh_host);
+		if (addressError) return addressError;
 	}
-	return null;
+	if (!SIGN_IN_FIELDS.some((field) => fields[field] !== undefined)) return null;
+	return validateSshSignIn(host);
 }
 
 function validateAndClampVisualProfile(vp: Record<string, unknown>): string | null {

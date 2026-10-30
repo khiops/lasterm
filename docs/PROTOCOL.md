@@ -1665,7 +1665,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
   default_cwd?: string,
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
   host_group_id?: string | null,      // host group ID
-  profile_json?: string | object,     // host-level terminal profile (Layer 3)
+  profile_json?: string | null,       // host-level terminal profile (Layer 3), as JSON text
   elevation_method?: 'sudo' | 'doas' | 'pkexec' | 'gsudo' | 'custom' | null,
   custom_command?: string,            // the elevation command, when elevation_method is "custom"
   os?: 'linux' | 'darwin' | 'windows' | null,
@@ -1676,6 +1676,14 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 **UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge). A field
 left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
 to 22), `ssh_user`, `ssh_key_path`, `default_shell` or `color` (#792).
+
+Both routes answer 400 `VALIDATION_ERROR` for a field of another type than the one above, or a
+value outside its choices (#795). An edit gets CreateHost's rules: each field it sends is checked
+as a new host's would be, and an edit of `type`, `ssh_host`, `ssh_auth` or `ssh_key_path` is checked
+on the host as it will be once saved, the stored values under the sent ones. An SSH host keeps an
+address, and key auth a key path, sent or stored: `{ ssh_auth: "key" }` with none, or
+`{ ssh_key_path: null }` on a host that stays on key auth, is refused; `{ ssh_auth: "agent",
+ssh_key_path: null }` is not.
 
 A field these routes do not know is ignored.
 

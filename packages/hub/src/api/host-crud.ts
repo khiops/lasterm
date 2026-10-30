@@ -1,14 +1,13 @@
-import { ELEVATION_METHODS_ALL, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
+import { toSnakeCase, validateCustomCommand } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
 	validateCreateHost,
-	validateHostColor,
 	validateIconImage,
 	validateProfileJson,
-	validateSshPort,
+	validateUpdateHost,
 } from "./hosts.js";
 import type { AnnounceHostsChange } from "./hosts-changed.js";
 import { parsePagination } from "./pagination.js";
@@ -162,29 +161,12 @@ export function registerHostCrudRoutes(
 				});
 			}
 
-			if (
-				body.ssh_remote_daemon !== undefined &&
-				body.ssh_remote_daemon !== null &&
-				typeof body.ssh_remote_daemon !== "boolean"
-			) {
-				return reply.code(400).send({
-					error: {
-						code: "VALIDATION_ERROR",
-						message: "ssh_remote_daemon must be boolean or null",
-					},
-				});
-			}
-
-			// A colour, or null to clear it (#659)
-			const colorError = validateHostColor(body.color);
-			if (colorError) {
-				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: colorError } });
-			}
-
-			// A port, or null to clear it, back to 22 (#792)
-			const portError = validateSshPort(body.ssh_port);
-			if (portError) {
-				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: portError } });
+			// POST's rules, on the host as it will be once saved (#795)
+			const validationError = validateUpdateHost(host, body);
+			if (validationError) {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: validationError } });
 			}
 
 			// An icon value is checked against the type it will have once saved.
@@ -203,22 +185,7 @@ export function registerHostCrudRoutes(
 				});
 			}
 
-			// Validate label if provided
 			if (body.label !== undefined) {
-				if (body.label.trim().length === 0 || body.label.length > 64) {
-					return reply.code(400).send({
-						error: { code: "VALIDATION_ERROR", message: "Label must be 1-64 characters" },
-					});
-				}
-				if (!/^[a-zA-Z0-9._-]+$/.test(body.label)) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message:
-								"Label must contain only alphanumeric characters, dots, dashes, and underscores",
-						},
-					});
-				}
 				// Duplicate label check (excluding self)
 				const labelConflict = metaDal.getHostByLabel(body.label.trim());
 				if (labelConflict && labelConflict.id !== request.params.id) {
@@ -256,20 +223,7 @@ export function registerHostCrudRoutes(
 				updateInput.sshRemoteDaemon = body.ssh_remote_daemon;
 			}
 			if (body.profile_json !== undefined) updateInput.profileJson = body.profile_json;
-			if (body.elevation_method !== undefined) {
-				if (
-					body.elevation_method !== null &&
-					!(ELEVATION_METHODS_ALL as readonly string[]).includes(body.elevation_method)
-				) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message: `elevation_method must be one of: ${ELEVATION_METHODS_ALL.join(", ")}`,
-						},
-					});
-				}
-				updateInput.elevationMethod = body.elevation_method;
-			}
+			if (body.elevation_method !== undefined) updateInput.elevationMethod = body.elevation_method;
 			if (body.custom_command !== undefined) {
 				// Validate custom_command if non-null (AUD-012)
 				if (body.custom_command != null) {
@@ -282,25 +236,8 @@ export function registerHostCrudRoutes(
 				}
 				updateInput.customCommand = body.custom_command;
 			}
-			if (body.os !== undefined) {
-				if (body.os !== null && !["linux", "darwin", "windows"].includes(body.os)) {
-					return reply.code(400).send({
-						error: {
-							code: "VALIDATION_ERROR",
-							message: "os must be 'linux', 'darwin', or 'windows'",
-						},
-					});
-				}
-				updateInput.os = body.os;
-			}
-			if (body.arch !== undefined) {
-				if (body.arch !== null && !["x64", "arm64"].includes(body.arch)) {
-					return reply.code(400).send({
-						error: { code: "VALIDATION_ERROR", message: "arch must be 'x64' or 'arm64'" },
-					});
-				}
-				updateInput.arch = body.arch;
-			}
+			if (body.os !== undefined) updateInput.os = body.os;
+			if (body.arch !== undefined) updateInput.arch = body.arch;
 
 			if (
 				("ssh_remote_daemon" in body || "os" in body) &&

@@ -157,6 +157,32 @@ describe("POST /api/hosts", () => {
 		});
 	});
 
+	// A field JSON brings as another type went to its column: as text, or as a
+	// 500 from SQLite (#795).
+	it.each([
+		[{ ssh_user: 5 }, "ssh_user must be a string or null"],
+		[{ default_shell: true }, "default_shell must be a string or null"],
+		[{ custom_command: 1 }, "custom_command must be a string or null"],
+		[{ label: 7 }, "Label is required"],
+		[{ ssh_auth: "token" }, "ssh_auth must be 'agent', 'key', or 'password'"],
+		[{ icon_type: "svg" }, "icon_type must be 'auto', 'emoji', or 'image'"],
+		[{ trust_remote_hints: "always" }, "trust_remote_hints must be 'apply', 'ask', or 'ignore'"],
+		[{ ssh_remote_daemon: "no" }, "ssh_remote_daemon must be boolean or null"],
+	])(
+		"refuses a field of another type or value, and creates nothing: %j",
+		async (field, message) => {
+			const before = (await server.inject({ method: "GET", url: "/api/hosts" })).json();
+			const res = await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "local", label: "typed", ...field },
+			});
+			expect(res.statusCode).toBe(400);
+			expect(res.json()).toEqual({ error: { code: "VALIDATION_ERROR", message } });
+			expect((await server.inject({ method: "GET", url: "/api/hosts" })).json()).toEqual(before);
+		},
+	);
+
 	it("returns 409 when label already exists", async () => {
 		await server.inject({
 			method: "POST",
@@ -436,6 +462,181 @@ describe("PUT /api/hosts/:id", () => {
 		expect(cleared.statusCode).toBe(200);
 		const row = dbs.meta.prepare("SELECT ssh_port FROM hosts WHERE id = ?").get(created.id);
 		expect(row).toEqual({ ssh_port: null });
+	});
+
+	// An edit is checked on the host as it will be once saved, the stored
+	// values under the body's, with the rules a new host keeps (#795).
+	describe("the sign-in, as the edit leaves it (#795)", () => {
+		const KEY_REQUIRED = {
+			error: {
+				code: "VALIDATION_ERROR",
+				message: "ssh_key_path is required when ssh_auth is 'key'",
+			},
+		};
+
+		async function sshHost(auth: Record<string, unknown>): Promise<string> {
+			const res = await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "ssh", label: "signs-in", ssh_host: "10.0.0.14", ...auth },
+			});
+			expect(res.statusCode).toBe(201);
+			return res.json<{ id: string }>().id;
+		}
+
+		function signIn(id: string): unknown {
+			return dbs.meta.prepare("SELECT ssh_auth, ssh_key_path FROM hosts WHERE id = ?").get(id);
+		}
+
+		it.each([
+			{ ssh_auth: "key" },
+			{ ssh_auth: "key", ssh_key_path: "" },
+			{ ssh_auth: "key", ssh_key_path: null },
+		])("refuses key auth with no key path, given or stored: %j", async (payload) => {
+			const id = await sshHost({ ssh_auth: "agent" });
+			const res = await server.inject({ method: "PUT", url: `/api/hosts/${id}`, payload });
+			expect(res.statusCode).toBe(400);
+			expect(res.json()).toEqual(KEY_REQUIRED);
+			expect(signIn(id)).toEqual({ ssh_auth: "agent", ssh_key_path: null });
+		});
+
+		it.each([
+			{ ssh_key_path: null },
+			{ ssh_key_path: "  " },
+			{ ssh_auth: "key", ssh_key_path: "" },
+		])("refuses clearing the key path of a host that stays on key auth: %j", async (payload) => {
+			const id = await sshHost({ ssh_auth: "key", ssh_key_path: "/home/pi/.ssh/id_ed25519" });
+			const res = await server.inject({ method: "PUT", url: `/api/hosts/${id}`, payload });
+			expect(res.statusCode).toBe(400);
+			expect(res.json()).toEqual(KEY_REQUIRED);
+			expect(signIn(id)).toEqual({
+				ssh_auth: "key",
+				ssh_key_path: "/home/pi/.ssh/id_ed25519",
+			});
+		});
+
+		// What Edit Host sends once the key gives way to the agent (#793).
+		it("switches a host from its key to the agent, the key path cleared", async () => {
+			const id = await sshHost({ ssh_auth: "key", ssh_key_path: "/home/pi/.ssh/id_ed25519" });
+			const res = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${id}`,
+				payload: { ssh_auth: "agent", ssh_key_path: null },
+			});
+			expect(res.statusCode).toBe(200);
+			expect(signIn(id)).toEqual({ ssh_auth: "agent", ssh_key_path: null });
+		});
+
+		it("takes key auth back with the key path it is given, or the one it keeps", async () => {
+			const id = await sshHost({ ssh_auth: "agent" });
+			const given = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${id}`,
+				payload: { ssh_auth: "key", ssh_key_path: "/home/pi/.ssh/id_rsa" },
+			});
+			expect(given.statusCode).toBe(200);
+			const kept = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${id}`,
+				payload: { ssh_auth: "key" },
+			});
+			expect(kept.statusCode).toBe(200);
+			expect(signIn(id)).toEqual({ ssh_auth: "key", ssh_key_path: "/home/pi/.ssh/id_rsa" });
+		});
+
+		it("refuses an SSH address cleared, or a local host made SSH with none", async () => {
+			const id = await sshHost({ ssh_auth: "agent" });
+			const cleared = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${id}`,
+				payload: { ssh_host: null },
+			});
+			expect(cleared.statusCode).toBe(400);
+			const local = (
+				await server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "local", label: "stays-local" },
+				})
+			).json<{ id: string }>();
+			const made = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${local.id}`,
+				payload: { type: "ssh" },
+			});
+			expect(made.statusCode).toBe(400);
+			for (const res of [cleared, made]) {
+				expect(res.json()).toEqual({
+					error: {
+						code: "VALIDATION_ERROR",
+						message: "ssh_host is required for SSH hosts and must not contain null bytes",
+					},
+				});
+			}
+			const rows = dbs.meta
+				.prepare("SELECT type, ssh_host FROM hosts WHERE id IN (?, ?) ORDER BY label")
+				.all(id, local.id);
+			expect(rows).toEqual([
+				{ type: "ssh", ssh_host: "10.0.0.14" },
+				{ type: "local", ssh_host: null },
+			]);
+		});
+
+		// A host stored before these checks, here with key auth and no key: an
+		// edit that leaves its sign-in alone, such as a move, still goes through.
+		it("does not refuse an edit that leaves the sign-in alone", async () => {
+			const id = await sshHost({ ssh_auth: "agent" });
+			dbs.meta.prepare("UPDATE hosts SET ssh_auth = 'key' WHERE id = ?").run(id);
+			const res = await server.inject({
+				method: "PUT",
+				url: `/api/hosts/${id}`,
+				payload: { label: "moved", host_group_id: null },
+			});
+			expect(res.statusCode).toBe(200);
+		});
+	});
+
+	// A field JSON brings as another type went to its column: as text, or as a
+	// 500 from SQLite (#795).
+	it.each([
+		[{ ssh_user: 5 }, "ssh_user must be a string or null"],
+		[{ ssh_user: {} }, "ssh_user must be a string or null"],
+		[{ default_shell: true }, "default_shell must be a string or null"],
+		[{ default_shell: ["/bin/sh"] }, "default_shell must be a string or null"],
+		[{ ssh_key_path: 22 }, "ssh_key_path must be a string or null"],
+		[{ custom_command: 1 }, "custom_command must be a string or null"],
+		[{ label: 7 }, "Label is required"],
+		[{ type: "vm" }, "type must be 'local' or 'ssh'"],
+		[{ ssh_auth: "token" }, "ssh_auth must be 'agent', 'key', or 'password'"],
+		[{ ssh_auth: null }, "ssh_auth must be 'agent', 'key', or 'password'"],
+		[{ icon_type: "svg" }, "icon_type must be 'auto', 'emoji', or 'image'"],
+		[{ trust_remote_hints: "always" }, "trust_remote_hints must be 'apply', 'ask', or 'ignore'"],
+		[{ ssh_host: "two words" }, "ssh_host must contain only valid hostname characters"],
+	])("refuses a field of another type or value, and stores nothing: %j", async (field, message) => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: {
+					type: "ssh",
+					label: "typed",
+					ssh_host: "10.0.0.15",
+					ssh_auth: "agent",
+					ssh_user: "pi",
+					default_shell: "/bin/zsh",
+				},
+			})
+		).json<{ id: string }>();
+		const before = dbs.meta.prepare("SELECT * FROM hosts WHERE id = ?").get(created.id);
+
+		const res = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: field,
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({ error: { code: "VALIDATION_ERROR", message } });
+		expect(dbs.meta.prepare("SELECT * FROM hosts WHERE id = ?").get(created.id)).toEqual(before);
 	});
 
 	// The dialog's Appearance tab, for the host the hub creates itself (#656).

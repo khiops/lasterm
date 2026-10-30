@@ -77,8 +77,8 @@ export function resolveEnvironmentChanges(
  *
  * It keeps the rule every shell a client names keeps, a SPAWN's and a launch
  * profile's: an absolute path, not a command (`validateShell`). The hosts
- * routes do not check it, so one that breaks the rule is not started either:
- * the terminal starts as with none, and Edit Host says why.
+ * routes check only that it is text, so one that breaks the rule is not
+ * started: the terminal starts as with none, and Edit Host says why.
  */
 export function chosenDefaultShell(host: Pick<Host, "defaultShell">): string | undefined {
 	const shell = host.defaultShell?.trim();

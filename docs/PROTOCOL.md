@@ -1038,9 +1038,10 @@ The hub sends PROMPT_CANCEL for an AUTH_PROMPT, a HOST_VERIFY (§ 4.9) or an AGE
 with a higher `delivery_epoch`, and when the connection the prompt was for is given up.
 
 **Security note:** The hub writes none of these secrets to disk. A password is used for the SSH
-handshake and dropped; one the server refused is replaced by the next one asked for. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min
-with `remember_session`, so that a reconnect needs no prompt; one that does not decrypt the key is
-dropped from it at once, before it is asked for again (#812). An elevation password is kept in the
+handshake and dropped; one the server refused is replaced by the next one asked for (#815). A key's
+passphrase is kept in the hub's memory, per host, for 60 s, or 15 min with `remember_session`, so
+that a reconnect needs no prompt; one that does not decrypt the key is dropped from it at once,
+before it is asked for again (#812). An elevation password is kept in the
 hub's memory, per host and client, for 5 min when it was typed to open an elevated terminal and
 15 min when it was typed to restart one, and sent to the agent in the SPAWN that needs it
 (SECURITY.md § 4.3).

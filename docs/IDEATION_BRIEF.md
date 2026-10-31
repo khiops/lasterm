@@ -24,8 +24,6 @@
 | Eternal Terminal | Repair SSH seulement, pas multi-session |
 | VS Code Remote | Lourd, IDE-centric, pas terminal-first |
 
-> Current competitors, with sources, are in [`COMPETITORS.md`](COMPETITORS.md) (2026-10-31); some rows above no longer hold.
-
 ## Proposed Solution
 
 **Approach:** Hub local (daemon Node.js) + agents distants (lancés via SSH stdio) + UI PWA (Vue 3 + xterm.js). Local-first avec cache SQLite obligatoire.

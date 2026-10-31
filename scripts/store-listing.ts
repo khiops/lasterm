@@ -2,6 +2,8 @@
 // Limits: Microsoft Learn (updated 2026-08-24):
 // https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/add-and-edit-store-listing-info
 // https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/add-additional-information
+// Publish mode: the app submission resource (updated 2026-03-10):
+// https://learn.microsoft.com/en-us/windows/uwp/monetize/manage-app-submissions#app-submission-resource
 // Partner Center JSON retains arbitrary fields and their original casing.
 // biome-ignore lint/suspicious/noExplicitAny: external submission schema is preserved, only mapped keys are changed.
 type JsonObject = Record<string, any>;
@@ -25,9 +27,10 @@ export interface Listing {
 //   node scripts/store-listing.ts <version> <submission.json> the submission, updated
 //
 // The submission is what `msstore submission get` prints. The updated one goes to
-// standard output, for `msstore submission update`. Exit code 3 means no line was
-// added since the previous release: Store users would be told nothing, and the
-// submission must stay a draft until someone writes its What's new.
+// standard output, for `msstore submission update`, set to go live as soon as it
+// passes certification. Exit code 3 means no line was added since the previous
+// release: Store users would be told nothing, and the submission must stay a
+// draft until someone writes its What's new.
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -220,6 +223,20 @@ export function applyListings(submission: JsonObject, listings: Listing[]) {
 	return { submission: updated };
 }
 
+/**
+ * The submission set to go live as soon as it passes certification. Each draft
+ * starts as a copy of the previous submission, so a manual mode chosen once in
+ * Partner Center would otherwise hold every later release back until someone
+ * publishes it there, and a date would hold it back until that date. The publish
+ * date, read only for `SpecificDate`, is left as it is. A submission without the
+ * field gets it in the API's casing.
+ */
+export function publishOnceCertified(submission: JsonObject) {
+	const updated = structuredClone(submission);
+	updated[keyOf(updated, "targetPublishMode") ?? "targetPublishMode"] = "Immediate";
+	return updated;
+}
+
 /** Every `listing-*.md` of this folder, parsed. */
 export function readListings(folder = HERE) {
 	const listings = readdirSync(folder)
@@ -320,10 +337,12 @@ export function main(argv: string[], cwd = ROOT): number {
 		fields: { ...listing.fields, releaseNotes: news[languageOf(listing)] ?? "" },
 	}));
 	const result = submissionPath
-		? applyListings(
-				JSON.parse(readFileSync(submissionPath, "utf8").replace(/^\uFEFF/, "")),
-				complete,
-			).submission
+		? publishOnceCertified(
+				applyListings(
+					JSON.parse(readFileSync(submissionPath, "utf8").replace(/^\uFEFF/, "")),
+					complete,
+				).submission,
+			)
 		: complete;
 	console.log(JSON.stringify(result, null, 2));
 	return 0;

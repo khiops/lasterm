@@ -596,6 +596,10 @@ jobs:
           # What's new is gathered from the lines added to packaging/store/news/
           # since the previous release. With none, Store users would be told
           # nothing: the draft waits for someone to write it instead.
+          # The updated submission also goes live as soon as it passes
+          # certification (publish mode Immediate): the draft copies the
+          # previous submission's mode, and a manual one would leave a
+          # certified release waiting for "Publish now" in Partner Center.
           status=0
           node scripts/store-listing.ts "$VERSION" "$RUNNER_TEMP/submission.json" \
             > "$RUNNER_TEMP/updated.json" || status=$?
@@ -608,4 +612,4 @@ jobs:
 
           msstore submission update "$PRODUCT_ID" --payload "$RUNNER_TEMP/updated.json"
           msstore submission publish "$PRODUCT_ID"
-          echo "Submitted $VERSION to the Store for certification." >> "$GITHUB_STEP_SUMMARY"
+          echo "Submitted $VERSION to the Store for certification. It goes live as soon as it passes." >> "$GITHUB_STEP_SUMMARY"

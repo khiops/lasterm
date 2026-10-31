@@ -20,6 +20,8 @@ const MAX_TITLE_STACK = 5;
  */
 const DEFAULT_FONT_FAMILY = '"Consolas", "Liberation Mono", "Courier New", monospace';
 const DEFAULT_FONT_SIZE = 14;
+/** xterm's scrollbar width when no ruler width is set (its `DEFAULT_SCROLL_BAR_WIDTH`). */
+const DEFAULT_XTERM_SCROLLBAR_WIDTH = 14;
 
 export function useTerminal(
 	containerRef: Ref<HTMLElement | null>,
@@ -48,14 +50,32 @@ export function useTerminal(
 	const canWrite = ref(true);
 
 	/**
-	 * Last cols/rows sent to the hub, used to avoid sending duplicate RESIZE
-	 * messages that would trigger unnecessary SIGWINCH → prompt redraws.
+	 * The size the PTY has, as far as this pane knows: the last one it sent, or
+	 * the one the hub said. A RESIZE for it again would only trigger a needless
+	 * SIGWINCH and a prompt redraw.
 	 */
 	let lastSentCols = 0;
 	let lastSentRows = 0;
 
 	/** Debounce timer for RESIZE messages */
 	let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/**
+	 * Whether this pane decides its terminal's size (#831).
+	 *
+	 * A terminal has one size, its PTY's, and one client decides it: the one
+	 * holding the write lock, which the pane is told with `setDecidesSize`. That
+	 * pane fits the terminal to itself and sends the hub its size. Every other
+	 * pane draws the terminal at the PTY's size, top-left, and sends none: it
+	 * would only fight the one deciding. With nobody holding the lock, nobody
+	 * decides, and the size stays put.
+	 */
+	let decidesSize = false;
+
+	/** The PTY's size as the hub last said it: in ATTACH_OK, then in CHANNEL_SIZE. */
+	let ptySize: { cols: number; rows: number } | null = null;
+
+	let sizeUnsubscribe: (() => void) | null = null;
 
 	/**
 	 * Title stack — tracks recent non-empty titles from xterm.js onTitleChange
@@ -85,11 +105,128 @@ export function useTerminal(
 	}
 
 	function sendResize(cols: number, rows: number): void {
-		if (!channelId || !wsClient.isConnected) return;
+		if (!channelId || !wsClient.isConnected || !decidesSize) return;
 		if (cols === lastSentCols && rows === lastSentRows) return;
 		lastSentCols = cols;
 		lastSentRows = rows;
 		wsClient.send({ type: "RESIZE", channelId, cols, rows });
+	}
+
+	/**
+	 * Whether the pane has a size of its own to give. One out of sight — a tab
+	 * in the background, a zone folded away — measures 0×0, and a fit to that
+	 * would hand the PTY two columns.
+	 */
+	function paneMeasurable(): boolean {
+		const el = containerRef.value;
+		return el !== null && el.clientWidth > 0 && el.clientHeight > 0;
+	}
+
+	/**
+	 * Size the terminal: to the pane when it decides the size, or while it has
+	 * not been told the PTY's; to the PTY's otherwise.
+	 */
+	function layout(): void {
+		const term = terminal.value;
+		if (!term) return;
+		if (decidesSize || ptySize === null) {
+			drawAtPaneSize(term);
+			if (!paneMeasurable()) return;
+			fitAddon.fit();
+			// Even when the fit changes nothing: a pane coming back into sight
+			// has the size it had, which the PTY may no longer have.
+			scheduleSync();
+		} else {
+			drawAtPtySize(term, ptySize);
+		}
+	}
+
+	/** Send the size shortly, once a run of resizes has settled. */
+	function scheduleSync(): void {
+		if (resizeTimer !== null) clearTimeout(resizeTimer);
+		resizeTimer = setTimeout(() => {
+			resizeTimer = null;
+			syncChannelSize();
+		}, 50);
+	}
+
+	/** Class the pane's container carries while it draws at the PTY's size. */
+	const FOLLOWS_CLASS = "terminal-container--follows";
+
+	/**
+	 * Draw the terminal at the PTY's size, top-left in its pane.
+	 *
+	 * Not scaled down to fit a smaller pane: xterm maps a click to a cell with
+	 * the cell size it measured, against the rectangle the browser reports, so
+	 * under a CSS transform selection and links land on the wrong cells. The
+	 * pane scrolls instead, and its text stays the size the profile says.
+	 */
+	function drawAtPtySize(term: Terminal, size: { cols: number; rows: number }): void {
+		containerRef.value?.classList.add(FOLLOWS_CLASS);
+		if (term.cols !== size.cols || term.rows !== size.rows) term.resize(size.cols, size.rows);
+		// xterm's element spans its pane, and its scrollbar its right edge: as
+		// wide as a fit to this size would have made the pane, it keeps the
+		// scrollbar against the last column and leaves the rest to the ground.
+		const cell = measuredCellWidth(term);
+		if (term.element && cell > 0) {
+			term.element.style.width = `${Math.ceil(size.cols * cell + fitScrollbarWidth(term))}px`;
+		}
+	}
+
+	/** Draw the terminal across its pane, as the one deciding its size does. */
+	function drawAtPaneSize(term: Terminal): void {
+		containerRef.value?.classList.remove(FOLLOWS_CLASS);
+		if (term.element) term.element.style.width = "";
+	}
+
+	/** The width the fit addon leaves for xterm's scrollbar, by its own rule. */
+	function fitScrollbarWidth(term: Terminal): number {
+		if (term.options.scrollback === 0) return 0;
+		return term.options.overviewRuler?.width || DEFAULT_XTERM_SCROLLBAR_WIDTH;
+	}
+
+	/**
+	 * The width of a cell as xterm measured it. xterm says it only through its
+	 * core, which is where the fit addon reads it too; 0 when it has not
+	 * measured one yet.
+	 */
+	function measuredCellWidth(term: Terminal): number {
+		const core = (
+			term as unknown as {
+				_core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number } } } } };
+			}
+		)._core;
+		return core?._renderService?.dimensions?.css?.cell?.width ?? 0;
+	}
+
+	/** The hub said the PTY's size: when attaching, and whenever it changes. */
+	function takePtySize(cols: number, rows: number): void {
+		ptySize = { cols, rows };
+		// The pane deciding the size knows the one it asked for; what the hub
+		// says is kept for the moment it stops deciding. Any other pane follows.
+		if (decidesSize) return;
+		lastSentCols = cols;
+		lastSentRows = rows;
+		layout();
+	}
+
+	/**
+	 * Say whether this pane decides its terminal's size: it does while its
+	 * client holds the write lock (#831). Taking the lock makes the pane's own
+	 * fit the terminal's size, at once; losing it makes the pane draw the
+	 * terminal at the size the hub says.
+	 */
+	function setDecidesSize(decides: boolean): void {
+		if (decidesSize === decides) return;
+		decidesSize = decides;
+		if (decides && ptySize !== null) {
+			// Compared with the PTY's real size, not with what this pane sent
+			// before someone else decided.
+			lastSentCols = ptySize.cols;
+			lastSentRows = ptySize.rows;
+		}
+		layout();
+		syncChannelSize();
 	}
 
 	/** Wait for the font this terminal will measure itself with. */
@@ -161,13 +298,16 @@ export function useTerminal(
 			}
 		});
 
-		// Terminal resize → send RESIZE to hub (debounced to coalesce rapid resizes)
-		term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
-			if (resizeTimer !== null) clearTimeout(resizeTimer);
-			resizeTimer = setTimeout(() => {
-				resizeTimer = null;
-				sendResize(cols, rows);
-			}, 50);
+		// Terminal resize → send RESIZE to hub (debounced to coalesce rapid
+		// resizes), when this pane decides the size and still has one of its own.
+		term.onResize(scheduleSync);
+
+		// The PTY's size changed: the pane draws at it unless it decides it (#831).
+		sizeUnsubscribe?.();
+		sizeUnsubscribe = wsClient.on("CHANNEL_SIZE", (msg) => {
+			if (msg.type === "CHANNEL_SIZE" && msg.channelId === channelId) {
+				takePtySize(msg.cols, msg.rows);
+			}
 		});
 
 		// What was typed went nowhere: the terminal takes no input, and its agent
@@ -182,12 +322,12 @@ export function useTerminal(
 
 		// Container resize → refit terminal
 		resizeObserver = new ResizeObserver(() => {
-			fitAddon.fit();
+			layout();
 		});
 		resizeObserver.observe(containerRef.value);
 		onScrollbarChanged = (): void => {
 			applyScrollbarWidth(term);
-			fitAddon.fit();
+			layout();
 		};
 		window.addEventListener("nt:scrollbar-changed", onScrollbarChanged);
 
@@ -242,9 +382,7 @@ export function useTerminal(
 		});
 
 		// Send initial RESIZE so the PTY matches our dimensions from the start
-		if (terminal.value) {
-			sendResize(terminal.value.cols, terminal.value.rows);
-		}
+		syncChannelSize();
 	}
 
 	/**
@@ -285,6 +423,8 @@ export function useTerminal(
 			cached: boolean;
 			/** Output between the snapshot and now was dropped rather than cut. */
 			truncated: boolean;
+			/** The PTY's size; null from a hub that does not say it. */
+			size: { cols: number; rows: number } | null;
 		}>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				unsubOk();
@@ -307,6 +447,10 @@ export function useTerminal(
 						displayTitle: uiMsg.displayTitle ?? null,
 						cached: uiMsg.cached === true,
 						truncated: uiMsg.truncated === true,
+						size:
+							typeof uiMsg.cols === "number" && typeof uiMsg.rows === "number"
+								? { cols: uiMsg.cols, rows: uiMsg.rows }
+								: null,
 					});
 				}
 			});
@@ -331,6 +475,16 @@ export function useTerminal(
 
 			wsClient.send({ type: "ATTACH", channelId: id });
 		});
+
+		// The PTY's size. A pane that does not decide it draws the screen below
+		// at that size, the one it was drawn for (#831). One that decides it
+		// compares its own with it, whatever it sent before: a restart spawned
+		// the PTY anew, or another client decided meanwhile.
+		if (result.size !== null) {
+			lastSentCols = result.size.cols;
+			lastSentRows = result.size.rows;
+			takePtySize(result.size.cols, result.size.rows);
+		}
 
 		// Restore snapshot if present (channelId still unset → no RESIZE sent)
 		if (terminal.value && result.snapshot && !opts?.preserveContent) {
@@ -375,11 +529,10 @@ export function useTerminal(
 			}
 		});
 
-		// Send ONE RESIZE with actual terminal dimensions so the PTY matches.
-		// This is debounced + dedup'd so ResizeObserver won't cause duplicates.
-		if (terminal.value) {
-			sendResize(terminal.value.cols, terminal.value.rows);
-		}
+		// Send ONE RESIZE with actual terminal dimensions so the PTY matches,
+		// when this pane decides it. Dedup'd so ResizeObserver won't cause
+		// duplicates.
+		syncChannelSize();
 
 		if (result.truncated) {
 			// A terminal cannot be handed a piece of a stream, so it was not: the
@@ -409,12 +562,18 @@ export function useTerminal(
 		if (!term) return;
 		lastSentCols = spawnedCols ?? term.cols;
 		lastSentRows = spawnedRows ?? term.rows;
+		// The size the PTY has: the pane holds it until the hub says it decides,
+		// then sends its fit if that differs (#831).
+		ptySize = { cols: lastSentCols, rows: lastSentRows };
 	}
 
-	/** Tell the channel the size the terminal actually has, if it differs. */
+	/**
+	 * Tell the channel the size the terminal actually has, if it differs: only
+	 * when this pane decides the size, and has one of its own (#831).
+	 */
 	function syncChannelSize(): void {
 		const term = terminal.value;
-		if (term) sendResize(term.cols, term.rows);
+		if (term && decidesSize && paneMeasurable()) sendResize(term.cols, term.rows);
 	}
 
 	/** Re-apply profile options (font, cursor, scrollback, scrollbar markers) to the live terminal. */
@@ -431,7 +590,7 @@ export function useTerminal(
 		// Bell audio handled by playBellSound() via onBell handler — not xterm.js
 		// bellStyle is not in the shipped @xterm/xterm type definition; cast to suppress
 		(term.options as Record<string, unknown>).bellStyle = "none";
-		fitAddon.fit();
+		layout();
 		// xterm measures a cell from the font in use, and a family just set — or
 		// still loading — is measured only once the browser has drawn with it. A
 		// fit in this tick keeps the old cell, which is how a PTY ended up 231
@@ -458,7 +617,7 @@ export function useTerminal(
 			requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
 		});
 		if (terminal.value !== term) return;
-		fitAddon.fit();
+		layout();
 	}
 
 	/**
@@ -493,6 +652,9 @@ export function useTerminal(
 		outputUnsubscribe = null;
 		inputDroppedUnsubscribe?.();
 		inputDroppedUnsubscribe = null;
+		sizeUnsubscribe?.();
+		sizeUnsubscribe = null;
+		ptySize = null;
 		if (onScrollbarChanged) {
 			window.removeEventListener("nt:scrollbar-changed", onScrollbarChanged);
 			onScrollbarChanged = null;
@@ -519,6 +681,7 @@ export function useTerminal(
 		applyProfile,
 		suppressNextResize,
 		syncChannelSize,
+		setDecidesSize,
 		dispose,
 		fitAddon,
 	};

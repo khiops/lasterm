@@ -68,6 +68,22 @@ describe("TerminalPane spawn size", () => {
 	});
 });
 
+// What a pane draws and sends is in composables/useTerminal.spec.ts.
+describe("TerminalPane: one size per terminal (#831)", () => {
+	it("decides its terminal's size while its client holds the write lock, and only then", () => {
+		const watcher = /watch\(\s*isWriter,[\s\S]*?\{ immediate: true \},?\s*\);/.exec(SOURCE)?.[0];
+		expect(watcher, "the isWriter watcher moved").toBeDefined();
+		expect(watcher).toContain("setDecidesSize(writerNow)");
+	});
+
+	it("gives a terminal drawn at another's size a ground of its own, and lets its pane scroll", () => {
+		const rule = /\.terminal-container\.terminal-container--follows\s*\{[^}]*\}/.exec(SOURCE)?.[0];
+		expect(rule, "no rule styles a pane that follows").toBeDefined();
+		expect(rule).toMatch(/overflow:\s*auto/);
+		expect(rule).toMatch(/background:/);
+	});
+});
+
 describe("TerminalPane recovery", () => {
 	const errorBlock = /class="terminal-error"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/.exec(SOURCE)?.[0];
 

@@ -139,7 +139,11 @@ First message, sent immediately on start.
 Command Prompt stays one of the `available_shells`. A Windows agent finds each PowerShell where its
 `PATH` first finds it (a Store install's alias in `WindowsApps` included), lists them in that order
 before `COMSPEC`, and names the default exactly as `available_shells` does, since the hub finds a
-shell's profile by its path.
+shell's profile by its path. A shell found inside a Store package, under
+`%ProgramFiles%\WindowsApps\<package>\`, is reported by its app execution alias,
+`%LOCALAPPDATA%\Microsoft\WindowsApps\<file name>`, or, when there is none, not at all: the search
+goes on in the next `PATH` directories. The package's directory is named for its version and goes
+with the next Store update, so it is never reported (#818).
 
 The hub records them on the host as `discovered_shells` and `discovered_default_shell` (§ 6), and
 seeds a launch profile for each shell, marking the default one's as the host's default profile

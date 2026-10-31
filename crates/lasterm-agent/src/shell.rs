@@ -1,6 +1,7 @@
 /// Detect available shells on the system.
 /// Linux/macOS: parse /etc/shells + check $SHELL
-/// Windows: pwsh and powershell, each where PATH first finds it, then COMSPEC
+/// Windows: pwsh and powershell, each where PATH first finds it, then COMSPEC;
+/// a Store package's by its alias (#818)
 pub fn detect_available_shells() -> Vec<String> {
     #[cfg(unix)]
     {
@@ -38,7 +39,9 @@ pub fn default_shell_among(detected: &[String]) -> String {
 /// A PowerShell is the one `detected` lists, spelled as it lists it: the hub
 /// finds a shell's profile by its path, so the default names the path it
 /// seeded one for. Detection lists the first of each that `PATH` finds, the
-/// one typing its name starts; were one listed twice, the first would win.
+/// one typing its name starts, and a Store package's by its alias, never by
+/// the directory its next update replaces (#818); were one listed twice, the
+/// first would win.
 pub fn default_shell(
     platform: crate::environment::Platform,
     detected: &[String],
@@ -166,48 +169,126 @@ fn detect_unix_shells() -> Vec<String> {
 
 #[cfg(windows)]
 fn detect_windows_shells() -> Vec<String> {
-    use std::path::Path;
+    windows_shells(
+        |name| std::env::var(name).ok(),
+        |path| std::path::Path::new(path).exists(),
+    )
+}
+
+/// The shells a Windows agent reports, as `var` reads its environment and
+/// `exists` its disks: `pwsh.exe` and `powershell.exe`, each where `PATH`
+/// first finds it, the Store's alias in WindowsApps included, then `COMSPEC`.
+/// That is the order the default is chosen in (#804), and the one a new
+/// host's profile menu lists them in. `cmd.exe` when none is found.
+///
+/// Every path is admitted by [`reported_windows_shell`], and listed once.
+#[cfg(any(windows, test))]
+fn windows_shells(
+    var: impl Fn(&str) -> Option<String>,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let path_var = var("PATH").unwrap_or_default();
+    let in_path = |name: &str| {
+        first_reported(
+            path_var
+                .split(';')
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| windows_join(dir, name)),
+            &var,
+            &exists,
+        )
+    };
+    let found = [
+        in_path("pwsh.exe"),
+        in_path("powershell.exe"),
+        first_reported(
+            var("COMSPEC").filter(|comspec| !comspec.is_empty()),
+            &var,
+            &exists,
+        ),
+    ];
 
     let mut shells: Vec<String> = Vec::new();
-
-    // pwsh.exe and powershell.exe, each where PATH first finds it, the Store's
-    // alias in WindowsApps included, then COMSPEC: the order the default is
-    // chosen in (#804), and the one a new host's profile menu lists them in
-    for name in &["pwsh.exe", "powershell.exe"] {
-        if let Some(path) = find_in_path(name) {
-            if !shells.contains(&path) {
-                shells.push(path);
-            }
+    for shell in found.into_iter().flatten() {
+        if !shells.contains(&shell) {
+            shells.push(shell);
         }
     }
-
-    // COMSPEC (usually cmd.exe)
-    if let Ok(comspec) = std::env::var("COMSPEC") {
-        if !comspec.is_empty() && Path::new(&comspec).exists() && !shells.contains(&comspec) {
-            shells.push(comspec);
-        }
-    }
-
-    // Fallback to cmd.exe
     if shells.is_empty() {
         shells.push("cmd.exe".into());
     }
-
     shells
 }
 
-#[cfg(windows)]
-fn find_in_path(name: &str) -> Option<String> {
-    use std::path::Path;
+/// The first of `candidates` that `exists`, as [`reported_windows_shell`]
+/// reports it: one it does not report leaves the search to the next.
+#[cfg(any(windows, test))]
+fn first_reported(
+    candidates: impl IntoIterator<Item = String>,
+    var: &impl Fn(&str) -> Option<String>,
+    exists: &impl Fn(&str) -> bool,
+) -> Option<String> {
+    candidates
+        .into_iter()
+        .filter(|candidate| exists(candidate))
+        .find_map(|found| reported_windows_shell(&found, var, exists))
+}
 
-    let path_var = std::env::var("PATH").ok()?;
-    for dir in path_var.split(';') {
-        let full = Path::new(dir).join(name);
-        if full.exists() {
-            return Some(full.to_string_lossy().into_owned());
+/// The path a Windows shell found at `found` is reported by (#818).
+///
+/// A Store app lives in a package directory under `%ProgramFiles%\WindowsApps`
+/// named for its version, which the app's next Store update replaces: a launch
+/// profile seeded with that path then fails to start (#816). Such a shell is
+/// reported by its app execution alias,
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps\<file name>`, which updates keep, or
+/// not at all when that alias does not exist. Any other path is reported as
+/// found.
+///
+/// `ProgramFiles` is `C:\Program Files` when unset or empty; paths are
+/// compared case aside, as Windows reads them.
+#[cfg(any(windows, test))]
+fn reported_windows_shell(
+    found: &str,
+    var: impl Fn(&str) -> Option<String>,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    let program_files = set("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into());
+    if !windows_path_within(found, &windows_join(&program_files, "WindowsApps")) {
+        return Some(found.to_owned());
+    }
+    let aliases = windows_join(&set("LOCALAPPDATA")?, r"Microsoft\WindowsApps");
+    let alias = windows_join(&aliases, windows_file_name(found));
+    exists(&alias).then_some(alias)
+}
+
+/// `name` in the Windows directory `dir`, spelled as `Path::join` spells it
+/// there: one `\` between them unless `dir` ends with a separator.
+#[cfg(any(windows, test))]
+fn windows_join(dir: &str, name: &str) -> String {
+    if dir.ends_with(['\\', '/']) {
+        format!("{dir}{name}")
+    } else {
+        format!(r"{dir}\{name}")
+    }
+}
+
+/// Whether the Windows path `path` lies inside the directory `dir`: below it,
+/// not `dir` itself. Either separator, repeated or trailing ones aside, and
+/// case aside.
+#[cfg(any(windows, test))]
+fn windows_path_within(path: &str, dir: &str) -> bool {
+    fn parts(path: &str) -> impl Iterator<Item = &str> {
+        path.split(['\\', '/']).filter(|part| !part.is_empty())
+    }
+    let mut path = parts(path);
+    for dir_part in parts(dir) {
+        match path.next() {
+            Some(part) if part.eq_ignore_ascii_case(dir_part) => {}
+            _ => return false,
         }
     }
-    None
+    path.next().is_some()
 }
 
 #[cfg(test)]
@@ -394,6 +475,173 @@ mod tests {
         assert_eq!(
             default_shell(Platform::Unix, &detected, vars(&[])),
             "/bin/sh"
+        );
+    }
+
+    // ─── A Store PowerShell, by the path its updates keep (#818) ────────────
+
+    /// Where a Store PowerShell's package lives, until its next update.
+    const STORE_PACKAGE: &str =
+        r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe";
+    const PACKAGE_PWSH: &str =
+        r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe\pwsh.exe";
+    /// The directory of the Store's app execution aliases, `STORE_PWSH`'s.
+    const STORE_ALIASES: &str = r"C:\Users\pi\AppData\Local\Microsoft\WindowsApps";
+    /// As `PATH` usually spells them: `PROGRAM_FILES_PWSH`'s and `POWERSHELL`'s.
+    const PROGRAM_FILES_PWSH_DIR: &str = r"C:\Program Files\PowerShell\7\";
+    const POWERSHELL_DIR: &str = r"C:\windows\system32\windowspowershell\v1.0\";
+    const LOCAL_APP_DATA: &str = r"C:\Users\pi\AppData\Local";
+
+    /// A Windows agent's environment, `PATH` aside.
+    fn windows_env(path: &str) -> [(&str, &str); 4] {
+        [
+            ("PATH", path),
+            ("ProgramFiles", r"C:\Program Files"),
+            ("LOCALAPPDATA", LOCAL_APP_DATA),
+            ("COMSPEC", CMD),
+        ]
+    }
+
+    /// A disk holding these files, and nothing else.
+    fn on_disk<'a>(files: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
+        move |path| files.contains(&path)
+    }
+
+    // A Store update replaces the package directory, and its alias stays.
+    #[test]
+    fn a_store_package_shell_is_reported_by_its_alias() {
+        let path = [STORE_PACKAGE, POWERSHELL_DIR].join(";");
+        let env = windows_env(&path);
+        let disk = [PACKAGE_PWSH, STORE_PWSH, POWERSHELL, CMD];
+        assert_eq!(
+            reported_windows_shell(PACKAGE_PWSH, vars(&env), on_disk(&disk)),
+            Some(STORE_PWSH.to_string())
+        );
+        let shells = windows_shells(vars(&env), on_disk(&disk));
+        assert_eq!(shells, listed(&[STORE_PWSH, POWERSHELL, CMD]));
+        assert_eq!(
+            default_shell(Platform::Windows, &shells, vars(&env)),
+            STORE_PWSH
+        );
+    }
+
+    // Without an alias the package's path is still not reported: the search
+    // goes on in the next PATH directories.
+    #[test]
+    fn a_store_package_shell_without_an_alias_is_not_reported() {
+        let disk = [PACKAGE_PWSH, PROGRAM_FILES_PWSH, POWERSHELL, CMD];
+        let path = [STORE_PACKAGE, PROGRAM_FILES_PWSH_DIR, POWERSHELL_DIR].join(";");
+        let env = windows_env(&path);
+        assert_eq!(
+            reported_windows_shell(PACKAGE_PWSH, vars(&env), on_disk(&disk)),
+            None
+        );
+        assert_eq!(
+            windows_shells(vars(&env), on_disk(&disk)),
+            listed(&[PROGRAM_FILES_PWSH, POWERSHELL, CMD])
+        );
+
+        let path = [STORE_PACKAGE, POWERSHELL_DIR].join(";");
+        let env = windows_env(&path);
+        let shells = windows_shells(vars(&env), on_disk(&disk));
+        assert_eq!(shells, listed(&[POWERSHELL, CMD]));
+        assert_eq!(
+            default_shell(Platform::Windows, &shells, vars(&env)),
+            POWERSHELL
+        );
+
+        // Nor without a LOCALAPPDATA to find the alias in
+        let env = [("ProgramFiles", r"C:\Program Files"), ("LOCALAPPDATA", "")];
+        assert_eq!(
+            reported_windows_shell(PACKAGE_PWSH, vars(&env), |_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_shell_outside_the_store_packages_is_reported_as_found() {
+        let env = windows_env("");
+        for found in [
+            PROGRAM_FILES_PWSH,
+            POWERSHELL,
+            STORE_PWSH,
+            CMD,
+            r"C:\Program Files\WindowsAppsOld\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe\pwsh.exe",
+        ] {
+            assert_eq!(
+                reported_windows_shell(found, vars(&env), |_| false),
+                Some(found.to_string()),
+                "{found}"
+            );
+        }
+        // Spelled as PATH spells its directory
+        let path = [PROGRAM_FILES_PWSH_DIR, "", POWERSHELL_DIR].join(";");
+        assert_eq!(
+            windows_shells(
+                vars(&windows_env(&path)),
+                on_disk(&[PROGRAM_FILES_PWSH, POWERSHELL, CMD])
+            ),
+            listed(&[PROGRAM_FILES_PWSH, POWERSHELL, CMD])
+        );
+    }
+
+    #[test]
+    fn a_store_package_is_told_case_aside() {
+        let lower_package =
+            r"c:\program files\windowsapps\microsoft.powershell_7.6.8.0_x64__8wekyb3d8bbwe";
+        let lower_pwsh = format!(r"{lower_package}\pwsh.exe");
+        let disk = [lower_pwsh.as_str(), STORE_PWSH, CMD];
+        let env = windows_env(lower_package);
+        assert_eq!(
+            windows_shells(vars(&env), on_disk(&disk)),
+            listed(&[STORE_PWSH, CMD])
+        );
+
+        let env = [
+            ("ProgramFiles", r"C:\PROGRAM FILES\"),
+            ("LOCALAPPDATA", LOCAL_APP_DATA),
+        ];
+        assert_eq!(
+            reported_windows_shell(PACKAGE_PWSH, vars(&env), on_disk(&disk)),
+            Some(STORE_PWSH.to_string())
+        );
+    }
+
+    // Found again where PATH names the alias directory itself, it is listed
+    // once, whichever comes first.
+    #[test]
+    fn a_store_alias_also_on_path_is_listed_once() {
+        let disk = [PACKAGE_PWSH, STORE_PWSH, POWERSHELL, CMD];
+        for path in [
+            [STORE_PACKAGE, STORE_ALIASES, POWERSHELL_DIR].join(";"),
+            [STORE_ALIASES, STORE_PACKAGE, POWERSHELL_DIR].join(";"),
+        ] {
+            assert_eq!(
+                windows_shells(vars(&windows_env(&path)), on_disk(&disk)),
+                listed(&[STORE_PWSH, POWERSHELL, CMD]),
+                "{path}"
+            );
+        }
+    }
+
+    // The package root is `%ProgramFiles%\WindowsApps`, `C:\Program Files`
+    // when the variable is unset or empty.
+    #[test]
+    fn the_store_packages_are_found_under_program_files() {
+        let disk = [STORE_PWSH];
+        let local = ("LOCALAPPDATA", LOCAL_APP_DATA);
+        for env in [vec![local], vec![local, ("ProgramFiles", "")]] {
+            assert_eq!(
+                reported_windows_shell(PACKAGE_PWSH, vars(&env), on_disk(&disk)),
+                Some(STORE_PWSH.to_string())
+            );
+        }
+        let elsewhere =
+            r"D:\Apps\WindowsApps\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe\pwsh.exe";
+        let env = [local, ("ProgramFiles", r"D:\Apps")];
+        assert_eq!(
+            reported_windows_shell(elsewhere, vars(&env), on_disk(&disk)),
+            Some(STORE_PWSH.to_string())
         );
     }
 

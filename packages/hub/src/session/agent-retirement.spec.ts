@@ -32,6 +32,8 @@ interface FakeDaemon {
 	 * written. `displaced`: answer that another connection took this one's place.
 	 */
 	stopMode: "obey" | "hold" | "silent" | "throw" | "displaced";
+	/** Report the end of a terminal it is told to destroy, as a real daemon may, before what follows. */
+	exitOnDestroy: boolean;
 	release?: () => void;
 	readonly agents: FakeAgent[];
 }
@@ -69,7 +71,14 @@ const remote = vi.hoisted(() => ({
 
 const daemons = vi.hoisted(() => ({
 	make(version: string): FakeDaemon {
-		return { version, channels: new Set(), othersHold: 0, stopMode: "obey", agents: [] };
+		return {
+			version,
+			channels: new Set(),
+			othersHold: 0,
+			stopMode: "obey",
+			exitOnDestroy: false,
+			agents: [],
+		};
 	},
 }));
 
@@ -95,6 +104,10 @@ const behaviour = vi.hoisted(() => ({
 		}
 		if (msg.type === "DESTROY") {
 			daemon.channels.delete(msg.channelId);
+			if (daemon.exitOnDestroy) {
+				const { channelId } = msg;
+				setImmediate(() => emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 1 }));
+			}
 			return;
 		}
 		if (msg.type !== "STOP") return;
@@ -515,26 +528,46 @@ describe("the local agent, older than the hub (#805)", () => {
 		expect(sm.channels.get("ch-held")?.status).toBe("live");
 	});
 
+	it("lets nothing go between a restart's end of the old shell and the start of its new one", async () => {
+		const old = daemons.make(OLD);
+		old.exitOnDestroy = true;
+		const hostId = await restartOnto(old);
+
+		expect(await sm.restartChannel("ch-held")).toBe(true);
+		await settle(20);
+
+		expect(stopsTo(old)).toEqual([]);
+		expect(sm.agents.get(hostId)).toBe(old.agents[0]);
+		expect(sm.channels.get("ch-held")?.status).toBe("live");
+		expect(old.channels.has("ch-held")).toBe(true);
+	});
+
 	it.each([
 		["the STOP cannot be written", "throw"],
 		["another connection took the hub's place", "displaced"],
-	] as const)("marks nothing ended, and starts nothing, when %s", async (_label, mode) => {
+	] as const)("marks nothing ended, starts nothing, and asks again later, when %s", async (_label, mode) => {
 		const old = daemons.make(OLD);
 		old.stopMode = mode;
 		const hostId = await restartOnto(old);
-		const before = heard.length;
+		addWindow();
 
 		old.agents[0]?.exit("ch-held");
 		await settle(20);
 
+		expect(stopsTo(old)).toHaveLength(1);
 		expect(pipe.launched).toEqual([]);
 		expect(sm.hostIsBeingStopped(hostId)).toBe(false);
 		expect(
-			heard
-				.slice(before)
-				.filter((m) => m.type === "CHANNEL_STATE" && (m as { endReason?: string }).endReason),
+			heard.filter((m) => m.type === "CHANNEL_STATE" && (m as { endReason?: string }).endReason),
 		).toEqual([]);
 		if (mode === "throw") expect(sm.agents.get(hostId)).toBe(old.agents[0]);
+
+		// Not taken for a stop: the next terminal asks again, and gets the current agent.
+		old.stopMode = "obey";
+		expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId })).not.toBeNull();
+		expect(stopsTo(old)).toHaveLength(2);
+		expect(pipe.launched.map((d) => d.version)).toEqual([HUB_VERSION]);
+		expect(spawnsTo(old)).toEqual([]);
 	});
 
 	it("keeps the agent when it does not say it stopped in time", async () => {
@@ -544,15 +577,25 @@ describe("the local agent, older than the hub (#805)", () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
 		old.agents[0]?.exit("ch-held");
-		await vi.waitFor(() => expect(stopsTo(old)).toHaveLength(1));
+		await settle();
+		expect(stopsTo(old)).toHaveLength(1);
 		expect(sm.hostIsBeingStopped(hostId)).toBe(true);
-		await vi.advanceTimersByTimeAsync(15_000);
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(sm.hostIsBeingStopped(hostId)).toBe(true);
+		await vi.advanceTimersByTimeAsync(1);
 		vi.useRealTimers();
 		await settle();
 
 		expect(sm.hostIsBeingStopped(hostId)).toBe(false);
 		expect(sm.agents.get(hostId)).toBe(old.agents[0]);
 		expect(pipe.launched).toEqual([]);
+
+		// Not taken for a stop: the next terminal asks again, and gets the current agent.
+		old.stopMode = "obey";
+		addWindow();
+		expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId })).not.toBeNull();
+		expect(stopsTo(old)).toHaveLength(2);
+		expect(pipe.launched.map((d) => d.version)).toEqual([HUB_VERSION]);
 	});
 
 	it("never stops one while the hub quits", async () => {

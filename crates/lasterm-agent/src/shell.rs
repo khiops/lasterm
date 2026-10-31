@@ -1,7 +1,7 @@
 /// Detect available shells on the system.
-/// Linux/macOS: parse /etc/shells + check $SHELL
+/// Linux/macOS: parse /etc/shells + check $SHELL, each file once (#821)
 /// Windows: pwsh and powershell, each where PATH first finds it, then COMSPEC;
-/// a Store package's by its alias (#818)
+/// a Store app's by its alias (#818, #821)
 pub fn detect_available_shells() -> Vec<String> {
     #[cfg(unix)]
     {
@@ -22,16 +22,22 @@ pub fn get_default_shell() -> String {
 /// [`default_shell`] for this agent, among the shells it detected. HELLO
 /// passes the list it reports, so that both come from one detection.
 pub fn default_shell_among(detected: &[String]) -> String {
-    default_shell(crate::environment::Platform::current(), detected, |name| {
-        std::env::var(name).ok()
-    })
+    default_shell(
+        crate::environment::Platform::current(),
+        detected,
+        |name| std::env::var(name).ok(),
+        real_path,
+    )
 }
 
 /// The shell a terminal starts when nothing names one, which HELLO reports as
 /// `default_shell`: the hub marks its profile as the host's default while the
 /// user has chosen none (#802).
 ///
-/// - Unix: `SHELL`, else `/bin/sh`.
+/// - Unix: `SHELL`, else `/bin/sh`, spelled as `detected` lists the same file
+///   ([`unix_shell_identity`], as `resolve` resolves paths): with a merged
+///   `/usr`, `SHELL=/usr/bin/bash` is `/bin/bash` when that is what is listed
+///   (#821). As it is when `detected` lists no such file.
 /// - Windows (#804): PowerShell 7 (`pwsh.exe`), else Windows PowerShell
 ///   (`powershell.exe`), else `COMSPEC`, else `cmd.exe`. The Command Prompt
 ///   stays a profile of its own.
@@ -39,16 +45,27 @@ pub fn default_shell_among(detected: &[String]) -> String {
 /// A PowerShell is the one `detected` lists, spelled as it lists it: the hub
 /// finds a shell's profile by its path, so the default names the path it
 /// seeded one for. Detection lists the first of each that `PATH` finds, the
-/// one typing its name starts, and a Store package's by its alias, never by
-/// the directory its next update replaces (#818); were one listed twice, the
+/// one typing its name starts, and a Store app's by its alias, never by the
+/// directory its next update replaces (#818); were one listed twice, the
 /// first would win.
 pub fn default_shell(
     platform: crate::environment::Platform,
     detected: &[String],
     var: impl Fn(&str) -> Option<String>,
+    resolve: impl Fn(&str) -> Option<String>,
 ) -> String {
     match platform {
-        crate::environment::Platform::Unix => var("SHELL").unwrap_or_else(|| "/bin/sh".into()),
+        crate::environment::Platform::Unix => {
+            let shell = var("SHELL").unwrap_or_else(|| "/bin/sh".into());
+            unix_shell_identity(&shell, &resolve)
+                .and_then(|file| {
+                    detected.iter().find(|listed| {
+                        unix_shell_identity(listed, &resolve).as_ref() == Some(&file)
+                    })
+                })
+                .cloned()
+                .unwrap_or(shell)
+        }
         crate::environment::Platform::Windows => {
             let listed = |file: &str| {
                 detected
@@ -129,42 +146,91 @@ pub fn login_shell_args(
 
 #[cfg(unix)]
 fn detect_unix_shells() -> Vec<String> {
-    use std::path::Path;
+    unix_shells(
+        &std::fs::read_to_string("/etc/shells").unwrap_or_default(),
+        std::env::var("SHELL").ok(),
+        real_path,
+    )
+}
 
-    let mut shells: Vec<String> = Vec::new();
+/// The shells a Unix agent reports, from the content of `/etc/shells` and
+/// `SHELL`, as `resolve` resolves paths on its disks: each line of
+/// `/etc/shells` that exists, then `SHELL` first when they hold no such file,
+/// and the common shells when neither gives one.
+///
+/// Each file is listed once, under the first spelling listed (#821): with a
+/// merged `/usr`, Debian's `/etc/shells` lists `/bin/bash`, then
+/// `/usr/bin/bash`, the same file, and the hub would seed a profile for each.
+/// [`unix_shell_identity`] tells them apart.
+#[cfg(any(unix, test))]
+fn unix_shells(
+    etc_shells: &str,
+    shell: Option<String>,
+    resolve: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    // (file, spelling)
+    let mut shells: Vec<(String, String)> = Vec::new();
+    let is_new = |shells: &[(String, String)], path: &str| {
+        unix_shell_identity(path, &resolve)
+            .filter(|file| shells.iter().all(|(listed, _)| listed != file))
+    };
 
-    // Parse /etc/shells
-    if let Ok(content) = std::fs::read_to_string("/etc/shells") {
-        for line in content.lines() {
-            let line = line.trim();
-            // Skip comments and empty lines
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            // Only include shells that actually exist on disk
-            if Path::new(line).exists() && !shells.contains(&line.to_string()) {
-                shells.push(line.to_string());
-            }
+    for line in etc_shells.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(file) = is_new(&shells, line) {
+            shells.push((file, line.to_owned()));
         }
     }
 
-    // Also include $SHELL if set and not already in the list
-    if let Ok(shell) = std::env::var("SHELL") {
-        if !shell.is_empty() && Path::new(&shell).exists() && !shells.contains(&shell) {
-            shells.insert(0, shell);
+    if let Some(shell) = shell.filter(|shell| !shell.is_empty()) {
+        if let Some(file) = is_new(&shells, &shell) {
+            shells.insert(0, (file, shell));
         }
     }
 
-    // Fallback: check common shell paths
     if shells.is_empty() {
-        for candidate in &["/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/zsh"] {
-            if Path::new(candidate).exists() {
-                shells.push(candidate.to_string());
+        for candidate in ["/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/zsh"] {
+            if let Some(file) = is_new(&shells, candidate) {
+                shells.push((file, candidate.to_owned()));
             }
         }
     }
 
-    shells
+    shells.into_iter().map(|(_, spelling)| spelling).collect()
+}
+
+/// The file a Unix shell's `path` starts, as `resolve` resolves paths: two
+/// paths are the same shell when this is equal (#821). `None` when the path
+/// does not exist.
+///
+/// A path is resolved whole when that keeps its file name: `/bin/bash`
+/// through a merged `/usr` is `/usr/bin/bash`, and so is `/usr/bin/bash`.
+/// A link to a file of another name, as Debian's `rbash` to `bash` or `sh` to
+/// `dash`, is a shell of its own: those behave by the name they are started
+/// under. Only its directory is resolved then, and it keeps its name.
+fn unix_shell_identity(path: &str, resolve: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let real = resolve(path)?;
+    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
+    if name(&real) == name(path) {
+        return Some(real);
+    }
+    match path.rsplit_once('/') {
+        Some((dir, file)) => {
+            let dir = resolve(if dir.is_empty() { "/" } else { dir })?;
+            Some(format!("{}/{file}", dir.trim_end_matches('/')))
+        }
+        None => Some(path.to_owned()),
+    }
+}
+
+/// `path` with every link resolved, as this agent's disks have it: `None`
+/// when it does not exist.
+fn real_path(path: &str) -> Option<String> {
+    std::fs::canonicalize(path)
+        .ok()
+        .map(|real| real.to_string_lossy().into_owned())
 }
 
 #[cfg(windows)]
@@ -234,15 +300,21 @@ fn first_reported(
         .find_map(|found| reported_windows_shell(&found, var, exists))
 }
 
-/// The path a Windows shell found at `found` is reported by (#818).
+/// The path a Windows shell found at `found` is reported by: a Store app's by
+/// its app execution alias, `%LOCALAPPDATA%\Microsoft\WindowsApps\<file name>`,
+/// which is one path for one app, and which its updates keep.
 ///
-/// A Store app lives in a package directory under `%ProgramFiles%\WindowsApps`
-/// named for its version, which the app's next Store update replaces: a launch
-/// profile seeded with that path then fails to start (#816). Such a shell is
-/// reported by its app execution alias,
-/// `%LOCALAPPDATA%\Microsoft\WindowsApps\<file name>`, which updates keep, or
-/// not at all when that alias does not exist. Any other path is reported as
-/// found.
+/// - Under `%ProgramFiles%\WindowsApps`, a Store app lives in a package
+///   directory named for its version, which the app's next Store update
+///   replaces: a launch profile seeded with that path then fails to start
+///   (#816, #818). Reported by its alias, or not at all when that alias does
+///   not exist.
+/// - Under `%LOCALAPPDATA%\Microsoft\WindowsApps`, an app also has an alias
+///   in a folder named for its package family, such as
+///   `Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe`: the same shell by a second
+///   path, which the hub would seed a second profile for (#821). Reported by
+///   the alias beside that folder when it exists, else as found: it stays.
+/// - Any other path is reported as found.
 ///
 /// `ProgramFiles` is `C:\Program Files` when unset or empty; paths are
 /// compared case aside, as Windows reads them.
@@ -253,13 +325,24 @@ fn reported_windows_shell(
     exists: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    let aliases = set("LOCALAPPDATA").map(|local| windows_join(&local, r"Microsoft\WindowsApps"));
+    let alias = || {
+        aliases
+            .as_deref()
+            .map(|aliases| windows_join(aliases, windows_file_name(found)))
+            .filter(|alias| exists(alias))
+    };
+
     let program_files = set("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into());
-    if !windows_path_within(found, &windows_join(&program_files, "WindowsApps")) {
-        return Some(found.to_owned());
+    if windows_depth_within(found, &windows_join(&program_files, "WindowsApps")) > 0 {
+        return alias();
     }
-    let aliases = windows_join(&set("LOCALAPPDATA")?, r"Microsoft\WindowsApps");
-    let alias = windows_join(&aliases, windows_file_name(found));
-    exists(&alias).then_some(alias)
+    match aliases.as_deref() {
+        Some(aliases) if windows_depth_within(found, aliases) > 1 => {
+            Some(alias().unwrap_or_else(|| found.to_owned()))
+        }
+        _ => Some(found.to_owned()),
+    }
 }
 
 /// `name` in the Windows directory `dir`, spelled as `Path::join` spells it
@@ -273,11 +356,12 @@ fn windows_join(dir: &str, name: &str) -> String {
     }
 }
 
-/// Whether the Windows path `path` lies inside the directory `dir`: below it,
-/// not `dir` itself. Either separator, repeated or trailing ones aside, and
+/// How many levels below the directory `dir` the Windows path `path` lies: 1
+/// for a file in it, 2 for one in a folder of it, 0 when it is not inside it,
+/// or is `dir` itself. Either separator, repeated or trailing ones aside, and
 /// case aside.
 #[cfg(any(windows, test))]
-fn windows_path_within(path: &str, dir: &str) -> bool {
+fn windows_depth_within(path: &str, dir: &str) -> usize {
     fn parts(path: &str) -> impl Iterator<Item = &str> {
         path.split(['\\', '/']).filter(|part| !part.is_empty())
     }
@@ -285,10 +369,10 @@ fn windows_path_within(path: &str, dir: &str) -> bool {
     for dir_part in parts(dir) {
         match path.next() {
             Some(part) if part.eq_ignore_ascii_case(dir_part) => {}
-            _ => return false,
+            _ => return 0,
         }
     }
-    path.next().is_some()
+    path.count()
 }
 
 #[cfg(test)]
@@ -387,7 +471,17 @@ mod tests {
     }
 
     fn windows_default(detected: &[&str], env: &[(&str, &str)]) -> String {
-        default_shell(Platform::Windows, &listed(detected), vars(env))
+        default_shell(
+            Platform::Windows,
+            &listed(detected),
+            vars(env),
+            nothing_resolves,
+        )
+    }
+
+    /// A disk where no path exists, for a default that resolves none.
+    fn nothing_resolves(_: &str) -> Option<String> {
+        None
     }
 
     #[test]
@@ -460,7 +554,7 @@ mod tests {
         assert_eq!(windows_default(&["cmd.exe"], &[("COMSPEC", "")]), "cmd.exe");
     }
 
-    // Unchanged on Unix: `SHELL`, whatever the agent found.
+    // On Unix: `SHELL`, as it is when the agent found no other spelling of it.
     #[test]
     fn a_unix_agent_starts_shell_else_bin_sh() {
         let detected = listed(&["/usr/bin/pwsh", "/bin/bash"]);
@@ -468,12 +562,13 @@ mod tests {
             default_shell(
                 Platform::Unix,
                 &detected,
-                vars(&[("SHELL", "/usr/bin/zsh")])
+                vars(&[("SHELL", "/usr/bin/zsh")]),
+                nothing_resolves
             ),
             "/usr/bin/zsh"
         );
         assert_eq!(
-            default_shell(Platform::Unix, &detected, vars(&[])),
+            default_shell(Platform::Unix, &detected, vars(&[]), nothing_resolves),
             "/bin/sh"
         );
     }
@@ -520,7 +615,7 @@ mod tests {
         let shells = windows_shells(vars(&env), on_disk(&disk));
         assert_eq!(shells, listed(&[STORE_PWSH, POWERSHELL, CMD]));
         assert_eq!(
-            default_shell(Platform::Windows, &shells, vars(&env)),
+            default_shell(Platform::Windows, &shells, vars(&env), nothing_resolves),
             STORE_PWSH
         );
     }
@@ -546,7 +641,7 @@ mod tests {
         let shells = windows_shells(vars(&env), on_disk(&disk));
         assert_eq!(shells, listed(&[POWERSHELL, CMD]));
         assert_eq!(
-            default_shell(Platform::Windows, &shells, vars(&env)),
+            default_shell(Platform::Windows, &shells, vars(&env), nothing_resolves),
             POWERSHELL
         );
 
@@ -642,6 +737,180 @@ mod tests {
         assert_eq!(
             reported_windows_shell(elsewhere, vars(&env), on_disk(&disk)),
             Some(STORE_PWSH.to_string())
+        );
+    }
+
+    // ─── One shell, one path (#821) ─────────────────────────────────────────
+
+    /// The folder of a Store PowerShell's alias named for its package family,
+    /// which a Store PowerShell puts first on the `PATH` it hands down.
+    const FAMILY_ALIASES: &str =
+        r"C:\Users\pi\AppData\Local\Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe";
+    const FAMILY_PWSH: &str = r"C:\Users\pi\AppData\Local\Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe";
+
+    #[test]
+    fn a_package_family_alias_is_reported_by_the_alias_beside_its_folder() {
+        let disk = [FAMILY_PWSH, STORE_PWSH, POWERSHELL, CMD];
+        let env = windows_env("");
+        assert_eq!(
+            reported_windows_shell(FAMILY_PWSH, vars(&env), on_disk(&disk)),
+            Some(STORE_PWSH.to_string())
+        );
+        let lower = format!(r"{}\pwsh.exe", FAMILY_ALIASES.to_lowercase());
+        assert_eq!(
+            reported_windows_shell(&lower, vars(&env), on_disk(&disk)),
+            Some(STORE_PWSH.to_string()),
+            "case aside"
+        );
+
+        for path in [
+            [FAMILY_ALIASES, STORE_ALIASES, POWERSHELL_DIR].join(";"),
+            [STORE_ALIASES, FAMILY_ALIASES, POWERSHELL_DIR].join(";"),
+        ] {
+            let env = windows_env(&path);
+            let shells = windows_shells(vars(&env), on_disk(&disk));
+            assert_eq!(shells, listed(&[STORE_PWSH, POWERSHELL, CMD]), "{path}");
+            assert_eq!(
+                default_shell(Platform::Windows, &shells, vars(&env), nothing_resolves),
+                STORE_PWSH
+            );
+        }
+    }
+
+    // Unlike a package's directory, it stays through updates: without the
+    // alias beside its folder, it is reported as found.
+    #[test]
+    fn a_package_family_alias_alone_is_reported_as_found() {
+        let disk = [FAMILY_PWSH, POWERSHELL, CMD];
+        let path = [FAMILY_ALIASES, POWERSHELL_DIR].join(";");
+        assert_eq!(
+            windows_shells(vars(&windows_env(&path)), on_disk(&disk)),
+            listed(&[FAMILY_PWSH, POWERSHELL, CMD])
+        );
+        let no_local = [("ProgramFiles", r"C:\Program Files")];
+        assert_eq!(
+            reported_windows_shell(FAMILY_PWSH, vars(&no_local), |_| true),
+            Some(FAMILY_PWSH.to_string())
+        );
+    }
+
+    /// Raspberry Pi OS or Debian with a merged `/usr`: `/bin` is a link to
+    /// `/usr/bin`, `sh` one to `dash` and `rbash` one to `bash`.
+    fn merged_usr(path: &str) -> Option<String> {
+        let path = match path.strip_prefix("/bin") {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("/usr/bin{rest}"),
+            _ => path.to_owned(),
+        };
+        match path.as_str() {
+            "/usr/bin/sh" => Some("/usr/bin/dash".into()),
+            "/usr/bin/rbash" | "/usr/local/bin/bash" => Some("/usr/bin/bash".into()),
+            "/" | "/usr/bin" | "/usr/local/bin" | "/usr/bin/bash" | "/usr/bin/dash"
+            | "/usr/bin/mksh" | "/usr/bin/zsh" => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Debian's `/etc/shells`, which lists each shell under both spellings.
+    const DEBIAN_ETC_SHELLS: &str = "# /etc/shells: valid login shells
+/bin/sh
+/usr/bin/sh
+/bin/bash
+/usr/bin/bash
+/bin/rbash
+/usr/bin/rbash
+/bin/dash
+/usr/bin/dash
+/usr/bin/mksh
+/bin/mksh
+/bin/fish
+";
+
+    #[test]
+    fn a_unix_agent_lists_each_shell_once_under_its_first_spelling() {
+        assert_eq!(
+            unix_shells(DEBIAN_ETC_SHELLS, None, merged_usr),
+            listed(&[
+                "/bin/sh",
+                "/bin/bash",
+                "/bin/rbash",
+                "/bin/dash",
+                "/usr/bin/mksh"
+            ])
+        );
+    }
+
+    // `rbash` and `sh` behave by the name they are started under: links to
+    // `bash` and `dash`, they stay shells of their own. A link of the same
+    // name is the file it names.
+    #[test]
+    fn a_shell_is_its_file_under_its_own_name() {
+        let file = |path: &str| unix_shell_identity(path, merged_usr);
+        assert_eq!(file("/bin/bash"), Some("/usr/bin/bash".to_string()));
+        assert_eq!(
+            file("/usr/local/bin/bash"),
+            Some("/usr/bin/bash".to_string())
+        );
+        assert_eq!(file("/bin/rbash"), Some("/usr/bin/rbash".to_string()));
+        assert_eq!(file("/bin/sh"), Some("/usr/bin/sh".to_string()));
+        assert_eq!(file("/bin/fish"), None, "not on this disk");
+    }
+
+    #[test]
+    fn shell_is_started_under_the_spelling_detection_lists() {
+        let shells = unix_shells(DEBIAN_ETC_SHELLS, Some("/usr/bin/bash".into()), merged_usr);
+        assert_eq!(shells, unix_shells(DEBIAN_ETC_SHELLS, None, merged_usr));
+        for shell in ["/usr/bin/bash", "/usr/local/bin/bash", "/bin/bash"] {
+            assert_eq!(
+                default_shell(
+                    Platform::Unix,
+                    &shells,
+                    vars(&[("SHELL", shell)]),
+                    merged_usr
+                ),
+                "/bin/bash",
+                "{shell}"
+            );
+        }
+        assert_eq!(
+            default_shell(Platform::Unix, &shells, vars(&[]), merged_usr),
+            "/bin/sh"
+        );
+    }
+
+    #[test]
+    fn a_shell_etc_shells_lacks_is_listed_first() {
+        let shells = unix_shells(DEBIAN_ETC_SHELLS, Some("/bin/zsh".into()), merged_usr);
+        assert_eq!(shells.first().map(String::as_str), Some("/bin/zsh"));
+        assert_eq!(
+            default_shell(
+                Platform::Unix,
+                &shells,
+                vars(&[("SHELL", "/bin/zsh")]),
+                merged_usr
+            ),
+            "/bin/zsh"
+        );
+
+        // Not on the disk: not listed, and the default all the same, as before
+        let missing = "/opt/fish/bin/fish";
+        let shells = unix_shells("/bin/bash\n", Some(missing.into()), merged_usr);
+        assert_eq!(shells, listed(&["/bin/bash"]));
+        assert_eq!(
+            default_shell(
+                Platform::Unix,
+                &shells,
+                vars(&[("SHELL", missing)]),
+                merged_usr
+            ),
+            missing
+        );
+    }
+
+    #[test]
+    fn without_etc_shells_the_common_shells_are_listed_once() {
+        assert_eq!(
+            unix_shells("", None, merged_usr),
+            listed(&["/bin/sh", "/bin/bash", "/bin/zsh"])
         );
     }
 

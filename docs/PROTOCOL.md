@@ -143,7 +143,15 @@ shell's profile by its path. A shell found inside a Store package, under
 `%ProgramFiles%\WindowsApps\<package>\`, is reported by its app execution alias,
 `%LOCALAPPDATA%\Microsoft\WindowsApps\<file name>`, or, when there is none, not at all: the search
 goes on in the next `PATH` directories. The package's directory is named for its version and goes
-with the next Store update, so it is never reported (#818).
+with the next Store update, so it is never reported (#818). An alias in a folder named for the
+app's package family, `%LOCALAPPDATA%\Microsoft\WindowsApps\<package family>\<file name>`, is
+reported by the alias beside that folder when it exists, so that one shell has one path (#821).
+
+Each shell is reported once (#821). A Unix agent lists each line of `/etc/shells` that exists, and
+`SHELL` first when they hold no such file, keeping the first spelling of each file: with a merged
+`/usr`, `/bin/bash` and `/usr/bin/bash` are one shell, reported as `/bin/bash`, and so is the
+default when `SHELL` is `/usr/bin/bash`. A link to a file of another name, such as `rbash` to
+`bash`, stays a shell of its own, since those behave by the name they are started under.
 
 The hub records them on the host as `discovered_shells` and `discovered_default_shell` (§ 6), and
 seeds a launch profile for each shell, marking the default one's as the host's default profile

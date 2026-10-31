@@ -1,2 +1,2 @@
-en: On Windows, a PowerShell from the Microsoft Store is now detected by a path its updates keep, so a launch profile created for it no longer breaks at its next update.
-fr: Sous Windows, un PowerShell du Microsoft Store est désormais détecté par un chemin que ses mises à jour conservent, et le profil de lancement créé pour lui ne casse plus à sa prochaine mise à jour.
+en: Each shell on a host now gets one launch profile, under a path that lasts: a Microsoft Store PowerShell's no longer breaks at its next update, and shells reached through both /bin and /usr/bin, or through two Store aliases, are no longer listed twice.
+fr: Chaque shell d'un hôte a désormais un seul profil de lancement, sous un chemin qui dure : celui d'un PowerShell du Microsoft Store ne casse plus à sa prochaine mise à jour, et les shells accessibles par /bin et /usr/bin, ou par deux alias du Store, ne sont plus listés deux fois.

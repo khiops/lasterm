@@ -7,6 +7,7 @@ import {
 	resetRelaySlotsForTests,
 	responseStream,
 } from "./hub-fetch.js";
+import { resetIpcFallbackForTests } from "./tauri-ipc-fallback.js";
 
 function responseFrame(
 	id: bigint,
@@ -433,6 +434,38 @@ describe("hubFetch desktop transport", () => {
 			hubFetch("https://127.0.0.1:4242/api/upload", { method: "POST", body: form }),
 		).rejects.toThrow("IPC rejected the chunk");
 		expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: "33" }, undefined);
+	});
+
+	it("fails an upload whose chunk reached native as JSON, and reloads the page once (#822)", async () => {
+		const reload = vi.fn();
+		window.sessionStorage.clear();
+		resetIpcFallbackForTests(reload);
+		const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const invoke = vi.fn(async (command: string) => {
+			if (command === "relay_hub_upload_start") return 33;
+			if (command === "relay_hub_upload_chunk") {
+				throw "multipart relay chunk must use Tauri raw IPC bytes";
+			}
+			return undefined;
+		});
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			configurable: true,
+			value: { invoke, transformCallback: () => 1 },
+		});
+		const form = new FormData();
+		form.append("field", "value");
+
+		try {
+			await expect(
+				hubFetch("https://127.0.0.1:4242/api/upload", { method: "POST", body: form }),
+			).rejects.toThrow("must use Tauri raw IPC bytes");
+			expect(invoke).toHaveBeenCalledWith("relay_hub_upload_cancel", { uploadId: "33" }, undefined);
+			expect(reload).toHaveBeenCalledTimes(1);
+		} finally {
+			resetIpcFallbackForTests();
+			window.sessionStorage.clear();
+			consoleWarn.mockRestore();
+		}
 	});
 
 	it("cancels a body rejected on its first pull without finishing the request", async () => {

@@ -1,6 +1,6 @@
 /// Detect available shells on the system.
 /// Linux/macOS: parse /etc/shells + check $SHELL
-/// Windows: check COMSPEC + look for pwsh/powershell in PATH
+/// Windows: pwsh and powershell, each where PATH first finds it, then COMSPEC
 pub fn detect_available_shells() -> Vec<String> {
     #[cfg(unix)]
     {
@@ -12,16 +12,58 @@ pub fn detect_available_shells() -> Vec<String> {
     }
 }
 
-/// Get the default shell for the current user.
+/// Get the default shell for the current user: the one a terminal starts when
+/// its SPAWN names none.
 pub fn get_default_shell() -> String {
-    #[cfg(unix)]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    default_shell_among(&detect_available_shells())
+}
+
+/// [`default_shell`] for this agent, among the shells it detected. HELLO
+/// passes the list it reports, so that both come from one detection.
+pub fn default_shell_among(detected: &[String]) -> String {
+    default_shell(crate::environment::Platform::current(), detected, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// The shell a terminal starts when nothing names one, which HELLO reports as
+/// `default_shell`: the hub marks its profile as the host's default while the
+/// user has chosen none (#802).
+///
+/// - Unix: `SHELL`, else `/bin/sh`.
+/// - Windows (#804): PowerShell 7 (`pwsh.exe`), else Windows PowerShell
+///   (`powershell.exe`), else `COMSPEC`, else `cmd.exe`. The Command Prompt
+///   stays a profile of its own.
+///
+/// A PowerShell is the one `detected` lists, spelled as it lists it: the hub
+/// finds a shell's profile by its path, so the default names the path it
+/// seeded one for. Detection lists the first of each that `PATH` finds, the
+/// one typing its name starts; were one listed twice, the first would win.
+pub fn default_shell(
+    platform: crate::environment::Platform,
+    detected: &[String],
+    var: impl Fn(&str) -> Option<String>,
+) -> String {
+    match platform {
+        crate::environment::Platform::Unix => var("SHELL").unwrap_or_else(|| "/bin/sh".into()),
+        crate::environment::Platform::Windows => {
+            let listed = |file: &str| {
+                detected
+                    .iter()
+                    .find(|shell| windows_file_name(shell).eq_ignore_ascii_case(file))
+                    .cloned()
+            };
+            listed("pwsh.exe")
+                .or_else(|| listed("powershell.exe"))
+                .or_else(|| var("COMSPEC").filter(|comspec| !comspec.is_empty()))
+                .unwrap_or_else(|| "cmd.exe".into())
+        }
     }
-    #[cfg(windows)]
-    {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
-    }
+}
+
+/// A Windows path's file name: what follows its last `\` or `/`.
+fn windows_file_name(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
 /// Where a terminal starts when its SPAWN names no directory (#581): the home
@@ -128,19 +170,21 @@ fn detect_windows_shells() -> Vec<String> {
 
     let mut shells: Vec<String> = Vec::new();
 
-    // COMSPEC (usually cmd.exe)
-    if let Ok(comspec) = std::env::var("COMSPEC") {
-        if !comspec.is_empty() && Path::new(&comspec).exists() {
-            shells.push(comspec);
-        }
-    }
-
-    // Look for pwsh.exe and powershell.exe in PATH
+    // pwsh.exe and powershell.exe, each where PATH first finds it, the Store's
+    // alias in WindowsApps included, then COMSPEC: the order the default is
+    // chosen in (#804), and the one a new host's profile menu lists them in
     for name in &["pwsh.exe", "powershell.exe"] {
         if let Some(path) = find_in_path(name) {
             if !shells.contains(&path) {
                 shells.push(path);
             }
+        }
+    }
+
+    // COMSPEC (usually cmd.exe)
+    if let Ok(comspec) = std::env::var("COMSPEC") {
+        if !comspec.is_empty() && Path::new(&comspec).exists() && !shells.contains(&comspec) {
+            shells.push(comspec);
         }
     }
 
@@ -230,17 +274,127 @@ mod tests {
         assert!(login_shell_args(Platform::Unix, "/bin/bash", Vec::new(), false).is_empty());
     }
 
-    // ConPTY shells have no login flavour to ask for.
+    // ConPTY shells have no login flavour to ask for. The default a Windows
+    // SSH host starts, a PowerShell since #804, is asked for one, and gets no
+    // `-Login`: pwsh takes it on Linux and macOS only, powershell.exe never.
     #[test]
     fn a_windows_agent_ignores_the_request() {
-        assert!(login_shell_args(Platform::Windows, "sh", Vec::new(), true).is_empty());
-        assert!(login_shell_args(
-            Platform::Windows,
+        for shell in [
+            "sh",
             r"C:\Windows\System32\cmd.exe",
-            Vec::new(),
-            true
-        )
-        .is_empty());
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        ] {
+            assert!(
+                login_shell_args(Platform::Windows, shell, Vec::new(), true).is_empty(),
+                "{shell}"
+            );
+        }
+    }
+
+    // ─── The shell a terminal starts when none is named (#804) ──────────────
+
+    const CMD: &str = r"C:\WINDOWS\system32\cmd.exe";
+    const PROGRAM_FILES_PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+    /// Where `PATH` finds a Store install: its app execution alias.
+    const STORE_PWSH: &str = r"C:\Users\pi\AppData\Local\Microsoft\WindowsApps\pwsh.exe";
+    /// As `PATH` usually spells it.
+    const POWERSHELL: &str = r"C:\windows\system32\windowspowershell\v1.0\powershell.exe";
+
+    fn listed(shells: &[&str]) -> Vec<String> {
+        shells.iter().map(|shell| shell.to_string()).collect()
+    }
+
+    fn windows_default(detected: &[&str], env: &[(&str, &str)]) -> String {
+        default_shell(Platform::Windows, &listed(detected), vars(env))
+    }
+
+    #[test]
+    fn a_windows_agent_starts_powershell_7_when_installed() {
+        let env = [("COMSPEC", CMD)];
+        assert_eq!(
+            windows_default(&[PROGRAM_FILES_PWSH, POWERSHELL, CMD], &env),
+            PROGRAM_FILES_PWSH
+        );
+        // Whatever the order of the list: an agent before #804 listed COMSPEC first
+        assert_eq!(
+            windows_default(&[CMD, POWERSHELL, PROGRAM_FILES_PWSH], &env),
+            PROGRAM_FILES_PWSH
+        );
+    }
+
+    // The path is the one listed, for the hub to find the profile it seeded
+    // for it: a Store install's alias, not where the package lives.
+    #[test]
+    fn a_store_install_is_named_by_the_alias_path_finds() {
+        assert_eq!(
+            windows_default(&[STORE_PWSH, POWERSHELL, CMD], &[("COMSPEC", CMD)]),
+            STORE_PWSH
+        );
+    }
+
+    // Detection lists the one `PATH` finds first, which typing `pwsh` starts.
+    #[test]
+    fn of_two_powershell_7_the_one_listed_first_is_started() {
+        assert_eq!(
+            windows_default(&[STORE_PWSH, PROGRAM_FILES_PWSH, CMD], &[]),
+            STORE_PWSH
+        );
+        assert_eq!(
+            windows_default(&[PROGRAM_FILES_PWSH, STORE_PWSH, CMD], &[]),
+            PROGRAM_FILES_PWSH
+        );
+    }
+
+    #[test]
+    fn without_powershell_7_a_windows_agent_starts_windows_powershell() {
+        assert_eq!(
+            windows_default(&[CMD, POWERSHELL], &[("COMSPEC", CMD)]),
+            POWERSHELL
+        );
+    }
+
+    // A file name, not a word in the path: case aside, as Windows reads it.
+    #[test]
+    fn a_powershell_is_told_by_its_file_name() {
+        assert_eq!(
+            windows_default(&[r"C:\Tools\PWSH.EXE"], &[]),
+            r"C:\Tools\PWSH.EXE"
+        );
+        assert_eq!(
+            windows_default(&[r"C:\pwsh.exe.d\bash.exe", r"C:\powershell\cmd.exe"], &[]),
+            "cmd.exe"
+        );
+    }
+
+    #[test]
+    fn without_any_powershell_a_windows_agent_starts_comspec() {
+        let comspec = r"D:\Shells\tcc.exe";
+        assert_eq!(windows_default(&[CMD], &[("COMSPEC", comspec)]), comspec);
+    }
+
+    #[test]
+    fn with_nothing_a_windows_agent_starts_cmd_exe() {
+        assert_eq!(windows_default(&[], &[]), "cmd.exe");
+        assert_eq!(windows_default(&["cmd.exe"], &[("COMSPEC", "")]), "cmd.exe");
+    }
+
+    // Unchanged on Unix: `SHELL`, whatever the agent found.
+    #[test]
+    fn a_unix_agent_starts_shell_else_bin_sh() {
+        let detected = listed(&["/usr/bin/pwsh", "/bin/bash"]);
+        assert_eq!(
+            default_shell(
+                Platform::Unix,
+                &detected,
+                vars(&[("SHELL", "/usr/bin/zsh")])
+            ),
+            "/usr/bin/zsh"
+        );
+        assert_eq!(
+            default_shell(Platform::Unix, &detected, vars(&[])),
+            "/bin/sh"
+        );
     }
 
     // ─── The directory a terminal starts in without one (#581) ──────────────

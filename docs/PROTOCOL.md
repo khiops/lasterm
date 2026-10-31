@@ -126,13 +126,20 @@ First message, sent immediately on start.
   capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes"],
                             // a daemon adds "hub-identity"
   available_shells?: string[],  // the shells the agent found on its host
-  default_shell?: string,       // its user's default shell
+  default_shell?: string,       // the shell it starts when a SPAWN names none (below)
   visual_hints?: {              // declared, never sent: no agent sends hints (SPEC.md § 4.4)
     badge?: { text: string, color: string },
     theme_overlay?: Record<string, string>
   }
 }
 ```
+
+**The default shell.** On Unix, `SHELL`, else `/bin/sh`. On Windows (#804), PowerShell 7
+(`pwsh.exe`), else Windows PowerShell (`powershell.exe`), else `COMSPEC`, else `cmd.exe`; the
+Command Prompt stays one of the `available_shells`. A Windows agent finds each PowerShell where its
+`PATH` first finds it (a Store install's alias in `WindowsApps` included), lists them in that order
+before `COMSPEC`, and names the default exactly as `available_shells` does, since the hub finds a
+shell's profile by its path.
 
 The hub records them on the host as `discovered_shells` and `discovered_default_shell` (§ 6), and
 seeds a launch profile for each shell, marking the default one's as the host's default profile
@@ -203,7 +210,8 @@ hub, `DISPLACED` means a newer connection of its own took over, and the stale on
   request_id: string,
   channel_id?: string,  // hub-provided ID for warm restart; if omitted, agent generates one
   shell?: string,       // "/bin/bash"; only a shell the terminal has of its own, on a restart too (#583);
-                        // absent: the agent's user's default shell (SHELL on Unix, COMSPEC on Windows)
+                        // absent: the agent's default shell, HELLO's default_shell (§ 3.1): SHELL on
+                        // Unix, a PowerShell on Windows (#804)
   args?: string[],      // the shell's arguments; absent when there are none
   cwd?: string,         // only a directory the terminal has of its own, on a restart too (#581);
                         // absent: the agent's user's home (HOME on Unix, USERPROFILE on Windows),
@@ -1707,7 +1715,8 @@ own, which no route writes:
 {
   discovered_shells?: string[],      // the shells its agent reported at the last connection (§ 3.1)
   discovered_shells_at?: string,     // when, ISO 8601
-  discovered_default_shell?: string, // the one its agent starts when told none: SHELL, or COMSPEC (#794)
+  discovered_default_shell?: string, // the one its agent starts when told none (#794): SHELL, or on
+                                     // Windows a PowerShell, else COMSPEC (§ 3.1, #804)
   ssh_fingerprint: string | null,    // the host key pinned, null until one is
   ssh_proxy_fingerprint?: string,    // the key pinned for a jump given as a spec
   agent_sha256?: string              // the agent binary pinned

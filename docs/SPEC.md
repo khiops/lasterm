@@ -507,7 +507,8 @@ Host (permanent config)
  ├── sortOrder: number
  ├── discoveredShells?: string[]       // shells found on remote at last connect
  ├── discoveredShellsAt?: string       // ISO 8601 — when shells were last probed
- ├── discoveredDefaultShell?: string   // the agent's default at last connect: SHELL, or COMSPEC (#794);
+ ├── discoveredDefaultShell?: string   // the agent's default at last connect (#794): SHELL, or on Windows
+ │                                     // pwsh, else powershell.exe, else COMSPEC (#804; PROTOCOL.md § 3.1);
  │                                     // its profile is the host's default while the user chose none (#802)
  ├── os: 'linux' | 'darwin' | 'windows' | null    // null = auto-detect on first connect
  ├── arch: 'x64' | 'arm64' | null                 // null = auto-detect on first connect
@@ -1030,7 +1031,8 @@ the shell of the host's default profile, which a new terminal runs in the place 
 whether its user chose it or the hub marked it for the agent's default (#802), or the one its
 agent reported, which `ssh host` itself starts (#794); a terminal with no shell named runs the
 agent's. The hub asks for it (`login_shell`), a Unix agent adds `-l` for a shell known to take it.
-Local terminals are unchanged.
+A Windows agent adds nothing: its default is a PowerShell (#804), and pwsh takes `-Login` only on
+Linux and macOS. Local terminals are unchanged.
 
 Native effect resolution:
 

@@ -3668,18 +3668,46 @@ fn relay_response(
     head
 }
 
-#[tauri::command]
-fn relay_hub_request(
-    request: RelayHubRequest,
-    response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-) -> Result<RelayHubHead, String> {
-    let admission = reserve_hub_relay()?;
-    let hub_response = send_relay_hub_request(&request, None)?;
-    Ok(relay_response(hub_response, response, admission))
+/// Run a relay command's work on the async runtime's blocking pool (#824).
+///
+/// Tauri runs a command declared as a plain `fn` on the main thread, which on
+/// Windows is the WebView2 UI thread: there, waiting on the hub froze the window
+/// for as long as the hub took to answer, up to `HUB_REQUEST_TIMEOUT`. An
+/// `async fn` command runs on the async runtime instead, but its body must not
+/// block one of the runtime's few workers either, and reqwest's blocking client
+/// refuses to run on one. So each relay command that sends to the hub, or waits
+/// on an upload's body pipe or response, is an `async fn` that hands that work
+/// here and awaits it.
+async fn relay_off_main_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("desktop relay task failed: {error}"))?
 }
 
 #[tauri::command]
-fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
+async fn relay_hub_request(
+    request: RelayHubRequest,
+    response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<RelayHubHead, String> {
+    relay_off_main_thread(move || {
+        let admission = reserve_hub_relay()?;
+        let hub_response = send_relay_hub_request(&request, None)?;
+        Ok(relay_response(hub_response, response, admission))
+    })
+    .await
+}
+
+/// Starting an upload does not wait on the hub itself. It runs off the main
+/// thread with the upload's other commands all the same: it takes the locks
+/// they take, and handles the blocking hub client.
+#[tauri::command]
+async fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
+    relay_off_main_thread(move || start_hub_upload(request)).await
+}
+
+fn start_hub_upload(request: RelayHubRequest) -> Result<String, String> {
     validate_relay_request_headers(&request.headers)?;
     relay_request_connection(&request)?;
     let mut uploads = hub_uploads()
@@ -3720,8 +3748,12 @@ fn relay_hub_upload_start(request: RelayHubRequest) -> Result<String, String> {
     Ok(id.to_string())
 }
 
+/// An `async fn`, as `relay_hub_ws_send` is, still receives the raw IPC body:
+/// Tauri hands the command its whole request either way. The claim stays ahead
+/// of the copy; only the wait for room in the body pipe goes to the blocking
+/// pool.
 #[tauri::command]
-fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+async fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let upload_id = request
         .headers()
         .get("X-Lasterm-Upload-Id")
@@ -3745,12 +3777,10 @@ fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String
     // Tauri has already materialised this raw IPC body before entering the
     // command. An oversized body is rejected here without another copy or any
     // relay retention; an admitted bounded frame is copied into the body pipe.
-    send_hub_upload_chunk_claimed(
-        upload_id,
-        claim,
-        bytes.clone(),
-        Instant::now() + HUB_REQUEST_TIMEOUT,
-    )
+    let bytes = bytes.clone();
+    let deadline = Instant::now() + HUB_REQUEST_TIMEOUT;
+    relay_off_main_thread(move || send_hub_upload_chunk_claimed(upload_id, claim, bytes, deadline))
+        .await
 }
 
 #[cfg(test)]
@@ -3922,11 +3952,20 @@ fn end_hub_upload(upload_id: u64, reason: HubUploadEndReason) -> Option<Arc<HubU
 }
 
 #[tauri::command]
-fn relay_hub_upload_finish(
+async fn relay_hub_upload_finish(
     upload_id: String,
     response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RelayHubHead, String> {
-    let upload_id = parse_relay_identifier(&upload_id, "multipart relay upload id")?;
+    relay_off_main_thread(move || finish_hub_upload(&upload_id, response)).await
+}
+
+/// Waits for an accepted chunk and for room for the terminal frame, up to
+/// `HUB_REQUEST_TIMEOUT`, then for the hub's answer, as long again.
+fn finish_hub_upload(
+    upload_id: &str,
+    response: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<RelayHubHead, String> {
+    let upload_id = parse_relay_identifier(upload_id, "multipart relay upload id")?;
     let upload = end_hub_upload(upload_id, HubUploadEndReason::Finish)
         .ok_or_else(|| "multipart relay upload is no longer active".to_string())?;
     let response_receiver = upload
@@ -3953,10 +3992,16 @@ fn relay_hub_upload_finish(
 }
 
 /// Idempotent: `finish` may have won the failure race and already removed it.
+/// Ending an upload waits for a chunk in flight and for room for its terminal
+/// frame, so this leaves the main thread too.
 #[tauri::command]
-fn relay_hub_upload_cancel(upload_id: String) {
+async fn relay_hub_upload_cancel(upload_id: String) {
     if let Ok(upload_id) = parse_relay_identifier(&upload_id, "multipart relay upload id") {
-        let _ = end_hub_upload(upload_id, HubUploadEndReason::Cancel);
+        let _ = relay_off_main_thread(move || {
+            let _ = end_hub_upload(upload_id, HubUploadEndReason::Cancel);
+            Ok(())
+        })
+        .await;
     }
 }
 
@@ -8193,6 +8238,7 @@ mod tests {
 
     #[test]
     fn cancelling_uploads_keeps_admission_until_their_workers_end() {
+        let _admission = relay_admission_test_guard();
         let mut releases = Vec::new();
         let mut workers = Vec::new();
         let mut ids = Vec::new();
@@ -8232,6 +8278,171 @@ mod tests {
         assert!(ids
             .iter()
             .all(|id| !active_hub_relays().lock().unwrap().contains(id)));
+    }
+
+    static RELAY_ADMISSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serialises the tests that take relay admissions: one of them takes every
+    /// slot and expects the next reservation to be refused.
+    fn relay_admission_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        RELAY_ADMISSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How long the silent hub's client waits for an answer, in place of
+    /// `HUB_REQUEST_TIMEOUT`.
+    const SILENT_HUB_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Establish a hub connection to a listener that never accepts: the
+    /// system completes each connection, and the TLS handshake then waits for
+    /// an answer that never comes, as on a stuck hub (#726). The client gives
+    /// up after `SILENT_HUB_TIMEOUT` and closes first, which is what a
+    /// loopback peer needs on Windows (see `let_the_client_close_first`).
+    fn install_silent_hub() -> std::net::TcpListener {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let expected_spki = rcgen::KeyPair::generate()
+            .unwrap()
+            .subject_public_key_info();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(SILENT_HUB_TIMEOUT)
+            .use_preconfigured_tls(pinned_hub_tls_config(expected_spki.clone()).unwrap())
+            .build()
+            .unwrap();
+        *HUB_CONNECTION.lock().unwrap() = Some(HubConnection {
+            port: listener.local_addr().unwrap().port(),
+            expected_spki,
+            client,
+        });
+        listener
+    }
+
+    /// Wakes the test thread that polls a command's future.
+    struct UnparkOnWake(std::thread::Thread);
+
+    impl std::task::Wake for UnparkOnWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    /// What a command's future gave when polled to its end on this thread.
+    struct PolledCommand<T> {
+        /// Its first poll already completed it. A command doing its blocking
+        /// work inside the poll would, on whichever thread polls it: with Tauri,
+        /// a worker of the async runtime.
+        ready_at_first_poll: bool,
+        output: T,
+    }
+
+    /// Poll a command's future on this thread, as a runtime worker would, until
+    /// it completes.
+    fn poll_command_on_this_thread<F: std::future::Future>(future: F) -> PolledCommand<F::Output> {
+        let waker = std::task::Waker::from(Arc::new(UnparkOnWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        let deadline = Instant::now() + SILENT_HUB_TIMEOUT * 3;
+        let mut ready_at_first_poll = true;
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return PolledCommand {
+                    ready_at_first_poll,
+                    output,
+                };
+            }
+            ready_at_first_poll = false;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "the command never completed");
+            std::thread::park_timeout(remaining);
+        }
+    }
+
+    fn assert_hub_request_failed(command: &str, error: Option<String>) {
+        let error = error.unwrap_or_else(|| panic!("{command} succeeded against a silent hub"));
+        assert!(
+            error.starts_with("pinned hub request failed"),
+            "{command} failed otherwise than on the silent hub: {error}"
+        );
+    }
+
+    fn relay_test_request(method: &str, path: &str, port: u16) -> RelayHubRequest {
+        RelayHubRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            port,
+            headers: Vec::new(),
+        }
+    }
+
+    /// #824: a relay command that waited on the hub froze the window, because
+    /// Tauri runs a plain `fn` command on the main thread. It runs an `async fn`
+    /// command on its async runtime instead, so the relay commands are `async
+    /// fn`s, and these tests call them as futures, which keeps them so. Their
+    /// waits must not happen inside a poll either, which would hold one of the
+    /// runtime's workers: polled while the hub is silent, they are pending, and
+    /// they complete later, woken from the thread that did wait.
+    #[test]
+    fn a_relay_request_waits_for_a_silent_hub_outside_its_poll() {
+        let _connection = hub_connection_test_guard();
+        let _admission = relay_admission_test_guard();
+        let hub = install_silent_hub();
+        let port = hub.local_addr().unwrap().port();
+
+        let polled = poll_command_on_this_thread(relay_hub_request(
+            relay_test_request("GET", "/api/health", port),
+            tauri::ipc::Channel::new(|_| Ok(())),
+        ));
+        assert!(
+            !polled.ready_at_first_poll,
+            "relay_hub_request waited for the hub inside its poll"
+        );
+        assert_hub_request_failed("relay_hub_request", polled.output.err());
+
+        *HUB_CONNECTION.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn a_relay_upload_waits_for_a_silent_hub_outside_its_poll() {
+        let _connection = hub_connection_test_guard();
+        let _admission = relay_admission_test_guard();
+        let hub = install_silent_hub();
+        let port = hub.local_addr().unwrap().port();
+
+        let upload_id = poll_command_on_this_thread(relay_hub_upload_start(relay_test_request(
+            "POST",
+            "/api/upload",
+            port,
+        )))
+        .output
+        .expect("an upload starts without waiting on the hub");
+
+        let polled = poll_command_on_this_thread(relay_hub_upload_finish(
+            upload_id.clone(),
+            tauri::ipc::Channel::new(|_| Ok(())),
+        ));
+        assert!(
+            !polled.ready_at_first_poll,
+            "relay_hub_upload_finish waited for the hub inside its poll"
+        );
+        assert_hub_request_failed("relay_hub_upload_finish", polled.output.err());
+
+        // Inert: finish has ended the upload.
+        poll_command_on_this_thread(relay_hub_upload_cancel(upload_id.clone()));
+        assert!(!hub_uploads()
+            .lock()
+            .unwrap()
+            .contains_key(&upload_id.parse::<u64>().unwrap()));
+
+        // The chunk command takes Tauri's raw request, which only Tauri can
+        // build, so it is not called here; this keeps it an `async fn` too.
+        fn returns_a_future<'a, F: std::future::Future<Output = Result<(), String>>>(
+            _command: fn(tauri::ipc::Request<'a>) -> F,
+        ) {
+        }
+        returns_a_future(relay_hub_upload_chunk);
+
+        *HUB_CONNECTION.lock().unwrap() = None;
     }
 
     #[test]

@@ -593,7 +593,6 @@ All incoming messages (from agent or UI) must be validated:
 | Host label | 1-64 chars, alphanumeric + dash/underscore |
 | SSH host | Valid hostname or IP, no shell metacharacters |
 | SSH port | 1-65535 |
-| Default Shell | A string or null (#795), stored as sent; a terminal starts it only when it keeps the rule of a SPAWN's `shell` (§ 5.1), else as with none (#794) |
 | Config TOML | Parse-validated before saving |
 | Pairing code | Exactly 8 digits |
 

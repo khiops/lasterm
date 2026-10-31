@@ -125,7 +125,6 @@ describe("useHostForm", () => {
 				iconValue: "",
 				color: "",
 				hostGroup: "",
-				defaultShell: "",
 				trustRemoteHints: "apply" as const,
 				sortOrder: 0,
 				os: null as null,
@@ -559,20 +558,14 @@ describe("useHostForm", () => {
 		});
 
 		// Left out, an emptied field kept what the hub had: once set, the SSH
-		// user or the default shell could never be removed (#792).
-		it.each([
-			["the SSH user", "sshUser", "ssh_user"],
-			["the default shell", "defaultShell", "default_shell"],
-		] as const)(
-			"sends %s, emptied, as null, which the hub clears (#792)",
-			async (_, field, wire) => {
-				const host = storedHost({ sshUser: "pi", defaultShell: "/bin/zsh" });
-				const body = await savedBody(host, (form) => {
-					form[field] = "";
-				});
-				expect(body).toEqual({ [wire]: null });
-			},
-		);
+		// user could never be removed (#792).
+		it("sends the SSH user, emptied, as null, which the hub clears (#792)", async () => {
+			const host = storedHost({ sshUser: "pi" });
+			const body = await savedBody(host, (form) => {
+				form.sshUser = "";
+			});
+			expect(body).toEqual({ ssh_user: null });
+		});
 
 		it("sends an emptied port as null: the host is then reached on 22, as a new one is (#792)", async () => {
 			const body = await savedBody(storedHost({ sshPort: 2222 }), (form) => {
@@ -611,7 +604,6 @@ describe("useHostForm", () => {
 				sshUser: "pi",
 				sshRemoteDaemon: true,
 				elevationMethod: "sudo",
-				defaultShell: "/bin/bash",
 			});
 			const body = await savedBody(host, (form) => {
 				form.label = "renamed";

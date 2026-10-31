@@ -44,7 +44,6 @@ describe("MetaDAL — Hosts CRUD", () => {
 				color: "#ff6600",
 				profileJson: '{"fontSize":14}',
 				trustRemoteHints: "ask",
-				defaultShell: "/bin/zsh",
 				defaultCwd: "/home/user",
 			});
 
@@ -58,7 +57,6 @@ describe("MetaDAL — Hosts CRUD", () => {
 			expect(host.color).toBe("#ff6600");
 			expect(host.profileJson).toBe('{"fontSize":14}');
 			expect(host.trustRemoteHints).toBe("ask");
-			expect(host.defaultShell).toBe("/bin/zsh");
 			expect(host.defaultCwd).toBe("/home/user");
 		});
 

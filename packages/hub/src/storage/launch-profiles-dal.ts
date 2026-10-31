@@ -105,6 +105,17 @@ function rowToHostOverride(row: HostLaunchProfileRow): HostLaunchProfileOverride
 	return result;
 }
 
+/**
+ * A profile of a host's menu, with the host's override of it, if any: whether
+ * it is pinned, hidden or the default, and whether the user set that (#802)
+ * or the hub did from what the host's agent reported.
+ */
+export type HostMenuProfile = LaunchProfile & {
+	overrideType?: string;
+	setByUser?: boolean;
+	effectiveSort: number;
+};
+
 // ─── LaunchProfilesDAL ───────────────────────────────────────────────────────
 
 export class LaunchProfilesDAL {
@@ -250,13 +261,14 @@ export class LaunchProfilesDAL {
 		txn();
 	}
 
-	listHostProfiles(
-		hostId: string,
-		hostOs: string,
-	): Array<LaunchProfile & { overrideType?: string; effectiveSort: number }> {
+	/**
+	 * The host's profile menu, as `GET /api/hosts/:id/profiles` answers it and
+	 * the profile menu lists it: its default profile first, then by order.
+	 */
+	listHostProfiles(hostId: string, hostOs: string): HostMenuProfile[] {
 		const rows = this.db
 			.prepare(
-				`SELECT p.*, hlp.override_type,
+				`SELECT p.*, hlp.override_type, hlp.set_by_user,
 				        COALESCE(hlp.sort_order, p.sort_order) AS effective_sort
 				 FROM launch_profiles p
 				 LEFT JOIN host_launch_profiles hlp
@@ -274,16 +286,23 @@ export class LaunchProfilesDAL {
 				     p.name`,
 			)
 			.all(hostId, hostOs) as Array<
-			LaunchProfileRow & { override_type: string | null; effective_sort: number }
+			LaunchProfileRow & {
+				override_type: string | null;
+				set_by_user: number | null;
+				effective_sort: number;
+			}
 		>;
 
 		return rows.map((row) => {
 			const profile = rowToLaunchProfile(row);
-			const result: LaunchProfile & { overrideType?: string; effectiveSort: number } = {
+			const result: HostMenuProfile = {
 				...profile,
 				effectiveSort: row.effective_sort,
 			};
-			if (row.override_type != null) result.overrideType = row.override_type;
+			if (row.override_type != null) {
+				result.overrideType = row.override_type;
+				result.setByUser = row.set_by_user !== 0;
+			}
 			return result;
 		});
 	}

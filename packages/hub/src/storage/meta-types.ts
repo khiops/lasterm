@@ -26,7 +26,6 @@ export interface CreateHostInput {
 	color?: string | null;
 	profileJson?: string;
 	trustRemoteHints?: "apply" | "ask" | "ignore";
-	defaultShell?: string | null;
 	defaultCwd?: string;
 	hostGroupId?: string | null;
 	sortOrder?: number;

@@ -688,86 +688,193 @@ describe("HostModal open while the hub detects the host's OS (#789)", () => {
 	});
 });
 
-describe("HostModal Default Shell: what the host's agent detected (#794)", () => {
+describe("HostModal Default Shell: the host's default launch profile (#802)", () => {
 	/** The host once connected: the shells its agent reported, and the one it starts. */
 	const DETECTED: Host = {
 		...SSH,
 		discoveredShells: ["/bin/bash", "/usr/bin/fish"],
 		discoveredDefaultShell: "/bin/bash",
 	};
+	const BASH = { id: "01PROFILEBASH0000000000000", name: "bash", shell: "/bin/bash" };
+	const FISH = { id: "01PROFILEFISH0000000000000", name: "fish", shell: "/usr/bin/fish" };
 
-	/** The field under its label, as someone reading the dialog finds it. */
-	function shellField(): HTMLInputElement {
-		const field = Array.from(document.body.querySelectorAll("#panel-terminal .field")).find(
-			(candidate) => candidate.querySelector(".field-label")?.textContent === "Default Shell",
-		);
-		const input = field?.querySelector<HTMLInputElement>("input");
-		if (!input) throw new Error("no Default Shell field");
-		return input;
+	/**
+	 * The host's profile menu as the hub lists it, snake_case as on the wire:
+	 * bash marked default for the agent's default shell, or fish as the user's.
+	 */
+	function menu(userChoseFish = false): unknown[] {
+		const [first, second] = userChoseFish ? [FISH, BASH] : [BASH, FISH];
+		return [
+			{ ...first, override_type: "default", set_by_user: userChoseFish },
+			{ ...second, override_type: "pin", set_by_user: false },
+		].map((profile) => ({
+			mode: "shell",
+			elevated: false,
+			supported_os: "linux",
+			icon_type: "auto",
+			sort_order: 0,
+			effective_sort: 0,
+			created_at: STAMP,
+			updated_at: STAMP,
+			...profile,
+		}));
 	}
 
-	/** The suggestions the field offers, in order. */
-	function suggestions(): string[] {
-		const list = shellField().getAttribute("list");
-		if (list === null) return [];
-		return Array.from(
-			document.body.querySelectorAll<HTMLOptionElement>(`datalist#${list} option`),
-		).map((option) => option.value);
+	const json = (body: unknown): Response =>
+		new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+
+	/** The hub: the host's profiles, the host as saved, and what the dialog sends it. */
+	function hub(listed: unknown[], host: Host = DETECTED) {
+		const sent: Array<{ method: string; url: string; body?: unknown }> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			sent.push({ method, url, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+			if (method === "GET" && url.endsWith("/profiles")) return json(listed);
+			if (method === "PUT" && url === `/api/hosts/${host.id}`) return json(toSnakeCase(host));
+			return new Response(null, { status: 204 });
+		});
+		return sent;
 	}
 
-	it("shows the detected default in the empty field, and offers the detected shells", () => {
-		mountModal(DETECTED);
-
-		expect(shellField().value).toBe("");
-		expect(shellField().placeholder).toBe("Detected: /bin/bash");
-		expect(suggestions()).toEqual(["/bin/bash", "/usr/bin/fish"]);
-	});
-
-	it("shows the Default Shell the user chose, the detected one still as the placeholder", () => {
-		mountModal({ ...DETECTED, defaultShell: "/usr/bin/fish" });
-
-		expect(shellField().value).toBe("/usr/bin/fish");
-		expect(shellField().placeholder).toBe("Detected: /bin/bash");
-	});
-
-	it("detects nothing and offers nothing for a host that never connected", () => {
-		mountModal(SSH);
-
-		expect(shellField().placeholder).toBe("/bin/bash");
-		expect(shellField().hasAttribute("list")).toBe(false);
-		expect(suggestions()).toEqual([]);
-	});
-
-	// The hub starts only an absolute path, as for any shell a terminal is
-	// asked for: one it would not start is said, not silently passed over.
-	it("says when the hub would not start the shell typed", async () => {
-		mountModal(DETECTED);
-		const panel = () => el("#panel-terminal")?.textContent ?? "";
-
-		shellField().value = "zsh";
-		shellField().dispatchEvent(new Event("input"));
+	async function openOnTerminal(host: Host): Promise<{ onSaved: ReturnType<typeof vi.fn> }> {
+		const { onSaved } = mountModal(host);
+		useAuthStore().setToken("token");
+		el<HTMLButtonElement>("#tab-terminal")?.click();
+		await settle();
 		await nextTick();
-		expect(panel()).toContain("New terminals ignore it: shell must be an absolute path.");
+		return { onSaved };
+	}
 
-		shellField().value = "/usr/bin/zsh";
-		shellField().dispatchEvent(new Event("input"));
+	function shellSelect(): HTMLSelectElement {
+		const select = el<HTMLSelectElement>("#host-default-shell");
+		if (!select) throw new Error("no Default Shell choice");
+		return select;
+	}
+	const options = () => Array.from(shellSelect().options).map((o) => o.textContent?.trim());
+	const hint = () => shellSelect().closest(".field")?.querySelector(".field-hint")?.textContent;
+
+	async function choose(value: string): Promise<void> {
+		shellSelect().value = value;
+		shellSelect().dispatchEvent(new Event("change"));
 		await nextTick();
-		expect(panel()).not.toContain("New terminals ignore it");
-		expect(panel()).toContain("The shell a new terminal starts");
+	}
+
+	async function clickSave(): Promise<void> {
+		el<HTMLButtonElement>(".dialog-actions .btn-primary")?.click();
+		await settle();
+	}
+
+	/** What the dialog wrote to the hub, in order. */
+	const writes = (sent: ReturnType<typeof hub>) => sent.filter((s) => s.method !== "GET");
+
+	it("offers Automatic, with the shell the host's agent reported, and the host's profiles", async () => {
+		hub(menu());
+		await openOnTerminal(DETECTED);
+
+		expect(options()).toEqual(["Automatic (/bin/bash)", "bash", "fish"]);
+		// The hub's own mark is Automatic: the user chose nothing.
+		expect(shellSelect().value).toBe("");
+		expect(shellSelect().disabled).toBe(false);
+		expect(hint()).toContain("The launch profile a new terminal starts");
+	});
+
+	it("shows the profile the user made the host's default", async () => {
+		hub(menu(true));
+		await openOnTerminal(DETECTED);
+
+		expect(shellSelect().value).toBe(FISH.id);
+	});
+
+	it("saves a profile chosen as the host's default, as the user's, through the hosts' profile route", async () => {
+		const sent = hub(menu());
+		const { onSaved } = await openOnTerminal(DETECTED);
+
+		await choose(FISH.id);
+		await clickSave();
+
+		expect(writes(sent).map(({ method, url }) => `${method} ${url}`)).toEqual([
+			`PUT /api/hosts/${SSH.id}`,
+			`PUT /api/hosts/${SSH.id}/profiles/${FISH.id}`,
+		]);
+		expect(writes(sent)[0]?.body).not.toHaveProperty("default_shell");
+		expect(writes(sent)[1]?.body).toEqual({ override_type: "default" });
+		expect(onSaved).toHaveBeenCalled();
+	});
+
+	it("saves Automatic by removing the user's default, so the agent's applies again", async () => {
+		const sent = hub(menu(true));
+		await openOnTerminal(DETECTED);
+
+		await choose("");
+		await clickSave();
+
+		expect(writes(sent).map(({ method, url }) => `${method} ${url}`)).toEqual([
+			`PUT /api/hosts/${SSH.id}`,
+			`DELETE /api/hosts/${SSH.id}/profiles/${FISH.id}`,
+		]);
+	});
+
+	it("sends nothing of the default left as it was", async () => {
+		const sent = hub(menu(true));
+		await openOnTerminal(DETECTED);
+
+		await clickSave();
+
+		expect(writes(sent).map(({ method, url }) => `${method} ${url}`)).toEqual([
+			`PUT /api/hosts/${SSH.id}`,
+		]);
+	});
+
+	it("says why the default could not be saved, and stays open", async () => {
+		const sent = hub(menu());
+		vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			sent.push({ method, url });
+			if (method === "GET") return json(menu());
+			if (url === `/api/hosts/${SSH.id}`) return json(toSnakeCase(DETECTED));
+			return new Response(
+				JSON.stringify({ error: { code: "NOT_FOUND", message: "Launch profile not found" } }),
+				{ status: 404, headers: { "Content-Type": "application/json" } },
+			);
+		});
+		const { onSaved } = await openOnTerminal(DETECTED);
+
+		await choose(FISH.id);
+		await clickSave();
+
+		expect(el(".dialog-actions [role='alert']")?.textContent).toBe("Launch profile not found");
+		expect(onSaved).not.toHaveBeenCalled();
+	});
+
+	it("offers only Automatic for a host that never connected, and says why", async () => {
+		hub([], SSH);
+		await openOnTerminal(SSH);
+
+		expect(options()).toEqual(["Automatic"]);
+		expect(shellSelect().disabled).toBe(true);
+		expect(hint()).toBe("Its launch profiles show here once it has connected.");
+	});
+
+	it("offers only Automatic for a host being added, and says why", async () => {
+		mountModal(null);
+		el<HTMLButtonElement>("#tab-terminal")?.click();
+		await nextTick();
+
+		expect(options()).toEqual(["Automatic"]);
+		expect(hint()).toBe("Its launch profiles show here once it has connected.");
 	});
 
 	it("shows what a connection detects while the dialog is open", async () => {
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			async (input) =>
-				new Response(
-					JSON.stringify(
-						String(input).includes("/api/host-groups") ? [] : toSnakeCase([LOCAL, DETECTED]),
-					),
-					{ headers: { "Content-Type": "application/json" } },
-				),
-		);
-		mountModal(SSH);
-		useAuthStore().setToken("token");
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.includes("/api/host-groups")) return json([]);
+			if (url.endsWith("/profiles")) return json([]);
+			return json(toSnakeCase([LOCAL, DETECTED]));
+		});
+		await openOnTerminal(SSH);
+		expect(options()).toEqual(["Automatic"]);
 
 		useHostsStore().hubChanged("hosts");
 		await vi.waitFor(() =>
@@ -777,8 +884,7 @@ describe("HostModal Default Shell: what the host's agent detected (#794)", () =>
 		);
 		await nextTick();
 
-		expect(shellField().placeholder).toBe("Detected: /bin/bash");
-		expect(suggestions()).toEqual(["/bin/bash", "/usr/bin/fish"]);
+		expect(options()).toEqual(["Automatic (/bin/bash)"]);
 	});
 });
 

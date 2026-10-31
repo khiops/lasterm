@@ -17,6 +17,7 @@ import { SpoolDAL } from "../storage/spool.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
+import { resolveHostOs } from "./host-profile-menu.js";
 import {
 	clearContext,
 	openContext,
@@ -1119,13 +1120,16 @@ describe("SessionManager", () => {
 		});
 	});
 
-	// ── The host's Default Shell (#794) ───────────────────────────────────────
+	// ── The host's default profile (#802) ───────────────────────────────────
 	//
-	// Edit Host's Default Shell picked nothing: a terminal opened with nothing
-	// named started the host's first profile, which for an SSH host is the one
-	// its agent's default was given.
+	// A host had three defaults that could disagree: Edit Host's Default Shell,
+	// which a terminal opened with nothing named started; the profile marked
+	// default, the ✓ of the profile menu and what Ctrl+Shift+1 starts; and, on
+	// the local host, the first profile of all. There is one now: the host's
+	// default profile, the one its user chose, else the one the hub marked for
+	// its agent's default shell.
 
-	describe("the shell a terminal opened with nothing named starts (#794)", () => {
+	describe("what a terminal opened with nothing named starts: its host's default profile (#802)", () => {
 		let dal: MetaDAL;
 
 		beforeEach(() => {
@@ -1134,7 +1138,7 @@ describe("SessionManager", () => {
 		});
 
 		/** An SSH host as a connection leaves it: its agent's shells recorded, a profile for each. */
-		async function connectedSshHost(label: string, defaultShell?: string): Promise<string> {
+		async function connectedSshHost(label: string): Promise<string> {
 			const host = dal.createHost({
 				type: "ssh",
 				label,
@@ -1142,7 +1146,6 @@ describe("SessionManager", () => {
 				sshAuth: "key",
 				sshKeyPath: "/nonexistent/key",
 				os: "linux",
-				...(defaultShell !== undefined && { defaultShell }),
 			});
 			const shells = ["/bin/bash", "/usr/bin/fish"];
 			dal.updateHostDiscoveredShells(host.id, shells, "/bin/bash");
@@ -1150,98 +1153,223 @@ describe("SessionManager", () => {
 			return host.id;
 		}
 
-		/** The local host, with a profile for the Command Prompt first in the list. */
-		async function localHost(defaultShell?: string): Promise<string> {
+		const PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+		const CMD = "C:\\WINDOWS\\system32\\cmd.exe";
+
+		/**
+		 * The local host of a Windows hub as its agent's HELLO leaves it: the
+		 * profiles the hub found at its first start, PowerShell first of all, and
+		 * the Command Prompt marked as its default, its agent's (COMSPEC).
+		 */
+		async function localHost(): Promise<string> {
 			const id = await sm.ensureLocalHost();
-			if (defaultShell !== undefined) dal.updateHost(id, { defaultShell });
-			dal.createLaunchProfile({
-				name: "Command Prompt",
-				shell: "C:\\Windows\\System32\\cmd.exe",
-				args: ["/k", "ver"],
-				mode: "shell",
-				elevated: false,
-				supportedOs: "any",
-				iconType: "auto",
-				sortOrder: 0,
-			});
+			for (const [sortOrder, [name, shell]] of [
+				["PowerShell", PWSH],
+				["Command Prompt", CMD],
+			].entries()) {
+				dal.createLaunchProfile({
+					name: name as string,
+					shell: shell as string,
+					mode: "shell",
+					elevated: false,
+					supportedOs: "windows",
+					iconType: "auto",
+					sortOrder,
+				});
+			}
+			dal.updateHostDiscoveredShells(id, [PWSH, CMD], CMD);
+			await seedShellProfiles(id, [PWSH, CMD], CMD, null, dal);
 			return id;
 		}
 
-		/** What the hub asks the host's agent to start for this request. */
+		/** A profile of the host's, by its shell. */
+		function profileOf(hostId: string, shell: string): string {
+			const host = dal.getHost(hostId);
+			if (!host) throw new Error("no such host");
+			const found = dal
+				.listHostProfiles(hostId, resolveHostOs(host))
+				.find((p) => p.shell === shell);
+			if (!found) throw new Error(`no profile for ${shell}`);
+			return found.id;
+		}
+
+		/** What Edit Host's Default Shell, and Settings › Profiles, save: the user's mark. */
+		function chooseDefault(hostId: string, profileId: string): void {
+			dal.upsertHostProfileOverride(hostId, profileId, "default");
+		}
+
+		/** What the hub asks the host's agent to start for this request, and the channel it records. */
 		async function started(
 			hostId: string,
 			msg: Partial<UiSpawnMessage> = {},
-		): Promise<AgentSpawnMessage | undefined> {
+		): Promise<{ spawn: AgentSpawnMessage | undefined; launchProfileId: string | undefined }> {
 			const channelId = await sm.handleSpawn("c-shell", { type: "SPAWN", hostId, ...msg });
-			const local = hostId === "local" || dal.getHost(hostId)?.type === "local";
+			const local = dal.getHost(hostId)?.type === "local";
 			const send = local ? mockLocalAgents.at(-1)?.send : mockSshAgentInstance?.send;
 			const spawn = (send?.mock.calls ?? [])
 				.map(([message]) => message as AgentSpawnMessage)
 				.filter((message) => message.type === "SPAWN")
 				.at(-1);
-			if (channelId !== null) expect(dal.getChannel(channelId)?.shell).toBe(spawn?.shell);
-			return spawn;
+			const channel = channelId === null ? undefined : dal.getChannel(channelId);
+			if (channel !== undefined) expect(channel.shell).toBe(spawn?.shell);
+			return { spawn, launchProfileId: channel?.launchProfileId };
 		}
 
-		it("starts the Default Shell the user chose on an SSH host, as its login shell", async () => {
-			const hostId = await connectedSshHost("pi-fish", "/usr/bin/fish");
+		/** The first profile of the host's menu: the ✓ one, what Ctrl+Shift+1 starts. */
+		function firstOfMenu(hostId: string) {
+			const host = dal.getHost(hostId);
+			if (!host) throw new Error("no such host");
+			return dal.listHostProfiles(hostId, resolveHostOs(host))[0];
+		}
 
-			const spawn = await started(hostId);
+		it("starts the profile its agent's default shell was given while its user chose none", async () => {
+			const hostId = await connectedSshHost("pi-automatic");
+
+			const { spawn, launchProfileId } = await started(hostId);
+
+			expect(spawn?.shell).toBe("/bin/bash");
+			expect(spawn?.loginShell).toBe(true);
+			expect(launchProfileId).toBe(profileOf(hostId, "/bin/bash"));
+		});
+
+		it("starts the default profile its user chose on an SSH host, as its login shell", async () => {
+			const hostId = await connectedSshHost("pi-fish");
+			chooseDefault(hostId, profileOf(hostId, "/usr/bin/fish"));
+
+			const { spawn, launchProfileId } = await started(hostId);
 
 			expect(spawn?.shell).toBe("/usr/bin/fish");
 			expect(spawn).not.toHaveProperty("args");
 			expect(spawn?.loginShell).toBe(true);
+			expect(launchProfileId).toBe(profileOf(hostId, "/usr/bin/fish"));
 		});
 
-		it("still starts a launch profile named in the request", async () => {
-			const hostId = await connectedSshHost("pi-profile", "/usr/bin/fish");
-			const bash = dal.listHostProfiles(hostId, "linux").find((p) => p.shell === "/bin/bash");
-			if (!bash) throw new Error("expected a profile for bash");
+		// A restart decides the login shell as the first start did.
+		it("restarts it as a login shell too", async () => {
+			const hostId = await connectedSshHost("pi-fish-restart");
+			chooseDefault(hostId, profileOf(hostId, "/usr/bin/fish"));
+			const channelId = await sm.handleSpawn("c-shell", { type: "SPAWN", hostId });
+			if (channelId === null) throw new Error("expected a channel");
 
-			expect((await started(hostId, { launchProfileId: bash.id }))?.shell).toBe("/bin/bash");
-			expect((await started(hostId, { shell: "/bin/sh" }))?.shell).toBe("/bin/sh");
+			expect(await sm.restartChannel(channelId)).toBe(true);
+
+			const restarted = (mockSshAgentInstance?.send.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN")
+				.at(-1);
+			expect(restarted?.channelId).toBe(channelId);
+			expect(restarted?.shell).toBe("/usr/bin/fish");
+			expect(restarted?.loginShell).toBe(true);
 		});
 
-		it("starts the agent's default shell when none is chosen, as before", async () => {
-			const hostId = await connectedSshHost("pi-none");
+		it("starts the local host's default profile, its agent's, not the first profile of all", async () => {
+			const id = await localHost();
 
-			const spawn = await started(hostId);
+			const { spawn, launchProfileId } = await started(id);
 
-			expect(spawn?.shell).toBe("/bin/bash");
-			expect(spawn?.loginShell).toBe(true);
-		});
-
-		it("takes a blank Default Shell for none", async () => {
-			const hostId = await connectedSshHost("pi-blank", "  ");
-
-			expect((await started(hostId))?.shell).toBe("/bin/bash");
-		});
-
-		// What a SPAWN may not name, a Default Shell stored through the API does
-		// not start either.
-		it("takes a Default Shell no SPAWN could name for none", async () => {
-			const hostId = await connectedSshHost("pi-command", "/bin/sh;reboot");
-
-			expect((await started(hostId))?.shell).toBe("/bin/bash");
-		});
-
-		it("starts the Default Shell the user chose on the local host, over its first profile", async () => {
-			await localHost("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
-
-			const spawn = await started("local");
-
-			expect(spawn?.shell).toBe("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
-			expect(spawn).not.toHaveProperty("args");
+			expect(spawn?.shell).toBe(CMD);
+			expect(launchProfileId).toBe(profileOf(id, CMD));
 			expect(spawn).not.toHaveProperty("loginShell");
 		});
 
-		it("starts the local host's first profile when none is chosen, as before", async () => {
-			await localHost();
+		it("starts the default profile the user chose on the local host", async () => {
+			const id = await localHost();
+			const gitBash = dal.createLaunchProfile({
+				name: "Git Bash",
+				shell: "C:\\Program Files\\Git\\bin\\bash.exe",
+				args: ["--login", "-i"],
+				mode: "shell",
+				elevated: false,
+				supportedOs: "windows",
+				iconType: "auto",
+				sortOrder: 2,
+			});
+			chooseDefault(id, gitBash.id);
 
-			const spawn = await started("local");
+			const { spawn, launchProfileId } = await started(id);
 
-			expect(spawn?.shell).toBe("C:\\Windows\\System32\\cmd.exe");
-			expect(spawn?.args).toEqual(["/k", "ver"]);
+			expect(spawn?.shell).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
+			expect(spawn?.args).toEqual(["--login", "-i"]);
+			expect(launchProfileId).toBe(gitBash.id);
+		});
+
+		// One default: what a new terminal starts is the ✓ of the profile menu,
+		// its first entry, which Ctrl+Shift+1 starts.
+		it("starts what the profile menu lists first, its ✓, on an SSH host and on the local host", async () => {
+			const sshId = await connectedSshHost("pi-menu");
+			const localId = await localHost();
+			chooseDefault(sshId, profileOf(sshId, "/usr/bin/fish"));
+
+			for (const hostId of [sshId, localId]) {
+				const first = firstOfMenu(hostId);
+				expect(first?.overrideType, "the ✓").toBe("default");
+				expect((await started(hostId)).launchProfileId).toBe(first?.id);
+			}
+		});
+
+		// Started as the menu starts it, not its shell alone.
+		it("starts the default profile whole: its directory, its environment and its mode", async () => {
+			const hostId = await connectedSshHost("pi-whole");
+			const project = dal.createLaunchProfile({
+				name: "fish in /srv",
+				shell: "/usr/bin/fish",
+				cwd: "/srv",
+				env: { FROM_PROFILE: "yes" },
+				mode: "shell",
+				elevated: false,
+				supportedOs: "linux",
+				iconType: "auto",
+				sortOrder: 5,
+			});
+			chooseDefault(hostId, project.id);
+
+			const { spawn, launchProfileId } = await started(hostId);
+
+			expect(spawn?.shell).toBe("/usr/bin/fish");
+			expect(spawn?.cwd).toBe("/srv");
+			expect(spawn?.env).toMatchObject({ FROM_PROFILE: "yes" });
+			expect(spawn).not.toHaveProperty("directProcess");
+			expect(launchProfileId).toBe(project.id);
+		});
+
+		it("still starts a launch profile or a shell named in the request", async () => {
+			const hostId = await connectedSshHost("pi-named");
+			chooseDefault(hostId, profileOf(hostId, "/usr/bin/fish"));
+			const bash = profileOf(hostId, "/bin/bash");
+
+			expect((await started(hostId, { launchProfileId: bash })).spawn?.shell).toBe("/bin/bash");
+			const named = await started(hostId, { shell: "/bin/sh" });
+			expect(named.spawn?.shell).toBe("/bin/sh");
+			expect(named.launchProfileId).toBeUndefined();
+		});
+
+		it("starts its agent's own default when the host has no profile", async () => {
+			const host = dal.createHost({
+				type: "ssh",
+				label: "pi-bare",
+				sshHost: "pi@pi.local",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+				os: "linux",
+			});
+
+			const { spawn, launchProfileId } = await started(host.id);
+
+			expect(spawn).not.toHaveProperty("shell");
+			expect(spawn?.loginShell).toBe(true);
+			expect(launchProfileId).toBeUndefined();
+		});
+
+		// The column stays (STORAGE.md § 9.1), and nothing reads it: a value a
+		// hub before #802 stored starts nothing.
+		it("starts no shell from the host's default_shell column", async () => {
+			const hostId = await connectedSshHost("pi-column");
+			dbManager.meta
+				.prepare("UPDATE hosts SET default_shell = '/usr/bin/fish' WHERE id = ?")
+				.run(hostId);
+
+			expect((await started(hostId)).spawn?.shell).toBe("/bin/bash");
+			expect(dal.getHost(hostId)).not.toHaveProperty("defaultShell");
 		});
 	});
 
@@ -1577,17 +1705,16 @@ describe("SessionManager", () => {
 		expect(updatedHost?.discoveredShellsAt).toBeTruthy();
 	});
 
-	// The agent's default went over the user's at every connection, so Edit
-	// Host's Default Shell lasted until the next one (#794).
-	it("keeps the Default Shell the user chose through a HELLO, and records the agent's apart", async () => {
+	// The agent's default has a column of its own (#794); the host's default is
+	// the profile its HELLO marks for it, while the user has chosen none (#802).
+	it("records the agent's default shell apart, and marks its profile as the host's default", async () => {
 		const dal = new MetaDAL(dbManager.meta);
 		const host = dal.createHost({
 			type: "ssh",
-			label: "pi-chosen-shell",
+			label: "pi-agent-default",
 			sshHost: "user@localhost",
 			sshAuth: "key",
 			sshKeyPath: "/nonexistent/key",
-			defaultShell: "/usr/bin/fish",
 		});
 		sm.addClient(makeClient("c1", []));
 		await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
@@ -1601,10 +1728,11 @@ describe("SessionManager", () => {
 			defaultShell: "/bin/bash",
 		});
 
-		expect(dal.getHost(host.id)).toMatchObject({
-			defaultShell: "/usr/bin/fish",
-			discoveredDefaultShell: "/bin/bash",
-		});
+		expect(dal.getHost(host.id)?.discoveredDefaultShell).toBe("/bin/bash");
+		expect(dal.getHost(host.id)).not.toHaveProperty("defaultShell");
+		const marked = dal.getHostDefaultOverride(host.id);
+		expect(marked?.setByUser).toBe(false);
+		expect(dal.getLaunchProfile(marked?.profileId ?? "")?.shell).toBe("/bin/bash");
 	});
 
 	it("SC-23: HELLO without available_shells does not call updateHostDiscoveredShells", async () => {

@@ -3,6 +3,7 @@ import { generateId } from "@lasterm/shared";
 import { computed, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
+import { type HostVisibleProfile, useProfilesStore } from "../stores/profiles.js";
 
 /**
  * The jump, as the hub stores it: a host of this list, or an address.
@@ -61,7 +62,6 @@ export interface HostFormData {
 	iconValue: string;
 	color: string;
 	hostGroup: string;
-	defaultShell: string;
 	trustRemoteHints: "apply" | "ask" | "ignore";
 	elevationMethod: string;
 	customCommand: string;
@@ -92,7 +92,6 @@ function formOf(host?: Host): HostFormData {
 		iconValue: host?.iconValue ?? "",
 		color: host?.color ?? "",
 		hostGroup: host?.hostGroupId ?? "",
-		defaultShell: host?.defaultShell ?? "",
 		trustRemoteHints: host?.trustRemoteHints ?? "apply",
 		elevationMethod: host?.elevationMethod ?? "",
 		// Loaded, so that a save does not erase it: starting empty made every
@@ -124,9 +123,9 @@ const LINKED_FIELDS = [
  * dialog was opened on: an OS detected meanwhile, or another window's save.
  *
  * A field `before` has and `body` no longer does was emptied: the SSH user,
- * the default shell, the port, or the key path of a host that stopped signing
- * in with a key. It is sent as null, which the hub clears; left out, the hub
- * kept it, and once set it could never be removed (#792).
+ * the port, or the key path of a host that stopped signing in with a key. It
+ * is sent as null, which the hub clears; left out, the hub kept it, and once
+ * set it could never be removed (#792).
  */
 function changedFields(
 	before: Record<string, unknown>,
@@ -174,6 +173,56 @@ export function useHostForm(editHost?: Host) {
 				storedHost.value = current;
 			},
 		);
+	}
+
+	/**
+	 * The host's launch profiles, among which its Default Shell is chosen
+	 * (#802), as the hub lists them: null until read. A host that never
+	 * connected has none of its own yet.
+	 */
+	const hostProfiles = ref<HostVisibleProfile[] | null>(null);
+	/** Why they could not be read, as the hub said it, or that it did not answer. */
+	const hostProfilesError = ref<string | null>(null);
+	/** The Default Shell chosen: "" for Automatic, else the id of a launch profile. */
+	const defaultProfileId = ref("");
+	/** The default profile the user had chosen, as last read or saved: what Automatic removes. */
+	let userDefaultRead: string | null = null;
+
+	/**
+	 * Read the host's launch profiles, once, for its Default Shell: the one
+	 * marked default by its user is the choice shown, and one the hub marked
+	 * for its agent's default shell is "Automatic" (#802).
+	 */
+	async function loadHostProfiles(): Promise<void> {
+		if (!editHost || hostProfiles.value !== null) return;
+		hostProfilesError.value = null;
+		try {
+			const listed = await useProfilesStore().fetchHostProfiles(editHost.id);
+			const chosen = listed.find((p) => p.overrideType === "default" && p.setByUser === true);
+			userDefaultRead = chosen?.id ?? null;
+			defaultProfileId.value = userDefaultRead ?? "";
+			hostProfiles.value = listed;
+		} catch (error) {
+			hostProfilesError.value = `Could not read its launch profiles: ${
+				error instanceof Error ? error.message : String(error)
+			}`;
+			hostProfiles.value = [];
+		}
+	}
+
+	/**
+	 * Save the Default Shell chosen, when it changed (#802): the profile made
+	 * the host's default, as the user's choice, or for Automatic the user's
+	 * default removed. Null once done, else why not.
+	 */
+	async function saveDefaultProfile(hostId: string): Promise<string | null> {
+		if (hostProfiles.value === null) return null;
+		const chosen = defaultProfileId.value === "" ? null : defaultProfileId.value;
+		if (chosen === userDefaultRead) return null;
+		const answer = await useProfilesStore().setHostDefaultProfile(hostId, chosen, userDefaultRead);
+		if (!answer.ok) return answer.message;
+		userDefaultRead = chosen;
+		return null;
 	}
 
 	// INV-13: clear key path when switching away from key auth
@@ -428,9 +477,6 @@ export function useHostForm(editHost?: Host) {
 			// null once reset: the colour then comes from the label (#659).
 			color: f.color || null,
 			host_group_id: f.hostGroup || null,
-			...(f.defaultShell && {
-				default_shell: f.defaultShell,
-			}),
 			trust_remote_hints: f.trustRemoteHints,
 			elevation_method: f.elevationMethod || null,
 			custom_command: f.customCommand || null,
@@ -471,6 +517,14 @@ export function useHostForm(editHost?: Host) {
 			if (!answer.ok) {
 				saveError.value = answer.message;
 				return null;
+			}
+			// The Default Shell is the host's default profile, saved apart (#802).
+			if (isEdit) {
+				const refused = await saveDefaultProfile(answer.host.id);
+				if (refused !== null) {
+					saveError.value = refused;
+					return null;
+				}
 			}
 			return answer.host;
 		} catch (error) {
@@ -575,5 +629,9 @@ export function useHostForm(editHost?: Host) {
 		save,
 		quickConnect,
 		parseConnectionString,
+		hostProfiles,
+		hostProfilesError,
+		defaultProfileId,
+		loadHostProfiles,
 	};
 }

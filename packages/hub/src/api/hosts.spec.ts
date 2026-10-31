@@ -89,7 +89,6 @@ describe("validateCreateHost", () => {
 			"ssh_proxy_host_id",
 			"ssh_proxy_spec",
 			"icon_value",
-			"default_shell",
 			"default_cwd",
 			"host_group_id",
 			"profile_json",
@@ -212,8 +211,8 @@ describe("validateUpdateHost", () => {
 		);
 		expect(edit(stored, { type: "vm" })).toBe("type must be 'local' or 'ssh'");
 		expect(edit(stored, { ssh_user: 5 })).toBe("ssh_user must be a string or null");
-		expect(edit(stored, { default_shell: true })).toBe("default_shell must be a string or null");
-		expect(edit(stored, { ssh_user: null, default_shell: null })).toBeNull();
+		expect(edit(stored, { custom_command: true })).toBe("custom_command must be a string or null");
+		expect(edit(stored, { ssh_user: null, custom_command: null })).toBeNull();
 	});
 
 	// A host stored before this check: an edit of anything else is not refused

@@ -2,12 +2,12 @@ import { EventEmitter } from "node:events";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.fixture.js";
+import { resolveHostOs } from "../session/host-profile-menu.js";
 import { seedShellProfiles } from "../session/shell-profile-seed.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { getTestTls } from "../test-tls.fixture.js";
-import { resolveHostOs } from "./host-profiles.js";
 import {
 	type CreateLaunchProfileBody,
 	type UpdateLaunchProfileBody,
@@ -737,6 +737,111 @@ describe("DELETE /api/hosts/:id/profiles/:profileId", () => {
 			url: `/api/hosts/${hostId}/profiles/${profile.id}`,
 		});
 		expect(res.statusCode).toBe(404);
+	});
+});
+
+// ─── One default per host: what Edit Host's Default Shell saves (#802) ────────
+//
+// Edit Host's Default Shell and Settings › Profiles › "Set as Default" save the
+// same mark, through these routes: PUT `default` for a profile, DELETE of the
+// user's default for "Automatic", which gives the host its agent's default.
+
+describe("a host's default profile through the hosts' profile routes (#802)", () => {
+	useHubServer();
+
+	interface MenuEntry {
+		id: string;
+		name: string;
+		override_type?: string;
+		set_by_user?: boolean;
+	}
+
+	let hostId: string;
+	let dal: MetaDAL;
+	const id = (name: string) => dal.getLaunchProfileByName(name)?.id ?? "";
+	const menu = async () =>
+		(await server.inject({ method: "GET", url: `/api/hosts/${hostId}/profiles?os=linux` })).json<
+			MenuEntry[]
+		>();
+
+	beforeEach(async () => {
+		const hosts = (await server.inject({ method: "GET", url: "/api/hosts" })).json<
+			Array<{ id: string; type: string }>
+		>();
+		const local = hosts.find((h) => h.type === "local");
+		if (!local) throw new Error("local host not found");
+		hostId = local.id;
+		dal = new MetaDAL(dbs.meta);
+		// A connection, as the hub records it: its agent reported bash.
+		const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+		dal.updateHostDiscoveredShells(hostId, ["/bin/bash", "/usr/bin/fish"], "/bin/bash");
+		await seedShellProfiles(hostId, ["/bin/bash", "/usr/bin/fish"], "/bin/bash", "linux", dal);
+		quiet.mockRestore();
+	});
+
+	it("lists the default first, and says whose mark each override is", async () => {
+		expect((await menu())[0]).toMatchObject({
+			name: "bash",
+			override_type: "default",
+			set_by_user: false,
+		});
+
+		await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}/profiles/${id("fish")}`,
+			payload: { override_type: "default" },
+		});
+
+		const listed = await menu();
+		expect(listed[0]).toMatchObject({ name: "fish", override_type: "default", set_by_user: true });
+		// A profile with no override says nothing of whose it is.
+		expect(listed.find((p) => p.name === "bash")).not.toHaveProperty("set_by_user");
+	});
+
+	it("gives the host its agent's default again at once when the user's is removed: Automatic", async () => {
+		await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}/profiles/${id("fish")}`,
+			payload: { override_type: "default" },
+		});
+
+		const res = await server.inject({
+			method: "DELETE",
+			url: `/api/hosts/${hostId}/profiles/${id("fish")}`,
+		});
+
+		expect(res.statusCode).toBe(204);
+		expect((await menu())[0]).toMatchObject({
+			name: "bash",
+			override_type: "default",
+			set_by_user: false,
+		});
+	});
+
+	it("gives it back at once when the user's default turns into a pin, or its profile is deleted", async () => {
+		await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}/profiles/${id("fish")}`,
+			payload: { override_type: "default" },
+		});
+		await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}/profiles/${id("fish")}`,
+			payload: { override_type: "pin" },
+		});
+		expect((await menu())[0]).toMatchObject({ name: "bash", set_by_user: false });
+
+		await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}/profiles/${id("fish")}`,
+			payload: { override_type: "default" },
+		});
+		const deleted = await server.inject({
+			method: "DELETE",
+			url: `/api/launch-profiles/${id("fish")}`,
+		});
+		expect(deleted.statusCode).toBe(204);
+		expect((await menu())[0]).toMatchObject({ name: "bash", set_by_user: false });
 	});
 });
 

@@ -540,9 +540,9 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 // ─── Migration 023: the agent's default shell apart (#794) ───────────────────
 //
 // A hub before #794 wrote the default shell a host's agent reports into
-// default_shell, the user's Default Shell, at every connection. What a database
-// it left holds there is the agent's on every host that connected, and can only
-// be the user's on one that never did.
+// default_shell at every connection. What a database it left holds there is the
+// agent's on every host that connected. Nothing reads default_shell any more
+// (#802): it is left as it is.
 
 describe("meta.db migration 023: the agent's default shell in a column of its own", () => {
 	let dir: string;
@@ -593,7 +593,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 		before.close();
 	}
 
-	it("moves a connected host's value to the agent's column, and keeps a never-connected host's", () => {
+	it("copies a connected host's value to the agent's column, and leaves default_shell as it is", () => {
 		databaseAt22();
 
 		dbs = openDatabases(dir);
@@ -606,34 +606,38 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 		]);
 		const row = (
 			id: string,
-			chosen: string | null,
+			left: string | null,
 			reported: string | null,
 			found: string | null,
 		) => ({
 			id,
-			default_shell: chosen,
+			default_shell: left,
 			discovered_default_shell: reported,
 			discovered_shells: found,
 			updated_at: at,
 		});
 		expect(shells(dbs.meta)).toEqual([
-			row("C", null, "/bin/bash", piShells),
+			row("C", "/bin/bash", "/bin/bash", piShells),
 			row("E", null, null, null),
-			row("L", null, cmd, JSON.stringify([cmd])),
+			row("L", cmd, cmd, JSON.stringify([cmd])),
 			row("N", "/usr/bin/fish", null, null),
 		]);
-		// As the hub reads them: no Default Shell chosen where the agent's was.
+		// As the hub reads them: the agent's default where one connected, and no
+		// default_shell anywhere (#802).
 		const dal = new MetaDAL(dbs.meta);
-		expect(dal.getHost("C")?.defaultShell).toBeUndefined();
 		expect(dal.getHost("C")?.discoveredDefaultShell).toBe("/bin/bash");
-		expect(dal.getHost("N")?.defaultShell).toBe("/usr/bin/fish");
 		expect(dal.getHost("N")?.discoveredDefaultShell).toBeUndefined();
+		for (const id of ["C", "E", "L", "N"]) {
+			expect(dal.getHost(id)).not.toHaveProperty("defaultShell");
+		}
 	});
 
-	it("is not run again over a Default Shell chosen since", () => {
+	it("is not run again over what a connection recorded since", () => {
 		databaseAt22();
 		dbs = openDatabases(dir);
-		dbs.meta.prepare("UPDATE hosts SET default_shell = '/usr/bin/fish' WHERE id = 'C'").run();
+		dbs.meta
+			.prepare("UPDATE hosts SET discovered_default_shell = '/usr/bin/fish' WHERE id = 'C'")
+			.run();
 		const chosen = shells(dbs.meta);
 		dbs.close();
 

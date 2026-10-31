@@ -480,18 +480,17 @@ describe("MetaDAL — Launch Profiles", () => {
 			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash"], "/bin/bash");
 			const host = dal.getHost(localHostId);
 			expect(host?.discoveredDefaultShell).toBe("/bin/bash");
-			expect(host?.defaultShell).toBeUndefined();
 		});
 
-		// The user's Default Shell lasted until the next connection (#794).
-		it("leaves the Default Shell the user chose as it is, whatever the agent reports", () => {
-			dal.updateHost(localHostId, { defaultShell: "/bin/zsh" });
-
+		// The host's default_shell column is read and written by nothing (#802).
+		it("writes nothing to the host's default_shell column", () => {
 			dal.updateHostDiscoveredShells(localHostId, ["/bin/bash", "/bin/zsh"], "/bin/bash");
 
 			const host = dal.getHost(localHostId);
-			expect(host?.defaultShell).toBe("/bin/zsh");
-			expect(host?.discoveredDefaultShell).toBe("/bin/bash");
+			expect(host).not.toHaveProperty("defaultShell");
+			expect(
+				dbs.meta.prepare("SELECT default_shell FROM hosts WHERE id = ?").get(localHostId),
+			).toEqual({ default_shell: null });
 		});
 
 		it("keeps the agent's default shell when none is provided", () => {

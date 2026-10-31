@@ -3,6 +3,7 @@ import { sshAddress, targetRoute } from "../ssh-route.js";
 import type { DatabaseManager } from "./db.js";
 import { openTestDatabases } from "./db.js";
 import { HostsDAL } from "./hosts-dal.js";
+import { LaunchProfilesDAL } from "./launch-profiles-dal.js";
 import type { CreateHostInput } from "./meta-types.js";
 
 describe("HostsDAL — agent SHA256 pinning", () => {
@@ -373,6 +374,38 @@ describe("HostsDAL — duplicateHost (#746)", () => {
 		expect(specCopy?.sshProxyHostId).toBeUndefined();
 	});
 
+	// The Default Shell is the host's default profile (#802): a copy keeps the
+	// one its user chose, as it kept the Default Shell, and not the hub's mark,
+	// which its own agent gives it at its first connection.
+	it("copies the default profile the user chose, not the one the hub marked", () => {
+		const profiles = new LaunchProfilesDAL(dbs.meta);
+		const profile = (name: string) =>
+			profiles.createLaunchProfile({
+				name,
+				shell: `/usr/bin/${name}`,
+				mode: "shell",
+				elevated: false,
+				supportedOs: "linux",
+				iconType: "auto",
+				sortOrder: 0,
+			}).id;
+		const fish = profile("fish");
+		const bash = profile("bash");
+		const chosen = create("chosen");
+		const seeded = create("seeded");
+		profiles.upsertHostProfileOverride(chosen.id, fish, "default");
+		profiles.upsertHostProfileOverride(seeded.id, bash, "default", undefined, false);
+
+		const chosenCopy = dal.duplicateHost(chosen.id);
+		const seededCopy = dal.duplicateHost(seeded.id);
+
+		expect(profiles.getHostDefaultOverride(chosenCopy?.id ?? "")).toMatchObject({
+			profileId: fish,
+			setByUser: true,
+		});
+		expect(profiles.getHostDefaultOverride(seededCopy?.id ?? "")).toBeUndefined();
+	});
+
 	it("copies none of the keys and binaries the original trusts", () => {
 		const original = create("pinned", { sshProxySpec: "jump" });
 		const route = targetRoute(dal.getHost(original.id)!, (id) => sshAddress(dal.getHost(id)));
@@ -456,23 +489,18 @@ describe("HostsDAL — what the hub records of a host, said once it changed (#78
 			discoveredShells: ["/bin/bash", "/usr/bin/fish"],
 			discoveredDefaultShell: "/usr/bin/fish",
 		});
-		expect(dal.getHost(id)?.defaultShell).toBeUndefined();
 	});
 
-	// The agent's default is its own column (#794): a host whose user chose
-	// another one is not told it changed at every connection.
-	it("says nothing when the agent reports again the default it reported, the user's being another", () => {
-		dal.updateHost(id, { defaultShell: "/usr/bin/fish" });
+	// The agent's default is its own column (#794): a host is not told it
+	// changed at every connection.
+	it("says nothing when the agent reports again the default it reported", () => {
 		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"], "/bin/bash");
 		said = 0;
 
 		dal.updateHostDiscoveredShells(id, ["/bin/bash", "/usr/bin/fish"], "/bin/bash");
 
 		expect(said).toBe(0);
-		expect(dal.getHost(id)).toMatchObject({
-			defaultShell: "/usr/bin/fish",
-			discoveredDefaultShell: "/bin/bash",
-		});
+		expect(dal.getHost(id)?.discoveredDefaultShell).toBe("/bin/bash");
 	});
 
 	it("still answers that a key found again is this host's", () => {

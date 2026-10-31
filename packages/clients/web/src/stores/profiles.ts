@@ -32,11 +32,18 @@ export interface LaunchProfileBody {
 /** Profile with host-specific override info (from GET /api/hosts/:id/profiles). */
 export type HostVisibleProfile = LaunchProfile & {
 	overrideType?: "pin" | "hide" | "default";
+	/**
+	 * With an override: whether the user set it, or the hub did from what the
+	 * host's agent reported, such as the default it marks for the agent's
+	 * default shell while the user has chosen none (#802).
+	 */
+	setByUser?: boolean;
 	effectiveSort: number;
 };
 
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { type HubAnswer, hubRefusal } from "../utils/hub-answer.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { useAuthStore } from "./auth.js";
@@ -87,6 +94,39 @@ export const useProfilesStore = defineStore("profiles", () => {
 		});
 		if (!res.ok) throw new Error(`GET /api/hosts/${hostId}/profiles failed: ${res.status}`);
 		return toCamelCase(await res.json()) as HostVisibleProfile[];
+	}
+
+	/**
+	 * Make a profile the host's default, as the user's choice (#802): what Edit
+	 * Host's Default Shell sends, through the route Settings › Profiles ›
+	 * "Set as Default" uses. Null is "Automatic": the user's default,
+	 * `userDefaultId`, is removed, and the hub marks the profile of its agent's
+	 * default shell again. A refusal comes back with the hub's reason; a hub
+	 * that does not answer throws.
+	 */
+	async function setHostDefaultProfile(
+		hostId: string,
+		profileId: string | null,
+		userDefaultId: string | null,
+	): Promise<HubAnswer> {
+		const target = profileId ?? userDefaultId;
+		if (target === null) return { ok: true };
+		const url = `${hubBaseUrl()}/api/hosts/${encodeURIComponent(hostId)}/profiles/${encodeURIComponent(target)}`;
+		const res =
+			profileId === null
+				? await hubFetch(url, {
+						method: "DELETE",
+						headers: { Authorization: `Bearer ${authStore.token}` },
+					})
+				: await hubFetch(url, {
+						method: "PUT",
+						headers: {
+							"Content-Type": "application/json",
+							Authorization: `Bearer ${authStore.token}`,
+						},
+						body: JSON.stringify({ override_type: "default" }),
+					});
+		return res.ok ? { ok: true } : hubRefusal(res);
 	}
 
 	// -------------------------------------------------------------------------
@@ -182,6 +222,8 @@ export const useProfilesStore = defineStore("profiles", () => {
 	/**
 	 * Spawn the Nth profile of the active host's menu (Ctrl+Shift+N). The host
 	 * is asked at each press, so the menu is the one the dropdown would show.
+	 * The hub lists the host's default profile first, the ✓ one: Ctrl+Shift+1
+	 * starts what a new terminal starts (#802).
 	 */
 	async function spawnNthHostProfile(n: number): Promise<void> {
 		const channelsStore = useChannelsStore();
@@ -222,6 +264,7 @@ export const useProfilesStore = defineStore("profiles", () => {
 		loading,
 		fetchProfiles,
 		fetchHostProfiles,
+		setHostDefaultProfile,
 		loadHostProfiles,
 		spawnNthHostProfile,
 		createProfile,

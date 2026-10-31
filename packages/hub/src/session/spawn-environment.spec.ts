@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-	chosenDefaultShell,
 	envNamesIgnoreCase,
 	resolveEnvironmentChanges,
 	spawnEnvironmentFields,
@@ -96,69 +95,59 @@ describe("envNamesIgnoreCase", () => {
 	});
 });
 
-describe("chosenDefaultShell", () => {
-	it("is the Default Shell the user chose, and none when it is empty or blank (#794)", () => {
-		expect(chosenDefaultShell({ defaultShell: "/usr/bin/fish" })).toBe("/usr/bin/fish");
-		expect(chosenDefaultShell({ defaultShell: " C:\\Tools\\nu.exe " })).toBe("C:\\Tools\\nu.exe");
-		expect(chosenDefaultShell({})).toBeUndefined();
-		expect(chosenDefaultShell({ defaultShell: "" })).toBeUndefined();
-		expect(chosenDefaultShell({ defaultShell: "  " })).toBeUndefined();
-	});
-
-	// The rule a SPAWN's shell and a launch profile's keep: the hosts routes do
-	// not check this one, so the hub does before it starts it.
-	it("is none when it is not a shell a client may name: a command, or not an absolute path", () => {
-		expect(chosenDefaultShell({ defaultShell: "zsh" })).toBeUndefined();
-		expect(chosenDefaultShell({ defaultShell: "/bin/sh;reboot" })).toBeUndefined();
-		expect(chosenDefaultShell({ defaultShell: "/bin/$(id)" })).toBeUndefined();
-		expect(chosenDefaultShell({ defaultShell: "/opt/../bin/sh" })).toBeUndefined();
-	});
-});
-
 describe("wantsLoginShell", () => {
-	/** A host whose agent reported bash, and whose user chose nothing. */
+	/** A host whose agent reported bash. */
 	const pi = { type: "ssh" as const, discoveredDefaultShell: "/bin/bash" };
-	/** The same host, its user having chosen fish (#794). */
-	const piFish = { ...pi, defaultShell: "/usr/bin/fish" };
+	/** Its default profile's shell, as the hub marks it for the agent's default. */
+	const seeded = "/bin/bash";
+	/** Its default profile's shell, as its user chose it (#802). */
+	const chosen = "/usr/bin/fish";
 
 	it("asks for one on an SSH host running its default shell, as a shell, with no arguments", () => {
-		expect(wantsLoginShell(pi, "/bin/bash", [], false)).toBe(true);
-		expect(wantsLoginShell(pi, "/bin/bash", undefined, undefined)).toBe(true);
+		expect(wantsLoginShell(pi, seeded, "/bin/bash", [], false)).toBe(true);
+		expect(wantsLoginShell(pi, seeded, "/bin/bash", undefined, undefined)).toBe(true);
 	});
 
 	// No shell named: the agent starts its own default, the one it reported.
 	it("counts no shell named as the default one", () => {
-		expect(wantsLoginShell(pi, undefined, [], false)).toBe(true);
-		expect(wantsLoginShell({ type: "ssh" }, undefined, [], false)).toBe(true);
+		expect(wantsLoginShell(pi, undefined, undefined, [], false)).toBe(true);
+		expect(wantsLoginShell({ type: "ssh" }, undefined, undefined, [], false)).toBe(true);
 	});
 
-	// A terminal opened with nothing named runs the user's choice in the place
-	// of `ssh host`; the agent's is still the one `ssh host` starts.
-	it("counts the Default Shell the user chose and the agent's as default ones (#794)", () => {
-		expect(wantsLoginShell(piFish, "/usr/bin/fish", [], false), "the user's").toBe(true);
-		expect(wantsLoginShell(piFish, "/bin/bash", [], false), "the agent's").toBe(true);
+	// A new terminal starts the host's default profile in the place of
+	// `ssh host`, whoever made it the default; the agent's shell is still the
+	// one `ssh host` starts.
+	it("counts the default profile's shell and the agent's as default ones (#802)", () => {
+		expect(wantsLoginShell(pi, chosen, "/usr/bin/fish", [], false), "the user's profile").toBe(
+			true,
+		);
+		expect(wantsLoginShell(pi, chosen, "/bin/bash", [], false), "the agent's").toBe(true);
 		expect(
-			wantsLoginShell({ type: "ssh", defaultShell: "/usr/bin/fish" }, "/usr/bin/fish", [], false),
-			"the user's, before any connection",
+			wantsLoginShell({ type: "ssh" }, chosen, "/usr/bin/fish", [], false),
+			"the user's profile, the agent's default not known yet",
 		).toBe(true);
+		expect(wantsLoginShell(pi, seeded, "/bin/bash", [], false), "the profile the hub marked").toBe(
+			true,
+		);
 	});
 
 	it("leaves every other terminal as it was", () => {
-		expect(wantsLoginShell(piFish, "/usr/bin/zsh", [], false), "another shell").toBe(false);
-		expect(wantsLoginShell(piFish, "/usr/bin/fish", ["-c", "htop"], false), "arguments").toBe(
+		expect(wantsLoginShell(pi, chosen, "/usr/bin/zsh", [], false), "another shell").toBe(false);
+		expect(wantsLoginShell(pi, chosen, "/usr/bin/fish", ["-c", "htop"], false), "arguments").toBe(
 			false,
 		);
-		expect(wantsLoginShell(piFish, "/usr/bin/fish", [], true), "a direct process").toBe(false);
-		expect(wantsLoginShell({ type: "ssh" }, "/bin/bash", [], false), "no default known").toBe(
-			false,
-		);
+		expect(wantsLoginShell(pi, chosen, "/usr/bin/fish", [], true), "a direct process").toBe(false);
 		expect(
-			wantsLoginShell({ type: "ssh", defaultShell: "" }, "", [], false),
-			"an empty Default Shell",
+			wantsLoginShell({ type: "ssh" }, undefined, "/bin/bash", [], false),
+			"no default known",
 		).toBe(false);
 		expect(
-			wantsLoginShell({ ...piFish, type: "local" }, "/usr/bin/fish", [], false),
+			wantsLoginShell({ ...pi, type: "local" }, chosen, "/usr/bin/fish", [], false),
 			"a local terminal",
+		).toBe(false);
+		expect(
+			wantsLoginShell({ ...pi, type: "local" }, seeded, undefined, [], false),
+			"a local terminal with no shell named",
 		).toBe(false);
 	});
 });

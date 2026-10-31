@@ -23,6 +23,7 @@ import type {
 import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@lasterm/shared";
 import type { AgentConnection } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
+import { hostDefaultProfile } from "./host-profile-menu.js";
 import { HostUnreachableError, hostAwayDuringSpawn } from "./host-reachability.js";
 import {
 	clearContext,
@@ -125,7 +126,13 @@ export class ChannelLifecycleManager {
 		);
 		const loginShell =
 			host !== undefined &&
-			wantsLoginShell(host, channel?.shell, channel?.args, channel?.directProcess);
+			wantsLoginShell(
+				host,
+				hostDefaultProfile(host, this.ctx.metaDal)?.shell,
+				channel?.shell,
+				channel?.args,
+				channel?.directProcess,
+			);
 		return spawnEnvironmentFields(environment, spawnEnvMode(profile?.envMode), loginShell);
 	}
 

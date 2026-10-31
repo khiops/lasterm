@@ -21,7 +21,6 @@ export interface CreateHostBody {
 	icon_value?: string | null;
 	/** null stores none: the colour then comes from the label (#659). */
 	color?: string | null;
-	default_shell?: string | null;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
 	host_group_id?: string | null;
@@ -51,8 +50,6 @@ export interface UpdateHostBody {
 	icon_value?: string | null;
 	/** null clears it, back to the colour the label gives: the dialog's Reset (#659). */
 	color?: string | null;
-	/** null clears it, as `ssh_user` does: the dialog's emptied field (#792). */
-	default_shell?: string | null;
 	default_cwd?: string;
 	trust_remote_hints?: "apply" | "ask" | "ignore";
 	host_group_id?: string | null;
@@ -153,7 +150,6 @@ const HOST_TEXT_FIELDS = [
 	"ssh_proxy_host_id",
 	"ssh_proxy_spec",
 	"icon_value",
-	"default_shell",
 	"default_cwd",
 	"host_group_id",
 	"profile_json",

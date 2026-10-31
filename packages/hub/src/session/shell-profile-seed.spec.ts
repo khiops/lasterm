@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
-import { seedShellProfiles } from "./shell-profile-seed.js";
+import { restoreAgentDefaultProfile, seedShellProfiles } from "./shell-profile-seed.js";
 
 const CMD = "C:\\WINDOWS\\system32\\cmd.exe";
 const POWERSHELL = "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
@@ -203,6 +203,70 @@ describe("seedShellProfiles", () => {
 
 			expect(menu("linux")).toEqual(["fish", "zsh"]);
 			expect(dal.getHostDefaultOverride(hostId)).toBeUndefined();
+		});
+
+		// Edit Host's "Automatic" (#802): the user's default goes, and the
+		// agent's applies to the next terminal, not after the next connection.
+		describe("given back at once when the user's goes (restoreAgentDefaultProfile)", () => {
+			/** A host as its last connection left it: its agent reported bash. */
+			async function connected(): Promise<void> {
+				dal.updateHostDiscoveredShells(hostId, UNIX_SHELLS, "/bin/bash");
+				await connect("/bin/bash");
+			}
+
+			it("is the agent's once the user clears theirs", async () => {
+				await connected();
+				setAsDefault("fish");
+				dal.deleteHostProfileOverride(hostId, id("fish"));
+
+				restoreAgentDefaultProfile(hostId, dal);
+
+				expect(defaults()).toEqual(["bash (default)"]);
+				expect(dal.getHostDefaultOverride(hostId)?.setByUser).toBe(false);
+			});
+
+			it("is the agent's once the profile the user set is deleted", async () => {
+				await connected();
+				setAsDefault("fish");
+				dal.deleteLaunchProfile(id("fish"));
+
+				restoreAgentDefaultProfile(hostId, dal);
+
+				expect(defaults()).toEqual(["bash (default)"]);
+			});
+
+			it("leaves a default the host has, the user's or the hub's", async () => {
+				await connected();
+				setAsDefault("fish");
+
+				restoreAgentDefaultProfile(hostId, dal);
+
+				expect(dal.getHostDefaultOverride(hostId)).toMatchObject({
+					profileId: id("fish"),
+					setByUser: true,
+				});
+			});
+
+			// One the user deleted comes back with the next connection, as it did.
+			it("brings back no profile the user deleted, and marks none", async () => {
+				await connected();
+				dal.deleteLaunchProfile(id("bash"));
+
+				restoreAgentDefaultProfile(hostId, dal);
+
+				expect(dal.getLaunchProfileByName("bash")).toBeUndefined();
+				expect(dal.getHostDefaultOverride(hostId)).toBeUndefined();
+			});
+
+			it("marks none on a host whose agent never reported its default, nor a profile it hid", async () => {
+				restoreAgentDefaultProfile(hostId, dal);
+				expect(dal.getHostDefaultOverride(hostId)).toBeUndefined();
+
+				await connected();
+				dal.upsertHostProfileOverride(hostId, id("bash"), "hide");
+				restoreAgentDefaultProfile(hostId, dal);
+				expect(dal.getHostDefaultOverride(hostId)).toBeUndefined();
+			});
 		});
 	});
 });

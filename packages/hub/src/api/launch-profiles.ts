@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import type { LaunchProfile } from "@lasterm/shared";
 import { toSnakeCase, validateShell } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
+import { restoreAgentDefaultProfile } from "../session/shell-profile-seed.js";
 import {
 	findWindowsTerminalSettingsPath,
 	importWindowsTerminalProfiles,
@@ -376,6 +377,9 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				error: { code: "NOT_FOUND", message: "Launch profile not found" },
 			});
 		}
+		// A host whose default it was has none left (ON DELETE CASCADE): the
+		// one its agent reports applies again, at once (#802).
+		for (const host of metaDal.listHosts()) restoreAgentDefaultProfile(host.id, metaDal);
 		return reply.code(204).send();
 	});
 

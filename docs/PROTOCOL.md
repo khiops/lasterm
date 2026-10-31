@@ -138,8 +138,8 @@ The hub records them on the host as `discovered_shells` and `discovered_default_
 seeds a launch profile for each shell, marking the default one's as the host's default profile
 where the host has none, or has only the mark an earlier HELLO left, so that mark follows the
 agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:profileId`) is never
-replaced, and a profile the user hid is never marked (#800). The agent's `default_shell` never
-goes to the host's `default_shell`, which is the user's choice (#794).
+replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
+new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
 **Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all five, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
@@ -687,14 +687,14 @@ Hub passes RESIZE on to the agent and stores the size; it sends it to no other c
   type: "SPAWN",
   host_id: string,
   request_id?: string, // a ULID naming this SPAWN, echoed in what answers it (below)
-  shell?: string,     // default: the launch profile's, else the host's `default_shell` (#794), else the host's
-                      // first profile's, else none: the agent's default (§ 3.2)
-  args?: string[],    // default: taken with the shell, as above; none with the host's `default_shell`
+  shell?: string,     // default: the launch profile's (below), else none: the agent's default (§ 3.2)
+  args?: string[],    // default: the launch profile's
   cwd?: string,       // default: the launch profile's, else none: the agent starts the shell in its user's home (§ 3.2)
   env?: Record<string, string>,  // set over the scopes' and the launch profile's (max 256 entries)
   cols?: number,      // 1 to 500; default 80
   rows?: number,      // 1 to 500; default 24
-  launch_profile_id?: string,  // the launch profile to start; the request's own fields win
+  launch_profile_id?: string,  // the launch profile to start; the request's own fields win. With neither
+                               // it nor `shell`: the host's default profile (below, #802)
   direct_process?: boolean,    // default: the launch profile's `mode` is `process`
   elevated?: boolean, // default: the launch profile's; ignored on an SSH host
   group_id?: string,  // optional channel group to place new channel in
@@ -705,6 +705,16 @@ Hub passes RESIZE on to the agent and stores the size; it sends it to no other c
 // Hub → UI
 { type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string }
 ```
+
+A SPAWN that names neither `shell` nor a launch profile, as the `+` button, the host picker and an
+empty pane send it, starts the host's **default profile**, as one naming it would: its shell,
+arguments, directory, environment, mode and elevation, and the channel records it as its
+`launch_profile_id`. It is the first profile `GET /api/hosts/:id/profiles` lists, the ✓ of the
+profile menu and what Ctrl+Shift+1 starts: the one the user chose (Edit Host's Default Shell, or
+Settings › Profiles), else the one the hub marked for the default shell its agent reports (§ 3.1).
+A host with none marked starts its first profile; one with no profile at all, none, and its agent
+starts its own default. The local host is no exception: its agent's HELLO marks its default as an
+SSH host's does (#802).
 
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's
@@ -1430,9 +1440,9 @@ every client `HOSTS_CHANGED`; § 4.18 lists which.
 | POST | `/api/hosts/:id/reconnect` | ● | `{ client_id?, force? }` → 202 `{ status: "connecting", ended }`. Closes the host's connection, then connects as above. A remote daemon keeps its terminals, taken up on the new connection. An agent on stdio ends with its connection, and its terminals with it (`end_reason: "stopped"`, § 4.7): unless `force` is `true`, the hub does nothing and answers 409 `{ error: { code: "TERMINALS_WOULD_END", message, terminals } }` with how many, for the client to ask its user and send `force: true`. With no connection up there is nothing to close and nothing ends |
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`. The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
-| GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
-| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800) |
-| DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
+| GET | `/api/hosts/:id/profiles` | ● | The host's profile menu (query: `?os=linux\|darwin\|windows`): `LaunchProfile[]`, its default profile first, each with the host's `override_type` and `set_by_user` when it has one (`true` for the user's, `false` for one the hub made from what the host's agent reported, #802) |
+| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
+| DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204. Removing the user's default is Edit Host's "Automatic": the host gets back at once the default the hub marks for the default shell its agent last reported, when that profile exists and is not hidden (#802) |
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
 400 `NOT_SSH_HOST`, 409 `HUB_QUITTING`, 409 `HOST_BUSY` (stop or acquisition),
@@ -1547,7 +1557,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 |
 | GET | `/api/launch-profiles/:id` | ● | `LaunchProfile` |
 | PUT | `/api/launch-profiles/:id` | ● | UpdateLaunchProfile → `LaunchProfile` |
-| DELETE | `/api/launch-profiles/:id` | ● | 204. 400 `LAST_PROFILE` for the only one left |
+| DELETE | `/api/launch-profiles/:id` | ● | 204. 400 `LAST_PROFILE` for the only one left. A host whose default it was gets back at once the one its agent's default shell was given (#802) |
 | POST | `/api/launch-profiles/import-windows-terminal` | ● | — → `{ imported, skipped, profiles }`, from Windows Terminal's `settings.json`. 501 `NOT_SUPPORTED` on a hub not on Windows, 404 `NOT_FOUND` when there is no such file |
 
 #### Configuration
@@ -1663,7 +1673,6 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'
   icon_value?: string | null,         // emoji char, or for 'image' a data:image/png|jpeg|gif|webp;base64 URI of at most 65536 chars
   color?: string | null,              // hex "#rrggbb" or null for auto
-  default_shell?: string | null,
   default_cwd?: string,
   trust_remote_hints?: 'apply' | 'ask' | 'ignore',  // default 'apply'
   host_group_id?: string | null,      // host group ID
@@ -1677,7 +1686,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 
 **UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge). A field
 left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
-to 22), `ssh_user`, `ssh_key_path`, `default_shell` or `color` (#792).
+to 22), `ssh_user`, `ssh_key_path` or `color` (#792).
 
 Both routes answer 400 `VALIDATION_ERROR` for a field of another type than the one above, or a
 value outside its choices (#795). An edit gets CreateHost's rules: each field it sends is checked
@@ -1687,7 +1696,8 @@ address, and key auth a key path, sent or stored: `{ ssh_auth: "key" }` with non
 `{ ssh_key_path: null }` on a host that stays on key auth, is refused; `{ ssh_auth: "agent",
 ssh_key_path: null }` is not.
 
-A field these routes do not know is ignored.
+A field these routes do not know is ignored, `default_shell` among them: a host's default is a
+launch profile (§ 4.4), which the hosts' profile routes set (#802).
 
 **Host:** what `GET /api/hosts` and the routes above answer: the CreateHost fields as stored,
 `id`, `sort_order`, `created_at` and `updated_at`, and what the hub records of the host on its
@@ -1704,12 +1714,8 @@ own, which no route writes:
 }
 ```
 
-`default_shell` is the user's Default Shell, and only a route writes it: a terminal opened with no
-shell and no launch profile starts it, with no arguments (§ 4.4). It is started only when it keeps
-the rule of a SPAWN's `shell`, an absolute path and not a command (SECURITY.md § 5.1); empty, or
-not keeping it, such a terminal starts the host's first profile, as before. Edit Host shows
-`discovered_default_shell` in the empty field, and says when the hub would not start what is
-typed (#794).
+`discovered_default_shell` is the shell whose launch profile the hub marks as the host's default
+while the user has chosen none: Edit Host shows it beside "Automatic" (#802).
 
 **CreateGroup:** (tab channel groups; no other key)
 ```typescript

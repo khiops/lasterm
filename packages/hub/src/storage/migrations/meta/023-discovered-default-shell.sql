@@ -1,31 +1,29 @@
 -- Migration 023: the default shell a host's agent reports gets a column of its own (#794).
 --
--- `default_shell` is the Default Shell of Edit Host: the user's choice. Until
--- #794 the hub also wrote into it the default shell the host's agent reports in
--- its HELLO, at every connection, so what the user typed or cleared lasted only
--- until the next one. From now on the agent's goes to `discovered_default_shell`,
--- beside `discovered_shells`, and `default_shell` is the user's alone.
+-- Until #794 the hub wrote the default shell a host's agent reports in its
+-- HELLO into `default_shell`, at every connection. From now on it goes to
+-- `discovered_default_shell`, beside `discovered_shells`: the hub marks its
+-- launch profile as the host's default while the user has chosen none, and
+-- asks for a login shell when a terminal on an SSH host runs it.
 --
--- What `default_shell` holds today cannot say whose it is, so the host's history
--- decides:
+-- `default_shell` is read and written by nothing from #802 on: a host's
+-- default is a launch profile. No released hub ever started a terminal from
+-- it either, so the column is left as it is: it stays, as every column does
+-- once released (STORAGE.md § 9.1).
 --
--- - A host with `discovered_shells` has connected, and each connection wrote its
---   agent's default over `default_shell`. The value is the agent's: it moves to
---   the new column and leaves `default_shell` empty. One the user typed since the
---   last connection is moved too; the next connection of a hub before #794
---   would have overwritten it all the same.
--- - A host that never connected has no agent that could have written it: the
---   value can only be the user's, and stays.
+-- A host with `discovered_shells` has connected, and each connection wrote its
+-- agent's default into `default_shell`: that value is copied to the new
+-- column, so the hub knows the agent's default before the host's next
+-- connection. A host that never connected has no agent's default to copy.
 --
 -- `updated_at` is left as it is: nobody edited these hosts. A hub before #794,
 -- run again on the database, ignores the new column and writes the agent's
--- default into `default_shell` again at the next connection.
+-- default into `default_shell` at the next connection, as it always did.
 
 ALTER TABLE hosts ADD COLUMN discovered_default_shell TEXT;
 
 UPDATE hosts
-SET discovered_default_shell = default_shell,
-    default_shell = NULL
+SET discovered_default_shell = default_shell
 WHERE discovered_shells IS NOT NULL;
 
 INSERT INTO schema_version VALUES (23, datetime('now'));

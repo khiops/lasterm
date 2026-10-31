@@ -103,11 +103,6 @@ export interface Host {
 	color?: string; // hex #rrggbb
 	profileJson?: string; // JSON string of TerminalProfile
 	trustRemoteHints: TrustPolicy;
-	/**
-	 * The Default Shell the user chose: what a terminal opened without a shell
-	 * or a launch profile starts. Only the user sets it (#794).
-	 */
-	defaultShell?: string;
 	defaultCwd?: string;
 	elevationMethod?: ElevationMethod | null;
 	customCommand?: string | null;
@@ -119,7 +114,9 @@ export interface Host {
 	discoveredShellsAt?: string;
 	/**
 	 * The shell the host's agent starts when told none, as it reported it at the
-	 * last connection: `SHELL` on Unix, `COMSPEC` on Windows (#794).
+	 * last connection: `SHELL` on Unix, `COMSPEC` on Windows (#794). Its launch
+	 * profile is the host's default profile while the user has chosen none
+	 * ("Automatic" in Edit Host, #802).
 	 */
 	discoveredDefaultShell?: string;
 	/** Operating system of the remote host (null = auto-detect on first connect) */

@@ -161,7 +161,6 @@ describe("POST /api/hosts", () => {
 	// 500 from SQLite (#795).
 	it.each([
 		[{ ssh_user: 5 }, "ssh_user must be a string or null"],
-		[{ default_shell: true }, "default_shell must be a string or null"],
 		[{ custom_command: 1 }, "custom_command must be a string or null"],
 		[{ label: 7 }, "Label is required"],
 		[{ ssh_auth: "token" }, "ssh_auth must be 'agent', 'key', or 'password'"],
@@ -403,31 +402,49 @@ describe("PUT /api/hosts/:id", () => {
 	});
 
 	// Edit Host sends an emptied field as null (#792).
-	it("clears an SSH user and a default shell given as null", async () => {
+	it("clears an SSH user given as null", async () => {
 		const created = (
 			await server.inject({
 				method: "POST",
 				url: "/api/hosts",
-				payload: {
-					type: "ssh",
-					label: "clear-user",
-					ssh_host: "10.0.0.12",
-					ssh_user: "pi",
-					default_shell: "/bin/zsh",
-				},
+				payload: { type: "ssh", label: "clear-user", ssh_host: "10.0.0.12", ssh_user: "pi" },
 			})
 		).json<Record<string, unknown>>();
 
 		const cleared = await server.inject({
 			method: "PUT",
 			url: `/api/hosts/${created.id}`,
-			payload: { ssh_user: null, default_shell: null },
+			payload: { ssh_user: null },
 		});
 		expect(cleared.statusCode).toBe(200);
-		const row = dbs.meta
-			.prepare("SELECT ssh_user, default_shell FROM hosts WHERE id = ?")
-			.get(created.id);
-		expect(row).toEqual({ ssh_user: null, default_shell: null });
+		const row = dbs.meta.prepare("SELECT ssh_user FROM hosts WHERE id = ?").get(created.id);
+		expect(row).toEqual({ ssh_user: null });
+	});
+
+	// A host's default is a launch profile (#802): default_shell is a field the
+	// routes no longer know, ignored as any other, never stored nor answered.
+	it("ignores a default_shell, on a new host and on an edit", async () => {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "ssh", label: "no-shell", ssh_host: "10.0.0.16", default_shell: "/bin/zsh" },
+		});
+		expect(res.statusCode).toBe(201);
+		const created = res.json<Record<string, unknown>>();
+		expect(created).not.toHaveProperty("default_shell");
+
+		const edited = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { default_shell: "/usr/bin/fish" },
+		});
+		expect(edited.statusCode).toBe(200);
+		expect(edited.json()).not.toHaveProperty("default_shell");
+		const read = await server.inject({ method: "GET", url: `/api/hosts/${created.id}` });
+		expect(read.json()).not.toHaveProperty("default_shell");
+		expect(
+			dbs.meta.prepare("SELECT default_shell FROM hosts WHERE id = ?").get(created.id),
+		).toEqual({ default_shell: null });
 	});
 
 	// validateSshPort is unit-tested in hosts.spec.ts; this proves the route
@@ -601,8 +618,6 @@ describe("PUT /api/hosts/:id", () => {
 	it.each([
 		[{ ssh_user: 5 }, "ssh_user must be a string or null"],
 		[{ ssh_user: {} }, "ssh_user must be a string or null"],
-		[{ default_shell: true }, "default_shell must be a string or null"],
-		[{ default_shell: ["/bin/sh"] }, "default_shell must be a string or null"],
 		[{ ssh_key_path: 22 }, "ssh_key_path must be a string or null"],
 		[{ custom_command: 1 }, "custom_command must be a string or null"],
 		[{ label: 7 }, "Label is required"],
@@ -623,7 +638,6 @@ describe("PUT /api/hosts/:id", () => {
 					ssh_host: "10.0.0.15",
 					ssh_auth: "agent",
 					ssh_user: "pi",
-					default_shell: "/bin/zsh",
 				},
 			})
 		).json<{ id: string }>();

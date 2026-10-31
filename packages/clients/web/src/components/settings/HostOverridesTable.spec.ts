@@ -21,14 +21,14 @@ let app: App | null = null;
 let root: HTMLElement;
 
 /** The hub's answer to GET /api/hosts/H1/profiles: this profile, with the override given. */
-function hostProfiles(overrideType?: string): Response {
+function hostProfiles(overrideType?: string, setByUser = true): Response {
 	return new Response(
 		JSON.stringify([
 			{
 				id: PROFILE_ID,
 				name: "fish",
 				shell: "/usr/bin/fish",
-				...(overrideType !== undefined && { override_type: overrideType }),
+				...(overrideType !== undefined && { override_type: overrideType, set_by_user: setByUser }),
 			},
 		]),
 		{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -54,7 +54,7 @@ async function mount(): Promise<void> {
 	await settle();
 }
 
-const badge = () => root.querySelector("td.col-status")?.textContent?.trim();
+const badge = () => root.querySelector("td.col-status")?.textContent?.replace(/\s+/g, " ").trim();
 const select = () => root.querySelector<HTMLSelectElement>("select.override-select");
 
 beforeEach(() => {
@@ -94,5 +94,38 @@ describe("Per-Host Overrides", () => {
 		expect(init.method).toBe("PUT");
 		expect(JSON.parse(init.body as string)).toEqual({ override_type: "default" });
 		expect(badge()).toBe("Default");
+	});
+
+	// The hub marks the profile of a host's agent's default shell, and pins the
+	// shells it reported: those are not the user's (#802).
+	it("says which marks the hub made from what the host's agent reported", async () => {
+		mocks.hubFetch.mockResolvedValueOnce(hostProfiles("default", false));
+
+		await mount();
+
+		expect(badge()).toBe("Default automatic");
+		expect(select()?.value).toBe("default");
+	});
+
+	// "No Override" on the user's default is Edit Host's Automatic: the hub
+	// marks its agent's again, which may be this very profile (#802).
+	it("shows the default the hub gives back once the user's is removed", async () => {
+		mocks.hubFetch.mockResolvedValueOnce(hostProfiles("default"));
+		await mount();
+		expect(badge()).toBe("Default");
+		mocks.hubFetch
+			.mockResolvedValueOnce(new Response(null, { status: 204 }))
+			.mockResolvedValueOnce(hostProfiles("default", false));
+
+		const control = select();
+		if (!control) throw new Error("no override select");
+		control.value = "";
+		control.dispatchEvent(new Event("change"));
+		await settle();
+
+		const [url, init] = mocks.hubFetch.mock.calls[1] as [string, RequestInit];
+		expect(url).toBe(`/api/hosts/H1/profiles/${PROFILE_ID}`);
+		expect(init.method).toBe("DELETE");
+		expect(badge()).toBe("Default automatic");
 	});
 });

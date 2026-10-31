@@ -27,7 +27,6 @@ interface HostRow {
 	color: string | null;
 	profile_json: string | null;
 	trust_remote_hints: string;
-	default_shell: string | null;
 	default_cwd: string | null;
 	host_group_id: string | null;
 	sort_order: number;
@@ -81,7 +80,6 @@ function rowToHost(row: HostRow): Host {
 	if (row.icon_value != null) host.iconValue = row.icon_value;
 	if (row.color != null) host.color = row.color;
 	if (row.profile_json != null) host.profileJson = row.profile_json;
-	if (row.default_shell != null) host.defaultShell = row.default_shell;
 	if (row.default_cwd != null) host.defaultCwd = row.default_cwd;
 	if (row.host_group_id != null) host.hostGroupId = row.host_group_id;
 	if (row.ssh_config_host != null) host.sshConfigHost = row.ssh_config_host;
@@ -155,7 +153,7 @@ export class HostsDAL {
 				`INSERT INTO hosts (
 				id, type, label, ssh_host, ssh_port, ssh_auth, ssh_key_path,
 				icon_type, icon_value, color, profile_json, trust_remote_hints,
-				default_shell, default_cwd,
+				default_cwd,
 				host_group_id, sort_order, ssh_config_host, ssh_user,
 				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon,
 				elevation_method, custom_command,
@@ -164,7 +162,7 @@ export class HostsDAL {
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?,
-				?, ?,
+				?,
 				?, ?, ?, ?,
 				?, ?, ?,
 				?, ?,
@@ -185,7 +183,6 @@ export class HostsDAL {
 				input.color ?? null,
 				input.profileJson ?? null,
 				input.trustRemoteHints ?? "apply",
-				input.defaultShell ?? null,
 				input.defaultCwd ?? null,
 				input.hostGroupId ?? null,
 				input.sortOrder ?? 0,
@@ -282,7 +279,6 @@ export class HostsDAL {
 				color: "color",
 				profileJson: "profile_json",
 				trustRemoteHints: "trust_remote_hints",
-				defaultShell: "default_shell",
 				defaultCwd: "default_cwd",
 				hostGroupId: "host_group_id",
 				sortOrder: "sort_order",
@@ -504,7 +500,6 @@ export class HostsDAL {
 				...(original.trustRemoteHints !== undefined && {
 					trustRemoteHints: original.trustRemoteHints,
 				}),
-				...(original.defaultShell !== undefined && { defaultShell: original.defaultShell }),
 				...(original.defaultCwd !== undefined && { defaultCwd: original.defaultCwd }),
 				...(original.sshConfigHost != null && { sshConfigHost: original.sshConfigHost }),
 				...(original.sshUser != null && { sshUser: original.sshUser }),
@@ -521,6 +516,16 @@ export class HostsDAL {
 				os: original.os,
 				arch: original.arch,
 			});
+
+			// The default profile the user chose for it is a setting too (#802):
+			// what the original's Default Shell starts, the copy's starts.
+			this.db
+				.prepare(
+					`INSERT INTO host_launch_profiles (host_id, profile_id, override_type, sort_order, set_by_user)
+					SELECT ?, profile_id, override_type, sort_order, set_by_user FROM host_launch_profiles
+					WHERE host_id = ? AND override_type = 'default' AND set_by_user = 1`,
+				)
+				.run(copy.id, original.id);
 
 			const now = new Date().toISOString();
 			const move = this.db.prepare("UPDATE hosts SET sort_order = ?, updated_at = ? WHERE id = ?");
@@ -640,11 +645,10 @@ export class HostsDAL {
 
 	/**
 	 * Found at every connection, and stamped each time: the shells the host's
-	 * agent reports, and the one it starts when told none. That one goes to
-	 * `discovered_default_shell`, never to `default_shell`, which is the
-	 * user's Default Shell: written there, it undid the user's choice at every
-	 * connection (#794). Said only when the shells, or the agent's default,
-	 * differ from what is stored.
+	 * agent reports, and the one it starts when told none, which goes to
+	 * `discovered_default_shell` (#794). `default_shell` is read and written
+	 * by nothing: the host's default is a launch profile (#802). Said only when
+	 * the shells, or the agent's default, differ from what is stored.
 	 */
 	updateHostDiscoveredShells(hostId: string, shells: string[], reportedDefault?: string): void {
 		const now = new Date().toISOString();

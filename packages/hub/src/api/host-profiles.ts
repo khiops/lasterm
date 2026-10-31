@@ -1,39 +1,8 @@
-import type { Host } from "@lasterm/shared";
 import { toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
+import { resolveHostOs } from "../session/host-profile-menu.js";
+import { restoreAgentDefaultProfile } from "../session/shell-profile-seed.js";
 import type { MetaDAL } from "../storage/meta.js";
-
-/**
- * Infer the OS of a host for launch profile filtering.
- *
- * Resolution order:
- * 1. Agent-reported shells (discoveredShells): infer from path patterns.
- * 2. Local host: use process.platform.
- * 3. SSH host without HELLO data: 'unknown' (show all profiles).
- *
- * @param host  The host record from meta.db.
- */
-export function resolveHostOs(host: Host): string {
-	// Prefer explicitly stored OS (set after auto-detect on first SSH connect)
-	if (host.os != null) return host.os;
-	if (host.discoveredShells && host.discoveredShells.length > 0) {
-		const hasWindowsShells = host.discoveredShells.some(
-			(s) => s.includes("\\") || s.toLowerCase().endsWith(".exe"),
-		);
-		if (hasWindowsShells) return "windows";
-		const hasMacPaths = host.discoveredShells.some(
-			(s) => s.includes("/usr/local/") || s.includes("/opt/homebrew/"),
-		);
-		if (hasMacPaths) return "darwin";
-		return "linux";
-	}
-	if (host.type === "local") {
-		if (process.platform === "win32") return "windows";
-		if (process.platform === "darwin") return "darwin";
-		return "linux";
-	}
-	return "unknown";
-}
 
 export function registerHostProfileRoutes(server: FastifyInstance, metaDal: MetaDAL): void {
 	// GET /api/hosts/:id/profiles — filtered launch profiles for this host
@@ -53,7 +22,9 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 		},
 	);
 
-	// PUT /api/hosts/:id/profiles/:profileId — upsert override
+	// PUT /api/hosts/:id/profiles/:profileId — upsert override. A `default`
+	// set here is the user's (#800): what Edit Host's Default Shell and
+	// Settings › Profiles › "Set as Default" both send (#802).
 	server.put<{
 		Params: { id: string; profileId: string };
 		Body: { override_type: string; sort_order?: number };
@@ -86,10 +57,15 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 			override_type,
 			sort_order,
 		);
+		// The user's default turned into a pin or hidden: the agent's applies
+		// again at once (#802).
+		restoreAgentDefaultProfile(request.params.id, metaDal);
 		return reply.code(204).send();
 	});
 
-	// DELETE /api/hosts/:id/profiles/:profileId — remove override
+	// DELETE /api/hosts/:id/profiles/:profileId — remove override. Removing the
+	// user's default is Edit Host's "Automatic": the default the hub marks for
+	// the host's agent applies again, at once (#802).
 	server.delete<{ Params: { id: string; profileId: string } }>(
 		"/api/hosts/:id/profiles/:profileId",
 		async (request, reply) => {
@@ -102,6 +78,7 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 					.code(404)
 					.send({ error: { code: "NOT_FOUND", message: "Override not found" } });
 			}
+			restoreAgentDefaultProfile(request.params.id, metaDal);
 			return reply.code(204).send();
 		},
 	);

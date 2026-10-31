@@ -94,7 +94,6 @@ export function registerHostCrudRoutes(
 			...(body.icon_value !== undefined && { iconValue: body.icon_value }),
 			...(body.color !== undefined && { color: body.color }),
 			...(body.trust_remote_hints !== undefined && { trustRemoteHints: body.trust_remote_hints }),
-			...(body.default_shell !== undefined && { defaultShell: body.default_shell }),
 			...(body.default_cwd !== undefined && { defaultCwd: body.default_cwd }),
 			...(body.host_group_id !== undefined && { hostGroupId: body.host_group_id }),
 			...(body.ssh_config_host !== undefined && { sshConfigHost: body.ssh_config_host }),
@@ -210,7 +209,6 @@ export function registerHostCrudRoutes(
 			if (body.color !== undefined) updateInput.color = body.color;
 			if (body.trust_remote_hints !== undefined)
 				updateInput.trustRemoteHints = body.trust_remote_hints;
-			if (body.default_shell !== undefined) updateInput.defaultShell = body.default_shell;
 			if (body.default_cwd !== undefined) updateInput.defaultCwd = body.default_cwd;
 			if (body.host_group_id !== undefined) updateInput.hostGroupId = body.host_group_id;
 			if (body.ssh_config_host !== undefined) updateInput.sshConfigHost = body.ssh_config_host;

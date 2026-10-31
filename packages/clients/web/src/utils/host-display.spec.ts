@@ -15,7 +15,6 @@ function mockHost(overrides: Record<string, unknown> = {}) {
 		iconType: "auto" as const,
 		iconValue: "",
 		color: "",
-		defaultShell: "",
 		trustRemoteHints: "apply" as const,
 		sortOrder: 0,
 		os: null,

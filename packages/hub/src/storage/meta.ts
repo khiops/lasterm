@@ -17,7 +17,11 @@ import type Database from "better-sqlite3";
 import { ChannelGroupsDAL } from "./channel-groups-dal.js";
 import { ChannelsDAL } from "./channels-dal.js";
 import { HostsDAL } from "./hosts-dal.js";
-import { LaunchProfilesDAL, type LaunchProfileUpdate } from "./launch-profiles-dal.js";
+import {
+	type HostMenuProfile,
+	LaunchProfilesDAL,
+	type LaunchProfileUpdate,
+} from "./launch-profiles-dal.js";
 import type {
 	CreateChannelInput,
 	CreateHostInput,
@@ -453,10 +457,7 @@ export class MetaDAL {
 		this.launchProfiles.reorderLaunchProfiles(ids);
 	}
 
-	listHostProfiles(
-		hostId: string,
-		hostOs: string,
-	): Array<LaunchProfile & { overrideType?: string; effectiveSort: number }> {
+	listHostProfiles(hostId: string, hostOs: string): HostMenuProfile[] {
 		return this.launchProfiles.listHostProfiles(hostId, hostOs);
 	}
 

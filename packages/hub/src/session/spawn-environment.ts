@@ -1,4 +1,4 @@
-import { type AgentSpawnMessage, type EnvMode, type Host, validateShell } from "@lasterm/shared";
+import type { AgentSpawnMessage, EnvMode, Host } from "@lasterm/shared";
 
 /**
  * What a SPAWN says about the environment its terminal starts with (#576).
@@ -71,22 +71,6 @@ export function resolveEnvironmentChanges(
 }
 
 /**
- * The Default Shell the user chose for a host, when there is one (#794): the
- * shell a terminal opened without a shell or a launch profile starts. Empty or
- * blank is none, and the terminal starts as it did before there was one.
- *
- * It keeps the rule every shell a client names keeps, a SPAWN's and a launch
- * profile's: an absolute path, not a command (`validateShell`). The hosts
- * routes check only that it is text, so one that breaks the rule is not
- * started: the terminal starts as with none, and Edit Host says why.
- */
-export function chosenDefaultShell(host: Pick<Host, "defaultShell">): string | undefined {
-	const shell = host.defaultShell?.trim();
-	if (shell === undefined || shell === "") return undefined;
-	return validateShell(shell) === null ? shell : undefined;
-}
-
-/**
  * Whether a terminal starts as a login shell.
  *
  * `ssh host` gives one, and a remote terminal takes its place: it reads
@@ -94,16 +78,19 @@ export function chosenDefaultShell(host: Pick<Host, "defaultShell">): string | u
  * terminal on an SSH host asks for one when it runs one of the host's default
  * shells, with no arguments, as a shell rather than a direct process:
  *
- * - the Default Shell the user chose, which a terminal opened with nothing
- *   named runs in the place of `ssh host` (#794), as `chsh` would have it;
+ * - the shell of the host's default profile (`defaultProfileShell`, #802):
+ *   what a new terminal starts in the place of `ssh host`, whether the user
+ *   chose that profile, as `chsh` would have it, or the hub marked it for the
+ *   agent's default;
  * - the one its agent reported, which is the shell `ssh host` itself starts,
- *   whether a profile or the user names it;
+ *   whichever profile, or request, names it;
  * - none named, which is the agent's own default.
  *
  * Local terminals are unchanged: the desktop session already read the profile.
  */
 export function wantsLoginShell(
-	host: Pick<Host, "type" | "defaultShell" | "discoveredDefaultShell">,
+	host: Pick<Host, "type" | "discoveredDefaultShell">,
+	defaultProfileShell: string | undefined,
 	shell: string | undefined,
 	args: readonly string[] | undefined,
 	directProcess: boolean | undefined,
@@ -112,7 +99,7 @@ export function wantsLoginShell(
 	if (directProcess === true) return false;
 	if (args !== undefined && args.length > 0) return false;
 	if (shell === undefined) return true;
-	return shell === chosenDefaultShell(host) || shell === host.discoveredDefaultShell;
+	return shell === defaultProfileShell || shell === host.discoveredDefaultShell;
 }
 
 /** The mode a profile names, read as the agent reads it: anything else is `inherit`. */

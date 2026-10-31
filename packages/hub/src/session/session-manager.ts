@@ -68,6 +68,7 @@ import {
 	terminalsEndedByReconnect,
 	terminalsOutliveConnection,
 } from "./host-connection.js";
+import { hostDefaultProfile } from "./host-profile-menu.js";
 import {
 	hostDisconnectedMessage,
 	hostReconnecting,
@@ -110,7 +111,6 @@ import {
 } from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import {
-	chosenDefaultShell,
 	envNamesIgnoreCase,
 	resolveEnvironmentChanges,
 	spawnEnvironmentFields,
@@ -1269,42 +1269,32 @@ export class SessionManager {
 				let resolvedElevated = msg.elevated ?? false;
 				let resolvedLaunchProfileId: string | undefined;
 
-				if (msg.launchProfileId) {
-					const profile = this.ctx.metaDal.getLaunchProfile(msg.launchProfileId);
-					if (profile) {
-						resolvedShell = msg.shell ?? profile.shell;
-						resolvedArgs = msg.args ?? profile.args ?? [];
-						resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
-						resolvedEnv = { ...(profile.env ?? {}), ...(msg.env ?? {}) };
-						resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
-						resolvedElevated = msg.elevated ?? profile.elevated;
-						resolvedLaunchProfileId = profile.id;
-					}
-				}
+				// The host as its agent's HELLO left it: the one read above predates
+				// the connection, and a first one records its shells and marks its
+				// default profile (#802).
+				const reachedHost = this.ctx.metaDal.getHost(hostId) ?? host;
+				// What a new terminal on this host starts when it names nothing: its
+				// default profile, as the profile menu lists it first (#802).
+				const defaultProfile = hostDefaultProfile(reachedHost, this.ctx.metaDal);
 
-				// ── The host's Default Shell ──────────────────────────────────────────
-				// A terminal opened with no shell and no launch profile starts the
-				// shell the user chose for its host (#794), as it is, with no
-				// arguments. A profile named in the request still wins.
-				if (resolvedShell === undefined) resolvedShell = chosenDefaultShell(host);
-
-				// ── First-profile fallback ────────────────────────────────────────────
-				// With none chosen, as before: the first profile the host lists, an
-				// SSH host's default one first.
-				if (resolvedShell === undefined) {
-					const firstProfile =
-						host.type === "ssh"
-							? this.ctx.metaDal.listHostProfiles(hostId, host.os ?? "linux")[0]
-							: this.ctx.metaDal.listLaunchProfiles(1)[0];
-					if (firstProfile !== undefined) {
-						resolvedShell = firstProfile.shell;
-						if (resolvedArgs.length === 0 && firstProfile.args) {
-							resolvedArgs = firstProfile.args;
-						}
-						if (Object.keys(resolvedEnv).length === 0 && firstProfile.env) {
-							resolvedEnv = { ...firstProfile.env };
-						}
-					}
+				// ── The launch profile it starts ──────────────────────────────────────
+				// The profile the request names; with neither a shell nor a profile
+				// named, the host's default one, started as the menu would start it,
+				// whether the user chose it or the hub marked it for the agent's
+				// default (#802). With no profile at all, none: the agent starts its
+				// own default shell.
+				const profile =
+					(msg.launchProfileId
+						? this.ctx.metaDal.getLaunchProfile(msg.launchProfileId)
+						: undefined) ?? (resolvedShell === undefined ? defaultProfile : undefined);
+				if (profile) {
+					resolvedShell = msg.shell ?? profile.shell;
+					resolvedArgs = msg.args ?? profile.args ?? [];
+					resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
+					resolvedEnv = { ...(profile.env ?? {}), ...(msg.env ?? {}) };
+					resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
+					resolvedElevated = msg.elevated ?? profile.elevated;
+					resolvedLaunchProfileId = profile.id;
 				}
 
 				// ── Elevation checks ──────────────────────────────────────────────────
@@ -1349,7 +1339,13 @@ export class SessionManager {
 					...spawnEnvironmentFields(
 						environment,
 						spawnEnvMode(terminalProfile?.envMode),
-						wantsLoginShell(host, resolvedShell, resolvedArgs, resolvedDirectProcess),
+						wantsLoginShell(
+							reachedHost,
+							defaultProfile?.shell,
+							resolvedShell,
+							resolvedArgs,
+							resolvedDirectProcess,
+						),
 					),
 				};
 

@@ -71,7 +71,7 @@
 <script setup lang="ts">
 import type { LaunchProfile } from "@lasterm/shared";
 import type { HostVisibleProfile } from "../stores/profiles.js";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useProfilesStore } from "../stores/profiles.js";
 import QuickCommandInput from "./QuickCommandInput.vue";
 
@@ -161,7 +161,11 @@ onUnmounted(() => {
 // Helpers
 // -------------------------------------------------------------------------
 
-/** Whether a profile is the "default" for this host (marked via overrideType=default). */
+/**
+ * Whether a profile is the host's default: the one a new terminal starts, the
+ * user's choice or else its agent's (#802). The hub lists it first, so it is
+ * also the one Ctrl+Shift+1 starts.
+ */
 function isDefault(profileId: string): boolean {
 	const profile = visibleProfiles.value.find((p) => p.id === profileId);
 	return profile?.overrideType === "default";
@@ -193,14 +197,6 @@ function onProfileClick(profileId: string): void {
 function onRunCommand(): void {
 	showQuickInput.value = true;
 }
-
-/** ID of the default profile for this host (if any). */
-const defaultProfileId = computed(() => {
-	const def = visibleProfiles.value.find((p) => p.overrideType === "default");
-	return def?.id ?? null;
-});
-
-defineExpose({ defaultProfileId });
 </script>
 
 <style scoped>

@@ -1,5 +1,5 @@
 import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
-import { generateId } from "@lasterm/shared";
+import { ErrorCode, generateId } from "@lasterm/shared";
 import { computed, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -383,11 +383,13 @@ export function useHostForm(editHost?: Host) {
 			const sshProxy = form.value.sshProxy;
 			const proxy = formProxyFields(sshProxy);
 
+			// Null when nothing was tested: the person cancelled the password or
+			// passphrase asked for (#815).
 			const result = await new Promise<{
 				ok: boolean;
 				message?: string;
 				platform?: TestConnectPlatform;
-			}>((resolve) => {
+			} | null>((resolve) => {
 				const cleanup = (): void => {
 					unsubOk();
 					unsubFail();
@@ -403,7 +405,9 @@ export function useHostForm(editHost?: Host) {
 				const unsubFail = wsClient.on("TEST_CONNECT_FAIL", (msg) => {
 					if (msg.type === "TEST_CONNECT_FAIL" && msg.hostId === testHostId) {
 						cleanup();
-						resolve({ ok: false, message: msg.message });
+						resolve(
+							msg.code === ErrorCode.AUTH_CANCELLED ? null : { ok: false, message: msg.message },
+						);
 					}
 				});
 
@@ -420,6 +424,9 @@ export function useHostForm(editHost?: Host) {
 				});
 			});
 
+			// Cancelled: the test ends quietly, with no failure shown, and what an
+			// earlier test learned stands (#815).
+			if (result === null) return;
 			if (testConnection === latestTestConnection) {
 				testResult.value = result;
 				lastCompletedTestPlatformOs.value =

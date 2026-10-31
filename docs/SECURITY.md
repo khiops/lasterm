@@ -273,7 +273,7 @@ A deadline on a human decision throws away the answer that arrives a second late
 
 That is only safe because none of them holds anything open while it waits:
 
-- A password or passphrase is asked **before anything is dialled** (`buildSshConnectConfig` prompts, then connects).
+- A password or passphrase is asked **before anything is dialled** (`buildSshConnectConfig` prompts, then connects). A password the server refused is asked for again only once that connection is closed, and the host is dialled again with the new one (`password-auth.ts`, #815).
 - A host key is asked **after the verifier refused it** and the client was destroyed.
 - The remote agent binary is found over a live connection — so that connection is **closed before the question is asked**. The deploy hands back what it saw (`AgentBinaryDecisionNeeded`) instead of asking from inside itself; the caller closes, asks, and connects again with the answer.
 
@@ -464,7 +464,8 @@ again, which is now roughly every two and a quarter years rather than every rest
 - Auth token: kept in memory for comparison
 - Hub key: read once at start and kept for the run, to put in each daemon connection's AUTH (§ 3.6)
 - Pairing-code key: 32 random bytes drawn at each hub start, never written; a restart discards it (§ 2.3)
-- SSH passwords: cleared after authentication (not stored)
+- SSH passwords: cleared after authentication (not stored). One the server refused is replaced by
+  the one asked for next, and none is kept for a reconnect, which therefore cannot use one (#815)
 - SSH key passphrases: kept per host for 60 s, or 15 min when the person asks to remember it, so
   that a reconnect needs no prompt; a reconnect uses only what is kept, and never asks. One that
   has expired is removed the next time the hub looks for that host's passphrase, and stays in

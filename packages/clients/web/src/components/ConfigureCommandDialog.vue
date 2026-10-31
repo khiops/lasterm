@@ -136,6 +136,7 @@ async function onApply(): Promise<void> {
 
 async function onApplyRestart(): Promise<void> {
 	if (!props.channelId) return;
+	restartError.value = null;
 	const configOk = await channelsStore.updateChannelConfig(props.channelId, {
 		icon: form.value.icon || null,
 		shell: form.value.shell || null,
@@ -149,7 +150,10 @@ async function onApplyRestart(): Promise<void> {
 	}
 	const restartOk = await channelsStore.restartChannel(props.channelId);
 	if (!restartOk) {
-		restartError.value = "Failed to restart channel";
+		// Why, as the store kept it for the pane. None when nothing failed: the
+		// person cancelled the password or passphrase its host asked for, and
+		// the dialog stays as it was (#815).
+		restartError.value = channelsStore.restartFailures.get(props.channelId)?.reason ?? null;
 		return;
 	}
 	emit("applied");

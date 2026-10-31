@@ -44,18 +44,33 @@ afterAll(() => removeTempDir(KEY_DIR));
 /**
  * An SSH server that accepts any client and counts authentication attempts.
  * With `uname`, it answers `uname -sm` with that system; any other command fails.
+ * With `password`, it takes that password and nothing else, as OpenSSH does,
+ * and counts the connections it is dialled.
  */
 function sshServer(
 	uname?: string,
-): Promise<{ server: SshServer; port: number; auth: { attempts: number; usernames: string[] } }> {
-	const auth = { attempts: 0, usernames: [] as string[] };
+	password?: string,
+): Promise<{
+	server: SshServer;
+	port: number;
+	auth: { attempts: number; usernames: string[]; connections: number };
+}> {
+	const auth = { attempts: 0, usernames: [] as string[], connections: 0 };
 	return new Promise((resolve) => {
 		const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+			auth.connections++;
 			client.on("error", () => {});
 			client.on("authentication", (context) => {
 				auth.attempts++;
 				auth.usernames.push(context.username);
-				context.accept();
+				if (
+					password === undefined ||
+					(context.method === "password" && context.password === password)
+				) {
+					context.accept();
+				} else {
+					context.reject(["password"]);
+				}
 			});
 			client.on("ready", () => {
 				client.on("session", (accept) => {
@@ -155,6 +170,29 @@ async function serverFingerprint(port: number): Promise<string> {
 	);
 	if (!probe.unverifiedFingerprint) throw new Error("the server presented no key");
 	return probe.unverifiedFingerprint;
+}
+
+/** Answer the `index`th AUTH_PROMPT the client was sent, once it is. */
+async function answerAuthPrompt(
+	client: { send: Mock },
+	mgr: SshConnectionManager,
+	index: number,
+	secret: string | null,
+) {
+	const prompt = await vi.waitFor(() => {
+		const asked = client.send.mock.calls
+			.map(([message]) => message)
+			.filter((message) => message.type === "AUTH_PROMPT")[index];
+		if (!asked) throw new Error("not asked yet");
+		return asked as { hostId: string; promptId: string; deliveryEpoch: number; message: string };
+	});
+	mgr.handleAuthPromptResponse("c1", {
+		hostId: prompt.hostId,
+		secret,
+		promptId: prompt.promptId,
+		deliveryEpoch: prompt.deliveryEpoch,
+	});
+	return prompt;
 }
 
 async function hostVerifyPrompt(client: { send: Mock }) {
@@ -402,6 +440,80 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		expect(ctx.passphraseCache.size).toBe(0);
 	});
 
+	/** A saved host whose key is known, tested with password authentication. */
+	async function passwordHost() {
+		const mock = await sshServer(undefined, "right-password");
+		server = mock.server;
+		const fingerprint = await serverFingerprint(mock.port);
+		mock.auth.connections = 0;
+		const harness = setup({ type: "ssh", sshHost: "127.0.0.1", sshPort: mock.port, fingerprint });
+		const message: TestConnectMessage = {
+			...testMessage("saved-host", mock.port),
+			sshAuth: "password",
+		};
+		delete message.sshKeyPath;
+		return { ...harness, mock, message };
+	}
+
+	// As for a session: a password the server refused is asked for again,
+	// saying so, and the server dialled again; none of them is kept (#815).
+	it("asks again for a password the server refused, then connects", async () => {
+		const { ctx, client, mgr, mock, message } = await passwordHost();
+
+		const done = mgr.handleTestConnect("c1", message);
+		const first = await answerAuthPrompt(client, mgr, 0, "wrong-password");
+		const again = await answerAuthPrompt(client, mgr, 1, "right-password");
+		await done;
+
+		expect(first.message).toBe("Enter password for tester@127.0.0.1");
+		expect(again.message).toBe("Wrong password for tester@127.0.0.1. Try again.");
+		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+		expect(mock.auth.connections).toBe(2);
+		expect(ctx.passphraseCache.size).toBe(0);
+	});
+
+	// A cancel is no failure: the test says it as a cancel, which the dialog
+	// shows as nothing (#815).
+	it.each([
+		["asked first", ["cancel"]],
+		["asked again", ["wrong-password", "cancel"]],
+	] as const)("says a password prompt cancelled when %s as a cancel", async (_when, answers) => {
+		const { client, mgr, mock, message } = await passwordHost();
+
+		const done = mgr.handleTestConnect("c1", message);
+		for (const [index, answer] of answers.entries()) {
+			await answerAuthPrompt(client, mgr, index, answer === "cancel" ? null : answer);
+		}
+		await done;
+
+		expect(client.send).toHaveBeenCalledWith({
+			type: "TEST_CONNECT_FAIL",
+			hostId: "saved-host",
+			message: "Authentication cancelled by user",
+			code: "AUTH_CANCELLED",
+		});
+		expect(mock.auth.connections).toBe(answers.length - 1);
+	});
+
+	// Only a refused password is asked for again: a host that cannot be reached
+	// is a failure, asked once and said with its reason.
+	it("does not ask again for a password when the host cannot be reached", async () => {
+		const { client, mgr, message } = await passwordHost();
+		await new Promise<void>((resolve) => server?.close(() => resolve()));
+		server = undefined;
+
+		const done = mgr.handleTestConnect("c1", message);
+		await answerAuthPrompt(client, mgr, 0, "right-password");
+		await done;
+
+		const reply = client.send.mock.calls
+			.map(([sent]) => sent)
+			.find((sent) => sent.type === "TEST_CONNECT_FAIL");
+		expect(reply).toMatchObject({ message: expect.stringContaining("ECONNREFUSED") });
+		expect(reply).not.toHaveProperty("code");
+		expect(client.send.mock.calls.filter(([sent]) => sent.type === "AUTH_PROMPT")).toHaveLength(1);
+	});
+
 	it("names a system no agent is built for, before any session (#401)", async () => {
 		const mock = await sshServer("Linux armv7l");
 		server = mock.server;
@@ -489,6 +601,8 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			unsaved?: boolean;
 			stale?: boolean;
 			password?: boolean;
+			/** With `password`: the one password the bastion takes. */
+			jumpPassword?: string;
 			refuseAuth?: boolean;
 			stall?: boolean;
 			revokedTarget?: boolean;
@@ -513,6 +627,11 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				bastionUsernames.push(auth.username);
 				if (options.refuseAuth) auth.reject();
 				else if (options.password && auth.method !== "password") auth.reject(["password"]);
+				else if (
+					options.jumpPassword !== undefined &&
+					!(auth.method === "password" && auth.password === options.jumpPassword)
+				)
+					auth.reject(["password"]);
 				else auth.accept();
 			});
 			conn.on("ready", () =>
@@ -981,10 +1100,33 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			deliveryEpoch: auth.deliveryEpoch,
 		});
 		await done;
-		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
+		// Said as a cancel, which the dialog shows as nothing (#815).
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL", code: "AUTH_CANCELLED" });
 		expect(f.routes).toEqual([]);
 		expect(f.connections).toEqual([]);
 		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+	});
+	// The bastion's refused password is asked for again, under the bastion's id,
+	// and the route opened again (#815).
+	it("asks again for the bastion's refused password, and opens the route again", async () => {
+		const f = await fixture({ password: true, jumpPassword: "bastion-password" });
+		const done = f.mgr.handleTestConnect("c1", f.msg);
+		const first = await answerAuthPrompt(f.client, f.mgr, 0, "wrong-password");
+		const again = await answerAuthPrompt(f.client, f.mgr, 1, "bastion-password");
+		// The target's key, then, through the route the right password opened.
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect([first.hostId, again.hostId]).toEqual(["jump", "jump"]);
+		expect(again.message).toBe("Wrong password for tester@127.0.0.1. Try again.");
+		// Refused, then the route the key was read through, then the trusted one:
+		// the password was asked for twice, not once more for the last route.
+		expect(f.connections).toHaveLength(3);
+		expect(f.routes).toEqual(["target:2222", "target:2222"]);
+		expect(f.client.send.mock.calls.filter(([m]) => m.type === "AUTH_PROMPT")).toHaveLength(2);
+		expect(f.ctx.passphraseCache.size).toBe(0);
+		await ended(f);
 	});
 	it("bounds a stalled channel open and closes the bastion", async () => {
 		const f = await fixture({ stall: true });
@@ -1007,6 +1149,8 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			type: "TEST_CONNECT_FAIL",
 			message: "Cannot reach the jump host 127.0.0.1: All configured authentication methods failed",
 		});
+		// A failure, not a cancel.
+		expect(reply(f)).not.toHaveProperty("code");
 		expect(f.routes).toEqual([]);
 		await ended(f);
 	});

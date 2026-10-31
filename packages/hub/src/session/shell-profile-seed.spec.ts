@@ -117,6 +117,163 @@ describe("seedShellProfiles", () => {
 		expect(menu()).toEqual(["Windows PowerShell (default)"]);
 	});
 
+	// A profile is the hub's, not a host's: one seeded from another machine,
+	// the Store PowerShell of the hub's own, bears the file name of a shell a
+	// Windows Server reports at another path. Reusing it by that name started
+	// a path the server does not have, and it became the server's default
+	// (#816).
+	describe("a shell whose file name a profile launching another path bears (#816)", () => {
+		const STORE_PWSH =
+			"C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.6.0_x64__8wekyb3d8bbwe\\pwsh.exe";
+		const SERVER_PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+		const SERVER_CMD = "C:\\Windows\\system32\\cmd.exe";
+		const SERVER_SHELLS = [SERVER_PWSH, SERVER_CMD];
+		const QUALIFIED = "pwsh.exe (C:\\Program Files\\PowerShell\\7)";
+		let serverId: string;
+
+		/** The hub's own "pwsh.exe", seeded from its machine before the server was added. */
+		function storePwsh() {
+			return dal.createLaunchProfile({
+				name: "pwsh.exe",
+				shell: STORE_PWSH,
+				mode: "shell",
+				elevated: false,
+				supportedOs: "windows",
+				iconType: "auto",
+				sortOrder: 1,
+			});
+		}
+
+		/** The 0.15.2 agent's HELLO: PowerShell 7 its default (#806). */
+		const connect = () => seedShellProfiles(serverId, SERVER_SHELLS, SERVER_PWSH, "windows", dal);
+		const defaultOf = () => {
+			const marked = dal.getHostDefaultOverride(serverId);
+			const profile = marked && dal.getLaunchProfile(marked.profileId);
+			return profile && { name: profile.name, shell: profile.shell, setByUser: marked.setByUser };
+		};
+
+		beforeEach(() => {
+			discoveredWindowsProfiles();
+			serverId = dal.createHost({
+				type: "ssh",
+				label: "server",
+				sshHost: "admin@server",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+				os: "windows",
+			}).id;
+		});
+
+		it("gets a profile of its own, named after its directory, and the other is left alone", async () => {
+			const store = storePwsh();
+
+			await connect();
+
+			expect(dal.getLaunchProfileByName(QUALIFIED)?.shell).toBe(SERVER_PWSH);
+			expect(dal.getLaunchProfile(store.id)).toEqual(store);
+			expect(dal.getHostLaunchProfileOverride(serverId, store.id)).toBeUndefined();
+			expect(defaultOf()).toEqual({ name: QUALIFIED, shell: SERVER_PWSH, setByUser: false });
+		});
+
+		it("seeds nothing more at the next connection", async () => {
+			storePwsh();
+			await connect();
+			const profiles = dal.listLaunchProfiles();
+
+			await connect();
+
+			expect(dal.listLaunchProfiles()).toEqual(profiles);
+			expect(defaultOf()?.name).toBe(QUALIFIED);
+		});
+
+		// What a hub before #816 left: its mark on the profile bearing the name.
+		it("takes the hub's mark off a profile launching another path", async () => {
+			const store = storePwsh();
+			dal.upsertHostProfileOverride(serverId, store.id, "default", undefined, false);
+
+			await connect();
+
+			expect(defaultOf()).toEqual({ name: QUALIFIED, shell: SERVER_PWSH, setByUser: false });
+			expect(dal.getLaunchProfile(store.id)).toEqual(store);
+		});
+
+		it("never takes off the user's, whatever path it launches", async () => {
+			const store = storePwsh();
+			dal.upsertHostProfileOverride(serverId, store.id, "default");
+
+			await connect();
+
+			expect(defaultOf()).toEqual({ name: "pwsh.exe", shell: STORE_PWSH, setByUser: true });
+		});
+
+		it("is numbered when its directory's name is taken too", async () => {
+			storePwsh();
+			dal.createLaunchProfile({
+				name: QUALIFIED,
+				shell: "C:\\Tools\\pwsh.exe",
+				mode: "shell",
+				elevated: false,
+				supportedOs: "windows",
+				iconType: "auto",
+				sortOrder: 7,
+			});
+
+			await connect();
+
+			expect(dal.getLaunchProfileByName(`${QUALIFIED} 2`)?.shell).toBe(SERVER_PWSH);
+			expect(dal.getLaunchProfileByName(QUALIFIED)?.shell).toBe("C:\\Tools\\pwsh.exe");
+		});
+
+		it("renames a path-named seed of its own to a name that is free", async () => {
+			storePwsh();
+			const stale = dal.createLaunchProfile({
+				name: SERVER_PWSH,
+				shell: SERVER_PWSH,
+				mode: "shell",
+				elevated: false,
+				supportedOs: "linux",
+				iconType: "auto",
+				sortOrder: 0,
+			});
+
+			await connect();
+
+			expect(dal.getLaunchProfile(stale.id)?.name).toBe(QUALIFIED);
+			expect(dal.getLaunchProfileByName("pwsh.exe")?.shell).toBe(STORE_PWSH);
+			expect(defaultOf()?.name).toBe(QUALIFIED);
+		});
+
+		it("is told apart on a Unix host by its directory too", async () => {
+			const other = dal.createHost({
+				type: "ssh",
+				label: "usrmerged",
+				sshHost: "me@usrmerged",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+				os: "linux",
+			}).id;
+			await seedShellProfiles(hostId, ["/bin/bash"], "/bin/bash", "linux", dal);
+
+			await seedShellProfiles(other, ["/usr/bin/bash"], "/usr/bin/bash", "linux", dal);
+
+			expect(dal.getLaunchProfileByName("bash")?.shell).toBe("/bin/bash");
+			expect(dal.getLaunchProfileByName("bash (/usr/bin)")?.shell).toBe("/usr/bin/bash");
+			expect(dal.getLaunchProfile(dal.getHostDefaultOverride(other)?.profileId ?? "")?.shell).toBe(
+				"/usr/bin/bash",
+			);
+		});
+
+		// Edit Host's "Automatic": only a profile launching the reported shell.
+		it("is not marked by restoreAgentDefaultProfile before it has a profile", () => {
+			storePwsh();
+			dal.updateHostDiscoveredShells(serverId, SERVER_SHELLS, SERVER_PWSH);
+
+			restoreAgentDefaultProfile(serverId, dal);
+
+			expect(dal.getHostDefaultOverride(serverId)).toBeUndefined();
+		});
+	});
+
 	it("names a Unix shell by its file name, and pins it on the host", async () => {
 		await seedShellProfiles(hostId, ["/bin/bash", "/usr/bin/fish"], "/bin/bash", "linux", dal);
 

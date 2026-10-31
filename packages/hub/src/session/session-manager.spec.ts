@@ -1373,6 +1373,142 @@ describe("SessionManager", () => {
 			expect((await started(hostId)).spawn?.shell).toBe("/bin/bash");
 			expect(dal.getHost(hostId)).not.toHaveProperty("defaultShell");
 		});
+
+		// A Windows Server whose hub runs on Windows too, as #816 found it: the
+		// global profiles were seeded from the hub's own machine, the Store
+		// PowerShell among them as "pwsh.exe", and its agent, from 0.15.2 on,
+		// reports PowerShell 7 as its default (#806).
+		describe("a Windows Server whose agent reports PowerShell 7 (#816)", () => {
+			const STORE_PWSH =
+				"C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.6.0_x64__8wekyb3d8bbwe\\pwsh.exe";
+			const SERVER_PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+			const SERVER_POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+			const SERVER_CMD = "C:\\Windows\\system32\\cmd.exe";
+			const SERVER_SHELLS = [SERVER_PWSH, SERVER_POWERSHELL, SERVER_CMD];
+
+			/** The server, connected once by an agent that reported COMSPEC as its default. */
+			async function server(label: string): Promise<string> {
+				for (const [sortOrder, [name, shell]] of [
+					["pwsh.exe", STORE_PWSH],
+					["Windows PowerShell", "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"],
+					["Command Prompt", CMD],
+				].entries()) {
+					dal.createLaunchProfile({
+						name: name as string,
+						shell: shell as string,
+						mode: "shell",
+						elevated: false,
+						supportedOs: "windows",
+						iconType: "auto",
+						sortOrder,
+					});
+				}
+				const host = dal.createHost({
+					type: "ssh",
+					label,
+					sshHost: "administrateur@192.168.1.251",
+					sshAuth: "key",
+					sshKeyPath: "/nonexistent/key",
+					os: "windows",
+				});
+				dal.updateHostDiscoveredShells(host.id, SERVER_SHELLS, SERVER_CMD);
+				await seedShellProfiles(host.id, SERVER_SHELLS, SERVER_CMD, "windows", dal);
+				return host.id;
+			}
+
+			/** Its 0.15.2 agent's HELLO. */
+			async function reconnected(hostId: string): Promise<void> {
+				dal.updateHostDiscoveredShells(hostId, SERVER_SHELLS, SERVER_PWSH);
+				await seedShellProfiles(hostId, SERVER_SHELLS, SERVER_PWSH, "windows", dal);
+			}
+
+			/** A terminal it ends, its row kept: what a restart brings back. */
+			function bury(channelId: string): void {
+				const tracked = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+				const entry = tracked.get(channelId);
+				if (entry) entry.status = "dead";
+				dal.updateChannelStatus(channelId, "dead");
+			}
+
+			/**
+			 * What the web sends for a terminal its list does not carry, one on a
+			 * host other than the one in view: its id and nothing else.
+			 */
+			async function broughtBack(hostId: string, channelId: string): Promise<AgentSpawnMessage> {
+				expect(
+					await sm.handleSpawn("c-shell", { type: "SPAWN", hostId, reuseChannelId: channelId }),
+				).toBe(channelId);
+				const frame = (mockSshAgentInstance?.send.mock.calls ?? [])
+					.map(([message]) => message as AgentSpawnMessage)
+					.filter((message) => message.type === "SPAWN")
+					.at(-1);
+				if (frame === undefined) throw new Error("expected a SPAWN");
+				return frame;
+			}
+
+			// The hub started the host's default profile in the terminal's place,
+			// the hub's own "pwsh.exe", which the agent could not find: "Le
+			// fichier spécifié est introuvable. (os error 2)".
+			it("brings a dead terminal back with its own shell and arguments, not the host's default", async () => {
+				const hostId = await server("AD");
+				const cmd = await sm.handleSpawn("c-shell", { type: "SPAWN", hostId, shell: CMD });
+				const quiet = await sm.handleSpawn("c-shell", {
+					type: "SPAWN",
+					hostId,
+					shell: CMD,
+					args: ["/q"],
+				});
+				if (cmd === null || quiet === null) throw new Error("expected two terminals");
+				bury(cmd);
+				bury(quiet);
+				await reconnected(hostId);
+
+				expect(await broughtBack(hostId, cmd)).toEqual({
+					type: "SPAWN",
+					requestId: expect.any(String),
+					channelId: cmd,
+					shell: CMD,
+					cols: 80,
+					rows: 24,
+					env: {},
+					envMode: "inherit",
+				});
+				const withArgs = await broughtBack(hostId, quiet);
+				expect(withArgs.shell).toBe(CMD);
+				expect(withArgs.args).toEqual(["/q"]);
+				expect(dal.getChannel(quiet)?.args).toEqual(["/q"]);
+			});
+
+			// One with no shell of its own (#583) starts what a new terminal
+			// would: the host's default profile, now the one launching the
+			// PowerShell its agent reported.
+			it("brings one with no shell of its own back in the host's default profile", async () => {
+				const hostId = await server("AD-bare");
+				const first = await sm.handleSpawn("c-shell", { type: "SPAWN", hostId, shell: CMD });
+				if (first === null) throw new Error("expected a terminal");
+				const sessionId = dal.getChannel(first)?.sessionId ?? "";
+				dal.createChannel({ id: "bare-ch", sessionId, status: "dead", cols: 80, rows: 24 });
+				expect(dal.getChannel("bare-ch")).not.toHaveProperty("shell");
+				await reconnected(hostId);
+
+				const frame = await broughtBack(hostId, "bare-ch");
+
+				expect(frame.shell).toBe(SERVER_PWSH);
+				expect(frame).not.toHaveProperty("args");
+				expect(frame.loginShell).toBe(true);
+			});
+
+			// What a new terminal on it starts: a shell its agent reported, not
+			// one found by its file name on the hub's own machine.
+			it("starts a new terminal in the PowerShell its agent reported", async () => {
+				const hostId = await server("AD-new");
+				await reconnected(hostId);
+
+				expect(firstOfMenu(hostId)?.shell).toBe(SERVER_PWSH);
+				expect((await started(hostId)).spawn?.shell).toBe(SERVER_PWSH);
+				expect(dal.getLaunchProfileByName("pwsh.exe")?.shell).toBe(STORE_PWSH);
+			});
+		});
 	});
 
 	// ── End launch profile resolution ─────────────────────────────────────────
@@ -3686,12 +3822,13 @@ describe("handleTestConnect", () => {
 		});
 		await promise;
 
-		// Should have received TEST_CONNECT_FAIL after cancellation
+		// Should have received TEST_CONNECT_FAIL after cancellation, said as a
+		// cancel: the dialog shows no failed test for it (#815).
 		const failMsg = received.find((m) => m.type === "TEST_CONNECT_FAIL") as
 			| (ProtocolMessage & { message?: string })
 			| undefined;
 		expect(failMsg).toBeDefined();
-		expect(failMsg?.type).toBe("TEST_CONNECT_FAIL");
+		expect(failMsg).toMatchObject({ type: "TEST_CONNECT_FAIL", code: ErrorCode.AUTH_CANCELLED });
 	});
 });
 

@@ -1032,9 +1032,13 @@ error. It ignores a response from any client but the one the prompt was last sen
 
 A key's passphrase that does not decrypt the key is asked for again, as OpenSSH does, by a new
 AUTH_PROMPT whose `message` says so (`Wrong passphrase for <key path>. Try again.`), until one
-decrypts it or the person cancels (#812). A cancelled password or passphrase ends a session's
-connection with `AUTH_CANCELLED` (§ 4.14), and a connection test with `TEST_CONNECT_FAIL` (§ 4.11).
-A wrong password is not asked for again: only the server refuses it, once dialled.
+decrypts it or the person cancels (#812). A password the server refuses is asked for again the same
+way (`Wrong password for <user>@<host>. Try again.`), once that connection is closed, and the host
+dialled again, until the server takes one or the person cancels (#815); a jump's is asked under the
+jump's `host_id`. A server that takes no password, or a failure of any other kind, is not asked for
+another. A cancelled password or passphrase ends a session's connection with `AUTH_CANCELLED`
+(§ 4.14), and a connection test with a `TEST_CONNECT_FAIL` whose `code` is `AUTH_CANCELLED`
+(§ 4.11).
 
 ```typescript
 // Hub → UI: dismiss a prompt the hub no longer waits on
@@ -1046,9 +1050,10 @@ The hub sends PROMPT_CANCEL for an AUTH_PROMPT, a HOST_VERIFY (§ 4.9) or an AGE
 with a higher `delivery_epoch`, and when the connection the prompt was for is given up.
 
 **Security note:** The hub writes none of these secrets to disk. A password is used for the SSH
-handshake and dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min
-with `remember_session`, so that a reconnect needs no prompt; one that does not decrypt the key is
-dropped from it at once, before it is asked for again (#812). An elevation password is kept in the
+handshake and dropped; one the server refused is replaced by the next one asked for (#815). A key's
+passphrase is kept in the hub's memory, per host, for 60 s, or 15 min with `remember_session`, so
+that a reconnect needs no prompt; one that does not decrypt the key is dropped from it at once,
+before it is asked for again (#812). An elevation password is kept in the
 hub's memory, per host and client, for 5 min when it was typed to open an elevated terminal and
 15 min when it was typed to restart one, and sent to the agent in the SPAWN that needs it
 (SECURITY.md § 4.3).
@@ -1077,8 +1082,12 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
 { type: "TEST_CONNECT_OK", host_id: string, platform?: TestConnectPlatform }
 
 // Hub → UI (failure)
-{ type: "TEST_CONNECT_FAIL", host_id: string, message: string }
+{ type: "TEST_CONNECT_FAIL", host_id: string, message: string, code?: "AUTH_CANCELLED" }
 ```
+
+`code` is `AUTH_CANCELLED` when the person cancelled the password or passphrase asked for (§ 4.10):
+nothing failed, and the dialog ends the test without a result rather than show a failure (#815). It
+is absent when the test failed, and `message` says why.
 
 ### 4.12 Terminal Event Relay (Hub → UI)
 
@@ -1169,7 +1178,7 @@ An unknown or refused token is not an ERROR: it is `AUTH_FAIL` (§ 4.1).
 | `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started, or, for a SPAWN marked `automatic`, its user disconnected it (#648). Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
 | `HUB_QUITTING` | SPAWN refused: the hub is quitting |
 | `SSH_CONNECT_FAILED` | The SSH connection a SPAWN needed failed |
-| `AUTH_CANCELLED` | The SSH connection a SPAWN, or the host menu's Connect, needed was not made: the password or key passphrase asked for (§ 4.10) was cancelled. Not a failure: a pane shows no reason for it, and no toast says it (#812) |
+| `AUTH_CANCELLED` | The SSH connection a SPAWN, or the host menu's Connect, needed was not made: the password or key passphrase asked for (§ 4.10) was cancelled. Not a failure: a pane shows no reason for it, and no toast says it (#812). Also the `code` of a `TEST_CONNECT_FAIL` the same cancel ends (§ 4.11, #815) |
 | `SSH_HOST_KEY_REJECTED` | The user rejected the host's key (§ 4.9) |
 | `SSH_HOST_KEY_REVOKED` | The host's key is marked `@revoked` in a `known_hosts` file; carries `host_id` |
 | `SSH_JUMP_UNUSABLE` | The host's jump cannot be used (SECURITY.md § 3.3b); carries `host_id` |

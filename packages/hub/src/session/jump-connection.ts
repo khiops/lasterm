@@ -22,6 +22,7 @@ import {
 	judgeAgainstKnownHosts,
 	readUserKnownHosts,
 } from "../ssh/known-hosts.js";
+import { passwordRefusal } from "./password-auth.js";
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 
 export interface JumpTarget {
@@ -111,9 +112,12 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 				return;
 			}
 			fail(
-				presented === "" || error.message.includes("verification")
-					? error
-					: new Error(`Cannot reach the jump host ${options.jump.host}: ${error.message}`),
+				// The jump refused its password: whoever opens the route asks for it
+				// again, and opens it again (#815).
+				passwordRefusal(options.auth, error) ??
+					(presented === "" || error.message.includes("verification")
+						? error
+						: new Error(`Cannot reach the jump host ${options.jump.host}: ${error.message}`)),
 			);
 		});
 

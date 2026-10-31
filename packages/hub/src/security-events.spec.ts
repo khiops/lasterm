@@ -7,11 +7,15 @@ import { format } from "node:util";
 import {
 	type AuthPromptMessage,
 	decodeMessage,
+	encodeFrame,
 	encodeMessage,
+	type HelloMessage,
+	type Host,
 	isValidUlid,
 	type ProtocolMessage,
 } from "@lasterm/shared";
 import type { FastifyInstance, LogLevel } from "fastify";
+import { Server as SshServer, utils as sshUtils } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getBootAssetToken } from "./asset-token.js";
 import { createToken, revokeToken } from "./auth.js";
@@ -21,6 +25,7 @@ import { createServer, startServer as listen } from "./server.fixture.js";
 import type { SharedSessionContext } from "./session/session-context.js";
 import type { WsClient } from "./session/session-manager.js";
 import { SshConnectionManager } from "./session/ssh-connection-manager.js";
+import { fingerprintOf } from "./ssh/fingerprint.js";
 import { type DatabaseManager, openTestDatabases } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
 import { getTestTls } from "./test-tls.fixture.js";
@@ -930,6 +935,134 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 		expect(text).toContain("[lasterm-ssh] key decryption failed, asking again");
 		expect(text).toContain("[lasterm-ssh] returning cached passphrase");
 		// Neither passphrase, nor any piece of one, nor a length.
+		expect(text).not.toContain(fragment);
+		expect(text).not.toContain(wrongFragment);
+		for (const length of lengths) {
+			expect(text).not.toMatch(new RegExp(`(?<![0-9A-Za-z])${length}(?!\\d)`));
+		}
+	});
+});
+
+describe("an SSH password leaves no trace in the logs, refused or taken (#815)", () => {
+	// As for a passphrase: four-digit lengths no timestamp holds, a count of
+	// characters and one of bytes for each.
+	const fragment = "spec-password-815-";
+	const password = `${"é".repeat(6)}${fragment.repeat(60)}`.slice(0, 1061);
+	const wrongFragment = "spec-wrong-password-815-";
+	const wrong = `${"ü".repeat(4)}${wrongFragment.repeat(50)}`.slice(0, 1051);
+	const lengths = [
+		password.length,
+		Buffer.byteLength(password),
+		wrong.length,
+		Buffer.byteLength(wrong),
+	];
+
+	it("logs neither password nor its length, and keeps none, when one is refused", async () => {
+		expect(lengths).toEqual([1061, 1067, 1051, 1055]);
+		const { SshAgent } =
+			await vi.importActual<typeof import("./session/ssh-agent.js")>("./session/ssh-agent.js");
+		const { privateKey: hostKey } = generateKeyPairSync("rsa", {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: "pkcs1", format: "pem" },
+			privateKeyEncoding: { type: "pkcs1", format: "pem" },
+		});
+		const parsedKey = sshUtils.parseKey(hostKey);
+		if (parsedKey instanceof Error || Array.isArray(parsedKey)) throw new Error("invalid key");
+		const hello: HelloMessage = {
+			type: "HELLO",
+			version: 1,
+			agentVersion: "0.0.0-test",
+			capabilities: [],
+		};
+		// Takes this password and nothing else, then runs an agent that says HELLO.
+		const server = new SshServer({ hostKeys: [hostKey] }, (conn) => {
+			conn.on("error", () => {});
+			conn.on("authentication", (ctx) => {
+				if (ctx.method === "password" && ctx.password === password) ctx.accept();
+				else ctx.reject(["password"]);
+			});
+			conn.on("ready", () => {
+				conn.on("session", (accept) => {
+					accept().on("exec", (acceptExec) => {
+						acceptExec().write(Buffer.from(encodeFrame(hello)));
+					});
+				});
+			});
+		});
+		server.on("error", () => {});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as { port: number }).port;
+
+		const hostId = "spec-password-host";
+		const sent: AuthPromptMessage[] = [];
+		const client = {
+			id: "spec-client",
+			send: (msg: AuthPromptMessage) => sent.push(msg),
+		} as unknown as WsClient;
+		const ctx = {
+			passphraseCache: new Map(),
+			promptContexts: new Map(),
+			promptIndex: new Map(),
+			pendingPrompts: new Map(),
+			clients: new Map([[client.id, client]]),
+			channels: new Map(),
+			acquisitions: new Map(),
+			hubLogger: new HubLogger(log.dir, {
+				level: "trace",
+				format: "jsonl",
+				output: "file",
+				maxAgeDays: 30,
+				maxSizeMb: 50,
+			}),
+		} as unknown as SharedSessionContext;
+		const manager = new SshConnectionManager(ctx, null as never, null as never, null as never);
+		const agent = new SshAgent(
+			{
+				id: hostId,
+				type: "ssh",
+				label: "spec",
+				sshHost: "127.0.0.1",
+				sshPort: port,
+				sshUser: "pi",
+				sshAuth: "password",
+			} as Host,
+			manager.buildPromptAuth(client),
+		);
+		const answer = (prompt: AuthPromptMessage, secret: string) =>
+			manager.handleAuthPromptResponse(client.id, {
+				hostId,
+				secret,
+				// Asked to remember it: a password is kept all the same nowhere.
+				rememberSession: true,
+				promptId: prompt.promptId,
+				deliveryEpoch: prompt.deliveryEpoch,
+			});
+
+		const output = captureOutput();
+		try {
+			const started = agent.start(fingerprintOf(parsedKey.getPublicSSH()));
+			// A wrong one first, which the server refuses.
+			await vi.waitFor(() => expect(sent).toHaveLength(1));
+			answer(sent[0] as AuthPromptMessage, wrong);
+			// Asked again, saying so: the right one this time.
+			await vi.waitFor(() => expect(sent).toHaveLength(2));
+			expect((sent[1] as AuthPromptMessage).message).toBe(
+				"Wrong password for pi@127.0.0.1. Try again.",
+			);
+			answer(sent[1] as AuthPromptMessage, password);
+			expect((await started).hello.type).toBe("HELLO");
+		} finally {
+			output.restore();
+			await agent.close();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+
+		expect(ctx.passphraseCache.size).toBe(0);
+		const text = `${output.text()}\n${log.text()}`;
+		// The path was heard, and says whether there is one.
+		expect(text).toContain("[lasterm-ssh] the server refused the password for pi@127.0.0.1");
+		expect(text).toContain("[lasterm-ssh] password obtained: yes");
+		// Neither password, nor any piece of one, nor a length.
 		expect(text).not.toContain(fragment);
 		expect(text).not.toContain(wrongFragment);
 		for (const length of lengths) {

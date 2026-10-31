@@ -26,7 +26,9 @@ import { findHostKeyRevocation } from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
 import { computeTargetStatus } from "./agent-status.js";
+import { AuthCancelledError } from "./auth-cancelled.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { PasswordRefusedError, passwordRefusal } from "./password-auth.js";
 import {
 	clearContext,
 	isReconnectContextId,
@@ -717,6 +719,9 @@ export class SshConnectionManager {
 				type: "TEST_CONNECT_FAIL",
 				hostId: msg.hostId,
 				message: err instanceof Error ? err.message : "Connection test failed",
+				// The person cancelled the password or passphrase asked for:
+				// nothing failed, and the test ends without a result (#815).
+				...(err instanceof AuthCancelledError ? { code: err.code } : {}),
 			});
 		} finally {
 			// Guard E: clear the test context on every terminal path.
@@ -769,7 +774,7 @@ export class SshConnectionManager {
 			(name): name is string => typeof name === "string" && name.length > 0,
 		);
 		let successfulJumpFingerprint: string | undefined;
-		const attempt = async (trusted: ReadonlySet<string>) => {
+		const attemptOnce = async (trusted: ReadonlySet<string>) => {
 			if (!jump || !jumpAuth)
 				return attemptSshTest(connectConfig, trusted, probePlatform, undefined, namesToLookUp);
 			const route = await openJumpRoute({
@@ -793,6 +798,23 @@ export class SshConnectionManager {
 				return result;
 			} finally {
 				route.close();
+			}
+		};
+		// A password the target or its jump refused is asked for again, saying so,
+		// and the test dialled again under the same trust, until one is taken or
+		// the person cancels (#815).
+		const attempt = async (trusted: ReadonlySet<string>) => {
+			for (;;) {
+				let refusal: PasswordRefusedError;
+				try {
+					const outcome = await attemptOnce(trusted);
+					if (outcome.passwordRefused === undefined) return outcome;
+					refusal = outcome.passwordRefused;
+				} catch (err) {
+					if (!(err instanceof PasswordRefusedError)) throw err;
+					refusal = err;
+				}
+				await refusal.askAgain();
 			}
 		};
 		const finish = (result: TestConnectResult): TestConnectResult => {
@@ -820,6 +842,8 @@ export class SshConnectionManager {
 				msg.hostId,
 			);
 		} catch (err) {
+			// A cancel is said as one (`handleTestConnect`, #815).
+			if (err instanceof AuthCancelledError) throw err;
 			return {
 				ok: false,
 				message: err instanceof Error ? err.message : "Authentication error",
@@ -892,7 +916,8 @@ const SSH_TEST_TIMEOUT_MS = 10_000;
 
 /**
  * One bounded connection attempt. A server key outside `trusted` ends it with
- * that key's fingerprint, before any authentication is sent.
+ * that key's fingerprint, before any authentication is sent. A password the
+ * server refused ends it with that refusal, for the caller to ask again (#815).
  */
 export function attemptSshTest(
 	connectConfig: SshConnectConfig,
@@ -900,9 +925,14 @@ export function attemptSshTest(
 	probe?: (client: SshClient) => Promise<TestConnectPlatform | undefined>,
 	createClient: () => SshClient = () => new SshClient(),
 	names: readonly string[] = connectConfig.host ? [connectConfig.host] : [],
-): Promise<{ result: TestConnectResult; unverifiedFingerprint?: string }> {
+): Promise<{
+	result: TestConnectResult;
+	unverifiedFingerprint?: string;
+	passwordRefused?: PasswordRefusedError;
+}> {
 	const sshClient = createClient();
 	let unverifiedFingerprint: string | undefined;
+	let passwordRefused: PasswordRefusedError | undefined;
 	let revoked: { file: string; line: number } | undefined;
 	const config: SshConnectConfig = {
 		...connectConfig,
@@ -925,7 +955,11 @@ export function attemptSshTest(
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			resolve(unverifiedFingerprint === undefined ? { result } : { result, unverifiedFingerprint });
+			resolve({
+				result,
+				...(unverifiedFingerprint !== undefined && { unverifiedFingerprint }),
+				...(passwordRefused !== undefined && { passwordRefused }),
+			});
 		};
 		const timer = setTimeout(() => {
 			sshClient.destroy();
@@ -957,6 +991,7 @@ export function attemptSshTest(
 				finish({ ok: false, message: "SSH host key not trusted" });
 				return;
 			}
+			passwordRefused = passwordRefusal(connectConfig, err) ?? undefined;
 			const errMsg = err.message ?? "Unknown error";
 			const lower = errMsg.toLowerCase();
 			if (

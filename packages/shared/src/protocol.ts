@@ -872,6 +872,12 @@ export interface TestConnectFailMessage {
 	type: "TEST_CONNECT_FAIL";
 	hostId: string;
 	message: string;
+	/**
+	 * `AUTH_CANCELLED`: the person cancelled the password or passphrase asked
+	 * for. Nothing failed, and the test ends without a result (#815). Absent
+	 * for a test that failed.
+	 */
+	code?: string;
 }
 
 // ---------------------------------------------------------------------------

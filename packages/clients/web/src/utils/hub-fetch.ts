@@ -1,4 +1,5 @@
 import type { InvokeArgs, InvokeOptions } from "@tauri-apps/api/core";
+import { isRawIpcRefusal, rawIpcWorked, reloadAfterIpcFallback } from "./tauri-ipc-fallback.js";
 
 type RelayRequest = {
 	method: string;
@@ -290,12 +291,20 @@ async function sendRequestChunks(
 				// Allocate only this IPC frame: some browser streams yield views onto a
 				// larger backing buffer, which must not cross the boundary wholesale.
 				const payload = new Uint8Array(value.subarray(offset, offset + UPLOAD_CHUNK_BYTES));
-				await relayWait(
-					invoke("relay_hub_upload_chunk", payload.buffer, {
-						headers: { "X-Lasterm-Upload-Id": String(uploadId) },
-					}),
-					"hub relay request body timed out while sending a chunk",
-				);
+				try {
+					await relayWait(
+						invoke("relay_hub_upload_chunk", payload.buffer, {
+							headers: { "X-Lasterm-Upload-Id": String(uploadId) },
+						}),
+						"hub relay request body timed out while sending a chunk",
+					);
+				} catch (error) {
+					// The upload fails either way. A chunk that reached native as JSON
+					// also says Tauri's IPC fell back for this page (#822).
+					if (isRawIpcRefusal(error)) reloadAfterIpcFallback(String(error));
+					throw error;
+				}
+				rawIpcWorked();
 			}
 			progressDeadline = Date.now() + HUB_RELAY_WAIT_TIMEOUT_MS;
 		}

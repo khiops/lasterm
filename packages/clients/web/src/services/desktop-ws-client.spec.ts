@@ -1,5 +1,6 @@
 import { encodeMessage } from "@lasterm/shared";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IPC_FALLBACK_RELOAD_KEY, resetIpcFallbackForTests } from "../utils/tauri-ipc-fallback.js";
 import { createWsClient } from "./ws-client.js";
 
 const ipc = vi.hoisted(() => ({
@@ -485,6 +486,144 @@ describe("DesktopWsClient — a reloaded page", () => {
 		// A reconnect within the same document replaces its own relay only.
 		await client.connect("ws://127.0.0.1:4100/ws");
 		expect(commands().filter((command) => command === "relay_hub_ws_close_all")).toHaveLength(1);
+		client.close();
+	});
+});
+
+// ─── Tauri's IPC fell back to postMessage (#822) ─────────────────────────────
+//
+// One failed custom-protocol fetch makes Tauri send every later command through
+// postMessage, as JSON, for the life of the page. Native refuses WebSocket input
+// that is not raw bytes, so each reconnect was refused the same way and the
+// window said "Reconnecting" for good. Only a new document resets Tauri's flag.
+
+describe("DesktopWsClient — Tauri's IPC fell back to postMessage (#822)", () => {
+	const reload = vi.fn();
+	const REFUSAL = "WebSocket input must use Tauri raw IPC bytes";
+
+	beforeEach(() => {
+		window.sessionStorage.clear();
+		reload.mockClear();
+		resetIpcFallbackForTests(reload);
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: ipc.invoke, transformCallback: () => 1 },
+			configurable: true,
+		});
+	});
+
+	afterEach(() => {
+		resetIpcFallbackForTests();
+		window.sessionStorage.clear();
+		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+		ipc.invoke.mockReset();
+		ipc.invoke.mockImplementation((command: string) =>
+			command === "relay_hub_ws_connect" ? Promise.resolve(41) : Promise.resolve(),
+		);
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	/** Native as it answers once Tauri sends raw bytes as JSON: every send refused. */
+	function refuseEverySend(): () => number {
+		let connects = 0;
+		ipc.invoke.mockImplementation((command: string): Promise<void> | Promise<number> => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(40 + ++connects);
+			if (command === "relay_hub_ws_send") return Promise.reject<void>(REFUSAL);
+			return Promise.resolve();
+		});
+		return () => connects;
+	}
+
+	it("reloads the page once instead of reconnecting for ever", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const connects = refuseEverySend();
+		const client = createWsClient();
+		const disconnected = vi.fn();
+		client.onDisconnect(disconnected);
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "t" });
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(reload).toHaveBeenCalledTimes(1);
+		expect(disconnected).toHaveBeenCalledTimes(1);
+		expect(window.sessionStorage.getItem(IPC_FALLBACK_RELOAD_KEY)).toContain(REFUSAL);
+
+		// The page is going: nothing dials the hub again in the meantime.
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(connects()).toBe(1);
+		expect(reload).toHaveBeenCalledTimes(1);
+		client.close();
+	});
+
+	it("does not reload again when the reload before it brought no raw bytes through", async () => {
+		vi.useFakeTimers();
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		window.sessionStorage.setItem(IPC_FALLBACK_RELOAD_KEY, "2026-10-31T15:00:00.000Z earlier");
+		const connects = refuseEverySend();
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "t" });
+		await vi.advanceTimersByTimeAsync(120_000);
+
+		expect(reload).not.toHaveBeenCalled();
+		// Nothing in this page can carry raw bytes: it stops instead of retrying.
+		expect(connects()).toBe(1);
+		expect(client.isConnected).toBe(false);
+		expect(consoleError).toHaveBeenCalledWith(
+			"[DesktopWsClient] This page can no longer send raw bytes to the hub; reload the window to reconnect:",
+			REFUSAL,
+		);
+		client.close();
+	});
+
+	it("takes a send that goes through as proof the reload worked, so a later fallback reloads again", async () => {
+		vi.spyOn(console, "info").mockImplementation(() => undefined);
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		window.sessionStorage.setItem(IPC_FALLBACK_RELOAD_KEY, "2026-10-31T15:00:00.000Z earlier");
+		let refuse = false;
+		ipc.invoke.mockImplementation((command: string): Promise<void> | Promise<number> => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(41);
+			if (command === "relay_hub_ws_send" && refuse) return Promise.reject<void>(REFUSAL);
+			return Promise.resolve();
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "t" });
+		await vi.waitFor(() =>
+			expect(window.sessionStorage.getItem(IPC_FALLBACK_RELOAD_KEY)).toBeNull(),
+		);
+
+		refuse = true;
+		client.send({ type: "AUTH", token: "t" });
+		await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+		client.close();
+	});
+
+	it("still reconnects after a send failure that is not that refusal", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		let connects = 0;
+		ipc.invoke.mockImplementation((command: string): Promise<void> | Promise<number> => {
+			if (command === "relay_hub_ws_connect") return Promise.resolve(40 + ++connects);
+			if (command === "relay_hub_ws_send" && connects === 1) {
+				return Promise.reject<void>("WebSocket relay input queue is full");
+			}
+			return Promise.resolve();
+		});
+		const client = createWsClient();
+		await client.connect("ws://127.0.0.1:4100/ws");
+
+		client.send({ type: "AUTH", token: "t" });
+		await vi.advanceTimersByTimeAsync(1000);
+
+		expect(reload).not.toHaveBeenCalled();
+		expect(connects).toBe(2);
 		client.close();
 	});
 });

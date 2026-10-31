@@ -407,6 +407,8 @@ export class AgentConnectionManager {
 					exitLogger.close();
 					this.ctx.loggerRegistry?.delete(exitMsg.channelId);
 				}
+				// Its last one here, perhaps: an agent older than this hub goes now (#805).
+				this.lifecycle.agentMayBeIdle(hostId);
 			} else if (msg.type === "TITLE_CHANGE") {
 				this.broadcaster.handleTitleChange(msg as AgentTitleChangeMessage);
 			} else if (msg.type === "PROCESS_TITLE") {
@@ -661,6 +663,10 @@ export class AgentConnectionManager {
 			this.ctx.commits.adoptAgent(quitEpoch, hostId, agent);
 			this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 			this.ctx.hubLogger?.log("info", "agent-connection-manager: agent active", { hostId });
+			// A daemon an older hub started, and that holds nothing of this hub's,
+			// is replaced with the agent beside this hub (#805). A start that is
+			// waiting for this agent waits for that too.
+			this.lifecycle.agentMayBeIdle(hostId);
 
 			return agent;
 		} catch (err) {

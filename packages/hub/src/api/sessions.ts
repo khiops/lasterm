@@ -79,11 +79,16 @@ export function registerSessionRoutes(
 	 *
 	 * Everything that agent is holding ends with it: a PTY belongs to the
 	 * process that opened it, and no update carries one across (#456). That is
-	 * why this is a request and never something the hub decides by itself.
+	 * why, while it holds terminals of this hub, this is a request and never
+	 * something the hub decides by itself. One older than the hub that holds
+	 * none, the hub replaces itself (#805).
 	 *
 	 * An agent that other hubs also use refuses while they hold terminals
 	 * there: the answer is a 409 that says how many, and the same request with
 	 * `{ "force": true }` ends those too (#127).
+	 *
+	 * On the local host it does only what the hub would do by itself, now, and
+	 * ends nothing: ending the local terminals is what Quit completely is for.
 	 */
 	server.post<{ Params: { id: string }; Body: unknown }>(
 		"/api/hosts/:id/agent/replace",

@@ -44,6 +44,7 @@ import {
 	generateId,
 	validateCustomCommand,
 } from "@lasterm/shared";
+import { HUB_VERSION } from "../build-version.js";
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { LoggerRegistry } from "../logging/index.js";
@@ -60,6 +61,7 @@ import type { AgentConnection } from "./agent-connection.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
+import { AgentRetirement, isOlderVersion } from "./agent-retirement.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { requestDaemonStop } from "./daemon-stop.js";
 import {
@@ -226,6 +228,8 @@ export class SessionManager {
 	private readonly lifecycle: ChannelLifecycleManager;
 	private readonly sshMgr: SshConnectionManager;
 	private readonly agentMgr: AgentConnectionManager;
+	/** Replaces an agent older than this hub once it holds nothing of it (#805). */
+	private readonly retirement: AgentRetirement;
 
 	// ─── Spool GC (owned by coordinator) ─────────────────────────────────────
 	private readonly gc: SpoolGarbageCollector;
@@ -339,6 +343,14 @@ export class SessionManager {
 		this.sshMgr = new SshConnectionManager(ctx, this.broadcaster, this.lifecycle, this.agentMgr);
 		// Break the circular reference: AgentConnectionManager needs SshConnectionManager
 		this.agentMgr.sshMgr = this.sshMgr;
+
+		this.retirement = new AgentRetirement(ctx, {
+			release: (hostId, agent) => this.releaseAgent(hostId, agent),
+			startLocalAgent: (hostId, sessionId) => this.startLocalAgentAgain(hostId, sessionId),
+		});
+		this.lifecycle.onAgentMayBeIdle = (hostId) => {
+			void this.retirement.retireIfIdle(hostId);
+		};
 
 		// Wire reconnect callback for restartChannel on SSH hosts
 		this.lifecycle.onReconnectAgent = async (hostId: string): Promise<boolean> => {
@@ -659,6 +671,11 @@ export class SessionManager {
 
 	async restartChannel(channelId: string, requestingClientId?: string): Promise<boolean | "busy"> {
 		const hostId = this.ctx.metaDal.getChannelWithHost(channelId)?.hostId;
+		// An outdated agent being replaced there (#805): the restart waits, and
+		// lands on the one that replaces it.
+		if (hostId !== undefined && this.retirement.isUnderWay(hostId)) {
+			await this.retirement.settled(hostId);
+		}
 		if (hostId !== undefined && this.hostIsBeingStopped(hostId)) return "busy";
 		if (this.isQuitting()) return false;
 		// Its host is away: the reconnect has the next attempt, and a restart
@@ -674,15 +691,26 @@ export class SessionManager {
 		// (#592). Claimed for the length of this one, as a SPAWN claims it.
 		if (this.ctx.startingChannels.has(channelId)) return false;
 		this.ctx.startingChannels.add(channelId);
+		let endStart: (() => void) | undefined;
 		try {
+			if (restartHostId !== undefined) {
+				// Nothing restarts on an agent older than this hub that holds
+				// nothing of it: it is replaced first (#805).
+				await this.retirement.retireIfIdle(restartHostId);
+				endStart = this.retirement.startOn(restartHostId);
+			}
 			return await this.lifecycle.restartChannel(channelId, requestingClientId);
 		} finally {
 			this.ctx.startingChannels.delete(channelId);
+			endStart?.();
 		}
 	}
 
 	async closeSession(sessionId: string): Promise<"closed" | "busy"> {
 		const recorded = this.ctx.metaDal.getSession(sessionId);
+		if (recorded && this.retirement.isUnderWay(recorded.hostId)) {
+			await this.retirement.settled(recorded.hostId);
+		}
 		if (recorded && this.hostIsBeingStopped(recorded.hostId)) return "busy";
 		let hostId: string | undefined;
 		for (const [hId, state] of this.ctx.sessions.entries()) {
@@ -697,11 +725,9 @@ export class SessionManager {
 			return "closed";
 		}
 
+		// Let go of first, and closed once the terminals are killed, below.
 		const agent = this.ctx.agents.get(hostId);
-		if (agent) {
-			agent.close();
-			this.ctx.agents.delete(hostId);
-		}
+		if (agent) this.ctx.agents.delete(hostId);
 
 		// P1: Abort in-flight acquisition synchronously via state-machine primitive.
 		// close() sets CLOSING before abort — joins are refused from that moment.
@@ -724,6 +750,11 @@ export class SessionManager {
 		// Asked for (DELETE /api/sessions/:id): its terminals are killed, and a
 		// pane over one must not bring it back, now or later (#580, #592).
 		this.lifecycle.closeSession(hostId, sessionId, "killed");
+		// A daemon older than this hub, which now holds nothing of it, is
+		// stopped rather than left running with nothing to do (#805); the next
+		// terminal there starts the current one. Any other connection is
+		// closed, the daemon left as it is.
+		if (agent && !this.retirement.retireDetached(hostId, agent)) void agent.close();
 		return "closed";
 	}
 
@@ -903,6 +934,10 @@ export class SessionManager {
 		reuseChannelId: string | undefined,
 		reusedCwd: string | undefined,
 	): Promise<string | null> {
+		// An outdated agent being replaced there (#805): this terminal waits,
+		// and starts on the one that replaces it. Only a stop someone asked for
+		// turns it away.
+		if (this.retirement.isUnderWay(hostId)) await this.retirement.settled(hostId);
 		if (this.hostIsBeingStopped(hostId)) {
 			client.send({
 				type: "ERROR",
@@ -984,6 +1019,8 @@ export class SessionManager {
 		let lease: Lease | null = null;
 		// acq reference kept for identity re-validation after awaits — invariant 7.
 		let acq: SessionAcquisition | null = null;
+		// This start, counted once its agent is chosen, until the outer finally (#805).
+		let endStart: (() => void) | null = null;
 
 		// ── Single outer try/finally — release the lease on EVERY exit path ─────────
 		// Invariant 2: the try wraps the entire acquisition + spawn body so all early
@@ -1244,8 +1281,28 @@ export class SessionManager {
 					}
 				}
 
+				// Not on an agent older than this hub that holds nothing of it: it is
+				// replaced first, and this terminal starts on the current one (#805).
+				// One started there would keep it running, which is how an update
+				// left the previous agent serving every new terminal.
 				// biome-ignore lint/style/noNonNullAssertion: invariant — all failure paths returned null above
-				const readyAgent = agent!;
+				let readyAgent: AgentConnection | null = agent!;
+				const retiring = this.retirement.retireIfIdle(hostId);
+				if (retiring !== null) readyAgent = await this.agentAfterRetirement(hostId, retiring);
+				if (readyAgent === null) {
+					client.send({
+						type: "ERROR",
+						code: host.type === "ssh" ? "SSH_CONNECT_FAILED" : ErrorCode.AGENT_ERROR,
+						message:
+							"This host's agent was older than this Lasterm and was stopped, and the current one could not be started.",
+						hostId,
+						...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+					} satisfies ErrorMessage);
+					return null;
+				}
+				// Counted with nothing awaited since the agent was chosen: no
+				// retirement begins under this start.
+				endStart = this.retirement.startOn(hostId);
 
 				this.ctx.hubLogger?.log("debug", "handleSpawn: agent ready, building SPAWN message", {
 					hostId,
@@ -1533,6 +1590,8 @@ export class SessionManager {
 				return spawnResult.channelId;
 			} // end inner bare block
 		} finally {
+			// Started or not, this start is over: a failed one may leave the host idle.
+			endStart?.();
 			// ── Single outer finally — release lease exactly once ─────────────────
 			// Invariant 2: covers ALL exit paths (success, failure, early return, throw).
 			// release() is idempotent (invariant 6).
@@ -2019,6 +2078,8 @@ export class SessionManager {
 		if (!host) return error(404, "NOT_FOUND", "Host not found");
 		if (host.type !== "ssh")
 			return error(400, ErrorCode.NOT_SSH_HOST, "This host is not an SSH host.");
+		// An outdated agent being replaced there finishes first (#805).
+		if (this.retirement.isUnderWay(hostId)) await this.retirement.settled(hostId);
 		if (this.isQuitting()) return error(409, "HUB_QUITTING", "The hub is quitting.");
 		if (this.ctx.stoppingAgents.has(hostId) || this.ctx.acquisitions.has(hostId)) {
 			return error(409, ErrorCode.HOST_BUSY, "This host is busy.");
@@ -2184,7 +2245,8 @@ export class SessionManager {
 	 * There is no way to do this gently: a PTY belongs to the process that
 	 * opened it, so everything that daemon is holding ends here. That is the
 	 * price, it is written next to the button that asks for this, and it is the
-	 * reason nothing does it on its own (#456).
+	 * reason the hub does it on its own only once the agent holds none of its
+	 * terminals, and is older than itself (#456, #805).
 	 *
 	 * The stop goes over the connection already open — opening another would
 	 * ask for a password again — and the agent is dropped afterwards, so the
@@ -2194,11 +2256,15 @@ export class SessionManager {
 	 * hubs hold terminals there unless `force` says to end those too. One the
 	 * STOP cannot reach is stopped with its own `--stop`, which knows nothing
 	 * of other hubs.
+	 *
+	 * The local host is answered by {@link replaceLocalAgent}.
 	 */
 	async replaceAgent(
 		hostId: string,
 		options: { readonly force?: boolean } = {},
 	): Promise<ReplaceAgentOutcome> {
+		// An outdated agent being replaced there already finishes first (#805).
+		if (this.retirement.isUnderWay(hostId)) await this.retirement.settled(hostId);
 		if (this.hostIsBeingStopped(hostId)) {
 			return {
 				replaced: false,
@@ -2206,6 +2272,7 @@ export class SessionManager {
 				message: "This host's agent is being stopped.",
 			};
 		}
+		if (this.ctx.metaDal.getHost(hostId)?.type === "local") return this.replaceLocalAgent(hostId);
 		this.ctx.stoppingAgents.add(hostId);
 		let heldAgent = false;
 		try {
@@ -2332,6 +2399,131 @@ export class SessionManager {
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
 			if (!this.isQuitting()) this.broadcaster.announceSessionState(hostId);
+		}
+	}
+
+	// ─── An agent older than this hub (#805) ────────────────────────────────
+
+	/**
+	 * Replace on the local host: what the hub now does by itself, done now.
+	 *
+	 * An agent older than the hub is replaced as soon as it holds none of this
+	 * hub's terminals, so there is nothing left for a request to do but that.
+	 * Ending the local terminals to replace their agent is what Quit completely
+	 * is for, and the local host offers no button that asks for it.
+	 */
+	private async replaceLocalAgent(hostId: string): Promise<ReplaceAgentOutcome> {
+		const agent = this.ctx.agents.get(hostId);
+		if (agent?.connected !== true) {
+			return {
+				replaced: false,
+				message:
+					"This hub is not connected to this host's agent. The next terminal opened here replaces it if it is older than this Lasterm.",
+			};
+		}
+		const running = agent.helloMessage?.agentVersion;
+		if (running === undefined || !isOlderVersion(running, HUB_VERSION)) {
+			return {
+				replaced: false,
+				message: `This host's agent (${running ?? "version unknown"}) is not older than this Lasterm (${HUB_VERSION}): there is nothing to replace.`,
+			};
+		}
+		let live = 0;
+		for (const channel of this.ctx.channels.values()) {
+			if (channel.hostId === hostId && channel.status !== "dead") live++;
+		}
+		if (live > 0) {
+			return {
+				replaced: false,
+				message: `This host's agent is replaced by itself as soon as none of this hub's terminals runs on it. ${live} still ${live === 1 ? "does" : "do"}.`,
+			};
+		}
+		if (this.retirement.wasRetired(hostId, running)) {
+			return {
+				replaced: false,
+				message: `An agent ${running} was stopped here already, and the one that took its place is ${running} too: replacing it would start the same version again.`,
+			};
+		}
+		const retiring = this.retirement.retireIfIdle(hostId);
+		if (retiring === null) {
+			return {
+				replaced: false,
+				message: "A terminal is starting on this host. Its agent is replaced once none runs on it.",
+			};
+		}
+		const outcome = await retiring;
+		switch (outcome.kind) {
+			case "retired":
+				return {
+					replaced: true,
+					message: "The agent was stopped, and the one this Lasterm carries runs in its place.",
+				};
+			case "refused": {
+				// Not offered with `force`: ending other hubs' terminals to replace
+				// the local agent is not this request's to do.
+				const held = outcome.otherOwnerChannels;
+				const which = held === null ? "terminals" : `${held} terminal${held === 1 ? "" : "s"}`;
+				return {
+					replaced: false,
+					message: `Other Lasterm hubs hold ${which} on this agent, so it is kept until they have ended.`,
+				};
+			}
+			case "unconfirmed":
+				return {
+					replaced: false,
+					message: "The agent did not confirm it had stopped. Nothing was changed.",
+				};
+		}
+	}
+
+	/**
+	 * The agent a start goes to once the outdated one it reached has been
+	 * dealt with: the host's agent then, or one reached again when there is
+	 * none. Null when none could be.
+	 *
+	 * Locally the retirement has started the agent beside the hub already;
+	 * if it could not, it is tried once more here. A remote host is reached
+	 * again, which deploys and starts the current agent: the same connection a
+	 * restart makes, its questions put to a window.
+	 */
+	private async agentAfterRetirement(
+		hostId: string,
+		retiring: Promise<unknown>,
+	): Promise<AgentConnection | null> {
+		await retiring;
+		const current = this.ctx.agents.get(hostId);
+		if (current?.connected === true) return current;
+		if (this.isQuitting()) return null;
+		if (this.ctx.metaDal.getHost(hostId)?.type === "ssh") {
+			const reached = (await this.lifecycle.onReconnectAgent?.(hostId)) === true;
+			const agent = this.ctx.agents.get(hostId);
+			return reached && agent?.connected === true ? agent : null;
+		}
+		const session = this.ctx.sessions.get(hostId);
+		if (session === undefined) return null;
+		try {
+			return await this.agentMgr.connectDaemonAgent(hostId, session.id);
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Start the agent beside this hub for the local host's session, in place
+	 * of the outdated one just stopped (#805). Never rejects: one that does not
+	 * start leaves the session disconnected, and the next terminal tries again.
+	 */
+	private async startLocalAgentAgain(hostId: string, sessionId: string): Promise<void> {
+		try {
+			await this.agentMgr.reconnectDaemon(hostId, sessionId);
+		} catch (error) {
+			this.ctx.hubLogger?.log("warn", "session-manager: the current local agent did not start", {
+				hostId,
+				message: error instanceof Error ? error.message : String(error),
+			});
+			if (!this.isQuitting() && this.ctx.sessions.get(hostId)?.id === sessionId) {
+				this.broadcaster.updateSessionStatus(hostId, sessionId, "disconnected");
+			}
 		}
 	}
 

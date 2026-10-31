@@ -4157,6 +4157,26 @@ mod tests {
                 assert_eq!(summary.confirmed_shell_exits, 1);
             }
 
+            /// Another hub connected but holding nothing does not keep the
+            /// daemon: only terminals refuse a STOP without force. A hub
+            /// replacing an agent older than itself relies on it (#805): the
+            /// other hub's connection closes too, and it dials again.
+            #[tokio::test]
+            async fn stop_without_force_ends_a_daemon_another_hub_merely_connects_to() {
+                let daemon = TestDaemon::start("stop-idle-other").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
+
+                a.send(&stop(false)).await;
+                let frames = a.frames_until_closed().await;
+                assert_eq!(errors(&frames), Vec::<String>::new());
+                let seen_by_b = b.frames_until_closed().await;
+                assert_eq!(errors(&seen_by_b), Vec::<String>::new());
+                let summary = daemon.finished().await.expect("a clean stop");
+                assert_eq!(summary.confirmed_shell_exits, 0);
+                assert!(summary.unresolved.is_empty());
+            }
+
             /// A connection that opens with a request rather than AUTH, on a
             /// daemon without a token, is refused: told why, closed, and shown
             /// nothing of the channels there. The hub holding them goes on.

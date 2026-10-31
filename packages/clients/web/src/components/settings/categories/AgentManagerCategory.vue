@@ -17,8 +17,10 @@
 					Keep an agent running on remote hosts
 					<span class="daemon-note">
 						Their terminals then survive a dropped connection and a Lasterm restart. It
-						is a process left on the other machine, which ends by itself once it holds
-						no terminals. Windows hosts are unaffected.
+						is a process left on the other machine, which ends by itself half an hour
+						after it holds no terminals and no Lasterm is connected to it. After an
+						update, Lasterm replaces it as soon as it runs none of this Lasterm's
+						terminals. Windows hosts are unaffected.
 					</span>
 				</span>
 			</label>

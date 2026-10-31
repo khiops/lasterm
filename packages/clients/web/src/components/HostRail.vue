@@ -416,9 +416,10 @@ const footerRows = computed(() => chunkIntoRows(FOOTER_ACTIONS, props.columns));
  * Whether this host is served by an agent from before an update.
  *
  * A hub deploys an agent matched to itself, so a version that differs means
- * the one answering was started by an older hub and is still there — a remote
- * daemon holding terminals, most often. Nothing is done about it: those
- * terminals are worth more than a version number (#456). The dot carries the
+ * the one answering was started by an older hub and is still there — a
+ * daemon holding terminals, most often. The hub leaves it be while it holds
+ * them: those terminals are worth more than a version number (#456). Once it
+ * holds none of this hub's, the hub replaces it (#805). The dot carries the
  * mark, the hover says why, and the detail belongs in the host's settings.
  */
 function agentIsOlder(hostId: string): boolean {
@@ -428,7 +429,7 @@ function agentIsOlder(hostId: string): boolean {
 function olderAgentHint(hostId: string): string {
 	const outdated = hostsStore.getOutdatedAgent(hostId);
 	if (outdated === null) return "";
-	return `Served by agent ${outdated.running}; this hub carries ${outdated.expected}. Its terminals have to end before it can be replaced.`;
+	return `Served by agent ${outdated.running}; this hub carries ${outdated.expected}. It is replaced as soon as none of this hub's terminals runs on it, unless other hubs hold terminals there.`;
 }
 
 const dragHostId = ref<string | null>(null);

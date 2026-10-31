@@ -190,6 +190,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - Reconnect (remote): exponential backoff (1s, 2s, 4s, ... 30s max, 5min total timeout)
 - Connect, Reconnect and Disconnect a remote host on its user's request, and hold back from reconnecting one its user disconnected (§ 5.5b)
 - Reconnect (local): connect to the daemon again, launching a new one if none answers
+- An agent older than the hub (semver), local or a remote daemon, is replaced once this hub holds none of its terminals there (#805, `agent-retirement.ts`): when the hub reaches it holding none, when its last terminal of this hub ends (exit, kill, its session closed), and before a terminal starts on it. The hub asks it to stop without `force` (PROTOCOL.md § 3.17), so one where other hubs hold terminals refuses and is kept, and asks again only at the next of those moments. Nothing new starts on the host meanwhile: a SPAWN or a restart waits, and lands on the agent that replaces it. On the local host the agent beside the hub is started at once; a remote one gets the current agent with its next connection, which deploys it. An agent as new as the hub, or newer, is never stopped: two hubs of different versions can share the local daemon (#127). Nor is one on stdio, which every connection replaces, nor anything while the hub quits. Nor, until the hub restarts, one of a version it already stopped on that host: what took its place was no newer, a binary beside a development hub built from an older tree, or the older hub sharing the pipe starting its own again, and stopping it would only start it once more
 - Channel multiplexing: multiple PTYs per agent connection
 
 **Client Manager:**
@@ -381,7 +382,8 @@ The hub ships with the agent binary for its own platform, co-located with the hu
 next to itself via `sea-agent-resolver`; the desktop bundles it as a Tauri sidecar). Local sessions use
 this agent. It is therefore available **offline and immediately** at install, and its version always
 matches the hub by construction. A terminal app must open a local shell without a network round-trip, so
-this is never fetched.
+this is never fetched. A daemon an older hub started outlives an update, though, and keeps its terminals:
+the hub replaces it with its own as soon as it holds none of this hub's terminals (#805, § 3.3).
 
 **Remote agents (other OS/arch, for SSH hosts) — fetched on demand.**
 The hub does **not** bundle agents for platforms other than its own. When deploying to a remote host whose
@@ -392,8 +394,10 @@ remote host over SFTP. Pre-population is available via `lasterm-hub agent fetch 
 
 On a POSIX host the upload goes to a hidden temporary file beside the target, is made executable, and only
 then is renamed over the target (`posix-rename@openssh.com`, or `mv -f` where the server lacks it). A remote
-daemon still running the old binary keeps it, and the host reports that daemon as outdated until someone
-replaces it (#456, #555); the notice then says the new agent is installed and waits for that. A
+daemon still running the old binary keeps it, and the host reports that daemon as outdated until it is
+replaced (#456, #555): by the hub itself once it holds none of this hub's terminals and no other hub holds
+any there (#805), or by someone, with Replace, which ends them. The notice then says the new agent is
+installed and waits for that. A
 temporary a crash left behind is removed by a later upload to the same directory once the remote's own
 clock says it is an hour old: another hub may be uploading there, and its file is always younger (#127,
 #559). A Windows host gets the same temporary, and PowerShell moves it into place (#725). Its agent runs on
@@ -952,6 +956,11 @@ Hub starts (or reconnects after restart)
   │  Hub: reconcileChannelState()
   │  ├─ alive channels → adopt into session, update DB
   │  └─ dead channels → mark dead in DB, notify UI
+  │  An agent older than the hub, holding none of its channels (#805):
+  │  │  Hub → Agent: STOP { force: false }; a SPAWN meanwhile waits
+  │  ├─ The connection ends → it stopped: connectOrLaunch again, which
+  │  │  launches the binary beside the hub, and the SPAWN goes to it
+  │  └─ OTHER_HUBS_HOLD_CHANNELS, or no answer → it is kept
   │  Normal operation resumes
   │
   └─ The connection fails (no daemon):

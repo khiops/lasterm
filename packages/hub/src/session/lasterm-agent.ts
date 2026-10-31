@@ -29,6 +29,11 @@ export class LastermAgent extends AgentConnection {
 	private socketClosed = false;
 	private closePromise: Promise<void> | null = null;
 	private static _connSeq = 0;
+	/**
+	 * Set when this hub closes the connection itself, so that a STOP waiting
+	 * for the daemon's close does not read this one as the daemon going (#805).
+	 */
+	closedByHub = false;
 
 	constructor(socket: Duplex, hubLogger?: HubLogger) {
 		super();
@@ -90,6 +95,7 @@ export class LastermAgent extends AgentConnection {
 	close(): Promise<void> {
 		if (this.socketClosed) return Promise.resolve();
 		if (this.closePromise) return this.closePromise;
+		this.closedByHub = true;
 
 		this.closePromise = new Promise((resolve) => {
 			const timer = setTimeout(() => {

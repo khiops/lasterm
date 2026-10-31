@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, type Stats } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
 	findWindowsTerminalSettingsPath,
 	firstReportedWindowsShell,
 	importWindowsTerminalProfiles,
+	linkOrFileExists,
 	parseCommandLine,
 	parseWindowsTerminalSettings,
 	probeWslDistributions,
@@ -25,6 +27,7 @@ vi.mock("node:fs", async (importOriginal) => {
 	return {
 		...actual,
 		existsSync: vi.fn(actual.existsSync),
+		lstatSync: vi.fn(actual.lstatSync),
 		readFileSync: vi.fn(actual.readFileSync),
 		readdirSync: vi.fn(actual.readdirSync),
 	};
@@ -576,6 +579,49 @@ describe("reportedWindowsShell (#818)", () => {
 	});
 });
 
+/**
+ * The folder of a Store PowerShell's alias named for its package family, which
+ * a Store PowerShell puts first on the PATH it hands down (#821).
+ */
+const FAMILY_ALIASES = `${LOCAL_APP_DATA}\\Microsoft\\WindowsApps\\Microsoft.PowerShell_8wekyb3d8bbwe`;
+const FAMILY_PWSH = `${FAMILY_ALIASES}\\pwsh.exe`;
+
+describe("reportedWindowsShell with a package family's alias (#821)", () => {
+	it("reports it by the alias beside its folder, case aside", () => {
+		expect(reportedWindowsShell(FAMILY_PWSH, WINDOWS_ENV, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+		const lower = `${FAMILY_ALIASES.toLowerCase()}\\pwsh.exe`;
+		expect(reportedWindowsShell(lower, WINDOWS_ENV, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+	});
+
+	// Unlike a package's directory, it stays through updates.
+	it("reports it as found without that alias, or without LOCALAPPDATA", () => {
+		expect(reportedWindowsShell(FAMILY_PWSH, WINDOWS_ENV, onDisk())).toBe(FAMILY_PWSH);
+		const noLocal = vars({ ProgramFiles: "C:\\Program Files" });
+		expect(reportedWindowsShell(FAMILY_PWSH, noLocal, () => true)).toBe(FAMILY_PWSH);
+	});
+});
+
+describe("linkOrFileExists (#818)", () => {
+	// Windows' app execution alias is such a link; symlinks need no privilege
+	// on Unix, so the spec makes one there.
+	it.skipIf(process.platform === "win32")(
+		"finds a link that cannot be followed, which existsSync says is not there",
+		async () => {
+			const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+			const dir = fs.mkdtempSync(join(tmpdir(), "lasterm-818-"));
+			try {
+				const link = join(dir, "pwsh.exe");
+				fs.symlinkSync(join(dir, "nowhere"), link);
+				expect(fs.existsSync(link)).toBe(false);
+				expect(linkOrFileExists(link)).toBe(true);
+				expect(linkOrFileExists(join(dir, "missing.exe"))).toBe(false);
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
+});
+
 describe("firstReportedWindowsShell (#818)", () => {
 	it("skips a Store package's path without an alias for the next where.exe line", () => {
 		expect(
@@ -614,6 +660,7 @@ describe("discoverWindowsShells with a Store PowerShell (#818)", () => {
 		platform.mockRestore();
 		vi.unstubAllEnvs();
 		vi.mocked(existsSync).mockRestore();
+		vi.mocked(lstatSync).mockRestore();
 	});
 
 	/** where.exe prints `lines` for pwsh.exe, and finds nothing else. */
@@ -625,26 +672,52 @@ describe("discoverWindowsShells with a Store PowerShell (#818)", () => {
 		);
 	}
 
+	/**
+	 * The disk holds these app execution aliases, and nothing else. Node cannot
+	 * open one: `existsSync` says it is not there, `lstatSync` finds the link.
+	 */
+	function aliasesOnDisk(...aliases: string[]): void {
+		mockExistsSync.mockReturnValue(false);
+		vi.mocked(lstatSync).mockImplementation(((path: string) =>
+			aliases.includes(path) ? ({} as Stats) : undefined) as unknown as typeof lstatSync);
+	}
+
 	function powerShells(shells: { label: string; shell: string }[]): string[] {
 		return shells.filter((shell) => shell.label === "PowerShell").map((shell) => shell.shell);
 	}
 
-	it("seeds a Store PowerShell by its alias, once, not by its package directory", async () => {
-		mockExistsSync.mockImplementation((p) => p === STORE_PWSH);
-		await whereFindsPwsh(PACKAGE_PWSH, STORE_PWSH);
+	// where.exe prints the package's path alone: only the rule can name the alias.
+	it("seeds a Store PowerShell by its alias, not by its package directory", async () => {
+		aliasesOnDisk(STORE_PWSH);
+		await whereFindsPwsh(PACKAGE_PWSH);
+
+		expect(powerShells(await discoverWindowsShells())).toEqual([STORE_PWSH]);
+	});
+
+	// What where.exe prints under a Store PowerShell's own PATH (#821).
+	it("seeds it by its alias, not by its package family's alias found first", async () => {
+		aliasesOnDisk(FAMILY_PWSH, STORE_PWSH);
+		await whereFindsPwsh(FAMILY_PWSH);
+
+		expect(powerShells(await discoverWindowsShells())).toEqual([STORE_PWSH]);
+	});
+
+	it("seeds the alias once when where.exe also finds it", async () => {
+		aliasesOnDisk(FAMILY_PWSH, STORE_PWSH);
+		await whereFindsPwsh(PACKAGE_PWSH, FAMILY_PWSH, STORE_PWSH);
 
 		expect(powerShells(await discoverWindowsShells())).toEqual([STORE_PWSH]);
 	});
 
 	it("takes the next where.exe line when the package has no alias", async () => {
-		mockExistsSync.mockReturnValue(false);
+		aliasesOnDisk();
 		await whereFindsPwsh(PACKAGE_PWSH, PROGRAM_FILES_PWSH);
 
 		expect(powerShells(await discoverWindowsShells())).toEqual([PROGRAM_FILES_PWSH]);
 	});
 
 	it("seeds no PowerShell 7 that only its package directory holds", async () => {
-		mockExistsSync.mockReturnValue(false);
+		aliasesOnDisk();
 		await whereFindsPwsh(PACKAGE_PWSH);
 
 		const shells = await discoverWindowsShells();

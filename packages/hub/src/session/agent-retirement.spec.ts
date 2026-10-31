@@ -545,30 +545,33 @@ describe("the local agent, older than the hub (#805)", () => {
 	it.each([
 		["the STOP cannot be written", "throw"],
 		["another connection took the hub's place", "displaced"],
-	] as const)("marks nothing ended, starts nothing, and asks again later, when %s", async (_label, mode) => {
-		const old = daemons.make(OLD);
-		old.stopMode = mode;
-		const hostId = await restartOnto(old);
-		addWindow();
+	] as const)(
+		"marks nothing ended, starts nothing, and asks again later, when %s",
+		async (_label, mode) => {
+			const old = daemons.make(OLD);
+			old.stopMode = mode;
+			const hostId = await restartOnto(old);
+			addWindow();
 
-		old.agents[0]?.exit("ch-held");
-		await settle(20);
+			old.agents[0]?.exit("ch-held");
+			await settle(20);
 
-		expect(stopsTo(old)).toHaveLength(1);
-		expect(pipe.launched).toEqual([]);
-		expect(sm.hostIsBeingStopped(hostId)).toBe(false);
-		expect(
-			heard.filter((m) => m.type === "CHANNEL_STATE" && (m as { endReason?: string }).endReason),
-		).toEqual([]);
-		if (mode === "throw") expect(sm.agents.get(hostId)).toBe(old.agents[0]);
+			expect(stopsTo(old)).toHaveLength(1);
+			expect(pipe.launched).toEqual([]);
+			expect(sm.hostIsBeingStopped(hostId)).toBe(false);
+			expect(
+				heard.filter((m) => m.type === "CHANNEL_STATE" && (m as { endReason?: string }).endReason),
+			).toEqual([]);
+			if (mode === "throw") expect(sm.agents.get(hostId)).toBe(old.agents[0]);
 
-		// Not taken for a stop: the next terminal asks again, and gets the current agent.
-		old.stopMode = "obey";
-		expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId })).not.toBeNull();
-		expect(stopsTo(old)).toHaveLength(2);
-		expect(pipe.launched.map((d) => d.version)).toEqual([HUB_VERSION]);
-		expect(spawnsTo(old)).toEqual([]);
-	});
+			// Not taken for a stop: the next terminal asks again, and gets the current agent.
+			old.stopMode = "obey";
+			expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId })).not.toBeNull();
+			expect(stopsTo(old)).toHaveLength(2);
+			expect(pipe.launched.map((d) => d.version)).toEqual([HUB_VERSION]);
+			expect(spawnsTo(old)).toEqual([]);
+		},
+	);
 
 	it("keeps the agent when it does not say it stopped in time", async () => {
 		const old = daemons.make(OLD);

@@ -50,23 +50,39 @@ function isPathNamedSeed(profile: LaunchProfile): boolean {
 
 /**
  * The profile seeding gives a shell, when one exists: one launching it with no
- * arguments, else one launching it, else one bearing its name. `stale` lists
- * the profiles an earlier seeding named after the whole path, which the
+ * arguments, else one launching it. Only one launching that very path: a
+ * profile bearing its file name may launch another, a shell of the hub's own
+ * machine or of another host, which this host does not have (#816). `stale`
+ * lists the profiles an earlier seeding named after the whole path, which the
  * seeding renames or removes.
  */
 function profileForShell(
 	shellPath: string,
 	profiles: LaunchProfile[],
-	metaDal: Pick<MetaDAL, "getLaunchProfileByName">,
 ): { profile: LaunchProfile | undefined; stale: LaunchProfile[] } {
 	const launching = profiles.filter((p) => sameShell(p.shell, shellPath));
 	const stale = launching.filter(isPathNamedSeed);
 	const current = launching.filter((p) => !isPathNamedSeed(p));
-	const profile =
-		current.find((p) => p.args === undefined) ??
-		current[0] ??
-		metaDal.getLaunchProfileByName(shellFileName(shellPath));
+	const profile = current.find((p) => p.args === undefined) ?? current[0];
 	return { profile, stale };
+}
+
+/**
+ * The name a profile the seeding gives a shell takes: its file name, else,
+ * where a profile launching another path already bears it (names ignore
+ * case), its file name and the directory it is in, as
+ * `pwsh.exe (C:\Program Files\PowerShell\7)`, numbered should that be taken
+ * too. Never the whole path, which is how a stale seed is named.
+ */
+function seedName(shellPath: string, metaDal: Pick<MetaDAL, "getLaunchProfileByName">): string {
+	const name = shellFileName(shellPath);
+	if (metaDal.getLaunchProfileByName(name) === undefined) return name;
+	const dir = shellPath.slice(0, shellPath.length - name.length).replace(/[\\/]+$/, "");
+	const qualified = dir === "" ? name : `${name} (${dir})`;
+	for (let n = 1; ; n++) {
+		const candidate = n === 1 ? qualified : `${qualified} ${n}`;
+		if (metaDal.getLaunchProfileByName(candidate) === undefined) return candidate;
+	}
 }
 
 /**
@@ -103,7 +119,6 @@ export function restoreAgentDefaultProfile(
 		MetaDAL,
 		| "getHost"
 		| "listLaunchProfiles"
-		| "getLaunchProfileByName"
 		| "getHostDefaultOverride"
 		| "getHostLaunchProfileOverride"
 		| "upsertHostProfileOverride"
@@ -112,7 +127,7 @@ export function restoreAgentDefaultProfile(
 	if (metaDal.getHostDefaultOverride(hostId) !== undefined) return;
 	const reported = metaDal.getHost(hostId)?.discoveredDefaultShell;
 	if (reported === undefined) return;
-	const { profile, stale } = profileForShell(reported, metaDal.listLaunchProfiles(), metaDal);
+	const { profile, stale } = profileForShell(reported, metaDal.listLaunchProfiles());
 	const found = profile ?? stale[0];
 	if (found !== undefined) markAgentDefault(hostId, found.id, metaDal);
 }
@@ -121,14 +136,18 @@ export function restoreAgentDefaultProfile(
  * Auto-seed launch profiles for the shells an agent reports in its HELLO.
  *
  * A shell some profile already launches reuses that profile, so the local
- * host's "Command Prompt" is not listed a second time as `cmd.exe`. Idempotent:
- * it pins a profile only when the host neither sees it nor holds an override
- * for it, so a profile the user hid stays hidden.
+ * host's "Command Prompt" is not listed a second time as `cmd.exe`. A shell no
+ * profile launches gets one of its own, even where a profile bearing its file
+ * name launches another path (#816): that profile is left as it is, and never
+ * pinned or marked for this shell. Idempotent: it pins a profile only when the
+ * host neither sees it nor holds an override for it, so a profile the user hid
+ * stays hidden.
  *
  * The profile of the agent's default shell becomes the host's default when the
  * host has none, or when the one it has is an earlier seeding's, so it follows
- * the agent's default when that changes. A default the user set is never
- * replaced (#800), and a profile the user hid is not marked.
+ * the agent's default when that changes, and an earlier seeding's mark on a
+ * profile launching another path gives way to it. A default the user set is
+ * never replaced (#800), and a profile the user hid is not marked.
  */
 export async function seedShellProfiles(
 	hostId: string,
@@ -152,23 +171,27 @@ export async function seedShellProfiles(
 
 	// Profiles this host already sees, so a seeded shell is not pinned twice
 	const visible = new Set<string>(metaDal.listHostProfiles(hostId, supportedOs).map((p) => p.id));
-	const profiles = metaDal.listLaunchProfiles();
 
 	let seededCount = 0;
 	let defaultProfileId: string | undefined;
 
 	for (const [i, shellPath] of availableShells.entries()) {
-		const name = shellFileName(shellPath);
-		const found = profileForShell(shellPath, profiles, metaDal);
+		// Read again for each shell: one seeded, renamed or removed for the
+		// shell before counts for the next, the same path spelled otherwise.
+		const found = profileForShell(shellPath, metaDal.listLaunchProfiles());
 		const stale = found.stale;
 
-		// A profile launching this shell, one bearing its name, or a stale one renamed
+		// A profile launching this shell, or a stale one renamed
 		let profile =
 			found.profile ??
-			(stale[0] && metaDal.updateLaunchProfile(stale[0].id, { name, supportedOs }));
+			(stale[0] &&
+				metaDal.updateLaunchProfile(stale[0].id, {
+					name: seedName(shellPath, metaDal),
+					supportedOs,
+				}));
 		if (!profile) {
 			profile = metaDal.createLaunchProfile({
-				name,
+				name: seedName(shellPath, metaDal),
 				shell: shellPath,
 				mode: "shell",
 				elevated: false,

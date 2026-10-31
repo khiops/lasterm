@@ -1,0 +1,2 @@
+en: A terminal restarted from another host's tab starts its own shell again, and a Windows host whose default is PowerShell 7 starts the one installed there, not a path from another computer.
+fr: Un terminal redémarré depuis l'onglet d'un autre hôte relance de nouveau son propre shell, et un hôte Windows dont le shell par défaut est PowerShell 7 lance celui qui y est installé, et non un chemin venant d'un autre ordinateur.

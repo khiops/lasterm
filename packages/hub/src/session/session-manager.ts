@@ -126,6 +126,13 @@ import { SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 import { StateBroadcaster } from "./state-broadcaster.js";
 
+/** What a dead terminal brought back by a SPAWN has of its own (#583). */
+interface ReusedTerminal {
+	cwd?: string;
+	shell?: string;
+	args?: string[];
+}
+
 export interface WsClient {
 	id: string;
 	send: (msg: ProtocolMessage) => void;
@@ -858,8 +865,8 @@ export class SessionManager {
 		// very host qualifies: anything else would have this spawn take over a
 		// terminal that is someone's, or one that is still running.
 		let reuseChannelId: string | undefined;
-		// The directory the terminal being brought back has of its own, if any.
-		let reusedCwd: string | undefined;
+		// What the terminal being brought back has of its own, if anything.
+		let reused: ReusedTerminal | undefined;
 		if (msg.reuseChannelId !== undefined) {
 			const existing = this.ctx.metaDal.getChannelWithHost(msg.reuseChannelId);
 			// A dead entry still in the live map is not a terminal running: it is
@@ -873,7 +880,11 @@ export class SessionManager {
 			const starting = this.ctx.startingChannels.has(msg.reuseChannelId);
 			if (existing && existing.hostId === hostId && live === undefined && !starting) {
 				reuseChannelId = msg.reuseChannelId;
-				reusedCwd = existing.channel.cwd;
+				reused = {
+					...(existing.channel.cwd !== undefined && { cwd: existing.channel.cwd }),
+					...(existing.channel.shell !== undefined && { shell: existing.channel.shell }),
+					...(existing.channel.args !== undefined && { args: existing.channel.args }),
+				};
 			} else {
 				// Spawning a stranger instead would put a terminal on screen that
 				// nobody asked for, beside the one that was meant to come back.
@@ -915,7 +926,7 @@ export class SessionManager {
 				hostId,
 				spawnFence,
 				reuseChannelId,
-				reusedCwd,
+				reused,
 			);
 		} finally {
 			this.ctx.startingChannels.delete(reuseChannelId);
@@ -933,7 +944,7 @@ export class SessionManager {
 		hostId: string,
 		spawnFence: QuitFence,
 		reuseChannelId: string | undefined,
-		reusedCwd: string | undefined,
+		reused: ReusedTerminal | undefined,
 	): Promise<string | null> {
 		// An outdated agent being replaced there (#805): this terminal waits,
 		// and starts on the one that replaces it. Only a stop someone asked for
@@ -1314,15 +1325,23 @@ export class SessionManager {
 				const rows = msg.rows ?? 24;
 
 				// ── Launch profile resolution ─────────────────────────────────────────
-				let resolvedShell = msg.shell ?? undefined;
-				let resolvedArgs = msg.args ?? [];
+				// A terminal brought back with neither a shell nor a profile named
+				// starts its own shell and arguments, as a restart sends them (#583).
+				// The web names them only for a terminal its list carries: one on a
+				// host other than the one in view comes back with its id alone, and
+				// started the host's default profile in its place, a shell it never
+				// ran, and one its host may not have.
+				const ownShell =
+					msg.shell === undefined && msg.launchProfileId === undefined ? reused : undefined;
+				let resolvedShell = msg.shell ?? ownShell?.shell;
+				let resolvedArgs = msg.args ?? (ownShell?.shell !== undefined ? ownShell.args : []) ?? [];
 				// The directory, in this order: the request's; the launch profile's,
 				// when the request names one (below), as for a new terminal; for a
 				// terminal brought back, the one it has of its own, as a restart
 				// sends it (#583), since the web brings one back with its shell and
 				// arguments only; else none, and its agent starts it in its user's
 				// home (#581).
-				let resolvedCwd = msg.cwd ?? reusedCwd;
+				let resolvedCwd = msg.cwd ?? reused?.cwd;
 				let resolvedEnv: Record<string, string> = msg.env ?? {};
 				let resolvedDirectProcess = msg.directProcess ?? false;
 				let resolvedElevated = msg.elevated ?? false;

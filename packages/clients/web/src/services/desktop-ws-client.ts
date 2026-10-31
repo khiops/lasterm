@@ -1,5 +1,10 @@
 import type { ProtocolMessage } from "@lasterm/shared";
 import { decodeMessage, encodeMessage } from "@lasterm/shared";
+import {
+	isRawIpcRefusal,
+	rawIpcWorked,
+	reloadAfterIpcFallback,
+} from "../utils/tauri-ipc-fallback.js";
 import type { IWsClient } from "./ws-client.js";
 
 type MessageListener = (msg: ProtocolMessage) => void;
@@ -277,6 +282,31 @@ export class DesktopWsClient implements IWsClient {
 			return;
 		}
 		console.error("[DesktopWsClient] Transport failure:", error);
+		this._dropRelay();
+		this._scheduleReconnect();
+	}
+
+	/**
+	 * Native refused a send because its bytes reached it as JSON: Tauri's IPC
+	 * fell back to postMessage for the rest of this page (#822), and every
+	 * reconnect would be refused the same way. The page reloads once to get raw
+	 * IPC back; if it will not, retrying is pointless, so the client stops.
+	 */
+	private _ipcFallback(reason: string): void {
+		const reloading = reloadAfterIpcFallback(reason);
+		if (!reloading) {
+			console.error(
+				"[DesktopWsClient] This page can no longer send raw bytes to the hub; reload the window to reconnect:",
+				reason,
+			);
+		}
+		this.reconnectUrl = null;
+		this._cancelReconnect();
+		if (this.relayId !== null) this._dropRelay();
+	}
+
+	/** Forget the current relay, close it natively, and say the link is down. */
+	private _dropRelay(): void {
 		const activeRelayId = this.relayId;
 		this.relayId = null;
 		this.pendingFrame = undefined;
@@ -290,7 +320,6 @@ export class DesktopWsClient implements IWsClient {
 				);
 		}
 		this._notify(this.disconnectListeners);
-		this._scheduleReconnect();
 	}
 
 	private _isCurrentRelay(relayId: string, generation = this.connectionGeneration): boolean {
@@ -312,8 +341,13 @@ export class DesktopWsClient implements IWsClient {
 			await invoke("relay_hub_ws_send", send.payload, {
 				headers: { "X-Lasterm-Ws-Id": String(send.relayId) },
 			});
+			rawIpcWorked();
 		} catch (error) {
-			if (this._isCurrentRelay(send.relayId, send.generation)) {
+			// Whichever relay it was for, this refusal says no relay of this page
+			// can take input any more.
+			if (isRawIpcRefusal(error)) {
+				this._ipcFallback(String(error));
+			} else if (this._isCurrentRelay(send.relayId, send.generation)) {
 				this._transportFailure(String(error), send.relayId, send.generation);
 			}
 		} finally {

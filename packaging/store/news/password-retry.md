@@ -1,0 +1,2 @@
+en: A wrong SSH password is now asked for again instead of ending the connection. Cancelling a password or passphrase prompt no longer shows a failure in a host's connection test or when restarting a terminal after configuring its command.
+fr: Un mot de passe SSH erroné est désormais redemandé au lieu de couper la connexion. Annuler la demande d'un mot de passe ou d'une phrase secrète n'affiche plus d'échec au test de connexion d'un hôte, ni au redémarrage d'un terminal après la configuration de sa commande.

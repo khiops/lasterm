@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
-import ssh2, { Client, type ClientChannel, type SyncHostVerifier } from "ssh2";
+import ssh2, { Client, type ClientChannel, type ConnectConfig, type SyncHostVerifier } from "ssh2";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { findHostKeyRevocation } from "../ssh/known-hosts.js";
 import { parseSshHost } from "../ssh-route.js";
@@ -20,6 +20,11 @@ import {
 import { AuthCancelledError } from "./auth-cancelled.js";
 import { HelloSeeker } from "./hello-seeker.js";
 import { openJumpRoute } from "./jump-connection.js";
+import {
+	authenticateWithPassword,
+	PasswordRefusedError,
+	passwordRefusal,
+} from "./password-auth.js";
 import type { ResolvedJump } from "./proxy-jump.js";
 import {
 	attachRemoteDaemon,
@@ -67,8 +72,9 @@ export interface HostKeyVerification {
 export interface AuthPromptOptions {
 	/**
 	 * The answer to the prompt before this one, for the same host, was wrong: a
-	 * passphrase that did not decrypt the key. A cache that gave it must not
-	 * give it again, and a prompt that cannot ask anyone gives up.
+	 * passphrase that did not decrypt the key, or a password the server refused
+	 * (#815). A cache that gave it must not give it again, and a prompt that
+	 * cannot ask anyone gives up.
 	 */
 	previousRejected?: boolean;
 }
@@ -198,7 +204,9 @@ async function promptUntilKeyDecrypts(
 /**
  * Build the ssh2 ConnectConfig for a given auth method.
  * Throws on missing config, and `AuthCancelledError` when a prompt is
- * cancelled. A key's wrong passphrase is asked for again (#812).
+ * cancelled. A key's wrong passphrase is asked for again (#812). A wrong
+ * password is known only once dialled: whoever dials asks for it again
+ * (`passwordRefusal`, #815).
  * Call sites that need non-throwing behavior (e.g. test-connect) should catch
  * and convert to their own error representation.
  */
@@ -224,7 +232,13 @@ export async function buildSshConnectConfig(
 		if (secret === null) {
 			throw new AuthCancelledError();
 		}
-		connectConfig.password = secret;
+		// Only the server can say it is wrong, once dialled: then it is asked
+		// for again, saying so, by whoever dials (`passwordRefusal`, #815).
+		authenticateWithPassword(connectConfig, secret, `${user}@${hostname}`, () =>
+			promptAuth(hostId, "password", `Wrong password for ${user}@${hostname}. Try again.`, {
+				previousRejected: true,
+			}),
+		);
 	} else if (auth.method === "agent") {
 		const address = sshAgentAddress({
 			env: process.env,
@@ -456,11 +470,8 @@ export class SshAgent extends AgentConnection {
 		const authMethod = this.host.sshAuth ?? "key";
 		console.error(`[lasterm-ssh] resolved: ${username}@${hostname}:${port} auth=${authMethod}`);
 
-		const client = new Client();
-		this.client = client;
-
 		// If aborted while building the connect config (which may prompt for auth),
-		// destroy the client and reject before proceeding.
+		// reject before proceeding.
 		const connectConfig = await buildSshConnectConfig(
 			{ method: authMethod, keyPath: this.host.sshKeyPath ?? undefined },
 			hostname,
@@ -475,6 +486,53 @@ export class SshAgent extends AgentConnection {
 			throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 		}
 
+		// The bastion's credentials, asked for once: a target that refuses its
+		// password does not ask for the jump's again.
+		const jumpAuth = jump === undefined ? undefined : await buildJumpAuth(jump, this.promptAuth);
+
+		// A password the host or its jump refused is asked for again, saying so,
+		// and the host dialled again, until one is taken or the person cancels
+		// (#815). The refused connection is closed first: nothing of it stays
+		// open while the person is asked.
+		for (;;) {
+			try {
+				return await this.dial(
+					connectConfig,
+					{ hostname, port, username },
+					{ storedFingerprint, sessionTrustedFingerprint },
+					signal,
+					jump === undefined || jumpAuth === undefined ? undefined : { jump, auth: jumpAuth },
+				);
+			} catch (err) {
+				if (!(err instanceof PasswordRefusedError)) throw err;
+				this.cleanup();
+				await err.askAgain();
+				if (signal?.aborted) {
+					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+				}
+			}
+		}
+	}
+
+	/**
+	 * One connection to the host, through its jump when it has one, up to the
+	 * agent's HELLO: what `start` does, once its credentials are at hand.
+	 */
+	private async dial(
+		connectConfig: ConnectConfig,
+		target: { hostname: string; port: number; username: string },
+		trust: {
+			storedFingerprint: string | null | undefined;
+			sessionTrustedFingerprint: string | null | undefined;
+		},
+		signal: AbortSignal | undefined,
+		via: { jump: ResolvedJump; auth: ConnectConfig } | undefined,
+	): Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }> {
+		const { hostname, port, username } = target;
+		const { storedFingerprint, sessionTrustedFingerprint } = trust;
+		const client = new Client();
+		this.client = client;
+
 		// TOFU host key verification.
 		// The verifier populates this object synchronously before the connect attempt resolves.
 		// Also synced to this.lastKeyVerification so callers can inspect it after rejection.
@@ -487,8 +545,8 @@ export class SshAgent extends AgentConnection {
 
 		// The route first, when there is one: the target's connection runs inside a
 		// channel on the bastion, so there is nothing to connect until it is open.
-		if (jump !== undefined) {
-			const jumpAuth = await buildJumpAuth(jump, this.promptAuth);
+		if (via !== undefined) {
+			const { jump, auth: jumpAuth } = via;
 			const route = await openJumpRoute({
 				jump: jump.jump,
 				knownHostsNames: jump.knownHostsNames,
@@ -617,10 +675,18 @@ export class SshAgent extends AgentConnection {
 						);
 						return;
 					}
-					rejectOnce(err instanceof Error ? err : new Error(String(err)));
+					// The server refused the password: `start` asks for it again, and
+					// dials again (#815).
+					rejectOnce(
+						passwordRefusal(connectConfig, err) ??
+							(err instanceof Error ? err : new Error(String(err))),
+					);
 				});
 
 				client.on("close", () => {
+					// A connection whose password was refused, closed after the next
+					// one began: its end is not that one's (#815).
+					if (this.client !== null && this.client !== client) return;
 					this.client = null;
 					this.channelOpen = false;
 					// The bastion carried this connection and nothing else: it ends

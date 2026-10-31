@@ -1,14 +1,17 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import {
 	discoverUnixShells,
 	discoverWindowsShells,
+	type EnvLookup,
 	findWindowsTerminalSettingsPath,
+	firstReportedWindowsShell,
 	importWindowsTerminalProfiles,
 	parseCommandLine,
 	parseWindowsTerminalSettings,
 	probeWslDistributions,
+	reportedWindowsShell,
 	seedShellProfiles,
 } from "./shell-discovery.js";
 import type { DatabaseManager } from "./storage/db.js";
@@ -495,6 +498,158 @@ describe("discoverWindowsShells", () => {
 		for (const s of shells) {
 			expect(s.supportedOs).toBe("windows");
 		}
+	});
+});
+
+// ─── A Store shell, by the path its updates keep (#818) ──────────────────────
+//
+// A Store app's package directory is named for its version, and its next update
+// replaces it: a profile seeded with that path then fails to start (#816). Its
+// app execution alias stays. The agent decides the same way (shell.rs).
+
+/** Where a Store PowerShell's package lives, until its next update. */
+const STORE_PACKAGE =
+	"C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe";
+const PACKAGE_PWSH = `${STORE_PACKAGE}\\pwsh.exe`;
+const LOCAL_APP_DATA = "C:\\Users\\test\\AppData\\Local";
+/** The Store PowerShell's app execution alias. */
+const STORE_PWSH = `${LOCAL_APP_DATA}\\Microsoft\\WindowsApps\\pwsh.exe`;
+const PROGRAM_FILES_PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+function vars(pairs: Record<string, string>): EnvLookup {
+	return (name) => pairs[name];
+}
+
+const WINDOWS_ENV = vars({ ProgramFiles: "C:\\Program Files", LOCALAPPDATA: LOCAL_APP_DATA });
+
+/** A disk holding these files, and nothing else. */
+function onDisk(...files: string[]): (path: string) => boolean {
+	return (path) => files.includes(path);
+}
+
+describe("reportedWindowsShell (#818)", () => {
+	it("reports a Store package's shell by its alias", () => {
+		expect(reportedWindowsShell(PACKAGE_PWSH, WINDOWS_ENV, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+	});
+
+	it("reports none when the alias does not exist, or there is no LOCALAPPDATA to find it in", () => {
+		expect(reportedWindowsShell(PACKAGE_PWSH, WINDOWS_ENV, onDisk())).toBeNull();
+		for (const env of [
+			vars({ ProgramFiles: "C:\\Program Files" }),
+			vars({ ProgramFiles: "C:\\Program Files", LOCALAPPDATA: "" }),
+		]) {
+			expect(reportedWindowsShell(PACKAGE_PWSH, env, () => true)).toBeNull();
+		}
+	});
+
+	it("reports any other path as found", () => {
+		for (const found of [
+			PROGRAM_FILES_PWSH,
+			POWERSHELL,
+			STORE_PWSH,
+			"C:\\Program Files\\WindowsAppsOld\\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe\\pwsh.exe",
+		]) {
+			expect(reportedWindowsShell(found, WINDOWS_ENV, () => false)).toBe(found);
+		}
+	});
+
+	it("tells a Store package case aside", () => {
+		expect(reportedWindowsShell(PACKAGE_PWSH.toLowerCase(), WINDOWS_ENV, onDisk(STORE_PWSH))).toBe(
+			STORE_PWSH,
+		);
+		const shouting = vars({ ProgramFiles: "C:\\PROGRAM FILES\\", LOCALAPPDATA: LOCAL_APP_DATA });
+		expect(reportedWindowsShell(PACKAGE_PWSH, shouting, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+	});
+
+	it("finds the Store packages under ProgramFiles, C:\\Program Files when it is unset or empty", () => {
+		for (const env of [
+			vars({ LOCALAPPDATA: LOCAL_APP_DATA }),
+			vars({ LOCALAPPDATA: LOCAL_APP_DATA, ProgramFiles: "" }),
+		]) {
+			expect(reportedWindowsShell(PACKAGE_PWSH, env, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+		}
+		const elsewhere =
+			"D:\\Apps\\WindowsApps\\Microsoft.PowerShell_7.6.8.0_x64__8wekyb3d8bbwe\\pwsh.exe";
+		const env = vars({ LOCALAPPDATA: LOCAL_APP_DATA, ProgramFiles: "D:\\Apps" });
+		expect(reportedWindowsShell(elsewhere, env, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+	});
+});
+
+describe("firstReportedWindowsShell (#818)", () => {
+	it("skips a Store package's path without an alias for the next where.exe line", () => {
+		expect(
+			firstReportedWindowsShell(
+				[`${PACKAGE_PWSH}\r`, `${PROGRAM_FILES_PWSH}\r`, ""],
+				WINDOWS_ENV,
+				onDisk(),
+			),
+		).toBe(PROGRAM_FILES_PWSH);
+		expect(firstReportedWindowsShell([`${PACKAGE_PWSH}\r`, ""], WINDOWS_ENV, onDisk())).toBeNull();
+	});
+
+	it("names the alias once when where.exe also finds it, whichever comes first", () => {
+		for (const lines of [
+			[PACKAGE_PWSH, STORE_PWSH],
+			[STORE_PWSH, PACKAGE_PWSH],
+		]) {
+			expect(firstReportedWindowsShell(lines, WINDOWS_ENV, onDisk(STORE_PWSH))).toBe(STORE_PWSH);
+		}
+	});
+});
+
+describe("discoverWindowsShells with a Store PowerShell (#818)", () => {
+	let platform: MockInstance;
+
+	beforeEach(() => {
+		// resolveFromPath asks where.exe on Windows only
+		platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		vi.stubEnv("SystemRoot", "C:\\Windows");
+		vi.stubEnv("ProgramFiles", "C:\\Program Files");
+		vi.stubEnv("LOCALAPPDATA", LOCAL_APP_DATA);
+		vi.stubEnv("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+	});
+
+	afterEach(() => {
+		platform.mockRestore();
+		vi.unstubAllEnvs();
+		vi.mocked(existsSync).mockRestore();
+	});
+
+	/** where.exe prints `lines` for pwsh.exe, and finds nothing else. */
+	async function whereFindsPwsh(...lines: string[]): Promise<void> {
+		await answerProbes((file, args) =>
+			file.endsWith("where.exe") && args[0] === "pwsh.exe"
+				? `${lines.join("\r\n")}\r\n`
+				: new Error("not found"),
+		);
+	}
+
+	function powerShells(shells: { label: string; shell: string }[]): string[] {
+		return shells.filter((shell) => shell.label === "PowerShell").map((shell) => shell.shell);
+	}
+
+	it("seeds a Store PowerShell by its alias, once, not by its package directory", async () => {
+		mockExistsSync.mockImplementation((p) => p === STORE_PWSH);
+		await whereFindsPwsh(PACKAGE_PWSH, STORE_PWSH);
+
+		expect(powerShells(await discoverWindowsShells())).toEqual([STORE_PWSH]);
+	});
+
+	it("takes the next where.exe line when the package has no alias", async () => {
+		mockExistsSync.mockReturnValue(false);
+		await whereFindsPwsh(PACKAGE_PWSH, PROGRAM_FILES_PWSH);
+
+		expect(powerShells(await discoverWindowsShells())).toEqual([PROGRAM_FILES_PWSH]);
+	});
+
+	it("seeds no PowerShell 7 that only its package directory holds", async () => {
+		mockExistsSync.mockReturnValue(false);
+		await whereFindsPwsh(PACKAGE_PWSH);
+
+		const shells = await discoverWindowsShells();
+		expect(powerShells(shells)).toEqual([]);
+		expect(shells.map((shell) => shell.shell)).not.toContain(PACKAGE_PWSH);
 	});
 });
 

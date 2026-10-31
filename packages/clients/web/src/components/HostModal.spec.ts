@@ -347,6 +347,20 @@ describe("HostModal for an SSH host", () => {
 	});
 });
 
+describe("HostModal on a host served by an agent from before an update (#805)", () => {
+	it("says the hub replaces it once none of its terminals runs there, and what Replace now ends", async () => {
+		mountModal(SSH);
+		useHostsStore().rememberOutdatedAgent(SSH.id, { running: "0.15.0", expected: "0.15.1" });
+		await nextTick();
+
+		const text = el(".outdated-agent__text")?.textContent?.replace(/\s+/g, " ").trim();
+		expect(text).toBe(
+			"This host is served by agent 0.15.0; this Lasterm carries 0.15.1. It is replaced as soon as none of this Lasterm's terminals runs on it, unless other hubs hold terminals there. Replacing it now ends every terminal it is holding.",
+		);
+		expect(el(".outdated-agent__btn")?.textContent).toBe("Replace it now, ending its terminals");
+	});
+});
+
 describe("HostModal remote daemon choice", () => {
 	function selectWithOption(text: string): HTMLSelectElement {
 		const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(

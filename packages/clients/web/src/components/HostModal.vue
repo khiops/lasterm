@@ -320,9 +320,10 @@
 								<div v-if="outdatedAgent" class="outdated-agent">
 									<p class="outdated-agent__text">
 										This host is served by agent {{ outdatedAgent.running }}; this
-										Lasterm carries {{ outdatedAgent.expected }}. It is left alone
-										on purpose: replacing it ends every terminal it is holding, and
-										it goes by itself once it holds none.
+										Lasterm carries {{ outdatedAgent.expected }}. It is replaced as
+										soon as none of this Lasterm's terminals runs on it, unless other
+										hubs hold terminals there. Replacing it now ends every terminal it
+										is holding.
 									</p>
 									<button
 										type="button"
@@ -689,9 +690,10 @@ const socketForwardingRefused = computed(
 
 /**
  * Stop the agent serving this host, so the next connection starts the current
- * one. Everything it is holding ends with it, which is why this is only ever a
- * button someone presses — and why ending terminals other hubs opened there
- * takes a second yes.
+ * one. Everything it is holding ends with it, which is why, while it holds
+ * terminals, this is only ever a button someone presses — and why ending
+ * terminals other hubs opened there takes a second yes. One that holds none of
+ * this hub's the hub replaces by itself (#805).
  */
 async function onReplaceAgent(): Promise<void> {
 	const host = props.editHost;

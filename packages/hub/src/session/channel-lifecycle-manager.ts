@@ -89,10 +89,22 @@ export class ChannelLifecycleManager {
 	/** Optional callback to reconnect an SSH agent when restartChannel finds no connected agent. */
 	onReconnectAgent?: (hostId: string) => Promise<boolean>;
 
+	/**
+	 * Told when this hub may have just stopped holding anything on a host: a
+	 * terminal of it ended, or its agent was reached and judged. An agent older
+	 * than the hub is replaced then (#805).
+	 */
+	onAgentMayBeIdle?: (hostId: string) => void;
+
 	constructor(
 		private readonly ctx: SharedSessionContext,
 		private readonly broadcaster: StateBroadcaster,
 	) {}
+
+	/** See {@link onAgentMayBeIdle}. */
+	agentMayBeIdle(hostId: string): void {
+		this.onAgentMayBeIdle?.(hostId);
+	}
 
 	/**
 	 * The environment a terminal is started again with.
@@ -406,14 +418,17 @@ export class ChannelLifecycleManager {
 		this.ctx.scheduler.untrackChannel(channelId);
 		this.ctx.chunker.untrackChannel(channelId);
 		this.ctx.channels.delete(channelId);
+		this.agentMayBeIdle(ch.hostId);
 
 		return true;
 	}
 
 	retireChannel(channelId: string, sessionId: string): void {
+		const hostId = this.ctx.channels.get(channelId)?.hostId;
 		this.clearElevationForChannel(channelId);
 		this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
 		this.forgetChannel(channelId);
+		if (hostId !== undefined) this.agentMayBeIdle(hostId);
 	}
 
 	/**
@@ -1253,6 +1268,9 @@ export class ChannelLifecycleManager {
 			if (agent.otherOwnerChannels !== undefined && this.ctx.agents.get(hostId) === agent) {
 				this.broadcaster.announceSessionState(hostId);
 			}
+			// Judged: a daemon older than this hub holding nothing of this hub's
+			// is replaced now, before anything starts on it (#805).
+			this.agentMayBeIdle(hostId);
 		} catch (stateErr) {
 			// Reachable, and it will not say what it holds. Most likely it wants a
 			// token: a remote running its own hub has an auth.json of its own, and

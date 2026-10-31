@@ -304,6 +304,20 @@ describe("HostRail tooltip (#731)", () => {
 	});
 });
 
+describe("HostRail mark of an agent from before an update (#805)", () => {
+	it("says the agent is replaced once none of this hub's terminals runs on it", async () => {
+		const { hostsStore } = mountRail();
+		hostsStore.rememberOutdatedAgent("local", { running: "0.15.0", expected: "0.15.1" });
+		await nextTick();
+
+		const dot = badge("local").querySelector(".status-dot--older-agent");
+		expect(dot?.getAttribute("title")).toBe(
+			"Served by agent 0.15.0; this hub carries 0.15.1. It is replaced as soon as none of this hub's terminals runs on it, unless other hubs hold terminals there.",
+		);
+		expect(badge("a").querySelector(".status-dot--older-agent")).toBeNull();
+	});
+});
+
 describe("HostRail drag and drop", () => {
 	it("in a grid, marks the drop with a vertical bar before the target", async () => {
 		mountRail({ columns: 3 });

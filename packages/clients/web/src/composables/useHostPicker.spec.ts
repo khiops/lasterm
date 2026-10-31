@@ -341,6 +341,26 @@ describe("useHostPicker", () => {
 		expect(spawn).toHaveBeenCalledTimes(2);
 	});
 
+	// The person cancelled the passphrase the host asked for: nothing failed,
+	// and the row offers to connect again with no reason under it (#812).
+	it("says no reason when the person cancelled the prompt", async () => {
+		const channelsStore = useChannelsStore();
+		vi.spyOn(channelsStore, "spawnChannel").mockRejectedValue(
+			Object.assign(new Error("AUTH_CANCELLED: Authentication cancelled by user"), {
+				code: ErrorCode.AUTH_CANCELLED,
+			}),
+		);
+		const { picker, press, search, hostRow } = mountPicker();
+		await search("nas");
+		press("Enter");
+		await flush();
+
+		expect(picker.opening.value).toBeNull();
+		expect(picker.waitingFor.value).toBeNull();
+		expect(hostRow("nas").note).toBeNull();
+		expect(hostRow("nas").action.text).toBe("Connect");
+	});
+
 	it("offers to add the host that nothing matched", async () => {
 		const { picker, asked, press, search, ids } = mountPicker();
 		await search("stag");

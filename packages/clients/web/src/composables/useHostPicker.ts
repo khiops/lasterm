@@ -160,6 +160,12 @@ export function useHostPicker(sources: HostPickerSources, actions: HostPickerAct
 		} catch (err) {
 			if (mine !== attempt) return;
 			const failure = restartFailureOf(err, hostId);
+			// The password or passphrase asked for was cancelled: nothing failed,
+			// and the row stays as it was (#812).
+			if (failure === null) {
+				opening.value = null;
+				return;
+			}
 			// Away: wait for it; back already: open now (onHostBack); anything else is the reason to show.
 			hostWait.restartFailed(failure, false);
 			if (opening.value === null) return;

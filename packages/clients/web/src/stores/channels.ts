@@ -135,10 +135,15 @@ export interface RestartFailure {
 	hostAway?: { hostId: string };
 }
 
-/** A spawn's rejection, as the failure the pane shows or waits out. */
-export function restartFailureOf(err: unknown, hostIdHint: string): RestartFailure {
-	const reason = restartFailureReason(err);
+/**
+ * A spawn's rejection, as the failure the pane shows or waits out. Null when
+ * nothing failed: the person cancelled the password or passphrase the host
+ * asked for (`AUTH_CANCELLED`), and the pane stays as it was (#812).
+ */
+export function restartFailureOf(err: unknown, hostIdHint: string): RestartFailure | null {
 	const refusal = err as { code?: unknown; hostId?: unknown } | null;
+	if (refusal?.code === ErrorCode.AUTH_CANCELLED) return null;
+	const reason = restartFailureReason(err);
 	if (refusal?.code !== ErrorCode.HOST_UNREACHABLE) return { reason };
 	return {
 		reason,
@@ -1471,6 +1476,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				return true;
 			} catch (err) {
+				// A cancelled prompt leaves none: nothing failed (#812).
 				setRestartFailure(channelId, restartFailureOf(err, hostId));
 				return false;
 			}

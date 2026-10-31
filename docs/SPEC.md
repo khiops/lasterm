@@ -689,7 +689,10 @@ Each host record specifies exactly one auth method via `ssh_auth` field (`'agent
 - `key`: read private key from `ssh_key_path`. If passphrase-protected, prompt user via UI dialog. A
   passphrase that does not decrypt the key is asked for again, saying so, until one does or the
   user cancels; a cancel is not reported as a failure (`AUTH_CANCELLED`, #812).
-- `password`: prompt user via UI dialog at connect time. **Never stored.**
+- `password`: prompt user via UI dialog at connect time. **Never stored.** A password the server
+  refuses is asked for again, saying so, and the host dialled again, until the server takes one or
+  the user cancels (#815). A server that takes no password, or a failure of any other kind, is not
+  asked for another.
 
 ### 4.5b Reaching a host through another (ProxyJump)
 

@@ -3822,12 +3822,13 @@ describe("handleTestConnect", () => {
 		});
 		await promise;
 
-		// Should have received TEST_CONNECT_FAIL after cancellation
+		// Should have received TEST_CONNECT_FAIL after cancellation, said as a
+		// cancel: the dialog shows no failed test for it (#815).
 		const failMsg = received.find((m) => m.type === "TEST_CONNECT_FAIL") as
 			| (ProtocolMessage & { message?: string })
 			| undefined;
 		expect(failMsg).toBeDefined();
-		expect(failMsg?.type).toBe("TEST_CONNECT_FAIL");
+		expect(failMsg).toMatchObject({ type: "TEST_CONNECT_FAIL", code: ErrorCode.AUTH_CANCELLED });
 	});
 });
 

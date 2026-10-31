@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 import { join } from "node:path";
 import type { HelloMessage, Host } from "@lasterm/shared";
 import { ErrorCode, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
@@ -85,10 +86,17 @@ function makeHelloFrame(): Buffer {
  */
 function createMockSshServer(
 	onExec: (stream: NodeJS.ReadWriteStream, command: string) => void,
-	opts: { rejectAuth?: boolean } = {},
+	opts: {
+		rejectAuth?: boolean;
+		/** Takes this password and nothing else, as OpenSSH does. */
+		password?: string;
+		/** Counts the connections it is dialled, and the passwords it refuses. */
+		seen?: { connections: number; refused: number };
+	} = {},
 ): Promise<{ server: SshServer; port: number }> {
 	return new Promise((resolve) => {
 		const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+			if (opts.seen) opts.seen.connections++;
 			// Suppress connection-level errors (e.g. KEY_EXCHANGE_FAILED when the
 			// SSH client abruptly disconnects after rejecting the host key).
 			client.on("error", () => {});
@@ -96,6 +104,15 @@ function createMockSshServer(
 			client.on("authentication", (ctx) => {
 				if (opts.rejectAuth) {
 					ctx.reject(["publickey"]);
+					return;
+				}
+				if (opts.password !== undefined) {
+					if (ctx.method === "password" && ctx.password === opts.password) {
+						ctx.accept();
+						return;
+					}
+					if (ctx.method === "password" && opts.seen) opts.seen.refused++;
+					ctx.reject(["password"]);
 					return;
 				}
 				ctx.accept();
@@ -1550,6 +1567,175 @@ describe("SshAgent — auth prompting", () => {
 			await expect(started).rejects.toThrow("Authentication cancelled by user");
 			await expect(started).rejects.toBeInstanceOf(AuthCancelledError);
 			expect(promptAuth).toHaveBeenCalledOnce();
+		},
+		TEST_TIMEOUT,
+	);
+
+	// As OpenSSH does: a password the server refused is asked for again, saying
+	// so, and the host dialled again, under the key already checked (#815).
+	it(
+		"password auth: a password the server refused is asked for again, then connects",
+		async () => {
+			const seen = { connections: 0, refused: 0 };
+			const { server, port } = await createMockSshServer(
+				(stream) => {
+					stream.write(makeHelloFrame());
+				},
+				{ password: "right-password", seen },
+			);
+			servers.push(server);
+
+			const fp = await getServerFingerprint(port);
+			seen.connections = 0;
+			const promptAuth = vi
+				.fn<AuthPromptFn>()
+				.mockResolvedValueOnce("wrong-password")
+				.mockResolvedValueOnce("right-password");
+			const host = makeHost(port, { sshAuth: "password", sshUser: "tester" });
+			const agent = new SshAgent(host, promptAuth);
+			agents.push(agent);
+
+			const { hello } = await agent.start(fp);
+			expect(hello.type).toBe("HELLO");
+			expect(agent.connected).toBe(true);
+			expect(promptAuth.mock.calls).toEqual([
+				[host.id, "password", "Enter password for tester@127.0.0.1"],
+				[
+					host.id,
+					"password",
+					"Wrong password for tester@127.0.0.1. Try again.",
+					{ previousRejected: true },
+				],
+			]);
+			expect(seen).toEqual({ connections: 2, refused: 1 });
+		},
+		TEST_TIMEOUT,
+	);
+
+	it(
+		"password auth: a refused password, then a cancel, throws the cancel",
+		async () => {
+			const seen = { connections: 0, refused: 0 };
+			const { server, port } = await createMockSshServer(() => {}, {
+				password: "right-password",
+				seen,
+			});
+			servers.push(server);
+
+			const fp = await getServerFingerprint(port);
+			seen.connections = 0;
+			const promptAuth = vi
+				.fn<AuthPromptFn>()
+				.mockResolvedValueOnce("wrong-password")
+				.mockResolvedValueOnce(null);
+			const agent = new SshAgent(makeHost(port, { sshAuth: "password" }), promptAuth);
+			agents.push(agent);
+
+			const started = agent.start(fp);
+			await expect(started).rejects.toBeInstanceOf(AuthCancelledError);
+			await expect(started).rejects.toMatchObject({ code: ErrorCode.AUTH_CANCELLED });
+			expect(promptAuth).toHaveBeenCalledTimes(2);
+			// Nothing was dialled for the cancel.
+			expect(seen).toEqual({ connections: 1, refused: 1 });
+		},
+		TEST_TIMEOUT,
+	);
+
+	// Only a password sent and refused is asked for again: a server that takes
+	// none, or one that cannot be reached, fails as before, asked once.
+	it.each([
+		["a server that takes no password", "takes-none"],
+		["a host that cannot be reached", "unreachable"],
+	] as const)(
+		"password auth: %s is not asked for another password",
+		async (_name, kind) => {
+			const { server, port } = await createMockSshServer(() => {}, { rejectAuth: true });
+			servers.push(server);
+			const fp = await getServerFingerprint(port);
+			if (kind === "unreachable") {
+				// Nothing listens on the port any more: the dial is refused.
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+				servers = servers.filter((candidate) => candidate !== server);
+			}
+
+			const promptAuth = vi.fn<AuthPromptFn>().mockResolvedValue("some-password");
+			const agent = new SshAgent(makeHost(port, { sshAuth: "password" }), promptAuth);
+			agents.push(agent);
+
+			await expect(agent.start(fp)).rejects.toThrow(
+				kind === "takes-none" ? "All configured authentication methods failed" : /ECONNREFUSED/,
+			);
+			expect(promptAuth).toHaveBeenCalledOnce();
+		},
+		TEST_TIMEOUT,
+	);
+
+	// A jump's refused password is asked for again under the jump's id, and the
+	// route opened again; the target's credentials are not asked for again.
+	it(
+		"password auth: a jump's refused password is asked for again, for the jump",
+		async () => {
+			const { server: target, port: targetPort } = await createMockSshServer((stream) => {
+				stream.write(makeHelloFrame());
+			});
+			servers.push(target);
+			const fp = await getServerFingerprint(targetPort);
+
+			const seen = { connections: 0, refused: 0 };
+			const bastion = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
+				seen.connections++;
+				conn.on("error", () => {});
+				conn.on("authentication", (ctx) => {
+					if (ctx.method === "password" && ctx.password === "bastion-password") {
+						ctx.accept();
+						return;
+					}
+					if (ctx.method === "password") seen.refused++;
+					ctx.reject(["password"]);
+				});
+				conn.on("ready", () => {
+					conn.on("tcpip", (accept) => {
+						const stream = accept();
+						const onward = netConnect(targetPort, "127.0.0.1");
+						onward.on("error", () => stream.destroy());
+						stream.on("error", () => onward.destroy());
+						stream.pipe(onward).pipe(stream);
+					});
+				});
+			});
+			bastion.on("error", () => {});
+			await new Promise<void>((resolve) => bastion.listen(0, "127.0.0.1", resolve));
+			servers.push(bastion);
+			const bastionPort = (bastion.address() as { port: number }).port;
+
+			const promptAuth = vi
+				.fn<AuthPromptFn>()
+				.mockResolvedValueOnce("wrong-password")
+				.mockResolvedValueOnce("bastion-password");
+			const agent = new SshAgent(makeHost(targetPort), promptAuth);
+			agents.push(agent);
+
+			const { hello } = await agent.start(fp, null, undefined, {
+				jump: { host: "127.0.0.1", port: bastionPort, username: "ops" },
+				knownHostsNames: ["127.0.0.1"],
+				auth: { method: "password" },
+				promptHostId: "host-bastion",
+				pinnedFingerprint: fp,
+				trustKnownHosts: false,
+				pinTo: { kind: "host", hostId: "host-bastion", expectedRoute: null },
+			});
+
+			expect(hello.type).toBe("HELLO");
+			expect(promptAuth.mock.calls).toEqual([
+				["host-bastion", "password", "Enter password for ops@127.0.0.1"],
+				[
+					"host-bastion",
+					"password",
+					"Wrong password for ops@127.0.0.1. Try again.",
+					{ previousRejected: true },
+				],
+			]);
+			expect(seen).toEqual({ connections: 2, refused: 1 });
 		},
 		TEST_TIMEOUT,
 	);

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.4](https://github.com/khiops/lasterm/compare/v0.15.3...v0.15.4) (2026-10-31)
+
+
+### Documentation
+
+* add the Microsoft Store competitive analysis ([#826](https://github.com/khiops/lasterm/issues/826)) ([2484409](https://github.com/khiops/lasterm/commit/2484409c2d40fd18203858e38a871eea20f26f2f)), closes [#721](https://github.com/khiops/lasterm/issues/721)
+* remove the competitive analysis from this repository ([#828](https://github.com/khiops/lasterm/issues/828)) ([e89a099](https://github.com/khiops/lasterm/commit/e89a099c0f2b158256df38f4bace5eb68144429d))
+
 ## [0.15.3](https://github.com/khiops/lasterm/compare/v0.15.2...v0.15.3) (2026-10-31)
 
 

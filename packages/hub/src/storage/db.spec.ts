@@ -3,7 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { seedShellProfiles } from "../session/shell-profile-seed.js";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -58,12 +59,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 23 after migration", () => {
+	it("meta.db: schema_version is 24 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(23);
+		expect(row.v).toBe(24);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -102,7 +103,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 23)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 24)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -117,8 +118,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(23);
-		expect(v2).toBe(23);
+		expect(v1).toBe(24);
+		expect(v2).toBe(24);
 	});
 
 	it("close() does not throw", () => {
@@ -255,10 +256,15 @@ describe("meta.db and its baseline", () => {
 			(column) => column.name,
 		);
 
-	it("comes out new at version 23, with the final schema", () => {
+	it("comes out new at version 24, with the final schema", () => {
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
 			"cache_index",
@@ -308,6 +314,13 @@ describe("meta.db and its baseline", () => {
 			"ssh_remote_daemon",
 			"discovered_default_shell",
 		]);
+		expect(columns(dbs.meta, "host_launch_profiles")).toEqual([
+			"host_id",
+			"profile_id",
+			"override_type",
+			"sort_order",
+			"set_by_user",
+		]);
 		expect(columns(dbs.meta, "channels")).toContain("end_reason");
 		expect(columns(dbs.meta, "auth_tokens")).toContain("swept_at");
 		expect(columns(dbs.meta, "pairing_codes")).toContain("code_hash");
@@ -327,14 +340,27 @@ describe("meta.db and its baseline", () => {
 				ssh_fingerprint TEXT, ssh_proxy_fingerprint TEXT
 			);
 			INSERT INTO hosts (id, label) VALUES ('H1', 'here');
+			CREATE TABLE host_launch_profiles (
+				host_id TEXT NOT NULL, profile_id TEXT NOT NULL, override_type TEXT NOT NULL
+			);
 			CREATE TABLE workspaces (id TEXT PRIMARY KEY);
 		`);
 		before.close();
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
-		expect(tables(dbs.meta)).toEqual(["hosts", "schema_version", "workspaces"]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
+		expect(tables(dbs.meta)).toEqual([
+			"host_launch_profiles",
+			"hosts",
+			"schema_version",
+			"workspaces",
+		]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
 			"label",
@@ -441,7 +467,12 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			return targetRoute(host, (other) => sshAddress(dal.getHost(other)));
 		};
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
 		expect(dal.getHostFingerprint("B", routeOf("B"))).toBe(fingerprintOf(bastion));
@@ -465,10 +496,15 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 		]);
 	});
 
-	it("comes out new at version 23", () => {
+	it("comes out new at version 24", () => {
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
 
@@ -480,7 +516,12 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 
 		// The runner does not run it twice...
 		dbs = openDatabases(dir);
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
 		// ...and its statements find nothing left to change if they do run.
@@ -557,7 +598,12 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
 		const row = (
 			id: string,
 			chosen: string | null,
@@ -593,7 +639,113 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
 		expect(shells(dbs.meta)).toEqual(chosen);
+	});
+});
+
+// ─── Migration 024: whose launch profile override it is (#800) ───────────────
+//
+// A hub before #800 marked the profile of its agent's default shell as the
+// host's default at every connection, over any default the user had set. Every
+// default mark a database it left holds is the agent's.
+
+describe("meta.db migration 024: a launch profile override says whether the user set it", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-024-");
+	});
+
+	afterEach(async () => {
+		dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+	const versions = (db: Database.Database) =>
+		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
+	const overrides = (db: Database.Database) =>
+		db.prepare("SELECT * FROM host_launch_profiles ORDER BY profile_id").all();
+
+	const at = "2026-10-01T00:00:00.000Z";
+
+	/** A database as #799 left it: version 23, with the agent's default marked on the host. */
+	function databaseAt23(): void {
+		const before = new Database(join(dir, "meta.db"));
+		for (const file of [
+			"021-baseline.sql",
+			"022-unpadded-ssh-pins.sql",
+			"023-discovered-default-shell.sql",
+		]) {
+			before.exec(migration(file));
+		}
+		before
+			.prepare(
+				`INSERT INTO hosts (id, type, label, ssh_host, created_at, updated_at)
+				VALUES ('H', 'ssh', 'pi', 'pi.test', '${at}', '${at}')`,
+			)
+			.run();
+		const profile = before.prepare(
+			`INSERT INTO launch_profiles (id, name, shell, supported_os, sort_order, created_at, updated_at)
+			VALUES (?, ?, ?, 'linux', ?, '${at}', '${at}')`,
+		);
+		profile.run("P1", "bash", "/bin/bash", 0);
+		profile.run("P2", "fish", "/usr/bin/fish", 1);
+		const override = before.prepare(
+			"INSERT INTO host_launch_profiles (host_id, profile_id, override_type, sort_order) VALUES ('H', ?, ?, ?)",
+		);
+		override.run("P1", "default", null);
+		override.run("P2", "pin", 1);
+		expect(versions(before)).toEqual([{ version: 21 }, { version: 22 }, { version: 23 }]);
+		before.close();
+	}
+
+	it("reads every override already there as not the user's, and changes nothing else", () => {
+		databaseAt23();
+
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+		]);
+		expect(overrides(dbs.meta)).toEqual([
+			{
+				host_id: "H",
+				profile_id: "P1",
+				override_type: "default",
+				sort_order: null,
+				set_by_user: 0,
+			},
+			{ host_id: "H", profile_id: "P2", override_type: "pin", sort_order: 1, set_by_user: 0 },
+		]);
+		expect(new MetaDAL(dbs.meta).getHostDefaultOverride("H")).toMatchObject({
+			profileId: "P1",
+			setByUser: false,
+		});
+	});
+
+	it("leaves the agent's mark free to follow the agent", async () => {
+		databaseAt23();
+		dbs = openDatabases(dir);
+		const dal = new MetaDAL(dbs.meta);
+		// The seeding reports what it seeded on stderr
+		const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await seedShellProfiles("H", ["/bin/bash", "/usr/bin/fish"], "/usr/bin/fish", "linux", dal);
+		quiet.mockRestore();
+
+		expect(dal.getHostDefaultOverride("H")).toMatchObject({ profileId: "P2", setByUser: false });
 	});
 });

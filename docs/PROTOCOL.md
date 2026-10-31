@@ -135,9 +135,11 @@ First message, sent immediately on start.
 ```
 
 The hub records them on the host as `discovered_shells` and `discovered_default_shell` (§ 6), and
-seeds a launch profile for each shell, marking the default one's as the host's default profile.
-The agent's `default_shell` never goes to the host's `default_shell`, which is the user's choice
-(#794).
+seeds a launch profile for each shell, marking the default one's as the host's default profile
+where the host has none, or has only the mark an earlier HELLO left, so that mark follows the
+agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:profileId`) is never
+replaced, and a profile the user hid is never marked (#800). The agent's `default_shell` never
+goes to the host's `default_shell`, which is the user's choice (#794).
 
 **Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all five, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
@@ -1429,7 +1431,7 @@ every client `HOSTS_CHANGED`; § 4.18 lists which.
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`. The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
 | GET | `/api/hosts/:id/profiles` | ● | `LaunchProfile[]` (query: `?os=linux\|darwin\|windows`) |
-| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204 |
+| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800) |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204 |
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,

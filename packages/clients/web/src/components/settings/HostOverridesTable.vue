@@ -48,7 +48,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import type { HostLaunchProfileOverride } from "@lasterm/shared";
+import { toCamelCase } from "@lasterm/shared";
 import { hubBaseUrl } from "../../utils/hub-url.js";
 import { hubFetch } from "../../utils/hub-fetch.js";
 import { useHostsStore } from "../../stores/hosts.js";
@@ -94,7 +94,7 @@ async function fetchOverrides(): Promise<void> {
 					headers: { Authorization: `Bearer ${authStore.token!}` },
 				});
 				if (!res.ok) return;
-				const items = (await res.json()) as Array<{ id: string; overrideType?: string }>;
+				const items = toCamelCase(await res.json()) as Array<{ id: string; overrideType?: string }>;
 				const match = items.find((p) => p.id === props.profileId);
 				if (match?.overrideType && ["pin", "hide", "default"].includes(match.overrideType)) {
 					newMap.set(host.id, match.overrideType as "pin" | "hide" | "default");
@@ -139,7 +139,8 @@ async function handleOverrideChange(hostId: string, value: string): Promise<void
 						"Content-Type": "application/json",
 						Authorization: `Bearer ${authStore.token}`,
 					},
-					body: JSON.stringify({ overrideType }),
+					// snake_case, as the hub reads it: it refused `overrideType` (#800)
+					body: JSON.stringify({ override_type: overrideType }),
 				},
 			);
 			if (res.ok) {

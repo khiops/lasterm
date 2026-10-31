@@ -1,2 +1,2 @@
-en: The Default Shell you choose for a host now stays, and new terminals on that host start it. Editing a host also shows the shell detected there.
-fr: Le shell par défaut choisi pour un hôte est désormais conservé, et les nouveaux terminaux de cet hôte le lancent. La modification d'un hôte montre aussi le shell détecté sur celui-ci.
+en: The Default Shell you choose for a host now stays, and new terminals on that host start it. Making a profile a host's default in the profile settings now works, and is kept too. Editing a host also shows the shell detected there.
+fr: Le shell par défaut choisi pour un hôte est désormais conservé, et les nouveaux terminaux de cet hôte le lancent. Faire d'un profil celui par défaut d'un hôte, dans les réglages des profils, fonctionne désormais et est conservé lui aussi. La modification d'un hôte montre également le shell détecté sur celui-ci.

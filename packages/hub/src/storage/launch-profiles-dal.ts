@@ -45,6 +45,7 @@ interface HostLaunchProfileRow {
 	profile_id: string;
 	override_type: string;
 	sort_order: number | null;
+	set_by_user: number;
 }
 
 // ─── Row mapper ──────────────────────────────────────────────────────────────
@@ -91,6 +92,17 @@ function rowToLaunchProfile(row: LaunchProfileRow): LaunchProfile {
 		}
 	}
 	return profile;
+}
+
+function rowToHostOverride(row: HostLaunchProfileRow): HostLaunchProfileOverride {
+	const result: HostLaunchProfileOverride = {
+		hostId: row.host_id,
+		profileId: row.profile_id,
+		overrideType: row.override_type as HostLaunchProfileOverride["overrideType"],
+		setByUser: row.set_by_user !== 0,
+	};
+	if (row.sort_order != null) result.sortOrder = row.sort_order;
+	return result;
 }
 
 // ─── LaunchProfilesDAL ───────────────────────────────────────────────────────
@@ -276,11 +288,19 @@ export class LaunchProfilesDAL {
 		});
 	}
 
+	/**
+	 * Set a host's override of a profile. A `default` replaces the host's
+	 * default, whoever set it: a caller that must not replace the user's checks
+	 * getHostDefaultOverride first (#800). `setByUser` says whose it is: the
+	 * user's unless the caller says otherwise, so only the hub's own seeding
+	 * writes an override that is not.
+	 */
 	upsertHostProfileOverride(
 		hostId: string,
 		profileId: string,
 		overrideType: string,
 		sortOrder?: number,
+		setByUser = true,
 	): void {
 		const txn = this.db.transaction(() => {
 			if (overrideType === "default") {
@@ -293,13 +313,14 @@ export class LaunchProfilesDAL {
 			}
 			this.db
 				.prepare(
-					`INSERT INTO host_launch_profiles (host_id, profile_id, override_type, sort_order)
-					 VALUES (?, ?, ?, ?)
+					`INSERT INTO host_launch_profiles (host_id, profile_id, override_type, sort_order, set_by_user)
+					 VALUES (?, ?, ?, ?, ?)
 					 ON CONFLICT(host_id, profile_id) DO UPDATE SET
 					     override_type = excluded.override_type,
-					     sort_order = excluded.sort_order`,
+					     sort_order = excluded.sort_order,
+					     set_by_user = excluded.set_by_user`,
 				)
-				.run(hostId, profileId, overrideType, sortOrder ?? null);
+				.run(hostId, profileId, overrideType, sortOrder ?? null, setByUser ? 1 : 0);
 		});
 		txn();
 	}
@@ -318,13 +339,18 @@ export class LaunchProfilesDAL {
 		const row = this.db
 			.prepare("SELECT * FROM host_launch_profiles WHERE host_id = ? AND profile_id = ?")
 			.get(hostId, profileId) as HostLaunchProfileRow | undefined;
-		if (!row) return undefined;
-		const result: HostLaunchProfileOverride = {
-			hostId: row.host_id,
-			profileId: row.profile_id,
-			overrideType: row.override_type as HostLaunchProfileOverride["overrideType"],
-		};
-		if (row.sort_order != null) result.sortOrder = row.sort_order;
-		return result;
+		return row ? rowToHostOverride(row) : undefined;
+	}
+
+	/**
+	 * The host's default profile override, when it has one. A profile deleted
+	 * takes its overrides with it (ON DELETE CASCADE), so the profile it names
+	 * exists, and a `default` lists it on the host whatever its OS.
+	 */
+	getHostDefaultOverride(hostId: string): HostLaunchProfileOverride | undefined {
+		const row = this.db
+			.prepare("SELECT * FROM host_launch_profiles WHERE host_id = ? AND override_type = 'default'")
+			.get(hostId) as HostLaunchProfileRow | undefined;
+		return row ? rowToHostOverride(row) : undefined;
 	}
 }

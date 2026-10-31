@@ -55,6 +55,11 @@ function isPathNamedSeed(profile: LaunchProfile): boolean {
  * host's "Command Prompt" is not listed a second time as `cmd.exe`. Idempotent:
  * it pins a profile only when the host neither sees it nor holds an override
  * for it, so a profile the user hid stays hidden.
+ *
+ * The profile of the agent's default shell becomes the host's default when the
+ * host has none, or when the one it has is an earlier seeding's, so it follows
+ * the agent's default when that changes. A default the user set is never
+ * replaced (#800), and a profile the user hid is not marked.
  */
 export async function seedShellProfiles(
 	hostId: string,
@@ -67,6 +72,7 @@ export async function seedShellProfiles(
 		| "listLaunchProfiles"
 		| "getLaunchProfileByName"
 		| "getHostLaunchProfileOverride"
+		| "getHostDefaultOverride"
 		| "createLaunchProfile"
 		| "updateLaunchProfile"
 		| "deleteLaunchProfile"
@@ -111,7 +117,7 @@ export async function seedShellProfiles(
 		}
 
 		if (!visible.has(profile.id) && !metaDal.getHostLaunchProfileOverride(hostId, profile.id)) {
-			metaDal.upsertHostProfileOverride(hostId, profile.id, "pin", i);
+			metaDal.upsertHostProfileOverride(hostId, profile.id, "pin", i, false);
 		}
 
 		if (defaultShell !== undefined && sameShell(shellPath, defaultShell)) {
@@ -119,9 +125,15 @@ export async function seedShellProfiles(
 		}
 	}
 
-	// Mark the default shell profile as host default
+	// Mark the default shell's profile as the host's default, unless the user
+	// set one (#800) or hid this one
 	if (defaultProfileId !== undefined) {
-		metaDal.upsertHostProfileOverride(hostId, defaultProfileId, "default");
+		const marked = metaDal.getHostDefaultOverride(hostId);
+		const hidden =
+			metaDal.getHostLaunchProfileOverride(hostId, defaultProfileId)?.overrideType === "hide";
+		if (!marked?.setByUser && marked?.profileId !== defaultProfileId && !hidden) {
+			metaDal.upsertHostProfileOverride(hostId, defaultProfileId, "default", undefined, false);
+		}
 	}
 
 	console.error(`[lasterm-ssh] seeded ${seededCount} shell profiles for host ${hostId}`);

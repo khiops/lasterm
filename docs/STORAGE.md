@@ -512,6 +512,7 @@ packages/hub/src/storage/migrations/
 │   ├── 021-baseline.sql
 │   ├── 022-unpadded-ssh-pins.sql
 │   ├── 023-discovered-default-shell.sql
+│   ├── 024-launch-profile-set-by-user.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -547,6 +548,7 @@ them. `spool.db` was not squashed: it still has its one migration.
 |-----------|--------------|
 | `022-unpadded-ssh-pins.sql` | Takes the base64 padding off the SSH pins a hub before #717 wrote, 0.14.3 included: `hosts.ssh_fingerprint` and `hosts.ssh_proxy_fingerprint`, when one is `SHA256:` and 43 base64 characters followed by `=`. The hub spells a key as OpenSSH prints it and compares pins as they are, so without it every host pinned before would report a changed key. Any other value is left as it is. A hub before #717, run again on the database, would see each of these pins, and each one pinned since, as a changed key. |
 | `023-discovered-default-shell.sql` | Adds `hosts.discovered_default_shell`, where the default shell a host's agent reports in its HELLO goes from now on (#794). A hub before it wrote that shell into `default_shell` at every connection, over the Default Shell the user chose. What `default_shell` holds cannot say whose it is, so a host that has connected (`discovered_shells` set) has its value moved to the new column and `default_shell` emptied: each connection had written the agent's there, and one the user typed since the last would have been overwritten at the next. A host that never connected keeps it: no agent could have written it. A hub before #794, run again on the database, ignores the new column and writes the agent's default into `default_shell` again at the next connection. |
+| `024-launch-profile-set-by-user.sql` | Adds `host_launch_profiles.set_by_user`: 1 for an override the user set through the hosts' profile routes, 0 for one the hub made from what an agent reported (#800). The hub marks the profile of the default shell a host's agent reports as the host's default only where the host has none, or where the one it has is its own earlier mark, which so follows the agent's default; it never replaces a default the user set, and never marks a profile the user hid. A hub before it marked the agent's at every connection, over the user's, so every row already there is left at 0, the column's default, and none is rewritten. A hub before #800, run again on the database, ignores the column and marks its agent's default at every connection again; a row it adds reads 0. |
 
 ## 10. Backup & Restore
 

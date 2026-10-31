@@ -363,6 +363,11 @@ export const useSessionStore = defineStore("session", () => {
 					// User chose to reject the binary — no toast needed.
 					return;
 				}
+				// Nor when they cancelled the password or passphrase asked for:
+				// nothing failed (#812).
+				if (msg.code === ErrorCode.AUTH_CANCELLED) {
+					return;
+				}
 				// News about one terminal belongs in that terminal's pane, which
 				// shows it as a state rather than a red banner that outlives the
 				// glance it was worth.

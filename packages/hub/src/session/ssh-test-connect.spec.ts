@@ -25,6 +25,19 @@ const { privateKey: CLIENT_KEY } = generateKeyPairSync("rsa", {
 const KEY_DIR = makeTempDir("lasterm-test-connect-");
 const CLIENT_KEY_PATH = join(KEY_DIR, "client.pem");
 writeFileSync(CLIENT_KEY_PATH, CLIENT_KEY, { mode: 0o600 });
+const PASSPHRASE = "test-connect-passphrase-812";
+const { privateKey: ENCRYPTED_CLIENT_KEY } = generateKeyPairSync("rsa", {
+	modulusLength: 2048,
+	publicKeyEncoding: { type: "pkcs1", format: "pem" },
+	privateKeyEncoding: {
+		type: "pkcs1",
+		format: "pem",
+		cipher: "aes-256-cbc",
+		passphrase: PASSPHRASE,
+	},
+});
+const ENCRYPTED_KEY_PATH = join(KEY_DIR, "encrypted-client.pem");
+writeFileSync(ENCRYPTED_KEY_PATH, ENCRYPTED_CLIENT_KEY, { mode: 0o600 });
 
 afterAll(() => removeTempDir(KEY_DIR));
 
@@ -344,6 +357,49 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 
 		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 		expect(client.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "HOST_VERIFY" }));
+	});
+
+	// A wrong passphrase is asked for again, as for a session (#812), and the
+	// test caches none of them.
+	it("asks again for a wrong passphrase, then connects", async () => {
+		const mock = await sshServer();
+		server = mock.server;
+		const { ctx, client, mgr } = setup({
+			type: "ssh",
+			sshHost: "127.0.0.1",
+			sshPort: mock.port,
+			fingerprint: await serverFingerprint(mock.port),
+		});
+		const authPrompts = () =>
+			client.send.mock.calls
+				.map(([message]) => message)
+				.filter((message) => message.type === "AUTH_PROMPT");
+		const answer = async (index: number, secret: string) => {
+			const prompt = await vi.waitFor(() => {
+				const asked = authPrompts()[index];
+				if (!asked) throw new Error("not asked yet");
+				return asked as { promptId: string; deliveryEpoch: number; message: string };
+			});
+			mgr.handleAuthPromptResponse("c1", {
+				hostId: "saved-host",
+				secret,
+				promptId: prompt.promptId,
+				deliveryEpoch: prompt.deliveryEpoch,
+			});
+			return prompt;
+		};
+
+		const done = mgr.handleTestConnect("c1", {
+			...testMessage("saved-host", mock.port),
+			sshKeyPath: ENCRYPTED_KEY_PATH,
+		});
+		await answer(0, "not-the-passphrase");
+		const again = await answer(1, PASSPHRASE);
+		await done;
+
+		expect(again.message).toBe(`Wrong passphrase for ${ENCRYPTED_KEY_PATH}. Try again.`);
+		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+		expect(ctx.passphraseCache.size).toBe(0);
 	});
 
 	it("names a system no agent is built for, before any session (#401)", async () => {

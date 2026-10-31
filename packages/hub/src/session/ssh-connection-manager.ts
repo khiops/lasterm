@@ -100,6 +100,17 @@ export class SshConnectionManager {
 		return context?.kind === "session" && this._authPromptWireType(promptEntry) === "passphrase";
 	}
 
+	/**
+	 * Cached for the host the prompt named, which is the one `buildPromptAuth`
+	 * looks up and drops it under. A connection's prompts share one context,
+	 * whose host is the first to ask: a jump's passphrase asked after its
+	 * target's was cached under the target, and a wrong one outlived its
+	 * eviction there (#609, #812).
+	 *
+	 * Cached before anything checks it: a passphrase that does not decrypt the
+	 * key is dropped by the prompt that asks for it again (`previousRejected`),
+	 * before the hub handles anything else (#812).
+	 */
 	private _cacheAcceptedPassphrase(
 		promptEntry: PendingPromptEntry | undefined,
 		fallbackHostId: string,
@@ -108,10 +119,11 @@ export class SshConnectionManager {
 	): void {
 		if (secret === null || !this._isCacheableSessionPassphrase(promptEntry)) return;
 		const ttl = rememberSession === true ? 15 * 60 * 1000 : 60 * 1000;
-		this.ctx.passphraseCache.set(promptEntry?.hostId ?? fallbackHostId, {
-			secret,
-			expiresAt: Date.now() + ttl,
-		});
+		const promptedHostId = (promptEntry?.resendPayload as { hostId?: unknown } | undefined)?.hostId;
+		this.ctx.passphraseCache.set(
+			typeof promptedHostId === "string" ? promptedHostId : (promptEntry?.hostId ?? fallbackHostId),
+			{ secret, expiresAt: Date.now() + ttl },
+		);
 	}
 
 	private _getOrOpenSessionPromptContext(
@@ -151,16 +163,22 @@ export class SshConnectionManager {
 	// ─── Auth prompt ─────────────────────────────────────────────────────────
 
 	buildPromptAuth(client: WsClient, signal?: AbortSignal, acqId?: string): AuthPromptFn {
-		return async (hostId, promptType, message) => {
-			// Cache hit: return cached passphrase without prompting the UI
-			if (promptType === "passphrase") {
+		return async (hostId, promptType, message, options) => {
+			// The last passphrase did not decrypt the key: dropped before anything
+			// else, the abort included, so that it outlives the attempt in no case,
+			// and asked for again rather than given back (#812).
+			if (promptType === "passphrase" && options?.previousRejected === true) {
+				this.ctx.passphraseCache.delete(hostId);
+				console.error(`[lasterm-ssh] passphrase for ${hostId} was wrong: dropped from the cache`);
+			} else if (promptType === "passphrase") {
+				// Cache hit: return cached passphrase without prompting the UI
 				const cached = this.ctx.passphraseCache.get(hostId);
 				console.error(
 					`[lasterm-ssh] passphrase cache lookup for ${hostId}: ${cached ? "hit" : "miss"}`,
 				);
 				if (cached) {
 					if (cached.expiresAt > Date.now()) {
-						// Never its length: see buildSshConnectConfig (#644).
+						// Never its length: see promptUntilKeyDecrypts (#644).
 						console.error("[lasterm-ssh] returning cached passphrase");
 						return cached.secret;
 					}
@@ -407,10 +425,18 @@ export class SshConnectionManager {
 	 *
 	 * Each prompt is answered for the host it names, as an interactive prompt is
 	 * cached: a host's bastion asks under its own id, for its own key (#609).
+	 *
+	 * A cached passphrase that did not decrypt the key is dropped, and the
+	 * reconnect gives up: nobody is there to type another, and giving the same
+	 * one again would ask for ever (#812).
 	 */
 	buildCacheOnlyPromptAuth(): AuthPromptFn {
-		return async (hostId, promptType, _message) => {
+		return async (hostId, promptType, _message, options) => {
 			if (promptType !== "passphrase") return null;
+			if (options?.previousRejected === true) {
+				this.ctx.passphraseCache.delete(hostId);
+				throw new Error("cached passphrase did not decrypt the key; reconnect needs a new one");
+			}
 			const cached = this.ctx.passphraseCache.get(hostId);
 			if (cached && cached.expiresAt > Date.now()) {
 				return cached.secret;

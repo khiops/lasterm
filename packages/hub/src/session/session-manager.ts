@@ -62,6 +62,7 @@ import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
 import { AgentRetirement, isOlderVersion } from "./agent-retirement.js";
+import { sshConnectErrorCode } from "./auth-cancelled.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { requestDaemonStop } from "./daemon-stop.js";
 import {
@@ -1049,10 +1050,11 @@ export class SessionManager {
 						try {
 							session = await acq.connectPromise;
 						} catch (err) {
-							// Leader reported failure — relay to this client too.
+							// Leader reported failure — relay to this client too, a
+							// cancelled prompt as what it is (#812).
 							client.send({
 								type: "ERROR",
-								code: "SSH_CONNECT_FAILED",
+								code: sshConnectErrorCode(err),
 								message: err instanceof Error ? err.message : "SSH connection failed",
 							} satisfies ErrorMessage);
 							return null;
@@ -3209,7 +3211,7 @@ export class SessionManager {
 					} else {
 						client.send({
 							type: "ERROR",
-							code: "SSH_CONNECT_FAILED",
+							code: sshConnectErrorCode(retryErr),
 							message: retryErr instanceof Error ? retryErr.message : "SSH connection failed",
 						} satisfies ErrorMessage);
 					}
@@ -3230,9 +3232,11 @@ export class SessionManager {
 				// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
 				return retryAgent;
 			}
+			// A prompt cancelled is no failure: it is said as what it is, and a
+			// pane shows no reason for it (#812).
 			client.send({
 				type: "ERROR",
-				code: "SSH_CONNECT_FAILED",
+				code: sshConnectErrorCode(err),
 				message: err instanceof Error ? err.message : "SSH connection failed",
 			} satisfies ErrorMessage);
 			throw err instanceof Error ? err : new Error("SSH connection failed");

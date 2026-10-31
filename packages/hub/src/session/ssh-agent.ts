@@ -17,6 +17,7 @@ import {
 	type SftpSupport,
 	windowsLaunchCommand,
 } from "./agent-deployer.js";
+import { AuthCancelledError } from "./auth-cancelled.js";
 import { HelloSeeker } from "./hello-seeker.js";
 import { openJumpRoute } from "./jump-connection.js";
 import type { ResolvedJump } from "./proxy-jump.js";
@@ -62,11 +63,26 @@ export interface HostKeyVerification {
 	tofu: boolean;
 }
 
-/** Callback to prompt the user for a secret (password or key passphrase). */
+/** What a prompt is told of the answer it follows (#812). */
+export interface AuthPromptOptions {
+	/**
+	 * The answer to the prompt before this one, for the same host, was wrong: a
+	 * passphrase that did not decrypt the key. A cache that gave it must not
+	 * give it again, and a prompt that cannot ask anyone gives up.
+	 */
+	previousRejected?: boolean;
+}
+
+/**
+ * Callback to prompt the user for a secret (password or key passphrase).
+ * Resolves null when no secret is given: the person cancelled, or nobody can
+ * be asked.
+ */
 export type AuthPromptFn = (
 	hostId: string,
 	promptType: "password" | "passphrase" | "elevation",
 	message: string,
+	options?: AuthPromptOptions,
 ) => Promise<string | null>;
 
 /**
@@ -143,8 +159,46 @@ export function buildJumpAuth(jump: ResolvedJump, promptAuth?: AuthPromptFn) {
 }
 
 /**
+ * Ask for a key's passphrase until one decrypts it, as OpenSSH asks again
+ * (#812). A wrong one is asked for again, saying so, and the prompt is told
+ * (`previousRejected`): a cache that gave it drops it rather than give it
+ * back. Rejects with `AuthCancelledError` when no passphrase is given.
+ */
+async function promptUntilKeyDecrypts(
+	keyContent: Buffer,
+	keyPath: string,
+	hostId: string,
+	promptAuth: AuthPromptFn,
+): Promise<{ secret: string; type: string }> {
+	let previousRejected = false;
+	for (;;) {
+		const secret = previousRejected
+			? await promptAuth(hostId, "passphrase", `Wrong passphrase for ${keyPath}. Try again.`, {
+					previousRejected: true,
+				})
+			: await promptAuth(hostId, "passphrase", `Enter passphrase for ${keyPath}`);
+		// Whether there is one, never its length: a length narrows a
+		// brute-force search, and the desktop keeps stderr in hub.log (#644).
+		console.error(
+			`[lasterm-ssh] passphrase obtained: ${secret === null ? "no (cancelled)" : "yes"}`,
+		);
+		if (secret === null) throw new AuthCancelledError();
+		// ssh2 connect() decrypts the key itself; checked here first, so that a
+		// wrong passphrase is asked for again rather than end the connection.
+		const parsed = ssh2.utils.parseKey(keyContent, secret);
+		if (!(parsed instanceof Error)) {
+			const key = Array.isArray(parsed) ? parsed[0] : parsed;
+			return { secret, type: key.type };
+		}
+		console.error(`[lasterm-ssh] key decryption failed, asking again: ${parsed.message}`);
+		previousRejected = true;
+	}
+}
+
+/**
  * Build the ssh2 ConnectConfig for a given auth method.
- * Throws on missing config or user-cancelled prompts.
+ * Throws on missing config, and `AuthCancelledError` when a prompt is
+ * cancelled. A key's wrong passphrase is asked for again (#812).
  * Call sites that need non-throwing behavior (e.g. test-connect) should catch
  * and convert to their own error representation.
  */
@@ -168,7 +222,7 @@ export async function buildSshConnectConfig(
 		}
 		const secret = await promptAuth(hostId, "password", `Enter password for ${user}@${hostname}`);
 		if (secret === null) {
-			throw new Error("Authentication cancelled by user");
+			throw new AuthCancelledError();
 		}
 		connectConfig.password = secret;
 	} else if (auth.method === "agent") {
@@ -198,24 +252,13 @@ export async function buildSshConnectConfig(
 			if (!promptAuth || !hostId) {
 				throw new Error("Key is passphrase-protected but no prompt callback available");
 			}
-			const secret = await promptAuth(hostId, "passphrase", `Enter passphrase for ${auth.keyPath}`);
-			// Whether there is one, never its length: a length narrows a
-			// brute-force search, and the desktop keeps stderr in hub.log (#644).
-			console.error(
-				`[lasterm-ssh] passphrase obtained: ${secret === null ? "no (cancelled)" : "yes"}`,
+			const { secret, type } = await promptUntilKeyDecrypts(
+				keyContent,
+				auth.keyPath,
+				hostId,
+				promptAuth,
 			);
-			if (secret === null) {
-				throw new Error("Authentication cancelled by user");
-			}
-			// Pass raw key + passphrase — ssh2 connect() decrypts internally.
-			// Verify first that the passphrase works, to give a clear error.
-			const verify = ssh2.utils.parseKey(keyContent, secret);
-			if (verify instanceof Error) {
-				console.error(`[lasterm-ssh] key decryption failed: ${verify.message}`);
-				throw new Error(`Failed to decrypt SSH key: ${verify.message}`);
-			}
-			const verifiedKey = Array.isArray(verify) ? verify[0] : verify;
-			console.error(`[lasterm-ssh] key verified (type: ${verifiedKey.type})`);
+			console.error(`[lasterm-ssh] key verified (type: ${type})`);
 			connectConfig.privateKey = keyContent;
 			connectConfig.passphrase = secret;
 		} else {

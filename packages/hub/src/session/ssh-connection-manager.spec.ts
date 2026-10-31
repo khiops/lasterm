@@ -1,5 +1,10 @@
+import { generateKeyPairSync } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { TestConnectMessage } from "@lasterm/shared";
-import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { AuthCancelledError } from "./auth-cancelled.js";
 import {
 	clearContext,
 	clientDisconnect,
@@ -9,7 +14,7 @@ import {
 } from "./prompt-context.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
-import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
+import { type AuthPromptFn, buildSshConnectConfig, SshAgent } from "./ssh-agent.js";
 import { SshConnectionManager } from "./ssh-connection-manager.js";
 
 // Deferred promise helper — lets tests resolve/reject mock Promises on demand.
@@ -406,6 +411,162 @@ describe("SshConnectionManager — passphrase cache", () => {
 		await testPromise;
 
 		expect(ctx.passphraseCache.get(hostId)?.secret).toBe("cached-session-passphrase");
+	});
+
+	// A connection's prompts share one context, opened by the first to ask: a
+	// jump's passphrase asked after its target's was cached under the target,
+	// where nothing dropped it once it proved wrong (#609, #812).
+	it("caches each passphrase for the host its prompt named", async () => {
+		const ctx = makeCtx();
+		const mgr = makeMgr(ctx);
+		const client = registerClient(ctx, "c-jump-cache");
+		const promptAuth = mgr.buildPromptAuth(client, undefined, "acq-jump-cache");
+
+		const target = promptAuth("host-target", "passphrase", "Enter passphrase for the target key");
+		mgr.handleAuthPromptResponse("c-jump-cache", {
+			hostId: "host-target",
+			secret: "the target's",
+			...onlyPrompt(ctx),
+		});
+		await expect(target).resolves.toBe("the target's");
+
+		const bastion = promptAuth("host-bastion", "passphrase", "Enter passphrase for the jump key");
+		mgr.handleAuthPromptResponse("c-jump-cache", {
+			hostId: "host-bastion",
+			secret: "the bastion's",
+			...onlyPrompt(ctx),
+		});
+		await expect(bastion).resolves.toBe("the bastion's");
+
+		expect(ctx.passphraseCache.get("host-bastion")?.secret).toBe("the bastion's");
+		expect(ctx.passphraseCache.get("host-target")?.secret).toBe("the target's");
+		clearContext(ctx as SharedSessionContext, "acq-jump-cache");
+	});
+});
+
+// ─── A wrong passphrase (#812) ──────────────────────────────────────────────
+//
+// It is asked for again, as OpenSSH does, until it decrypts the key or the
+// person cancels; and it never comes back from the cache: it was cached as it
+// was answered, before anything checked it, for 60 s or 15 min, and every
+// later attempt failed with it, unasked.
+
+describe("SshConnectionManager — a wrong passphrase (#812)", () => {
+	const PASSPHRASE = "the-right-passphrase-812";
+	const keyDir = makeTempDir("lasterm-wrong-passphrase-");
+	const keyPath = join(keyDir, "id_rsa");
+	const { privateKey } = generateKeyPairSync("rsa", {
+		modulusLength: 2048,
+		publicKeyEncoding: { type: "pkcs1", format: "pem" },
+		privateKeyEncoding: {
+			type: "pkcs1",
+			format: "pem",
+			cipher: "aes-256-cbc",
+			passphrase: PASSPHRASE,
+		},
+	});
+	writeFileSync(keyPath, privateKey, { mode: 0o600 });
+
+	afterAll(async () => {
+		await removeTempDir(keyDir);
+	});
+
+	const connect = (promptAuth: AuthPromptFn, hostId: string) =>
+		buildSshConnectConfig({ method: "key", keyPath }, "pi.local", 22, "pi", promptAuth, hostId);
+
+	/** The AUTH_PROMPTs a client was sent, in order. */
+	const promptsTo = (client: ReturnType<typeof makeClient>) =>
+		client.send.mock.calls
+			.map(([msg]) => msg as { type: string; message?: string })
+			.filter((msg) => msg.type === "AUTH_PROMPT");
+
+	it("asks again, saying so, and connects with the right one", async () => {
+		const ctx = makeCtx();
+		const mgr = makeMgr(ctx);
+		const hostId = "host-wrong-then-right";
+		const client = registerClient(ctx, "c-wrong-then-right");
+
+		const connecting = connect(mgr.buildPromptAuth(client), hostId);
+		await vi.waitFor(() => expect(promptsTo(client)).toHaveLength(1));
+		mgr.handleAuthPromptResponse(client.id, {
+			hostId,
+			secret: "not-the-passphrase",
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
+
+		await vi.waitFor(() => expect(promptsTo(client)).toHaveLength(2));
+		expect(promptsTo(client)[0]?.message).toBe(`Enter passphrase for ${keyPath}`);
+		expect(promptsTo(client)[1]?.message).toBe(`Wrong passphrase for ${keyPath}. Try again.`);
+		// Dropped as soon as it proved wrong, while the next one is asked for.
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
+
+		mgr.handleAuthPromptResponse(client.id, { hostId, secret: PASSPHRASE, ...onlyPrompt(ctx) });
+		expect((await connecting).passphrase).toBe(PASSPHRASE);
+		expect(ctx.passphraseCache.get(hostId)?.secret).toBe(PASSPHRASE);
+	});
+
+	it("leaves nothing cached when a wrong one is followed by a cancel, and asks next time", async () => {
+		const ctx = makeCtx();
+		const mgr = makeMgr(ctx);
+		const hostId = "host-wrong-then-cancel";
+		const client = registerClient(ctx, "c-wrong-then-cancel");
+
+		const connecting = connect(mgr.buildPromptAuth(client), hostId);
+		await vi.waitFor(() => expect(promptsTo(client)).toHaveLength(1));
+		mgr.handleAuthPromptResponse(client.id, {
+			hostId,
+			secret: "not-the-passphrase",
+			rememberSession: true,
+			...onlyPrompt(ctx),
+		});
+		await vi.waitFor(() => expect(promptsTo(client)).toHaveLength(2));
+		mgr.handleAuthPromptResponse(client.id, { hostId, secret: null, ...onlyPrompt(ctx) });
+
+		await expect(connecting).rejects.toBeInstanceOf(AuthCancelledError);
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
+
+		// The next attempt asks: nothing answers for the person.
+		const again = connect(mgr.buildPromptAuth(client), hostId);
+		await vi.waitFor(() => expect(promptsTo(client)).toHaveLength(3));
+		expect(promptsTo(client)[2]?.message).toBe(`Enter passphrase for ${keyPath}`);
+		mgr.handleAuthPromptResponse(client.id, { hostId, secret: null, ...onlyPrompt(ctx) });
+		await expect(again).rejects.toBeInstanceOf(AuthCancelledError);
+	});
+
+	it("drops a cached passphrase that does not decrypt the key, and asks instead", async () => {
+		const ctx = makeCtx();
+		const mgr = makeMgr(ctx);
+		const hostId = "host-cached-wrong";
+		const client = registerClient(ctx, "c-cached-wrong");
+		ctx.passphraseCache.set(hostId, {
+			secret: "not-the-passphrase",
+			expiresAt: Date.now() + 15 * 60_000,
+		});
+
+		const connecting = connect(mgr.buildPromptAuth(client), hostId);
+		await vi.waitFor(() => expect(promptsTo(client)).toHaveLength(1));
+		expect(promptsTo(client)[0]?.message).toBe(`Wrong passphrase for ${keyPath}. Try again.`);
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
+
+		mgr.handleAuthPromptResponse(client.id, { hostId, secret: PASSPHRASE, ...onlyPrompt(ctx) });
+		expect((await connecting).passphrase).toBe(PASSPHRASE);
+	});
+
+	// Nobody is there to type another: the reconnect gives up, at once.
+	it("a reconnect drops a cached passphrase that does not decrypt the key, and gives up", async () => {
+		const ctx = makeCtx();
+		const mgr = makeMgr(ctx);
+		const hostId = "host-reconnect-wrong";
+		ctx.passphraseCache.set(hostId, {
+			secret: "not-the-passphrase",
+			expiresAt: Date.now() + 15 * 60_000,
+		});
+
+		await expect(connect(mgr.buildCacheOnlyPromptAuth(), hostId)).rejects.toThrow(
+			"cached passphrase did not decrypt the key",
+		);
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
 	});
 });
 

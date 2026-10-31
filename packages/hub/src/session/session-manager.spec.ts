@@ -8,6 +8,7 @@ import type {
 	ProtocolMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
+import { ErrorCode } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createHostsChangeAnnouncer, HOSTS_CHANGED_QUIET_MS } from "../api/hosts-changed.js";
 import type { ConfigResolver } from "../config.js";
@@ -17,6 +18,7 @@ import { SpoolDAL } from "../storage/spool.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
+import { AuthCancelledError } from "./auth-cancelled.js";
 import { resolveHostOs } from "./host-profile-menu.js";
 import {
 	clearContext,
@@ -4773,7 +4775,14 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		// Single SPAWN — fails because start() rejects
 		const ch1 = await sm.handleSpawn("c-conc-fail-1", { type: "SPAWN", hostId });
 		expect(ch1).toBeNull();
-		expect(c1Received.some((m) => m.type === "ERROR")).toBe(true);
+		// A real failure is said as one: the pane shows its reason (#812).
+		expect(
+			c1Received.some(
+				(m) =>
+					m.type === "ERROR" &&
+					(m as ProtocolMessage & { code?: string }).code === "SSH_CONNECT_FAILED",
+			),
+		).toBe(true);
 
 		// INVARIANT: in-flight entry cleared after failure — no leak
 		expect(sm.acquisitions.size).toBe(0);
@@ -5065,6 +5074,50 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 					(m as ProtocolMessage & { code?: string }).code === "SSH_CONNECT_FAILED",
 			),
 		).toBe(true);
+	});
+
+	// A cancelled password or passphrase is no failure (#812): the window that
+	// was asked, and one that joined its connection meanwhile, hear
+	// AUTH_CANCELLED, which their panes show no reason for.
+	it("says a cancelled prompt as AUTH_CANCELLED, to the leader and to a follower", async () => {
+		const hostId = await createSshHost();
+		let cancel!: () => void;
+		const cancelled = new Promise<void>((resolve) => {
+			cancel = resolve;
+		});
+		// biome-ignore lint/complexity/useArrowFunction: vitest 4 needs a constructable function for new-ed mocks
+		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (host: { id: string }) {
+			const agent = new MockSshAgent(host);
+			agent.start = vi.fn(async () => {
+				await cancelled;
+				throw new AuthCancelledError();
+			});
+			mockSshAgentInstance = agent;
+			return agent as never;
+		});
+
+		const c1Received: ProtocolMessage[] = [];
+		const c2Received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-cancel-1", c1Received));
+		sm.addClient(makeClient("c-cancel-2", c2Received));
+
+		const spawn1 = sm.handleSpawn("c-cancel-1", { type: "SPAWN", hostId });
+		await vi.waitFor(() => expect(sm.acquisitions.has(hostId)).toBe(true));
+		const acq = sm.acquisitions.get(hostId);
+		if (!acq) throw new Error("expected acquisition");
+		const spawn2 = sm.handleSpawn("c-cancel-2", { type: "SPAWN", hostId });
+		await vi.waitFor(() => expect(acq.leases.size).toBe(2));
+
+		cancel();
+		expect(await Promise.all([spawn1, spawn2])).toEqual([null, null]);
+
+		const errorCodes = (received: ProtocolMessage[]) =>
+			received
+				.filter((m) => m.type === "ERROR")
+				.map((m) => (m as ProtocolMessage & { code?: string }).code);
+		expect(errorCodes(c1Received)).toEqual([ErrorCode.AUTH_CANCELLED]);
+		expect(errorCodes(c2Received)).toEqual([ErrorCode.AUTH_CANCELLED]);
+		expect(sm.acquisitions.has(hostId)).toBe(false);
 	});
 
 	// ── Fix 3: shutdown clears acquiringSessions ──

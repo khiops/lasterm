@@ -839,10 +839,19 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 	// 1024 bytes, which ssh2, hashing all of it, then cannot decrypt.
 	const fragment = "spec-passphrase-644-";
 	const passphrase = `${"é".repeat(8)}${fragment.repeat(60)}`.slice(0, 1009);
-	const lengths = [passphrase.length, Buffer.byteLength(passphrase)];
+	// A wrong one is typed first, and asked for again (#812): it leaves no
+	// more trace than the right one.
+	const wrongFragment = "spec-wrong-passphrase-812-";
+	const wrong = `${"ü".repeat(5)}${wrongFragment.repeat(40)}`.slice(0, 1013);
+	const lengths = [
+		passphrase.length,
+		Buffer.byteLength(passphrase),
+		wrong.length,
+		Buffer.byteLength(wrong),
+	];
 
-	it("logs neither the passphrase nor its length, asked for or remembered", async () => {
-		expect(lengths).toEqual([1009, 1017]);
+	it("logs neither passphrase nor its length, asked for, asked again or remembered", async () => {
+		expect(lengths).toEqual([1009, 1017, 1013, 1018]);
 		const { buildSshConnectConfig } =
 			await vi.importActual<typeof import("./session/ssh-agent.js")>("./session/ssh-agent.js");
 		const keyPath = path.join(log.dir, "id_rsa");
@@ -882,11 +891,24 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 
 		const output = captureOutput();
 		try {
-			// Asked for: the person types it and asks the hub to remember it.
+			// Asked for: the person types a wrong one first, and asks the hub to
+			// remember it.
 			const asked = connect();
 			await vi.waitFor(() => expect(sent).toHaveLength(1));
-			const prompt = sent[0] as AuthPromptMessage;
+			const first = sent[0] as AuthPromptMessage;
+			expect(first).toMatchObject({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" });
+			manager.handleAuthPromptResponse(client.id, {
+				hostId,
+				secret: wrong,
+				rememberSession: true,
+				promptId: first.promptId,
+				deliveryEpoch: first.deliveryEpoch,
+			});
+			// Asked again, saying so: the right one this time.
+			await vi.waitFor(() => expect(sent).toHaveLength(2));
+			const prompt = sent[1] as AuthPromptMessage;
 			expect(prompt).toMatchObject({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" });
+			expect(prompt.message).toMatch(/^Wrong passphrase/);
 			manager.handleAuthPromptResponse(client.id, {
 				hostId,
 				secret: passphrase,
@@ -897,7 +919,7 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 			expect((await asked).passphrase).toBe(passphrase);
 			// Remembered: the next connection takes it from the cache, unasked.
 			expect((await connect()).passphrase).toBe(passphrase);
-			expect(sent).toHaveLength(1);
+			expect(sent).toHaveLength(2);
 		} finally {
 			output.restore();
 		}
@@ -905,9 +927,11 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 		const text = `${output.text()}\n${log.text()}`;
 		// The path was heard, and says whether it has a passphrase.
 		expect(text).toContain("[lasterm-ssh] passphrase obtained: yes");
+		expect(text).toContain("[lasterm-ssh] key decryption failed, asking again");
 		expect(text).toContain("[lasterm-ssh] returning cached passphrase");
-		// Neither the passphrase, nor any piece of it, nor its length.
+		// Neither passphrase, nor any piece of one, nor a length.
 		expect(text).not.toContain(fragment);
+		expect(text).not.toContain(wrongFragment);
 		for (const length of lengths) {
 			expect(text).not.toMatch(new RegExp(`(?<![0-9A-Za-z])${length}(?!\\d)`));
 		}

@@ -686,7 +686,9 @@ User-configured host overrides (Layer 3) are persistent in meta.db and are not a
 Each host record specifies exactly one auth method via `ssh_auth` field (`'agent'`, `'key'`, `'password'`). There is **no fallback chain**. If the chosen method fails, the connection fails and the user must reconfigure.
 
 - `agent`: the agent this machine publishes — `SSH_AUTH_SOCK` where there is one, and on Windows the OpenSSH agent's named pipe, which no variable announces. Fail if no agent answers.
-- `key`: read private key from `ssh_key_path`. If passphrase-protected, prompt user via UI dialog.
+- `key`: read private key from `ssh_key_path`. If passphrase-protected, prompt user via UI dialog. A
+  passphrase that does not decrypt the key is asked for again, saying so, until one does or the
+  user cancels; a cancel is not reported as a failure (`AUTH_CANCELLED`, #812).
 - `password`: prompt user via UI dialog at connect time. **Never stored.**
 
 ### 4.5b Reaching a host through another (ProxyJump)

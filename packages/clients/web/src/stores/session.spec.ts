@@ -765,6 +765,33 @@ describe("useSessionStore — a host coming back (#605)", () => {
 		});
 		expect(toastStore.messages).toHaveLength(1);
 	});
+
+	// The person cancelled the passphrase asked for: nothing failed (#812). A
+	// connection that did fail is still said.
+	it("says nothing of a cancelled prompt, and still says a failed connection", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const toastStore = useToastStore();
+		const ws = wsHarness.instances[0];
+
+		ws?.emit({
+			type: "ERROR",
+			code: "AUTH_CANCELLED",
+			message: "Authentication cancelled by user",
+		});
+		expect(toastStore.messages).toHaveLength(0);
+
+		ws?.emit({
+			type: "ERROR",
+			code: "SSH_CONNECT_FAILED",
+			message: "connect ECONNREFUSED 192.0.2.7:22",
+		});
+		expect(toastStore.messages).toHaveLength(1);
+		expect(toastStore.messages[0]).toMatchObject({
+			level: "error",
+			text: "connect ECONNREFUSED 192.0.2.7:22",
+		});
+	});
 });
 
 // ─── A host its user disconnected (#648) ─────────────────────────────────────

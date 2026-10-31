@@ -1,4 +1,4 @@
-import type { ChannelCreatedMessage } from "@lasterm/shared";
+import { type ChannelCreatedMessage, ErrorCode } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "./channels.js";
@@ -1647,6 +1647,24 @@ describe("useChannelsStore — restartChannel failures", () => {
 		const ok = await store.restartChannel("ch-dead", "host-pi");
 
 		expect(ok).toBe(true);
+		expect(store.restartFailures.has("ch-dead")).toBe(false);
+	});
+
+	// The person cancelled the passphrase the host asked for: nothing failed,
+	// and the card stays without a "Could not restart it" line (#812).
+	it("keeps no reason when the person cancelled the prompt", async () => {
+		const store = useChannelsStore();
+		hubAnswering({ code: "SSH_CONNECT_FAILED", message: "Agent HELLO timeout" });
+		await store.restartChannel("ch-dead", "host-pi");
+		expect(store.restartFailures.has("ch-dead")).toBe(true);
+
+		hubAnswering({
+			code: ErrorCode.AUTH_CANCELLED,
+			message: "Authentication cancelled by user",
+		});
+		const ok = await store.restartChannel("ch-dead", "host-pi");
+
+		expect(ok).toBe(false);
 		expect(store.restartFailures.has("ch-dead")).toBe(false);
 	});
 

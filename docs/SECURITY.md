@@ -236,7 +236,8 @@ nothing, so the one minute is all there is to protect.
   the file is a key.
 - Passphrase: asked of the person before anything is dialled (§ 3.3c), never written to disk. It is
   kept in the hub's memory, per host, for 60 s, or 15 min when the person asks to remember it, so
-  that a reconnect needs no prompt (§ 4.3)
+  that a reconnect needs no prompt (§ 4.3). One that does not decrypt the key is dropped from there
+  at once and asked for again, until one does or the person cancels (#812)
 - ssh-agent: preferred — lasterm just requests signing, never sees key material
 
 ### 3.3 Known Hosts
@@ -467,7 +468,9 @@ again, which is now roughly every two and a quarter years rather than every rest
 - SSH key passphrases: kept per host for 60 s, or 15 min when the person asks to remember it, so
   that a reconnect needs no prompt; a reconnect uses only what is kept, and never asks. One that
   has expired is removed the next time the hub looks for that host's passphrase, and stays in
-  memory until then (`ssh-connection-manager.ts`)
+  memory until then (`ssh-connection-manager.ts`). One that does not decrypt the key is removed
+  before it is asked for again, or, on a reconnect, before it gives up (#812). Each is kept under
+  the host its prompt named, a jump's under the jump
 - Elevation passwords: kept per host and per client, the one that typed it, and sent to the agent
   in each SPAWN that needs one. How long depends on where it was typed: 5 min when opening an
   elevated terminal (`spawnOnHost`, `session-manager.ts`), 15 min when restarting one

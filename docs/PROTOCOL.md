@@ -1018,6 +1018,12 @@ The hub answers a response without a valid `prompt_id` or `delivery_epoch` with 
 error. It ignores a response from any client but the one the prompt was last sent to, and one whose
 `delivery_epoch` is not the prompt's latest.
 
+A key's passphrase that does not decrypt the key is asked for again, as OpenSSH does, by a new
+AUTH_PROMPT whose `message` says so (`Wrong passphrase for <key path>. Try again.`), until one
+decrypts it or the person cancels (#812). A cancelled password or passphrase ends a session's
+connection with `AUTH_CANCELLED` (§ 4.14), and a connection test with `TEST_CONNECT_FAIL` (§ 4.11).
+A wrong password is not asked for again: only the server refuses it, once dialled.
+
 ```typescript
 // Hub → UI: dismiss a prompt the hub no longer waits on
 { type: "PROMPT_CANCEL", prompt_id: string }
@@ -1029,7 +1035,8 @@ with a higher `delivery_epoch`, and when the connection the prompt was for is gi
 
 **Security note:** The hub writes none of these secrets to disk. A password is used for the SSH
 handshake and dropped. A key's passphrase is kept in the hub's memory, per host, for 60 s, or 15 min
-with `remember_session`, so that a reconnect needs no prompt. An elevation password is kept in the
+with `remember_session`, so that a reconnect needs no prompt; one that does not decrypt the key is
+dropped from it at once, before it is asked for again (#812). An elevation password is kept in the
 hub's memory, per host and client, for 5 min when it was typed to open an elevated terminal and
 15 min when it was typed to restart one, and sent to the agent in the SPAWN that needs it
 (SECURITY.md § 4.3).
@@ -1150,6 +1157,7 @@ An unknown or refused token is not an ERROR: it is `AUTH_FAIL` (§ 4.1).
 | `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started, or, for a SPAWN marked `automatic`, its user disconnected it (#648). Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
 | `HUB_QUITTING` | SPAWN refused: the hub is quitting |
 | `SSH_CONNECT_FAILED` | The SSH connection a SPAWN needed failed |
+| `AUTH_CANCELLED` | The SSH connection a SPAWN, or the host menu's Connect, needed was not made: the password or key passphrase asked for (§ 4.10) was cancelled. Not a failure: a pane shows no reason for it, and no toast says it (#812) |
 | `SSH_HOST_KEY_REJECTED` | The user rejected the host's key (§ 4.9) |
 | `SSH_HOST_KEY_REVOKED` | The host's key is marked `@revoked` in a `known_hosts` file; carries `host_id` |
 | `SSH_JUMP_UNUSABLE` | The host's jump cannot be used (SECURITY.md § 3.3b); carries `host_id` |

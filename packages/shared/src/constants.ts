@@ -113,6 +113,12 @@ export const ErrorCode = {
 	NOT_SSH_HOST: "NOT_SSH_HOST",
 	/** REST: the host's agent did not answer in time (#576). */
 	AGENT_TIMEOUT: "AGENT_TIMEOUT",
+	/**
+	 * SPAWN, and the host menu's Connect: the person asked for an SSH password
+	 * or key passphrase cancelled, so the host was not reached. Nothing failed:
+	 * a pane shows no reason for it, and no toast says it (#812).
+	 */
+	AUTH_CANCELLED: "AUTH_CANCELLED",
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];

@@ -2,13 +2,14 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HelloMessage, Host } from "@lasterm/shared";
-import { encodeFrame, type ProtocolMessage } from "@lasterm/shared";
+import { ErrorCode, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { windowsLaunchCommand } from "./agent-deployer.js";
-import { type AuthPromptFn, SshAgent } from "./ssh-agent.js";
+import { AuthCancelledError } from "./auth-cancelled.js";
+import { type AuthPromptFn, buildJumpAuth, SshAgent } from "./ssh-agent.js";
 import { sshExec } from "./ssh-exec.js";
 
 // ─── Mock agent-deployer.js for Fix B deploy-fallback tests ─────────────────
@@ -1385,11 +1386,109 @@ describe("SshAgent — auth prompting", () => {
 			const agent = new SshAgent(makeHost(port, { sshKeyPath: ENCRYPTED_KEY_PATH }), promptAuth);
 			agents.push(agent);
 
-			await expect(agent.start()).rejects.toThrow("Authentication cancelled by user");
+			const started = agent.start();
+			await expect(started).rejects.toThrow("Authentication cancelled by user");
+			// Said as a cancel, not a failure: the pane shows no reason for it (#812).
+			await expect(started).rejects.toBeInstanceOf(AuthCancelledError);
+			await expect(started).rejects.toMatchObject({ code: ErrorCode.AUTH_CANCELLED });
 			expect(promptAuth).toHaveBeenCalledOnce();
 		},
 		TEST_TIMEOUT,
 	);
+
+	// As OpenSSH does: a wrong passphrase is asked for again, saying so, and the
+	// prompt is told, so that a cache never gives the wrong one back (#812).
+	it(
+		"key auth with encrypted key: a wrong passphrase is asked for again, then connects",
+		async () => {
+			const { server, port } = await createMockSshServer((stream) => {
+				stream.write(makeHelloFrame());
+			});
+			servers.push(server);
+
+			const fp = await getServerFingerprint(port);
+			const promptAuth = vi
+				.fn<AuthPromptFn>()
+				.mockResolvedValueOnce("not-the-passphrase")
+				.mockResolvedValueOnce(PASSPHRASE);
+			const host = makeHost(port, { sshKeyPath: ENCRYPTED_KEY_PATH });
+			const agent = new SshAgent(host, promptAuth);
+			agents.push(agent);
+
+			const { hello } = await agent.start(fp);
+			expect(hello.type).toBe("HELLO");
+			expect(agent.connected).toBe(true);
+			expect(promptAuth).toHaveBeenCalledTimes(2);
+			expect(promptAuth).toHaveBeenNthCalledWith(
+				1,
+				host.id,
+				"passphrase",
+				`Enter passphrase for ${ENCRYPTED_KEY_PATH}`,
+			);
+			expect(promptAuth).toHaveBeenNthCalledWith(
+				2,
+				host.id,
+				"passphrase",
+				`Wrong passphrase for ${ENCRYPTED_KEY_PATH}. Try again.`,
+				{ previousRejected: true },
+			);
+		},
+		TEST_TIMEOUT,
+	);
+
+	it(
+		"key auth with encrypted key: a wrong passphrase, then a cancel, throws the cancel",
+		async () => {
+			const { server, port } = await createMockSshServer(() => {
+				// never called — cancelled before connect
+			});
+			servers.push(server);
+
+			const promptAuth = vi
+				.fn<AuthPromptFn>()
+				.mockResolvedValueOnce("not-the-passphrase")
+				.mockResolvedValueOnce(null);
+			const agent = new SshAgent(makeHost(port, { sshKeyPath: ENCRYPTED_KEY_PATH }), promptAuth);
+			agents.push(agent);
+
+			await expect(agent.start()).rejects.toBeInstanceOf(AuthCancelledError);
+			expect(promptAuth).toHaveBeenCalledTimes(2);
+			expect(promptAuth).toHaveBeenLastCalledWith(
+				expect.any(String),
+				"passphrase",
+				expect.stringMatching(/^Wrong passphrase/),
+				{ previousRejected: true },
+			);
+		},
+		TEST_TIMEOUT,
+	);
+
+	// A jump's key is asked for under the jump's id, and asked again the same way.
+	it("a jump's wrong passphrase is asked for again, for the jump", async () => {
+		const promptAuth = vi
+			.fn<AuthPromptFn>()
+			.mockResolvedValueOnce("not-the-passphrase")
+			.mockResolvedValueOnce(PASSPHRASE);
+
+		const config = await buildJumpAuth(
+			{
+				jump: { host: "bastion.example.test", port: 22, username: "ops" },
+				knownHostsNames: ["bastion.example.test"],
+				auth: { method: "key", keyPath: ENCRYPTED_KEY_PATH },
+				promptHostId: "host-bastion",
+				pinnedFingerprint: null,
+				trustKnownHosts: false,
+				pinTo: { kind: "host", hostId: "host-bastion", expectedRoute: null },
+			},
+			promptAuth,
+		);
+
+		expect(config.passphrase).toBe(PASSPHRASE);
+		expect(promptAuth.mock.calls.map(([hostId, , , options]) => [hostId, options])).toEqual([
+			["host-bastion", undefined],
+			["host-bastion", { previousRejected: true }],
+		]);
+	});
 
 	it(
 		"key auth with encrypted key: no promptAuth callback → throws",
@@ -1447,7 +1546,9 @@ describe("SshAgent — auth prompting", () => {
 			const agent = new SshAgent(makeHost(port, { sshAuth: "password" }), promptAuth);
 			agents.push(agent);
 
-			await expect(agent.start()).rejects.toThrow("Authentication cancelled by user");
+			const started = agent.start();
+			await expect(started).rejects.toThrow("Authentication cancelled by user");
+			await expect(started).rejects.toBeInstanceOf(AuthCancelledError);
 			expect(promptAuth).toHaveBeenCalledOnce();
 		},
 		TEST_TIMEOUT,

@@ -11,6 +11,7 @@ import {
 	newsAdded,
 	parseListing,
 	previousRelease,
+	publishOnceCertified,
 	readListings,
 	whatsNew,
 } from "./store-listing.ts";
@@ -176,6 +177,40 @@ test("the texts land in the fields the submission has, whatever their case", () 
 	);
 });
 
+// Each draft copies the previous submission's publish mode: one set to manual in
+// Partner Center left a certified release waiting for "Publish now".
+test("a submission copied from a manual one goes live once certified, whatever the key's case", () => {
+	const submission = {
+		Id: "1152921505700000000",
+		TargetPublishMode: "Manual",
+		TargetPublishDate: null,
+		Listings: { "en-us": { BaseListing: { Description: "kept" } } },
+	};
+	const updated = publishOnceCertified(submission);
+	assert.equal(updated.TargetPublishMode, "Immediate");
+	assert.deepEqual(Object.keys(updated), Object.keys(submission), "no second key in another case");
+	assert.equal(updated.TargetPublishDate, null);
+	assert.deepEqual(updated.Listings, submission.Listings, "the rest is kept");
+	assert.equal(submission.TargetPublishMode, "Manual", "the input is not modified");
+});
+
+test("a submission copied from a dated one goes live once certified, its date left as it was", () => {
+	assert.deepEqual(
+		publishOnceCertified({
+			targetPublishMode: "SpecificDate",
+			targetPublishDate: "2026-11-02T08:00:00Z",
+		}),
+		{ targetPublishMode: "Immediate", targetPublishDate: "2026-11-02T08:00:00Z" },
+	);
+});
+
+test("a submission without a publish mode gets one, in the API's casing", () => {
+	assert.deepEqual(publishOnceCertified({ listings: {} }), {
+		listings: {},
+		targetPublishMode: "Immediate",
+	});
+});
+
 const roots: string[] = [];
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -295,6 +330,32 @@ test("detached release SHA excludes its own tag and gathers added fragments only
 		listing[0].fields.releaseNotes,
 		"Version 0.2.0\n\n• First.\n• Second.\n\nAll changes: https://github.com/khiops/lasterm/releases/tag/v0.2.0",
 	);
+});
+test("the submission sent carries the listings and goes live once certified", () => {
+	const root = repo(true);
+	const path = join(temp(), "submission.json");
+	writeFileSync(
+		path,
+		JSON.stringify({
+			TargetPublishMode: "Manual",
+			Listings: {
+				"en-us": {
+					BaseListing: {
+						ShortDescription: "old",
+						Description: "old",
+						Features: [],
+						Keywords: [],
+						ReleaseNotes: "old",
+					},
+				},
+			},
+		}),
+	);
+	const output = vi.spyOn(console, "log").mockImplementation(() => {});
+	assert.equal(main(["0.2.0", path], root), 0);
+	const sent = JSON.parse(String(output.mock.calls[0]?.[0]));
+	assert.equal(sent.TargetPublishMode, "Immediate");
+	assert.match(sent.Listings["en-us"].BaseListing.ReleaseNotes, /• First\.\n• Second\./);
 });
 test("an accented fragment added between tags appears in What's new", () => {
 	const root = repo(false, (root) => {

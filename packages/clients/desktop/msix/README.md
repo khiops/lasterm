@@ -118,14 +118,19 @@ Before it changes Partner Center, the job checks the package, the listing texts,
 the news files and the four secrets, and stops if any check fails. It
 then uploads the package as a draft, applies the reviewed `packaging/store/listing-*.md`
 texts and What's new from news files added since the previous release, and sends
-it to certification. The Store CLI it runs is MSStoreCLI v0.4.3, downloaded from
+it to certification, set to go live as soon as it passes (publish mode
+`Immediate`). Each draft starts as a copy of the previous submission, publish mode
+included: without it, one submission switched to manual publication would hold
+every later release, certified, until someone clicks *Publish now* in Partner
+Center. The Store CLI it runs is MSStoreCLI v0.4.3, downloaded from
 its GitHub release and refused unless its SHA-256 matches the one in the workflow. Each user-visible change adds its own news file in its pull
 request (see `packaging/store/news/README.md`).
 
 With no new news file, the job succeeds with a warning: the package is uploaded
 but waits as a draft. Someone must write its What's new in Partner Center and
-submit it there. Rerunning cannot fix missing news because it checks out the same
-frozen commit. A later release's job replaces a draft still waiting.
+submit it there; that draft keeps the previous submission's publish mode, so check
+its publication option before submitting. Rerunning cannot fix missing news
+because it checks out the same frozen commit. A later release's job replaces a draft still waiting.
 
 Before rerunning a failed job, check the submission's status in Partner Center:
 it may be unchanged, a draft, or already in certification if the runner failed

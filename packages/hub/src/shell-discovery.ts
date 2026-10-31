@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join, win32 } from "node:path";
 import type { LaunchProfile } from "@lasterm/shared";
 import type { MetaDAL } from "./storage/meta.js";
 
@@ -418,7 +418,10 @@ function runProbe(
  * Resolve a bare executable name (e.g. "pwsh.exe") to an absolute path via
  * the OS path resolution mechanism.
  *
- * On Windows: uses `where.exe` (no shell involved — execFile with fixed args).
+ * On Windows: uses `where.exe` (no shell involved — execFile with fixed args),
+ * and takes the first path it prints as {@link firstReportedWindowsShell} does:
+ * a Store app's by its alias, never by its versioned directory (#818) nor by
+ * a second alias (#821).
  * On Unix: uses `which` (for testing on non-Windows hosts only).
  *
  * Resolves null when the executable is not on PATH or the command fails.
@@ -429,8 +432,11 @@ export async function resolveFromPath(executable: string): Promise<string | null
 			// where.exe is always present in System32 — use absolute path to avoid PATH injection
 			const whereExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe");
 			const output = await runProbe(whereExe, [executable], { encoding: "utf8", timeout: 3000 });
-			const firstLine = (output.trim().split("\n")[0] ?? "").trim();
-			return firstLine.length > 0 ? firstLine : null;
+			return firstReportedWindowsShell(
+				output.split("\n"),
+				(name) => process.env[name],
+				linkOrFileExists,
+			);
 		}
 		// Unix fallback — only used in tests / non-Windows environments
 		const result = (
@@ -440,6 +446,110 @@ export async function resolveFromPath(executable: string): Promise<string | null
 	} catch {
 		return null;
 	}
+}
+
+// ─── A Store shell, by the path its updates keep (#818) ──────────────────────
+
+/** Reads an environment variable: `undefined` when it is unset. */
+export type EnvLookup = (name: string) => string | undefined;
+
+/**
+ * Whether something is at `path`, a link included, without following it.
+ *
+ * An app execution alias is a reparse point Node cannot open: `existsSync`
+ * says it is not there, and `statSync` fails with EACCES. `lstatSync` reads
+ * the link itself, which is what tells whether the alias exists (#818).
+ */
+export function linkOrFileExists(path: string): boolean {
+	try {
+		return lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The first of `found`, the lines `where.exe` printed, that
+ * {@link reportedWindowsShell} reports, as it reports it: a line it does not
+ * report leaves the search to the next. Blank lines, and the `\r` that ends
+ * each line, are ignored. `null` when none is reported.
+ */
+export function firstReportedWindowsShell(
+	found: readonly string[],
+	env: EnvLookup,
+	exists: (path: string) => boolean,
+): string | null {
+	for (const line of found) {
+		const path = line.trim();
+		if (path.length === 0) continue;
+		const reported = reportedWindowsShell(path, env, exists);
+		if (reported !== null) return reported;
+	}
+	return null;
+}
+
+/**
+ * The path a Windows shell found at `found` is reported by, as the agent's
+ * `reported_windows_shell` decides it: a Store app's by its app execution
+ * alias, `%LOCALAPPDATA%\Microsoft\WindowsApps\<file name>`, which is one path
+ * for one app, and which its updates keep.
+ *
+ * - Under `%ProgramFiles%\WindowsApps`, a Store app lives in a package
+ *   directory named for its version, which the app's next Store update
+ *   replaces: a launch profile seeded with that path then fails to start
+ *   (#816, #818). Reported by its alias, or not at all (`null`) when that
+ *   alias does not exist.
+ * - Under `%LOCALAPPDATA%\Microsoft\WindowsApps`, an app also has an alias in
+ *   a folder named for its package family, such as
+ *   `Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe`: the same shell by a second
+ *   path (#821). Reported by the alias beside that folder when it exists, else
+ *   as found: it stays.
+ * - Any other path is reported as found.
+ *
+ * `ProgramFiles` is `C:\Program Files` when unset or empty; paths are compared
+ * case aside, as Windows reads them.
+ */
+export function reportedWindowsShell(
+	found: string,
+	env: EnvLookup,
+	exists: (path: string) => boolean,
+): string | null {
+	const set = (name: string): string | undefined => {
+		const value = env(name);
+		return value !== undefined && value.length > 0 ? value : undefined;
+	};
+	const localAppData = set("LOCALAPPDATA");
+	const aliases =
+		localAppData === undefined ? undefined : win32.join(localAppData, "Microsoft", "WindowsApps");
+	const alias = (): string | null => {
+		if (aliases === undefined) return null;
+		const path = win32.join(aliases, win32.basename(found));
+		return exists(path) ? path : null;
+	};
+
+	const programFiles = set("ProgramFiles") ?? "C:\\Program Files";
+	if (windowsDepthWithin(found, win32.join(programFiles, "WindowsApps")) > 0) return alias();
+	if (aliases !== undefined && windowsDepthWithin(found, aliases) > 1) return alias() ?? found;
+	return found;
+}
+
+/**
+ * How many levels below the directory `dir` the Windows path `path` lies: 1
+ * for a file in it, 2 for one in a folder of it, 0 when it is not inside it,
+ * or is `dir` itself. Either separator, repeated or trailing ones aside, and
+ * case aside.
+ */
+function windowsDepthWithin(path: string, dir: string): number {
+	const parts = (of: string): string[] =>
+		of
+			.split(/[\\/]/)
+			.filter((part) => part.length > 0)
+			.map((part) => part.toLowerCase());
+	const pathParts = parts(path);
+	const dirParts = parts(dir);
+	const inside =
+		pathParts.length > dirParts.length && dirParts.every((part, i) => part === pathParts[i]);
+	return inside ? pathParts.length - dirParts.length : 0;
 }
 
 /**

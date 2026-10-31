@@ -9,10 +9,12 @@ import { StateBroadcaster } from "./state-broadcaster.js";
 
 // ─── Which agent is serving a host ───────────────────────────────────────────
 //
-// A hub deploys an agent matched to itself, so a version that differs means the
-// one answering was started by an older hub and is still there — a remote
-// daemon holding terminals, most often. The hub sends the comparison rather
-// than both versions: it is the side that knows its own (#456).
+// A hub deploys an agent matched to itself, so an older version means the one
+// answering was started by an older hub and is still there — a remote daemon
+// holding terminals, most often. A newer one is not outdated: another hub of a
+// later version shares the local agent (#127), or this hub was downgraded, and
+// nothing replaces it (#809). The hub sends the comparison rather than both
+// versions: it is the side that knows its own (#456).
 
 const HOST = "host-1";
 const SESSION = "session-1";
@@ -53,7 +55,7 @@ describe("StateBroadcaster — the agent serving a host", () => {
 		expect(state.outdatedAgent).toBeUndefined();
 	});
 
-	it("says which two disagree when they do", () => {
+	it("says which two disagree when the agent is older", () => {
 		const { sent, broadcaster } = makeBroadcaster("0.0.1-from-an-older-hub");
 		broadcaster.updateSessionStatus(HOST, SESSION, "active");
 
@@ -64,6 +66,20 @@ describe("StateBroadcaster — the agent serving a host", () => {
 			running: "0.0.1-from-an-older-hub",
 			expected: HUB_VERSION,
 		});
+	});
+
+	it.each([
+		["newer than this hub (#809)", "999.0.0"],
+		["this hub's version with build metadata", `${HUB_VERSION}+build.7`],
+		["not a version this hub can read", "dev"],
+	])("says nothing when the agent is %s", (_name, agentVersion) => {
+		const { sent, broadcaster } = makeBroadcaster(agentVersion);
+		broadcaster.updateSessionStatus(HOST, SESSION, "active");
+
+		const state = sent.find((m) => m.type === "SESSION_STATE");
+		expect(state).toBeTruthy();
+		expect(state).not.toHaveProperty("outdatedAgent");
+		expect(broadcaster.getStateSnapshot().sessions[0]).not.toHaveProperty("outdatedAgent");
 	});
 
 	it("says nothing when no agent is connected", () => {

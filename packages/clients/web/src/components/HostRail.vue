@@ -415,8 +415,8 @@ const footerRows = computed(() => chunkIntoRows(FOOTER_ACTIONS, props.columns));
 /**
  * Whether this host is served by an agent from before an update.
  *
- * A hub deploys an agent matched to itself, so a version that differs means
- * the one answering was started by an older hub and is still there — a
+ * A hub deploys an agent matched to itself, so an older version means the one
+ * answering was started by an older hub and is still there — a
  * daemon holding terminals, most often. The hub leaves it be while it holds
  * them: those terminals are worth more than a version number (#456). Once it
  * holds none of this hub's, the hub replaces it (#805). The dot carries the

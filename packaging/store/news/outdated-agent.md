@@ -1,2 +1,2 @@
-en: After an update, the previous agent is replaced as soon as none of your terminals runs on it, so new terminals start on the current one.
-fr: Après une mise à jour, l'agent précédent est remplacé dès qu'aucun de vos terminaux ne tourne plus dessus, et les nouveaux terminaux démarrent sur l'agent à jour.
+en: After an update, the previous agent is replaced as soon as none of your terminals runs on it, so new terminals start on the current one. An agent newer than Lasterm is no longer reported as outdated.
+fr: Après une mise à jour, l'agent précédent est remplacé dès qu'aucun de vos terminaux ne tourne plus dessus, et les nouveaux terminaux démarrent sur l'agent à jour. Un agent plus récent que Lasterm n'est plus signalé comme obsolète.

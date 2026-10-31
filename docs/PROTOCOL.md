@@ -857,10 +857,10 @@ absent from `channels` has ended, or is unknown.
   session_id: string,
   host_id: string,
   status: "starting" | "active" | "detached" | "disconnected" | "closed",
-  // Only when the agent serving the host is not the version this hub carries (#456).
-  // One older than the hub is replaced once it holds none of this hub's channels,
-  // unless other hubs hold some there (§ 3.17, #805): its SESSION_STATE then says
-  // it no more.
+  // Only when the agent serving the host is older than the version this hub carries
+  // (#456); a newer one, or one whose version is not semver, is not reported (#809).
+  // It is replaced once it holds none of this hub's channels, unless other hubs
+  // hold some there (§ 3.17, #805): its SESSION_STATE then says it no more.
   outdated_agent?: { running: string, expected: string },
   // Only when other hubs hold channels on that agent, as its CHANNEL_STATE_END said
   // (§ 3.16, #127). Informational: replacing the agent would end them too. Sent

@@ -333,8 +333,8 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * Called by the session store whenever a SESSION_STATE message arrives.
 	 */
 	/**
-	 * Hosts served by an agent that is not the one this hub carries, as the hub
-	 * reports it: present means a disagreement, absent means none (#456).
+	 * Hosts served by an agent older than the one this hub carries, as the hub
+	 * reports it: present means an older agent, absent means none (#456, #809).
 	 */
 	const _outdatedAgents = ref<Map<string, { running: string; expected: string }>>(new Map());
 

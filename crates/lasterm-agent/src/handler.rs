@@ -251,12 +251,16 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
     if daemon {
         capabilities.push("hub-identity".into());
     }
+    // One detection for both: the default is named as the list names it, which
+    // is how the hub finds its profile (#804).
+    let available_shells = shell::detect_available_shells();
+    let default_shell = shell::default_shell_among(&available_shells);
     AgentToHub::Hello {
         version: 1,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         capabilities,
-        available_shells: Some(shell::detect_available_shells()),
-        default_shell: Some(shell::get_default_shell()),
+        available_shells: Some(available_shells),
+        default_shell: Some(default_shell),
     }
 }
 

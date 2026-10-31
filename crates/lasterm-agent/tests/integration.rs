@@ -615,6 +615,21 @@ async fn test_hello_contains_shells() {
         .expect("default_shell must be present in HELLO");
     assert!(!default.is_empty(), "default_shell must be non-empty");
 
+    // Windows ships Windows PowerShell, so a Windows agent's default is a
+    // PowerShell, named as available_shells names it: the hub finds the
+    // profile it seeded for that shell by its path (#804).
+    if cfg!(windows) {
+        let name = default.rsplit('\\').next().unwrap_or(default);
+        assert!(
+            name.eq_ignore_ascii_case("pwsh.exe") || name.eq_ignore_ascii_case("powershell.exe"),
+            "default_shell {default} is not a PowerShell"
+        );
+        assert!(
+            shells.iter().any(|shell| shell.as_str() == Some(default)),
+            "default_shell {default} is not in available_shells {shells:?}"
+        );
+    }
+
     agent.kill().await.ok();
 }
 

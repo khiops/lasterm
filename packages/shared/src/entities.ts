@@ -114,9 +114,10 @@ export interface Host {
 	discoveredShellsAt?: string;
 	/**
 	 * The shell the host's agent starts when told none, as it reported it at the
-	 * last connection: `SHELL` on Unix, `COMSPEC` on Windows (#794). Its launch
-	 * profile is the host's default profile while the user has chosen none
-	 * ("Automatic" in Edit Host, #802).
+	 * last connection (#794): `SHELL` on Unix; on Windows PowerShell 7, else
+	 * Windows PowerShell, else `COMSPEC` (#804). Its launch profile is the
+	 * host's default profile while the user has chosen none ("Automatic" in
+	 * Edit Host, #802).
 	 */
 	discoveredDefaultShell?: string;
 	/** Operating system of the remote host (null = auto-detect on first connect) */

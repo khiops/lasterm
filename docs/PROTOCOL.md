@@ -577,7 +577,8 @@ and its connection closes with the rest. The hub sends one by itself, never with
 older than itself (semver) that holds none of its channels (#805): local, or remote when reached as a
 daemon. A refusal keeps that daemon, as does a STOP not confirmed, and the hub asks again only when one
 of its channels there ends, when it reaches the daemon again, or before a SPAWN or a restart there.
-Those wait for the stop, and go to the agent that replaces it.
+Those wait for the stop, and go to the agent that replaces it. A version it has stopped on a host is
+not stopped there again until the hub restarts (SPEC.md § 3.3).
 
 The hub sends it to every daemon. It takes the count from the refusal's `other_owner_channels`
 when that is a whole number of zero or more, and knows none otherwise. It never reads a count out

@@ -44,6 +44,7 @@ describe("useHostForm", () => {
 	function testConnectionHarness(): {
 		respondOk: (index: number, os: string) => Promise<void>;
 		respondFail: (index: number) => Promise<void>;
+		respondCancelled: (index: number) => Promise<void>;
 	} {
 		const handlers = new Map<
 			string,
@@ -53,6 +54,7 @@ describe("useHostForm", () => {
 					hostId: string;
 					platform?: { os: string; system: string; agent: "ready"; agentVersion: string };
 					message?: string;
+					code?: string;
 				}) => void
 			>
 		>();
@@ -64,6 +66,7 @@ describe("useHostForm", () => {
 					hostId: string;
 					platform?: { os: string; system: string; agent: "ready"; agentVersion: string };
 					message?: string;
+					code?: string;
 				}) => void,
 			) => {
 				const current = handlers.get(type) ?? [];
@@ -102,8 +105,48 @@ describe("useHostForm", () => {
 					handler({ type: "TEST_CONNECT_FAIL", hostId, message: "failed" });
 				}
 			},
+			respondCancelled: async (index) => {
+				await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(index + 1));
+				const { hostId } = messageAt(index);
+				for (const handler of handlers.get("TEST_CONNECT_FAIL") ?? []) {
+					handler({
+						type: "TEST_CONNECT_FAIL",
+						hostId,
+						message: "Authentication cancelled by user",
+						code: "AUTH_CANCELLED",
+					});
+				}
+			},
 		};
 	}
+
+	// The person cancelled the password or passphrase the test asked for:
+	// nothing failed, and nothing was learned (#815).
+	it("ends a test whose prompt was cancelled quietly, with no failure shown", async () => {
+		const { form, testing, testResult, sshRemoteDaemonUnavailable, testConnectionInline } =
+			useHostForm();
+		form.value.sshHost = "10.0.0.1";
+		form.value.sshAuth = "password";
+		const harness = testConnectionHarness();
+		const windows = testConnectionInline();
+		await harness.respondOk(0, "windows");
+		await windows;
+
+		const cancelled = testConnectionInline();
+		await harness.respondCancelled(1);
+		await cancelled;
+
+		expect(testing.value).toBe(false);
+		expect(testResult.value).toBeNull();
+		// What the last test found still stands.
+		expect(sshRemoteDaemonUnavailable.value).toBe(true);
+
+		// A test that failed still says so.
+		const failed = testConnectionInline();
+		await harness.respondFail(2);
+		await failed;
+		expect(testResult.value).toEqual({ ok: false, message: "failed" });
+	});
 
 	describe("SC-09: port placeholder behavior", () => {
 		it("new host form has undefined sshPort", () => {

@@ -390,6 +390,66 @@ describe("MetaDAL — Launch Profiles", () => {
 		});
 	});
 
+	// ─── Whose override it is (#800) ──────────────────────────────────────
+
+	describe("upsertHostProfileOverride — set by the user or not", () => {
+		it("records an override as the user's unless told otherwise", () => {
+			const p1 = dal.createLaunchProfile(makeProfile({ name: "Chosen" }));
+			const p2 = dal.createLaunchProfile(makeProfile({ name: "Seeded" }));
+
+			dal.upsertHostProfileOverride(localHostId, p1.id, "pin");
+			dal.upsertHostProfileOverride(localHostId, p2.id, "pin", 3, false);
+
+			expect(dal.getHostLaunchProfileOverride(localHostId, p1.id)?.setByUser).toBe(true);
+			expect(dal.getHostLaunchProfileOverride(localHostId, p2.id)).toEqual({
+				hostId: localHostId,
+				profileId: p2.id,
+				overrideType: "pin",
+				sortOrder: 3,
+				setByUser: false,
+			});
+		});
+
+		it("records who set it last", () => {
+			const p = dal.createLaunchProfile(makeProfile());
+
+			dal.upsertHostProfileOverride(localHostId, p.id, "default", undefined, false);
+			dal.upsertHostProfileOverride(localHostId, p.id, "default");
+
+			expect(dal.getHostDefaultOverride(localHostId)).toMatchObject({
+				profileId: p.id,
+				setByUser: true,
+			});
+		});
+	});
+
+	describe("getHostDefaultOverride", () => {
+		it("returns the host's default, or none", () => {
+			const p1 = dal.createLaunchProfile(makeProfile({ name: "Pinned" }));
+			const p2 = dal.createLaunchProfile(makeProfile({ name: "Default" }));
+			dal.upsertHostProfileOverride(localHostId, p1.id, "pin");
+			expect(dal.getHostDefaultOverride(localHostId)).toBeUndefined();
+
+			dal.upsertHostProfileOverride(localHostId, p2.id, "default", undefined, false);
+
+			expect(dal.getHostDefaultOverride(localHostId)).toEqual({
+				hostId: localHostId,
+				profileId: p2.id,
+				overrideType: "default",
+				setByUser: false,
+			});
+		});
+
+		it("returns none once the default profile is deleted", () => {
+			const p = dal.createLaunchProfile(makeProfile());
+			dal.upsertHostProfileOverride(localHostId, p.id, "default");
+
+			dal.deleteLaunchProfile(p.id);
+
+			expect(dal.getHostDefaultOverride(localHostId)).toBeUndefined();
+		});
+	});
+
 	// ─── deleteHostProfileOverride ────────────────────────────────────────
 
 	describe("deleteHostProfileOverride", () => {

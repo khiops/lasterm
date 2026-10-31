@@ -273,6 +273,12 @@ export interface HostLaunchProfileOverride {
 	profileId: string;
 	overrideType: "pin" | "hide" | "default";
 	sortOrder?: number;
+	/**
+	 * Whether the user set it, through the hosts' profile routes, rather than the
+	 * hub from what the host's agent reported. A default the user set is never
+	 * replaced by the agent's (#800).
+	 */
+	setByUser: boolean;
 }
 
 export interface PaginatedResponse<T> {

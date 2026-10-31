@@ -125,4 +125,84 @@ describe("seedShellProfiles", () => {
 			dal.getHostLaunchProfileOverride(hostId, dal.getLaunchProfileByName("fish")?.id ?? ""),
 		).toMatchObject({ overrideType: "pin" });
 	});
+
+	// Every connection seeds again: each HELLO with shells calls it (#800).
+	describe("the host's default profile", () => {
+		const UNIX_SHELLS = ["/bin/bash", "/usr/bin/fish", "/usr/bin/zsh"];
+		const connect = (agentDefault: string) =>
+			seedShellProfiles(hostId, UNIX_SHELLS, agentDefault, "linux", dal);
+		const id = (name: string) => dal.getLaunchProfileByName(name)?.id ?? "";
+		const defaults = () => menu("linux").filter((entry) => entry.endsWith("(default)"));
+		/** What Settings > Profiles > "Set as Default" stores, through the hosts' profile routes. */
+		const setAsDefault = (name: string) =>
+			dal.upsertHostProfileOverride(hostId, id(name), "default");
+
+		it("is the agent's on a host that has none", async () => {
+			await connect("/bin/bash");
+
+			expect(defaults()).toEqual(["bash (default)"]);
+			expect(dal.getHostDefaultOverride(hostId)).toMatchObject({
+				profileId: id("bash"),
+				setByUser: false,
+			});
+		});
+
+		it("stays the one the user set when the host connects again", async () => {
+			await connect("/bin/bash");
+			setAsDefault("fish");
+
+			await connect("/bin/bash");
+
+			expect(defaults()).toEqual(["fish (default)"]);
+			expect(menu("linux")).toEqual(["fish (default)", "bash", "zsh"]);
+		});
+
+		it("stays the one the user set when the agent's default changes", async () => {
+			await connect("/bin/bash");
+			// The user chose the agent's own default: it is theirs all the same
+			setAsDefault("bash");
+
+			await connect("/usr/bin/zsh");
+
+			expect(defaults()).toEqual(["bash (default)"]);
+		});
+
+		it("follows the agent's default while the user has set none", async () => {
+			await connect("/bin/bash");
+
+			await connect("/usr/bin/zsh");
+
+			expect(defaults()).toEqual(["zsh (default)"]);
+		});
+
+		it("is the agent's again once the profile the user set is deleted", async () => {
+			await connect("/bin/bash");
+			setAsDefault("fish");
+			dal.deleteLaunchProfile(id("fish"));
+
+			await connect("/bin/bash");
+
+			expect(defaults()).toEqual(["bash (default)"]);
+		});
+
+		it("is the agent's again once the user clears theirs", async () => {
+			await connect("/bin/bash");
+			setAsDefault("fish");
+			dal.deleteHostProfileOverride(hostId, id("fish"));
+
+			await connect("/bin/bash");
+
+			expect(defaults()).toEqual(["bash (default)"]);
+		});
+
+		it("is never a profile the user hid", async () => {
+			await connect("/bin/bash");
+			dal.upsertHostProfileOverride(hostId, id("bash"), "hide");
+
+			await connect("/bin/bash");
+
+			expect(menu("linux")).toEqual(["fish", "zsh"]);
+			expect(dal.getHostDefaultOverride(hostId)).toBeUndefined();
+		});
+	});
 });

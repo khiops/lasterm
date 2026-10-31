@@ -465,8 +465,15 @@ export class MetaDAL {
 		profileId: string,
 		overrideType: string,
 		sortOrder?: number,
+		setByUser?: boolean,
 	): void {
-		this.launchProfiles.upsertHostProfileOverride(hostId, profileId, overrideType, sortOrder);
+		this.launchProfiles.upsertHostProfileOverride(
+			hostId,
+			profileId,
+			overrideType,
+			sortOrder,
+			setByUser,
+		);
 	}
 
 	deleteHostProfileOverride(hostId: string, profileId: string): boolean {
@@ -478,5 +485,9 @@ export class MetaDAL {
 		profileId: string,
 	): HostLaunchProfileOverride | undefined {
 		return this.launchProfiles.getHostLaunchProfileOverride(hostId, profileId);
+	}
+
+	getHostDefaultOverride(hostId: string): HostLaunchProfileOverride | undefined {
+		return this.launchProfiles.getHostDefaultOverride(hostId);
 	}
 }

@@ -2,8 +2,10 @@ import { EventEmitter } from "node:events";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.fixture.js";
+import { seedShellProfiles } from "../session/shell-profile-seed.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import { MetaDAL } from "../storage/meta.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import { resolveHostOs } from "./host-profiles.js";
 import {
@@ -660,6 +662,39 @@ describe("PUT /api/hosts/:id/profiles/:profileId", () => {
 			payload: { override_type: "pin" },
 		});
 		expect(res.statusCode).toBe(404);
+	});
+
+	// "Set as Default" lasted until the host's agent connected again (#800).
+	it("keeps a default set here when the host's agent connects again", async () => {
+		const hostsRes = await server.inject({ method: "GET", url: "/api/hosts" });
+		const hosts = hostsRes.json<Array<{ id: string; type: string }>>();
+		const localHost = hosts.find((h) => h.type === "local");
+		if (!localHost) throw new Error("local host not found");
+		const hostId = localHost.id;
+		const dal = new MetaDAL(dbs.meta);
+		// The seeding reports what it seeded on stderr
+		const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+		const connect = () =>
+			seedShellProfiles(hostId, ["/bin/bash", "/usr/bin/fish"], "/bin/bash", "linux", dal);
+		await connect();
+		const fishId = dal.getLaunchProfileByName("fish")?.id ?? "";
+
+		const res = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${hostId}/profiles/${fishId}`,
+			payload: { override_type: "default" },
+		});
+		await connect();
+		quiet.mockRestore();
+
+		expect(res.statusCode).toBe(204);
+		const profiles = (
+			await server.inject({ method: "GET", url: `/api/hosts/${hostId}/profiles?os=linux` })
+		).json<Array<{ name: string; override_type?: string }>>();
+		expect(profiles.filter((p) => p.override_type === "default").map((p) => p.name)).toEqual([
+			"fish",
+		]);
+		expect(dal.getHostDefaultOverride(hostId)?.setByUser).toBe(true);
 	});
 });
 

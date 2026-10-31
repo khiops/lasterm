@@ -504,13 +504,15 @@ export interface SessionStateMessage {
 	 */
 	otherOwnerChannels?: number;
 	/**
-	 * Set only when the agent answering here is not the one this hub carries.
+	 * Set only when the agent answering here is older than the one this hub
+	 * carries.
 	 *
-	 * A hub deploys an agent matched to itself, so a difference means the one
-	 * running was started by an older hub and is still there — a remote daemon
-	 * holding terminals, most often (#79). Its terminals are worth more than a
-	 * version number, so nothing is done about it: it is said, and the person
-	 * decides (#456).
+	 * A hub deploys an agent matched to itself, so an older one was started by
+	 * an older hub and is still there — a remote daemon holding terminals, most
+	 * often (#79). Its terminals are worth more than a version number, so
+	 * nothing is done about it: it is said, and the person decides (#456). A
+	 * newer agent, or one whose version the hub cannot read, is not reported
+	 * (#809).
 	 *
 	 * The hub sends the comparison rather than its ingredients, because it is
 	 * the side that knows both and the client would otherwise need a second
@@ -610,7 +612,7 @@ export interface StateSyncMessage {
 		sessionId: string;
 		hostId: string;
 		status: SessionStatus;
-		/** Set only on a mismatch. See SessionStateMessage. */
+		/** Set only when the agent is older. See SessionStateMessage. */
 		outdatedAgent?: { running: string; expected: string };
 		/** Set only when other hubs hold channels there. See SessionStateMessage. */
 		otherOwnerChannels?: number;

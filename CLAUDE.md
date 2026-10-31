@@ -17,6 +17,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 | `docs/SECURITY.md` | Threat model, auth, SSH security, input validation | When touching auth/SSH/validation |
 | `docs/MVP_ROADMAP.md` | 6 milestones, ~30 blocks, exit criteria, dependencies | For implementation planning |
 | `docs/IDEATION_BRIEF.md` | Original ideation with rationale for all decisions | When questioning "why" |
+| `docs/COMPETITORS.md` | Competitors (Microsoft Store focus): inventory, feature matrix, file-transfer UX, gaps | When designing a user-facing feature or positioning |
 
 ## Stack
 

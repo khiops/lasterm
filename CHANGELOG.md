@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.15.2](https://github.com/khiops/lasterm/compare/v0.15.1...v0.15.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **agent:** report PowerShell as the default shell on Windows ([#806](https://github.com/khiops/lasterm/issues/806)) ([f447785](https://github.com/khiops/lasterm/commit/f4477855ea4fb2c43c7d3bc880b3260e8c858113)), closes [#804](https://github.com/khiops/lasterm/issues/804)
+* **hub,web:** keep the default profile the user set when a host reconnects ([#801](https://github.com/khiops/lasterm/issues/801)) ([fa3bf54](https://github.com/khiops/lasterm/commit/fa3bf54ca431e1895daa4b86b7516cbbaea6a03d)), closes [#800](https://github.com/khiops/lasterm/issues/800)
+* **hub,web:** one default per host: the launch profile new terminals start ([#803](https://github.com/khiops/lasterm/issues/803)) ([c68168f](https://github.com/khiops/lasterm/commit/c68168fd3b4ef32d07232b8846cc96a05b838e00)), closes [#802](https://github.com/khiops/lasterm/issues/802)
+* **hub:** check a host edit with the same rules as its creation ([#796](https://github.com/khiops/lasterm/issues/796)) ([274b0cf](https://github.com/khiops/lasterm/commit/274b0cfaa5c77bb5984c80cf65c9fb6e275bcc90)), closes [#795](https://github.com/khiops/lasterm/issues/795)
+* **hub:** keep the Default Shell the user chose, and start terminals with it ([#799](https://github.com/khiops/lasterm/issues/799)) ([0523b1c](https://github.com/khiops/lasterm/commit/0523b1c6f5690491a30129c3cea8c26fa6dba35f)), closes [#794](https://github.com/khiops/lasterm/issues/794)
+* **hub:** only flag a strictly older agent as outdated ([#810](https://github.com/khiops/lasterm/issues/810)) ([fce6948](https://github.com/khiops/lasterm/commit/fce69485e116d5d9faba483f1d6edcc8ca7b56db)), closes [#809](https://github.com/khiops/lasterm/issues/809)
+* **hub:** replace an outdated agent as soon as it holds no terminals ([#808](https://github.com/khiops/lasterm/issues/808)) ([0fc65e7](https://github.com/khiops/lasterm/commit/0fc65e7b25c0740a00b1b9e8c0817c9da848ca70))
+
+
+### CI/CD
+
+* **release:** publish each Store submission as soon as it is certified ([#811](https://github.com/khiops/lasterm/issues/811)) ([02f9ad8](https://github.com/khiops/lasterm/commit/02f9ad875988c4c9b0421d58f553b9d73fc402c1))
+
 ## [0.15.1](https://github.com/khiops/lasterm/compare/v0.15.0...v0.15.1) (2026-10-30)
 
 

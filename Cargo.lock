@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "lasterm-agent"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "async-xpty",
  "clap",

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.3](https://github.com/khiops/lasterm/compare/v0.15.2...v0.15.3) (2026-10-31)
+
+
+### Bug Fixes
+
+* **desktop:** keep the hub relay's waits off the window's main thread ([#825](https://github.com/khiops/lasterm/issues/825)) ([91ce981](https://github.com/khiops/lasterm/commit/91ce9819dd48fde8c9dac27352a12eb9eb6965dc)), closes [#824](https://github.com/khiops/lasterm/issues/824)
+* **hub:** ask again for a password the server refused, and show no failure for a cancelled prompt ([#819](https://github.com/khiops/lasterm/issues/819)) ([9ca3728](https://github.com/khiops/lasterm/commit/9ca372845360e2f65c8e05196ed7d365a80c965f)), closes [#815](https://github.com/khiops/lasterm/issues/815)
+* **hub:** ask again for a wrong SSH key passphrase, and say a cancel as no failure ([#813](https://github.com/khiops/lasterm/issues/813)) ([7cd0d14](https://github.com/khiops/lasterm/commit/7cd0d1411fc09f879e1b23a985406b806431cbef)), closes [#812](https://github.com/khiops/lasterm/issues/812)
+* **hub:** bring a terminal back with its own shell, and seed no profile launching another path ([#816](https://github.com/khiops/lasterm/issues/816)) ([#817](https://github.com/khiops/lasterm/issues/817)) ([c8a070f](https://github.com/khiops/lasterm/commit/c8a070fc7130b530687665d4facc5d20c612e60a))
+* report each shell once, by a path that lasts (Store aliases, merged /usr) ([#820](https://github.com/khiops/lasterm/issues/820)) ([a264e5c](https://github.com/khiops/lasterm/commit/a264e5c7535e7b2121846907fdc2dba967e00a4f)), closes [#818](https://github.com/khiops/lasterm/issues/818) [#821](https://github.com/khiops/lasterm/issues/821)
+* **web:** keep a dropped file from breaking the desktop's IPC, and recover when it breaks anyway ([#823](https://github.com/khiops/lasterm/issues/823)) ([77fb2e3](https://github.com/khiops/lasterm/commit/77fb2e3d13a01372279a2df55b82320c6e4ee514)), closes [#822](https://github.com/khiops/lasterm/issues/822)
+
 ## [0.15.2](https://github.com/khiops/lasterm/compare/v0.15.1...v0.15.2) (2026-10-31)
 
 

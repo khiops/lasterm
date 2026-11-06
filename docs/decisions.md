@@ -43,6 +43,38 @@ heading, with a pointer to the section that replaced it. A section without one i
   that does not exist, which on Windows also keeps the OpenSSH pipe out; the specs of this change
   run a fake agent of their own.
 
+## HUB-NODE-ORCHESTRATOR — the hub stays in Node and orchestrates; what is critical moves to Rust behind Node-API, as the need arises (2026-11-06)
+
+- **No rewrite of the hub in Rust now.** The hub is large: Fastify REST and WebSocket, the ssh2
+  client with SFTP and its Win32-OpenSSH particulars, transfers, the config cascade, migrations,
+  auth and pairing. About 6,400 TypeScript tests are written against it, and `@lasterm/shared`
+  gives the web client the same protocol types. A rewrite would freeze the product for months
+  right after its Store launch, for no problem measured today.
+- **Node orchestrates; Rust does what is critical.** The agent is Rust. The hub already reaches
+  for Rust where Node is weak at system work: `lasterm-hub-lock`, `lasterm-tls-identity`,
+  `lasterm-process-lock` and `lasterm-protected-fs`, through napi-rs. That is the direction. A
+  subsystem moves to a Rust crate when Node becomes a measured problem there, not before:
+  throughput, latency, footprint, a system API, or a packaging risk. SQLite is the next candidate
+  (#883, and the study of `node:sqlite` against a rusqlite crate).
+- **Native code goes through Node-API only.** It must be napi-rs, or anything else on Node-API's
+  stable ABI. A dependency whose addon uses Node's C++ `ObjectWrap` API is a liability: compiled
+  with Node ≥ 24.19 headers, it can abort the process on GC (#868, #883, nodejs/node#65446).
+- **Not a dead end.** Each step keeps a full move possible later:
+  - The protocol is the contract (PROTOCOL.md). Tests that drive the hub through REST, WebSocket
+    and the agent protocol are the ones a reimplementation would have to pass, so behaviour is
+    tested there rather than through TypeScript internals wherever possible.
+  - A Rust crate owns its logic whole, not a thin binding around TypeScript decisions, so a Rust hub
+    could use it as it is.
+- **What reopens the question.** Any one of these, measured, reopens it. The outcome is recorded
+  here.
+  - **Performance:** a throughput, latency or memory target the hub cannot meet in Node, for example
+    upload throughput or keystroke latency once their known causes are fixed (#873).
+  - **A hub without Node:** an ARM or headless hub where Node's footprint or startup matters.
+  - **Packaging:** recurring trouble with the single executable and its native addons (extraction,
+    antivirus, ABI drift).
+  - **Weight:** the share of the hub's hot paths already in Rust passing roughly half, when the Node
+    layer becomes glue more than logic.
+
 ## STALE-AGENT-RECORD — a stop that finds no agent running succeeds, and clears a record whose process is gone (#871, 2026-11-06)
 
 - **A record whose process is gone is stale, not a failed stop.** A crash, a kill or a Windows

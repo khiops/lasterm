@@ -15,10 +15,18 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	writeFileSync,
+} from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { churnBetterSqlite3 } from "./better-sqlite3-gc-churn.js";
 import type { SeaBuildConfig } from "./build-sea-binary.js";
 import { buildSeaBinary } from "./build-sea-binary.js";
 import { buildOptions } from "./build-sea-hub.js";
@@ -190,6 +198,27 @@ export function locateBetterSqlite3(): string {
 			`    ${rootNodeModules}\n` +
 			`  Run \`pnpm install\` to build native addons first.`,
 	);
+}
+
+/**
+ * Refuse a better-sqlite3 addon that aborts when the garbage collector reclaims its statements
+ * (#883, docs/STORAGE.md § 2). The test suite churns the addon of its own install, and the one
+ * here may have been compiled from source, so this runs the same churn on the file the
+ * executable embeds, under the Node it embeds: the one running this build.
+ */
+export async function checkBetterSqlite3Gc(addonPath: string): Promise<void> {
+	const { code, signal, stdout, stderr } = await churnBetterSqlite3(addonPath);
+	const loaded = /^addon (.+)$/m.exec(stdout)?.[1];
+	if (loaded === undefined || realpathSync(loaded) !== realpathSync(addonPath)) {
+		throw new Error(
+			`[package-sea-hub] the garbage-collector churn did not load ${addonPath} (it loaded ${loaded ?? "nothing"}).\n${stderr}`,
+		);
+	}
+	if (code !== 0 || signal !== null || !stdout.endsWith("survived\n")) {
+		throw new Error(
+			`[package-sea-hub] better-sqlite3 addon ${addonPath} aborts when the garbage collector reclaims a statement (exit ${code}, signal ${signal}); see docs/STORAGE.md § 2.\n${stderr}`,
+		);
+	}
 }
 
 /** The build script passes the target-qualified N-API artefact directly to packaging. */
@@ -405,12 +434,15 @@ async function main(): Promise<void> {
 	console.log("[package-sea-hub] step 5/5: SEA binary packaging");
 
 	const betterSqlite3Path = locateBetterSqlite3();
+	await checkBetterSqlite3Gc(betterSqlite3Path);
 	const hubLockAddonPath = locateHubLockAddon();
 	const tlsIdentityAddonPath = locateTlsIdentityAddon();
 	const tomlWasmPath = locateTomlWasm();
 	const version = readHubVersion();
 
-	console.log(`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path}`);
+	console.log(
+		`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path} (survives the garbage collector)`,
+	);
 	console.log(`[package-sea-hub] hub lock addon:      ${hubLockAddonPath}`);
 	console.log(`[package-sea-hub] TLS identity addon:  ${tlsIdentityAddonPath}`);
 	console.log(`[package-sea-hub] toml-edit WASM:        ${tomlWasmPath}`);

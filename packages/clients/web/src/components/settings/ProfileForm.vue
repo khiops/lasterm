@@ -703,7 +703,7 @@ async function handleSave(): Promise<void> {
 	background: var(--nt-bg-surface);
 	border-radius: 12px;
 	font-size: 12px;
-	font-family: var(--nt-font-mono, monospace);
+	font-family: monospace;
 	color: var(--nt-fg);
 }
 
@@ -772,7 +772,7 @@ async function handleSave(): Promise<void> {
 	width: 120px;
 	min-width: 120px;
 	flex: 0 0 120px;
-	font-family: var(--nt-font-mono, monospace);
+	font-family: monospace;
 	font-size: 12px;
 }
 
@@ -791,7 +791,7 @@ async function handleSave(): Promise<void> {
 
 .env-value {
 	flex: 1;
-	font-family: var(--nt-font-mono, monospace);
+	font-family: monospace;
 	font-size: 12px;
 }
 

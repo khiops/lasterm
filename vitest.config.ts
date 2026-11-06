@@ -39,6 +39,10 @@ export default defineConfig({
 					name: "web",
 					include: ["packages/clients/web/**/*.spec.ts"],
 					environment: "happy-dom",
+					// Vitest hands a spec an empty module for every stylesheet it does
+					// not include, `?raw` or not. One read as text is read whole, for
+					// the specs that check the theme variables base.css declares (#830).
+					css: { include: [/\.css\?raw$/] },
 				},
 			},
 			{

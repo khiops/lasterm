@@ -526,6 +526,42 @@ describe("readableText", () => {
 	});
 });
 
+// `--nt-status-*`: a level's colour, readable on the theme's ground (#830).
+describe("applyTheme status colours", () => {
+	it("takes them from the theme's palette, made to read on its background", () => {
+		const theme = BUNDLED_THEMES["solarized-light"] as LastermTheme;
+		const { background, yellow } = theme.colors;
+		useThemeStore().applyTheme(theme);
+		expect(setPropertyMock).toHaveBeenCalledWith(
+			"--nt-status-error",
+			readableText(theme.ui.badge, background),
+		);
+		expect(setPropertyMock).toHaveBeenCalledWith(
+			"--nt-status-warning",
+			readableText(yellow, background),
+		);
+		expect(setPropertyMock).toHaveBeenCalledWith(
+			"--nt-status-info",
+			readableText(theme.ui.accent, background),
+		);
+	});
+
+	it("takes a level's colour the theme names over its palette", () => {
+		useThemeStore().applyTheme({
+			...catppuccinMocha,
+			ui: {
+				...catppuccinMocha.ui,
+				badgeDanger: "#ff8080",
+				badgeWarning: "#ffaa00",
+				badgeInfo: "#00ccff",
+			},
+		});
+		expect(setPropertyMock).toHaveBeenCalledWith("--nt-status-error", "#ff8080");
+		expect(setPropertyMock).toHaveBeenCalledWith("--nt-status-warning", "#ffaa00");
+		expect(setPropertyMock).toHaveBeenCalledWith("--nt-status-info", "#00ccff");
+	});
+});
+
 // ─── reloadAppearance: what a start does, and a change made elsewhere ───────
 //
 // A theme chosen in another window stayed unseen here until a restart (#479).

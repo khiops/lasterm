@@ -83,6 +83,12 @@
 	/* --nt-fg where it reads at 4.5:1 on --nt-bg, and the least change of it
 	   that does where it does not (set by applyTheme at runtime) */
 	--nt-text-strong: var(--nt-fg);
+	/* An error's, a warning's and a note's colour, each where it reads at 4.5:1
+	   on --nt-bg, and the least change of it that does where it does not (set by
+	   applyTheme at runtime, #830) */
+	--nt-status-error: #f38ba8;
+	--nt-status-warning: #f9e2af;
+	--nt-status-info: #89b4fa;
 	/* Muted text levels derive from the active theme's fg/bg (both theme-driven)
 	   so they stay legible in BOTH light and dark mode — blending fg toward bg
 	   keeps contrast against the current background regardless of theme. */

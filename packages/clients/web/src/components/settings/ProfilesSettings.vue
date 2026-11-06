@@ -384,7 +384,7 @@ onMounted(async () => {
 	background: var(--nt-bg-surface);
 	border-radius: 8px;
 	font-size: 18px;
-	font-family: var(--nt-font-mono, monospace);
+	font-family: monospace;
 }
 
 /* ── Info ────────────────────────────────────────────────────────────────── */
@@ -416,7 +416,7 @@ onMounted(async () => {
 .profile-shell {
 	font-size: 11px;
 	color: var(--nt-text-secondary);
-	font-family: var(--nt-font-mono, monospace);
+	font-family: monospace;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;

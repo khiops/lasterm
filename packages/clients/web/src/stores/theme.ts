@@ -155,6 +155,14 @@ export const useThemeStore = defineStore("theme", () => {
 			"--nt-text-strong",
 			readableText(theme.colors.foreground, theme.colors.background),
 		);
+		// What an error, a warning or a note is marked with, made to read on the
+		// theme's background as text does (#830). Each comes from the theme's own
+		// palette unless it names one: the badge fallbacks above are Catppuccin
+		// Mocha's pastels, under 2.4:1 on every bundled light theme.
+		const statusOn = (colour: string) => readableText(colour, theme.colors.background);
+		root.setProperty("--nt-status-error", statusOn(theme.ui.badgeDanger ?? theme.ui.badge));
+		root.setProperty("--nt-status-warning", statusOn(theme.ui.badgeWarning ?? theme.colors.yellow));
+		root.setProperty("--nt-status-info", statusOn(theme.ui.badgeInfo ?? theme.ui.accent));
 
 		// RGB components for rgba() usage
 		root.setProperty("--nt-accent-rgb", hexToRgb(theme.ui.accent));

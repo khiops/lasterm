@@ -2,6 +2,7 @@ use lasterm_process_lock::ProcessLock;
 use window_material::WindowSurface;
 pub mod hub_log;
 pub mod tls_identity;
+mod uploads;
 pub mod window_material;
 use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -17,10 +18,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::TrayIconBuilder;
+use tauri::menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem};
+use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::webview::{PageLoadEvent, PermissionKind, PermissionResponse};
 use tauri::{Emitter, Manager, Url, WindowEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
+use uploads::{Answer, Ending, Start, Step, TrayMenuTop, TrayTextStep};
 
 /// The hub port, once the launch path resolved it. Zero until then.
 ///
@@ -297,6 +302,44 @@ fn allows_current_webview_navigation(url: &Url) -> bool {
 /// predicate so popup refusal is testable without a running renderer.
 fn allows_webview_new_window(_url: &Url) -> bool {
     false
+}
+
+/// The shell's answer to a page's permission request: **Allow** for File
+/// System Access, and only for the app's own document; every other kind, and
+/// any other document, keeps the webview's default (#837).
+///
+/// Why it is answered at all: after a restart, a file handle read back from
+/// IndexedDB is in the "prompt" state, and resuming an upload calls
+/// `requestPermission` on it. WebView2 raises `PermissionRequested` for that
+/// and shows no prompt of its own: unanswered, the promise stays pending for
+/// ever (seen on WebView2 156). Answered Allow, it is granted at once.
+///
+/// Why it is safe: the page can only hold handles to files and folders the
+/// user dropped or picked, and `requestPermission` still needs the click that
+/// resumes the upload. The page's CSP loads no frame (`default-src 'none'`, no
+/// `frame-src`), so the document asking is the window's own, whose origin is
+/// checked here as the navigation boundary checks it: the packaged origin
+/// (`http://tauri.localhost` on Windows), and Vite's in a development build.
+///
+/// What it costs, stated: WebView2 asks `FILE_READ_WRITE` even for a read, so
+/// the grant is read-write, while the page never writes a local file; and
+/// WebView2 saves the grant in the app's profile (`EBWebView` under
+/// `%LOCALAPPDATA%\app.lasterm.desktop`), so later requests for that handle
+/// are granted without coming here, still only after a click.
+fn webview_permission_response(
+    kind: PermissionKind,
+    document: Option<&Url>,
+    development_build: bool,
+) -> PermissionResponse {
+    match document {
+        Some(document)
+            if kind == PermissionKind::FileSystemAccess
+                && allows_webview_navigation(document, development_build) =>
+        {
+            PermissionResponse::Allow
+        }
+        _ => PermissionResponse::Default,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1975,6 +2018,11 @@ enum QuitAction {
 }
 
 impl QuitCoordinator {
+    /// A quit is under way: the hub was asked, or its answer is being acted on.
+    fn in_progress(&self) -> bool {
+        self.active.is_some()
+    }
+
     fn begin(&mut self) -> QuitStart {
         if self.active.is_some() {
             return QuitStart::InProgress;
@@ -4935,7 +4983,28 @@ fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
     }
 }
 
+/// Every quit gesture: the tray's Quit, Quit completely in the close question
+/// or its native fallback, and a window close under the "Quit completely"
+/// preference. While this window sends uploads, it asks first (#837).
 fn request_app_quit(app: tauri::AppHandle) {
+    if quit_coordinator()
+        .lock()
+        .expect("quit coordinator lock poisoned")
+        .in_progress()
+    {
+        // Decided already, uploads or not: the hub is on its way out.
+        return;
+    }
+    let start = uploads_shell().gate.request(Ending::Quit);
+    match start {
+        Start::Proceed => begin_hub_quit(app),
+        Start::Ask { in_progress } => ask_about_uploads(app, Ending::Quit, in_progress),
+        Start::AlreadyAsking => {}
+    }
+}
+
+/// The quit itself: the hub is asked to stop, then the app leaves.
+fn begin_hub_quit(app: tauri::AppHandle) {
     let started = quit_coordinator()
         .lock()
         .expect("quit coordinator lock poisoned")
@@ -5005,10 +5074,21 @@ fn relaunch_detached() -> std::io::Result<()> {
 /// coordination is for a user who is leaving — it tells the hub to stop serving
 /// and the replacement would then meet a hub on its way out rather than start
 /// its own.
+///
+/// While this window sends uploads, it asks first, as quitting does (#837).
 #[tauri::command]
 fn restart_desktop(app: tauri::AppHandle) {
+    let start = uploads_shell().gate.request(Ending::Restart);
+    match start {
+        Start::Proceed => restart_now(&app),
+        Start::Ask { in_progress } => ask_about_uploads(app, Ending::Restart, in_progress),
+        Start::AlreadyAsking => {}
+    }
+}
+
+fn restart_now(app: &tauri::AppHandle) {
     RESTART_AFTER_QUIT.store(true, Ordering::SeqCst);
-    finish_quit(&app);
+    finish_quit(app);
 }
 
 fn handle_tray_quit(app: tauri::AppHandle) {
@@ -5147,6 +5227,311 @@ fn cancel_desktop_close(attempt_id: u64) {
         .lock()
         .expect("window close coordinator lock poisoned")
         .answer(attempt_id);
+}
+
+// ── This window's uploads (#837) ─────────────────────────────────────────────
+//
+// The page tells the shell its uploads on every change (`set_uploads_in_progress`);
+// the rules are in `uploads.rs`, and this carries them out: the question when
+// quitting, the quit that waits, the tray's text. While the page reports none,
+// which it never does with `[experimental] file_transfer` off, nothing here acts.
+
+/// What the shell knows of the uploads, and the tray text it shows for them.
+/// Never held across a dialog, a main-thread call or a quit.
+#[derive(Default)]
+struct UploadsShell {
+    gate: uploads::QuitGate,
+    tray_text: uploads::TrayTextThrottle,
+}
+
+static UPLOADS_SHELL: OnceLock<Mutex<UploadsShell>> = OnceLock::new();
+
+/// One notice on screen at a time; the tray keeps the count meanwhile.
+static UPLOADS_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Tells the page when the quit that waits for its uploads starts or ends.
+const UPLOADS_QUIT_PENDING_EVENT: &str = "uploads-quit-pending";
+
+fn uploads_shell() -> std::sync::MutexGuard<'static, UploadsShell> {
+    UPLOADS_SHELL
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The quit that waits for this window's uploads, as the page reads it: `null`,
+/// `"quit"` or `"restart"`.
+#[derive(Clone, Copy, Serialize)]
+struct UploadsQuitPending {
+    pending: Option<Ending>,
+}
+
+/// Change the uploads' state, then carry out what the change asks for, and
+/// tell the page and the tray. Returns the quit that waits, after the change.
+fn update_uploads(
+    app: &tauri::AppHandle,
+    change: impl FnOnce(&mut uploads::QuitGate) -> Step,
+) -> Option<Ending> {
+    let (before, step, after) = {
+        let mut shell = uploads_shell();
+        let before = shell.gate.pending();
+        let step = change(&mut shell.gate);
+        (before, step, shell.gate.pending())
+    };
+    let pending_changed = before != after;
+    if pending_changed {
+        let _ = app.emit(
+            UPLOADS_QUIT_PENDING_EVENT,
+            UploadsQuitPending { pending: after },
+        );
+    }
+    refresh_uploads_tray(app, pending_changed);
+    carry_out_uploads_step(app, step);
+    after
+}
+
+fn carry_out_uploads_step(app: &tauri::AppHandle, step: Step) {
+    match step {
+        Step::Nothing => {}
+        Step::End(Ending::Quit) => begin_hub_quit(app.clone()),
+        Step::End(Ending::Restart) => restart_now(app),
+        Step::Wait { ending, notify } => {
+            // A quit leaves: the window goes to the tray now, and the app with
+            // it once the uploads end. A restart comes back, so the window stays.
+            if ending == Ending::Quit {
+                hide_main_window(app);
+            }
+            if let Some(waiting) = notify {
+                notify_uploads_waiting(app.clone(), waiting);
+            }
+        }
+        Step::Notify { waiting } => notify_uploads_waiting(app.clone(), waiting),
+    }
+}
+
+/// "N uploads in progress": quit (or restart) now and resume them later, once
+/// they end, or not. Asked over the window, shown again if it was in the tray.
+fn ask_about_uploads(app: tauri::AppHandle, ending: Ending, in_progress: u32) {
+    std::thread::spawn(move || {
+        if let Err(error) = raise_main_window(app.clone()) {
+            eprintln!("[lasterm] WARN: cannot show the window to ask about its uploads: {error}");
+        }
+        let question = uploads::question(ending, in_progress);
+        let result = app
+            .dialog()
+            .message(question.message.clone())
+            .title(question.title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::YesNoCancelCustom(
+                question.resume_later.to_string(),
+                question.when_finished.to_string(),
+                question.cancel.to_string(),
+            ))
+            .blocking_show_with_result();
+        let answer = uploads_answer(&question, &result);
+        update_uploads(&app, |gate| gate.answer(answer));
+    });
+}
+
+/// The answer a closed question gives. The first button, Quit and resume later,
+/// is the default; Esc and the close box are Cancel.
+fn uploads_answer(question: &uploads::Question, result: &MessageDialogResult) -> Answer {
+    match result {
+        MessageDialogResult::Custom(label) => uploads::answer_for_label(question, label),
+        // A dialog that reports its three buttons by place rather than label.
+        MessageDialogResult::Yes | MessageDialogResult::Ok => Answer::ResumeLater,
+        MessageDialogResult::No => Answer::WhenFinished,
+        MessageDialogResult::Cancel => Answer::Cancel,
+    }
+}
+
+/// While a quit waits, an upload stopped on a conflict cannot end by itself,
+/// and its question is in a window nobody sees: say so, once.
+fn notify_uploads_waiting(app: tauri::AppHandle, waiting: u32) {
+    if UPLOADS_NOTICE_SHOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let show = app
+            .dialog()
+            .message(uploads::waiting_notice(waiting))
+            .title("Lasterm")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Show Lasterm".to_string(),
+                "Later".to_string(),
+            ))
+            .blocking_show();
+        UPLOADS_NOTICE_SHOWN.store(false, Ordering::SeqCst);
+        if show {
+            if let Err(error) = raise_main_window(app) {
+                eprintln!(
+                    "[lasterm] WARN: cannot show the window for an upload's question: {error}"
+                );
+            }
+        }
+    });
+}
+
+/// Offer the tray its new text; it changes at most once a second. The cancel
+/// line follows a waiting quit at once.
+fn refresh_uploads_tray(app: &tauri::AppHandle, pending_changed: bool) {
+    let step = {
+        let mut shell = uploads_shell();
+        let text = uploads::tray_text(&shell.gate.uploads(), shell.gate.pending());
+        shell.tray_text.offer(text, Instant::now())
+    };
+    follow_tray_text_step(app, step, pending_changed);
+}
+
+fn follow_tray_text_step(app: &tauri::AppHandle, step: TrayTextStep, pending_changed: bool) {
+    match step {
+        TrayTextStep::Show => sync_uploads_tray(app),
+        TrayTextStep::Later(delay) => {
+            let timer_app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let step = uploads_shell().tray_text.timer_fired(Instant::now());
+                follow_tray_text_step(&timer_app, step, false);
+            });
+            if pending_changed {
+                sync_uploads_tray(app);
+            }
+        }
+        TrayTextStep::Keep if pending_changed => sync_uploads_tray(app),
+        TrayTextStep::Keep => {}
+    }
+}
+
+/// Bring the tray to the shell's state, on the main thread, where the tray
+/// lives. It reads that state there rather than carrying it, so tasks queued
+/// out of order still leave the latest.
+fn sync_uploads_tray(app: &tauri::AppHandle) {
+    if !TRAY_AVAILABLE.load(Ordering::Relaxed) {
+        return;
+    }
+    let main_app = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        if let Some(tray) = main_app.try_state::<UploadsTray>() {
+            tray.sync();
+        }
+    }) {
+        eprintln!("[lasterm] WARN: cannot update the tray for the uploads: {error}");
+    }
+}
+
+/// The tray, its menu, and the lines the uploads add above "Show Lasterm":
+/// the tray's text, disabled (Linux shows no tray tooltips), and "Cancel quit
+/// when finished" while one waits.
+struct UploadsTray {
+    tray: TrayIcon,
+    menu: Menu<tauri::Wry>,
+    status: MenuItem<tauri::Wry>,
+    cancel: MenuItem<tauri::Wry>,
+    separator: PredefinedMenuItem<tauri::Wry>,
+    /// What the tray shows; touched on the main thread only.
+    shown: Mutex<(String, TrayMenuTop)>,
+}
+
+impl UploadsTray {
+    fn sync(&self) {
+        let (text, pending) = {
+            let shell = uploads_shell();
+            (shell.tray_text.shown().to_string(), shell.gate.pending())
+        };
+        let top = TrayMenuTop::for_state(&text, pending);
+        let mut shown = self
+            .shown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shown.0 != text {
+            if let Err(error) = self.tray.set_tooltip(Some(&text)) {
+                eprintln!("[lasterm] WARN: cannot set the tray's tooltip: {error}");
+            }
+            let _ = self.status.set_text(&text);
+            shown.0 = text;
+        }
+        if shown.1 != top {
+            self.lay_out(shown.1, top);
+            shown.1 = top;
+        }
+    }
+
+    fn lay_out(&self, from: TrayMenuTop, to: TrayMenuTop) {
+        if from.status {
+            let _ = self.menu.remove(&self.status);
+        }
+        if from.cancel.is_some() {
+            let _ = self.menu.remove(&self.cancel);
+        }
+        if !from.is_empty() {
+            let _ = self.menu.remove(&self.separator);
+        }
+        let mut at = 0;
+        if to.status {
+            let _ = self.menu.insert(&self.status, at);
+            at += 1;
+        }
+        if let Some(ending) = to.cancel {
+            let _ = self.cancel.set_text(uploads::cancel_pending_label(ending));
+            let _ = self.menu.insert(&self.cancel, at);
+            at += 1;
+        }
+        if !to.is_empty() {
+            let _ = self.menu.insert(&self.separator, at);
+        }
+    }
+}
+
+/// Cancel the quit that waits for the uploads. True when there was one.
+fn cancel_uploads_quit(app: &tauri::AppHandle) -> bool {
+    let mut cancelled = false;
+    update_uploads(app, |gate| {
+        cancelled = gate.cancel_pending();
+        Step::Nothing
+    });
+    cancelled
+}
+
+/// The page's uploads, on every change, and at least once when the last one
+/// ends (#837). Only the uploads this window sends count, not those a reader
+/// sees.
+///
+/// - `seq`: 1, 2, 3 … for each call from this document; a report not above
+///   the last is dropped, since calls may run out of order. A new document
+///   starts again from 1.
+/// - `inProgress`: uploads that have not ended (queued, sending, verifying, or
+///   waiting for an answer).
+/// - `waiting`: of those, the ones stopped on a conflict question.
+/// - `failed`: uploads that ended failed and are still listed.
+/// - `percent`: how far the bytes of those in progress are, 0–100, or null.
+///
+/// Answers the quit that waits for them, as `{ pending }`. Async and off the
+/// main thread (#824).
+#[tauri::command]
+async fn set_uploads_in_progress(
+    app: tauri::AppHandle,
+    seq: u64,
+    in_progress: u32,
+    waiting: u32,
+    failed: u32,
+    percent: Option<f64>,
+) -> Result<UploadsQuitPending, String> {
+    let report = uploads::UploadsReport::from_page(in_progress, waiting, failed, percent);
+    tauri::async_runtime::spawn_blocking(move || UploadsQuitPending {
+        pending: update_uploads(&app, |gate| gate.report(seq, report)),
+    })
+    .await
+    .map_err(|error| format!("the uploads report was not taken: {error}"))
+}
+
+/// The page's Cancel on "Lasterm will quit when these uploads end". True when a
+/// quit was waiting.
+#[tauri::command]
+async fn cancel_quit_when_finished(app: tauri::AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || cancel_uploads_quit(&app))
+        .await
+        .map_err(|error| format!("the waiting quit was not cancelled: {error}"))
 }
 
 #[tauri::command]
@@ -5500,12 +5885,23 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+    // Added above those two only while uploads run (#837), so the menu is as it
+    // was otherwise.
+    let uploads_status = MenuItemBuilder::with_id("uploads-status", uploads::TRAY_TEXT_IDLE)
+        .enabled(false)
+        .build(app)?;
+    let cancel_uploads_quit_item = MenuItemBuilder::with_id(
+        "cancel-quit-when-finished",
+        uploads::cancel_pending_label(Ending::Quit),
+    )
+    .build(app)?;
+    let uploads_separator = PredefinedMenuItem::separator(app)?;
 
     // A tray entry with no icon is a blank slot: the window can be sent there
     // and never found again. The app's own icon is the one already bundled for
     // every other surface, so the thing in the tray looks like the thing it is.
     let tray = TrayIconBuilder::new()
-        .tooltip("Lasterm")
+        .tooltip(uploads::TRAY_TEXT_IDLE)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
@@ -5516,6 +5912,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             "quit" => {
                 handle_tray_quit(app.clone());
+            }
+            "cancel-quit-when-finished" => {
+                cancel_uploads_quit(app);
             }
             _ => {}
         })
@@ -5531,6 +5930,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[lasterm] WARN: this build bundles no window icon for the tray");
             }
             TRAY_AVAILABLE.store(true, Ordering::Relaxed);
+            app.manage(UploadsTray {
+                tray: tray.clone(),
+                menu,
+                status: uploads_status,
+                cancel: cancel_uploads_quit_item,
+                separator: uploads_separator,
+                shown: Mutex::new((uploads::TRAY_TEXT_IDLE.to_string(), TrayMenuTop::default())),
+            });
             app.manage(tray);
         }
         Err(error) => {
@@ -5685,6 +6092,18 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
+        // Resuming an upload after a restart asks for file access, which WebView2
+        // otherwise leaves pending for ever (#837).
+        .on_permission_request(|webview, kind| {
+            let document = webview.url().ok();
+            webview_permission_response(kind, document.as_ref(), cfg!(dev))
+        })
+        // A new document holds no uploads yet, whatever the last one reported.
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == PageLoadEvent::Started {
+                update_uploads(webview.app_handle(), |gate| gate.page_started());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_hub_auth_token,
             get_hub_port,
@@ -5712,7 +6131,9 @@ pub fn run() {
             restart_hub_after_exit,
             apply_window_background,
             apply_window_tone,
-            restart_desktop
+            restart_desktop,
+            set_uploads_in_progress,
+            cancel_quit_when_finished
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
@@ -5914,6 +6335,117 @@ mod tests {
                 "new-window policy accepted {url}"
             );
         }
+    }
+
+    /// File access is granted to the app's own document, and nothing else is
+    /// answered: every other kind, and any other document, keeps the default.
+    #[test]
+    fn file_access_is_allowed_for_the_app_document_only() {
+        #[cfg(windows)]
+        let packaged_url = "http://tauri.localhost/";
+        #[cfg(not(windows))]
+        let packaged_url = "tauri://localhost/";
+        let packaged = Url::parse(packaged_url).unwrap();
+        let vite = Url::parse("http://localhost:5173/").unwrap();
+
+        for development_build in [false, true] {
+            assert_eq!(
+                webview_permission_response(
+                    PermissionKind::FileSystemAccess,
+                    Some(&packaged),
+                    development_build
+                ),
+                PermissionResponse::Allow
+            );
+        }
+        // Vite's document is the app's own in a development build only.
+        assert_eq!(
+            webview_permission_response(PermissionKind::FileSystemAccess, Some(&vite), true),
+            PermissionResponse::Allow
+        );
+        assert_eq!(
+            webview_permission_response(PermissionKind::FileSystemAccess, Some(&vite), false),
+            PermissionResponse::Default
+        );
+
+        for other in [
+            "https://tauri.localhost/",
+            "http://tauri.localhost:8080/",
+            "http://tauri.localhost.example.com/",
+            "https://evil.example/",
+            "https://127.0.0.1:4100/",
+            "about:blank",
+            "data:text/html,x",
+            "file:///C:/Users/",
+        ] {
+            assert_eq!(
+                webview_permission_response(
+                    PermissionKind::FileSystemAccess,
+                    Some(&Url::parse(other).unwrap()),
+                    true
+                ),
+                PermissionResponse::Default,
+                "file access answered for {other}"
+            );
+        }
+        // A document the webview could not name gets nothing either.
+        assert_eq!(
+            webview_permission_response(PermissionKind::FileSystemAccess, None, true),
+            PermissionResponse::Default
+        );
+
+        for kind in [
+            PermissionKind::Microphone,
+            PermissionKind::Camera,
+            PermissionKind::Geolocation,
+            PermissionKind::Notifications,
+            PermissionKind::ClipboardRead,
+            PermissionKind::DisplayCapture,
+            PermissionKind::Midi,
+            PermissionKind::Sensors,
+            PermissionKind::MediaKeySystemAccess,
+            PermissionKind::LocalFonts,
+            PermissionKind::WindowManagement,
+            PermissionKind::PointerLock,
+            PermissionKind::AutomaticDownloads,
+            PermissionKind::Autoplay,
+            PermissionKind::Other,
+        ] {
+            assert_eq!(
+                webview_permission_response(kind, Some(&packaged), false),
+                PermissionResponse::Default,
+                "{kind} was answered for the app's own document"
+            );
+        }
+    }
+
+    /// Each of the three buttons of "N uploads in progress" gives its answer,
+    /// however the dialog reports it, and closing it any other way cancels.
+    #[test]
+    fn the_uploads_question_reads_each_button() {
+        let question = uploads::question(Ending::Quit, 2);
+        let custom = |label: &str| MessageDialogResult::Custom(label.to_string());
+        assert_eq!(
+            uploads_answer(&question, &custom("Quit and resume later")),
+            Answer::ResumeLater
+        );
+        assert_eq!(
+            uploads_answer(&question, &custom("Quit when finished")),
+            Answer::WhenFinished
+        );
+        assert_eq!(uploads_answer(&question, &custom("Cancel")), Answer::Cancel);
+        assert_eq!(
+            uploads_answer(&question, &MessageDialogResult::Yes),
+            Answer::ResumeLater
+        );
+        assert_eq!(
+            uploads_answer(&question, &MessageDialogResult::No),
+            Answer::WhenFinished
+        );
+        assert_eq!(
+            uploads_answer(&question, &MessageDialogResult::Cancel),
+            Answer::Cancel
+        );
     }
 
     struct TestWindowRaiseTarget {

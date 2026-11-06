@@ -19,6 +19,8 @@ import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { getTestTls } from "../test-tls.fixture.js";
 
 vi.mock("ssh2", () => ({
+	// Extended as the key-auth agent signer loads (#876).
+	BaseAgent: class {},
 	Client: vi.fn().mockImplementation(() => ({
 		connect: vi.fn(),
 		end: vi.fn(),

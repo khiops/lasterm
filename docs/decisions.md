@@ -7,6 +7,45 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## UPLOADS-DESKTOP — quitting asks while uploads run, and the shell grants file access to its own page (#837, 2026-11-06)
+
+- **The shell answers WebView2's file-access request, for its own page only.** Resuming an upload
+  after a restart calls `requestPermission` on a handle read back from IndexedDB. WebView2 raises
+  `PermissionRequested` for it and shows no prompt: unanswered, the promise stays pending for ever
+  (WebView2 156). Tauri's `Builder::on_permission_request` answers **Allow** for
+  `PermissionKind::FileSystemAccess` when the webview's document has the app's origin, as the
+  navigation boundary reads it (`http://tauri.localhost`, and Vite's in a development build only),
+  and the default for every other kind and document. The handler is given the webview, not the
+  frame that asks; the page's CSP loads no frame, so the document asking is the window's own.
+  - Safe because the page holds handles only to what the user dropped or picked, and
+    `requestPermission` still needs the click that resumes.
+  - The trade-offs, accepted: WebView2 asks `FILE_READ_WRITE` even for a read, so the grant is
+    read-write although the page never writes a local file; and WebView2 keeps the grant in the
+    app's profile, so later requests for that handle are granted without reaching the handler,
+    still after a click.
+- **The page reports, the shell decides.** The page sends its uploads on every change
+  (`set_uploads_in_progress`, async per #824), counted from 1 per document so that calls run out of
+  order cannot leave a stale count; the rules are plain state in `src-tauri/src/uploads.rs`, tested
+  without a window. While the page reports nothing, as with `[experimental] file_transfer` off,
+  every quit and the tray are as before.
+- **The question is native.** Quitting is the shell's, and the page may be hidden or stuck when it
+  is asked; the other quit question ("other clients connected") is native too. Every quit path goes
+  through `request_app_quit`, which brings the window back and asks: Quit and resume later (first
+  and default, Esc cancels), Quit when finished, Cancel. A close under "Keep running in tray" only
+  hides, so it asks nothing. The background restart asks the same, and its "when finished" keeps the
+  window on screen.
+- **Showing the window does not cancel a waiting quit.** Opening it to watch the uploads must not
+  undo the choice; the page there says "Lasterm will quit when these uploads end · Cancel", and the
+  tray has Cancel quit when finished while one waits.
+- **A notice, not a toast, for an answer the quit waits on.** One native message per upload that
+  starts waiting while the window is hidden, "Show Lasterm / Later", one on screen at a time. A
+  Windows toast goes out under an AppUserModelID: the Store package's is its package family's,
+  while `tauri-plugin-notification` names `app.lasterm.desktop`, which the package does not declare,
+  and whether its toast shows there was not checked. A message always shows, and needs no new
+  dependency.
+- **The tray's text** changes at most once a second, only when it differs, and is the menu's first
+  line too, since Linux shows no tray tooltips. The menu gains lines only while uploads run.
+
 ## UPLOADS — bytes over REST, placed without replacing, every outcome said (#833, 2026-11-06)
 
 - **The bytes go over REST, the rest over the WebSocket.** `TRANSFER_START`, the answers, retries

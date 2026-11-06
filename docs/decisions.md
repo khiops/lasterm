@@ -46,7 +46,51 @@ heading, with a pointer to the section that replaced it. A section without one i
 - **The tray's text** changes at most once a second, only when it differs, and is the menu's first
   line too, since Linux shows no tray tooltips. The menu gains lines only while uploads run.
 
+---
+
+## UPLOAD-RESUME — uploads kept in meta.db, resumed only when a window asks (#860, 2026-11-06)
+
+- **meta.db, not a file of its own.** Two tables, `transfers` and `transfer_items`, added by an
+  additive migration (026): a downgraded hub opens the database as one ahead of its migrations and
+  never names them, and the host cascade removes an upload with its host. No CHECK on states or
+  kinds, so that a later one (`download`) needs no table rebuild. The terminal is not a reference:
+  an upload outlives it, and a purged terminal must not take a resumable upload with it.
+- **What is written, and how often.** A state change at once, batched per turn in one transaction;
+  a file's acknowledged prefix only every 8 MiB or 2 s, since a write per 1 MiB chunk of a gigabyte
+  would be a thousand transactions for nothing a resume needs; and everything when the hub quits,
+  before its agents stop. The prefix recorded is the contiguous one the host acknowledged, never a
+  temporary's size: with several SFTP writes in flight a later one can land first, and after a crash
+  the temporary can be longer than the record. So a resume **cuts** each temporary back to the
+  record (`setstat`, `truncate -s` else `dd`, `SetLength`) rather than trusting what is there, and
+  starts again a file whose temporary is missing or shorter. Over SSH commands a chunk is answered
+  once the connection took it, so the host can also hold less: that file starts again too.
+- **Nothing remote resumes by itself after a restart.** Every upload that was moving comes back
+  `interrupted`, and only a window's `TRANSFER_RESUME` takes it up: the window holding the files
+  (#837) is the one that can send them, and a background reconnect has only a cached passphrase,
+  which a restart empties. A resume reaches its hosts **one at a time** through the interactive
+  Connect, as part of the same request, so the window gets one question at a time; a question
+  cancelled leaves that host's uploads resumable with a `reason`, said and recorded, and the next
+  host goes on. Only the device that started an upload resumes it (`NOT_THE_SENDER`), since only it
+  holds the bytes. An upload whose window is still open and whose link merely dropped resumes when
+  the hub reconnects the host: nothing about it changed but the link.
+- **Discard removes by recorded path; the sweep by name, age and ignorance.** Discard and the
+  7-day expiry remove exactly the temporaries their record names, at once or, for a host away, at
+  its next connection, the record kept as `discarded` until then. The sweep at an upload's start
+  removes only what matches the hub's naming, is a file, is older than an hour and that no record
+  knows: what a hub that died before writing its record left. The hour is there for another hub
+  writing to the same folder, whose temporaries no record of this one knows; a temporary whose bytes
+  are all there carries the file's own time, so a second hub's upload waiting on a conflict there
+  can look old. That case was accepted: it needs two hubs uploading into one folder, one of them
+  leaving a conflict unanswered.
+- **Verified by size after a restart, and said so.** Over SSH commands the hub's running hash of a
+  file ends with the hub; a file resumed after a restart is checked by size and reported
+  `size_resumed`, rather than hashed on the host against nothing or silently reported `size`.
+
+---
+
 ## UPLOADS — bytes over REST, placed without replacing, every outcome said (#833, 2026-11-06)
+
+**Status:** its last point, in memory first, is replaced by UPLOAD-RESUME (#860).
 
 - **The bytes go over REST, the rest over the WebSocket.** `TRANSFER_START`, the answers, retries
   and cancels are WebSocket messages, lock-checked as INPUT is; a file's bytes are `PUT` one chunk

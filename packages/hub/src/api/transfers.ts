@@ -127,6 +127,13 @@ export function registerTransferRoutes(server: FastifyInstance, deps: TransferRo
 		async (request, reply) => {
 			if (!deps.enabled()) return disabled(reply);
 			const channelId = request.query.channel_id;
+			// Without one, every upload the hub holds: a window offering to resume
+			// what a restart interrupted reads them all (#860).
+			if (channelId === undefined) {
+				return reply
+					.header("Cache-Control", "no-store")
+					.send({ transfers: deps.transfers.listFor() });
+			}
 			if (!isValidUlid(channelId)) {
 				return refuse(reply, 400, "VALIDATION_ERROR", "channel_id must be a terminal's id");
 			}

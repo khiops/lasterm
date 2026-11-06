@@ -4,9 +4,12 @@ import type { SessionManager, WsClient } from "../../session/session-manager.js"
 import type { WriteLockManager } from "../../session/write-lock.js";
 import type { TransferService } from "../../transfers/transfer-service.js";
 
-/** Uploads, for the TRANSFER_* messages (#833). */
+/** Uploads, for the TRANSFER_* messages (#833, #860). */
 export interface WsTransfers {
-	readonly service: Pick<TransferService, "start" | "resolve" | "retry" | "cancel">;
+	readonly service: Pick<
+		TransferService,
+		"start" | "resolve" | "retry" | "cancel" | "resume" | "discard"
+	>;
 	/** `[experimental] file_transfer`, read at each message. */
 	enabled(): boolean;
 }

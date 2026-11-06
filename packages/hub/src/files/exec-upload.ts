@@ -3,8 +3,8 @@ import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
 import type { TransferVerification } from "@lasterm/shared";
 import type { ClientChannel, Client as SshClient } from "ssh2";
+import { PowerShellLoop } from "../session/powershell-loop.js";
 import { quotePosix } from "../session/remote-daemon.js";
-import { sshExec } from "../session/ssh-exec.js";
 import {
 	describeError,
 	encodedPowerShell,
@@ -40,7 +40,10 @@ const WRITE_STALL_MS = 60_000;
 /** How long a script that places, creates or removes may go without a byte moving. */
 const SCRIPT_STALL_MS = 60_000;
 
-/** How long a PowerShell that places or removes may take, on top of the shell's start-up. */
+/**
+ * How long a Windows script that places, cuts, removes or creates folders may take,
+ * on top of the shell's start-up when it is the one that starts the loop.
+ */
 const WINDOWS_TIMEOUT_MS = 60_000;
 
 /** How long an aborted write waits for the host to finish what it was given. */
@@ -165,6 +168,43 @@ export function posixRemoveScript(path: string): string {
 	return posixScript([`rm -f -- ${quotePosix(path)}`, "r OK"].join("\n"));
 }
 
+/**
+ * The script that cuts the file `path` to its first `size` bytes (#860):
+ * `truncate -s`, GNU coreutils' and BusyBox's, else POSIX `dd`, which cuts
+ * its output where `seek` leaves it unless told `conv=notrunc`, and copies
+ * nothing from `/dev/null`. Not through a link, nor anything but a file.
+ * Then the size it now has, after `OK`.
+ */
+export function posixTruncateScript(path: string, size: number): string {
+	if (!Number.isSafeInteger(size) || size < 0) throw new Error("A size is a whole number of bytes");
+	return posixScript(
+		[
+			`t=${quotePosix(path)}`,
+			`n=${size}`,
+			'{ [ -f "$t" ] && [ ! -L "$t" ]; } || r NOT_FOUND',
+			'truncate -s "$n" -- "$t" 2>/dev/null || dd if=/dev/null of="$t" bs=1 seek="$n" count=0 2>/dev/null || r FAILED',
+			's=$(wc -c < "$t") || r FAILED',
+			`printf '%s\\nOK\\n%s\\n' "$M" "$s"`,
+		].join("\n"),
+	);
+}
+
+/**
+ * The PowerShell that cuts the file `$p` to its first `size` bytes:
+ * `FileStream.SetLength`, on a file that is not a reparse point. Then the
+ * size it now has, after `OK`.
+ */
+export function windowsTruncateScript(path: string, size: number): string {
+	if (!Number.isSafeInteger(size) || size < 0) throw new Error("A size is a whole number of bytes");
+	return windowsScript(
+		path,
+		WINDOWS_ERRORS,
+		"if(-not [IO.File]::Exists($p) -or (([int][IO.File]::GetAttributes($p)) -band 1024) -ne 0){Ans 'NOT_FOUND'}",
+		`try{$o=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write);try{$o.SetLength(${size})}finally{$o.Dispose()}}catch{Why $_;throw}`,
+		"Ans ('OK'+[char]10+[IO.FileInfo]::new($p).Length)",
+	);
+}
+
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
 /** What every Windows answer starts with, and how an exception becomes one. */
@@ -240,13 +280,18 @@ export function windowsPlaceScript(
 	);
 }
 
-/** The PowerShell that creates the folders whose paths arrive on stdin, one Base64 line each (see `posixMkdirScript`). */
-export function windowsMkdirScript(): string {
+/**
+ * The PowerShell that creates each folder of `paths`, in order (see
+ * `posixMkdirScript`). Each path is Base64 of its UTF-8 bytes, and the list a
+ * single-quoted word of them, comma-separated: Base64 holds no comma or quote.
+ * It reads nothing on its stdin, which is the loop's (`PowerShellLoop`).
+ */
+export function windowsMkdirScript(paths: readonly string[]): string {
+	const encoded = paths.map((path) => Buffer.from(path, "utf8").toString("base64")).join(",");
 	return windowsScript(
 		null,
-		"$r=[IO.StreamReader]::new([Console]::OpenStandardInput())",
 		"$b=[Text.StringBuilder]::new()",
-		"while(($l=$r.ReadLine()) -ne $null){if($l -eq ''){continue};$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($l));if([IO.Directory]::Exists($p)){$c='E'}elseif([IO.File]::Exists($p)){$c='F'}else{try{[void][IO.Directory]::CreateDirectory($p);$c='C'}catch{if([IO.Directory]::Exists($p)){$c='E'}else{$c='X'}}};[void]$b.Append($c+[char]10)}",
+		`foreach($l in '${encoded}'.Split(',')){if($l -eq ''){continue};$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($l));if([IO.Directory]::Exists($p)){$c='E'}elseif([IO.File]::Exists($p)){$c='F'}else{try{[void][IO.Directory]::CreateDirectory($p);$c='C'}catch{if([IO.Directory]::Exists($p)){$c='E'}else{$c='X'}}};[void]$b.Append($c+[char]10)}`,
 		"Ans ('OK'+[char]10+$b)",
 	);
 }
@@ -419,31 +464,43 @@ class ExecSink implements UploadSink {
  * and a file whose hashes differ is not placed. Placing is a second command
  * (`posixPlaceScript`, `windowsPlaceScript`). Every path reaches the host as
  * data: a `sh` argument or a single-quoted word, or Base64 for PowerShell.
+ *
+ * On Windows, every script but a file's write runs in the upload's one
+ * `PowerShellLoop` (#865): placing, cutting a temporary, removing, creating folders, and what it
+ * asks of the folder. A write keeps a PowerShell of its own, since its stdin
+ * carries the file's bytes as they come.
  */
 export class ExecUploadBackend implements UploadBackend {
 	readonly transport = "exec";
+	private readonly loop: PowerShellLoop | null;
+	/** `browse`, with its Windows scripts run in `loop`. */
+	private readonly files: ExecFileBackend;
 
 	constructor(
 		private readonly client: SshClient,
 		readonly style: PathStyle,
 		private readonly isLost: () => boolean,
-		private readonly browse: ExecFileBackend,
-	) {}
+		browse: ExecFileBackend,
+	) {
+		const loop = style === "windows" ? new PowerShellLoop(client) : null;
+		this.loop = loop;
+		this.files = loop === null ? browse : browse.through((script, ms) => loop.run(script, ms));
+	}
 
 	get lost(): boolean {
 		return this.isLost();
 	}
 
 	list(dir: string): Promise<FileEntry[]> {
-		return this.browse.list(dir, true);
+		return this.files.list(dir, true);
 	}
 
 	stat(path: string): Promise<FileEntry> {
-		return this.browse.stat(path);
+		return this.files.stat(path);
 	}
 
 	freeSpace(dir: string): Promise<{ available: number | null; total: number | null }> {
-		return this.browse.freeSpace(dir);
+		return this.files.freeSpace(dir);
 	}
 
 	async mkdirs(paths: readonly string[]): Promise<FolderResult[]> {
@@ -451,14 +508,8 @@ export class ExecUploadBackend implements UploadBackend {
 		for (let at = 0; at < paths.length; at += MKDIR_BATCH) {
 			const batch = paths.slice(at, at + MKDIR_BATCH);
 			const result =
-				this.style === "windows"
-					? await this.run(windowsMkdirScriptCommand(), "The folders could not be created", () =>
-							Readable.from(
-								Buffer.from(
-									`${batch.map((path) => Buffer.from(path, "utf8").toString("base64")).join("\n")}\n`,
-								),
-							),
-						)
+				this.loop !== null
+					? await this.inLoop(this.loop, windowsMkdirScript(batch), WINDOWS_TIMEOUT_MS)
 					: await this.run("sh -s", "The folders could not be created", () =>
 							Readable.from(Buffer.from(posixMkdirScript(batch), "utf8")),
 						);
@@ -498,17 +549,13 @@ export class ExecUploadBackend implements UploadBackend {
 	async place(temp: string, target: string, replace: boolean): Promise<PlaceResult> {
 		const what = "The file could not be put in place";
 		let result: { stdout: string | Buffer; stderr: string; exitCode: number | null };
-		if (this.style === "windows") {
+		if (this.loop !== null) {
 			const aside = `${target}.${randomBytes(8).toString("hex")}.old`;
-			try {
-				result = await sshExec(
-					this.client,
-					encodedPowerShell(windowsPlaceScript(temp, target, replace, aside)),
-					WINDOWS_TIMEOUT_MS,
-				);
-			} catch (error) {
-				throw this.interrupted(error);
-			}
+			result = await this.inLoop(
+				this.loop,
+				windowsPlaceScript(temp, target, replace, aside),
+				WINDOWS_TIMEOUT_MS,
+			);
 		} else {
 			result = await this.run("sh -s", what, () =>
 				Readable.from(Buffer.from(posixPlaceScript(temp, target, replace), "utf8")),
@@ -519,7 +566,7 @@ export class ExecUploadBackend implements UploadBackend {
 			case "OK":
 				return { kind: "placed" };
 			case "EXISTS":
-				return { kind: "exists", existing: await this.browse.stat(target).catch(() => null) };
+				return { kind: "exists", existing: await this.files.stat(target).catch(() => null) };
 			case "IS_DIRECTORY":
 				throw new FileAccessError("ALREADY_EXISTS", `${what}: a folder has that name`);
 			case "NOT_FOUND":
@@ -533,12 +580,8 @@ export class ExecUploadBackend implements UploadBackend {
 
 	async remove(path: string): Promise<void> {
 		try {
-			if (this.style === "windows") {
-				await sshExec(
-					this.client,
-					encodedPowerShell(windowsRemoveScript(path)),
-					WINDOWS_TIMEOUT_MS,
-				);
+			if (this.loop !== null) {
+				await this.loop.run(windowsRemoveScript(path), WINDOWS_TIMEOUT_MS);
 			} else {
 				await this.run("sh -s", "The file could not be removed", () =>
 					Readable.from(Buffer.from(posixRemoveScript(path), "utf8")),
@@ -549,11 +592,42 @@ export class ExecUploadBackend implements UploadBackend {
 		}
 	}
 
+	async truncate(path: string, size: number): Promise<void> {
+		const what = "The file could not be cut to what the host acknowledged";
+		let result: { stdout: string | Buffer; stderr: string; exitCode: number | null };
+		if (this.loop !== null) {
+			result = await this.inLoop(this.loop, windowsTruncateScript(path, size), WINDOWS_TIMEOUT_MS);
+		} else {
+			result = await this.run("sh -s", what, () =>
+				Readable.from(Buffer.from(posixTruncateScript(path, size), "utf8")),
+			);
+		}
+		const reply = replyOf(result);
+		switch (reply?.status) {
+			case "OK":
+				if (Number(reply.lines[0]) !== size) {
+					throw new FileAccessError(
+						"FILE_ACCESS_FAILED",
+						`${what}: it holds ${reply.lines[0] || "no"} bytes, not ${size}`,
+					);
+				}
+				return;
+			case "NOT_FOUND":
+				throw new FileAccessError("NOT_FOUND", `${what}: ${REASONS.NOT_FOUND}`);
+			case "PERMISSION_DENIED":
+				throw new FileAccessError("PERMISSION_DENIED", `${what}: ${REASONS.PERMISSION_DENIED}`);
+			default:
+				throw this.scriptFailure(result, what);
+		}
+	}
+
 	async placement(): Promise<"temp"> {
 		return "temp";
 	}
 
-	release(): void {}
+	release(): void {
+		this.loop?.release();
+	}
 
 	/** Why a file's command ended without writing it, as the upload reads it. */
 	writeFailure(result: StdinExecResult, cause?: unknown): Error {
@@ -608,8 +682,16 @@ export class ExecUploadBackend implements UploadBackend {
 			throw this.interrupted(error);
 		}
 	}
-}
 
-function windowsMkdirScriptCommand(): string {
-	return encodedPowerShell(windowsMkdirScript());
+	private async inLoop(
+		loop: PowerShellLoop,
+		script: string,
+		timeoutMs: number,
+	): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+		try {
+			return await loop.run(script, timeoutMs);
+		} catch (error) {
+			throw this.interrupted(error);
+		}
+	}
 }

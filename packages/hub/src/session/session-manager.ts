@@ -38,6 +38,7 @@ import type {
 	StateSyncMessage,
 	StopKeepingAgentResponse,
 	TestConnectMessage,
+	TransferSyncEntry,
 	UiAttachOkMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
@@ -60,12 +61,13 @@ import {
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
+import type { TransferConnectOutcome } from "../transfers/transfer-service.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
 import { AgentRetirement, isOlderVersion } from "./agent-retirement.js";
-import { sshConnectErrorCode } from "./auth-cancelled.js";
+import { HostKeyRejectedError, notResumedReason, sshConnectErrorCode } from "./auth-cancelled.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { requestDaemonStop } from "./daemon-stop.js";
 import {
@@ -222,6 +224,12 @@ export interface HostTransfers {
 	activeOn(hostId: string): number;
 	/** Its connection is being closed on purpose: they stop, interrupted, and resume on a retry. */
 	interruptOn(hostId: string): void;
+	/** A remote host's agent connected, whoever connected it: what waited for that goes on (#860). */
+	hostConnected?(hostId: string): void;
+	/** Write to meta.db what the uploads hold, before the agents stop: the hub quits (#860). */
+	saveNow?(): void;
+	/** The interrupted uploads, for STATE_SYNC (#860). */
+	interruptedUploads?(): TransferSyncEntry[];
 }
 
 /** What came of DELETE /api/sessions/:id. */
@@ -336,6 +344,16 @@ export class SessionManager {
 						throw new Error("This host's agent is being stopped.");
 					}
 					agents.set(hostId, agent);
+					// Uploads that waited for this host's connection go on (#860), told
+					// once the commit is done, whoever made the connection.
+					const transfers = this.transfers;
+					if (
+						transfers?.hostConnected !== undefined &&
+						agent.connected &&
+						ctx.metaDal.getHost(hostId)?.type === "ssh"
+					) {
+						setImmediate(() => transfers.hostConnected?.(hostId));
+					}
 					// The session went active before this agent was the host's: what
 					// only it knows is said again now (#79, #722, #765).
 					if (
@@ -568,6 +586,8 @@ export class SessionManager {
 	 */
 	beginQuit(): void {
 		if (this.ctx.quitState === "QUITTING") return;
+		// What the uploads hold reaches meta.db before anything stops (#860).
+		this.transfers?.saveNow?.();
 		this.ctx.quitState = "QUITTING";
 		this.ctx.quitEpoch++;
 		Acq.shutdownAll(this.ctx);
@@ -695,7 +715,10 @@ export class SessionManager {
 	// ─── State broadcast ──────────────────────────────────────────────────────
 
 	getStateSnapshot(): StateSyncMessage {
-		return this.broadcaster.getStateSnapshot();
+		const snapshot = this.broadcaster.getStateSnapshot();
+		// What a restart, a window that left or a closed connection interrupted (#860).
+		const transfers = this.transfers?.interruptedUploads?.() ?? [];
+		return transfers.length > 0 ? { ...snapshot, transfers } : snapshot;
 	}
 
 	broadcastToAllClients(msg: ProtocolMessage): void {
@@ -2261,14 +2284,23 @@ export class SessionManager {
 	/**
 	 * Connect an SSH host for an upload (#833), as the host menu's Connect does:
 	 * through the acquisition a SPAWN uses, its questions put to `clientId`.
-	 * True once its agent is connected; never rejects. An upload is someone
-	 * acting on the host, so one its user disconnected is reached again.
+	 * Connected once its agent is; otherwise why not, for an upload that could
+	 * not resume to say (#860): a passphrase or a password asked for and not
+	 * given, a host key not accepted, or any other failure. Never rejects. An
+	 * upload is someone acting on the host, so one its user disconnected is
+	 * reached again.
 	 */
-	async connectForTransfer(hostId: string, clientId: string): Promise<boolean> {
-		const outcome = this.connectHost(hostId, { clientId });
-		if (outcome.kind === "connected") return true;
-		if (outcome.kind === "connecting") return outcome.done;
-		return false;
+	async connectForTransfer(hostId: string, clientId: string): Promise<TransferConnectOutcome> {
+		let failure: unknown;
+		const outcome = this.connectHost(hostId, {
+			clientId,
+			onFailure: (error) => {
+				failure = error;
+			},
+		});
+		if (outcome.kind === "connected") return { connected: true };
+		if (outcome.kind === "connecting" && (await outcome.done)) return { connected: true };
+		return { connected: false, reason: notResumedReason(failure) };
 	}
 
 	/** A host's last running upload ended: an outdated agent that waited for it may go now (#805). */
@@ -2807,7 +2839,14 @@ export class SessionManager {
 	 * as long as it takes to answer, which no request waits out: the host's
 	 * session says the rest, `starting` then `active`.
 	 */
-	connectHost(hostId: string, options: { readonly clientId?: string } = {}): HostConnectionOutcome {
+	connectHost(
+		hostId: string,
+		options: {
+			readonly clientId?: string;
+			/** Told why the connection was not made, when it failed (#860). */
+			readonly onFailure?: (error: unknown) => void;
+		} = {},
+	): HostConnectionOutcome {
 		const host = this.ctx.metaDal.getHost(hostId);
 		if (this.hostIsBeingStopped(hostId)) return { kind: "busy" };
 		if (host?.type !== "ssh") return { kind: "not-ssh" };
@@ -2822,7 +2861,7 @@ export class SessionManager {
 		return {
 			kind: "connecting",
 			ended: 0,
-			done: this.reachHostOnRequest(hostId, host, options.clientId),
+			done: this.reachHostOnRequest(hostId, host, options.clientId, options.onFailure),
 		};
 	}
 
@@ -3091,6 +3130,7 @@ export class SessionManager {
 		hostId: string,
 		host: Host,
 		clientId: string | undefined,
+		onFailure?: (error: unknown) => void,
 	): Promise<boolean> {
 		let fence: QuitFence;
 		try {
@@ -3110,7 +3150,8 @@ export class SessionManager {
 				try {
 					await inFlight.connectPromise;
 					return this.ctx.agents.get(hostId)?.connected === true;
-				} catch {
+				} catch (err) {
+					onFailure?.(err);
 					return false;
 				} finally {
 					Acq.release(this.ctx, joined, () => this.holdsHost(hostId));
@@ -3159,6 +3200,7 @@ export class SessionManager {
 			});
 			this.settleFailedConnect(hostId, session, neverConnected);
 			this.failConnectingAcq(acq, err, lease, () => this.holdsHost(hostId));
+			onFailure?.(err);
 			return false;
 		} finally {
 			if (!lease.released) Acq.release(this.ctx, lease, () => this.holdsHost(hostId));
@@ -3444,7 +3486,7 @@ export class SessionManager {
 						code: "SSH_HOST_KEY_REJECTED",
 						message: "SSH host key rejected by user",
 					} satisfies ErrorMessage);
-					throw new Error("SSH host key rejected by user");
+					throw new HostKeyRejectedError();
 				}
 				const retryFp = kv.capturedFingerprint;
 				// Abort guard: if the session was closed (aborted) or replaced while

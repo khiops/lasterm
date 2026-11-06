@@ -1,23 +1,43 @@
 import type {
 	TransferCancelMessage,
+	TransferDiscardMessage,
 	TransferErrorMessage,
 	TransferResolveMessage,
+	TransferResumeMessage,
 	TransferRetryMessage,
 	TransferStartMessage,
 } from "@lasterm/shared";
 import { ErrorCode } from "@lasterm/shared";
 import type { WsHandlerContext } from "./types.js";
 
-type TransferMessage =
+export type TransferMessage =
 	| TransferStartMessage
 	| TransferResolveMessage
 	| TransferRetryMessage
-	| TransferCancelMessage;
+	| TransferCancelMessage
+	| TransferResumeMessage
+	| TransferDiscardMessage;
+
+/** The upload a refusal names: a start's request, one upload's id, or the first of several. */
+function refusalTarget(msg: TransferMessage): Partial<TransferErrorMessage> {
+	switch (msg.type) {
+		case "TRANSFER_START":
+			return { requestId: typeof msg.requestId === "string" ? msg.requestId : "" };
+		case "TRANSFER_RESUME":
+		case "TRANSFER_DISCARD": {
+			const first = Array.isArray(msg.transferIds) ? msg.transferIds[0] : undefined;
+			return { transferId: typeof first === "string" ? first : "" };
+		}
+		default:
+			return { transferId: typeof msg.transferId === "string" ? msg.transferId : "" };
+	}
+}
 
 /**
- * TRANSFER_START, _RESOLVE, _RETRY and _CANCEL (#833): handed to the transfer
- * service, which checks the write lock as INPUT does and answers. Refused at
- * once while `[experimental] file_transfer` is off.
+ * TRANSFER_START, _RESOLVE, _RETRY and _CANCEL (#833), _RESUME and _DISCARD
+ * (#860): handed to the transfer service, which checks the write lock as
+ * INPUT does and answers. Refused at once while `[experimental]
+ * file_transfer` is off.
  *
  * Nothing is logged: the messages hold paths and names, which are the user's.
  */
@@ -26,9 +46,7 @@ export function handleTransfer(msg: TransferMessage, ctx: WsHandlerContext): voi
 	if (transfers === undefined || !transfers.enabled()) {
 		ctx.client.send({
 			type: "TRANSFER_ERROR",
-			...(msg.type === "TRANSFER_START"
-				? { requestId: typeof msg.requestId === "string" ? msg.requestId : "" }
-				: { transferId: typeof msg.transferId === "string" ? msg.transferId : "" }),
+			...refusalTarget(msg),
 			code: ErrorCode.FILE_TRANSFER_DISABLED,
 			message: "File transfer is off: [experimental] file_transfer",
 		} satisfies TransferErrorMessage);
@@ -54,6 +72,12 @@ export function handleTransfer(msg: TransferMessage, ctx: WsHandlerContext): voi
 				break;
 			case "TRANSFER_CANCEL":
 				transfers.service.cancel(requester, msg);
+				break;
+			case "TRANSFER_RESUME":
+				void transfers.service.resume(requester, msg).catch(failed);
+				break;
+			case "TRANSFER_DISCARD":
+				void transfers.service.discard(requester, msg).catch(failed);
 				break;
 		}
 	} catch (error) {

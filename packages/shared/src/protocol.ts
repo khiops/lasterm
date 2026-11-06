@@ -12,12 +12,16 @@ import type {
 	TransferAcceptedMessage,
 	TransferCancelMessage,
 	TransferConflictMessage,
+	TransferDiscardMessage,
 	TransferDoneMessage,
 	TransferErrorMessage,
 	TransferProgressMessage,
 	TransferResolveMessage,
+	TransferResumeMessage,
 	TransferRetryMessage,
 	TransferStartMessage,
+	TransferStateMessage,
+	TransferSyncEntry,
 } from "./transfer-protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -761,6 +765,12 @@ export interface StateSyncMessage {
 	 */
 	userDisconnectedHosts?: string[];
 	/**
+	 * The uploads the hub holds as interrupted, those a hub restart left
+	 * included (#860), for a window to offer to resume or discard. Absent when
+	 * there are none, and while `[experimental] file_transfer` is off.
+	 */
+	transfers?: TransferSyncEntry[];
+	/**
 	 * Every channel the hub holds that has not ended, and every one killed on
 	 * purpose that it still lists (`dead`, with `endReason: "killed"`): a
 	 * window that connects learns how those ended, and none of its panes brings
@@ -1082,6 +1092,8 @@ export type UiMessage =
 	| TransferResolveMessage
 	| TransferRetryMessage
 	| TransferCancelMessage
+	| TransferResumeMessage
+	| TransferDiscardMessage
 	| ErrorMessage;
 
 /** All messages that the Hub sends to the UI */
@@ -1125,6 +1137,7 @@ export type HubToUiMessage =
 	| TransferProgressMessage
 	| TransferConflictMessage
 	| TransferDoneMessage
+	| TransferStateMessage
 	| TransferErrorMessage
 	| ErrorMessage;
 
@@ -1202,9 +1215,12 @@ export type ProtocolMessage =
 	| TransferResolveMessage
 	| TransferRetryMessage
 	| TransferCancelMessage
+	| TransferResumeMessage
+	| TransferDiscardMessage
 	| TransferAcceptedMessage
 	| TransferProgressMessage
 	| TransferConflictMessage
 	| TransferDoneMessage
+	| TransferStateMessage
 	| TransferErrorMessage
 	| ErrorMessage;

@@ -1131,6 +1131,158 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("logs no name and no path, and nothing at INFO, kept across a restart, swept, resumed and discarded (#860)", async () => {
+		const folderName = "lasterm-kept-folder-8608";
+		const fileName = "lasterm-kept-file-8608.bin";
+		const strayName = ".lasterm-kept-stray-8608.bin.0123456789abcdef.partial";
+		const destName = "lasterm-kept-dest-8608";
+		const serverLog = new ServerLog();
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-kept-log-"));
+		const configDir = path.join(root, "config");
+		fs.mkdirSync(configDir);
+		fs.writeFileSync(path.join(configDir, "config.toml"), "[experimental]\nfile_transfer = true\n");
+		const dest = path.join(root, destName);
+		fs.mkdirSync(dest);
+		// What a hub that died before writing its record left: swept at the next start there.
+		const stray = path.join(dest, strayName);
+		fs.writeFileSync(stray, "left");
+		const twoHoursAgo = (Date.now() - 2 * 60 * 60_000) / 1000;
+		fs.utimesSync(stray, twoHoursAgo, twoHoursAgo);
+		const hubOn = () =>
+			createServer({
+				tls: getTestTls(),
+				logger: { level: "trace", destination: serverLog.destination },
+				dbManager: dbs,
+				skipShellDiscovery: true,
+				authToken: PRIMARY_TOKEN,
+				authConfig: { tokenTtlDays: 90 },
+				securityLog: log.securityLog,
+				hubLogger,
+				configDir,
+			});
+		/** A window of the hub, authenticated, and what it heard. */
+		const windowOf = async (server: FastifyInstance) => {
+			const socket = await openSocket(server);
+			const received: Record<string, unknown>[] = [];
+			socket.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)) as never);
+			});
+			socket.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			const clientId = (received.find((m) => m.type === "AUTH_OK") as { clientId: string })
+				.clientId;
+			return { socket, received, clientId };
+		};
+		const sending = (received: Record<string, unknown>[]) =>
+			vi.waitFor(() =>
+				expect(
+					received.some(
+						(m) =>
+							m.type === "TRANSFER_PROGRESS" &&
+							(m.items as { itemId: number; state: string }[]).some(
+								(item) => item.itemId === 1 && item.state === "sending",
+							),
+					),
+				).toBe(true),
+			);
+		const chunk = 1024 * 1024;
+		const data = Buffer.alloc(3 * chunk, 2);
+		let hub = await hubOn();
+		let ws: InjectedSocket | undefined;
+		try {
+			await hub.ready();
+			const remoteHostId = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@pi.local",
+			}).id;
+			const channels = terminalsOnLocalAndRemoteHosts(remoteHostId);
+			const first = await windowOf(hub);
+			ws = first.socket;
+			const fromFirst = serverLog.mark();
+			ws.send(
+				encodeMessage({
+					type: "TRANSFER_START",
+					requestId: "kept",
+					channelId: channels.local,
+					dir: dest,
+					items: [
+						{ relPath: folderName, kind: "dir" },
+						{ relPath: `${folderName}/${fileName}`, kind: "file", size: data.length },
+					],
+					onConflict: "ask",
+				} as never),
+			);
+			const accepted = await vi.waitFor(() => {
+				const found = first.received.find((m) => m.requestId === "kept");
+				expect(found?.type).toBe("TRANSFER_ACCEPTED");
+				return found as Record<string, unknown>;
+			});
+			const transferId = accepted.transferId as string;
+			expect(fs.existsSync(stray)).toBe(false);
+			await sending(first.received);
+			const put = (clientId: string, at: number) =>
+				hub.inject({
+					method: "PUT",
+					url: `/api/transfers/${transferId}/items/1?offset=${at}`,
+					headers: {
+						...bearer,
+						"content-type": "application/octet-stream",
+						"x-lasterm-client-id": clientId,
+					},
+					payload: data.subarray(at, at + chunk),
+				});
+			expect((await put(first.clientId, 0)).statusCode).toBe(200);
+			expect(serverLog.shipped(fromFirst)).toEqual([]);
+
+			// The hub stops, and the next one brings the upload back.
+			ws.terminate();
+			await hub.close();
+			hub = await hubOn();
+			await hub.ready();
+			const second = await windowOf(hub);
+			ws = second.socket;
+			const fromSecond = serverLog.mark();
+			expect(second.received.find((m) => m.type === "STATE_SYNC")?.transfers).toEqual([
+				expect.objectContaining({ transferId, state: "interrupted" }),
+			]);
+			expect(
+				(await hub.inject({ method: "GET", url: "/api/transfers", headers: bearer })).statusCode,
+			).toBe(200);
+			ws.send(encodeMessage({ type: "TRANSFER_RESUME", transferIds: [transferId] } as never));
+			await sending(second.received);
+			expect((await put(second.clientId, chunk)).statusCode).toBe(200);
+			ws.send(encodeMessage({ type: "TRANSFER_DISCARD", transferIds: [transferId] } as never));
+			await vi.waitFor(() =>
+				expect(
+					second.received.some((m) => m.type === "TRANSFER_STATE" && m.state === "discarded"),
+				).toBe(true),
+			);
+			await vi.waitFor(() =>
+				expect(
+					fs.readdirSync(path.join(dest, folderName)).filter((name) => name.endsWith(".partial")),
+				).toEqual([]),
+			);
+
+			expect(serverLog.shipped(fromSecond)).toEqual([]);
+			const text = `${serverLog.text()}\n${log.text()}`;
+			for (const name of [folderName, fileName, strayName, destName, "lasterm-kept-stray-8608"]) {
+				expect(text).not.toContain(name);
+			}
+		} finally {
+			ws?.terminate();
+			await hub.close();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("no logged request carries a secret, at any level", () => {

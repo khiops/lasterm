@@ -9,7 +9,7 @@ export { handlePing } from "./ping.js";
 export { handleResize } from "./resize.js";
 export { handleSpawn } from "./spawn.js";
 export { handleTestConnect } from "./test-connect.js";
-export { handleTransfer } from "./transfer.js";
+export { handleTransfer, type TransferMessage } from "./transfer.js";
 export type { WsHandlerContext, WsMessageHandler, WsTransfers } from "./types.js";
 export {
 	handleWriteClaim,

@@ -15,6 +15,7 @@ import type net from "node:net";
 import { join } from "node:path";
 import {
 	type AgentSpawnMessage,
+	type AuthPromptMessage,
 	encodeFrame,
 	FrameReader,
 	generateId,
@@ -57,6 +58,22 @@ const HOST_KEY = rsaPem();
 const KEY_DIR = makeTempDir("lasterm-host-connection-");
 const CLIENT_KEY_PATH = join(KEY_DIR, "client.pem");
 writeFileSync(CLIENT_KEY_PATH, rsaPem(), { mode: 0o600 });
+/** A key that needs its passphrase (#860). */
+const ENCRYPTED_KEY_PATH = join(KEY_DIR, "encrypted.pem");
+writeFileSync(
+	ENCRYPTED_KEY_PATH,
+	generateKeyPairSync("rsa", {
+		modulusLength: 2048,
+		publicKeyEncoding: { type: "pkcs1", format: "pem" },
+		privateKeyEncoding: {
+			type: "pkcs1",
+			format: "pem",
+			cipher: "aes-256-cbc",
+			passphrase: "not-a-real-secret",
+		},
+	}).privateKey,
+	{ mode: 0o600 },
+);
 
 const HOST_FINGERPRINT = (() => {
 	const parsed = ssh2.utils.parseKey(HOST_KEY);
@@ -279,6 +296,8 @@ async function hubWith(
 		/** The pin as 0.14.3 wrote it, padded, then migration 022 as an upgrade runs it. */
 		pinnedBy0143?: boolean;
 		refusesForwarding?: boolean;
+		/** The key the hub signs in with; one that needs no passphrase by default. */
+		keyPath?: string;
 	} = {
 		daemon: false,
 	},
@@ -294,7 +313,7 @@ async function hubWith(
 		sshHost: "127.0.0.1",
 		sshPort: remote.port,
 		sshAuth: "key",
-		sshKeyPath: CLIENT_KEY_PATH,
+		sshKeyPath: options.keyPath ?? CLIENT_KEY_PATH,
 		sshRemoteDaemon: options.daemon,
 	});
 	if (options.pinned !== false)
@@ -944,9 +963,84 @@ describe("uploads to a host hold its connection (#833)", { timeout: 20_000 }, ()
 		await connected(h);
 		h.sm.disconnectHost(h.host.id);
 		expect(agentOf(h)).toBeUndefined();
-		await expect(h.sm.connectForTransfer(h.host.id, h.window.id)).resolves.toBe(true);
+		await expect(h.sm.connectForTransfer(h.host.id, h.window.id)).resolves.toEqual({
+			connected: true,
+		});
 		expect(agentOf(h)).toBeDefined();
 		expect(h.sm.getStateSnapshot().userDisconnectedHosts).toBeUndefined();
+	});
+
+	it("says why it could not connect for an upload: a host key not accepted (#860)", async () => {
+		const h = await hubWith({ daemon: false, pinned: false });
+		h.window.send = (msg) => {
+			h.heard.push(msg);
+			if (msg.type === "HOST_VERIFY") {
+				queueMicrotask(() =>
+					h.sm.handleHostVerifyResponse((msg as HostVerifyMessage).promptId, "reject", h.window.id),
+				);
+			}
+		};
+		await expect(h.sm.connectForTransfer(h.host.id, h.window.id)).resolves.toEqual({
+			connected: false,
+			reason: "host_key_not_accepted",
+		});
+		expect(agentOf(h)).toBeUndefined();
+	});
+
+	it("says why it could not connect for an upload: a passphrase asked of the window, and not given (#860)", async () => {
+		const h = await hubWith({ daemon: false, keyPath: ENCRYPTED_KEY_PATH });
+		h.window.send = (msg) => {
+			h.heard.push(msg);
+			if (msg.type === "AUTH_PROMPT") {
+				const prompt = msg as AuthPromptMessage;
+				queueMicrotask(() =>
+					h.sm.handleAuthPromptResponse(h.window.id, {
+						hostId: prompt.hostId,
+						secret: null,
+						promptId: prompt.promptId,
+						deliveryEpoch: prompt.deliveryEpoch,
+					}),
+				);
+			}
+		};
+		await expect(h.sm.connectForTransfer(h.host.id, h.window.id)).resolves.toEqual({
+			connected: false,
+			reason: "needs_passphrase",
+		});
+		expect(h.heard.filter((m) => m.type === "AUTH_PROMPT")).toMatchObject([
+			{ promptType: "passphrase" },
+		]);
+		expect(agentOf(h)).toBeUndefined();
+	});
+
+	it("tells the uploads when a host's agent connects, lists the interrupted ones in STATE_SYNC, and has them saved as the hub quits (#860)", async () => {
+		const h = await hubWith({ daemon: true });
+		const told: string[] = [];
+		let saved = 0;
+		const entry = {
+			transferId: "01HZ0000000000000000000TR1",
+			channelId: "01HZ0000000000000000000CH1",
+			hostId: h.host.id,
+			dir: "/srv",
+			state: "interrupted" as const,
+			totals: { files: 1, bytes: 10, acked: 4, states: { interrupted: 1 } },
+			updatedAt: "2026-11-06T00:00:00.000Z",
+		};
+		h.sm.setTransfers({
+			activeOn: () => 0,
+			interruptOn: () => {},
+			hostConnected: (hostId) => told.push(hostId),
+			saveNow: () => {
+				saved++;
+			},
+			interruptedUploads: () => [entry],
+		});
+		await connected(h);
+		await until("the uploads are told", () => told.length > 0);
+		expect(told).toEqual([h.host.id]);
+		expect(h.sm.getStateSnapshot().transfers).toEqual([entry]);
+		h.sm.beginQuit();
+		expect(saved).toBe(1);
 	});
 });
 

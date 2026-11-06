@@ -460,6 +460,12 @@ export function parseWindowsEntries(lines: readonly string[], name?: string): Fi
 
 // ─── The backend ──────────────────────────────────────────────────────────────
 
+/** What runs a Windows script in place of an SSH command of its own: a `PowerShellLoop`. */
+export type WindowsRunner = (
+	script: string,
+	timeoutMs: number,
+) => Promise<{ stdout: string; stderr: string; exitCode: number | null }>;
+
 /**
  * A host's files over SSH commands, on the hub's own connection: POSIX or
  * Windows, as the host's style says.
@@ -470,7 +476,13 @@ export class ExecFileBackend implements FileBackend {
 		private readonly style: PathStyle,
 		/** Whether the connection is gone, so that a failure is said as `HOST_NOT_CONNECTED`. */
 		private readonly lost: () => boolean,
+		private readonly runWindows: WindowsRunner | null = null,
 	) {}
+
+	/** The same files, with each Windows script run by `run` (#865). */
+	through(run: WindowsRunner): ExecFileBackend {
+		return new ExecFileBackend(this.client, this.style, this.lost, run);
+	}
 
 	async home(): Promise<string> {
 		const what = "The home folder could not be found";
@@ -603,11 +615,14 @@ export class ExecFileBackend implements FileBackend {
 		);
 	}
 
-	/** Run an encoded PowerShell, and answer the lines after its `OK` (see `posix`). */
+	/** Run an encoded PowerShell, or the script through `runWindows`, and answer the lines after its `OK` (see `posix`). */
 	private async windows(script: string, what: string, parent = false): Promise<string[]> {
-		let result: { stdout: string; stderr: string; exitCode: number };
+		let result: { stdout: string; stderr: string; exitCode: number | null };
 		try {
-			result = await sshExec(this.client, encodedPowerShell(script), WINDOWS_TIMEOUT_MS);
+			result =
+				this.runWindows !== null
+					? await this.runWindows(script, WINDOWS_TIMEOUT_MS)
+					: await sshExec(this.client, encodedPowerShell(script), WINDOWS_TIMEOUT_MS);
 		} catch (error) {
 			if (this.lost()) throw this.gone(error);
 			throw new FileAccessError("FILE_ACCESS_FAILED", `${what}: ${describeError(error)}`, {

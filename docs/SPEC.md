@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-29
+> Last updated: 2026-11-06
 
 ## 1. Vision
 
@@ -249,8 +249,16 @@ Local daemon, single process, binds to 127.0.0.1.
 - Running uploads hold their host's connection: the acquisition, the retirement of an outdated
   daemon (#805), and the gestures that close a connection, which ask first
   (`TRANSFERS_WOULD_STOP`)
-- In memory for now; keeping them in `meta.db` and resuming them after a restart is #833's second
-  part. Logs no path and no name, and nothing per chunk at INFO
+- Kept in `meta.db` (`transfers`, `transfer_items`, STORAGE.md § 3.9, #860): state changes at once,
+  each file's acknowledged prefix every 8 MiB or 2 s and when the hub quits. After a restart every
+  upload that was moving is interrupted and listed in STATE_SYNC; only a window's
+  `TRANSFER_RESUME` takes it up, its hosts reached one at a time through the interactive Connect,
+  each temporary cut to what its host acknowledged, a missing or short one started again, a placed
+  file never sent again. A cancelled question leaves it resumable, saying why. One whose window is
+  still open and whose link merely dropped resumes when the hub reconnects the host
+- `TRANSFER_DISCARD` and a 7-day expiry remove what an upload left on its host, at once or at the
+  host's next connection; an upload's start sweeps the folders it lists of temporaries no record
+  knows, older than an hour. Logs no path and no name, and nothing per chunk at INFO
 
 **Cache Manager:**
 - Write-through: every OUTPUT chunk → spool.db

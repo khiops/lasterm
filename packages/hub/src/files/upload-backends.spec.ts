@@ -23,6 +23,7 @@ import {
 	VerifyFailed,
 } from "./upload-backend.js";
 import {
+	execBackend,
 	sftpBackend,
 	UPLOAD_BACKENDS,
 	type UploadHarness,
@@ -102,6 +103,26 @@ describe.each(UPLOAD_BACKENDS.filter((kind) => kind.runs))("an upload over $name
 			expect(readFileSync(h.local(target))).toEqual(data);
 			expect(Math.round(statSync(h.local(target)).mtimeMs / 1000)).toBe(MTIME / 1000);
 			expect(existsSync(h.local(temp))).toBe(false);
+		}));
+
+	it("cuts a temporary to the bytes its host acknowledged, then appends from there (#860)", () =>
+		use(async (h) => {
+			const data = bytes(200_000);
+			const target = h.at("resumed.bin");
+			const temp = tempPathFor(target, h.backend.style);
+			const first = await h.backend.open(temp, options(data.length));
+			await first.write(data.subarray(0, 150_000), 0);
+			await first.abort();
+			await h.backend.truncate(temp, 100_000);
+			expect(statSync(h.local(temp)).size).toBe(100_000);
+			expect(readFileSync(h.local(temp))).toEqual(data.subarray(0, 100_000));
+			const rest = await h.backend.open(temp, options(data.length, { resumeAt: 100_000 }));
+			await rest.write(data.subarray(100_000), 100_000);
+			expect(await rest.finish(null)).toBe("size");
+			expect(readFileSync(h.local(temp))).toEqual(data);
+			await expect(h.backend.truncate(h.at("not there.bin"), 0)).rejects.toMatchObject({
+				code: "NOT_FOUND",
+			});
 		}));
 
 	it("never replaces a file that has the name, whether it was there first or appeared meanwhile", () =>
@@ -270,6 +291,33 @@ describe.skipIf(windowsMachine)("a POSIX host over SSH commands with no tool to 
 		} finally {
 			await host.close();
 			await removeTempDir(root);
+		}
+	});
+});
+
+// Starting a PowerShell costs a second or more; a script in the upload's loop, milliseconds (#865).
+describe.runIf(windowsMachine)("a Windows host over SSH commands", () => {
+	it("starts a PowerShell per file it writes, and one for everything else an upload asks", async () => {
+		const h = await execBackend("windows").start();
+		try {
+			const [made] = await h.backend.mkdirs([h.at("in")]);
+			expect(made?.kind).toBe("created");
+			const target = h.at("in", "a.txt");
+			const first = await sendWhole(h, target, Buffer.from("a"));
+			expect(await h.backend.place(first, target, false)).toEqual({ kind: "placed" });
+			const second = await sendWhole(h, target, Buffer.from("b"));
+			expect(await h.backend.place(second, target, false)).toMatchObject({
+				kind: "exists",
+				existing: { kind: "file", size: 1 },
+			});
+			await h.backend.remove(second);
+			expect((await h.backend.list(h.at("in"))).map((entry) => entry.name)).toEqual(["a.txt"]);
+			expect(await h.backend.stat(target)).toMatchObject({ kind: "file", size: 1 });
+			expect((await h.backend.freeSpace(h.dir)).total).toBeGreaterThan(0);
+			expect(readFileSync(h.local(target), "utf8")).toBe("a");
+			expect(h.host?.server.execCommands).toHaveLength(3);
+		} finally {
+			await h.close();
 		}
 	});
 });

@@ -2,7 +2,7 @@
 
 > Version: 1 (MVP)
 > Status: draft
-> Last updated: 2026-10-28
+> Last updated: 2026-11-06
 
 ## 1. Framing
 
@@ -1019,7 +1019,18 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
   }>,
   // The hosts their user disconnected (#648), with a session or without one: a host
   // whose connection ran its terminals has none left. Absent when there are none.
-  user_disconnected_hosts?: string[]
+  user_disconnected_hosts?: string[],
+  // The uploads the hub holds as interrupted (§ 4.19, #860): a restart's, a window's that
+  // left, a connection's closed on purpose. Absent when there are none, and while
+  // [experimental] file_transfer is off.
+  transfers?: Array<{
+    transfer_id: string, channel_id: string, host_id: string,
+    dir: string,                    // normalised for the host
+    state: "interrupted",
+    reason?: "needs_passphrase" | "needs_password" | "host_key_not_accepted" | "host_unreachable",
+    totals: { files, bytes, acked, states },
+    updated_at: string              // ISO 8601; discarded 7 days after
+  }>
 }
 ```
 
@@ -1526,11 +1537,18 @@ conflict, of how many ("7 of 120"). Or it answers
 | `skipped` | Left out, as an answer or `on_conflict` said |
 | `conflict` | Something has its name at the destination: it waits for an answer, the others go on |
 | `cancelled` | Stopped, its temporary removed. Retry sends it again |
-| `interrupted` | Stopped by the window that sent it leaving, or by the connection ending; its temporary kept. Retry resumes it |
+| `interrupted` | Stopped by the window that sent it leaving, by the connection ending, or by the hub stopping; its temporary kept. Retry or a resume takes it up again |
 
 `outcome` is `placed`, `replaced`, `kept_both` (with `final_name`), `skipped`, and for a folder
-`created` or `merged`: a saved policy never acts unseen. `verification` is `size`, `sha256`, or
-`no_hash_tool` (over SSH commands, on a host with no tool to hash with: the size check stands).
+`created` or `merged`: a saved policy never acts unseen. `verification` is `size`, `sha256`,
+`no_hash_tool` (over SSH commands, on a host with no tool to hash with: the size check stands), or
+`size_resumed` (over SSH commands with `transfer_verify` on, a file whose first bytes a hub before a
+restart sent: their hash ended with that hub, and the size check stands, #860).
+
+An upload as a whole is `running` while a window sends it, `interrupted` once no window does (it
+left, its connection was closed on purpose, the hub restarted), `done` once nothing is left to
+send, answer or place, and `discarded` once dropped (below). The upload list (§ 6) gives it, and
+TRANSFER_STATE says each change.
 
 **Following (Hub → UI)**, to every client attached to the terminal, readers included, and to the
 window that sends the bytes:
@@ -1543,6 +1561,9 @@ window that sends the bytes:
 { type: "TRANSFER_CONFLICT", transfer_id, channel_id,
   items: [{ item_id, existing: { kind, size, mtime } | null, type_clash?: true, late?: true }] }
 { type: "TRANSFER_DONE", transfer_id, channel_id, totals }
+{ type: "TRANSFER_STATE", transfer_id, channel_id, host_id,
+  state: "running" | "interrupted" | "done" | "discarded",
+  reason?: "needs_passphrase" | "needs_password" | "host_key_not_accepted" | "host_unreachable" }
 ```
 
 PROGRESS carries what changed in the last 100 ms: the items, and the folders whose files changed,
@@ -1550,8 +1571,10 @@ PROGRESS carries what changed in the last 100 ms: the items, and the folders who
 `totals` count files only ("118 of 120 placed, 2 failed"). CONFLICT lists the items that found
 something under their name after the start had looked (`late`): a file that appeared meanwhile, or
 a file where a folder was to be created. DONE says nothing is left to send, answer or place;
-failed and cancelled files may still be retried. A client attached later reads an upload with
-`GET /api/transfers?channel_id=` and `GET /api/transfers/:id` (§ 6).
+failed and cancelled files may still be retried. STATE says the upload's own state when it changes,
+and, after a resume that could not reach the host, why (below); it goes to the window that asked
+too. A client attached later reads an upload with `GET /api/transfers?channel_id=` and
+`GET /api/transfers/:id` (§ 6).
 
 **Answering (UI → Hub).** Each names a `scope`: an item's id (a folder's: everything under it),
 or `"upload"`, the whole upload.
@@ -1580,9 +1603,43 @@ Each is refused with `TRANSFER_ERROR` `{ transfer_id, code, message }`: `TRANSFE
 `ITEM_NOT_FOUND`, `INVALID_ACTION`, `HOST_NOT_CONNECTED` (a retry that could not reach the host),
 or `WRITE_LOCK_DENIED`.
 
-**The write lock.** Only a window that may type into the terminal starts, answers, retries or
-cancels; for a terminal that ended (or was deleted), the device that started the upload, by its
-token. The bytes come only from the window that started the upload, and only while it may type:
+**Resuming and discarding (UI → Hub, #860).** Each names one upload or several ("Resume all",
+"Discard all"), at most 1,000:
+
+```typescript
+{ type: "TRANSFER_RESUME",  transfer_ids: string[] }
+{ type: "TRANSFER_DISCARD", transfer_ids: string[] }
+```
+
+- RESUME takes up interrupted uploads, the window that asks sending their bytes from then on. It is
+  lock-checked as a start is (for an ended terminal, by the device that started it), and only a
+  window of the device that started an upload may resume it, since only that device holds its
+  files (`NOT_THE_SENDER`). The hosts are reached one at a time, in the order named: a host not
+  connected is connected as a Connect does, as part of the same request, its passphrase or host-key
+  question put to this window (AUTH_PROMPT, HOST_VERIFY, § 4.9, § 4.10), with no separate connect
+  step. A question cancelled, or a host that cannot be reached, leaves that host's uploads
+  `interrupted` with a `reason` (`needs_passphrase`, `needs_password`, `host_key_not_accepted`,
+  `host_unreachable`), said by TRANSFER_STATE and kept for the list and STATE_SYNC, so that the row
+  can say "Not resumed: <host> needs its passphrase"; the next host goes on, and the next RESUME
+  asks again. Reached, each file of an upload is looked at before any byte moves: a placed file is
+  never sent again; a file whose temporary is at least as long as what its host acknowledged
+  (`acked`) has it cut to that (SFTP `setstat` size, `truncate -s` else `dd`, `SetLength`, the hub's
+  `truncate`) and goes on from there; one whose temporary is missing or shorter starts again under a
+  new one; a whole temporary is only placed. Then what failed, was cancelled or interrupted is
+  queued, as a retry would, and TRANSFER_PROGRESS gives each file's `acked`.
+- DISCARD drops uploads: what they were doing stops, TRANSFER_STATE says `discarded`, and their
+  temporaries are removed by their recorded paths, the host reached as for a resume. A host that
+  cannot be reached keeps the record, `discarded`, and its temporaries are removed at its next
+  connection, whoever makes it. Placed files stay.
+
+Both are refused per upload with `TRANSFER_ERROR` `{ transfer_id, code, message }`
+(`TRANSFER_NOT_FOUND`, `WRITE_LOCK_DENIED`, `NOT_THE_SENDER`), and as a whole with
+`INVALID_INPUT` when `transfer_ids` names none or more than 1,000.
+
+**The write lock.** Only a window that may type into the terminal starts, answers, retries,
+cancels, resumes or discards; for a terminal that ended (or was deleted), the device that started
+the upload, by its token. The bytes come only from the window that started the upload (or the one
+that resumed it), and only while it may type:
 if the lock moves meanwhile, the files it is sending finish, and its queued files and the
 conflicts wait; the new writer hears of them and may answer, retry or cancel them. They go on when
 the lock comes back.
@@ -1626,9 +1683,19 @@ is a conflict, `late`: nothing is replaced unasked.
 
 Folders are created from the destination down, before what is in them is sent: SFTP `mkdir`, one
 per folder; a POSIX `sh -s` script with `mkdir --` per folder, five hundred to a script; a Windows
-encoded PowerShell reading the paths as Base64 on its stdin, `[IO.Directory]::CreateDirectory`
-each; the hub's `fs.mkdir`. A folder (or a link to one) already there is merged into; anything
-else there is a type clash.
+PowerShell script holding the paths as Base64 data, `[IO.Directory]::CreateDirectory` each, five
+hundred to a script; the hub's `fs.mkdir`. A folder (or a link to one) already there is merged
+into; anything else there is a type clash.
+
+**One PowerShell per upload on Windows.** Over SSH commands, a Windows file's bytes go on the stdin
+of an encoded PowerShell of its own. Everything else the upload asks of the host (placing,
+replacing, cutting or removing a temporary, creating folders, looking at the destination) goes
+to one PowerShell per upload, which reads each script as a Base64 line on its stdin and runs it
+in a runspace of its own, then prints a line of `lasterm-done-5e0c27` and Base64 of the error
+that stopped it, if any (#865). Starting a PowerShell takes a second or more; a script there,
+some 25 ms. It starts with the upload's first such script, and is let go when the upload ends or
+after 30 s without one; a script that gives no answer in time closes it, and the next starts
+another.
 
 **Verification.** Every file's size is checked on the host before it is placed. Over SSH commands
 with `transfer_verify` on (the default), the hub hashes the bytes as they pass, and the host hashes
@@ -1636,7 +1703,9 @@ the temporary before placement (`sha256sum`, else `openssl dgst -sha256`, else `
 each reading it on stdin; on Windows .NET's SHA-256): a file whose hashes differ fails
 (`HASH_MISMATCH`) and its temporary is removed, so a corrupted file never lands under its name.
 A file that resumes over SSH commands appends to its temporary only when the temporary holds
-exactly the bytes the hub sent and hashed; otherwise it starts again. Over SFTP and locally the
+exactly the bytes the hub sent and hashed; otherwise it starts again. After a hub restart, whose
+running hash ended with that hub, its temporary is cut to what the record says the host
+acknowledged and appended to, and the file is checked by size, `size_resumed` (#860). Over SFTP and locally the
 option does nothing. A full disk fails the file with `NO_SPACE`, its temporary removed.
 
 **Holding the host's connection.** A running or queued upload holds its host's connection as a
@@ -1647,9 +1716,33 @@ and Disconnect, Reconnect, `DELETE /api/sessions/:id`, Stop keeping an agent and
 Forced, they become `interrupted`, and a retry resumes them. The local host's uploads go through
 the hub's own file system, which none of these touch.
 
-In memory only for now: a hub restart forgets the uploads, their temporaries left on the hosts.
-Keeping them in `meta.db`, resuming them after a restart, Discard, their expiry and the sweep of
-temporaries nobody knows come with #833's second part.
+**Kept across a restart (#860).** An upload is kept in `meta.db` (STORAGE.md § 3.9): a state change
+is written at once; a file's `acked`, the contiguous prefix its host acknowledged, once 8 MiB more
+are there or within 2 s, and all of it when the hub quits, before its agents stop. With several
+SFTP writes in flight a later one can land first, so a temporary's size proves nothing, and after a
+crash the host may hold more than the record says: a resume cuts it back. After a restart (a crash,
+an update, a quit) every upload that was moving is `interrupted`, each file that was being sent or
+placed too, and STATE_SYNC lists them to every window. Nothing resumes by itself after a restart:
+background reconnects use only a cached passphrase, and that cache is empty after one; only a
+window's RESUME takes an upload up again. An upload whose window is still open and whose link
+merely dropped resumes by itself when the hub reconnects its host. A same drop again
+(TRANSFER_START with the same tree) joins an interrupted upload after a restart as before one.
+
+Over SSH commands a file resumed after a restart is checked by size and reported `size_resumed`.
+Over SSH commands a chunk is answered once the connection took it, so after a crash the host may
+hold less than the record says: that file starts again.
+
+**Expiry and the sweep.** An interrupted upload nobody resumes is discarded 7 days after it last
+changed, as Discard does, looked at when the hub starts and every hour; its temporaries are removed
+when its host is next reached. When an upload starts, the hub removes from each folder of the
+destination it lists the temporaries of its naming (`.<name>.<16 hex>.partial`, files only) that no
+record knows and that are older than an hour: what a hub that died before writing its record left.
+A temporary a record knows is never swept, nor anything younger, nor a name of another shape; the
+hour leaves alone what another hub may still be writing there.
+
+**Retirement and updates.** An interrupted upload holds no connection: an outdated remote daemon
+may be retired (§ 3.17, #805), and the hub updated, while one waits, its record kept. A resume
+holds the host's connection from the moment it reaches for it, as a start does.
 
 ### 4.20 FILES_PANEL (the writer's files panel, #838)
 
@@ -2134,14 +2227,16 @@ Uploads (#833, § 4.19): a file's bytes, and what an upload is at. Every route w
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | PUT | `/api/transfers/:id/items/:item` | ● | `?offset=`, `Content-Type: application/octet-stream`, header `X-Lasterm-Client-Id` → 200 `{ acked }`. One chunk of a file, at `offset`, which must be where the host's bytes end (`acked`, as TRANSFER_PROGRESS says it). Chunks of 1 MiB, the last shorter; 4 MiB at most (413 above). Answered once the host acknowledged it. Only from the window that started the upload, named by the header and authenticated with the request's own token (403 `NOT_THE_SENDER`), and only for a file in `sending` (409 `ITEM_NOT_SENDING` with `state`); 409 `OFFSET_MISMATCH` with `acked`, 409 `ITEM_BUSY` while another chunk of it is written, 400 `PAST_END` for an empty chunk or one past its size, 415 for another content type. A chunk the host failed answers its code: 409 `INTERRUPTED` (the file is `interrupted`), 502 otherwise (`failed`, with its reason) |
-| GET | `/api/transfers` | ● | `?channel_id=` (required) → `{ transfers: [{ transfer_id, channel_id, host_id, dir, on_conflict, direction: "upload", state: "running" \| "interrupted" \| "done", totals }] }`: the uploads from that terminal. `interrupted`: the window sending it left |
+| GET | `/api/transfers` | ● | `?channel_id=` → `{ transfers: [{ transfer_id, channel_id, host_id, dir, on_conflict, direction: "upload", state: "running" \| "interrupted" \| "done", reason?, totals, updated_at }] }`: the uploads from that terminal; without `channel_id`, every upload the hub holds, those a restart left included (#860). `interrupted`: no window sends it (it left, its connection was closed on purpose, the hub restarted); `reason`, why the last resume did not reach its host (§ 4.19). A discarded upload is not listed |
 | GET | `/api/transfers/:id` | ● | That upload, as above, with `items: [{ item_id, rel_path, kind, size, state, acked?, outcome?, final_name?, verification?, reason?, code?, existing?, type_clash?, late? }]`; 404 `TRANSFER_NOT_FOUND` |
 
 These routes take `application/octet-stream` in their own scope, with their own body limit, rather
 than the multipart limit of the other uploads. Every answer carries `Cache-Control: no-store`.
 Nothing of them is logged at INFO, a chunk's route running once a megabyte; no path or name is
 logged at any level. An upload whose every file is placed or skipped is forgotten 10 minutes after
-its end; others stay until the hub stops.
+its end, its record with it; one that ended with failures stays until the hub stops, and the next
+hub drops its record; an interrupted one stays across restarts until it is resumed, discarded, or
+7 days old (§ 4.19, #860).
 
 #### Channel Groups (tab groups)
 

@@ -154,7 +154,8 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 			truncated: number;
 		}>();
 		expect(body.truncated).toBe(0);
-		expect(body.entries[0]).toEqual({
+		const named = (name: string) => body.entries.find((entry) => entry.name === name);
+		expect(named("sub")).toEqual({
 			name: "sub",
 			kind: "directory",
 			size: null,
@@ -164,7 +165,11 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 			process.platform === "win32" ? ["sub", "f.txt"] : ["link", "sub", "f.txt"],
 		);
 		if (process.platform !== "win32") {
-			expect(body.entries[0]).toMatchObject({ link_target: "sub", link_kind: "directory" });
+			expect(named("link")).toMatchObject({
+				kind: "symlink",
+				link_target: "sub",
+				link_kind: "directory",
+			});
 		}
 		const hidden = await list(root, "&hidden=1");
 		expect(hidden.json<{ entries: unknown[] }>().entries).toHaveLength(

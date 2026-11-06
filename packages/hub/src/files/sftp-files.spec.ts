@@ -5,7 +5,7 @@ import type { Client, SFTPWrapper } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SftpServerOptions } from "../session/sftp-server.fixture.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
-import { failsWith, LOCAL_ROUND_TRIP_NAMES } from "./file-names.fixture.js";
+import { failsWith, LOCAL_ROUND_TRIP_NAMES, roundTripNames } from "./file-names.fixture.js";
 import { WINDOWS_ROOT } from "./host-paths.js";
 import { SFTP_IDLE_MS, SftpFileBackend, SharedSftp } from "./sftp-files.js";
 import { type MockSshHost, startMockSshHost } from "./ssh-host.fixture.js";
@@ -180,7 +180,8 @@ describe("a Windows host's files over SFTP, as Win32-OpenSSH serves them", () =>
 		await failsWith(state.files.list("C:\\Users\\test\\missing", false), "NOT_FOUND");
 	});
 
-	it.each(LOCAL_ROUND_TRIP_NAMES)("round-trips the name %j", async (name) => {
+	// What a Windows name may hold: a backslash is a separator there, wherever the view runs.
+	it.each(roundTripNames("windows"))("round-trips the name %j", async (name) => {
 		await state.files.mkdir(`C:\\Users\\test\\${name}`);
 		writeFileSync(join(home(), name, name), "x");
 		expect((await state.files.list("C:\\Users\\test", false)).map((entry) => entry.name)).toEqual([

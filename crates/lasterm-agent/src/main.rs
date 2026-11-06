@@ -1,6 +1,7 @@
 mod away;
 mod batch;
 mod color_veto;
+mod cwd;
 mod daemon;
 mod elevation;
 mod environment;

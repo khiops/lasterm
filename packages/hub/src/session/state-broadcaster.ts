@@ -15,6 +15,8 @@ import type {
 	ChannelEndReason,
 	ChannelStateMessage,
 	CwdChangeMessage,
+	FilesPanelMessage,
+	FilesPanelState,
 	ProtocolMessage,
 	SessionStateMessage,
 	StateSyncMessage,
@@ -32,6 +34,14 @@ import { SshAgent } from "./ssh-agent.js";
 const TITLE_DEBOUNCE_MS = 100;
 
 export class StateBroadcaster {
+	/**
+	 * The terminals on which the writer's files panel is open (#838), by id, in
+	 * memory only. Kept through a terminal's end and its restart under the same
+	 * id, as the writer's panel stays on its pane; a hub restarted forgets them,
+	 * and each writer's window says its own again once it holds the lock.
+	 */
+	private readonly filesPanelsOpen = new Set<string>();
+
 	constructor(private readonly ctx: SharedSessionContext) {}
 
 	// ─── Client registry ────────────────────────────────────────────────────
@@ -159,6 +169,7 @@ export class StateBroadcaster {
 					status: ch.status,
 					displayTitle: ch.displayTitle,
 					...cwdFields(ch.liveCwd),
+					filesPanel: this.filesPanelOf(channelId),
 				});
 			}
 		}
@@ -495,6 +506,33 @@ export class StateBroadcaster {
 			channelId: msg.channelId,
 			...live,
 		} satisfies CwdChangeMessage);
+	}
+
+	/**
+	 * Whether the writer's files panel is open on a terminal (#838): closed
+	 * until its writer says otherwise. ATTACH_OK and STATE_SYNC carry it.
+	 */
+	filesPanelOf(channelId: string): FilesPanelState {
+		return { open: this.filesPanelsOpen.has(channelId) };
+	}
+
+	/**
+	 * Record what the writer's files panel is on a terminal (#838), as the WS
+	 * handler lets the write lock's holder say it, and tell every client
+	 * attached to the terminal when it changed, that one included. A terminal
+	 * the hub does not hold is left alone.
+	 */
+	setFilesPanel(channelId: string, open: boolean): void {
+		if (!this.ctx.channels.has(channelId)) return;
+		if (this.filesPanelsOpen.has(channelId) === open) return;
+		if (open) this.filesPanelsOpen.add(channelId);
+		else this.filesPanelsOpen.delete(channelId);
+		this.ctx.hubLogger?.log("debug", "state-broadcaster: FILES_PANEL", { channelId, open });
+		this.broadcastToChannel(channelId, {
+			type: "FILES_PANEL",
+			channelId,
+			open,
+		} satisfies FilesPanelMessage);
 	}
 
 	/** What ATTACH_OK says of a terminal's working directory (#834). */

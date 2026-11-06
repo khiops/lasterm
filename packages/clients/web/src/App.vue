@@ -370,6 +370,7 @@
 						:form="filesForm"
 						:side="filesPanelSide"
 						:width="filesPanelResize.width.value"
+						:over="filesForm === 'overlay' ? filesFloatOver : null"
 						:attached-on-screen="filesAttachedOnScreen"
 						@close="closeFilesPanel"
 						@show-terminal="showFilesTerminal"
@@ -456,6 +457,7 @@ import {
 	displayedChannelIds,
 } from './composables/displayedChannels.js';
 import { MULTI_PANE_SEARCH_KEY, useMultiPaneSearch } from './composables/useMultiPaneSearch.js';
+import { usePaneBox } from './composables/usePaneBox.js';
 import { findFirstLeafPaneId, MAX_PANE_COUNT, type PaneNode } from './composables/usePaneTree.js';
 import { useResizable } from './composables/useResizable.js';
 import { useShortcutsOverlay } from './composables/useShortcutsOverlay.js';
@@ -641,8 +643,11 @@ provide(
 readSwitchesFrom((name) => configStore.uiConfig.experimental?.[name] === true);
 
 const filesPanel = useFilesPanelStore();
-/** Everything of the panel waits behind file transfer's switch. */
-const filesPanelShown = computed(() => configStore.fileTransferEnabled && filesPanel.open);
+/**
+ * Everything of the panel waits behind file transfer's switch. On a terminal this window reads,
+ * it shows as its reader chose there, following the writer's by default (#838).
+ */
+const filesPanelShown = computed(() => configStore.fileTransferEnabled && filesPanel.shown);
 const filesPanelSide = computed<'left' | 'right'>(() =>
 	configStore.uiConfig.transfer?.panelSide === 'left' ? 'left' : 'right',
 );
@@ -735,8 +740,13 @@ let stopTransferGuards: (() => void) | null = null;
 
 function onWindowDragEnter(event: DragEvent): void {
 	if (!event.dataTransfer?.types.includes('Files')) return;
-	if (!configStore.fileTransferEnabled || filesPanel.open || focusedTerminal.value === null) return;
+	const channelId = focusedTerminal.value;
+	if (!configStore.fileTransferEnabled || filesPanel.shown || channelId === null) return;
 	if (configStore.uiConfig.transfer?.openOnDrag === false) return;
+	// A terminal this window only reads takes no drop: a drag there leaves its reader's choice
+	// of panel (#838) as it was.
+	const holder = writeLockStore.locks.get(channelId)?.holder ?? null;
+	if (holder !== null && !writeLockStore.isWriter(channelId)) return;
 	filesPanel.openFor(null);
 }
 
@@ -783,18 +793,38 @@ watch(terminalBody, (el, _before, onCleanup) => {
 });
 
 /**
- * Docked, floating or a sheet. A reader's panel floats, so that it resizes nothing, until the
- * writer's panel reaches the readers (#838).
+ * Docked, floating or a sheet. The window's own panel docks, narrowing every pane of the tab, so
+ * the terminals this window writes there get their new size (#831); the writer's panel a reader
+ * only follows floats over that terminal's pane, and resizes nothing (#838).
  */
-const filesForm = computed(() => {
-	const attached = filesPanel.attachedChannelId;
-	return filesPanelForm({
+const filesForm = computed(() =>
+	filesPanelForm({
 		windowWidth: windowWidth.value,
 		areaWidth: terminalBodyWidth.value,
 		panelWidth: filesPanelResize.width.value,
-		writesAttached: attached === null ? null : writeLockStore.isWriter(attached),
-	});
+		follows: filesPanel.followsWriter,
+	}),
+);
+
+/** The pane of the terminal the panel is attached to, in the tab shown, when it follows the writer's. */
+const filesFollowedPaneId = computed<string | null>(() => {
+	const channelId = filesPanel.attachedChannelId;
+	const tab = layout.activeTab.value;
+	const root = tab === null ? undefined : layout.layouts.value[tab.id];
+	if (!filesPanel.followsWriter || channelId === null || root === null || root === undefined) {
+		return null;
+	}
+	const leaf = paneLeaves(root).find(
+		(candidate) => candidate.node.type === 'terminal' && candidate.node.channelId === channelId,
+	);
+	return leaf?.id ?? null;
 });
+/** Where the writer's panel a reader follows floats: over that pane, below its header. */
+const filesFloatOver = usePaneBox(
+	terminalBody,
+	() => filesFollowedPaneId.value,
+	() => [layout.layouts.value, layout.activeTab.value?.id],
+);
 
 /** Whether the keyboard is in the files panel. */
 function keyboardInFilesPanel(): boolean {
@@ -807,7 +837,7 @@ function keyboardInFilesPanel(): boolean {
  */
 function toggleFilesPanel(): void {
 	if (!configStore.fileTransferEnabled) return;
-	if (filesPanel.open && keyboardInFilesPanel()) closeFilesPanel();
+	if (filesPanel.shown && keyboardInFilesPanel()) closeFilesPanel();
 	else filesPanel.openFor(null, { keyboard: true });
 }
 

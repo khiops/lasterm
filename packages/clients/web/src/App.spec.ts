@@ -302,8 +302,10 @@ describe("the files panel in the window", () => {
 
 	it("shows it only while file transfer is on, beside the panes, below the tab bar", () => {
 		const text = flat(SOURCE);
+		// Shown as the store says for the attached terminal: the window's own panel, or on one it
+		// reads, as its reader chose there (#838, stores/files-panel-sharing.spec.ts).
 		expect(text).toContain(
-			"const filesPanelShown = computed(() => configStore.fileTransferEnabled && filesPanel.open);",
+			"const filesPanelShown = computed(() => configStore.fileTransferEnabled && filesPanel.shown);",
 		);
 		expect(text).toContain('<template v-if="filesPanelShown">');
 		// The panes and the panel share the row under the tab bar; the panes keep their zone.
@@ -322,7 +324,7 @@ describe("the files panel in the window", () => {
 		expect(toggle).toContain("if (!configStore.fileTransferEnabled) return;");
 		// With the keyboard in it, the chord closes it back to the pane; else it opens, keyboard in.
 		expect(toggle).toContain(
-			"if (filesPanel.open && keyboardInFilesPanel()) closeFilesPanel(); else filesPanel.openFor(null, { keyboard: true });",
+			"if (filesPanel.shown && keyboardInFilesPanel()) closeFilesPanel(); else filesPanel.openFor(null, { keyboard: true });",
 		);
 		expect(flat(body(/function closeFilesPanel\(/))).toContain(
 			"const inside = keyboardInFilesPanel(); filesPanel.close(); if (inside) void nextTick(focusActivePane);",
@@ -347,13 +349,21 @@ describe("the files panel in the window", () => {
 		expect(text).toContain("if (leaf !== undefined) layout.setActivePaneId(tab.id, leaf.id);");
 	});
 
-	// Until the writer's panel reaches the readers (#838), a reader's own panel never resizes
-	// the terminal: it floats (utils/files-panel.spec.ts).
-	it("asks whether this window writes the attached terminal for the panel's form", () => {
-		expect(flat(SOURCE)).toContain(
-			"writesAttached: attached === null ? null : writeLockStore.isWriter(attached),",
-		);
+	// The window's own panel docks; the writer's panel a reader only follows floats, and resizes
+	// nothing (#838, utils/files-panel.spec.ts, stores/files-panel-sharing.spec.ts).
+	it("floats the panel a reader only follows over that terminal's pane, and docks its own", () => {
+		const text = flat(SOURCE);
+		expect(text).toContain("follows: filesPanel.followsWriter,");
+		expect(text).not.toContain("writesAttached");
 		expect(SOURCE).toContain(':form="filesForm"');
+		// Over the attached terminal's pane in the tab shown, below its header (usePaneBox).
+		expect(text).toContain(
+			"candidate.node.type === 'terminal' && candidate.node.channelId === channelId,",
+		);
+		expect(text).toContain(
+			"const filesFloatOver = usePaneBox( terminalBody, () => filesFollowedPaneId.value,",
+		);
+		expect(SOURCE).toContain(`:over="filesForm === 'overlay' ? filesFloatOver : null"`);
 		// Only a docked panel has an edge to drag; its width is `[layout] transfer_panel_width`.
 		expect(SOURCE).toContain(`v-if="filesForm === 'docked'"`);
 		expect(flat(SOURCE)).toContain(

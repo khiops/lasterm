@@ -21,6 +21,7 @@ vi.mock("../../utils/host-files.js", () => ({
 }));
 vi.mock("../../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
 
+import type { PaneBox } from "../../composables/usePaneBox.js";
 import { useChannelsStore } from "../../stores/channels.js";
 import { useConfigStore } from "../../stores/config.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
@@ -71,11 +72,13 @@ const props = reactive<{
 	side: "left" | "right";
 	width: number;
 	attachedOnScreen: boolean;
+	over: PaneBox | null;
 }>({
 	form: "docked",
 	side: "right",
 	width: 300,
 	attachedOnScreen: true,
+	over: null,
 });
 
 async function settle(): Promise<void> {
@@ -109,7 +112,13 @@ const separator = (): HTMLElement | null => root.querySelector('[role="separator
 beforeEach(() => {
 	localStorage.clear();
 	setActivePinia(createPinia());
-	Object.assign(props, { form: "docked", side: "right", width: 300, attachedOnScreen: true });
+	Object.assign(props, {
+		form: "docked",
+		side: "right",
+		width: 300,
+		attachedOnScreen: true,
+		over: null,
+	});
 	closed = 0;
 	shown = 0;
 	mocks.listHostFiles.mockReset();
@@ -286,6 +295,57 @@ describe("the panel's forms", () => {
 		await mountPanel();
 		expect(aside().classList).toContain(`files-panel--${form}`);
 		expect(aside().style.width).toBe(width);
+	});
+
+	it("floats over the pane it is given, below its header, no wider than the pane", async () => {
+		props.form = "overlay";
+		props.over = { top: 70, left: 0, right: 500, bottom: 0, width: 260 };
+		await mountPanel();
+		expect(aside().style.top).toBe("70px");
+		expect(aside().style.right).toBe("500px");
+		expect(aside().style.bottom).toBe("0px");
+		expect(aside().style.width).toBe("260px");
+		props.side = "left";
+		await settle();
+		expect(aside().style.left).toBe("0px");
+		expect(aside().style.right).toBe("");
+	});
+});
+
+// ─── The writer's panel, in a reader's window (#838) ─────────────────────────
+
+describe("the writer's panel a reader follows", () => {
+	/** This window reads ON_RPI and has chosen nothing there; its writer's panel is open on it. */
+	function followTheWriter(): void {
+		const panel = useFilesPanelStore();
+		panel.close();
+		panel.takeWriterPanel(ON_RPI, true);
+		panel.openFor(null);
+		expect(panel.followsWriter).toBe(true);
+	}
+
+	it("says it is the writer's, and offers Dock here, which makes it the reader's own", async () => {
+		followTheWriter();
+		props.form = "overlay";
+		await mountPanel();
+		expect(aside().classList).toContain("files-panel--follows");
+		expect(root.querySelector(".files-header__owner")?.textContent).toBe("Writer's panel");
+		const dock = [...root.querySelectorAll<HTMLButtonElement>(".files-header button")].find(
+			(b) => b.textContent?.trim() === "Dock here",
+		);
+		expect(dock).toBeDefined();
+
+		dock?.click();
+		await settle();
+
+		const panel = useFilesPanelStore();
+		expect([panel.followsWriter, panel.readerChoice(ON_RPI)]).toEqual([false, "open"]);
+		expect(root.querySelector(".files-header__owner")).toBeNull();
+		expect(root.textContent).not.toContain("Dock here");
+		// It stays when the writer closes theirs.
+		panel.takeWriterPanel(ON_RPI, false);
+		await settle();
+		expect(panel.shown).toBe(true);
 	});
 });
 

@@ -9,8 +9,10 @@ import {
 	joinPath,
 	optionSource,
 	optionsSummary,
+	panelShowing,
 	parentPath,
 	pathStyleOf,
+	readerChoiceAfter,
 	type StatusFacts,
 	scopeChoices,
 	sourceLabel,
@@ -18,6 +20,7 @@ import {
 	TRANSFERS_SHARE_DEFAULT,
 	TRANSFERS_SHARE_MAX,
 	typeAheadIndex,
+	writerStatements,
 } from "./files-panel.js";
 
 // ─── Where the panel shows ───────────────────────────────────────────────────
@@ -26,33 +29,116 @@ describe("the panel's form", () => {
 	const wide = { windowWidth: 1400, areaWidth: 1100, panelWidth: 300 };
 
 	it("docks beside the panes while they keep 480 px", () => {
-		expect(filesPanelForm({ ...wide, writesAttached: true })).toBe("docked");
-		expect(filesPanelForm({ ...wide, areaWidth: 780, writesAttached: true })).toBe("docked");
-		// With no terminal attached (an empty pane), nothing of its own to resize either.
-		expect(filesPanelForm({ ...wide, writesAttached: null })).toBe("docked");
+		expect(filesPanelForm({ ...wide, follows: false })).toBe("docked");
+		expect(filesPanelForm({ ...wide, areaWidth: 780, follows: false })).toBe("docked");
 	});
 
 	it("floats over the panes when docking would leave them less than 480 px", () => {
 		// The desktop's narrowest window: 56 + 200 + 544, the panel 300 wide.
 		expect(
-			filesPanelForm({ windowWidth: 800, areaWidth: 544, panelWidth: 300, writesAttached: true }),
+			filesPanelForm({ windowWidth: 800, areaWidth: 544, panelWidth: 300, follows: false }),
 		).toBe("overlay");
-		expect(filesPanelForm({ ...wide, areaWidth: 779, writesAttached: true })).toBe("overlay");
+		expect(filesPanelForm({ ...wide, areaWidth: 779, follows: false })).toBe("overlay");
 	});
 
-	// Until the writer's panel reaches the readers (#838): docking narrows every pane of the tab,
-	// and the window would resize the terminals it writes there for everyone.
-	it("floats in a window that only reads the attached terminal, so that it resizes nothing", () => {
-		expect(filesPanelForm({ ...wide, writesAttached: false })).toBe("overlay");
+	// Docked, it would narrow every pane of the reader's tab, and that window would resize the
+	// terminals it writes there for everyone (#838).
+	it("floats when it only follows the writer's, so that it resizes nothing", () => {
+		expect(filesPanelForm({ ...wide, follows: true })).toBe("overlay");
 	});
 
 	it("is a sheet over the terminal area below a 560 px window", () => {
 		expect(
-			filesPanelForm({ windowWidth: 559, areaWidth: 503, panelWidth: 300, writesAttached: true }),
+			filesPanelForm({ windowWidth: 559, areaWidth: 503, panelWidth: 300, follows: false }),
 		).toBe("sheet");
 		expect(
-			filesPanelForm({ windowWidth: 390, areaWidth: 340, panelWidth: 300, writesAttached: false }),
+			filesPanelForm({ windowWidth: 390, areaWidth: 340, panelWidth: 300, follows: true }),
 		).toBe("sheet");
+	});
+});
+
+// ─── Whose panel it is (#838) ────────────────────────────────────────────────
+
+describe("a reader's choice, per terminal", () => {
+	const reader = { writes: false, ownOpen: false } as const;
+
+	it("none: follows the writer's, floating, opening and closing with it", () => {
+		expect(panelShowing({ ...reader, choice: "none", writerOpen: true })).toBe("follows");
+		expect(panelShowing({ ...reader, choice: "none", writerOpen: false })).toBe("hidden");
+		// The window's own panel, open elsewhere, changes nothing here.
+		expect(panelShowing({ ...reader, ownOpen: true, choice: "none", writerOpen: false })).toBe(
+			"hidden",
+		);
+	});
+
+	it("closed: stays closed whatever the writer does", () => {
+		expect(panelShowing({ ...reader, choice: "closed", writerOpen: true })).toBe("hidden");
+		expect(panelShowing({ ...reader, choice: "closed", writerOpen: false })).toBe("hidden");
+	});
+
+	it("open: stays open, and docks, whatever the writer does", () => {
+		expect(panelShowing({ ...reader, choice: "open", writerOpen: true })).toBe("own");
+		expect(panelShowing({ ...reader, choice: "open", writerOpen: false })).toBe("own");
+	});
+
+	it("is what its gestures make it: opening follows an open writer's, else is its own", () => {
+		expect(readerChoiceAfter("open", true)).toBe("none");
+		expect(readerChoiceAfter("open", false)).toBe("open");
+		expect(readerChoiceAfter("close", true)).toBe("closed");
+		expect(readerChoiceAfter("close", false)).toBe("closed");
+		// "Dock here" makes the writer's panel the reader's own.
+		expect(readerChoiceAfter("dock", true)).toBe("open");
+	});
+
+	it("is not read in a window that writes the terminal, or with none attached", () => {
+		for (const writes of [true, null]) {
+			expect(panelShowing({ writes, ownOpen: true, choice: "closed", writerOpen: false })).toBe(
+				"own",
+			);
+			expect(panelShowing({ writes, ownOpen: false, choice: "open", writerOpen: true })).toBe(
+				"hidden",
+			);
+		}
+	});
+});
+
+describe("what a writer's window tells the hub", () => {
+	const hubHas =
+		(...open: string[]) =>
+		(id: string) =>
+			open.includes(id);
+
+	it("says its panel open on the terminal it is attached to, and nothing the hub has already", () => {
+		expect(
+			writerStatements({ written: ["A", "D"], attached: "A", ownOpen: true, hubOpen: hubHas() }),
+		).toEqual([{ channelId: "A", open: true }]);
+		expect(
+			writerStatements({ written: ["A", "D"], attached: "A", ownOpen: true, hubOpen: hubHas("A") }),
+		).toEqual([]);
+	});
+
+	it("closes it on A and opens it on B as it moves", () => {
+		expect(
+			writerStatements({ written: ["A", "B"], attached: "B", ownOpen: true, hubOpen: hubHas("A") }),
+		).toEqual([
+			{ channelId: "A", open: false },
+			{ channelId: "B", open: true },
+		]);
+	});
+
+	it("closes it where it was once closed, or attached to a terminal the window only reads", () => {
+		expect(
+			writerStatements({ written: ["A"], attached: "A", ownOpen: false, hubOpen: hubHas("A") }),
+		).toEqual([{ channelId: "A", open: false }]);
+		expect(
+			writerStatements({ written: ["A"], attached: "R", ownOpen: true, hubOpen: hubHas("A") }),
+		).toEqual([{ channelId: "A", open: false }]);
+	});
+
+	it("says nothing of a terminal it does not write", () => {
+		expect(
+			writerStatements({ written: [], attached: "R", ownOpen: true, hubOpen: hubHas() }),
+		).toEqual([]);
 	});
 });
 

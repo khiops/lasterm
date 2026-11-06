@@ -70,6 +70,7 @@ import { useConfigStore } from "./config.js";
 import { useFilesPanelStore } from "./files-panel.js";
 import { useHostsStore } from "./hosts.js";
 import { useToastStore } from "./toast.js";
+import { useWriteLockStore } from "./writelock.js";
 
 /**
  * The window's uploads (#837, part of #721): every upload of every terminal this window shows,
@@ -416,7 +417,7 @@ export const useTransfersStore = defineStore("transfers", () => {
 				.catch(() => undefined);
 		}
 		// Said when the panel is closed: open, the row says it.
-		if (record.sender && left === 0 && !useFilesPanelStore().open) {
+		if (record.sender && left === 0 && !useFilesPanelStore().shown) {
 			useToastStore().show(
 				"info",
 				`Uploaded ${plural(states.placed ?? 0, "file")} to ${hostLabelOf(record.hostId)} › ${record.dir}`,
@@ -1213,7 +1214,14 @@ export const useTransfersStore = defineStore("transfers", () => {
 			const before = quitPending.value;
 			quitPending.value = pending;
 			// The window went to the tray for it: once shown again, Transfers says it at once.
-			if (pending !== null && before === null) showTransfers(null);
+			if (pending === null || before !== null) return;
+			const panel = useFilesPanelStore();
+			const attached = panel.attachedChannelId;
+			panel.setTransfersCollapsed(false);
+			// The window's own panel only: a reader's choice on a terminal it reads stays its own (#838).
+			if (!panel.shown && (attached === null || useWriteLockStore().isWriter(attached))) {
+				panel.openFor(null);
+			}
 		};
 		desktop =
 			bridge === undefined

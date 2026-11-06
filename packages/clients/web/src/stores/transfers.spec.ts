@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({ hubFetch: vi.fn() }));
 vi.mock("../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
 
 import type { IWsClient } from "../services/ws-client.js";
+import type { DesktopBridge } from "../utils/desktop-uploads.js";
 import type { HandleStore, KeptItem, KeptUpload } from "../utils/upload-handles.js";
 import type { ChunkAnswer } from "../utils/upload-send.js";
 import {
@@ -20,10 +21,13 @@ import {
 	type HandleLike,
 	rootFromDirectoryHandle,
 } from "../utils/upload-walk.js";
+import { useAuthStore } from "./auth.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
+import { useFilesPanelStore } from "./files-panel.js";
 import { useToastStore } from "./toast.js";
 import { type UploadTarget, useTransfersStore } from "./transfers.js";
+import { useWriteLockStore } from "./writelock.js";
 
 const C1 = "01ARZ3NDEKTSV4RRFFQ69G5FC1";
 const C2 = "01ARZ3NDEKTSV4RRFFQ69G5FC2";
@@ -464,6 +468,45 @@ describe("answering a conflict", () => {
 			scope: 2,
 			action: "skip",
 		});
+	});
+});
+
+describe("a quit the desktop holds for these uploads", () => {
+	const ME = "01ARZ3NDEKTSV4RRFFQ69G5FME";
+	const quitting: DesktopBridge = {
+		invoke: async () => ({ pending: "quit" }),
+		listen: async () => () => undefined,
+	};
+
+	function focusOn(holder: string): ReturnType<typeof useFilesPanelStore> {
+		useAuthStore().setClientId(ME);
+		useWriteLockStore().handleWriteLock(C1, holder);
+		const panel = useFilesPanelStore();
+		panel.setChannelsInTabs(new Set([C1]));
+		panel.setFocused(C1);
+		panel.setTransfersCollapsed(true);
+		return panel;
+	}
+
+	it("opens this window's own panel on its Transfers, to say so", async () => {
+		const panel = focusOn(ME);
+		const stop = transfers().startWindowGuards(Promise.resolve(quitting));
+		await flush();
+		expect(transfers().quitPending).toBe("quit");
+		expect(panel.shown).toBe(true);
+		expect(panel.transfersCollapsed).toBe(false);
+		stop();
+	});
+
+	it("leaves a reader's choice of panel on a terminal it reads as it was (#838)", async () => {
+		const panel = focusOn("01ARZ3NDEKTSV4RRFFQ69G5FOT");
+		const stop = transfers().startWindowGuards(Promise.resolve(quitting));
+		await flush();
+		expect(transfers().quitPending).toBe("quit");
+		expect(panel.shown).toBe(false);
+		expect(panel.readerChoice(C1)).toBe("none");
+		expect(panel.transfersCollapsed).toBe(false);
+		stop();
 	});
 });
 

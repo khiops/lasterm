@@ -3,6 +3,7 @@ import {
 	DEFAULT_NOTIFICATION_CONFIG,
 	ErrorCode,
 	generateId,
+	type UiAttachOkMessage,
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { markRaw, ref, watch } from "vue";
@@ -174,6 +175,7 @@ export const useSessionStore = defineStore("session", () => {
 
 		_registerStateSyncHandler(hostsStore, channelsStore);
 		_registerCwdHandlers(useFilesPanelStore());
+		_registerFilesPanelHandlers(useFilesPanelStore());
 
 		// Authenticate immediately after connecting
 		await _authenticate();
@@ -523,6 +525,35 @@ export const useSessionStore = defineStore("session", () => {
 		wsClient.on("CHANNEL_STATE", (msg) => {
 			if (msg.type === "CHANNEL_STATE" && msg.status === "dead")
 				filesPanel.forgetCwd(msg.channelId);
+		});
+	}
+
+	/**
+	 * The writer's files panel, as the hub keeps it per terminal (#838, PROTOCOL.md § 4.20): each
+	 * FILES_PANEL, and `filesPanel` in ATTACH_OK and each STATE_SYNC entry. A hub older than it
+	 * sends none, and every terminal's writer panel reads as closed. The store says this window's
+	 * own panel back over the same socket while it holds a terminal's lock.
+	 */
+	function _registerFilesPanelHandlers(filesPanel: ReturnType<typeof useFilesPanelStore>): void {
+		filesPanel.setWsClient(wsClient);
+		wsClient.on("FILES_PANEL", (msg) => {
+			if (msg.type === "FILES_PANEL" && typeof msg.open === "boolean") {
+				filesPanel.takeWriterPanel(msg.channelId, msg.open);
+			}
+		});
+		wsClient.on("ATTACH_OK", (msg) => {
+			const state = (msg as Partial<UiAttachOkMessage>).filesPanel;
+			if (msg.type === "ATTACH_OK" && typeof state?.open === "boolean") {
+				filesPanel.takeWriterPanel(msg.channelId, state.open);
+			}
+		});
+		wsClient.on("STATE_SYNC", (msg) => {
+			if (msg.type !== "STATE_SYNC") return;
+			for (const channel of msg.channels) {
+				if (typeof channel.filesPanel?.open === "boolean") {
+					filesPanel.takeWriterPanel(channel.channelId, channel.filesPanel.open);
+				}
+			}
 		});
 	}
 

@@ -12,12 +12,16 @@ import type {
 	TransferAcceptedMessage,
 	TransferCancelMessage,
 	TransferConflictMessage,
+	TransferDiscardMessage,
 	TransferDoneMessage,
 	TransferErrorMessage,
 	TransferProgressMessage,
 	TransferResolveMessage,
+	TransferResumeMessage,
 	TransferRetryMessage,
 	TransferStartMessage,
+	TransferStateMessage,
+	TransferSyncEntry,
 } from "./transfer-protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -508,6 +512,34 @@ export interface UiAttachOkMessage {
 	cwdSource?: CwdSource;
 	/** The program holding the terminal, when it is not the shell. */
 	foreground?: string;
+	/**
+	 * Whether the writer's files panel is open on this terminal (#838), as the
+	 * hub keeps it. Absent from a hub older than that.
+	 */
+	filesPanel?: FilesPanelState;
+}
+
+/**
+ * The files panel of a terminal's writer, as the hub keeps it per terminal, in
+ * memory (#838): open when the window holding the write lock has its panel
+ * open and attached to that terminal. Closed until a writer says otherwise.
+ */
+export interface FilesPanelState {
+	open: boolean;
+}
+
+/**
+ * Both ways (#838). UI → Hub: the window holding the terminal's write lock
+ * says whether its files panel is open on it, and nobody else may: from any
+ * other client it is refused with `ERROR { code: WRITE_LOCK_DENIED }`. Hub →
+ * UI: the state changed, told to every client attached to the terminal, that
+ * one included. A writer's panel is open on one terminal at a time: its
+ * opening on one closes it on every other the same client holds the lock on.
+ */
+export interface FilesPanelMessage {
+	type: "FILES_PANEL";
+	channelId: string;
+	open: boolean;
 }
 
 /**
@@ -733,6 +765,12 @@ export interface StateSyncMessage {
 	 */
 	userDisconnectedHosts?: string[];
 	/**
+	 * The uploads the hub holds as interrupted, those a hub restart left
+	 * included (#860), for a window to offer to resume or discard. Absent when
+	 * there are none, and while `[experimental] file_transfer` is off.
+	 */
+	transfers?: TransferSyncEntry[];
+	/**
 	 * Every channel the hub holds that has not ended, and every one killed on
 	 * purpose that it still lists (`dead`, with `endReason: "killed"`): a
 	 * window that connects learns how those ended, and none of its panes brings
@@ -750,6 +788,8 @@ export interface StateSyncMessage {
 		cwd?: string | null;
 		cwdSource?: CwdSource;
 		foreground?: string;
+		/** As in ATTACH_OK (#838): on a channel that has not ended. */
+		filesPanel?: FilesPanelState;
 	}>;
 }
 
@@ -1037,6 +1077,7 @@ export type UiMessage =
 	| DetachMessage
 	| InputMessage
 	| ResizeMessage
+	| FilesPanelMessage
 	| WriteClaimMessage
 	| WriteReleaseMessage
 	| WriteForceMessage
@@ -1051,6 +1092,8 @@ export type UiMessage =
 	| TransferResolveMessage
 	| TransferRetryMessage
 	| TransferCancelMessage
+	| TransferResumeMessage
+	| TransferDiscardMessage
 	| ErrorMessage;
 
 /** All messages that the Hub sends to the UI */
@@ -1060,6 +1103,7 @@ export type HubToUiMessage =
 	| UiSpawnOkMessage
 	| UiAttachOkMessage
 	| ChannelSizeMessage
+	| FilesPanelMessage
 	| OutputMessage
 	| SessionStateMessage
 	| ChannelStateMessage
@@ -1093,6 +1137,7 @@ export type HubToUiMessage =
 	| TransferProgressMessage
 	| TransferConflictMessage
 	| TransferDoneMessage
+	| TransferStateMessage
 	| TransferErrorMessage
 	| ErrorMessage;
 
@@ -1127,6 +1172,7 @@ export type ProtocolMessage =
 	| UiAttachMessage
 	| UiAttachOkMessage
 	| ChannelSizeMessage
+	| FilesPanelMessage
 	| DetachMessage
 	| WriteClaimMessage
 	| WriteReleaseMessage
@@ -1169,9 +1215,12 @@ export type ProtocolMessage =
 	| TransferResolveMessage
 	| TransferRetryMessage
 	| TransferCancelMessage
+	| TransferResumeMessage
+	| TransferDiscardMessage
 	| TransferAcceptedMessage
 	| TransferProgressMessage
 	| TransferConflictMessage
 	| TransferDoneMessage
+	| TransferStateMessage
 	| TransferErrorMessage
 	| ErrorMessage;

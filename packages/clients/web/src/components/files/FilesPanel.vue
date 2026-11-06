@@ -5,7 +5,11 @@
 		:id="FILES_PANEL_ID"
 		ref="panelEl"
 		class="files-panel"
-		:class="[`files-panel--${form}`, `files-panel--${side}`]"
+		:class="[
+			`files-panel--${form}`,
+			`files-panel--${side}`,
+			{ 'files-panel--follows': filesPanel.followsWriter },
+		]"
 		:style="panelStyle"
 		:aria-label="hostLabel === '' ? 'Files' : `Files on ${hostLabel}`"
 		data-focus-zone="files"
@@ -25,8 +29,19 @@
 				<HostBadge v-if="host" :host="host" :size="18" :status="hostStatus" />
 				<div class="files-header__names">
 					<span class="files-header__host">{{ hostLabel === "" ? "Files" : hostLabel }}</span>
-					<span v-if="title !== ''" class="files-header__title">{{ title }}</span>
+					<!-- A reader shows the writer's panel, floating, until it makes it its own (#838). -->
+					<span v-if="filesPanel.followsWriter" class="files-header__owner">Writer's panel</span>
+					<span v-else-if="title !== ''" class="files-header__title">{{ title }}</span>
 				</div>
+				<button
+					v-if="filesPanel.followsWriter"
+					type="button"
+					class="files-link"
+					title="Keep it open beside the panes, whatever the writer does"
+					@click="filesPanel.dockHere()"
+				>
+					Dock here
+				</button>
 				<button
 					v-if="filesPanel.pinned && !attachedOnScreen"
 					type="button"
@@ -130,6 +145,7 @@ import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
 import { shortcutLabel } from "../../utils/app-shortcuts.js";
+import type { PaneBox } from "../../composables/usePaneBox.js";
 import {
 	FILES_PANEL_ID,
 	type FilesPanelForm,
@@ -150,6 +166,12 @@ const props = defineProps<{
 	width: number;
 	/** The terminal it is attached to is in the tab shown. */
 	attachedOnScreen: boolean;
+	/**
+	 * Floating, the pane it floats over, below its header: the writer's panel a reader follows
+	 * covers that terminal's pane and no other (#838). Absent, it floats over the right of the
+	 * pane area.
+	 */
+	over?: PaneBox | null;
 }>();
 
 const emit = defineEmits<{
@@ -239,7 +261,20 @@ onUnmounted(() => {
 
 const panelEl = ref<HTMLElement | null>(null);
 
-const panelStyle = computed(() => (props.form === "sheet" ? {} : { width: `${props.width}px` }));
+const panelStyle = computed(() => {
+	if (props.form === "sheet") return {};
+	const over = props.over;
+	if (props.form !== "overlay" || over === null || over === undefined) {
+		return { width: `${props.width}px` };
+	}
+	// Over its pane, on the side the panel opens on, no wider than the pane.
+	return {
+		width: `${Math.min(props.width, over.width)}px`,
+		top: `${over.top}px`,
+		bottom: `${over.bottom}px`,
+		...(props.side === "right" ? { right: `${over.right}px` } : { left: `${over.left}px` }),
+	};
+});
 const transfersStyle = computed(() =>
 	filesPanel.transfersCollapsed ? {} : { flexBasis: `${filesPanel.transfersShare * 100}%` },
 );
@@ -312,7 +347,8 @@ function onSplitDown(event: PointerEvent): void {
 }
 
 /* Floating over the right of the pane area, below the pane header, so that its folder button
-   and lock stay in view: no room taken, no terminal resized. */
+   and lock stay in view: no room taken, no terminal resized. The writer's panel a reader follows
+   floats the same way over its own terminal's pane, which App.vue measures (#838). */
 .files-panel--overlay {
 	position: absolute;
 	top: 29px;
@@ -412,6 +448,16 @@ function onSplitDown(event: PointerEvent): void {
 	text-overflow: ellipsis;
 	font-size: 11px;
 	color: var(--nt-text-secondary);
+}
+
+/* Whose panel it is, when a reader follows the writer's. */
+.files-header__owner {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--nt-accent);
 }
 
 .files-header__btn {

@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-29
+> Last updated: 2026-11-06
 
 ## 1. Vision
 
@@ -249,8 +249,16 @@ Local daemon, single process, binds to 127.0.0.1.
 - Running uploads hold their host's connection: the acquisition, the retirement of an outdated
   daemon (#805), and the gestures that close a connection, which ask first
   (`TRANSFERS_WOULD_STOP`)
-- In memory for now; keeping them in `meta.db` and resuming them after a restart is #833's second
-  part. Logs no path and no name, and nothing per chunk at INFO
+- Kept in `meta.db` (`transfers`, `transfer_items`, STORAGE.md § 3.9, #860): state changes at once,
+  each file's acknowledged prefix every 8 MiB or 2 s and when the hub quits. After a restart every
+  upload that was moving is interrupted and listed in STATE_SYNC; only a window's
+  `TRANSFER_RESUME` takes it up, its hosts reached one at a time through the interactive Connect,
+  each temporary cut to what its host acknowledged, a missing or short one started again, a placed
+  file never sent again. A cancelled question leaves it resumable, saying why. One whose window is
+  still open and whose link merely dropped resumes when the hub reconnects the host
+- `TRANSFER_DISCARD` and a 7-day expiry remove what an upload left on its host, at once or at the
+  host's next connection; an upload's start sweeps the folders it lists of temporaries no record
+  knows, older than an hour. Logs no path and no name, and nothing per chunk at INFO
 
 **Cache Manager:**
 - Write-through: every OUTPUT chunk → spool.db
@@ -367,9 +375,31 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
   when focused, a double click back to 300). Docked, it narrows every pane of the tab, so the window
   that writes those terminals resizes them (#831). It floats over the right of the pane area, below the
   pane header, on an opaque ground and resizing nothing, when docking would leave the panes less than
-  480 px; it is a sheet over the terminal area below a 560 px window. Until the writer's panel reaches
-  the readers (#838), a panel attached to a terminal this window only reads floats too, so that it
-  never resizes anything (`filesPanelForm`).
+  480 px; it is a sheet over the terminal area below a 560 px window (`filesPanelForm`).
+- **The writer's panel, shared (#838).** The panel is a window-level change to a terminal, as its size
+  is (#831), and the window that writes the terminal decides it:
+  - **The writer's own panel always docks**, and in the writer's window narrows every pane of the
+    tab, so the other terminals it writes there get their new size from that window, and their
+    readers draw at it: the accepted consequence of the writer's gesture.
+  - **The hub keeps it.** The writer's window tells the hub, per terminal it writes, whether its panel
+    is open and attached there (FILES_PANEL, PROTOCOL.md § 4.20): moving the panel from A to B closes
+    it on A and opens it on B. The hub takes it from the write lock's holder only, tells every client
+    attached, and gives it in ATTACH_OK and STATE_SYNC. When the lock moves, the new writer's window
+    says its own; while nobody holds it, the last state stands.
+  - **A reader's choice is its own**, per terminal, kept in its browser (`lasterm:files:reader-choices`)
+    and never sent: *none* (the default) follows the writer's panel, opening and closing with it,
+    **floating over that terminal's pane**, below its header, on an opaque ground, so that it resizes
+    nothing; *closed* stays closed whatever the writer does, until this reader opens it again; *open*
+    is the reader's own, **docked**, whatever the writer does. Closing sets *closed*; opening sets
+    *none* while the writer's is open and *open* while it is closed; the floating panel's header says
+    "Writer's panel" and offers **Dock here**, which sets *open* (`readerChoiceAfter`,
+    `panelShowing`). The writer's gestures change no reader's choice.
+  - So a reader whose tab shows A split with D, which it writes, resizes nothing when the writer of A
+    opens its panel there: the panel floats over A. A docked reader panel narrows that reader's panes
+    only, and resizes only the terminals that reader writes.
+  - **A reader becoming the writer** shares its panel as it shows: shown, it stays and docks; not
+    shown, it says it closed. A lock the window gets back after a reconnect, or gets on attaching
+    before anyone else held it, leaves its own panel as its user left it.
 - **Attachment.** It shows the terminal whose pane has the focus, and follows the focus; a pin keeps
   it on one terminal while a tab shows it, with "Show terminal" when that tab is not the one shown.
   An empty pane, or no tab: "No terminal". The attached pane's folder button shows pressed
@@ -414,9 +444,11 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
   and "Transfers, all hosts"; a fifth F6 zone, `files`, after the pane on the right and before it on
   the left, in which F6 goes from Files to Transfers before leaving it; Esc in it goes back to the pane,
   unless a question there takes it (`data-own-escape`).
-- **Kept in this browser** (`localStorage`, `stores/files-panel.ts`): open or not, the pin, per
-  terminal whether it follows and the folder browsed (the last 100 terminals), Options expanded, the
-  split, Transfers folded. Each window owns its open state; the writer's reaching the readers is #838.
+- **Kept in this browser** (`localStorage`, `stores/files-panel.ts`): its own panel open or not, the
+  pin, per terminal whether it follows and the folder browsed, and a reader's choice (the last 100
+  terminals each), Options expanded, the split, Transfers folded. What stays per window: width, pin,
+  follow state, the folder browsed, the selection, Options expanded; only whether the writer's panel
+  is open on a terminal is shared (above).
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub

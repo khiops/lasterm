@@ -3,24 +3,33 @@ import {
 	generateId,
 	isValidUlid,
 	TRANSFER_CONFLICT_ACTIONS,
+	TRANSFER_EXPIRY_MS,
+	TRANSFER_ITEM_STATES,
+	TRANSFER_MAX_IDS,
 	TRANSFER_ON_CONFLICT_VALUES,
 	type TransferAcceptedItem,
 	type TransferCancelMessage,
 	type TransferConflictAction,
 	type TransferConflictItem,
+	type TransferDiscardMessage,
 	type TransferErrorMessage,
 	type TransferExisting,
 	type TransferFolderConflicts,
 	type TransferFolderProgress,
 	type TransferItemProgress,
 	type TransferItemState,
+	type TransferNotResumedReason,
 	type TransferOnConflict,
 	type TransferOutcome,
 	type TransferResolveMessage,
+	type TransferResumeMessage,
 	type TransferRetryMessage,
 	type TransferScope,
 	type TransferStartMessage,
+	type TransferStateMessage,
+	type TransferSyncEntry,
 	type TransferTotals,
+	type TransferUploadState,
 	type TransferVerification,
 } from "@lasterm/shared";
 import { FileAccessError, type FileEntry, mapLimited } from "../files/host-files.js";
@@ -36,10 +45,35 @@ import {
 	type UploadSink,
 	VerifyFailed,
 } from "../files/upload-backend.js";
+import type { TransferItemRecord, TransferRecord, TransfersDAL } from "../storage/transfers-dal.js";
 import { buildUploadTree, type TreeItem } from "./upload-tree.js";
 
 /** How long the changes of an upload gather before they are said in one TRANSFER_PROGRESS. */
 const PROGRESS_FLUSH_MS = 100;
+
+/**
+ * How many more bytes of a file its host may acknowledge before they are
+ * written to meta.db (#860); `ACKED_PERSIST_MS` writes what is left of them.
+ */
+export const ACKED_PERSIST_BYTES = 8 * 1024 * 1024;
+
+/** How long a file's acknowledged bytes may wait to be written to meta.db, at most. */
+export const ACKED_PERSIST_MS = 2_000;
+
+/** How often the uploads nobody resumes are looked at for their expiry. */
+const EXPIRY_CHECK_MS = 60 * 60_000;
+
+/**
+ * How old a temporary that no record knows must be before the sweep removes
+ * it: one younger may be another hub's, still being written.
+ */
+export const SWEEP_MIN_AGE_MS = 60 * 60_000;
+
+/** A temporary of this hub's naming, as `tempPathFor` names one: `.name.<16 hex>.partial`. */
+const TEMP_NAME = /^\..+\.[0-9a-f]{16}\.partial$/;
+
+/** How many requests at once the hub makes of a host for work of its own: stats, truncations, removals. */
+const HOST_WORK_CONCURRENCY = 8;
 
 /** How long an upload whose every file was placed or skipped is remembered, for a client that asks. */
 const FINISHED_KEPT_MS = 10 * 60_000;
@@ -75,6 +109,11 @@ export class TransferRequestError extends Error {
 	}
 }
 
+/** What came of reaching a host for an upload: connected, or why not. */
+export type TransferConnectOutcome =
+	| { readonly connected: true }
+	| { readonly connected: false; readonly reason: TransferNotResumedReason };
+
 /** What the transfer service needs of the rest of the hub. */
 export interface TransferDeps {
 	readonly files: {
@@ -92,15 +131,37 @@ export interface TransferDeps {
 	isConnected(hostId: string, hostType: string): boolean;
 	/**
 	 * Connect a remote host, asking `clientId` what it must (a passphrase, a
-	 * host key), as a Connect does; true once it is connected.
+	 * host key), as a Connect does; connected, or why not.
 	 */
-	connect(hostId: string, clientId: string): Promise<boolean>;
+	connect(hostId: string, clientId: string): Promise<TransferConnectOutcome>;
 	/** Whether uploads to this host are checked by SHA-256 over SSH commands (`transfer_verify`). */
 	verifyFor(hostId: string, channelId: string): boolean;
 	/** How many files one window sends at once (`[transfer] max_concurrent`). */
 	maxConcurrent(): number;
 	/** A host's last running upload ended: what waited for it (a retirement, #805) may go on. */
 	onHostIdle(hostId: string): void;
+	/** meta.db's uploads (#860): without it they live in memory only, and a restart forgets them. */
+	readonly store?: TransfersDAL | null;
+	/** The type of a host the hub knows (`local`, `ssh`); null for one it no longer does. */
+	hostType?(hostId: string): string | null;
+	/**
+	 * `[experimental] file_transfer`, read each time: what the service does of
+	 * itself on a host (removing what Discard and the expiry left, resuming
+	 * after a dropped link) waits behind it, as every request does. On by default.
+	 */
+	enabled?(): boolean;
+	/** The time, in milliseconds since the epoch; `Date.now` by default. */
+	now?(): number;
+}
+
+/** An upload dropped whose temporaries wait for their host to be reached, by their recorded paths. */
+interface PendingRemoval {
+	readonly id: string;
+	readonly hostId: string;
+	readonly hostType: string;
+	readonly dir: string;
+	readonly style: PathStyle;
+	readonly temps: readonly string[];
 }
 
 /** Who asks: a window, by its client id and the token it authenticated with. */
@@ -135,6 +196,13 @@ interface Item extends TreeItem {
 	writing: boolean;
 	reason: string | null;
 	code: string | null;
+	/**
+	 * Its temporary holds bytes an earlier run of the hub sent (#860): no
+	 * running hash covers them, and it is cut to `acked` before it resumes.
+	 */
+	carried: boolean;
+	/** The `acked` meta.db holds for it. */
+	persistedAcked: number;
 }
 
 interface Totals {
@@ -181,6 +249,22 @@ interface Upload {
 	forgetTimer: ReturnType<typeof setTimeout> | null;
 	/** Placements and other host work under way that no state shows. */
 	busy: number;
+	/** When it started, ISO 8601. */
+	readonly createdAt: string;
+	/** When its own state or reason last changed, in ms: its expiry counts from there. */
+	changedAt: number;
+	/** Why the last resume did not reach its host; null once one did (#860). */
+	reason: TransferNotResumedReason | null;
+	/** Its link to the host dropped while a window sent it: the hub's reconnect resumes it. */
+	linkDropped: boolean;
+	/** Brought back from meta.db and not yet resumed: its queues are built when it is (#860). */
+	stale: boolean;
+	/** Whether meta.db has its rows. */
+	stored: boolean;
+	/** Its state and reason as meta.db last had them. */
+	recorded: { state: TransferUploadState; reason: string | null } | null;
+	/** Its state and reason as TRANSFER_STATE last said them. */
+	said: { state: TransferUploadState; reason: string | null } | null;
 }
 
 function emptyTotals(): Totals {
@@ -211,6 +295,46 @@ function codeOf(error: unknown): string {
 	return "TRANSFER_FAILED";
 }
 
+/** Whether two states with their reasons are the same. */
+function sameState(
+	a: { state: TransferUploadState; reason: string | null } | null,
+	b: { state: TransferUploadState; reason: string | null },
+): boolean {
+	return a !== null && a.state === b.state && a.reason === b.reason;
+}
+
+const NOT_RESUMED_REASONS: ReadonlySet<string> = new Set<TransferNotResumedReason>([
+	"needs_passphrase",
+	"needs_password",
+	"host_key_not_accepted",
+	"host_unreachable",
+]);
+
+/** What a file of an upload brought back from meta.db is at: one that was moving is interrupted. */
+function revivedState(state: string): TransferItemState {
+	if (state === "sending" || state === "verifying") return "interrupted";
+	return (TRANSFER_ITEM_STATES as readonly string[]).includes(state)
+		? (state as TransferItemState)
+		: "interrupted";
+}
+
+/** What had an item's name, as meta.db keeps it. */
+function existingOf(json: string | null, name: string): FileEntry | null {
+	if (json === null) return null;
+	try {
+		const parsed = JSON.parse(json) as Partial<FileEntry>;
+		return {
+			name,
+			kind: parsed.kind ?? "other",
+			size: typeof parsed.size === "number" ? parsed.size : null,
+			mtime: typeof parsed.mtime === "string" ? parsed.mtime : null,
+			...(parsed.linkKind !== undefined ? { linkKind: parsed.linkKind } : {}),
+		};
+	} catch {
+		return null;
+	}
+}
+
 /**
  * Uploads to the host a terminal runs on (#833): what they hold, what each of
  * their files and folders is at, and the work that moves them on. Bound to a
@@ -224,8 +348,15 @@ function codeOf(error: unknown): string {
  * once. Every change is said to every client attached to the terminal,
  * readers included.
  *
- * In memory only, for now: a hub restart forgets them, their temporaries left
- * on the hosts (#833's second part keeps them in meta.db and resumes them).
+ * Kept in meta.db when the hub gives it one (#860): a state change is written
+ * at once, a file's acknowledged bytes at most every `ACKED_PERSIST_MS` or
+ * `ACKED_PERSIST_BYTES`, and everything when the hub stops. After a restart
+ * (`restore`) every upload that was moving is `interrupted`, and only a
+ * window's TRANSFER_RESUME takes it up again: nothing reaches a remote host
+ * by itself. Discard and the 7-day expiry remove what an upload left on its
+ * host, at once or at the host's next connection; the start of an upload
+ * sweeps the folders it lists of temporaries no record knows, older than an
+ * hour.
  *
  * Nothing here logs: a path or a name is the user's.
  */
@@ -237,8 +368,31 @@ export class TransferService {
 	private readonly activeHosts = new Set<string>();
 	private pumpScheduled = false;
 	private stopped = false;
+	/** Uploads with changes to write to meta.db at once: their ids, and the items that changed. */
+	private readonly unsaved = new Map<string, Set<number>>();
+	/** Files whose acknowledged bytes wait for the next timed write, by upload. */
+	private readonly unsavedAcks = new Map<string, Set<number>>();
+	private saveScheduled = false;
+	private ackTimer: ReturnType<typeof setTimeout> | null = null;
+	private expiryTimer: ReturnType<typeof setInterval> | null = null;
+	/** Uploads dropped whose temporaries wait for their host, by id (#860). */
+	private readonly pendingRemoval = new Map<string, PendingRemoval>();
+	/** The work under way on a host for its connection, by host: one at a time. */
+	private readonly hostWork = new Map<string, Promise<void>>();
 
 	constructor(private readonly deps: TransferDeps) {}
+
+	private get store(): TransfersDAL | null {
+		return this.deps.store ?? null;
+	}
+
+	private now(): number {
+		return this.deps.now?.() ?? Date.now();
+	}
+
+	private isEnabled(): boolean {
+		return this.deps.enabled?.() ?? true;
+	}
 
 	// ─── Holding a host's connection ────────────────────────────────────────
 
@@ -314,7 +468,7 @@ export class TransferService {
 		try {
 			if (!this.deps.isConnected(hostId, hostType)) {
 				const reached = await this.deps.connect(hostId, requester.clientId);
-				if (!reached) {
+				if (!reached.connected) {
 					return refuse("HOST_NOT_CONNECTED", "This terminal's host could not be connected");
 				}
 			}
@@ -348,9 +502,12 @@ export class TransferService {
 			}
 
 			const upload = this.create(requester, msg, hostId, hostType, dir, backend, tree);
-			await this.lookAtDestination(upload);
+			const listed = await this.lookAtDestination(upload);
+			// What a hub that died before writing its record left there (#860).
+			for (const folder of listed) await this.sweep(backend, folder.path, folder.entries);
 			this.applyPolicy(upload);
 			this.uploads.set(upload.id, upload);
+			this.record(upload);
 			adopted = true;
 			this.deps.send(requester.clientId, this.accepted(upload, requestId, false, null));
 			this.markAll(upload);
@@ -433,7 +590,7 @@ export class TransferService {
 		if (again.length === 0) return;
 		if (!this.deps.isConnected(upload.hostId, upload.hostType)) {
 			const reached = await this.deps.connect(upload.hostId, requester.clientId);
-			if (!reached) {
+			if (!reached.connected) {
 				return this.refuseControl(
 					requester,
 					msg.transferId,
@@ -442,7 +599,17 @@ export class TransferService {
 				);
 			}
 		}
-		// What it is in comes back first: a file goes into a folder in place.
+		this.requeueAll(upload, again);
+		this.settle(upload);
+		this.schedulePump();
+	}
+
+	/**
+	 * Queue again what failed, was cancelled or interrupted among `again`, and
+	 * first the folders they are in that need it: a file goes into a folder in
+	 * place. An upload brought back from meta.db gets its queues here.
+	 */
+	private requeueAll(upload: Upload, again: readonly Item[]): void {
 		const requeued = new Set<number>();
 		for (const item of again) {
 			for (
@@ -466,10 +633,16 @@ export class TransferService {
 				this.requeue(upload, item);
 			}
 		}
+		if (upload.stale) {
+			// Nothing of it was queued: everything queued is, now, in its order.
+			upload.stale = false;
+			upload.queue = [];
+			upload.folderQueue = [];
+			upload.waiting.clear();
+			this.enqueueReady(upload, null);
+		}
 		upload.doneSaid = false;
 		this.clearForget(upload);
-		this.settle(upload);
-		this.schedulePump();
 	}
 
 	/** TRANSFER_CANCEL: stop what is not placed under a scope, and remove its temporaries. */
@@ -516,6 +689,157 @@ export class TransferService {
 				return;
 			}
 		}
+	}
+
+	// ─── Resuming and discarding (#860) ──────────────────────────────────────
+
+	/**
+	 * TRANSFER_RESUME: take up the uploads named, this window sending their
+	 * bytes. Their hosts are reached one at a time, in the order named, each
+	 * through the interactive Connect, so that the window is asked one
+	 * question at a time; a host whose question is cancelled, or that cannot
+	 * be reached, leaves its uploads interrupted with the reason, and the next
+	 * host goes on. Never rejects.
+	 */
+	async resume(requester: TransferRequester, msg: TransferResumeMessage): Promise<void> {
+		const uploads = this.named(requester, msg.transferIds, true);
+		for (const [hostId, group] of this.byHost(uploads)) {
+			const hostType = (group[0] as Upload).hostType;
+			this.hold(hostId);
+			try {
+				if (!this.deps.isConnected(hostId, hostType)) {
+					const reached = await this.deps.connect(hostId, requester.clientId);
+					if (!reached.connected) {
+						for (const upload of group) this.notResumed(upload, reached.reason, requester);
+						continue;
+					}
+				}
+				await this.atConnection(hostId, hostType);
+				for (const upload of group) {
+					if (this.uploads.get(upload.id) === upload) await this.takeUp(upload, requester);
+				}
+			} finally {
+				this.letGo(hostId, hostType);
+			}
+		}
+	}
+
+	/**
+	 * TRANSFER_DISCARD: drop the uploads named. What they were doing stops,
+	 * their records go, and their temporaries are removed by their recorded
+	 * paths: at once, the host being reached as for a resume, or, for a host
+	 * that cannot be, at its next connection. Placed files stay. Never rejects.
+	 */
+	async discard(requester: TransferRequester, msg: TransferDiscardMessage): Promise<void> {
+		const uploads = this.named(requester, msg.transferIds, false);
+		for (const [hostId, group] of this.byHost(uploads)) {
+			const hostType = (group[0] as Upload).hostType;
+			for (const upload of group) this.drop(upload, requester.clientId);
+			if (!this.deps.isConnected(hostId, hostType)) {
+				const reached = await this.deps.connect(hostId, requester.clientId);
+				// Its temporaries wait for the host's next connection.
+				if (!reached.connected) continue;
+			}
+			await this.atConnection(hostId, hostType);
+		}
+	}
+
+	/**
+	 * A remote host's agent connected to the hub, whoever connected it: what
+	 * Discard and the expiry left there is removed, and the uploads whose link
+	 * merely dropped while their window sent them go on by themselves. One the
+	 * hub restarted from never does: it waits for a window's resume.
+	 */
+	hostConnected(hostId: string): void {
+		if (this.stopped || !this.isEnabled()) return;
+		const hostType = this.deps.hostType?.(hostId) ?? "ssh";
+		void this.atConnection(hostId, hostType).then(() => this.resumeDropped(hostId));
+	}
+
+	/** The interrupted uploads, as STATE_SYNC lists them; none while the switch is off. */
+	interruptedUploads(): TransferSyncEntry[] {
+		if (!this.isEnabled()) return [];
+		const entries: TransferSyncEntry[] = [];
+		for (const upload of this.uploads.values()) {
+			if (this.uploadState(upload) !== "interrupted") continue;
+			entries.push({
+				transferId: upload.id,
+				channelId: upload.channelId,
+				hostId: upload.hostId,
+				dir: upload.dir,
+				state: "interrupted",
+				...(upload.reason !== null ? { reason: upload.reason } : {}),
+				totals: totalsOnWire(upload.totals),
+				updatedAt: new Date(upload.changedAt).toISOString(),
+			});
+		}
+		return entries;
+	}
+
+	/**
+	 * Bring back the uploads meta.db holds, as the hub starts: every one that
+	 * was moving is `interrupted`, each file that was being sent or placed
+	 * too, its temporary and its acknowledged bytes kept. Nothing is asked of
+	 * a remote host: a resume does that. A record whose upload was done goes;
+	 * one discarded, or interrupted for longer than `TRANSFER_EXPIRY_MS`, waits
+	 * for its host's next connection to remove its temporaries. Then the
+	 * expiry is looked at every hour.
+	 */
+	restore(): void {
+		const store = this.store;
+		if (store !== null) {
+			let records: TransferRecord[] = [];
+			try {
+				records = store.list();
+			} catch {
+				records = [];
+			}
+			for (const record of records) {
+				if (this.uploads.has(record.id) || this.pendingRemoval.has(record.id)) continue;
+				try {
+					this.bringBack(store, record);
+				} catch {
+					// A record this hub cannot read is left as it is.
+				}
+			}
+			this.saveNow();
+			const local = new Set(
+				[...this.pendingRemoval.values()]
+					.filter((pending) => pending.hostType === "local")
+					.map((pending) => pending.hostId),
+			);
+			// The local host is always there: what it has to remove goes now.
+			if (this.isEnabled()) for (const hostId of local) void this.atConnection(hostId, "local");
+		}
+		if (this.expiryTimer === null && !this.stopped) {
+			this.expiryTimer = setInterval(() => this.expire(), EXPIRY_CHECK_MS);
+			this.expiryTimer.unref?.();
+		}
+	}
+
+	/**
+	 * Discard the uploads nobody resumed in `TRANSFER_EXPIRY_MS`, and forget a
+	 * finished one kept for its failures as long: their temporaries are
+	 * removed now when their host is reached, at its next connection otherwise.
+	 */
+	expire(): void {
+		const now = this.now();
+		const reach = new Map<string, string>();
+		for (const upload of [...this.uploads.values()]) {
+			if (upload.source !== null || this.isActive(upload)) continue;
+			if (now - upload.changedAt < TRANSFER_EXPIRY_MS) continue;
+			this.drop(upload, null);
+			if (this.deps.isConnected(upload.hostId, upload.hostType)) {
+				reach.set(upload.hostId, upload.hostType);
+			}
+		}
+		if (!this.isEnabled()) return;
+		for (const [hostId, hostType] of reach) void this.atConnection(hostId, hostType);
+	}
+
+	/** Write to meta.db now whatever waits, the acknowledged bytes included: the hub is quitting. */
+	saveNow(): void {
+		this.save(true);
 	}
 
 	// ─── The bytes (REST) ────────────────────────────────────────────────────
@@ -606,10 +930,10 @@ export class TransferService {
 
 	// ─── Reading them (REST) ─────────────────────────────────────────────────
 
-	/** The uploads from a terminal, as a client that attached late reads them. */
-	listFor(channelId: string): Record<string, unknown>[] {
+	/** The uploads from a terminal, as a client that attached late reads them; every one without. */
+	listFor(channelId?: string): Record<string, unknown>[] {
 		return [...this.uploads.values()]
-			.filter((upload) => upload.channelId === channelId)
+			.filter((upload) => channelId === undefined || upload.channelId === channelId)
 			.map((upload) => this.summary(upload));
 	}
 
@@ -641,9 +965,19 @@ export class TransferService {
 		};
 	}
 
-	/** The hub is stopping: what is being written stops where it is. */
+	/**
+	 * The hub is stopping: what meta.db is to hold is written, then what is
+	 * being written on the hosts stops where it is.
+	 */
 	shutdown(): void {
+		if (!this.stopped) this.saveNow();
 		this.stopped = true;
+		if (this.ackTimer !== null) clearTimeout(this.ackTimer);
+		this.ackTimer = null;
+		if (this.expiryTimer !== null) clearInterval(this.expiryTimer);
+		this.expiryTimer = null;
+		this.unsaved.clear();
+		this.unsavedAcks.clear();
 		for (const upload of this.uploads.values()) {
 			for (const item of upload.items) {
 				const sink = item.sink;
@@ -689,24 +1023,58 @@ export class TransferService {
 			writing: false,
 			reason: null,
 			code: null,
+			carried: false,
+			persistedAcked: 0,
 		}));
-		const upload: Upload = {
-			id: generateId(),
-			channelId: msg.channelId,
-			hostId,
-			hostType,
-			dir,
-			style: backend.style,
-			onConflict: msg.onConflict,
-			verify: backend.transport === "exec" && this.deps.verifyFor(hostId, msg.channelId),
-			tokenId: requester.tokenId,
-			signature: tree.signature,
+		return this.assemble(
+			{
+				id: generateId(),
+				channelId: msg.channelId,
+				hostId,
+				hostType,
+				dir,
+				style: backend.style,
+				onConflict: msg.onConflict,
+				verify: backend.transport === "exec" && this.deps.verifyFor(hostId, msg.channelId),
+				tokenId: requester.tokenId,
+				signature: tree.signature,
+				order: tree.order,
+				createdAt: new Date(this.now()).toISOString(),
+			},
 			items,
-			order: tree.order,
+			requester.clientId,
+			backend,
+		);
+	}
+
+	/** An upload of these items, its totals counted from what each is at. */
+	private assemble(
+		fields: Pick<
+			Upload,
+			| "id"
+			| "channelId"
+			| "hostId"
+			| "hostType"
+			| "dir"
+			| "style"
+			| "onConflict"
+			| "verify"
+			| "tokenId"
+			| "signature"
+			| "order"
+			| "createdAt"
+		>,
+		items: Item[],
+		source: string | null,
+		backend: UploadBackend | null,
+	): Upload {
+		const upload: Upload = {
+			...fields,
+			items,
 			folderTotals: new Map(),
 			totals: emptyTotals(),
 			folderStates: new Map(),
-			source: requester.clientId,
+			source,
 			backend,
 			queue: [],
 			folderQueue: [],
@@ -719,18 +1087,26 @@ export class TransferService {
 			doneSaid: false,
 			forgetTimer: null,
 			busy: 0,
+			changedAt: this.now(),
+			reason: null,
+			linkDropped: false,
+			stale: false,
+			stored: false,
+			recorded: null,
+			said: null,
 		};
 		for (const item of items) {
 			if (item.kind !== "dir") continue;
 			upload.folderTotals.set(item.id, emptyTotals());
-			upload.folderStates.set("queued", (upload.folderStates.get("queued") ?? 0) + 1);
+			upload.folderStates.set(item.state, (upload.folderStates.get(item.state) ?? 0) + 1);
 		}
 		for (const item of items) {
 			if (item.kind !== "file") continue;
 			for (const totals of this.totalsAbove(upload, item)) {
 				totals.files++;
 				totals.bytes += item.size;
-				totals.states.set("queued", (totals.states.get("queued") ?? 0) + 1);
+				totals.acked += item.acked;
+				totals.states.set(item.state, (totals.states.get(item.state) ?? 0) + 1);
 			}
 		}
 		return upload;
@@ -739,11 +1115,15 @@ export class TransferService {
 	/**
 	 * Find what already has each item's name: each folder of the destination
 	 * the upload goes into is listed once, links not followed. On a Windows
-	 * host names are matched whatever their case, as NTFS does.
+	 * host names are matched whatever their case, as NTFS does. Says what
+	 * each folder listed holds.
 	 */
-	private async lookAtDestination(upload: Upload): Promise<void> {
+	private async lookAtDestination(
+		upload: Upload,
+	): Promise<{ path: string; entries: FileEntry[] }[]> {
 		const backend = upload.backend as UploadBackend;
 		const key = (name: string) => (upload.style === "windows" ? name.toUpperCase() : name);
+		const seen: { path: string; entries: FileEntry[] }[] = [];
 		// Folders of the destination to list, with the items whose names go in them.
 		let level: { path: string; items: Item[] }[] = [
 			{ path: upload.dir, items: upload.items.filter((item) => item.parent === null) },
@@ -754,6 +1134,7 @@ export class TransferService {
 					if (error instanceof FileAccessError && error.code === "NOT_FOUND") return [];
 					throw error;
 				});
+				seen.push({ path, entries });
 				const byName = new Map(entries.map((entry) => [key(entry.name), entry]));
 				const next: { path: string; items: Item[] }[] = [];
 				for (const item of items) {
@@ -777,6 +1158,7 @@ export class TransferService {
 			});
 			level = listed.flat();
 		}
+		return seen;
 	}
 
 	/** What `on_conflict` does with each conflict the start found. */
@@ -871,16 +1253,19 @@ export class TransferService {
 		requestId: string,
 	): void {
 		upload.source = requester.clientId;
+		upload.reason = null;
+		upload.linkDropped = false;
 		const byPath = new Map(upload.items.map((item) => [item.relPath, item.id]));
 		const order = (msg.items as { relPath: string }[]).map((item) => byPath.get(item.relPath) ?? 0);
-		for (const id of upload.order) {
-			const item = upload.items[id] as Item;
-			if (item.state === "failed" || item.state === "cancelled" || item.state === "interrupted") {
-				this.requeue(upload, item);
-			}
-		}
-		upload.doneSaid = false;
-		this.clearForget(upload);
+		this.requeueAll(
+			upload,
+			upload.order
+				.map((id) => upload.items[id] as Item)
+				.filter(
+					(item) =>
+						item.state === "failed" || item.state === "cancelled" || item.state === "interrupted",
+				),
+		);
 		this.deps.send(requester.clientId, this.accepted(upload, requestId, true, order));
 		this.settle(upload);
 		this.schedulePump();
@@ -1117,11 +1502,21 @@ export class TransferService {
 		if (item.temp !== null && item.acked > 0) {
 			const there = await backend.stat(item.temp).catch(() => null);
 			const size = there?.kind === "file" ? (there.size ?? -1) : -1;
-			const resumable =
-				backend.transport === "exec"
+			let resumable =
+				backend.transport === "exec" && !item.carried
 					? // Appended to: what it holds must be all the hub sent, and hashed.
 						size === item.acked
 					: size >= item.acked;
+			if (resumable && size > item.acked) {
+				// Only the prefix the host acknowledged is known to be whole (#860).
+				resumable = await backend.truncate(item.temp, item.acked).then(
+					() => true,
+					(error: unknown) => {
+						if (isInterruption(error)) throw error;
+						return false;
+					},
+				);
+			}
 			if (!resumable) {
 				await backend.remove(item.temp);
 				this.restartFile(upload, item);
@@ -1137,10 +1532,13 @@ export class TransferService {
 			if (upload.verify) item.hash = createHash("sha256");
 			if (direct) {
 				await this.openDirect(upload, backend, item, parent);
+				this.persist(upload, item);
 				return;
 			}
 			item.temp = tempPathFor(target, upload.style);
 		}
+		// Known before it exists: a sweep never takes it for a stranger's.
+		this.persist(upload, item);
 		const options = {
 			resumeAt: item.acked,
 			size: item.size,
@@ -1153,6 +1551,7 @@ export class TransferService {
 			if (!(error instanceof TargetExists) || item.acked > 0) throw error;
 			// A name nobody should have: another one.
 			item.temp = tempPathFor(target, upload.style);
+			this.persist(upload, item);
 			item.sink = await backend.open(item.temp, options);
 		}
 		if (item.state !== "sending") {
@@ -1210,8 +1609,18 @@ export class TransferService {
 			return;
 		}
 		upload.busy--;
+		// Over SSH commands, bytes an earlier hub sent are hashed by nobody: the size stands (#860).
+		if (
+			item.carried &&
+			upload.verify &&
+			upload.backend?.transport === "exec" &&
+			item.verification === "size"
+		) {
+			item.verification = "size_resumed";
+		}
 		item.tempWhole = true;
 		item.hash = null;
+		this.persist(upload, item);
 		if (item.direct) {
 			this.filePlaced(
 				upload,
@@ -1340,6 +1749,8 @@ export class TransferService {
 		item.temp = null;
 		item.tempWhole = false;
 		item.hash = null;
+		item.carried = false;
+		this.persist(upload, item);
 	}
 
 	/** The connection went: everything of this upload under way stops, resumable. */
@@ -1348,6 +1759,8 @@ export class TransferService {
 		for (const item of upload.items) {
 			if (item.state === "sending" || item.state === "queued") this.interrupt(upload, item, reason);
 		}
+		// Its window is still there: the hub's reconnect takes it up again (#860).
+		if (upload.source !== null) upload.linkDropped = true;
 		this.releaseBackend(upload);
 	}
 
@@ -1446,15 +1859,17 @@ export class TransferService {
 		requester: TransferRequester,
 		msg: { transferId: string; scope: TransferScope },
 	): Upload | null {
-		const upload =
-			typeof msg.transferId === "string" ? this.uploads.get(msg.transferId) : undefined;
+		return this.controlledById(requester, msg.transferId, false);
+	}
+
+	/**
+	 * As `controlled`, by id. `sends`: the window is to send the upload's
+	 * bytes, which only a window of the device that started it holds.
+	 */
+	private controlledById(requester: TransferRequester, id: unknown, sends: boolean): Upload | null {
+		const upload = typeof id === "string" ? this.uploads.get(id) : undefined;
 		if (upload === undefined) {
-			this.refuseControl(
-				requester,
-				String(msg.transferId),
-				"TRANSFER_NOT_FOUND",
-				"No upload has that id",
-			);
+			this.refuseControl(requester, String(id), "TRANSFER_NOT_FOUND", "No upload has that id");
 			return null;
 		}
 		const allowed = this.deps.channelEnded(upload.channelId)
@@ -1469,7 +1884,46 @@ export class TransferService {
 			);
 			return null;
 		}
+		if (sends && requester.tokenId !== upload.tokenId) {
+			this.refuseControl(
+				requester,
+				upload.id,
+				"NOT_THE_SENDER",
+				"Only a window of the device that started this upload holds its files",
+			);
+			return null;
+		}
 		return upload;
+	}
+
+	/** The uploads a RESUME or a DISCARD names that this window may act on; the others refused. */
+	private named(requester: TransferRequester, ids: unknown, sends: boolean): Upload[] {
+		if (!Array.isArray(ids) || ids.length === 0 || ids.length > TRANSFER_MAX_IDS) {
+			this.refuseControl(
+				requester,
+				"",
+				"INVALID_INPUT",
+				`transfer_ids must name from 1 to ${TRANSFER_MAX_IDS} uploads`,
+			);
+			return [];
+		}
+		const uploads: Upload[] = [];
+		for (const id of new Set(ids)) {
+			const upload = this.controlledById(requester, id, sends);
+			if (upload !== null) uploads.push(upload);
+		}
+		return uploads;
+	}
+
+	/** Uploads by host, in the order the first of each was named. */
+	private byHost(uploads: readonly Upload[]): Map<string, Upload[]> {
+		const hosts = new Map<string, Upload[]>();
+		for (const upload of uploads) {
+			const group = hosts.get(upload.hostId) ?? [];
+			group.push(upload);
+			hosts.set(upload.hostId, group);
+		}
+		return hosts;
 	}
 
 	private refuseControl(
@@ -1517,6 +1971,8 @@ export class TransferService {
 		const before = item.state;
 		item.state = state;
 		upload.dirtyItems.add(item.id);
+		// With what else changed of it: its reason, its outcome, its temporary.
+		this.persist(upload, item);
 		if (before === state) return;
 		if (item.kind !== "file") {
 			const left = (upload.folderStates.get(before) ?? 1) - 1;
@@ -1540,6 +1996,568 @@ export class TransferService {
 		upload.dirtyItems.add(item.id);
 		for (const totals of this.totalsAbove(upload, item)) totals.acked += delta;
 		this.markFolders(upload, item);
+		this.persistAcked(upload, item);
+	}
+
+	// ─── Keeping it (#860) ───────────────────────────────────────────────────
+
+	/** Write an upload's change to meta.db at once, with whatever else changed meanwhile. */
+	private persist(upload: Upload, item?: Item): void {
+		if (this.store === null || this.stopped || !upload.stored) return;
+		let ids = this.unsaved.get(upload.id);
+		if (ids === undefined) {
+			ids = new Set();
+			this.unsaved.set(upload.id, ids);
+		}
+		if (item !== undefined) ids.add(item.id);
+		if (this.saveScheduled) return;
+		this.saveScheduled = true;
+		setImmediate(() => {
+			this.saveScheduled = false;
+			this.save(false);
+		});
+	}
+
+	/**
+	 * A file's acknowledged bytes grew: written once `ACKED_PERSIST_BYTES` more
+	 * are there, else within `ACKED_PERSIST_MS`. A restarted file's go at once.
+	 */
+	private persistAcked(upload: Upload, item: Item): void {
+		if (this.store === null || this.stopped || !upload.stored) return;
+		if (
+			item.acked < item.persistedAcked ||
+			item.acked - item.persistedAcked >= ACKED_PERSIST_BYTES
+		) {
+			this.persist(upload, item);
+			return;
+		}
+		let ids = this.unsavedAcks.get(upload.id);
+		if (ids === undefined) {
+			ids = new Set();
+			this.unsavedAcks.set(upload.id, ids);
+		}
+		ids.add(item.id);
+		if (this.ackTimer !== null) return;
+		this.ackTimer = setTimeout(() => {
+			this.ackTimer = null;
+			this.save(true);
+		}, ACKED_PERSIST_MS);
+		this.ackTimer.unref?.();
+	}
+
+	/** Write what changed; with `acks`, the acknowledged bytes that waited too. */
+	private save(acks: boolean): void {
+		const store = this.store;
+		if (store === null) return;
+		const at = this.now();
+		const iso = new Date(at).toISOString();
+		const pending = [...this.unsaved];
+		this.unsaved.clear();
+		if (acks) {
+			for (const [id, ids] of this.unsavedAcks) {
+				const merged = pending.find(([each]) => each === id)?.[1];
+				if (merged !== undefined) for (const itemId of ids) merged.add(itemId);
+				else pending.push([id, ids]);
+			}
+			this.unsavedAcks.clear();
+		}
+		if (pending.length === 0) return;
+		try {
+			store.transaction(() => {
+				for (const [id, ids] of pending) {
+					const upload = this.uploads.get(id);
+					if (upload === undefined || !upload.stored) continue;
+					for (const itemId of ids) {
+						const item = upload.items[itemId];
+						if (item === undefined) continue;
+						store.writeItem(upload.id, this.itemRecord(item, iso));
+						item.persistedAcked = item.acked;
+						this.unsavedAcks.get(upload.id)?.delete(itemId);
+					}
+					const now = { state: this.uploadState(upload), reason: upload.reason };
+					if (!sameState(upload.recorded, now)) {
+						store.setState(upload.id, now.state, now.reason, iso);
+						upload.recorded = now;
+						upload.changedAt = at;
+					}
+				}
+			});
+		} catch {
+			// meta.db refused the write: the uploads go on in memory, as before #860.
+		}
+	}
+
+	/** Its rows, once it has been accepted. */
+	private record(upload: Upload): void {
+		upload.said = { state: this.uploadState(upload), reason: null };
+		const store = this.store;
+		if (store === null) return;
+		const iso = new Date(this.now()).toISOString();
+		const state = this.uploadState(upload);
+		try {
+			store.insert(
+				{
+					id: upload.id,
+					hostId: upload.hostId,
+					channelId: upload.channelId,
+					tokenId: upload.tokenId,
+					destDir: upload.dir,
+					pathStyle: upload.style,
+					direction: "upload",
+					state,
+					onConflict: upload.onConflict,
+					verify: upload.verify,
+					signature: upload.signature,
+					reason: null,
+					createdAt: upload.createdAt,
+					updatedAt: iso,
+				},
+				upload.items.map((item) => this.itemRecord(item, iso)),
+			);
+		} catch {
+			return;
+		}
+		upload.stored = true;
+		upload.recorded = { state, reason: null };
+		for (const item of upload.items) item.persistedAcked = item.acked;
+	}
+
+	private itemRecord(item: Item, updatedAt: string): TransferItemRecord {
+		return {
+			id: item.id,
+			parentId: item.parent,
+			relPath: item.relPath,
+			kind: item.kind,
+			size: item.size,
+			mtime: item.mtime,
+			state: item.state,
+			ackedOffset: item.acked,
+			tempPath: item.temp,
+			tempWhole: item.tempWhole,
+			direct: item.direct,
+			finalName: item.finalName,
+			resolution: item.resolution,
+			outcome: item.outcome,
+			verification: item.verification,
+			existingJson:
+				item.existing === null
+					? null
+					: JSON.stringify({
+							kind: item.existing.kind,
+							size: item.existing.size,
+							mtime: item.existing.mtime,
+							...(item.existing.linkKind !== undefined ? { linkKind: item.existing.linkKind } : {}),
+						}),
+			typeClash: item.typeClash,
+			late: item.late,
+			errorCode: item.code,
+			reason: item.reason,
+			updatedAt,
+		};
+	}
+
+	/**
+	 * An upload from its rows, as `restore` brings it back: no window sends
+	 * it, nothing of it is queued until a resume says so.
+	 */
+	private bringBack(store: TransfersDAL, record: TransferRecord): void {
+		const hostType = this.deps.hostType?.(record.hostId) ?? null;
+		if (hostType === null || record.direction !== "upload") {
+			store.delete(record.id);
+			return;
+		}
+		if (record.state === "done") {
+			store.delete(record.id);
+			return;
+		}
+		const style: PathStyle = record.pathStyle === "windows" ? "windows" : "posix";
+		const rows = store.items(record.id);
+		if (record.state === "discarded") {
+			this.pendingRemoval.set(record.id, {
+				id: record.id,
+				hostId: record.hostId,
+				hostType,
+				dir: record.destDir,
+				style,
+				temps: rows.flatMap((row) =>
+					row.tempPath !== null && row.state !== "placed" ? [row.tempPath] : [],
+				),
+			});
+			return;
+		}
+		// Their ids are their places: a record with one missing is not this hub's to read.
+		if (rows.some((row, index) => row.id !== index)) return;
+		const items: Item[] = rows.map((row) => {
+			const cut = row.relPath.lastIndexOf("/");
+			const name = row.relPath.slice(cut + 1);
+			const state = revivedState(row.state);
+			const moving = state !== row.state;
+			return {
+				id: row.id,
+				relPath: row.relPath,
+				name,
+				kind: row.kind === "dir" ? "dir" : "file",
+				size: row.size,
+				mtime: row.mtime,
+				parent: row.parentId,
+				children: [],
+				state,
+				existing: existingOf(row.existingJson, name),
+				typeClash: row.typeClash,
+				late: row.late,
+				resolution: (TRANSFER_CONFLICT_ACTIONS as readonly string[]).includes(row.resolution ?? "")
+					? (row.resolution as TransferConflictAction)
+					: null,
+				finalName: row.finalName,
+				path: null,
+				outcome: row.outcome as TransferOutcome | null,
+				verification: row.verification as TransferVerification | null,
+				acked: row.kind === "dir" ? 0 : row.ackedOffset,
+				temp: row.tempPath,
+				tempWhole: row.tempWhole,
+				direct: row.direct,
+				hash: null,
+				sink: null,
+				opening: null,
+				writing: false,
+				reason: moving ? "The hub stopped while it was being sent" : row.reason,
+				code: moving ? "INTERRUPTED" : row.errorCode,
+				carried: row.tempPath !== null && row.ackedOffset > 0,
+				persistedAcked: row.ackedOffset,
+			};
+		});
+		for (const item of items) {
+			if (item.parent !== null) items[item.parent]?.children.push(item.id);
+		}
+		const depth = (item: Item) => item.relPath.split("/").length;
+		const order = [...items]
+			.sort((a, b) => depth(a) - depth(b) || a.id - b.id)
+			.map((item) => item.id);
+		// Where each folder that was put in place is: what is in it goes there.
+		for (const id of order) {
+			const item = items[id] as Item;
+			if (item.kind !== "dir" || item.outcome === null || item.outcome === "skipped") continue;
+			const parent = item.parent === null ? record.destDir : items[item.parent]?.path;
+			if (parent === null || parent === undefined) continue;
+			item.path = joinHostPath(parent, item.finalName ?? item.name, style);
+		}
+		const upload = this.assemble(
+			{
+				id: record.id,
+				channelId: record.channelId,
+				hostId: record.hostId,
+				hostType,
+				dir: record.destDir,
+				style,
+				onConflict: (TRANSFER_ON_CONFLICT_VALUES as readonly string[]).includes(record.onConflict)
+					? (record.onConflict as TransferOnConflict)
+					: "ask",
+				verify: record.verify,
+				tokenId: record.tokenId,
+				signature: record.signature,
+				order,
+				createdAt: record.createdAt,
+			},
+			items,
+			null,
+			null,
+		);
+		upload.stale = true;
+		upload.stored = true;
+		upload.changedAt = Date.parse(record.updatedAt) || this.now();
+		upload.reason = NOT_RESUMED_REASONS.has(record.reason ?? "")
+			? (record.reason as TransferNotResumedReason)
+			: null;
+		upload.recorded = {
+			state: record.state as TransferUploadState,
+			reason: record.reason,
+		};
+		upload.said = { state: "interrupted", reason: upload.reason };
+		if (this.isSettled(upload)) {
+			// Nothing of it is left to send, answer or place: there is nothing to resume.
+			store.delete(record.id);
+			return;
+		}
+		this.uploads.set(upload.id, upload);
+		const expired =
+			record.state === "interrupted" && this.now() - upload.changedAt >= TRANSFER_EXPIRY_MS;
+		if (expired) {
+			this.drop(upload, null);
+			return;
+		}
+		// What was moving is written as it is now: interrupted.
+		for (const item of items) if (item.state !== rows[item.id]?.state) this.persist(upload, item);
+		this.persist(upload);
+	}
+
+	/** What an upload as a whole is at, as meta.db and TRANSFER_STATE say it. */
+	private uploadState(upload: Upload): TransferUploadState {
+		if (this.isSettled(upload)) return "done";
+		return upload.source === null ? "interrupted" : "running";
+	}
+
+	// ─── Resuming, discarding, and a host's connection (#860) ────────────────
+
+	/** A resume or a discard is reaching this host: it holds its connection as a start does. */
+	private hold(hostId: string): void {
+		this.starting.set(hostId, (this.starting.get(hostId) ?? 0) + 1);
+	}
+
+	private letGo(hostId: string, hostType: string): void {
+		const left = (this.starting.get(hostId) ?? 1) - 1;
+		if (left > 0) this.starting.set(hostId, left);
+		else this.starting.delete(hostId);
+		this.noteHost(hostId, hostType);
+	}
+
+	/**
+	 * Take up an upload, this window sending it: each temporary is looked at
+	 * first. One at least as long as what its host acknowledged is cut to
+	 * that and goes on from there; one missing or short, and the file starts
+	 * again under a new one. A whole one is only placed; a placed file is
+	 * never sent again. Then what failed, was cancelled or interrupted is
+	 * queued, as a retry would.
+	 */
+	private async takeUp(upload: Upload, requester: TransferRequester): Promise<void> {
+		upload.reason = null;
+		upload.linkDropped = false;
+		upload.busy++;
+		try {
+			const backend = await this.backendOf(upload);
+			const kept = upload.items.filter(
+				(item) =>
+					item.kind === "file" &&
+					item.temp !== null &&
+					(item.state === "interrupted" ||
+						item.state === "queued" ||
+						item.state === "conflict" ||
+						item.state === "failed" ||
+						item.state === "cancelled"),
+			);
+			await mapLimited(kept, HOST_WORK_CONCURRENCY, (item) =>
+				this.lookAtTemp(upload, backend, item),
+			);
+		} catch (error) {
+			upload.busy--;
+			if (isInterruption(error)) this.interruptAll(upload, messageOf(error));
+			this.notResumed(upload, "host_unreachable", requester);
+			return;
+		}
+		upload.busy--;
+		// Discarded meanwhile: nothing of it goes on.
+		if (this.uploads.get(upload.id) !== upload) return;
+		// Its bytes come from this window from now on.
+		upload.source = requester.clientId;
+		this.requeueAll(
+			upload,
+			upload.order
+				.map((id) => upload.items[id] as Item)
+				.filter(
+					(item) =>
+						item.state === "failed" || item.state === "cancelled" || item.state === "interrupted",
+				),
+		);
+		this.persist(upload);
+		this.settle(upload);
+		this.schedulePump();
+	}
+
+	/** What a resume finds of one temporary, and what it does about it (see `takeUp`). */
+	private async lookAtTemp(upload: Upload, backend: UploadBackend, item: Item): Promise<void> {
+		const temp = item.temp;
+		if (temp === null) return;
+		const there = await backend.stat(temp).catch((error: unknown) => {
+			if (isInterruption(error)) throw error;
+			return null;
+		});
+		const size = there?.kind === "file" ? (there.size ?? -1) : -1;
+		if (item.tempWhole) {
+			if (size === item.size) return;
+		} else if (item.acked > 0 && size >= item.acked) {
+			if (size === item.acked) return;
+			const cut = await backend.truncate(temp, item.acked).then(
+				() => true,
+				(error: unknown) => {
+					if (isInterruption(error)) throw error;
+					return false;
+				},
+			);
+			if (cut) return;
+		}
+		// Missing, short, or not what it was: its file starts again. Only a file is removed.
+		if (there?.kind === "file") await backend.remove(temp);
+		this.restartFile(upload, item);
+	}
+
+	/** A resume could not reach the upload's host: it stays interrupted, saying why. */
+	private notResumed(
+		upload: Upload,
+		reason: TransferNotResumedReason,
+		requester: TransferRequester,
+	): void {
+		if (this.uploads.get(upload.id) !== upload) return;
+		upload.reason = reason;
+		this.persist(upload);
+		this.sayState(upload, requester.clientId);
+	}
+
+	/**
+	 * Drop an upload: what it was doing stops, it is forgotten, its record
+	 * marked discarded until its temporaries are removed (`atConnection`).
+	 */
+	private drop(upload: Upload, requesterId: string | null): void {
+		const temps: string[] = [];
+		for (const item of upload.items) {
+			if (item.kind === "file" && item.temp !== null && item.state !== "placed") {
+				temps.push(item.temp);
+			}
+			const sink = item.sink;
+			item.sink = null;
+			if (sink !== null && !item.writing) void sink.abort();
+			// A write or a placement under way finds it so, and stops there.
+			if (UNSETTLED.has(item.state)) item.state = "cancelled";
+		}
+		upload.queue = [];
+		upload.folderQueue = [];
+		upload.waiting.clear();
+		if (upload.flushTimer !== null) clearTimeout(upload.flushTimer);
+		upload.flushTimer = null;
+		this.clearForget(upload);
+		this.uploads.delete(upload.id);
+		this.unsaved.delete(upload.id);
+		this.unsavedAcks.delete(upload.id);
+		this.releaseBackend(upload);
+		this.pendingRemoval.set(upload.id, {
+			id: upload.id,
+			hostId: upload.hostId,
+			hostType: upload.hostType,
+			dir: upload.dir,
+			style: upload.style,
+			temps,
+		});
+		if (upload.stored) {
+			try {
+				this.store?.setState(upload.id, "discarded", null, new Date(this.now()).toISOString());
+			} catch {
+				// Removed from memory all the same; meta.db keeps what it had.
+			}
+		}
+		const message: TransferStateMessage = {
+			type: "TRANSFER_STATE",
+			transferId: upload.id,
+			channelId: upload.channelId,
+			hostId: upload.hostId,
+			state: "discarded",
+		};
+		for (const clientId of this.audienceOf(upload, requesterId)) this.deps.send(clientId, message);
+		this.noteHost(upload.hostId, upload.hostType);
+	}
+
+	/**
+	 * What the hub does on a host once it reaches it, one at a time per host:
+	 * the temporaries of the uploads dropped there are removed by their
+	 * recorded paths, then their records deleted. A connection lost meanwhile
+	 * leaves the rest for the next.
+	 */
+	private atConnection(hostId: string, hostType: string): Promise<void> {
+		const before = this.hostWork.get(hostId) ?? Promise.resolve();
+		const work = before.then(() => this.removeDropped(hostId, hostType));
+		const settled = work.catch(() => {});
+		this.hostWork.set(hostId, settled);
+		void settled.then(() => {
+			if (this.hostWork.get(hostId) === settled) this.hostWork.delete(hostId);
+		});
+		return settled;
+	}
+
+	private async removeDropped(hostId: string, hostType: string): Promise<void> {
+		if (this.stopped) return;
+		const pending = [...this.pendingRemoval.values()].filter((each) => each.hostId === hostId);
+		if (pending.length === 0) return;
+		const backend = await this.deps.files.uploadBackend(hostId, hostType);
+		try {
+			for (const dropped of pending) {
+				await mapLimited(dropped.temps, HOST_WORK_CONCURRENCY, (temp) => backend.remove(temp));
+				if (backend.lost || this.stopped) return;
+				this.pendingRemoval.delete(dropped.id);
+				try {
+					this.store?.delete(dropped.id);
+				} catch {
+					// Kept as discarded: the next start removes nothing that is not there.
+				}
+			}
+		} finally {
+			backend.release();
+		}
+	}
+
+	/** Uploads to this host whose link dropped while their window sent them go on. */
+	private resumeDropped(hostId: string): void {
+		for (const upload of this.uploads.values()) {
+			if (upload.hostId !== hostId || upload.source === null) continue;
+			if (upload.backend?.lost === true)
+				this.interruptAll(upload, "The connection to the host was lost");
+			if (!upload.linkDropped) continue;
+			void this.takeUp(upload, { clientId: upload.source, tokenId: upload.tokenId });
+		}
+	}
+
+	/**
+	 * Remove from `dir` the temporaries of this hub's naming that no record
+	 * knows, and that are older than `SWEEP_MIN_AGE_MS`: what a hub that died
+	 * before writing its record left. Only files are removed; a folder or a
+	 * link of that name, a name of another shape, or a time the host does not
+	 * say is left alone.
+	 */
+	private async sweep(
+		backend: UploadBackend,
+		dir: string,
+		entries: readonly FileEntry[],
+	): Promise<void> {
+		const key = (path: string) => (backend.style === "windows" ? path.toUpperCase() : path);
+		const known = new Set<string>();
+		for (const upload of this.uploads.values()) {
+			for (const item of upload.items) if (item.temp !== null) known.add(key(item.temp));
+		}
+		for (const dropped of this.pendingRemoval.values()) {
+			for (const temp of dropped.temps) known.add(key(temp));
+		}
+		const before = this.now() - SWEEP_MIN_AGE_MS;
+		const stale = entries
+			.filter((entry) => {
+				if (entry.kind !== "file" || !TEMP_NAME.test(entry.name) || entry.mtime === null) {
+					return false;
+				}
+				const mtime = Date.parse(entry.mtime);
+				return Number.isFinite(mtime) && mtime < before;
+			})
+			.map((entry) => joinHostPath(dir, entry.name, backend.style))
+			.filter((path) => !known.has(key(path)));
+		await mapLimited(stale, HOST_WORK_CONCURRENCY, (path) => backend.remove(path));
+	}
+
+	/** Who hears of an upload: every client attached to its terminal, its window, and one more. */
+	private audienceOf(upload: Upload, extra: string | null = null): Set<string> {
+		const audience = new Set(this.deps.clientsOf(upload.channelId));
+		if (upload.source !== null) audience.add(upload.source);
+		if (extra !== null) audience.add(extra);
+		return audience;
+	}
+
+	/** Say the upload's own state, when it is not what was said last. */
+	private sayState(upload: Upload, extra: string | null = null): void {
+		const now = { state: this.uploadState(upload), reason: upload.reason };
+		if (sameState(upload.said, now)) return;
+		upload.said = now;
+		const message: TransferStateMessage = {
+			type: "TRANSFER_STATE",
+			transferId: upload.id,
+			channelId: upload.channelId,
+			hostId: upload.hostId,
+			state: now.state,
+			...(now.reason !== null ? { reason: now.reason } : {}),
+		};
+		for (const clientId of this.audienceOf(upload, extra)) this.deps.send(clientId, message);
 	}
 
 	private markFolders(upload: Upload, item: Item): void {
@@ -1575,6 +2593,8 @@ export class TransferService {
 
 	/** Say what changed soon, and whether the upload is done; let go of what an idle one holds. */
 	private settle(upload: Upload): void {
+		// Its own state is written as it changes: a window that left, its end.
+		this.persist(upload);
 		if (upload.flushTimer === null && !this.stopped) {
 			upload.flushTimer = setTimeout(() => {
 				upload.flushTimer = null;
@@ -1586,8 +2606,7 @@ export class TransferService {
 
 	private flush(upload: Upload): void {
 		if (!this.uploads.has(upload.id)) return;
-		const audience = new Set(this.deps.clientsOf(upload.channelId));
-		if (upload.source !== null) audience.add(upload.source);
+		const audience = this.audienceOf(upload);
 		const say = (message: unknown) => {
 			for (const clientId of audience) this.deps.send(clientId, message);
 		};
@@ -1634,6 +2653,7 @@ export class TransferService {
 			);
 			if (nothingLeft) this.forgetLater(upload);
 		}
+		this.sayState(upload);
 		if (!this.isActive(upload) && upload.source === null) this.releaseBackend(upload);
 		this.noteHost(upload.hostId, upload.hostType);
 	}
@@ -1671,7 +2691,6 @@ export class TransferService {
 	}
 
 	private summary(upload: Upload): Record<string, unknown> {
-		const settled = this.isSettled(upload);
 		return {
 			transfer_id: upload.id,
 			channel_id: upload.channelId,
@@ -1679,14 +2698,27 @@ export class TransferService {
 			dir: upload.dir,
 			on_conflict: upload.onConflict,
 			direction: "upload",
-			state: settled ? "done" : upload.source === null ? "interrupted" : "running",
+			state: this.uploadState(upload),
+			...(upload.reason !== null ? { reason: upload.reason } : {}),
 			totals: totalsOnWire(upload.totals),
+			updated_at: new Date(upload.changedAt).toISOString(),
 		};
 	}
 
 	private forgetLater(upload: Upload): void {
 		this.clearForget(upload);
-		upload.forgetTimer = setTimeout(() => this.uploads.delete(upload.id), FINISHED_KEPT_MS);
+		upload.forgetTimer = setTimeout(() => {
+			if (this.uploads.get(upload.id) !== upload) return;
+			this.uploads.delete(upload.id);
+			this.unsaved.delete(upload.id);
+			this.unsavedAcks.delete(upload.id);
+			if (!upload.stored) return;
+			try {
+				this.store?.delete(upload.id);
+			} catch {
+				// The next start deletes it, as done.
+			}
+		}, FINISHED_KEPT_MS);
 		upload.forgetTimer.unref?.();
 	}
 

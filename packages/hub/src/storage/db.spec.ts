@@ -12,6 +12,7 @@ import type { DatabaseManager } from "./db.js";
 import { openDatabases, openTestDatabases, restrictDatabaseFiles } from "./db.js";
 import { MetaDAL } from "./meta.js";
 import { describeOpenDatabases } from "./open-databases.fixture.js";
+import { TransfersDAL } from "./transfers-dal.js";
 
 describe("openTestDatabases", () => {
 	let dbs: DatabaseManager;
@@ -59,12 +60,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 25 after migration", () => {
+	it("meta.db: schema_version is 26 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(25);
+		expect(row.v).toBe(26);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -103,7 +104,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 25)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 26)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -118,8 +119,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(25);
-		expect(v2).toBe(25);
+		expect(v1).toBe(26);
+		expect(v2).toBe(26);
 	});
 
 	it("close() does not throw", () => {
@@ -256,7 +257,7 @@ describe("meta.db and its baseline", () => {
 			(column) => column.name,
 		);
 
-	it("comes out new at version 25, with the final schema", () => {
+	it("comes out new at version 26, with the final schema", () => {
 		dbs = openDatabases(dir);
 
 		expect(versions(dbs.meta)).toEqual([
@@ -265,6 +266,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
@@ -279,6 +281,8 @@ describe("meta.db and its baseline", () => {
 			"pairing_codes",
 			"schema_version",
 			"sessions",
+			"transfer_items",
+			"transfers",
 		]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
@@ -358,12 +362,15 @@ describe("meta.db and its baseline", () => {
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"host_launch_profiles",
 			"hosts",
 			"launch_profiles",
 			"schema_version",
+			"transfer_items",
+			"transfers",
 			"workspaces",
 		]);
 		expect(columns(dbs.meta, "launch_profiles")).toEqual(["id", "name", "report_directory"]);
@@ -479,6 +486,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
@@ -503,7 +511,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 		]);
 	});
 
-	it("comes out new at version 25", () => {
+	it("comes out new at version 26", () => {
 		dbs = openDatabases(dir);
 
 		expect(versions(dbs.meta)).toEqual([
@@ -512,6 +520,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
@@ -530,6 +539,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
@@ -613,6 +623,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		const row = (
 			id: string,
@@ -659,6 +670,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(shells(dbs.meta)).toEqual(chosen);
 	});
@@ -735,6 +747,7 @@ describe("meta.db migration 024: a launch profile override says whether the user
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(overrides(dbs.meta)).toEqual([
 			{
@@ -820,6 +833,7 @@ describe("meta.db migration 025: a launch profile can have its PowerShell report
 			{ version: 23 },
 			{ version: 24 },
 			{ version: 25 },
+			{ version: 26 },
 		]);
 		expect(
 			dbs.meta.prepare("SELECT id, report_directory, updated_at FROM launch_profiles").all(),
@@ -849,5 +863,254 @@ describe("meta.db migration 025: a launch profile can have its PowerShell report
 		expect(dal.updateLaunchProfile("P1", { reportDirectory: true })?.reportDirectory).toBe(true);
 		expect(dal.updateLaunchProfile("P1", { name: "PS" })?.reportDirectory).toBe(true);
 		expect(dal.updateLaunchProfile("P1", { reportDirectory: false })?.reportDirectory).toBe(false);
+	});
+});
+
+// ─── Migration 026: uploads that survive a hub restart (#860) ───────────────
+//
+// Two tables added, nothing else touched. A hub before #860 opens a database
+// at 26 as one ahead of its migrations, never names the tables, and a host it
+// deletes takes its uploads with it, through the cascades.
+
+describe("meta.db migration 026: the uploads' tables", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-026-");
+	});
+
+	afterEach(async () => {
+		dbs?.close();
+		dbs = undefined;
+		vi.doUnmock("./migration-files.js");
+		vi.resetModules();
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+	const versions = (db: Database.Database) =>
+		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
+	const tables = (db: Database.Database) =>
+		(
+			db
+				.prepare(
+					"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+				)
+				.all() as Array<{ name: string }>
+		).map((table) => table.name);
+	const columns = (db: Database.Database, table: string) =>
+		(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
+			(column) => column.name,
+		);
+	/** Every table but the version's, with its columns and its rows. */
+	const contents = (db: Database.Database) =>
+		Object.fromEntries(
+			tables(db)
+				.filter((table) => table !== "schema_version")
+				.map((table) => [
+					table,
+					{ columns: columns(db, table), rows: db.prepare(`SELECT * FROM ${table}`).all() },
+				]),
+		);
+	const count = (db: Database.Database, table: string) =>
+		(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+	const upTo25 = [
+		{ version: 21 },
+		{ version: 22 },
+		{ version: 23 },
+		{ version: 24 },
+		{ version: 25 },
+	];
+
+	const at = "2026-11-01T00:00:00.000Z";
+
+	/** A database as #839 left it: version 25, two hosts, a session and its terminal. */
+	function databaseAt25(): ReturnType<typeof contents> {
+		const before = new Database(join(dir, "meta.db"));
+		for (const file of [
+			"021-baseline.sql",
+			"022-unpadded-ssh-pins.sql",
+			"023-discovered-default-shell.sql",
+			"024-launch-profile-set-by-user.sql",
+			"025-launch-profile-report-directory.sql",
+		]) {
+			before.exec(migration(file));
+		}
+		const host = before.prepare(
+			`INSERT INTO hosts (id, type, label, ssh_host, created_at, updated_at)
+			VALUES (?, 'ssh', ?, ?, '${at}', '${at}')`,
+		);
+		host.run("H", "pi", "pi.test");
+		host.run("H2", "box", "box.test");
+		before
+			.prepare(
+				`INSERT INTO sessions (id, host_id, status, created_at, updated_at)
+				VALUES ('S', 'H', 'active', '${at}', '${at}')`,
+			)
+			.run();
+		before
+			.prepare(
+				`INSERT INTO channels (id, session_id, status, shell, created_at, updated_at)
+				VALUES ('C', 'S', 'live', 'bash', '${at}', '${at}')`,
+			)
+			.run();
+		const snapshot = contents(before);
+		expect(versions(before)).toEqual(upTo25);
+		before.close();
+		return snapshot;
+	}
+
+	/** An upload to `hostId`, with one file. */
+	function uploadTo(db: Database.Database, id: string, hostId: string): void {
+		new TransfersDAL(db).insert(
+			{
+				id,
+				hostId,
+				channelId: "C",
+				tokenId: null,
+				destDir: "/srv",
+				pathStyle: "posix",
+				direction: "upload",
+				state: "interrupted",
+				onConflict: "ask",
+				verify: true,
+				signature: "s",
+				reason: null,
+				createdAt: at,
+				updatedAt: at,
+			},
+			[
+				{
+					id: 0,
+					parentId: null,
+					relPath: "a.bin",
+					kind: "file",
+					size: 10,
+					mtime: null,
+					state: "interrupted",
+					ackedOffset: 4,
+					tempPath: "/srv/.a.bin.0123456789abcdef.partial",
+					tempWhole: false,
+					direct: false,
+					finalName: null,
+					resolution: null,
+					outcome: null,
+					verification: null,
+					existingJson: null,
+					typeClash: false,
+					late: false,
+					errorCode: null,
+					reason: null,
+					updatedAt: at,
+				},
+			],
+		);
+	}
+
+	it("adds the two tables, and changes nothing that was there", () => {
+		const before = databaseAt25();
+
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }]);
+		const after = contents(dbs.meta);
+		expect(Object.keys(after).filter((table) => !(table in before))).toEqual([
+			"transfer_items",
+			"transfers",
+		]);
+		for (const [table, was] of Object.entries(before)) expect(after[table]).toEqual(was);
+		expect(columns(dbs.meta, "transfers")).toEqual([
+			"id",
+			"host_id",
+			"channel_id",
+			"token_id",
+			"dest_dir",
+			"path_style",
+			"direction",
+			"state",
+			"on_conflict",
+			"verify",
+			"signature",
+			"reason",
+			"created_at",
+			"updated_at",
+		]);
+		expect(columns(dbs.meta, "transfer_items")).toEqual([
+			"transfer_id",
+			"id",
+			"parent_id",
+			"rel_path",
+			"kind",
+			"size",
+			"mtime",
+			"state",
+			"acked_offset",
+			"temp_path",
+			"temp_whole",
+			"direct",
+			"final_name",
+			"resolution",
+			"outcome",
+			"verification",
+			"existing_json",
+			"type_clash",
+			"late",
+			"error_code",
+			"reason",
+			"updated_at",
+		]);
+		expect(
+			dbs.meta
+				.prepare(
+					"SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_transfer%' ORDER BY name",
+				)
+				.all(),
+		).toEqual([{ name: "idx_transfer_items_state" }, { name: "idx_transfers_host" }]);
+		// An upload goes with its host, and its items with it.
+		uploadTo(dbs.meta, "T", "H2");
+		expect(new TransfersDAL(dbs.meta).items("T")).toHaveLength(1);
+		expect(new MetaDAL(dbs.meta).deleteHost("H2")).toBe(true);
+		expect(count(dbs.meta, "transfers")).toBe(0);
+		expect(count(dbs.meta, "transfer_items")).toBe(0);
+	});
+
+	it("is ignored by a hub without it, which opens the database and deletes a host with uploads", async () => {
+		databaseAt25();
+		dbs = openDatabases(dir);
+		uploadTo(dbs.meta, "T", "H2");
+		uploadTo(dbs.meta, "U", "H");
+		dbs.close();
+		dbs = undefined;
+
+		// The hub before #860: its migrations stop at 025.
+		vi.resetModules();
+		vi.doMock("./migration-files.js", async (importOriginal) => {
+			const real = await importOriginal<typeof import("./migration-files.js")>();
+			return {
+				...real,
+				readMigrationFiles: (set: Parameters<typeof real.readMigrationFiles>[0]) =>
+					real
+						.readMigrationFiles(set)
+						.filter((file) => set !== "meta" || Number.parseInt(file.file, 10) <= 25),
+			};
+		});
+		const older = await import("./db.js");
+		const said = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		dbs = older.openDatabases(dir);
+		const ahead = said.mock.calls.some(([text]) =>
+			String(text).includes("ahead of latest migration"),
+		);
+		said.mockRestore();
+
+		expect(ahead).toBe(true);
+		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }]);
+		const meta = new MetaDAL(dbs.meta);
+		expect(meta.getHost("H")?.label).toBe("pi");
+		expect(meta.deleteHost("H2")).toBe(true);
+		expect(count(dbs.meta, "transfers")).toBe(1);
+		expect(count(dbs.meta, "transfer_items")).toBe(1);
+		expect(tables(dbs.meta)).toEqual(expect.arrayContaining(["transfer_items", "transfers"]));
 	});
 });

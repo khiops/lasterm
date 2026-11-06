@@ -73,7 +73,7 @@ export function authenticateWithPassword(
 			console.error(
 				`[lasterm-ssh] password obtained: ${secret === null ? "no (cancelled)" : "yes"}`,
 			);
-			if (secret === null) throw new AuthCancelledError();
+			if (secret === null) throw new AuthCancelledError("password");
 			config.password = secret;
 		},
 	};

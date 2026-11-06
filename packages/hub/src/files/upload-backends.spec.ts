@@ -105,6 +105,26 @@ describe.each(UPLOAD_BACKENDS.filter((kind) => kind.runs))("an upload over $name
 			expect(existsSync(h.local(temp))).toBe(false);
 		}));
 
+	it("cuts a temporary to the bytes its host acknowledged, then appends from there (#860)", () =>
+		use(async (h) => {
+			const data = bytes(200_000);
+			const target = h.at("resumed.bin");
+			const temp = tempPathFor(target, h.backend.style);
+			const first = await h.backend.open(temp, options(data.length));
+			await first.write(data.subarray(0, 150_000), 0);
+			await first.abort();
+			await h.backend.truncate(temp, 100_000);
+			expect(statSync(h.local(temp)).size).toBe(100_000);
+			expect(readFileSync(h.local(temp))).toEqual(data.subarray(0, 100_000));
+			const rest = await h.backend.open(temp, options(data.length, { resumeAt: 100_000 }));
+			await rest.write(data.subarray(100_000), 100_000);
+			expect(await rest.finish(null)).toBe("size");
+			expect(readFileSync(h.local(temp))).toEqual(data);
+			await expect(h.backend.truncate(h.at("not there.bin"), 0)).rejects.toMatchObject({
+				code: "NOT_FOUND",
+			});
+		}));
+
 	it("never replaces a file that has the name, whether it was there first or appeared meanwhile", () =>
 		use(async (h) => {
 			const before = h.at("there before.txt");

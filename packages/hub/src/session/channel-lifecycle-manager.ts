@@ -5,6 +5,7 @@
 
 import type {
 	AgentChannelStateMessage,
+	AgentCwdQueryMessage,
 	AgentSpawnErrMessage,
 	AgentSpawnMessage,
 	AgentSpawnOkMessage,
@@ -1320,6 +1321,11 @@ export class ChannelLifecycleManager {
 				// from a session this run did not start (#79). Adopting it here is
 				// what makes the session it now belongs to the one it is in.
 				channelState.sessionId = session.id;
+				// A daemon says a terminal's directory when it changes, and a hub
+				// that started since has heard none of it: it asks (#834).
+				if (channelState.liveCwd === undefined) {
+					agent.send({ type: "CWD_QUERY", channelId } satisfies AgentCwdQueryMessage);
+				}
 				// A pane attached while the host was out of reach was answered
 				// from the spool, and says it is not connected. The channel was
 				// already live, so nothing changed, and nothing told that pane the

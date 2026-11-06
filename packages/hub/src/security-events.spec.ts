@@ -34,6 +34,8 @@ import { getTestTls } from "./test-tls.fixture.js";
 
 /** What the mocked agent says its environment is, when asked (#576). */
 const agentEnvironment = vi.hoisted(() => ({ env: {} as Record<string, string> }));
+/** The directory the mocked agent says its terminal is in, once spawned (#834). */
+const agentCwd = vi.hoisted(() => ({ dir: null as string | null }));
 
 vi.mock("./session/ssh-agent.js", () => {
 	const { EventEmitter } = require("node:events");
@@ -43,16 +45,35 @@ vi.mock("./session/ssh-agent.js", () => {
 			type: "HELLO",
 			version: 1,
 			agentVersion: "0.0.0",
-			capabilities: ["env-modes"],
+			capabilities: ["env-modes", "cwd"],
 		};
 		start = vi.fn().mockResolvedValue(undefined);
-		send = vi.fn((msg: { type: string; requestId?: string }) => {
+		send = vi.fn((msg: { type: string; requestId?: string; channelId?: string }) => {
 			if (msg.type === "SPAWN") {
+				const channelId = "01HZZZZZZZZZZZZZZZZZZZZZZY";
+				setImmediate(() => {
+					this.emit("message", { type: "SPAWN_OK", requestId: msg.requestId, channelId });
+					const dir = agentCwd.dir;
+					if (dir === null) return;
+					// Where it starts, then where its shell says it went.
+					this.emit("message", { type: "CWD_CHANGE", channelId, cwd: dir, source: "start" });
+					this.emit("message", {
+						type: "CWD_CHANGE",
+						channelId,
+						cwd: `${dir}/sub`,
+						source: "shell",
+						atPrompt: false,
+						foreground: "vim",
+					});
+				});
+			} else if (msg.type === "ATTACH") {
 				setImmediate(() =>
 					this.emit("message", {
-						type: "SPAWN_OK",
+						type: "ATTACH_OK",
+						channelId: msg.channelId,
 						requestId: msg.requestId,
-						channelId: "01HZZZZZZZZZZZZZZZZZZZZZZY",
+						snapshot: { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+						lastSeq: 0,
 					}),
 				);
 			} else if (msg.type === "ENV_QUERY") {
@@ -724,6 +745,78 @@ describe("a host's environment leaves no trace in the logs (#576)", () => {
 			ws?.terminate();
 			await hub.close();
 			agentEnvironment.env = {};
+		}
+	});
+});
+
+describe("a terminal's directory leaves no trace in the logs (#834)", () => {
+	// A directory is user content: its name can say whose files, which client,
+	// which project. The hub keeps it, relays it, and gives it in STATE_SYNC and
+	// ATTACH_OK, and writes it to no log, at any level.
+	it("logs no directory an agent reports, relayed, synced or attached", async () => {
+		const dir = "/home/me/lasterm-spec-secret-dir-4242";
+		agentCwd.dir = dir;
+		const serverLog = new ServerLog();
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const hub = await createServer({
+			tls: getTestTls(),
+			logger: { level: "trace", destination: serverLog.destination },
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			securityLog: log.securityLog,
+			hubLogger,
+		});
+		const sockets: InjectedSocket[] = [];
+		const connect = async (): Promise<ProtocolMessage[]> => {
+			const ws = await openSocket(hub);
+			sockets.push(ws);
+			const received: ProtocolMessage[] = [];
+			ws.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)));
+			});
+			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "STATE_SYNC")).toBe(true));
+			return received;
+		};
+		try {
+			const hostId = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@pi.local",
+			}).id;
+			const first = await connect();
+			sockets[0]?.send(
+				encodeMessage({ type: "SPAWN", hostId, cols: 80, rows: 24 } as ProtocolMessage),
+			);
+			await vi.waitFor(() => expect(first.filter((m) => m.type === "CWD_CHANGE")).toHaveLength(2));
+
+			// Another window: the directory in its STATE_SYNC, then in its ATTACH_OK.
+			const second = await connect();
+			const sync = second.find((m) => m.type === "STATE_SYNC");
+			expect(JSON.stringify(sync)).toContain(`${dir}/sub`);
+			sockets[1]?.send(encodeMessage({ type: "ATTACH", channelId: "01HZZZZZZZZZZZZZZZZZZZZZZY" }));
+			await vi.waitFor(() =>
+				expect(second.find((m) => m.type === "ATTACH_OK")).toMatchObject({
+					cwd: `${dir}/sub`,
+					cwdSource: "shell",
+				}),
+			);
+
+			const text = `${serverLog.text()}\n${log.text()}`;
+			expect(text).toContain("CWD_CHANGE");
+			expect(text).not.toContain(dir);
+		} finally {
+			for (const ws of sockets) ws.terminate();
+			await hub.close();
+			agentCwd.dir = null;
 		}
 	});
 });

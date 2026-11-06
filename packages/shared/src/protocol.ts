@@ -287,6 +287,50 @@ export interface AgentProcessTitleMessage {
 	displayTitle?: string;
 }
 
+/**
+ * Where the directory of a CWD_CHANGE came from (#834).
+ *
+ * - `shell`: the shell said so in its output (OSC 7, OSC 9;9, OSC 633;P;Cwd=,
+ *   OSC 1337;CurrentDir=). With `cwd: null`, it said it is on `otherHost`.
+ * - `process`: read from the shell's process. With `cwd: null`, the process
+ *   cannot tell: its directory is gone, it cannot be read, or it does not
+ *   follow the shell's (PowerShell).
+ * - `start`: the directory the agent started the terminal in, before any read.
+ */
+export type CwdSource = "shell" | "process" | "start";
+
+/** What a terminal's working directory is now, as a CWD_CHANGE says it. */
+export interface LiveCwd {
+	/** Null when unknown. */
+	cwd: string | null;
+	source: CwdSource;
+	/** False while a program holds the terminal; absent where it cannot be read (Windows). */
+	atPrompt?: boolean;
+	/** The program holding the terminal, when it is not the shell. */
+	foreground?: string;
+	/** The host a session nested in the terminal is on, when the shell reported another host. */
+	otherHost?: string;
+}
+
+/**
+ * Agent → Hub, and Hub → the clients attached to the channel: a terminal's
+ * working directory as it is now (#834). Sent when it changes, and in answer
+ * to CWD_QUERY. The directory is user content: never logged, on either side.
+ */
+export interface CwdChangeMessage extends LiveCwd {
+	type: "CWD_CHANGE";
+	channelId: string;
+}
+
+/**
+ * Hub → Agent: read a terminal's working directory afresh (#834). Answered
+ * with CWD_CHANGE, or with `ERROR { code: CHANNEL_NOT_FOUND, channelId }`.
+ */
+export interface AgentCwdQueryMessage {
+	type: "CWD_QUERY";
+	channelId: string;
+}
+
 /** Agent → Hub: terminal bell (BEL character, \x07) */
 export interface AgentBellMessage {
 	type: "BELL";
@@ -431,6 +475,14 @@ export interface UiAttachOkMessage {
 	 */
 	cols?: number;
 	rows?: number;
+	/**
+	 * The terminal's working directory as its agent last said it (#834), null
+	 * when unknown. Absent, with `cwdSource`, until the agent has said it.
+	 */
+	cwd?: string | null;
+	cwdSource?: CwdSource;
+	/** The program holding the terminal, when it is not the shell. */
+	foreground?: string;
 }
 
 /**
@@ -662,6 +714,10 @@ export interface StateSyncMessage {
 		displayTitle?: string;
 		/** Only on a `dead` entry: `killed` (#580, #592). */
 		endReason?: ChannelEndReason;
+		/** As in ATTACH_OK (#834): on a channel that has not ended, once its agent said it. */
+		cwd?: string | null;
+		cwdSource?: CwdSource;
+		foreground?: string;
 	}>;
 }
 
@@ -919,6 +975,7 @@ export type AgentMessage =
 	| ChannelStateEndMessage
 	| AgentTitleChangeMessage
 	| AgentProcessTitleMessage
+	| CwdChangeMessage
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| AgentLogMessage
@@ -936,6 +993,7 @@ export type HubToAgentMessage =
 	| SnapshotReqMessage
 	| AgentAttachMessage
 	| DestroyMessage
+	| AgentCwdQueryMessage
 	| HeartbeatMessage
 	| ErrorMessage;
 
@@ -978,6 +1036,7 @@ export type HubToUiMessage =
 	| WriteLockMessage
 	| AgentTitleChangeMessage
 	| AgentProcessTitleMessage
+	| CwdChangeMessage
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| InputDroppedMessage
@@ -1017,6 +1076,8 @@ export type ProtocolMessage =
 	| AgentStopMessage
 	| AgentEnvQueryMessage
 	| AgentEnvMessage
+	| AgentCwdQueryMessage
+	| CwdChangeMessage
 	| AuthMessage
 	| AuthOkMessage
 	| AuthFailMessage

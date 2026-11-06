@@ -228,6 +228,30 @@ Local daemon, single process, binds to 127.0.0.1.
 - Logs nothing: a path, a name or a variable is the user's, at any level, and a listing is a routine
   request
 
+**Uploads** (`packages/hub/src/transfers/`, the backends' writing side in `files/*-upload.ts`, #833):
+- Sends files to the host a terminal runs on: started, answered, retried and cancelled over the
+  WebSocket (`TRANSFER_*`, PROTOCOL.md § 4.19), the bytes over REST one chunk at a time
+  (`PUT /api/transfers/:id/items/:item`), so that terminal output never waits behind them. Waits
+  behind `[experimental] file_transfer`
+- An upload is bound to its host and destination folder from its start, and outlives its terminal.
+  Folders are items, created from the destination down before what is in them; the whole tree's
+  names are checked first (Windows names and path lengths included), so nothing is half sent for a
+  name found later
+- Never overwrites: each file goes to a hidden temporary created exclusively, then is placed without
+  replacing (`hardlink@openssh.com` or the plain SFTP rename, `ln`, `[IO.File]::Move`, `fs.link`);
+  only a Replace asked for replaces. A name taken meanwhile is a late conflict. An existing folder
+  is merged into
+- Conflicts are answered per file, per folder or for the whole upload; a placed file is never sent
+  again; a file whose window left or whose connection ended resumes from its acknowledged prefix
+- Over SSH commands, SHA-256 on both sides before a file is placed (`transfer_verify`)
+- The write lock decides who starts and answers; a running file finishes when the lock moves, the
+  rest waits for it to come back
+- Running uploads hold their host's connection: the acquisition, the retirement of an outdated
+  daemon (#805), and the gestures that close a connection, which ask first
+  (`TRANSFERS_WOULD_STOP`)
+- In memory for now; keeping them in `meta.db` and resuming them after a restart is #833's second
+  part. Logs no path and no name, and nothing per chunk at INFO
+
 **Cache Manager:**
 - Write-through: every OUTPUT chunk → spool.db
 - Periodic snapshots: store serialized screen state
@@ -1389,6 +1413,7 @@ lasterm/
 │   │       │   ├── ssh-file-transport.ts # SFTP session, mkdir walk, stdin exec, Windows reply marker (#832)
 │   │       │   └── spool-gc.ts       # Spool garbage collection (STORAGE.md § 7)
 │   │       ├── files/       # A terminal's host files: local fs, SFTP, SSH commands (§ 3.3, #832)
+│   │       ├── transfers/   # Uploads to a terminal's host: the tree, the states, the pace (#833)
 │   │       ├── ssh/         # known_hosts reader, ~/.ssh/config parser
 │   │       ├── logging/     # hub.jsonl, channel logs, the security log
 │   │       ├── storage/     # SQLite DAL (meta.db + spool.db)

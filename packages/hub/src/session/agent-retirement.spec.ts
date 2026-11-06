@@ -846,6 +846,24 @@ describe("a remote daemon older than the hub (#805)", () => {
 		expect(outdatedAgentOn(hostId)).toEqual({ running: OLD, expected: HUB_VERSION });
 	});
 
+	it("waits while an upload to the host runs, its connection carrying the upload's SFTP session, and goes once it ends (#833)", async () => {
+		let uploads = 1;
+		sm.setTransfers({ activeOn: (id) => (id === hostId ? uploads : 0), interruptOn: () => {} });
+		const old = daemons.make(OLD);
+		await connectHolding(old);
+
+		old.agents[0]?.exit("ch-remote");
+		await settle(20);
+		expect(stopsTo(old)).toEqual([]);
+		expect(sm.agents.get(hostId)).toBe(old.agents[0]);
+
+		// The transfer service says when the host's last upload ended.
+		uploads = 0;
+		sm.transfersEnded(hostId);
+		await vi.waitFor(() => expect(sm.agents.has(hostId)).toBe(false));
+		expect(stopsTo(old)).toEqual([{ type: "STOP", force: false }]);
+	});
+
 	it("never stops an agent on stdio, which every connection replaces", async () => {
 		remote.stdioVersion = OLD;
 		addWindow();

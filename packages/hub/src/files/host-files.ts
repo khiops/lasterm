@@ -69,6 +69,7 @@ export type FileErrorCode =
 	| "ALREADY_EXISTS"
 	| "PERMISSION_DENIED"
 	| "UNSUPPORTED_PATH"
+	| "NO_SPACE"
 	| "FILE_ACCESS_FAILED";
 
 /**
@@ -94,6 +95,7 @@ export const REASONS = {
 	PERMISSION_DENIED: "permission denied",
 	PARENT_NOT_FOUND: "the folder it would be in does not exist",
 	PARENT_NOT_A_DIRECTORY: "what it would be in is not a folder",
+	NO_SPACE: "the host's disk is full",
 } as const;
 
 /**

@@ -2,6 +2,7 @@ import type { HostOs } from "@lasterm/shared";
 import type { Client as SshClient } from "ssh2";
 import { readRemoteSystem, type SftpSupport } from "../session/agent-deployer.js";
 import { ExecFileBackend } from "./exec-files.js";
+import { ExecUploadBackend } from "./exec-upload.js";
 import { expandVariables, lookupIn, referencedVariables } from "./expand-vars.js";
 import {
 	FileAccessError,
@@ -17,7 +18,10 @@ import {
 } from "./host-files.js";
 import { normaliseHostPath, type PathStyle, parentOf, pathStyleOf } from "./host-paths.js";
 import { LocalFileBackend, localHostOs } from "./local-files.js";
+import { LocalUploadBackend } from "./local-upload.js";
 import { SFTP_IDLE_MS, SftpFileBackend, SharedSftp } from "./sftp-files.js";
+import { SftpUploadBackend } from "./sftp-upload.js";
+import type { UploadBackend } from "./upload-backend.js";
 
 /** What the service reads of a host's SSH connection: an `SshAgent`, connected. */
 export interface SshFileHost {
@@ -42,7 +46,7 @@ export interface HostFilesDeps {
 	 */
 	startFolder?(channelId: string): StartFolderSettings;
 	/** The local host's files; the hub's own file system unless a spec says otherwise. */
-	local?: { backend: FileBackend; os: HostOs };
+	local?: { backend: FileBackend; os: HostOs; upload?: UploadBackend };
 	/** How long a host's SFTP session stays open unused; `SFTP_IDLE_MS` by default. */
 	sftpIdleMs?: number;
 }
@@ -89,7 +93,7 @@ class RemoteFiles implements FileBackend {
 	private readonly exec: ExecFileBackend;
 
 	constructor(
-		client: SshClient,
+		private readonly client: SshClient,
 		readonly style: PathStyle,
 		private readonly support: () => SftpSupport | null,
 		idleMs: number,
@@ -125,6 +129,26 @@ class RemoteFiles implements FileBackend {
 	 */
 	env(names: readonly string[]): Promise<ReadonlyMap<string, string>> {
 		return this.exec.env(names);
+	}
+
+	/**
+	 * The way an upload writes on this host (#833): SFTP where the server
+	 * offers it and its session opens, SSH commands otherwise. One way for a
+	 * whole upload, unlike a listing: a file half written one way is not
+	 * finished the other. Each upload holds its own, and lets go of it.
+	 */
+	async upload(): Promise<UploadBackend> {
+		if (this.support()?.offered !== false) {
+			try {
+				await this.shared.current();
+				return new SftpUploadBackend(this.shared, this.style, this.sftp);
+			} catch {
+				if (this.shared.lost) {
+					throw new FileAccessError("HOST_NOT_CONNECTED", "The connection to the host was lost");
+				}
+			}
+		}
+		return new ExecUploadBackend(this.client, this.style, () => this.shared.lost, this.exec);
 	}
 
 	private async either<T>(request: (backend: FileBackend) => Promise<T>): Promise<T> {
@@ -164,13 +188,14 @@ class RemoteFiles implements FileBackend {
  * listing is a routine request.
  */
 export class HostFilesService {
-	private readonly local: { backend: FileBackend; os: HostOs };
+	private readonly local: { backend: FileBackend; os: HostOs; upload: UploadBackend };
 	private readonly sftpIdleMs: number;
 	private readonly remotes = new WeakMap<SshClient, RemoteFiles>();
 	private readonly detected = new WeakMap<SshClient, Promise<HostOs | null>>();
 
 	constructor(private readonly deps: HostFilesDeps) {
-		this.local = deps.local ?? { backend: new LocalFileBackend(), os: localHostOs() };
+		const local = deps.local ?? { backend: new LocalFileBackend(), os: localHostOs() };
+		this.local = { ...local, upload: local.upload ?? new LocalUploadBackend(local.os) };
 		this.sftpIdleMs = deps.sftpIdleMs ?? SFTP_IDLE_MS;
 	}
 
@@ -277,13 +302,34 @@ export class HostFilesService {
 		}
 	}
 
-	private async reach(channelId: string): Promise<{ backend: FileBackend; style: PathStyle }> {
+	/** The host a terminal runs on, and its type; ChannelNotFound for one this hub does not know. */
+	channelHost(channelId: string): { hostId: string; hostType: string } {
 		const channel = this.deps.channelHost(channelId);
 		if (channel === null) throw new ChannelNotFound();
+		return channel;
+	}
+
+	/**
+	 * The way an upload writes on a host, for one upload, which lets go of it
+	 * when it is done with it (`UploadBackend.release`). The host must be
+	 * connected: `HOST_NOT_CONNECTED` otherwise.
+	 */
+	async uploadBackend(hostId: string, hostType: string): Promise<UploadBackend> {
+		if (hostType === "local") return this.local.upload;
+		return (await this.remote(hostId)).upload();
+	}
+
+	private async reach(channelId: string): Promise<{ backend: FileBackend; style: PathStyle }> {
+		const channel = this.channelHost(channelId);
 		if (channel.hostType === "local") {
 			return { backend: this.local.backend, style: pathStyleOf(this.local.os) };
 		}
-		const host = this.deps.sshHost(channel.hostId);
+		const remote = await this.remote(channel.hostId);
+		return { backend: remote, style: remote.style };
+	}
+
+	private async remote(hostId: string): Promise<RemoteFiles> {
+		const host = this.deps.sshHost(hostId);
 		const client = host?.sshConnection ?? null;
 		if (host === null || client === null) {
 			throw new FileAccessError(
@@ -293,7 +339,7 @@ export class HostFilesService {
 		}
 		let remote = this.remotes.get(client);
 		if (remote === undefined) {
-			const os = this.deps.hostOs(channel.hostId) ?? (await this.detectOs(client));
+			const os = this.deps.hostOs(hostId) ?? (await this.detectOs(client));
 			if (os === null) {
 				throw new FileAccessError(
 					"FILE_ACCESS_FAILED",
@@ -306,7 +352,7 @@ export class HostFilesService {
 				new RemoteFiles(client, pathStyleOf(os), () => host.sftpSupport, this.sftpIdleMs);
 			this.remotes.set(client, remote);
 		}
-		return { backend: remote, style: remote.style };
+		return remote;
 	}
 
 	/** The OS of a host none of whose connections has recorded it, asked once per connection. */

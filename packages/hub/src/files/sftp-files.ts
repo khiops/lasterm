@@ -72,17 +72,37 @@ export class SharedSftp {
 
 	/** Run `task` on the session, opening it first if none is open. */
 	async use<T>(task: (session: SftpSession) => Promise<T>): Promise<T> {
-		this.users++;
-		clearTimeout(this.idle);
+		const release = this.hold();
 		try {
 			return await task(await this.open());
 		} finally {
+			release();
+		}
+	}
+
+	/**
+	 * Keep the session from closing for being unused until the returned
+	 * function is called, as an upload does between the chunks a client sends
+	 * (#833): its open files belong to the session.
+	 */
+	hold(): () => void {
+		this.users++;
+		clearTimeout(this.idle);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
 			this.users--;
 			if (this.users === 0 && !this.lost) {
 				this.idle = setTimeout(() => this.close(), this.idleMs);
 				this.idle.unref?.();
 			}
-		}
+		};
+	}
+
+	/** The session, opened if none is: for requests on handles it opened, which need that one. */
+	current(): Promise<SftpSession> {
+		return this.open();
 	}
 
 	/** End the session now, if one is open; the next request opens another. */
@@ -118,13 +138,13 @@ export class SharedSftp {
 	}
 }
 
-function statusOf(error: unknown): number | undefined {
+export function statusOf(error: unknown): number | undefined {
 	const code = (error as { code?: unknown } | null)?.code;
 	return typeof code === "number" ? code : undefined;
 }
 
 /** Whether the SFTP server said a path does not exist. */
-function isMissing(error: unknown): boolean {
+export function isMissing(error: unknown): boolean {
 	return statusOf(error) === NO_SUCH_FILE;
 }
 

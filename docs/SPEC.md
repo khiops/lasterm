@@ -284,6 +284,34 @@ Local daemon, single process, binds to 127.0.0.1.
 - **The desktop's hub** also ends with the desktop, through `--exit-with-stdin` (#188).
 - **Once a client can drive a hub it did not launch (#193):** its close gesture for that hub is **Disconnect**, which ends nothing on the hub. **Quit** stays for the hub it owns, and the close dialog names which of the two applies.
 
+**Quitting the desktop while uploads run (#837, decisions.md UPLOADS-DESKTOP).** The page tells the
+shell, on every change, the uploads this window sends: `set_uploads_in_progress({ seq, inProgress,
+waiting, failed, percent })`, an async command (#824); `seq` counts up from 1 per document, and a
+report not above the last is dropped. While none is in progress, which is always the case with
+`[experimental] file_transfer` off, nothing below acts.
+- **Every quit asks**: the tray's Quit, Quit completely (from the close question or under that close
+  preference), and the restart a window background asks for. The window comes back if it was in the
+  tray, and a native question says "2 uploads in progress": **Quit and resume later** (the default:
+  quit now), **Quit when finished**, **Cancel**; for the restart, "Restart and resume later" and
+  "Restart when finished". Under "Keep running in tray", closing hides the window and asks nothing.
+- **Quit when finished** hides the window (minimises it without a tray) and quits once the page
+  reports none in progress; failed uploads hold nothing. An upload waiting for a conflict answer
+  holds the quit, and each one that starts waiting while the window is hidden brings one native
+  notice, "Show Lasterm / Later". The tray menu's **Cancel quit when finished**, shown only then, or
+  the page's `cancel_quit_when_finished` cancels it; showing the window does not, the page there says
+  "Lasterm will quit when these uploads end · Cancel". `uploads-quit-pending` (`{ pending: null |
+  "quit" | "restart" }`) tells the page, and every report answers the same. A restart when finished
+  keeps its window on screen. A new document holds no uploads: its first report starts from zero,
+  and a quit waiting on the last document's uploads goes ahead.
+- **The tray says how they go**, in its tooltip and as its menu's first, disabled line (Linux shows
+  no tray tooltips): "Lasterm — 2 uploads · 64 % · 1 failed", "Lasterm — 1 waiting for an answer",
+  "Lasterm — quits when 2 uploads finish · 64 %", back to "Lasterm" when none runs. The text changes
+  at most once a second and only when it differs, within Windows' 127 characters; the menu gains its
+  lines only while there is something to say.
+- **File access for a resume.** The shell answers WebView2's file-access permission request Allow for
+  the app's own document only (`webview_permission_response`), and leaves every other kind and
+  document to the webview's default, which for this one is a promise pending for ever.
+
 ### 3.4 Web Client (`@lasterm/web`)
 
 Vue 3 SPA built with Vite. Served by hub in production, dev server in development.

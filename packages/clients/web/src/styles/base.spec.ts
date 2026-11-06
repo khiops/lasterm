@@ -140,3 +140,51 @@ describe("base.css: scrollbars in hidden mode (#845)", () => {
 		expect(declared(reader, "scrollbar-width")).toEqual([]);
 	});
 });
+
+// Thin and Wide drew the same scrollbars in Chromium 121+ and Firefox: the
+// style's width reached only the -webkit- rules, and Chromium ignores those
+// once an element has a standard scrollbar-color, as `*` gives every one (#853).
+describe("base.css: the scrollbar style, by the standard scrollbar-width (#853)", () => {
+	let element: Element;
+	let reader: Element;
+
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		document.body.innerHTML = `
+			<div class="terminal-container terminal-container--follows"></div>
+			<div class="settings-body"></div>`;
+		reader = document.querySelector(".terminal-container--follows") as Element;
+		element = document.querySelector(".settings-body") as Element;
+	});
+
+	afterEach(() => {
+		document.documentElement.removeAttribute("class");
+		document.documentElement.removeAttribute("style");
+		document.body.innerHTML = "";
+	});
+
+	/** An element's scrollbar-width: the last rule that says, here also the most specific one. */
+	function scrollbarWidth(of: Element): string {
+		return declared(of, "scrollbar-width").at(-1) ?? "auto";
+	}
+
+	const STYLES = [
+		{ style: "thin", own: "thin", inReader: "thin" },
+		{ style: "wide", own: "auto", inReader: "auto" },
+		{ style: "hidden", own: "none", inReader: "thin" },
+	] as const;
+
+	for (const { style, own, inReader } of STYLES) {
+		it(`${style} gives an element scrollbar-width ${own}, and a reader's pane ${inReader}`, () => {
+			useThemeStore().applyScrollbar({
+				style,
+				thumbColor: "",
+				trackColor: "",
+				widthThin: 6,
+				widthWide: 14,
+			});
+			expect(scrollbarWidth(element)).toBe(own);
+			expect(scrollbarWidth(reader)).toBe(inReader);
+		});
+	}
+});

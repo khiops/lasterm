@@ -142,6 +142,16 @@ body {
 	scrollbar-color: var(--nt-scrollbar-thumb) var(--nt-scrollbar-track);
 }
 
+/* Chromium 121+ and Firefox draw scrollbars by the standard properties: once
+   an element has a scrollbar-color, as `*` gives every one, Chromium ignores
+   its -webkit- rules below. The scrollbar style reaches them as
+   scrollbar-width: thin for Thin, auto (the default, their full width) for
+   Wide. The -webkit- rules, and --nt-scrollbar-width in them, remain for the
+   engines without the standard properties (#853). Hidden is further down. */
+.nt-scrollbar-thin * {
+	scrollbar-width: thin;
+}
+
 *::-webkit-scrollbar {
 	width: var(--nt-scrollbar-width);
 }

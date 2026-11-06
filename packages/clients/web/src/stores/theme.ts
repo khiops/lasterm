@@ -309,6 +309,11 @@ export const useThemeStore = defineStore("theme", () => {
 		if (scrollbar.trackColor) {
 			root.setProperty("--nt-scrollbar-track", scrollbar.trackColor);
 		}
+		// The width above reaches only the -webkit- rules. Chromium 121+ ignores
+		// them once an element has a standard scrollbar-color, as every element
+		// has here, so the style reaches Chromium and Firefox through the standard
+		// scrollbar-width, which this class sets in base.css (#853).
+		document.documentElement.classList.toggle("nt-scrollbar-thin", scrollbar.style === "thin");
 		document.documentElement.classList.toggle("nt-scrollbar-hidden", scrollbar.style === "hidden");
 		window.dispatchEvent(new CustomEvent("nt:scrollbar-changed"));
 	}

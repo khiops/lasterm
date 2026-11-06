@@ -6,5 +6,7 @@ export default defineConfig({
 	plugins: [vue()],
 	test: {
 		environment: "happy-dom",
+		// A stylesheet read as text is read whole (#830): see the root config.
+		css: { include: [/\.css\?raw$/] },
 	},
 });

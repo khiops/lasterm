@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
@@ -8,10 +7,9 @@ import {
 	statSync,
 	symlinkSync,
 	writeFileSync,
-	writeSync,
 } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { ExecFileBackend } from "./exec-files.js";
 import { ExecUploadBackend } from "./exec-upload.js";
@@ -31,60 +29,6 @@ import {
 	type UploadHarness,
 	windowsMachine,
 } from "./upload-backends.fixture.js";
-
-// #868, temporary: what the Linux runner's worker was doing when it died.
-const trace868 = (line: string): void => {
-	try {
-		writeSync(2, `[868] ${new Date().toISOString()} pid ${process.pid} ${line}\n`);
-	} catch {
-		// Nowhere to say it.
-	}
-};
-if (process.platform === "linux") {
-	// Outlives the worker: every signal sent to it but SIGCHLD, and by whom (the kernel's
-	// signal_generate tracepoint), its signal masks as they change, when it went, what ran then,
-	// and what the kernel said (an OOM kill, a segfault).
-	const watchdog = spawn(
-		"sh",
-		[
-			"-c",
-			[
-				"exec >&2",
-				"w=$1",
-				"T=/sys/kernel/tracing",
-				'[ -d "$T/events" ] || T=/sys/kernel/debug/tracing',
-				// Every signal but SIGCHLD, system-wide: a thread-directed one (SIGPIPE) names a thread.
-				`sudo -n sh -c "echo 20000 > $T/buffer_size_kb; echo 'sig != 17' > $T/events/signal/signal_generate/filter && echo 1 > $T/events/signal/signal_generate/enable && echo 1 > $T/tracing_on" 2>&1 | sed "s/^/[868] tracefs: /"`,
-				"tf=$(mktemp)",
-				'last=""',
-				'while kill -0 "$w" 2>/dev/null; do',
-				'  ls "/proc/$w/task" >> "$tf" 2>/dev/null',
-				'  m=$(grep -E "^Sig(Ign|Cgt)" "/proc/$w/status" 2>/dev/null | tr "\\n" " ")',
-				'  if [ "$m" != "$last" ]; then echo "[868] $(date -u +%FT%T.%3NZ) worker $w masks: $m"; last=$m; fi',
-				"  sleep 0.1",
-				"done",
-				'echo "[868] $(date -u +%FT%T.%3NZ) worker $w is gone"',
-				`p=$(sort -u "$tf" | tr "\\n" "|" | sed "s/|$//")`,
-				'echo "[868] its threads: $p"',
-				'sudo -n cat "$T/trace" 2>&1 | grep -E " pid=($p) " | tail -n 15 | sed "s/^/[868] signal: /"',
-				'ps -eo pid,ppid,pgid,etimes,stat,args --sort=-start_time 2>&1 | head -n 25 | cut -c1-200 | sed "s/^/[868] ps: /"',
-				'sudo -n dmesg 2>&1 | tail -n 4 | sed "s/^/[868] dmesg: /"',
-			].join("\n"),
-			"sh",
-			String(process.pid),
-		],
-		{ detached: true, stdio: ["ignore", "ignore", "inherit"] },
-	);
-	watchdog.on("error", () => {});
-	watchdog.unref();
-	process.on("exit", (code) => trace868(`exit ${code}`));
-	beforeEach((context) =>
-		trace868(
-			`start ${context.task.suite?.name} > ${context.task.name} rss=${process.memoryUsage().rss}`,
-		),
-	);
-	afterEach((context) => trace868(`end ${context.task.name} ${context.task.result?.state}`));
-}
 
 const MTIME = 1_700_000_000_000;
 
@@ -138,11 +82,7 @@ describe("the names an upload writes under", () => {
 	});
 });
 
-describe.each(
-	(process.platform === "linux" ? [1, 2, 3, 4] : [1]).flatMap(() =>
-		UPLOAD_BACKENDS.filter((kind) => kind.runs),
-	),
-)("an upload over $name", (kind) => {
+describe.each(UPLOAD_BACKENDS.filter((kind) => kind.runs))("an upload over $name", (kind) => {
 	const use = async (test: (h: UploadHarness) => Promise<void>) => {
 		const h = await kind.start();
 		try {

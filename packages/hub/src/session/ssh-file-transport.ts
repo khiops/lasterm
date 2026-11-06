@@ -179,17 +179,19 @@ export async function sftpRequest<T>(
 
 /**
  * The directories `mkdir -p` would create for `remotePath`, shallowest first, each a literal
- * prefix of it: the levels below a POSIX root, a drive's root (`C:\`) or a UNC share
- * (`\\server\share`, or `//server/share` as Win32-OpenSSH's SFTP takes it), none of which can be
- * created (#832). A relative path starts at its first name.
+ * prefix of it: the levels below a POSIX root, or, on a Windows host, below a drive's root
+ * (`C:\`) or a UNC share (`\\server\share`, or `//server/share` as Win32-OpenSSH's SFTP takes
+ * it), none of which can be created (#832). A relative path starts at its first name. On a
+ * POSIX host every level counts, `//host/x` included: it is a path like any other there.
  */
-export function mkdirLevels(remotePath: string): string[] {
+export function mkdirLevels(remotePath: string, style: "posix" | "windows" = "posix"): string[] {
 	const separator = remotePath.includes("/") ? "/" : "\\";
 	const root =
-		/^[A-Za-z]:\\/.exec(remotePath)?.[0] ??
-		// A share, as `\\server\share`, or as SFTP takes it from Win32-OpenSSH, `//server/share`.
-		/^(?:\\\\[^\\]+\\[^\\]+|\/\/[^/]+\/[^/]+)/.exec(remotePath)?.[0] ??
-		"";
+		style === "posix"
+			? ""
+			: (/^[A-Za-z]:\\/.exec(remotePath)?.[0] ??
+				/^(?:\\\\[^\\]+\\[^\\]+|\/\/[^/]+\/[^/]+)/.exec(remotePath)?.[0] ??
+				"");
 	const levels: string[] = [];
 	for (let end = Math.max(1, root.length); end <= remotePath.length; end++) {
 		if (end !== remotePath.length && remotePath[end] !== separator) continue;
@@ -201,13 +203,17 @@ export function mkdirLevels(remotePath: string): string[] {
 }
 
 /**
- * mkdir -p via SFTP for an absolute POSIX or drive-absolute parent, advisory: creates its
- * missing levels (`mkdirLevels`), and returns an error naming every level it could not create.
- * sftpMkdir rejects when its session ends or ssh2 throws synchronously.
+ * mkdir -p via SFTP for an absolute POSIX parent, or a drive-absolute or UNC one on a Windows
+ * host, advisory: creates its missing levels (`mkdirLevels`), and returns an error naming every
+ * level it could not create. sftpMkdir rejects when its session ends or ssh2 throws synchronously.
  */
-export async function sftpMkdir(sftp: SftpSession, remotePath: string): Promise<Error | undefined> {
+export async function sftpMkdir(
+	sftp: SftpSession,
+	remotePath: string,
+	style: "posix" | "windows" = "posix",
+): Promise<Error | undefined> {
 	if (sftp.ended) throw sftpClosed();
-	const levels = mkdirLevels(remotePath);
+	const levels = mkdirLevels(remotePath, style);
 	const isDirectory = (path: string): Promise<boolean> =>
 		sftpRequest(
 			sftp,

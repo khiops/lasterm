@@ -18,25 +18,32 @@ describe("mkdirLevels", () => {
 	});
 
 	it("walks a drive-absolute path below the drive's root (#832)", () => {
-		expect(mkdirLevels("C:\\Users\\me\\AppData")).toEqual([
+		expect(mkdirLevels("C:\\Users\\me\\AppData", "windows")).toEqual([
 			"C:\\Users",
 			"C:\\Users\\me",
 			"C:\\Users\\me\\AppData",
 		]);
-		expect(mkdirLevels("C:\\")).toEqual([]);
+		expect(mkdirLevels("C:\\", "windows")).toEqual([]);
 	});
 
 	it("walks a UNC path below its share, which cannot be created", () => {
-		expect(mkdirLevels("\\\\server\\share\\a\\b")).toEqual([
+		expect(mkdirLevels("\\\\server\\share\\a\\b", "windows")).toEqual([
 			"\\\\server\\share\\a",
 			"\\\\server\\share\\a\\b",
 		]);
-		expect(mkdirLevels("\\\\server\\share")).toEqual([]);
+		expect(mkdirLevels("\\\\server\\share", "windows")).toEqual([]);
 	});
 
 	it("walks a UNC path as SFTP takes it from Win32-OpenSSH, below its share", () => {
-		expect(mkdirLevels("//server/share/a/b")).toEqual(["//server/share/a", "//server/share/a/b"]);
-		expect(mkdirLevels("//server/share")).toEqual([]);
+		expect(mkdirLevels("//server/share/a/b", "windows")).toEqual([
+			"//server/share/a",
+			"//server/share/a/b",
+		]);
+		expect(mkdirLevels("//server/share", "windows")).toEqual([]);
+	});
+
+	it("keeps every level of a POSIX path starting with //, which names no share there", () => {
+		expect(mkdirLevels("//host/x/bin")).toEqual(["//host", "//host/x", "//host/x/bin"]);
 	});
 });
 
@@ -59,7 +66,9 @@ describe("sftpMkdir on a Windows host, as Win32-OpenSSH serves it", () => {
 	});
 
 	it("creates every missing level of a drive-absolute path", async () => {
-		expect(await sftpMkdir(session, "C:\\Users\\me\\AppData\\Local\\lasterm")).toBeUndefined();
+		expect(
+			await sftpMkdir(session, "C:\\Users\\me\\AppData\\Local\\lasterm", "windows"),
+		).toBeUndefined();
 		expect(
 			statSync(join(root, "C", "Users", "me", "AppData", "Local", "lasterm")).isDirectory(),
 		).toBe(true);
@@ -67,7 +76,7 @@ describe("sftpMkdir on a Windows host, as Win32-OpenSSH serves it", () => {
 
 	it("names the level it could not create", async () => {
 		writeFileSync(join(root, "C", "Users", "me"), "a file");
-		const error = await sftpMkdir(session, "C:\\Users\\me\\AppData");
+		const error = await sftpMkdir(session, "C:\\Users\\me\\AppData", "windows");
 		expect(error?.message).toContain("Could not create the directory C:\\Users\\me\\AppData");
 	});
 });

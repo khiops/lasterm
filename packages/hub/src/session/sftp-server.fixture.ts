@@ -209,6 +209,10 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 	const dirs = new Map<string, { names: string[]; from: string }>();
 	let nextHandle = 0;
 	const server = new Server({ hostKeys: [privateKey] }, (client) => {
+		// OpenSSH writes each packet whole; ssh2's JavaScript ciphers write it in
+		// pieces, and with Nagle on, every answer here waited for the hub's
+		// delayed ACK, a wait no real host adds (#873). The typings leave it out.
+		(client as unknown as { setNoDelay(noDelay: boolean): void }).setNoDelay(true);
 		clients.add(client);
 		client.on("close", () => clients.delete(client));
 		client.on("error", () => {});

@@ -23,6 +23,7 @@ import { useHostsStore } from "./hosts.js";
 import { useNotificationStore } from "./notifications.js";
 import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
+import { useTransfersStore } from "./transfers.js";
 import { useWriteLockStore } from "./writelock.js";
 
 export const useSessionStore = defineStore("session", () => {
@@ -117,6 +118,9 @@ export const useSessionStore = defineStore("session", () => {
 				connected.value = true;
 				authenticated.value = false;
 				await _authenticate();
+				// What this window was sending, the hub interrupted when the socket went: the same
+				// trees again join those uploads (#837).
+				useTransfersStore().rejoin();
 				// Re-fetch state after reconnect
 				const hostsStore2 = useHostsStore();
 				await hostsStore2.fetchHosts();
@@ -176,6 +180,8 @@ export const useSessionStore = defineStore("session", () => {
 		_registerStateSyncHandler(hostsStore, channelsStore);
 		_registerCwdHandlers(useFilesPanelStore());
 		_registerFilesPanelHandlers(useFilesPanelStore());
+		// Uploads (#837): their answers, progress, conflicts and ends.
+		useTransfersStore().registerHandlers(wsClient);
 
 		// Authenticate immediately after connecting
 		await _authenticate();

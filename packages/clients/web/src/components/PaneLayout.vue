@@ -2,11 +2,14 @@
 	<div ref="containerEl" :class="containerClass">
 		<!-- Terminal leaf node -->
 		<template v-if="node.type === 'terminal'">
+			<!-- Two kinds of drag land here: a pane moved (its zones), and files to upload to the
+			     terminal (#837), taken only when they will be: otherwise the cursor says no. -->
 			<div
 				class="pane-drop-wrapper"
 				:data-pane-id="node.paneId"
 				@mousedown="onPaneFocus(node.paneId)"
-				@dragover.prevent="onDragOver"
+				@dragenter="onDragEnter"
+				@dragover="onDragOver"
 				@dragleave="onDragLeave"
 				@drop="onDrop"
 			>
@@ -56,7 +59,7 @@
 			<div
 				class="pane-drop-wrapper"
 				:data-pane-id="node.id"
-				@dragover.prevent="onDragOver"
+				@dragover="onDragOver"
 				@dragleave="onDragLeave"
 				@drop="onDrop"
 			>
@@ -145,6 +148,7 @@
 import { computed, ref } from "vue";
 import type { DropZone, NodePath, PaneNode } from "../composables/useLayout.js";
 import { countPanes } from "../composables/useLayout.js";
+import { useUploadDrop } from "../composables/useUploadDrop.js";
 import PaneSplitter from "./PaneSplitter.vue";
 import TerminalPane from "./TerminalPane.vue";
 import VacantPane from "./VacantPane.vue";
@@ -259,8 +263,34 @@ function getDropZone(event: DragEvent, element: HTMLElement): DropZone {
 	return "center";
 }
 
+// ---------------------------------------------------------------------------
+// Files to upload (#837): on a terminal leaf only, beside the pane-move zones
+// ---------------------------------------------------------------------------
+
+const upload = useUploadDrop(() => ({
+	kind: "terminal",
+	channelId: props.node.type === "terminal" ? props.node.channelId : null,
+	paneId: props.node.type === "terminal" ? props.node.paneId : null,
+	dir: null,
+	folder: null,
+}));
+
+function isPaneMove(event: DragEvent): boolean {
+	return event.dataTransfer?.types.includes("text/x-lasterm-pane") ?? false;
+}
+
+function onDragEnter(event: DragEvent): void {
+	if (props.node.type !== "terminal" || isPaneMove(event)) return;
+	upload.onDragEnter(event);
+}
+
 function onDragOver(event: DragEvent): void {
-	if (!event.dataTransfer?.types.includes("text/x-lasterm-pane")) return;
+	if (!isPaneMove(event)) {
+		// Files: taken, refused with the cursor saying so, or left to the page's guard.
+		if (props.node.type === "terminal") upload.onDragOver(event);
+		return;
+	}
+	event.preventDefault();
 
 	showDropZones.value = true;
 
@@ -277,6 +307,7 @@ function onDragOver(event: DragEvent): void {
 }
 
 function onDragLeave(event: DragEvent): void {
+	if (props.node.type === "terminal" && !isPaneMove(event)) upload.onDragLeave(event);
 	// Only hide when actually leaving the wrapper element
 	const el = event.currentTarget as HTMLElement;
 	const related = event.relatedTarget as Node | null;
@@ -292,6 +323,11 @@ function onDrop(event: DragEvent): void {
 	dragEnterCount = 0;
 
 	if (!event.dataTransfer) return;
+	if (!isPaneMove(event)) {
+		if (props.node.type === "terminal") upload.onDrop(event);
+		return;
+	}
+	event.preventDefault();
 	const raw = event.dataTransfer.getData("text/x-lasterm-pane");
 	if (!raw) return;
 

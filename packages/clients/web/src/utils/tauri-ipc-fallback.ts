@@ -31,6 +31,18 @@ export const IPC_FALLBACK_RELOAD_KEY = "lasterm:ipc-fallback:reloaded";
 let rawIpcConfirmed = false;
 let reloadRequested = false;
 let reloadPage: () => void = () => window.location.reload();
+/** What goes before the reload: a `beforeunload` question would hold it (#837). */
+const beforeReload = new Set<() => void>();
+
+/**
+ * Run `undo` before this page reloads for the fallback: what would make the reload wait, such as
+ * the `beforeunload` handler of a window that sends uploads (#837), goes first. Returns what
+ * forgets it.
+ */
+export function onGuardedReload(undo: () => void): () => void {
+	beforeReload.add(undo);
+	return () => beforeReload.delete(undo);
+}
 
 /** Whether an IPC failure is native refusing a body that Tauri sent as JSON. */
 export function isRawIpcRefusal(error: unknown): boolean {
@@ -76,6 +88,13 @@ export function reloadAfterIpcFallback(reason: string): boolean {
 	}
 	reloadRequested = true;
 	console.warn(`[ipc] Tauri's IPC fell back to postMessage (${reason}): reloading the page once`);
+	for (const undo of [...beforeReload]) {
+		try {
+			undo();
+		} catch (error) {
+			console.error("[ipc] could not undo what holds the reload:", error);
+		}
+	}
 	reloadPage();
 	return true;
 }

@@ -6,7 +6,6 @@ import {
 	entryLabel,
 	filesPanelForm,
 	formatSize,
-	groupTransfers,
 	joinPath,
 	optionSource,
 	optionsSummary,
@@ -20,8 +19,6 @@ import {
 	statusLines,
 	TRANSFERS_SHARE_DEFAULT,
 	TRANSFERS_SHARE_MAX,
-	type TransferEntry,
-	transfersCount,
 	typeAheadIndex,
 	writerStatements,
 } from "./files-panel.js";
@@ -415,50 +412,7 @@ describe("the Options section", () => {
 
 // ─── Transfers ───────────────────────────────────────────────────────────────
 
-describe("the Transfers part's groups", () => {
-	const upload = (
-		id: string,
-		hostId: string,
-		channelId: string,
-		state: TransferEntry["state"] = "running",
-	) => ({
-		id,
-		hostId,
-		channelId,
-		state,
-	});
-
-	it("groups the window's uploads by host, then terminal, the focused terminal's first", () => {
-		const entries = [
-			upload("1", "AD", "a1", "failed"),
-			upload("2", "RPI", "r1"),
-			upload("3", "RPI", "r2"),
-			upload("4", "AD", "a1", "done"),
-		];
-		const groups = groupTransfers(entries, "r2");
-		expect(groups.map((group) => group.hostId)).toEqual(["RPI", "AD"]);
-		expect(groups[0]?.focused).toBe(true);
-		expect(groups[0]?.terminals.map((t) => t.channelId)).toEqual(["r2", "r1"]);
-		expect(groups[1]?.terminals[0]?.transfers.map((t) => t.id)).toEqual(["1", "4"]);
-		// A focus change reorders and removes nothing.
-		const after = groupTransfers(entries, "a1");
-		expect(after.map((group) => group.hostId)).toEqual(["AD", "RPI"]);
-		expect(after.flatMap((g) => g.terminals.flatMap((t) => t.transfers)).length).toBe(4);
-		expect(groupTransfers([], "a1")).toEqual([]);
-	});
-
-	it("counts what runs and fails for the header, a failure in the warning style", () => {
-		expect(transfersCount([])).toEqual({ text: "none", warn: false });
-		expect(
-			transfersCount([
-				upload("1", "A", "a", "running"),
-				upload("2", "A", "a", "queued"),
-				upload("3", "A", "a", "failed"),
-				upload("4", "A", "a", "done"),
-			]),
-		).toEqual({ text: "2 running, 1 failed", warn: true });
-	});
-
+describe("the split between Files and Transfers", () => {
 	it("never gives Transfers more than 70 % of the panel", () => {
 		expect(clampTransfersShare(0.9)).toBe(TRANSFERS_SHARE_MAX);
 		expect(TRANSFERS_SHARE_MAX).toBe(0.7);

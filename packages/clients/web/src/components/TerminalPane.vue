@@ -8,7 +8,9 @@
 			@dragend="onDragEnd"
 		>
 			<span class="pane-title">{{ paneTitle }}</span>
-			<!-- Its terminal's files (#836), left of the lock; only while file transfer is on. -->
+			<!-- Its terminal's uploads (#837), then its files (#836), left of the lock; only while
+			     file transfer is on. -->
+			<TransferChip :channel-id="effectiveChannelId" />
 			<FilesButton :channel-id="effectiveChannelId" />
 			<WriteLockIndicator :channel-id="effectiveChannelId" :is-dead="isDead || hasEnded || isGone" class="pane-lock" />
 		</div>
@@ -37,6 +39,18 @@
 
 		<!-- Background tint overlay (UX-07) -->
 		<div v-if="tintStyle" class="tint-overlay" :style="tintStyle" />
+
+		<!-- Files dragged over the terminal, and a drop's confirmation (#837): over the terminal
+		     area, below the header and the banner. -->
+		<UploadDropOverlay
+			:pane-id="paneId"
+			:channel-id="effectiveChannelId"
+			:host="paneHost"
+			:host-label="paneHost?.label ?? 'this host'"
+			:color="paneHost?.color ?? null"
+			:style="{ '--upload-drop-top': `${terminalTop}px` }"
+		/>
+		<UploadConfirm place="pane" :pane-id="paneId" @done="onUploadCardDone" />
 
 		<!-- Exit overlay for a dead channel whose pane asks what to do, and for one
 		     the hub has never heard of. While "When a terminal ends" acts, or waits
@@ -181,6 +195,9 @@
 					<span>Files</span>
 					<span class="context-menu__keys">{{ shortcutLabel("files.toggle") }}</span>
 				</button>
+				<button v-if="mayUpload" class="context-menu__item" @click="onUploadHere">
+					Upload files here…
+				</button>
 			</template>
 			<hr class="context-menu__divider" />
 			<button class="context-menu__item" @click="onDetachPane">Detach</button>
@@ -218,6 +235,7 @@ import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
 import { useToastStore } from '../stores/toast.js';
+import { useTransfersStore } from '../stores/transfers.js';
 import {
 	type AlwaysScope,
 	ALWAYS_SCOPES,
@@ -248,6 +266,9 @@ import { shortcutLabel } from '../utils/app-shortcuts.js';
 import { terminalKeyHandler } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
 import FilesButton from './files/FilesButton.vue';
+import TransferChip from './files/TransferChip.vue';
+import UploadConfirm from './files/UploadConfirm.vue';
+import UploadDropOverlay from './files/UploadDropOverlay.vue';
 import SearchOverlay from './SearchOverlay.vue';
 import UnreadLinesBar from './UnreadLinesBar.vue';
 import WriteLockIndicator from './WriteLockIndicator.vue';
@@ -1302,6 +1323,80 @@ function onSplitDown(): void {
 	contextMenuVisible.value = false;
 	const chId = effectiveChannelId.value;
 	if (chId !== null) emit('split-down', chId);
+}
+
+// ---------------------------------------------------------------------------
+// Uploads (#837)
+// ---------------------------------------------------------------------------
+
+const transfers = useTransfersStore();
+
+// What a drop on this pane, or on the panel attached to its terminal, needs to know of it: its
+// file-transfer settings as this pane resolved them, and whether it ended.
+watch(
+	() =>
+		[
+			effectiveChannelId.value,
+			resolvedProfile.value.transferDrop,
+			resolvedProfile.value.transferConfirmDrop,
+			resolvedProfile.value.transferOnConflict,
+			isDead.value || hasEnded.value || isGone.value,
+		] as const,
+	([channelId, drop, confirmDrop, onConflict, ended], before) => {
+		const previous = before?.[0];
+		if (previous !== undefined && previous !== null && previous !== channelId) {
+			transfers.setTerminalSettings(previous, null);
+		}
+		if (channelId === null) return;
+		transfers.setTerminalSettings(channelId, {
+			drop: drop ?? 'upload',
+			confirmDrop: confirmDrop !== false,
+			onConflict: onConflict ?? 'ask',
+			ended,
+		});
+	},
+	{ immediate: true },
+);
+onUnmounted(() => {
+	const channelId = effectiveChannelId.value;
+	if (channelId !== null) transfers.setTerminalSettings(channelId, null);
+});
+
+/** Where the overlay starts: below the header and the banner. */
+const terminalTop = ref(0);
+watch(
+	() =>
+		transfers.dropHover?.paneId === props.paneId ||
+		transfers.refusal?.paneId === props.paneId,
+	(over) => {
+		if (over) terminalTop.value = terminalContainer.value?.offsetTop ?? 0;
+	},
+);
+
+/** This window may upload from this terminal: it writes, or nobody does, and it has not ended. */
+const mayUpload = computed(() => {
+	const chId = effectiveChannelId.value;
+	if (chId === null || isDead.value || hasEnded.value || isGone.value) return false;
+	const holder = writeLockStore.locks.get(chId)?.holder ?? null;
+	return holder === null || isWriter.value;
+});
+
+/** "Upload files here…": the picker, to this terminal's directory. */
+function onUploadHere(): void {
+	contextMenuVisible.value = false;
+	const chId = effectiveChannelId.value;
+	if (chId === null) return;
+	void transfers.pickAndUpload('files', {
+		channelId: chId,
+		paneId: props.paneId ?? null,
+		dir: null,
+		place: 'pane',
+	});
+}
+
+/** The confirmation went: the keyboard goes back to the terminal. */
+function onUploadCardDone(): void {
+	void nextTick(() => terminal.value?.focus());
 }
 
 /** "Files": the panel opens on this pane's terminal, with the keyboard in it (#836). */

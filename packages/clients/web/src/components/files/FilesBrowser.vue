@@ -83,8 +83,20 @@
 			</p>
 		</div>
 
-		<div class="files-list-wrap">
+		<!-- Files dropped here go to the folder shown, or to the folder row under them (#837). -->
+		<div
+			class="files-list-wrap"
+			:class="{
+				'files-list-wrap--drop': dropHere === 'list',
+				'files-list-wrap--refused': dropHere === 'refused',
+			}"
+			@dragenter="onListDragEnter"
+			@dragover="onListDragOver"
+			@dragleave="listDrop.onDragLeave"
+			@drop="onListDrop"
+		>
 			<div v-if="tint !== null" class="files-tint" :style="tint" aria-hidden="true" />
+			<p v-if="dropText !== null" class="files-drop-note" aria-hidden="true">{{ dropText }}</p>
 			<p v-if="loading && listing === null" class="files-note">Loading…</p>
 			<div v-else-if="failure !== null" class="files-card files-card--error" role="alert">
 				<p class="files-card__text">{{ failureText }}</p>
@@ -117,7 +129,11 @@
 						v-for="row in visibleRows"
 						:key="row.entry.name"
 						class="files-row"
-						:class="{ 'files-row--current': row.index === current }"
+						:class="{
+							'files-row--current': row.index === current,
+							'files-row--drop': dropHere === 'row' && dropFolder === row.entry.name,
+						}"
+						:data-drop-folder="isFolderEntry(row.entry) ? row.entry.name : undefined"
 						role="option"
 						:aria-selected="row.index === current"
 						:aria-setsize="listing.entries.length"
@@ -145,6 +161,9 @@
 			</p>
 		</div>
 
+		<!-- A drop or a pick here, before any byte moves (#837). -->
+		<UploadConfirm place="panel" @done="onUploadCardDone" />
+
 		<!-- What writes on the host is the writer's: a reader sees why, in words. -->
 		<div class="files-actions">
 			<template v-if="naming">
@@ -165,19 +184,40 @@
 				</button>
 				<button type="button" class="files-btn" @click="stopNaming">Cancel</button>
 			</template>
-			<button
-				v-else
-				type="button"
-				class="files-btn"
-				:disabled="!writer || listing === null"
-				:aria-describedby="writer ? undefined : readerNoteId"
-				@click="startNaming"
-			>
-				<FilesIcon name="folder-plus" />
-				New folder
-			</button>
+			<template v-else>
+				<button
+					type="button"
+					class="files-btn"
+					:disabled="!writer || listing === null"
+					:aria-describedby="writer ? undefined : readerNoteId"
+					@click="startNaming"
+				>
+					<FilesIcon name="folder-plus" />
+					New folder
+				</button>
+				<button
+					type="button"
+					class="files-btn"
+					:disabled="!writer || listing === null"
+					:aria-describedby="writer ? undefined : readerNoteId"
+					@click="pick('files')"
+				>
+					<FilesIcon name="upload" />
+					Upload files…
+				</button>
+				<button
+					type="button"
+					class="files-btn"
+					:disabled="!writer || listing === null"
+					:aria-describedby="writer ? undefined : readerNoteId"
+					@click="pick('folder')"
+				>
+					<FilesIcon name="folder" />
+					Upload folder…
+				</button>
+			</template>
 			<p v-if="!writer" :id="readerNoteId" class="files-actions__note">
-				Only the writer can create folders here.
+				Only the writer can upload or create folders here.
 				<button type="button" class="files-link" @click="requestWrite">Request write</button>
 			</p>
 			<p v-if="createFailure !== null" class="files-actions__note files-actions__note--warn" role="alert">
@@ -206,9 +246,13 @@ import {
 	typeAheadIndex,
 } from "../../utils/files-panel.js";
 import { listMove } from "../../utils/focus-zones.js";
+import { useUploadDrop } from "../../composables/useUploadDrop.js";
+import { useTransfersStore } from "../../stores/transfers.js";
 import { createHostFolder, type FileListingView, listHostFiles } from "../../utils/host-files.js";
 import { hostConnectionFailure } from "../../utils/host-connection.js";
+import { overlayText, refusalText } from "../../utils/upload-drop.js";
 import FilesIcon from "./FilesIcon.vue";
+import UploadConfirm from "./UploadConfirm.vue";
 
 /**
  * The Files part's browser (#836): the attached terminal's host folder, following the terminal's
@@ -554,6 +598,79 @@ function requestWrite(): void {
 	writeLockStore.claim(props.channelId);
 }
 
+// ─── Uploads: a drop on the list or a folder row, and the pickers (#837) ─────
+
+const transfers = useTransfersStore();
+/** The folder row under the drag, or none: the folder shown. */
+const dropFolder = ref<string | null>(null);
+
+const listDrop = useUploadDrop(() => ({
+	kind: dropFolder.value === null ? "panel" : "folder",
+	// Nothing listed, nothing to drop into.
+	channelId: listing.value === null ? null : props.channelId,
+	paneId: null,
+	dir:
+		listing.value === null
+			? null
+			: dropFolder.value === null
+				? listing.value.path
+				: joinPath(listing.value.path, dropFolder.value, style.value),
+	folder: dropFolder.value,
+}));
+
+function folderUnder(event: DragEvent): string | null {
+	const target = event.target instanceof Element ? event.target : null;
+	return target?.closest("[data-drop-folder]")?.getAttribute("data-drop-folder") ?? null;
+}
+
+function onListDragEnter(event: DragEvent): void {
+	dropFolder.value = folderUnder(event);
+	listDrop.onDragEnter(event);
+}
+
+function onListDragOver(event: DragEvent): void {
+	dropFolder.value = folderUnder(event);
+	listDrop.onDragOver(event);
+}
+
+function onListDrop(event: DragEvent): void {
+	dropFolder.value = folderUnder(event);
+	listDrop.onDrop(event);
+	dropFolder.value = null;
+}
+
+/** What the list shows of a drag over it: the list, a row, or a refusal. */
+const dropHere = computed<"list" | "row" | "refused" | null>(() => {
+	const hover = transfers.dropHover;
+	if (hover === null || hover.place !== "panel" || hover.channelId !== props.channelId) return null;
+	if (hover.decision.kind === "refuse") return "refused";
+	return hover.folder === null ? "list" : "row";
+});
+
+const dropText = computed(() => {
+	const hover = transfers.dropHover;
+	if (dropHere.value === null || hover === null) return null;
+	if (hover.decision.kind === "refuse") return refusalText(hover.decision.reason, props.hostLabel);
+	return overlayText({
+		count: hover.count,
+		hostLabel: props.hostLabel,
+		dir: hover.dir,
+		origin: hover.folder === null ? "panel" : "folder",
+	});
+});
+
+/** "Upload files…", "Upload folder…": to the folder shown. */
+function pick(kind: "files" | "folder"): void {
+	const at = listing.value?.path;
+	if (at === undefined) return;
+	void transfers.pickAndUpload(kind, { channelId: props.channelId, paneId: null, dir: at, place: "panel" });
+}
+
+/** The confirmation went: the keyboard goes back to the list. */
+function onUploadCardDone(): void {
+	void nextTick(() => focusRow(current.value));
+}
+
 async function connect(): Promise<void> {
 	if (props.hostId === null) return;
 	const answer = await hostsStore.connectHost(props.hostId);
@@ -729,6 +846,37 @@ defineExpose({ reload });
 	inset: 0;
 	pointer-events: none;
 	z-index: 1;
+}
+
+/* A drag over the list (#837): its edge says where the files go, or that they cannot. */
+.files-list-wrap--drop {
+	box-shadow: inset 0 0 0 2px var(--nt-accent);
+}
+
+.files-list-wrap--refused {
+	box-shadow: inset 0 0 0 2px var(--nt-border);
+}
+
+.files-row--drop {
+	box-shadow: inset 0 0 0 2px var(--nt-accent);
+}
+
+.files-drop-note {
+	position: absolute;
+	left: 8px;
+	right: 8px;
+	bottom: 8px;
+	z-index: 3;
+	margin: 0;
+	padding: 6px 8px;
+	border-radius: 4px;
+	background: rgb(var(--nt-bg-rgb));
+	color: var(--nt-text-strong);
+	border: 1px solid var(--nt-border);
+	box-shadow: var(--nt-shadow);
+	font-size: 12px;
+	overflow-wrap: anywhere;
+	pointer-events: none;
 }
 
 .files-list {

@@ -13,6 +13,14 @@
 				</span>
 				<span class="toast-text">{{ msg.text }}</span>
 				<button
+					v-if="msg.action"
+					class="toast-action"
+					type="button"
+					@click="toastStore.act(msg.id)"
+				>
+					{{ msg.action.label }}
+				</button>
+				<button
 					class="toast-close"
 					type="button"
 					aria-label="Dismiss"
@@ -118,6 +126,21 @@ const toastStore = useToastStore();
 
 .toast-close:hover {
 	border-color: currentColor;
+}
+
+/* A toast's one action ("Show"): at the toast's own colours, as its close button. */
+.toast-action {
+	flex-shrink: 0;
+	background: none;
+	border: 1px solid currentColor;
+	border-radius: 3px;
+	cursor: pointer;
+	font: inherit;
+	font-size: 12px;
+	font-weight: 600;
+	color: inherit;
+	padding: 0 6px;
+	line-height: 1.4;
 }
 
 /* TransitionGroup animations */

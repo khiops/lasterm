@@ -364,6 +364,13 @@ export function useCommandPalette() {
 								icon: "📁",
 								shortcut: shortcutLabel("files.toggle"),
 							},
+							// The picker, to the focused terminal's directory, without a drag (#837).
+							{
+								id: "action:files-upload",
+								label: "Files: Upload to this terminal's directory…",
+								type: "action" as const,
+								icon: "⬆",
+							},
 						]
 					: []),
 			];

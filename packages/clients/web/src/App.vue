@@ -481,6 +481,7 @@ import { useSessionStore } from './stores/session.js';
 import { useSettingsStore } from './stores/settings.js';
 import { useThemeStore } from './stores/theme.js';
 import { useToastStore } from './stores/toast.js';
+import { useTransfersStore } from './stores/transfers.js';
 import { useWriteLockStore } from './stores/writelock.js';
 import { loadDesktopVersion } from './utils/desktop-version.js';
 import { endedPrefs, endedToDelete } from './utils/exit-action.js';
@@ -701,12 +702,53 @@ const focusedTerminal = computed<string | null>(() => {
 	const leaf = leaves.find((candidate) => candidate.id === activeId) ?? leaves[0];
 	return leaf?.node.type === 'terminal' ? leaf.node.channelId : null;
 });
+/** The pane of the focused terminal: where a picker's confirmation shows. */
+const focusedPaneId = computed<string | null>(() => {
+	const tab = layout.activeTab.value;
+	const root = tab === null ? undefined : layout.layouts.value[tab.id];
+	if (tab === null || root === null || root === undefined) return null;
+	const leaves = paneLeaves(root);
+	const activeId = layout.activePaneIds.value[tab.id] ?? findFirstLeafPaneId(root);
+	const leaf = leaves.find((candidate) => candidate.id === activeId) ?? leaves[0];
+	return leaf?.node.type === 'terminal' ? leaf.node.paneId : null;
+});
 watch(focusedTerminal, (channelId) => filesPanel.setFocused(channelId), { immediate: true });
+const transfers = useTransfersStore();
 watch(
 	() => displayedChannelIds(layout.layouts.value),
-	(ids) => filesPanel.setChannelsInTabs(new Set(ids)),
+	(ids) => {
+		filesPanel.setChannelsInTabs(new Set(ids));
+		// Closing a pane or a tab stops none of its uploads: one toast per gesture says so (#837).
+		transfers.noteChannelsInTabs(new Set(ids));
+	},
 	{ immediate: true },
 );
+// The uploads of the terminals shown, once the hub can be asked: a reload's, the writer's.
+watch(
+	() => configStore.fileTransferEnabled && sessionStore.authenticated,
+	(ready) => {
+		if (ready) transfers.readShownChannels();
+	},
+	{ immediate: true },
+);
+
+/**
+ * Files dragged into the window open the panel on the focused terminal (`[transfer]
+ * open_on_drag`), so that its folders are there to drop on.
+ */
+let stopTransferGuards: (() => void) | null = null;
+
+function onWindowDragEnter(event: DragEvent): void {
+	if (!event.dataTransfer?.types.includes('Files')) return;
+	const channelId = focusedTerminal.value;
+	if (!configStore.fileTransferEnabled || filesPanel.shown || channelId === null) return;
+	if (configStore.uiConfig.transfer?.openOnDrag === false) return;
+	// A terminal this window only reads takes no drop: a drag there leaves its reader's choice
+	// of panel (#838) as it was.
+	const holder = writeLockStore.locks.get(channelId)?.holder ?? null;
+	if (holder !== null && !writeLockStore.isWriter(channelId)) return;
+	filesPanel.openFor(null);
+}
 
 /** The terminal the panel shows is in the tab shown; pinned elsewhere, it offers to show it. */
 const filesAttachedOnScreen = computed(() => {
@@ -911,6 +953,17 @@ commandPalette.onExternalAction.value = (actionId: string) => {
 		// "Files: Show panel": on the focused terminal, with the keyboard in it (#836).
 		case 'action:files-show':
 			if (configStore.fileTransferEnabled) filesPanel.openFor(null, { keyboard: true });
+			break;
+		// "Files: Upload to this terminal's directory…": the picker, without a drag (#837).
+		case 'action:files-upload':
+			if (configStore.fileTransferEnabled && focusedTerminal.value !== null) {
+				void transfers.pickAndUpload('files', {
+					channelId: focusedTerminal.value,
+					paneId: focusedPaneId.value,
+					dir: null,
+					place: 'pane',
+				});
+			}
 			break;
 		default:
 			console.warn('[CommandPalette] unhandled external action:', actionId);
@@ -1189,6 +1242,10 @@ onMounted(async () => {
 	// Capture phase: the palette's shortcut is seen before any element's handler.
 	window.addEventListener('keydown', onGlobalKeydown, { capture: true });
 	window.addEventListener('resize', onWindowResize);
+	window.addEventListener('dragenter', onWindowDragEnter, { capture: true });
+	// While this window sends uploads, a browser asks before leaving, and the desktop shell is
+	// told so it can ask before closing or quitting (#837).
+	stopTransferGuards = transfers.startWindowGuards();
 	window.addEventListener(WINDOW_BACKGROUND_RESTART_EVENT, onWindowBackgroundNeedsRestart);
 	try {
 		const { listen } = await import('@tauri-apps/api/event');
@@ -1282,6 +1339,8 @@ onUnmounted(() => {
 	hubExitUnlisten?.();
 	desktopCloseExpiryUnlisten?.();
 	stopHubUpdate();
+	window.removeEventListener('dragenter', onWindowDragEnter, { capture: true });
+	stopTransferGuards?.();
 });
 
 async function onCloseModalSelect(decision: { action: 'quit' | 'tray'; remember: boolean }): Promise<void> {

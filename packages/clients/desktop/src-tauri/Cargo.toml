@@ -31,6 +31,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 dirs = "7"
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
+# The main window's handle, which owns the quit-path dialogs (#874).
+raw-window-handle = "0.6"
 lasterm-process-lock = { path = "../../../../crates/lasterm-process-lock" }
 lasterm-protected-fs = { path = "../../../../crates/lasterm-protected-fs" }
 

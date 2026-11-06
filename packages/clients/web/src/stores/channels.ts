@@ -11,6 +11,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
+import type { AskedSecret } from "../utils/pane-cover.js";
 import { useAuthStore } from "./auth.js";
 import { useConfigStore } from "./config.js";
 import { useHostsStore } from "./hosts.js";
@@ -1010,13 +1011,21 @@ export const useChannelsStore = defineStore("channels", () => {
 				reject(new Error("SPAWN timeout — no SPAWN_OK after 10s"));
 			}, SPAWN_DEADLINE_MS);
 
+			// The password or passphrase its host last asked for, if any: a refusal
+			// because none was given says which (#875).
+			let asked: AskedSecret | undefined;
+
 			// A prompt this spawn caused is a question for a person — a fingerprint
 			// to compare, a passphrase to fetch — and ten seconds is not that. The
 			// clock stops while one is on screen, leaving the long backstop for a
 			// hub that has genuinely stopped answering; what comes back is
 			// SPAWN_OK, or the ERROR the hub sends when the answer was no.
-			const holdForAnAnswer = (msg: { type: string; hostId?: string }): void => {
+			type Prompt = { type: string; hostId?: string; promptType?: string };
+			const holdForAnAnswer = (msg: Prompt): void => {
 				if (msg.hostId !== undefined && msg.hostId !== hostId) return;
+				if (msg.promptType === "password" || msg.promptType === "passphrase") {
+					asked = msg.promptType;
+				}
 				clearTimeout(timer);
 				timer = setTimeout(() => {
 					stopWaiting();
@@ -1025,7 +1034,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			};
 			unsubPrompts = (["HOST_VERIFY", "AUTH_PROMPT", "AGENT_BINARY_VERIFY"] as const).map((type) =>
 				sessionStore.wsClient.on(type, (msg) => {
-					holdForAnAnswer(msg as unknown as { type: string; hostId?: string });
+					holdForAnAnswer(msg as unknown as Prompt);
 				}),
 			);
 
@@ -1090,6 +1099,7 @@ export const useChannelsStore = defineStore("channels", () => {
 						Object.assign(new Error(`${msg.code}: ${msg.message}`), {
 							code: msg.code,
 							...(msg.hostId !== undefined && { hostId: msg.hostId }),
+							...(msg.code === ErrorCode.AUTH_CANCELLED && asked !== undefined && { asked }),
 						}),
 					);
 				}

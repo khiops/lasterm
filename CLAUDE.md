@@ -22,7 +22,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 
 | Key | Value |
 |-----|-------|
-| Runtime | Node.js 24 LTS, one exact version: `.nvmrc` for CI and `volta.node` in `package.json` locally, kept equal by `scripts/node-version.spec.ts` (hub, web, desktop shell — the agent is a Rust binary and needs none) |
+| Runtime | Node.js 24 LTS, one exact version: `.nvmrc` for CI and `mise.toml` locally (with pnpm, the `packageManager` one), kept equal by `scripts/node-version.spec.ts` (hub, web, desktop shell — the agent is a Rust binary and needs none) |
 | Language | TypeScript strict (all packages) |
 | Monorepo | pnpm workspaces |
 | Package manager | pnpm |
@@ -209,9 +209,11 @@ powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <c
   at any physical mouse event or a cursor found off its path. Exit 3 (interfered, or busy: no rest
   within 30 s) and 4 (timed out, `-TimeoutSeconds`, default 20) mean the result is discarded: retry
   later. 0 is a drag that ran, its `drop effect: …` the target's answer; 1 a harness failure.
-- Text with quotes, `|` or line breaks goes in a file, for `eval-file` or `type-file`. Volta's
-  `node` shim hands its arguments to cmd.exe, which cuts one at a newline, drops `^`, expands
-  `%NAME%`, and splits the command at a `|` or `&` outside what it takes for quotes. `eval-file`
+- Text with quotes, `|` or line breaks goes in a file, for `eval-file` or `type-file`. A `node`
+  reached through a `.cmd` shim (Volta's did, and mise's shims can) hands its arguments to cmd.exe,
+  which cuts one at a newline, drops `^`, expands `%NAME%`, and splits the command at a `|` or `&`
+  outside what it takes for quotes. With `mise activate` in the shell, `node` is the real
+  executable, but the file forms work whatever starts it. `eval-file`
   yields the script's last value and keeps its `let`/`const` to itself. `type` presses Enter at the
   end unless `--no-enter`, and each line break of the text is an Enter too.
 - `api <METHOD> <path> [body.json]` finds the hub's port in `runtime.json` in the state directory,

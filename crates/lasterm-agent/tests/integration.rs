@@ -802,7 +802,7 @@ async fn test_full_lifecycle() {
                 );
                 break;
             }
-            _ => {} // TITLE_CHANGE, PROCESS_TITLE, BELL — benign, ignore
+            _ => {} // TITLE_CHANGE, PROCESS_TITLE, CWD_CHANGE, BELL — benign, ignore
         }
     }
 
@@ -1011,6 +1011,7 @@ async fn test_conpty_no_stdout_leak() {
                         "OUTPUT"
                             | "TITLE_CHANGE"
                             | "PROCESS_TITLE"
+                            | "CWD_CHANGE"
                             | "BELL"
                             | "NOTIFICATION"
                             | "CHANNEL_EXIT"

@@ -15,6 +15,7 @@ import type {
 	AgentSnapshotResMessage,
 	AgentTitleChangeMessage,
 	ChannelExitMessage,
+	CwdChangeMessage,
 	ErrorMessage,
 	HelloMessage,
 	InputDroppedMessage,
@@ -384,6 +385,8 @@ export class AgentConnectionManager {
 				const exitMsg = msg as ChannelExitMessage;
 				const channel = this.ctx.channels.get(exitMsg.channelId);
 				if (channel) {
+					// An ended terminal has no directory any more (#834).
+					delete channel.liveCwd;
 					this.broadcaster.updateChannelStatus(
 						exitMsg.channelId,
 						channel.sessionId,
@@ -413,6 +416,8 @@ export class AgentConnectionManager {
 				this.broadcaster.handleTitleChange(msg as AgentTitleChangeMessage);
 			} else if (msg.type === "PROCESS_TITLE") {
 				this.broadcaster.handleProcessTitle(msg as AgentProcessTitleMessage);
+			} else if (msg.type === "CWD_CHANGE") {
+				this.broadcaster.handleCwdChange(msg as CwdChangeMessage);
 			} else if (msg.type === "BELL") {
 				const bellMsg = msg as AgentBellMessage;
 				if (this.broadcaster.rateLimitCheck(this.ctx.bellTimestamps, bellMsg.channelId, 10)) {

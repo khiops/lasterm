@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::batch::{
     batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender, EventFrame, OutputEvent,
 };
+use crate::cwd::{CwdTracker, ProcessRead};
 use crate::environment::{self, EnvMode, Platform};
 use crate::expand::expand_vars;
 use crate::flow::{Flow, Flows, InTransit, Queued};
@@ -28,7 +29,13 @@ pub(crate) enum ChannelCommand {
     Snapshot(oneshot::Sender<SnapshotInfo>),
     /// Notify the mirror of a resize.
     Resize(u16, u16),
+    /// Read the terminal's directory afresh and send it, changed or not
+    /// (CWD_QUERY, #834).
+    CwdQuery,
 }
+
+/// How often a terminal's process is read for its title and its directory.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A frame on its way to a connection's writer. A terminal's output and
 /// events carry their charge against their hub's connection, released once
@@ -247,6 +254,8 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
         // Reads SPAWN's env_mode, env_unset and login_shell, and answers
         // ENV_QUERY (#576).
         "env-modes".into(),
+        // Sends CWD_CHANGE and answers CWD_QUERY (#834).
+        "cwd".into(),
     ];
     if daemon {
         capabilities.push("hub-identity".into());
@@ -355,6 +364,9 @@ pub(crate) async fn handle_message(
         }
         HubToAgent::Attach { channel_id, .. } => {
             format!("ATTACH ch={}", &channel_id[..8.min(channel_id.len())])
+        }
+        HubToAgent::CwdQuery { channel_id } => {
+            format!("CWD_QUERY ch={}", &channel_id[..8.min(channel_id.len())])
         }
         HubToAgent::Auth { .. } => "AUTH".to_string(),
         HubToAgent::EnvQuery { mode, .. } => format!("ENV_QUERY mode={mode:?}"),
@@ -647,6 +659,22 @@ pub(crate) async fn handle_message(
             }
         }
 
+        HubToAgent::CwdQuery { channel_id } => {
+            // Its reader reads the directory afresh and sends it down the
+            // channel's own pipeline, as every CWD_CHANGE goes. A terminal the
+            // caller cannot see, or whose reader is gone, is not found.
+            let tx_opt = if visible_to(&pty_manager, &channel_id, owner).await {
+                let senders = cmd_senders.lock().await;
+                senders.get(&channel_id).cloned()
+            } else {
+                None
+            };
+            let asked = tx_opt.is_some_and(|tx| tx.send(ChannelCommand::CwdQuery).is_ok());
+            if !asked {
+                send_frame(&frame_tx, &channel_not_found(channel_id, None))?;
+            }
+        }
+
         HubToAgent::Auth { .. } => {
             // AUTH is consumed by the connection handshake in handle_connection_inner
             // before the message loop starts. If it arrives here the hub sent it
@@ -919,6 +947,8 @@ async fn handle_spawn(
             if let Some(pty_reader) = pty_reader_opt {
                 // Create a headless mirror for this channel (not Send — lives in the reader task)
                 let mirror = HeadlessMirror::new(cols, rows, 1000);
+                // Its directory, starting where the agent started it (#834).
+                let cwd = CwdTracker::new(&effective_program, expanded_cwd.clone());
 
                 // Create per-channel command channel for snapshot/resize
                 let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ChannelCommand>();
@@ -961,6 +991,7 @@ async fn handle_spawn(
                     pty_pid,
                     pty_reader,
                     mirror,
+                    cwd,
                     cmd_rx,
                     cmd_tx,
                     channel_events,
@@ -1021,6 +1052,7 @@ fn spawn_reader_task(
     pty_pid: u32,
     mut pty_reader: async_xpty::PtyReader,
     mirror: HeadlessMirror,
+    cwd: CwdTracker,
     mut cmd_rx: mpsc::UnboundedReceiver<ChannelCommand>,
     own_cmd_tx: mpsc::UnboundedSender<ChannelCommand>,
     channel_events: ChannelEventSender,
@@ -1031,6 +1063,7 @@ fn spawn_reader_task(
         let mut rbuf = vec![0u8; 4096];
         let mut seq: u64 = 0;
         let mut mirror = mirror;
+        let mut cwd = cwd;
         // What this terminal's output counts against: its hub's connection.
         // While that is full, the PTY is not read, and the program writing to
         // it blocks once the PTY's own buffer is full, as on a terminal nobody
@@ -1039,27 +1072,16 @@ fn spawn_reader_task(
         let flow = channel_events.flow(&owner);
         let mut held_back = flow.full();
 
-        // Spawn a dedicated title-polling task so it never blocks PTY I/O.
-        // The task sends the new title whenever it changes; the main loop
-        // receives it via the channel arm in select!.
-        let (title_tx, mut title_rx) = mpsc::unbounded_channel::<String>();
-        tokio::spawn(async move {
-            // Wait one tick before the first poll so the shell is ready.
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let mut last_title = String::new();
-            loop {
-                if let Some(title) = crate::process::get_process_title(pty_pid).await {
-                    if title != last_title {
-                        last_title = title.clone();
-                        if title_tx.send(title).is_err() {
-                            // Main task dropped — channel is gone, stop polling.
-                            break;
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        });
+        // A dedicated task reads the terminal's process, so that it never
+        // blocks PTY I/O: its title and its directory, every two seconds, and
+        // at once for a CWD_QUERY. The main loop receives each read via the
+        // channel arm in select!.
+        let (poll_tx, mut poll_rx) = mpsc::unbounded_channel::<Poll>();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        tokio::spawn(poll_process(pty_pid, poll_tx, Arc::clone(&wake)));
+
+        // The directory it starts in, before anything is read (#834).
+        send_cwd(&mut cwd, false, &channel_events, &flow, &owner, &channel_id);
 
         loop {
             tokio::select! {
@@ -1145,6 +1167,14 @@ fn spawn_reader_task(
                                 );
                             }
 
+                            // The shell said where it is: sent at once (#834).
+                            if let Some(report) = mirror.take_shell_cwd() {
+                                cwd.shell_reported(report);
+                                send_cwd(
+                                    &mut cwd, false, &channel_events, &flow, &owner, &channel_id,
+                                );
+                            }
+
                             if flow.full() {
                                 held_back = true;
                                 tracing::debug!(
@@ -1172,6 +1202,11 @@ fn spawn_reader_task(
                         Some(ChannelCommand::Resize(new_cols, new_rows)) => {
                             mirror.resize(new_cols, new_rows);
                         }
+                        Some(ChannelCommand::CwdQuery) => {
+                            // Answered by the read this starts, not by one
+                            // already under way.
+                            wake.notify_one();
+                        }
                         None => {
                             // Sender dropped — channel being destroyed
                             break;
@@ -1179,14 +1214,18 @@ fn spawn_reader_task(
                     }
                 }
 
-                // Process title update from polling task
-                Some(title) = title_rx.recv() => {
-                    let msg = AgentToHub::ProcessTitle {
-                        channel_id: channel_id.clone(),
-                        title,
-                        display_title: None,
-                    };
-                    send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
+                // What the polling task read of the terminal's process
+                Some(poll) = poll_rx.recv() => {
+                    if let Some(title) = poll.title {
+                        let msg = AgentToHub::ProcessTitle {
+                            channel_id: channel_id.clone(),
+                            title,
+                            display_title: None,
+                        };
+                        send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
+                    }
+                    cwd.process_read(poll.process);
+                    send_cwd(&mut cwd, poll.answering, &channel_events, &flow, &owner, &channel_id);
                 }
             }
         }
@@ -1239,6 +1278,74 @@ fn spawn_reader_task(
         };
         send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
     });
+}
+
+/// One read of a terminal's process by its polling task.
+struct Poll {
+    /// Its title, when it changed since the last read.
+    title: Option<String>,
+    /// Its directory, and whether its shell is at its prompt.
+    process: ProcessRead,
+    /// Read for a CWD_QUERY: what it gives is sent, changed or not.
+    answering: bool,
+}
+
+/// Read the process `pid` every [`POLL_INTERVAL`], and at once when `wake` is
+/// notified, until the reader task that receives the reads is gone.
+async fn poll_process(pid: u32, tx: mpsc::UnboundedSender<Poll>, wake: Arc<tokio::sync::Notify>) {
+    let mut last_title = String::new();
+    loop {
+        // The first read waits one tick too, so that the shell is ready,
+        // unless a query asks first.
+        let answering = tokio::select! {
+            _ = tokio::time::sleep(POLL_INTERVAL) => false,
+            _ = wake.notified() => true,
+        };
+        let title = match crate::process::get_process_title(pid).await {
+            Some(title) if title != last_title => {
+                last_title = title.clone();
+                Some(title)
+            }
+            _ => None,
+        };
+        let process = crate::cwd::read_process(pid).await;
+        if tx
+            .send(Poll {
+                title,
+                process,
+                answering,
+            })
+            .is_err()
+        {
+            // The reader is gone, and its terminal with it.
+            break;
+        }
+    }
+}
+
+/// Send the terminal's directory when it changed, or when `answering` a
+/// CWD_QUERY. Logged at DEBUG, without the directory: it is user content.
+fn send_cwd(
+    tracker: &mut CwdTracker,
+    answering: bool,
+    channel_events: &ChannelEventSender,
+    flow: &Arc<Flow>,
+    owner: &OwnerId,
+    channel_id: &str,
+) {
+    let Some(state) = tracker.change_to_send(answering) else {
+        return;
+    };
+    tracing::debug!(
+        channel_id = %channel_id,
+        source = ?state.source,
+        known = state.cwd.is_some(),
+        at_prompt = ?state.at_prompt,
+        answering,
+        "CWD_CHANGE"
+    );
+    let msg = state.into_message(channel_id.to_owned());
+    send_channel_event(channel_events, flow, owner, channel_id, &msg);
 }
 
 /// Send a frame about a channel down the pipeline its output takes, not to the
@@ -1543,15 +1650,26 @@ mod stdio_tests {
         manager: &Arc<Mutex<PtyManager>>,
         senders: &SnapshotSenders,
     ) {
+        start_terminal_in(channel_id, None, manager, senders).await;
+    }
+
+    /// Start a terminal under `channel_id` in `cwd`, as a SPAWN does. What it
+    /// sends about itself arrives on the receiver returned.
+    async fn start_terminal_in(
+        channel_id: &str,
+        cwd: Option<String>,
+        manager: &Arc<Mutex<PtyManager>>,
+        senders: &SnapshotSenders,
+    ) -> mpsc::UnboundedReceiver<ChannelEvent> {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
+        let (channel_events, channel_events_rx) = ChannelEventSender::new(Flows::default());
         let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         handle_spawn(
             "spawn-1".into(),
             Some(channel_id.into()),
             Some(shell.into()),
             Vec::new(),
-            None,
+            cwd,
             SpawnEnvironment {
                 mode: EnvMode::Inherit,
                 unset: Vec::new(),
@@ -1575,6 +1693,176 @@ mod stdio_tests {
         let spawned: serde_json::Value =
             rmp_serde::from_slice(&frame_rx.recv().await.expect("an answer").frame[4..]).unwrap();
         assert_eq!(spawned["type"], "SPAWN_OK", "{spawned}");
+        channel_events_rx
+    }
+
+    /// The next CWD_CHANGE `matching` among what a terminal sends, within
+    /// `within`; None when none comes.
+    async fn next_cwd_change(
+        events: &mut mpsc::UnboundedReceiver<ChannelEvent>,
+        within: std::time::Duration,
+        matching: impl Fn(&serde_json::Value) -> bool,
+    ) -> Option<serde_json::Value> {
+        tokio::time::timeout(within, async {
+            while let Some(event) = events.recv().await {
+                if let ChannelEvent::Frame(event) = event {
+                    let frame: serde_json::Value =
+                        rmp_serde::from_slice(&event.frame[4..]).unwrap();
+                    if frame["type"] == "CWD_CHANGE" && matching(&frame) {
+                        return Some(frame);
+                    }
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Whether a CWD_CHANGE names `dir`: the same directory, however each
+    /// side spells it (a short name, a symbolic link, the case of a letter).
+    fn names_dir(frame: &serde_json::Value, dir: &std::path::Path) -> bool {
+        let Some(cwd) = frame["cwd"].as_str() else {
+            return false;
+        };
+        match (std::fs::canonicalize(cwd), std::fs::canonicalize(dir)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => cwd.eq_ignore_ascii_case(dir.to_str().unwrap()),
+        }
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lasterm-handler-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A terminal says where it starts, answers a CWD_QUERY at once with a
+    /// fresh read, and follows `cd` within a poll (#834).
+    #[tokio::test]
+    async fn a_terminal_reports_its_directory_and_answers_a_query_at_once() {
+        use crate::protocol::HubToAgent;
+        use std::time::Duration;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let start = temp_dir("query");
+        let mut events = start_terminal_in(
+            "cwd-ch",
+            Some(start.to_str().unwrap().to_owned()),
+            &manager,
+            &senders,
+        )
+        .await;
+
+        let first = next_cwd_change(&mut events, Duration::from_secs(5), |_| true)
+            .await
+            .expect("the directory it starts in");
+        assert_eq!(first["source"], "start", "{first}");
+        assert_eq!(first["cwd"], start.to_str().unwrap(), "{first}");
+
+        // Well before the first poll's two seconds.
+        let asked = answers(
+            HubToAgent::CwdQuery {
+                channel_id: "cwd-ch".into(),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        assert_eq!(
+            asked,
+            Vec::<serde_json::Value>::new(),
+            "answered in the pipeline"
+        );
+        let fresh = next_cwd_change(&mut events, Duration::from_millis(1500), |_| true)
+            .await
+            .expect("a CWD_QUERY is answered at once");
+        assert_eq!(fresh["source"], "process", "{fresh}");
+        assert!(names_dir(&fresh, &start), "{fresh}");
+
+        let (line, target): (&[u8], &str) = if cfg!(windows) {
+            (b"cd /d C:\\Windows\r", "C:\\Windows")
+        } else {
+            (b"cd /tmp\n", "/tmp")
+        };
+        answers(
+            HubToAgent::Input {
+                channel_id: "cwd-ch".into(),
+                data: line.to_vec(),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let target = std::path::Path::new(target);
+        let moved = next_cwd_change(&mut events, Duration::from_secs(5), |frame| {
+            names_dir(frame, target)
+        })
+        .await
+        .expect("cd is followed within a poll");
+        assert_eq!(moved["source"], "process", "{moved}");
+
+        if let Some(process) = manager.lock().await.remove("cwd-ch") {
+            let _ = process.kill_tree();
+        }
+        let _ = std::fs::remove_dir_all(&start);
+    }
+
+    /// A shell's own report is sent at once, and wins over its process.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_report_is_sent_at_once() {
+        use crate::protocol::HubToAgent;
+        use std::time::Duration;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_terminal_in("osc-ch", None, &manager, &senders).await;
+        next_cwd_change(&mut events, Duration::from_secs(5), |_| true)
+            .await
+            .expect("the directory it starts in");
+
+        answers(
+            HubToAgent::Input {
+                channel_id: "osc-ch".into(),
+                data: b"printf '\\033]9;9;/reported/dir\\007'\n".to_vec(),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let reported = next_cwd_change(&mut events, Duration::from_millis(1500), |frame| {
+            frame["source"] == "shell"
+        })
+        .await
+        .expect("reported at once, before any poll");
+        assert_eq!(reported["cwd"], "/reported/dir");
+
+        let removed = manager.lock().await.remove("osc-ch");
+        if let Some(process) = removed {
+            let _ = process.kill_tree();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cwd_query_for_a_terminal_it_does_not_have_is_not_found() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let frames = answers(
+            HubToAgent::CwdQuery {
+                channel_id: "gone".into(),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["type"], "ERROR");
+        assert_eq!(frames[0]["code"], "CHANNEL_NOT_FOUND");
+        assert_eq!(frames[0]["channel_id"], "gone");
     }
 
     /// The ATTACH_OK of a live terminal echoes the request id too.
@@ -1675,6 +1963,19 @@ mod stdio_tests {
             match build_hello(daemon) {
                 AgentToHub::Hello { capabilities, .. } => {
                     assert!(capabilities.contains(&"env-modes".to_string()), "{daemon}");
+                }
+                _ => unreachable!("build_hello builds HELLO"),
+            }
+        }
+    }
+
+    /// Both kinds of agent send CWD_CHANGE and answer CWD_QUERY (#834).
+    #[test]
+    fn every_agent_says_cwd() {
+        for daemon in [true, false] {
+            match build_hello(daemon) {
+                AgentToHub::Hello { capabilities, .. } => {
+                    assert!(capabilities.contains(&"cwd".to_string()), "{daemon}");
                 }
                 _ => unreachable!("build_hello builds HELLO"),
             }
@@ -1956,6 +2257,87 @@ mod stdio_tests {
             !logs.contains(&cwd_marker),
             "working directory must not be logged"
         );
+    }
+
+    /// A terminal's directory is user content (#834): CWD_CHANGE is logged at
+    /// DEBUG, by its source and whether it is known, and never with the
+    /// directory, whether the agent started it there, read it, or the shell
+    /// reported it.
+    #[tokio::test]
+    async fn a_terminals_directory_is_never_logged() {
+        use crate::protocol::HubToAgent;
+        use std::time::Duration;
+        let marker = format!("lasterm-live-cwd-secret-{}", ulid::Ulid::generate());
+        let dir = std::env::temp_dir().join(&marker);
+        std::fs::create_dir_all(&dir).unwrap();
+        let capture = LogCapture(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        // As above: two dispatches, so no callsite caches "never".
+        let _parallel_dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut events = start_terminal_in(
+            "cwd-log",
+            Some(dir.to_string_lossy().into_owned()),
+            &manager,
+            &senders,
+        )
+        .await;
+        next_cwd_change(&mut events, Duration::from_secs(5), |frame| {
+            frame["source"] == "start"
+        })
+        .await
+        .expect("the start directory");
+        answers(
+            HubToAgent::CwdQuery {
+                channel_id: "cwd-log".into(),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        next_cwd_change(&mut events, Duration::from_secs(5), |frame| {
+            names_dir(frame, &dir)
+        })
+        .await
+        .expect("the directory, read");
+        // And as a shell reports it, where printing an OSC is plain.
+        if cfg!(unix) {
+            answers(
+                HubToAgent::Input {
+                    channel_id: "cwd-log".into(),
+                    data: format!("printf '\\033]7;file:///{marker}/x\\007'\n").into_bytes(),
+                },
+                &manager,
+                &senders,
+            )
+            .await;
+            next_cwd_change(&mut events, Duration::from_secs(5), |frame| {
+                frame["source"] == "shell"
+            })
+            .await
+            .expect("the directory, reported");
+        }
+        if let Some(process) = manager.lock().await.remove("cwd-log") {
+            let _ = process.kill_tree();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("CWD_CHANGE"), "CWD_CHANGE is logged: {logs}");
+        assert!(!logs.contains(&marker), "a directory must not be logged");
     }
 
     /// The whole chain, from SPAWN to the shell: what the request removes is

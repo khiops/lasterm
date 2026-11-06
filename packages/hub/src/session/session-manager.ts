@@ -18,6 +18,7 @@ import type {
 	AgentAttachMessage,
 	AgentAttachOkMessage,
 	AgentConfig,
+	AgentCwdQueryMessage,
 	AgentEnvMessage,
 	AgentEnvQueryMessage,
 	AgentSpawnMessage,
@@ -31,6 +32,7 @@ import type {
 	ErrorMessage,
 	Host,
 	InputMessage,
+	LiveCwd,
 	ProtocolMessage,
 	ResizeMessage,
 	StateSyncMessage,
@@ -78,6 +80,7 @@ import {
 	hostReconnecting,
 	hostUnreachableMessage,
 } from "./host-reachability.js";
+import { liveCwdOf } from "./live-cwd.js";
 import { OutputChunker } from "./output-chunker.js";
 import {
 	clearContext,
@@ -172,6 +175,23 @@ export type AgentEnvironmentOutcome =
 	| { readonly kind: "not-connected" }
 	/** The agent did not answer in time. */
 	| { readonly kind: "timeout" };
+
+/** How long an agent has to read a terminal's directory afresh (#834). */
+const CWD_QUERY_TIMEOUT_MS = 2_000;
+
+/**
+ * What came of asking a terminal's agent for its working directory, read
+ * afresh (#834). Where it could not be asked, or did not answer in time,
+ * `last` is what it said last, which the asker may use as it sees fit.
+ */
+export type ChannelCwdOutcome =
+	| { readonly kind: "ok"; readonly live: LiveCwd }
+	/** No terminal by that id is running here, or its agent no longer has it. */
+	| { readonly kind: "not-found" }
+	/** No agent of its host is connected to this hub. */
+	| { readonly kind: "not-connected"; readonly last: LiveCwd | null }
+	/** The agent did not answer in time. */
+	| { readonly kind: "timeout"; readonly last: LiveCwd | null };
 
 /** What came of asking to replace the agent serving a host. */
 export type ReplaceAgentOutcome =
@@ -1745,6 +1765,7 @@ export class SessionManager {
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
 				...this.sizeOf(channel, channelId),
+				...this.broadcaster.cwdFieldsOf(channelId),
 			};
 			client.send(attachOk);
 			return true;
@@ -1817,6 +1838,7 @@ export class SessionManager {
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
 				...this.sizeOf(channel, channelId),
+				...this.broadcaster.cwdFieldsOf(channelId),
 			};
 			client.send(attachOk);
 		} catch (err) {
@@ -1856,6 +1878,7 @@ export class SessionManager {
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
 				...this.sizeOf(channel, channelId),
+				...this.broadcaster.cwdFieldsOf(channelId),
 			};
 			client.send(attachOk);
 		}
@@ -2097,6 +2120,57 @@ export class SessionManager {
 			agent.on("message", onMessage);
 			agent.on("close", onClose);
 			agent.send({ type: "ENV_QUERY", requestId, mode } satisfies AgentEnvQueryMessage);
+		});
+	}
+
+	/**
+	 * A terminal's working directory, read afresh by its agent (#834): what a
+	 * listing of the terminal's folder opens at (#832).
+	 *
+	 * The agent answers CWD_QUERY with a CWD_CHANGE, which also goes the way
+	 * every CWD_CHANGE goes: kept for ATTACH_OK and STATE_SYNC, relayed to the
+	 * attached clients. The first CWD_CHANGE for this terminal after the
+	 * question is its answer. The directory is user content: handed to the
+	 * caller, never logged.
+	 */
+	async queryChannelCwd(
+		channelId: string,
+		timeoutMs = CWD_QUERY_TIMEOUT_MS,
+	): Promise<ChannelCwdOutcome> {
+		const channel = this.ctx.channels.get(channelId);
+		if (channel === undefined || channel.status === "dead") return { kind: "not-found" };
+		const last = (): LiveCwd | null => this.ctx.channels.get(channelId)?.liveCwd ?? null;
+		const agent = this.ctx.agents.get(channel.hostId);
+		if (!agent?.connected) return { kind: "not-connected", last: last() };
+		return new Promise<ChannelCwdOutcome>((resolve) => {
+			let settled = false;
+			const finish = (outcome: ChannelCwdOutcome): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				agent.off("message", onMessage);
+				agent.off("close", onClose);
+				resolve(outcome);
+			};
+			const onMessage = (incoming: ProtocolMessage): void => {
+				if (incoming.type === "CWD_CHANGE" && incoming.channelId === channelId) {
+					const live = liveCwdOf(incoming as unknown as Record<string, unknown>);
+					if (live !== null) finish({ kind: "ok", live });
+				} else if (
+					incoming.type === "ERROR" &&
+					incoming.code === ErrorCode.CHANNEL_NOT_FOUND &&
+					incoming.channelId === channelId &&
+					incoming.requestId === undefined
+				) {
+					finish({ kind: "not-found" });
+				}
+			};
+			const onClose = (): void => finish({ kind: "not-connected", last: last() });
+
+			const timer = setTimeout(() => finish({ kind: "timeout", last: last() }), timeoutMs);
+			agent.on("message", onMessage);
+			agent.on("close", onClose);
+			agent.send({ type: "CWD_QUERY", channelId } satisfies AgentCwdQueryMessage);
 		});
 	}
 

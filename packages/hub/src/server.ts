@@ -9,6 +9,7 @@ import Fastify from "fastify";
 import { registerAgentRoutes } from "./api/agents.js";
 import { registerChannelRoutes } from "./api/channels.js";
 import { registerConfigRoutes } from "./api/config.js";
+import { registerFileRoutes } from "./api/files.js";
 import { registerFontRoutes } from "./api/fonts.js";
 import { registerGroupRoutes } from "./api/groups.js";
 import { registerHostConnectionRoutes } from "./api/host-connection.js";
@@ -46,6 +47,7 @@ import {
 	loadGcConfig,
 	matchCorsOrigin,
 } from "./config.js";
+import { HostFilesService } from "./files/host-files-service.js";
 import type { HubLogger } from "./logging/hub-logger.js";
 import type { LoggerRegistry } from "./logging/index.js";
 import {
@@ -567,6 +569,14 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerSessionRoutes(server, metaDal, activeSessionManager);
 		registerHostConnectionRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
 		registerChannelRoutes(server, metaDal, activeSessionManager);
+		registerFileRoutes(server, {
+			files: new HostFilesService({
+				channelHost: (channelId) => metaDal.getChannelWithHost(channelId),
+				hostOs: (hostId) => metaDal.getHost(hostId)?.os ?? null,
+				sshHost: (hostId) => activeSessionManager.connectedSshAgent(hostId),
+			}),
+			writerCheck: wsRoutes.writerCheck,
+		});
 		registerGroupRoutes(server, metaDal);
 		registerConfigRoutes(
 			server,

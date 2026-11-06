@@ -199,6 +199,28 @@ Local daemon, single process, binds to 127.0.0.1.
 - Fanout: OUTPUT from one channel → all attached clients
 - Write-lock: track who holds write per channel, handle claim/release/force
 
+**Host Files** (`packages/hub/src/files/`, #832):
+- Lists, stats and creates folders on the host a terminal runs on, for the files panel (#836) and
+  the uploads (#833); routes and errors in PROTOCOL.md § 6, Host Files
+- One interface (`FileBackend`), three ways to the files, chosen per host: the hub's own file system
+  for the local host, as the hub's OS user, which runs the local agent's terminals; SFTP over the
+  hub's SSH connection to a remote host that offers it; SSH commands over exec channels (a `sh`
+  script, or an encoded PowerShell) where it does not (#722, #723), or where SFTP failed without a
+  verdict. An answer that settles a request (missing, not a folder, exists, refused) is not asked
+  again the other way; when both fail, the error says what each said
+- SFTP: one session per SSH connection, shared, closed after 60 s unused; a lost connection fails
+  the requests on it with `HOST_NOT_CONNECTED`
+- Paths are absolute and literal, in one form per host style (`host-paths.ts`): POSIX, or Windows
+  drive-absolute and UNC, `C:/x` and `/C:/x` read as `C:\x`, `/` the drives; `%NAME%` text is
+  refused (#711)
+- The SFTP and exec helpers it shares with the agent deployment (§ 3.5) live in
+  `session/ssh-file-transport.ts`: the SFTP session and its requests, the mkdir walk (POSIX,
+  drive-absolute and UNC parents), a command fed on its stdin, the Windows reply marker and Base64
+  path handling
+- A new folder is a write: only the window holding the terminal's write lock, named by the request
+  (`X-Lasterm-Client-Id`) and checked against the request's own token
+- Logs nothing: a path or a name is the user's, at any level, and a listing is a routine request
+
 **Cache Manager:**
 - Write-through: every OUTPUT chunk → spool.db
 - Periodic snapshots: store serialized screen state
@@ -1258,7 +1280,9 @@ lasterm/
 │   │       │   ├── ssh-agent.ts      # SshAgent: the agent over SSH, on stdio or a daemon's socket
 │   │       │   ├── remote-daemon.ts  # Whether and how a remote host keeps a daemon (#79, #600, #765)
 │   │       │   ├── ssh-keepalive.ts  # The SSH keepalive every connection carries (#607)
+│   │       │   ├── ssh-file-transport.ts # SFTP session, mkdir walk, stdin exec, Windows reply marker (#832)
 │   │       │   └── spool-gc.ts       # Spool garbage collection (STORAGE.md § 7)
+│   │       ├── files/       # A terminal's host files: local fs, SFTP, SSH commands (§ 3.3, #832)
 │   │       ├── ssh/         # known_hosts reader, ~/.ssh/config parser
 │   │       ├── logging/     # hub.jsonl, channel logs, the security log
 │   │       ├── storage/     # SQLite DAL (meta.db + spool.db)

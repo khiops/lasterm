@@ -1050,6 +1050,15 @@ export class SshAgent extends AgentConnection {
 		return this.client !== null && this.channelOpen;
 	}
 
+	/**
+	 * The SSH connection to this host while the agent is reached over it, for
+	 * the hub's own requests on the host: browsing its files (#832). Reusing it
+	 * matters, as for `execOnHost`: another would ask for a password again.
+	 */
+	get sshConnection(): Client | null {
+		return this.connected ? this.client : null;
+	}
+
 	protected describeAgent(): string {
 		return `The agent on ${this.host.label || this.host.sshHost || this.host.id}`;
 	}

@@ -1605,6 +1605,86 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | DELETE | `/api/channels/:id` | ● | `{ ok: true }`. A live channel is ended, and stored `dead` with `end_reason: "killed"`. A dead one is removed with its output: `{ ok: true, purged: true }`, answered once its row is gone; the output follows in the spool GC's bounded batches (STORAGE.md § 7.2) |
 | DELETE | `/api/channels/dead` | ● | Remove all dead channels, or a host's with `{ host_id }` → `{ ok: true, purged }`, their output as above |
 
+#### Host Files
+
+The files of the host a terminal runs on (#832), for any authenticated client, a reader of the
+terminal included; a new folder only from the window holding its write lock. The local host is reached
+through the hub's own file system, as the hub's OS user, which is the one the local agent runs
+terminals as; a remote host over SFTP on the hub's own SSH connection to it, or over SSH commands
+where the server offers no SFTP (`sftp_unavailable`, § 4.7) or where SFTP failed without a verdict.
+A dead terminal's host is browsed as a live one's. Nothing is uploaded here yet (#833).
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, link_target?, link_kind? }], truncated }`. Without `path` (or with an empty one), the folder a panel opens at: the account's home on that host for now (the terminal's own folder, #834, and the configured one, #835, will come first). `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
+| GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, link_target?, link_kind? }` |
+| GET | `/api/channels/:id/files/free-space` | ● | `?path=` → `{ path, available, total }`: the bytes the account may still write on that folder's file system, and its size; `null` when the host does not say (a Windows share over SSH commands). Without `path`, the home |
+| POST | `/api/channels/:id/folders` | ● | `{ path }`, header `X-Lasterm-Client-Id` → 201 `{ path }`. Creates that folder, and only it: its parent must exist and it must not. Refused with 403 `WRITE_LOCK_DENIED` unless the header names a window that holds the terminal's write lock (§ 4.5) |
+
+Every answer carries `Cache-Control: no-store`. An entry is:
+
+| Field | Value |
+|-------|-------|
+| `name` | Its name, as the host spells it; any character a name may hold, a line feed included |
+| `kind` | `"file"`, `"directory"`, `"symlink"` or `"other"`, as `lstat` says: a link is not followed |
+| `size` | Bytes; `null` for a folder, or when the host does not say |
+| `mtime` | Last modified, ISO 8601; `null` when the host does not say |
+| `link_target` | On a link: what it holds, as the host reads it; absent when it does not say (a Windows host over SSH commands) |
+| `link_kind` | On a link: what it leads to, followed: `"file"`, `"directory"`, `"other"`, or `"missing"` |
+
+Over SSH commands, a Windows host's folder that is a reparse point (a junction, a link to a folder)
+is a `symlink` whose `link_kind` is `"directory"`; a file that is one stays a `file`, since .NET
+Framework does not give the reparse tag that tells a link from a cloud placeholder.
+
+**Paths.** A path is absolute, with no `.` or `..` segment, and taken literally: nothing in it is
+expanded, so a name may hold `$`, `%`, quotes or backticks. Every answer gives it in one form:
+- **POSIX hosts** (Linux, macOS): `/…`, repeated and trailing `/` removed. A path starting with `~` or
+  `$` is refused, with its reason.
+- **Windows hosts**: drive-absolute (`C:\…`) or UNC (`\\server\share\…`). `C:/x` and `/C:/x`, the form
+  a Windows SFTP server answers in, are `C:\x`; the drive letter is upper case, `C:` is `C:\`. The path
+  `/` is the host's root, which lists its drives, each a folder named `C:`: `/` + `C:` is `/C:`, so a
+  name joins onto it as onto any folder. A path holding `%NAME%` text is refused with its reason: the
+  hub expands no environment variable (#711). So are device paths (`\\?\`, `\\.\`), a drive-relative
+  `C:x`, and a character no Windows name holds.
+
+**A new folder is a write.** A REST request carries a token, not a WebSocket, so it names its window
+in `X-Lasterm-Client-Id`, the id its `AUTH_OK` gave it (§ 4.1). The hub checks that this window is a
+socket open now, authenticated with the request's own token, and that it holds the terminal's write
+lock: a lock free, or held by another window, is refused (the window claims it first, § 4.5). A
+missing or unknown header is refused the same way.
+
+**Errors** answer `{ error: { code, message } }`. The message is the client's to show, and may name
+the path; the hub logs neither, at any level.
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `VALIDATION_ERROR` | A channel id that is not a ULID, `path` given twice or over 4,096 characters, `hidden` another value, a body that is not `{ path }` |
+| 400 | `UNSUPPORTED_PATH` | A path in none of the forms above; the message says why. Also a new folder at a root |
+| 403 | `WRITE_LOCK_DENIED` | A new folder from a window that does not hold the write lock, or that the request may not speak for |
+| 403 | `PERMISSION_DENIED` | The host's account may not read the folder, or write in it |
+| 404 | `CHANNEL_NOT_FOUND` | No terminal of this hub has that id |
+| 404 | `NOT_FOUND` | Nothing at that path, or no folder to create the new one in |
+| 409 | `NOT_A_DIRECTORY` | A listing or a free space of a path that is not a folder, or a new folder in one |
+| 409 | `ALREADY_EXISTS` | A new folder where something exists already. SFTP version 3 has no status for it, and OpenSSH and Win32-OpenSSH both answer "Failure", so after a failure the hub looks at what is there |
+| 409 | `HOST_NOT_CONNECTED` | The terminal's host has no agent connected to this hub, or its connection was lost while the request was on it |
+| 502 | `FILE_ACCESS_FAILED` | The host failed without saying why it should: what SFTP said, then what the SSH commands said, when both were tried (`Over SFTP: … Over SSH commands: …`) |
+
+**How each host is reached.** The local host: Node's `fs` (`readdir` with entry types, `lstat`,
+`statfs`, `mkdir`); the drives of a Windows hub are the letters whose root answers. A remote host:
+- **SFTP**, one session per SSH connection, opened when first asked for, shared by every request on
+  it, and closed after 60 s unused; a request is bound to the channel's life. `readdir` (whose
+  attributes are `lstat`'s), `readlink` and `stat` for a link, `statvfs@openssh.com` for the free space
+  where the server offers it.
+- **SSH commands**, on a POSIX host a `sh` script fed on its stdin (`sh -s`): `stat -c '%f %s %Y'`
+  (GNU coreutils and BusyBox), names as Base64 of their bytes, `df -Pk`, `mkdir --`. On a Windows host
+  an encoded PowerShell (`-EncodedCommand`), the path as Base64 data, .NET calls only
+  (`DirectoryInfo.GetFileSystemInfos`, which lists hidden and system entries as `Get-ChildItem -Force`
+  does, and `DriveInfo`), names as Base64. Either answers after the reply marker (`lasterm-reply-4d9b1f`),
+  past whatever the account's shell printed first (#749).
+
+A remote host whose OS no connection has recorded is asked once per connection, as the agent
+deployment asks it (`uname -sm`, then the Windows architecture).
+
 #### Channel Groups (tab groups)
 
 | Method | Path | Auth | Body / Notes |

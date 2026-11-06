@@ -85,7 +85,19 @@ export interface WsRoutes {
 	 * with the token `tokenId`. Returns how many there were.
 	 */
 	closeSocketsForToken(tokenId: string): number;
+	/**
+	 * Whether a REST request may act as the window `clientId` names on the
+	 * terminal `channelId`, as a write would: that client is a socket open now,
+	 * authenticated with the request's own credential (`tokenId`; null on a hub
+	 * without auth), and it holds the terminal's write lock (#832). A REST
+	 * request carries a token, not a socket, so it names the socket, and the
+	 * hub checks that it may speak for it.
+	 */
+	writerCheck(channelId: string, clientId: string, tokenId: string | null): WriterCheck;
 }
+
+/** What `writerCheck` found: the holder, or why the request may not write. */
+export type WriterCheck = "holder" | "unknown-client" | "not-holder";
 
 export async function registerWsRoutes(
 	server: FastifyInstance,
@@ -428,6 +440,16 @@ export async function registerWsRoutes(
 				server.log.info({ tokenId, closed }, "ws-auth: closed the sockets of a revoked token");
 			}
 			return closed;
+		},
+		writerCheck(channelId, clientId, tokenId) {
+			// With auth, only a socket that authenticated with this very credential:
+			// another token's window, or one still before its AUTH, is not the
+			// caller's to speak for.
+			const known = authToken
+				? tokenId !== null && tokenSockets.get(clientId)?.tokenId === tokenId
+				: clientSendRegistry.has(clientId);
+			if (!known) return "unknown-client";
+			return writeLockManager.isHolder(channelId, clientId) ? "holder" : "not-holder";
 		},
 	};
 }

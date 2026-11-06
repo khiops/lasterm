@@ -1613,7 +1613,8 @@ function onDragEnd(): void {
 /* A pane that does not decide its terminal's size draws it at the PTY's,
    which another client decides (#831): top-left, the rest of the pane a
    neutral ground, so that what the terminal has is told from what the pane
-   has. A pane smaller than that scrolls, its text unscaled. useTerminal sets
+   has. A pane smaller than that scrolls, its text unscaled, and shows its
+   scrollbars whatever the scrollbar style (base.css, #845). useTerminal sets
    the class, and xterm's width. */
 .terminal-container.terminal-container--follows {
 	overflow: auto;

@@ -197,11 +197,30 @@ body {
 	display: none;
 }
 
-/* Hidden mode: fully remove scrollbar from layout (keeps overflow-y: scroll for scroll events) */
-.nt-scrollbar-hidden *::-webkit-scrollbar {
+/* Hidden mode: fully remove scrollbar from layout (keeps overflow-y: scroll for scroll events).
+   Not from a reader's pane, which draws its terminal at another client's size
+   (#831): smaller than the terminal, its scrollbars are what tells it that the
+   terminal goes on past its edges (#845). xterm's own scrollbar, inside it,
+   stays hidden. :where() leaves these rules as weak as `*` was, so that an
+   element's own scrollbar style still outranks them. */
+.nt-scrollbar-hidden *:where(:not(.terminal-container--follows))::-webkit-scrollbar {
 	display: none;
 }
 
-.nt-scrollbar-hidden * {
+.nt-scrollbar-hidden *:where(:not(.terminal-container--follows)) {
 	scrollbar-width: none;
+}
+
+/* In hidden mode a reader's pane draws its scrollbars thin, in the theme's
+   colours (`*` above). An engine that reads only the -webkit- rules gets the
+   thin style's default width, since --nt-scrollbar-width is 0 in hidden mode;
+   Chromium reads scrollbar-width and scrollbar-color, and then ignores those
+   rules. */
+.nt-scrollbar-hidden .terminal-container--follows {
+	scrollbar-width: thin;
+}
+
+.nt-scrollbar-hidden .terminal-container--follows::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
 }

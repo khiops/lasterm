@@ -3,7 +3,7 @@ import { generateKeyPairSync, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
-import { type Attributes, type Connection, Server, utils } from "ssh2";
+import { type Attributes, type Connection, Server, type SFTPWrapper, utils } from "ssh2";
 
 const { privateKey } = generateKeyPairSync("rsa", {
 	modulusLength: 2048,
@@ -15,12 +15,75 @@ const codes = utils.sftp.STATUS_CODE;
 /** How many entries one READDIR answers, as a server splits a large folder. */
 const READDIR_BATCH = 64;
 
+/** The OpenSSH extensions this server can offer, as OpenSSH names them in its VERSION. */
+export type SftpExtension =
+	| "hardlink@openssh.com"
+	| "posix-rename@openssh.com"
+	| "fsync@openssh.com";
+
+/**
+ * Name `extensions` in the VERSION this SFTP session answers with. ssh2's server
+ * always answers a bare VERSION 3, so the packet is swapped on its way out: the
+ * client then offers what OpenSSH and Win32-OpenSSH offer (#833).
+ */
+function advertise(sftp: SFTPWrapper, extensions: readonly SftpExtension[]): void {
+	if (extensions.length === 0) return;
+	const inner = sftp as unknown as {
+		_protocol: { channelData(id: number, data: Buffer): void };
+		outgoing: { id: number };
+	};
+	const protocol = inner._protocol;
+	const send = protocol.channelData;
+	let swapped = false;
+	protocol.channelData = function (this: unknown, id: number, data: Buffer) {
+		// VERSION: uint32 length 5, type 2, uint32 version.
+		if (!swapped && id === inner.outgoing.id && data.length === 9 && data[4] === 2) {
+			swapped = true;
+			const strings = extensions
+				.flatMap((name) => [name, "1"])
+				.map((text) => {
+					const bytes = Buffer.from(text, "utf8");
+					const length = Buffer.alloc(4);
+					length.writeUInt32BE(bytes.length);
+					return Buffer.concat([length, bytes]);
+				});
+			const body = Buffer.concat([Buffer.from([2, 0, 0, 0, 3]), ...strings]);
+			const length = Buffer.alloc(4);
+			length.writeUInt32BE(body.length);
+			return send.call(this, id, Buffer.concat([length, body]));
+		}
+		return send.call(this, id, data);
+	};
+}
+
+/** The strings an EXTENDED request carries after its name. */
+function readStrings(data: Buffer | undefined, count: number): Buffer[] {
+	const strings: Buffer[] = [];
+	let at = 0;
+	for (let i = 0; i < count && data !== undefined && at + 4 <= data.length; i++) {
+		const length = data.readUInt32BE(at);
+		strings.push(data.subarray(at + 4, at + 4 + length));
+		at += 4 + length;
+	}
+	return strings;
+}
+
 export interface SftpServerOptions {
 	sftp?: boolean;
 	/** False: refuse every exec request, as a server that runs no command for this account. */
 	exec?: boolean;
 	closeOnRequest?: {
-		type: "STAT" | "LSTAT" | "MKDIR" | "OPEN" | "OPENDIR" | "READDIR" | "WRITE" | "SETSTAT";
+		type:
+			| "STAT"
+			| "LSTAT"
+			| "MKDIR"
+			| "OPEN"
+			| "OPENDIR"
+			| "READDIR"
+			| "WRITE"
+			| "SETSTAT"
+			| "RENAME"
+			| "EXTENDED";
 		occurrence?: number;
 		connection?: boolean;
 	};
@@ -46,6 +109,20 @@ export interface SftpServerOptions {
 	shell?: "sh" | "cmd";
 	/** What every exec prints before its command does, as an account's profile may (#749). */
 	prelude?: string;
+	/** The environment exec requests run with under `/bin/sh`, as an account's would; this process's by default. */
+	execEnv?: NodeJS.ProcessEnv;
+	/**
+	 * The OpenSSH extensions the server offers (#833); none by default. With
+	 * `hardlink@openssh.com`, a link refuses a name that exists, as link(2);
+	 * `posix-rename@openssh.com` replaces, as rename(2), and as Win32-OpenSSH's.
+	 */
+	extensions?: readonly SftpExtension[];
+	/**
+	 * Whether the plain SFTP rename replaces what it lands on. By default it
+	 * refuses a name that exists with `SSH_FX_FAILURE`, as OpenSSH and
+	 * Win32-OpenSSH 9.5 both do; some servers replace.
+	 */
+	renameReplaces?: boolean;
 }
 
 /** A path as the client sent it, mapped on to this machine's; null for one the view does not serve. */
@@ -163,7 +240,9 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 									windowsVerbatimArguments: true,
 									windowsHide: true,
 								})
-							: spawn("/bin/sh", ["-c", info.command]);
+							: spawn("/bin/sh", ["-c", info.command], {
+									...(options.execEnv !== undefined ? { env: options.execEnv } : {}),
+								});
 					// A command that exits without reading all of it closes its stdin under the pipe.
 					child.stdin.on("error", () => {});
 					stream.pipe(child.stdin);
@@ -182,6 +261,7 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 						return;
 					}
 					const sftp = acceptSftp();
+					advertise(sftp, options.extensions ?? []);
 					sftp.once("close", () => {
 						sftpClosures++;
 						channelClosed();
@@ -374,15 +454,49 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 						});
 					});
 					sftp.on("REMOVE", (id, path) => run(id, async () => fs.unlink(await resolve(path))));
-					for (const event of [
-						"READ",
-						"FSTAT",
-						"FSETSTAT",
-						"RMDIR",
-						"RENAME",
-						"SYMLINK",
-						"EXTENDED",
-					] as const) {
+					sftp.on("FSETSTAT", (id, handle, attrs) =>
+						run(id, async () => {
+							if (attrs.mtime !== undefined) {
+								await file(handle).utimes(attrs.atime ?? attrs.mtime, attrs.mtime);
+							}
+							if (attrs.size !== undefined) await file(handle).truncate(attrs.size);
+						}),
+					);
+					// rename(2) replaces, on POSIX and through Node on Windows alike: a server
+					// that refuses an existing name looks first.
+					sftp.on("RENAME", (id, from, to) => {
+						if (intercept("RENAME")) return;
+						run(id, async () => {
+							const [source, target] = [await resolve(from), await resolve(to)];
+							if (!options.renameReplaces && (await fs.lstat(target).catch(() => null)) !== null) {
+								throw Object.assign(new Error("exists"), { code: "EEXIST" });
+							}
+							await fs.rename(source, target);
+						});
+					});
+					sftp.on("EXTENDED", (id, name, data) => {
+						if (intercept("EXTENDED")) return;
+						const offered = (options.extensions ?? []) as readonly string[];
+						if (!offered.includes(name)) {
+							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported");
+							return;
+						}
+						if (name === "fsync@openssh.com") {
+							const [handle] = readStrings(data, 1);
+							run(id, async () => file(handle ?? Buffer.alloc(0)).sync());
+							return;
+						}
+						const [from = Buffer.alloc(0), to = Buffer.alloc(0)] = readStrings(data, 2);
+						run(id, async () => {
+							const [source, target] = [
+								await resolve(from.toString()),
+								await resolve(to.toString()),
+							];
+							if (name === "hardlink@openssh.com") await fs.link(source, target);
+							else await fs.rename(source, target);
+						});
+					});
+					for (const event of ["READ", "FSTAT", "RMDIR", "SYMLINK"] as const) {
 						sftp.on(event, (id: number) =>
 							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported"),
 						);

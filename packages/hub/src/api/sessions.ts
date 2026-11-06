@@ -5,20 +5,28 @@ import type { MetaDAL } from "../storage/meta.js";
 
 /**
  * What a replace request asks for. `force` ends the terminals other hubs hold
- * on that agent too (#127); anything but a boolean there is refused, since a
- * truthy string reading as "yes, end them" is not a guess to make.
+ * on that agent too (#127); `stop_transfers` stops the uploads to the host
+ * (#833). Anything but a boolean there is refused, since a truthy string
+ * reading as "yes, end them" is not a guess to make.
  */
 export function readReplaceAgentBody(
 	body: unknown,
-): { readonly force: boolean } | { readonly error: string } {
-	if (body === undefined || body === null) return { force: false };
+): { readonly force: boolean; readonly stopTransfers: boolean } | { readonly error: string } {
+	if (body === undefined || body === null) return { force: false, stopTransfers: false };
 	if (typeof body !== "object" || Array.isArray(body)) {
 		return { error: "The body must be a JSON object." };
 	}
-	const force = (body as { force?: unknown }).force;
-	if (force === undefined) return { force: false };
-	if (typeof force !== "boolean") return { error: "force must be true or false." };
-	return { force };
+	const { force, stop_transfers: stopTransfers } = body as {
+		force?: unknown;
+		stop_transfers?: unknown;
+	};
+	if (force !== undefined && typeof force !== "boolean") {
+		return { error: "force must be true or false." };
+	}
+	if (stopTransfers !== undefined && typeof stopTransfers !== "boolean") {
+		return { error: "stop_transfers must be true or false." };
+	}
+	return { force: force === true, stopTransfers: stopTransfers === true };
 }
 
 export function registerSessionRoutes(
@@ -106,7 +114,11 @@ export function registerSessionRoutes(
 
 			const outcome = await sessionManager.replaceAgent(request.params.id, options);
 			if (!outcome.replaced) {
-				if (outcome.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS || outcome.code === "HOST_BUSY") {
+				if (
+					outcome.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS ||
+					outcome.code === "HOST_BUSY" ||
+					outcome.code === ErrorCode.TRANSFERS_WOULD_STOP
+				) {
 					return reply.code(409).send({
 						error: {
 							code: outcome.code,
@@ -114,6 +126,7 @@ export function registerSessionRoutes(
 							...(outcome.otherOwnerChannels !== undefined && {
 								other_owner_channels: outcome.otherOwnerChannels,
 							}),
+							...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
 						},
 					});
 				}
@@ -143,18 +156,40 @@ export function registerSessionRoutes(
 		return toSnakeCase({ ...session, channels });
 	});
 
-	// DELETE /api/sessions/:id
-	server.delete<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) => {
-		const session = metaDal.getSession(request.params.id);
-		if (!session) {
-			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Session not found" } });
-		}
+	// DELETE /api/sessions/:id?force=true — `force`: the uploads to the host stop too (#833)
+	server.delete<{ Params: { id: string }; Querystring: { force?: unknown } }>(
+		"/api/sessions/:id",
+		async (request, reply) => {
+			const session = metaDal.getSession(request.params.id);
+			if (!session) {
+				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Session not found" } });
+			}
+			const { force } = request.query;
+			if (force !== undefined && force !== "true" && force !== "false") {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: "force must be true or false." } });
+			}
 
-		if ((await sessionManager.closeSession(request.params.id)) === "busy") {
-			return reply.code(409).send({
-				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+			const outcome = await sessionManager.closeSession(request.params.id, {
+				force: force === "true",
 			});
-		}
-		return reply.code(204).send();
-	});
+			if (outcome === "busy") {
+				return reply.code(409).send({
+					error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
+				});
+			}
+			if (outcome !== "closed") {
+				const count = outcome.transfersWouldStop;
+				return reply.code(409).send({
+					error: {
+						code: ErrorCode.TRANSFERS_WOULD_STOP,
+						message: `${count === 1 ? "1 upload" : `${count} uploads`} to this host would stop. Send force=true to stop them; a retry resumes them.`,
+						transfers: count,
+					},
+				});
+			}
+			return reply.code(204).send();
+		},
+	);
 }

@@ -1447,6 +1447,204 @@ quick succession, is one message. The client that wrote receives it too, and rea
 client waits 150 ms and reads once for every message in that time, and shows no list it read while
 one of its own writes was under way.
 
+### 4.19 Uploads: TRANSFER_* (#833)
+
+Sending files to the host a terminal runs on. Everything but the bytes goes over the WebSocket;
+the bytes go over REST, chunk by chunk (§ 6, Transfers), so that a window's terminal output is
+never queued behind them. Every message waits behind `[experimental] file_transfer`: while it is
+off, each is answered `TRANSFER_ERROR` `FILE_TRANSFER_DISABLED`, and nothing is done. An upload is
+bound to its host and its destination folder from its start, and outlives the terminal it started
+from: the terminal ending, or being killed, stops nothing.
+
+**Starting (UI → Hub).**
+
+```typescript
+{
+  type: "TRANSFER_START",
+  request_id: string,          // the client's own, echoed by the answer
+  channel_id: string,
+  dir: string,                 // absolute, as the files routes take it (§ 6, Host Files)
+  items: [{ rel_path: string, kind: "file" | "dir", size?: number, mtime?: number }],
+  on_conflict: "ask" | "replace" | "keep_both" | "skip"
+}
+```
+
+`rel_path` is `/`-separated under `dir`; `size` (bytes) is required for a file; `mtime` is in
+milliseconds since the epoch, kept at the destination when given. Folders are items too, so empty
+ones are created, and every folder an item is in must be an item. `on_conflict` is what the client
+resolved from `transfer_on_conflict` (CONFIG_REFERENCE.md). The hub, in order:
+
+1. checks the window may type into that terminal, as INPUT is checked (§ 4.5): it holds the write
+   lock, or nobody does. Otherwise `WRITE_LOCK_DENIED`;
+2. connects the host if its session closed, as a Connect does, through the acquisition a SPAWN
+   uses: a passphrase or a host key is asked of this window (§ 4.9, § 4.10). `HOST_NOT_CONNECTED`
+   when it is not reached;
+3. checks the destination is a folder, and the whole tree before any byte moves: every path a
+   relative path of names, no name twice, every folder named (`INVALID_ITEMS`); on a Windows host,
+   every name of every path (a device name such as `CON` or `com1.txt` with any extension, a
+   trailing dot or space, `<>:"/\|?*` or a control character), two names that differ only by
+   case, and the full path at the destination over 259 characters (`INVALID_NAMES`). The answer
+   lists every path refused (`names`, the first 1,000), so that the client leaves them out or
+   cancels: nothing is half sent for a name found later. At most 100,000 files, and 200,000 items
+   (`TOO_MANY_FILES`, whose message suggests an archive);
+4. joins an upload of the same tree to the same folder that a window left (same relative paths,
+   kinds, sizes and times; below), or else checks the free space, when the host says it
+   (`INSUFFICIENT_SPACE`), and lists each folder of the destination the upload goes into once, to
+   find what already has each item's name.
+
+It answers the window that asked:
+
+```typescript
+{
+  type: "TRANSFER_ACCEPTED",
+  request_id: string, transfer_id: string, channel_id: string, host_id: string,
+  dir: string,                 // normalised for the host
+  joined: boolean,
+  items: [{ item_id: number, state, existing?: { kind, size, mtime }, type_clash?: true }],
+  folder_conflicts: [{ item_id: number, conflicting: number, total: number }]
+}
+```
+
+`items` follows the order TRANSFER_START gave; `item_id` is what every later message and route
+names the item by. `folder_conflicts` says, per folder, how many of the files under it would
+conflict, of how many ("7 of 120"). Or it answers
+`{ type: "TRANSFER_ERROR", request_id, code, message, names? }`, and nothing has moved.
+
+**States.** Each file and folder is, and each message says:
+
+| State | Meaning |
+|-------|---------|
+| `queued` | Waiting its turn, or for its folder to be in place |
+| `sending` | The hub takes its bytes, from `acked` on (a file) |
+| `verifying` | Every byte is on the host: its size is checked, and over SSH commands its SHA-256, then it is placed |
+| `placed` | Under its name; `outcome` says how |
+| `failed` | With its `reason` and `code`; its temporary removed. Retry sends it again |
+| `skipped` | Left out, as an answer or `on_conflict` said |
+| `conflict` | Something has its name at the destination: it waits for an answer, the others go on |
+| `cancelled` | Stopped, its temporary removed. Retry sends it again |
+| `interrupted` | Stopped by the window that sent it leaving, or by the connection ending; its temporary kept. Retry resumes it |
+
+`outcome` is `placed`, `replaced`, `kept_both` (with `final_name`), `skipped`, and for a folder
+`created` or `merged`: a saved policy never acts unseen. `verification` is `size`, `sha256`, or
+`no_hash_tool` (over SSH commands, on a host with no tool to hash with: the size check stands).
+
+**Following (Hub → UI)**, to every client attached to the terminal, readers included, and to the
+window that sends the bytes:
+
+```typescript
+{ type: "TRANSFER_PROGRESS", transfer_id, channel_id,
+  items: [{ item_id, state, acked?, outcome?, final_name?, verification?, reason?, code? }],
+  folders: [{ item_id, files, bytes, acked, states: { <state>: count } }],
+  totals: { files, bytes, acked, states } }
+{ type: "TRANSFER_CONFLICT", transfer_id, channel_id,
+  items: [{ item_id, existing: { kind, size, mtime } | null, type_clash?: true, late?: true }] }
+{ type: "TRANSFER_DONE", transfer_id, channel_id, totals }
+```
+
+PROGRESS carries what changed in the last 100 ms: the items, and the folders whose files changed,
+`acked` being the bytes the host acknowledged, the contiguous prefix it holds. `folders` and
+`totals` count files only ("118 of 120 placed, 2 failed"). CONFLICT lists the items that found
+something under their name after the start had looked (`late`): a file that appeared meanwhile, or
+a file where a folder was to be created. DONE says nothing is left to send, answer or place;
+failed and cancelled files may still be retried. A client attached later reads an upload with
+`GET /api/transfers?channel_id=` and `GET /api/transfers/:id` (§ 6).
+
+**Answering (UI → Hub).** Each names a `scope`: an item's id (a folder's: everything under it),
+or `"upload"`, the whole upload.
+
+```typescript
+{ type: "TRANSFER_RESOLVE", transfer_id, scope: number | "upload", action: "replace" | "keep_both" | "skip" }
+{ type: "TRANSFER_RETRY",   transfer_id, scope: number | "upload" }
+{ type: "TRANSFER_CANCEL",  transfer_id, scope: number | "upload" }
+```
+
+- RESOLVE answers the conflicts under the scope. A file whose bytes are on the host already (a late
+  conflict) is placed at once; another is queued, then sent. A type clash (a folder where a file
+  goes, or the reverse) takes only `keep_both`, the incoming one becoming `name (1)`, or `skip`:
+  `replace` on it alone is refused (`INVALID_ACTION`), and under a wider scope leaves it waiting.
+  An existing folder is never replaced: it is merged into, and each file in it that exists is a
+  conflict of its own. "Always do this" is the client's: it writes `transfer_on_conflict` for the
+  host or everywhere with `planProfileWrite` (`@lasterm/shared`), as Settings does, then answers.
+- RETRY queues again the `failed`, `cancelled` and `interrupted` files under the scope, and the
+  folders they are in that need it; a placed file is never sent again. One with a kept temporary
+  resumes where the host's bytes end; a whole one is only placed. The host is connected first if it
+  is not.
+- CANCEL stops what is queued, sending, in conflict or interrupted under the scope, and removes
+  their temporaries. Placed files stay where they are.
+
+Each is refused with `TRANSFER_ERROR` `{ transfer_id, code, message }`: `TRANSFER_NOT_FOUND`,
+`ITEM_NOT_FOUND`, `INVALID_ACTION`, `HOST_NOT_CONNECTED` (a retry that could not reach the host),
+or `WRITE_LOCK_DENIED`.
+
+**The write lock.** Only a window that may type into the terminal starts, answers, retries or
+cancels; for a terminal that ended (or was deleted), the device that started the upload, by its
+token. The bytes come only from the window that started the upload, and only while it may type:
+if the lock moves meanwhile, the files it is sending finish, and its queued files and the
+conflicts wait; the new writer hears of them and may answer, retry or cancel them. They go on when
+the lock comes back.
+
+**Windows that leave.** A window that disconnects or reloads loses the files it was dropping: what
+it was sending becomes `interrupted`, its temporaries kept. The same drop again, from any window
+of the same token (TRANSFER_START with the same destination and the same tree: relative paths,
+kinds, sizes and times), joins that upload: `joined: true`, the item ids those of the upload,
+placed files skipped, interrupted ones resumed, the rest sent.
+
+**Pace.** At most `[transfer] max_concurrent` files of a window are sent at once, whatever upload
+or folder they are in; over SFTP, at most four writes of 30 KiB per file are in flight, so that the
+SSH connection's send queue never holds a terminal's keystrokes far behind file data. A chunk is
+answered once the host acknowledged it: the client goes at the host's pace.
+
+**Placing without overwriting.** Each file is written to a hidden temporary beside its target,
+`.<name>.<16 hex>.partial` (its name cut short to keep within 255 bytes, or within MAX_PATH on
+Windows), created exclusively, then placed without replacing anything:
+
+| Step | SFTP | SSH commands, POSIX | SSH commands, Windows | Local |
+|---|---|---|---|---|
+| Create | `open` `wx` (CREAT \| EXCL \| WRITE) | `set -C; cat > tmp`, the path an `sh -c` argument | `[IO.File]::Open(…, CreateNew)` | `fs.open(…, "wx")` |
+| Flush, time | `fsync@openssh.com` when offered, `futimes` | `TZ=UTC0 touch -t` | `Flush($true)`, `SetLastWriteTimeUtc` | `sync()`, `utimes` |
+| Place | `hardlink@openssh.com`, then the temporary removed; without it, the plain rename | `ln`, then `rm`; without hard links, the name checked then `mv` | `[IO.File]::Move` (refuses a name that exists), tried again on a sharing violation | `fs.link`, then `unlink`; without hard links, `copyFile` with `COPYFILE_EXCL` |
+| Replace (asked) | `posix-rename@openssh.com`; without it, the name removed, then the rename | `mv -f` | the file set aside, the temporary moved in, the old one deleted | `fs.rename`, tried again on EPERM or EBUSY |
+
+SFTP version 3 has no "already exists": an exclusive open, a hard link or a rename onto a name that
+exists fails with status 4 (`SSH_FX_FAILURE`), as any other failure. After one, the hub `lstat`s
+the name: something there is a conflict, nothing an error (a missing folder is `NOT_FOUND`).
+Win32-OpenSSH 9.5p2 (Windows Server 2022, NTFS) was checked: it honours `EXCL`; its plain rename
+and `hardlink@openssh.com` both refuse a name that exists and leave it as it was; its
+`posix-rename@openssh.com` replaces, so it is used for Replace only. On a server without
+`hardlink@`, the hub probes once per connection whether its plain rename replaces (two empty
+exclusive temporaries in the destination, one renamed onto the other); if it does, a new file
+there is written under its own name directly, `wx`, so that a name taken is a conflict before any
+byte moves. On a POSIX host whose file system makes no hard links, the check before `mv` leaves a
+short race, as OpenSSH's own rename does. A placement refused because the name was taken meanwhile
+is a conflict, `late`: nothing is replaced unasked.
+
+Folders are created from the destination down, before what is in them is sent: SFTP `mkdir`, one
+per folder; a POSIX `sh -s` script with `mkdir --` per folder, five hundred to a script; a Windows
+encoded PowerShell reading the paths as Base64 on its stdin, `[IO.Directory]::CreateDirectory`
+each; the hub's `fs.mkdir`. A folder (or a link to one) already there is merged into; anything
+else there is a type clash.
+
+**Verification.** Every file's size is checked on the host before it is placed. Over SSH commands
+with `transfer_verify` on (the default), the hub hashes the bytes as they pass, and the host hashes
+the temporary before placement (`sha256sum`, else `openssl dgst -sha256`, else `shasum -a 256`,
+each reading it on stdin; on Windows .NET's SHA-256): a file whose hashes differ fails
+(`HASH_MISMATCH`) and its temporary is removed, so a corrupted file never lands under its name.
+A file that resumes over SSH commands appends to its temporary only when the temporary holds
+exactly the bytes the hub sent and hashed; otherwise it starts again. Over SFTP and locally the
+option does nothing. A full disk fails the file with `NO_SPACE`, its temporary removed.
+
+**Holding the host's connection.** A running or queued upload holds its host's connection as a
+terminal does: an acquisition with only an upload behind it is not abandoned, an outdated remote
+daemon is not retired while one runs there (§ 3.17, #805) and is retired once the last one ends,
+and Disconnect, Reconnect, `DELETE /api/sessions/:id`, Stop keeping an agent and Replace answer 409
+`TRANSFERS_WOULD_STOP` with `transfers`, the count, until the request says to stop them (§ 6).
+Forced, they become `interrupted`, and a retry resumes them. The local host's uploads go through
+the hub's own file system, which none of these touch.
+
+In memory only for now: a hub restart forgets the uploads, their temporaries left on the hosts.
+Keeping them in `meta.db`, resuming them after a restart, Discard, their expiry and the sweep of
+temporaries nobody knows come with #833's second part.
+
 ## 5. Protocol Sequences
 
 ### 5.1 Local Session
@@ -1680,12 +1878,12 @@ every client `HOSTS_CHANGED`; § 4.18 lists which.
 | POST | `/api/hosts/:id/duplicate` | ● | → `Host` (201). The copy takes a free `<label>-copy`, `-copy-2`… label and the host's settings, jump, elevation, OS and the default profile its user chose (#802) included, and goes into its group right after it, renumbering that group's `sort_order` (#746). Its pinned host key, jump key and agent hash are not copied: its first connection treats them as a new host's. 400 `VALIDATION_ERROR` for the local host or an unknown id |
 | PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → `{ ok: true }`. 404 for an unknown channel, 400 `VALIDATION_ERROR` for one of another host |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
-| POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). Once the stop is confirmed, every terminal this hub held there is reported dead with `end_reason: "stopped"` (§ 4.7, #599). The daemon gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. One the STOP cannot reach is stopped with its own `--stop`. 409 `HOST_BUSY` while another Replace holds the host (`SessionManager.replaceAgent`). A displaced or hub-closed connection is not replaced: `requestDaemonStop` classifies it as unconfirmed, and Replace answers 409 `AGENT_NOT_REPLACED`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host. On the local host it ends nothing, and ignores `force`: it does now what the hub does by itself (§ 3.17, #805), stopping an agent older than the hub that holds none of its terminals and starting the one beside the hub, `{ replaced: true, message }`; otherwise 409 `AGENT_NOT_REPLACED`, whose message says why (no agent connected to this hub, one not older, one still holding this hub's terminals, other hubs holding some there, a terminal starting) |
+| POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean, stop_transfers?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). Once the stop is confirmed, every terminal this hub held there is reported dead with `end_reason: "stopped"` (§ 4.7, #599). The daemon gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. One the STOP cannot reach is stopped with its own `--stop`. 409 `HOST_BUSY` while another Replace holds the host (`SessionManager.replaceAgent`). A displaced or hub-closed connection is not replaced: `requestDaemonStop` classifies it as unconfirmed, and Replace answers 409 `AGENT_NOT_REPLACED`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host. While uploads to the host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` until `stop_transfers: true`, which interrupts them; not `force`, which is about other hubs' terminals. On the local host it ends nothing, and ignores `force`: it does now what the hub does by itself (§ 3.17, #805), stopping an agent older than the hub that holds none of its terminals and starting the one beside the hub, `{ replaced: true, message }`; otherwise 409 `AGENT_NOT_REPLACED`, whose message says why (no agent connected to this hub, one not older, one still holding this hub's terminals, other hubs holding some there, a terminal starting) |
 | GET | `/api/hosts/:id/agent-environment` | ● | `?mode=inherit\|minimal` (default `inherit`) → `{ mode, os, env }`: the variables a terminal on this host would start with in that mode, before any profile changes them, asked live of the agent over ENV_QUERY (§ 3.18) and answered with `Cache-Control: no-store` (#576). Never stored, never logged, names included. 409 `HOST_NOT_CONNECTED` when no agent of this host is connected to this hub, 504 `AGENT_TIMEOUT` after 5 s without an answer, 400 `VALIDATION_ERROR` for another mode, 404 for an unknown host |
 | POST | `/api/hosts/:id/connect` | ● | `{ client_id? }` → 202 `{ status: "connecting", ended: 0 }`, or 200 `{ status: "connected" }` when it is already. Connects an SSH host and readies its agent, without starting a terminal (#648): the first connection of a terminal, less the terminal, through the same SPAWN acquisition, so a SPAWN, a restart or an attach meanwhile waits for it rather than dial again. What a remote daemon still holds is taken up; on stdio, terminals a lost link left waiting start again under their ids. It answers at once: the host's `SESSION_STATE` says `starting`, then `active`, or `closed` / `disconnected` when it failed. Its questions (host key, passphrase, agent binary) go to the window `client_id` names, the id its `AUTH_OK` gave it, or else to the first window connected; a failure is an `ERROR` sent to that window, as for a SPAWN. A pending automatic reconnect gives way to it |
-| POST | `/api/hosts/:id/reconnect` | ● | `{ client_id?, force? }` → 202 `{ status: "connecting", ended }`. Closes the host's connection, then connects as above. A remote daemon keeps its terminals, taken up on the new connection. An agent on stdio ends with its connection, and its terminals with it (`end_reason: "stopped"`, § 4.7): unless `force` is `true`, the hub does nothing and answers 409 `{ error: { code: "TERMINALS_WOULD_END", message, terminals } }` with how many, for the client to ask its user and send `force: true`. With no connection up there is nothing to close and nothing ends |
-| POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`. The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
-| POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
+| POST | `/api/hosts/:id/reconnect` | ● | `{ client_id?, force? }` → 202 `{ status: "connecting", ended }`. Closes the host's connection, then connects as above. A remote daemon keeps its terminals, taken up on the new connection. An agent on stdio ends with its connection, and its terminals with it (`end_reason: "stopped"`, § 4.7): unless `force` is `true`, the hub does nothing and answers 409 `{ error: { code: "TERMINALS_WOULD_END", message, terminals } }` with how many, for the client to ask its user and send `force: true`; with uploads to the host running as well (§ 4.19), `transfers` counts them in the same answer. Uploads alone answer 409 `TRANSFERS_WOULD_STOP` `{ transfers }`; `force: true` interrupts them. With no connection up there is nothing to close and nothing ends |
+| POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`, and `TRANSFERS_WOULD_STOP` likewise while uploads to the host run (§ 4.19). The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
+| POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean, stop_transfers?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
 | GET | `/api/hosts/:id/profiles` | ● | The host's profile menu (query: `?os=linux\|darwin\|windows`): `LaunchProfile[]`, its default profile first, each with the host's `override_type` and `set_by_user` when it has one (`true` for the user's, `false` for one the hub made from what the host's agent reported, #802) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204. Removing the user's default is Edit Host's "Automatic": the host gets back at once the default the hub marks for the default shell its agent last reported, when that profile exists and is not hidden (#802) |
@@ -1699,7 +1897,8 @@ fields are optional; unknown fields are ignored.
 
 The operation's refusal answers change nothing: 409 `TERMINALS_WOULD_END` carries
 `error.terminals`, this hub's live terminals filed under that host, until
-`end_terminals: true`. The daemon ends every terminal it holds, so terminals that
+`end_terminals: true`; 409 `TRANSFERS_WOULD_STOP` carries `error.transfers`, the uploads to the
+host that would stop (§ 4.19), until `stop_transfers: true`, which interrupts them. The daemon ends every terminal it holds, so terminals that
 another host entry of this hub reaches through the same daemon, or a SPAWN not yet
 answered, are not counted (#701); a STOP refusal answers
 409 `OTHER_HUBS_HOLD_CHANNELS` with `error.other_owner_channels` when known.
@@ -1761,7 +1960,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 |--------|------|------|--------------|
 | GET | `/api/sessions` | ● | `Session[]` (query: `?host_id=X`) |
 | GET | `/api/sessions/:id` | ● | `Session` (includes channels) |
-| DELETE | `/api/sessions/:id` | ● | 204 (close). Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
+| DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
 
 #### Channels
 
@@ -1781,7 +1980,7 @@ terminal included; a new folder only from the window holding its write lock. The
 through the hub's own file system, as the hub's OS user, which is the one the local agent runs
 terminals as; a remote host over SFTP on the hub's own SSH connection to it, or over SSH commands
 where the server offers no SFTP (`sftp_unavailable`, § 4.7) or where SFTP failed without a verdict.
-A dead terminal's host is browsed as a live one's. Nothing is uploaded here yet (#833).
+A dead terminal's host is browsed as a live one's. Uploads are in § 4.19 and below (Transfers).
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
@@ -1858,6 +2057,23 @@ the path; the hub logs neither, at any level.
 
 A remote host whose OS no connection has recorded is asked once per connection, as the agent
 deployment asks it (`uname -sm`, then the Windows architecture).
+
+#### Transfers
+
+Uploads (#833, § 4.19): a file's bytes, and what an upload is at. Every route waits behind
+`[experimental] file_transfer`, and answers 404 `FILE_TRANSFER_DISABLED` while it is off.
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| PUT | `/api/transfers/:id/items/:item` | ● | `?offset=`, `Content-Type: application/octet-stream`, header `X-Lasterm-Client-Id` → 200 `{ acked }`. One chunk of a file, at `offset`, which must be where the host's bytes end (`acked`, as TRANSFER_PROGRESS says it). Chunks of 1 MiB, the last shorter; 4 MiB at most (413 above). Answered once the host acknowledged it. Only from the window that started the upload, named by the header and authenticated with the request's own token (403 `NOT_THE_SENDER`), and only for a file in `sending` (409 `ITEM_NOT_SENDING` with `state`); 409 `OFFSET_MISMATCH` with `acked`, 409 `ITEM_BUSY` while another chunk of it is written, 400 `PAST_END` for an empty chunk or one past its size, 415 for another content type. A chunk the host failed answers its code: 409 `INTERRUPTED` (the file is `interrupted`), 502 otherwise (`failed`, with its reason) |
+| GET | `/api/transfers` | ● | `?channel_id=` (required) → `{ transfers: [{ transfer_id, channel_id, host_id, dir, on_conflict, direction: "upload", state: "running" \| "interrupted" \| "done", totals }] }`: the uploads from that terminal. `interrupted`: the window sending it left |
+| GET | `/api/transfers/:id` | ● | That upload, as above, with `items: [{ item_id, rel_path, kind, size, state, acked?, outcome?, final_name?, verification?, reason?, code?, existing?, type_clash?, late? }]`; 404 `TRANSFER_NOT_FOUND` |
+
+These routes take `application/octet-stream` in their own scope, with their own body limit, rather
+than the multipart limit of the other uploads. Every answer carries `Cache-Control: no-store`.
+Nothing of them is logged at INFO, a chunk's route running once a megabyte; no path or name is
+logged at any level. An upload whose every file is placed or skipped is forgotten 10 minutes after
+its end; others stay until the hub stops.
 
 #### Channel Groups (tab groups)
 

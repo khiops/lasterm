@@ -8,6 +8,17 @@
 // TypeScript interfaces: camelCase
 
 import type { ChannelStatus, HostArch, HostOs, SessionStatus } from "./entities.js";
+import type {
+	TransferAcceptedMessage,
+	TransferCancelMessage,
+	TransferConflictMessage,
+	TransferDoneMessage,
+	TransferErrorMessage,
+	TransferProgressMessage,
+	TransferResolveMessage,
+	TransferRetryMessage,
+	TransferStartMessage,
+} from "./transfer-protocol.js";
 
 // ---------------------------------------------------------------------------
 // Shared sub-types
@@ -1036,6 +1047,10 @@ export type UiMessage =
 	| AuthPromptResponseMessage
 	| AgentBinaryVerifyResponseMessage
 	| TestConnectMessage
+	| TransferStartMessage
+	| TransferResolveMessage
+	| TransferRetryMessage
+	| TransferCancelMessage
 	| ErrorMessage;
 
 /** All messages that the Hub sends to the UI */
@@ -1074,6 +1089,11 @@ export type HubToUiMessage =
 	| AgentSyncedMessage
 	| ConfigChangedMessage
 	| HostsChangedMessage
+	| TransferAcceptedMessage
+	| TransferProgressMessage
+	| TransferConflictMessage
+	| TransferDoneMessage
+	| TransferErrorMessage
 	| ErrorMessage;
 
 /** Master union of every distinct protocol message type */
@@ -1145,4 +1165,13 @@ export type ProtocolMessage =
 	| AgentSyncedMessage
 	| ConfigChangedMessage
 	| HostsChangedMessage
+	| TransferStartMessage
+	| TransferResolveMessage
+	| TransferRetryMessage
+	| TransferCancelMessage
+	| TransferAcceptedMessage
+	| TransferProgressMessage
+	| TransferConflictMessage
+	| TransferDoneMessage
+	| TransferErrorMessage
 	| ErrorMessage;

@@ -16,6 +16,7 @@ export * from "./sanitize.js";
 export * from "./socket-path.js";
 export * from "./theme.js";
 export * from "./themes/index.js";
+export * from "./transfer-protocol.js";
 export * from "./utils.js";
 export * from "./validation.js";
 export * from "./var-expansion.js";

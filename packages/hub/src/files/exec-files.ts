@@ -71,7 +71,7 @@ const POSIX_PRELUDE = `M=${WINDOWS_REPLY_MARKER}
 r() { printf '%s\\n%s\\n' "$M" "$1"; exit 0; }
 `;
 
-function posixScript(body: string): string {
+export function posixScript(body: string): string {
 	return `{\n${POSIX_PRELUDE}${body}\n} </dev/null\n`;
 }
 
@@ -271,7 +271,7 @@ export function parseDfOutput(
  * `DirectoryInfo.GetFileSystemInfos`, which lists hidden and system entries
  * alike.
  */
-function windowsScript(path: string | null, ...body: string[]): string {
+export function windowsScript(path: string | null, ...body: string[]): string {
 	return [
 		"$ErrorActionPreference='Stop'",
 		...(path === null ? [] : [powerShellPathVariable(path)]),

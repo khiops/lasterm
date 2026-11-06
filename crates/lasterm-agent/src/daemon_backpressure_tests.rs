@@ -132,6 +132,7 @@ fn spawn_shell(channel_id: &str, shell: &str, args: Option<Vec<String>>) -> HubT
         env_mode: "inherit".to_string(),
         env_unset: None,
         login_shell: None,
+        report_directory: None,
     }
 }
 

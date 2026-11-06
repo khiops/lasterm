@@ -4,6 +4,7 @@ import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/sha
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createToken } from "../auth.js";
+import { normaliseHostPath } from "../files/host-paths.js";
 import { createServer } from "../server.fixture.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
@@ -175,6 +176,52 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 		expect(hidden.json<{ entries: unknown[] }>().entries).toHaveLength(
 			process.platform === "win32" ? 3 : 4,
 		);
+	});
+
+	it("opens without a path at the fallback folder its host's settings name, else at the home (#836)", async () => {
+		const dal = new MetaDAL(dbs.meta);
+		const [local] = dal.listLocalHosts();
+		if (!local) throw new Error("the hub made no local host");
+		mkdirSync(join(root, "drop"));
+		writeFileSync(join(root, "drop", "in.txt"), "");
+		const style = process.platform === "win32" ? "windows" : "posix";
+		const spelt = (path: string) => {
+			const normalised = normaliseHostPath(path, style);
+			if (!normalised.ok) throw new Error(normalised.reason);
+			return normalised.path;
+		};
+		const opening = () =>
+			server.inject({ method: "GET", url: `/api/channels/${channelId}/files`, headers: bearer() });
+
+		// Its variable from the host's own: the agent expands a cwd from those first.
+		const variable = "LASTERM_SPEC_ROUTE_836";
+		dal.updateHostProfile(
+			local.id,
+			JSON.stringify({ transferFallbackDir: `\${${variable}}/drop`, env: { [variable]: root } }),
+		);
+		const opened = await opening();
+		expect(opened.statusCode).toBe(200);
+		const body = opened.json<Record<string, unknown>>();
+		expect(body).toMatchObject({
+			path: spelt(join(root, "drop")),
+			start: "fallback",
+			entries: [{ name: "in.txt", kind: "file" }],
+		});
+		expect(body).not.toHaveProperty("fallback_problem");
+
+		const missing = spelt(join(root, "missing"));
+		dal.updateHostProfile(local.id, JSON.stringify({ transferFallbackDir: missing }));
+		const home = await opening();
+		expect(home.statusCode).toBe(200);
+		expect(home.json()).toMatchObject({
+			start: "home",
+			fallback_problem: `The fallback folder ${missing} cannot be opened: it does not exist`,
+		});
+
+		// A folder asked for by its path is only that folder.
+		const byPath = (await list(root)).json<Record<string, unknown>>();
+		expect(byPath).not.toHaveProperty("start");
+		expect(byPath).not.toHaveProperty("fallback_problem");
 	});
 
 	it("says what a path is, and the free space where it is", async () => {

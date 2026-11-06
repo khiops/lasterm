@@ -283,6 +283,18 @@ export class SftpFileBackend implements FileBackend {
 		}, "The folder could not be created");
 	}
 
+	/**
+	 * SFTP has no request that reads the environment: a host reached over SFTP
+	 * is asked over SSH commands instead (`RemoteFiles`). Said without a
+	 * verdict, so that another way is tried.
+	 */
+	async env(): Promise<ReadonlyMap<string, string>> {
+		throw new FileAccessError(
+			"FILE_ACCESS_FAILED",
+			"The environment could not be read: SFTP has no request for it",
+		);
+	}
+
 	/** Run `task` on the shared session, and name a lost connection or an SFTP that would not open. */
 	private async run<T>(task: (session: SftpSession) => Promise<T>, what: string): Promise<T> {
 		try {

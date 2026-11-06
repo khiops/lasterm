@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: test data holds the shell's own ${VAR} expansions, as the scripts write them
 import { chmodSync, mkdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,9 +8,14 @@ import { WINDOWS_REPLY_MARKER } from "../session/ssh-file-transport.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import {
 	ExecFileBackend,
+	isPosixVariableName,
+	isWindowsVariableName,
 	parseDfOutput,
+	parseEnvLines,
 	parsePosixGroups,
 	parseWindowsEntries,
+	posixEnvScript,
+	windowsEnvScript,
 } from "./exec-files.js";
 import { failsWith, roundTripNames } from "./file-names.fixture.js";
 import { normaliseHostPath, WINDOWS_ROOT } from "./host-paths.js";
@@ -67,6 +73,49 @@ describe("what the POSIX scripts print, read back", () => {
 			]),
 		).toEqual({ total: 1_000_000 * 1024, available: 550_000 * 1024 });
 		expect(parseDfOutput(["nothing"])).toBeNull();
+	});
+});
+
+describe("reading a host's variables over SSH commands (#836)", () => {
+	it("reads each variable set by its index, an empty value included, and nothing for one unset", () => {
+		const names = ["HOME", "EMPTY", "UNSET", "SPACED"];
+		const lines = [
+			"junk",
+			`0 ${b64("S/home/me")}`,
+			`1 ${b64("S")}`,
+			`3 ${b64("Sa b\nc")}`,
+			"9 eA==",
+		];
+		expect([...parseEnvLines(names, lines)]).toEqual([
+			["HOME", "/home/me"],
+			["EMPTY", ""],
+			["SPACED", "a b\nc"],
+		]);
+	});
+
+	it("takes every value before the script sets a variable of its own", () => {
+		const script = posixEnvScript(["M", "HOME"]);
+		const taken = script.indexOf("__lasterm_env_0=${M+S${M}}");
+		expect(taken).toBeGreaterThan(-1);
+		expect(script.indexOf("__lasterm_env_1=${HOME+S${HOME}}")).toBeGreaterThan(taken);
+		expect(script.indexOf("M=")).toBeGreaterThan(script.indexOf("__lasterm_env_1="));
+	});
+
+	it("asks a POSIX shell only for names it can hold, and Windows for any but those with =", () => {
+		expect(["HOME", "_x1", "a-b", "1A", "", "A B"].filter(isPosixVariableName)).toEqual([
+			"HOME",
+			"_x1",
+		]);
+		expect(["Path", "ProgramFiles(x86)", "a=b", ""].filter(isWindowsVariableName)).toEqual([
+			"Path",
+			"ProgramFiles(x86)",
+		]);
+	});
+
+	it("sends a Windows name as data", () => {
+		const script = windowsEnvScript(["$(evil)'"]);
+		expect(script).not.toContain("$(evil)");
+		expect(script).toContain(b64("$(evil)'"));
 	});
 });
 
@@ -222,6 +271,33 @@ describe.skipIf(windowsMachine)("a POSIX host's files over SSH commands", () => 
 		expect(statSync(join(state.root, "new")).isDirectory()).toBe(true);
 	});
 
+	// The mock server's commands run with this process's environment (#836).
+	it("reads the variables an SSH command gets, the script's own M not among them", async () => {
+		const values = {
+			LASTERM_SPEC_ENV_A: "/srv/it's here\n",
+			LASTERM_SPEC_ENV_EMPTY: "",
+			M: "mine",
+		};
+		Object.assign(process.env, values);
+		try {
+			const found = await state.files.env([
+				"LASTERM_SPEC_ENV_A",
+				"LASTERM_SPEC_ENV_EMPTY",
+				"LASTERM_SPEC_ENV_UNSET",
+				"M",
+				"not-a-name",
+			]);
+			expect([...found]).toEqual([
+				["LASTERM_SPEC_ENV_A", "/srv/it's here\n"],
+				["LASTERM_SPEC_ENV_EMPTY", ""],
+				["M", "mine"],
+			]);
+			expect(await state.files.env(["not-a-name"])).toEqual(new Map());
+		} finally {
+			for (const name of Object.keys(values)) delete process.env[name];
+		}
+	});
+
 	it.each(roundTripNames("posix"))("round-trips the name %j", async (name) => {
 		await state.files.mkdir(join(state.root, name));
 		writeFileSync(join(state.root, name, name), "x");
@@ -306,6 +382,17 @@ describe.runIf(windowsMachine)("a Windows host's files over SSH commands", () =>
 		const space = await state.files.freeSpace(state.root);
 		expect(space.total).toBeGreaterThan(0);
 		expect(space.available).toBeGreaterThanOrEqual(0);
+	});
+
+	// The mock server's commands run with this process's environment (#836).
+	it("reads the variables an SSH command gets, their names without regard to case", async () => {
+		process.env.LASTERM_SPEC_ENV_A = "C:\\It's 100%\\é";
+		try {
+			const found = await state.files.env(["lasterm_spec_env_a", "LASTERM_SPEC_ENV_UNSET"]);
+			expect([...found]).toEqual([["lasterm_spec_env_a", "C:\\It's 100%\\é"]]);
+		} finally {
+			delete process.env.LASTERM_SPEC_ENV_A;
+		}
 	});
 
 	it.each(roundTripNames("windows"))("round-trips the name %j", async (name) => {

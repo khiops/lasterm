@@ -31,7 +31,21 @@ export interface FileListing {
 	readonly entries: FileEntry[];
 	/** How many more entries the folder holds past `LISTING_CAP`: 0 for a whole listing. */
 	readonly truncated: number;
+	/**
+	 * Only for the folder a panel opens at, asked for without a path (#836):
+	 * the fallback folder the settings name for a terminal whose directory is
+	 * unknown (`transferFallbackDir`), or the home.
+	 */
+	readonly start?: StartFolder;
+	/**
+	 * With `start: "home"` only, when a fallback folder is set but cannot be
+	 * opened: why, for the client to show. It may name the path: never logged.
+	 */
+	readonly fallbackProblem?: string;
 }
+
+/** Which folder a listing asked for without a path is: the fallback the settings name, or the home. */
+export type StartFolder = "fallback" | "home";
 
 export interface FileStat extends FileEntry {
 	readonly path: string;
@@ -110,6 +124,14 @@ export interface FileBackend {
 	freeSpace(dir: string): Promise<{ available: number | null; total: number | null }>;
 	/** Create the folder `path`, whose parent exists; refuse one that exists. */
 	mkdir(path: string): Promise<void>;
+	/**
+	 * The values of the environment variables `names` for the account the host
+	 * runs terminals as, keyed by the name asked: only those set. Read to
+	 * expand a folder of the settings as the agent expands a terminal's `cwd`
+	 * (#836). Names are compared as the host compares them: without regard to
+	 * case on Windows.
+	 */
+	env(names: readonly string[]): Promise<ReadonlyMap<string, string>>;
 }
 
 /** Whether a name is hidden: it starts with a dot, on every host, whatever its attributes. */

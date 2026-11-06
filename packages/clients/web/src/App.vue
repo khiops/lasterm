@@ -303,6 +303,13 @@
 					@reorder-tab="layout.reorderTab"
 					@configure-command="onConfigureCommand"
 				/>
+				<!-- The panes, and beside them the files panel (#836): docked, it narrows every pane
+				     of the tab; floating or as a sheet, it covers them and resizes nothing. -->
+				<div
+					ref="terminalBody"
+					class="terminal-body"
+					:class="{ 'terminal-body--files-left': filesPanelSide === 'left' }"
+				>
 				<div class="pane-area" data-focus-zone="pane">
 					<div
 						v-for="(tab, idx) in layout.tabs.value"
@@ -344,6 +351,31 @@
 						<template v-else>Select a channel or click + to open a terminal.</template>
 					</div>
 				</div>
+				<template v-if="filesPanelShown">
+					<div
+						v-if="filesForm === 'docked'"
+						class="files-resize-handle"
+						role="separator"
+						aria-orientation="vertical"
+						aria-label="Resize the files panel"
+						tabindex="0"
+						:aria-valuenow="filesPanelResize.width.value"
+						:aria-valuemin="TRANSFER_PANEL_WIDTH_MIN"
+						:aria-valuemax="TRANSFER_PANEL_WIDTH_MAX"
+						@mousedown="filesPanelResize.onMouseDown"
+						@dblclick="onFilesWidthReset"
+						@keydown="onFilesWidthKey"
+					/>
+					<FilesPanel
+						:form="filesForm"
+						:side="filesPanelSide"
+						:width="filesPanelResize.width.value"
+						:attached-on-screen="filesAttachedOnScreen"
+						@close="closeFilesPanel"
+						@show-terminal="showFilesTerminal"
+					/>
+				</template>
+				</div>
 			</div>
 			<!-- The keys of the rail, the list or the tab bar while the keyboard is in one of
 			     them: under the rail and the list, never over a terminal (#639). -->
@@ -358,9 +390,13 @@ import type { Host, HostRailBadgeSize, LayoutConfig } from '@lasterm/shared';
 import {
 	DEFAULT_CHANNEL_NAME,
 	DEFAULT_LAYOUT_CONFIG,
+	DEFAULT_TRANSFER_PANEL_WIDTH,
 	generateId,
 	isHostRailBadgeSize,
 	isHostRailColumns,
+	isTransferPanelWidth,
+	TRANSFER_PANEL_WIDTH_MAX,
+	TRANSFER_PANEL_WIDTH_MIN,
 } from '@lasterm/shared';
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
 import AgentBinaryVerify from './components/AgentBinaryVerify.vue';
@@ -377,6 +413,7 @@ import ShortcutsOverlay from './components/ShortcutsOverlay.vue';
 import ConfigureCommandDialog from './components/ConfigureCommandDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import DeleteHostModal from './components/DeleteHostModal.vue';
+import FilesPanel from './components/files/FilesPanel.vue';
 import GroupActionDialog from './components/GroupActionDialog.vue';
 import GroupContextMenu from './components/GroupContextMenu.vue';
 import { stopAgentWithConsent } from './utils/stop-agent.js';
@@ -435,6 +472,7 @@ import { useServiceWorker } from './pwa/service-worker.js';
 import { useAuthStore } from './stores/auth.js';
 import { useChannelsStore } from './stores/channels.js';
 import { useConfigStore } from './stores/config.js';
+import { useFilesPanelStore } from './stores/files-panel.js';
 import { useHostsStore } from './stores/hosts.js';
 import { useProfilesStore } from './stores/profiles.js';
 import { useSessionStore } from './stores/session.js';
@@ -458,10 +496,19 @@ import {
 	movesKeyboard,
 	type PaneDirection,
 	paneMoveOf,
+	readSwitchesFrom,
 	tabNumberOf,
 	windowShortcutOf,
 } from './utils/app-shortcuts.js';
-import { type FocusZone, focusZoneOf, zoneAfter } from './utils/focus-zones.js';
+import { filesPanelForm } from './utils/files-panel.js';
+import {
+	type FilesPart,
+	type FocusZone,
+	filesPartAfter,
+	focusZoneOf,
+	focusZoneOrder,
+	zoneAfter,
+} from './utils/focus-zones.js';
 import { isRendered, isTabbable, tabbables } from './utils/focusable.js';
 import { windowKeyHints } from './utils/key-hints.js';
 import { type PaneLeaf, paneInDirection, paneLeaves, resizeTowards } from './utils/pane-geometry.js';
@@ -585,6 +632,169 @@ provide(
 	CHANNELS_ON_SCREEN_KEY,
 	computed(() => channelsOnScreen(layout.layouts.value, layout.activeTab.value?.id ?? null)),
 );
+
+// ─── The files panel (#836) ──────────────────────────────────────────────────
+
+// The shortcut table reads the experimental switches from the UI config: the files panel's
+// chord is no shortcut, and is listed nowhere, while file transfer is off (#835).
+readSwitchesFrom((name) => configStore.uiConfig.experimental?.[name] === true);
+
+const filesPanel = useFilesPanelStore();
+/** Everything of the panel waits behind file transfer's switch. */
+const filesPanelShown = computed(() => configStore.fileTransferEnabled && filesPanel.open);
+const filesPanelSide = computed<'left' | 'right'>(() =>
+	configStore.uiConfig.transfer?.panelSide === 'left' ? 'left' : 'right',
+);
+
+const filesPanelResize = useResizable({
+	initialWidth: DEFAULT_TRANSFER_PANEL_WIDTH,
+	minWidth: TRANSFER_PANEL_WIDTH_MIN,
+	maxWidth: TRANSFER_PANEL_WIDTH_MAX,
+	// Its edge faces the panes: dragging it towards them widens it.
+	grows: () => (filesPanelSide.value === 'right' ? -1 : 1),
+	onResizeEnd: (width) => saveLayout({ transferPanelWidth: width }),
+});
+
+// `[layout] transfer_panel_width`, as it loads and as another window sets it.
+watch(
+	() => configStore.uiConfig.layout?.transferPanelWidth,
+	(width) => {
+		if (isTransferPanelWidth(width)) filesPanelResize.width.value = width;
+	},
+	{ immediate: true },
+);
+
+/** The width handle, from the keyboard: the arrows move its edge, as a drag would. */
+function onFilesWidthKey(event: KeyboardEvent): void {
+	const step = event.key === 'ArrowLeft' ? -16 : event.key === 'ArrowRight' ? 16 : 0;
+	if (step === 0) return;
+	event.preventDefault();
+	const grows = filesPanelSide.value === 'right' ? -1 : 1;
+	const width = Math.min(
+		TRANSFER_PANEL_WIDTH_MAX,
+		Math.max(TRANSFER_PANEL_WIDTH_MIN, filesPanelResize.width.value + step * grows),
+	);
+	filesPanelResize.width.value = width;
+	saveLayout({ transferPanelWidth: width });
+}
+
+function onFilesWidthReset(): void {
+	filesPanelResize.reset();
+	saveLayout({ transferPanelWidth: DEFAULT_TRANSFER_PANEL_WIDTH });
+}
+
+/**
+ * The terminal whose pane has the focus in the tab shown, which the panel attaches to: the
+ * tab's active pane, else its first terminal; none for an empty pane, or without a tab.
+ */
+const focusedTerminal = computed<string | null>(() => {
+	const tab = layout.activeTab.value;
+	const root = tab === null ? undefined : layout.layouts.value[tab.id];
+	if (tab === null || root === null || root === undefined) return null;
+	const leaves = paneLeaves(root);
+	const activeId = layout.activePaneIds.value[tab.id] ?? findFirstLeafPaneId(root);
+	const leaf = leaves.find((candidate) => candidate.id === activeId) ?? leaves[0];
+	return leaf?.node.type === 'terminal' ? leaf.node.channelId : null;
+});
+watch(focusedTerminal, (channelId) => filesPanel.setFocused(channelId), { immediate: true });
+watch(
+	() => displayedChannelIds(layout.layouts.value),
+	(ids) => filesPanel.setChannelsInTabs(new Set(ids)),
+	{ immediate: true },
+);
+
+/** The terminal the panel shows is in the tab shown; pinned elsewhere, it offers to show it. */
+const filesAttachedOnScreen = computed(() => {
+	const channelId = filesPanel.attachedChannelId;
+	return (
+		channelId !== null &&
+		channelsOnScreen(layout.layouts.value, layout.activeTab.value?.id ?? null).has(channelId)
+	);
+});
+
+// An entry point named a terminal whose pane is not the focused one: its pane takes the focus,
+// which attaches the panel to it.
+watch(
+	() => filesPanel.paneRequest,
+	(request) => {
+		const tab = layout.activeTab.value;
+		const root = tab === null ? undefined : layout.layouts.value[tab.id];
+		if (request === null || tab === null || root === null || root === undefined) return;
+		const leaf = paneLeaves(root).find(
+			(candidate) =>
+				candidate.node.type === 'terminal' && candidate.node.channelId === request.channelId,
+		);
+		if (leaf !== undefined) layout.setActivePaneId(tab.id, leaf.id);
+	},
+);
+
+// The window's width, and the terminal area's, which the panel's form depends on.
+const windowWidth = ref(typeof window === 'undefined' ? 1024 : window.innerWidth);
+const terminalBody = ref<HTMLElement | null>(null);
+const terminalBodyWidth = ref(0);
+function onWindowResize(): void {
+	windowWidth.value = window.innerWidth;
+}
+watch(terminalBody, (el, _before, onCleanup) => {
+	if (el === null || typeof ResizeObserver === 'undefined') return;
+	terminalBodyWidth.value = el.clientWidth;
+	const observer = new ResizeObserver(() => {
+		terminalBodyWidth.value = el.clientWidth;
+	});
+	observer.observe(el);
+	onCleanup(() => observer.disconnect());
+});
+
+/**
+ * Docked, floating or a sheet. A reader's panel floats, so that it resizes nothing, until the
+ * writer's panel reaches the readers (#838).
+ */
+const filesForm = computed(() => {
+	const attached = filesPanel.attachedChannelId;
+	return filesPanelForm({
+		windowWidth: windowWidth.value,
+		areaWidth: terminalBodyWidth.value,
+		panelWidth: filesPanelResize.width.value,
+		writesAttached: attached === null ? null : writeLockStore.isWriter(attached),
+	});
+});
+
+/** Whether the keyboard is in the files panel. */
+function keyboardInFilesPanel(): boolean {
+	return focusZoneOf(document.activeElement) === 'files';
+}
+
+/**
+ * Ctrl+Shift+E: the panel opens on the focused terminal with the keyboard in it; open, the
+ * keyboard goes into it; with the keyboard in it already, it closes, back to the pane.
+ */
+function toggleFilesPanel(): void {
+	if (!configStore.fileTransferEnabled) return;
+	if (filesPanel.open && keyboardInFilesPanel()) closeFilesPanel();
+	else filesPanel.openFor(null, { keyboard: true });
+}
+
+/** Close the panel; the keyboard, if it was in it, goes back to the pane. */
+function closeFilesPanel(): void {
+	const inside = keyboardInFilesPanel();
+	filesPanel.close();
+	if (inside) void nextTick(focusActivePane);
+}
+
+/** "Show terminal", on a panel pinned to a terminal of another tab: that tab comes to the front. */
+function showFilesTerminal(): void {
+	const channelId = filesPanel.attachedChannelId;
+	const tabId = channelId === null ? null : layout.findTabForChannel(channelId);
+	const index = layout.tabs.value.findIndex((tab) => tab.id === tabId);
+	if (index !== -1) layout.setActiveTab(index);
+}
+
+// An entry point asked for the keyboard in the panel: once it is drawn, its Files part takes it.
+watch(
+	() => filesPanel.keyboardRequests,
+	() => void nextTick(() => filesZoneEntry(1)?.focus()),
+);
+
 const commandPalette = useCommandPalette();
 const shortcutsOverlay = useShortcutsOverlay();
 const profilesStore = useProfilesStore();
@@ -672,6 +882,10 @@ commandPalette.onExternalAction.value = (actionId: string) => {
 			break;
 		case 'action:keyboard-shortcuts':
 			shortcutsOverlay.open();
+			break;
+		// "Files: Show panel": on the focused terminal, with the keyboard in it (#836).
+		case 'action:files-show':
+			if (configStore.fileTransferEnabled) filesPanel.openFor(null, { keyboard: true });
 			break;
 		default:
 			console.warn('[CommandPalette] unhandled external action:', actionId);
@@ -949,6 +1163,7 @@ function openPendingTab(hostId: string): void {
 onMounted(async () => {
 	// Capture phase: the palette's shortcut is seen before any element's handler.
 	window.addEventListener('keydown', onGlobalKeydown, { capture: true });
+	window.addEventListener('resize', onWindowResize);
 	window.addEventListener(WINDOW_BACKGROUND_RESTART_EVENT, onWindowBackgroundNeedsRestart);
 	try {
 		const { listen } = await import('@tauri-apps/api/event');
@@ -1036,6 +1251,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
 	window.removeEventListener('keydown', onGlobalKeydown, { capture: true });
+	window.removeEventListener('resize', onWindowResize);
 	window.removeEventListener(WINDOW_BACKGROUND_RESTART_EVENT, onWindowBackgroundNeedsRestart);
 	desktopCloseUnlisten?.();
 	hubExitUnlisten?.();
@@ -1276,15 +1492,17 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 		return;
 	}
 
-	// Esc on the rail, the terminal list or the tab bar goes back to the pane (#637). A text
-	// field there, such as a tab being renamed, keeps its own Esc.
+	// Esc on the rail, the terminal list, the tab bar or in the files panel goes back to the pane
+	// (#637, #836). A text field there, such as a tab being renamed, keeps its own Esc, and so
+	// does a question that Esc cancels (`data-own-escape`: the panel's "Keep this for").
 	if (
 		event.key === 'Escape' &&
 		!event.ctrlKey &&
 		!event.altKey &&
 		!event.metaKey &&
 		!event.shiftKey &&
-		!isTextField(event.target)
+		!isTextField(event.target) &&
+		!ownsEscape(event.target)
 	) {
 		const zone = focusZoneOf(event.target);
 		if (zone !== null && zone !== 'pane' && focusActivePane()) {
@@ -1387,6 +1605,9 @@ function runAppAction(action: AppActionId): void {
 		case 'zone.previous':
 			cycleFocusZone(-1);
 			break;
+		case 'files.toggle':
+			toggleFilesPanel();
+			break;
 	}
 }
 
@@ -1394,6 +1615,11 @@ function runAppAction(action: AppActionId): void {
 
 function isInModalDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest('[aria-modal="true"]') !== null;
+}
+
+/** An element that takes Esc itself, to cancel what it asks. */
+function ownsEscape(target: EventTarget | null): boolean {
+	return target instanceof Element && target.closest('[data-own-escape]') !== null;
 }
 
 function isTextField(target: EventTarget | null): boolean {
@@ -1466,9 +1692,13 @@ function focusActivePane(): boolean {
 	return target !== null;
 }
 
-/** The element F6 lands on in a zone, or null for a zone hidden or with nothing to focus. */
-function zoneEntry(zone: FocusZone): HTMLElement | null {
+/**
+ * The element F6 lands on in a zone, or null for a zone hidden or with nothing to focus. The
+ * files panel's is in its first part going forward, its last going back (`step`).
+ */
+function zoneEntry(zone: FocusZone, step: 1 | -1 = 1): HTMLElement | null {
 	if (zone === 'pane') return activePaneTarget();
+	if (zone === 'files') return filesZoneEntry(step);
 	const el = document.querySelector<HTMLElement>(`[data-focus-zone="${zone}"]`);
 	// A zone folded away (`display: none`) is passed over.
 	if (el === null || !isRendered(el)) return null;
@@ -1477,11 +1707,53 @@ function zoneEntry(zone: FocusZone): HTMLElement | null {
 	return item !== null && isTabbable(item) ? item : null;
 }
 
-/** F6 and Shift+F6: the next zone that can take the keyboard, in FOCUS_ZONES order. */
+/**
+ * Where the keyboard lands in a part of the files panel: the list's row that takes Tab, or the
+ * part's own entry (Transfers' header), else its first control.
+ */
+function filesPartEntry(part: FilesPart): HTMLElement | null {
+	const el = document.querySelector<HTMLElement>(
+		`[data-focus-zone="files"] [data-files-part="${part}"]`,
+	);
+	if (el === null || !isRendered(el)) return null;
+	const item =
+		el.querySelector<HTMLElement>('[data-zone-item][tabindex="0"]') ??
+		el.querySelector<HTMLElement>('[data-files-entry]');
+	if (item !== null && isTabbable(item)) return item;
+	return tabbables(el)[0] ?? null;
+}
+
+/** The files panel's entry: Files going forward, Transfers coming back, either when alone. */
+function filesZoneEntry(step: 1 | -1): HTMLElement | null {
+	return step === 1
+		? (filesPartEntry('files') ?? filesPartEntry('transfers'))
+		: (filesPartEntry('transfers') ?? filesPartEntry('files'));
+}
+
+/**
+ * F6 and Shift+F6: the next zone that can take the keyboard, the files panel's where it sits.
+ * Inside the panel, F6 goes from Files to Transfers before it leaves it.
+ */
 function cycleFocusZone(step: 1 | -1): void {
-	const current = focusZoneOf(document.activeElement) ?? 'pane';
-	const next = zoneAfter(current, step, (zone) => zoneEntry(zone) !== null);
-	if (next !== null) zoneEntry(next)?.focus();
+	const active = document.activeElement;
+	const current = focusZoneOf(active) ?? 'pane';
+	if (current === 'files') {
+		const part = active?.closest('[data-files-part]')?.getAttribute('data-files-part');
+		if (part === 'files' || part === 'transfers') {
+			const nextPart = filesPartAfter(part, step, (p) => filesPartEntry(p) !== null);
+			if (nextPart !== null) {
+				filesPartEntry(nextPart)?.focus();
+				return;
+			}
+		}
+	}
+	const next = zoneAfter(
+		current,
+		step,
+		(zone) => zoneEntry(zone, step) !== null,
+		focusZoneOrder(filesPanelSide.value),
+	);
+	if (next !== null) zoneEntry(next, step)?.focus();
 }
 
 /** Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+Alt+digit, among the tabs the bar shows. */
@@ -2295,12 +2567,45 @@ body,
 	flex-direction: column;
 }
 
+/* Below the tab bar: the panes, and the files panel beside them (#836). A floating panel or a
+   sheet is placed over this box, so it covers the panes without taking their room. */
+.terminal-body {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	position: relative;
+	overflow: hidden;
+}
+
+.terminal-body--files-left {
+	flex-direction: row-reverse;
+}
+
 .pane-area {
 	flex: 1;
+	min-width: 0;
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
 	position: relative;
+}
+
+/* The docked panel's edge: dragged, or moved with the arrows when focused. */
+.files-resize-handle {
+	flex-shrink: 0;
+	width: 6px;
+	margin: 0 -3px;
+	position: relative;
+	z-index: 6;
+	cursor: col-resize;
+	transition: background 0.15s;
+}
+
+.files-resize-handle:hover,
+.files-resize-handle:active,
+.files-resize-handle:focus-visible {
+	background: rgba(var(--nt-accent-rgb), 0.3);
+	outline: none;
 }
 
 .pane-tab-container {

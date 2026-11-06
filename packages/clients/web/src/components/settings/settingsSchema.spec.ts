@@ -297,9 +297,11 @@ describe("settingsSchema — nothing offered in vain", () => {
 		/(settingsSchema\.ts|\/settings\/categories\/.*|hub\/src\/api\/config\.ts|hub\/src\/config\.ts|shared\/src\/config\.ts|shared\/src\/appearance\.ts|shared\/src\/file-transfer\.ts)$/;
 
 	// Offered only behind an experimental switch, off by default, before
-	// anything reads them: File transfer's settings wait for the files panel
-	// (#836) and upload (#837), which take the category out of this set.
-	const notReadYet = new Set(["transfer"]);
+	// anything reads them: the File transfer settings that only upload reads
+	// (#837), which takes them out of this set. The files panel (#836) reads
+	// the others: its side, its Options rows, and the fallback folder the hub
+	// opens it at.
+	const notReadYet = new Set(["transferDrop", "maxConcurrent"]);
 	const code = Object.entries(sources)
 		.filter(([path]) => !notAReader.test(path))
 		.map(([, text]) => text)
@@ -311,7 +313,7 @@ describe("settingsSchema — nothing offered in vain", () => {
 
 	for (const setting of settingsSchema) {
 		const leaf = setting.key.split(".").at(-1) ?? setting.key;
-		it.skipIf(notReadYet.has(setting.category))(`${setting.key} is read somewhere`, () => {
+		it.skipIf(notReadYet.has(setting.key))(`${setting.key} is read somewhere`, () => {
 			// A whole word, without escapes a formatter may rewrite: `source`
 			// must not be found inside `sources`.
 			const word = new RegExp(`(^|[^A-Za-z0-9_])${leaf}([^A-Za-z0-9_]|$)`);

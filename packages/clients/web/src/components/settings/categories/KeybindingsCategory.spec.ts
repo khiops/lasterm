@@ -9,6 +9,7 @@ import {
 	APP_SHORTCUTS,
 	type AppActionId,
 	outsideTerminalKeys,
+	readSwitchesFrom,
 	shortcutKeys,
 	TAB_NUMBERS,
 } from "../../../utils/app-shortcuts.js";
@@ -22,6 +23,7 @@ afterEach(() => {
 	app?.unmount();
 	app = null;
 	root?.remove();
+	readSwitchesFrom(() => false);
 });
 
 interface Row {
@@ -90,9 +92,11 @@ describe("Settings › Keybindings", () => {
 		"pane.resizeRight": ["Panes", "Resize Right"],
 		"pane.resizeUp": ["Panes", "Resize Up"],
 		"pane.resizeDown": ["Panes", "Resize Down"],
+		"files.toggle": ["Files", "Files Panel"],
 	};
 
 	it("shows every shortcut of the table, with the keys the table gives it", () => {
+		readSwitchesFrom(() => true);
 		const rows = mountRows();
 		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
 			const [group, label] = SHOWN[id];
@@ -141,6 +145,19 @@ describe("Settings › Keybindings", () => {
 		link?.click();
 		expect(overlay.isOpen.value).toBe(true);
 		overlay.close();
+	});
+
+	// The files panel waits behind file transfer's switch (#835, #836), and its chord with it.
+	it("shows the files panel's chord only while file transfer is on", () => {
+		readSwitchesFrom(() => false);
+		expect(mountRows().some((row) => row.label === "Files Panel")).toBe(false);
+		app?.unmount();
+		root.remove();
+		readSwitchesFrom((name) => name === "fileTransfer");
+		expect(mountRows().find((row) => row.label === "Files Panel")).toMatchObject({
+			group: "Files",
+			keys: ["Ctrl", "Shift", "E"],
+		});
 	});
 
 	it("names the actions as the table does", () => {

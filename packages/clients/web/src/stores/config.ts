@@ -126,6 +126,8 @@ interface UiConfig {
 interface SavedUiSections {
 	layout: LayoutConfig;
 	keyboard: KeyboardConfig;
+	/** The files panel's own, which its Options change at once (#836). */
+	transfer: TransferConfig;
 }
 
 export const useConfigStore = defineStore("config", () => {
@@ -298,6 +300,18 @@ export const useConfigStore = defineStore("config", () => {
 	 * could not be asked.
 	 */
 	async function readProfileLayers(target: ProfileWriteTarget): Promise<ProfileWriteLayers | null> {
+		const cascade = await readCascade(target);
+		return cascade === null
+			? null
+			: { host: cascade.terminal.host, channel: cascade.terminal.channel };
+	}
+
+	/**
+	 * Every layer of a terminal's settings as the hub resolves them now, from the defaults to
+	 * its own: what the files panel's Options show, each value with where it comes from (#836).
+	 * Null when the hub could not be asked.
+	 */
+	async function readCascade(target: ProfileWriteTarget): Promise<CascadeResponse | null> {
 		try {
 			const authStore = useAuthStore();
 			const params = new URLSearchParams();
@@ -308,8 +322,7 @@ export const useConfigStore = defineStore("config", () => {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (!resp.ok) return null;
-			const cascade = (await resp.json()) as CascadeResponse;
-			return { host: cascade.terminal.host, channel: cascade.terminal.channel };
+			return (await resp.json()) as CascadeResponse;
 		} catch (err) {
 			console.warn("[config] failed to read a terminal's profiles:", err);
 			return null;
@@ -436,6 +449,7 @@ export const useConfigStore = defineStore("config", () => {
 		loadUiConfig,
 		saveUiSettings,
 		readProfileLayers,
+		readCascade,
 		saveProfileWrite,
 		saveWhenEnded,
 		onProfileChange,

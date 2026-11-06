@@ -88,11 +88,14 @@ function entryOnWire(entry: FileEntry): Record<string, unknown> {
 	};
 }
 
+/** A listing as the wire carries it; `start` and `fallback_problem` only for one asked without a path. */
 function listingOnWire(listing: FileListing): Record<string, unknown> {
 	return {
 		path: listing.path,
 		entries: listing.entries.map(entryOnWire),
 		truncated: listing.truncated,
+		...(listing.start !== undefined ? { start: listing.start } : {}),
+		...(listing.fallbackProblem !== undefined ? { fallback_problem: listing.fallbackProblem } : {}),
 	};
 }
 

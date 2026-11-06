@@ -144,6 +144,20 @@ export class LocalFileBackend implements FileBackend {
 		}
 	}
 
+	/**
+	 * The hub's own environment: the local agent is the hub's child, or a
+	 * daemon of the same user, so it is the one the local terminals start
+	 * from. Node reads names without regard to case on Windows, as Windows does.
+	 */
+	async env(names: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		const found = new Map<string, string>();
+		for (const name of names) {
+			const value = process.env[name];
+			if (value !== undefined) found.set(name, value);
+		}
+		return found;
+	}
+
 	private async entry(path: string, name: string): Promise<FileEntry> {
 		const stats = await fs.lstat(path);
 		const kind = kindOf(stats);

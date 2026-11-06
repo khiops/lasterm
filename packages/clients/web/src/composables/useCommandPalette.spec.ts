@@ -1,10 +1,11 @@
 import type { Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ref } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { type HostVisibleProfile, useProfilesStore } from "../stores/profiles.js";
-import { type AppActionId, shortcutLabel } from "../utils/app-shortcuts.js";
+import { type AppActionId, readSwitchesFrom, shortcutLabel } from "../utils/app-shortcuts.js";
 import {
 	arrangeForDisplay,
 	fuzzyMatch,
@@ -550,6 +551,29 @@ describe("useCommandPalette", () => {
 			// Windows Terminal's Ctrl+Shift+W closes a pane (#637).
 			const closePane = palette.results.value.find((r) => r.id === "action:close-pane");
 			expect([closePane?.label, closePane?.shortcut]).toEqual(["Close Pane", "Ctrl+Shift+W"]);
+		});
+
+		// The files panel (#836): App.vue opens it on the focused terminal (App.spec.ts), as
+		// Ctrl+Shift+E does, and only while file transfer is on (#835).
+		it("offer Files: Show panel, with its chord, only while file transfer is on", () => {
+			const palette = useCommandPalette();
+			const handler = vi.fn();
+			palette.onExternalAction.value = handler;
+			// Read as the window reads it: reactively, from the UI config.
+			const fileTransfer = ref(false);
+			readSwitchesFrom((name) => name === "fileTransfer" && fileTransfer.value);
+			try {
+				palette.search(">files");
+				expect(palette.results.value.find((r) => r.id === "action:files-show")).toBeUndefined();
+				fileTransfer.value = true;
+				const item = palette.results.value.find((r) => r.id === "action:files-show");
+				expect([item?.label, item?.shortcut]).toEqual(["Files: Show panel", "Ctrl+Shift+E"]);
+				if (item === undefined) throw new Error("Files: Show panel is not offered");
+				palette.execute(item);
+				expect(handler).toHaveBeenCalledExactlyOnceWith("action:files-show");
+			} finally {
+				readSwitchesFrom(() => false);
+			}
 		});
 
 		// The keyboard shortcuts overlay (#639): App.vue opens it (App.spec.ts), as Ctrl+/ does.

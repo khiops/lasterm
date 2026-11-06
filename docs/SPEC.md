@@ -1006,8 +1006,12 @@ Hub starts (or reconnects after restart)
 Channel ch-1: Client A = WRITER, Client B = READER
 
 ── Tier 1: Auto-release ──
-A disconnects → lock freed → Hub broadcasts WRITE_LOCK { holder: null }
-B sends WRITE_CLAIM → lock granted → Hub broadcasts WRITE_LOCK { holder: B }
+A disconnects → lock kept for A's window for 10 s (#846)
+  → Hub broadcasts WRITE_LOCK { holder: null, reserved: true }; nobody types or resizes
+  ├─ A's window attaches again (reload, reconnect) → WRITE_LOCK { holder: A's new client }
+  ├─ B sends WRITE_CLAIM → lock granted at once → WRITE_LOCK { holder: B }
+  └─ 10 s pass → lock freed → WRITE_LOCK { holder: null }, then to B if B is the only one left
+A disconnects, its AUTH named no window → lock freed at once, as on the last line
 
 ── Tier 2: Request/Approve ──
 B → Hub: WRITE_CLAIM
@@ -1026,6 +1030,13 @@ RESIZE; the hub drops any other client's, and tells every attached client the ne
 (`CHANNEL_SIZE`, PROTOCOL.md § 4.3). The readers draw the terminal at that size rather than at
 their own. With no writer, the size stays put. When the lock changes hands, the new writer's fit
 becomes the terminal's size.
+
+A writer that reloads or reconnects comes back on a new socket, under a new client id. Its AUTH
+names its window (a ULID the web keeps in sessionStorage, PROTOCOL.md § 4.1), and the hub keeps the
+lock for that window, under the same token, for 10 s after its socket closes (#846). Meanwhile
+nobody writes and nobody decides the size, so the writer gets back both the lock and the size it
+left, rather than coming back a reader of a terminal sized for whoever was left. Any client can
+still take the lock during those seconds with a claim, which is granted at once.
 
 ## 6. Config Cascade
 

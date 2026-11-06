@@ -5,6 +5,11 @@ import { useAuthStore } from "./auth.js";
 
 interface LockState {
 	holder: string | null;
+	/**
+	 * Nobody holds the lock: the hub keeps it for the holder that just left,
+	 * whose window may come back within its grace (#846). Set only then.
+	 */
+	reserved?: true;
 }
 
 interface IncomingRequest {
@@ -30,9 +35,9 @@ export const useWriteLockStore = defineStore("writelock", () => {
 
 	// ── Incoming protocol message handlers ──────────────────────────────────
 
-	function handleWriteLock(channelId: string, holder: string | null): void {
+	function handleWriteLock(channelId: string, holder: string | null, reserved = false): void {
 		const next = new Map(locks.value);
-		next.set(channelId, { holder });
+		next.set(channelId, reserved && holder === null ? { holder, reserved: true } : { holder });
 		locks.value = next;
 	}
 

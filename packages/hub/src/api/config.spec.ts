@@ -137,8 +137,15 @@ describe("UI_VALUE_VALIDATORS", () => {
 	});
 
 	it("has a rule for every key of the sections file transfer adds", () => {
+		expect(Object.keys(UI_VALUE_VALIDATORS.transfer ?? {}).sort()).toEqual([
+			"maxConcurrent",
+			"openOnDrag",
+			"panelSide",
+			"showHidden",
+		]);
+		expect(Object.keys(UI_VALUE_VALIDATORS.experimental ?? {})).toEqual(["fileTransfer"]);
 		for (const section of ["transfer", "experimental"]) {
-			expect(Object.keys(UI_VALUE_VALIDATORS[section] ?? {}).sort()).toEqual(
+			expect(Object.keys(UI_VALUE_VALIDATORS[section] ?? {}).sort(), section).toEqual(
 				[...(UI_SECTION_KEYS[section] ?? [])].sort(),
 			);
 		}

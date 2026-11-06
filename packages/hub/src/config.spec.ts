@@ -1445,7 +1445,12 @@ describe("extractUiConfig — transfer section", () => {
 		const config = extractUiConfig({
 			transfer: { panel_side: "top", open_on_drag: "yes", max_concurrent: 4, show_hidden: 1 },
 		});
-		expect(config.transfer).toEqual(DEFAULT_UI_CONFIG.transfer);
+		expect(config.transfer).toEqual({
+			panelSide: "right",
+			openOnDrag: true,
+			maxConcurrent: 2,
+			showHidden: false,
+		});
 	});
 });
 

@@ -14,13 +14,16 @@ import type {
 	ChannelCreatedMessage,
 	ChannelEndReason,
 	ChannelStateMessage,
+	CwdChangeMessage,
 	ProtocolMessage,
 	SessionStateMessage,
 	StateSyncMessage,
+	UiAttachOkMessage,
 } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, resolveChannelDisplayName } from "@lasterm/shared";
 import { HUB_VERSION } from "../build-version.js";
 import { isOlderVersion } from "./agent-retirement.js";
+import { cwdFields, liveCwdOf } from "./live-cwd.js";
 import { socketForwardingRefusedOn } from "./remote-daemon.js";
 import type { SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
@@ -155,6 +158,7 @@ export class StateBroadcaster {
 					sessionId: ch.sessionId,
 					status: ch.status,
 					displayTitle: ch.displayTitle,
+					...cwdFields(ch.liveCwd),
 				});
 			}
 		}
@@ -462,6 +466,40 @@ export class StateBroadcaster {
 				this.ctx.metaDal.updateProcessTitle(msg.channelId, msg.title);
 			}, TITLE_DEBOUNCE_MS),
 		);
+	}
+
+	/**
+	 * A terminal's working directory, as its agent says it (#834): kept in
+	 * memory for ATTACH_OK and STATE_SYNC, and relayed to the clients attached
+	 * to it. Never written to `channels.cwd`, which stays the directory it
+	 * started in, and never logged: a directory is user content.
+	 */
+	handleCwdChange(msg: CwdChangeMessage): void {
+		const channel = this.ctx.channels.get(msg.channelId);
+		const live = liveCwdOf(msg as unknown as Record<string, unknown>);
+		if (!channel || live === null) {
+			this.ctx.hubLogger?.log("debug", "state-broadcaster: CWD_CHANGE ignored", {
+				channelId: msg.channelId,
+				known: channel !== undefined,
+			});
+			return;
+		}
+		channel.liveCwd = live;
+		this.ctx.hubLogger?.log("debug", "state-broadcaster: CWD_CHANGE", {
+			channelId: msg.channelId,
+			source: live.source,
+			known: live.cwd !== null,
+		});
+		this.broadcastToChannel(msg.channelId, {
+			type: "CWD_CHANGE",
+			channelId: msg.channelId,
+			...live,
+		} satisfies CwdChangeMessage);
+	}
+
+	/** What ATTACH_OK says of a terminal's working directory (#834). */
+	cwdFieldsOf(channelId: string): Pick<UiAttachOkMessage, "cwd" | "cwdSource" | "foreground"> {
+		return cwdFields(this.ctx.channels.get(channelId)?.liveCwd);
 	}
 
 	clearProcessTitleDebounce(channelId: string): void {

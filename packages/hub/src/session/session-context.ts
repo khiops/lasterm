@@ -4,7 +4,7 @@
  * so they can read/write the same Maps without circular constructor deps.
  */
 
-import type { AgentConfig, ChannelStatus, SessionStatus } from "@lasterm/shared";
+import type { AgentConfig, ChannelStatus, LiveCwd, SessionStatus } from "@lasterm/shared";
 import type { ConfigResolver } from "../config.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { SpoolDAL } from "../storage/spool.js";
@@ -182,6 +182,12 @@ export interface ChannelState {
 	dynamicTitle: string | null;
 	processTitle: string | null;
 	displayTitle: string;
+	/**
+	 * Its working directory as its agent last said it (CWD_CHANGE, #834).
+	 * Kept in memory only, and never in `cwd`, which stays the directory it
+	 * starts in. Absent until the agent says it, and once the terminal ends.
+	 */
+	liveCwd?: LiveCwd;
 	/**
 	 * The `channelClock` reading when this terminal last started, as its
 	 * SPAWN_OK arrived. Absent for one this run did not start: restored from

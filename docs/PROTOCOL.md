@@ -79,10 +79,11 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
 - Connection displacement: a daemon serves several hubs at once, one connection per hub, and a new
   connection replaces only the same hub's previous one (§ 3.1b). The replaced connection gets
   `ERROR { code: "DISPLACED" }`, then EOF
-- A terminal's output and events (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, BELL, NOTIFICATION,
-  LOG) go to the current connection of the hub that owns the terminal, whichever of its connections
-  spawned it (#549, § 3.1b).
-  Replies (SPAWN_OK, ATTACH_OK, SNAPSHOT_RES, ERROR) go to the connection that asked.
+- A terminal's output and events (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, CWD_CHANGE, BELL,
+  NOTIFICATION, LOG) go to the current connection of the hub that owns the terminal, whichever of its
+  connections spawned it (#549, § 3.1b).
+  Replies (SPAWN_OK, ATTACH_OK, SNAPSHOT_RES, ERROR) go to the connection that asked. A CWD_CHANGE
+  that answers a CWD_QUERY is an event too (§ 3.20).
 - Agent queues output and events while no hub is connected: each channel's newest, up to 1 MiB per
   channel and 16 MiB per hub, the oldest dropped first and a channel's CHANNEL_EXIT always kept
   (SPEC.md § 3.2). Each hub has its own queue, flushed only to that hub's next
@@ -123,7 +124,7 @@ First message, sent immediately on start.
   type: "HELLO",
   version: 1,
   agent_version: "0.12.0",
-  capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes"],
+  capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes", "cwd"],
                             // a daemon adds "hub-identity"
   available_shells?: string[],  // the shells the agent found on its host
   default_shell?: string,       // the shell it starts when a SPAWN names none (below)
@@ -160,7 +161,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all five, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all six, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -372,8 +373,8 @@ says in its terminal that what was typed was dropped because the terminal is not
 ```
 
 **Batching:** Buffer 16ms or 4KB, whichever comes first, then flush. Any other frame about a
-channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, BELL, NOTIFICATION, LOG) first flushes that
-channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT.
+channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, CWD_CHANGE, BELL, NOTIFICATION, LOG) first
+flushes that channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT.
 
 ### 3.6 RESIZE (Hub → Agent)
 
@@ -489,6 +490,12 @@ OSC 9 desktop notification request. Hub relays to all attached UI clients.
   message: string
 }
 ```
+
+Only a plain `ESC ] 9 ; <message> ST` (or `BEL`) is a notification: `message` is everything after
+`9;`, semicolons included. ConEmu's and Windows Terminal's OSC 9 sub-commands, a first parameter from
+`1` to `12` (`9;4;<state>;<progress>` is progress, from winget or a prompt, `9;9;<dir>` the shell's
+directory), are not, and raise nothing: `9;9` feeds CWD_CHANGE (§ 3.20) instead (#829). A sequence
+split across two reads of the PTY is read whole.
 
 ### 3.16 AGENT_CHANNEL_STATE / CHANNEL_STATE_END (Daemon Reconnect)
 
@@ -635,6 +642,75 @@ A diagnostic about a channel: a SPAWN that failed, at `error`, or a PTY that clo
 The hub writes it to that channel's log when it keeps one, else to its own log under the channel's
 id, and reads any other level as `info`. It never reaches a client.
 
+### 3.20 CWD_CHANGE / CWD_QUERY (`cwd`)
+
+```typescript
+// Agent → Hub
+{
+  type: "CWD_CHANGE",
+  channel_id: string,
+  cwd: string | null,                       // always on the wire; null when unknown
+  source: "shell" | "process" | "start",
+  at_prompt?: boolean,                      // absent where it cannot be read (Windows)
+  foreground?: string,                      // the program holding the terminal, when not the shell
+  other_host?: string                       // the shell reported this host instead of a directory
+}
+
+// Hub → Agent
+{ type: "CWD_QUERY", channel_id: string }
+```
+
+A terminal's working directory as it is now, not the one it started in (#834). Per terminal, the
+agent keeps it and where it came from:
+
+1. **`shell`**: the shell said so in its output: OSC 7 (`file://<host>/<path>`, percent-encoded),
+   OSC 9;9 (`9;9;"<path>"`, quoted or not), OSC 633;P;Cwd= (VS Code's, with its `\\` and `\xHH`
+   escapes) or OSC 1337;CurrentDir=, read across chunk boundaries. An OSC 7 whose host is neither
+   empty, `localhost`, this host's name nor one whose first label is its name reports
+   `cwd: null, other_host: <host>`: a session nested in the terminal, over ssh most often. On a
+   Windows agent an OSC 7 path `/C:/x` is `C:\x`. A report wins while the shell keeps reporting:
+   until a process read finds the process directory moved since the first read after the report,
+   or finds the shell back at its prompt when that read found a program holding the terminal (the
+   program that made the report has ended).
+2. **`process`**: read from the shell's process, without its help, every 2 s:
+   - Linux: `/proc/<pid>/cwd` (a ` (deleted)` target is gone: `null`), and from `/proc/<pid>/stat`
+     the process group and the terminal's foreground group. When they differ a program holds the
+     terminal: `at_prompt: false`, `foreground` from `/proc/<tpgid>/comm`; when they are equal,
+     `at_prompt: true`.
+   - Windows: for `cmd.exe` only, the `CurrentDirectory` of its process parameters, read from its
+     PEB (`NtQueryInformationProcess`, `ReadProcessMemory`), the 32-bit PEB for a WOW64 shell.
+     `at_prompt` and `foreground` are not read.
+   - PowerShell (`pwsh`, `powershell`, on either system) is never read: `Set-Location` leaves its
+     process directory where it started, so the read would be wrong, not missing. Without a shell
+     report it is `null`, never its start directory; its prompt can report it (#839).
+   - `null` when the process cannot tell: its directory deleted, a process the agent may not read
+     (an elevated shell), a terminal that has ended.
+3. **`start`**: the directory the agent started the terminal in, before any read, for a program
+   the agent reads; for one it does not read, the first state is `cwd: null, source: "process"`.
+
+The agent sends the first state as the terminal starts, after its SPAWN_OK, then a CWD_CHANGE
+whenever any of its fields changes: a shell report at once, in the chunk that carried it (the last
+report of a chunk), a process read within 2 s. It answers CWD_QUERY with a fresh read, sent whether
+or not anything changed, down the channel's own pipeline like any other event (§ 2.1b), so it
+reaches the hub's current connection. A CWD_QUERY about a channel the caller cannot see, or whose
+reader is gone, is answered `ERROR { code: "CHANNEL_NOT_FOUND", channel_id }`, without a
+`request_id`. Both kinds of agent send it, stdio and daemon.
+
+The directory is user content, and so is a host name: neither is logged, at any level, on either
+side. The agent logs a CWD_CHANGE at DEBUG with its channel, its source and whether the directory
+is known; the hub at DEBUG the same way (`security-events.spec.ts`).
+
+**What the hub does with it.** It keeps the last CWD_CHANGE per channel in memory, never in
+`channels.cwd`, which stays the directory the terminal starts in, and forgets it when the terminal
+ends. It relays each to the clients attached to the channel (§ 4.12), and gives the last in
+ATTACH_OK (§ 4.2) and STATE_SYNC (§ 4.6) as `cwd`, `cwd_source` and `foreground`. When it adopts a
+daemon's terminal it has heard nothing about, after a hub restart, it sends CWD_QUERY for it
+(§ 3.16). `SessionManager.queryChannelCwd` asks for a fresh read, for the folder a listing of the
+terminal's files opens at (`GET /api/channels/:id/files` without `path`, § 6, #832), which does not
+use it yet: the first CWD_CHANGE for that channel after the question is its answer; it gives
+`not-found` on that channel's `CHANNEL_NOT_FOUND`, and after 2 s, or when the host has no agent
+connected, what was said last.
+
 ## 4. Message Types — Hub ↔ UI (WS)
 
 ### 4.1 AUTH
@@ -698,7 +774,12 @@ sends a frame or disconnects.
   process_title?: string,      // its foreground process, when known
   display_title: string,       // the title a tab shows
   cols: number,                // the terminal's size: its PTY's (§ 4.3, #831)
-  rows: number
+  rows: number,
+  // Its working directory as the agent last said it (§ 3.20), null when unknown. Absent, with
+  // cwd_source, until the agent has said it, and once the terminal has ended.
+  cwd?: string | null,
+  cwd_source?: "shell" | "process" | "start",
+  foreground?: string          // the program holding the terminal, when not the shell
 }
 
 // UI → Hub
@@ -904,7 +985,11 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     exit_code?: number,
     display_title?: string,
     // Only on a "dead" entry: "killed", as on CHANNEL_STATE (§ 4.7) (#592).
-    end_reason?: "killed"
+    end_reason?: "killed",
+    // As in ATTACH_OK (§ 4.2, § 3.20): on an entry that has not ended, once its agent said it.
+    cwd?: string | null,
+    cwd_source?: "shell" | "process" | "start",
+    foreground?: string
   }>,
   // The hosts their user disconnected (#648), with a session or without one: a host
   // whose connection ran its terminals has none left. Absent when there are none.
@@ -1156,7 +1241,7 @@ is absent when the test failed, and `message` says why.
 
 ### 4.12 Terminal Event Relay (Hub → UI)
 
-These messages originate from the agent (see §3.12–3.15, above, and § 3.4) and are relayed by the hub to all UI clients attached to the affected channel.
+These messages originate from the agent (see §3.12–3.15, above, § 3.4 and § 3.20) and are relayed by the hub to all UI clients attached to the affected channel.
 
 ```typescript
 // Terminal title changed (OSC 0/2)
@@ -1164,6 +1249,11 @@ These messages originate from the agent (see §3.12–3.15, above, and § 3.4) a
 
 // Foreground process name changed
 { type: "PROCESS_TITLE",  channel_id: string, title: string, display_title?: string }
+
+// Its working directory changed, or was read for a CWD_QUERY (§ 3.20): the agent's
+// CWD_CHANGE, its fields as the agent sent them
+{ type: "CWD_CHANGE",     channel_id: string, cwd: string | null, source: "shell" | "process" | "start",
+  at_prompt?: boolean, foreground?: string, other_host?: string }
 
 // Terminal bell (\x07)
 { type: "BELL",           channel_id: string }

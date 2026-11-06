@@ -16,6 +16,13 @@ describe("settings reachable where they apply", () => {
 });
 
 describe("settings category visibility", () => {
+	it("shows File transfer after Environment, at every scope (#835)", () => {
+		for (const scope of ["global", "host", "channel"] as const) {
+			const ids = getVisibleSettingsCategories(scope, false).map((cat) => cat.id);
+			expect(ids.indexOf("transfer"), scope).toBe(ids.indexOf("environment") + 1);
+		}
+	});
+
 	it("hides the desktop category outside Tauri", () => {
 		const categories = getVisibleSettingsCategories("global", false);
 

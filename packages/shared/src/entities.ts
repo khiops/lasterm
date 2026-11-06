@@ -2,6 +2,7 @@
 // These represent the domain model; DB types are defined in hub/storage
 
 import type { BellSound } from "./config.js";
+import type { TransferDrop, TransferOnConflict } from "./file-transfer.js";
 import type { ChannelEndReason } from "./protocol.js";
 
 export type BackgroundMode = "image" | "solid" | "transparent";
@@ -59,6 +60,32 @@ export interface TerminalProfile {
 	 * `panes.keepEnded` says.
 	 */
 	whenEnded?: "ask" | "restart" | "close";
+	/**
+	 * What dropping files on this terminal does (#835): "upload" sends them to
+	 * its host, "off" does nothing. Default: "upload"
+	 */
+	transferDrop?: TransferDrop;
+	/** Ask before the upload a drop starts, showing where it goes. Default: true */
+	transferConfirmDrop?: boolean;
+	/**
+	 * What an upload does with a file of the same name where it lands: ask,
+	 * replace it, keep both under a new name, or skip it. Default: "ask"
+	 */
+	transferOnConflict?: TransferOnConflict;
+	/** Upload into the shell's current directory when it is known. Default: true */
+	transferFollowCwd?: boolean;
+	/**
+	 * Where an upload lands when the shell's directory is unknown or not
+	 * followed: "" for the home. The agent expands `${VAR}` in it, as in a
+	 * launch profile's `cwd`. Global or per host only. Default: ""
+	 */
+	transferFallbackDir?: string;
+	/**
+	 * Check each upload by SHA-256 on a host whose SSH server offers no SFTP,
+	 * where the bytes go through the account's shell. Global or per host
+	 * only. Default: true
+	 */
+	transferVerify?: boolean;
 	[key: string]: unknown;
 }
 

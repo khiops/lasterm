@@ -138,7 +138,11 @@ describe("the names an upload writes under", () => {
 	});
 });
 
-describe.each(UPLOAD_BACKENDS.filter((kind) => kind.runs))("an upload over $name", (kind) => {
+describe.each(
+	(process.platform === "linux" ? [1, 2, 3, 4] : [1]).flatMap(() =>
+		UPLOAD_BACKENDS.filter((kind) => kind.runs),
+	),
+)("an upload over $name", (kind) => {
 	const use = async (test: (h: UploadHarness) => Promise<void>) => {
 		const h = await kind.start();
 		try {

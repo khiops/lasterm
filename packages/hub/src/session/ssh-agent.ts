@@ -35,6 +35,7 @@ import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
 import { shellStartAllowance } from "./ssh-exec.js";
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
+import { connectWithoutDelay } from "./ssh-nodelay.js";
 
 /**
  * How long the agent has to say HELLO once its command runs, on top of what
@@ -1013,7 +1014,7 @@ export class SshAgent extends AgentConnection {
 					}
 				});
 
-				client.connect(connectConfig);
+				connectWithoutDelay(client, connectConfig);
 			},
 		);
 	}

@@ -57,6 +57,7 @@ import {
 	type SshAgentDeployOptions,
 } from "./ssh-agent.js";
 import { SSH_KEEPALIVE } from "./ssh-keepalive.js";
+import { connectWithoutDelay } from "./ssh-nodelay.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
 import { probeTestConnectPlatform } from "./test-connect-platform.js";
 
@@ -1017,7 +1018,7 @@ export function attemptSshTest(
 		});
 
 		try {
-			sshClient.connect(config);
+			connectWithoutDelay(sshClient, config);
 		} catch (err) {
 			finish({
 				ok: false,

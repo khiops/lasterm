@@ -24,6 +24,7 @@ import {
 } from "../ssh/known-hosts.js";
 import { passwordRefusal } from "./password-auth.js";
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
+import { connectWithoutDelay } from "./ssh-nodelay.js";
 
 export interface JumpTarget {
 	host: string;
@@ -194,7 +195,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 		}) as SyncHostVerifier;
 
 		try {
-			client.connect({
+			connectWithoutDelay(client, {
 				...options.auth,
 				// A bastion that goes silent is noticed like the host behind it (#607).
 				...SSH_KEEPALIVE,

@@ -1190,6 +1190,14 @@ Only a slower link, saturated, could lose a connection that was alive. The value
 could turn them off would bring #605 back for itself. Hosts used to show a "Keep Alive (s)"
 value that nothing read; it is gone (STORAGE.md § 3.1).
 
+The same connections have Nagle's algorithm off on their socket (#873). The hub uses ssh2's
+JavaScript ciphers (its single executable stubs out the native binding), which write each SSH
+packet in several pieces: length, body, tag. With Nagle on, all but the first waited for the
+peer to acknowledge it, and a peer holding part of a packet acknowledges only when its
+delayed-ACK timer fires, so each SFTP request and each keystroke paid tens of milliseconds. A
+host behind a jump host is reached in a channel of the jump host's connection, whose socket
+carries it (`packages/hub/src/session/ssh-nodelay.ts`).
+
 ### 5.5b Connect, Reconnect and Disconnect, on request (#648)
 
 A remote host's menu in the rail (right-click its badge) acts on its connection, and never on
@@ -1595,6 +1603,7 @@ lasterm/
 │   │       │   ├── ssh-agent.ts      # SshAgent: the agent over SSH, on stdio or a daemon's socket
 │   │       │   ├── remote-daemon.ts  # Whether and how a remote host keeps a daemon (#79, #600, #765)
 │   │       │   ├── ssh-keepalive.ts  # The SSH keepalive every connection carries (#607)
+│   │       │   ├── ssh-nodelay.ts    # Every connection sends each packet at once, Nagle off (#873)
 │   │       │   ├── ssh-file-transport.ts # SFTP session, mkdir walk, stdin exec, Windows reply marker (#832)
 │   │       │   └── spool-gc.ts       # Spool garbage collection (STORAGE.md § 7)
 │   │       ├── files/       # A terminal's host files: local fs, SFTP, SSH commands (§ 3.3, #832)

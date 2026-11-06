@@ -1852,6 +1852,7 @@ export class SessionManager {
 				displayTitle,
 				...this.sizeOf(channel, channelId),
 				...this.broadcaster.cwdFieldsOf(channelId),
+				filesPanel: this.broadcaster.filesPanelOf(channelId),
 			};
 			client.send(attachOk);
 			return true;
@@ -1925,6 +1926,7 @@ export class SessionManager {
 				displayTitle,
 				...this.sizeOf(channel, channelId),
 				...this.broadcaster.cwdFieldsOf(channelId),
+				filesPanel: this.broadcaster.filesPanelOf(channelId),
 			};
 			client.send(attachOk);
 		} catch (err) {
@@ -1965,6 +1967,7 @@ export class SessionManager {
 				displayTitle,
 				...this.sizeOf(channel, channelId),
 				...this.broadcaster.cwdFieldsOf(channelId),
+				filesPanel: this.broadcaster.filesPanelOf(channelId),
 			};
 			client.send(attachOk);
 		}
@@ -2037,6 +2040,15 @@ export class SessionManager {
 				rows,
 			} satisfies ChannelSizeMessage);
 		}
+	}
+
+	/**
+	 * Record whether the writer's files panel is open on a terminal (#838): the
+	 * WS handler lets through only the write lock's holder. Every client
+	 * attached to it is told when it changes.
+	 */
+	setFilesPanel(channelId: string, open: boolean): void {
+		this.broadcaster.setFilesPanel(channelId, open);
 	}
 
 	handleAuthPromptResponse(

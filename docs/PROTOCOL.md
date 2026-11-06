@@ -801,7 +801,8 @@ sends a frame or disconnects.
   // cwd_source, until the agent has said it, and once the terminal has ended.
   cwd?: string | null,
   cwd_source?: "shell" | "process" | "start",
-  foreground?: string          // the program holding the terminal, when not the shell
+  foreground?: string,         // the program holding the terminal, when not the shell
+  files_panel: { open: boolean } // whether the writer's files panel is open on it (§ 4.20, #838)
 }
 
 // UI → Hub
@@ -954,7 +955,8 @@ another pane's overlay, or by its host's return; `automatic` changes nothing on 
 ```
 
 The holder also decides the terminal's size (§ 4.3): taking the lock makes a client's pane the one
-the PTY is sized to.
+the PTY is sized to. It alone says whether the writer's files panel is open on the terminal
+(§ 4.20), and taking the lock makes its window's panel the one the readers follow.
 
 **A holder that leaves is waited for** (#846). When the socket holding a lock closes, as a reload or
 a dropped connection closes it, and its AUTH named a window (§ 4.1), the hub keeps the lock for that
@@ -1011,7 +1013,9 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     // As in ATTACH_OK (§ 4.2, § 3.20): on an entry that has not ended, once its agent said it.
     cwd?: string | null,
     cwd_source?: "shell" | "process" | "start",
-    foreground?: string
+    foreground?: string,
+    // As in ATTACH_OK (§ 4.20, #838): on an entry that has not ended.
+    files_panel?: { open: boolean }
   }>,
   // The hosts their user disconnected (#648), with a session or without one: a host
   // whose connection ran its terminals has none left. Absent when there are none.
@@ -1360,7 +1364,7 @@ An unknown or refused token is not an ERROR: it is `AUTH_FAIL` (§ 4.1).
 | `CHANNEL_NOT_FOUND` | ATTACH on a terminal the hub has no record of (§ 4.2) |
 | `CHANNEL_DEAD` | ATTACH on a terminal that has ended (§ 4.2) |
 | `CHANNEL_NOT_REUSABLE` | SPAWN with `reuse_channel_id` refused; `channel_id` names that terminal (§ 4.4) |
-| `WRITE_LOCK_DENIED` | INPUT from a client that does not hold the write lock; carries `channel_id` |
+| `WRITE_LOCK_DENIED` | INPUT from a client that does not hold the write lock, or FILES_PANEL from one that does not (§ 4.20); carries `channel_id` |
 | `HOST_NOT_FOUND` | SPAWN on a host this hub does not list; carries `host_id` |
 | `HOST_BUSY` | SPAWN refused while Replace holds the host, at `SessionManager.spawnOnHost` or, for one already under way, before its frame is written: "This host's agent is being stopped." |
 | `HOST_UNREACHABLE` | SPAWN refused because its host is away: the hub is reconnecting it, or lost it while the terminal started, or, for a SPAWN marked `automatic`, its user disconnected it (#648). Carries `host_id` and `host_status`, and `channel_id` for a terminal being brought back (§ 4.4, #605) |
@@ -1727,6 +1731,47 @@ hour leaves alone what another hub may still be writing there.
 **Retirement and updates.** An interrupted upload holds no connection: an outdated remote daemon
 may be retired (§ 3.17, #805), and the hub updated, while one waits, its record kept. A resume
 holds the host's connection from the moment it reaches for it, as a start does.
+
+### 4.20 FILES_PANEL (the writer's files panel, #838)
+
+```typescript
+// Both ways. UI → Hub: the write lock's holder says whether its files panel is open on the
+// terminal. Hub → UI: it changed, told to every client attached to the terminal.
+{ type: "FILES_PANEL", channel_id: string, open: boolean }
+
+// In ATTACH_OK (§ 4.2) and in each STATE_SYNC entry that has not ended (§ 4.6)
+files_panel: { open: boolean }
+```
+
+The files panel (SPEC.md § 4, #836) is a window-level change to a terminal, as its size is
+(§ 4.3, #831), and follows the same rule: the window that writes the terminal decides. The hub
+keeps, per terminal and in memory only, whether the **writer's** panel is open on it: open and
+attached to that terminal, the one whose pane has the focus or the one it is pinned to. It is
+closed until a writer says otherwise.
+
+- **Only the holder says it.** A FILES_PANEL from any other client is refused with
+  `ERROR { code: "WRITE_LOCK_DENIED", channel_id }`, as its INPUT is, and changes nothing. While
+  nobody holds the lock, after a release or during a holder's grace (§ 4.5), nobody may say it,
+  and the last state stands. One whose `channel_id` is not a ULID, or whose `open` is not a
+  boolean, is refused with `INVALID_INPUT`. One naming a terminal the hub does not hold is ignored.
+- **One panel, on one terminal.** A window has one panel. Its opening on a terminal closes it on
+  every other terminal the same client holds the lock on, so a panel moving from A to B closes on
+  A and opens on B even when the client says only the second. The web says both.
+- **Told on change.** Each change goes to every client attached to the terminal, the one that
+  said it included; one that changes nothing goes to nobody. A client attaching reads it in
+  ATTACH_OK, one connecting in STATE_SYNC.
+- **When the lock moves**, the new writer's window says its own state, and that wins. The hub
+  does not clear it: a writer that leaves without a word leaves its state standing.
+- **Kept through a terminal's end and its restart** under the same id, as the writer's panel stays
+  on the pane. A hub restarted forgets it; each writer's window says its own again once it holds
+  the lock again.
+- **A reader's own choice is never sent.** Each reader keeps, per terminal and in its browser,
+  whether its panel follows the writer's (the default, floating over that pane), stays closed, or
+  is its own (docked). Nothing of it reaches the hub.
+
+A hub older than this neither sends nor reads any of it, and answers a FILES_PANEL with nothing;
+the web then reads every writer's panel as closed. The hub logs a FILES_PANEL it applies at DEBUG,
+with its channel and state.
 
 ## 5. Protocol Sequences
 

@@ -1,14 +1,20 @@
 use std::num::NonZeroU16;
+use std::ops::RangeInclusive;
 use std::time::Instant;
 
-/// Receives the window title. vt100 reports it through callbacks rather than
-/// keeping it on the screen; OSC 0 and OSC 2 both arrive here.
+/// What vt100 hands back through callbacks rather than keeping on the screen:
+/// the window title (OSC 0 and OSC 2), and the OSC sequences it does not
+/// handle itself, which is where notifications (OSC 9) arrive. The parser
+/// keeps its state from one chunk to the next, so a sequence split across two
+/// reads of the PTY arrives whole.
 #[derive(Default)]
-struct TitleCallbacks {
+struct MirrorCallbacks {
     title: String,
+    /// The first notification of the chunk being processed.
+    notification: Option<String>,
 }
 
-impl vt100::Callbacks for TitleCallbacks {
+impl vt100::Callbacks for MirrorCallbacks {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         // A title that is not UTF-8 is ignored, as vt100 did before it moved
         // titles to callbacks.
@@ -16,12 +22,18 @@ impl vt100::Callbacks for TitleCallbacks {
             self.title = title.to_string();
         }
     }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let Some(Osc::Notification(message)) = parse_osc(params) {
+            self.notification.get_or_insert(message);
+        }
+    }
 }
 
 /// Terminal state mirror backed by vt100::Parser.
 /// Tracks screen content, cursor, title, bell, and notifications.
 pub struct HeadlessMirror {
-    parser: vt100::Parser<TitleCallbacks>,
+    parser: vt100::Parser<MirrorCallbacks>,
     current_title: String,
     last_bell: Option<Instant>,
     last_notification: Option<Instant>,
@@ -33,6 +45,9 @@ pub struct HeadlessMirror {
 const BELL_THROTTLE_MS: u128 = 100;
 const NOTIFICATION_THROTTLE_MS: u128 = 500;
 const MAX_NOTIFICATION_LEN: usize = 256;
+/// ConEmu's and Windows Terminal's OSC 9 sub-commands, `9;1` to `9;12`: `9;4`
+/// is progress, `9;9` the shell's directory. None of them is a notification.
+const CONEMU_SUBCOMMANDS: RangeInclusive<u32> = 1..=12;
 
 impl HeadlessMirror {
     /// Create a new headless terminal mirror.
@@ -42,7 +57,7 @@ impl HeadlessMirror {
             dimension(rows),
             dimension(cols),
             scrollback,
-            TitleCallbacks::default(),
+            MirrorCallbacks::default(),
         );
         Self {
             parser,
@@ -86,9 +101,8 @@ impl HeadlessMirror {
             }
         }
 
-        // Check for OSC 9 (notification)
-        // Scan data for \x1b]9;...\x07 or \x1b]9;...\x1b\\
-        if let Some(msg) = extract_osc9(data) {
+        // A plain OSC 9 is a notification; its sub-commands are not (#829).
+        if let Some(msg) = self.parser.callbacks_mut().notification.take() {
             let now = Instant::now();
             let should_fire = match self.last_notification {
                 Some(last) => now.duration_since(last).as_millis() >= NOTIFICATION_THROTTLE_MS,
@@ -175,25 +189,44 @@ fn contains_bell(data: &[u8]) -> bool {
     false
 }
 
-/// Extract OSC 9 notification message from raw data.
-fn extract_osc9(data: &[u8]) -> Option<String> {
-    // Look for \x1b]9;...\x07 or \x1b]9;...\x1b\\
-    let data_str = String::from_utf8_lossy(data);
-    // Pattern: ESC ] 9 ; <message> BEL  or  ESC ] 9 ; <message> ST
-    if let Some(start) = data_str.find("\x1b]9;") {
-        let msg_start = start + 4; // skip \x1b]9;
-        let remaining = &data_str[msg_start..];
-        // Find terminator: \x07 or \x1b\\
-        let end = remaining
-            .find('\x07')
-            .or_else(|| remaining.find("\x1b\\"))
-            .unwrap_or(remaining.len());
-        let msg = &remaining[..end];
-        if !msg.is_empty() {
-            return Some(msg.to_string());
-        }
+/// What an OSC sequence vt100 left alone says.
+#[derive(Debug, PartialEq, Eq)]
+enum Osc {
+    /// OSC 9 ; <message>: a desktop notification.
+    Notification(String),
+}
+
+/// An OSC's parameters joined back with the `;` the parser split them at: a
+/// message can hold one.
+fn joined(params: &[&[u8]]) -> Vec<u8> {
+    params.join(&b';')
+}
+
+fn parse_osc(params: &[&[u8]]) -> Option<Osc> {
+    let (number, rest) = params.split_first()?;
+    match *number {
+        b"9" => osc9(rest),
+        _ => None,
     }
-    None
+}
+
+/// OSC 9: a notification, unless it is one of ConEmu's sub-commands.
+fn osc9(rest: &[&[u8]]) -> Option<Osc> {
+    let first = rest.first()?;
+    if subcommand(first).is_some() {
+        return None;
+    }
+    let message = String::from_utf8_lossy(&joined(rest)).into_owned();
+    (!message.is_empty()).then_some(Osc::Notification(message))
+}
+
+/// The number of a ConEmu sub-command, when `param` is one.
+fn subcommand(param: &[u8]) -> Option<u32> {
+    if param.is_empty() || param.len() > 2 || !param.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let number: u32 = std::str::from_utf8(param).ok()?.parse().ok()?;
+    CONEMU_SUBCOMMANDS.contains(&number).then_some(number)
 }
 
 /// Sanitize a notification message: strip control chars, limit length.
@@ -287,6 +320,56 @@ mod tests {
         let notif = mirror.take_notification().unwrap();
         assert!(!notif.contains('\x01'));
         assert!(notif.contains("HelloWorld"));
+    }
+
+    /// ConEmu's and Windows Terminal's OSC 9 sub-commands are not
+    /// notifications: progress from winget or a prompt, the directory from a
+    /// PowerShell prompt set up for Windows Terminal (#829).
+    #[test]
+    fn osc9_sub_commands_are_not_notifications() {
+        for sequence in [
+            &b"\x1b]9;4;1;50\x07"[..],
+            b"\x1b]9;4;0\x1b\\",
+            b"\x1b]9;9;\"C:\\Users\\me\"\x1b\\",
+            b"\x1b]9;9;/home/me\x07",
+            b"\x1b]9;1;500\x07",
+            b"\x1b]9;12\x07",
+        ] {
+            let mut mirror = HeadlessMirror::new(80, 24, 1000);
+            mirror.process(sequence);
+            assert_eq!(
+                mirror.take_notification(),
+                None,
+                "{}",
+                String::from_utf8_lossy(sequence)
+            );
+        }
+    }
+
+    /// A plain message is one, semicolons, digits and all.
+    #[test]
+    fn a_plain_osc9_message_is_a_notification() {
+        for (sequence, message) in [
+            (&b"\x1b]9;Build; done\x07"[..], "Build; done"),
+            (b"\x1b]9;100% done\x07", "100% done"),
+            (b"\x1b]9;42;answer\x07", "42;answer"),
+        ] {
+            let mut mirror = HeadlessMirror::new(80, 24, 1000);
+            mirror.process(sequence);
+            assert_eq!(mirror.take_notification().as_deref(), Some(message));
+        }
+    }
+
+    #[test]
+    fn a_notification_split_across_reads_arrives_whole() {
+        let mut mirror = HeadlessMirror::new(80, 24, 1000);
+        mirror.process(b"output\x1b]9;Build co");
+        assert_eq!(mirror.take_notification(), None);
+        mirror.process(b"mplete\x07more");
+        assert_eq!(
+            mirror.take_notification().as_deref(),
+            Some("Build complete")
+        );
     }
 
     #[test]

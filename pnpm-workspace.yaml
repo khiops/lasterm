@@ -72,12 +72,23 @@ catalog:
 # recorded as skipped. A node_modules populated by a pnpm 11 that never read
 # this policy stays that way through `pnpm install`, which reports it up to
 # date, and better-sqlite3 keeps failing on its missing binding. Repair such a
-# tree once with `pnpm rebuild better-sqlite3 cpu-features esbuild ssh2`, or
+# tree once with `pnpm rebuild better-sqlite3 cpu-features esbuild`, or
 # delete node_modules and install again.
+#
+# ssh2 is denied as well (#868). Its build compiles an optional native cipher
+# binding, sshcrypto.node, that the shipped hub never loads: its bundle stubs it
+# out (scripts/build-sea-hub.ts), and ssh2 then uses Node's own crypto. Compiled
+# against Node 24.19 headers or later, that binding aborts the whole process
+# when the garbage collector reclaims one of its ciphers (nodejs/node#65446),
+# which killed the test workers that open many SSH connections. ssh2's fix is
+# not released as of 1.17.0. Without the binding, the tests and a hub run from
+# source use the ciphers the shipped hub uses. A tree whose ssh2 was built
+# keeps its binding through `pnpm install`: delete node_modules/.pnpm/ssh2@*
+# and install again.
 allowBuilds:
   better-sqlite3: true
   cpu-features: true
   edgedriver: false
   esbuild: true
   geckodriver: false
-  ssh2: true
+  ssh2: false

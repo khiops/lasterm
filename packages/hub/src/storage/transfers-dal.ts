@@ -192,10 +192,12 @@ const ITEM_COLUMNS = [
 	"updated_at",
 ] as const;
 
-/** What changes of an item once it is written: everything but where it is in its tree. */
+/**
+ * What changes of an item once it is written: everything but where it is in its tree. A file's
+ * size and time too: a resume sends a file that changed since again, as it is now (#837).
+ */
 const ITEM_CHANGING = ITEM_COLUMNS.filter(
-	(column) =>
-		!["transfer_id", "id", "parent_id", "rel_path", "kind", "size", "mtime"].includes(column),
+	(column) => !["transfer_id", "id", "parent_id", "rel_path", "kind"].includes(column),
 );
 
 export class TransfersDAL {

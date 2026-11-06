@@ -608,3 +608,479 @@ describe("an upload another window sends", () => {
 		expect(transfers().report.inProgress).toBe(0);
 	});
 });
+
+// ─── After a crash or a restart (#837) ───────────────────────────────────────
+
+describe("resuming after a crash or a restart", () => {
+	const T2 = "01ARZ3NDEKTSV4RRFFQ69G5FT2";
+	const WHEN = 1_700_000_000_000;
+
+	function domError(name: string): Error {
+		return Object.assign(new Error(name), { name });
+	}
+
+	function keptFile(name: string, size: number, lastModified = WHEN): File {
+		return new File([new Uint8Array(size)], name, { lastModified });
+	}
+
+	/** The kept folder `photos`, as IndexedDB gives it back, its access answered by `access`. */
+	function photosHandle(files: Record<string, File>, access: () => Promise<string>) {
+		const requestPermission = vi.fn(access);
+		const queryPermission = vi.fn(async () => "prompt");
+		const handle = {
+			kind: "directory",
+			name: "photos",
+			requestPermission,
+			queryPermission,
+			getDirectoryHandle: async () => {
+				throw domError("NotFoundError");
+			},
+			getFileHandle: async (name: string) => {
+				const found = files[name];
+				if (found === undefined) throw domError("NotFoundError");
+				return { kind: "file", name, getFile: async () => found };
+			},
+		};
+		return { handle, requestPermission, queryPermission };
+	}
+
+	/** What IndexedDB kept of an upload of photos/ (a.jpg, b.jpg, c.jpg, 10 bytes each). */
+	function keep(transferId: string, handle: unknown): void {
+		handles.uploads.set(transferId, {
+			transferId,
+			hostId: HOST,
+			channelId: C1,
+			dir: "/home/pi",
+			savedAt: WHEN,
+			roots: [{ name: "photos", kind: "directory", handle }],
+		});
+		handles.items.set(
+			transferId,
+			["a.jpg", "b.jpg", "c.jpg"].map((name, i) => ({
+				transferId,
+				itemId: i + 1,
+				relPath: `photos/${name}`,
+				root: 0,
+				pathInRoot: name,
+				size: 10,
+				lastModified: WHEN,
+			})),
+		);
+	}
+
+	/** The upload as the hub describes it after its restart: a.jpg placed, b.jpg half there. */
+	function described(transferId: string, extra: Record<string, unknown> = {}) {
+		return {
+			transfer_id: transferId,
+			channel_id: C1,
+			host_id: HOST,
+			dir: "/home/pi",
+			state: "interrupted",
+			updated_at: "2026-11-05T09:00:00.000Z",
+			from_this_device: true,
+			totals: { files: 3, bytes: 30, acked: 15, states: { placed: 1, interrupted: 2 } },
+			items: [
+				{ item_id: 0, rel_path: "photos", kind: "dir", size: null, state: "placed" },
+				{
+					item_id: 1,
+					rel_path: "photos/a.jpg",
+					kind: "file",
+					size: 10,
+					state: "placed",
+					acked: 10,
+				},
+				{
+					item_id: 2,
+					rel_path: "photos/b.jpg",
+					kind: "file",
+					size: 10,
+					state: "interrupted",
+					acked: 5,
+				},
+				{
+					item_id: 3,
+					rel_path: "photos/c.jpg",
+					kind: "file",
+					size: 10,
+					state: "interrupted",
+					acked: 0,
+				},
+			],
+			...extra,
+		};
+	}
+
+	/** The hub: each upload described as given, and listed. */
+	function hubHolds(...bodies: ReturnType<typeof described>[]): void {
+		mocks.hubFetch.mockImplementation(async (url: unknown) => {
+			const path = String(url);
+			const one = /\/api\/transfers\/([0-9A-Z]+)$/.exec(path);
+			if (one !== null) {
+				const body = bodies.find((b) => b.transfer_id === one[1]);
+				return body === undefined
+					? new Response("{}", { status: 404 })
+					: new Response(JSON.stringify(body));
+			}
+			return new Response(JSON.stringify({ transfers: bodies }));
+		});
+	}
+
+	/** STATE_SYNC as a window hears it at its start, listing the interrupted uploads. */
+	async function started(...entries: { id: string; fromThisDevice?: boolean; label?: string }[]) {
+		socket.hear({
+			type: "STATE_SYNC",
+			sessions: [],
+			channels: [],
+			transfers: entries.map((entry) => ({
+				transferId: entry.id,
+				channelId: C1,
+				hostId: HOST,
+				dir: "/home/pi",
+				state: "interrupted",
+				totals: { files: 3, bytes: 30, acked: 15, states: { placed: 1, interrupted: 2 } },
+				updatedAt: "2026-11-05T09:00:00.000Z",
+				fromThisDevice: entry.fromThisDevice ?? true,
+				...(entry.label !== undefined ? { deviceLabel: entry.label } : {}),
+			})),
+		});
+		await flush();
+	}
+
+	const resumes = () => socket.sent.filter((msg) => msg.type === "TRANSFER_RESUME");
+
+	beforeEach(() => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			transfer: { maxConcurrent: 2 },
+			experimental: { fileTransfer: true },
+		};
+	});
+
+	it("lists what the hub reports interrupted, reads its handles, says so once, and resumes nothing by itself", async () => {
+		const photos = photosHandle({}, async () => "granted");
+		keep(T1, photos.handle);
+		hubHolds(described(T1));
+		const show = vi.spyOn(useToastStore(), "show");
+		await started({ id: T1 });
+		expect(transfers().interrupted).toEqual([
+			expect.objectContaining({
+				id: T1,
+				label: "photos/",
+				state: "interrupted",
+				fromThisDevice: true,
+				kept: "kept",
+				resume: null,
+			}),
+		]);
+		expect(show.mock.calls.map((call) => call[1])).toEqual([
+			"1 upload was interrupted: resume it in Transfers",
+		]);
+		await started({ id: T1 });
+		expect(show).toHaveBeenCalledTimes(1);
+		expect(resumes()).toEqual([]);
+		expect(photos.requestPermission).not.toHaveBeenCalled();
+	});
+
+	it("asks access inside the click, never from queryPermission, and sends only what is not placed, from the hub's offsets", async () => {
+		const photos = photosHandle(
+			{
+				"a.jpg": keptFile("a.jpg", 10),
+				"b.jpg": keptFile("b.jpg", 10),
+				"c.jpg": keptFile("c.jpg", 10),
+			},
+			async () => "granted",
+		);
+		keep(T1, photos.handle);
+		hubHolds(described(T1));
+		await started({ id: T1 });
+
+		transfers().resumeUploads([T1]);
+		// Asked before the click's handler returns: its activation is what lets it through.
+		expect(photos.requestPermission).toHaveBeenCalledWith({ mode: "read" });
+		expect(photos.queryPermission).not.toHaveBeenCalled();
+		expect(transfers().interrupted[0]?.resume).toEqual({ phase: "asking" });
+		await flush();
+		expect(resumes()).toEqual([{ type: "TRANSFER_RESUME", transferIds: [T1] }]);
+		expect(transfers().interrupted[0]).toMatchObject({
+			sender: true,
+			resume: { phase: "resuming" },
+		});
+
+		socket.hear({
+			type: "TRANSFER_PROGRESS",
+			transferId: T1,
+			channelId: C1,
+			items: [
+				{ itemId: 2, state: "sending", acked: 5 },
+				{ itemId: 3, state: "sending", acked: 0 },
+			],
+			folders: [],
+			totals: { files: 3, bytes: 30, acked: 15, states: { placed: 1, sending: 2 } },
+		});
+		socket.hear({
+			type: "TRANSFER_STATE",
+			transferId: T1,
+			channelId: C1,
+			hostId: HOST,
+			state: "running",
+		});
+		await flush();
+		expect(puts.map((p) => [p.transferId, p.itemId, p.offset, p.size])).toEqual([
+			[T1, 2, 5, 5],
+			[T1, 3, 0, 10],
+		]);
+		// Running again, it leaves the interrupted ones for its group.
+		expect(transfers().interrupted).toEqual([]);
+		expect(transfers().uploads[0]).toMatchObject({ id: T1, state: "running", resume: null });
+		expect(transfers().report.inProgress).toBe(1);
+	});
+
+	it("asks about a file changed since it was sent, leaves out one gone, and sends the changed one again from the start if asked", async () => {
+		const grown = keptFile("b.jpg", 12, WHEN + 5_000);
+		const photos = photosHandle(
+			{ "a.jpg": keptFile("a.jpg", 10), "b.jpg": grown },
+			async () => "granted",
+		);
+		keep(T1, photos.handle);
+		hubHolds(described(T1));
+		await started({ id: T1 });
+
+		transfers().resumeUploads([T1]);
+		await flush();
+		// Nothing goes before its answer.
+		expect(resumes()).toEqual([]);
+		expect(transfers().interrupted[0]?.resume).toEqual({
+			phase: "changed",
+			files: [
+				{
+					itemId: 2,
+					relPath: "photos/b.jpg",
+					was: { size: 10, lastModified: WHEN },
+					now: { size: 12, lastModified: WHEN + 5_000 },
+					answer: null,
+				},
+			],
+			gone: 1,
+			unreadable: 0,
+		});
+
+		transfers().answerChanged(T1, 2, "restart");
+		expect(resumes()).toEqual([
+			{
+				type: "TRANSFER_RESUME",
+				transferIds: [T1],
+				files: [
+					{ transferId: T1, itemId: 3, action: "skip", why: "gone" },
+					{ transferId: T1, itemId: 2, action: "restart", size: 12, mtime: WHEN + 5_000 },
+				],
+			},
+		]);
+		expect(transfers().interrupted[0]?.items.find((item) => item.itemId === 2)).toMatchObject({
+			size: 12,
+			acked: 0,
+		});
+		expect(transfers().interrupted[0]?.leftOut).toEqual({ gone: 1, unreadable: 0 });
+		socket.hear({
+			type: "TRANSFER_PROGRESS",
+			transferId: T1,
+			channelId: C1,
+			items: [{ itemId: 2, state: "sending", acked: 0 }],
+			folders: [],
+			totals: { files: 3, bytes: 32, acked: 10, states: { placed: 1, sending: 1, skipped: 1 } },
+		});
+		await flush();
+		expect(puts.map((p) => [p.itemId, p.offset, p.size])).toEqual([[2, 0, 12]]);
+	});
+
+	it("leaves a changed file out when told to skip it", async () => {
+		const photos = photosHandle(
+			{
+				"a.jpg": keptFile("a.jpg", 10),
+				"b.jpg": keptFile("b.jpg", 10, WHEN + 1),
+				"c.jpg": keptFile("c.jpg", 9),
+			},
+			async () => "granted",
+		);
+		keep(T1, photos.handle);
+		hubHolds(described(T1));
+		await started({ id: T1 });
+		transfers().resumeUploads([T1]);
+		await flush();
+		expect(resumes()).toEqual([]);
+		transfers().answerChanged(T1, "all", "skip");
+		expect(resumes()[0]).toEqual({
+			type: "TRANSFER_RESUME",
+			transferIds: [T1],
+			files: [
+				{ transferId: T1, itemId: 2, action: "skip", why: "changed" },
+				{ transferId: T1, itemId: 3, action: "skip", why: "changed" },
+			],
+		});
+	});
+
+	it("falls back to a drop, without hanging, when access is refused or never answered", async () => {
+		const refused = photosHandle({}, async () => {
+			throw domError("NotAllowedError");
+		});
+		keep(T1, refused.handle);
+		const silent = photosHandle({}, () => new Promise<string>(() => undefined));
+		keep(T2, silent.handle);
+		hubHolds(described(T1), described(T2));
+		await started({ id: T1 }, { id: T2 });
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			transfers().resumeUploads([T1, T2]);
+			await vi.advanceTimersByTimeAsync(14_000);
+			expect(transfers().interrupted.map((u) => u.resume)).toEqual([
+				{ phase: "redrop", why: "denied" },
+				{ phase: "asking" },
+			]);
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(transfers().interrupted.map((u) => u.resume)).toEqual([
+				{ phase: "redrop", why: "denied" },
+				{ phase: "redrop", why: "timeout" },
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(resumes()).toEqual([]);
+	});
+
+	it("keeps it interrupted, saying why, when the host's passphrase is cancelled; Resume asks again", async () => {
+		const photos = photosHandle(
+			{
+				"a.jpg": keptFile("a.jpg", 10),
+				"b.jpg": keptFile("b.jpg", 10),
+				"c.jpg": keptFile("c.jpg", 10),
+			},
+			async () => "granted",
+		);
+		keep(T1, photos.handle);
+		hubHolds(described(T1));
+		await started({ id: T1 });
+		transfers().resumeUploads([T1]);
+		await flush();
+		expect(resumes()).toHaveLength(1);
+		socket.hear({
+			type: "TRANSFER_STATE",
+			transferId: T1,
+			channelId: C1,
+			hostId: HOST,
+			state: "interrupted",
+			reason: "needs_passphrase",
+		});
+		expect(transfers().interrupted[0]).toMatchObject({
+			id: T1,
+			reason: "needs_passphrase",
+			sender: false,
+			resume: null,
+		});
+		transfers().resumeUploads([T1]);
+		await flush();
+		expect(resumes()).toHaveLength(2);
+		expect(photos.requestPermission).toHaveBeenCalledTimes(2);
+	});
+
+	it("resumes all in one request, so that the hub asks one host at a time", async () => {
+		const files = { "b.jpg": keptFile("b.jpg", 10), "c.jpg": keptFile("c.jpg", 10) };
+		keep(T1, photosHandle(files, async () => "granted").handle);
+		keep(T2, photosHandle(files, async () => "granted").handle);
+		hubHolds(described(T1), described(T2));
+		await started({ id: T1 }, { id: T2 });
+		transfers().resumeUploads([T1, T2]);
+		await flush();
+		expect(resumes()).toEqual([{ type: "TRANSFER_RESUME", transferIds: [T1, T2] }]);
+	});
+
+	it("does not resume another device's upload, nor one whose files were not kept", async () => {
+		hubHolds(
+			described(T1),
+			described(T2, { from_this_device: false, device_label: "Paired from 10.0.0.2" }),
+		);
+		const load = vi.spyOn(handles.store, "load");
+		await started({ id: T1 }, { id: T2, fromThisDevice: false, label: "Paired from 10.0.0.2" });
+		expect(transfers().interrupted).toEqual([
+			expect.objectContaining({ id: T1, fromThisDevice: true, kept: "none" }),
+			expect.objectContaining({
+				id: T2,
+				fromThisDevice: false,
+				deviceLabel: "Paired from 10.0.0.2",
+				kept: "none",
+			}),
+		]);
+		// Only this device holds its files: nothing of the other's is looked for.
+		expect(load.mock.calls.map((call) => call[0])).toEqual([T1]);
+		transfers().resumeUploads([T1, T2]);
+		await flush();
+		expect(resumes()).toEqual([]);
+		expect(transfers().interrupted.map((u) => u.resume)).toEqual([
+			{ phase: "redrop", why: "unsupported" },
+			null,
+		]);
+	});
+
+	it("keeps them on Not now, and Discard lets the handles go once the hub says it discarded them", async () => {
+		keep(T1, photosHandle({}, async () => "granted").handle);
+		hubHolds(described(T1));
+		await started({ id: T1 });
+		transfers().notNow();
+		expect(transfers().interruptedFolded).toBe(true);
+		// Not over: Clear finished keeps it too.
+		transfers().dismissFinished();
+		expect(transfers().interrupted).toHaveLength(1);
+		expect(handles.uploads.has(T1)).toBe(true);
+
+		transfers().discardUploads([T1]);
+		expect(socket.sent.filter((msg) => msg.type === "TRANSFER_DISCARD")).toEqual([
+			{ type: "TRANSFER_DISCARD", transferIds: [T1] },
+		]);
+		expect(transfers().interrupted[0]?.resume).toEqual({ phase: "discarding" });
+		socket.hear({
+			type: "TRANSFER_STATE",
+			transferId: T1,
+			channelId: C1,
+			hostId: HOST,
+			state: "discarded",
+		});
+		await flush();
+		expect(transfers().interrupted).toEqual([]);
+		expect(handles.uploads.has(T1)).toBe(false);
+	});
+
+	it("offers a resume again once a connection lost while it was asked for is back", async () => {
+		const photos = photosHandle(
+			{ "b.jpg": keptFile("b.jpg", 10), "c.jpg": keptFile("c.jpg", 10) },
+			async () => "granted",
+		);
+		keep(T1, photos.handle);
+		hubHolds(described(T1));
+		await started({ id: T1 });
+		transfers().resumeUploads([T1]);
+		await flush();
+		expect(transfers().interrupted[0]?.resume).toMatchObject({ phase: "resuming" });
+		socket.drop();
+		transfers().rejoin();
+		await started({ id: T1 });
+		expect(transfers().interrupted[0]).toMatchObject({ sender: false, resume: null });
+		transfers().resumeUploads([T1]);
+		await flush();
+		expect(resumes()).toHaveLength(2);
+	});
+
+	it("lets go of handles the hub no longer lists once they are 7 days old, and of no other", async () => {
+		const old = WHEN - 8 * 24 * 60 * 60_000;
+		vi.spyOn(Date, "now").mockReturnValue(WHEN);
+		for (const [id, savedAt] of [
+			[T1, old],
+			[T2, old],
+			["01ARZ3NDEKTSV4RRFFQ69G5FT3", WHEN - 60_000],
+		] as const) {
+			keep(id, null);
+			handles.uploads.set(id, { ...(handles.uploads.get(id) as KeptUpload), savedAt });
+		}
+		// The hub still holds T1; T2 and the young one it no longer lists.
+		hubHolds(described(T1));
+		await started({ id: T1 });
+		expect([...handles.uploads.keys()].sort()).toEqual([T1, "01ARZ3NDEKTSV4RRFFQ69G5FT3"].sort());
+	});
+});

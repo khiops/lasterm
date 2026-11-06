@@ -127,26 +127,28 @@ export function registerTransferRoutes(server: FastifyInstance, deps: TransferRo
 		async (request, reply) => {
 			if (!deps.enabled()) return disabled(reply);
 			const channelId = request.query.channel_id;
+			// Each says whether it is from the asking window's device, which alone may resume it (#837).
+			const viewer = request.authTokenRecord?.id ?? null;
 			// Without one, every upload the hub holds: a window offering to resume
 			// what a restart interrupted reads them all (#860).
 			if (channelId === undefined) {
 				return reply
 					.header("Cache-Control", "no-store")
-					.send({ transfers: deps.transfers.listFor() });
+					.send({ transfers: deps.transfers.listFor(undefined, viewer) });
 			}
 			if (!isValidUlid(channelId)) {
 				return refuse(reply, 400, "VALIDATION_ERROR", "channel_id must be a terminal's id");
 			}
 			return reply
 				.header("Cache-Control", "no-store")
-				.send({ transfers: deps.transfers.listFor(channelId) });
+				.send({ transfers: deps.transfers.listFor(channelId, viewer) });
 		},
 	);
 
 	server.get<{ Params: { id: string } }>("/api/transfers/:id", async (request, reply) => {
 		if (!deps.enabled()) return disabled(reply);
 		const found = isValidUlid(request.params.id)
-			? deps.transfers.describe(request.params.id)
+			? deps.transfers.describe(request.params.id, request.authTokenRecord?.id ?? null)
 			: null;
 		if (found === null) return refuse(reply, 404, "TRANSFER_NOT_FOUND", "No upload has that id");
 		return reply.header("Cache-Control", "no-store").send(found);

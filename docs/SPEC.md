@@ -503,7 +503,23 @@ closing a pane or a tab, or the terminal ending, stops none of them.
   go to IndexedDB (`lasterm-transfers`): `uploads` keyed by the upload (host, terminal, destination,
   and its roots, one directory handle for a dropped folder), `items` keyed by `[upload, item]` (relative
   path, root, path under it, size and `lastModified` when sent). They go once everything is placed or
-  skipped, or the upload is dismissed. The resume after a restart that reads them is to come.
+  skipped, the upload is dismissed or discarded, or, for one the hub no longer lists, 7 days after it
+  started.
+- **Resuming after a crash or a restart** (`utils/upload-resume.ts`, `InterruptedUploads.vue`). The
+  interrupted uploads STATE_SYNC lists are offered above the groups, under "Interrupted uploads",
+  with **Resume all**, **Not now** (the block folded into "4 interrupted uploads · kept until 12 Nov
+  · Resume" until the next start) and **Discard all**, and per upload its host, destination, what
+  was placed, Resume and Discard. Nothing resumes by itself. Resume is the click: it calls
+  `requestPermission({ mode: "read" })` on every kept root before anything is awaited, never deciding
+  from `queryPermission`, and waits for the answer at most 15 s; refused or unanswered, the row says
+  "Drop the files again to finish" (a re-drop joins the upload). Granted, every file not placed is
+  read again and compared with its kept size and `lastModified`: one gone, or unreadable, is left out
+  and said; one that changed waits for "Send again from the start" or "Skip". Then one
+  TRANSFER_RESUME for all of them names those files (`files`), and the hub reaches their hosts one
+  at a time, asking a passphrase or a host key in this window; a question cancelled leaves the row
+  "Not resumed: AD needs its passphrase", with its Resume. Another device's upload says
+  "Interrupted · resumable from the device paired from …", with Discard only; one whose files were
+  not kept says "Can't be resumed after a restart: drop it again". Readers see the rows only.
 - **The Transfers part, its rows.** Every row names its host. One group per host, one sub-group per
   terminal when several sent there; the focused terminal's group first and expanded ("this terminal"),
   the others collapsed to one line in words ("AD · 1 failed", "raspberrypi · 2 running, 64 %",

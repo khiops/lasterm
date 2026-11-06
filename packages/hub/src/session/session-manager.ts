@@ -228,8 +228,11 @@ export interface HostTransfers {
 	hostConnected?(hostId: string): void;
 	/** Write to meta.db what the uploads hold, before the agents stop: the hub quits (#860). */
 	saveNow?(): void;
-	/** The interrupted uploads, for STATE_SYNC (#860). */
-	interruptedUploads?(): TransferSyncEntry[];
+	/**
+	 * The interrupted uploads, for STATE_SYNC (#860), as a window of `viewerTokenId` reads them:
+	 * whether each is from its device (#837).
+	 */
+	interruptedUploads?(viewerTokenId?: string | null): TransferSyncEntry[];
 }
 
 /** What came of DELETE /api/sessions/:id. */
@@ -714,10 +717,11 @@ export class SessionManager {
 
 	// ─── State broadcast ──────────────────────────────────────────────────────
 
-	getStateSnapshot(): StateSyncMessage {
+	/** STATE_SYNC, for a window of `viewerTokenId`: the uploads say whether they are from its device. */
+	getStateSnapshot(viewerTokenId: string | null = null): StateSyncMessage {
 		const snapshot = this.broadcaster.getStateSnapshot();
 		// What a restart, a window that left or a closed connection interrupted (#860).
-		const transfers = this.transfers?.interruptedUploads?.() ?? [];
+		const transfers = this.transfers?.interruptedUploads?.(viewerTokenId) ?? [];
 		return transfers.length > 0 ? { ...snapshot, transfers } : snapshot;
 	}
 

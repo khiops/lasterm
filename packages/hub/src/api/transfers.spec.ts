@@ -224,12 +224,26 @@ describe("uploads over the hub's WebSocket and REST routes (#833)", () => {
 				dir: h.dest,
 				state: "interrupted",
 				totals: expect.objectContaining({ files: 1, acked: chunk }),
+				// Listed for the window's own credential: it holds the files (#837).
+				fromThisDevice: true,
 			}),
 		]);
 		const listed = await h.server.inject({ method: "GET", url: "/api/transfers", headers: bearer });
 		expect(listed.json()).toEqual({
-			transfers: [expect.objectContaining({ transfer_id: transferId, state: "interrupted" })],
+			transfers: [
+				expect.objectContaining({
+					transfer_id: transferId,
+					state: "interrupted",
+					from_this_device: true,
+				}),
+			],
 		});
+		const described = await h.server.inject({
+			method: "GET",
+			url: `/api/transfers/${transferId}`,
+			headers: bearer,
+		});
+		expect(described.json()).toMatchObject({ transfer_id: transferId, from_this_device: true });
 
 		send(again.socket, { type: "TRANSFER_RESUME", transferIds: [transferId] });
 		await heard(

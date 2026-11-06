@@ -5,6 +5,8 @@ import {
 	type HostOs,
 	type ProtocolMessage,
 	planProfileWrite,
+	TRANSFER_EXPIRY_MS,
+	TRANSFER_MAX_FILES,
 	type TransferAcceptedMessage,
 	type TransferConflictAction,
 	type TransferConflictMessage,
@@ -13,9 +15,13 @@ import {
 	type TransferErrorMessage,
 	type TransferExisting,
 	type TransferItemState,
+	type TransferNotResumedReason,
 	type TransferOnConflict,
 	type TransferProgressMessage,
+	type TransferResumeFile,
 	type TransferScope,
+	type TransferStateMessage,
+	type TransferSyncEntry,
 	type TransferTotals,
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
@@ -32,9 +38,13 @@ import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
 import { isTauriRuntime } from "../utils/tauri-runtime.js";
 import {
+	type ChangedFileView,
 	type ConflictScope,
 	conflictScopePlan,
 	isActive,
+	isOver,
+	type LeftOut,
+	type ResumeState,
 	type UploadCounts,
 	type UploadItemView,
 	type UploadsReport,
@@ -51,8 +61,20 @@ import {
 	windowsNameProblems,
 	withoutPaths,
 } from "../utils/upload-drop.js";
-import { defaultHandleStore, type HandleStore, keptRecords } from "../utils/upload-handles.js";
+import {
+	defaultHandleStore,
+	type HandleStore,
+	type KeptItem,
+	type KeptUpload,
+	keptRecords,
+} from "../utils/upload-handles.js";
 import { pickFiles, pickFolder } from "../utils/upload-pick.js";
+import {
+	type AccessOutcome,
+	askReadAccess,
+	type FilesFound,
+	findKeptFiles,
+} from "../utils/upload-resume.js";
 import { type ChunkAnswer, putChunk, sendFileBytes } from "../utils/upload-send.js";
 import { createUnloadGuard, type UnloadGuard } from "../utils/upload-unload.js";
 import {
@@ -162,6 +184,47 @@ interface UploadRecord extends UploadView {
 	/** item id → index in `items`. */
 	index: Map<number, number>;
 	samples: { at: number; acked: number }[];
+	state: "running" | "interrupted" | "done";
+	reason: TransferNotResumedReason | undefined;
+	fromThisDevice: boolean;
+	deviceLabel: string | undefined;
+	updatedAt: string | null;
+	kept: "reading" | "kept" | "none";
+	resume: ResumeState | null;
+	leftOut: LeftOut | null;
+}
+
+/** What a new record starts with, of what says it is interrupted and how it resumes. */
+const RUNNING_HERE = {
+	state: "running",
+	reason: undefined,
+	fromThisDevice: true,
+	deviceLabel: undefined,
+	updatedAt: null,
+	kept: "none",
+	resume: null,
+	leftOut: null,
+} as const satisfies Partial<UploadRecord>;
+
+/** The upload's own state in a summary the hub gave, running when it says none. */
+function uploadStateOf(value: unknown): UploadRecord["state"] {
+	return value === "interrupted" || value === "done" ? value : "running";
+}
+
+const NOT_RESUMED: ReadonlySet<unknown> = new Set<TransferNotResumedReason>([
+	"needs_passphrase",
+	"needs_password",
+	"host_key_not_accepted",
+	"host_unreachable",
+]);
+
+function reasonOf(value: unknown): TransferNotResumedReason | undefined {
+	return NOT_RESUMED.has(value) ? (value as TransferNotResumedReason) : undefined;
+}
+
+/** A resume's work on one upload: what it found of its files, waiting to be sent or answered. */
+interface ResumeWork {
+	readonly found: FilesFound;
 }
 
 function totalsOf(wire: TransferTotals): UploadCounts {
@@ -256,6 +319,12 @@ export const useTransfersStore = defineStore("transfers", () => {
 	>();
 	/** Uploads to join again once the connection is back. */
 	const rejoining = new Set<string>();
+	/** Those whose joining TRANSFER_START waits for its answer: not offered for a resume meanwhile. */
+	const rejoinInFlight = new Set<string>();
+	/** The handles IndexedDB kept of each interrupted upload of this device, read for its Resume. */
+	const keptHandles = new Map<string, { upload: KeptUpload; items: KeptItem[] }>();
+	/** What a resume found of an upload's files, while a changed file waits for its answer. */
+	const resumeWork = new Map<string, ResumeWork>();
 	let seq = 0;
 
 	const uploads = computed<readonly UploadView[]>(() => records.value);
@@ -283,10 +352,12 @@ export const useTransfersStore = defineStore("transfers", () => {
 	}
 
 	function addRecord(
-		record: Omit<UploadRecord, "index" | "samples" | "seq" | "rate">,
+		record: Omit<UploadRecord, "index" | "samples" | "seq" | "rate" | keyof typeof RUNNING_HERE> &
+			Partial<Pick<UploadRecord, keyof typeof RUNNING_HERE>>,
 		keepSeq?: number,
 	): UploadRecord {
 		const full: UploadRecord = {
+			...RUNNING_HERE,
 			...record,
 			seq: keepSeq ?? ++seq,
 			rate: 0,
@@ -302,20 +373,20 @@ export const useTransfersStore = defineStore("transfers", () => {
 		records.value = records.value.filter((record) => record.id !== transferId);
 		sources.delete(transferId);
 		plans.delete(transferId);
+		keptHandles.delete(transferId);
+		resumeWork.delete(transferId);
 		void handleStore()
 			.remove(transferId)
 			.catch(() => undefined);
 	}
 
-	/** Every upload that is over: placed, skipped, nothing failed or waiting. */
+	/**
+	 * Every upload that is over: placed, skipped, nothing failed, waiting or interrupted. An
+	 * interrupted one keeps its handles for a resume: it is resumed or discarded instead (#837).
+	 */
 	function dismissFinished(): void {
 		for (const record of [...records.value]) {
-			if (
-				!isActive(record.totals) &&
-				(record.totals.states.failed ?? 0) + (record.totals.states.conflict ?? 0) === 0
-			) {
-				dismiss(record.id);
-			}
+			if (isOver(record)) dismiss(record.id);
 		}
 	}
 
@@ -347,6 +418,16 @@ export const useTransfersStore = defineStore("transfers", () => {
 		}
 		if (msg.transferId !== undefined) {
 			const record = recordOf(msg.transferId);
+			if (record !== undefined && record.resume !== null) {
+				// A resume or a discard refused: the row is back to what it was, with its Resume.
+				if (record.resume.phase === "resuming") stopSending(record);
+				record.resume = null;
+			}
+			if (record !== undefined && msg.code === "TRANSFER_NOT_FOUND") {
+				// The hub no longer has it (discarded elsewhere, or expired): nothing is left to show.
+				dismiss(record.id);
+				return;
+			}
 			const toast = useToastStore();
 			toast.show(
 				"error",
@@ -427,6 +508,142 @@ export const useTransfersStore = defineStore("transfers", () => {
 		}
 	}
 
+	/** This window no longer sends the upload: what it read of its files goes. */
+	function stopSending(record: UploadRecord): void {
+		record.sender = false;
+		sources.delete(record.id);
+	}
+
+	/**
+	 * TRANSFER_STATE (#860): the upload as a whole is running, interrupted (with why, after a resume
+	 * that could not reach its host), done, or discarded.
+	 */
+	function onState(msg: TransferStateMessage): void {
+		const record = recordOf(msg.transferId);
+		if (record === undefined) {
+			if (msg.state !== "discarded") void adopt(msg.transferId);
+			return;
+		}
+		if (msg.state === "discarded") {
+			// Its temporaries are removed at its host: its handles go here.
+			dismiss(record.id);
+			return;
+		}
+		record.state = msg.state;
+		record.reason = msg.state === "interrupted" ? msg.reason : undefined;
+		if (msg.state === "interrupted") {
+			// No window sends it: not this one either, whatever it was doing.
+			stopSending(record);
+			if (record.resume?.phase === "resuming") record.resume = null;
+			record.updatedAt = new Date().toISOString();
+			noteInterrupted(record);
+		} else if (record.resume?.phase === "resuming") {
+			record.resume = null;
+		}
+	}
+
+	/**
+	 * The interrupted uploads STATE_SYNC lists (#860), at each connection: a restart's, those a
+	 * window left. Each is read whole, and its handles looked for when it is this device's.
+	 */
+	function takeInterrupted(entries: readonly TransferSyncEntry[] | undefined): void {
+		const listed = entries ?? [];
+		let ours = 0;
+		for (const entry of listed) {
+			if (entry.fromThisDevice) ours++;
+			const record = recordOf(entry.transferId);
+			if (record === undefined) {
+				void adopt(entry.transferId);
+				continue;
+			}
+			// This window still holds its files: it joins it again by itself (`rejoin`).
+			if (record.sender || rejoining.has(record.id) || rejoinInFlight.has(record.id)) continue;
+			record.state = "interrupted";
+			record.reason = entry.reason;
+			record.fromThisDevice = entry.fromThisDevice === true;
+			record.deviceLabel = entry.deviceLabel;
+			record.updatedAt = entry.updatedAt;
+			record.totals = totalsOf(entry.totals);
+			noteInterrupted(record);
+		}
+		// Said once a page, the first time: the next start asks again.
+		if (!interruptedSaid && ours > 0) {
+			interruptedSaid = true;
+			useToastStore().show(
+				"info",
+				`${plural(ours, "upload")} ${ours === 1 ? "was" : "were"} interrupted: resume ${ours === 1 ? "it" : "them"} in Transfers`,
+				8_000,
+				{ label: "Show", run: () => showTransfers(null) },
+			);
+		}
+		if (entries !== undefined || useConfigStore().fileTransferEnabled) void forgetStaleHandles();
+	}
+
+	let interruptedSaid = false;
+
+	/** An interrupted upload of this device: its handles are read, for its Resume. */
+	function noteInterrupted(record: UploadRecord): void {
+		if (!record.fromThisDevice || record.kept !== "none" || keptHandles.has(record.id)) {
+			if (keptHandles.has(record.id)) record.kept = "kept";
+			return;
+		}
+		record.kept = "reading";
+		void handleStore()
+			.load(record.id)
+			.then(
+				(found) => {
+					const now = recordOf(record.id);
+					if (now === undefined) return;
+					if (found !== null && found.upload.roots.length > 0) {
+						keptHandles.set(record.id, found);
+						now.kept = "kept";
+					} else {
+						now.kept = "none";
+					}
+				},
+				() => {
+					const now = recordOf(record.id);
+					if (now !== undefined) now.kept = "none";
+				},
+			);
+	}
+
+	let forgetting = false;
+
+	/**
+	 * The handles kept for uploads nobody can resume any more: the hub does not list them, and they
+	 * were started over 7 days ago, past the hub's own expiry (discarded by another window, done in
+	 * one that was closed, expired). A younger one is left alone: this window may be driving
+	 * another hub than the one it started on.
+	 */
+	async function forgetStaleHandles(): Promise<void> {
+		if (forgetting) return;
+		forgetting = true;
+		try {
+			const now = Date.now();
+			const old = (await handleStore().list()).filter(
+				(upload) => now - upload.savedAt >= TRANSFER_EXPIRY_MS,
+			);
+			// Nothing that old: the hub need not be asked.
+			if (old.length === 0) return;
+			const body = (await readJson("/api/transfers")) as {
+				transfers?: { transfer_id?: unknown }[];
+			} | null;
+			if (body === null || !Array.isArray(body.transfers)) return;
+			const known = new Set(body.transfers.map((transfer) => transfer.transfer_id));
+			for (const upload of old) {
+				if (known.has(upload.transferId)) continue;
+				if (recordOf(upload.transferId)?.sender === true) continue;
+				keptHandles.delete(upload.transferId);
+				await handleStore().remove(upload.transferId);
+			}
+		} catch {
+			// Looked at again at the next connection.
+		} finally {
+			forgetting = false;
+		}
+	}
+
 	/** A failure is always said, once per file, whether or not the panel shows it. */
 	function sayFailed(record: UploadRecord, items: readonly UploadItemView[]): void {
 		const fresh = items.filter((item) => !failedSaid.has(`${record.id}:${item.itemId}`));
@@ -481,6 +698,14 @@ export const useTransfersStore = defineStore("transfers", () => {
 		client.on("TRANSFER_DONE", (msg) => {
 			if (msg.type === "TRANSFER_DONE") onDone(msg);
 		});
+		client.on("TRANSFER_STATE", (msg) => {
+			if (msg.type === "TRANSFER_STATE") onState(msg);
+		});
+		// What a restart, or a window that left, interrupted: offered for a resume (#837). The hub
+		// lists them only while `[experimental] file_transfer` is on.
+		client.on("STATE_SYNC", (msg) => {
+			if (msg.type === "STATE_SYNC") takeInterrupted(msg.transfers);
+		});
 		client.onDisconnect(() => {
 			// A start waiting for its answer has none to come on this socket.
 			for (const [requestId, answer] of [...answers]) {
@@ -496,6 +721,11 @@ export const useTransfersStore = defineStore("transfers", () => {
 			for (const record of records.value) {
 				if (record.sender && isActive(record.totals)) rejoining.add(record.id);
 				record.sender = false;
+				// A resume or a discard the hub was to answer has no answer to come on this socket:
+				// the next connection's STATE_SYNC says where it is.
+				if (record.resume?.phase === "resuming" || record.resume?.phase === "discarding") {
+					record.resume = null;
+				}
 			}
 			sources.clear();
 		});
@@ -514,35 +744,46 @@ export const useTransfersStore = defineStore("transfers", () => {
 		return response.json();
 	}
 
+	/** One upload as the hub describes it (`GET /api/transfers/:id`); null when it does not. */
+	async function describe(transferId: string): Promise<Record<string, unknown> | null> {
+		return (await readJson(`/api/transfers/${encodeURIComponent(transferId)}`)) as Record<
+			string,
+			unknown
+		> | null;
+	}
+
+	/** The items of an upload as the hub describes them. */
+	function itemViewsOf(body: Record<string, unknown>): UploadItemView[] {
+		const items = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
+		return items.map((raw) => ({
+			itemId: Number(raw.item_id),
+			relPath: String(raw.rel_path ?? ""),
+			kind: raw.kind === "dir" ? "dir" : "file",
+			size: typeof raw.size === "number" ? raw.size : 0,
+			state: String(raw.state) as TransferItemState,
+			acked: typeof raw.acked === "number" ? raw.acked : 0,
+			outcome:
+				typeof raw.outcome === "string" ? (raw.outcome as UploadItemView["outcome"]) : undefined,
+			finalName: typeof raw.final_name === "string" ? raw.final_name : undefined,
+			reason: typeof raw.reason === "string" ? raw.reason : undefined,
+			code: typeof raw.code === "string" ? raw.code : undefined,
+			existing: (raw.existing as TransferExisting | null | undefined) ?? undefined,
+			typeClash: raw.type_clash === true,
+		}));
+	}
+
 	/** An upload heard of for the first time: read it whole, as a reader follows it. */
 	async function adopt(transferId: string): Promise<void> {
 		if (adopting.has(transferId) || recordOf(transferId) !== undefined) return;
 		adopting.add(transferId);
 		try {
-			const body = (await readJson(`/api/transfers/${encodeURIComponent(transferId)}`)) as Record<
-				string,
-				unknown
-			> | null;
+			const body = await describe(transferId);
 			if (body === null || recordOf(transferId) !== undefined) return;
-			const items = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
-			const views: UploadItemView[] = items.map((raw) => ({
-				itemId: Number(raw.item_id),
-				relPath: String(raw.rel_path ?? ""),
-				kind: raw.kind === "dir" ? "dir" : "file",
-				size: typeof raw.size === "number" ? raw.size : 0,
-				state: String(raw.state) as TransferItemState,
-				acked: typeof raw.acked === "number" ? raw.acked : 0,
-				outcome:
-					typeof raw.outcome === "string" ? (raw.outcome as UploadItemView["outcome"]) : undefined,
-				finalName: typeof raw.final_name === "string" ? raw.final_name : undefined,
-				reason: typeof raw.reason === "string" ? raw.reason : undefined,
-				code: typeof raw.code === "string" ? raw.code : undefined,
-				existing: (raw.existing as TransferExisting | null | undefined) ?? undefined,
-				typeClash: raw.type_clash === true,
-			}));
+			const views = itemViewsOf(body);
 			const rootNames = views.filter((item) => !item.relPath.includes("/"));
 			const totals = body.totals as TransferTotals | undefined;
-			addRecord({
+			const state = uploadStateOf(body.state);
+			const record = addRecord({
 				id: transferId,
 				hostId: String(body.host_id ?? ""),
 				channelId: String(body.channel_id ?? ""),
@@ -559,7 +800,13 @@ export const useTransfersStore = defineStore("transfers", () => {
 				folderConflicts: [],
 				totals: totals === undefined ? countFrom(views) : totalsOf(totals),
 				done: body.state === "done",
+				state,
+				reason: reasonOf(body.reason),
+				fromThisDevice: body.from_this_device === true,
+				deviceLabel: typeof body.device_label === "string" ? body.device_label : undefined,
+				updatedAt: typeof body.updated_at === "string" ? body.updated_at : null,
 			});
+			if (state === "interrupted") noteInterrupted(record);
 		} catch {
 			// Read again at the next message about it.
 		} finally {
@@ -715,10 +962,24 @@ export const useTransfersStore = defineStore("transfers", () => {
 			rejoining.delete(transferId);
 			const plan = plans.get(transferId);
 			const record = recordOf(transferId);
-			if (plan === undefined || record === undefined) continue;
+			if (record === undefined) continue;
+			if (plan === undefined) {
+				// A resumed one: no drop to start again, its handles resume it, on a click.
+				record.state = "interrupted";
+				noteInterrupted(record);
+				continue;
+			}
+			rejoinInFlight.add(transferId);
 			void start({ ...plan.target, dir: record.dir }, plan.roots, plan.items).then((refused) => {
-				if (typeof refused !== "string")
-					useToastStore().show("error", `${record.label}: ${refused.message}`, 10_000);
+				rejoinInFlight.delete(transferId);
+				if (typeof refused === "string") return;
+				useToastStore().show("error", `${record.label}: ${refused.message}`, 10_000);
+				// Not joined: it waits among the interrupted uploads, for a resume or a drop.
+				const now = recordOf(transferId);
+				if (now !== undefined && !now.sender) {
+					now.state = "interrupted";
+					noteInterrupted(now);
+				}
 			});
 		}
 	}
@@ -766,6 +1027,257 @@ export const useTransfersStore = defineStore("transfers", () => {
 		}
 		send({ type: "TRANSFER_RESOLVE", transferId, scope, action });
 		return saved;
+	}
+
+	// ─── Interrupted uploads: Resume, Not now, Discard (#837) ────────────
+
+	/**
+	 * The uploads the hub holds as interrupted (a restart's, a crash's, a window's that left), in the
+	 * order this window heard of them: offered for a resume or a discard. Nothing resumes by itself.
+	 */
+	const interrupted = computed<readonly UploadView[]>(() =>
+		records.value.filter((record) => record.state === "interrupted"),
+	);
+
+	/** Not now: the block folded into one line, until the next start asks again. */
+	const interruptedFolded = ref(false);
+
+	function notNow(): void {
+		interruptedFolded.value = true;
+	}
+
+	function showInterrupted(): void {
+		interruptedFolded.value = false;
+	}
+
+	/**
+	 * Resume: **called from the click**, whose activation `requestPermission` needs. Read access to
+	 * each upload's kept files is asked at once, before anything is awaited. Granted, each file not
+	 * placed is read again and checked against what was sent, and the hub is asked to resume them
+	 * all in one TRANSFER_RESUME: it reaches their hosts one at a time, a passphrase or a host key
+	 * asked in this window when one needs it. An upload with a file that changed waits for its
+	 * answer first; one whose files cannot be read again says to drop them again.
+	 */
+	function resumeUploads(transferIds: readonly string[]): void {
+		const asked: Promise<string | null>[] = [];
+		for (const transferId of transferIds) {
+			const record = recordOf(transferId);
+			if (record === undefined || record.state !== "interrupted" || !record.fromThisDevice)
+				continue;
+			// One under way goes on; one that fell back to a drop may be asked again.
+			if (record.resume !== null && record.resume.phase !== "redrop") continue;
+			const held = keptHandles.get(transferId);
+			if (held === undefined) {
+				// Still being read, it is offered once read; otherwise nothing was kept to read.
+				if (record.kept !== "reading") record.resume = { phase: "redrop", why: "unsupported" };
+				continue;
+			}
+			const access = askReadAccess(held.upload.roots);
+			record.resume = { phase: "asking" };
+			asked.push(prepareResume(transferId, held, access));
+		}
+		if (asked.length === 0) return;
+		void Promise.all(asked).then((ready) =>
+			sendResume(ready.filter((id): id is string => id !== null)),
+		);
+	}
+
+	/** Whether the record is still there, at the phase it was left at. */
+	function stillAt(transferId: string, phase: ResumeState["phase"]): UploadRecord | null {
+		const record = recordOf(transferId);
+		return record !== undefined && record.resume?.phase === phase ? record : null;
+	}
+
+	/**
+	 * Once read access is answered: what the hub holds of the upload now, and each of its files
+	 * read again. Resolves with the upload's id when it can be resumed without a question.
+	 */
+	async function prepareResume(
+		transferId: string,
+		held: { upload: KeptUpload; items: KeptItem[] },
+		access: Promise<AccessOutcome>,
+	): Promise<string | null> {
+		const outcome = await access;
+		let record = stillAt(transferId, "asking");
+		if (record === null) return null;
+		if (outcome !== "granted") {
+			record.resume = { phase: "redrop", why: outcome };
+			return null;
+		}
+		record.resume = { phase: "checking" };
+		const body = await describe(transferId).catch(() => null);
+		record = stillAt(transferId, "checking");
+		if (record === null) return null;
+		if (body === null) {
+			record.resume = null;
+			useToastStore().show("error", `${record.label}: the hub could not say where it is`, 8_000);
+			return null;
+		}
+		refreshFrom(record, body);
+		const open = record.items
+			.filter((item) => item.kind === "file" && item.state !== "placed" && item.state !== "skipped")
+			.map((item) => item.itemId);
+		const found = await findKeptFiles(held, open);
+		record = stillAt(transferId, "checking");
+		if (record === null) return null;
+		if (found.unknown.length > 0) {
+			// Some of it came without a handle: only a drop gives those files again.
+			record.resume = { phase: "redrop", why: "unknown" };
+			return null;
+		}
+		resumeWork.set(transferId, { found });
+		if (found.changed.length === 0) return transferId;
+		record.resume = {
+			phase: "changed",
+			files: found.changed.map((file) => ({
+				itemId: file.itemId,
+				relPath: file.relPath,
+				was: file.was,
+				now: { size: file.file.size, lastModified: file.file.lastModified },
+				answer: null,
+			})),
+			gone: found.gone.length,
+			unreadable: found.unreadable.length,
+		};
+		return null;
+	}
+
+	/** What the hub describes of an upload, over what this window held of it. */
+	function refreshFrom(record: UploadRecord, body: Record<string, unknown>): void {
+		const views = itemViewsOf(body);
+		record.items = views;
+		record.index = new Map(views.map((item, i) => [item.itemId, i]));
+		const totals = body.totals as TransferTotals | undefined;
+		record.totals = totals === undefined ? countFrom(views) : totalsOf(totals);
+		record.reason = reasonOf(body.reason);
+	}
+
+	/**
+	 * A changed file's answer: send it again from the start, as it is now, or leave it out; for
+	 * one file, or for every one of the upload. The last answer resumes the upload.
+	 */
+	function answerChanged(
+		transferId: string,
+		itemId: number | "all",
+		answer: "restart" | "skip",
+	): void {
+		const record = stillAt(transferId, "changed");
+		if (record === null || record.resume?.phase !== "changed") return;
+		const files: ChangedFileView[] = record.resume.files.map((file) =>
+			itemId === "all" || file.itemId === itemId ? { ...file, answer } : file,
+		);
+		record.resume = { ...record.resume, files };
+		if (files.every((file) => file.answer !== null)) sendResume([transferId]);
+	}
+
+	/** Leave a resume that waits for answers: the upload stays interrupted, its Resume there. */
+	function cancelResume(transferId: string): void {
+		const record = recordOf(transferId);
+		if (record === undefined || record.resume === null || record.resume.phase === "resuming")
+			return;
+		record.resume = null;
+		resumeWork.delete(transferId);
+	}
+
+	/**
+	 * TRANSFER_RESUME for the uploads ready: what the window found of their files said with it
+	 * (gone and unreadable ones left out, changed ones as answered), and their files read again
+	 * from now on, each from where the hub says its host's bytes end.
+	 */
+	function sendResume(transferIds: readonly string[]): void {
+		const batches: { ids: string[]; files: TransferResumeFile[] }[] = [];
+		let batch: { ids: string[]; files: TransferResumeFile[] } = { ids: [], files: [] };
+		for (const transferId of transferIds) {
+			const record = recordOf(transferId);
+			const work = resumeWork.get(transferId);
+			if (record === undefined || work === undefined) continue;
+			resumeWork.delete(transferId);
+			const answers = record.resume?.phase === "changed" ? record.resume.files : [];
+			const reading = new Map<number, FileSource>();
+			const files: TransferResumeFile[] = [];
+			for (const { itemId, file } of work.found.same) {
+				reading.set(itemId, { root: 0, pathInRoot: "", file });
+			}
+			for (const itemId of work.found.gone) {
+				files.push({ transferId, itemId, action: "skip", why: "gone" });
+			}
+			for (const itemId of work.found.unreadable) {
+				files.push({ transferId, itemId, action: "skip", why: "unreadable" });
+			}
+			for (const changed of work.found.changed) {
+				const answer = answers.find((file) => file.itemId === changed.itemId)?.answer;
+				if (answer !== "restart") {
+					files.push({ transferId, itemId: changed.itemId, action: "skip", why: "changed" });
+					continue;
+				}
+				const { size, lastModified } = changed.file;
+				files.push({
+					transferId,
+					itemId: changed.itemId,
+					action: "restart",
+					size,
+					mtime: lastModified,
+				});
+				reading.set(changed.itemId, { root: 0, pathInRoot: "", file: changed.file });
+				setItem(record, changed.itemId, { size, acked: 0, mtime: lastModified });
+			}
+			sources.set(transferId, reading);
+			for (const key of [...parked]) if (key.startsWith(`${transferId}:`)) parked.delete(key);
+			for (const key of [...failedSaid])
+				if (key.startsWith(`${transferId}:`)) failedSaid.delete(key);
+			record.sender = true;
+			record.leftOut =
+				work.found.gone.length + work.found.unreadable.length > 0
+					? { gone: work.found.gone.length, unreadable: work.found.unreadable.length }
+					: null;
+			record.resume = {
+				phase: "resuming",
+				gone: work.found.gone.length,
+				unreadable: work.found.unreadable.length,
+			};
+			// One message for all, so that the hub asks one host at a time; within its bounds.
+			if (batch.ids.length > 0 && batch.files.length + files.length > TRANSFER_MAX_FILES) {
+				batches.push(batch);
+				batch = { ids: [], files: [] };
+			}
+			batch.ids.push(transferId);
+			batch.files.push(...files);
+		}
+		if (batch.ids.length > 0) batches.push(batch);
+		for (const { ids, files } of batches) {
+			const sent = send({
+				type: "TRANSFER_RESUME",
+				transferIds: ids,
+				...(files.length > 0 ? { files } : {}),
+			});
+			if (sent) continue;
+			for (const transferId of ids) {
+				const record = recordOf(transferId);
+				if (record === undefined) continue;
+				stopSending(record);
+				record.resume = null;
+			}
+			useToastStore().show("error", "Not resumed: not connected to the hub", 8_000);
+		}
+	}
+
+	/** Discard: TRANSFER_DISCARD; the hub removes their temporaries, and says each discarded. */
+	function discardUploads(transferIds: readonly string[]): void {
+		const ids = transferIds.filter((transferId) => {
+			const record = recordOf(transferId);
+			return record !== undefined && record.resume?.phase !== "resuming";
+		});
+		if (ids.length === 0) return;
+		if (!send({ type: "TRANSFER_DISCARD", transferIds: ids })) {
+			useToastStore().show("error", "Nothing was discarded: not connected to the hub", 8_000);
+			return;
+		}
+		for (const transferId of ids) {
+			const record = recordOf(transferId);
+			if (record === undefined) continue;
+			resumeWork.delete(transferId);
+			record.resume = { phase: "discarding" };
+		}
 	}
 
 	// ─── Starting: walk, confirm, start ──────────────────────────────────
@@ -1023,8 +1535,10 @@ export const useTransfersStore = defineStore("transfers", () => {
 		const existing = recordOf(msg.transferId);
 		if (existing !== undefined) {
 			// A re-drop, or this window again after its connection came back, joined an upload it
-			// lists already: it sends it now, in the same place in the list.
+			// lists already: it sends it now, in the same place in the list, from what was dropped.
 			records.value = records.value.filter((record) => record.id !== msg.transferId);
+			keptHandles.delete(msg.transferId);
+			resumeWork.delete(msg.transferId);
 		}
 		const record = addRecord(
 			{
@@ -1284,5 +1798,13 @@ export const useTransfersStore = defineStore("transfers", () => {
 		startWindowGuards,
 		rejoin,
 		pump,
+		interrupted,
+		interruptedFolded,
+		notNow,
+		showInterrupted,
+		resumeUploads,
+		answerChanged,
+		cancelResume,
+		discardUploads,
 	};
 });

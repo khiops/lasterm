@@ -458,6 +458,155 @@ describe("resuming through the interactive Connect", () => {
 	});
 });
 
+describe("what the resuming window found of its files (#837)", () => {
+	/** An upload the window left, one file of it partly sent. */
+	async function leftUpload(s: Service, h: UploadHarness): Promise<string> {
+		const data = content("x", 200_000);
+		const { transferId } = await startUpload(s, h.dir, [file("x.bin", data)]);
+		await sendPart(s, transferId, "x.bin", data, 100_000);
+		s.service.clientGone(WRITER.clientId);
+		await waitState(s, transferId, "x.bin", "interrupted");
+		return transferId;
+	}
+
+	it("leaves out a file gone from the device, sends one that changed again from its first byte as it is now, and the rest from where the host's bytes end", async () => {
+		const kind = LOCAL_BACKEND;
+		const h = await hostOf(kind);
+		const dbs = openTestDatabases();
+		cleanups.push(() => dbs.close());
+		addHost(dbs, kind);
+		const s = keptOn(h, kind, dbs);
+		s.world.maxConcurrent = 3;
+		const data = {
+			kept: content("kept", 200_000),
+			gone: content("gone", 100_000),
+			changed: content("changed", 150_000),
+		};
+		const { transferId } = await startUpload(s, h.dir, [
+			dir("d"),
+			file("d/kept.bin", data.kept),
+			file("d/gone.bin", data.gone),
+			file("d/changed.bin", data.changed),
+		]);
+		for (const name of ["kept", "gone", "changed"] as const) {
+			await sendPart(s, transferId, `d/${name}.bin`, data[name], 50_000);
+		}
+		s.service.clientGone(WRITER.clientId);
+		for (const name of ["kept", "gone", "changed"]) {
+			await waitState(s, transferId, `d/${name}.bin`, "interrupted");
+		}
+		expect(temporaries(h, h.at("d"))).toHaveLength(3);
+		const now = content("changed, as it is now", 80_000);
+		const gone = itemOf(s, transferId, "d/gone.bin").item_id;
+		const changed = itemOf(s, transferId, "d/changed.bin").item_id;
+
+		await s.service.resume(AGAIN, {
+			type: "TRANSFER_RESUME",
+			transferIds: [transferId],
+			files: [
+				{ transferId, itemId: gone, action: "skip", why: "gone" },
+				{ transferId, itemId: changed, action: "restart", size: now.length, mtime: MTIME + 60_000 },
+			],
+		});
+		expect(itemOf(s, transferId, "d/gone.bin")).toMatchObject({
+			state: "skipped",
+			outcome: "skipped",
+			reason: "no longer on the device that sent it",
+		});
+		// The one that changed starts again with its size now; the other goes on from its bytes.
+		expect((await waitState(s, transferId, "d/changed.bin", "sending")).acked).toBe(0);
+		expect((await waitState(s, transferId, "d/kept.bin", "sending")).acked).toBe(50_000);
+		expect(s.service.describe(transferId)?.totals).toMatchObject({
+			files: 3,
+			bytes: data.kept.length + data.gone.length + now.length,
+		});
+		await expect(
+			s.service.receive(AGAIN, transferId, changed, 0, data.changed.subarray(0, now.length + 1)),
+		).rejects.toMatchObject({ code: "PAST_END" });
+		await sendFile(s, transferId, "d/kept.bin", data.kept, 64 * 1024, AGAIN);
+		await sendFile(s, transferId, "d/changed.bin", now, 64 * 1024, AGAIN);
+		await waitState(s, transferId, "d/kept.bin", "placed");
+		await waitState(s, transferId, "d/changed.bin", "placed");
+		expect(readFileSync(h.local(h.at("d", "kept.bin")))).toEqual(data.kept);
+		expect(readFileSync(h.local(h.at("d", "changed.bin")))).toEqual(now);
+		expect(statSync(h.local(h.at("d", "changed.bin"))).mtimeMs).toBe(MTIME + 60_000);
+		expect(existsSync(h.local(h.at("d", "gone.bin")))).toBe(false);
+		await waitFor(() => expect(temporaries(h, h.at("d"))).toEqual([]));
+		// meta.db holds the file as it was sent: a restart meanwhile resumes that one.
+		const row = dbs.meta
+			.prepare("SELECT size, mtime, reason FROM transfer_items WHERE transfer_id = ? AND id = ?")
+			.get(transferId, changed) as { size: number; mtime: number };
+		expect(row).toMatchObject({ size: now.length, mtime: MTIME + 60_000 });
+		const skipped = dbs.meta
+			.prepare("SELECT state, reason FROM transfer_items WHERE transfer_id = ? AND id = ?")
+			.get(transferId, gone);
+		expect(skipped).toEqual({ state: "skipped", reason: "no longer on the device that sent it" });
+	});
+
+	it("refuses files that are not as the protocol says, and resumes nothing", async () => {
+		const kind = LOCAL_BACKEND;
+		const h = await hostOf(kind);
+		const s = serviceOn(h, kind);
+		cleanups.push(() => s.service.shutdown());
+		const transferId = await leftUpload(s, h);
+		for (const files of [
+			"x",
+			[{ transferId, itemId: 0, action: "restart", size: -1 }],
+			[{ transferId, itemId: 0, action: "restart" }],
+			[{ transferId, itemId: 0, action: "restart", size: 10, mtime: "today" }],
+			[{ transferId, itemId: 0, action: "skip", why: "bored" }],
+			[{ transferId, itemId: -1, action: "skip", why: "gone" }],
+			[{ transferId, itemId: 0, action: "replace" }],
+		]) {
+			await s.service.resume(AGAIN, {
+				type: "TRANSFER_RESUME",
+				transferIds: [transferId],
+				files,
+			} as never);
+			expect(received(s.world, AGAIN.clientId, "TRANSFER_ERROR").at(-1)).toMatchObject({
+				code: "INVALID_INPUT",
+			});
+		}
+		expect(received(s.world, AGAIN.clientId, "TRANSFER_ERROR")).toHaveLength(7);
+		expect(received(s.world, AGAIN.clientId, "TRANSFER_STATE")).toEqual([]);
+		expect(itemOf(s, transferId, "x.bin")).toMatchObject({ state: "interrupted", acked: 100_000 });
+	});
+
+	it("says to each window whether an upload is from its device, and names the device otherwise", async () => {
+		const kind = LOCAL_BACKEND;
+		const h = await hostOf(kind);
+		const s = serviceOn(h, kind);
+		cleanups.push(() => s.service.shutdown());
+		const device = WRITER.tokenId as string;
+		s.world.deviceLabels.set(device, "Paired from 192.168.1.20");
+		const transferId = await leftUpload(s, h);
+
+		const own = s.service.interruptedUploads(device);
+		expect(own).toEqual([expect.objectContaining({ transferId, fromThisDevice: true })]);
+		expect(own[0]).not.toHaveProperty("deviceLabel");
+		expect(s.service.interruptedUploads("tok-other")).toEqual([
+			expect.objectContaining({
+				transferId,
+				fromThisDevice: false,
+				deviceLabel: "Paired from 192.168.1.20",
+			}),
+		]);
+		expect(s.service.listFor(CHANNEL, "tok-other")[0]).toMatchObject({
+			from_this_device: false,
+			device_label: "Paired from 192.168.1.20",
+		});
+		expect(s.service.listFor(undefined, device)[0]).toMatchObject({ from_this_device: true });
+		expect(s.service.describe(transferId, device)).toMatchObject({ from_this_device: true });
+		expect(s.service.describe(transferId, "tok-other")).toMatchObject({
+			from_this_device: false,
+			device_label: "Paired from 192.168.1.20",
+		});
+		// A device without a name is named by none.
+		s.world.deviceLabels.set(device, "");
+		expect(s.service.interruptedUploads("tok-other")[0]).not.toHaveProperty("deviceLabel");
+	});
+});
+
 describe("a dropped link", () => {
 	it("resumes by itself when the hub reconnects the host, for an upload whose window is still there", async () => {
 		const kind = sftpBackend("posix", ["hardlink@openssh.com"]);

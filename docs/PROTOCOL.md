@@ -1029,7 +1029,12 @@ Sent immediately after `AUTH_OK`. Full snapshot of all active sessions and chann
     state: "interrupted",
     reason?: "needs_passphrase" | "needs_password" | "host_key_not_accepted" | "host_unreachable",
     totals: { files, bytes, acked, states },
-    updated_at: string              // ISO 8601; discarded 7 days after
+    updated_at: string,             // ISO 8601; discarded 7 days after
+    // The window it is listed to authenticated with the credential that started it (#837): only
+    // such a window holds the files, and may resume it. Without auth, every window does.
+    from_this_device: boolean,
+    // Otherwise, that credential's label (GET /api/auth/tokens), when it has one.
+    device_label?: string
   }>
 }
 ```
@@ -1607,7 +1612,12 @@ or `WRITE_LOCK_DENIED`.
 "Discard all"), at most 1,000:
 
 ```typescript
-{ type: "TRANSFER_RESUME",  transfer_ids: string[] }
+{ type: "TRANSFER_RESUME",  transfer_ids: string[],
+  // What the window found of their files before resuming them (#837), at most 100,000.
+  files?: Array<
+    | { transfer_id, item_id, action: "skip", why: "gone" | "changed" | "unreadable" }
+    | { transfer_id, item_id, action: "restart", size: number, mtime?: number }
+  > }
 { type: "TRANSFER_DISCARD", transfer_ids: string[] }
 ```
 
@@ -1627,6 +1637,14 @@ or `WRITE_LOCK_DENIED`.
   `truncate`) and goes on from there; one whose temporary is missing or shorter starts again under a
   new one; a whole temporary is only placed. Then what failed, was cancelled or interrupted is
   queued, as a retry would, and TRANSFER_PROGRESS gives each file's `acked`.
+- `files` says what the window found reading the files again (#837), each one not placed nor
+  skipped, once its host is reached and before any byte moves: `skip` leaves it out, its
+  temporary removed, `skipped` with a reason (`gone`: "no longer on the device that sent it",
+  `changed`: "changed since it was sent", `unreadable`: "could not be read on the device that
+  sent it"); `restart` sends it again from its first byte with the `size` and `mtime` it has now,
+  its temporary removed and its record changed. A file not named goes on from its `acked`. A
+  `files` that is not such a list is refused as a whole with `INVALID_INPUT`, and nothing is
+  resumed.
 - DISCARD drops uploads: what they were doing stops, TRANSFER_STATE says `discarded`, and their
   temporaries are removed by their recorded paths, the host reached as for a resume. A host that
   cannot be reached keeps the record, `discarded`, and its temporaries are removed at its next
@@ -2227,7 +2245,7 @@ Uploads (#833, § 4.19): a file's bytes, and what an upload is at. Every route w
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | PUT | `/api/transfers/:id/items/:item` | ● | `?offset=`, `Content-Type: application/octet-stream`, header `X-Lasterm-Client-Id` → 200 `{ acked }`. One chunk of a file, at `offset`, which must be where the host's bytes end (`acked`, as TRANSFER_PROGRESS says it). Chunks of 1 MiB, the last shorter; 4 MiB at most (413 above). Answered once the host acknowledged it. Only from the window that started the upload, named by the header and authenticated with the request's own token (403 `NOT_THE_SENDER`), and only for a file in `sending` (409 `ITEM_NOT_SENDING` with `state`); 409 `OFFSET_MISMATCH` with `acked`, 409 `ITEM_BUSY` while another chunk of it is written, 400 `PAST_END` for an empty chunk or one past its size, 415 for another content type. A chunk the host failed answers its code: 409 `INTERRUPTED` (the file is `interrupted`), 502 otherwise (`failed`, with its reason) |
-| GET | `/api/transfers` | ● | `?channel_id=` → `{ transfers: [{ transfer_id, channel_id, host_id, dir, on_conflict, direction: "upload", state: "running" \| "interrupted" \| "done", reason?, totals, updated_at }] }`: the uploads from that terminal; without `channel_id`, every upload the hub holds, those a restart left included (#860). `interrupted`: no window sends it (it left, its connection was closed on purpose, the hub restarted); `reason`, why the last resume did not reach its host (§ 4.19). A discarded upload is not listed |
+| GET | `/api/transfers` | ● | `?channel_id=` → `{ transfers: [{ transfer_id, channel_id, host_id, dir, on_conflict, direction: "upload", state: "running" \| "interrupted" \| "done", reason?, totals, updated_at, from_this_device, device_label? }] }`: the uploads from that terminal; without `channel_id`, every upload the hub holds, those a restart left included (#860). `interrupted`: no window sends it (it left, its connection was closed on purpose, the hub restarted); `reason`, why the last resume did not reach its host (§ 4.19). `from_this_device`: the request's credential started it, and holds its files; otherwise `device_label` names that credential, when it has a label (#837). A discarded upload is not listed |
 | GET | `/api/transfers/:id` | ● | That upload, as above, with `items: [{ item_id, rel_path, kind, size, state, acked?, outcome?, final_name?, verification?, reason?, code?, existing?, type_clash?, late? }]`; 404 `TRANSFER_NOT_FOUND` |
 
 These routes take `application/octet-stream` in their own scope, with their own body limit, rather

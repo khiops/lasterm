@@ -59,6 +59,8 @@ export interface ServiceWorld {
 	 * not connected until it is false again.
 	 */
 	linkDown: boolean;
+	/** The names of the devices, by credential, as the hub's credentials list them (#837). */
+	readonly deviceLabels: Map<string, string>;
 }
 
 /** A transfer service on a backend's host, with the rest of the hub as a spec decides it. */
@@ -83,6 +85,7 @@ export function serviceOn(
 		connect: null,
 		now: null,
 		linkDown: false,
+		deviceLabels: new Map(),
 	};
 	const hostType = kind.transport === "local" ? "local" : "ssh";
 	const isConnected = (hostId: string) =>
@@ -148,6 +151,7 @@ export function serviceOn(
 		store: options.store ?? null,
 		hostType: () => hostType,
 		now: () => world.now ?? Date.now(),
+		deviceLabel: (tokenId) => world.deviceLabels.get(tokenId) ?? null,
 	};
 	const service = new TransferService(deps);
 	return { service, world };

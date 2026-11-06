@@ -296,6 +296,10 @@ CREATE INDEX idx_transfer_items_state ON transfer_items(transfer_id, state);
 - **After a restart** every upload `running` is `interrupted`, and each file `sending` or
   `verifying` too, its temporary and `acked_offset` kept. A record whose upload was `done` is
   deleted then: nothing of it is left to resume.
+- **A file's `size` and `mtime`** change once, when a resume sends a file that changed since on
+  the sending device again from its first byte, as it is now (PROTOCOL.md § 4.19, #837); every
+  other column but the item's place in its tree changes with its state. `signature` keeps the tree
+  as it was dropped.
 - **Gone** when every file is placed or skipped (10 minutes after, with the upload in memory), when
   it is discarded and its temporaries removed, and with its host.
 - **`discarded`** marks a record whose temporaries wait for the next connection to its host:

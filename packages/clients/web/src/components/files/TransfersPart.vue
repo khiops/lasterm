@@ -36,6 +36,7 @@
 			@focusin="keyboardInside = true"
 			@focusout="onFocusOut"
 		>
+			<InterruptedUploads :may-control="mayControl" />
 			<div v-if="uploads.length > 0" class="transfers__tools">
 				<div class="transfers__filter" role="radiogroup" aria-label="Show the uploads of">
 					<button
@@ -55,7 +56,7 @@
 					Clear finished
 				</button>
 			</div>
-			<p v-if="groups.length === 0" class="transfers__empty">
+			<p v-if="groups.length === 0 && (uploads.length > 0 || transfers.interrupted.length === 0)" class="transfers__empty">
 				{{
 					uploads.length === 0
 						? "No uploads. Drop files on a terminal or on the folder above, or use Upload files…"
@@ -125,9 +126,8 @@ import {
 	groupUploads,
 	type HostGroup,
 	inOrder,
-	isActive,
 	isExpanded,
-	needsAttention,
+	isOver,
 	quitPendingText,
 	stableOrder,
 	type TransfersFilter,
@@ -137,6 +137,7 @@ import {
 import { dropRole } from "../../utils/upload-drop.js";
 import HostBadge from "../HostBadge.vue";
 import FilesIcon from "./FilesIcon.vue";
+import InterruptedUploads from "./InterruptedUploads.vue";
 import TransferUpload from "./TransferUpload.vue";
 
 const props = defineProps<{
@@ -158,14 +159,13 @@ const authStore = useAuthStore();
 const bodyId = useId();
 
 const collapsed = computed(() => filesPanel.transfersCollapsed);
-const uploads = computed(() => transfers.uploads);
-// Collapsed, the header still counts what runs and fails; a failure turns it to the warning
-// style and does not expand it.
-const count = computed(() => transfersCount(uploads.value));
+// The interrupted ones have their own block above the groups (#837).
+const uploads = computed(() => transfers.uploads.filter((upload) => upload.state !== "interrupted"));
+// Collapsed, the header still counts what runs, fails and waits for a resume; a failure turns it
+// to the warning style and does not expand it.
+const count = computed(() => transfersCount(transfers.uploads));
 const quitLine = computed(() => quitPendingText(transfers.quitPending));
-const finished = computed(
-	() => uploads.value.filter((upload) => !isActive(upload.totals) && !needsAttention(upload.totals)).length,
-);
+const finished = computed(() => uploads.value.filter((upload) => isOver(upload)).length);
 
 // ─── The focus, and rows that never move under the pointer or the keyboard ──
 
@@ -293,7 +293,8 @@ function titleOf(channelId: string): string {
  * once the terminal ended, for the device that started the upload. Readers see the rows only.
  */
 function mayControl(upload: UploadView): boolean {
-	if (transfers.originOf(upload) === "terminal ended") return true;
+	// The device that started it, once its terminal ended: the hub says which (#837).
+	if (transfers.originOf(upload) === "terminal ended") return upload.fromThisDevice !== false;
 	const holder = writeLockStore.locks.get(upload.channelId)?.holder;
 	return dropRole(holder, authStore.clientId) !== "reader";
 }

@@ -13,8 +13,10 @@ import {
 	conflictActions,
 	conflictScopePlan,
 	countItems,
+	deviceText,
 	fileConflicts,
 	filterGroups,
+	foldedText,
 	folderConflicts,
 	folderConflictText,
 	folderText,
@@ -22,9 +24,16 @@ import {
 	groupUploads,
 	inOrder,
 	isExpanded,
+	isOver,
+	keptUntil,
+	leftOutText,
+	notResumedText,
+	placedText,
 	quitPendingText,
+	resumeText,
 	stableOrder,
 	stateText,
+	transfersCount,
 	type UploadItemView,
 	type UploadView,
 	uploadsReportOf,
@@ -280,5 +289,67 @@ describe("the conflict step", () => {
 			body: { terminal: { transferOnConflict: "keep_both" } },
 		});
 		expect(everywhere?.dropped).toEqual([{ scope: "host", value: "skip" }]);
+	});
+});
+
+describe("the interrupted uploads (#837)", () => {
+	const interrupted = (id: string, updatedAt: string | null, extra: Partial<UploadView> = {}) =>
+		upload(id, "h1", "c1", [file(0, "a", "placed"), file(1, "b", "interrupted", 100, 40)], {
+			sender: false,
+			state: "interrupted",
+			updatedAt,
+			...extra,
+		});
+
+	it("folds into one line that says how many, and until when the first of them is kept", () => {
+		const until = keptUntil([
+			"2026-11-06T10:00:00.000Z",
+			"2026-11-05T09:00:00.000Z",
+			null,
+			"not a date",
+		]);
+		expect(until?.toISOString()).toBe("2026-11-12T09:00:00.000Z");
+		expect(foldedText(4, until)).toBe("4 interrupted uploads · kept until 12 Nov");
+		expect(foldedText(1, null)).toBe("1 interrupted upload");
+		expect(keptUntil([null, undefined])).toBeNull();
+	});
+
+	it("says what was placed, and why the last resume did not reach the host", () => {
+		expect(placedText(interrupted("t", null).totals)).toBe("1 of 2 placed");
+		expect(notResumedText("needs_passphrase", "AD")).toBe("Not resumed: AD needs its passphrase");
+		expect(notResumedText("needs_password", "AD")).toBe("Not resumed: AD needs its password");
+		expect(notResumedText("host_key_not_accepted", "AD")).toBe(
+			"Not resumed: AD's host key was not accepted",
+		);
+		expect(notResumedText("host_unreachable", "AD")).toBe("Not resumed: AD could not be reached");
+	});
+
+	it("names the device another device's upload can be resumed from", () => {
+		expect(deviceText("Paired from 192.168.1.20")).toBe("the device paired from 192.168.1.20");
+		expect(deviceText("Primary")).toBe("the desktop app");
+		expect(deviceText("Laptop")).toBe("Laptop");
+		expect(deviceText(undefined)).toBe("another device");
+		expect(deviceText(" ")).toBe("another device");
+	});
+
+	it("says where a resume is, and what it left out", () => {
+		expect(resumeText({ phase: "asking" })).toBe("Asking for access to its files…");
+		expect(resumeText({ phase: "redrop", why: "timeout" })).toBe("Drop the files again to finish");
+		expect(resumeText({ phase: "resuming", gone: 0, unreadable: 0 })).toBe("Resuming…");
+		expect(resumeText(null)).toBeNull();
+		expect(leftOutText(1, 0)).toBe("1 file no longer there: left out");
+		expect(leftOutText(2, 1)).toBe("2 files no longer there, 1 file could not be read: left out");
+		expect(leftOutText(0, 0)).toBeNull();
+	});
+
+	it("is never over, so that Clear finished keeps it, and the header counts it", () => {
+		const stopped = interrupted("t1", "2026-11-06T10:00:00.000Z");
+		expect(isOver(stopped)).toBe(false);
+		// Its files interrupted while the hub still says it runs: not over either.
+		expect(isOver({ ...stopped, state: "running" })).toBe(false);
+		expect(isOver(done("t2", "h1", "c1"))).toBe(true);
+		expect(transfersCount([stopped, running("t3", "h1", "c1")]).text).toBe(
+			"1 running, 1 interrupted",
+		);
 	});
 });

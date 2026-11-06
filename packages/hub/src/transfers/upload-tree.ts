@@ -50,7 +50,8 @@ export type UploadTree =
 /** The most problems one answer lists; the message counts the rest. */
 const PROBLEMS_LISTED = 1000;
 
-function isWholeNumber(value: unknown): value is number {
+/** A whole number at least 0 that a number holds exactly: a size, a time in milliseconds. */
+export function isWholeNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 

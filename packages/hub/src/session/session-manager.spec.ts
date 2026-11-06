@@ -6137,6 +6137,37 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		}
 	});
 
+	// An upload to the host holds its connection as a terminal does (#833): the
+	// sole requester leaving does not take a connection an upload runs on.
+	it("sole-requester disconnect: the connection stays while an upload to the host runs", async () => {
+		const hostId = await createSshHost();
+		sm.setTransfers({ activeOn: (id) => (id === hostId ? 1 : 0), interruptOn: vi.fn() });
+		sm.addClient(makeClient("c-upload-1", []));
+		const origMockImpl = vi
+			.mocked((await import("./ssh-agent.js")).SshAgent)
+			.getMockImplementation();
+		vi.mocked((await import("./ssh-agent.js")).SshAgent).mockImplementationOnce(function (
+			this: unknown,
+		) {
+			mockSshAgentInstance = new MockSshAgent({ id: hostId });
+			sm.removeClient("c-upload-1");
+			return mockSshAgentInstance;
+		} as never);
+
+		const result = await sm.handleSpawn("c-upload-1", { type: "SPAWN", hostId });
+
+		expect(result).toBeNull();
+		expect(mockSshAgentInstance?.close).not.toHaveBeenCalled();
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		expect(ctx.agents.has(hostId)).toBe(true);
+		expect(ctx.sessions.has(hostId)).toBe(true);
+		if (origMockImpl) {
+			vi.mocked((await import("./ssh-agent.js")).SshAgent).mockImplementation(
+				origMockImpl as never,
+			);
+		}
+	});
+
 	// ── Fix 2 follower guard: session NOT closed when another channel exists ──
 	//
 	// If a channel already references this session (another client spawned

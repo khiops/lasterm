@@ -7,6 +7,48 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## UPLOADS — bytes over REST, placed without replacing, every outcome said (#833, 2026-11-06)
+
+- **The bytes go over REST, the rest over the WebSocket.** `TRANSFER_START`, the answers, retries
+  and cancels are WebSocket messages, lock-checked as INPUT is; a file's bytes are `PUT` one chunk
+  at a time (1 MiB, 4 MiB at most), each answered once the host acknowledged it. A window's socket
+  carries its terminals' output, which a gigabyte of file data in the same queue would hold back;
+  and answering a chunk only once it is on the host paces the client by the host, with no flow
+  control of its own. The routes take `application/octet-stream` in their own scope, with their own
+  body limit.
+- **Never overwrite silently.** A file is written to a hidden temporary beside its target, created
+  exclusively, and placed by an operation that refuses a name that exists: a hard link where there
+  is one (`hardlink@openssh.com`, `ln`, `fs.link`), the plain SFTP rename, `[IO.File]::Move`. A
+  check followed by a replacing rename was not taken: the target can appear in between, and then it
+  is lost. Win32-OpenSSH 9.5p2 was checked by hand for each SFTP step, `posix-rename@openssh.com`
+  replacing and so kept for Replace. SFTP v3 says only "failure" for a name taken, so the hub looks
+  at the name after a failure. A server whose plain rename replaces, found by a probe once per
+  connection, gets new files written under their own names with an exclusive open instead.
+- **Conflicts are per file, answers scoped.** An existing folder is merged into, never replaced;
+  each file in it that exists is its own conflict, and the start counts them per folder for a
+  summary. An answer applies to a file, a folder's subtree or the whole upload; a type clash takes
+  only Keep both or Skip. Every outcome (`replaced`, `kept_both` with its name, `skipped`, `merged`)
+  is said per item, so a saved policy never acts unseen. "Always do this" stays the client's write
+  through `planProfileWrite`, as for `when_ended`: the hub's answer is about this upload only.
+- **Placed is final.** Retry re-queues failed, cancelled and interrupted files only. A file whose
+  window left keeps its temporary and resumes from the contiguous prefix the host acknowledged; the
+  same drop again joins the upload rather than starting a second one beside it.
+- **Verified where the bytes go through a shell.** Over SSH commands the hub hashes what it sends and
+  the host hashes the temporary before it is placed; a mismatch never lands under the name. Over SFTP
+  and locally the protocol and the file system are trusted, and the size checked.
+- **Uploads hold the connection.** The acquisition's "has channels" counts running uploads, the
+  retirement of an outdated daemon waits for them, and every gesture that closes a connection asks
+  first, with a count, as for terminals. Disconnect, Reconnect and `DELETE /api/sessions/:id` take
+  `force`, which already means "I was told what this ends", and TERMINALS_WOULD_END carries the
+  uploads' count too so one question covers both. Stop keeping and Replace take `stop_transfers`
+  instead: their `force` is about other hubs' terminals, which a person answering about uploads was
+  not told of.
+- **In memory first.** This part keeps uploads in memory; the second part (its own issue) records
+  them in `meta.db` and resumes them after a restart, with Discard, expiry and a sweep of unknown
+  temporaries.
+
+---
+
 ## FILE-TRANSFER-SETTINGS — upload keys cascade to the terminal, and the whole feature waits behind an experimental switch (#835, 2026-11-06)
 
 - What differs by host goes in the terminal profile, the only cascade with host and terminal layers, as `when_ended` did: `transfer_drop`, `transfer_confirm_drop`, `transfer_on_conflict` and `transfer_follow_cwd` at every scope; `transfer_fallback_dir` and `transfer_verify` globally or per host only, since they are about the host's file system and its SSH server, not a shell on it. A terminal's profile refuses those two.

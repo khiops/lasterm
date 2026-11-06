@@ -952,6 +952,154 @@ describe("a terminal's directory leaves no trace in the logs (#834)", () => {
 	});
 });
 
+describe("an upload's paths, names and chunks leave no trace in the logs (#833)", () => {
+	// What someone sends to a host, and where, is theirs: no name or path reaches
+	// hub.log or hub.jsonl, at any level. A chunk's route runs once a megabyte,
+	// and the messages that follow an upload as often: nothing of either at INFO.
+	it("logs no name and no path at any level, and nothing at INFO, started, sent, refused or in conflict", async () => {
+		const folderName = "lasterm-upload-folder-4343";
+		const fileName = "lasterm-upload-file-4343.bin";
+		const takenName = "lasterm-upload-taken-4343.txt";
+		const destName = "lasterm-upload-dest-4343";
+		const serverLog = new ServerLog();
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-upload-log-"));
+		const configDir = path.join(root, "config");
+		fs.mkdirSync(configDir);
+		fs.writeFileSync(path.join(configDir, "config.toml"), "[experimental]\nfile_transfer = true\n");
+		const dest = path.join(root, destName);
+		fs.mkdirSync(dest);
+		fs.writeFileSync(path.join(dest, takenName), "theirs");
+		const hub = await createServer({
+			tls: getTestTls(),
+			logger: { level: "trace", destination: serverLog.destination },
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			securityLog: log.securityLog,
+			hubLogger,
+			configDir,
+		});
+		let ws: InjectedSocket | undefined;
+		try {
+			await hub.ready();
+			const remoteHostId = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@pi.local",
+			}).id;
+			const channels = terminalsOnLocalAndRemoteHosts(remoteHostId);
+			ws = await openSocket(hub);
+			const received: Record<string, unknown>[] = [];
+			ws.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)) as never);
+			});
+			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			const clientId = (received.find((m) => m.type === "AUTH_OK") as { clientId: string })
+				.clientId;
+			const from = serverLog.mark();
+			const start = (requestId: string, items: unknown[]) =>
+				ws?.send(
+					encodeMessage({
+						type: "TRANSFER_START",
+						requestId,
+						channelId: channels.local,
+						dir: dest,
+						items,
+						onConflict: "ask",
+					} as never),
+				);
+			const answer = (requestId: string) =>
+				vi.waitFor(() => {
+					const found = received.find((m) => m.requestId === requestId);
+					expect(found).toBeDefined();
+					return found as Record<string, unknown>;
+				});
+
+			// Refused: a folder the upload does not name.
+			start("refused", [{ relPath: `${folderName}/${fileName}`, kind: "file", size: 1 }]);
+			expect((await answer("refused")).code).toBe("INVALID_ITEMS");
+
+			const data = Buffer.alloc(3 * 1024 * 1024, 1);
+			start("upload", [
+				{ relPath: folderName, kind: "dir" },
+				{ relPath: `${folderName}/${fileName}`, kind: "file", size: data.length },
+				{ relPath: takenName, kind: "file", size: 3 },
+			]);
+			const accepted = await answer("upload");
+			expect(accepted.type).toBe("TRANSFER_ACCEPTED");
+			const transferId = accepted.transferId as string;
+			await vi.waitFor(() =>
+				expect(
+					received.some(
+						(m) =>
+							m.type === "TRANSFER_PROGRESS" &&
+							(m.items as { itemId: number; state: string }[]).some(
+								(item) => item.itemId === 1 && item.state === "sending",
+							),
+					),
+				).toBe(true),
+			);
+			const chunk = 1024 * 1024;
+			for (let at = 0; at < data.length; at += chunk) {
+				const put = await hub.inject({
+					method: "PUT",
+					url: `/api/transfers/${transferId}/items/1?offset=${at}`,
+					headers: {
+						...bearer,
+						"content-type": "application/octet-stream",
+						"x-lasterm-client-id": clientId,
+					},
+					payload: data.subarray(at, at + chunk),
+				});
+				expect(put.statusCode).toBe(200);
+			}
+			// One refused chunk, and the conflict answered.
+			const wrong = await hub.inject({
+				method: "PUT",
+				url: `/api/transfers/${transferId}/items/2?offset=0`,
+				headers: { ...bearer, "content-type": "application/octet-stream" },
+				payload: Buffer.from("ours"),
+			});
+			expect(wrong.statusCode).toBe(403);
+			ws.send(
+				encodeMessage({
+					type: "TRANSFER_RESOLVE",
+					transferId,
+					scope: "upload",
+					action: "skip",
+				} as never),
+			);
+			await vi.waitFor(() => expect(received.some((m) => m.type === "TRANSFER_DONE")).toBe(true));
+			const listed = await hub.inject({
+				method: "GET",
+				url: `/api/transfers/${transferId}`,
+				headers: bearer,
+			});
+			expect(listed.statusCode).toBe(200);
+			expect(fs.readFileSync(path.join(dest, folderName, fileName))).toEqual(data);
+
+			expect(serverLog.shipped(from)).toEqual([]);
+			const text = `${serverLog.text()}\n${log.text()}`;
+			for (const name of [folderName, fileName, takenName, destName]) {
+				expect(text).not.toContain(name);
+			}
+		} finally {
+			ws?.terminate();
+			await hub.close();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("no logged request carries a secret, at any level", () => {
 	it("withholds the asset token, query values and request headers from every line", async () => {
 		const assetToken = getBootAssetToken();

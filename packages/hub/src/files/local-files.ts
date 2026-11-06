@@ -34,7 +34,7 @@ const STAT_CONCURRENCY = 32;
  * the client's only. `parent`: a missing folder, or one that is not, is the
  * new path's parent, as for mkdir.
  */
-function failure(error: unknown, what: string, parent = false): FileAccessError {
+export function localFailure(error: unknown, what: string, parent = false): FileAccessError {
 	const code = (error as NodeJS.ErrnoException | undefined)?.code;
 	switch (code) {
 		case "ENOENT":
@@ -58,6 +58,9 @@ function failure(error: unknown, what: string, parent = false): FileAccessError 
 			return new FileAccessError("PERMISSION_DENIED", `${what}: ${REASONS.PERMISSION_DENIED}`, {
 				cause: error,
 			});
+		case "ENOSPC":
+		case "EDQUOT":
+			return new FileAccessError("NO_SPACE", `${what}: ${REASONS.NO_SPACE}`, { cause: error });
 		default:
 			return new FileAccessError(
 				"FILE_ACCESS_FAILED",
@@ -103,7 +106,7 @@ export class LocalFileBackend implements FileBackend {
 		try {
 			names = await fs.readdir(dir, { withFileTypes: true });
 		} catch (error) {
-			throw failure(error, "The folder could not be listed");
+			throw localFailure(error, "The folder could not be listed");
 		}
 		const shown = hidden ? names : names.filter((dirent) => !isHiddenName(dirent.name));
 		const entries = await mapLimited(shown, STAT_CONCURRENCY, (dirent) =>
@@ -120,7 +123,7 @@ export class LocalFileBackend implements FileBackend {
 		try {
 			return await this.entry(path, baseNameOf(path, this.style));
 		} catch (error) {
-			throw failure(error, "The path could not be read");
+			throw localFailure(error, "The path could not be read");
 		}
 	}
 
@@ -129,7 +132,7 @@ export class LocalFileBackend implements FileBackend {
 			const space = await fs.statfs(dir);
 			return { available: space.bavail * space.bsize, total: space.blocks * space.bsize };
 		} catch (error) {
-			throw failure(error, "The free space could not be read");
+			throw localFailure(error, "The free space could not be read");
 		}
 	}
 
@@ -137,7 +140,7 @@ export class LocalFileBackend implements FileBackend {
 		try {
 			await fs.mkdir(path);
 		} catch (error) {
-			throw failure(error, "The folder could not be created", true);
+			throw localFailure(error, "The folder could not be created", true);
 		}
 	}
 

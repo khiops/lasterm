@@ -10,6 +10,8 @@ export interface WriteLockManagerOpts {
 	broadcastToChannel: (channelId: string, msg: unknown) => void;
 	/** Told when a force takes the lock from another client: a security event (SECURITY.md § 7.1). */
 	onForce?: (force: { channelId: string; byClientId: string; fromClientId: string }) => void;
+	/** Told after a channel's lock changed hands, was freed or kept: uploads wait or go on (#833). */
+	onChange?: (channelId: string) => void;
 }
 
 /**
@@ -77,11 +79,13 @@ export class WriteLockManager {
 	private sendToClient: (clientId: string, msg: unknown) => void;
 	private broadcastToChannel: (channelId: string, msg: unknown) => void;
 	private onForce: NonNullable<WriteLockManagerOpts["onForce"]>;
+	private onChange: NonNullable<WriteLockManagerOpts["onChange"]>;
 
 	constructor(opts: WriteLockManagerOpts) {
 		this.sendToClient = opts.sendToClient;
 		this.broadcastToChannel = opts.broadcastToChannel;
 		this.onForce = opts.onForce ?? (() => undefined);
+		this.onChange = opts.onChange ?? (() => undefined);
 	}
 
 	// ─── Lifecycle ──────────────────────────────────────────────────────────
@@ -415,6 +419,7 @@ export class WriteLockManager {
 
 	private _broadcastLock(channelId: string, holder: string | null, reserved = false): void {
 		this.broadcastToChannel(channelId, lockMessage(channelId, holder, reserved));
+		this.onChange(channelId);
 	}
 
 	/**

@@ -526,18 +526,34 @@ describe("SessionManager.queryAgentEnvironment", () => {
 
 describe("readReplaceAgentBody", () => {
 	it("reads no body, or no force, as not forcing", () => {
-		expect(readReplaceAgentBody(undefined)).toEqual({ force: false });
-		expect(readReplaceAgentBody(null)).toEqual({ force: false });
-		expect(readReplaceAgentBody({})).toEqual({ force: false });
+		const none = { force: false, stopTransfers: false };
+		expect(readReplaceAgentBody(undefined)).toEqual(none);
+		expect(readReplaceAgentBody(null)).toEqual(none);
+		expect(readReplaceAgentBody({})).toEqual(none);
 	});
 
 	it("takes force as the boolean it is", () => {
-		expect(readReplaceAgentBody({ force: true })).toEqual({ force: true });
-		expect(readReplaceAgentBody({ force: false })).toEqual({ force: false });
+		expect(readReplaceAgentBody({ force: true })).toEqual({ force: true, stopTransfers: false });
+		expect(readReplaceAgentBody({ force: false })).toEqual({ force: false, stopTransfers: false });
+	});
+
+	it("takes stop_transfers apart from force: the uploads to the host stop, other hubs' terminals do not (#833)", () => {
+		expect(readReplaceAgentBody({ stop_transfers: true })).toEqual({
+			force: false,
+			stopTransfers: true,
+		});
 	});
 
 	it("refuses anything else, rather than guess that it means yes", () => {
-		for (const body of [{ force: "true" }, { force: 1 }, { force: null }, [], "force", 1]) {
+		for (const body of [
+			{ force: "true" },
+			{ force: 1 },
+			{ force: null },
+			{ stop_transfers: "yes" },
+			[],
+			"force",
+			1,
+		]) {
 			expect(readReplaceAgentBody(body)).toHaveProperty("error");
 		}
 	});
@@ -1025,6 +1041,44 @@ describe("POST stop-keeping", () => {
 			expect.objectContaining({ type: "SESSION_STATE", status: "closed" }),
 		);
 		expect(f.ctx.sessions.has(hostId)).toBe(false);
+	});
+
+	it("requires consent for the uploads to the host, apart from force, and interrupts them once given (#833)", async () => {
+		const f = fixture();
+		const interrupted: string[] = [];
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId && interrupted.length === 0 ? 1 : 0),
+			interruptOn: (id) => interrupted.push(id),
+		});
+		const refusal = await stop({ end_terminals: true, force: true });
+		expect(refusal.statusCode).toBe(409);
+		expect(refusal.json()).toMatchObject({ error: { code: "TRANSFERS_WOULD_STOP", transfers: 1 } });
+		unchanged(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { force: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({ error: { code: "TRANSFERS_WOULD_STOP", transfers: 1 } });
+		unchanged(f);
+		const kill = await server.inject({
+			method: "DELETE",
+			url: `/api/sessions/${f.ctx.sessions.get(hostId)?.id}`,
+		});
+		expect(kill.statusCode).toBe(409);
+		expect(kill.json()).toMatchObject({ error: { code: "TRANSFERS_WOULD_STOP", transfers: 1 } });
+		const badForce = await server.inject({
+			method: "DELETE",
+			url: `/api/sessions/${f.ctx.sessions.get(hostId)?.id}?force=yes`,
+		});
+		expect(badForce.statusCode).toBe(400);
+		unchanged(f);
+		expect(interrupted).toEqual([]);
+
+		const response = await stop({ end_terminals: true, stop_transfers: true });
+		expect(response.statusCode).toBe(200);
+		expect(interrupted).toEqual([hostId]);
 	});
 
 	it("preserves everything on an other-hub refusal and forwards forced retry", async () => {

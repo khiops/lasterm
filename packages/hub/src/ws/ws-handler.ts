@@ -8,6 +8,10 @@ import type {
 	ProtocolMessage,
 	ResizeMessage,
 	TestConnectMessage,
+	TransferCancelMessage,
+	TransferResolveMessage,
+	TransferRetryMessage,
+	TransferStartMessage,
 	UiAttachMessage,
 	UiSpawnMessage,
 	WriteClaimMessage,
@@ -39,12 +43,14 @@ import {
 	handleResize,
 	handleSpawn,
 	handleTestConnect,
+	handleTransfer,
 	handleWriteClaim,
 	handleWriteDeny,
 	handleWriteForce,
 	handleWriteGrant,
 	handleWriteRelease,
 	type WsHandlerContext,
+	type WsTransfers,
 } from "./handlers/index.js";
 
 /**
@@ -94,6 +100,24 @@ export interface WsRoutes {
 	 * hub checks that it may speak for it.
 	 */
 	writerCheck(channelId: string, clientId: string, tokenId: string | null): WriterCheck;
+	/** Whether `clientId` may type into the terminal, as INPUT checks it: it holds the lock, or nobody does. */
+	mayWrite(channelId: string, clientId: string): boolean;
+	/**
+	 * The token the socket `clientId` authenticated with: null on a hub
+	 * without auth, undefined for no socket of this hub (#833).
+	 */
+	clientToken(clientId: string): string | null | undefined;
+	/** Send to one socket, if it is open. */
+	sendTo(clientId: string, message: ProtocolMessage): void;
+}
+
+/** What else the WebSocket route serves. */
+export interface WsRouteOptions {
+	/** Uploads (#833): their messages, and the window and lock events they follow. */
+	readonly transfers?: WsTransfers & {
+		clientGone(clientId: string): void;
+		lockChanged(channelId: string): void;
+	};
 }
 
 /** What `writerCheck` found: the holder, or why the request may not write. */
@@ -105,7 +129,9 @@ export async function registerWsRoutes(
 	authToken?: string,
 	db?: Database | null,
 	ttlDays?: number,
+	options: WsRouteOptions = {},
 ): Promise<WsRoutes> {
+	const transfers = options.transfers;
 	// Registry: clientId → send function.
 	// WriteLockManager needs to send to arbitrary clients (not just those on a given
 	// channel) for WRITE_REQUEST / WRITE_DENY / WRITE_REVOKED. The registry is
@@ -122,6 +148,7 @@ export async function registerWsRoutes(
 			}
 		},
 		onForce: (force) => server.security.writeLockForced(force),
+		onChange: (channelId) => transfers?.lockChanged(channelId),
 	});
 	// A hub stopping keeps no lock for a holder that left: the grace ends with it.
 	server.addHook("onClose", async () => {
@@ -188,6 +215,7 @@ export async function registerWsRoutes(
 			if (authenticated) {
 				writeLockManager.onClientDisconnect(clientId);
 				sessionManager.removeClient(clientId);
+				transfers?.clientGone(clientId);
 			}
 		};
 
@@ -370,10 +398,12 @@ export async function registerWsRoutes(
 
 			const ctx: WsHandlerContext = {
 				clientId,
+				tokenId: credential?.id ?? null,
 				client,
 				log: server.log,
 				sessionManager,
 				writeLockManager,
+				...(transfers !== undefined ? { transfers } : {}),
 			};
 
 			switch (msg.type) {
@@ -422,6 +452,19 @@ export async function registerWsRoutes(
 				case "TEST_CONNECT":
 					handleTestConnect(msg as TestConnectMessage, ctx);
 					break;
+				case "TRANSFER_START":
+				case "TRANSFER_RESOLVE":
+				case "TRANSFER_RETRY":
+				case "TRANSFER_CANCEL":
+					handleTransfer(
+						msg as
+							| TransferStartMessage
+							| TransferResolveMessage
+							| TransferRetryMessage
+							| TransferCancelMessage,
+						ctx,
+					);
+					break;
 				default:
 					server.log.warn(
 						{ msgType: msg.type, keys: Object.keys(msg) },
@@ -461,6 +504,17 @@ export async function registerWsRoutes(
 				: clientSendRegistry.has(clientId);
 			if (!known) return "unknown-client";
 			return writeLockManager.isHolder(channelId, clientId) ? "holder" : "not-holder";
+		},
+		mayWrite(channelId, clientId) {
+			return writeLockManager.isWriteLockHolder(channelId, clientId);
+		},
+		clientToken(clientId) {
+			if (!clientSendRegistry.has(clientId)) return undefined;
+			if (!authToken) return null;
+			return tokenSockets.get(clientId)?.tokenId;
+		},
+		sendTo(clientId, message) {
+			clientSendRegistry.get(clientId)?.(message);
 		},
 	};
 }

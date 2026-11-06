@@ -42,6 +42,11 @@ function terminalsText(count: number): string {
 	return count === 1 ? "1 terminal" : `${count} terminals`;
 }
 
+/** "2 uploads", "1 upload". */
+function uploadsText(count: number): string {
+	return count === 1 ? "1 upload" : `${count} uploads`;
+}
+
 /** Say what came of it, in the shapes PROTOCOL.md § 6 gives. */
 function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyReply {
 	switch (outcome.kind) {
@@ -64,8 +69,20 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 			return reply.code(409).send({
 				error: {
 					code: ErrorCode.TERMINALS_WOULD_END,
-					message: `${terminalsText(outcome.terminals)} on this host would end. Send force: true to end them.`,
+					message:
+						outcome.transfers === undefined
+							? `${terminalsText(outcome.terminals)} on this host would end. Send force: true to end them.`
+							: `${terminalsText(outcome.terminals)} on this host would end, and ${uploadsText(outcome.transfers)} to it would stop. Send force: true to go on.`,
 					terminals: outcome.terminals,
+					...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
+				},
+			});
+		case "transfers-would-stop":
+			return reply.code(409).send({
+				error: {
+					code: ErrorCode.TRANSFERS_WOULD_STOP,
+					message: `${uploadsText(outcome.transfers)} to this host would stop. Send force: true to stop them; a retry resumes them.`,
+					transfers: outcome.transfers,
 				},
 			});
 		case "connected":
@@ -115,6 +132,7 @@ export function registerHostConnectionRoutes(
 					code: outcome.code,
 					message: outcome.message,
 					...(outcome.terminals !== undefined && { terminals: outcome.terminals }),
+					...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
 					...(outcome.otherOwnerChannels !== undefined && {
 						other_owner_channels: outcome.otherOwnerChannels,
 					}),
@@ -159,20 +177,37 @@ export function registerHostConnectionRoutes(
 	}
 }
 
-/** Parse consent for SessionManager.stopKeepingAgent. */
+/**
+ * Parse consent for SessionManager.stopKeepingAgent: `end_terminals`, this
+ * hub's terminals end; `force`, other hubs' too (#127); `stop_transfers`, the
+ * uploads to the host stop (#833). Each its own, since each is told apart.
+ */
 export function readStopKeepingBody(
 	body: unknown,
-): { endTerminals: boolean; force: boolean } | { error: string } {
-	if (body === undefined || body === null) return { endTerminals: false, force: false };
+): { endTerminals: boolean; force: boolean; stopTransfers: boolean } | { error: string } {
+	if (body === undefined || body === null) {
+		return { endTerminals: false, force: false, stopTransfers: false };
+	}
 	if (typeof body !== "object" || Array.isArray(body))
 		return { error: "The body must be a JSON object." };
-	const { end_terminals: endTerminals, force } = body as {
+	const {
+		end_terminals: endTerminals,
+		force,
+		stop_transfers: stopTransfers,
+	} = body as {
 		end_terminals?: unknown;
 		force?: unknown;
+		stop_transfers?: unknown;
 	};
 	if (endTerminals !== undefined && typeof endTerminals !== "boolean")
 		return { error: "end_terminals must be true or false." };
 	if (force !== undefined && typeof force !== "boolean")
 		return { error: "force must be true or false." };
-	return { endTerminals: endTerminals === true, force: force === true };
+	if (stopTransfers !== undefined && typeof stopTransfers !== "boolean")
+		return { error: "stop_transfers must be true or false." };
+	return {
+		endTerminals: endTerminals === true,
+		force: force === true,
+		stopTransfers: stopTransfers === true,
+	};
 }

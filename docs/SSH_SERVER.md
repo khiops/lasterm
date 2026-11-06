@@ -74,7 +74,9 @@ exec channel. A profile also must not
 read stdin, exit, or redefine `echo` or `powershell`. [`SPEC.md` §3.5](SPEC.md), "What a PowerShell
 profile may do", has the details. cmd.exe's AutoRun (`HKCU\Software\Microsoft\Command Processor`) runs
 the same way under cmd.exe; a `chcp 65001` there prints "Active code page: 65001" before every
-command, which the hub copes with too.
+command, which the hub copes with too. The snippet that has PowerShell report its directory
+([README](../README.md#following-powershells-directory)) is safe there: it prints nothing, and only
+wraps `prompt`, which no command of the hub's calls.
 
 **Skipping the profile.** For Windows PowerShell (`powershell.exe`), set `DefaultShellCommandOption`
 to `-NoProfile`:

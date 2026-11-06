@@ -245,8 +245,81 @@ describe("ProfileForm save (#665)", () => {
 			mode: "shell",
 			supported_os: "any",
 			elevated: false,
+			report_directory: false,
 			icon_type: "auto",
 		});
 		expect(onSaved).toHaveBeenCalled();
+	});
+});
+
+describe("ProfileForm: Report its directory (#839)", () => {
+	/** A PowerShell profile with the switch on. */
+	const REPORTING: LaunchProfile = {
+		...BARE,
+		id: "01PROFILE0000000000000000C",
+		name: "PowerShell 7",
+		shell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+		supportedOs: "windows",
+		reportDirectory: true,
+	};
+
+	function setReportDirectory(checked: boolean): void {
+		const box = el<HTMLInputElement>("#pf-report-directory");
+		if (!box) throw new Error("no Report its directory box");
+		box.checked = checked;
+		box.dispatchEvent(new Event("change"));
+	}
+
+	it("is offered for a PowerShell only, by its file name", async () => {
+		mountForm(BARE);
+		expect(el("#pf-report-directory")).toBeNull();
+		for (const shell of [
+			"pwsh",
+			"powershell.exe",
+			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\PowerShell.EXE",
+		]) {
+			type("#pf-shell", shell);
+			await nextTick();
+			expect(el("#pf-report-directory"), shell).not.toBeNull();
+		}
+		type("#pf-shell", "cmd.exe");
+		await nextTick();
+		expect(el("#pf-report-directory")).toBeNull();
+	});
+
+	it("says what it does, and links to the README's section, snippet included", () => {
+		mountForm(REPORTING);
+		const box = el<HTMLInputElement>("#pf-report-directory");
+		expect(box?.checked).toBe(true);
+		expect(box?.closest("label")?.textContent?.trim()).toBe("Report its directory");
+		const hint = el(`#${box?.getAttribute("aria-describedby")}`);
+		expect(hint?.textContent).toContain("Set-Location");
+		const link = hint?.querySelector("a");
+		expect(link?.getAttribute("href")).toBe(
+			"https://github.com/khiops/lasterm#following-powershells-directory",
+		);
+		expect(link?.getAttribute("target")).toBe("_blank");
+	});
+
+	it("sends report_directory as the box is", async () => {
+		mountForm({ ...REPORTING, reportDirectory: false });
+		expect(el<HTMLInputElement>("#pf-report-directory")?.checked).toBe(false);
+		setReportDirectory(true);
+		await nextTick();
+		expect((await save()).body.report_directory).toBe(true);
+	});
+
+	it("sends it off once unchecked", async () => {
+		mountForm(REPORTING);
+		setReportDirectory(false);
+		await nextTick();
+		expect((await save()).body.report_directory).toBe(false);
+	});
+
+	it("sends it off for a shell that is no PowerShell, which it has no effect on", async () => {
+		mountForm(REPORTING);
+		type("#pf-shell", "C:\\Windows\\System32\\cmd.exe");
+		await nextTick();
+		expect((await save()).body.report_directory).toBe(false);
 	});
 });

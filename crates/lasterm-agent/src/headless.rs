@@ -341,11 +341,16 @@ fn osc7(uri: &[u8], local_host: &str) -> Option<ShellReport> {
 }
 
 /// An OSC 7 path as this host writes one: on Windows, `/C:/Users/me` is
-/// `C:\Users\me`.
+/// `C:\Users\me`, and `//server/share/dir`, a share's path as PowerShell's
+/// prompt writes it (#839), is `\\server\share\dir`.
 fn osc7_path(path: String, windows: bool) -> String {
     let bytes = path.as_bytes();
     let drive =
         bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':';
+    let share = bytes.len() >= 3 && bytes[0] == b'/' && bytes[1] == b'/' && bytes[2] != b'/';
+    if windows && share {
+        return path.replace('/', "\\");
+    }
     if !windows || !drive {
         return path;
     }
@@ -634,6 +639,13 @@ mod tests {
         assert_eq!(osc7_path("/C:".into(), true), "C:\\");
         assert_eq!(osc7_path("/C:/Users/me".into(), false), "/C:/Users/me");
         assert_eq!(osc7_path("/home/me".into(), true), "/home/me");
+        // A share, as the PowerShell prompt of #839 writes one after the host.
+        assert_eq!(
+            osc7_path("//server/share/My Files".into(), true),
+            "\\\\server\\share\\My Files"
+        );
+        assert_eq!(osc7_path("//server/share".into(), false), "//server/share");
+        assert_eq!(osc7_path("///x".into(), true), "///x");
     }
 
     #[test]

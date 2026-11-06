@@ -18,6 +18,7 @@ mod platform_dirs;
 mod process;
 mod protocol;
 mod pty;
+mod report_directory;
 mod shell;
 #[cfg(unix)]
 mod socket_dir;

@@ -35,7 +35,14 @@ export function validateCreateBody(body: CreateLaunchProfileBody): string | null
 }
 
 /** The fields that always hold a value: PUT cannot clear them. */
-const REQUIRED_ON_UPDATE = ["mode", "elevated", "supported_os", "icon_type", "sort_order"] as const;
+const REQUIRED_ON_UPDATE = [
+	"mode",
+	"elevated",
+	"supported_os",
+	"icon_type",
+	"sort_order",
+	"report_directory",
+] as const;
 
 /**
  * What PUT /api/launch-profiles/:id accepts: the fields it is given, by the rules
@@ -118,6 +125,13 @@ function validateProfileFields(
 	) {
 		return "icon_type must be 'auto', 'emoji', or 'image'";
 	}
+	if (
+		body.report_directory !== undefined &&
+		body.report_directory !== null &&
+		typeof body.report_directory !== "boolean"
+	) {
+		return "report_directory must be true or false";
+	}
 	return null;
 }
 
@@ -175,6 +189,8 @@ export interface CreateLaunchProfileBody {
 	color?: string | null;
 	profile_overrides?: Record<string, unknown> | null;
 	sort_order?: number | null;
+	/** Its PowerShell reports its directory (#839); default false. */
+	report_directory?: boolean | null;
 }
 
 /** A field left out stays as stored; null clears one that may be empty (#665). */
@@ -192,6 +208,7 @@ export interface UpdateLaunchProfileBody {
 	color?: string | null;
 	profile_overrides?: Record<string, unknown> | null;
 	sort_order?: number;
+	report_directory?: boolean;
 }
 
 // ─── Route registration ──────────────────────────────────────────────────────
@@ -257,6 +274,7 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 			supportedOs: body.supported_os ?? "any",
 			iconType: body.icon_type ?? "auto",
 			sortOrder: body.sort_order ?? 0,
+			reportDirectory: body.report_directory ?? false,
 			...(body.args !== undefined && body.args !== null && { args: body.args }),
 			...(body.cwd !== undefined && body.cwd !== null && { cwd: body.cwd }),
 			...(body.env !== undefined && body.env !== null && { env: body.env }),
@@ -328,6 +346,9 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				...(body.supported_os !== undefined && { supportedOs: body.supported_os }),
 				...(body.icon_type !== undefined && { iconType: body.icon_type }),
 				...(body.sort_order !== undefined && { sortOrder: body.sort_order }),
+				...(body.report_directory !== undefined && {
+					reportDirectory: body.report_directory,
+				}),
 				...(body.args !== undefined && { args: body.args }),
 				...(body.cwd !== undefined && { cwd: body.cwd }),
 				...(body.icon_value !== undefined && { iconValue: body.icon_value }),

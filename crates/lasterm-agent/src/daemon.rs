@@ -1993,6 +1993,7 @@ mod tests {
                 env_mode: "inherit".to_string(),
                 env_unset: None,
                 login_shell: None,
+                report_directory: None,
             };
             stream
                 .write_all(&encode_frame(&spawn).expect("encode SPAWN"))
@@ -3565,6 +3566,7 @@ mod tests {
                 env_mode: "inherit".to_string(),
                 env_unset: None,
                 login_shell: None,
+                report_directory: None,
             }
         }
 
@@ -3704,6 +3706,7 @@ mod tests {
                     env_mode: "inherit".to_string(),
                     env_unset: None,
                     login_shell: None,
+                    report_directory: None,
                 }
             }
 

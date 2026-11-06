@@ -695,6 +695,7 @@ LaunchProfile (reusable spawn template)
  ├── iconValue?: string
  ├── color?: string
  ├── profileOverrides?: Partial<TerminalProfile>
+ ├── reportDirectory: boolean          // its PowerShell reports its directory (#839)
  ├── sortOrder: number
  ├── createdAt: string                 // ISO 8601
  └── updatedAt: string
@@ -966,7 +967,7 @@ User clicks [+ channel] on remote host
   │     UI: error notification
   │
   └─ Yes (ACTIVE) → reuse SSH connection
-     Hub → Agent: SPAWN { shell, cwd, env, env_unset, env_mode, login_shell, cols, rows }
+     Hub → Agent: SPAWN { shell, cwd, env, env_unset, env_mode, login_shell, report_directory, cols, rows }
      Agent: build the environment (§ 6), spawn PTY, create the vt100 screen model
      Agent → Hub: SPAWN_OK { channelId: "ch-new" }
      Hub: create Channel record (meta.db), status: BORN → LIVE
@@ -1205,6 +1206,14 @@ agent reported, which `ssh host` itself starts (#794); a terminal with no shell 
 agent's. The hub asks for it (`login_shell`), a Unix agent adds `-l` for a shell known to take it.
 A Windows agent adds nothing: its default is a PowerShell (#804), and pwsh takes `-Login` only on
 Linux and macOS. Local terminals are unchanged.
+
+A launch profile with **Report its directory** (`report_directory`, #839) has its PowerShell say
+where it is at every prompt, which its process cannot tell: `Set-Location` moves PowerShell's
+location, not its process directory (#834). The hub sends it in the SPAWN of each of the profile's
+terminals, restarts included; a Windows agent starts a `pwsh` or `powershell` whose arguments run
+nothing of their own with `-NoExit -EncodedCommand` and the README's snippet, which wraps the prompt
+the user's `$PROFILE` set so that it writes OSC 7 first (PROTOCOL.md § 3.2). The same snippet can go
+in `$PROFILE` instead, on any host. Off by default.
 
 Native effect resolution:
 

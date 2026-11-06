@@ -27,6 +27,8 @@ export interface LaunchProfileBody {
 	color?: string | null;
 	/** Kept in camelCase inside: the hub stores it as it comes. */
 	profile_overrides?: Partial<TerminalProfile> | null;
+	/** Its PowerShell reports its directory (#839). */
+	report_directory?: boolean;
 }
 
 /** Profile with host-specific override info (from GET /api/hosts/:id/profiles). */

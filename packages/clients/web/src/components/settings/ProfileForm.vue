@@ -90,6 +90,28 @@
 					Elevated (run as admin/sudo)
 				</label>
 			</div>
+
+			<div v-if="powerShell" class="form-row form-row-checkbox">
+				<label class="form-label-inline">
+					<input
+						id="pf-report-directory"
+						v-model="form.reportDirectory"
+						type="checkbox"
+						class="form-checkbox"
+						aria-describedby="pf-report-directory-hint"
+					/>
+					Report its directory
+				</label>
+				<p id="pf-report-directory-hint" class="field-hint">
+					PowerShell does not tell other programs its directory. On a Windows host, this starts
+					it with a prompt that does, after your <code>$PROFILE</code> and keeping your prompt, so
+					that Lasterm follows <code>Set-Location</code>. It changes nothing when the arguments
+					run a command or a file.
+					<a :href="POWERSHELL_DIRECTORY_HELP_URL" target="_blank" rel="noopener noreferrer"
+						>How it works, and a snippet for <code>$PROFILE</code></a
+					>
+				</p>
+			</div>
 		</section>
 
 		<!-- ── Arguments ─────────────────────────────────────────────────── -->
@@ -292,6 +314,7 @@
 import { ref, reactive, computed, watch } from "vue";
 import type { LaunchProfile, LaunchProfileMode, SupportedOs, IconType } from "@lasterm/shared";
 import type { TerminalProfile } from "@lasterm/shared";
+import { isPowerShell, POWERSHELL_DIRECTORY_HELP_URL } from "@lasterm/shared";
 import HostOverridesTable from "./HostOverridesTable.vue";
 import { type LaunchProfileBody, useProfilesStore } from "../../stores/profiles.js";
 
@@ -318,6 +341,7 @@ interface FormState {
 	mode: LaunchProfileMode;
 	supportedOs: SupportedOs;
 	elevated: boolean;
+	reportDirectory: boolean;
 	iconType: IconType;
 	iconValue: string;
 	color: string;
@@ -333,6 +357,7 @@ function buildInitialForm(p?: LaunchProfile): FormState {
 		mode: p?.mode ?? "shell",
 		supportedOs: p?.supportedOs ?? "any",
 		elevated: p?.elevated ?? false,
+		reportDirectory: p?.reportDirectory ?? false,
 		iconType: p?.iconType ?? "auto",
 		iconValue: p?.iconValue ?? "",
 		color: p?.color ?? "",
@@ -358,6 +383,15 @@ watch(
 	},
 	{ immediate: false },
 );
+
+// ── Report its directory (#839) ─────────────────────────────────────────────
+
+/**
+ * Whether the shell is a PowerShell, by file name as the agent tells: only then
+ * is the switch shown, and saved on. For any other shell it is saved off, so
+ * that it does not come back on, unseen, with a later PowerShell.
+ */
+const powerShell = computed(() => isPowerShell(form.shell.trim()));
 
 // ── Color ───────────────────────────────────────────────────────────────────
 
@@ -522,6 +556,7 @@ async function handleSave(): Promise<void> {
 			mode: form.mode,
 			supported_os: form.supportedOs,
 			elevated: form.elevated,
+			report_directory: powerShell.value && form.reportDirectory,
 			icon_type: form.iconType,
 			...clearable("args", form.args.length > 0 ? [...form.args] : undefined, stored?.args),
 			...clearable("cwd", form.cwd.trim() || undefined, stored?.cwd),

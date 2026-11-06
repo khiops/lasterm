@@ -195,6 +195,11 @@ pub enum HubToAgent {
         /// known to take it, when `args` is empty; Windows ignores it.
         #[serde(default)]
         login_shell: Option<bool>,
+        /// The launch profile's `report_directory` (#839): a Windows agent
+        /// starts a PowerShell whose `args` run nothing of their own with a
+        /// prompt that reports its directory; anything else ignores it.
+        #[serde(default)]
+        report_directory: Option<bool>,
     },
     /// Ask for the variables a terminal would start with in `mode`
     /// (`env-modes`, #576). Answered with ENV.
@@ -500,6 +505,36 @@ mod tests {
         )
         .expect_err("a SPAWN without env_mode must not decode");
         assert!(error.to_string().contains("env_mode"), "{error}");
+    }
+
+    /// A launch profile's `report_directory` (#839) arrives as SPAWN's; the hub
+    /// leaves it out when it is off.
+    #[test]
+    fn spawn_reads_report_directory() {
+        let spawn = |extra: serde_json::Value| {
+            let mut frame = serde_json::json!({
+                "type": "SPAWN", "request_id": "r", "cols": 80, "rows": 24, "env_mode": "inherit",
+            });
+            frame
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            match hub_frame(frame) {
+                HubToAgent::Spawn {
+                    report_directory, ..
+                } => report_directory,
+                other => panic!("expected SPAWN, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            spawn(serde_json::json!({ "report_directory": true })),
+            Some(true)
+        );
+        assert_eq!(
+            spawn(serde_json::json!({ "report_directory": false })),
+            Some(false)
+        );
+        assert_eq!(spawn(serde_json::json!({})), None);
     }
 
     #[test]

@@ -20,6 +20,7 @@ use crate::pty::{
     log_teardown_outcome, spawn_teardown_confirmation, DestroyAllSummary, PtyManager,
     TeardownConfirmation, TeardownStart,
 };
+use crate::report_directory;
 use crate::shell;
 use async_xpty::PtySize;
 
@@ -396,6 +397,7 @@ pub(crate) async fn handle_message(
             env_mode,
             env_unset,
             login_shell,
+            report_directory,
             ..
         } => {
             handle_spawn(
@@ -409,6 +411,7 @@ pub(crate) async fn handle_message(
                     unset: env_unset.unwrap_or_default(),
                     env,
                     login_shell: login_shell.unwrap_or(false),
+                    report_directory: report_directory.unwrap_or(false),
                 },
                 cols,
                 rows,
@@ -734,6 +737,8 @@ pub(crate) struct SpawnEnvironment {
     pub env: Option<HashMap<String, String>>,
     /// Whether the hub asks for a login shell.
     pub login_shell: bool,
+    /// Whether the launch profile has a PowerShell report its directory (#839).
+    pub report_directory: bool,
 }
 
 /// The whole environment a terminal starts with: the base for the mode, the
@@ -798,6 +803,7 @@ async fn handle_spawn(
         unset: env_unset,
         env,
         login_shell,
+        report_directory,
     } = spawn_env;
     // Counts, presence and the mode only: environment names and values,
     // arguments and the working directory can be secrets.
@@ -813,6 +819,7 @@ async fn handle_spawn(
         env_unset_count = env_unset.len(),
         env_mode = ?env_mode,
         login_shell,
+        report_directory,
         "SPAWN received"
     );
 
@@ -821,6 +828,14 @@ async fn handle_spawn(
 
     // Expand vars in args, cwd, env values (NOT shell)
     let expanded_args: Vec<String> = args.iter().map(|a| expand_vars(a, env.as_ref())).collect();
+    // Judged on the arguments as the shell gets them, and added after their
+    // expansion: the script is data, not something to expand.
+    let expanded_args = report_directory::report_directory_args(
+        Platform::current(),
+        &resolved_shell,
+        expanded_args,
+        report_directory,
+    );
     let expanded_cwd = spawn_cwd(cwd, env.as_ref(), shell::agent_default_cwd);
     let expanded_env: Option<std::collections::HashMap<String, String>> = env.map(|e| {
         e.into_iter()
@@ -1661,20 +1676,36 @@ mod stdio_tests {
         manager: &Arc<Mutex<PtyManager>>,
         senders: &SnapshotSenders,
     ) -> mpsc::UnboundedReceiver<ChannelEvent> {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        start_shell_in(channel_id, shell, Vec::new(), cwd, false, manager, senders).await
+    }
+
+    /// Start `shell` with `args` under `channel_id` in `cwd`, its launch
+    /// profile reporting its directory or not, as a SPAWN does. What it sends
+    /// about itself arrives on the receiver returned.
+    async fn start_shell_in(
+        channel_id: &str,
+        shell: &str,
+        args: Vec<String>,
+        cwd: Option<String>,
+        report_directory: bool,
+        manager: &Arc<Mutex<PtyManager>>,
+        senders: &SnapshotSenders,
+    ) -> mpsc::UnboundedReceiver<ChannelEvent> {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
         let (channel_events, channel_events_rx) = ChannelEventSender::new(Flows::default());
-        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         handle_spawn(
             "spawn-1".into(),
             Some(channel_id.into()),
             Some(shell.into()),
-            Vec::new(),
+            args,
             cwd,
             SpawnEnvironment {
                 mode: EnvMode::Inherit,
                 unset: Vec::new(),
                 env: None,
                 login_shell: false,
+                report_directory,
             },
             80,
             24,
@@ -1843,6 +1874,77 @@ mod stdio_tests {
         let removed = manager.lock().await.remove("osc-ch");
         if let Some(process) = removed {
             let _ = process.kill_tree();
+        }
+    }
+
+    /// A PowerShell whose launch profile reports its directory says where it
+    /// is at its first prompt, and follows `Set-Location`, which its process
+    /// directory never does: the prompt's OSC 7 comes through ConPTY (#839).
+    /// Windows PowerShell 5.1 always, PowerShell 7 where this machine has it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_powershell_reporting_its_directory_is_followed_through_set_location() {
+        use crate::protocol::HubToAgent;
+        use std::time::Duration;
+        let powershells: Vec<String> = shell::detect_available_shells()
+            .into_iter()
+            .filter(|shell| {
+                let name = shell.rsplit('\\').next().unwrap_or(shell);
+                name.eq_ignore_ascii_case("powershell.exe") || name.eq_ignore_ascii_case("pwsh.exe")
+            })
+            .collect();
+        assert!(
+            powershells
+                .iter()
+                .any(|shell| shell.to_ascii_lowercase().ends_with("powershell.exe")),
+            "Windows PowerShell is part of Windows: {powershells:?}"
+        );
+        let windows = std::path::Path::new("C:\\Windows");
+
+        for (i, powershell) in powershells.iter().enumerate() {
+            let manager = Arc::new(Mutex::new(PtyManager::new()));
+            let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+            let start = temp_dir(&format!("report-{i}"));
+            let channel = format!("ps-ch-{i}");
+            let mut events = start_shell_in(
+                &channel,
+                powershell,
+                vec!["-NoLogo".into(), "-NoProfile".into()],
+                Some(start.to_str().unwrap().to_owned()),
+                true,
+                &manager,
+                &senders,
+            )
+            .await;
+
+            let first = next_cwd_change(&mut events, Duration::from_secs(30), |frame| {
+                frame["source"] == "shell"
+            })
+            .await
+            .unwrap_or_else(|| panic!("{powershell} reports where it starts"));
+            assert!(names_dir(&first, &start), "{powershell}: {first}");
+
+            answers(
+                HubToAgent::Input {
+                    channel_id: channel.clone(),
+                    data: b"Set-Location C:\\Windows\r".to_vec(),
+                },
+                &manager,
+                &senders,
+            )
+            .await;
+            let moved = next_cwd_change(&mut events, Duration::from_secs(15), |frame| {
+                names_dir(frame, windows)
+            })
+            .await
+            .unwrap_or_else(|| panic!("{powershell} reports Set-Location"));
+            assert_eq!(moved["source"], "shell", "{powershell}: {moved}");
+            assert!(moved["other_host"].is_null(), "{powershell}: {moved}");
+
+            if let Some(process) = manager.lock().await.remove(&channel) {
+                let _ = process.kill_tree();
+            }
+            let _ = std::fs::remove_dir_all(&start);
         }
     }
 
@@ -2219,6 +2321,7 @@ mod stdio_tests {
                 unset: vec![],
                 env: None,
                 login_shell: false,
+                report_directory: false,
             },
             80,
             24,
@@ -2369,6 +2472,7 @@ mod stdio_tests {
                 unset: vec![removed.into()],
                 env: Some(map(&[("LASTERM_ENV_E2E", "given")])),
                 login_shell: false,
+                report_directory: false,
             },
             80,
             24,
@@ -2515,6 +2619,7 @@ mod tests {
                 unset: Vec::new(),
                 env: None,
                 login_shell: false,
+                report_directory: false,
             },
             80,
             24,

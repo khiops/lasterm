@@ -259,10 +259,8 @@ async fn spawn_daemon_from(binary: &str, socket: &std::path::Path) -> Child {
         .expect("spawn daemon")
 }
 
-#[cfg(unix)]
 struct DaemonGuard(Child);
 
-#[cfg(unix)]
 impl std::ops::Deref for DaemonGuard {
     type Target = Child;
 
@@ -271,14 +269,12 @@ impl std::ops::Deref for DaemonGuard {
     }
 }
 
-#[cfg(unix)]
 impl std::ops::DerefMut for DaemonGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-#[cfg(unix)]
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
         let _ = self.0.start_kill();
@@ -573,6 +569,154 @@ async fn replaced_daemon_binary_remains_stoppable() {
     std::fs::remove_dir_all(dir).expect("remove daemon fixture directory");
     // Mutation caught: comparing /proc/<pid>/exe's deleted pathname instead of
     // the opened executable inode refuses an upgraded-but-live daemon.
+}
+
+/// A daemon endpoint with a throwaway profile of its own, for the daemon and
+/// for every `--stop` aimed at it, on either platform: a socket whose records
+/// sit beside it on Unix, a named pipe whose records go to the state directory
+/// on Windows. Every directory the agent reads is set, so nothing reaches the
+/// profile of whoever runs the tests.
+struct StopFixture {
+    dir: std::path::PathBuf,
+    socket: String,
+}
+
+impl StopFixture {
+    fn new(label: &str) -> Self {
+        let id = ulid::Ulid::generate();
+        let dir = std::env::temp_dir().join(format!("lasterm-agent-{label}-{id}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
+                .expect("create private daemon fixture directory");
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(&dir).expect("create daemon fixture directory");
+        let socket = if cfg!(windows) {
+            format!(r"\\.\pipe\lasterm-agent-{label}-{id}")
+        } else {
+            dir.join("agent.socket")
+                .to_str()
+                .expect("UTF-8 socket path")
+                .to_owned()
+        };
+        Self { dir, socket }
+    }
+
+    /// Where the daemon's identity records go.
+    fn record_dir(&self) -> std::path::PathBuf {
+        if cfg!(windows) {
+            self.dir.join("lasterm")
+        } else {
+            self.dir.clone()
+        }
+    }
+
+    fn agent(&self, mode: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"));
+        command
+            .args([mode, "--socket", &self.socket])
+            .env("XDG_STATE_HOME", &self.dir)
+            .env("XDG_CONFIG_HOME", &self.dir)
+            .env("LOCALAPPDATA", &self.dir)
+            .env("APPDATA", &self.dir);
+        command
+    }
+
+    fn spawn_daemon(&self) -> DaemonGuard {
+        DaemonGuard(
+            self.agent("--daemon")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .expect("spawn daemon"),
+        )
+    }
+
+    /// Run `--stop`: whether it exited 0, and the word it printed.
+    async fn stop(&self) -> (bool, String) {
+        let output = self.agent("--stop").output().await.expect("run stop mode");
+        let said = String::from_utf8(output.stdout).expect("stop output is UTF-8");
+        (output.status.success(), said.trim().to_owned())
+    }
+
+    /// The daemon's live identity record, once it is published.
+    async fn live_record(&self) -> std::path::PathBuf {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let found = std::fs::read_dir(self.record_dir()).ok().and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("agent.identity-") && name.ends_with(".json")
+                        })
+                })
+            });
+            if let Some(record) = found {
+                return record;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the live record of {}",
+                self.socket
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn remove(self) {
+        // The daemon is gone, but Windows may release its log file a moment
+        // after; a leftover temporary directory fails no test.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// #871: a daemon that ended without its own cleanup, a crash or a kill, leaves
+/// its live record naming a process that is gone. The next stop has nothing to
+/// stop: it says so and succeeds, and removes the record. So does the stop
+/// after it, which finds no record at all.
+#[tokio::test]
+async fn stop_mode_reports_a_killed_daemon_not_running_and_clears_its_record() {
+    let fixture = StopFixture::new("killed");
+    let mut daemon = fixture.spawn_daemon();
+    let record = fixture.live_record().await;
+
+    daemon.kill().await.expect("force kill daemon");
+    let _ = daemon.wait().await.expect("wait killed daemon");
+    assert!(record.exists(), "a kill leaves the live record behind");
+
+    assert_eq!(fixture.stop().await, (true, "not running".to_owned()));
+    assert!(!record.exists(), "the record of a process that is gone goes");
+    assert_eq!(fixture.stop().await, (true, "not running".to_owned()));
+
+    fixture.remove();
+    // Mutation caught: answering `record does not match a live process` for a
+    // recorded process that no longer exists failed every later quit (#871);
+    // answering `no record` once the record is removed would fail them too.
+}
+
+/// What `--stop` stopped leaves no record. On Unix the daemon removes its own
+/// as it exits; on Windows the stop terminates it, so the stop does (#871).
+#[tokio::test]
+async fn stop_mode_leaves_no_record_of_the_daemon_it_stopped() {
+    let fixture = StopFixture::new("stopped-record");
+    let mut daemon = fixture.spawn_daemon();
+    let record = fixture.live_record().await;
+
+    assert_eq!(fixture.stop().await, (true, "stopped".to_owned()));
+    let _ = daemon.wait().await.expect("wait stopped daemon");
+    assert!(!record.exists(), "a stopped daemon leaves no live record");
+    assert_eq!(fixture.stop().await, (true, "not running".to_owned()));
+
+    fixture.remove();
+    // Mutation caught: on Windows, keeping the record of the daemon the stop
+    // terminated, which a later reuse of its pid turns into a mismatch.
 }
 
 /// SC-09: Agent sends HELLO as the very first frame on stdout.

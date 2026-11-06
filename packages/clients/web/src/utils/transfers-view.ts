@@ -8,10 +8,12 @@ import {
 	type ProfileWriteLayers,
 	type ProfileWritePlan,
 	planProfileWrite,
+	TRANSFER_EXPIRY_MS,
 	type TransferConflictAction,
 	type TransferExisting,
 	type TransferFolderConflicts,
 	type TransferItemState,
+	type TransferNotResumedReason,
 	type TransferOutcome,
 } from "@lasterm/shared";
 import { formatSize } from "./files-panel.js";
@@ -63,7 +65,60 @@ export interface UploadView {
 	readonly rate: number;
 	/** Its files by state, as the hub last counted them. */
 	readonly totals: UploadCounts;
+	/** The upload as a whole, as the hub last said it (#860); running when it did not. */
+	readonly state?: "running" | "interrupted" | "done";
+	/** Why the last resume did not reach its host. */
+	readonly reason?: TransferNotResumedReason | undefined;
+	/** The device that started it is this window's: only then can it be resumed here (#837). */
+	readonly fromThisDevice?: boolean;
+	/** Otherwise, that device's name as the hub lists it. */
+	readonly deviceLabel?: string | undefined;
+	/** ISO 8601, when it last changed: an interrupted one is discarded 7 days after. */
+	readonly updatedAt?: string | null;
+	/** Its handles, for a resume after a restart: being read, kept, or none. */
+	readonly kept?: "reading" | "kept" | "none";
+	/** Where a resume, or a discard, of it is. */
+	readonly resume?: ResumeState | null;
+	/** What its last resume left out, the files gone or unreadable on this device. */
+	readonly leftOut?: LeftOut | null;
 }
+
+/** The files a resume left out: gone from this device, or unreadable on it. */
+export interface LeftOut {
+	readonly gone: number;
+	readonly unreadable: number;
+}
+
+/** A file a resume found changed since it was sent, and what its user answered. */
+export interface ChangedFileView {
+	readonly itemId: number;
+	readonly relPath: string;
+	readonly was: { readonly size: number; readonly lastModified: number };
+	readonly now: { readonly size: number; readonly lastModified: number };
+	readonly answer: "restart" | "skip" | null;
+}
+
+/** Where a resume, or a discard, of an interrupted upload is (#837). */
+export type ResumeState =
+	/** Its files' read access is asked: the browser may ask its own question. */
+	| { readonly phase: "asking" }
+	/** Each file is read again, and compared with what was sent. */
+	| { readonly phase: "checking" }
+	/** Files changed since they were sent: each waits for "send again" or "skip". */
+	| {
+			readonly phase: "changed";
+			readonly files: readonly ChangedFileView[];
+			readonly gone: number;
+			readonly unreadable: number;
+	  }
+	/** Asked of the hub, which may ask for the host's passphrase first. */
+	| { readonly phase: "resuming"; readonly gone: number; readonly unreadable: number }
+	/** The files cannot be read again here: a drop of them finishes the upload. */
+	| {
+			readonly phase: "redrop";
+			readonly why: "denied" | "timeout" | "unsupported" | "unknown";
+	  }
+	| { readonly phase: "discarding" };
 
 /** Files by state, and bytes, of an upload or of a folder in it. */
 export interface UploadCounts {
@@ -109,6 +164,20 @@ export function isActive(counts: UploadCounts): boolean {
 /** Whether it waits on the user: a conflict to answer, a failure to retry. */
 export function needsAttention(counts: UploadCounts): boolean {
 	return count(counts.states, "conflict") + count(counts.states, "failed") > 0;
+}
+
+/**
+ * Whether nothing is left of it to do: nothing moving, failing, waiting for an answer, or
+ * interrupted. Only such an upload is dismissed, or cleared as finished: an interrupted one is
+ * resumed or discarded (#837).
+ */
+export function isOver(upload: Pick<UploadView, "totals" | "state">): boolean {
+	return (
+		upload.state !== "interrupted" &&
+		!isActive(upload.totals) &&
+		!needsAttention(upload.totals) &&
+		count(upload.totals.states, "interrupted") === 0
+	);
 }
 
 /** A whole percentage of the bytes the host holds. */
@@ -442,13 +511,18 @@ export function groupSummary(
 	};
 }
 
-/** What the Transfers header counts: "2 running, 1 failed", or "none". */
+/** What the Transfers header counts: "2 running, 1 failed, 1 interrupted", or "none". */
 export function transfersCount(uploads: readonly UploadView[]): { text: string; warn: boolean } {
 	let running = 0;
 	let failed = 0;
 	let deciding = 0;
+	let interrupted = 0;
 	for (const upload of uploads) {
 		const counts = upload.totals;
+		if (upload.state === "interrupted") {
+			interrupted++;
+			continue;
+		}
 		if (isActive(counts)) running++;
 		if (count(counts.states, "failed") > 0) failed++;
 		if (count(counts.states, "conflict") > 0) deciding++;
@@ -457,6 +531,7 @@ export function transfersCount(uploads: readonly UploadView[]): { text: string; 
 		...(running > 0 ? [`${running} running`] : []),
 		...(failed > 0 ? [`${failed} failed`] : []),
 		...(deciding > 0 ? [`${deciding} to decide`] : []),
+		...(interrupted > 0 ? [`${interrupted} interrupted`] : []),
 	];
 	return { text: parts.length > 0 ? parts.join(", ") : "none", warn: failed + deciding > 0 };
 }
@@ -560,6 +635,102 @@ export function uploadsReportOf(uploads: readonly UploadView[]): UploadsReport {
 export function quitPendingText(pending: "quit" | "restart" | null): string | null {
 	if (pending === null) return null;
 	return `Lasterm will ${pending} when these uploads end`;
+}
+
+// ─── Interrupted uploads (#837) ──────────────────────────────────────────────
+
+/** Why the last resume did not reach the upload's host: "Not resumed: AD needs its passphrase". */
+export function notResumedText(reason: TransferNotResumedReason, hostLabel: string): string {
+	switch (reason) {
+		case "needs_passphrase":
+			return `Not resumed: ${hostLabel} needs its passphrase`;
+		case "needs_password":
+			return `Not resumed: ${hostLabel} needs its password`;
+		case "host_key_not_accepted":
+			return `Not resumed: ${hostLabel}'s host key was not accepted`;
+		case "host_unreachable":
+			return `Not resumed: ${hostLabel} could not be reached`;
+	}
+}
+
+/** A day as the panel says it: "12 Nov". */
+export function dayText(date: Date): string {
+	return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+/**
+ * Until when interrupted uploads are kept: the first of them to go, 7 days after it last changed
+ * (`TRANSFER_EXPIRY_MS`); null when none says when.
+ */
+export function keptUntil(updatedAts: readonly (string | null | undefined)[]): Date | null {
+	let first: number | null = null;
+	for (const at of updatedAts) {
+		const ms = at === null || at === undefined ? Number.NaN : Date.parse(at);
+		if (!Number.isNaN(ms) && (first === null || ms < first)) first = ms;
+	}
+	return first === null ? null : new Date(first + TRANSFER_EXPIRY_MS);
+}
+
+/** The block folded by Not now, in one line: "4 interrupted uploads · kept until 12 Nov". */
+export function foldedText(count: number, until: Date | null): string {
+	const what = `${count.toLocaleString("en-US")} interrupted ${count === 1 ? "upload" : "uploads"}`;
+	return until === null ? what : `${what} · kept until ${dayText(until)}`;
+}
+
+/** What was placed of an upload: "118 of 120 placed". */
+export function placedText(counts: UploadCounts): string {
+	return `${count(counts.states, "placed").toLocaleString("en-US")} of ${counts.files.toLocaleString("en-US")} placed`;
+}
+
+/**
+ * The device another device's upload can be resumed from, by the name the hub's credentials give
+ * it: the desktop app holds the hub's own one ("Primary"), a pairing names its address.
+ */
+export function deviceText(label: string | undefined): string {
+	if (label === undefined || label.trim() === "") return "another device";
+	if (label === "Primary") return "the desktop app";
+	const paired = /^Paired from (.+)$/.exec(label);
+	return paired !== null ? `the device paired from ${paired[1]}` : label;
+}
+
+/** A resume under way, in words; null when it says nothing of its own. */
+export function resumeText(resume: ResumeState | null | undefined): string | null {
+	switch (resume?.phase) {
+		case "asking":
+			return "Asking for access to its files…";
+		case "checking":
+			return "Checking its files…";
+		case "resuming":
+			return "Resuming…";
+		case "discarding":
+			return "Discarding…";
+		case "redrop":
+			return "Drop the files again to finish";
+		default:
+			return null;
+	}
+}
+
+/** What a resume left out, said on its row: "1 file no longer there, left out". */
+export function leftOutText(gone: number, unreadable: number): string | null {
+	const parts = [
+		...(gone > 0
+			? [`${gone.toLocaleString("en-US")} ${gone === 1 ? "file" : "files"} no longer there`]
+			: []),
+		...(unreadable > 0
+			? [
+					`${unreadable.toLocaleString("en-US")} ${unreadable === 1 ? "file" : "files"} could not be read`,
+				]
+			: []),
+	];
+	return parts.length === 0 ? null : `${parts.join(", ")}: left out`;
+}
+
+/** A changed file's line: "notes.md · 4 KB, 3 Nov → 6 KB, 5 Nov". */
+export function changedText(file: ChangedFileView): string {
+	const side = (it: { size: number; lastModified: number }) =>
+		`${formatSize(it.size)}, ${dayText(new Date(it.lastModified))}`;
+	return `${file.relPath} · ${side(file.was)} → ${side(file.now)}`;
 }
 
 // ─── Conflicts ───────────────────────────────────────────────────────────────

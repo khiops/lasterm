@@ -7,6 +7,35 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## UPLOAD-RESUME-CLIENT — a resume after a restart starts from a click, checks every file, and asks before resending a changed one (#837, 2026-11-06)
+
+- **The click asks, and nothing else does.** After a restart a handle read back from IndexedDB is in
+  the "prompt" state, and `requestPermission` needs the user activation of a click; in WebView2,
+  `queryPermission` answers "prompt" even when a saved grant lets `requestPermission` through at
+  once. So Resume asks every kept root inside its click, before anything is awaited, and never
+  decides beforehand. There is no "resume on start" setting: it could not read a file without the
+  click, nor reach a host without asking a passphrase out of nowhere.
+- **The wait is bounded at 15 s**, not the 3 s of a drop: a browser asks its own question for a
+  restored handle, which takes its user a moment, and the desktop answers at once (UPLOADS-DESKTOP).
+  Past it, the row falls back to a drop, which joins the upload, rather than hanging.
+- **A file is checked before any byte moves, and a changed one is never sent silently.** A handle
+  follows the path, not the file, so its size and `lastModified` are compared with what was kept.
+  A gone or unreadable file is left out and said. A changed one waits for "Send again from the
+  start" or "Skip", and the upload's resume with it; the other uploads of a Resume all go on.
+  Sending it again needs the hub to take its new size and time: `TRANSFER_RESUME` gained `files`,
+  which skips a file with its reason or restarts it from its first byte as it is now. Cancelling and
+  retrying it would have kept the old size, which the hub's size check then fails. A file that
+  changed is not appended to from the old offset either: its first bytes may be what changed.
+- **Which device may resume is the hub's to say.** STATE_SYNC and the upload list now say, for the
+  window's own credential, whether it started the upload (`from_this_device`), and name the other
+  device otherwise (`device_label`). The web client does not know its own token's id, and comparing
+  labels would not tell two devices with the same one apart.
+- **Stale handles are swept late.** Handles of an upload the hub no longer lists are removed only
+  7 days after it started: a window may drive another hub than the one it started an upload on, and
+  that upload's handles must survive the visit.
+
+---
+
 ## UPLOADS-DESKTOP — quitting asks while uploads run, and the shell grants file access to its own page (#837, 2026-11-06)
 
 - **The shell answers WebView2's file-access request, for its own page only.** Resuming an upload

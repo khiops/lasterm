@@ -44,6 +44,7 @@
 		<p v-if="upload.notResumable && !settled" class="upload__note">
 			Can't be resumed after a restart: drop it again if it is interrupted
 		</p>
+		<p v-if="leftOut !== null" class="upload__note" data-upload-left-out>{{ leftOut }}</p>
 		<div v-if="mayControl && (failedCount > 0 || cancellableCount > 0)" class="upload__actions">
 			<button v-if="failedCount > 0" type="button" class="upload__btn" @click="transfers.retry(upload.id, 'upload')">
 				Retry all failed ({{ failedCount }})
@@ -77,7 +78,8 @@ import {
 	buildTree,
 	bytesText,
 	cancellable,
-	isActive,
+	isOver,
+	leftOutText,
 	needsAttention,
 	percentOf,
 	retriable,
@@ -108,7 +110,11 @@ const percent = computed(() => percentOf(counts.value));
 const state = computed(() => stateText(counts.value));
 const bytes = computed(() => bytesText(counts.value, props.upload.rate));
 const attention = computed(() => needsAttention(counts.value));
-const settled = computed(() => !isActive(counts.value) && !needsAttention(counts.value));
+const settled = computed(() => isOver(props.upload));
+// What its resume left out of it, gone or unreadable on this device (#837).
+const leftOut = computed(() =>
+	props.upload.leftOut ? leftOutText(props.upload.leftOut.gone, props.upload.leftOut.unreadable) : null,
+);
 const failedCount = computed(() => retriable(counts.value));
 const cancellableCount = computed(() => cancellable(counts.value));
 const tree = computed(() => (open.value ? buildTree(props.upload.items) : []));

@@ -2,6 +2,7 @@ export { handleAgentBinaryVerifyResponse } from "./agent-binary-verify-response.
 export { handleAttach } from "./attach.js";
 export { handleAuthPromptResponse } from "./auth-prompt-response.js";
 export { handleDetach } from "./detach.js";
+export { handleFilesPanel } from "./files-panel.js";
 export { handleHostVerifyResponse } from "./host-verify-response.js";
 export { handleInput } from "./input.js";
 export { handlePing } from "./ping.js";

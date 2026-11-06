@@ -508,6 +508,34 @@ export interface UiAttachOkMessage {
 	cwdSource?: CwdSource;
 	/** The program holding the terminal, when it is not the shell. */
 	foreground?: string;
+	/**
+	 * Whether the writer's files panel is open on this terminal (#838), as the
+	 * hub keeps it. Absent from a hub older than that.
+	 */
+	filesPanel?: FilesPanelState;
+}
+
+/**
+ * The files panel of a terminal's writer, as the hub keeps it per terminal, in
+ * memory (#838): open when the window holding the write lock has its panel
+ * open and attached to that terminal. Closed until a writer says otherwise.
+ */
+export interface FilesPanelState {
+	open: boolean;
+}
+
+/**
+ * Both ways (#838). UI → Hub: the window holding the terminal's write lock
+ * says whether its files panel is open on it, and nobody else may: from any
+ * other client it is refused with `ERROR { code: WRITE_LOCK_DENIED }`. Hub →
+ * UI: the state changed, told to every client attached to the terminal, that
+ * one included. A writer's panel is open on one terminal at a time: its
+ * opening on one closes it on every other the same client holds the lock on.
+ */
+export interface FilesPanelMessage {
+	type: "FILES_PANEL";
+	channelId: string;
+	open: boolean;
 }
 
 /**
@@ -750,6 +778,8 @@ export interface StateSyncMessage {
 		cwd?: string | null;
 		cwdSource?: CwdSource;
 		foreground?: string;
+		/** As in ATTACH_OK (#838): on a channel that has not ended. */
+		filesPanel?: FilesPanelState;
 	}>;
 }
 
@@ -1037,6 +1067,7 @@ export type UiMessage =
 	| DetachMessage
 	| InputMessage
 	| ResizeMessage
+	| FilesPanelMessage
 	| WriteClaimMessage
 	| WriteReleaseMessage
 	| WriteForceMessage
@@ -1060,6 +1091,7 @@ export type HubToUiMessage =
 	| UiSpawnOkMessage
 	| UiAttachOkMessage
 	| ChannelSizeMessage
+	| FilesPanelMessage
 	| OutputMessage
 	| SessionStateMessage
 	| ChannelStateMessage
@@ -1127,6 +1159,7 @@ export type ProtocolMessage =
 	| UiAttachMessage
 	| UiAttachOkMessage
 	| ChannelSizeMessage
+	| FilesPanelMessage
 	| DetachMessage
 	| WriteClaimMessage
 	| WriteReleaseMessage

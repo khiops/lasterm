@@ -316,6 +316,15 @@ export class WriteLockManager {
 		return this.holders.get(channelId) ?? null;
 	}
 
+	/** The channels whose lock `clientId` holds now. */
+	heldBy(clientId: string): string[] {
+		const held: string[] = [];
+		for (const [channelId, holder] of this.holders) {
+			if (holder === clientId) held.push(channelId);
+		}
+		return held;
+	}
+
 	// ─── Bulk operations ────────────────────────────────────────────────────
 
 	/**

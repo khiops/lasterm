@@ -1,13 +1,15 @@
-import type { Channel, ProtocolMessage } from "@lasterm/shared";
+import { type AuthMessage, type Channel, isValidUlid, type ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { factsFromAttachOk, factsFromRefusal, paneCover } from "../utils/pane-cover.js";
+import { windowId } from "../utils/window-id.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
 import { HOSTS_CHANGED_READ_DELAY_MS, useHostsStore } from "./hosts.js";
 import { useSessionStore } from "./session.js";
 import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
+import { useWriteLockStore } from "./writelock.js";
 
 type Listener = (msg: ProtocolMessage) => void;
 
@@ -206,6 +208,37 @@ describe("useSessionStore — connect()", () => {
 		// One handshake for both callers, and no second connection.
 		expect(ws?.sent.filter((m) => m.type === "AUTH")).toHaveLength(1);
 		expect(wsHarness.instances).toHaveLength(1);
+	});
+
+	// Every socket gets a new client id from the hub. A write lock's holder
+	// that reconnects is recognised by its window instead, and gets the lock
+	// back within the hub's grace (#846).
+	it("names this window in every AUTH, the same after a reconnect", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const ws = wsHarness.instances[0];
+
+		ws?.emitDisconnect();
+		wsHarness.deferAuth = true;
+		ws?.emitReconnect();
+		await vi.advanceTimersByTimeAsync(0);
+
+		const auths = (ws?.sent ?? []).filter((m): m is AuthMessage => m.type === "AUTH");
+		expect(auths.map((auth) => auth.windowId)).toEqual([windowId(), windowId()]);
+		expect(isValidUlid(windowId())).toBe(true);
+	});
+
+	it("keeps that the hub holds a lock for a writer reconnecting, until someone holds it", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const ws = wsHarness.instances[0];
+		const channelId = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+		ws?.emit({ type: "WRITE_LOCK", channelId, holder: null, reserved: true });
+		expect(useWriteLockStore().locks.get(channelId)).toEqual({ holder: null, reserved: true });
+
+		ws?.emit({ type: "WRITE_LOCK", channelId, holder: "client-2" });
+		expect(useWriteLockStore().locks.get(channelId)).toEqual({ holder: "client-2" });
 	});
 });
 

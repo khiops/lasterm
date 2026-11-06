@@ -351,6 +351,7 @@ const {
 	applyProfile,
 	suppressNextResize,
 	syncChannelSize,
+	setDecidesSize,
 	dispose,
 	canWrite,
 	currentDynamicTitle,
@@ -448,10 +449,13 @@ const isWriter = computed(() => {
 	return chId ? writeLockStore.isWriter(chId) : false;
 });
 
+// The writer also decides the terminal's size: its pane's fit is the PTY's,
+// and every other pane draws the terminal at that size (#831).
 watch(
 	isWriter,
 	(writerNow) => {
 		canWrite.value = writerNow;
+		setDecidesSize(writerNow);
 	},
 	{ immediate: true },
 );
@@ -1604,6 +1608,21 @@ function onDragEnd(): void {
 	background: rgba(var(--nt-bg-rgb), var(--nt-terminal-alpha));
 	position: relative;
 	z-index: 2;
+}
+
+/* A pane that does not decide its terminal's size draws it at the PTY's,
+   which another client decides (#831): top-left, the rest of the pane a
+   neutral ground, so that what the terminal has is told from what the pane
+   has. A pane smaller than that scrolls, its text unscaled. useTerminal sets
+   the class, and xterm's width. */
+.terminal-container.terminal-container--follows {
+	overflow: auto;
+	background: var(--nt-host-rail);
+}
+
+.terminal-container--follows :deep(.xterm) {
+	background: rgba(var(--nt-bg-rgb), var(--nt-terminal-alpha));
+	box-shadow: 1px 1px 0 var(--nt-border);
 }
 
 .tint-overlay {

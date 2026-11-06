@@ -7,6 +7,18 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## ONE-TERMINAL-SIZE — the writer decides a terminal's size, and every other client draws at it (#831, 2026-10-31)
+
+- A terminal has one size, its PTY's. Before this, every client sent RESIZE for its own pane and the hub applied whichever came last, telling nobody else: two windows of different sizes on one terminal fought over it, and the one that resized first drew a screen laid out for another width.
+- **One client decides: the one holding the write lock.** The hub drops a RESIZE from any other client, without an error: a reader's pane resizing is normal. Taking the lock makes a client's fit the terminal's size; its pane sends it at once when it differs from the PTY's.
+- **With nobody holding the lock, nobody decides, and the size stays put** until a client takes the lock. Rejected: the last client to resize while the lock is free, which is the fight this ends, between any two clients that resize while nobody writes. The lock is free with clients attached only after its holder released it or left with several others attached (the hub grants it to a sole client left, and to the first client attaching to a terminal with no holder), and the web types nothing into a terminal whose lock is free anyway.
+- **The hub tells every client attached the size whenever it changes** (`CHANNEL_SIZE`, the one that asked included, so that it knows the PTY's real size once it stops deciding), and a client attaching in `ATTACH_OK`. A hub restarted reads it from meta.db, where every applied RESIZE is stored.
+- **A pane that does not decide draws the terminal at the PTY's size**, top-left, on a neutral ground; a pane smaller than that scrolls. Not scaled with a CSS transform: xterm maps a click to a cell with the cell size it measured against the rectangle the browser reports after the transform, so selection and links land on the wrong cells. Not scaled by a smaller font either: more code, and unreadable once the gap is large; tmux, the prior art, also shows a smaller client part of the window rather than shrinking it.
+- A pane out of sight (a tab in the background, a zone folded away) measures 0×0 and sends no size.
+- Other window-level changes to a terminal's size, such as a side panel opening beside it (#721), follow the same rule: they change the writer's pane, whose fit is the terminal's size.
+
+---
+
 ## ONE-STOP-PER-HOST — a stop has the host to itself, and a close the hub caused is not a stop (#674, 2026-10-25)
 
 - Within one hub, one Replace runs per host at a time: it marks the host in `stoppingAgents` before anything else and answers `HOST_BUSY` when the host is already marked. The stop-keeping operation (`POST /api/hosts/:id/agent/stop-keeping`, docs/PROTOCOL.md § 6) takes the same marker. After refusing a quitting hub, it answers `HOST_BUSY` when the host is marked or an acquisition for it is running. The operations below only read it.

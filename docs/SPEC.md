@@ -377,11 +377,12 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
 - **Entry points.** The folder button in each pane header, left of the write-lock indicator (it
   toggles); Ctrl+Shift+E, which opens the panel with the keyboard in it, moves the keyboard into it
   when open, and closes it back to the pane when pressed inside it; the palette's "Files: Show panel";
-  the pane menu's "Files". A file dragged over a terminal is upload's (#837).
+  the pane menu's "Files"; files dragged into the window, under `[transfer] open_on_drag` (on by
+  default), so that its folders are there to drop on. A file dragged over a terminal is upload's (below).
 - **Two parts.** **Files** on top, the attached host's: its badge and name in the header, its banner,
   border on the outer edges and tint over the list (`useVisualProfile`). **Transfers** below, the
   window's and neutral, "Transfers · all hosts", its uploads grouped by host › terminal with the focused
-  terminal's group first (`groupTransfers`); its rows come with upload (#837). A horizontal separator
+  terminal's group first (`groupUploads`, below). A horizontal separator
   splits them (arrows when focused, a double click back to 30 %, Transfers at most 70 %), and
   Transfers folds to its header line, which still counts what runs and fails. A retarget to a pane on
   another host changes the Files part's host and colours, rings its header for 600 ms (not under
@@ -416,7 +417,90 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
   unless a question there takes it (`data-own-escape`).
 - **Kept in this browser** (`localStorage`, `stores/files-panel.ts`): open or not, the pin, per
   terminal whether it follows and the folder browsed (the last 100 terminals), Options expanded, the
-  split, Transfers folded. Each window owns its open state; the writer's reaching the readers is #838.
+  split, Transfers folded, its filter. Each window owns its open state; the writer's reaching the
+  readers is #838.
+
+**Uploads (#837, part of #721).** Behind `[experimental] file_transfer` as the panel is; the hub's
+side is PROTOCOL.md § 4.19. The window's uploads live in `stores/transfers.ts`, not in a pane, so
+closing a pane or a tab, or the terminal ending, stops none of them.
+- **Drop targets.** A terminal pane: its wrapper in `PaneLayout.vue` has a file branch beside its
+  pane-move zones (`useUploadDrop`), which prevents `dragover` and `drop` only for files it will take,
+  and sets `dropEffect = "none"` for those it refuses: a reader (another window holds the write lock;
+  "Request write" is offered where the drag was let go), an ended terminal, and `transfer_drop = "off"`.
+  The panel's list (the folder shown) and a folder row (that folder) take files whatever
+  `transfer_drop` says. Anything else (a pane moved, a link, file transfer off) is left to the page,
+  where `utils/file-drop-guard.ts` refuses what nothing takes. While files are dragged over a terminal,
+  an overlay over its terminal area, below the header and the banner, names the destination, host
+  first ("Drop 3 items to upload to raspberrypi › /home/pi — this terminal's directory"), with a warning
+  when a program is in the foreground or the terminal shows another host (#834). A terminal's
+  destination is its directory as the hub last said it, else the folder its panel opens at, read when
+  the drag comes over it and fixed once shown.
+- **Pickers.** "Upload files…" and "Upload folder…" in the panel (to the folder shown), the palette's
+  "Files: Upload to this terminal's directory…" and the pane menu's "Upload files here…":
+  `showOpenFilePicker({ multiple: true })` and `showDirectoryPicker()` where the browser has them, an
+  `<input type=file>` (`webkitdirectory` for a folder) elsewhere (`utils/upload-pick.ts`).
+- **Reading a drop** (`utils/upload-walk.ts`). Inside the drop event, each item is asked for its handle
+  (`getAsFileSystemHandle()`) and its entry (`webkitGetAsEntry()`); the handles are awaited **within
+  3 s**: a folder under `%LOCALAPPDATA%` can leave the promise pending for ever in WebView2. Past the
+  bound, or without the API, the item goes on with its entry, and its row says "Can't be resumed after
+  a restart: drop it again if it is interrupted". The walk goes through `values()` or
+  `readEntries()` until it gives no more; every folder an item is in is an item, empty ones included;
+  hidden files are counted; a folder that is the same as one above it is skipped as a link, one deeper
+  than 32 levels too. It counts as it goes ("Counting… 12,300 files, 4.1 GB", with Cancel, once it takes
+  over 400 ms) and stops past 100,000 files.
+- **Before any byte moves.** A confirmation card, over the pane or in the panel, when
+  `transfer_confirm_drop` is on, and whatever it says for an upload above 10,000 files or 10 GB (which
+  it warns about) or one it refuses (over 100,000 files: "send an archive"). It states what will be sent
+  ("photos/: 120 files (4 hidden), 4 folders (1 empty), 412 MB; 1 link skipped"), the host and the
+  folder, with Upload, Choose folder…, Cancel, and "Don't ask again" for the host or everywhere, written
+  through `planProfileWrite`. On a Windows host, every name it cannot hold, two names differing only by
+  case, and paths over 259 characters are listed for the whole tree, with Skip those / Cancel; what the
+  hub refuses at the start (`INVALID_NAMES`, `INSUFFICIENT_SPACE`, …) is said in the card the same way.
+  Esc cancels, and the keyboard goes back to the terminal (or to the panel's list).
+- **Sending** (`utils/upload-send.ts`). TRANSFER_START names the tree, `on_conflict` as the terminal's
+  cascade resolves it. Each file the hub puts in `sending` is sent in 1 MiB chunks,
+  `PUT /api/transfers/:id/items/:item?offset=`, from the offset the host holds (`acked`, or the one an
+  `OFFSET_MISMATCH` gives); at most `[transfer] max_concurrent` at once from this window. A chunk that
+  did not get through, or `ITEM_BUSY`, is sent again from the same offset up to five times (0.5 s to
+  8 s apart), then the file is cancelled at the hub, so that it holds no place, and a Retry sends it
+  again. The loop waits on the hub's answers, not on timers, so a hidden window keeps uploading. A
+  window whose connection came back starts the same tree again, which joins what it was sending; a
+  re-drop after a reload joins the same way (PROTOCOL.md § 4.19). A window learns of an upload it does
+  not send from its messages and from `GET /api/transfers?channel_id=` for each terminal it comes to
+  show, and reads it whole (`GET /api/transfers/:id`).
+- **Keeping handles** (`utils/upload-handles.ts`). The File System Access handles of a drop or a pick
+  go to IndexedDB (`lasterm-transfers`): `uploads` keyed by the upload (host, terminal, destination,
+  and its roots, one directory handle for a dropped folder), `items` keyed by `[upload, item]` (relative
+  path, root, path under it, size and `lastModified` when sent). They go once everything is placed or
+  skipped, or the upload is dismissed. The resume after a restart that reads them is to come.
+- **The Transfers part, its rows.** Every row names its host. One group per host, one sub-group per
+  terminal when several sent there; the focused terminal's group first and expanded ("this terminal"),
+  the others collapsed to one line in words ("AD · 1 failed", "raspberrypi · 2 running, 64 %",
+  "local · 3 done"), a failure or a conflict in the warning style. While the pointer or the keyboard is
+  in the list, nothing moves (`stableOrder`); a group expanded by hand stays so when the focus moves on.
+  Filter "All" (default) or "This terminal", remembered in the browser. A group whose pane closed or
+  whose terminal ended says so. Each upload: a bar, bytes and rate, its state in words ("117 of 120
+  placed, 1 failed, 1 sending, 1 waiting"), Retry all failed and Cancel the rest; its tree on demand,
+  each folder summing what it holds ("60 of 62, 1 failed") with Retry N failed and Cancel, each file
+  with Retry or Cancel as its state allows, failures and conflicts first, a fully placed folder one line.
+  A reader sees the rows without their actions. A toast says each failure, and a completion while the
+  panel is closed, with Show; closing panes or a tab with uploads running says "2 uploads continue in
+  Transfers · Show", once per gesture. Each pane header has a chip for its own terminal's uploads ("↑ 2 ·
+  64 %", "⚠ 1 failed"), which opens the panel on that pane, its group expanded.
+- **Conflicts.** A card in the upload's group, never a modal dialog: an existing folder summed up
+  first ("photos/ already exists in assets: 7 of 120 files would conflict. The 113 others merge in.")
+  with Skip, Keep both, Replace (those 7), and "Show the 7" to answer file by file; files on their own
+  with the existing and the new size and date. "Apply to all in this upload" answers for the whole
+  upload; "Always do this" saves the answer for the upload's own host or everywhere, Replace included,
+  through `planProfileWrite`. A folder against a file takes Keep both or Skip only.
+- **Leaving.** In a browser, a `beforeunload` handler while this window sends uploads
+  (`utils/upload-unload.ts`), removed before the guarded reload of `utils/tauri-ipc-fallback.ts`
+  (#823, `onGuardedReload`). In the desktop, the page reports what it sends to the shell instead
+  (`utils/desktop-uploads.ts`, #863): `set_uploads_in_progress({ seq, inProgress, waiting,
+  failed, percent })` on every change and at start, `seq` counting from 1 per document; the newest
+  report's answer and the `uploads-quit-pending` event say whether a quit (or a restart) waits for these
+  uploads, which Transfers then says, "Lasterm will quit when these uploads end · Cancel" (Cancel is
+  `cancel_quit_when_finished`). A shell without these commands changes nothing.
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub
@@ -1196,7 +1280,8 @@ The environment a terminal is spawned with cascades through the same layers, and
 
 File transfer's keys (#835, part of #721) cascade through the same layers, save two that stop at
 the host. All of them wait behind `[experimental] file_transfer`, off by default until upload
-(#837) lands; `isFileTransferEnabled` (`@lasterm/shared`) is the one check each part makes:
+(#837) is whole, its resume after a restart included; `isFileTransferEnabled` (`@lasterm/shared`)
+is the one check each part makes:
 
 | TOML key | Profile key | Values | Default | Scopes | Notes |
 |----------|-------------|--------|---------|--------|-------|

@@ -2,8 +2,8 @@
  * The files panel beside the panes (#836, part of #721): what it decides without a page. Where
  * it shows (docked, floating, a sheet), which terminal it is attached to, a host's paths as its
  * path bar reads them, a listing's rows, the settings in its Options section and where each
- * comes from, and the Transfers part's groups. The panel (components/files/) and App.vue read
- * them here; each is tested beside this file.
+ * comes from. The panel (components/files/) and App.vue read them here; each is tested beside
+ * this file.
  */
 import {
 	type CwdSource,
@@ -476,71 +476,7 @@ export function scopeChoices(
 	return choices;
 }
 
-// ─── Transfers: the window's uploads, grouped (#837 brings the rows) ──────────
-
-/** What an upload is doing, as its row will say (#837). */
-export type TransferState = "queued" | "running" | "conflict" | "failed" | "done" | "cancelled";
-
-/** An upload, as the Transfers part groups it: bound to the host and terminal it started from. */
-export interface TransferEntry {
-	readonly id: string;
-	readonly hostId: string;
-	readonly channelId: string;
-	readonly state: TransferState;
-}
-
-export interface TransferTerminalGroup {
-	readonly channelId: string;
-	readonly transfers: readonly TransferEntry[];
-}
-
-export interface TransferHostGroup {
-	readonly hostId: string;
-	readonly terminals: readonly TransferTerminalGroup[];
-	/** It holds the focused terminal's uploads: first, and expanded. */
-	readonly focused: boolean;
-}
-
-/**
- * The window's uploads, one group per host and inside it one per terminal, each in the order of
- * its first upload; the group of the focused terminal's host first, that terminal first in it.
- * A focus change reorders and removes nothing.
- */
-export function groupTransfers(
-	entries: readonly TransferEntry[],
-	focusedChannelId: string | null,
-): TransferHostGroup[] {
-	const hosts = new Map<string, Map<string, TransferEntry[]>>();
-	for (const entry of entries) {
-		const terminals = hosts.get(entry.hostId) ?? new Map<string, TransferEntry[]>();
-		hosts.set(entry.hostId, terminals);
-		const list = terminals.get(entry.channelId) ?? [];
-		terminals.set(entry.channelId, list);
-		list.push(entry);
-	}
-	const groups: TransferHostGroup[] = [...hosts].map(([hostId, terminals]) => {
-		const list = [...terminals].map(([channelId, transfers]) => ({ channelId, transfers }));
-		const focused = list.findIndex((t) => t.channelId === focusedChannelId);
-		if (focused > 0) list.unshift(...list.splice(focused, 1));
-		return { hostId, terminals: list, focused: focused !== -1 };
-	});
-	const first = groups.findIndex((group) => group.focused);
-	if (first > 0) groups.unshift(...groups.splice(first, 1));
-	return groups;
-}
-
-/** What the Transfers header counts: "2 running, 1 failed", or "none". */
-export function transfersCount(entries: readonly TransferEntry[]): { text: string; warn: boolean } {
-	const running = entries.filter((e) => e.state === "running" || e.state === "queued").length;
-	const failed = entries.filter((e) => e.state === "failed").length;
-	const conflicts = entries.filter((e) => e.state === "conflict").length;
-	const parts = [
-		...(running > 0 ? [`${running} running`] : []),
-		...(failed > 0 ? [`${failed} failed`] : []),
-		...(conflicts > 0 ? [`${conflicts} to decide`] : []),
-	];
-	return { text: parts.length > 0 ? parts.join(", ") : "none", warn: failed + conflicts > 0 };
-}
+// The Transfers part's groups and rows: `transfers-view.ts` (#837).
 
 // ─── The split between Files and Transfers ───────────────────────────────────
 

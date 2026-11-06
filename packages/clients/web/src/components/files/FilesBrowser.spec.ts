@@ -363,8 +363,16 @@ describe("a new folder", () => {
 		) as HTMLButtonElement;
 		expect(create.disabled).toBe(true);
 		const note = root.querySelector(".files-actions__note") as HTMLElement;
-		expect(note.textContent).toContain("Only the writer can create folders here.");
+		expect(note.textContent).toContain("Only the writer can upload or create folders here.");
 		expect(create.getAttribute("aria-describedby")).toBe(note.id);
+		// Nor do the pickers upload for a reader (#837), and they say why the same way.
+		for (const label of ["Upload files…", "Upload folder…"]) {
+			const button = [...root.querySelectorAll<HTMLButtonElement>(".files-actions button")].find(
+				(b) => b.textContent?.includes(label),
+			) as HTMLButtonElement;
+			expect(button.disabled, label).toBe(true);
+			expect(button.getAttribute("aria-describedby")).toBe(note.id);
+		}
 		// Readers still browse.
 		expect(rows()).toEqual(["src", "logs", "notes.md"]);
 		note.querySelector<HTMLButtonElement>("button")?.click();

@@ -1587,7 +1587,9 @@ the lock comes back.
 it was sending becomes `interrupted`, its temporaries kept. The same drop again, from any window
 of the same token (TRANSFER_START with the same destination and the same tree: relative paths,
 kinds, sizes and times), joins that upload: `joined: true`, the item ids those of the upload,
-placed files skipped, interrupted ones resumed, the rest sent.
+placed files skipped, interrupted ones resumed, the rest sent. The web client does it by itself for
+a socket that comes back while the page still holds the files (#837): it sends each such upload's
+TRANSFER_START again once AUTH_OK is in, with the destination ACCEPTED gave.
 
 **Pace.** At most `[transfer] max_concurrent` files of a window are sent at once, whatever upload
 or folder they are in; over SFTP, at most four writes of 30 KiB per file are in flight, so that the

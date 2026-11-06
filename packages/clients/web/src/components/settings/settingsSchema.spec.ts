@@ -296,12 +296,10 @@ describe("settingsSchema — nothing offered in vain", () => {
 	const notAReader =
 		/(settingsSchema\.ts|\/settings\/categories\/.*|hub\/src\/api\/config\.ts|hub\/src\/config\.ts|shared\/src\/config\.ts|shared\/src\/appearance\.ts|shared\/src\/file-transfer\.ts)$/;
 
-	// Offered only behind an experimental switch, off by default, before
-	// anything reads them: the File transfer settings that only upload reads
-	// (#837), which takes them out of this set. The files panel (#836) reads
-	// the others: its side, its Options rows, and the fallback folder the hub
-	// opens it at.
-	const notReadYet = new Set(["transferDrop", "maxConcurrent"]);
+	// A setting offered before anything reads it, kept here until something
+	// does. None now: upload (#837) reads the last of the File transfer
+	// settings, `transfer_drop` and `max_concurrent`.
+	const notReadYet = new Set<string>();
 	const code = Object.entries(sources)
 		.filter(([path]) => !notAReader.test(path))
 		.map(([, text]) => text)

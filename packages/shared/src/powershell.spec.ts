@@ -2,9 +2,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { isPowerShell, POWERSHELL_DIRECTORY_HELP_URL } from "./powershell.js";
 
-/** A file of this repository, from its root. */
+/**
+ * A file of this repository, from its root, its line endings read as `\n`: a
+ * Windows checkout may end them with `\r\n` (`core.autocrlf`).
+ */
 function repositoryFile(path: string): string {
-	return readFileSync(new URL(`../../../${path}`, import.meta.url), "utf-8");
+	return readFileSync(new URL(`../../../${path}`, import.meta.url), "utf-8").replace(/\r\n/g, "\n");
 }
 
 /** The anchor GitHub gives a Markdown heading. */

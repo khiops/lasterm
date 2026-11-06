@@ -3,6 +3,7 @@ import type {
 	AuthMessage,
 	AuthPromptResponseMessage,
 	DetachMessage,
+	FilesPanelMessage,
 	HostVerifyResponseMessage,
 	InputMessage,
 	ProtocolMessage,
@@ -37,6 +38,7 @@ import {
 	handleAttach,
 	handleAuthPromptResponse,
 	handleDetach,
+	handleFilesPanel,
 	handleHostVerifyResponse,
 	handleInput,
 	handlePing,
@@ -421,6 +423,9 @@ export async function registerWsRoutes(
 					break;
 				case "RESIZE":
 					handleResize(msg as ResizeMessage, ctx);
+					break;
+				case "FILES_PANEL":
+					handleFilesPanel(msg as FilesPanelMessage, ctx);
 					break;
 				case "WRITE_CLAIM":
 					handleWriteClaim(msg as WriteClaimMessage, ctx);

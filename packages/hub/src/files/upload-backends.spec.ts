@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
@@ -7,9 +8,10 @@ import {
 	statSync,
 	symlinkSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { ExecFileBackend } from "./exec-files.js";
 import { ExecUploadBackend } from "./exec-upload.js";
@@ -29,6 +31,48 @@ import {
 	type UploadHarness,
 	windowsMachine,
 } from "./upload-backends.fixture.js";
+
+// #868, temporary: what the Linux runner's worker was doing when it died.
+const trace868 = (line: string): void => {
+	try {
+		writeSync(2, `[868] ${new Date().toISOString()} pid ${process.pid} ${line}\n`);
+	} catch {
+		// Nowhere to say it.
+	}
+};
+if (process.platform === "linux") {
+	try {
+		trace868(
+			`ps ${execFileSync("ps", ["-o", "pid=,ppid=,pgid=,sid=,rss=", "-p", String(process.pid)])
+				.toString()
+				.trim()}`,
+		);
+	} catch (error) {
+		trace868(`ps failed: ${String(error)}`);
+	}
+	for (const signal of [
+		"SIGTERM",
+		"SIGINT",
+		"SIGHUP",
+		"SIGQUIT",
+		"SIGUSR2",
+		"SIGALRM",
+		"SIGXCPU",
+		"SIGXFSZ",
+	] as const) {
+		process.once(signal, () => {
+			trace868(`got ${signal}`);
+			process.kill(process.pid, signal);
+		});
+	}
+	process.on("exit", (code) => trace868(`exit ${code}`));
+	beforeEach((context) =>
+		trace868(
+			`start ${context.task.suite?.name} > ${context.task.name} rss=${process.memoryUsage().rss}`,
+		),
+	);
+	afterEach((context) => trace868(`end ${context.task.name} ${context.task.result?.state}`));
+}
 
 const MTIME = 1_700_000_000_000;
 

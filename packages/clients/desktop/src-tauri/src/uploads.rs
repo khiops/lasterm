@@ -398,12 +398,18 @@ pub struct Question {
 
 pub fn question(ending: Ending, in_progress: u32) -> Question {
     let uploads = plural(in_progress, "upload", "uploads");
+    // One upload is resumed as "it", and ends; several as "them", and end.
+    let (them, they_end) = if in_progress == 1 {
+        ("it", "it ends")
+    } else {
+        ("them", "they end")
+    };
     match ending {
         Ending::Quit => Question {
             title: "Quit Lasterm",
             message: format!(
-                "{uploads} in progress.\n\nQuit now and resume them at the next start, or keep \
-                 Lasterm running hidden and quit once they end."
+                "{uploads} in progress.\n\nQuit now and resume {them} at the next start, or keep \
+                 Lasterm running hidden and quit once {they_end}."
             ),
             resume_later: "Quit and resume later",
             when_finished: "Quit when finished",
@@ -412,8 +418,8 @@ pub fn question(ending: Ending, in_progress: u32) -> Question {
         Ending::Restart => Question {
             title: "Restart Lasterm",
             message: format!(
-                "{uploads} in progress.\n\nRestart now and resume them after the restart, or \
-                 restart once they end."
+                "{uploads} in progress.\n\nRestart now and resume {them} after the restart, or \
+                 restart once {they_end}."
             ),
             resume_later: "Restart and resume later",
             when_finished: "Restart when finished",
@@ -434,16 +440,17 @@ pub fn answer_for_label(question: &Question, label: &str) -> Answer {
     }
 }
 
-/// The words of the notice that asks for an answer a waiting quit needs.
+/// The words of the notice that asks for an answer a waiting quit needs. Other
+/// uploads may run beside the ones waiting, or none: "any other uploads".
 pub fn waiting_notice(waiting: u32) -> String {
     if waiting == 1 {
-        "An upload is waiting for your answer. Lasterm will quit once it is answered and the \
+        "An upload is waiting for your answer. Lasterm will quit once it is answered and any \
          other uploads end."
             .to_string()
     } else {
         format!(
             "{waiting} uploads are waiting for your answer. Lasterm will quit once they are \
-             answered and the other uploads end."
+             answered and any other uploads end."
         )
     }
 }
@@ -901,5 +908,66 @@ mod tests {
         assert!(question(Ending::Quit, 1)
             .message
             .starts_with("1 upload in progress."));
+    }
+
+    // One upload is "it", several "them" (#874): "resume them" was said of one.
+    #[test]
+    fn the_question_says_it_of_one_upload_and_them_of_several() {
+        assert_eq!(
+            question(Ending::Quit, 1).message,
+            "1 upload in progress.\n\nQuit now and resume it at the next start, or keep Lasterm \
+             running hidden and quit once it ends."
+        );
+        assert_eq!(
+            question(Ending::Quit, 2).message,
+            "2 uploads in progress.\n\nQuit now and resume them at the next start, or keep \
+             Lasterm running hidden and quit once they end."
+        );
+        assert_eq!(
+            question(Ending::Restart, 1).message,
+            "1 upload in progress.\n\nRestart now and resume it after the restart, or restart \
+             once it ends."
+        );
+        assert_eq!(
+            question(Ending::Restart, 2).message,
+            "2 uploads in progress.\n\nRestart now and resume them after the restart, or \
+             restart once they end."
+        );
+    }
+
+    #[test]
+    fn the_tray_text_counts_one_upload_and_several() {
+        assert_eq!(
+            tray_text(&report(1, 0, 1, Some(10)), None),
+            "Lasterm — 1 upload · 10 % · 1 failed"
+        );
+        assert_eq!(
+            tray_text(&report(1, 0, 0, None), Some(Ending::Quit)),
+            "Lasterm — quits when 1 upload finishes"
+        );
+        assert_eq!(
+            tray_text(&report(2, 0, 0, None), Some(Ending::Restart)),
+            "Lasterm — restarts when 2 uploads finish"
+        );
+        assert_eq!(
+            tray_text(&report(2, 2, 0, None), None),
+            "Lasterm — 2 waiting for an answer"
+        );
+    }
+
+    // The uploads waiting may be all there are: "the other uploads" said there
+    // were more.
+    #[test]
+    fn the_waiting_notice_counts_one_upload_and_several() {
+        assert_eq!(
+            waiting_notice(1),
+            "An upload is waiting for your answer. Lasterm will quit once it is answered and any \
+             other uploads end."
+        );
+        assert_eq!(
+            waiting_notice(2),
+            "2 uploads are waiting for your answer. Lasterm will quit once they are answered and \
+             any other uploads end."
+        );
     }
 }

@@ -246,6 +246,9 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					// A command that exits without reading all of it closes its stdin under the pipe.
 					child.stdin.on("error", () => {});
 					stream.pipe(child.stdin);
+					// A channel that closes, with its connection or alone, ends the command's
+					// stdin, as sshd closes its pipes: a command that reads until then ends.
+					stream.once("close", () => child.stdin.end());
 					child.stdout.pipe(stream, { end: false });
 					child.stderr.pipe(stream.stderr, { end: false });
 					child.on("close", (code) => {

@@ -23,6 +23,7 @@ import {
 	VerifyFailed,
 } from "./upload-backend.js";
 import {
+	execBackend,
 	sftpBackend,
 	UPLOAD_BACKENDS,
 	type UploadHarness,
@@ -270,6 +271,33 @@ describe.skipIf(windowsMachine)("a POSIX host over SSH commands with no tool to 
 		} finally {
 			await host.close();
 			await removeTempDir(root);
+		}
+	});
+});
+
+// Starting a PowerShell costs a second or more; a script in the upload's loop, milliseconds (#865).
+describe.runIf(windowsMachine)("a Windows host over SSH commands", () => {
+	it("starts a PowerShell per file it writes, and one for everything else an upload asks", async () => {
+		const h = await execBackend("windows").start();
+		try {
+			const [made] = await h.backend.mkdirs([h.at("in")]);
+			expect(made?.kind).toBe("created");
+			const target = h.at("in", "a.txt");
+			const first = await sendWhole(h, target, Buffer.from("a"));
+			expect(await h.backend.place(first, target, false)).toEqual({ kind: "placed" });
+			const second = await sendWhole(h, target, Buffer.from("b"));
+			expect(await h.backend.place(second, target, false)).toMatchObject({
+				kind: "exists",
+				existing: { kind: "file", size: 1 },
+			});
+			await h.backend.remove(second);
+			expect((await h.backend.list(h.at("in"))).map((entry) => entry.name)).toEqual(["a.txt"]);
+			expect(await h.backend.stat(target)).toMatchObject({ kind: "file", size: 1 });
+			expect((await h.backend.freeSpace(h.dir)).total).toBeGreaterThan(0);
+			expect(readFileSync(h.local(target), "utf8")).toBe("a");
+			expect(h.host?.server.execCommands).toHaveLength(3);
+		} finally {
+			await h.close();
 		}
 	});
 });

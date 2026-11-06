@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { APP_SHORTCUTS, type AppActionId } from "./app-shortcuts.js";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { APP_SHORTCUTS, type AppActionId, readSwitchesFrom } from "./app-shortcuts.js";
 import { type TerminalKeyTarget, terminalKeyHandler } from "./terminal-keys.js";
 
 type KeyInit = Partial<KeyboardEventInit> & { altGraph?: boolean };
@@ -40,8 +40,33 @@ describe("terminalKeyHandler", () => {
 		expect(target.openSearch).not.toHaveBeenCalled();
 	});
 
+	// The files panel's chord (#836): the window opens and closes the panel on it, so the shell
+	// must not also get it. While file transfer is off it is no shortcut, and reaches the shell as
+	// it did before the feature (#835).
+	it("keeps Ctrl+Shift+E from the PTY while file transfer is on, and only then", () => {
+		const { target, handle } = pane();
+		try {
+			readSwitchesFrom((name) => name === "fileTransfer");
+			for (const type of TYPES) {
+				expect(handle(event(type, "E", { ctrlKey: true, shiftKey: true })), type).toBe(false);
+				expect(handle(event(type, "e", { ctrlKey: true, shiftKey: true })), type).toBe(false);
+			}
+			// Ctrl+E alone is the shell's: the end of the line.
+			expect(handle(event("keydown", "e", { ctrlKey: true }))).toBe(true);
+			readSwitchesFrom(() => false);
+			for (const type of TYPES) {
+				expect(handle(event(type, "E", { ctrlKey: true, shiftKey: true })), type).toBe(true);
+			}
+		} finally {
+			readSwitchesFrom(() => false);
+		}
+		expect(target.openSearch).not.toHaveBeenCalled();
+	});
+
 	// The window runs them; a terminal with the keyboard must not also send them (#631, #637).
 	it("keeps every chord of the table from the PTY, on every event of it", () => {
+		readSwitchesFrom(() => true);
+		onTestFinished(() => readSwitchesFrom(() => false));
 		const { target, handle } = pane();
 		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
 			const chord = APP_SHORTCUTS[id];

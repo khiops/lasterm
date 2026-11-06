@@ -5,6 +5,7 @@ import { factsFromAttachOk, factsFromRefusal, paneCover } from "../utils/pane-co
 import { windowId } from "../utils/window-id.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
+import { useFilesPanelStore } from "./files-panel.js";
 import { HOSTS_CHANGED_READ_DELAY_MS, useHostsStore } from "./hosts.js";
 import { useSessionStore } from "./session.js";
 import { useThemeStore } from "./theme.js";
@@ -396,6 +397,66 @@ describe("useSessionStore — CONFIG_CHANGED", () => {
 		wsHarness.instances[0]?.emit({ type: "CONFIG_CHANGED", scope: "host", hostId: "host-pi" });
 
 		expect(events).toEqual([{ scope: "host", hostId: "host-pi" }]);
+	});
+});
+
+// ─── A terminal's live directory (#834), for the files panel (#836) ────────
+
+describe("useSessionStore — live directories", () => {
+	const CH = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	// The messages a hub that relays them sends; one that does not sends none of them, and
+	// ATTACH_OK and STATE_SYNC without their fields, which leave nothing behind.
+	it("hands CWD_CHANGE, ATTACH_OK and STATE_SYNC to the files panel, and forgets an ended terminal's", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const ws = wsHarness.instances[0];
+		const panel = useFilesPanelStore();
+
+		ws?.emit({ type: "ATTACH_OK", channelId: CH } as unknown as ProtocolMessage);
+		expect(panel.liveCwdFor(CH)).toBeUndefined();
+		ws?.emit({
+			type: "ATTACH_OK",
+			channelId: CH,
+			cwd: "/home/pi",
+			cwdSource: "process",
+		} as unknown as ProtocolMessage);
+		expect(panel.liveCwdFor(CH)).toEqual({ cwd: "/home/pi", source: "process" });
+		ws?.emit({
+			type: "CWD_CHANGE",
+			channelId: CH,
+			cwd: "/home/pi/src",
+			source: "shell",
+			atPrompt: true,
+		} as unknown as ProtocolMessage);
+		expect(panel.liveCwdFor(CH)).toEqual({ cwd: "/home/pi/src", source: "shell", atPrompt: true });
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [],
+			channels: [
+				{ channelId: CH, sessionId: "s", status: "live", cwd: "/srv", cwdSource: "process" },
+			],
+		} as unknown as ProtocolMessage);
+		expect(panel.liveCwdFor(CH)?.cwd).toBe("/srv");
+		ws?.emit({
+			type: "CHANNEL_STATE",
+			channelId: CH,
+			status: "dead",
+		} as unknown as ProtocolMessage);
+		expect(panel.liveCwdFor(CH)).toBeUndefined();
 	});
 });
 

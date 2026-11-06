@@ -3,11 +3,20 @@
  * the host rail, the terminal list, the tab bar, the focused pane — as Windows' own F6 does in
  * Explorer and Edge. Within a zone, one element takes Tab (a roving `tabindex`) and the arrow
  * keys move between its items. Pure: the components and App.vue do the focusing.
+ *
+ * The files panel (#836) is a fifth zone, `files`, beside the pane: after it when the panel is on
+ * the right, before it when on the left. Inside it, F6 moves between its two parts, Files then
+ * Transfers, before going on to the next zone.
  */
 
-/** The zones, in the order F6 visits them. */
-export const FOCUS_ZONES = ["rail", "sidebar", "tabs", "pane"] as const;
+/** The zones, in the order F6 visits them with the files panel on the right. */
+export const FOCUS_ZONES = ["rail", "sidebar", "tabs", "pane", "files"] as const;
 export type FocusZone = (typeof FOCUS_ZONES)[number];
+
+/** The order F6 visits the zones in: the files panel's comes where it sits, beside the pane. */
+export function focusZoneOrder(panelSide: "left" | "right"): readonly FocusZone[] {
+	return panelSide === "left" ? ["rail", "sidebar", "tabs", "files", "pane"] : FOCUS_ZONES;
+}
 
 export function isFocusZone(value: unknown): value is FocusZone {
 	return (FOCUS_ZONES as readonly unknown[]).includes(value);
@@ -29,8 +38,26 @@ export function zoneAfter(
 	current: FocusZone,
 	step: 1 | -1,
 	canTakeFocus: (zone: FocusZone) => boolean,
+	order: readonly FocusZone[] = FOCUS_ZONES,
 ): FocusZone | null {
-	return nextInCycle(FOCUS_ZONES, current, step, canTakeFocus);
+	return nextInCycle(order, current, step, canTakeFocus);
+}
+
+/** The files panel's two parts, in the order F6 visits them inside its zone. */
+export const FILES_PARTS = ["files", "transfers"] as const;
+export type FilesPart = (typeof FILES_PARTS)[number];
+
+/**
+ * Where F6 (`step` 1) or Shift+F6 (-1) goes from the part `current` of the files panel: the
+ * other part, when it is that way and can take the keyboard, or null to leave the zone.
+ */
+export function filesPartAfter(
+	current: FilesPart,
+	step: 1 | -1,
+	canTakeFocus: (part: FilesPart) => boolean,
+): FilesPart | null {
+	const next = FILES_PARTS[FILES_PARTS.indexOf(current) + step];
+	return next !== undefined && canTakeFocus(next) ? next : null;
 }
 
 /**

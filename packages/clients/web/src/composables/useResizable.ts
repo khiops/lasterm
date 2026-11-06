@@ -7,6 +7,11 @@ export interface ResizeOptions {
 	/** Width below which the panel collapses to 0 (optional) */
 	collapseThreshold?: number;
 	onResizeEnd?: (width: number) => void;
+	/**
+	 * Which way a drag widens it: 1 (the default) when its edge is on its right, -1 when on its
+	 * left, as the files panel's on the right of the window (#836). Read at each drag.
+	 */
+	grows?: () => 1 | -1;
 }
 
 export function useResizable(options: ResizeOptions): {
@@ -22,7 +27,7 @@ export function useResizable(options: ResizeOptions): {
 	let startWidth = 0;
 
 	function onMouseMove(e: MouseEvent): void {
-		const delta = e.clientX - startX;
+		const delta = (e.clientX - startX) * (options.grows?.() ?? 1);
 		const newWidth = startWidth + delta;
 
 		if (options.collapseThreshold !== undefined && newWidth < options.collapseThreshold) {

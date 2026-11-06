@@ -14,6 +14,8 @@
  * keyboard shortcuts overlay show, is kept here too (`APP_SHORTCUT_NAMES`).
  */
 
+import type { ExperimentalConfig } from "@lasterm/shared";
+
 /**
  * A chord, as data. Each modifier is either held or not held: no other modifier may be. Only a
  * chord matched on its character may leave Shift to what typing it takes (`shiftAsTyped`).
@@ -68,7 +70,8 @@ export type AppActionId =
 	| "pane.resizeUp"
 	| "pane.resizeDown"
 	| "zone.next"
-	| "zone.previous";
+	| "zone.previous"
+	| "files.toggle";
 
 const CTRL_ALT = { ctrl: true, alt: true, shift: false } as const;
 const ALT = { ctrl: false, alt: true, shift: false } as const;
@@ -120,7 +123,41 @@ export const APP_SHORTCUTS: Readonly<Record<AppActionId, Chord>> = {
 	// does it only outside a terminal (OUTSIDE_TERMINAL_SHORTCUTS).
 	"zone.next": { ctrl: true, alt: false, shift: false, key: "F6" },
 	"zone.previous": { ctrl: true, alt: false, shift: true, key: "F6" },
+	// The files panel beside the panes (#836), the chord of an editor's file explorer. It opens
+	// the panel with the keyboard in it, and closes it back to the pane. Windows Terminal leaves
+	// it free, and a shell loses nothing Ctrl+E (end of line) does not give it.
+	"files.toggle": { ctrl: true, alt: false, shift: true, key: "E" },
 };
+
+/** An experimental switch, by its key in `[experimental]` (#835). */
+export type ExperimentalSwitch = keyof ExperimentalConfig;
+
+/**
+ * The actions that wait behind an experimental switch (#835). While it is off, their chord is no
+ * shortcut, so a terminal keeps the key as it did before the feature, and nothing lists them:
+ * neither the palette, Settings › Keybindings nor the shortcuts overlay.
+ */
+export const ACTION_SWITCHES: Readonly<Partial<Record<AppActionId, ExperimentalSwitch>>> = {
+	"files.toggle": "fileTransfer",
+};
+
+/** How the table reads a switch: every one off until told otherwise (`readSwitchesFrom`). */
+let switchIsOn: (name: ExperimentalSwitch) => boolean = () => false;
+
+/**
+ * Tell the table how to read the experimental switches. The window hands it its UI config's
+ * (App.vue), read at each call: a switch turned on in Settings holds at once, and a computed that
+ * asks is told when it changes.
+ */
+export function readSwitchesFrom(read: (name: ExperimentalSwitch) => boolean): void {
+	switchIsOn = read;
+}
+
+/** Whether an action is offered now: it waits behind no switch, or its switch is on. */
+export function isActionOffered(id: AppActionId): boolean {
+	const name = ACTION_SWITCHES[id];
+	return name === undefined || switchIsOn(name);
+}
 
 /**
  * Chords an action has besides its own, which hold only where the keyboard is not in a terminal.
@@ -172,7 +209,7 @@ export function appShortcutOf(
 	place: KeyboardPlace = "terminal",
 ): AppActionId | null {
 	for (const [id, chord] of Object.entries(APP_SHORTCUTS) as [AppActionId, Chord][]) {
-		if (matchesChord(ev, chord)) return id;
+		if (matchesChord(ev, chord) && isActionOffered(id)) return id;
 	}
 	if (place === "elsewhere") {
 		for (const [id, chord] of Object.entries(OUTSIDE_TERMINAL_SHORTCUTS) as [
@@ -219,7 +256,8 @@ export function movesKeyboard(id: AppActionId): boolean {
 		tabNumberOf(id) !== null ||
 		paneMoveOf(id)?.move === "focus" ||
 		id === "zone.next" ||
-		id === "zone.previous"
+		id === "zone.previous" ||
+		id === "files.toggle"
 	);
 }
 
@@ -278,4 +316,5 @@ export const APP_SHORTCUT_NAMES: Readonly<Record<AppActionId, string>> = {
 	"pane.resizeDown": "Resize Down",
 	"zone.next": "Next Area (rail, list, tabs, pane)",
 	"zone.previous": "Previous Area",
+	"files.toggle": "Files Panel",
 };

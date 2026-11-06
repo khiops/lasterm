@@ -38,10 +38,12 @@
 <script setup lang="ts">
 // The app's shortcuts are shown from the table the window and the terminals read (#631, #637),
 // under the names it gives them (#639).
+import { computed } from "vue";
 import { useShortcutsOverlay } from "../../../composables/useShortcutsOverlay.js";
 import {
 	APP_SHORTCUT_NAMES,
 	type AppActionId,
+	isActionOffered,
 	outsideTerminalKeys,
 	shortcutKeys,
 	TAB_NUMBERS,
@@ -70,7 +72,15 @@ function fromTable(id: AppActionId): Keybinding {
 	};
 }
 
-const keybindingGroups: KeybindingGroup[] = [
+// The files panel's chord waits behind file transfer's switch (#835, #836), as the panel does.
+const keybindingGroups = computed<KeybindingGroup[]>(() => [
+	...GROUPS,
+	...(isActionOffered("files.toggle")
+		? [{ name: "Files", bindings: [fromTable("files.toggle")] }]
+		: []),
+]);
+
+const GROUPS: KeybindingGroup[] = [
 	{
 		name: "General",
 		bindings: [fromTable("palette.open"), fromTable("settings.open"), fromTable("help.shortcuts")],

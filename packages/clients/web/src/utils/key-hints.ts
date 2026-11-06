@@ -14,6 +14,7 @@ import {
 	APP_SHORTCUT_NAMES,
 	APP_SHORTCUTS,
 	type AppActionId,
+	isActionOffered,
 	outsideTerminalKeys,
 	shortcutKeys,
 } from "./app-shortcuts.js";
@@ -154,6 +155,13 @@ const ZONE_ITEM_KEYS: Readonly<Record<HintZone, readonly KeyHint[]>> = {
 		{ keys: ["Enter"], does: "open" },
 		{ keys: ["Delete"], does: "close" },
 	],
+	// A file or a folder of the files panel (#836, FilesBrowser).
+	files: [
+		{ keys: ["↑↓"], does: "files" },
+		{ keys: ["Enter"], does: "open" },
+		{ keys: ["Backspace"], does: "up" },
+		{ keys: ["F2"], does: "edit the path" },
+	],
 };
 
 /**
@@ -277,6 +285,17 @@ function searchTextOf(group: ShortcutGroup, row: ShortcutRow): string {
 			? [row.chord.join("+"), row.outsideTerminal?.join("+") ?? ""].join(" ")
 			: keyHintText(row.hints);
 	return `${group.name} ${row.name} ${keys}`.toLowerCase();
+}
+
+/**
+ * The groups without the actions offered only behind a switch that is off (#835,
+ * `isActionOffered`): the files panel's chord is not listed while file transfer is.
+ */
+export function offeredShortcutGroups(groups: readonly ShortcutGroup[]): readonly ShortcutGroup[] {
+	return groups.map((group) => ({
+		name: group.name,
+		rows: group.rows.filter((row) => row.kind !== "chord" || isActionOffered(row.id)),
+	}));
 }
 
 /**

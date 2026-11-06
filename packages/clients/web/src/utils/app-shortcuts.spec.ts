@@ -1,16 +1,19 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import HOST_RAIL from "../components/HostRail.vue?raw";
 import {
+	ACTION_SWITCHES,
 	APP_SHORTCUT_NAMES,
 	APP_SHORTCUTS,
 	type AppActionId,
 	appShortcutOf,
+	isActionOffered,
 	keyboardPlaceOf,
 	matchesChord,
 	movesKeyboard,
 	OUTSIDE_TERMINAL_SHORTCUTS,
 	outsideTerminalKeys,
 	paneMoveOf,
+	readSwitchesFrom,
 	shortcutKeys,
 	shortcutLabel,
 	TAB_NUMBERS,
@@ -71,6 +74,7 @@ describe("the table of the app's shortcuts", () => {
 			"pane.resizeDown",
 			"zone.next",
 			"zone.previous",
+			"files.toggle",
 		]);
 	});
 
@@ -96,6 +100,7 @@ describe("the table of the app's shortcuts", () => {
 			"Alt+Shift+↓",
 			"Ctrl+F6",
 			"Ctrl+Shift+F6",
+			"Ctrl+Shift+E",
 		]);
 	});
 
@@ -396,6 +401,8 @@ describe("the focus zone chords", () => {
 	});
 
 	it("leave the other chords the same outside a terminal", () => {
+		readSwitchesFrom(() => true);
+		onTestFinished(() => readSwitchesFrom(() => false));
 		for (const id of IDS) {
 			const chord = APP_SHORTCUTS[id];
 			const event = key(chord.key, {
@@ -490,11 +497,15 @@ describe("what an action is", () => {
 			"pane.focusDown",
 			"zone.next",
 			"zone.previous",
+			"files.toggle",
 		]);
 	});
 });
 
 describe("matching an event", () => {
+	beforeEach(() => readSwitchesFrom(() => true));
+	afterEach(() => readSwitchesFrom(() => false));
+
 	it("matches every event xterm hands its key handler", () => {
 		for (const type of ["keydown", "keypress", "keyup"]) {
 			expect(appShortcutOf(key("P", CTRL_SHIFT, type))).toBe("palette.open");
@@ -552,6 +563,36 @@ describe("the Settings chord", () => {
 	// Settings is a modal dialog: its chord must still close it from inside.
 	it("runs from inside a modal dialog", () => {
 		expect(movesKeyboard("settings.open")).toBe(false);
+	});
+});
+
+// The files panel (#836) waits behind file transfer's switch (#835): off, Ctrl+Shift+E is no
+// shortcut, and a terminal keeps it as it did before.
+describe("the files panel's chord", () => {
+	afterEach(() => readSwitchesFrom(() => false));
+
+	it("is Ctrl+Shift+E, in either case, while file transfer is on", () => {
+		readSwitchesFrom((name) => name === "fileTransfer");
+		expect(isActionOffered("files.toggle")).toBe(true);
+		expect(appShortcutOf(key("E", CTRL_SHIFT))).toBe("files.toggle");
+		expect(appShortcutOf(key("e", CTRL_SHIFT))).toBe("files.toggle");
+		expect(appShortcutOf(key("E", CTRL_SHIFT), "elsewhere")).toBe("files.toggle");
+		expect(appShortcutOf(key("e", { ctrlKey: true }))).toBeNull();
+		expect(APP_SHORTCUT_NAMES["files.toggle"]).toBe("Files Panel");
+	});
+
+	it("is no shortcut while file transfer is off, which it is until told", () => {
+		expect(ACTION_SWITCHES["files.toggle"]).toBe("fileTransfer");
+		expect(isActionOffered("files.toggle")).toBe(false);
+		expect(appShortcutOf(key("E", CTRL_SHIFT))).toBeNull();
+		expect(appShortcutOf(key("E", CTRL_SHIFT), "elsewhere")).toBeNull();
+		// The others never wait for a switch.
+		expect(isActionOffered("palette.open")).toBe(true);
+		expect(appShortcutOf(key("P", CTRL_SHIFT))).toBe("palette.open");
+	});
+
+	it("takes the keyboard into the panel, so it does nothing behind a modal dialog", () => {
+		expect(movesKeyboard("files.toggle")).toBe(true);
 	});
 });
 

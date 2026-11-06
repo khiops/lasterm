@@ -79,7 +79,11 @@
 import { computed, ref, watch } from "vue";
 import { useModalFocus } from "../composables/useModalFocus.js";
 import { useShortcutsOverlay } from "../composables/useShortcutsOverlay.js";
-import { filterShortcutGroups, SHORTCUT_GROUPS } from "../utils/key-hints.js";
+import {
+	filterShortcutGroups,
+	offeredShortcutGroups,
+	SHORTCUT_GROUPS,
+} from "../utils/key-hints.js";
 import KeyHints from "./KeyHints.vue";
 
 const overlay = useShortcutsOverlay();
@@ -88,7 +92,10 @@ const dialogEl = ref<HTMLElement | null>(null);
 const searchEl = ref<HTMLInputElement | null>(null);
 const query = ref("");
 
-const shownGroups = computed(() => filterShortcutGroups(SHORTCUT_GROUPS, query.value));
+// An action behind a switch that is off (the files panel's, #835) is not listed.
+const shownGroups = computed(() =>
+	filterShortcutGroups(offeredShortcutGroups(SHORTCUT_GROUPS), query.value),
+);
 
 // Each opening starts from the whole list.
 watch(overlay.isOpen, (open) => {

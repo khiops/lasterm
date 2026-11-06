@@ -8,6 +8,8 @@
 			@dragend="onDragEnd"
 		>
 			<span class="pane-title">{{ paneTitle }}</span>
+			<!-- Its terminal's files (#836), left of the lock; only while file transfer is on. -->
+			<FilesButton :channel-id="effectiveChannelId" />
 			<WriteLockIndicator :channel-id="effectiveChannelId" :is-dead="isDead || hasEnded || isGone" class="pane-lock" />
 		</div>
 
@@ -173,6 +175,13 @@
 		>
 			<button class="context-menu__item" @click="onSplitRight">Split Right</button>
 			<button class="context-menu__item" @click="onSplitDown">Split Down</button>
+			<template v-if="configStore.fileTransferEnabled">
+				<hr class="context-menu__divider" />
+				<button class="context-menu__item context-menu__item--shortcut" @click="onShowFiles">
+					<span>Files</span>
+					<span class="context-menu__keys">{{ shortcutLabel("files.toggle") }}</span>
+				</button>
+			</template>
 			<hr class="context-menu__divider" />
 			<button class="context-menu__item" @click="onDetachPane">Detach</button>
 			<button class="context-menu__item context-menu__item--danger" @click="onClosePane">
@@ -203,6 +212,7 @@ import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
 import { useWindowFocus } from '../composables/useWindowFocus.js';
 import { useChannelsStore } from '../stores/channels.js';
 import { useConfigStore } from '../stores/config.js';
+import { useFilesPanelStore } from '../stores/files-panel.js';
 import { useHostsStore } from '../stores/hosts.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
@@ -234,8 +244,10 @@ import {
 	factsFromRefusal,
 	paneCover,
 } from '../utils/pane-cover.js';
+import { shortcutLabel } from '../utils/app-shortcuts.js';
 import { terminalKeyHandler } from '../utils/terminal-keys.js';
 import EnvironmentBanner from './EnvironmentBanner.vue';
+import FilesButton from './files/FilesButton.vue';
 import SearchOverlay from './SearchOverlay.vue';
 import UnreadLinesBar from './UnreadLinesBar.vue';
 import WriteLockIndicator from './WriteLockIndicator.vue';
@@ -307,6 +319,7 @@ const paneHostId = computed<string | undefined>(() => {
 });
 const writeLockStore = useWriteLockStore();
 const configStore = useConfigStore();
+const filesPanel = useFilesPanelStore();
 const notificationStore = useNotificationStore();
 const terminalContainer = ref<HTMLElement | null>(null);
 const ready = ref(false);
@@ -1291,6 +1304,13 @@ function onSplitDown(): void {
 	if (chId !== null) emit('split-down', chId);
 }
 
+/** "Files": the panel opens on this pane's terminal, with the keyboard in it (#836). */
+function onShowFiles(): void {
+	contextMenuVisible.value = false;
+	const chId = effectiveChannelId.value;
+	if (chId !== null) filesPanel.openFor(chId, { keyboard: true });
+}
+
 function onDetachPane(): void {
 	contextMenuVisible.value = false;
 	const chId = effectiveChannelId.value;
@@ -1711,6 +1731,18 @@ function onDragEnd(): void {
 
 .context-menu__item--danger {
 	color: var(--nt-badge);
+}
+
+/* An item and its chord, as the palette shows it. */
+.context-menu__item--shortcut {
+	display: flex;
+	justify-content: space-between;
+	gap: 16px;
+}
+
+.context-menu__keys {
+	color: var(--nt-text-secondary);
+	font-size: 11px;
 }
 
 .context-menu__divider {

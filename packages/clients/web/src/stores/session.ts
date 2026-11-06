@@ -16,6 +16,7 @@ import { useAuthStore } from "./auth.js";
 import { useAuthPromptStore } from "./auth-prompt.js";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
+import { useFilesPanelStore } from "./files-panel.js";
 import { useHostVerifyStore } from "./host-verify.js";
 import { useHostsStore } from "./hosts.js";
 import { useNotificationStore } from "./notifications.js";
@@ -172,6 +173,7 @@ export const useSessionStore = defineStore("session", () => {
 		_registerConfigHandlers(configStore);
 
 		_registerStateSyncHandler(hostsStore, channelsStore);
+		_registerCwdHandlers(useFilesPanelStore());
 
 		// Authenticate immediately after connecting
 		await _authenticate();
@@ -499,6 +501,26 @@ export const useSessionStore = defineStore("session", () => {
 					channelsStore.setDisplayTitle(msg.channelId, msg.displayTitle);
 				}
 			}
+		});
+	}
+
+	/**
+	 * A terminal's live working directory (#834), which the files panel follows (#836): each
+	 * CWD_CHANGE, and the last one in ATTACH_OK and in each STATE_SYNC entry. A hub that does not
+	 * relay it sends none of them, and the fields are read only when present. A terminal that
+	 * ends has none any more.
+	 */
+	function _registerCwdHandlers(filesPanel: ReturnType<typeof useFilesPanelStore>): void {
+		const fields = (msg: unknown) => msg as Readonly<Record<string, unknown>>;
+		wsClient.on("CWD_CHANGE", (msg) => filesPanel.takeCwd(fields(msg)));
+		wsClient.on("ATTACH_OK", (msg) => filesPanel.takeCwd(fields(msg)));
+		wsClient.on("STATE_SYNC", (msg) => {
+			if (msg.type !== "STATE_SYNC") return;
+			for (const channel of msg.channels) filesPanel.takeCwd(fields(channel));
+		});
+		wsClient.on("CHANNEL_STATE", (msg) => {
+			if (msg.type === "CHANNEL_STATE" && msg.status === "dead")
+				filesPanel.forgetCwd(msg.channelId);
 		});
 	}
 

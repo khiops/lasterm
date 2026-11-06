@@ -7,12 +7,13 @@
  * (utils/app-shortcuts.spec.ts), and the palette's row is tested in useCommandPalette.spec.ts.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type App, createApp, nextTick } from "vue";
+import { type App, createApp, nextTick, ref } from "vue";
 import { useShortcutsOverlay } from "../composables/useShortcutsOverlay.js";
 import {
 	APP_SHORTCUT_NAMES,
 	APP_SHORTCUTS,
 	type AppActionId,
+	readSwitchesFrom,
 	shortcutKeys,
 } from "../utils/app-shortcuts.js";
 import ShortcutsOverlay from "./ShortcutsOverlay.vue";
@@ -21,7 +22,13 @@ let app: App | null = null;
 let opener: HTMLButtonElement;
 const overlay = useShortcutsOverlay();
 
+/** File transfer's switch, read as the window reads it: reactively. */
+const fileTransferOn = ref(true);
+
 beforeEach(() => {
+	// Every action of the table, the files panel's too (#836): its switch is on here.
+	fileTransferOn.value = true;
+	readSwitchesFrom(() => fileTransferOn.value);
 	overlay.close();
 	// Where the keyboard was: a terminal, say.
 	opener = document.createElement("button");
@@ -39,6 +46,7 @@ afterEach(() => {
 	app?.unmount();
 	app = null;
 	document.body.replaceChildren();
+	readSwitchesFrom(() => false);
 });
 
 async function settle(): Promise<void> {
@@ -104,6 +112,18 @@ describe("the keyboard shortcuts overlay", () => {
 		// F6 outside a terminal, beside Ctrl+F6.
 		const alias = el('[data-shortcut-id="zone.next"] .shortcuts-alias').textContent ?? "";
 		expect(alias.replace(/\s+/g, " ").trim()).toBe("(F6 outside a terminal)");
+	});
+
+	// The files panel waits behind file transfer's switch (#835, #836), and its chord with it.
+	it("lists the files panel's chord only while file transfer is on", async () => {
+		await openOverlay();
+		expect(listedIds()).toContain("files.toggle");
+		overlay.close();
+		await settle();
+		fileTransferOn.value = false;
+		await openOverlay();
+		expect(listedIds()).not.toContain("files.toggle");
+		expect(listedIds()).toHaveLength(Object.keys(APP_SHORTCUTS).length - 1);
 	});
 
 	it("groups them General, Tabs, Panes, Areas and Settings, with the keys inside each area", async () => {

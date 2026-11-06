@@ -262,6 +262,9 @@ Local daemon, single process, binds to 127.0.0.1.
   each temporary cut to what its host acknowledged, a missing or short one started again, a placed
   file never sent again. A cancelled question leaves it resumable, saying why. One whose window is
   still open and whose link merely dropped resumes when the hub reconnects the host
+- A hub that stops (quit, stop, a signal) gives what it serves a second to finish, then ends it: a
+  chunk whose body is still arriving, a WebSocket whose client does not answer the close (#872).
+  Each window's uploads stop interrupted, their acknowledged prefix kept, and the hub exits at once
 - `TRANSFER_DISCARD` and a 7-day expiry remove what an upload left on its host, at once or at the
   host's next connection; an upload's start sweeps the folders it lists of temporaries no record
   knows, older than an hour. Logs no path and no name, and nothing per chunk at INFO
@@ -297,6 +300,12 @@ Local daemon, single process, binds to 127.0.0.1.
 - **Paired clients** (a browser, or a remote client) authenticate with a token that can drive the hub but never end it.
 - **The desktop's hub** also ends with the desktop, through `--exit-with-stdin` (#188).
 - **Once a client can drive a hub it did not launch (#193):** its close gesture for that hub is **Disconnect**, which ends nothing on the hub. **Quit** stays for the hub it owns, and the close dialog names which of the two applies.
+
+**The desktop leaves once its hub took the quit (#872).** Its hub exiting, whatever the code, ends
+the quit at once; a teardown it cannot confirm is said in a dialog, then the app leaves; a quit
+gesture after the hub died leaves without asking it. Once leaving is decided, the process ends
+within 5 s even when the window's main thread, which carries out the exit and shows the dialogs,
+no longer runs: a dialog is shown only after that thread answered.
 
 **Quitting the desktop while uploads run (#837, decisions.md UPLOADS-DESKTOP).** The page tells the
 shell, on every change, the uploads this window sends: `set_uploads_in_progress({ seq, inProgress,

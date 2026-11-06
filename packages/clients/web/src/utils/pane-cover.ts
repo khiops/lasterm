@@ -1,4 +1,4 @@
-import type { ChannelStatus } from "@lasterm/shared";
+import { type ChannelStatus, ErrorCode } from "@lasterm/shared";
 
 /** What a terminal pane knows about the terminal behind it. */
 export interface PaneFacts {
@@ -69,4 +69,36 @@ export function factsFromRefusal(code: string | undefined): AttachFacts | null {
  */
 export function factsFromKnownEnd(): AttachFacts {
 	return { ended: true, gone: false, detached: false };
+}
+
+/** What a host can ask for before a terminal starts on it. */
+export type AskedSecret = "password" | "passphrase";
+
+/**
+ * A new terminal that never started: its host asked for a password or a key's
+ * passphrase, and none was given (`AUTH_CANCELLED`). `asked` says which, when
+ * the spawn saw the question.
+ */
+export interface SecretNotGiven {
+	asked?: AskedSecret;
+}
+
+/**
+ * Whether a spawn was refused because the password or passphrase its host
+ * asked for was not given, and which was asked for. Null for anything else.
+ *
+ * That is no failure, and no end (#812): no shell started and nothing ended,
+ * so the pane offers to connect again, which asks again (#875).
+ */
+export function secretNotGiven(err: unknown): SecretNotGiven | null {
+	const refusal = err as { code?: unknown; asked?: unknown } | null;
+	if (refusal?.code !== ErrorCode.AUTH_CANCELLED) return null;
+	return refusal.asked === "password" || refusal.asked === "passphrase"
+		? { asked: refusal.asked }
+		: {};
+}
+
+/** What the pane says of it: "Not connected: the passphrase was not given". */
+export function notGivenMessage(notGiven: SecretNotGiven): string {
+	return `Not connected: the ${notGiven.asked ?? "password or passphrase"} was not given`;
 }

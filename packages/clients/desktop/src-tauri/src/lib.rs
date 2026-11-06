@@ -1967,9 +1967,15 @@ struct HubQuitTarget {
 /// completing a newer (or no longer active) attempt.
 #[derive(Debug, PartialEq, Eq)]
 enum QuitAttemptState {
-    Requested { force: bool },
+    Requested {
+        force: bool,
+    },
     WaitingForNativeConsent,
-    ConfirmingHubGone,
+    /// The hub took the quit, or may have; `diagnostic` is what it said of the
+    /// agent's stop when that was not confirmed.
+    ConfirmingHubGone {
+        diagnostic: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2013,6 +2019,9 @@ enum QuitAction {
     },
     Exit,
     ExitWithDiagnostic(String),
+    /// The hub was asked to quit and may have, but that it did could not be
+    /// confirmed: say why, then leave (#872).
+    ExitUnconfirmed(String),
     Failed(String),
     Ignore,
 }
@@ -2056,7 +2065,9 @@ impl QuitCoordinator {
                 QuitAction::Failed("Quit was refused again; nothing was stopped.".to_string())
             }
             QuitRequestResult::Committed { target, diagnostic } => {
-                attempt.state = QuitAttemptState::ConfirmingHubGone;
+                attempt.state = QuitAttemptState::ConfirmingHubGone {
+                    diagnostic: diagnostic.clone(),
+                };
                 QuitAction::Observe {
                     attempt_id: id,
                     target,
@@ -2064,7 +2075,7 @@ impl QuitCoordinator {
                 }
             }
             QuitRequestResult::Unobserved(target) => {
-                attempt.state = QuitAttemptState::ConfirmingHubGone;
+                attempt.state = QuitAttemptState::ConfirmingHubGone { diagnostic: None };
                 QuitAction::Observe {
                     attempt_id: id,
                     target,
@@ -2106,13 +2117,34 @@ impl QuitCoordinator {
         let Some(attempt) = self.active.as_ref() else {
             return QuitAction::Ignore;
         };
-        if attempt.id != id || attempt.state != QuitAttemptState::ConfirmingHubGone {
+        if attempt.id != id || !matches!(attempt.state, QuitAttemptState::ConfirmingHubGone { .. })
+        {
             return QuitAction::Ignore;
         }
         self.active = None;
         match observed {
             Ok(()) => diagnostic.map_or(QuitAction::Exit, QuitAction::ExitWithDiagnostic),
-            Err(message) => QuitAction::Failed(message),
+            // The hub took the quit, or may have: its agent and terminals are
+            // ending. Staying would keep a window on a hub that is going, with
+            // nothing left to do there but kill it (#872).
+            Err(message) => QuitAction::ExitUnconfirmed(message),
+        }
+    }
+
+    /// The hub this desktop launched has exited (#872). A quit under way has
+    /// nothing left to wait for, whether the hub answered or not, and whatever
+    /// its exit code or its runtime record say: the app leaves now, saying what
+    /// the hub said of the agent if it said anything. A late answer or
+    /// observation then belongs to no attempt and is ignored.
+    // Under `tauri dev` no sidecar is launched, so no hub exit is ever seen.
+    #[cfg_attr(dev, allow(dead_code))]
+    fn hub_exited(&mut self) -> QuitAction {
+        match self.active.take().map(|attempt| attempt.state) {
+            None => QuitAction::Ignore,
+            Some(QuitAttemptState::ConfirmingHubGone {
+                diagnostic: Some(diagnostic),
+            }) => QuitAction::ExitWithDiagnostic(diagnostic),
+            Some(_) => QuitAction::Exit,
         }
     }
 }
@@ -4906,14 +4938,52 @@ fn show_startup_failure_then_exit(app: tauri::AppHandle, message: String) {
 }
 
 fn show_quit_diagnostic_then_exit(app: tauri::AppHandle, diagnostic: String) {
-    app.dialog()
-        .message(format!(
-            "The hub shut down, but the local agent was not confirmed stopped: {diagnostic}"
-        ))
-        .title("Agent Stop Not Confirmed")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::Ok)
-        .show(move |_| app.exit(0));
+    say_then_leave(
+        app,
+        "Agent Stop Not Confirmed",
+        format!("The hub shut down, but the local agent was not confirmed stopped: {diagnostic}"),
+    );
+}
+
+fn show_unconfirmed_quit_then_exit(app: tauri::AppHandle, message: String) {
+    say_then_leave(
+        app,
+        "Quit Not Confirmed",
+        format!("Lasterm quits, but the hub was not confirmed stopped: {message}"),
+    );
+}
+
+/// Say why a quit ended as it did, then leave once that is dismissed.
+///
+/// A dialog is made on the main thread, as the exit is carried out there. A
+/// main thread that no longer runs, as in #872, shows neither: the quit would
+/// end in no dialog and no exit. So the main thread is asked first, and one
+/// that does not answer gets no dialog: the reason goes to standard error, and
+/// the app leaves without it.
+fn say_then_leave(app: tauri::AppHandle, title: &'static str, message: String) {
+    std::thread::spawn(move || {
+        let probe = app.clone();
+        let answers = run_after_main_thread_action(
+            move |action| {
+                probe
+                    .run_on_main_thread(action)
+                    .map_err(|error| error.to_string())
+            },
+            || Ok(()),
+        );
+        if let Err(error) = answers {
+            eprintln!("[lasterm] {title}, and no dialog can say it ({error}): {message}");
+            finish_quit(&app);
+            return;
+        }
+        let leaving = app.clone();
+        app.dialog()
+            .message(message)
+            .title(title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::Ok)
+            .show(move |_| finish_quit(&leaving));
+    });
 }
 
 fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
@@ -4978,6 +5048,7 @@ fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
         QuitAction::ExitWithDiagnostic(diagnostic) => {
             show_quit_diagnostic_then_exit(app, diagnostic)
         }
+        QuitAction::ExitUnconfirmed(message) => show_unconfirmed_quit_then_exit(app, message),
         QuitAction::Failed(message) => show_shutdown_error(&app, message),
         QuitAction::Ignore => {}
     }
@@ -4987,6 +5058,13 @@ fn apply_quit_action(app: tauri::AppHandle, action: QuitAction) {
 /// or its native fallback, and a window close under the "Quit completely"
 /// preference. While this window sends uploads, it asks first (#837).
 fn request_app_quit(app: tauri::AppHandle) {
+    // A hub that has died has nothing left to stop, nor a record to ask it by:
+    // a quit would only fail, and leave the app with no way out but the hub
+    // dialog's Quit (#872). Leave as that does.
+    if matches!(hub_state(), HubState::Exited(_)) {
+        finish_quit(&app);
+        return;
+    }
     if quit_coordinator()
         .lock()
         .expect("quit coordinator lock poisoned")
@@ -5048,7 +5126,31 @@ fn finish_quit(app: &tauri::AppHandle) {
             }
         }
     }
-    app.exit(0);
+    leave(|| app.exit(0), || std::process::exit(0), QUIT_EXIT_GRACE);
+}
+
+/// How long the event loop gets to end the app once a quit is decided, before
+/// the quit ends the process itself.
+const QUIT_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Ask the event loop to end the app, and end the process anyway if it has not
+/// within `grace`.
+///
+/// `app.exit` only sends the event loop a message, and the event loop runs on
+/// the window's main thread. In #872 that thread no longer ran: the window
+/// stayed on screen, frozen, its WebView2 no longer answering, and the quit the
+/// coordinator had decided never took effect. Nothing is left to stop by then:
+/// the hub has gone, or will end with this process (`--exit-with-stdin`).
+fn leave(request_exit: impl FnOnce(), force_exit: impl FnOnce() + Send + 'static, grace: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(grace);
+        eprintln!(
+            "[lasterm] the app did not end within {} ms of quitting; ending it",
+            grace.as_millis()
+        );
+        force_exit();
+    });
+    request_exit();
 }
 
 /// Start the desktop that replaces this one, told to wait for the lock.
@@ -5738,7 +5840,16 @@ fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
                         payload.code, payload.signal
                     ));
                     publish_hub_state(HubState::Exited(payload.code));
-                    if served {
+                    // A hub that exits while it is asked to quit ends the quit,
+                    // whatever its code: the app leaves, and the window is not
+                    // told a hub it is leaving has stopped (#872).
+                    let quitting = quit_coordinator()
+                        .lock()
+                        .expect("quit coordinator lock poisoned")
+                        .hub_exited();
+                    if !matches!(quitting, QuitAction::Ignore) {
+                        apply_quit_action(exit_notice.clone(), quitting);
+                    } else if served {
                         notify_hub_exit(&exit_notice, payload.code);
                     }
                     exited = true;
@@ -8031,6 +8142,107 @@ mod tests {
             coordinator.request_finished(id, false, QuitRequestResult::Unobserved(test_target())),
             QuitAction::Observe { attempt_id, .. } if attempt_id == id
         ));
+    }
+
+    /// #872: the hub took the quit, then its teardown timed out and it exited
+    /// 1. However that is learned, the app leaves.
+    #[test]
+    fn a_hub_that_exits_during_its_quit_ends_the_quit_whatever_comes_late() {
+        let mut coordinator = QuitCoordinator::default();
+        assert!(matches!(coordinator.hub_exited(), QuitAction::Ignore));
+
+        // Before its answer was read: the answer, when it comes, belongs to no attempt.
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts")
+        };
+        assert!(matches!(coordinator.hub_exited(), QuitAction::Exit));
+        assert!(!coordinator.in_progress());
+        assert!(matches!(
+            coordinator.request_finished(
+                id,
+                false,
+                QuitRequestResult::Committed {
+                    target: test_target(),
+                    diagnostic: None
+                }
+            ),
+            QuitAction::Ignore
+        ));
+
+        // While its teardown is being confirmed: nor does the observation.
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts again")
+        };
+        let _ =
+            coordinator.request_finished(id, false, QuitRequestResult::Unobserved(test_target()));
+        assert!(matches!(coordinator.hub_exited(), QuitAction::Exit));
+        assert!(matches!(
+            coordinator.observation_finished(id, Err("runtime record remains".to_string()), None),
+            QuitAction::Ignore
+        ));
+
+        // What the hub said of the agent is still said.
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts a third time")
+        };
+        let _ = coordinator.request_finished(
+            id,
+            false,
+            classify_quit_response(503, r#"{"message":"record mismatch"}"#, test_target()),
+        );
+        assert!(matches!(
+            coordinator.hub_exited(),
+            QuitAction::ExitWithDiagnostic(message) if message == "record mismatch"
+        ));
+    }
+
+    /// #872: a teardown that could not be confirmed left the app open over a
+    /// hub that was going, with nothing to do but kill it.
+    #[test]
+    fn an_unconfirmed_teardown_says_why_then_leaves() {
+        let mut coordinator = QuitCoordinator::default();
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("starts")
+        };
+        let _ = coordinator.request_finished(
+            id,
+            false,
+            QuitRequestResult::Committed {
+                target: test_target(),
+                diagnostic: None,
+            },
+        );
+        assert!(matches!(
+            coordinator.observation_finished(
+                id,
+                Err("Hub teardown was not confirmed within 47000ms: runtime record remains".to_string()),
+                None
+            ),
+            QuitAction::ExitUnconfirmed(message) if message.contains("not confirmed")
+        ));
+        assert!(!coordinator.in_progress());
+    }
+
+    /// #872: the quit was decided, but the event loop that carries out
+    /// `app.exit` ran on a main thread that no longer ran.
+    #[test]
+    fn a_decided_quit_ends_the_process_when_the_event_loop_never_does() {
+        let (ended, ended_received) = mpsc::channel();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let asked_for_exit = asked.clone();
+        leave(
+            move || {
+                asked_for_exit.fetch_add(1, Ordering::SeqCst);
+            },
+            move || {
+                let _ = ended.send(());
+            },
+            Duration::from_millis(20),
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        ended_received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the process is ended though the event loop never exits");
     }
 
     #[test]

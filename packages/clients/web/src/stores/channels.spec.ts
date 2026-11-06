@@ -896,6 +896,34 @@ describe("useChannelsStore — spawnChannel waiting on a person", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	// A cancel says which secret was not given, so the pane can say it (#875).
+	it.each(["passphrase", "password"] as const)(
+		"says the %s its host asked for was not given",
+		async (promptType) => {
+			const sessionStore = useSessionStore();
+			const ws = silentWsClient();
+			// @ts-expect-error — overwrite reactive wsClient for test
+			sessionStore.wsClient = { on: ws.on, send: ws.send };
+			const store = useChannelsStore();
+
+			const spawn = store.spawnChannel("host-pi", { select: false });
+			// Another host's question is not this spawn's.
+			const other = promptType === "password" ? "passphrase" : "password";
+			ws.emit({ type: "AUTH_PROMPT", hostId: "host-other", promptType: other, promptId: "p0" });
+			ws.emit({ type: "AUTH_PROMPT", hostId: "host-pi", promptType, promptId: "p1" });
+			ws.emit({
+				type: "ERROR",
+				code: ErrorCode.AUTH_CANCELLED,
+				message: "Authentication cancelled by user",
+			});
+
+			await expect(spawn).rejects.toMatchObject({
+				code: ErrorCode.AUTH_CANCELLED,
+				asked: promptType,
+			});
+		},
+	);
 });
 
 // ---------------------------------------------------------------------------

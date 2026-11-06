@@ -41,7 +41,7 @@ const WRITE_STALL_MS = 60_000;
 const SCRIPT_STALL_MS = 60_000;
 
 /**
- * How long a Windows script that places, removes or creates folders may take,
+ * How long a Windows script that places, cuts, removes or creates folders may take,
  * on top of the shell's start-up when it is the one that starts the loop.
  */
 const WINDOWS_TIMEOUT_MS = 60_000;
@@ -466,7 +466,7 @@ class ExecSink implements UploadSink {
  * data: a `sh` argument or a single-quoted word, or Base64 for PowerShell.
  *
  * On Windows, every script but a file's write runs in the upload's one
- * `PowerShellLoop` (#865): placing, removing, creating folders, and what it
+ * `PowerShellLoop` (#865): placing, cutting a temporary, removing, creating folders, and what it
  * asks of the folder. A write keeps a PowerShell of its own, since its stdin
  * carries the file's bytes as they come.
  */
@@ -595,16 +595,8 @@ export class ExecUploadBackend implements UploadBackend {
 	async truncate(path: string, size: number): Promise<void> {
 		const what = "The file could not be cut to what the host acknowledged";
 		let result: { stdout: string | Buffer; stderr: string; exitCode: number | null };
-		if (this.style === "windows") {
-			try {
-				result = await sshExec(
-					this.client,
-					encodedPowerShell(windowsTruncateScript(path, size)),
-					WINDOWS_TIMEOUT_MS,
-				);
-			} catch (error) {
-				throw this.interrupted(error);
-			}
+		if (this.loop !== null) {
+			result = await this.inLoop(this.loop, windowsTruncateScript(path, size), WINDOWS_TIMEOUT_MS);
 		} else {
 			result = await this.run("sh -s", what, () =>
 				Readable.from(Buffer.from(posixTruncateScript(path, size), "utf8")),

@@ -1687,12 +1687,13 @@ into; anything else there is a type clash.
 
 **One PowerShell per upload on Windows.** Over SSH commands, a Windows file's bytes go on the stdin
 of an encoded PowerShell of its own. Everything else the upload asks of the host (placing,
-replacing, removing a temporary, creating folders, looking at the destination) goes to one
-PowerShell per upload, which reads each script as a Base64 line on its stdin and runs it in a
-runspace of its own, then prints a line of `lasterm-done-5e0c27` and Base64 of the error that
-stopped it, if any (#865). Starting a PowerShell takes a second or more; a script there, some
-25 ms. It starts with the upload's first such script, and is let go when the upload ends or after
-30 s without one; a script that gives no answer in time closes it, and the next starts another.
+replacing, cutting or removing a temporary, creating folders, looking at the destination) goes
+to one PowerShell per upload, which reads each script as a Base64 line on its stdin and runs it
+in a runspace of its own, then prints a line of `lasterm-done-5e0c27` and Base64 of the error
+that stopped it, if any (#865). Starting a PowerShell takes a second or more; a script there,
+some 25 ms. It starts with the upload's first such script, and is let go when the upload ends or
+after 30 s without one; a script that gives no answer in time closes it, and the next starts
+another.
 
 **Verification.** Every file's size is checked on the host before it is placed. Over SSH commands
 with `transfer_verify` on (the default), the hub hashes the bytes as they pass, and the host hashes

@@ -180,13 +180,16 @@ export async function sftpRequest<T>(
 /**
  * The directories `mkdir -p` would create for `remotePath`, shallowest first, each a literal
  * prefix of it: the levels below a POSIX root, a drive's root (`C:\`) or a UNC share
- * (`\\server\share`), none of which can be created (#832). A relative path starts at its first
- * name.
+ * (`\\server\share`, or `//server/share` as Win32-OpenSSH's SFTP takes it), none of which can be
+ * created (#832). A relative path starts at its first name.
  */
 export function mkdirLevels(remotePath: string): string[] {
 	const separator = remotePath.includes("/") ? "/" : "\\";
 	const root =
-		/^[A-Za-z]:\\/.exec(remotePath)?.[0] ?? /^\\\\[^\\]+\\[^\\]+/.exec(remotePath)?.[0] ?? "";
+		/^[A-Za-z]:\\/.exec(remotePath)?.[0] ??
+		// A share, as `\\server\share`, or as SFTP takes it from Win32-OpenSSH, `//server/share`.
+		/^(?:\\\\[^\\]+\\[^\\]+|\/\/[^/]+\/[^/]+)/.exec(remotePath)?.[0] ??
+		"";
 	const levels: string[] = [];
 	for (let end = Math.max(1, root.length); end <= remotePath.length; end++) {
 		if (end !== remotePath.length && remotePath[end] !== separator) continue;

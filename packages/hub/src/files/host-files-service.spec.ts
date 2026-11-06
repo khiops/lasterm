@@ -283,8 +283,18 @@ describe("a Windows host over SFTP, as Win32-OpenSSH serves it", () => {
 		expect(drive.entries.map((entry) => entry.name)).toEqual(["Users"]);
 	});
 
-	it("accepts a UNC path, and refuses %VAR% text with its reason", async () => {
-		// The mock serves no share: it is asked, and answers that it is not there.
+	it.each(["\\\\server\\share\\x", "//server/share/x", "///server/share/x"])(
+		"reads the UNC path %j as \\\\server\\share\\x, and lists the share over SFTP",
+		async (form) => {
+			mkdirSync(join(view, "UNC", "server", "share", "x", "inside"), { recursive: true });
+			const listing = await windowsHost.list(REMOTE_CHANNEL, form, false);
+			expect(listing.path).toBe("\\\\server\\share\\x");
+			expect(listing.entries.map((entry) => entry.name)).toEqual(["inside"]);
+		},
+	);
+
+	it("says a missing folder of a share is not found, and refuses %VAR% text with its reason", async () => {
+		mkdirSync(join(view, "UNC", "server", "share"), { recursive: true });
 		await failsWith(windowsHost.list(REMOTE_CHANNEL, "\\\\server\\share\\x", false), "NOT_FOUND");
 		const message = await failsWith(
 			windowsHost.list(REMOTE_CHANNEL, "%USERPROFILE%\\Documents", false),

@@ -80,6 +80,8 @@ function normaliseWindowsPath(input: string): NormalisedPath {
 	if (/^\\+$/.test(path)) return { ok: true, path: WINDOWS_ROOT };
 	// `/C:/x`, as a Windows SFTP server spells `C:\x`.
 	if (/^\\[A-Za-z]:(?:\\|$)/.test(path)) path = path.slice(1);
+	// `///server/share/x`, as Win32-OpenSSH's realpath spells `\\server\share\x` (#832).
+	if (/^\\{3,}[^\\]/.test(path)) path = `\\\\${path.replace(/^\\+/, "")}`;
 
 	let root: string;
 	let rest: string;

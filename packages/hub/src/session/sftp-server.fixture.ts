@@ -30,11 +30,15 @@ export interface SftpServerOptions {
 	 * - `posix` serves `/x` from `<root>/x`, its home at `/home/test`;
 	 * - `windows` serves `C:\x`, `C:/x` and `/C:/x` from `<root>/C/x`, lists the
 	 *   drives (`<root>`'s one-letter folders) at `/`, and answers `realpath` as
-	 *   Win32-OpenSSH does, `/C:/Users/test`.
+	 *   Win32-OpenSSH does, `/C:/Users/test`. A share is served as Win32-OpenSSH
+	 *   9.5 serves one: `//server/share/x` from `<root>/UNC/server/share/x`, its
+	 *   realpath `///server/share/x`; `\\server\share` is a folder of drive C:,
+	 *   which does not exist, and `/\\server\share` a bad message.
 	 *
+	 * `home` is what `realpath(".")` answers, in the server's own form.
 	 * Exec requests still run on this machine's paths.
 	 */
-	view?: { style: "posix" | "windows"; root: string };
+	view?: { style: "posix" | "windows"; root: string; home?: string };
 	/**
 	 * What runs an exec request: `/bin/sh -c` by default, or `cmd.exe /c "…"`
 	 * as Win32-OpenSSH runs it under its default shell (Windows only).
@@ -56,6 +60,11 @@ function pathMap(view: SftpServerOptions["view"]): PathMap {
 		};
 	}
 	return (path) => {
+		const share = /^\/\/([^/\\]+)\/([^/\\]+)((?:\/.*)?)$/s.exec(path);
+		if (share) {
+			const [, server = "", name = "", rest = ""] = share;
+			return join(view.root, "UNC", server, name, ...rest.split("/").filter((part) => part !== ""));
+		}
 		const match = /^\/?([A-Za-z]):((?:[\\/].*)?)$/s.exec(path);
 		if (!match) return null;
 		const [, drive = "", rest = ""] = match;
@@ -89,6 +98,8 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 	password: string;
 	/** Every command an exec request asked for, in order. */
 	execCommands: string[];
+	/** Every path an SFTP request named, as the client sent it, in order. */
+	sftpPaths: string[];
 	/** How many times a client asked for the SFTP subsystem, granted or refused. */
 	sftpRequests: () => number;
 	/** How many SFTP sessions have closed. */
@@ -102,6 +113,7 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 	const local = pathMap(options.view);
 	const windowsView = options.view?.style === "windows";
 	const execCommands: string[] = [];
+	const sftpPaths: string[] = [];
 	let sftpRequests = 0;
 	let sftpClosures = 0;
 	let closeFirings = 0;
@@ -203,6 +215,10 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					const missing = () => Object.assign(new Error("No such file"), { code: "ENOENT" });
 					/** The local path, or a rejection as a path the view does not serve. */
 					const resolve = (path: string): Promise<string> => {
+						sftpPaths.push(path);
+						if (windowsView && path.startsWith("/\\")) {
+							return Promise.reject(Object.assign(new Error("Bad message"), { code: "EINVAL" }));
+						}
 						const mapped = local(path);
 						return mapped === null ? Promise.reject(missing()) : Promise.resolve(mapped);
 					};
@@ -306,12 +322,19 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					const noAttrs = {} as Attributes;
 					sftp.on("REALPATH", (id, path) => {
 						const home =
-							options.view === undefined
+							options.view?.home ??
+							(options.view === undefined
 								? process.cwd()
 								: windowsView
 									? "/C:/Users/test"
-									: "/home/test";
-						const real = path === "." || path === "" ? home : path;
+									: "/home/test");
+						// Win32-OpenSSH 9.5 answers a share with three leading slashes.
+						const real =
+							path === "." || path === ""
+								? home
+								: windowsView && /^\/\/[^/]/.test(path)
+									? `/${path}`
+									: path;
 						sftp.name(id, [{ filename: real, longname: real, attrs: noAttrs }]);
 					});
 					sftp.on("READLINK", (id, path) => {
@@ -376,6 +399,7 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 		password,
 		port: (server.address() as { port: number }).port,
 		execCommands,
+		sftpPaths,
 		sftpRequests: () => sftpRequests,
 		sftpClosures: () => sftpClosures,
 		closeFirings: () => closeFirings,

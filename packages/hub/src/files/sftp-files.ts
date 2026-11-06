@@ -129,19 +129,36 @@ function isMissing(error: unknown): boolean {
 }
 
 /**
+ * `path`, as the service normalised it, the way the host's SFTP server reads
+ * it. A drive-absolute path goes as it is (`C:\…`, #716). A UNC path goes with
+ * forward slashes (`//server/share/…`): Win32-OpenSSH 9.5 takes
+ * `\\server\share` for a folder on drive C: and answers "No such file", which
+ * the hub would otherwise take for the share's verdict (#832).
+ */
+export function sftpPathOf(path: string, style: PathStyle): string {
+	return style === "windows" && path.startsWith("\\\\") ? path.replace(/\\/g, "/") : path;
+}
+
+/**
  * A host's files over SFTP, on the hub's own SSH connection to it.
  *
- * Paths go to the server as the service normalised them: POSIX, or a Windows
- * drive-absolute or UNC path, which Win32-OpenSSH takes as it is (#716). What it
- * answers in its own form (`/C:/…`) is normalised back. Version 3 has no status
- * for "exists" or "not a folder", and Win32-OpenSSH answers most failures with
- * the generic one, so a failure is explained by a `stat` of the path.
+ * Paths go to the server as the service normalised them (`sftpPathOf`): POSIX,
+ * or a Windows drive-absolute path, which Win32-OpenSSH takes as it is (#716),
+ * or a UNC path with forward slashes. What it answers in its own form (`/C:/…`,
+ * `///server/share/…`) is normalised back. Version 3 has no status for
+ * "exists" or "not a folder", and Win32-OpenSSH answers most failures with the
+ * generic one, so a failure is explained by a `stat` of the path.
  */
 export class SftpFileBackend implements FileBackend {
 	constructor(
 		private readonly shared: SharedSftp,
 		private readonly style: PathStyle,
 	) {}
+
+	/** `path` as this host's SFTP server reads it. */
+	private wire(path: string): string {
+		return sftpPathOf(path, this.style);
+	}
 
 	home(): Promise<string> {
 		return this.run(async (session) => {
@@ -164,7 +181,7 @@ export class SftpFileBackend implements FileBackend {
 			let found: FileEntryWithStats[];
 			try {
 				found = await sftpRequest<FileEntryWithStats[]>(session, (done) => {
-					session.channel.readdir(dir, done);
+					session.channel.readdir(this.wire(dir), done);
 				});
 			} catch (error) {
 				throw await this.explain(session, error, dir, "The folder could not be listed");
@@ -195,7 +212,7 @@ export class SftpFileBackend implements FileBackend {
 			let attrs: Stats;
 			try {
 				attrs = await sftpRequest<Stats>(session, (done) => {
-					session.channel.lstat(path, done);
+					session.channel.lstat(this.wire(path), done);
 				});
 			} catch (error) {
 				throw this.failure(error, "The path could not be read");
@@ -209,7 +226,7 @@ export class SftpFileBackend implements FileBackend {
 			let space: { f_frsize: unknown; f_blocks: unknown; f_bavail: unknown };
 			try {
 				space = await sftpRequest(session, (done) => {
-					session.channel.ext_openssh_statvfs(dir, done);
+					session.channel.ext_openssh_statvfs(this.wire(dir), done);
 				});
 			} catch (error) {
 				if (error instanceof Error && /does not support/.test(error.message)) {
@@ -231,7 +248,7 @@ export class SftpFileBackend implements FileBackend {
 			const what = "The folder could not be created";
 			try {
 				await sftpRequest<void>(session, (done) => {
-					session.channel.mkdir(path, (error) => done(error, undefined));
+					session.channel.mkdir(this.wire(path), (error) => done(error, undefined));
 				});
 			} catch (error) {
 				// Version 3 has no "exists": OpenSSH and Win32-OpenSSH both say FAILURE,
@@ -294,7 +311,7 @@ export class SftpFileBackend implements FileBackend {
 		let attrs: Stats;
 		try {
 			attrs = await sftpRequest<Stats>(session, (done) => {
-				session.channel.stat(dir, done);
+				session.channel.stat(this.wire(dir), done);
 			});
 		} catch (statError) {
 			if (isMissing(statError)) {
@@ -313,7 +330,7 @@ export class SftpFileBackend implements FileBackend {
 	private async lstatOrNull(session: SftpSession, path: string): Promise<Stats | null> {
 		try {
 			return await sftpRequest<Stats>(session, (done) => {
-				session.channel.lstat(path, done);
+				session.channel.lstat(this.wire(path), done);
 			});
 		} catch (error) {
 			if (isMissing(error)) return null;
@@ -331,10 +348,10 @@ export class SftpFileBackend implements FileBackend {
 		if (entry.kind !== "symlink") return entry;
 		const [target, linkKind] = await Promise.all([
 			sftpRequest<string>(session, (done) => {
-				session.channel.readlink(path, done);
+				session.channel.readlink(this.wire(path), done);
 			}).catch(() => undefined),
 			sftpRequest<Stats>(session, (done) => {
-				session.channel.stat(path, done);
+				session.channel.stat(this.wire(path), done);
 			}).then(
 				(followed): LinkKind => linkKindOfMode(followed.mode),
 				(): LinkKind => "missing",

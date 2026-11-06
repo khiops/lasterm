@@ -7,13 +7,21 @@ import type { SftpServerOptions } from "../session/sftp-server.fixture.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { failsWith, LOCAL_ROUND_TRIP_NAMES, roundTripNames } from "./file-names.fixture.js";
 import { WINDOWS_ROOT } from "./host-paths.js";
-import { SFTP_IDLE_MS, SftpFileBackend, SharedSftp } from "./sftp-files.js";
+import { SFTP_IDLE_MS, SftpFileBackend, SharedSftp, sftpPathOf } from "./sftp-files.js";
 import { type MockSshHost, startMockSshHost } from "./ssh-host.fixture.js";
 
 const windowsMachine = process.platform === "win32";
 
-/** A mock host whose SFTP serves `root` as a POSIX or a Windows host would show it. */
-function useHost(style: "posix" | "windows", options: SftpServerOptions = {}, idleMs?: number) {
+/**
+ * A mock host whose SFTP serves `root` as a POSIX or a Windows host would show
+ * it, its home what `realpath(".")` answers when `home` is given.
+ */
+function useHost(
+	style: "posix" | "windows",
+	options: SftpServerOptions = {},
+	idleMs?: number,
+	home?: string,
+) {
 	const state = {} as {
 		root: string;
 		host: MockSshHost;
@@ -22,7 +30,10 @@ function useHost(style: "posix" | "windows", options: SftpServerOptions = {}, id
 	};
 	beforeEach(async () => {
 		state.root = makeTempDir("lasterm-sftp-files-");
-		state.host = await startMockSshHost({ ...options, view: { style, root: state.root } });
+		state.host = await startMockSshHost({
+			...options,
+			view: { style, root: state.root, ...(home !== undefined ? { home } : {}) },
+		});
 		state.shared = new SharedSftp(state.host.client, idleMs);
 		state.files = new SftpFileBackend(state.shared, style);
 	});
@@ -190,6 +201,47 @@ describe("a Windows host's files over SFTP, as Win32-OpenSSH serves them", () =>
 		expect(
 			(await state.files.list(`C:\\Users\\test\\${name}`, false)).map((entry) => entry.name),
 		).toEqual([name]);
+	});
+
+	// Win32-OpenSSH 9.5 reads `//server/share` as the share and `\\server\share` as a
+	// folder of drive C:, which it answers "No such file": sent that way, a share
+	// that exists would be said not to (#832).
+	it("reaches a share by the forward-slash form the server reads", async () => {
+		const share = join(state.root, "UNC", "localhost", "C$");
+		mkdirSync(join(share, "Windows"), { recursive: true });
+
+		expect((await state.files.list("\\\\localhost\\C$", false)).map((entry) => entry.name)).toEqual(
+			["Windows"],
+		);
+		expect(await state.files.stat("\\\\localhost\\C$\\Windows")).toMatchObject({
+			name: "Windows",
+			kind: "directory",
+		});
+		await state.files.mkdir("\\\\localhost\\C$\\Windows\\new");
+		expect(statSync(join(share, "Windows", "new")).isDirectory()).toBe(true);
+		await failsWith(state.files.list("\\\\localhost\\C$\\missing", false), "NOT_FOUND");
+	});
+
+	it("never sends a share in the backslash form the server misreads", async () => {
+		mkdirSync(join(state.root, "UNC", "localhost", "C$"), { recursive: true });
+		await state.files.list("\\\\localhost\\C$", false);
+		await state.files.stat("\\\\localhost\\C$");
+		await failsWith(state.files.mkdir("\\\\localhost\\C$\\missing\\new"), "NOT_FOUND");
+		const sent = state.host.server.sftpPaths;
+		expect(sent.length).toBeGreaterThan(0);
+		expect(sent.filter((path) => path.includes("\\"))).toEqual([]);
+		expect(sent).toContain("//localhost/C$");
+		expect(sftpPathOf("\\\\localhost\\C$\\Windows", "windows")).toBe("//localhost/C$/Windows");
+		expect(sftpPathOf("C:\\Users\\test", "windows")).toBe("C:\\Users\\test");
+		expect(sftpPathOf("/home/u\\v", "posix")).toBe("/home/u\\v");
+	});
+});
+
+describe("a Windows host whose home is on a share", () => {
+	const state = useHost("windows", {}, undefined, "///fileserver/homes/test");
+
+	it("reads the home realpath gives as ///server/share/…, in its UNC form", async () => {
+		expect(await state.files.home()).toBe("\\\\fileserver\\homes\\test");
 	});
 });
 

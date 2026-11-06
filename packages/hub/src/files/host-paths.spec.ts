@@ -62,6 +62,9 @@ describe("normaliseHostPath on a Windows host", () => {
 		["\\\\server\\share", "\\\\server\\share"],
 		["\\\\server\\share\\dir\\", "\\\\server\\share\\dir"],
 		["//server/share/dir", "\\\\server\\share\\dir"],
+		// Win32-OpenSSH 9.5's realpath of a share: three leading slashes (#832).
+		["///localhost/C$/Windows", "\\\\localhost\\C$\\Windows"],
+		["\\\\\\server\\share", "\\\\server\\share"],
 		// Names keep what Windows allows, taken literally.
 		["C:\\it's 100% $HOME `x`", "C:\\it's 100% $HOME `x`"],
 		["C:\\50% off 20%", "C:\\50% off 20%"],

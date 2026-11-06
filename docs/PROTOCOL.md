@@ -1641,7 +1641,9 @@ expanded, so a name may hold `$`, `%`, quotes or backticks. Every answer gives i
 - **POSIX hosts** (Linux, macOS): `/…`, repeated and trailing `/` removed. A path starting with `~` or
   `$` is refused, with its reason.
 - **Windows hosts**: drive-absolute (`C:\…`) or UNC (`\\server\share\…`). `C:/x` and `/C:/x`, the form
-  a Windows SFTP server answers in, are `C:\x`; the drive letter is upper case, `C:` is `C:\`. The path
+  a Windows SFTP server answers in, are `C:\x`; `//server/share/x`, and `///server/share/x` as
+  Win32-OpenSSH's `realpath` answers a share, are `\\server\share\x`. The drive letter is upper case,
+  `C:` is `C:\`. The path
   `/` is the host's root, which lists its drives, each a folder named `C:`: `/` + `C:` is `/C:`, so a
   name joins onto it as onto any folder. A path holding `%NAME%` text is refused with its reason: the
   hub expands no environment variable (#711). So are device paths (`\\?\`, `\\.\`), a drive-relative
@@ -1674,7 +1676,10 @@ the path; the hub logs neither, at any level.
 - **SFTP**, one session per SSH connection, opened when first asked for, shared by every request on
   it, and closed after 60 s unused; a request is bound to the channel's life. `readdir` (whose
   attributes are `lstat`'s), `readlink` and `stat` for a link, `statvfs@openssh.com` for the free space
-  where the server offers it.
+  where the server offers it. On a Windows host, a drive-absolute path goes as it is, `/` lists the
+  drives (`C:`, `D:`), and a UNC path goes as `//server/share/…`: Win32-OpenSSH 9.5 reads
+  `\\server\share` as a folder of drive C: and answers "No such file", which would say a share that
+  exists is not there.
 - **SSH commands**, on a POSIX host a `sh` script fed on its stdin (`sh -s`): `stat -c '%f %s %Y'`
   (GNU coreutils and BusyBox), names as Base64 of their bytes, `df -Pk`, `mkdir --`. On a Windows host
   an encoded PowerShell (`-EncodedCommand`), the path as Base64 data, .NET calls only

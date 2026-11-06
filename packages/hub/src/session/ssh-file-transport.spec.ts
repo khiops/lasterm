@@ -33,6 +33,11 @@ describe("mkdirLevels", () => {
 		]);
 		expect(mkdirLevels("\\\\server\\share")).toEqual([]);
 	});
+
+	it("walks a UNC path as SFTP takes it from Win32-OpenSSH, below its share", () => {
+		expect(mkdirLevels("//server/share/a/b")).toEqual(["//server/share/a", "//server/share/a/b"]);
+		expect(mkdirLevels("//server/share")).toEqual([]);
+	});
 });
 
 describe("sftpMkdir on a Windows host, as Win32-OpenSSH serves it", () => {

@@ -211,8 +211,9 @@ Local daemon, single process, binds to 127.0.0.1.
 - SFTP: one session per SSH connection, shared, closed after 60 s unused; a lost connection fails
   the requests on it with `HOST_NOT_CONNECTED`
 - Paths are absolute and literal, in one form per host style (`host-paths.ts`): POSIX, or Windows
-  drive-absolute and UNC, `C:/x` and `/C:/x` read as `C:\x`, `/` the drives; `%NAME%` text is
-  refused (#711)
+  drive-absolute and UNC, `C:/x` and `/C:/x` read as `C:\x`, `///server/share` as `\\server\share`,
+  `/` the drives; `%NAME%` text is refused (#711). Over SFTP a UNC path goes as `//server/share`,
+  the only form Win32-OpenSSH 9.5 reads as a share (`sftpPathOf`)
 - The SFTP and exec helpers it shares with the agent deployment (§ 3.5) live in
   `session/ssh-file-transport.ts`: the SFTP session and its requests, the mkdir walk (POSIX,
   drive-absolute and UNC parents), a command fed on its stdin, the Windows reply marker and Base64

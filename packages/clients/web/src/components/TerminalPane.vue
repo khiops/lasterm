@@ -32,6 +32,17 @@
 				</div>
 			</div>
 		</div>
+		<!-- Its host asked for a password or passphrase that was not given: no shell
+		     started and nothing failed (#875). Connect spawns again, which asks again. -->
+		<div v-else-if="notConnected" class="terminal-error terminal-error--not-connected">
+			<div class="terminal-error__box">
+				<span>{{ notConnected }}</span>
+				<div class="terminal-error__actions">
+					<button class="exit-btn exit-btn--primary" @click="onRetry">Connect</button>
+					<button class="exit-btn" @click="onClosePaneFromOverlay">Close</button>
+				</div>
+			</div>
+		</div>
 		<div v-else-if="!ready" class="terminal-loading">
 			<span>Connecting…</span>
 		</div>
@@ -260,7 +271,9 @@ import {
 	factsFromAttachOk,
 	factsFromKnownEnd,
 	factsFromRefusal,
+	notGivenMessage,
 	paneCover,
+	secretNotGiven,
 } from '../utils/pane-cover.js';
 import { shortcutLabel } from '../utils/app-shortcuts.js';
 import { terminalKeyHandler } from '../utils/terminal-keys.js';
@@ -345,6 +358,12 @@ const notificationStore = useNotificationStore();
 const terminalContainer = ref<HTMLElement | null>(null);
 const ready = ref(false);
 const error = ref<string | null>(null);
+/**
+ * Why the terminal this pane was to start is not there: its host asked for a
+ * password or passphrase and none was given (#875). No shell started, so it is
+ * neither an end nor a failure; Connect asks again.
+ */
+const notConnected = ref<string | null>(null);
 /**
  * Host of a spawn this pane owes, kept until the channel exists: the one App.vue
  * registered for this pane, kept so a retry can spawn it.
@@ -937,6 +956,14 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			ready.value = true;
 			return;
 		}
+		// The password or passphrase its host asked for was not given: no shell
+		// started, so nothing exited and nothing failed (#812). The pane says it
+		// is not connected, and its spawn stays owed, for Connect (#875).
+		const notGiven = secretNotGiven(err);
+		if (notGiven !== null) {
+			notConnected.value = notGivenMessage(notGiven);
+			return;
+		}
 		// AGENT_NOT_AVAILABLE is explained by the AgentDeployFailed modal, so the
 		// pane does not repeat why. It still has to stop saying "Connecting…":
 		// returning here left a pane waiting for ever on something that had
@@ -965,9 +992,10 @@ onMounted(async () => {
 	await openChannel(cols, rows);
 });
 
-/** Try again after a failure — the button the error offers. */
+/** Try again: the error's Retry, and Connect once a password or passphrase was not given. */
 async function onRetry(): Promise<void> {
 	error.value = null;
+	notConnected.value = null;
 	const term = terminal.value;
 	await openChannel(term?.cols ?? 80, term?.rows ?? 24);
 }
@@ -1002,7 +1030,10 @@ watch(
 	async () => {
 		// A pane that failed to open never became ready: the connection coming
 		// back is its chance to try again, which is what left it stuck before.
+		// One whose password or passphrase was not given waits for its Connect:
+		// trying again would ask again, unasked (#875).
 		if (!ready.value) {
+			if (notConnected.value !== null) return;
 			if (error.value !== null) await onRetry();
 			// Still opening: the attempt in flight speaks to a socket that is
 			// gone, so let it fail and try again then.
@@ -1776,6 +1807,12 @@ function onDragEnd(): void {
 
 .terminal-error {
 	color: var(--nt-badge);
+}
+
+/* A password or passphrase not given is no error (#875): said in the text colour
+   the theme makes to read on its ground, as the exit card's. */
+.terminal-error--not-connected {
+	color: var(--nt-text-strong);
 }
 
 .terminal-error__box {

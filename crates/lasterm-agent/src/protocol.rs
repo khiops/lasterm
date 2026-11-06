@@ -71,6 +71,22 @@ pub enum AgentToHub {
         #[serde(skip_serializing_if = "Option::is_none")]
         display_title: Option<String>,
     },
+    /// A terminal's working directory as it is now (`cwd`, #834): sent when
+    /// it changes, and in answer to CWD_QUERY. The directory is user content:
+    /// never logged, on either side.
+    #[serde(rename = "CWD_CHANGE")]
+    CwdChange {
+        channel_id: String,
+        /// Null when unknown: always on the wire.
+        cwd: Option<String>,
+        source: crate::cwd::CwdSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at_prompt: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        foreground: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        other_host: Option<String>,
+    },
     #[serde(rename = "BELL")]
     Bell { channel_id: String },
     #[serde(rename = "NOTIFICATION")]
@@ -213,6 +229,10 @@ pub enum HubToAgent {
     },
     #[serde(rename = "DESTROY")]
     Destroy { channel_id: String },
+    /// Ask for a terminal's working directory, read afresh (`cwd`, #834).
+    /// Answered with CWD_CHANGE, or with ERROR `CHANNEL_NOT_FOUND`.
+    #[serde(rename = "CWD_QUERY")]
+    CwdQuery { channel_id: String },
     #[serde(rename = "HEARTBEAT")]
     Heartbeat { ts: String },
     /// Ask a daemon to stop (#127). Without `force`, it refuses while other
@@ -505,6 +525,14 @@ mod tests {
         assert_eq!(decoded["request_id"], "q1");
         assert_eq!(decoded["env"]["LC_ALL"], "C");
         assert_eq!(decoded["os"], "linux");
+    }
+
+    #[test]
+    fn cwd_query_reads_its_channel() {
+        match hub_frame(serde_json::json!({ "type": "CWD_QUERY", "channel_id": "ch-1" })) {
+            HubToAgent::CwdQuery { channel_id } => assert_eq!(channel_id, "ch-1"),
+            other => panic!("expected CWD_QUERY, got {other:?}"),
+        }
     }
 
     #[test]

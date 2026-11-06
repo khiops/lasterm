@@ -29,7 +29,7 @@ export interface ResolvedJump {
 	/** Names used to look up this jump in `known_hosts`. */
 	knownHostsNames: string[];
 	/** How the jump itself is authenticated, as `buildSshConnectConfig` takes it. */
-	auth: { method: string; keyPath?: string | undefined };
+	auth: { method: string; keyPath?: string | undefined; sshConfigHost?: string | undefined };
 	/** The host id any prompt for the jump belongs to. */
 	promptHostId: string;
 	/** The key already trusted for this jump, when there is one. */
@@ -105,6 +105,8 @@ export function resolveJump(
 					auth: {
 						method: jumpHost.sshAuth ?? "agent",
 						keyPath: jumpHost.sshKeyPath ?? undefined,
+						// Its `IdentityAgent none` keeps the agent from signing its key (#876).
+						...(jumpHost.sshConfigHost ? { sshConfigHost: jumpHost.sshConfigHost } : {}),
 					},
 					promptHostId: jumpHost.id,
 					pinnedFingerprint: hosts.getHostFingerprint(jumpHost.id, expectedRoute),

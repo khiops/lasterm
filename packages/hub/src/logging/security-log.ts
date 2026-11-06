@@ -31,11 +31,14 @@ const TOKEN_STATUSES = [
 	"expired",
 ] as const satisfies readonly InvalidTokenReason[];
 const SSH_AUTH_METHODS = ["agent", "key", "password"] as const satisfies readonly SshAuthMethod[];
+const SSH_KEY_SIGNERS = ["agent", "file"] as const;
 const SSH_DISCONNECT_REASONS = ["closed_by_hub", "connection_lost"] as const;
 const PERMISSIONS_CHECKS = ["passed", "not_checked_on_windows"] as const;
 const TOKEN_REVOCATION_OUTCOMES = ["revoked", "not_found", "not_revocable"] as const;
 
 export type SshDisconnectReason = (typeof SSH_DISCONNECT_REASONS)[number];
+/** Who signed for a key-auth connection: the SSH agent, which held the key, or its file (#876). */
+export type SshKeySigner = (typeof SSH_KEY_SIGNERS)[number];
 export type PermissionsCheck = (typeof PERMISSIONS_CHECKS)[number];
 export type TokenRevocationOutcome = (typeof TOKEN_REVOCATION_OUTCOMES)[number];
 
@@ -183,11 +186,18 @@ export class SecurityLog {
 		});
 	}
 
-	sshConnected(event: { hostId: string; hostLabel: string; authMethod: SshAuthMethod }): void {
+	/** `signer` is said for key auth only, and names who signed, never the key. */
+	sshConnected(event: {
+		hostId: string;
+		hostLabel: string;
+		authMethod: SshAuthMethod;
+		signer?: SshKeySigner;
+	}): void {
 		this.write("ssh.connect", "SSH connect", {
 			hostId: ulid(event.hostId),
 			hostLabel: typeof event.hostLabel === "string" ? event.hostLabel : WITHHELD,
 			authMethod: oneOf(event.authMethod, SSH_AUTH_METHODS),
+			...(event.signer !== undefined && { signer: oneOf(event.signer, SSH_KEY_SIGNERS) }),
 		});
 	}
 

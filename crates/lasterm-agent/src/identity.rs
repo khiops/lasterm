@@ -4,11 +4,24 @@
 //! recorded pid, creation-time fingerprint, and executable all still describe
 //! one live process before it sends a stop request. `--stop` therefore stops
 //! the process the record describes; it does not prove that process still owns
-//! the endpoint. The record is published only after the endpoint binds, so a
-//! stop in that small interval returns `no record` and refuses to act. Two
-//! concurrent stops both send SIGTERM; the second is the daemon's forced-exit
-//! request, which cuts teardown short and leaves no exit record. In particular,
-//! a missing record proves nothing: a crash can leave a stale record behind.
+//! the endpoint. Two concurrent stops both send SIGTERM; the second is the
+//! daemon's forced-exit request, which cuts teardown short and leaves no exit
+//! record.
+//!
+//! A crash, a kill, or a Windows stop (which terminates the daemon) leaves the
+//! live record behind. A record whose process is verifiably gone is stale: the
+//! stopper removes it and answers `not running` when nothing listens on the
+//! endpoint either (#871). A record that names a different live process, a
+//! reused pid or another executable, is not proof of anything and stays, with
+//! `record does not match a live process`. Removing a record never signals a
+//! process; the worst a wrong removal can do is leave a daemon that a later stop
+//! refuses with `no record`.
+//!
+//! The record is published only after the endpoint binds, so a stop in that
+//! small interval finds the endpoint taken and no record naming a live daemon:
+//! it answers `no record` and refuses to act. A daemon that has been started
+//! but has not bound its endpoint yet is not seen at all, and the stop answers
+//! `not running`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -57,9 +70,18 @@ pub(crate) struct ExitRecord {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum StopOutcome {
+    /// The recorded daemon was live, and is gone now.
     Stopped,
+    /// No daemon to stop: no record names a live process (there is none, or
+    /// the one there named a process that is gone, and was removed), and
+    /// nothing listens on the endpoint.
+    NotRunning,
     StillRunningAtBound,
+    /// Something listens on the endpoint, but no record names a live process:
+    /// in practice a daemon between binding and publishing its record.
     NoRecord,
+    /// The record is malformed, names another endpoint, or names a process
+    /// that is live but not the one recorded. It is kept.
     RecordDoesNotMatchLiveProcess,
 }
 
@@ -67,10 +89,17 @@ impl StopOutcome {
     pub(crate) fn words(&self) -> &'static str {
         match self {
             Self::Stopped => "stopped",
+            Self::NotRunning => "not running",
             Self::StillRunningAtBound => "still running at the bound",
             Self::NoRecord => "no record",
             Self::RecordDoesNotMatchLiveProcess => "record does not match a live process",
         }
+    }
+
+    /// Whether `--stop` exits 0: no daemon is left on the endpoint that a
+    /// record named.
+    pub(crate) fn succeeded(&self) -> bool {
+        matches!(self, Self::Stopped | Self::NotRunning)
     }
 }
 
@@ -426,8 +455,9 @@ pub(crate) fn stop(
     let path = live_record_path(state_dir, socket);
     let record = match read_live_record_at(&path) {
         Ok(Some(record)) => record,
-        Ok(None) => return Ok(StopOutcome::NoRecord),
+        Ok(None) => return Ok(without_live_record(socket)),
         // A malformed record is stale state, not an undocumented CLI error.
+        // Nothing says what it named, so it is not removed.
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
             return Ok(StopOutcome::RecordDoesNotMatchLiveProcess);
         }
@@ -436,22 +466,37 @@ pub(crate) fn stop(
     if record.socket != socket {
         return Ok(StopOutcome::RecordDoesNotMatchLiveProcess);
     }
-    stop_record(record, wait_bound)
+    let outcome = stop_record(&record, wait_bound)?;
+    if outcome.succeeded() {
+        // The process the record names is gone, as the kernel says through a
+        // reference to it: never merely a different process at its pid, which
+        // is a mismatch and keeps the record. A daemon removes its own record
+        // when it exits cleanly; a crash, a kill, or a Windows stop leaves it,
+        // and a later pid reuse would turn it into a mismatch that fails every
+        // stop after it (#871). Only a record still naming this identity goes:
+        // one a new daemon published meanwhile stays.
+        if let Err(error) = remove_live_record(state_dir, &record) {
+            tracing::warn!(%error, "the record of a daemon that is gone could not be removed");
+        }
+    }
+    Ok(match outcome {
+        // The recorded daemon was gone before anything was sent. Whether
+        // another one has bound the endpoint since is the endpoint's to say.
+        StopOutcome::NotRunning => without_live_record(socket),
+        outcome => outcome,
+    })
 }
 
-fn stop_record(record: IdentityRecord, wait_bound: Duration) -> io::Result<StopOutcome> {
-    let process = match validate_process(&record)? {
+/// Stop the process `record` names. `NotRunning` means it was gone before
+/// anything was sent to it.
+fn stop_record(record: &IdentityRecord, wait_bound: Duration) -> io::Result<StopOutcome> {
+    let process = match validate_process(record)? {
         Validation::Matching(process) => process,
-        validation => {
-            return Ok(match validation {
-                Validation::Gone => StopOutcome::RecordDoesNotMatchLiveProcess,
-                Validation::Mismatch => StopOutcome::RecordDoesNotMatchLiveProcess,
-                Validation::Matching(_) => unreachable!(),
-            });
-        }
+        Validation::Gone => return Ok(StopOutcome::NotRunning),
+        Validation::Mismatch => return Ok(StopOutcome::RecordDoesNotMatchLiveProcess),
     };
-    if let Err(error) = process.send_stop(&record) {
-        return match process.status(&record)? {
+    if let Err(error) = process.send_stop(record) {
+        return match process.status(record)? {
             ProcessStatus::Gone => Ok(StopOutcome::Stopped),
             ProcessStatus::Mismatch => Ok(StopOutcome::RecordDoesNotMatchLiveProcess),
             ProcessStatus::Matching => Err(error),
@@ -460,7 +505,7 @@ fn stop_record(record: IdentityRecord, wait_bound: Duration) -> io::Result<StopO
 
     let deadline = Instant::now() + wait_bound;
     loop {
-        match process.status(&record)? {
+        match process.status(record)? {
             ProcessStatus::Gone => return Ok(StopOutcome::Stopped),
             ProcessStatus::Mismatch => return Ok(StopOutcome::RecordDoesNotMatchLiveProcess),
             ProcessStatus::Matching if Instant::now() >= deadline => {
@@ -469,6 +514,61 @@ fn stop_record(record: IdentityRecord, wait_bound: Duration) -> io::Result<StopO
             ProcessStatus::Matching => std::thread::sleep(Duration::from_millis(25)),
         }
     }
+}
+
+/// What a stop answers when no record names a live daemon: `not running` when
+/// nothing listens on the endpoint either, `no record` when something does.
+/// Nothing is signalled either way.
+fn without_live_record(socket: &str) -> StopOutcome {
+    if endpoint_is_free(socket) {
+        StopOutcome::NotRunning
+    } else {
+        StopOutcome::NoRecord
+    }
+}
+
+/// Whether nothing listens on the endpoint. Only a plain "nobody there" counts:
+/// any other answer is taken for a listener, so a doubt never becomes
+/// `not running`.
+#[cfg(unix)]
+fn endpoint_is_free(socket: &str) -> bool {
+    // Connecting is what tells a listening daemon from a socket file a dead one
+    // left behind, as the daemon's own bind does. A daemon that listens sees a
+    // connection that closes before its AUTH.
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => false,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn endpoint_is_free(socket: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+    if socket.contains('\0') {
+        return false;
+    }
+    let name: Vec<u16> = std::ffi::OsStr::new(socket)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // Waits for an instance of the pipe without connecting to it. With no
+    // instance of that name at all, it fails at once with
+    // ERROR_FILE_NOT_FOUND, whatever the timeout.
+    if unsafe { WaitNamedPipeW(name.as_ptr(), 1) } != 0 {
+        return false;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn endpoint_is_free(_socket: &str) -> bool {
+    false
 }
 
 fn validate_process(record: &IdentityRecord) -> io::Result<Validation> {
@@ -972,8 +1072,119 @@ mod tests {
         path
     }
 
+    /// An endpoint name of this platform's kind, which nothing listens on.
     fn test_socket(label: &str) -> String {
-        socket_identity(&format!("identity-test-{label}-{}", ulid::Ulid::generate()))
+        let name = format!("identity-test-{label}-{}", ulid::Ulid::generate());
+        #[cfg(windows)]
+        let name = format!(r"\\.\pipe\{name}");
+        socket_identity(&name)
+    }
+
+    /// An endpoint something listens on, for as long as the guard lives: a
+    /// socket in `dir` on Unix, a named pipe on Windows.
+    #[cfg(unix)]
+    fn listening_endpoint(dir: &Path) -> (String, std::os::unix::net::UnixListener) {
+        let socket = socket_identity(&dir.join("agent.socket").to_string_lossy());
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        (socket, listener)
+    }
+
+    #[cfg(windows)]
+    struct PipeInstance(windows_sys::Win32::Foundation::HANDLE);
+
+    #[cfg(windows)]
+    impl Drop for PipeInstance {
+        fn drop(&mut self) {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        }
+    }
+
+    #[cfg(windows)]
+    fn listening_endpoint(_dir: &Path) -> (String, PipeInstance) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT};
+
+        let socket = test_socket("listening");
+        let name: Vec<u16> = std::ffi::OsStr::new(&socket)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_ne!(
+            handle,
+            INVALID_HANDLE_VALUE,
+            "create a pipe instance: {}",
+            io::Error::last_os_error()
+        );
+        (socket, PipeInstance(handle))
+    }
+
+    /// A process that has exited. On Windows the returned handle keeps its pid
+    /// from being reused while the test runs; on Linux it is reaped, and pids
+    /// are handed out in sequence.
+    fn exited_process() -> std::process::Child {
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd.exe");
+            command.args(["/C", "exit 0"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "exit 0"]);
+            command
+        };
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        child
+    }
+
+    /// A process that runs for a minute unless it is stopped, and the record
+    /// that names it.
+    fn running_process(socket: String) -> (std::process::Child, IdentityRecord) {
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("ping.exe");
+            command.args(["-n", "60", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let details = process_details(child.id())
+            .unwrap()
+            .expect("the child runs");
+        let record = IdentityRecord {
+            format_version: FORMAT_VERSION,
+            pid: child.id(),
+            creation_time: details.creation_time,
+            executable: details.executable,
+            executable_file_identity: details.executable_file_identity,
+            socket,
+        };
+        (child, record)
     }
 
     #[test]
@@ -1024,15 +1235,115 @@ mod tests {
     }
 
     #[test]
-    fn missing_record_reports_no_record() {
+    fn missing_record_with_nothing_listening_reports_not_running() {
         let state_dir = temp_dir();
         let socket = test_socket("missing");
         assert_eq!(
             stop(&state_dir, &socket, Duration::from_millis(1)).unwrap(),
+            StopOutcome::NotRunning
+        );
+        assert!(StopOutcome::NotRunning.succeeded());
+        fs::remove_dir_all(state_dir).unwrap();
+        // Mutation caught: answering `no record` for an endpoint nobody serves
+        // fails every quit that follows a clean one, or a removed stale record
+        // (#871).
+    }
+
+    #[test]
+    fn an_endpoint_someone_listens_on_without_a_live_record_is_refused() {
+        let state_dir = temp_dir();
+        let (socket, listener) = listening_endpoint(&state_dir);
+        assert_eq!(
+            stop(&state_dir, &socket, Duration::from_millis(1)).unwrap(),
             StopOutcome::NoRecord
         );
+
+        // A record of a process that is gone does not vouch for the listener
+        // either. It is still stale, so it goes.
+        let exited = exited_process();
+        let mut stale = create_identity(socket.clone()).unwrap();
+        stale.pid = exited.id();
+        write_live_record(&state_dir, &stale).unwrap();
+        assert_eq!(
+            stop(&state_dir, &socket, Duration::from_millis(1)).unwrap(),
+            StopOutcome::NoRecord
+        );
+        assert!(!live_record_path(&state_dir, &socket).exists());
+        assert!(!StopOutcome::NoRecord.succeeded());
+
+        drop(listener);
+        drop(exited);
         fs::remove_dir_all(state_dir).unwrap();
-        // Mutation caught: treating an absent record as a safe bare-pid stop.
+        // Mutation caught: reading a missing or stale record as "not running"
+        // without asking the endpoint reports success while a daemon that has
+        // bound and not yet published its record keeps running.
+    }
+
+    #[test]
+    fn a_record_whose_process_is_gone_reports_not_running_and_is_removed() {
+        let state_dir = temp_dir();
+        let socket = test_socket("gone");
+        let exited = exited_process();
+        let mut stale = create_identity(socket.clone()).unwrap();
+        stale.pid = exited.id();
+        write_live_record(&state_dir, &stale).unwrap();
+
+        assert_eq!(
+            stop(&state_dir, &socket, Duration::from_millis(1)).unwrap(),
+            StopOutcome::NotRunning
+        );
+        assert!(!live_record_path(&state_dir, &socket).exists());
+        // And the stop after it finds nothing to refuse.
+        assert_eq!(
+            stop(&state_dir, &socket, Duration::from_millis(1)).unwrap(),
+            StopOutcome::NotRunning
+        );
+
+        drop(exited);
+        fs::remove_dir_all(state_dir).unwrap();
+        // Mutation caught: mapping a recorded process that no longer exists to
+        // `record does not match a live process` fails every quit after a crash
+        // or a forced stop of the daemon, until one starts again (#871).
+    }
+
+    #[test]
+    fn a_stopped_process_leaves_no_record() {
+        let state_dir = temp_dir();
+        let socket = test_socket("stopped");
+        let (mut child, record) = running_process(socket.clone());
+        write_live_record(&state_dir, &record).unwrap();
+
+        assert_eq!(
+            stop(&state_dir, &socket, Duration::from_secs(10)).unwrap(),
+            StopOutcome::Stopped
+        );
+        assert!(!live_record_path(&state_dir, &socket).exists());
+
+        child.wait().unwrap();
+        fs::remove_dir_all(state_dir).unwrap();
+        // Mutation caught: keeping the record of a process the stop confirmed
+        // gone. On Windows the stop terminates the daemon, which cannot remove
+        // it, and a reuse of its pid later makes the record a mismatch.
+    }
+
+    #[test]
+    fn a_record_naming_a_reused_pid_is_refused_and_kept() {
+        let state_dir = temp_dir();
+        let mut identity = create_identity(test_socket("reused-pid")).unwrap();
+        // This process, live, but not the one the record says started then.
+        identity.creation_time.push_str("-earlier");
+        write_live_record(&state_dir, &identity).unwrap();
+
+        assert_eq!(
+            stop(&state_dir, &identity.socket, Duration::from_millis(1)).unwrap(),
+            StopOutcome::RecordDoesNotMatchLiveProcess
+        );
+        assert!(live_record_path(&state_dir, &identity.socket).exists());
+
+        fs::remove_dir_all(state_dir).unwrap();
+        // Mutation caught: treating a mismatch like a process that is gone,
+        // which reports success and removes the record on a fingerprint that
+        // disagrees, rather than on the kernel's word that the process ended.
     }
 
     #[test]
@@ -1048,8 +1359,11 @@ mod tests {
         );
         assert_eq!(
             stop(&state_dir, &test_socket("third"), Duration::from_millis(1)).unwrap(),
-            StopOutcome::NoRecord
+            StopOutcome::NotRunning
         );
+        // Both records name this very process, which is still running.
+        assert!(live_record_path(&state_dir, &first.socket).exists());
+        assert!(live_record_path(&state_dir, &second.socket).exists());
         fs::remove_dir_all(state_dir).unwrap();
         // Mutation caught: a fixed agent.identity.json lets a stop for one
         // sibling socket act on whichever daemon wrote last.
@@ -1082,6 +1396,7 @@ mod tests {
             stop(&state_dir, &identity.socket, Duration::from_millis(1)).unwrap(),
             StopOutcome::RecordDoesNotMatchLiveProcess
         );
+        assert!(live_record_path(&state_dir, &identity.socket).exists());
         fs::remove_dir_all(state_dir).unwrap();
         // Mutation caught: omitting executable validation accepts another
         // executable with the same pid and creation fingerprint record.
@@ -1096,9 +1411,10 @@ mod tests {
             stop(&state_dir, &socket, Duration::from_millis(1)).unwrap(),
             StopOutcome::RecordDoesNotMatchLiveProcess
         );
+        assert!(live_record_path(&state_dir, &socket).exists());
         fs::remove_dir_all(state_dir).unwrap();
         // Mutation caught: leaking InvalidData from --stop creates an
-        // undocumented fifth outcome.
+        // undocumented outcome.
     }
 
     #[test]

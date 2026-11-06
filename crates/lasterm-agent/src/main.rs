@@ -48,7 +48,7 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     idle_timeout: u64,
 
-    /// Stop the process described by the matching local daemon record. This does not prove that process still owns the endpoint. Unix requests graceful shutdown; Windows terminates it, so no exit record is written. This does not check for a hub; a live hub may relaunch it.
+    /// Stop the process described by the matching local daemon record. This does not prove that process still owns the endpoint. Unix requests graceful shutdown; Windows terminates it, so no exit record is written. Prints `stopped`, or `not running` when no record names a live process and nothing listens on the endpoint (a record whose process is gone is removed); both exit 0. This does not check for a hub; a live hub may relaunch it.
     #[arg(long, conflicts_with_all = ["daemon", "stdio"])]
     stop: bool,
 
@@ -234,11 +234,13 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
             DAEMON_GRACEFUL_SHUTDOWN_DEADLINE,
         )?;
         println!("{}", outcome.words());
-        if outcome == identity::StopOutcome::Stopped {
+        if outcome.succeeded() {
             return Ok(());
         }
-        // A request only succeeds after the record's exact identity is gone;
-        // delivery, a missing record, and a stale record are not success.
+        // A request only succeeds once the record's exact identity is gone, or
+        // when no record names a live process and nothing listens on the
+        // endpoint (#871). Delivery is not success, nor is a record naming some
+        // other live process, nor an endpoint taken by a daemon no record names.
         std::process::exit(1);
     }
 

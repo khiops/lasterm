@@ -1,4 +1,6 @@
+import type { ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { request as requestHttps } from "node:https";
 import { join } from "node:path";
@@ -9,6 +11,7 @@ import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cmdQuit, type RuntimeInfo } from "./cli.js";
 import { createServer, startServer } from "./server.fixture.js";
+import { stopLocalAgent } from "./session/agent-launcher.js";
 import {
 	createQuitLifecycle,
 	gracefulShutdown,
@@ -394,6 +397,69 @@ describe("POST /api/shutdown", () => {
 		expect(calls).toEqual(["stop-agent"]);
 		await tick();
 		expect(calls).toEqual(["stop-agent", "teardown"]);
+	});
+
+	// #871: a quit with no local agent to stop, none started or only the stale
+	// record of one that died, succeeds. The agent's stopper answers `not
+	// running` with exit 0 (crates/lasterm-agent/src/identity.rs), and the hub
+	// says that, rather than that it stopped an agent. Mutation: answer every
+	// success with the fixed "Local agent stopped", and `lasterm quit` claims to
+	// have stopped an agent that was not there.
+	it("POST /api/quit answers 200 when its stopper finds no local agent running", async () => {
+		const calls: string[] = [];
+		const stopper = vi.fn(() => {
+			const child = new EventEmitter() as ChildProcess;
+			const stdout = new EventEmitter();
+			Object.assign(child, { stdout, stderr: new EventEmitter(), kill: vi.fn() });
+			setImmediate(() => {
+				stdout.emit("data", Buffer.from("not running\n"));
+				child.emit("close", 0, null);
+			});
+			return child;
+		});
+		// The real coordinator and stopper reading, around a stopper process that
+		// says what the agent says. Teardown is not under test: it is recorded.
+		const coordinator = new QuitCoordinator(
+			{
+				beginQuit: () => calls.push("beginQuit"),
+				stopLocalAgent: () =>
+					stopLocalAgent("/tmp/lasterm-agent.sock", {
+						agentPath: "/opt/lasterm-agent",
+						spawn: stopper as unknown as typeof spawn,
+					}),
+			},
+			{
+				server: Fastify({ logger: false }),
+				dbManager: { close: () => {} },
+				runtime: runtimeRecord(),
+				deleteRuntime: () => true,
+				exit: () => {},
+			},
+		);
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			ownerToken: OWNER_TOKEN,
+			onQuit: () => coordinator.beginQuit(),
+			onQuitDelivered: () => {
+				calls.push("teardown");
+			},
+		});
+
+		const response = await server.inject({
+			method: "POST",
+			url: "/api/quit",
+			headers: { "x-lasterm-owner": OWNER_TOKEN },
+		});
+
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({
+			ok: true,
+			message: "No local agent was running; hub is shutting down",
+		});
+		expect(stopper).toHaveBeenCalledTimes(1);
+		await tick();
+		expect(calls).toEqual(["beginQuit", "teardown"]);
 	});
 
 	// Mutation: answer a hub with no quit to run with 503 again, as the stopper's

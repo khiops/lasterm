@@ -7,6 +7,33 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## STALE-AGENT-RECORD — a stop that finds no agent running succeeds, and clears a record whose process is gone (#871, 2026-11-06)
+
+- **A record whose process is gone is stale, not a failed stop.** A crash, a kill or a Windows
+  `--stop` (which terminates the daemon) leaves the daemon's live record behind.
+  `--stop` used to answer such a record `record does not match a live process`, exit 1, so every
+  later quit with no local terminal opened reported "Agent Stop Not Confirmed". It now answers
+  `not running`, exit 0, and removes the record (SPEC.md § 3.2).
+- **Only the system's word that the process ended removes a record:** a process reference that
+  cannot be opened for that pid, or one that reports the process exited. A live process at the
+  recorded pid that does not match (a reused pid, another executable) keeps the record and stays a
+  failure: a fingerprint that disagrees does not say which side is wrong. Removing a record signals
+  nothing, so a wrong removal can only make a later stop refuse with `no record`; and only a record
+  still naming that identity goes, so one a new daemon published meanwhile stays.
+- **What `--stop` stopped loses its record too.** On Windows the daemon cannot remove its own, and a
+  reuse of its pid would later turn it into a mismatch.
+- **No record is success only when nothing listens.** Once stale records go, the next quit finds
+  none; `no record` used to fail that quit too, and already failed every quit after a clean one on
+  Linux, where the daemon removes its record as it exits. The stopper now asks the endpoint: nothing
+  there is `not running`, exit 0; something there is `no record`, exit 1, which is in practice a
+  daemon between listening and publishing its record. A Unix socket is asked by connecting, as the
+  daemon's own bind does; a named pipe with `WaitNamedPipeW`, which connects to nothing. A daemon
+  started but not yet listening is not seen: after its latch the hub starts none, but one it
+  started just before can still be starting.
+- **The hub goes by the exit status, and words its answer by the line.** `/api/quit` answers 200
+  either way, with "Local agent stopped" or "No local agent was running". The remote callers of
+  `--stop` (a refused socket forward, stop-keeping, Replace) count both as the daemon being gone.
+
 ## UPLOAD-RESUME-CLIENT — a resume after a restart starts from a click, checks every file, and asks before resending a changed one (#837, 2026-11-06)
 
 - **The click asks, and nothing else does.** After a restart a handle read back from IndexedDB is in

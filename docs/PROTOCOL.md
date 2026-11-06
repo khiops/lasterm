@@ -716,7 +716,7 @@ connected, what was said last.
 
 ```typescript
 // UI → Hub (must be first message)
-{ type: "AUTH", token: string }
+{ type: "AUTH", token: string, window_id?: string }
 
 // Hub → UI
 { type: "AUTH_OK", client_id: string, echoes_spawn_request_id?: true }
@@ -725,6 +725,17 @@ connected, what was said last.
 
 `echoes_spawn_request_id` says that this hub echoes a SPAWN's `request_id` in everything that
 answers it (§ 4.4, #777). A hub older than it leaves it out.
+
+`window_id` is a ULID naming the window the socket belongs to (#846): the same across the window's
+reloads and reconnections, never the same in two windows. Every socket gets a new `client_id`, so
+this is what tells the hub that a write lock's holder has come back (§ 4.5), and that is all the hub
+uses it for. It reads it under the token the socket authenticated with: two windows sharing a token
+are two windows, and the same id under another token is another window. One that is not a ULID is
+ignored, as is its absence from a client older than this; the socket is accepted all the same.
+
+The web keeps it in sessionStorage, which a reload keeps and a new window starts without. A
+duplicated tab copies sessionStorage, so the page takes the id out of it as it starts and puts it
+back only as it goes (`pagehide`): a tab duplicated meanwhile finds none, and draws its own.
 
 A first frame that is not AUTH is also answered `AUTH_FAIL`, and the socket closed. A socket that
 sends no AUTH within 10 s is closed with code `4001`, reason `AUTH_TIMEOUT`.
@@ -797,7 +808,9 @@ A terminal has one size, its PTY's, and one client decides it: the one holding i
 (§ 4.5, #831). The hub passes that client's RESIZE on to the agent and stores the size in meta.db.
 It drops a RESIZE from any other client without an answer: every client resizes its own pane, a
 reader beside the writer or a second device, and that is not an error. While nobody holds the lock,
-nobody decides, and the size stays as it is until a client takes the lock and sends its own.
+nobody decides, and the size stays as it is until a client takes the lock and sends its own. That
+includes the grace the hub keeps for a holder that left (§ 4.5, #846): a writer that reloads comes
+back to the size it left.
 
 Whenever the size changes, the hub sends `CHANNEL_SIZE` to every client attached to the channel, the
 one that asked included, before any output the program draws for the new size. A client attaching
@@ -914,11 +927,38 @@ another pane's overlay, or by its host's return; `automatic` changes nothing on 
 { type: "WRITE_REVOKED",  channel_id: string }
 
 // Hub → ALL on channel: lock state broadcast
-{ type: "WRITE_LOCK",     channel_id: string, holder: string | null }
+{ type: "WRITE_LOCK",     channel_id: string, holder: string | null, reserved?: true }
 ```
 
 The holder also decides the terminal's size (§ 4.3): taking the lock makes a client's pane the one
 the PTY is sized to.
+
+**A holder that leaves is waited for** (#846). When the socket holding a lock closes, as a reload or
+a dropped connection closes it, and its AUTH named a window (§ 4.1), the hub keeps the lock for that
+window for 10 s instead of handing it on. Meanwhile nobody holds it: the hub refuses every client's
+INPUT (`WRITE_LOCK_DENIED`) and applies nobody's RESIZE. It tells every client attached
+`WRITE_LOCK { holder: null, reserved: true }`, and a client attaching meanwhile the same; that one
+is not given the lock for being the first. The web shows "Writer reconnecting". The wait ends in one
+of three ways:
+
+- **The window attaches to the terminal again**, on its new socket: it holds the lock again
+  (`WRITE_LOCK { holder: <its new client_id> }`), and its pane sends its fit as any new holder's
+  does (§ 4.3). The size is the one it left, nobody having changed it.
+- **A client sends WRITE_CLAIM or WRITE_FORCE**: the lock is free, so it is granted at once, with no
+  WRITE_REQUEST and no WRITE_REVOKED, and the window coming back later reads.
+- **Nobody comes back within the grace**: the lock is free (`WRITE_LOCK { holder: null }`) and goes
+  to the one client left attached, when there is exactly one, as any freed lock does.
+
+Each terminal waits on its own: a window that comes back to other terminals leaves those it does not
+attach to for the third case. A window already back on another socket when its old one is seen to
+close has the lock at once. A holder that sent DETACH or WRITE_RELEASE, or whose AUTH named no
+window, is not waited for. A hub stopping ends every wait; a hub restarted knows no holder, and the
+first client attaching to each terminal takes its lock, as before.
+
+Ten seconds covers a reload, the desktop's own after Tauri's IPC fallback (#823) included, which
+takes the page a second or two to attach its panes again, and the web's first three reconnect
+attempts, 1, 3 and 7 s after a drop. It is also how long the one client left waits, when nobody
+comes back, before it is handed the lock; it can take it at once instead.
 
 ### 4.6 STATE_SYNC (Hub → UI)
 
@@ -1478,6 +1518,23 @@ Client A (WRITER)           Hub                Client B (READER)
  │◄── CHANNEL_SIZE ─────────│── CHANNEL_SIZE ─────────►│
  │  (draws at B's size)      │                           │
 ```
+
+### 5.6 Write-Lock Holder Reloading (#846)
+
+```
+Client A (WRITER, window W)  Hub                Client B (READER)
+ │  (reloads: socket closes) │                           │
+ │                           │── WRITE_LOCK {null, ─────►│ (nobody types or resizes)
+ │                           │    reserved}              │
+ │── AUTH {token, W} ───────►│ (new socket, client A')   │
+ │── ATTACH ────────────────►│                           │
+ │◄── ATTACH_OK ────────────│                           │
+ │◄── WRITE_LOCK {A'} ──────│── WRITE_LOCK {A'} ───────►│
+ │── RESIZE {A's fit} ──────►│ (only if it differs)      │
+ │  (WRITER again)           │            (still READER) │
+```
+
+Had A not come back within 10 s, B would have received `WRITE_LOCK {B}` instead.
 
 ## 6. REST API
 

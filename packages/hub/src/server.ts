@@ -69,6 +69,7 @@ import type { QuitResult } from "./shutdown.js";
 import { listenFromPort } from "./start-port.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
+import { TransfersDAL } from "./storage/transfers-dal.js";
 import { ThemeManager } from "./theme-manager.js";
 import { TransferService } from "./transfers/transfer-service.js";
 import { registerWebUiDirectory } from "./web-ui-files.js";
@@ -561,6 +562,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			startFolder: (channelId) => startFolderSettings(channelId, metaDal, configResolver),
 		});
 		let routesForTransfers: WsRoutes | null = null;
+		const fileTransferEnabled = () => isFileTransferEnabled(configResolver.uiConfig);
 		const transfers = new TransferService({
 			files: hostFiles,
 			mayWrite: (channelId, clientId) => routesForTransfers?.mayWrite(channelId, clientId) ?? false,
@@ -580,9 +582,14 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			maxConcurrent: () =>
 				configResolver.uiConfig.transfer.maxConcurrent ?? DEFAULT_TRANSFER_CONFIG.maxConcurrent,
 			onHostIdle: (hostId) => activeSessionManager.transfersEnded(hostId),
+			// Kept in meta.db, so that a restart, a crash or an update loses none (#860).
+			store: new TransfersDAL(options.dbManager.meta),
+			hostType: (hostId) => metaDal.getHost(hostId)?.type ?? null,
+			enabled: fileTransferEnabled,
 		});
 		activeSessionManager.setTransfers(transfers);
-		const fileTransferEnabled = () => isFileTransferEnabled(configResolver.uiConfig);
+		// What a hub before this one left: interrupted, until a window resumes it.
+		transfers.restore();
 		server.addHook("onClose", async () => {
 			transfers.shutdown();
 		});

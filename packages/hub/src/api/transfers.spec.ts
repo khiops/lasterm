@@ -23,7 +23,7 @@ type InjectedSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
 
 interface Hub {
 	server: FastifyInstance;
-	dbs: DatabaseManager;
+	readonly dbs: DatabaseManager;
 	root: string;
 	dest: string;
 	sockets: InjectedSocket[];
@@ -40,6 +40,32 @@ afterEach(async () => {
 	hub = null;
 });
 
+/** A hub on `dbs`, its configuration in `root`. */
+async function serverOn(root: string, dbs: DatabaseManager): Promise<FastifyInstance> {
+	const server = await createServer({
+		tls: getTestTls(),
+		logger: false,
+		dbManager: dbs,
+		skipShellDiscovery: true,
+		authToken: PRIMARY_TOKEN,
+		authConfig: { tokenTtlDays: 90 },
+		configDir: join(root, "config"),
+	});
+	await server.ready();
+	return server;
+}
+
+/** Stop the hub, its windows with it, and start another on the same meta.db (#860). */
+async function restartHub(h: Hub, fileTransfer = true): Promise<void> {
+	for (const socket of h.sockets.splice(0)) socket.terminate();
+	await h.server.close();
+	writeFileSync(
+		join(h.root, "config", "config.toml"),
+		`[experimental]\nfile_transfer = ${fileTransfer}\n`,
+	);
+	h.server = await serverOn(h.root, h.dbs);
+}
+
 /** A hub with a terminal on its local host, file transfer on or off. */
 async function startHub(fileTransfer: boolean): Promise<Hub> {
 	const root = makeTempDir("lasterm-transfer-route-");
@@ -53,16 +79,7 @@ async function startHub(fileTransfer: boolean): Promise<Hub> {
 		`[experimental]\nfile_transfer = ${fileTransfer}\n`,
 	);
 	const dbs = openTestDatabases();
-	const server = await createServer({
-		tls: getTestTls(),
-		logger: false,
-		dbManager: dbs,
-		skipShellDiscovery: true,
-		authToken: PRIMARY_TOKEN,
-		authConfig: { tokenTtlDays: 90 },
-		configDir,
-	});
-	await server.ready();
+	const server = await serverOn(root, dbs);
 	const dal = new MetaDAL(dbs.meta);
 	const [local] = dal.listLocalHosts();
 	if (!local) throw new Error("the hub made no local host");
@@ -154,6 +171,84 @@ describe("uploads over the hub's WebSocket and REST routes (#833)", () => {
 			headers: bearer,
 		});
 		expect(listed.statusCode).toBe(404);
+		for (const type of ["TRANSFER_RESUME", "TRANSFER_DISCARD"]) {
+			send(writer.socket, { type, transferIds: [transferId] });
+			expect(
+				await heard(writer.seen, (m) => m.type === "TRANSFER_ERROR" && m.transferId === transferId),
+			).toMatchObject({ code: "FILE_TRANSFER_DISABLED" });
+			writer.seen.length = 0;
+		}
+	});
+
+	it("survive a hub restart: the next hub lists the upload interrupted, and a window resumes it where the host's bytes end (#860)", async () => {
+		const h = await startHub(true);
+		const writer = await window(h);
+		const data = Buffer.alloc(2_500_000);
+		for (let i = 0; i < data.length; i++) data[i] = (i * 31) & 0xff;
+		send(writer.socket, {
+			type: "TRANSFER_START",
+			requestId: "r9",
+			channelId: CHANNEL,
+			dir: h.dest,
+			items: [{ relPath: "big.bin", kind: "file", size: data.length }],
+			onConflict: "ask",
+		});
+		const accepted = await heard(writer.seen, (m) => m.type === "TRANSFER_ACCEPTED");
+		const transferId = accepted.transferId as string;
+		await heard(
+			writer.seen,
+			(m) =>
+				m.type === "TRANSFER_PROGRESS" &&
+				(m.items as { state: string }[]).some((item) => item.state === "sending"),
+		);
+		const chunk = 1024 * 1024;
+		expect((await put(h, transferId, 0, 0, data.subarray(0, chunk), writer.id)).statusCode).toBe(
+			200,
+		);
+
+		// Stopped; with the switch off, the next hub says nothing of it.
+		await restartHub(h, false);
+		const away = await window(h);
+		const quiet = (await heard(away.seen, (m) => m.type === "STATE_SYNC")) as {
+			transfers?: unknown;
+		};
+		expect(quiet.transfers).toBeUndefined();
+
+		await restartHub(h, true);
+		const again = await window(h);
+		const sync = await heard(again.seen, (m) => m.type === "STATE_SYNC");
+		expect(sync.transfers).toEqual([
+			expect.objectContaining({
+				transferId,
+				channelId: CHANNEL,
+				dir: h.dest,
+				state: "interrupted",
+				totals: expect.objectContaining({ files: 1, acked: chunk }),
+			}),
+		]);
+		const listed = await h.server.inject({ method: "GET", url: "/api/transfers", headers: bearer });
+		expect(listed.json()).toEqual({
+			transfers: [expect.objectContaining({ transfer_id: transferId, state: "interrupted" })],
+		});
+
+		send(again.socket, { type: "TRANSFER_RESUME", transferIds: [transferId] });
+		await heard(
+			again.seen,
+			(m) => m.type === "TRANSFER_STATE" && m.transferId === transferId && m.state === "running",
+		);
+		const sending = await heard(
+			again.seen,
+			(m) =>
+				m.type === "TRANSFER_PROGRESS" &&
+				(m.items as { state: string }[]).some((item) => item.state === "sending"),
+		);
+		expect((sending.items as { acked: number }[])[0]?.acked).toBe(chunk);
+		for (let at = chunk; at < data.length; at += chunk) {
+			const answer = await put(h, transferId, 0, at, data.subarray(at, at + chunk), again.id);
+			expect(answer.statusCode).toBe(200);
+		}
+		await heard(again.seen, (m) => m.type === "TRANSFER_DONE");
+		expect(readFileSync(join(h.root, "dest", "big.bin"))).toEqual(data);
 	});
 
 	it("start over the socket, take each chunk over REST once the host holds it, and say it to every window", async () => {

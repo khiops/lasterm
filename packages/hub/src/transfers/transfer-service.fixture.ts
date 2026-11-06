@@ -5,9 +5,16 @@ import type {
 	TransferStartMessage,
 } from "@lasterm/shared";
 import { expect, vi } from "vitest";
+import { FileAccessError } from "../files/host-files.js";
 import type { UploadBackend, UploadSink } from "../files/upload-backend.js";
 import type { UploadBackendKind, UploadHarness } from "../files/upload-backends.fixture.js";
-import { type TransferDeps, type TransferRequester, TransferService } from "./transfer-service.js";
+import type { TransfersDAL } from "../storage/transfers-dal.js";
+import {
+	type TransferConnectOutcome,
+	type TransferDeps,
+	type TransferRequester,
+	TransferService,
+} from "./transfer-service.js";
 
 export const CHANNEL = "01HZ0000000000000000000CH1";
 export const HOST = "01HZ0000000000000000000HO1";
@@ -27,7 +34,12 @@ export interface ServiceWorld {
 	ended: boolean;
 	verify: boolean;
 	maxConcurrent: number;
+	/** Whether the hosts are connected, but those in `away`. */
 	connected: boolean;
+	/** Hosts not connected, whatever `connected` says. */
+	readonly away: Set<string>;
+	/** The host each terminal runs on: `HOST` for any other. */
+	readonly hostOf: Map<string, string>;
 	/** Every message sent, by client. */
 	readonly sent: Map<string, Record<string, unknown>[]>;
 	readonly idle: string[];
@@ -35,31 +47,67 @@ export interface ServiceWorld {
 	wrap: ((backend: UploadBackend) => Partial<UploadBackend>) | null;
 	/** How many times each path was opened for bytes. */
 	readonly opened: Map<string, number>;
+	/** Every connection asked for, by host, in order. */
+	readonly connects: string[];
+	/** What a connection asked for does: by default the host is connected. */
+	connect: ((hostId: string, clientId: string) => Promise<TransferConnectOutcome>) | null;
+	/** The time the service reads, when set; the clock's otherwise. */
+	now: number | null;
+	/**
+	 * The link to the remote host dropped: every backend handed out says it is
+	 * lost, every write on it fails as on a lost connection, and the host is
+	 * not connected until it is false again.
+	 */
+	linkDown: boolean;
 }
 
 /** A transfer service on a backend's host, with the rest of the hub as a spec decides it. */
-export function serviceOn(h: UploadHarness, kind: UploadBackendKind) {
-	const world: ServiceWorld = {
+export function serviceOn(
+	h: UploadHarness,
+	kind: UploadBackendKind,
+	options: { store?: TransfersDAL; world?: ServiceWorld } = {},
+) {
+	const world: ServiceWorld = options.world ?? {
 		holder: null,
 		ended: false,
 		verify: true,
 		maxConcurrent: 2,
 		connected: true,
+		away: new Set(),
+		hostOf: new Map(),
 		sent: new Map(),
 		idle: [],
 		wrap: null,
 		opened: new Map(),
+		connects: [],
+		connect: null,
+		now: null,
+		linkDown: false,
 	};
+	const hostType = kind.transport === "local" ? "local" : "ssh";
+	const isConnected = (hostId: string) =>
+		hostType === "local" || (world.connected && !world.linkDown && !world.away.has(hostId));
 	const backend = (): UploadBackend => {
 		const real = h.backend;
 		const overrides = world.wrap?.(real) ?? {};
+		const lostLink = () =>
+			new FileAccessError("HOST_NOT_CONNECTED", "The connection to the host was lost");
 		// Each upload lets go of what it is handed; the harness keeps the real one.
 		const view: UploadBackend = Object.create(real, {
 			release: { value: () => {} },
+			lost: { get: () => world.linkDown || real.lost },
 			open: {
-				value: (path: string, options: Parameters<UploadBackend["open"]>[1]) => {
+				value: async (path: string, options: Parameters<UploadBackend["open"]>[1]) => {
 					world.opened.set(path, (world.opened.get(path) ?? 0) + 1);
-					return (overrides.open ?? real.open.bind(real))(path, options);
+					const sink = await (overrides.open ?? real.open.bind(real))(path, options);
+					return {
+						write: async (data: Buffer, offset: number) => {
+							if (world.linkDown) throw lostLink();
+							await sink.write(data, offset);
+						},
+						finish: (sha256: string | null) => sink.finish(sha256),
+						abort: () => sink.abort(),
+					} satisfies UploadSink;
 				},
 			},
 		});
@@ -70,9 +118,11 @@ export function serviceOn(h: UploadHarness, kind: UploadBackendKind) {
 	};
 	const deps: TransferDeps = {
 		files: {
-			channelHost: () => ({ hostId: HOST, hostType: kind.transport === "local" ? "local" : "ssh" }),
-			uploadBackend: async () => {
-				if (!world.connected) throw new Error("not connected");
+			channelHost: (channelId) => ({ hostId: world.hostOf.get(channelId) ?? HOST, hostType }),
+			uploadBackend: async (hostId) => {
+				if (!isConnected(hostId)) {
+					throw new FileAccessError("HOST_NOT_CONNECTED", "This host is not connected");
+				}
 				return backend();
 			},
 		},
@@ -84,14 +134,20 @@ export function serviceOn(h: UploadHarness, kind: UploadBackendKind) {
 			list.push(message as Record<string, unknown>);
 			world.sent.set(clientId, list);
 		},
-		isConnected: () => world.connected,
-		connect: async () => {
+		isConnected: (hostId) => isConnected(hostId),
+		connect: async (hostId, clientId) => {
+			world.connects.push(hostId);
+			if (world.connect !== null) return world.connect(hostId, clientId);
 			world.connected = true;
-			return true;
+			world.away.delete(hostId);
+			return { connected: true };
 		},
 		verifyFor: () => world.verify,
 		maxConcurrent: () => world.maxConcurrent,
 		onHostIdle: (hostId) => world.idle.push(hostId),
+		store: options.store ?? null,
+		hostType: () => hostType,
+		now: () => world.now ?? Date.now(),
 	};
 	const service = new TransferService(deps);
 	return { service, world };
@@ -115,12 +171,13 @@ export async function startUpload(
 	items: TransferStartItem[],
 	onConflict: TransferOnConflict = "ask",
 	requester: TransferRequester = WRITER,
+	channelId: string = CHANNEL,
 ): Promise<{ transferId: string; accepted: Record<string, unknown> }> {
 	const requestId = `r${Math.random().toString(36).slice(2)}`;
 	const msg: TransferStartMessage = {
 		type: "TRANSFER_START",
 		requestId,
-		channelId: CHANNEL,
+		channelId,
 		dir,
 		items,
 		onConflict,

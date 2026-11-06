@@ -9,10 +9,6 @@ import type {
 	ProtocolMessage,
 	ResizeMessage,
 	TestConnectMessage,
-	TransferCancelMessage,
-	TransferResolveMessage,
-	TransferRetryMessage,
-	TransferStartMessage,
 	UiAttachMessage,
 	UiSpawnMessage,
 	WriteClaimMessage,
@@ -51,6 +47,7 @@ import {
 	handleWriteForce,
 	handleWriteGrant,
 	handleWriteRelease,
+	type TransferMessage,
 	type WsHandlerContext,
 	type WsTransfers,
 } from "./handlers/index.js";
@@ -461,14 +458,9 @@ export async function registerWsRoutes(
 				case "TRANSFER_RESOLVE":
 				case "TRANSFER_RETRY":
 				case "TRANSFER_CANCEL":
-					handleTransfer(
-						msg as
-							| TransferStartMessage
-							| TransferResolveMessage
-							| TransferRetryMessage
-							| TransferCancelMessage,
-						ctx,
-					);
+				case "TRANSFER_RESUME":
+				case "TRANSFER_DISCARD":
+					handleTransfer(msg as TransferMessage, ctx);
 					break;
 				default:
 					server.log.warn(

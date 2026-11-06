@@ -451,6 +451,8 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 						if (intercept("SETSTAT")) return;
 						run(id, async () => {
 							if (attrs.mode !== undefined) await fs.chmod(await resolve(path), attrs.mode);
+							// As OpenSSH's sftp-server, with truncate(2) (#860).
+							if (attrs.size !== undefined) await fs.truncate(await resolve(path), attrs.size);
 						});
 					});
 					sftp.on("REMOVE", (id, path) => run(id, async () => fs.unlink(await resolve(path))));

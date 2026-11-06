@@ -42,23 +42,103 @@ export interface PanelFormFacts {
 	/** The panel's own width. */
 	readonly panelWidth: number;
 	/**
-	 * Whether this window writes the terminal the panel is attached to, which makes it the one
-	 * that decides its size (#831); null when the panel is attached to none.
+	 * The panel shows only because it follows the writer's (#838): a reader's window, whose user
+	 * made no choice of its own on that terminal.
 	 */
-	readonly writesAttached: boolean | null;
+	readonly follows: boolean;
 }
 
 /**
- * How the panel shows. A sheet below 560 px of window. Then, until the writer's panel is shared
- * with the readers (#838), a reader's panel floats, so that opening it never resizes anything: a
- * docked panel narrows every pane of the tab, and the window would resize the terminals it writes
- * there for everyone, by a gesture on a terminal it only reads. Otherwise docked while the panes
- * keep 480 px, floating when they would not.
+ * How the panel shows. A sheet below 560 px of window. A panel that only follows the writer's
+ * floats over that terminal's pane, so that it resizes nothing (#838): docked, it would narrow
+ * every pane of the reader's tab, and the reader's window would resize the terminals it writes
+ * there for everyone, by a gesture of someone who does not touch them. Otherwise the window's own
+ * panel, the writer's or one its reader opened, docks while the panes keep 480 px, and floats over
+ * the right of the pane area when they would not.
  */
 export function filesPanelForm(facts: PanelFormFacts): FilesPanelForm {
 	if (facts.windowWidth < SHEET_BELOW_WINDOW_WIDTH) return "sheet";
-	if (facts.writesAttached === false) return "overlay";
+	if (facts.follows) return "overlay";
 	return facts.areaWidth - facts.panelWidth < DOCKED_PANES_MIN_WIDTH ? "overlay" : "docked";
+}
+
+// ─── Whose panel it is: the writer's, shared; a reader's, its own (#838) ─────
+
+/**
+ * What a reader chose for its panel on one terminal, kept in its browser and told to nobody:
+ * `none`, it follows the writer's, floating; `closed`, it stays closed whatever the writer does;
+ * `open`, it stays open and docked whatever the writer does.
+ */
+export type ReaderChoice = "none" | "closed" | "open";
+
+/** A reader's gesture on its panel: opening it, closing it, or "Dock here". */
+export type ReaderGesture = "open" | "close" | "dock";
+
+/**
+ * A reader's choice after its gesture. Opening follows the writer's panel when that one is open,
+ * and is the reader's own otherwise; closing keeps it closed; "Dock here" makes it its own. The
+ * writer's gestures change no reader's choice.
+ */
+export function readerChoiceAfter(gesture: ReaderGesture, writerOpen: boolean): ReaderChoice {
+	if (gesture === "close") return "closed";
+	if (gesture === "dock") return "open";
+	return writerOpen ? "none" : "open";
+}
+
+export interface PanelShowFacts {
+	/** Whether this window writes the terminal the panel is attached to; null with none. */
+	readonly writes: boolean | null;
+	/** This window's own panel, open or closed as its user left it. */
+	readonly ownOpen: boolean;
+	/** On a terminal this window reads: its user's choice there. */
+	readonly choice: ReaderChoice;
+	/** Whether the writer's panel is open on that terminal, as the hub says. */
+	readonly writerOpen: boolean;
+}
+
+/** Whether the panel shows, and whose it is. */
+export type PanelShowing = "own" | "follows" | "hidden";
+
+/**
+ * Whether the panel shows, and whose: `own`, the window's, docked like any panel its user opens;
+ * `follows`, the writer's, shown by a reader that chose nothing there, floating; or `hidden`. A
+ * window that writes the terminal, or has none attached, shows its own panel as its user left
+ * it; a reader, as its choice on that terminal says.
+ */
+export function panelShowing(facts: PanelShowFacts): PanelShowing {
+	if (facts.writes !== false) return facts.ownOpen ? "own" : "hidden";
+	if (facts.choice === "open") return "own";
+	if (facts.choice === "closed") return "hidden";
+	return facts.writerOpen ? "follows" : "hidden";
+}
+
+/** One terminal's writer panel, as a writer's window says it to the hub (FILES_PANEL). */
+export interface PanelStatement {
+	readonly channelId: string;
+	readonly open: boolean;
+}
+
+/**
+ * What a window tells the hub of its panel (#838): for each terminal it writes, whether its own
+ * panel is open and attached there, only where that is not what the hub has. A panel that moves
+ * from A to B says A closed and B open. A reader says nothing: its choice stays in its browser.
+ */
+export function writerStatements(facts: {
+	/** The terminals whose write lock this window holds. */
+	readonly written: Iterable<string>;
+	/** The terminal the panel is attached to, focused or pinned. */
+	readonly attached: string | null;
+	/** Whether the window's own panel is open. */
+	readonly ownOpen: boolean;
+	/** Whether the hub has the writer's panel open on a terminal. */
+	readonly hubOpen: (channelId: string) => boolean;
+}): PanelStatement[] {
+	const statements: PanelStatement[] = [];
+	for (const channelId of facts.written) {
+		const open = facts.ownOpen && facts.attached === channelId;
+		if (open !== facts.hubOpen(channelId)) statements.push({ channelId, open });
+	}
+	return statements;
 }
 
 // ─── Which terminal it shows ─────────────────────────────────────────────────

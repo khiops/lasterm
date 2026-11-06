@@ -1,6 +1,7 @@
 import { type AuthMessage, type Channel, isValidUlid, type ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 import { factsFromAttachOk, factsFromRefusal, paneCover } from "../utils/pane-cover.js";
 import { windowId } from "../utils/window-id.js";
 import { useChannelsStore } from "./channels.js";
@@ -457,6 +458,59 @@ describe("useSessionStore — live directories", () => {
 			status: "dead",
 		} as unknown as ProtocolMessage);
 		expect(panel.liveCwdFor(CH)).toBeUndefined();
+	});
+});
+
+// ─── The writer's files panel, shared (#838) ─────────────────────────────────
+
+describe("useSessionStore — the writer's files panel", () => {
+	const CH = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("hands FILES_PANEL, ATTACH_OK's and STATE_SYNC's to the panel, and says the window's own back", async () => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const ws = wsHarness.instances[0];
+		const panel = useFilesPanelStore();
+		const say = (msg: unknown) => ws?.emit(msg as ProtocolMessage);
+
+		say({
+			type: "STATE_SYNC",
+			sessions: [],
+			channels: [{ channelId: CH, sessionId: "s", status: "live", filesPanel: { open: true } }],
+		});
+		expect(panel.writerOpenOn(CH)).toBe(true);
+		say({ type: "FILES_PANEL", channelId: CH, open: false });
+		expect(panel.writerOpenOn(CH)).toBe(false);
+		say({ type: "ATTACH_OK", channelId: CH, filesPanel: { open: true } });
+		expect(panel.writerOpenOn(CH)).toBe(true);
+		// A hub older than it says nothing of it: what was said stands.
+		say({ type: "ATTACH_OK", channelId: CH });
+		expect(panel.writerOpenOn(CH)).toBe(true);
+		say({ type: "FILES_PANEL", channelId: CH, open: false });
+
+		// This window takes the lock and opens its panel there: the hub hears it on this socket.
+		useConfigStore().uiConfig = { onChannelDead: "readonly", experimental: { fileTransfer: true } };
+		panel.setChannelsInTabs(new Set([CH]));
+		panel.setFocused(CH);
+		say({ type: "WRITE_LOCK", channelId: CH, holder: "client-1" });
+		panel.openFor(null);
+		await nextTick();
+		expect(ws?.sent.filter((msg) => msg.type === "FILES_PANEL")).toEqual([
+			{ type: "FILES_PANEL", channelId: CH, open: true },
+		]);
 	});
 });
 

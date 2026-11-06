@@ -1887,6 +1887,7 @@ dependencies = [
  "lasterm-process-lock",
  "lasterm-protected-fs",
  "libc",
+ "raw-window-handle",
  "rcgen",
  "reqwest 0.12.28",
  "rustls",

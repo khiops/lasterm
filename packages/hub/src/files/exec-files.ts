@@ -178,6 +178,50 @@ export function posixHomeScript(): string {
 	);
 }
 
+/** A name a POSIX shell holds a variable under: the only ones read from its environment. */
+export function isPosixVariableName(name: string): boolean {
+	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+/**
+ * The script that prints the variables `names` (each a POSIX name: see
+ * `isPosixVariableName`): per variable set, its index in `names` and Base64
+ * of `S` and its value, an empty value included; nothing for one unset.
+ *
+ * Every value is taken before the prelude sets the script's own `M`, each
+ * into a variable of its own, so that a variable the folder names is never
+ * one the script itself set. Names are written into the script, which only a
+ * name of letters, digits and `_` can be.
+ */
+export function posixEnvScript(names: readonly string[]): string {
+	const taken = names.map((name, i) => `__lasterm_env_${i}=\${${name}+S\${${name}}}`);
+	const printed = names.map(
+		(_, i) =>
+			`[ -z "$__lasterm_env_${i}" ] || { printf '${i} '; printf '%s' "$__lasterm_env_${i}" | base64 | tr -d '\\n'; echo; }`,
+	);
+	return `{\n${taken.join("\n")}\n${POSIX_PRELUDE}printf '%s\\nOK\\n' "$M"\n${printed.join("\n")}\n} </dev/null\n`;
+}
+
+/**
+ * The variables a script printed as `<index> <Base64 of S and the value>`
+ * lines, keyed by the name at that index of `names`.
+ */
+export function parseEnvLines(
+	names: readonly string[],
+	lines: readonly string[],
+): Map<string, string> {
+	const found = new Map<string, string>();
+	for (const line of lines) {
+		const match = /^(\d+) ([A-Za-z0-9+/=]+)$/.exec(line.trim());
+		if (!match) continue;
+		const name = names[Number(match[1])];
+		const value = decodeName(decodeBase64(match[2] ?? ""));
+		if (name === undefined || !value.startsWith("S")) continue;
+		found.set(name, value.slice(1));
+	}
+	return found;
+}
+
 /** One entry of a POSIX group, before its name is known. */
 interface PosixStat {
 	mode: number;
@@ -358,6 +402,33 @@ export function windowsHomeScript(): string {
 	);
 }
 
+/** A name Windows can hold a variable under: not empty, and without `=` or NUL. */
+export function isWindowsVariableName(name: string): boolean {
+	return name !== "" && !/[=\0]/.test(name);
+}
+
+/**
+ * The script that prints the variables `names` of the process, as
+ * `posixEnvScript` does: per variable set, its index and Base64 of `S` and its
+ * value. Each name travels as Base64 data, so nothing in it is read as code;
+ * Windows compares names without regard to case.
+ */
+export function windowsEnvScript(names: readonly string[]): string {
+	const list = names
+		.map((name) => {
+			const encoded = Buffer.from(name, "utf8").toString("base64");
+			return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`;
+		})
+		.join(",");
+	return windowsScript(
+		null,
+		`$n=@(${list})`,
+		"$o=[Text.StringBuilder]::new()",
+		"for($i=0;$i -lt $n.Count;$i++){$v=[Environment]::GetEnvironmentVariable($n[$i]);if($null -ne $v){[void]$o.Append([string]$i+' '+(B64 ('S'+$v))+[char]10)}}",
+		"Ans ('OK'+[char]10+$o)",
+	);
+}
+
 /** The entries of `WINDOWS_ENTRY` lines, named by `name` when given. */
 export function parseWindowsEntries(lines: readonly string[], name?: string): FileEntry[] {
 	const entries: FileEntry[] = [];
@@ -466,6 +537,24 @@ export class ExecFileBackend implements FileBackend {
 			return;
 		}
 		await this.posix(posixMkdirScript(path, parentOf(path, "posix") ?? "/"), what, true);
+	}
+
+	/**
+	 * The variables `names` of the environment an SSH command gets: the one a
+	 * remote agent started over SSH gets too. A name the host's shell cannot
+	 * hold is not asked, and reads as unset.
+	 */
+	async env(names: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		const what = "The environment could not be read";
+		const asked = names.filter(
+			this.style === "windows" ? isWindowsVariableName : isPosixVariableName,
+		);
+		if (asked.length === 0) return new Map();
+		const lines =
+			this.style === "windows"
+				? await this.windows(windowsEnvScript(asked), what)
+				: await this.posix(posixEnvScript(asked), what);
+		return parseEnvLines(asked, lines);
 	}
 
 	private parsed(what: string, lines: readonly string[], name?: string): FileEntry[] {

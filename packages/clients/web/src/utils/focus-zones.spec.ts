@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+	FILES_PARTS,
 	FOCUS_ZONES,
 	type FocusZone,
+	filesPartAfter,
 	focusZoneOf,
+	focusZoneOrder,
 	gridMove,
 	listMove,
 	nextInCycle,
@@ -17,11 +20,11 @@ const except =
 
 describe("F6 and Shift+F6", () => {
 	it("visit the rail, the terminal list, the tab bar and the pane, in that order", () => {
-		expect(FOCUS_ZONES).toEqual(["rail", "sidebar", "tabs", "pane"]);
+		expect(FOCUS_ZONES).toEqual(["rail", "sidebar", "tabs", "pane", "files"]);
 		const visited: FocusZone[] = [];
 		let zone: FocusZone = "pane";
 		for (let i = 0; i < 4; i++) {
-			zone = zoneAfter(zone, 1, everywhere) ?? zone;
+			zone = zoneAfter(zone, 1, except("files")) ?? zone;
 			visited.push(zone);
 		}
 		expect(visited).toEqual(["rail", "sidebar", "tabs", "pane"]);
@@ -31,10 +34,38 @@ describe("F6 and Shift+F6", () => {
 		const visited: FocusZone[] = [];
 		let zone: FocusZone = "pane";
 		for (let i = 0; i < 4; i++) {
-			zone = zoneAfter(zone, -1, everywhere) ?? zone;
+			zone = zoneAfter(zone, -1, except("files")) ?? zone;
 			visited.push(zone);
 		}
 		expect(visited).toEqual(["tabs", "sidebar", "rail", "pane"]);
+	});
+
+	// The files panel (#836) is a fifth zone, beside the pane on whichever side it is docked.
+	it("visit the files panel after the pane on the right, before it on the left", () => {
+		const visit = (order: readonly FocusZone[]): FocusZone[] => {
+			const visited: FocusZone[] = [];
+			let zone: FocusZone = "rail";
+			for (let i = 0; i < 5; i++) {
+				zone = zoneAfter(zone, 1, everywhere, order) ?? zone;
+				visited.push(zone);
+			}
+			return visited;
+		};
+		expect(focusZoneOrder("right")).toEqual(FOCUS_ZONES);
+		expect(visit(focusZoneOrder("right"))).toEqual(["sidebar", "tabs", "pane", "files", "rail"]);
+		expect(visit(focusZoneOrder("left"))).toEqual(["sidebar", "tabs", "files", "pane", "rail"]);
+		// A panel that is closed takes nothing.
+		expect(zoneAfter("pane", 1, except("files"))).toBe("rail");
+	});
+
+	it("move between the panel's two parts before leaving it", () => {
+		expect(FILES_PARTS).toEqual(["files", "transfers"]);
+		expect(filesPartAfter("files", 1, () => true)).toBe("transfers");
+		expect(filesPartAfter("transfers", 1, () => true)).toBeNull();
+		expect(filesPartAfter("transfers", -1, () => true)).toBe("files");
+		expect(filesPartAfter("files", -1, () => true)).toBeNull();
+		// A part with nothing to focus is not landed on.
+		expect(filesPartAfter("files", 1, (part) => part !== "transfers")).toBeNull();
 	});
 
 	it("pass over a zone that is hidden or has nothing to focus", () => {
@@ -42,7 +73,7 @@ describe("F6 and Shift+F6", () => {
 		expect(zoneAfter("rail", 1, except("sidebar"))).toBe("tabs");
 		expect(zoneAfter("tabs", -1, except("sidebar"))).toBe("rail");
 		// No tab: neither the bar nor a pane can take the keyboard.
-		expect(zoneAfter("sidebar", 1, except("tabs", "pane"))).toBe("rail");
+		expect(zoneAfter("sidebar", 1, except("tabs", "pane", "files"))).toBe("rail");
 	});
 
 	it("stay put when no other zone can take the keyboard", () => {

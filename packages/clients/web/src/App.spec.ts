@@ -148,6 +148,7 @@ describe("the window's shortcuts", () => {
 			"pane.close": "closeFocusedPane();",
 			"zone.next": "cycleFocusZone(1);",
 			"zone.previous": "cycleFocusZone(-1);",
+			"files.toggle": "toggleFilesPanel();",
 		};
 		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
 			const action = actions[id];
@@ -290,6 +291,87 @@ describe("the keyboard among tabs, panes and zones", () => {
 	it("opens a terminal from the list on Enter, and takes the keyboard into it", () => {
 		expect(SOURCE).toContain('@open-channel="onOpenChannelFromList"');
 		expect(flat(body(/function onOpenChannelFromList\(/))).toContain("onSelectChannel(channelId);");
+	});
+});
+
+// The files panel beside the panes (#836). What it decides is tested in
+// utils/files-panel.spec.ts, its state in stores/files-panel.spec.ts, and the
+// panel itself in components/files/*.spec.ts; here, how the window holds it.
+describe("the files panel in the window", () => {
+	const flat = (text: string): string => text.replace(/\s+/g, " ");
+
+	it("shows it only while file transfer is on, beside the panes, below the tab bar", () => {
+		const text = flat(SOURCE);
+		expect(text).toContain(
+			"const filesPanelShown = computed(() => configStore.fileTransferEnabled && filesPanel.open);",
+		);
+		expect(text).toContain('<template v-if="filesPanelShown">');
+		// The panes and the panel share the row under the tab bar; the panes keep their zone.
+		const row = text.indexOf('class="terminal-body"');
+		expect(row).toBeGreaterThan(text.indexOf("<TabBar"));
+		expect(text.indexOf('<div class="pane-area" data-focus-zone="pane">')).toBeGreaterThan(row);
+		expect(text.indexOf("<FilesPanel")).toBeGreaterThan(row);
+		// The shortcut table reads the switch from the UI config.
+		expect(text).toContain(
+			"readSwitchesFrom((name) => configStore.uiConfig.experimental?.[name] === true);",
+		);
+	});
+
+	it("opens, closes and toggles it from the shortcut and the palette's row, on the focused terminal", () => {
+		const toggle = flat(body(/function toggleFilesPanel\(/));
+		expect(toggle).toContain("if (!configStore.fileTransferEnabled) return;");
+		// With the keyboard in it, the chord closes it back to the pane; else it opens, keyboard in.
+		expect(toggle).toContain(
+			"if (filesPanel.open && keyboardInFilesPanel()) closeFilesPanel(); else filesPanel.openFor(null, { keyboard: true });",
+		);
+		expect(flat(body(/function closeFilesPanel\(/))).toContain(
+			"const inside = keyboardInFilesPanel(); filesPanel.close(); if (inside) void nextTick(focusActivePane);",
+		);
+		expect(flat(SOURCE)).toContain(
+			"case 'action:files-show': if (configStore.fileTransferEnabled) filesPanel.openFor(null, { keyboard: true }); break;",
+		);
+		expect(SOURCE).toContain('@close="closeFilesPanel"');
+		// An entry point asking for the keyboard: once drawn, the Files part takes it.
+		expect(flat(SOURCE)).toContain(
+			"watch( () => filesPanel.keyboardRequests, () => void nextTick(() => filesZoneEntry(1)?.focus()), );",
+		);
+	});
+
+	it("attaches it to the focused pane's terminal, and focuses the pane an entry point names", () => {
+		const text = flat(SOURCE);
+		expect(text).toContain(
+			"watch(focusedTerminal, (channelId) => filesPanel.setFocused(channelId), { immediate: true });",
+		);
+		// An empty pane has no terminal: the panel says so.
+		expect(text).toContain("return leaf?.node.type === 'terminal' ? leaf.node.channelId : null;");
+		expect(text).toContain("if (leaf !== undefined) layout.setActivePaneId(tab.id, leaf.id);");
+	});
+
+	// Until the writer's panel reaches the readers (#838), a reader's own panel never resizes
+	// the terminal: it floats (utils/files-panel.spec.ts).
+	it("asks whether this window writes the attached terminal for the panel's form", () => {
+		expect(flat(SOURCE)).toContain(
+			"writesAttached: attached === null ? null : writeLockStore.isWriter(attached),",
+		);
+		expect(SOURCE).toContain(':form="filesForm"');
+		// Only a docked panel has an edge to drag; its width is `[layout] transfer_panel_width`.
+		expect(SOURCE).toContain(`v-if="filesForm === 'docked'"`);
+		expect(flat(SOURCE)).toContain(
+			"onResizeEnd: (width) => saveLayout({ transferPanelWidth: width }),",
+		);
+	});
+
+	it("makes it a zone for F6, Files then Transfers, and Esc in it goes back to the pane", () => {
+		const cycle = flat(body(/function cycleFocusZone\(/));
+		expect(cycle).toContain(
+			"const nextPart = filesPartAfter(part, step, (p) => filesPartEntry(p) !== null);",
+		);
+		expect(cycle).toContain("focusZoneOrder(filesPanelSide.value)");
+		const keydown = flat(body(/function onGlobalKeydown\(/));
+		expect(keydown).toContain("!isTextField(event.target) && !ownsEscape(event.target)");
+		expect(flat(body(/function ownsEscape\(/))).toContain(
+			"target.closest('[data-own-escape]') !== null",
+		);
 	});
 });
 

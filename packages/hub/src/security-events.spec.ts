@@ -796,6 +796,7 @@ describe("the paths and names a client browses leave no trace in the logs (#832)
 		const folderName = "lasterm-spec-folder-4242";
 		const fileName = "lasterm-spec-file-4242.txt";
 		const newName = "lasterm-spec-new-4242";
+		const variableName = "LASTERM_SPEC_VARIABLE_4242";
 		const serverLog = new ServerLog();
 		const hubLogger = new HubLogger(log.dir, {
 			level: "trace",
@@ -869,9 +870,41 @@ describe("the paths and names a client browses leave no trace in the logs (#832)
 
 			expect(statuses).toEqual([200, 200, 200, 409, 404, 409, 201, 409, 403]);
 			expect(fs.statSync(path.join(folder, newName)).isDirectory()).toBe(true);
+
+			// The folder a panel opens at (#836): the fallback folder, through a
+			// variable, then one that cannot be opened. Neither the path nor the
+			// variable's name is logged.
+			const dal = new MetaDAL(dbs.meta);
+			const localHost = dal.listLocalHosts()[0];
+			if (!localHost) throw new Error("the hub made no local host");
+			const opening = () =>
+				hub.inject({
+					method: "GET",
+					url: `/api/channels/${channels.local}/files`,
+					headers: bearer,
+				});
+			dal.updateHostProfile(
+				localHost.id,
+				JSON.stringify({
+					transferFallbackDir: `\${${variableName}}`,
+					env: { [variableName]: folder },
+				}),
+			);
+			const fallback = await opening();
+			expect(fallback.statusCode).toBe(200);
+			expect(fallback.json()).toMatchObject({ start: "fallback" });
+			dal.updateHostProfile(
+				localHost.id,
+				JSON.stringify({ transferFallbackDir: path.join(folder, `${newName}-missing`) }),
+			);
+			const home = await opening();
+			expect(home.statusCode).toBe(200);
+			expect(home.json()).toMatchObject({ start: "home", fallback_problem: expect.any(String) });
 			expect(serverLog.shipped(from)).toEqual([]);
 			const text = `${serverLog.text()}\n${log.text()}`;
-			for (const name of [folderName, fileName, newName]) expect(text).not.toContain(name);
+			for (const name of [folderName, fileName, newName, variableName]) {
+				expect(text).not.toContain(name);
+			}
 		} finally {
 			ws?.terminate();
 			await hub.close();

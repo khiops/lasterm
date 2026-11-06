@@ -53,6 +53,7 @@ import {
 	matchCorsOrigin,
 } from "./config.js";
 import { HostFilesService } from "./files/host-files-service.js";
+import { startFolderSettings } from "./files/start-folder.js";
 import type { HubLogger } from "./logging/hub-logger.js";
 import type { LoggerRegistry } from "./logging/index.js";
 import {
@@ -556,6 +557,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			channelHost: (channelId) => metaDal.getChannelWithHost(channelId),
 			hostOs: (hostId) => metaDal.getHost(hostId)?.os ?? null,
 			sshHost: (hostId) => activeSessionManager.connectedSshAgent(hostId),
+			// The folder a panel opens at when the terminal's own is unknown (#836).
+			startFolder: (channelId) => startFolderSettings(channelId, metaDal, configResolver),
 		});
 		let routesForTransfers: WsRoutes | null = null;
 		const transfers = new TransferService({

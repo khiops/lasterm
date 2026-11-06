@@ -1962,7 +1962,7 @@ A dead terminal's host is browsed as a live one's. Uploads are in § 4.19 and be
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, link_target?, link_kind? }], truncated }`. Without `path` (or with an empty one), the folder a panel opens at: the account's home on that host for now (the terminal's own folder, #834, and the configured one, #835, will come first). `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
+| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, link_target?, link_kind? }], truncated, start?, fallback_problem? }`. Without `path` (or with an empty one), the folder a panel opens at when the terminal's own folder is unknown or not followed (below), with `start`. `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
 | GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, link_target?, link_kind? }` |
 | GET | `/api/channels/:id/files/free-space` | ● | `?path=` → `{ path, available, total }`: the bytes the account may still write on that folder's file system, and its size; `null` when the host does not say (a Windows share over SSH commands). Without `path`, the home |
 | POST | `/api/channels/:id/folders` | ● | `{ path }`, header `X-Lasterm-Client-Id` → 201 `{ path }`. Creates that folder, and only it: its parent must exist and it must not. Refused with 403 `WRITE_LOCK_DENIED` unless the header names a window that holds the terminal's write lock (§ 4.5) |
@@ -1981,6 +1981,27 @@ Every answer carries `Cache-Control: no-store`. An entry is:
 Over SSH commands, a Windows host's folder that is a reparse point (a junction, a link to a folder)
 is a `symlink` whose `link_kind` is `"directory"`; a file that is one stays a `file`, since .NET
 Framework does not give the reparse tag that tells a link from a cloud placeholder.
+
+**The folder a panel opens at** (#836), a listing asked without `path`: the terminal's own folder
+(#834) is the client's to ask for by its path, so the hub lists, in this order:
+1. the **fallback folder**, `transfer_fallback_dir` as the cascade resolves it for that terminal (set
+   globally or for its host, CONFIG_REFERENCE.md), its `${VAR}` expanded as the agent expands a launch
+   profile's `cwd` before it starts a terminal there: from the variables a SPAWN of that terminal
+   carries (its scopes' `env`, then its launch profile's), else from the environment of the account the
+   host runs terminals as, read over SSH commands on a remote host (SFTP has no request for it) and
+   from the hub's own on the local host; without regard to case on a Windows host. A variable with no
+   value stays as written; `\${VAR}` is the text `${VAR}`, so on Windows the variable comes first
+   (`${USERPROFILE}\Downloads`), and `\\` is one backslash, as in a `cwd`;
+2. else the account's **home** on that host.
+
+| Field | Value |
+|-------|-------|
+| `start` | Only without `path`: `"fallback"` or `"home"`, the folder listed |
+| `fallback_problem` | Only with `start: "home"`, when a fallback folder is set but cannot be opened: why, as a sentence for the client to show (it may name the path). Its expansion is not a path, or its listing answered `NOT_FOUND`, `NOT_A_DIRECTORY`, `PERMISSION_DENIED` or `UNSUPPORTED_PATH`, or the host's variables could not be read |
+
+A host that cannot be reached, or that failed both ways on the fallback folder, answers the error as
+any listing does (`HOST_NOT_CONNECTED`, `FILE_ACCESS_FAILED`): the home is not shown in its place.
+The free space without `path` stays the home's.
 
 **Paths.** A path is absolute, with no `.` or `..` segment, and taken literally: nothing in it is
 expanded, so a name may hold `$`, `%`, quotes or backticks. Every answer gives it in one form:

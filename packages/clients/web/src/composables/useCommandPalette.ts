@@ -4,7 +4,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useProfilesStore } from "../stores/profiles.js";
 import { useWriteLockStore } from "../stores/writelock.js";
-import { APP_SHORTCUT_NAMES, shortcutLabel } from "../utils/app-shortcuts.js";
+import { APP_SHORTCUT_NAMES, isActionOffered, shortcutLabel } from "../utils/app-shortcuts.js";
 import { formatConnectionString } from "../utils/host-display.js";
 import { useHostRows } from "./useHostRows.js";
 import { useRecentPaletteItems } from "./useRecentPaletteItems.js";
@@ -354,6 +354,18 @@ export function useCommandPalette() {
 					type: "action",
 					icon: "◧",
 				},
+				// The files panel, on the focused terminal (#836), while file transfer is on.
+				...(isActionOffered("files.toggle")
+					? [
+							{
+								id: "action:files-show",
+								label: "Files: Show panel",
+								type: "action" as const,
+								icon: "📁",
+								shortcut: shortcutLabel("files.toggle"),
+							},
+						]
+					: []),
 			];
 
 			for (const a of actions) {

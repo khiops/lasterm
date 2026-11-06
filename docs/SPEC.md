@@ -220,7 +220,13 @@ Local daemon, single process, binds to 127.0.0.1.
   path handling
 - A new folder is a write: only the window holding the terminal's write lock, named by the request
   (`X-Lasterm-Client-Id`) and checked against the request's own token
-- Logs nothing: a path or a name is the user's, at any level, and a listing is a routine request
+- The folder a panel opens at, a listing asked without a path (#836): the terminal's host's
+  `transfer_fallback_dir`, its `${VAR}` expanded as the agent expands a `cwd` (`expand-vars.ts`):
+  from the variables the terminal's SPAWN carries, then from the account's environment on the host,
+  read over SSH commands (SFTP has none) or from the hub's own for the local host. Else, or when it
+  cannot be opened, the home, and the answer says which (`start`) and why (`fallback_problem`)
+- Logs nothing: a path, a name or a variable is the user's, at any level, and a listing is a routine
+  request
 
 **Uploads** (`packages/hub/src/transfers/`, the backends' writing side in `files/*-upload.ts`, #833):
 - Sends files to the host a terminal runs on: started, answered, retried and cancelled over the
@@ -301,6 +307,7 @@ Vue 3 SPA built with Vite. Served by hub in production, dev server in developmen
 - `SettingsPanel` — settings at global, host and terminal scope (terminal, environment, appearance, keybindings, agents…)
 - `ShortcutsOverlay` — Ctrl+/, every shortcut of the table and the keys inside each area, with a search field
 - `KeyHintStrip` — one line naming the keys that work where the keyboard is: at the bottom of Settings, and under the rail and the list
+- `FilesPanel` — the files of the focused terminal's host, beside the panes, and the window's transfers below them (#836, behind `[experimental] file_transfer`; below)
 - `TitleBar` — the UI's version and build; the window controls in the desktop app
 
 **Keyboard shortcuts:** Windows Terminal's chords, held in one table keyed by action id
@@ -321,6 +328,67 @@ the app's actions, from the table; it shows for the keyboard only, is hidden fro
 Settings › Appearance turns it off (`[keyboard] key_hints`). Ctrl+/ opens an overlay listing every
 shortcut of the table and the keys inside each area, from the same source, with a search field; the
 palette's Keyboard Shortcuts row and Settings › Keybindings open it too (decisions.md KEYBOARD-NAV).
+An action may wait behind an experimental switch (`ACTION_SWITCHES`): while the switch is off its
+chord is no shortcut, so a terminal keeps the key, and the palette, Settings › Keybindings and the
+overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental] file_transfer`.
+
+**Files panel (#836, part of #721).** Everything below waits behind `[experimental] file_transfer`
+(`fileTransferEnabled`): off, no pane shows its folder button and nothing of the panel is drawn.
+- **Place.** One per window, below the tab bar beside the panes, on `[transfer] panel_side` (right by
+  default), `[layout] transfer_panel_width` wide (240–520 px, its edge dragged or moved with the arrows
+  when focused, a double click back to 300). Docked, it narrows every pane of the tab, so the window
+  that writes those terminals resizes them (#831). It floats over the right of the pane area, below the
+  pane header, on an opaque ground and resizing nothing, when docking would leave the panes less than
+  480 px; it is a sheet over the terminal area below a 560 px window. Until the writer's panel reaches
+  the readers (#838), a panel attached to a terminal this window only reads floats too, so that it
+  never resizes anything (`filesPanelForm`).
+- **Attachment.** It shows the terminal whose pane has the focus, and follows the focus; a pin keeps
+  it on one terminal while a tab shows it, with "Show terminal" when that tab is not the one shown.
+  An empty pane, or no tab: "No terminal". The attached pane's folder button shows pressed
+  (`aria-pressed`, `aria-controls`).
+- **Entry points.** The folder button in each pane header, left of the write-lock indicator (it
+  toggles); Ctrl+Shift+E, which opens the panel with the keyboard in it, moves the keyboard into it
+  when open, and closes it back to the pane when pressed inside it; the palette's "Files: Show panel";
+  the pane menu's "Files". A file dragged over a terminal is upload's (#837).
+- **Two parts.** **Files** on top, the attached host's: its badge and name in the header, its banner,
+  border on the outer edges and tint over the list (`useVisualProfile`). **Transfers** below, the
+  window's and neutral, "Transfers · all hosts", its uploads grouped by host › terminal with the focused
+  terminal's group first (`groupTransfers`); its rows come with upload (#837). A horizontal separator
+  splits them (arrows when focused, a double click back to 30 %, Transfers at most 70 %), and
+  Transfers folds to its header line, which still counts what runs and fails. A retarget to a pane on
+  another host changes the Files part's host and colours, rings its header for 600 ms (not under
+  `prefers-reduced-motion`) and is announced once ("Files on AD").
+- **Following.** The panel shows the terminal's live directory (#834: CWD_CHANGE, and `cwd` in
+  ATTACH_OK and STATE_SYNC, read when the hub sends them) while `transfer_follow_cwd` says to follow.
+  Any move in the panel pauses it, and the status line then reads "Terminal is in `<dir>` · Go there";
+  the Following toggle (`aria-pressed`) or Go there resumes it. With no directory known, the panel asks
+  the hub for the folder it opens at, the host's `transfer_fallback_dir` expanded there, else the home
+  (§ 3.3, Host Files), and says why it cannot follow (an agent that does not report it, PowerShell,
+  a nested session on another host) and where it opened.
+- **Browsing.** A path bar (Up, the folders to this one, F2 or Ctrl+L to edit it as text, Refresh),
+  a virtualized list of up to 5,000 entries, folders first, with one roving tabindex (arrows, Home,
+  End, Page Up/Down, type-ahead, Enter opens a folder, Backspace goes up), hidden files as
+  `[transfer] show_hidden` says, and New folder for the window holding the write lock only: a reader
+  sees why, in words, and a Request write. A host that is not connected says so, with Connect.
+- **Options**, the Files part's last row: the attached host's file transfer settings as they hold for
+  its terminal, collapsed to one line ("Options · Ask if a file exists · Following · Verify", Verify
+  only on a host without SFTP), expanded to one row per value with where it comes from (everywhere,
+  the host, this terminal). A change of a per-host value writes nothing until a scope is chosen
+  ("Keep … for: <host> · Everywhere · Cancel", Esc puts the control back), says first which nearer
+  override the write drops, and writes through `planProfileWrite`. `show_hidden` and `open_on_drag`
+  are global and apply at once. "All file transfer settings…" opens Settings › File transfer at the
+  host's scope (`settingsStore.openAt`). Changes made elsewhere arrive through CONFIG_CHANGED.
+- **Looks.** The panel's ground is the terminal list's, `rgba(var(--nt-sidebar-rgb),
+  var(--nt-sidebar-alpha))`, so it follows the list's opacity under Mica, Acrylic, a see-through window
+  or a wallpaper; every card that asks or warns has the exit card's opaque ground, checked in every
+  bundled theme (`FilesPanel.spec.ts`).
+- **Keyboard and screen readers.** An `<aside>` landmark, "Files on <host>", with two regions, "Files"
+  and "Transfers, all hosts"; a fifth F6 zone, `files`, after the pane on the right and before it on
+  the left, in which F6 goes from Files to Transfers before leaving it; Esc in it goes back to the pane,
+  unless a question there takes it (`data-own-escape`).
+- **Kept in this browser** (`localStorage`, `stores/files-panel.ts`): open or not, the pin, per
+  terminal whether it follows and the folder browsed (the last 100 terminals), Options expanded, the
+  split, Transfers folded. Each window owns its open state; the writer's reaching the readers is #838.
 
 **Connection flow:**
 1. UI loads → `fetch /api/health` to verify hub
@@ -332,7 +400,7 @@ palette's Keyboard Shortcuts row and Settings › Keybindings open it too (decis
 **State management:**
 - Pinia store for: hosts, sessions, channels, config, write-locks
 - Reactive: WS messages update store → Vue reactivity updates UI
-- Persistent: the tabs and their splits are kept in the browser's `localStorage` (`useLayout`). The hub keeps no layout (STORAGE.md § 3.5)
+- Persistent: the tabs and their splits are kept in the browser's `localStorage` (`useLayout`), and so is the files panel's state (`lasterm:files:*`, above). The hub keeps no layout (STORAGE.md § 3.5)
 
 **Client and hub versions (browser):** the hub is the source of truth for the UI it
 serves (#132). A tab loaded before a hub upgrade keeps running the old JavaScript
@@ -1107,7 +1175,7 @@ the host. All of them wait behind `[experimental] file_transfer`, off by default
 | `transfer_confirm_drop` | `transferConfirmDrop` | boolean | `true` | global, host, terminal | Ask before the upload a drop starts, showing where it goes. |
 | `transfer_on_conflict` | `transferOnConflict` | `ask`, `replace`, `keep_both`, `skip` | `ask` | global, host, terminal | What an upload does with a file of the same name where it lands. |
 | `transfer_follow_cwd` | `transferFollowCwd` | boolean | `true` | global, host, terminal | Upload into the shell's folder when it is known. |
-| `transfer_fallback_dir` | `transferFallbackDir` | string, ≤ 1024 | `""` (the home) | global, host | Where an upload lands otherwise. `${VAR}` is expanded by the agent, as in a launch profile's `cwd`. |
+| `transfer_fallback_dir` | `transferFallbackDir` | string, ≤ 1024 | `""` (the home) | global, host | Where an upload lands otherwise, and where the files panel opens when the shell's folder is unknown (#836). `${VAR}` is expanded on the host as the agent expands a launch profile's `cwd` (§ 3.3, Host Files). |
 | `transfer_verify` | `transferVerify` | boolean | `true` | global, host | Check uploads by SHA-256 over SSH commands, on hosts whose server offers no SFTP. |
 
 A terminal's profile refuses the two host keys (`HOST_ONLY_PROFILE_KEYS`). Every value is checked

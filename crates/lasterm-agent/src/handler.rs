@@ -1840,7 +1840,8 @@ mod stdio_tests {
         .expect("reported at once, before any poll");
         assert_eq!(reported["cwd"], "/reported/dir");
 
-        if let Some(process) = manager.lock().await.remove("osc-ch") {
+        let removed = manager.lock().await.remove("osc-ch");
+        if let Some(process) = removed {
             let _ = process.kill_tree();
         }
     }

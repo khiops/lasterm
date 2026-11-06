@@ -63,15 +63,21 @@ const isReader = computed(() => {
 
 const hasHolder = computed(() => lockState.value?.holder !== null && lockState.value?.holder !== undefined);
 
+// Kept for the writer that just left, whose window may come back within the
+// hub's grace (#846): nobody writes meanwhile, and taking it is still possible.
+const isReserved = computed(() => !hasHolder.value && lockState.value?.reserved === true);
+
 const stateClass = computed(() => {
 	if (isCurrentWriter.value) return "state-writer";
 	if (hasHolder.value) return "state-reader";
+	if (isReserved.value) return "state-reserved";
 	return "state-free";
 });
 
 const label = computed(() => {
 	if (isCurrentWriter.value) return "Writer";
 	if (hasHolder.value) return "Reader";
+	if (isReserved.value) return "Writer reconnecting";
 	return "No lock";
 });
 
@@ -79,6 +85,9 @@ const tooltip = computed(() => {
 	const holder = lockState.value?.holder;
 	if (isCurrentWriter.value) return "You have write access";
 	if (holder) return `Client ${holder} holds write access`;
+	if (isReserved.value) {
+		return "The writer's window is reconnecting: write access is kept for it a few seconds, then handed on";
+	}
 	return "No client holds write access";
 });
 
@@ -137,6 +146,14 @@ function handleRelease(): void {
 }
 
 .state-free .wl-label {
+	color: var(--nt-text-secondary);
+}
+
+.state-reserved .wl-dot {
+	background: var(--nt-yellow);
+}
+
+.state-reserved .wl-label {
 	color: var(--nt-text-secondary);
 }
 

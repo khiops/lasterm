@@ -1,9 +1,15 @@
-import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
+import {
+	type AuthOkMessage,
+	decodeMessage,
+	encodeMessage,
+	type ProtocolMessage,
+} from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createToken, revokeToken } from "../auth.js";
+import { createToken, PRIMARY_TOKEN_ID, revokeToken } from "../auth.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
 import { createServer } from "../server.fixture.js";
+import { WriteLockManager } from "../session/write-lock.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
@@ -11,6 +17,8 @@ import { WS_CLOSE_POLICY_VIOLATION, WS_CLOSE_TRY_AGAIN_LATER } from "./ws-handle
 
 const TEST_TOKEN = "a".repeat(64);
 const CHANNEL_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const WINDOW_1 = "01HZZZZZZZZZZZZZZZZZZZZZW1";
+const WINDOW_2 = "01HZZZZZZZZZZZZZZZZZZZZZW2";
 
 type InjectedSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
 
@@ -148,6 +156,37 @@ describe("WebSocket authentication against the token store", () => {
 			expect(observed.messages.find((msg) => msg.type === "AUTH_OK")).toMatchObject({
 				echoesSpawnRequestId: true,
 			});
+		});
+
+		// A write lock's holder coming back from a reload is recognised by its
+		// window, under its token (#846): two windows of one token are two
+		// windows, and a window id under another token is another window.
+		it("tells the write lock which window each socket belongs to, under its token", async () => {
+			const identify = vi.spyOn(WriteLockManager.prototype, "identify");
+			const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });
+			const clientIdOf = async (token: string, windowId?: string): Promise<string> => {
+				const ws = await server.injectWS("/ws");
+				const observed = observe(ws);
+				ws.send(
+					encodeMessage({ type: "AUTH", token, ...(windowId !== undefined && { windowId }) }),
+				);
+				await vi.waitFor(() => expect(observed.types()).toContain("AUTH_OK"));
+				const ok = observed.messages.find((msg) => msg.type === "AUTH_OK");
+				return (ok as AuthOkMessage).clientId;
+			};
+
+			const desktop = await clientIdOf(TEST_TOKEN, WINDOW_1);
+			const desktopOther = await clientIdOf(TEST_TOKEN, WINDOW_2);
+			const browser = await clientIdOf(paired.token, WINDOW_1);
+			// Accepted all the same, as a client older than window ids is.
+			await clientIdOf(TEST_TOKEN);
+			await clientIdOf(TEST_TOKEN, "not-a-window-id");
+
+			expect(identify.mock.calls).toEqual([
+				[desktop, { tokenId: PRIMARY_TOKEN_ID, windowId: WINDOW_1 }],
+				[desktopOther, { tokenId: PRIMARY_TOKEN_ID, windowId: WINDOW_2 }],
+				[browser, { tokenId: paired.id, windowId: WINDOW_1 }],
+			]);
 		});
 
 		it("still answers AUTH_FAIL to a token the store does not know", async () => {

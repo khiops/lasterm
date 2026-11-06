@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { WriteLockManager } from "./write-lock.js";
+import type { WriteLockMessage } from "@lasterm/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type ClientWindow, WRITE_LOCK_GRACE_MS, WriteLockManager } from "./write-lock.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -443,5 +444,245 @@ describe("WriteLockManager — a lock nobody holds", () => {
 		mgr.onClientDisconnect("only");
 
 		expect(mgr.getHolder("ch1")).toBeNull();
+	});
+});
+
+// ─── A holder that leaves is waited for (#846) ──────────────────────────────
+//
+// The holder decides the terminal's size (#831). A reload or a short drop
+// brings its window back on a new connection, under a new client id: handing
+// the lock to whoever was left meanwhile handed them the size too, and the
+// writer came back as a reader of a terminal sized for someone else's pane.
+
+describe("WriteLockManager — a holder that leaves keeps the lock for its window", () => {
+	const DESKTOP_WINDOW: ClientWindow = { tokenId: "desktop", windowId: "window-1" };
+	const DESKTOP_OTHER_WINDOW: ClientWindow = { tokenId: "desktop", windowId: "window-2" };
+	const LAPTOP_WINDOW: ClientWindow = { tokenId: "laptop", windowId: "window-9" };
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** The desktop's window holds the lock on ch1; the laptop reads it. */
+	function writerAndReader() {
+		const m = makeManager();
+		m.mgr.identify("writer", DESKTOP_WINDOW);
+		m.mgr.identify("reader", LAPTOP_WINDOW);
+		m.mgr.attach("ch1", "writer");
+		m.mgr.attach("ch1", "reader");
+		return m;
+	}
+
+	/** Who each WRITE_LOCK broadcast on ch1 named, in order. */
+	function holdersNamed(broadcastOn: (channelId: string) => unknown[]): Array<string | null> {
+		return broadcastOn("ch1").map((msg) => (msg as WriteLockMessage).holder);
+	}
+
+	it("gives the lock back to the holder's window coming back within the grace, never to the client left", () => {
+		const { mgr, broadcastOn } = writerAndReader();
+
+		mgr.onClientDisconnect("writer"); // the desktop reloads
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS - 1);
+
+		// Kept for it meanwhile: nobody types, and nobody decides the size.
+		expect(mgr.getHolder("ch1")).toBeNull();
+		expect(mgr.isWriteLockHolder("ch1", "reader")).toBe(false);
+
+		mgr.identify("writer-reloaded", DESKTOP_WINDOW);
+		mgr.attach("ch1", "writer-reloaded");
+		expect(mgr.getHolder("ch1")).toBe("writer-reloaded");
+		expect(mgr.isWriteLockHolder("ch1", "writer-reloaded")).toBe(true);
+
+		// The grace's end, cancelled, changes nothing.
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS);
+		expect(mgr.getHolder("ch1")).toBe("writer-reloaded");
+		expect(broadcastOn("ch1")).toEqual([
+			{ type: "WRITE_LOCK", channelId: "ch1", holder: "writer" },
+			{ type: "WRITE_LOCK", channelId: "ch1", holder: null, reserved: true },
+			{ type: "WRITE_LOCK", channelId: "ch1", holder: "writer-reloaded" },
+		]);
+	});
+
+	it("hands the lock to the client left once the grace ends without the holder's window", () => {
+		const { mgr, lastBroadcast } = writerAndReader();
+
+		mgr.onClientDisconnect("writer");
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS - 1);
+		expect(mgr.getHolder("ch1")).toBeNull();
+
+		vi.advanceTimersByTime(1);
+		expect(mgr.getHolder("ch1")).toBe("reader");
+		expect(mgr.isWriteLockHolder("ch1", "reader")).toBe(true);
+		expect(lastBroadcast("ch1")).toEqual({
+			type: "WRITE_LOCK",
+			channelId: "ch1",
+			holder: "reader",
+		});
+
+		// Back too late, the window reads like any other.
+		mgr.identify("writer-late", DESKTOP_WINDOW);
+		mgr.attach("ch1", "writer-late");
+		expect(mgr.getHolder("ch1")).toBe("reader");
+	});
+
+	it.each(["claim", "force"] as const)(
+		"lets another client take the lock with a %s during the grace, which ends the wait",
+		(take) => {
+			const { mgr, sentTo, broadcastOn } = writerAndReader();
+
+			mgr.onClientDisconnect("writer");
+			expect(mgr.isWriteLockHolder("ch1", "reader")).toBe(false);
+
+			mgr[take]("ch1", "reader");
+			expect(mgr.getHolder("ch1")).toBe("reader");
+			expect(mgr.isWriteLockHolder("ch1", "reader")).toBe(true);
+			// Granted, not asked of anyone: nobody held the lock.
+			expect(sentTo("writer")).toEqual([]);
+
+			mgr.identify("writer-reloaded", DESKTOP_WINDOW);
+			mgr.attach("ch1", "writer-reloaded");
+			vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS);
+
+			expect(mgr.getHolder("ch1")).toBe("reader");
+			expect(holdersNamed(broadcastOn)).toEqual(["writer", null, "reader"]);
+		},
+	);
+
+	it("tells two windows sharing one token apart", () => {
+		const { mgr, sentTo } = makeManager();
+		mgr.identify("writer", DESKTOP_WINDOW);
+		mgr.identify("other-window", DESKTOP_OTHER_WINDOW);
+		mgr.attach("ch1", "writer");
+		mgr.attach("ch1", "other-window");
+
+		mgr.onClientDisconnect("writer");
+		expect(mgr.getHolder("ch1")).toBeNull();
+
+		// The desktop's other window, attaching again on a new connection, is
+		// not the holder's coming back.
+		mgr.identify("other-window-again", DESKTOP_OTHER_WINDOW);
+		mgr.attach("ch1", "other-window-again");
+		expect(mgr.getHolder("ch1")).toBeNull();
+		expect(sentTo("other-window-again")).toEqual([
+			{ type: "WRITE_LOCK", channelId: "ch1", holder: null, reserved: true },
+		]);
+
+		mgr.identify("writer-reloaded", DESKTOP_WINDOW);
+		mgr.attach("ch1", "writer-reloaded");
+		expect(mgr.getHolder("ch1")).toBe("writer-reloaded");
+	});
+
+	it("does not take the holder's window id under another token for its window", () => {
+		const { mgr } = makeManager();
+		mgr.identify("writer", DESKTOP_WINDOW);
+		mgr.attach("ch1", "writer");
+
+		mgr.onClientDisconnect("writer");
+		mgr.identify("impostor", { tokenId: "laptop", windowId: DESKTOP_WINDOW.windowId });
+		mgr.attach("ch1", "impostor");
+
+		expect(mgr.getHolder("ch1")).toBeNull();
+	});
+
+	it("waits for the holder's window rather than give the lock to the first client attaching meanwhile", () => {
+		const { mgr, sentTo } = makeManager();
+		mgr.identify("writer", DESKTOP_WINDOW);
+		mgr.attach("ch1", "writer");
+
+		mgr.onClientDisconnect("writer");
+		mgr.identify("newcomer", LAPTOP_WINDOW);
+		mgr.attach("ch1", "newcomer");
+
+		expect(mgr.getHolder("ch1")).toBeNull();
+		expect(sentTo("newcomer")).toEqual([
+			{ type: "WRITE_LOCK", channelId: "ch1", holder: null, reserved: true },
+		]);
+
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS);
+		expect(mgr.getHolder("ch1")).toBe("newcomer");
+	});
+
+	it("gives the lock at once to the holder's window already back on another connection", () => {
+		const { mgr, broadcastOn } = writerAndReader();
+		// The window reconnected before its old connection was seen to close.
+		mgr.identify("writer-reconnected", DESKTOP_WINDOW);
+		mgr.attach("ch1", "writer-reconnected");
+		expect(mgr.getHolder("ch1")).toBe("writer");
+
+		mgr.onClientDisconnect("writer");
+
+		expect(mgr.getHolder("ch1")).toBe("writer-reconnected");
+		expect(holdersNamed(broadcastOn)).toEqual(["writer", "writer-reconnected"]);
+	});
+
+	it("hands on, after the grace, a terminal its holder's window did not come back to", () => {
+		const { mgr } = makeManager();
+		mgr.identify("writer", DESKTOP_WINDOW);
+		mgr.identify("reader", LAPTOP_WINDOW);
+		mgr.attach("ch1", "writer");
+		mgr.attach("ch2", "writer");
+		mgr.attach("ch1", "reader");
+
+		mgr.onClientDisconnect("writer");
+		// The reloaded window shows ch2 only.
+		mgr.identify("writer-reloaded", DESKTOP_WINDOW);
+		mgr.attach("ch2", "writer-reloaded");
+
+		expect(mgr.getHolder("ch2")).toBe("writer-reloaded");
+		expect(mgr.getHolder("ch1")).toBeNull();
+
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS);
+		expect(mgr.getHolder("ch1")).toBe("reader");
+		expect(mgr.getHolder("ch2")).toBe("writer-reloaded");
+	});
+
+	it("leaves the lock free after the grace when several clients are left", () => {
+		const { mgr, lastBroadcast } = writerAndReader();
+		mgr.identify("second-reader", DESKTOP_OTHER_WINDOW);
+		mgr.attach("ch1", "second-reader");
+
+		mgr.onClientDisconnect("writer");
+		expect(lastBroadcast("ch1")).toEqual({
+			type: "WRITE_LOCK",
+			channelId: "ch1",
+			holder: null,
+			reserved: true,
+		});
+
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS);
+		expect(mgr.getHolder("ch1")).toBeNull();
+		expect(lastBroadcast("ch1")).toEqual({ type: "WRITE_LOCK", channelId: "ch1", holder: null });
+	});
+
+	it("ends the grace with the hub", () => {
+		const { mgr, broadcast } = writerAndReader();
+		mgr.onClientDisconnect("writer");
+		expect(vi.getTimerCount()).toBe(1);
+
+		mgr.shutdown();
+		expect(vi.getTimerCount()).toBe(0);
+		const told = broadcast.length;
+		vi.advanceTimersByTime(WRITE_LOCK_GRACE_MS);
+		expect(broadcast.length).toBe(told);
+
+		// A socket closing after the hub stopped keeps nothing either.
+		mgr.identify("late", DESKTOP_WINDOW);
+		mgr.attach("ch1", "late");
+		mgr.onClientDisconnect("late");
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("ends the grace of a terminal removed", () => {
+		const { mgr } = writerAndReader();
+		mgr.onClientDisconnect("writer");
+		expect(vi.getTimerCount()).toBe(1);
+
+		mgr.removeChannel("ch1");
+
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

@@ -9,6 +9,7 @@ import { markRaw, ref, watch } from "vue";
 import { showSimpleNotification } from "../composables/useDesktopNotifications.js";
 import { createWsClient } from "../services/ws-client.js";
 import { hubWsUrl } from "../utils/hub-url.js";
+import { windowId } from "../utils/window-id.js";
 import { useAgentManagerStore } from "./agent-manager.js";
 import { useAgentVerifyStore } from "./agent-verify.js";
 import { useAuthStore } from "./auth.js";
@@ -231,6 +232,9 @@ export const useSessionStore = defineStore("session", () => {
 			wsClient.send({
 				type: "AUTH",
 				token: authStore.token ?? "",
+				// The same after a reload or a reconnect: a write lock this window
+				// held comes back to it within the hub's grace (#846).
+				windowId: windowId(),
 			});
 		});
 	}
@@ -241,7 +245,7 @@ export const useSessionStore = defineStore("session", () => {
 	function _registerWriteLockHandlers(writeLockStore: ReturnType<typeof useWriteLockStore>): void {
 		wsClient.on("WRITE_LOCK", (msg) => {
 			if (msg.type === "WRITE_LOCK") {
-				writeLockStore.handleWriteLock(msg.channelId, msg.holder);
+				writeLockStore.handleWriteLock(msg.channelId, msg.holder, msg.reserved === true);
 			}
 		});
 		wsClient.on("WRITE_REQUEST", (msg) => {

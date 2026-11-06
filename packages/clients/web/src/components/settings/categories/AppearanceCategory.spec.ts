@@ -77,7 +77,12 @@ describe("Appearance › Host rail › Badge size", () => {
 
 		configStore.uiConfig = {
 			onChannelDead: "readonly",
-			layout: { hostRailColumns: 2, hostRailBadgeSize: "small", sidebarWidth: 200 },
+			layout: {
+				hostRailColumns: 2,
+				hostRailBadgeSize: "small",
+				sidebarWidth: 200,
+				transferPanelWidth: 300,
+			},
 		};
 		await nextTick();
 		expect(radio("Small").checked).toBe(true);

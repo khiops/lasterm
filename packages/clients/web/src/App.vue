@@ -438,6 +438,7 @@ import { useConfigStore } from './stores/config.js';
 import { useHostsStore } from './stores/hosts.js';
 import { useProfilesStore } from './stores/profiles.js';
 import { useSessionStore } from './stores/session.js';
+import { useSettingsStore } from './stores/settings.js';
 import { useThemeStore } from './stores/theme.js';
 import { useToastStore } from './stores/toast.js';
 import { useWriteLockStore } from './stores/writelock.js';
@@ -587,7 +588,8 @@ provide(
 const commandPalette = useCommandPalette();
 const shortcutsOverlay = useShortcutsOverlay();
 const profilesStore = useProfilesStore();
-const showSettings = ref(false);
+// In the settings store, so that a panel can open Settings at a place of its own (#835).
+const showSettings = toRef(useSettingsStore(), 'panelOpen');
 const desktopVersion = ref<string | undefined>(undefined);
 const closeModalVisible = ref(false);
 const desktopCloseAttempt = ref<number | null>(null);

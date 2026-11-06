@@ -12,7 +12,7 @@ export interface SettingDefinition {
 	/**
 	 * Config section name.
 	 * - "terminal" → terminal profile (cascaded, all scopes)
-	 * - "tabs" | "panes" | "search" | "startup" | "title" → UI config sub-section (global only)
+	 * - "tabs" | "panes" | "search" | "startup" | "title" | "transfer" → UI config sub-section (global only)
 	 */
 	section: string;
 	scopes: ("global" | "host" | "channel")[];
@@ -32,10 +32,25 @@ export interface SettingDefinition {
 	 * would only raise the question of where it went.
 	 */
 	disabledWhen?: { key: string; section: string; value: string; reason: string };
+	/**
+	 * A heading the setting is shown under, within its category: the settings
+	 * of one group follow each other, and the first carries the heading.
+	 */
+	group?: string;
+	/** What an empty text field means, shown in it. */
+	placeholder?: string;
 }
 
 /** UI config sub-sections — these route through PUT /api/config/ui */
-const UI_SECTIONS = new Set(["tabs", "panes", "channels", "search", "startup", "title"]);
+const UI_SECTIONS = new Set([
+	"tabs",
+	"panes",
+	"channels",
+	"search",
+	"startup",
+	"title",
+	"transfer",
+]);
 
 /**
  * Map a schema definition to the store's (section, key) pair.
@@ -374,6 +389,128 @@ export const settingsSchema: SettingDefinition[] = [
 		section: "startup",
 		scopes: ["global"],
 		description: "Show welcome tab when connecting to a host",
+	},
+
+	// ─── File transfer category (#835) ─────────────────────────────────
+	// Shown only while `[experimental] file_transfer` is on: FileTransferCategory
+	// shows the switch alone until then. Terminal-profile keys, cascaded like
+	// the font; the last two are the host's and are never set per terminal.
+	{
+		key: "transferDrop",
+		label: "Files dropped on a terminal",
+		type: "select",
+		category: "transfer",
+		section: "terminal",
+		group: "Uploads",
+		scopes: ["global", "host", "channel"],
+		options: [
+			{ label: "Upload to its host", value: "upload" },
+			{ label: "Do nothing", value: "off" },
+		],
+	},
+	{
+		key: "transferConfirmDrop",
+		label: "Confirm before uploading",
+		type: "toggle",
+		category: "transfer",
+		section: "terminal",
+		group: "Uploads",
+		scopes: ["global", "host", "channel"],
+		description: "Show where dropped files will go, and ask, before the upload starts.",
+	},
+	{
+		key: "transferOnConflict",
+		label: "When a file already exists",
+		type: "select",
+		category: "transfer",
+		section: "terminal",
+		group: "Uploads",
+		scopes: ["global", "host", "channel"],
+		options: [
+			{ label: "Ask", value: "ask" },
+			{ label: "Replace it", value: "replace" },
+			{ label: "Keep both", value: "keep_both" },
+			{ label: "Skip it", value: "skip" },
+		],
+	},
+	{
+		key: "transferFollowCwd",
+		label: "Upload to the shell's folder",
+		type: "toggle",
+		category: "transfer",
+		section: "terminal",
+		group: "Uploads",
+		scopes: ["global", "host", "channel"],
+		description:
+			"Upload into the folder the terminal's shell is in, when it is known. Otherwise, to the host's upload folder.",
+	},
+	{
+		key: "transferFallbackDir",
+		label: "Upload folder",
+		type: "text",
+		category: "transfer",
+		section: "terminal",
+		group: "Uploads",
+		scopes: ["global", "host"],
+		placeholder: "Home folder",
+		description:
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: the `${VAR}` syntax the agent expands, named as such
+			"Where uploads go when the shell's folder is unknown or not followed. Empty for the home folder; ${VAR} is expanded on the host.",
+	},
+	{
+		key: "transferVerify",
+		label: "Verify uploads without SFTP",
+		type: "toggle",
+		category: "transfer",
+		section: "terminal",
+		group: "Uploads",
+		scopes: ["global", "host"],
+		description:
+			"On a host whose SSH server offers no SFTP, check each uploaded file's SHA-256 on the host.",
+	},
+	// `[transfer]`: the window's files panel, global only.
+	{
+		key: "panelSide",
+		label: "Panel side",
+		type: "select",
+		category: "transfer",
+		section: "transfer",
+		scopes: ["global"],
+		group: "Panel",
+		options: [
+			{ label: "Right", value: "right" },
+			{ label: "Left", value: "left" },
+		],
+	},
+	{
+		key: "openOnDrag",
+		label: "Open when files are dragged in",
+		type: "toggle",
+		category: "transfer",
+		section: "transfer",
+		scopes: ["global"],
+		group: "Panel",
+	},
+	{
+		key: "maxConcurrent",
+		label: "Transfers at once",
+		type: "number",
+		category: "transfer",
+		section: "transfer",
+		scopes: ["global"],
+		group: "Panel",
+		min: 1,
+		max: 3,
+		step: 1,
+	},
+	{
+		key: "showHidden",
+		label: "Show hidden files",
+		type: "toggle",
+		category: "transfer",
+		section: "transfer",
+		scopes: ["global"],
+		group: "Panel",
 	},
 ];
 

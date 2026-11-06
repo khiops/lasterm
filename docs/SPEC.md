@@ -256,6 +256,9 @@ Local daemon, single process, binds to 127.0.0.1.
   each temporary cut to what its host acknowledged, a missing or short one started again, a placed
   file never sent again. A cancelled question leaves it resumable, saying why. One whose window is
   still open and whose link merely dropped resumes when the hub reconnects the host
+- A hub that stops (quit, stop, a signal) gives what it serves a second to finish, then ends it: a
+  chunk whose body is still arriving, a WebSocket whose client does not answer the close (#872).
+  Each window's uploads stop interrupted, their acknowledged prefix kept, and the hub exits at once
 - `TRANSFER_DISCARD` and a 7-day expiry remove what an upload left on its host, at once or at the
   host's next connection; an upload's start sweeps the folders it lists of temporaries no record
   knows, older than an hour. Logs no path and no name, and nothing per chunk at INFO

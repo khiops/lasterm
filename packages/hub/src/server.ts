@@ -220,6 +220,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		options.securityLog ?? new SecurityLog((msg, fields) => server.log.info(fields, msg)),
 	);
 	server.decorateRequest("authTokenRecord", null);
+	endWhatOutlastsTheClose(server);
 
 	// Helmet — sets security-related HTTP response headers
 	await server.register(fastifyHelmet, {
@@ -762,6 +763,45 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 	await registerSeaStaticServing(server);
 
 	return server;
+}
+
+/**
+ * How long a closing server lets what it serves finish by itself: an answer
+ * being written, a chunk the host is acknowledging, a WebSocket answering the
+ * close (#872).
+ */
+export const CLOSE_DRAIN_MS = 1_000;
+
+/**
+ * A close waits for every connection to end, and nothing ends one that is
+ * still busy: Fastify closes only the idle ones, and a WebSocket client gets
+ * the `ws` library's 30 s to answer the close. An upload's chunk whose body
+ * stops arriving, as a desktop's does while it quits, or a window's socket
+ * whose client reads nothing, held a quitting hub past its teardown bound, so
+ * that it exited 1 (#872). Past `CLOSE_DRAIN_MS`, what remains is ended: the
+ * HTTP connections destroyed, the WebSockets terminated. Each window's uploads
+ * are then interrupted where the host's bytes end, as when a window leaves,
+ * and the `onClose` hooks that follow save them.
+ */
+function endWhatOutlastsTheClose(server: FastifyInstance): void {
+	let drain: NodeJS.Timeout | null = null;
+	server.addHook("preClose", (done) => {
+		drain = setTimeout(() => {
+			drain = null;
+			server.server.closeAllConnections();
+			// Absent on a server built without databases: it has no WebSocket route.
+			const sockets = (server as { websocketServer?: FastifyInstance["websocketServer"] })
+				.websocketServer;
+			for (const client of sockets?.clients ?? []) client.terminate();
+		}, CLOSE_DRAIN_MS);
+		drain.unref();
+		done();
+	});
+	server.addHook("onClose", (_instance, done) => {
+		if (drain !== null) clearTimeout(drain);
+		drain = null;
+		done();
+	});
 }
 
 function getHeaderValue(value: string | string[] | undefined): string | undefined {

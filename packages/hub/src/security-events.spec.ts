@@ -568,6 +568,22 @@ async function serverLoggingTo(serverLog: ServerLog, level: LogLevel): Promise<F
 
 const bearer = { authorization: `Bearer ${PRIMARY_TOKEN}` };
 
+/** A terminal on the local host, and one on the remote host `remoteHostId`, as rows only. */
+function terminalsOnLocalAndRemoteHosts(remoteHostId: string): { local: string; remote: string } {
+	const dal = new MetaDAL(dbs.meta);
+	const [local] = dal.listLocalHosts();
+	if (!local) throw new Error("the hub made no local host");
+	const ids = { local: "01K832F5000000000000000001", remote: "01K832F5000000000000000002" };
+	for (const [hostId, channelId, session] of [
+		[local.id, ids.local, "01K832F5SE5500000000000001"],
+		[remoteHostId, ids.remote, "01K832F5SE5500000000000002"],
+	] as const) {
+		dal.createSession({ id: session, hostId, status: "active" });
+		dal.createChannel({ id: channelId, sessionId: session, status: "live" });
+	}
+	return ids;
+}
+
 describe("routine requests leave no line at the shipped level", () => {
 	// Fastify's own "incoming request" and "request completed" lines, two per
 	// request at INFO, were most of the desktop's hub.log (#512).
@@ -590,14 +606,37 @@ describe("routine requests leave no line at the shipped level", () => {
 			// The settings page asks for a host's environment each time it shows
 			// one (#576); a host with no agent connected answers 409.
 			const environment = `/api/hosts/${hostId}/agent-environment?mode=inherit`;
-			for (let i = 0; i < 3; i++) {
-				expect((await hub.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
-				const hosts = await hub.inject({ method: "GET", url: "/api/hosts", headers: bearer });
-				expect(hosts.statusCode).toBe(200);
-				expect((await hub.inject({ method: "GET", url: asset })).statusCode).toBe(404);
-				expect((await hub.inject({ method: "GET", url: "/nowhere" })).statusCode).toBe(404);
-				const unreached = await hub.inject({ method: "GET", url: environment, headers: bearer });
-				expect(unreached.statusCode).toBe(409);
+			// A files panel lists its folder each time it opens or moves (#832):
+			// found, missing, refused, or on a host not connected.
+			const channels = terminalsOnLocalAndRemoteHosts(hostId);
+			const folder = fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-routine-files-"));
+			const filesOf = (channelId: string, query: string) =>
+				hub.inject({
+					method: "GET",
+					url: `/api/channels/${channelId}/files${query}`,
+					headers: bearer,
+				});
+			try {
+				for (let i = 0; i < 3; i++) {
+					expect((await hub.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+					const hosts = await hub.inject({ method: "GET", url: "/api/hosts", headers: bearer });
+					expect(hosts.statusCode).toBe(200);
+					expect((await hub.inject({ method: "GET", url: asset })).statusCode).toBe(404);
+					expect((await hub.inject({ method: "GET", url: "/nowhere" })).statusCode).toBe(404);
+					const unreached = await hub.inject({ method: "GET", url: environment, headers: bearer });
+					expect(unreached.statusCode).toBe(409);
+					const at = `?path=${encodeURIComponent(folder)}`;
+					expect((await filesOf(channels.local, at)).statusCode).toBe(200);
+					expect((await filesOf(channels.local, `${at}-missing`)).statusCode).toBe(404);
+					expect((await filesOf(channels.local, "?path=relative")).statusCode).toBe(400);
+					expect((await filesOf(channels.remote, "")).statusCode).toBe(409);
+					const stat = `/api/channels/${channels.local}/files/stat${at}`;
+					expect((await hub.inject({ method: "GET", url: stat, headers: bearer })).statusCode).toBe(
+						200,
+					);
+				}
+			} finally {
+				fs.rmSync(folder, { recursive: true, force: true });
 			}
 
 			expect(serverLog.shipped(from)).toEqual([]);
@@ -724,6 +763,98 @@ describe("a host's environment leaves no trace in the logs (#576)", () => {
 			ws?.terminate();
 			await hub.close();
 			agentEnvironment.env = {};
+		}
+	});
+});
+
+describe("the paths and names a client browses leave no trace in the logs (#832)", () => {
+	// A path or a file name is the user's: what they keep where, and what they
+	// call it. Neither reaches hub.log nor hub.jsonl, at any level, whatever
+	// the request comes to.
+	it("logs no path and no name, listed, read, created or refused", async () => {
+		const folderName = "lasterm-spec-folder-4242";
+		const fileName = "lasterm-spec-file-4242.txt";
+		const newName = "lasterm-spec-new-4242";
+		const serverLog = new ServerLog();
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const hub = await createServer({
+			tls: getTestTls(),
+			logger: { level: "trace", destination: serverLog.destination },
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			securityLog: log.securityLog,
+			hubLogger,
+		});
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-files-log-"));
+		const folder = path.join(root, folderName);
+		fs.mkdirSync(folder);
+		fs.writeFileSync(path.join(folder, fileName), "x");
+		let ws: InjectedSocket | undefined;
+		try {
+			await hub.ready();
+			const remoteHostId = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@pi.local",
+			}).id;
+			const channels = terminalsOnLocalAndRemoteHosts(remoteHostId);
+			// The window that holds the terminal's write lock.
+			ws = await openSocket(hub);
+			const received: ProtocolMessage[] = [];
+			ws.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)));
+			});
+			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			const clientId = (received.find((m) => m.type === "AUTH_OK") as { clientId: string })
+				.clientId;
+			ws.send(encodeMessage({ type: "WRITE_CLAIM", channelId: channels.local } as ProtocolMessage));
+			ws.send(encodeMessage({ type: "PING" }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			const from = serverLog.mark();
+
+			const get = (channelId: string, route: string, at: string) =>
+				hub.inject({
+					method: "GET",
+					url: `/api/channels/${channelId}/${route}?path=${encodeURIComponent(at)}&hidden=1`,
+					headers: bearer,
+				});
+			const create = (at: string, headers: Record<string, string>) =>
+				hub.inject({
+					method: "POST",
+					url: `/api/channels/${channels.local}/folders`,
+					headers: { ...bearer, ...headers },
+					payload: { path: at },
+				});
+			const statuses = [
+				(await get(channels.local, "files", folder)).statusCode,
+				(await get(channels.local, "files/stat", path.join(folder, fileName))).statusCode,
+				(await get(channels.local, "files/free-space", folder)).statusCode,
+				(await get(channels.local, "files", path.join(folder, fileName))).statusCode,
+				(await get(channels.local, "files", path.join(folder, newName))).statusCode,
+				(await get(channels.remote, "files", folder)).statusCode,
+				(await create(path.join(folder, newName), { "x-lasterm-client-id": clientId })).statusCode,
+				(await create(path.join(folder, newName), { "x-lasterm-client-id": clientId })).statusCode,
+				(await create(path.join(folder, `${newName}-2`), {})).statusCode,
+			];
+
+			expect(statuses).toEqual([200, 200, 200, 409, 404, 409, 201, 409, 403]);
+			expect(fs.statSync(path.join(folder, newName)).isDirectory()).toBe(true);
+			expect(serverLog.shipped(from)).toEqual([]);
+			const text = `${serverLog.text()}\n${log.text()}`;
+			for (const name of [folderName, fileName, newName]) expect(text).not.toContain(name);
+		} finally {
+			ws?.terminate();
+			await hub.close();
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

@@ -6,8 +6,10 @@
  * them here; each is tested beside this file.
  */
 import {
+	type CwdSource,
 	type DroppedOverride,
 	type HostOs,
+	type LiveCwd,
 	type ProfileWriteLayers,
 	type ProfileWriteScope,
 	planProfileWrite,
@@ -235,21 +237,8 @@ export function typeAheadIndex(
 
 // ─── The status line ─────────────────────────────────────────────────────────
 
-/** Where a terminal's working directory came from, as a CWD_CHANGE says it (#834). */
-export type CwdSource = "shell" | "process" | "start";
-
 /** A terminal's working directory as it is now, as the hub last relayed it (#834). */
-export interface LiveCwd {
-	/** Null when the agent cannot tell. */
-	readonly cwd: string | null;
-	readonly source: CwdSource;
-	/** False while a program holds the terminal; absent where it cannot be read. */
-	readonly atPrompt?: boolean;
-	/** The program holding the terminal, when it is not the shell. */
-	readonly foreground?: string;
-	/** The host a session nested in the terminal is on, when its shell said so. */
-	readonly otherHost?: string;
-}
+export type { CwdSource, LiveCwd };
 
 /** The facts the status line is made of. */
 export interface StatusFacts {

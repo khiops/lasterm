@@ -505,14 +505,16 @@ export const useSessionStore = defineStore("session", () => {
 	}
 
 	/**
-	 * A terminal's live working directory (#834), which the files panel follows (#836): each
-	 * CWD_CHANGE, and the last one in ATTACH_OK and in each STATE_SYNC entry. A hub that does not
-	 * relay it sends none of them, and the fields are read only when present. A terminal that
-	 * ends has none any more.
+	 * A terminal's live working directory (#834, PROTOCOL.md § 3.20), which the files panel
+	 * follows (#836): each CWD_CHANGE, and the last one in ATTACH_OK and in each STATE_SYNC
+	 * entry, read only when present: absent until the agent has said it, and from an agent or a
+	 * hub older than #834. A terminal that ends has none any more.
 	 */
 	function _registerCwdHandlers(filesPanel: ReturnType<typeof useFilesPanelStore>): void {
 		const fields = (msg: unknown) => msg as Readonly<Record<string, unknown>>;
-		wsClient.on("CWD_CHANGE", (msg) => filesPanel.takeCwd(fields(msg)));
+		wsClient.on("CWD_CHANGE", (msg) => {
+			if (msg.type === "CWD_CHANGE") filesPanel.takeCwd(fields(msg));
+		});
 		wsClient.on("ATTACH_OK", (msg) => filesPanel.takeCwd(fields(msg)));
 		wsClient.on("STATE_SYNC", (msg) => {
 			if (msg.type !== "STATE_SYNC") return;

@@ -121,6 +121,13 @@ export interface UploadBackend {
 	/** Remove a file, if it is there. Never rejects. */
 	remove(path: string): Promise<void>;
 	/**
+	 * Cut the file `path` to its first `size` bytes: a temporary that resumes
+	 * after a hub restart keeps only what its host acknowledged (#860), since
+	 * with several writes in flight a later one can land before an earlier,
+	 * and its size proves nothing. `NOT_FOUND` when it is not there.
+	 */
+	truncate(path: string, size: number): Promise<void>;
+	/**
 	 * How a new file reaches its name in `dir`: through a temporary, or, where
 	 * the host's rename replaces what it lands on and nothing else places
 	 * without replacing, written under its own name directly, created

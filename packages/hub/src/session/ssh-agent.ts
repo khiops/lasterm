@@ -188,7 +188,7 @@ async function promptUntilKeyDecrypts(
 		console.error(
 			`[lasterm-ssh] passphrase obtained: ${secret === null ? "no (cancelled)" : "yes"}`,
 		);
-		if (secret === null) throw new AuthCancelledError();
+		if (secret === null) throw new AuthCancelledError("passphrase");
 		// ssh2 connect() decrypts the key itself; checked here first, so that a
 		// wrong passphrase is asked for again rather than end the connection.
 		const parsed = ssh2.utils.parseKey(keyContent, secret);
@@ -230,7 +230,7 @@ export async function buildSshConnectConfig(
 		}
 		const secret = await promptAuth(hostId, "password", `Enter password for ${user}@${hostname}`);
 		if (secret === null) {
-			throw new AuthCancelledError();
+			throw new AuthCancelledError("password");
 		}
 		// Only the server can say it is wrong, once dialled: then it is asked
 		// for again, saying so, by whoever dials (`passwordRefusal`, #815).

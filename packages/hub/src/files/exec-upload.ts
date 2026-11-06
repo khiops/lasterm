@@ -165,6 +165,43 @@ export function posixRemoveScript(path: string): string {
 	return posixScript([`rm -f -- ${quotePosix(path)}`, "r OK"].join("\n"));
 }
 
+/**
+ * The script that cuts the file `path` to its first `size` bytes (#860):
+ * `truncate -s`, GNU coreutils' and BusyBox's, else POSIX `dd`, which cuts
+ * its output where `seek` leaves it unless told `conv=notrunc`, and copies
+ * nothing from `/dev/null`. Not through a link, nor anything but a file.
+ * Then the size it now has, after `OK`.
+ */
+export function posixTruncateScript(path: string, size: number): string {
+	if (!Number.isSafeInteger(size) || size < 0) throw new Error("A size is a whole number of bytes");
+	return posixScript(
+		[
+			`t=${quotePosix(path)}`,
+			`n=${size}`,
+			'{ [ -f "$t" ] && [ ! -L "$t" ]; } || r NOT_FOUND',
+			'truncate -s "$n" -- "$t" 2>/dev/null || dd if=/dev/null of="$t" bs=1 seek="$n" count=0 2>/dev/null || r FAILED',
+			's=$(wc -c < "$t") || r FAILED',
+			`printf '%s\\nOK\\n%s\\n' "$M" "$s"`,
+		].join("\n"),
+	);
+}
+
+/**
+ * The PowerShell that cuts the file `$p` to its first `size` bytes:
+ * `FileStream.SetLength`, on a file that is not a reparse point. Then the
+ * size it now has, after `OK`.
+ */
+export function windowsTruncateScript(path: string, size: number): string {
+	if (!Number.isSafeInteger(size) || size < 0) throw new Error("A size is a whole number of bytes");
+	return windowsScript(
+		path,
+		WINDOWS_ERRORS,
+		"if(-not [IO.File]::Exists($p) -or (([int][IO.File]::GetAttributes($p)) -band 1024) -ne 0){Ans 'NOT_FOUND'}",
+		`try{$o=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write);try{$o.SetLength(${size})}finally{$o.Dispose()}}catch{Why $_;throw}`,
+		"Ans ('OK'+[char]10+[IO.FileInfo]::new($p).Length)",
+	);
+}
+
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
 /** What every Windows answer starts with, and how an exception becomes one. */
@@ -546,6 +583,43 @@ export class ExecUploadBackend implements UploadBackend {
 			}
 		} catch {
 			// Left behind: nothing else can be done about it here.
+		}
+	}
+
+	async truncate(path: string, size: number): Promise<void> {
+		const what = "The file could not be cut to what the host acknowledged";
+		let result: { stdout: string | Buffer; stderr: string; exitCode: number | null };
+		if (this.style === "windows") {
+			try {
+				result = await sshExec(
+					this.client,
+					encodedPowerShell(windowsTruncateScript(path, size)),
+					WINDOWS_TIMEOUT_MS,
+				);
+			} catch (error) {
+				throw this.interrupted(error);
+			}
+		} else {
+			result = await this.run("sh -s", what, () =>
+				Readable.from(Buffer.from(posixTruncateScript(path, size), "utf8")),
+			);
+		}
+		const reply = replyOf(result);
+		switch (reply?.status) {
+			case "OK":
+				if (Number(reply.lines[0]) !== size) {
+					throw new FileAccessError(
+						"FILE_ACCESS_FAILED",
+						`${what}: it holds ${reply.lines[0] || "no"} bytes, not ${size}`,
+					);
+				}
+				return;
+			case "NOT_FOUND":
+				throw new FileAccessError("NOT_FOUND", `${what}: ${REASONS.NOT_FOUND}`);
+			case "PERMISSION_DENIED":
+				throw new FileAccessError("PERMISSION_DENIED", `${what}: ${REASONS.PERMISSION_DENIED}`);
+			default:
+				throw this.scriptFailure(result, what);
 		}
 	}
 

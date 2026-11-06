@@ -98,10 +98,38 @@ export type TransferOutcome =
 
 /**
  * How a placed file was checked: its size; its size and SHA-256 (over SSH
- * commands with `transfer_verify` on); or its size alone where the host had
- * no tool to hash it with.
+ * commands with `transfer_verify` on); its size alone where the host had no
+ * tool to hash it with; or, over SSH commands with `transfer_verify` on, its
+ * size alone because it resumed after a hub restart (#860): the hash the hub
+ * kept of the bytes it had sent ended with that hub.
  */
-export type TransferVerification = "size" | "sha256" | "no_hash_tool";
+export type TransferVerification = "size" | "sha256" | "no_hash_tool" | "size_resumed";
+
+/**
+ * What an upload as a whole is at (#860): `running` while a window sends it;
+ * `interrupted` once that window left, its connection was closed or the hub
+ * restarted, until it is resumed; `done` once nothing is left to send, answer
+ * or place; `discarded` once Discard or the 7-day expiry dropped it, its
+ * temporaries removed at once or at the next connection to its host.
+ */
+export type TransferUploadState = "running" | "interrupted" | "done" | "discarded";
+
+/** Why an upload was not resumed: what reaching its host needed, and did not get. */
+export type TransferNotResumedReason =
+	/** A key's passphrase was asked for, and not given. */
+	| "needs_passphrase"
+	/** The account's password was asked for, and not given. */
+	| "needs_password"
+	/** The host's key was asked about, and not accepted. */
+	| "host_key_not_accepted"
+	/** The host could not be reached, for any other reason. */
+	| "host_unreachable";
+
+/** How long an interrupted upload nobody resumes is kept before it is discarded (#860). */
+export const TRANSFER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The most uploads one TRANSFER_RESUME or TRANSFER_DISCARD names. */
+export const TRANSFER_MAX_IDS = 1000;
 
 /** How a conflict is answered. A folder where a file goes, or the reverse, takes only `keep_both` or `skip`. */
 export type TransferConflictAction = Exclude<TransferOnConflict, "ask">;
@@ -162,6 +190,27 @@ export interface TransferCancelMessage {
 	type: "TRANSFER_CANCEL";
 	transferId: string;
 	scope: TransferScope;
+}
+
+/**
+ * Resume interrupted uploads (#860), one or several ("Resume all"). The hub
+ * reaches their hosts one at a time, asking this window what a connection
+ * needs (a passphrase, a host key), and each file goes on from the bytes its
+ * host acknowledged; a placed file is never sent again. This window sends
+ * the bytes from then on.
+ */
+export interface TransferResumeMessage {
+	type: "TRANSFER_RESUME";
+	transferIds: string[];
+}
+
+/**
+ * Drop uploads (#860): their temporaries removed, at once or at the next
+ * connection to their host, and their records deleted. Placed files stay.
+ */
+export interface TransferDiscardMessage {
+	type: "TRANSFER_DISCARD";
+	transferIds: string[];
 }
 
 // ─── Hub → UI ────────────────────────────────────────────────────────────────
@@ -260,6 +309,34 @@ export interface TransferDoneMessage {
 	transferId: string;
 	channelId: string;
 	totals: TransferTotals;
+}
+
+/**
+ * Hub → every client attached, the window sending it and the window that
+ * asked: an upload's own state changed (#860).
+ */
+export interface TransferStateMessage {
+	type: "TRANSFER_STATE";
+	transferId: string;
+	channelId: string;
+	hostId: string;
+	state: TransferUploadState;
+	/** While `interrupted`, after a resume that could not reach the host: why. */
+	reason?: TransferNotResumedReason;
+}
+
+/** An interrupted upload, as STATE_SYNC lists it to every window (#860). */
+export interface TransferSyncEntry {
+	transferId: string;
+	channelId: string;
+	hostId: string;
+	/** The destination, normalised for the host. */
+	dir: string;
+	state: "interrupted";
+	reason?: TransferNotResumedReason;
+	totals: TransferTotals;
+	/** ISO 8601: when it last changed. It is discarded `TRANSFER_EXPIRY_MS` after. */
+	updatedAt: string;
 }
 
 /** One name a Windows host would refuse, or a tree that cannot be sent as given. */

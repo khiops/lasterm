@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-10-30
+> Last updated: 2026-11-06
 
 ## 1. Overview
 
@@ -232,6 +232,78 @@ CREATE TABLE schema_version (
 -- The baseline's version (§ 9.3)
 INSERT INTO schema_version VALUES (21, datetime('now'));
 ```
+
+### 3.9 transfers and transfer_items (#860)
+
+Uploads to a terminal's host (PROTOCOL.md § 4.19), kept so that a hub restart, a crash or an
+update loses none. Added by `026-transfers.sql`.
+
+```sql
+CREATE TABLE transfers (
+  id          TEXT PRIMARY KEY,                                   -- ULID
+  host_id     TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+  channel_id  TEXT NOT NULL,           -- the terminal it started from; no reference: it outlives it
+  token_id    TEXT,                    -- the paired device that holds the bytes; NULL without auth
+  dest_dir    TEXT NOT NULL,           -- normalised for the host
+  path_style  TEXT NOT NULL,           -- 'posix' | 'windows'
+  direction   TEXT NOT NULL DEFAULT 'upload',                     -- 'download' later
+  state       TEXT NOT NULL,           -- 'running' | 'interrupted' | 'done' | 'discarded'
+  on_conflict TEXT NOT NULL,           -- 'ask' | 'replace' | 'keep_both' | 'skip'
+  verify      INTEGER NOT NULL DEFAULT 0,  -- SHA-256 over SSH commands (transfer_verify)
+  signature   TEXT NOT NULL,           -- the tree's, for a drop that joins it
+  reason      TEXT,                    -- why the last resume did not reach the host
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL            -- the last change of its state or reason
+);
+CREATE INDEX idx_transfers_host ON transfers(host_id, state);
+
+CREATE TABLE transfer_items (
+  transfer_id   TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+  id            INTEGER NOT NULL,      -- its index in TRANSFER_START's items, its item_id
+  parent_id     INTEGER,               -- the folder it is in; NULL at the top
+  rel_path      TEXT NOT NULL,
+  kind          TEXT NOT NULL,         -- 'file' | 'dir'
+  size          INTEGER NOT NULL DEFAULT 0,
+  mtime         INTEGER,               -- milliseconds since the epoch
+  state         TEXT NOT NULL,         -- as TRANSFER_PROGRESS says it
+  acked_offset  INTEGER NOT NULL DEFAULT 0,  -- the contiguous prefix the host acknowledged
+  temp_path     TEXT,                  -- its temporary on the host, while it is not placed
+  temp_whole    INTEGER NOT NULL DEFAULT 0,  -- every byte there and checked: only placing is left
+  direct        INTEGER NOT NULL DEFAULT 0,  -- written under its own name (an SFTP rename that replaces)
+  final_name    TEXT,                  -- the name Keep both gave it
+  resolution    TEXT,                  -- a conflict's answer
+  outcome       TEXT,
+  verification  TEXT,
+  existing_json TEXT,                  -- what had its name, for a conflict
+  type_clash    INTEGER NOT NULL DEFAULT 0,
+  late          INTEGER NOT NULL DEFAULT 0,
+  error_code    TEXT,
+  reason        TEXT,
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (transfer_id, id)
+);
+CREATE INDEX idx_transfer_items_state ON transfer_items(transfer_id, state);
+```
+
+- **What is written, and when.** An upload's rows are written once it is accepted. A state change
+  (and what changes with it: a temporary's path, an outcome, a reason) is written at once, with
+  whatever else changed in the same turn, in one transaction. `acked_offset` is written once 8 MiB
+  more are acknowledged, or within 2 s, and all of it when the hub stops: the quit writes it before
+  the agents stop. It is the **contiguous** prefix the host acknowledged, never a temporary's size:
+  with several SFTP writes in flight a later one can land first. After a crash the host can hold
+  more than it says (a resume cuts the temporary back) or, over SSH commands, less (the file
+  starts again).
+- **After a restart** every upload `running` is `interrupted`, and each file `sending` or
+  `verifying` too, its temporary and `acked_offset` kept. A record whose upload was `done` is
+  deleted then: nothing of it is left to resume.
+- **Gone** when every file is placed or skipped (10 minutes after, with the upload in memory), when
+  it is discarded and its temporaries removed, and with its host.
+- **`discarded`** marks a record whose temporaries wait for the next connection to its host:
+  Discard and the 7-day expiry (counted from `updated_at`) remove them by `temp_path`, then delete
+  the record.
+- No column has a CHECK: the states and kinds are the hub's to read, and a later one is added
+  without rebuilding a table (§ 9.1). Paths and names are stored as a terminal's directory and title
+  are, and never logged.
 
 ## 4. Schema — spool.db
 
@@ -513,6 +585,8 @@ packages/hub/src/storage/migrations/
 │   ├── 022-unpadded-ssh-pins.sql
 │   ├── 023-discovered-default-shell.sql
 │   ├── 024-launch-profile-set-by-user.sql
+│   ├── 025-launch-profile-report-directory.sql
+│   ├── 026-transfers.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -550,6 +624,7 @@ them. `spool.db` was not squashed: it still has its one migration.
 | `023-discovered-default-shell.sql` | Adds `hosts.discovered_default_shell`, where the default shell a host's agent reports in its HELLO goes from now on (#794). A hub before it wrote that shell into `default_shell` at every connection: a host that has connected (`discovered_shells` set) has that value copied to the new column, so the hub knows its agent's default before the next connection. `default_shell` is left as it is: from #802 on nothing reads or writes it, a host's default being a launch profile, and no released hub ever started a terminal from it. The column stays (§ 9.1). A hub before #794, run again on the database, ignores the new column and writes the agent's default into `default_shell` at the next connection, as it always did. |
 | `024-launch-profile-set-by-user.sql` | Adds `host_launch_profiles.set_by_user`: 1 for an override the user set through the hosts' profile routes, 0 for one the hub made from what an agent reported (#800). The hub marks the profile of the default shell a host's agent reports as the host's default only where the host has none, or where the one it has is its own earlier mark, which so follows the agent's default; it never replaces a default the user set, and never marks a profile the user hid. A hub before it marked the agent's at every connection, over the user's, so every row already there is left at 0, the column's default, and none is rewritten. A hub before #800, run again on the database, ignores the column and marks its agent's default at every connection again; a row it adds reads 0. |
 | `025-launch-profile-report-directory.sql` | Adds `launch_profiles.report_directory`: 1 for a profile whose PowerShell reports its directory (#839). The hub then says so in the SPAWN of each of its terminals, restarts included, and a Windows agent starts a `pwsh` or `powershell` whose arguments run nothing of their own with a prompt that reports its directory (PROTOCOL.md § 3.2). Every profile already there reads 0, the column's default: the switch changes the command line a shell starts with, and only its user turns it on. No row is rewritten. A hub before #839, run again on the database, ignores the column and starts every profile as it always did; a profile it adds reads 0. |
+| `026-transfers.sql` | Adds `transfers` and `transfer_items` (§ 3.9), where uploads are kept so that a restart, a crash or an update loses none (#860). Nothing else is touched. A hub before #860, run again on the database, opens it as one ahead of its migrations (§ 9.1), never names the two tables, and keeps its uploads in memory as it did; a host it deletes takes its uploads' rows with it, through the cascades. Back on a hub with #860, what it left there is read as before. |
 
 ## 10. Backup & Restore
 

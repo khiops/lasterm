@@ -196,6 +196,24 @@ export class LocalUploadBackend implements UploadBackend {
 		await fs.rm(path, { force: true }).catch(() => {});
 	}
 
+	async truncate(path: string, size: number): Promise<void> {
+		// Not through a link: a temporary is a file the hub created, and a link
+		// put in its place is not followed (where the system has O_NOFOLLOW).
+		let file: fs.FileHandle;
+		try {
+			file = await fs.open(path, constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0));
+		} catch (error) {
+			throw localFailure(error, "The file could not be cut to what the host acknowledged");
+		}
+		try {
+			await file.truncate(size);
+		} catch (error) {
+			throw localFailure(error, "The file could not be cut to what the host acknowledged");
+		} finally {
+			await file.close().catch(() => {});
+		}
+	}
+
 	async placement(): Promise<"temp"> {
 		return "temp";
 	}

@@ -300,6 +300,18 @@ export class SftpUploadBackend implements UploadBackend {
 		}
 	}
 
+	async truncate(path: string, size: number): Promise<void> {
+		const what = "The file could not be cut to what the host acknowledged";
+		const session = await this.session(what);
+		try {
+			await sftpRequest<void>(session, (done) => {
+				session.channel.setstat(this.wire(path), { size }, (error) => done(error, undefined));
+			});
+		} catch (error) {
+			throw this.failure(error, what);
+		}
+	}
+
 	async placement(dir: string): Promise<"temp" | "direct"> {
 		const session = await this.session("The folder could not be written in");
 		// A hard link places without replacing, wherever it is offered.

@@ -628,7 +628,8 @@ TerminalProfile (config override — used in layers 3 & 4)
  ├── cursorStyle?: 'block' | 'underline' | 'bar'
  ├── scrollback?: number
  └── …                                 // every [terminal] key of CONFIG_REFERENCE.md, camelCased:
-                                       // bell, wallpaper, background, envMode, env, whenEnded
+                                       // bell, wallpaper, background, envMode, env, whenEnded,
+                                       // transfer* (§ 6)
 
 TabLayout (workspace persistence)
  ├── type: 'tabs'
@@ -1059,6 +1060,31 @@ The environment a terminal is spawned with cascades through the same layers, and
 |----------|-------------|--------|---------|-------|
 | `env_mode` | `envMode` | `inherit`, `minimal` | `inherit` | What the PTY's environment starts from, applied by the agent on the host (#576): `inherit`, the agent's own environment; `minimal`, only what programs need to run (`HOME`, `PATH`, the locale…), taken from it and never invented. The lists are in PROTOCOL.md § 3.2. Either way the agent then drops the inherited `NO_COLOR` and sets the terminal's identity: `TERM=xterm-256color` on Unix, `COLORTERM=truecolor`, `TERM_PROGRAM=lasterm`, `TERM_PROGRAM_VERSION`. |
 | `env` | `env` | map of name → value or `null` | `{}` | This scope's **changes** to that start, never a snapshot of the result. A value sets the variable; `null` removes it, whether an outer scope set it or the agent would have passed it on (`false` in `config.toml`, which has no null). Merged key by key down the layers: a host changes what the global scope set, a channel both, and the same name set closer wins, either way. The hub resolves the layers into values and removals and sends them in SPAWN as `env` and `env_unset`; a launch profile's own `env`, then the spawn request's, are applied over them. On a Windows host names compare without case. Stored in the clear in `meta.db` and `config.toml`, like every other profile value: not a place for secrets. Reaches the terminals spawned after it and the ones restarted, never the ones already running. |
+
+File transfer's keys (#835, part of #721) cascade through the same layers, save two that stop at
+the host. All of them wait behind `[experimental] file_transfer`, off by default until upload
+(#837) lands; `isFileTransferEnabled` (`@lasterm/shared`) is the one check each part makes:
+
+| TOML key | Profile key | Values | Default | Scopes | Notes |
+|----------|-------------|--------|---------|--------|-------|
+| `transfer_drop` | `transferDrop` | `upload`, `off` | `upload` | global, host, terminal | What dropping files on a terminal does. |
+| `transfer_confirm_drop` | `transferConfirmDrop` | boolean | `true` | global, host, terminal | Ask before the upload a drop starts, showing where it goes. |
+| `transfer_on_conflict` | `transferOnConflict` | `ask`, `replace`, `keep_both`, `skip` | `ask` | global, host, terminal | What an upload does with a file of the same name where it lands. |
+| `transfer_follow_cwd` | `transferFollowCwd` | boolean | `true` | global, host, terminal | Upload into the shell's folder when it is known. |
+| `transfer_fallback_dir` | `transferFallbackDir` | string, ≤ 1024 | `""` (the home) | global, host | Where an upload lands otherwise. `${VAR}` is expanded by the agent, as in a launch profile's `cwd`. |
+| `transfer_verify` | `transferVerify` | boolean | `true` | global, host | Check uploads by SHA-256 over SSH commands, on hosts whose server offers no SFTP. |
+
+A terminal's profile refuses the two host keys (`HOST_ONLY_PROFILE_KEYS`). Every value is checked
+where it is written, by the tables of `file-transfer.ts`, and one in `config.toml` that a route would
+refuse is not read. The window's settings of the files panel are global, in `[transfer]`
+(`panel_side`, `open_on_drag`, `max_concurrent` 1–3, `show_hidden`), and its width in
+`[layout] transfer_panel_width` (240–520 px); CONFIG_REFERENCE.md has them all.
+
+A key set for a host or globally holds on a given terminal only once the overrides nearer to it
+are gone: `planProfileWrite` (`@lasterm/shared`) plans that write, the value then each drop, and
+says which overrides it drops so that a caller can say so first. "Always do this" on an ended
+terminal writes `when_ended` through it; the files panel's options and an upload's conflict step
+write theirs.
 
 Settings › Environment shows, at host and terminal scope, the variables the host's agent would
 start a terminal with in the chosen mode, asked live (`GET /api/hosts/:id/agent-environment`,

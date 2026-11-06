@@ -38,9 +38,11 @@ import {
 	DEFAULT_AGENT_CONFIG,
 	DEFAULT_APPEARANCE,
 	DEFAULT_ELEVATION_CONFIG,
+	DEFAULT_EXPERIMENTAL_CONFIG,
 	DEFAULT_LAYOUT_CONFIG,
 	DEFAULT_PROFILE,
 	DEFAULT_SSH_CONFIG,
+	DEFAULT_TRANSFER_CONFIG,
 	deepMerge,
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
@@ -48,8 +50,12 @@ import {
 	isAgentLogFilesKept,
 	isHostRailBadgeSize,
 	isHostRailColumns,
+	isTransferPanelWidth,
 	parseAgentConfig,
 	TERMINAL_PROFILE_KEYS,
+	TRANSFER_CONFIG_KEYS,
+	TRANSFER_CONFIG_VALIDATORS,
+	TRANSFER_PROFILE_VALIDATORS,
 	UI_CONFIG_SECTIONS,
 	validateCustomCommand,
 } from "@lasterm/shared";
@@ -237,6 +243,8 @@ export const DEFAULT_UI_CONFIG: UiConfig = {
 	search: { ...DEFAULT_SEARCH_CONFIG },
 	layout: { ...DEFAULT_LAYOUT_CONFIG },
 	keyboard: { ...DEFAULT_KEYBOARD_CONFIG },
+	transfer: { ...DEFAULT_TRANSFER_CONFIG },
+	experimental: { ...DEFAULT_EXPERIMENTAL_CONFIG },
 };
 
 /**
@@ -254,6 +262,8 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		search: { ...DEFAULT_SEARCH_CONFIG },
 		layout: { ...DEFAULT_LAYOUT_CONFIG },
 		keyboard: { ...DEFAULT_KEYBOARD_CONFIG },
+		transfer: { ...DEFAULT_TRANSFER_CONFIG },
+		experimental: { ...DEFAULT_EXPERIMENTAL_CONFIG },
 	};
 
 	// ── [ui] section ────────────────────────────────────────────────────
@@ -407,6 +417,9 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		if (typeof raw.sidebar_width === "number" && raw.sidebar_width >= 0) {
 			config.layout.sidebarWidth = raw.sidebar_width;
 		}
+		if (isTransferPanelWidth(raw.transfer_panel_width)) {
+			config.layout.transferPanelWidth = raw.transfer_panel_width;
+		}
 	}
 
 	// ── [keyboard] section (#639) ───────────────────────────────────────
@@ -415,6 +428,28 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		const raw = keyboardSection as Record<string, unknown>;
 		if (typeof raw.key_hints === "boolean") {
 			config.keyboard.keyHints = raw.key_hints;
+		}
+	}
+
+	// ── [transfer] section (#835) ───────────────────────────────────────
+	// The rules PUT /api/config/ui applies: a value it would refuse is not
+	// read from the file either, and leaves the default.
+	const transferSection = parsed.transfer;
+	if (transferSection != null && typeof transferSection === "object") {
+		const raw = transferSection as Record<string, unknown>;
+		const transfer = config.transfer as Record<string, unknown>;
+		for (const key of TRANSFER_CONFIG_KEYS) {
+			const value = raw[camelToSnake(key)];
+			if (TRANSFER_CONFIG_VALIDATORS[key](value)) transfer[key] = value;
+		}
+	}
+
+	// ── [experimental] section (#835) ───────────────────────────────────
+	const experimentalSection = parsed.experimental;
+	if (experimentalSection != null && typeof experimentalSection === "object") {
+		const raw = experimentalSection as Record<string, unknown>;
+		if (typeof raw.file_transfer === "boolean") {
+			config.experimental.fileTransfer = raw.file_transfer;
 		}
 	}
 
@@ -907,7 +942,14 @@ export class ConfigResolver {
 				} else if (key === "env") {
 					flat.env = envFromToml(val);
 				} else {
-					flat[snakeToCamel(key)] = val;
+					const profileKey = snakeToCamel(key);
+					// A file-transfer value the routes would refuse is not read
+					// from the file either: the default holds (#835).
+					const rule = (TRANSFER_PROFILE_VALIDATORS as Record<string, (v: unknown) => boolean>)[
+						profileKey
+					];
+					if (rule !== undefined && !rule(val)) continue;
+					flat[profileKey] = val;
 				}
 			}
 			this.fileConfig = flat as Partial<TerminalProfile>;

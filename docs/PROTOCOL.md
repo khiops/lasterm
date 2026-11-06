@@ -1724,8 +1724,8 @@ deployment asks it (`uname -sm`, then the Windows architecture).
 | GET | `/api/config/defaults` | ● | Layer 1 built-in defaults |
 | GET | `/api/config/ui` | ● | UI behavioral config |
 | GET | `/api/config/cascade` | ● | Full 4-layer cascade, the merged result included (query: `?host_id=X&channel_id=Y`) |
-| PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }`. A `null` inside `terminal.env` is a removal, written `false` in `config.toml` (which has no null) and read back as `null` |
-| PUT | `/api/config/ui` | ● | `{ <section>: { <key>: value } }` → `{ ok }` |
+| PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }`. A `null` inside `terminal.env` is a removal, written `false` in `config.toml` (which has no null) and read back as `null`. A file-transfer value outside its table (CONFIG_REFERENCE.md `[terminal]`) 400 `INVALID_VALUE`, and nothing is written |
+| PUT | `/api/config/ui` | ● | `{ <section>: { <key>: value } }` → `{ ok }`. A key the section does not have 400 `VALIDATION_ERROR`, a value its rule refuses 400 `INVALID_VALUE`. `transfer` and `experimental` are sections (#835) |
 | PUT | `/api/config/appearance` | ● | `{ theme?, autoSwitch?, ... }` → `{ ok }` |
 | GET | `/api/config/elevation` | ● | Current elevation config |
 | PUT | `/api/config/elevation` | ● | `{ methodLinux?, methodDarwin?, ... }` → `{ ok }`. A method the OS does not have, or an empty custom command, 400 `INVALID_VALUE` |
@@ -1734,9 +1734,9 @@ deployment asks it (`uname -sm`, then the Windows architecture).
 | GET | `/api/config/logging` | ● | What Settings edits of `[logging]`: `{ agentFilesKept }`, the log files an agent daemon keeps (STORAGE.md § 12.1) |
 | PUT | `/api/config/logging` | ● | `{ agentFilesKept }` → `{ agentFilesKept }`, as saved. A whole number from 0 (all) to 3650, else 400 `INVALID_VALUE`; any other key 400 `VALIDATION_ERROR`. Reaches each agent daemon when it next starts |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
-| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR` |
+| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR`; a file-transfer value outside its table 400 `INVALID_VALUE` |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |
-| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, as for a host |
+| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, as for a host. `transferFallbackDir` and `transferVerify`, which are the host's, 400 `VALIDATION_ERROR` unless `null` |
 
 #### Fonts
 

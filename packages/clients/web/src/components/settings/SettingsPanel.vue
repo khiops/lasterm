@@ -68,6 +68,11 @@
 										v-else-if="settingsStore.activeCategory === 'environment'"
 										:scope="settingsStore.activeScope"
 									/>
+									<FileTransferCategory
+										v-else-if="settingsStore.activeCategory === 'transfer'"
+										:scope="settingsStore.activeScope"
+										v-bind="hostName !== undefined ? { hostName } : {}"
+									/>
 									<ElevationCategory
 										v-else-if="settingsStore.activeCategory === 'elevation'"
 										:scope="settingsStore.activeScope"
@@ -135,6 +140,7 @@ import DesktopCategory from './categories/DesktopCategory.vue';
 import ConfirmationsCategory from './categories/ConfirmationsCategory.vue';
 import ElevationCategory from './categories/ElevationCategory.vue';
 import EnvironmentCategory from './categories/EnvironmentCategory.vue';
+import FileTransferCategory from './categories/FileTransferCategory.vue';
 import KeybindingsCategory from './categories/KeybindingsCategory.vue';
 import SchemaCategory from './categories/SchemaCategory.vue';
 import WallpaperCategory from './categories/WallpaperCategory.vue';
@@ -160,33 +166,45 @@ const showAbout = ref(false);
 const runsInTauri = isTauriRuntime();
 
 // ─── Derived context ──────────────────────────────────────────────────
+//
+// The host and the terminal the Host and Channel scopes edit: the ones Settings was opened at
+// (`openAt`, #835), else the ones the sidebar selects. Opening at one never changes the sidebar.
 
-const showHost = computed(() => hostsStore.selectedHostId !== null);
-const showChannel = computed(() => channelsStore.selectedChannelId !== null);
+const contextHostId = computed(() =>
+	settingsStore.target !== null ? settingsStore.target.hostId : hostsStore.selectedHostId,
+);
+const contextChannelId = computed(() =>
+	settingsStore.target !== null ? settingsStore.target.channelId : channelsStore.selectedChannelId,
+);
+
+const showHost = computed(() => contextHostId.value !== null);
+const showChannel = computed(() => contextChannelId.value !== null);
 
 const hostName = computed(() => {
-	if (!hostsStore.selectedHostId) return undefined;
-	const host = hostsStore.hosts.find((h) => h.id === hostsStore.selectedHostId);
+	if (!contextHostId.value) return undefined;
+	const host = hostsStore.hosts.find((h) => h.id === contextHostId.value);
 	return host?.label ?? undefined;
 });
 
 const channelName = computed(() => {
-	if (!channelsStore.selectedChannelId) return undefined;
-	const ch = channelsStore.channels.find((c) => c.id === channelsStore.selectedChannelId);
+	if (!contextChannelId.value) return undefined;
+	const ch = channelsStore.channels.find((c) => c.id === contextChannelId.value);
 	return ch?.displayTitle ?? DEFAULT_CHANNEL_NAME;
 });
 
 // ─── Load cascade when panel opens ────────────────────────────────────
+//
+// And again when it is opened at another place while open. The place it was opened at holds
+// while it is open only: closing forgets it.
 
 watch(
-	() => props.visible,
-	(isVisible) => {
-		if (isVisible) {
-			void settingsStore.loadCascade(
-				hostsStore.selectedHostId ?? undefined,
-				channelsStore.selectedChannelId ?? undefined,
-			);
+	() => [props.visible, contextHostId.value, contextChannelId.value] as const,
+	([isVisible, hostId, channelId], [wasVisible]) => {
+		if (!isVisible) {
+			if (wasVisible) settingsStore.target = null;
+			return;
 		}
+		void settingsStore.loadCascade(hostId ?? undefined, channelId ?? undefined);
 	},
 );
 

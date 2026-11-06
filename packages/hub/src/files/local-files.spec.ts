@@ -33,6 +33,19 @@ describe("the local host's files, through the hub's own file system", () => {
 		expect(await files.home()).toBe(home.ok ? home.path : "");
 	});
 
+	// The local agent starts its terminals from the hub's user's environment (#836).
+	it("reads the hub's own variables, by name as the system reads names", async () => {
+		process.env.LASTERM_SPEC_LOCAL_ENV = "/srv/drop";
+		try {
+			const asked = ["LASTERM_SPEC_LOCAL_ENV", "LASTERM_SPEC_LOCAL_UNSET"];
+			expect([...(await files.env(asked))]).toEqual([["LASTERM_SPEC_LOCAL_ENV", "/srv/drop"]]);
+			const folded = await files.env(["lasterm_spec_local_env"]);
+			expect(folded.get("lasterm_spec_local_env")).toBe(windows ? "/srv/drop" : undefined);
+		} finally {
+			delete process.env.LASTERM_SPEC_LOCAL_ENV;
+		}
+	});
+
 	it("lists a folder's entries with their kind, size and time", async () => {
 		mkdirSync(join(root, "sub"));
 		writeFileSync(join(root, "file.txt"), "12345");

@@ -2,15 +2,18 @@ import type { HostOs } from "@lasterm/shared";
 import type { Client as SshClient } from "ssh2";
 import { readRemoteSystem, type SftpSupport } from "../session/agent-deployer.js";
 import { ExecFileBackend } from "./exec-files.js";
+import { expandVariables, lookupIn, referencedVariables } from "./expand-vars.js";
 import {
 	FileAccessError,
 	type FileBackend,
 	type FileEntry,
+	type FileErrorCode,
 	type FileListing,
 	type FileStat,
 	type FreeSpace,
 	finishListing,
 	isDefinitive,
+	REASONS,
 } from "./host-files.js";
 import { normaliseHostPath, type PathStyle, parentOf, pathStyleOf } from "./host-paths.js";
 import { LocalFileBackend, localHostOs } from "./local-files.js";
@@ -31,10 +34,38 @@ export interface HostFilesDeps {
 	hostOs(hostId: string): HostOs | null;
 	/** The connected SSH agent of a remote host, or null when none is connected to this hub. */
 	sshHost(hostId: string): SshFileHost | null;
+	/**
+	 * What decides the folder a panel opens at for a terminal (#836): its
+	 * host's `transferFallbackDir` as the cascade resolves it for that
+	 * terminal, and the variables its scopes and launch profile set, which the
+	 * agent reads first when it expands a `cwd`. Absent: the home.
+	 */
+	startFolder?(channelId: string): StartFolderSettings;
 	/** The local host's files; the hub's own file system unless a spec says otherwise. */
 	local?: { backend: FileBackend; os: HostOs };
 	/** How long a host's SFTP session stays open unused; `SFTP_IDLE_MS` by default. */
 	sftpIdleMs?: number;
+}
+
+/** What the settings say of the folder a panel opens at, for one terminal. */
+export interface StartFolderSettings {
+	/** The folder for a terminal whose directory is unknown, as written: "" for the home. */
+	readonly fallbackDir: string;
+	/** The variables the terminal's SPAWN would carry, read before the host's own environment. */
+	readonly env: Readonly<Record<string, string>>;
+}
+
+/** The errors that say the fallback folder cannot be opened, rather than that the host cannot be reached. */
+const FALLBACK_REFUSALS: ReadonlySet<FileErrorCode> = new Set<FileErrorCode>([
+	"NOT_FOUND",
+	"NOT_A_DIRECTORY",
+	"PERMISSION_DENIED",
+	"UNSUPPORTED_PATH",
+]);
+
+/** Why the fallback folder `shown` is not the one listed, as the client shows it. */
+function fallbackProblem(shown: string, reason: string): string {
+	return `The fallback folder ${shown} cannot be opened: ${reason}`;
 }
 
 /** The terminal a request names is not one this hub knows. */
@@ -88,6 +119,14 @@ class RemoteFiles implements FileBackend {
 		return this.either((backend) => backend.mkdir(path));
 	}
 
+	/**
+	 * Over SSH commands only: SFTP has no request for the environment. An exec
+	 * channel gets the environment a remote agent started over SSH gets.
+	 */
+	env(names: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		return this.exec.env(names);
+	}
+
 	private async either<T>(request: (backend: FileBackend) => Promise<T>): Promise<T> {
 		const support = this.support();
 		let sftpSaid: string;
@@ -137,13 +176,26 @@ export class HostFilesService {
 
 	/**
 	 * The entries of the folder `path`, or of the folder a panel opens at
-	 * without one: the account's home (the terminal's own folder, #834, and the
-	 * configured one, #835, will come first).
+	 * without one (#836): the fallback folder the settings name for a terminal
+	 * whose directory is unknown, its variables expanded on the host, else the
+	 * account's home. A fallback folder that cannot be opened gives the home,
+	 * and says why; a host that cannot be reached is said as it is. The
+	 * terminal's live directory (#834) is the client's to ask for by its path.
 	 */
 	async list(channelId: string, path: string | undefined, hidden: boolean): Promise<FileListing> {
 		const { backend, style } = await this.reach(channelId);
-		const dir = path === undefined ? await backend.home() : normalised(path, style);
-		return finishListing(dir, await backend.list(dir, hidden), hidden);
+		if (path !== undefined) {
+			const dir = normalised(path, style);
+			return finishListing(dir, await backend.list(dir, hidden), hidden);
+		}
+		const fallback = await this.fallbackListing(channelId, backend, style, hidden);
+		if ("listing" in fallback) return fallback.listing;
+		const home = await backend.home();
+		return {
+			...finishListing(home, await backend.list(home, hidden), hidden),
+			start: "home",
+			...(fallback.problem !== undefined ? { fallbackProblem: fallback.problem } : {}),
+		};
 	}
 
 	async stat(channelId: string, path: string): Promise<FileStat> {
@@ -167,6 +219,62 @@ export class HostFilesService {
 		}
 		await backend.mkdir(target);
 		return { path: target };
+	}
+
+	/**
+	 * The fallback folder's listing, or why there is none: no fallback set
+	 * (no problem), or one that cannot be opened (its problem). Its variables
+	 * are expanded as the agent expands a terminal's `cwd`: from the
+	 * terminal's own variables, then from the host's environment, without
+	 * regard to case on Windows.
+	 */
+	private async fallbackListing(
+		channelId: string,
+		backend: FileBackend,
+		style: PathStyle,
+		hidden: boolean,
+	): Promise<{ listing: FileListing } | { problem?: string }> {
+		const settings = this.deps.startFolder?.(channelId);
+		const written = settings?.fallbackDir.trim() ?? "";
+		if (settings === undefined || written === "") return {};
+		const ignoreCase = style === "windows";
+		const ownVariables = lookupIn(settings.env, ignoreCase);
+		const fromHost = referencedVariables(written).filter(
+			(name) => ownVariables(name) === undefined,
+		);
+		let hostVariables: (name: string) => string | undefined = () => undefined;
+		if (fromHost.length > 0) {
+			try {
+				hostVariables = lookupIn(await backend.env(fromHost), ignoreCase);
+			} catch (error) {
+				// A connection lost is said as it is; anything else leaves the
+				// variables unread, and the folder they name unknown.
+				if (error instanceof FileAccessError && error.code === "HOST_NOT_CONNECTED") throw error;
+				const said = error instanceof Error ? error.message : String(error);
+				return {
+					problem: fallbackProblem(
+						written,
+						`its variables could not be read on the host (${said})`,
+					),
+				};
+			}
+		}
+		const expanded = expandVariables(written, (name) => ownVariables(name) ?? hostVariables(name));
+		const dir = normaliseHostPath(expanded, style);
+		if (!dir.ok) return { problem: fallbackProblem(expanded, dir.reason) };
+		try {
+			const listing = finishListing(dir.path, await backend.list(dir.path, hidden), hidden);
+			return { listing: { ...listing, start: "fallback" } };
+		} catch (error) {
+			if (error instanceof FileAccessError && FALLBACK_REFUSALS.has(error.code)) {
+				const reason =
+					error.code === "UNSUPPORTED_PATH"
+						? error.message
+						: REASONS[error.code as keyof typeof REASONS];
+				return { problem: fallbackProblem(dir.path, reason) };
+			}
+			throw error;
+		}
 	}
 
 	private async reach(channelId: string): Promise<{ backend: FileBackend; style: PathStyle }> {

@@ -220,7 +220,13 @@ Local daemon, single process, binds to 127.0.0.1.
   path handling
 - A new folder is a write: only the window holding the terminal's write lock, named by the request
   (`X-Lasterm-Client-Id`) and checked against the request's own token
-- Logs nothing: a path or a name is the user's, at any level, and a listing is a routine request
+- The folder a panel opens at, a listing asked without a path (#836): the terminal's host's
+  `transfer_fallback_dir`, its `${VAR}` expanded as the agent expands a `cwd` (`expand-vars.ts`):
+  from the variables the terminal's SPAWN carries, then from the account's environment on the host,
+  read over SSH commands (SFTP has none) or from the hub's own for the local host. Else, or when it
+  cannot be opened, the home, and the answer says which (`start`) and why (`fallback_problem`)
+- Logs nothing: a path, a name or a variable is the user's, at any level, and a listing is a routine
+  request
 
 **Cache Manager:**
 - Write-through: every OUTPUT chunk → spool.db

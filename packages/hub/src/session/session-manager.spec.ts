@@ -872,6 +872,57 @@ describe("SessionManager", () => {
 		expect(row?.rows).toBe(40);
 	});
 
+	// ─── One size per terminal (#831) ──────────────────────────────────────
+	// The WS handler lets only the write lock's holder through to handleResize
+	// (ws/handlers/resize.spec.ts); what it applies, every client attached is
+	// told, and a client attaching reads it.
+
+	it("tells every client attached to a terminal its new size, and no other client", async () => {
+		const writer: ProtocolMessage[] = [];
+		const reader: ProtocolMessage[] = [];
+		const elsewhere: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c1", writer));
+		sm.addClient(makeClient("c2", reader));
+		sm.addClient(makeClient("c3", elsewhere));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local", cols: 100, rows: 30 });
+		await sm.handleAttach("c2", "local-ch-1");
+
+		sm.handleResize("c1", "local-ch-1", 120, 40);
+
+		const size = { type: "CHANNEL_SIZE", channelId: "local-ch-1", cols: 120, rows: 40 };
+		expect(reader.filter((m) => m.type === "CHANNEL_SIZE")).toEqual([size]);
+		// The one that asked too: it falls back to the PTY's size once it no
+		// longer decides it.
+		expect(writer.filter((m) => m.type === "CHANNEL_SIZE")).toEqual([size]);
+		expect(elsewhere.some((m) => m.type === "CHANNEL_SIZE")).toBe(false);
+	});
+
+	it("tells nobody of a size the terminal already has", async () => {
+		const reader: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c1", []));
+		sm.addClient(makeClient("c2", reader));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local", cols: 100, rows: 30 });
+		await sm.handleAttach("c2", "local-ch-1");
+
+		sm.handleResize("c1", "local-ch-1", 100, 30);
+		sm.handleResize("c1", "local-ch-1", 120, 40);
+		sm.handleResize("c1", "local-ch-1", 120, 40);
+
+		expect(reader.filter((m) => m.type === "CHANNEL_SIZE")).toHaveLength(1);
+	});
+
+	it("gives a client attaching the terminal's current size in ATTACH_OK", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local", cols: 100, rows: 30 });
+		sm.handleResize("c1", "local-ch-1", 132, 43);
+
+		const late: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", late));
+		await sm.handleAttach("c2", "local-ch-1");
+
+		expect(late.find((m) => m.type === "ATTACH_OK")).toMatchObject({ cols: 132, rows: 43 });
+	});
+
 	it("removeClient cleans up all channel attachments", async () => {
 		const received: ProtocolMessage[] = [];
 		const client = makeClient("c1", received);

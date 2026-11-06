@@ -685,7 +685,9 @@ sends a frame or disconnects.
   truncated?: true,            // output after the snapshot was too much to send, and is left out
   dynamic_title?: string,      // the title the terminal set (OSC 0/2), when it set one
   process_title?: string,      // its foreground process, when known
-  display_title: string        // the title a tab shows
+  display_title: string,       // the title a tab shows
+  cols: number,                // the terminal's size: its PTY's (§ 4.3, #831)
+  rows: number
 }
 
 // UI → Hub
@@ -701,11 +703,31 @@ The answer is what a pane shows, and a pane attaches again whenever its socket i
 ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,
 and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
 
-### 4.3 INPUT / OUTPUT / RESIZE
+### 4.3 INPUT / OUTPUT / RESIZE / CHANNEL_SIZE
 
 Same as agent messages (section 3.4–3.6).
 Hub verifies write-lock on INPUT. Rejects with ERROR (`WRITE_LOCK_DENIED`) if not holder.
-Hub passes RESIZE on to the agent and stores the size; it sends it to no other client.
+
+```typescript
+// Hub → every client attached to the channel: its PTY's size changed
+{ type: "CHANNEL_SIZE", channel_id: string, cols: number, rows: number }
+```
+
+A terminal has one size, its PTY's, and one client decides it: the one holding its write lock
+(§ 4.5, #831). The hub passes that client's RESIZE on to the agent and stores the size in meta.db.
+It drops a RESIZE from any other client without an answer: every client resizes its own pane, a
+reader beside the writer or a second device, and that is not an error. While nobody holds the lock,
+nobody decides, and the size stays as it is until a client takes the lock and sends its own.
+
+Whenever the size changes, the hub sends `CHANNEL_SIZE` to every client attached to the channel, the
+one that asked included, before any output the program draws for the new size. A client attaching
+reads the current size in `ATTACH_OK` (§ 4.2); a hub restarted takes it from meta.db. A hub older
+than this sends neither, and takes every client's RESIZE.
+
+The client that decides fits the terminal to its pane and sends its size whenever that changes, and
+once more when it takes the lock. Every other client draws the terminal at the size the hub gives,
+and sends no RESIZE. The web draws it top-left in its pane, on a neutral ground, and lets a pane
+smaller than that scroll rather than scaling the text.
 
 ### 4.4 SPAWN / SPAWN_OK
 
@@ -814,6 +836,9 @@ another pane's overlay, or by its host's return; `automatic` changes nothing on 
 // Hub → ALL on channel: lock state broadcast
 { type: "WRITE_LOCK",     channel_id: string, holder: string | null }
 ```
+
+The holder also decides the terminal's size (§ 4.3): taking the lock makes a client's pane the one
+the PTY is sized to.
 
 ### 4.6 STATE_SYNC (Hub → UI)
 
@@ -1286,6 +1311,7 @@ UI                          Hub                        Local agent (daemon)
  │── INPUT {data} ──────────►│── INPUT ─────────────────►│── pty.write()
  │◄── OUTPUT {data} ────────│◄── OUTPUT ────────────────│◄── PTY output
  │── RESIZE {cols,rows} ───►│── RESIZE ────────────────►│── pty.resize()
+ │◄── CHANNEL_SIZE ─────────│ (to every attached client; the writer's RESIZE only)
  │── DETACH ────────────────►│── channel → ORPHAN        │
 ```
 
@@ -1359,6 +1385,9 @@ Client A (WRITER)           Hub                Client B (READER)
  │                           │── WRITE_LOCK {B} ───────►│
  │◄── WRITE_LOCK {B} ───────│                           │
  │  (now READER)             │            (now WRITER)   │
+ │                           │◄── RESIZE {B's fit} ─────│ (only if it differs)
+ │◄── CHANNEL_SIZE ─────────│── CHANNEL_SIZE ─────────►│
+ │  (draws at B's size)      │                           │
 ```
 
 ## 6. REST API

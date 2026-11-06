@@ -997,6 +997,12 @@ Hub: immediately transfer → A gets WRITE_REVOKED
 Hub: broadcast WRITE_LOCK { holder: B }
 ```
 
+The writer also decides the terminal's size, which is its PTY's (#831). Its pane's fit is sent as
+RESIZE; the hub drops any other client's, and tells every attached client the new size
+(`CHANNEL_SIZE`, PROTOCOL.md § 4.3). The readers draw the terminal at that size rather than at
+their own. With no writer, the size stays put. When the lock changes hands, the new writer's fit
+becomes the terminal's size.
+
 ## 6. Config Cascade
 
 ```

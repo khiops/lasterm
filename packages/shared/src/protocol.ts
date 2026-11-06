@@ -425,6 +425,27 @@ export interface UiAttachOkMessage {
 	dynamicTitle?: string;
 	processTitle?: string;
 	displayTitle?: string;
+	/**
+	 * The terminal's size: its PTY's, which every pane but the deciding one
+	 * draws it at (#831). Absent from a hub older than that.
+	 */
+	cols?: number;
+	rows?: number;
+}
+
+/**
+ * Hub → UI: the size of a terminal's PTY changed (#831).
+ *
+ * A terminal has one size, and one client decides it: the one holding its
+ * write lock. Sent to every client attached to the channel, that one
+ * included, whenever the size changes; a client attaching reads it in
+ * ATTACH_OK.
+ */
+export interface ChannelSizeMessage {
+	type: "CHANNEL_SIZE";
+	channelId: string;
+	cols: number;
+	rows: number;
 }
 
 /** UI → Hub: detach this client from a channel (keep channel alive) */
@@ -944,6 +965,7 @@ export type HubToUiMessage =
 	| AuthFailMessage
 	| UiSpawnOkMessage
 	| UiAttachOkMessage
+	| ChannelSizeMessage
 	| OutputMessage
 	| SessionStateMessage
 	| ChannelStateMessage
@@ -1002,6 +1024,7 @@ export type ProtocolMessage =
 	| UiSpawnOkMessage
 	| UiAttachMessage
 	| UiAttachOkMessage
+	| ChannelSizeMessage
 	| DetachMessage
 	| WriteClaimMessage
 	| WriteReleaseMessage

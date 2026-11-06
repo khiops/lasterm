@@ -25,6 +25,7 @@ import type {
 	AuthPromptMessage,
 	AuthPromptResponseMessage,
 	ChannelEndReason,
+	ChannelSizeMessage,
 	ElevationMethod,
 	EnvMode,
 	ErrorMessage,
@@ -1743,6 +1744,7 @@ export class SessionManager {
 				...(dynamicTitle !== undefined && { dynamicTitle }),
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
+				...this.sizeOf(channel, channelId),
 			};
 			client.send(attachOk);
 			return true;
@@ -1814,6 +1816,7 @@ export class SessionManager {
 				...(dynamicTitle !== undefined && { dynamicTitle }),
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
+				...this.sizeOf(channel, channelId),
 			};
 			client.send(attachOk);
 		} catch (err) {
@@ -1852,10 +1855,21 @@ export class SessionManager {
 				...(dynamicTitle !== undefined && { dynamicTitle }),
 				...(processTitle !== undefined && { processTitle }),
 				displayTitle,
+				...this.sizeOf(channel, channelId),
 			};
 			client.send(attachOk);
 		}
 		return true;
+	}
+
+	/**
+	 * A terminal's size as an ATTACH_OK gives it: its PTY's, which every pane
+	 * but the deciding one draws it at (#831). Read as it is now, since a resize
+	 * may have come in while the agent answered the attach.
+	 */
+	private sizeOf(channel: ChannelState, channelId: string): { cols: number; rows: number } {
+		const current = this.ctx.channels.get(channelId) ?? channel;
+		return { cols: current.cols, rows: current.rows };
 	}
 
 	/**
@@ -1884,6 +1898,16 @@ export class SessionManager {
 		agent.send(inputMsg);
 	}
 
+	/**
+	 * Set a terminal's size, as the client deciding it asked: the WS handler
+	 * lets through only the one holding the write lock (#831).
+	 *
+	 * Every client attached to the terminal is told the new size, that one
+	 * included, before any output the program draws for it: the others draw the
+	 * terminal at that size rather than at their own, and the one deciding it
+	 * learns the size the PTY has, which it falls back to once someone else
+	 * decides.
+	 */
 	handleResize(_clientId: string, channelId: string, cols: number, rows: number): void {
 		const channel = this.ctx.channels.get(channelId);
 		if (!channel) return;
@@ -1892,9 +1916,18 @@ export class SessionManager {
 		const resizeMsg: ResizeMessage = { type: "RESIZE", channelId, cols, rows };
 		agent.send(resizeMsg);
 		this.ctx.scheduler.onResize(channelId);
+		const changed = channel.cols !== cols || channel.rows !== rows;
 		channel.cols = cols;
 		channel.rows = rows;
 		this.ctx.metaDal.updateChannelDimensions(channelId, cols, rows);
+		if (changed) {
+			this.broadcaster.broadcastToChannel(channelId, {
+				type: "CHANNEL_SIZE",
+				channelId,
+				cols,
+				rows,
+			} satisfies ChannelSizeMessage);
+		}
 	}
 
 	handleAuthPromptResponse(

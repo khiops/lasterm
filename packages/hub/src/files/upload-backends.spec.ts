@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
@@ -41,30 +41,19 @@ const trace868 = (line: string): void => {
 	}
 };
 if (process.platform === "linux") {
-	try {
-		trace868(
-			`ps ${execFileSync("ps", ["-o", "pid=,ppid=,pgid=,sid=,rss=", "-p", String(process.pid)])
-				.toString()
-				.trim()}`,
-		);
-	} catch (error) {
-		trace868(`ps failed: ${String(error)}`);
-	}
-	for (const signal of [
-		"SIGTERM",
-		"SIGINT",
-		"SIGHUP",
-		"SIGQUIT",
-		"SIGUSR2",
-		"SIGALRM",
-		"SIGXCPU",
-		"SIGXFSZ",
-	] as const) {
-		process.once(signal, () => {
-			trace868(`got ${signal}`);
-			process.kill(process.pid, signal);
-		});
-	}
+	// Outlives the worker: says when it went, and what the kernel said (an OOM kill, a segfault).
+	const watchdog = spawn(
+		"sh",
+		[
+			"-c",
+			'exec >&2; w=$1; while kill -0 "$w" 2>/dev/null; do sleep 0.2; done; echo "[868] $(date -u +%FT%T.%3NZ) worker $w is gone"; sudo -n dmesg 2>&1 | tail -n 12 | sed "s/^/[868] dmesg: /"',
+			"sh",
+			String(process.pid),
+		],
+		{ detached: true, stdio: ["ignore", "ignore", "inherit"] },
+	);
+	watchdog.on("error", () => {});
+	watchdog.unref();
 	process.on("exit", (code) => trace868(`exit ${code}`));
 	beforeEach((context) =>
 		trace868(

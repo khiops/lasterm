@@ -1,10 +1,13 @@
+import { ErrorCode } from "@lasterm/shared";
 import { describe, expect, it } from "vitest";
 import {
 	factsFromAttachOk,
 	factsFromKnownEnd,
 	factsFromRefusal,
+	notGivenMessage,
 	type PaneFacts,
 	paneCover,
+	secretNotGiven,
 } from "./pane-cover.js";
 
 const plain: PaneFacts = { status: "live", ended: false, gone: false, detached: false };
@@ -79,5 +82,43 @@ describe("an end the client already knew of", () => {
 	// The list that told it was the host in view's; the rail changes that.
 	it("keeps the overlay once no list in view carries the terminal", () => {
 		expect(paneCover({ status: undefined, ...factsFromKnownEnd() })).toBe("exited");
+	});
+});
+
+// A new terminal whose host asked for a password or passphrase that was not
+// given never started: its pane says it is not connected, not that a shell
+// exited or that something failed (#875).
+describe("a password or passphrase not given", () => {
+	const cancelled = (asked?: unknown) =>
+		Object.assign(new Error("AUTH_CANCELLED: Authentication cancelled by user"), {
+			code: ErrorCode.AUTH_CANCELLED,
+			...(asked !== undefined && { asked }),
+		});
+
+	it("is told from the spawn's refusal, with the secret its host asked for", () => {
+		expect(secretNotGiven(cancelled("passphrase"))).toEqual({ asked: "passphrase" });
+		expect(secretNotGiven(cancelled("password"))).toEqual({ asked: "password" });
+		// Asked of another window, or nothing said: which one is unknown.
+		expect(secretNotGiven(cancelled())).toEqual({});
+		expect(secretNotGiven(cancelled("elevation"))).toEqual({});
+	});
+
+	it("is no other refusal", () => {
+		const failed = Object.assign(new Error("SSH_CONNECT_FAILED: refused"), {
+			code: "SSH_CONNECT_FAILED",
+		});
+		expect(secretNotGiven(failed)).toBeNull();
+		expect(secretNotGiven(new Error("SPAWN timeout — no SPAWN_OK after 10s"))).toBeNull();
+		expect(secretNotGiven(null)).toBeNull();
+	});
+
+	it("says which was not given, and that the terminal is not connected", () => {
+		expect(notGivenMessage({ asked: "passphrase" })).toBe(
+			"Not connected: the passphrase was not given",
+		);
+		expect(notGivenMessage({ asked: "password" })).toBe(
+			"Not connected: the password was not given",
+		);
+		expect(notGivenMessage({})).toBe("Not connected: the password or passphrase was not given");
 	});
 });

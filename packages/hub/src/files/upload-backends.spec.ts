@@ -41,12 +41,25 @@ const trace868 = (line: string): void => {
 	}
 };
 if (process.platform === "linux") {
-	// Outlives the worker: says when it went, and what the kernel said (an OOM kill, a segfault).
+	// Outlives the worker: its signal masks as they change, when it went, what ran then, and what
+	// the kernel said (an OOM kill, a segfault).
 	const watchdog = spawn(
 		"sh",
 		[
 			"-c",
-			'exec >&2; w=$1; while kill -0 "$w" 2>/dev/null; do sleep 0.2; done; echo "[868] $(date -u +%FT%T.%3NZ) worker $w is gone"; sudo -n dmesg 2>&1 | tail -n 12 | sed "s/^/[868] dmesg: /"',
+			[
+				"exec >&2",
+				"w=$1",
+				'last=""',
+				'while kill -0 "$w" 2>/dev/null; do',
+				'  m=$(grep -E "^Sig(Ign|Cgt)" "/proc/$w/status" 2>/dev/null | tr "\\n" " ")',
+				'  if [ "$m" != "$last" ]; then echo "[868] $(date -u +%FT%T.%3NZ) worker $w masks: $m"; last=$m; fi',
+				"  sleep 0.1",
+				"done",
+				'echo "[868] $(date -u +%FT%T.%3NZ) worker $w is gone"',
+				'ps -eo pid,ppid,pgid,etimes,stat,args --sort=-start_time 2>&1 | head -n 25 | cut -c1-200 | sed "s/^/[868] ps: /"',
+				'sudo -n dmesg 2>&1 | tail -n 4 | sed "s/^/[868] dmesg: /"',
+			].join("\n"),
 			"sh",
 			String(process.pid),
 		],

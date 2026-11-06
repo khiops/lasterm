@@ -61,6 +61,21 @@ when another account does (SECURITY.md § 2.2, item 3).
 On Windows no mode is set or checked. The files, like the state directory, rely on the
 profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 
+**The addon and the garbage collector (#883).** better-sqlite3 wraps its databases and
+statements in `node::ObjectWrap`. An addon compiled against Node 24.19 headers or later aborts
+the hub when the garbage collector reclaims one of them: `Assertion failed: (env) != nullptr`
+(nodejs/node#65446), as ssh2's cipher binding did in the tests (#868). The 12.11.1 prebuilt
+addon predates those headers. One compiled from source does not, and that happens with a missing
+prebuild, a `pnpm rebuild` that cannot download one, or a release whose prebuilds were built
+with newer headers.
+
+- `packages/hub/src/storage/better-sqlite3-gc.spec.ts` prepares and drops statements by the ten
+  thousand in a child process, and expects it to survive.
+- `scripts/package-sea-hub.ts` runs the same churn on the addon the executable embeds, under the
+  Node it embeds, and refuses to package one that aborts.
+- **Before bumping better-sqlite3 or Node, run that spec first.** If it aborts, the bump waits
+  until a better-sqlite3 or a Node release no longer does.
+
 ## 3. Schema — meta.db
 
 ### 3.1 hosts

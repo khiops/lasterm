@@ -233,6 +233,8 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 						return;
 					}
 					const stream = acceptExec();
+					// What a command prints after the client closed its channel goes nowhere.
+					stream.on("error", () => {});
 					if (options.prelude !== undefined) stream.write(options.prelude);
 					const child =
 						options.shell === "cmd"
@@ -240,9 +242,17 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 									windowsVerbatimArguments: true,
 									windowsHide: true,
 								})
-							: spawn("/bin/sh", ["-c", info.command], {
+							: // In a session of its own, as sshd starts a command (#868): a signal to
+								// the command's process group, from it or from anything it starts,
+								// stays there and never reaches the spec's worker.
+								spawn("/bin/sh", ["-c", info.command], {
+									detached: true,
 									...(options.execEnv !== undefined ? { env: options.execEnv } : {}),
 								});
+					// A command that could not start is said on the channel, as sshd says it.
+					child.on("error", (error) => {
+						stream.stderr.write(`${error.message}\n`);
+					});
 					// A command that exits without reading all of it closes its stdin under the pipe.
 					child.stdin.on("error", () => {});
 					stream.pipe(child.stdin);
@@ -253,7 +263,8 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					child.stderr.pipe(stream.stderr, { end: false });
 					child.on("close", (code) => {
 						stream.unpipe(child.stdin);
-						stream.exit(code ?? 1);
+						// Killed by a signal, or never started (a negative errno): no status of its own.
+						stream.exit(code === null ? 1 : code < 0 ? 127 : code);
 						stream.end();
 					});
 				});

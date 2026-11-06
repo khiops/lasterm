@@ -159,8 +159,9 @@ describe("a PowerShell loop, as the hub drives it", () => {
 	});
 });
 
-/** Whether a process of this machine is running. */
+/** Whether a process of this machine is running; never a signal to a group. */
 function running(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
 	try {
 		process.kill(pid, 0);
 		return true;

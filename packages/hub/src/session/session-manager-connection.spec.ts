@@ -855,6 +855,101 @@ describe("a host its user did not disconnect", { timeout: 20_000 }, () => {
 	});
 });
 
+describe("uploads to a host hold its connection (#833)", { timeout: 20_000 }, () => {
+	/** `count` uploads running to the host until a gesture interrupts them. */
+	function uploads(h: Harness, count: number): { interrupted: string[] } {
+		let running = count;
+		const interrupted: string[] = [];
+		h.sm.setTransfers({
+			activeOn: (hostId) => (hostId === h.host.id ? running : 0),
+			interruptOn: (hostId) => {
+				interrupted.push(hostId);
+				running = 0;
+			},
+		});
+		return { interrupted };
+	}
+
+	it("Disconnect and Reconnect say how many would stop, and interrupt them once told", async () => {
+		const h = await hubWith({ daemon: true });
+		await connected(h);
+		const running = uploads(h, 2);
+
+		expect(h.sm.disconnectHost(h.host.id)).toEqual({ kind: "transfers-would-stop", transfers: 2 });
+		expect(h.sm.reconnectHost(h.host.id, { clientId: h.window.id })).toEqual({
+			kind: "transfers-would-stop",
+			transfers: 2,
+		});
+		expect(agentOf(h)).toBeDefined();
+		expect(running.interrupted).toEqual([]);
+
+		expect(h.sm.disconnectHost(h.host.id, { force: true })).toEqual({
+			kind: "disconnected",
+			ended: 0,
+		});
+		expect(running.interrupted).toEqual([h.host.id]);
+		expect(agentOf(h)).toBeUndefined();
+	});
+
+	it("counts them beside the terminals that would end, in one answer", async () => {
+		const h = await hubWith({ daemon: false });
+		await connected(h);
+		terminalsOn(h, 1);
+		uploads(h, 1);
+		expect(h.sm.disconnectHost(h.host.id)).toEqual({
+			kind: "terminals-would-end",
+			terminals: 1,
+			transfers: 1,
+		});
+	});
+
+	it("DELETE /api/sessions/:id stops them only when forced", async () => {
+		const h = await hubWith({ daemon: true });
+		await connected(h);
+		const running = uploads(h, 1);
+		const sessionId = sessionOf(h)?.id ?? "";
+		expect(await h.sm.closeSession(sessionId)).toEqual({ transfersWouldStop: 1 });
+		expect(agentOf(h)).toBeDefined();
+		expect(await h.sm.closeSession(sessionId, { force: true })).toBe("closed");
+		expect(running.interrupted).toEqual([h.host.id]);
+		expect(sessionOf(h)).toBeUndefined();
+	});
+
+	it("Stop keeping and Replace refuse until told the uploads stop", async () => {
+		const h = await hubWith({ daemon: true });
+		await connected(h);
+		const running = uploads(h, 1);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ kind: "error", code: "TRANSFERS_WOULD_STOP", transfers: 1 });
+		expect(await h.sm.replaceAgent(h.host.id)).toMatchObject({
+			replaced: false,
+			code: "TRANSFERS_WOULD_STOP",
+			transfers: 1,
+		});
+		expect(h.remote.stops).toEqual([]);
+		expect(running.interrupted).toEqual([]);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, {
+				endTerminals: false,
+				force: false,
+				stopTransfers: true,
+			}),
+		).toMatchObject({ kind: "done", response: { outcome: "stopped" } });
+		expect(running.interrupted).toEqual([h.host.id]);
+	});
+
+	it("an upload connects a host through the acquisition, a host its user disconnected included", async () => {
+		const h = await hubWith({ daemon: true });
+		await connected(h);
+		h.sm.disconnectHost(h.host.id);
+		expect(agentOf(h)).toBeUndefined();
+		await expect(h.sm.connectForTransfer(h.host.id, h.window.id)).resolves.toBe(true);
+		expect(agentOf(h)).toBeDefined();
+		expect(h.sm.getStateSnapshot().userDisconnectedHosts).toBeUndefined();
+	});
+});
+
 describe("Stop keeping (#674)", { timeout: 20_000 }, () => {
 	it("stops the daemon, ends two terminals and saves No", async () => {
 		const h = await hubWith({ daemon: true });

@@ -203,10 +203,30 @@ export type ReplaceAgentOutcome =
 			 * Set when the agent refused because other hubs hold channels there
 			 * (#127): asking again with `force` ends them too.
 			 */
-			readonly code?: typeof ErrorCode.OTHER_HUBS_HOLD_CHANNELS | typeof ErrorCode.HOST_BUSY;
+			readonly code?:
+				| typeof ErrorCode.OTHER_HUBS_HOLD_CHANNELS
+				| typeof ErrorCode.HOST_BUSY
+				| typeof ErrorCode.TRANSFERS_WOULD_STOP;
 			/** How many, when the agent said. */
 			readonly otherOwnerChannels?: number;
+			/** With TRANSFERS_WOULD_STOP: the uploads to the host that would stop (#833). */
+			readonly transfers?: number;
 	  };
+
+/** The uploads to each host, as the session manager weighs them (#833). */
+export interface HostTransfers {
+	/** How many uploads to this host are running or queued: they hold its connection. */
+	activeOn(hostId: string): number;
+	/** Its connection is being closed on purpose: they stop, interrupted, and resume on a retry. */
+	interruptOn(hostId: string): void;
+}
+
+/** What came of DELETE /api/sessions/:id. */
+export type CloseSessionOutcome =
+	| "closed"
+	| "busy"
+	/** Uploads to the host would stop, and `force` did not say to: nothing was done. */
+	| { readonly transfersWouldStop: number };
 
 /** What came of asking to connect, reconnect or disconnect a host (#648). */
 export type HostConnectionOutcome =
@@ -214,8 +234,17 @@ export type HostConnectionOutcome =
 	| { readonly kind: "not-ssh" }
 	| { readonly kind: "quitting" }
 	| { readonly kind: "busy" }
-	/** Closing the connection would end terminals, and `force` did not say to: nothing was done. */
-	| { readonly kind: "terminals-would-end"; readonly terminals: number }
+	/**
+	 * Closing the connection would end terminals, and `force` did not say to:
+	 * nothing was done. `transfers`: the uploads it would stop too, when any.
+	 */
+	| {
+			readonly kind: "terminals-would-end";
+			readonly terminals: number;
+			readonly transfers?: number;
+	  }
+	/** Closing the connection would stop uploads to the host (#833), and `force` did not say to. */
+	| { readonly kind: "transfers-would-stop"; readonly transfers: number }
 	/** Connected already. */
 	| { readonly kind: "connected" }
 	/**
@@ -244,6 +273,7 @@ export type StopKeepingAgentOutcome =
 			message: string;
 			terminals?: number;
 			otherOwnerChannels?: number;
+			transfers?: number;
 	  };
 
 export class SessionManager {
@@ -257,6 +287,8 @@ export class SessionManager {
 	private readonly lifecycle: ChannelLifecycleManager;
 	private readonly sshMgr: SshConnectionManager;
 	private readonly agentMgr: AgentConnectionManager;
+	/** The uploads to each host (#833): they hold its connection as its terminals do. */
+	private transfers: HostTransfers | null = null;
 	/** Replaces an agent older than this hub once it holds nothing of it (#805). */
 	private readonly retirement: AgentRetirement;
 
@@ -376,6 +408,7 @@ export class SessionManager {
 		this.retirement = new AgentRetirement(ctx, {
 			release: (hostId, agent) => this.releaseAgent(hostId, agent),
 			startLocalAgent: (hostId, sessionId) => this.startLocalAgentAgain(hostId, sessionId),
+			transfersOn: (hostId) => this.transfersOn(hostId),
 		});
 		this.lifecycle.onAgentMayBeIdle = (hostId) => {
 			void this.retirement.retireIfIdle(hostId);
@@ -735,12 +768,22 @@ export class SessionManager {
 		}
 	}
 
-	async closeSession(sessionId: string): Promise<"closed" | "busy"> {
+	async closeSession(
+		sessionId: string,
+		options: { readonly force?: boolean } = {},
+	): Promise<CloseSessionOutcome> {
 		const recorded = this.ctx.metaDal.getSession(sessionId);
 		if (recorded && this.retirement.isUnderWay(recorded.hostId)) {
 			await this.retirement.settled(recorded.hostId);
 		}
 		if (recorded && this.hostIsBeingStopped(recorded.hostId)) return "busy";
+		// Uploads to a remote host go over its connection, which this closes
+		// (#833); the local host's go through the hub's own file system.
+		if (recorded && this.ctx.metaDal.getHost(recorded.hostId)?.type === "ssh") {
+			const transfers = this.transfersOn(recorded.hostId);
+			if (transfers > 0 && options.force !== true) return { transfersWouldStop: transfers };
+			if (transfers > 0) this.transfers?.interruptOn(recorded.hostId);
+		}
 		let hostId: string | undefined;
 		for (const [hId, state] of this.ctx.sessions.entries()) {
 			if (state.id === sessionId) {
@@ -1247,9 +1290,10 @@ export class SessionManager {
 			{
 				// ── Client-disconnect guard ───────────────────────────────────────────────
 				if (!this.ctx.clients.has(clientId)) {
-					const sessionHasChannels = [...this.ctx.channels.values()].some(
-						(ch) => ch.sessionId === session.id,
-					);
+					// An upload running to the host holds it as a terminal does (#833).
+					const sessionHasChannels =
+						[...this.ctx.channels.values()].some((ch) => ch.sessionId === session.id) ||
+						this.transfersOn(hostId) > 0;
 					if (lease !== null && !lease.released) {
 						// SSH path: attempt reap via the lease. If the acq was already committed
 						// (P2 — deleted from map), release() returns false; Fix A guarantees it
@@ -1642,10 +1686,13 @@ export class SessionManager {
 				// `session` is unassigned on follower failure paths (e.g. acq.connectPromise
 				// rejected before a session resolved). Guard the deref so the finally never
 				// throws on `session.id` — that would mask the original error and skip release.
-				Acq.release(this.ctx, lease, () =>
-					[...this.ctx.channels.values()].some(
-						(ch) => session != null && ch.sessionId === session.id,
-					),
+				Acq.release(
+					this.ctx,
+					lease,
+					() =>
+						[...this.ctx.channels.values()].some(
+							(ch) => session != null && ch.sessionId === session.id,
+						) || this.transfersOn(hostId) > 0,
 				);
 			}
 		}
@@ -2178,6 +2225,29 @@ export class SessionManager {
 		return this.ctx.stoppingAgents.has(hostId);
 	}
 
+	/** The uploads to each host (#833), which hold its connection. */
+	setTransfers(transfers: HostTransfers): void {
+		this.transfers = transfers;
+	}
+
+	/**
+	 * Connect an SSH host for an upload (#833), as the host menu's Connect does:
+	 * through the acquisition a SPAWN uses, its questions put to `clientId`.
+	 * True once its agent is connected; never rejects. An upload is someone
+	 * acting on the host, so one its user disconnected is reached again.
+	 */
+	async connectForTransfer(hostId: string, clientId: string): Promise<boolean> {
+		const outcome = this.connectHost(hostId, { clientId });
+		if (outcome.kind === "connected") return true;
+		if (outcome.kind === "connecting") return outcome.done;
+		return false;
+	}
+
+	/** A host's last running upload ended: an outdated agent that waited for it may go now (#805). */
+	transfersEnded(hostId: string): void {
+		void this.retirement.retireIfIdle(hostId);
+	}
+
 	/**
 	 * The SSH agent through which this hub reaches a remote host, while it is
 	 * connected: its connection carries the hub's own requests on the host, such
@@ -2205,7 +2275,12 @@ export class SessionManager {
 
 	async stopKeepingAgent(
 		hostId: string,
-		options: { readonly endTerminals: boolean; readonly force: boolean },
+		options: {
+			readonly endTerminals: boolean;
+			readonly force: boolean;
+			/** The uploads to the host stop too, the person having been told how many (#833). */
+			readonly stopTransfers?: boolean;
+		},
 	): Promise<StopKeepingAgentOutcome> {
 		const error = (status: number, code: string, message: string): StopKeepingAgentOutcome => ({
 			kind: "error",
@@ -2245,6 +2320,17 @@ export class SessionManager {
 					terminals: ended,
 				};
 			}
+			const transfers = this.transfersOn(hostId);
+			if (transfers > 0 && options.stopTransfers !== true) {
+				return {
+					kind: "error",
+					status: 409,
+					code: ErrorCode.TRANSFERS_WOULD_STOP,
+					message: "Send stop_transfers: true to stop the uploads to this host.",
+					transfers,
+				};
+			}
+			if (transfers > 0) this.transfers?.interruptOn(hostId);
 			const stop = await requestDaemonStop(agent, {
 				force: options.force,
 				isHubQuitting: () => this.isQuitting(),
@@ -2400,7 +2486,11 @@ export class SessionManager {
 	 */
 	async replaceAgent(
 		hostId: string,
-		options: { readonly force?: boolean } = {},
+		options: {
+			readonly force?: boolean;
+			/** The uploads to the host stop too, the person having been told how many (#833). */
+			readonly stopTransfers?: boolean;
+		} = {},
 	): Promise<ReplaceAgentOutcome> {
 		// An outdated agent being replaced there already finishes first (#805).
 		if (this.retirement.isUnderWay(hostId)) await this.retirement.settled(hostId);
@@ -2427,6 +2517,16 @@ export class SessionManager {
 				};
 			}
 			heldAgent = true;
+			const transfers = this.transfersOn(hostId);
+			if (transfers > 0 && options.stopTransfers !== true) {
+				return {
+					replaced: false,
+					code: ErrorCode.TRANSFERS_WOULD_STOP,
+					message: "Send stop_transfers: true to stop the uploads to this host.",
+					transfers,
+				};
+			}
+			if (transfers > 0) this.transfers?.interruptOn(hostId);
 			const outcome = await this.stopAgentToReplace(hostId, agent, options);
 			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
 			return outcome;
@@ -2716,9 +2816,11 @@ export class SessionManager {
 		if (this.isQuitting()) return { kind: "quitting" };
 		const facts = this.connectionFacts(hostId, host);
 		const ending = terminalsEndedByReconnect(facts);
-		if (ending > 0 && options.force !== true) {
-			return { kind: "terminals-would-end", terminals: ending };
-		}
+		const transfers =
+			this.ctx.agents.get(hostId)?.connected === true ? this.transfersOn(hostId) : 0;
+		const refused = this.wouldStop(ending, transfers, options.force);
+		if (refused !== null) return refused;
+		if (transfers > 0) this.transfers?.interruptOn(hostId);
 		this.userActsOnHost(hostId, false);
 		this.askServerAgain(hostId);
 		const agent = this.ctx.agents.get(hostId);
@@ -2753,9 +2855,10 @@ export class SessionManager {
 		if (this.isQuitting()) return { kind: "quitting" };
 		const facts = this.connectionFacts(hostId, host);
 		const ending = terminalsEndedByDisconnect(facts);
-		if (ending > 0 && options.force !== true) {
-			return { kind: "terminals-would-end", terminals: ending };
-		}
+		const transfers = this.transfersOn(hostId);
+		const refused = this.wouldStop(ending, transfers, options.force);
+		if (refused !== null) return refused;
+		if (transfers > 0) this.transfers?.interruptOn(hostId);
 		const session = this.ctx.sessions.get(hostId);
 		const agent = this.ctx.agents.get(hostId);
 		// Nothing connected, nothing on its way, nothing waiting to come back.
@@ -2783,6 +2886,25 @@ export class SessionManager {
 			ended: ending,
 		});
 		return { kind: "disconnected", ended: ending };
+	}
+
+	/**
+	 * The refusal of a gesture that closes a host's connection, unless `force`
+	 * says the person was told: terminals that would end, uploads that would
+	 * stop (#833), or both, counted in one answer so that one question asks
+	 * about both.
+	 */
+	private wouldStop(
+		terminals: number,
+		transfers: number,
+		force: boolean | undefined,
+	): HostConnectionOutcome | null {
+		if (force === true) return null;
+		if (terminals > 0) {
+			return { kind: "terminals-would-end", terminals, ...(transfers > 0 ? { transfers } : {}) };
+		}
+		if (transfers > 0) return { kind: "transfers-would-stop", transfers };
+		return null;
 	}
 
 	/** What decides how many terminals end with a host's connection. */
@@ -2891,6 +3013,20 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Whether something of this hub holds the host's connection: a terminal
+	 * that has not ended, or an upload running or queued (#833). An
+	 * acquisition with only an upload behind it is not abandoned.
+	 */
+	private holdsHost(hostId: string): boolean {
+		return this.hostHasLiveChannels(hostId) || this.transfersOn(hostId) > 0;
+	}
+
+	/** How many uploads to this host are running or queued (#833). */
+	private transfersOn(hostId: string): number {
+		return this.transfers?.activeOn(hostId) ?? 0;
+	}
+
 	/** Whether this hub holds a terminal on the host that has not ended. */
 	private hostHasLiveChannels(hostId: string): boolean {
 		for (const channel of this.ctx.channels.values()) {
@@ -2949,7 +3085,7 @@ export class SessionManager {
 				} catch {
 					return false;
 				} finally {
-					Acq.release(this.ctx, joined, () => this.hostHasLiveChannels(hostId));
+					Acq.release(this.ctx, joined, () => this.holdsHost(hostId));
 				}
 			}
 		}
@@ -2994,10 +3130,10 @@ export class SessionManager {
 				message: err instanceof Error ? err.message : String(err),
 			});
 			this.settleFailedConnect(hostId, session, neverConnected);
-			this.failConnectingAcq(acq, err, lease, () => this.hostHasLiveChannels(hostId));
+			this.failConnectingAcq(acq, err, lease, () => this.holdsHost(hostId));
 			return false;
 		} finally {
-			if (!lease.released) Acq.release(this.ctx, lease, () => this.hostHasLiveChannels(hostId));
+			if (!lease.released) Acq.release(this.ctx, lease, () => this.holdsHost(hostId));
 		}
 	}
 

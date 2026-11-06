@@ -3,7 +3,11 @@ import * as path from "node:path";
 import cors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
 import websocket from "@fastify/websocket";
-import { MAX_WALLPAPER_SIZE } from "@lasterm/shared";
+import {
+	DEFAULT_TRANSFER_CONFIG,
+	isFileTransferEnabled,
+	MAX_WALLPAPER_SIZE,
+} from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import Fastify from "fastify";
 import { registerAgentRoutes } from "./api/agents.js";
@@ -23,6 +27,7 @@ import { registerSessionRoutes } from "./api/sessions.js";
 import { registerSshKeyRoutes } from "./api/ssh-keys.js";
 import { registerThemeRoutes } from "./api/themes.js";
 import { registerTokenRoutes } from "./api/tokens.js";
+import { registerTransferRoutes } from "./api/transfers.js";
 import { registerWallpaperRoutes } from "./api/wallpapers.js";
 import { getBootAssetToken, requestHasValidAssetToken } from "./asset-token.js";
 import {
@@ -64,8 +69,9 @@ import { listenFromPort } from "./start-port.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { MetaDAL } from "./storage/meta.js";
 import { ThemeManager } from "./theme-manager.js";
+import { TransferService } from "./transfers/transfer-service.js";
 import { registerWebUiDirectory } from "./web-ui-files.js";
-import { registerWsRoutes } from "./ws/ws-handler.js";
+import { registerWsRoutes, type WsRoutes } from "./ws/ws-handler.js";
 
 declare module "fastify" {
 	interface FastifyInstance {
@@ -544,13 +550,56 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			},
 		});
 
+		// The files of a terminal's host (#832), and the uploads to it (#833),
+		// which follow the windows and the write locks the WebSocket route holds.
+		const hostFiles = new HostFilesService({
+			channelHost: (channelId) => metaDal.getChannelWithHost(channelId),
+			hostOs: (hostId) => metaDal.getHost(hostId)?.os ?? null,
+			sshHost: (hostId) => activeSessionManager.connectedSshAgent(hostId),
+		});
+		let routesForTransfers: WsRoutes | null = null;
+		const transfers = new TransferService({
+			files: hostFiles,
+			mayWrite: (channelId, clientId) => routesForTransfers?.mayWrite(channelId, clientId) ?? false,
+			channelEnded: (channelId) => {
+				const channel = metaDal.getChannel(channelId);
+				return channel === undefined || channel.status === "dead";
+			},
+			clientsOf: (channelId) =>
+				activeSessionManager.getClientsForChannel(channelId).map((client) => client.id),
+			send: (clientId, message) =>
+				routesForTransfers?.sendTo(clientId, message as Parameters<WsRoutes["sendTo"]>[1]),
+			isConnected: (hostId, hostType) =>
+				hostType === "local" || activeSessionManager.connectedSshAgent(hostId) !== null,
+			connect: (hostId, clientId) => activeSessionManager.connectForTransfer(hostId, clientId),
+			verifyFor: (hostId, channelId) =>
+				configResolver.resolve(hostId, channelId).transferVerify !== false,
+			maxConcurrent: () =>
+				configResolver.uiConfig.transfer.maxConcurrent ?? DEFAULT_TRANSFER_CONFIG.maxConcurrent,
+			onHostIdle: (hostId) => activeSessionManager.transfersEnded(hostId),
+		});
+		activeSessionManager.setTransfers(transfers);
+		const fileTransferEnabled = () => isFileTransferEnabled(configResolver.uiConfig);
+		server.addHook("onClose", async () => {
+			transfers.shutdown();
+		});
+
 		const wsRoutes = await registerWsRoutes(
 			server,
 			activeSessionManager,
 			options.authToken,
 			options.authToken ? (options.dbManager.meta ?? null) : null,
 			options.authToken ? authConfig.tokenTtlDays : undefined,
+			{
+				transfers: {
+					service: transfers,
+					enabled: fileTransferEnabled,
+					clientGone: (clientId) => transfers.clientGone(clientId),
+					lockChanged: (channelId) => transfers.lockChanged(channelId),
+				},
+			},
 		);
+		routesForTransfers = wsRoutes;
 		// Every client hears that the hosts or their groups changed, once for a
 		// burst of writes (#783).
 		const hostsChange = createHostsChangeAnnouncer((message) => {
@@ -569,13 +618,11 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerSessionRoutes(server, metaDal, activeSessionManager);
 		registerHostConnectionRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
 		registerChannelRoutes(server, metaDal, activeSessionManager);
-		registerFileRoutes(server, {
-			files: new HostFilesService({
-				channelHost: (channelId) => metaDal.getChannelWithHost(channelId),
-				hostOs: (hostId) => metaDal.getHost(hostId)?.os ?? null,
-				sshHost: (hostId) => activeSessionManager.connectedSshAgent(hostId),
-			}),
-			writerCheck: wsRoutes.writerCheck,
+		registerFileRoutes(server, { files: hostFiles, writerCheck: wsRoutes.writerCheck });
+		registerTransferRoutes(server, {
+			transfers,
+			enabled: fileTransferEnabled,
+			clientToken: (clientId) => wsRoutes.clientToken(clientId),
 		});
 		registerGroupRoutes(server, metaDal);
 		registerConfigRoutes(

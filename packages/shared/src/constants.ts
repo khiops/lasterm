@@ -109,6 +109,15 @@ export const ErrorCode = {
 	 * terminals. Consent is read by readHostConnectionBody or readStopKeepingBody (#648).
 	 */
 	TERMINALS_WOULD_END: "TERMINALS_WOULD_END",
+	/**
+	 * REST, disconnect, reconnect, DELETE /api/sessions/:id, stop-keeping and
+	 * replace: closing this host's connection would stop uploads to it, which
+	 * the request did not say to (#833). Forced, they are interrupted, and a
+	 * retry resumes them.
+	 */
+	TRANSFERS_WOULD_STOP: "TRANSFERS_WOULD_STOP",
+	/** WS TRANSFER_* and the transfer routes: `[experimental] file_transfer` is off (#835). */
+	FILE_TRANSFER_DISABLED: "FILE_TRANSFER_DISABLED",
 	/** REST, connect, reconnect, disconnect and POST /api/hosts/:id/agent/stop-keeping: the host is the local one, which has no connection to act on (#648). */
 	NOT_SSH_HOST: "NOT_SSH_HOST",
 	/** REST: the host's agent did not answer in time (#576). */

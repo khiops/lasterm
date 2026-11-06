@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostConnectionOutcome, SessionManager } from "../session/session-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
-import { readHostConnectionBody, registerHostConnectionRoutes } from "./host-connection.js";
+import {
+	readHostConnectionBody,
+	readStopKeepingBody,
+	registerHostConnectionRoutes,
+} from "./host-connection.js";
 
 const WINDOW_ID = "01K6480000000000000000WNDW";
 
@@ -84,6 +88,23 @@ function post(action: string, hostId: string, payload?: unknown) {
 	});
 }
 
+describe("readStopKeepingBody", () => {
+	it("reads each consent on its own: this hub's terminals, other hubs', the uploads (#833)", () => {
+		const none = { endTerminals: false, force: false, stopTransfers: false };
+		expect(readStopKeepingBody(undefined)).toEqual(none);
+		expect(readStopKeepingBody({})).toEqual(none);
+		expect(readStopKeepingBody({ stop_transfers: true })).toEqual({ ...none, stopTransfers: true });
+		expect(readStopKeepingBody({ end_terminals: true, force: true })).toEqual({
+			endTerminals: true,
+			force: true,
+			stopTransfers: false,
+		});
+		for (const body of [{ stop_transfers: "yes" }, { force: 1 }, [], "x"]) {
+			expect(readStopKeepingBody(body)).toHaveProperty("error");
+		}
+	});
+});
+
 describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 	it.each(["connect", "reconnect", "disconnect"])(
 		"%s reads its body through readHostConnectionBody: refused, 400; accepted, it reaches the hub",
@@ -154,6 +175,35 @@ describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 				code: "TERMINALS_WOULD_END",
 				message: "3 terminals on this host would end. Send force: true to end them.",
 				terminals: 3,
+			},
+		});
+	});
+
+	it("answers 409 with how many uploads would stop, alone or beside the terminals (#833)", async () => {
+		manager.disconnectHost.mockReturnValue({ kind: "transfers-would-stop", transfers: 2 });
+		const alone = await post("disconnect", sshHostId);
+		expect(alone.statusCode).toBe(409);
+		expect(alone.json()).toEqual({
+			error: {
+				code: "TRANSFERS_WOULD_STOP",
+				message:
+					"2 uploads to this host would stop. Send force: true to stop them; a retry resumes them.",
+				transfers: 2,
+			},
+		});
+		manager.disconnectHost.mockReturnValue({
+			kind: "terminals-would-end",
+			terminals: 1,
+			transfers: 1,
+		});
+		const both = await post("disconnect", sshHostId);
+		expect(both.json()).toEqual({
+			error: {
+				code: "TERMINALS_WOULD_END",
+				message:
+					"1 terminal on this host would end, and 1 upload to it would stop. Send force: true to go on.",
+				terminals: 1,
+				transfers: 1,
 			},
 		});
 	});

@@ -103,6 +103,11 @@ export interface RetirementHost {
 	release(hostId: string, agent: AgentConnection): void;
 	/** Start the local agent beside the hub for that session. Never rejects. */
 	startLocalAgent(hostId: string, sessionId: string): Promise<void>;
+	/**
+	 * How many uploads to the host are running or queued (#833): a remote
+	 * daemon's connection carries their SFTP session, so it waits for them.
+	 */
+	transfersOn?(hostId: string): number;
 }
 
 type StoppableAgent = AgentConnection & {
@@ -225,6 +230,8 @@ export class AgentRetirement {
 		for (const channel of this.ctx.channels.values()) {
 			if (channel.hostId === hostId && channel.status !== "dead") return false;
 		}
+		// The local host's uploads go through the hub's own file system.
+		if (host?.type === "ssh" && (this.host.transfersOn?.(hostId) ?? 0) > 0) return false;
 		return true;
 	}
 

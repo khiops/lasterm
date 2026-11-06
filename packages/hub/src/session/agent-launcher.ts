@@ -29,6 +29,7 @@ const AGENT_STOP_TIMEOUT_MS = 12_000;
 const AGENT_STOP_OUTPUT_LIMIT = 8_192;
 
 export interface AgentStopResult {
+	/** The stopper exited 0: the agent it found stopped, or none was running (#871). */
 	readonly stopped: boolean;
 	readonly diagnostic: string;
 	readonly stdout: string;
@@ -127,8 +128,12 @@ export function stopLocalAgent(
 			finish(false, `Could not run agent stopper: ${err.message}`);
 		});
 		child.once("close", (code, signal) => {
+			// Its exit status decides; its word only says which success it was.
+			// `not running`: no record named a live agent (a record whose process
+			// is gone is stale, and the stopper removed it) and nothing listened.
 			if (code === 0) {
-				finish(true, "Local agent stopped");
+				const said = stdout.trim().split(/\r?\n/).at(-1)?.trim();
+				finish(true, said === "not running" ? "No local agent was running" : "Local agent stopped");
 				return;
 			}
 			const detail = stderr || stdout;

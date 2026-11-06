@@ -44,6 +44,13 @@ const toastStore = useToastStore();
 	pointer-events: none;
 }
 
+/* A toast is drawn as the exit card is (TerminalPane.vue): on the theme's own
+   opaque ground, in the text the theme makes read on it (`--nt-text-strong`,
+   4.5:1 on `--nt-bg`), so neither a wallpaper nor the window's material shows
+   through, in a light theme or a dark one (#830). Its level shows in its border
+   and its icon, in the level's colour made to read on that same ground. Every
+   variable named here, and every pair of colours, is checked in every bundled
+   theme by ToastContainer.spec.ts. */
 .toast-item {
 	display: flex;
 	align-items: flex-start;
@@ -53,29 +60,35 @@ const toastStore = useToastStore();
 	font-size: 13px;
 	line-height: 1.4;
 	pointer-events: all;
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-	border: 1px solid transparent;
-	background: var(--nt-sidebar-bg, #21252b);
-	color: var(--nt-fg, #abb2bf);
+	box-shadow: var(--nt-shadow);
+	border: 1px solid var(--nt-border);
+	background: rgb(var(--nt-bg-rgb));
+	color: var(--nt-text-strong);
 	word-break: break-word;
 }
 
 .toast-item--error {
-	border-color: var(--nt-red, #e06c75);
-	background: rgba(224, 108, 117, 0.12);
-	color: var(--nt-red, #e06c75);
+	border-color: var(--nt-status-error);
+}
+
+.toast-item--error .toast-icon {
+	color: var(--nt-status-error);
 }
 
 .toast-item--warning {
-	border-color: var(--nt-yellow, #e5c07b);
-	background: rgba(229, 192, 123, 0.12);
-	color: var(--nt-yellow, #e5c07b);
+	border-color: var(--nt-status-warning);
+}
+
+.toast-item--warning .toast-icon {
+	color: var(--nt-status-warning);
 }
 
 .toast-item--info {
-	border-color: var(--nt-accent, #61afef);
-	background: rgba(97, 175, 239, 0.12);
-	color: var(--nt-fg, #abb2bf);
+	border-color: var(--nt-status-info);
+}
+
+.toast-item--info .toast-icon {
+	color: var(--nt-status-info);
 }
 
 .toast-icon {
@@ -89,20 +102,22 @@ const toastStore = useToastStore();
 	min-width: 0;
 }
 
+/* At full strength: dimmed, it fell under what a control must read at on
+   Solarized Light. Hover marks its edge and leaves the colours alone. */
 .toast-close {
 	flex-shrink: 0;
 	background: none;
-	border: none;
+	border: 1px solid transparent;
+	border-radius: 3px;
 	cursor: pointer;
 	font-size: 11px;
 	color: inherit;
-	opacity: 0.6;
 	padding: 0 2px;
 	line-height: 1.4;
 }
 
 .toast-close:hover {
-	opacity: 1;
+	border-color: currentColor;
 }
 
 /* TransitionGroup animations */

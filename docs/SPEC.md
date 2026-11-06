@@ -199,6 +199,29 @@ Local daemon, single process, binds to 127.0.0.1.
 - Fanout: OUTPUT from one channel → all attached clients
 - Write-lock: track who holds write per channel, handle claim/release/force
 
+**Host Files** (`packages/hub/src/files/`, #832):
+- Lists, stats and creates folders on the host a terminal runs on, for the files panel (#836) and
+  the uploads (#833); routes and errors in PROTOCOL.md § 6, Host Files
+- One interface (`FileBackend`), three ways to the files, chosen per host: the hub's own file system
+  for the local host, as the hub's OS user, which runs the local agent's terminals; SFTP over the
+  hub's SSH connection to a remote host that offers it; SSH commands over exec channels (a `sh`
+  script, or an encoded PowerShell) where it does not (#722, #723), or where SFTP failed without a
+  verdict. An answer that settles a request (missing, not a folder, exists, refused) is not asked
+  again the other way; when both fail, the error says what each said
+- SFTP: one session per SSH connection, shared, closed after 60 s unused; a lost connection fails
+  the requests on it with `HOST_NOT_CONNECTED`
+- Paths are absolute and literal, in one form per host style (`host-paths.ts`): POSIX, or Windows
+  drive-absolute and UNC, `C:/x` and `/C:/x` read as `C:\x`, `///server/share` as `\\server\share`,
+  `/` the drives; `%NAME%` text is refused (#711). Over SFTP a UNC path goes as `//server/share`,
+  the only form Win32-OpenSSH 9.5 reads as a share (`sftpPathOf`)
+- The SFTP and exec helpers it shares with the agent deployment (§ 3.5) live in
+  `session/ssh-file-transport.ts`: the SFTP session and its requests, the mkdir walk (POSIX,
+  drive-absolute and UNC parents), a command fed on its stdin, the Windows reply marker and Base64
+  path handling
+- A new folder is a write: only the window holding the terminal's write lock, named by the request
+  (`X-Lasterm-Client-Id`) and checked against the request's own token
+- Logs nothing: a path or a name is the user's, at any level, and a listing is a routine request
+
 **Cache Manager:**
 - Write-through: every OUTPUT chunk → spool.db
 - Periodic snapshots: store serialized screen state
@@ -606,7 +629,8 @@ TerminalProfile (config override — used in layers 3 & 4)
  ├── cursorStyle?: 'block' | 'underline' | 'bar'
  ├── scrollback?: number
  └── …                                 // every [terminal] key of CONFIG_REFERENCE.md, camelCased:
-                                       // bell, wallpaper, background, envMode, env, whenEnded
+                                       // bell, wallpaper, background, envMode, env, whenEnded,
+                                       // transfer* (§ 6)
 
 TabLayout (workspace persistence)
  ├── type: 'tabs'
@@ -982,8 +1006,12 @@ Hub starts (or reconnects after restart)
 Channel ch-1: Client A = WRITER, Client B = READER
 
 ── Tier 1: Auto-release ──
-A disconnects → lock freed → Hub broadcasts WRITE_LOCK { holder: null }
-B sends WRITE_CLAIM → lock granted → Hub broadcasts WRITE_LOCK { holder: B }
+A disconnects → lock kept for A's window for 10 s (#846)
+  → Hub broadcasts WRITE_LOCK { holder: null, reserved: true }; nobody types or resizes
+  ├─ A's window attaches again (reload, reconnect) → WRITE_LOCK { holder: A's new client }
+  ├─ B sends WRITE_CLAIM → lock granted at once → WRITE_LOCK { holder: B }
+  └─ 10 s pass → lock freed → WRITE_LOCK { holder: null }, then to B if B is the only one left
+A disconnects, its AUTH named no window → lock freed at once, as on the last line
 
 ── Tier 2: Request/Approve ──
 B → Hub: WRITE_CLAIM
@@ -1002,6 +1030,13 @@ RESIZE; the hub drops any other client's, and tells every attached client the ne
 (`CHANNEL_SIZE`, PROTOCOL.md § 4.3). The readers draw the terminal at that size rather than at
 their own. With no writer, the size stays put. When the lock changes hands, the new writer's fit
 becomes the terminal's size.
+
+A writer that reloads or reconnects comes back on a new socket, under a new client id. Its AUTH
+names its window (a ULID the web keeps in sessionStorage, PROTOCOL.md § 4.1), and the hub keeps the
+lock for that window, under the same token, for 10 s after its socket closes (#846). Meanwhile
+nobody writes and nobody decides the size, so the writer gets back both the lock and the size it
+left, rather than coming back a reader of a terminal sized for whoever was left. Any client can
+still take the lock during those seconds with a claim, which is granted at once.
 
 ## 6. Config Cascade
 
@@ -1037,6 +1072,31 @@ The environment a terminal is spawned with cascades through the same layers, and
 |----------|-------------|--------|---------|-------|
 | `env_mode` | `envMode` | `inherit`, `minimal` | `inherit` | What the PTY's environment starts from, applied by the agent on the host (#576): `inherit`, the agent's own environment; `minimal`, only what programs need to run (`HOME`, `PATH`, the locale…), taken from it and never invented. The lists are in PROTOCOL.md § 3.2. Either way the agent then drops the inherited `NO_COLOR` and sets the terminal's identity: `TERM=xterm-256color` on Unix, `COLORTERM=truecolor`, `TERM_PROGRAM=lasterm`, `TERM_PROGRAM_VERSION`. |
 | `env` | `env` | map of name → value or `null` | `{}` | This scope's **changes** to that start, never a snapshot of the result. A value sets the variable; `null` removes it, whether an outer scope set it or the agent would have passed it on (`false` in `config.toml`, which has no null). Merged key by key down the layers: a host changes what the global scope set, a channel both, and the same name set closer wins, either way. The hub resolves the layers into values and removals and sends them in SPAWN as `env` and `env_unset`; a launch profile's own `env`, then the spawn request's, are applied over them. On a Windows host names compare without case. Stored in the clear in `meta.db` and `config.toml`, like every other profile value: not a place for secrets. Reaches the terminals spawned after it and the ones restarted, never the ones already running. |
+
+File transfer's keys (#835, part of #721) cascade through the same layers, save two that stop at
+the host. All of them wait behind `[experimental] file_transfer`, off by default until upload
+(#837) lands; `isFileTransferEnabled` (`@lasterm/shared`) is the one check each part makes:
+
+| TOML key | Profile key | Values | Default | Scopes | Notes |
+|----------|-------------|--------|---------|--------|-------|
+| `transfer_drop` | `transferDrop` | `upload`, `off` | `upload` | global, host, terminal | What dropping files on a terminal does. |
+| `transfer_confirm_drop` | `transferConfirmDrop` | boolean | `true` | global, host, terminal | Ask before the upload a drop starts, showing where it goes. |
+| `transfer_on_conflict` | `transferOnConflict` | `ask`, `replace`, `keep_both`, `skip` | `ask` | global, host, terminal | What an upload does with a file of the same name where it lands. |
+| `transfer_follow_cwd` | `transferFollowCwd` | boolean | `true` | global, host, terminal | Upload into the shell's folder when it is known. |
+| `transfer_fallback_dir` | `transferFallbackDir` | string, ≤ 1024 | `""` (the home) | global, host | Where an upload lands otherwise. `${VAR}` is expanded by the agent, as in a launch profile's `cwd`. |
+| `transfer_verify` | `transferVerify` | boolean | `true` | global, host | Check uploads by SHA-256 over SSH commands, on hosts whose server offers no SFTP. |
+
+A terminal's profile refuses the two host keys (`HOST_ONLY_PROFILE_KEYS`). Every value is checked
+where it is written, by the tables of `file-transfer.ts`, and one in `config.toml` that a route would
+refuse is not read. The window's settings of the files panel are global, in `[transfer]`
+(`panel_side`, `open_on_drag`, `max_concurrent` 1–3, `show_hidden`), and its width in
+`[layout] transfer_panel_width` (240–520 px); CONFIG_REFERENCE.md has them all.
+
+A key set for a host or globally holds on a given terminal only once the overrides nearer to it
+are gone: `planProfileWrite` (`@lasterm/shared`) plans that write, the value then each drop, and
+says which overrides it drops so that a caller can say so first. "Always do this" on an ended
+terminal writes `when_ended` through it; the files panel's options and an upload's conflict step
+write theirs.
 
 Settings › Environment shows, at host and terminal scope, the variables the host's agent would
 start a terminal with in the chosen mode, asked live (`GET /api/hosts/:id/agent-environment`,
@@ -1258,7 +1318,9 @@ lasterm/
 │   │       │   ├── ssh-agent.ts      # SshAgent: the agent over SSH, on stdio or a daemon's socket
 │   │       │   ├── remote-daemon.ts  # Whether and how a remote host keeps a daemon (#79, #600, #765)
 │   │       │   ├── ssh-keepalive.ts  # The SSH keepalive every connection carries (#607)
+│   │       │   ├── ssh-file-transport.ts # SFTP session, mkdir walk, stdin exec, Windows reply marker (#832)
 │   │       │   └── spool-gc.ts       # Spool garbage collection (STORAGE.md § 7)
+│   │       ├── files/       # A terminal's host files: local fs, SFTP, SSH commands (§ 3.3, #832)
 │   │       ├── ssh/         # known_hosts reader, ~/.ssh/config parser
 │   │       ├── logging/     # hub.jsonl, channel logs, the security log
 │   │       ├── storage/     # SQLite DAL (meta.db + spool.db)

@@ -2178,6 +2178,17 @@ export class SessionManager {
 		return this.ctx.stoppingAgents.has(hostId);
 	}
 
+	/**
+	 * The SSH agent through which this hub reaches a remote host, while it is
+	 * connected: its connection carries the hub's own requests on the host, such
+	 * as browsing its files (#832). Null for the local host, and for a host with
+	 * no agent connected to this hub.
+	 */
+	connectedSshAgent(hostId: string): SshAgent | null {
+		const agent = this.ctx.agents.get(hostId);
+		return agent instanceof SshAgent && agent.connected ? agent : null;
+	}
+
 	private connectedThroughRemoteDaemon(hostId: string): boolean {
 		const agent = this.ctx.agents.get(hostId);
 		return agent instanceof SshAgent && agent.connected && agent.usedRemoteDaemon;

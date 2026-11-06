@@ -5,12 +5,16 @@ import {
 	ELEVATION_METHODS_DARWIN,
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
+	HOST_ONLY_PROFILE_KEYS,
 	isHostRailBadgeSize,
 	isHostRailColumns,
+	isTransferPanelWidth,
 	LOGGING_SETTINGS_KEYS,
 	LOGGING_SETTINGS_VALIDATORS,
 	SSH_CONFIG_KEYS,
 	TERMINAL_PROFILE_KEYS,
+	TRANSFER_CONFIG_VALIDATORS,
+	TRANSFER_PROFILE_VALIDATORS,
 	UI_CONFIG_SECTIONS,
 	UI_SECTION_KEYS,
 } from "@lasterm/shared";
@@ -68,11 +72,58 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 		hostRailColumns: isHostRailColumns,
 		hostRailBadgeSize: isHostRailBadgeSize,
 		sidebarWidth: (v) => typeof v === "number" && Number.isInteger(v) && v >= 0,
+		transferPanelWidth: isTransferPanelWidth,
 	},
 	keyboard: {
 		keyHints: (v) => typeof v === "boolean",
 	},
+	transfer: { ...TRANSFER_CONFIG_VALIDATORS },
+	experimental: {
+		fileTransfer: (v) => typeof v === "boolean",
+	},
 };
+
+/**
+ * The values a terminal profile accepts, by key, wherever it is written:
+ * `PUT /api/config/global`, and a host's or a channel's profile `PATCH`. A key
+ * without an entry is stored as given; `null`, which removes a key, is never
+ * asked about. Each rule is unit-tested in `config.spec.ts`, and each route
+ * keeps one test proving it consults this table.
+ */
+export const TERMINAL_VALUE_VALIDATORS: Record<string, (v: unknown) => boolean> = {
+	...TRANSFER_PROFILE_VALIDATORS,
+};
+
+type ProfileScope = "global" | "host" | "channel";
+
+/**
+ * What is wrong with the values of a terminal profile written at `scope`, or
+ * null: a key a terminal's profile never holds (`HOST_ONLY_PROFILE_KEYS`), or a
+ * value `TERMINAL_VALUE_VALIDATORS` refuses. Keys are checked against the
+ * whitelist before.
+ */
+export function profileValueError(
+	profile: Record<string, unknown>,
+	scope: ProfileScope,
+): { code: "VALIDATION_ERROR" | "INVALID_VALUE"; message: string } | null {
+	for (const [key, value] of Object.entries(profile)) {
+		if (value === null) continue;
+		if (scope === "channel" && HOST_ONLY_PROFILE_KEYS.includes(key)) {
+			return {
+				code: "VALIDATION_ERROR",
+				message: `"${key}" is set globally or for a host, not for one terminal`,
+			};
+		}
+		const valid = TERMINAL_VALUE_VALIDATORS[key];
+		if (valid !== undefined && !valid(value)) {
+			return {
+				code: "INVALID_VALUE",
+				message: `Invalid value for "${key}": ${JSON.stringify(value)}`,
+			};
+		}
+	}
+	return null;
+}
 
 export function registerConfigRoutes(
 	server: FastifyInstance,
@@ -130,6 +181,8 @@ export function registerConfigRoutes(
 					});
 				}
 			}
+			const valueError = profileValueError(terminal as Record<string, unknown>, "global");
+			if (valueError !== null) return reply.code(400).send({ error: valueError });
 
 			for (const [key, value] of Object.entries(terminal as Record<string, unknown>)) {
 				await configResolver.saveGlobalTerminal(key, value);
@@ -276,6 +329,8 @@ export function registerConfigRoutes(
 					});
 				}
 			}
+			const valueError = profileValueError(profile as Record<string, unknown>, "host");
+			if (valueError !== null) return reply.code(400).send({ error: valueError });
 
 			const existingRaw = metaDal.getHostProfile(id);
 			const existing = existingRaw ? (JSON.parse(existingRaw) as Record<string, unknown>) : {};
@@ -491,6 +546,8 @@ export function registerConfigRoutes(
 					});
 				}
 			}
+			const valueError = profileValueError(profile as Record<string, unknown>, "channel");
+			if (valueError !== null) return reply.code(400).send({ error: valueError });
 
 			const existingRaw = metaDal.getChannelProfile(id);
 			const existing = existingRaw ? (JSON.parse(existingRaw) as Record<string, unknown>) : {};

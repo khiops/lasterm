@@ -9,6 +9,19 @@ import { useToastStore } from "./toast.js";
 
 export type Scope = "global" | "host" | "channel";
 
+/**
+ * A place to open Settings at, rather than where the sidebar is (#835): the
+ * files panel's gear opens File transfer at its terminal's host.
+ */
+export interface SettingsTarget {
+	category: string;
+	scope: Scope;
+	/** The host the Host scope edits; null: none, whatever the sidebar selects. */
+	hostId: string | null;
+	/** The terminal the Channel scope edits; null: none. */
+	channelId: string | null;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Traverse an object by dot-separated path. Returns undefined for missing keys. */
@@ -57,6 +70,36 @@ export const useSettingsStore = defineStore("settings", () => {
 	const lastError = ref<string | null>(null);
 	const currentHostId = ref<string | null>(null);
 	const currentChannelId = ref<string | null>(null);
+
+	// ─── Opening the panel ────────────────────────────────────────────────
+
+	/** Whether the panel is open. */
+	const panelOpen = ref(false);
+	/**
+	 * The host and terminal the panel was opened at (`openAt`), in the place of
+	 * the sidebar's selection, until it closes; null: the sidebar's selection.
+	 */
+	const target = ref<Pick<SettingsTarget, "hostId" | "channelId"> | null>(null);
+
+	/**
+	 * Open the panel at a category and a scope, for a host and a terminal
+	 * given rather than the ones the sidebar selects, which it leaves as they
+	 * are (#835). Closing the panel forgets them. A scope with nothing to edit,
+	 * the Channel scope without a terminal say, falls back to the next one out.
+	 */
+	function openAt(at: SettingsTarget): void {
+		target.value = { hostId: at.hostId, channelId: at.channelId };
+		activeCategory.value = at.category;
+		activeScope.value =
+			at.scope === "channel" && at.channelId === null
+				? at.hostId === null
+					? "global"
+					: "host"
+				: at.scope === "host" && at.hostId === null
+					? "global"
+					: at.scope;
+		panelOpen.value = true;
+	}
 
 	// ─── Load cascade from API ────────────────────────────────────────────
 
@@ -360,6 +403,9 @@ export const useSettingsStore = defineStore("settings", () => {
 		lastError,
 		currentHostId,
 		currentChannelId,
+		panelOpen,
+		target,
+		openAt,
 		loadCascade,
 		getValue,
 		isOverridden,

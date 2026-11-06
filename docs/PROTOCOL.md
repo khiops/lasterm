@@ -705,8 +705,9 @@ is known; the hub at DEBUG the same way (`security-events.spec.ts`).
 ends. It relays each to the clients attached to the channel (§ 4.12), and gives the last in
 ATTACH_OK (§ 4.2) and STATE_SYNC (§ 4.6) as `cwd`, `cwd_source` and `foreground`. When it adopts a
 daemon's terminal it has heard nothing about, after a hub restart, it sends CWD_QUERY for it
-(§ 3.16). `SessionManager.queryChannelCwd` asks for a fresh read for the listing of a terminal's
-folder (#832): the first CWD_CHANGE for that channel after the question is its answer; it gives
+(§ 3.16). `SessionManager.queryChannelCwd` asks for a fresh read, for the folder a listing of the
+terminal's files opens at (`GET /api/channels/:id/files` without `path`, § 6, #832), which does not
+use it yet: the first CWD_CHANGE for that channel after the question is its answer; it gives
 `not-found` on that channel's `CHANNEL_NOT_FOUND`, and after 2 s, or when the host has no agent
 connected, what was said last.
 
@@ -716,7 +717,7 @@ connected, what was said last.
 
 ```typescript
 // UI → Hub (must be first message)
-{ type: "AUTH", token: string }
+{ type: "AUTH", token: string, window_id?: string }
 
 // Hub → UI
 { type: "AUTH_OK", client_id: string, echoes_spawn_request_id?: true }
@@ -725,6 +726,17 @@ connected, what was said last.
 
 `echoes_spawn_request_id` says that this hub echoes a SPAWN's `request_id` in everything that
 answers it (§ 4.4, #777). A hub older than it leaves it out.
+
+`window_id` is a ULID naming the window the socket belongs to (#846): the same across the window's
+reloads and reconnections, never the same in two windows. Every socket gets a new `client_id`, so
+this is what tells the hub that a write lock's holder has come back (§ 4.5), and that is all the hub
+uses it for. It reads it under the token the socket authenticated with: two windows sharing a token
+are two windows, and the same id under another token is another window. One that is not a ULID is
+ignored, as is its absence from a client older than this; the socket is accepted all the same.
+
+The web keeps it in sessionStorage, which a reload keeps and a new window starts without. A
+duplicated tab copies sessionStorage, so the page takes the id out of it as it starts and puts it
+back only as it goes (`pagehide`): a tab duplicated meanwhile finds none, and draws its own.
 
 A first frame that is not AUTH is also answered `AUTH_FAIL`, and the socket closed. A socket that
 sends no AUTH within 10 s is closed with code `4001`, reason `AUTH_TIMEOUT`.
@@ -797,7 +809,9 @@ A terminal has one size, its PTY's, and one client decides it: the one holding i
 (§ 4.5, #831). The hub passes that client's RESIZE on to the agent and stores the size in meta.db.
 It drops a RESIZE from any other client without an answer: every client resizes its own pane, a
 reader beside the writer or a second device, and that is not an error. While nobody holds the lock,
-nobody decides, and the size stays as it is until a client takes the lock and sends its own.
+nobody decides, and the size stays as it is until a client takes the lock and sends its own. That
+includes the grace the hub keeps for a holder that left (§ 4.5, #846): a writer that reloads comes
+back to the size it left.
 
 Whenever the size changes, the hub sends `CHANNEL_SIZE` to every client attached to the channel, the
 one that asked included, before any output the program draws for the new size. A client attaching
@@ -914,11 +928,38 @@ another pane's overlay, or by its host's return; `automatic` changes nothing on 
 { type: "WRITE_REVOKED",  channel_id: string }
 
 // Hub → ALL on channel: lock state broadcast
-{ type: "WRITE_LOCK",     channel_id: string, holder: string | null }
+{ type: "WRITE_LOCK",     channel_id: string, holder: string | null, reserved?: true }
 ```
 
 The holder also decides the terminal's size (§ 4.3): taking the lock makes a client's pane the one
 the PTY is sized to.
+
+**A holder that leaves is waited for** (#846). When the socket holding a lock closes, as a reload or
+a dropped connection closes it, and its AUTH named a window (§ 4.1), the hub keeps the lock for that
+window for 10 s instead of handing it on. Meanwhile nobody holds it: the hub refuses every client's
+INPUT (`WRITE_LOCK_DENIED`) and applies nobody's RESIZE. It tells every client attached
+`WRITE_LOCK { holder: null, reserved: true }`, and a client attaching meanwhile the same; that one
+is not given the lock for being the first. The web shows "Writer reconnecting". The wait ends in one
+of three ways:
+
+- **The window attaches to the terminal again**, on its new socket: it holds the lock again
+  (`WRITE_LOCK { holder: <its new client_id> }`), and its pane sends its fit as any new holder's
+  does (§ 4.3). The size is the one it left, nobody having changed it.
+- **A client sends WRITE_CLAIM or WRITE_FORCE**: the lock is free, so it is granted at once, with no
+  WRITE_REQUEST and no WRITE_REVOKED, and the window coming back later reads.
+- **Nobody comes back within the grace**: the lock is free (`WRITE_LOCK { holder: null }`) and goes
+  to the one client left attached, when there is exactly one, as any freed lock does.
+
+Each terminal waits on its own: a window that comes back to other terminals leaves those it does not
+attach to for the third case. A window already back on another socket when its old one is seen to
+close has the lock at once. A holder that sent DETACH or WRITE_RELEASE, or whose AUTH named no
+window, is not waited for. A hub stopping ends every wait; a hub restarted knows no holder, and the
+first client attaching to each terminal takes its lock, as before.
+
+Ten seconds covers a reload, the desktop's own after Tauri's IPC fallback (#823) included, which
+takes the page a second or two to attach its panes again, and the web's first three reconnect
+attempts, 1, 3 and 7 s after a drop. It is also how long the one client left waits, when nobody
+comes back, before it is handed the lock; it can take it at once instead.
 
 ### 4.6 STATE_SYNC (Hub → UI)
 
@@ -1479,6 +1520,23 @@ Client A (WRITER)           Hub                Client B (READER)
  │  (draws at B's size)      │                           │
 ```
 
+### 5.6 Write-Lock Holder Reloading (#846)
+
+```
+Client A (WRITER, window W)  Hub                Client B (READER)
+ │  (reloads: socket closes) │                           │
+ │                           │── WRITE_LOCK {null, ─────►│ (nobody types or resizes)
+ │                           │    reserved}              │
+ │── AUTH {token, W} ───────►│ (new socket, client A')   │
+ │── ATTACH ────────────────►│                           │
+ │◄── ATTACH_OK ────────────│                           │
+ │◄── WRITE_LOCK {A'} ──────│── WRITE_LOCK {A'} ───────►│
+ │── RESIZE {A's fit} ──────►│ (only if it differs)      │
+ │  (WRITER again)           │            (still READER) │
+```
+
+Had A not come back within 10 s, B would have received `WRITE_LOCK {B}` instead.
+
 ## 6. REST API
 
 Base: `https://127.0.0.1:<port>/api`, the port `runtime.json` records (SPEC.md § 7)
@@ -1694,6 +1752,91 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | DELETE | `/api/channels/:id` | ● | `{ ok: true }`. A live channel is ended, and stored `dead` with `end_reason: "killed"`. A dead one is removed with its output: `{ ok: true, purged: true }`, answered once its row is gone; the output follows in the spool GC's bounded batches (STORAGE.md § 7.2) |
 | DELETE | `/api/channels/dead` | ● | Remove all dead channels, or a host's with `{ host_id }` → `{ ok: true, purged }`, their output as above |
 
+#### Host Files
+
+The files of the host a terminal runs on (#832), for any authenticated client, a reader of the
+terminal included; a new folder only from the window holding its write lock. The local host is reached
+through the hub's own file system, as the hub's OS user, which is the one the local agent runs
+terminals as; a remote host over SFTP on the hub's own SSH connection to it, or over SSH commands
+where the server offers no SFTP (`sftp_unavailable`, § 4.7) or where SFTP failed without a verdict.
+A dead terminal's host is browsed as a live one's. Nothing is uploaded here yet (#833).
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, link_target?, link_kind? }], truncated }`. Without `path` (or with an empty one), the folder a panel opens at: the account's home on that host for now (the terminal's own folder, #834, and the configured one, #835, will come first). `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
+| GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, link_target?, link_kind? }` |
+| GET | `/api/channels/:id/files/free-space` | ● | `?path=` → `{ path, available, total }`: the bytes the account may still write on that folder's file system, and its size; `null` when the host does not say (a Windows share over SSH commands). Without `path`, the home |
+| POST | `/api/channels/:id/folders` | ● | `{ path }`, header `X-Lasterm-Client-Id` → 201 `{ path }`. Creates that folder, and only it: its parent must exist and it must not. Refused with 403 `WRITE_LOCK_DENIED` unless the header names a window that holds the terminal's write lock (§ 4.5) |
+
+Every answer carries `Cache-Control: no-store`. An entry is:
+
+| Field | Value |
+|-------|-------|
+| `name` | Its name, as the host spells it; any character a name may hold, a line feed included |
+| `kind` | `"file"`, `"directory"`, `"symlink"` or `"other"`, as `lstat` says: a link is not followed |
+| `size` | Bytes; `null` for a folder, or when the host does not say |
+| `mtime` | Last modified, ISO 8601; `null` when the host does not say |
+| `link_target` | On a link: what it holds, as the host reads it; absent when it does not say (a Windows host over SSH commands) |
+| `link_kind` | On a link: what it leads to, followed: `"file"`, `"directory"`, `"other"`, or `"missing"` |
+
+Over SSH commands, a Windows host's folder that is a reparse point (a junction, a link to a folder)
+is a `symlink` whose `link_kind` is `"directory"`; a file that is one stays a `file`, since .NET
+Framework does not give the reparse tag that tells a link from a cloud placeholder.
+
+**Paths.** A path is absolute, with no `.` or `..` segment, and taken literally: nothing in it is
+expanded, so a name may hold `$`, `%`, quotes or backticks. Every answer gives it in one form:
+- **POSIX hosts** (Linux, macOS): `/…`, repeated and trailing `/` removed. A path starting with `~` or
+  `$` is refused, with its reason.
+- **Windows hosts**: drive-absolute (`C:\…`) or UNC (`\\server\share\…`). `C:/x` and `/C:/x`, the form
+  a Windows SFTP server answers in, are `C:\x`; `//server/share/x`, and `///server/share/x` as
+  Win32-OpenSSH's `realpath` answers a share, are `\\server\share\x`. The drive letter is upper case,
+  `C:` is `C:\`. The path
+  `/` is the host's root, which lists its drives, each a folder named `C:`: `/` + `C:` is `/C:`, so a
+  name joins onto it as onto any folder. A path holding `%NAME%` text is refused with its reason: the
+  hub expands no environment variable (#711). So are device paths (`\\?\`, `\\.\`), a drive-relative
+  `C:x`, and a character no Windows name holds.
+
+**A new folder is a write.** A REST request carries a token, not a WebSocket, so it names its window
+in `X-Lasterm-Client-Id`, the id its `AUTH_OK` gave it (§ 4.1). The hub checks that this window is a
+socket open now, authenticated with the request's own token, and that it holds the terminal's write
+lock: a lock free, or held by another window, is refused (the window claims it first, § 4.5). A
+missing or unknown header is refused the same way.
+
+**Errors** answer `{ error: { code, message } }`. The message is the client's to show, and may name
+the path; the hub logs neither, at any level.
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `VALIDATION_ERROR` | A channel id that is not a ULID, `path` given twice or over 4,096 characters, `hidden` another value, a body that is not `{ path }` |
+| 400 | `UNSUPPORTED_PATH` | A path in none of the forms above; the message says why. Also a new folder at a root |
+| 403 | `WRITE_LOCK_DENIED` | A new folder from a window that does not hold the write lock, or that the request may not speak for |
+| 403 | `PERMISSION_DENIED` | The host's account may not read the folder, or write in it |
+| 404 | `CHANNEL_NOT_FOUND` | No terminal of this hub has that id |
+| 404 | `NOT_FOUND` | Nothing at that path, or no folder to create the new one in |
+| 409 | `NOT_A_DIRECTORY` | A listing or a free space of a path that is not a folder, or a new folder in one |
+| 409 | `ALREADY_EXISTS` | A new folder where something exists already. SFTP version 3 has no status for it, and OpenSSH and Win32-OpenSSH both answer "Failure", so after a failure the hub looks at what is there |
+| 409 | `HOST_NOT_CONNECTED` | The terminal's host has no agent connected to this hub, or its connection was lost while the request was on it |
+| 502 | `FILE_ACCESS_FAILED` | The host failed without saying why it should: what SFTP said, then what the SSH commands said, when both were tried (`Over SFTP: … Over SSH commands: …`) |
+
+**How each host is reached.** The local host: Node's `fs` (`readdir` with entry types, `lstat`,
+`statfs`, `mkdir`); the drives of a Windows hub are the letters whose root answers. A remote host:
+- **SFTP**, one session per SSH connection, opened when first asked for, shared by every request on
+  it, and closed after 60 s unused; a request is bound to the channel's life. `readdir` (whose
+  attributes are `lstat`'s), `readlink` and `stat` for a link, `statvfs@openssh.com` for the free space
+  where the server offers it. On a Windows host, a drive-absolute path goes as it is, `/` lists the
+  drives (`C:`, `D:`), and a UNC path goes as `//server/share/…`: Win32-OpenSSH 9.5 reads
+  `\\server\share` as a folder of drive C: and answers "No such file", which would say a share that
+  exists is not there.
+- **SSH commands**, on a POSIX host a `sh` script fed on its stdin (`sh -s`): `stat -c '%f %s %Y'`
+  (GNU coreutils and BusyBox), names as Base64 of their bytes, `df -Pk`, `mkdir --`. On a Windows host
+  an encoded PowerShell (`-EncodedCommand`), the path as Base64 data, .NET calls only
+  (`DirectoryInfo.GetFileSystemInfos`, which lists hidden and system entries as `Get-ChildItem -Force`
+  does, and `DriveInfo`), names as Base64. Either answers after the reply marker (`lasterm-reply-4d9b1f`),
+  past whatever the account's shell printed first (#749).
+
+A remote host whose OS no connection has recorded is asked once per connection, as the agent
+deployment asks it (`uname -sm`, then the Windows architecture).
+
 #### Channel Groups (tab groups)
 
 | Method | Path | Auth | Body / Notes |
@@ -1733,8 +1876,8 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | GET | `/api/config/defaults` | ● | Layer 1 built-in defaults |
 | GET | `/api/config/ui` | ● | UI behavioral config |
 | GET | `/api/config/cascade` | ● | Full 4-layer cascade, the merged result included (query: `?host_id=X&channel_id=Y`) |
-| PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }`. A `null` inside `terminal.env` is a removal, written `false` in `config.toml` (which has no null) and read back as `null` |
-| PUT | `/api/config/ui` | ● | `{ <section>: { <key>: value } }` → `{ ok }` |
+| PUT | `/api/config/global` | ● | `{ terminal: {...} }` → `{ ok }`. A `null` inside `terminal.env` is a removal, written `false` in `config.toml` (which has no null) and read back as `null`. A file-transfer value outside its table (CONFIG_REFERENCE.md `[terminal]`) 400 `INVALID_VALUE`, and nothing is written |
+| PUT | `/api/config/ui` | ● | `{ <section>: { <key>: value } }` → `{ ok }`. A key the section does not have 400 `VALIDATION_ERROR`, a value its rule refuses 400 `INVALID_VALUE`. `transfer` and `experimental` are sections (#835) |
 | PUT | `/api/config/appearance` | ● | `{ theme?, autoSwitch?, ... }` → `{ ok }` |
 | GET | `/api/config/elevation` | ● | Current elevation config |
 | PUT | `/api/config/elevation` | ● | `{ methodLinux?, methodDarwin?, ... }` → `{ ok }`. A method the OS does not have, or an empty custom command, 400 `INVALID_VALUE` |
@@ -1743,9 +1886,9 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | GET | `/api/config/logging` | ● | What Settings edits of `[logging]`: `{ agentFilesKept }`, the log files an agent daemon keeps (STORAGE.md § 12.1) |
 | PUT | `/api/config/logging` | ● | `{ agentFilesKept }` → `{ agentFilesKept }`, as saved. A whole number from 0 (all) to 3650, else 400 `INVALID_VALUE`; any other key 400 `VALIDATION_ERROR`. Reaches each agent daemon when it next starts |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
-| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR` |
+| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR`; a file-transfer value outside its table 400 `INVALID_VALUE` |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |
-| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, as for a host |
+| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, as for a host. `transferFallbackDir` and `transferVerify`, which are the host's, 400 `VALIDATION_ERROR` unless `null` |
 
 #### Fonts
 

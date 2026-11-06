@@ -1,6 +1,14 @@
 // Config types and deep merge utility for lasterm config cascade
 import type { AppearanceConfig } from "./appearance.js";
 import type { ElevationMethod, Host, TerminalProfile } from "./entities.js";
+import {
+	DEFAULT_TRANSFER_PANEL_WIDTH,
+	EXPERIMENTAL_CONFIG_KEYS,
+	type ExperimentalConfig,
+	TRANSFER_CONFIG_KEYS,
+	TRANSFER_PROFILE_KEYS,
+	type TransferConfig,
+} from "./file-transfer.js";
 import type { HostRailBadgeSize } from "./host-rail.js";
 import { isPlainObject } from "./utils.js";
 
@@ -269,6 +277,12 @@ export const DEFAULT_PROFILE: TerminalProfile = {
 	envMode: "inherit",
 	env: {},
 	whenEnded: "ask",
+	transferDrop: "upload",
+	transferConfirmDrop: true,
+	transferOnConflict: "ask",
+	transferFollowCwd: true,
+	transferFallbackDir: "",
+	transferVerify: true,
 };
 
 // ─── UI behavioral config (combined) ─────────────────────────────────────────
@@ -285,15 +299,18 @@ export interface LayoutConfig {
 	hostRailBadgeSize: HostRailBadgeSize;
 	/** Channel sidebar width in pixels. 0 means collapsed. Default: 200. */
 	sidebarWidth: number;
+	/** The files panel's width in pixels, 240 to 520, as its edge was last dragged (#835). Default: 300. */
+	transferPanelWidth: number;
 }
 
 export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
 	hostRailColumns: 1,
 	hostRailBadgeSize: "medium",
 	sidebarWidth: 200,
+	transferPanelWidth: DEFAULT_TRANSFER_PANEL_WIDTH,
 };
 
-/** UI behavioral configuration (from [ui], [tabs], [panes], [channels], [startup], [title], [search], [layout], [keyboard] in config.toml). */
+/** UI behavioral configuration (from [ui], [tabs], [panes], [channels], [startup], [title], [search], [layout], [keyboard], [transfer] and [experimental] in config.toml). */
 export interface UiConfig {
 	/** What to do when a channel dies: "close" the tab or keep it "readonly". Default: "readonly". */
 	onChannelDead: "close" | "readonly";
@@ -313,6 +330,10 @@ export interface UiConfig {
 	layout: LayoutConfig;
 	/** The window's keys: the key hints (#639). */
 	keyboard: KeyboardConfig;
+	/** The files panel (#835). */
+	transfer: TransferConfig;
+	/** The switches of features not finished yet (#835). */
+	experimental: ExperimentalConfig;
 }
 
 // ─── Agent environment endpoint response ─────────────────────────────────────
@@ -392,7 +413,10 @@ export const TERMINAL_PROFILE_KEYS = [
 	"envMode",
 	"env",
 	"whenEnded",
+	...TRANSFER_PROFILE_KEYS,
 ] as const;
+
+export type TerminalProfileKey = (typeof TERMINAL_PROFILE_KEYS)[number];
 
 export const MAX_WALLPAPER_BLUR = 20;
 export const MAX_WALLPAPER_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -407,6 +431,8 @@ export const UI_CONFIG_SECTIONS = [
 	"search",
 	"layout",
 	"keyboard",
+	"transfer",
+	"experimental",
 ] as const;
 
 /** Per-section key whitelists — derived from the TypeScript interfaces above. */
@@ -437,7 +463,12 @@ export const TITLE_CONFIG_KEYS = [
 
 export const SEARCH_CONFIG_KEYS = ["position", "highlightOnClose", "historySize"] as const;
 
-export const LAYOUT_CONFIG_KEYS = ["hostRailColumns", "hostRailBadgeSize", "sidebarWidth"] as const;
+export const LAYOUT_CONFIG_KEYS = [
+	"hostRailColumns",
+	"hostRailBadgeSize",
+	"sidebarWidth",
+	"transferPanelWidth",
+] as const;
 
 export const KEYBOARD_CONFIG_KEYS = ["keyHints"] as const;
 
@@ -451,6 +482,8 @@ export const UI_SECTION_KEYS: Record<string, readonly string[]> = {
 	search: SEARCH_CONFIG_KEYS,
 	layout: LAYOUT_CONFIG_KEYS,
 	keyboard: KEYBOARD_CONFIG_KEYS,
+	transfer: TRANSFER_CONFIG_KEYS,
+	experimental: EXPERIMENTAL_CONFIG_KEYS,
 };
 
 export interface ElevationConfig {

@@ -1,4 +1,4 @@
-import type { FontFamily } from "@lasterm/shared";
+import { type FontFamily, planProfileWrite } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AlwaysChoice } from "../utils/exit-action.js";
@@ -92,7 +92,12 @@ describe("saveUiSettings", () => {
 		const store = useConfigStore();
 		store.uiConfig = {
 			onChannelDead: "readonly",
-			layout: { hostRailColumns: 2, hostRailBadgeSize: "medium", sidebarWidth: 200 },
+			layout: {
+				hostRailColumns: 2,
+				hostRailBadgeSize: "medium",
+				sidebarWidth: 200,
+				transferPanelWidth: 300,
+			},
 		};
 
 		const saving = store.saveUiSettings("layout", { hostRailBadgeSize: "large" });
@@ -101,6 +106,7 @@ describe("saveUiSettings", () => {
 			hostRailColumns: 2,
 			hostRailBadgeSize: "large",
 			sidebarWidth: 200,
+			transferPanelWidth: 300,
 		});
 		await expect(saving).resolves.toBe(true);
 
@@ -195,6 +201,99 @@ describe("saveWhenEnded", () => {
 			store.saveWhenEnded("restart", "host", { hostId: null, channelId: "c1" }),
 		).resolves.toBe(false);
 		expect(mocks.hubFetch).not.toHaveBeenCalled();
+	});
+});
+
+// The scoped write (#835), shared by "Always do this", the files panel's
+// options (#836) and an upload's conflict step (#837): the plan comes from
+// @lasterm/shared, whose hub spec makes it against the real routes; here, the
+// client makes its requests and says what it dropped.
+describe("saveProfileWrite and readProfileLayers", () => {
+	const where = { hostId: "h1", channelId: "c1" };
+
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		mocks.hubFetch.mockReset();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function json(body: unknown): Promise<Response> {
+		return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+	}
+
+	it("reads the terminal's layers, plans, and makes the plan's requests in order", async () => {
+		mocks.hubFetch.mockImplementation((url) =>
+			url.startsWith("/api/config/cascade")
+				? json({
+						terminal: {
+							host: { transferOnConflict: "replace" },
+							channel: { transferOnConflict: "keep_both" },
+						},
+					})
+				: json({ ok: true }),
+		);
+		const store = useConfigStore();
+		const changes: unknown[] = [];
+		store.onProfileChange((event) => changes.push(event));
+
+		const layers = await store.readProfileLayers(where);
+		expect(mocks.hubFetch.mock.calls[0]?.[0]).toBe("/api/config/cascade?host_id=h1&channel_id=c1");
+		const plan = planProfileWrite("transferOnConflict", "skip", "host", where, layers ?? {});
+		// What a caller says before writing.
+		expect(plan?.dropped).toEqual([{ scope: "channel", value: "keep_both" }]);
+
+		mocks.hubFetch.mockClear();
+		await expect(store.saveProfileWrite(plan as NonNullable<typeof plan>)).resolves.toBe(true);
+		expect(
+			mocks.hubFetch.mock.calls.map(([url, init]) => [
+				init?.method,
+				url,
+				JSON.parse(String(init?.body)),
+			]),
+		).toEqual([
+			["PATCH", "/api/hosts/h1/profile", { profile: { transferOnConflict: "skip" } }],
+			["PATCH", "/api/channels/c1/profile", { profile: { transferOnConflict: null } }],
+		]);
+		expect(changes).toEqual([{ scope: "host", hostId: "h1", channelId: "c1" }]);
+	});
+
+	it("stops at the first request the hub refuses, and says so", async () => {
+		mocks.hubFetch.mockImplementation(() => Promise.resolve(new Response("{}", { status: 400 })));
+		const store = useConfigStore();
+		const plan = planProfileWrite("transferDrop", "bogus", "global", where);
+
+		await expect(store.saveProfileWrite(plan as NonNullable<typeof plan>)).resolves.toBe(false);
+		// The PUT, then the profile read again after a global write; no drop.
+		expect(mocks.hubFetch.mock.calls.map(([url, init]) => [init?.method ?? "GET", url])).toEqual([
+			["PUT", "/api/config/global"],
+			["GET", "/api/config/cascade"],
+		]);
+	});
+
+	it("reads no layers from a hub that cannot answer", async () => {
+		mocks.hubFetch.mockImplementation(() => Promise.resolve(new Response("{}", { status: 500 })));
+		await expect(useConfigStore().readProfileLayers(where)).resolves.toBeNull();
+	});
+});
+
+// The one check file transfer's parts make (#835): off until the UI config
+// says `[experimental] file_transfer = true`.
+describe("fileTransferEnabled", () => {
+	beforeEach(() => {
+		setActivePinia(createPinia());
+	});
+
+	it("is off until the UI config turns it on, and follows it", () => {
+		const store = useConfigStore();
+		expect(store.fileTransferEnabled).toBe(false);
+		store.uiConfig = { onChannelDead: "readonly", experimental: { fileTransfer: true } };
+		expect(store.fileTransferEnabled).toBe(true);
+		store.uiConfig = { onChannelDead: "readonly", experimental: { fileTransfer: false } };
+		expect(store.fileTransferEnabled).toBe(false);
 	});
 });
 

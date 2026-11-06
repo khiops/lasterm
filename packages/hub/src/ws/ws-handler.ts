@@ -16,7 +16,7 @@ import type {
 	WriteGrantMessage,
 	WriteReleaseMessage,
 } from "@lasterm/shared";
-import { decodeMessage, encodeMessage, generateId } from "@lasterm/shared";
+import { decodeMessage, encodeMessage, generateId, isValidUlid } from "@lasterm/shared";
 import type { Database } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import {
@@ -85,7 +85,19 @@ export interface WsRoutes {
 	 * with the token `tokenId`. Returns how many there were.
 	 */
 	closeSocketsForToken(tokenId: string): number;
+	/**
+	 * Whether a REST request may act as the window `clientId` names on the
+	 * terminal `channelId`, as a write would: that client is a socket open now,
+	 * authenticated with the request's own credential (`tokenId`; null on a hub
+	 * without auth), and it holds the terminal's write lock (#832). A REST
+	 * request carries a token, not a socket, so it names the socket, and the
+	 * hub checks that it may speak for it.
+	 */
+	writerCheck(channelId: string, clientId: string, tokenId: string | null): WriterCheck;
 }
+
+/** What `writerCheck` found: the holder, or why the request may not write. */
+export type WriterCheck = "holder" | "unknown-client" | "not-holder";
 
 export async function registerWsRoutes(
 	server: FastifyInstance,
@@ -110,6 +122,10 @@ export async function registerWsRoutes(
 			}
 		},
 		onForce: (force) => server.security.writeLockForced(force),
+	});
+	// A hub stopping keeps no lock for a holder that left: the grace ends with it.
+	server.addHook("onClose", async () => {
+		writeLockManager.shutdown();
 	});
 
 	// Provide write-lock holder lookup so ATTACH_OK includes the current holder
@@ -322,6 +338,13 @@ export async function registerWsRoutes(
 					refuse: (status) => refuse(tokenId, status),
 				});
 				clearTimeout(authTimeout ?? undefined);
+				// The window this socket belongs to, under its token: a write lock's
+				// holder coming back from a reload or a drop is recognised by it
+				// (#846). A client that names none, or names it wrongly, is still
+				// accepted; its locks are handed on at once when it leaves.
+				if (isValidUlid(authMsg.windowId)) {
+					writeLockManager.identify(clientId, { tokenId, windowId: authMsg.windowId });
+				}
 				sessionManager.addClient(client);
 				server.log.info({ clientId }, "ws-auth: accepted");
 				server.security.authSucceeded({
@@ -428,6 +451,16 @@ export async function registerWsRoutes(
 				server.log.info({ tokenId, closed }, "ws-auth: closed the sockets of a revoked token");
 			}
 			return closed;
+		},
+		writerCheck(channelId, clientId, tokenId) {
+			// With auth, only a socket that authenticated with this very credential:
+			// another token's window, or one still before its AUTH, is not the
+			// caller's to speak for.
+			const known = authToken
+				? tokenId !== null && tokenSockets.get(clientId)?.tokenId === tokenId
+				: clientSendRegistry.has(clientId);
+			if (!known) return "unknown-client";
+			return writeLockManager.isHolder(channelId, clientId) ? "holder" : "not-holder";
 		},
 	};
 }

@@ -12,6 +12,8 @@ export const ALL_CATEGORIES: CategoryDef[] = [
 	{ id: "wallpaper", label: "Wallpaper", scopes: ["global", "host", "channel"] },
 	{ id: "terminal", label: "Terminal", scopes: ["global", "host", "channel"] },
 	{ id: "environment", label: "Environment", scopes: ["global", "host", "channel"] },
+	// Only its experimental switch until that is on (#835).
+	{ id: "transfer", label: "File transfer", scopes: ["global", "host", "channel"] },
 	{ id: "tabs", label: "Tabs", scopes: ["global"] },
 	{ id: "confirmations", label: "Confirmations", scopes: ["global"] },
 	{ id: "channels", label: "Channels", scopes: ["global"] },

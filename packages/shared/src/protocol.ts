@@ -370,6 +370,14 @@ export interface AgentLogMessage {
 export interface AuthMessage {
 	type: "AUTH";
 	token: string;
+	/**
+	 * A ULID naming the window this socket belongs to: the same across the
+	 * window's reloads and reconnections, never the same in two windows (#846).
+	 * The hub recognises by it, under the same token, a write lock's holder
+	 * that comes back within the grace, and gives it the lock back. Absent from
+	 * a client older than that, whose holder hands the lock on at once.
+	 */
+	windowId?: string;
 }
 
 /** Hub → UI: authentication succeeded */
@@ -558,6 +566,13 @@ export interface WriteLockMessage {
 	type: "WRITE_LOCK";
 	channelId: string;
 	holder: string | null; // clientId or null
+	/**
+	 * With `holder: null`: the lock is kept for the holder that just left, in
+	 * case its window comes back within the grace (#846). Nobody types into the
+	 * terminal or resizes it meanwhile; a WRITE_CLAIM or WRITE_FORCE still takes
+	 * the lock, and ends the wait. Absent when the lock is simply free.
+	 */
+	reserved?: true;
 }
 
 // --- State notifications ---

@@ -21,7 +21,7 @@ Settings are resolved through four layers. Each layer deep-merges on top of the 
 
 Merge rules: objects merge recursively, scalars overwrite, `null` removes a key (falls back to previous layer), arrays replace entirely. `[terminal] env` is the exception: a `null` there is a removal that reaches the terminal (see below).
 
-Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, theme, cursor, wallpaper, etc.). UI sections (`[tabs]`, `[search]`, `[appearance]`, etc.) are global-only and are ignored in per-host/per-channel profiles.
+Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, theme, cursor, wallpaper, etc.), and layer 4 not `transfer_fallback_dir` nor `transfer_verify`, which are the host's. UI sections (`[tabs]`, `[search]`, `[appearance]`, etc.) are global-only and are ignored in per-host/per-channel profiles.
 
 ---
 
@@ -49,6 +49,14 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | env_mode | `"inherit"` \| `"minimal"` | `"inherit"` | What a terminal's environment starts from, applied by the agent on the terminal's host: `inherit`, the environment that agent runs with; `minimal`, only what programs need to run (`HOME`, `USER`, `PATH`, `LANG`, `LC_*`… on Unix; `SystemRoot`, `Path`, `USERPROFILE`, `TEMP`… on Windows — the full lists are in PROTOCOL.md § 3.2), taken from it, never invented. Either way the inherited `NO_COLOR` is dropped and the terminal says what it is: `TERM=xterm-256color` (Unix), `COLORTERM=truecolor`, `TERM_PROGRAM=lasterm`, `TERM_PROGRAM_VERSION`. `env` can remove or change any of them |
 | env | table of name → string or `false` | `{}` | Changes to that start, for every terminal: a string sets the variable, `false` removes it (TOML has no null; host and terminal profiles write `null`). A host's `env` changes what this one sets, a terminal's both, and the same name set closer wins, either way. Only the changes are stored, never the environment they produce: a variable that appears on the host later still reaches new terminals unless it is removed. A launch profile's own `env`, then the spawn request's, are applied over these. Names compare without case on Windows hosts. Stored in the clear: no place for secrets. Reaches new and restarted terminals, never running ones. Example: `env = { EDITOR = "hx", PAGER = false }` |
 | when_ended | `"ask"` \| `"restart"` \| `"close"` | `"ask"` | What a pane does when the terminal in it ends. `ask` shows Restart and Close over it. `restart` brings it back, except one that ended within 5 seconds of starting, one that runs a command, and one whose write lock another window holds: those show the overlay, saying why. `close` closes its pane, deleting the terminal unless `[panes] keep_ended` keeps it. Neither applies, as it happens, to a terminal stopped from elsewhere — killed, its session closed, its agent replaced, or Lasterm quit — which keeps the overlay, saying so. A terminal found already ended, at launch or on a reload or an attach, shows the overlay first, then follows the setting once, when its pane is on screen (its tab is shown, or it is a split beside the one shown) in the window that has the focus: never in the background, and never in two windows at once. That includes one that ended with its agent replaced or with Lasterm quitting. It keeps asking when it was killed, it or its session, when it runs a command, and when a restart from that pane ended before the pane could reach it; one restarted this way that ends again within 5 seconds is held back as above. Set for every host here, or for one host or one terminal in Settings › Terminal. "Always do this" on the overlay, for this host or everywhere, writes it too, and drop the overrides nearer to that terminal so that it holds there. The overlays already waiting in that window, on that host or everywhere, then do the same once each is on screen, when their own setting now says so; one that ended within 5 seconds of starting, runs a command, or whose write lock another window holds keeps asking. A restart, this setting's or Restart clicked, that finds the terminal's host away (the hub is reconnecting it, or lost it while the terminal started) shows "Waiting for" and the host's name, "Waiting for raspberrypi…", with Cancel, in place of the overlay, and restarts it once, on its own, when that host is connected again, whatever the view and the focus; Cancel brings the overlay back. A restart that fails for any other reason shows the overlay with that reason |
+| transfer_drop | `"upload"` \| `"off"` | `"upload"` | What dropping files on a terminal does: send them to its host, or nothing. Global, per host or per terminal. Waits behind `[experimental] file_transfer`, like every file-transfer key |
+| transfer_confirm_drop | boolean | `true` | Ask before the upload a drop starts, showing where the files go. Global, per host or per terminal |
+| transfer_on_conflict | `"ask"` \| `"replace"` \| `"keep_both"` \| `"skip"` | `"ask"` | What an upload does with a file of the same name where it lands: ask, replace it, keep both under a new name, or skip it. Global, per host or per terminal |
+| transfer_follow_cwd | boolean | `true` | Upload into the folder the terminal's shell is in, when it is known; otherwise into `transfer_fallback_dir`. Global, per host or per terminal |
+| transfer_fallback_dir | string, up to 1024 characters | `""` | Where an upload lands when the shell's folder is unknown or not followed; `""` is the home folder. `${VAR}` is expanded by the agent on the host, as in a launch profile's `cwd`. Global or per host only: a terminal's profile refuses it |
+| transfer_verify | boolean | `true` | Check each upload by SHA-256 on a host whose SSH server offers no SFTP, where the bytes go through the account's shell; it costs one hash of a file just written, on that host only. Global or per host only: a terminal's profile refuses it |
+
+The file-transfer keys are checked where they are written: `PUT /api/config/global` and a host's or a terminal's profile answer 400 for a value outside the table, and one written by hand in this file that they would refuse is not read, leaving the default. Settings › File transfer sets them.
 
 ---
 
@@ -124,8 +132,32 @@ Whether matches are marked in the scrollbar is `[terminal] scrollbar_markers`, w
 | host_rail_columns | integer (1–5) | `1` | Host rail columns. More than one makes the rail a grid, filled left to right, then down |
 | host_rail_badge_size | `"small"` \| `"medium"` \| `"large"` | `"medium"` | Host rail badge size: 28, 36 or 44 px. Set in *Settings › Appearance › Host rail*, global only |
 | sidebar_width | number | `200` | Channel sidebar width in pixels (0 = collapsed) |
+| transfer_panel_width | integer (240–520) | `300` | The files panel's width in pixels, as its edge was last dragged; anything else leaves the default |
 
 The rail's width follows from its columns and its badge size: `12 + n·badge + (n−1)·6` px, never under 48 px, so one Medium column is 48 px. Dragging the rail's edge snaps to whole columns, and a new badge size keeps the columns.
+
+---
+
+### [transfer] — The Files Panel
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| panel_side | `"right"` \| `"left"` | `"right"` | Which side of the window the files panel opens on |
+| open_on_drag | boolean | `true` | Dragging files over the window opens the panel |
+| max_concurrent | integer (1–3) | `2` | Transfers run at once; the others wait their turn |
+| show_hidden | boolean | `false` | The panel lists dot files |
+
+Global only: Settings › File transfer › Panel. A value `PUT /api/config/ui` would refuse is not read from this file either, and leaves the default. What a terminal does with dropped files is in `[terminal]` (`transfer_*`), which a host or a terminal can override. Waits behind `[experimental] file_transfer`.
+
+---
+
+### [experimental] — Unfinished Features
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| file_transfer | boolean | `false` | File transfer (#721): sending files to a host by dropping them on its terminal, the files panel, and their settings. Off until it is finished; while off, Settings › File transfer shows this switch alone |
+
+One switch per feature that ships unfinished, off by default. A switch goes when its feature is done, and the feature is then simply on: a key left behind here is not read.
 
 ---
 

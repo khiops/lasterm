@@ -128,28 +128,51 @@ function controlBindings(def: SettingDefinition): Record<string, unknown> {
 		...(def.min !== undefined && { min: def.min }),
 		...(def.max !== undefined && { max: def.max }),
 		...(def.step !== undefined && { step: def.step }),
+		...(def.placeholder !== undefined && { placeholder: def.placeholder }),
 	};
+}
+
+/** The heading a setting starts, when it is the first shown of its group. */
+function groupHeading(index: number): string | null {
+	const group = filteredSchema.value[index]?.group;
+	if (group === undefined) return null;
+	return filteredSchema.value[index - 1]?.group === group ? null : group;
 }
 </script>
 
 <template>
 	<div class="schema-category">
-		<SettingRow
-			v-for="def in filteredSchema"
-			:key="`${def.section}.${def.key}`"
-			:label="def.label"
-			:scope="scope"
-			:is-overridden="isOverriddenForDef(def)"
-			v-bind="rowBindings(def)"
-			@reset="handleReset(def)"
-		>
-			<SettingControl
-				:model-value="displayValue(def)"
-				:type="def.type"
-				:disabled="disabledFor(def).disabled"
-				v-bind="controlBindings(def)"
-				@update:model-value="handleUpdate(def, $event)"
-			/>
-		</SettingRow>
+		<template v-for="(def, index) in filteredSchema" :key="`${def.section}.${def.key}`">
+			<h3 v-if="groupHeading(index) !== null" class="schema-group">{{ groupHeading(index) }}</h3>
+			<SettingRow
+				:label="def.label"
+				:scope="scope"
+				:is-overridden="isOverriddenForDef(def)"
+				v-bind="rowBindings(def)"
+				@reset="handleReset(def)"
+			>
+				<SettingControl
+					:model-value="displayValue(def)"
+					:type="def.type"
+					:disabled="disabledFor(def).disabled"
+					v-bind="controlBindings(def)"
+					@update:model-value="handleUpdate(def, $event)"
+				/>
+			</SettingRow>
+		</template>
 	</div>
 </template>
+
+<style scoped>
+/* As the other categories' section titles. */
+.schema-group {
+	margin: 24px 0 4px;
+	padding-top: 16px;
+	border-top: 1px solid var(--nt-border);
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--nt-fg);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+</style>

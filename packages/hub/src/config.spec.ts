@@ -227,6 +227,80 @@ describe("ConfigResolver.resolve", () => {
 		expect(resolver.resolve(host.id).whenEnded).toBe("restart");
 	});
 
+	// File transfer's keys (#835) cascade as `when_ended` does, down to the
+	// terminal: the defaults, config.toml for every host, a host, a terminal.
+	it("cascades the file-transfer keys per host and per terminal", () => {
+		const defaults = new ConfigResolver(metaDal).resolve();
+		expect(defaults).toMatchObject({
+			transferDrop: "upload",
+			transferConfirmDrop: true,
+			transferOnConflict: "ask",
+			transferFollowCwd: true,
+			transferFallbackDir: "",
+			transferVerify: true,
+		});
+
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}-transfer`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "config.toml"),
+			[
+				"[terminal]",
+				'transfer_on_conflict = "skip"',
+				'transfer_fallback_dir = "/srv/inbox"',
+				"transfer_verify = false",
+				"",
+			].join("\n"),
+		);
+		const host = metaDal.createHost({ type: "local", label: "test-host-transfer" });
+		const other = metaDal.createHost({ type: "local", label: "test-host-transfer-other" });
+		metaDal.updateHostProfile(
+			host.id,
+			JSON.stringify({ transferOnConflict: "replace", transferFallbackDir: "/srv/drop" }),
+		);
+		metaDal.createSession({ id: "ses-transfer", hostId: host.id, status: "starting" });
+		metaDal.createChannel({ id: "ch-transfer", sessionId: "ses-transfer", status: "born" });
+		const channel = { id: "ch-transfer" };
+		metaDal.updateChannelProfile(
+			channel.id,
+			JSON.stringify({ transferOnConflict: "keep_both", transferDrop: "off" }),
+		);
+
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(dir);
+		expect(resolver.resolve()).toMatchObject({
+			transferOnConflict: "skip",
+			transferFallbackDir: "/srv/inbox",
+			transferVerify: false,
+			transferDrop: "upload",
+		});
+		expect(resolver.resolve(other.id).transferOnConflict).toBe("skip");
+		expect(resolver.resolve(host.id)).toMatchObject({
+			transferOnConflict: "replace",
+			transferFallbackDir: "/srv/drop",
+			transferDrop: "upload",
+		});
+		expect(resolver.resolve(host.id, channel.id)).toMatchObject({
+			transferOnConflict: "keep_both",
+			transferDrop: "off",
+			transferFallbackDir: "/srv/drop",
+			transferVerify: false,
+		});
+	});
+
+	it("leaves a file-transfer value config.toml holds that the routes would refuse", () => {
+		const dir = join(tmpdir(), `lasterm-test-${Date.now()}-transfer-bad`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "config.toml"),
+			'[terminal]\ntransfer_drop = "download"\ntransfer_verify = "yes"\nfont_size = 15\n',
+		);
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(dir);
+		expect(resolver.getGlobalTerminalOverrides()).toEqual({ fontSize: 15 });
+		expect(resolver.resolve()).toMatchObject({ transferDrop: "upload", transferVerify: true });
+	});
+
 	// Every other field replaces the layer under it. Environment variables must
 	// not: a host that sets a proxy would erase the editor set globally.
 	it("merges environment variables key by key down the layers", () => {
@@ -1289,6 +1363,7 @@ describe("extractUiConfig — layout section", () => {
 			hostRailColumns: 1,
 			hostRailBadgeSize: "medium",
 			sidebarWidth: 200,
+			transferPanelWidth: 300,
 		});
 	});
 
@@ -1300,7 +1375,19 @@ describe("extractUiConfig — layout section", () => {
 			hostRailColumns: 3,
 			hostRailBadgeSize: "small",
 			sidebarWidth: 240,
+			transferPanelWidth: 300,
 		});
+	});
+
+	// The files panel's width (#835), kept as its edge is dragged.
+	it("parses transfer_panel_width from 240 to 520, and ignores anything else", () => {
+		expect(
+			extractUiConfig({ layout: { transfer_panel_width: 420 } }).layout.transferPanelWidth,
+		).toBe(420);
+		for (const width of [239, 521, 300.5, "300"]) {
+			const config = extractUiConfig({ layout: { transfer_panel_width: width } });
+			expect(config.layout.transferPanelWidth, String(width)).toBe(300);
+		}
 	});
 
 	it("ignores columns outside 1 to 5, and a size it does not know", () => {
@@ -1327,6 +1414,58 @@ describe("extractUiConfig — keyboard section", () => {
 
 	it("ignores a key_hints that is not a boolean", () => {
 		expect(extractUiConfig({ keyboard: { key_hints: "no" } }).keyboard.keyHints).toBe(true);
+	});
+});
+
+// ─── [transfer] and [experimental] (#835) ────────────────────────────────────
+
+describe("extractUiConfig — transfer section", () => {
+	it("has the files panel on the right, two transfers at once, by default", () => {
+		expect(extractUiConfig({}).transfer).toEqual({
+			panelSide: "right",
+			openOnDrag: true,
+			maxConcurrent: 2,
+			showHidden: false,
+		});
+	});
+
+	it("parses each key", () => {
+		const config = extractUiConfig({
+			transfer: { panel_side: "left", open_on_drag: false, max_concurrent: 3, show_hidden: true },
+		});
+		expect(config.transfer).toEqual({
+			panelSide: "left",
+			openOnDrag: false,
+			maxConcurrent: 3,
+			showHidden: true,
+		});
+	});
+
+	it("ignores a value PUT /api/config/ui would refuse, keeping the default", () => {
+		const config = extractUiConfig({
+			transfer: { panel_side: "top", open_on_drag: "yes", max_concurrent: 4, show_hidden: 1 },
+		});
+		expect(config.transfer).toEqual({
+			panelSide: "right",
+			openOnDrag: true,
+			maxConcurrent: 2,
+			showHidden: false,
+		});
+	});
+});
+
+describe("extractUiConfig — experimental section", () => {
+	it("keeps file transfer off by default", () => {
+		expect(extractUiConfig({}).experimental).toEqual({ fileTransfer: false });
+	});
+
+	it("parses file_transfer, a boolean only", () => {
+		expect(
+			extractUiConfig({ experimental: { file_transfer: true } }).experimental.fileTransfer,
+		).toBe(true);
+		expect(
+			extractUiConfig({ experimental: { file_transfer: "on" } }).experimental.fileTransfer,
+		).toBe(false);
 	});
 });
 

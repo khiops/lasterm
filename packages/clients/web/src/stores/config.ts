@@ -1,20 +1,28 @@
 import {
+	type CascadeResponse,
 	type ChannelsConfig,
 	DEFAULT_PROFILE,
+	type ExperimentalConfig,
 	type FontFamily,
+	isFileTransferEnabled,
 	type KeyboardConfig,
 	type LayoutConfig,
 	type NotificationConfig,
 	type PanesConfig,
+	type ProfileWriteLayers,
+	type ProfileWritePlan,
+	type ProfileWriteTarget,
+	planProfileWrite,
 	type SearchConfig,
 	type StartupConfig,
 	type SystemFontFamily,
 	type TabsConfig,
 	type TerminalProfile,
 	type TitleConfig,
+	type TransferConfig,
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import type { AlwaysChoice } from "../utils/exit-action.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { domPublicAssetUrl, hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
@@ -110,6 +118,8 @@ interface UiConfig {
 	notifications?: NotificationConfig;
 	layout?: LayoutConfig;
 	keyboard?: KeyboardConfig;
+	transfer?: TransferConfig;
+	experimental?: ExperimentalConfig;
 }
 
 /** The UI sections `saveUiSettings` writes. */
@@ -125,6 +135,13 @@ export const useConfigStore = defineStore("config", () => {
 	const systemFonts = ref<SystemFontFamily[] | null>(null);
 	const loaded = ref(false);
 	const uiConfig = ref<UiConfig>({ onChannelDead: "readonly" });
+
+	/**
+	 * File transfer is on (`[experimental] file_transfer`, #835): what the drop
+	 * on a terminal and the files panel check before anything (#836, #837).
+	 * Off until the UI config is read, and until someone turns it on.
+	 */
+	const fileTransferEnabled = computed(() => isFileTransferEnabled(uiConfig.value));
 
 	// ─── Profile change event bus ─────────────────────────────────────────
 	const profileChangeListeners = new Set<ProfileChangeListener>();
@@ -275,14 +292,83 @@ export const useConfigStore = defineStore("config", () => {
 	}
 
 	/**
+	 * The host's and the terminal's own profiles, as the hub holds them now
+	 * (#835): what `planProfileWrite` reads to say which overrides a write
+	 * drops, so that a caller can say so before writing. Null when the hub
+	 * could not be asked.
+	 */
+	async function readProfileLayers(target: ProfileWriteTarget): Promise<ProfileWriteLayers | null> {
+		try {
+			const authStore = useAuthStore();
+			const params = new URLSearchParams();
+			if (target.hostId !== null) params.set("host_id", target.hostId);
+			if (target.channelId !== null) params.set("channel_id", target.channelId);
+			const qs = params.toString();
+			const resp = await hubFetch(`${hubBaseUrl()}/api/config/cascade${qs ? `?${qs}` : ""}`, {
+				headers: { Authorization: `Bearer ${authStore.token}` },
+			});
+			if (!resp.ok) return null;
+			const cascade = (await resp.json()) as CascadeResponse;
+			return { host: cascade.terminal.host, channel: cascade.terminal.channel };
+		} catch (err) {
+			console.warn("[config] failed to read a terminal's profiles:", err);
+			return null;
+		}
+	}
+
+	/**
+	 * Make the write `planProfileWrite` planned (#835): one terminal-profile
+	 * key set for a host or globally, then the overrides nearer to the
+	 * terminal it has to hold on dropped, in that order, stopping at the
+	 * first request the hub refuses. "Always do this" (#574), the files
+	 * panel's options (#836) and an upload's conflict step (#837) all write
+	 * through here.
+	 *
+	 * The hub announces each write, so every window reads its terminals'
+	 * settings again; this one is told at once, refused or not, since part of
+	 * it may have been written.
+	 */
+	async function saveProfileWrite(plan: ProfileWritePlan): Promise<boolean> {
+		const authStore = useAuthStore();
+		let ok = true;
+		try {
+			for (const request of plan.requests) {
+				const resp = await hubFetch(`${hubBaseUrl()}${request.path}`, {
+					method: request.method,
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${authStore.token}`,
+					},
+					body: JSON.stringify(request.body),
+				});
+				if (!resp.ok) {
+					ok = false;
+					break;
+				}
+			}
+		} catch (err) {
+			console.warn(`[config] failed to save the terminal setting ${plan.key}:`, err);
+			ok = false;
+		}
+
+		const { hostId, channelId } = plan.target;
+		emitProfileChange({
+			scope: plan.scope,
+			...(hostId !== null && { hostId }),
+			...(channelId !== null && { channelId }),
+		});
+		if (plan.scope === "global") await loadProfile();
+		return ok;
+	}
+
+	/**
 	 * Write "When a terminal ends" where "Always do this" said (#574): for the
 	 * terminal's host, or globally.
 	 *
 	 * The choice then holds over the terminal it was made on: the overrides
 	 * nearer to it — the terminal's own, and with "globally" its host's — are
 	 * dropped, or it would not apply where it was just made. Other hosts keep
-	 * theirs, as Settings shows. The hub announces each write, so every window
-	 * reads its terminals' settings again; this one is told at once.
+	 * theirs, as Settings shows (`saveProfileWrite`).
 	 *
 	 * Once written, the choice is also told to the other panes of this window,
 	 * so that the overlays already waiting in its scope can follow it (#586).
@@ -295,50 +381,9 @@ export const useConfigStore = defineStore("config", () => {
 	): Promise<boolean> {
 		// The click, which orders it among the choices made in this window.
 		const at = performance.now();
-		const authStore = useAuthStore();
-		const send = async (method: "PUT" | "PATCH", path: string, body: unknown): Promise<boolean> => {
-			const resp = await hubFetch(`${hubBaseUrl()}${path}`, {
-				method,
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${authStore.token}`,
-				},
-				body: JSON.stringify(body),
-			});
-			return resp.ok;
-		};
-		const hostPath =
-			where.hostId === null ? null : `/api/hosts/${encodeURIComponent(where.hostId)}/profile`;
-		const channelPath =
-			where.channelId === null
-				? null
-				: `/api/channels/${encodeURIComponent(where.channelId)}/profile`;
-		if (scope === "host" && hostPath === null) return false;
-
-		let ok: boolean;
-		try {
-			if (scope === "global") {
-				ok = await send("PUT", "/api/config/global", { terminal: { whenEnded } });
-				if (ok && hostPath !== null) {
-					ok = await send("PATCH", hostPath, { profile: { whenEnded: null } });
-				}
-			} else {
-				ok = await send("PATCH", hostPath as string, { profile: { whenEnded } });
-			}
-			if (ok && channelPath !== null) {
-				ok = await send("PATCH", channelPath, { profile: { whenEnded: null } });
-			}
-		} catch (err) {
-			console.warn("[config] failed to save when a terminal ends:", err);
-			ok = false;
-		}
-
-		emitProfileChange({
-			scope,
-			...(where.hostId !== null && { hostId: where.hostId }),
-			...(where.channelId !== null && { channelId: where.channelId }),
-		});
-		if (scope === "global") await loadProfile();
+		const plan = planProfileWrite("whenEnded", whenEnded, scope, where);
+		if (plan === null) return false;
+		const ok = await saveProfileWrite(plan);
 		if (ok) {
 			announceAlwaysChoice({
 				action: whenEnded,
@@ -384,11 +429,14 @@ export const useConfigStore = defineStore("config", () => {
 		systemFonts,
 		loaded,
 		uiConfig,
+		fileTransferEnabled,
 		loadFonts,
 		loadSystemFonts,
 		loadProfile,
 		loadUiConfig,
 		saveUiSettings,
+		readProfileLayers,
+		saveProfileWrite,
 		saveWhenEnded,
 		onProfileChange,
 		emitProfileChange,

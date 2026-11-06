@@ -123,6 +123,8 @@ export interface SftpServerOptions {
 	 * Win32-OpenSSH 9.5 both do; some servers replace.
 	 */
 	renameReplaces?: boolean;
+	/** False: FSTAT is answered "unsupported", as a server that left it out would. */
+	fstat?: boolean;
 }
 
 /** A path as the client sent it, mapped on to this machine's; null for one the view does not serve. */
@@ -470,6 +472,16 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 						});
 					});
 					sftp.on("REMOVE", (id, path) => run(id, async () => fs.unlink(await resolve(path))));
+					sftp.on("FSTAT", (id, handle) => {
+						if (options.fstat === false) {
+							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported");
+							return;
+						}
+						void (async () => file(handle).stat())().then(
+							(stat) => sftp.attrs(id, attrsOf(stat)),
+							(error) => status(id, error),
+						);
+					});
 					sftp.on("FSETSTAT", (id, handle, attrs) =>
 						run(id, async () => {
 							if (attrs.mtime !== undefined) {
@@ -512,7 +524,7 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 							else await fs.rename(source, target);
 						});
 					});
-					for (const event of ["READ", "FSTAT", "RMDIR", "SYMLINK"] as const) {
+					for (const event of ["READ", "RMDIR", "SYMLINK"] as const) {
 						sftp.on(event, (id: number) =>
 							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported"),
 						);

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { TransferStartItem } from "@lasterm/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FileAccessError } from "../files/host-files.js";
 import {
 	LOCAL_BACKEND,
@@ -226,6 +226,39 @@ describe.each([LOCAL_BACKEND, sftpBackend("posix", ["hardlink@openssh.com"])])(
 		);
 	},
 );
+
+describe("telling the window which files to send (#873)", () => {
+	/** Whether the window was told that a file of the upload is sending. */
+	const toldSending = (s: Service) =>
+		received(s.world, WRITER.clientId, "TRANSFER_PROGRESS").some((message) =>
+			(message.items as { state: string }[]).some((item) => item.state === "sending"),
+		);
+
+	it("tells it at once, not with the next batch of progress", () =>
+		on(LOCAL_BACKEND, async (h, s) => {
+			const data = content("small", 10);
+			const { transferId, told } = await (async () => {
+				// The batch waits on the clock, frozen here: only what is said at once arrives.
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				try {
+					const started = await startUpload(s, h.dir, [file("small.txt", data)]);
+					for (let turn = 0; turn < 100 && !toldSending(s); turn++) {
+						await new Promise((resolve) => setImmediate(resolve));
+					}
+					return { transferId: started.transferId, told: toldSending(s) };
+				} finally {
+					// What waited on the frozen clock goes now, rather than never.
+					vi.runOnlyPendingTimers();
+					vi.useRealTimers();
+				}
+			})();
+			expect(told).toBe(true);
+
+			// And its bytes go as before.
+			await sendFile(s, transferId, "small.txt", data);
+			await waitState(s, transferId, "small.txt", "placed");
+		}));
+});
 
 describe("conflicts and their answers", () => {
 	const kind = LOCAL_BACKEND;

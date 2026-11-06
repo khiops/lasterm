@@ -42,6 +42,7 @@ vi.mock("./categories/SchemaCategory.vue", stubCategory);
 vi.mock("./categories/AppearanceCategory.vue", stubCategory);
 vi.mock("./categories/WallpaperCategory.vue", stubCategory);
 vi.mock("./categories/EnvironmentCategory.vue", stubCategory);
+vi.mock("./categories/FileTransferCategory.vue", stubCategory);
 vi.mock("./categories/ElevationCategory.vue", stubCategory);
 vi.mock("./categories/AgentManagerCategory.vue", stubCategory);
 vi.mock("./categories/DesktopCategory.vue", stubCategory);
@@ -314,6 +315,69 @@ describe("Settings: the scope tabs", () => {
 		await press("Home");
 		expect(settingsStore.activeScope).toBe("global");
 		expect(document.activeElement).toBe(el('.scope-tab[data-scope="global"]'));
+	});
+});
+
+// The files panel's gear opens File transfer at its terminal's host (#835): Settings shows that
+// host and that terminal, and the sidebar keeps the ones it selects.
+describe("Settings: opened at a place of its own", () => {
+	function mountFromStore() {
+		const settingsStore = useSettingsStore();
+		const load = vi.spyOn(settingsStore, "loadCascade").mockResolvedValue();
+		const hostsStore = useHostsStore();
+		hostsStore.hosts = [
+			{ id: "h1", label: "laptop" },
+			{ id: "h2", label: "build-box" },
+		] as typeof hostsStore.hosts;
+		hostsStore.selectedHostId = "h1";
+		useChannelsStore().selectedChannelId = "c1";
+		root = document.createElement("div");
+		document.body.appendChild(root);
+		app = createApp({
+			render: () =>
+				h(SettingsPanel, {
+					visible: settingsStore.panelOpen,
+					onClose: () => {
+						settingsStore.panelOpen = false;
+					},
+				}),
+		});
+		app.use(pinia);
+		app.mount(root);
+		return { settingsStore, load, hostsStore };
+	}
+
+	it("shows the category, the scope, the host and the terminal given, and leaves the sidebar's", async () => {
+		const { settingsStore, load, hostsStore } = mountFromStore();
+
+		settingsStore.openAt({ category: "transfer", scope: "host", hostId: "h2", channelId: null });
+		await settle();
+
+		expect(load).toHaveBeenCalledExactlyOnceWith("h2", undefined);
+		expect(settingsStore.activeCategory).toBe("transfer");
+		expect(settingsStore.activeScope).toBe("host");
+		expect(el(".category-nav [aria-current='page']").textContent?.trim()).toBe("File transfer");
+		expect(el('.scope-tab[data-scope="host"]').textContent?.trim()).toBe("Host: build-box");
+		expect(el('.scope-tab[data-scope="host"]').getAttribute("aria-selected")).toBe("true");
+		expect(document.querySelector('.scope-tab[data-scope="channel"]')).toBeNull();
+		// The sidebar's selection is untouched.
+		expect(hostsStore.selectedHostId).toBe("h1");
+		expect(useChannelsStore().selectedChannelId).toBe("c1");
+	});
+
+	it("forgets that place once closed: opened again, it shows the sidebar's", async () => {
+		const { settingsStore, load } = mountFromStore();
+		settingsStore.openAt({ category: "transfer", scope: "host", hostId: "h2", channelId: null });
+		await settle();
+		await press("Escape");
+		expect(settingsStore.panelOpen).toBe(false);
+		expect(settingsStore.target).toBeNull();
+
+		load.mockClear();
+		settingsStore.panelOpen = true;
+		await settle();
+		expect(load).toHaveBeenCalledExactlyOnceWith("h1", "c1");
+		expect(el('.scope-tab[data-scope="host"]').textContent?.trim()).toBe("Host: laptop");
 	});
 });
 

@@ -66,8 +66,15 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					highlightOnClose: "clear",
 					historySize: 20,
 				},
-				layout: { hostRailColumns: 1, hostRailBadgeSize: "medium", sidebarWidth: 200 },
+				layout: {
+					hostRailColumns: 1,
+					hostRailBadgeSize: "medium",
+					sidebarWidth: 200,
+					transferPanelWidth: 300,
+				},
 				keyboard: { keyHints: true },
+				transfer: { panelSide: "right", openOnDrag: true, maxConcurrent: 2, showHidden: false },
+				experimental: { fileTransfer: false },
 			},
 			global: {
 				tabs: { closeButton: false },
@@ -95,8 +102,15 @@ function makeCascade(overrides?: Partial<CascadeResponse>): CascadeResponse {
 					highlightOnClose: "clear",
 					historySize: 20,
 				},
-				layout: { hostRailColumns: 1, hostRailBadgeSize: "medium", sidebarWidth: 200 },
+				layout: {
+					hostRailColumns: 1,
+					hostRailBadgeSize: "medium",
+					sidebarWidth: 200,
+					transferPanelWidth: 300,
+				},
 				keyboard: { keyHints: true },
+				transfer: { panelSide: "right", openOnDrag: true, maxConcurrent: 2, showHidden: false },
+				experimental: { fileTransfer: false },
 			},
 		},
 		appearance: {
@@ -567,5 +581,32 @@ describe("useSettingsStore", () => {
 			// Optimistic: fontSize should be removed from host layer
 			expect(store.getValue("host", "terminal", "fontSize")).toBeUndefined();
 		});
+	});
+});
+
+// Settings opened at a place of the caller's (#835): the files panel's gear
+// opens File transfer at its terminal's host.
+describe("openAt", () => {
+	beforeEach(() => {
+		setActivePinia(createPinia());
+	});
+
+	it("opens the panel at the category, the scope, the host and the terminal given", () => {
+		const store = useSettingsStore();
+		store.openAt({ category: "transfer", scope: "host", hostId: "h2", channelId: "c9" });
+		expect(store.panelOpen).toBe(true);
+		expect(store.activeCategory).toBe("transfer");
+		expect(store.activeScope).toBe("host");
+		expect(store.target).toEqual({ hostId: "h2", channelId: "c9" });
+	});
+
+	it("falls back to the next scope out when the one given has nothing to edit", () => {
+		const store = useSettingsStore();
+		store.openAt({ category: "transfer", scope: "channel", hostId: "h2", channelId: null });
+		expect(store.activeScope).toBe("host");
+		store.openAt({ category: "transfer", scope: "channel", hostId: null, channelId: null });
+		expect(store.activeScope).toBe("global");
+		store.openAt({ category: "transfer", scope: "host", hostId: null, channelId: "c9" });
+		expect(store.activeScope).toBe("global");
 	});
 });

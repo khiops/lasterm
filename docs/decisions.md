@@ -7,6 +7,17 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## FILE-TRANSFER-SETTINGS — upload keys cascade to the terminal, and the whole feature waits behind an experimental switch (#835, 2026-11-06)
+
+- What differs by host goes in the terminal profile, the only cascade with host and terminal layers, as `when_ended` did: `transfer_drop`, `transfer_confirm_drop`, `transfer_on_conflict` and `transfer_follow_cwd` at every scope; `transfer_fallback_dir` and `transfer_verify` globally or per host only, since they are about the host's file system and its SSH server, not a shell on it. A terminal's profile refuses those two.
+- What is about the window goes in a global `[transfer]` section (the files panel's side, opening on a drag, transfers at once, hidden files), and its width in `[layout] transfer_panel_width`, as the sidebar's.
+- Every value is checked where it is written, by tables in `@lasterm/shared` (`file-transfer.ts`) that the routes and `config.toml`'s reader share: a value a route refuses is not read from the file either, and the default holds.
+- One scoped write, `planProfileWrite`: a key set for a host or globally, then the overrides nearer to one terminal dropped so that it holds there. "Always do this" (#574) moved onto it; the files panel's options (#836) and an upload's conflict step (#837) use it. It returns what it would drop, from the layers given, so that a caller can say so before writing.
+- **The experimental switch.** `[experimental] file_transfer`, off by default, gates the whole feature until upload (#837) lands, so that no release shows half of it. A section of its own rather than a key of `[transfer]`: a switch there goes when its feature is done, and nothing reads a key left behind, where an `enabled` among the feature's settings would read as a lasting off switch. `isFileTransferEnabled` is the one check every part makes. While it is off, Settings › File transfer shows the switch and one line.
+- Settings can be opened at a category, a scope, a host and a terminal of the caller's (`openAt`), which the files panel's gear needs; the sidebar's selection is left as it is, and closing forgets the place.
+
+---
+
 ## ONE-TERMINAL-SIZE — the writer decides a terminal's size, and every other client draws at it (#831, 2026-10-31)
 
 - A terminal has one size, its PTY's. Before this, every client sent RESIZE for its own pane and the hub applied whichever came last, telling nobody else: two windows of different sizes on one terminal fought over it, and the one that resized first drew a screen laid out for another width.

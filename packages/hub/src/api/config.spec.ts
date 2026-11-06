@@ -1,9 +1,15 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { TRANSFER_PROFILE_KEYS, UI_SECTION_KEYS } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerConfigRoutes, UI_VALUE_VALIDATORS } from "../api/config.js";
+import {
+	profileValueError,
+	registerConfigRoutes,
+	TERMINAL_VALUE_VALIDATORS,
+	UI_VALUE_VALIDATORS,
+} from "../api/config.js";
 import { ConfigResolver } from "../config.js";
 import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
@@ -61,6 +67,12 @@ function useHubServer(): void {
 	});
 }
 
+/** The hub server's config.toml, "" before anything wrote one. */
+function readConfigToml(): string {
+	const path = join(configDir, "config.toml");
+	return existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
 // ─── UI_VALUE_VALIDATORS — the rules PUT /api/config/ui applies ───────────────
 //
 // A table of pure functions: each rule is asserted here, where it lives, so a
@@ -100,12 +112,197 @@ describe("UI_VALUE_VALIDATORS", () => {
 		["keyboard", "keyHints", "accepts", false],
 		["keyboard", "keyHints", "refuses", "off"],
 		["keyboard", "keyHints", "refuses", 0],
+		// File transfer (#835): the rules are shared, and each is tested beside
+		// its table in @lasterm/shared; one case each shows this table uses them.
+		["layout", "transferPanelWidth", "accepts", 240],
+		["layout", "transferPanelWidth", "refuses", 521],
+		["transfer", "panelSide", "accepts", "left"],
+		["transfer", "panelSide", "refuses", "top"],
+		["transfer", "openOnDrag", "accepts", false],
+		["transfer", "openOnDrag", "refuses", "no"],
+		["transfer", "maxConcurrent", "accepts", 3],
+		["transfer", "maxConcurrent", "refuses", 4],
+		["transfer", "showHidden", "accepts", true],
+		["transfer", "showHidden", "refuses", 1],
+		["experimental", "fileTransfer", "accepts", true],
+		["experimental", "fileTransfer", "accepts", false],
+		["experimental", "fileTransfer", "refuses", "on"],
+		["experimental", "fileTransfer", "refuses", 1],
 	];
 
 	it.each(cases)("%s.%s %s %j", (section, key, verdict, value) => {
 		const validator = UI_VALUE_VALIDATORS[section]?.[key];
 		expect(validator, `no validator for ${section}.${key}`).toBeTypeOf("function");
 		expect(validator?.(value)).toBe(verdict === "accepts");
+	});
+
+	it("has a rule for every key of the sections file transfer adds", () => {
+		expect(Object.keys(UI_VALUE_VALIDATORS.transfer ?? {}).sort()).toEqual([
+			"maxConcurrent",
+			"openOnDrag",
+			"panelSide",
+			"showHidden",
+		]);
+		expect(Object.keys(UI_VALUE_VALIDATORS.experimental ?? {})).toEqual(["fileTransfer"]);
+		for (const section of ["transfer", "experimental"]) {
+			expect(Object.keys(UI_VALUE_VALIDATORS[section] ?? {}).sort(), section).toEqual(
+				[...(UI_SECTION_KEYS[section] ?? [])].sort(),
+			);
+		}
+	});
+});
+
+// ─── TERMINAL_VALUE_VALIDATORS — the rules every profile write applies ───────
+//
+// PUT /api/config/global and the host's and the channel's profile PATCH all
+// consult this table; each route keeps one test, below, proving it does.
+
+describe("TERMINAL_VALUE_VALIDATORS", () => {
+	type Case = [key: string, verdict: "accepts" | "refuses", value: unknown];
+	const cases: Case[] = [
+		["transferDrop", "accepts", "upload"],
+		["transferDrop", "accepts", "off"],
+		["transferDrop", "refuses", "download"],
+		["transferConfirmDrop", "accepts", false],
+		["transferConfirmDrop", "refuses", "false"],
+		["transferOnConflict", "accepts", "keep_both"],
+		["transferOnConflict", "refuses", "keepBoth"],
+		["transferFollowCwd", "accepts", true],
+		["transferFollowCwd", "refuses", 0],
+		["transferFallbackDir", "accepts", ""],
+		["transferFallbackDir", "accepts", "~/inbox"],
+		["transferFallbackDir", "refuses", "x".repeat(1025)],
+		["transferVerify", "accepts", true],
+		["transferVerify", "refuses", "true"],
+	];
+
+	it.each(cases)("%s %s %j", (key, verdict, value) => {
+		const validator = TERMINAL_VALUE_VALIDATORS[key];
+		expect(validator, `no validator for ${key}`).toBeTypeOf("function");
+		expect(validator?.(value)).toBe(verdict === "accepts");
+	});
+
+	it("has a rule for every file-transfer key", () => {
+		for (const key of TRANSFER_PROFILE_KEYS) {
+			expect(TERMINAL_VALUE_VALIDATORS[key], key).toBeTypeOf("function");
+		}
+	});
+});
+
+describe("profileValueError", () => {
+	it("refuses a key of the host's at a terminal's scope, and only there", () => {
+		for (const key of ["transferFallbackDir", "transferVerify"]) {
+			const value = key === "transferVerify" ? false : "/srv";
+			expect(profileValueError({ [key]: value }, "channel")?.code, key).toBe("VALIDATION_ERROR");
+			expect(profileValueError({ [key]: value }, "host"), key).toBeNull();
+			expect(profileValueError({ [key]: value }, "global"), key).toBeNull();
+		}
+	});
+
+	it("never asks about null, which removes an override", () => {
+		expect(profileValueError({ transferDrop: null, transferVerify: null }, "channel")).toBeNull();
+	});
+
+	it("names the key and the value refused", () => {
+		expect(profileValueError({ fontSize: 12, transferDrop: "both" }, "host")).toEqual({
+			code: "INVALID_VALUE",
+			message: 'Invalid value for "transferDrop": "both"',
+		});
+	});
+});
+
+// ─── The profile writes consult TERMINAL_VALUE_VALIDATORS ────────────────────
+
+describe("terminal profile writes: value validation", () => {
+	useHubServer();
+
+	const refusal = {
+		error: { code: "INVALID_VALUE", message: 'Invalid value for "transferDrop": "download"' },
+	};
+
+	async function makeChannel(): Promise<{ hostId: string; channelId: string }> {
+		const hostId = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "local", label: "t" },
+			})
+		).json<{ id: string }>().id;
+		const meta = new MetaDAL(dbs.meta);
+		meta.createSession({ id: "ses-validate", hostId, status: "starting" });
+		meta.createChannel({ id: "ch-validate", sessionId: "ses-validate", status: "born" });
+		return { hostId, channelId: "ch-validate" };
+	}
+
+	it("PUT /api/config/global refuses a value the table refuses, and stores one it accepts", async () => {
+		const refused = await server.inject({
+			method: "PUT",
+			url: "/api/config/global",
+			payload: { terminal: { transferDrop: "download" } },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual(refusal);
+		expect(readConfigToml()).not.toContain("transfer_drop");
+
+		const accepted = await server.inject({
+			method: "PUT",
+			url: "/api/config/global",
+			payload: { terminal: { transferDrop: "off" } },
+		});
+		expect(accepted.statusCode).toBe(200);
+		expect(readConfigToml()).toMatch(/transfer_drop = "off"/);
+	});
+
+	it("PATCH /api/hosts/:id/profile refuses a value the table refuses, and stores one it accepts", async () => {
+		const { hostId } = await makeChannel();
+		const url = `/api/hosts/${hostId}/profile`;
+		const refused = await server.inject({
+			method: "PATCH",
+			url,
+			payload: { profile: { transferDrop: "download" } },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual(refusal);
+
+		const accepted = await server.inject({
+			method: "PATCH",
+			url,
+			payload: { profile: { transferDrop: "off", transferVerify: false } },
+		});
+		expect(accepted.statusCode).toBe(200);
+		expect((await server.inject({ method: "GET", url })).json()).toEqual({
+			profile: { transferDrop: "off", transferVerify: false },
+		});
+	});
+
+	it("PATCH /api/channels/:id/profile refuses a value the table refuses, and a key of the host's", async () => {
+		const { channelId } = await makeChannel();
+		const url = `/api/channels/${channelId}/profile`;
+		const refused = await server.inject({
+			method: "PATCH",
+			url,
+			payload: { profile: { transferDrop: "download" } },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual(refusal);
+
+		const hostOnly = await server.inject({
+			method: "PATCH",
+			url,
+			payload: { profile: { transferFallbackDir: "/tmp" } },
+		});
+		expect(hostOnly.statusCode).toBe(400);
+		expect(hostOnly.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_ERROR");
+
+		const accepted = await server.inject({
+			method: "PATCH",
+			url,
+			payload: { profile: { transferDrop: "off" } },
+		});
+		expect(accepted.statusCode).toBe(200);
+		expect((await server.inject({ method: "GET", url })).json()).toEqual({
+			profile: { transferDrop: "off" },
+		});
 	});
 });
 

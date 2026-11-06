@@ -119,6 +119,7 @@ import {
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import {
 	envNamesIgnoreCase,
+	reportDirectoryField,
 	resolveEnvironmentChanges,
 	spawnEnvironmentFields,
 	spawnEnvMode,
@@ -135,6 +136,8 @@ interface ReusedTerminal {
 	cwd?: string;
 	shell?: string;
 	args?: string[];
+	/** The launch profile it was first started from. */
+	launchProfileId?: string;
 }
 
 export interface WsClient {
@@ -905,6 +908,9 @@ export class SessionManager {
 					...(existing.channel.cwd !== undefined && { cwd: existing.channel.cwd }),
 					...(existing.channel.shell !== undefined && { shell: existing.channel.shell }),
 					...(existing.channel.args !== undefined && { args: existing.channel.args }),
+					...(existing.channel.launchProfileId !== undefined && {
+						launchProfileId: existing.channel.launchProfileId,
+					}),
 				};
 			} else {
 				// Spawning a stranger instead would put a terminal on screen that
@@ -1445,6 +1451,16 @@ export class SessionManager {
 							resolvedArgs,
 							resolvedDirectProcess,
 						),
+					),
+					// The profile this spawn starts; for a terminal brought back under
+					// its own shell, which is how a window restarts an ended one, the
+					// profile it was first started from, as a restart reads it: bringing
+					// it back keeps the switch's effect (#839).
+					...reportDirectoryField(
+						profile ??
+							(reused?.launchProfileId !== undefined
+								? this.ctx.metaDal.getLaunchProfile(reused.launchProfileId)
+								: undefined),
 					),
 				};
 

@@ -27,6 +27,8 @@ interface LaunchProfileRow {
 	sort_order: number;
 	created_at: string;
 	updated_at: string;
+	/** 1: the profile's PowerShell reports its directory (#839). */
+	report_directory: number;
 }
 
 /** The fields of a launch profile that may be empty. */
@@ -59,6 +61,7 @@ function rowToLaunchProfile(row: LaunchProfileRow): LaunchProfile {
 		elevated: row.elevated !== 0,
 		supportedOs: row.supported_os as SupportedOs,
 		iconType: row.icon_type as LaunchProfile["iconType"],
+		reportDirectory: row.report_directory !== 0,
 		sortOrder: row.sort_order,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -132,8 +135,8 @@ export class LaunchProfilesDAL {
 				`INSERT INTO launch_profiles (
 				id, name, shell, args_json, cwd, env_json, mode, elevated,
 				supported_os, icon_type, icon_value, color, profile_overrides_json,
-				sort_order, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				sort_order, created_at, updated_at, report_directory
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				id,
@@ -152,6 +155,7 @@ export class LaunchProfilesDAL {
 				input.sortOrder,
 				now,
 				now,
+				input.reportDirectory ? 1 : 0,
 			);
 
 		return this.getLaunchProfile(id) as LaunchProfile;
@@ -206,6 +210,7 @@ export class LaunchProfilesDAL {
 			iconValue: "icon_value",
 			color: "color",
 			sortOrder: "sort_order",
+			reportDirectory: "report_directory",
 		};
 
 		const setClauses: string[] = ["updated_at = ?"];
@@ -215,7 +220,7 @@ export class LaunchProfilesDAL {
 			if (camel in updates) {
 				setClauses.push(`${snake} = ?`);
 				const val = updates[camel as keyof LaunchProfile];
-				if (camel === "elevated") {
+				if (camel === "elevated" || camel === "reportDirectory") {
 					values.push(val ? 1 : 0);
 				} else {
 					values.push(val !== undefined ? val : null);

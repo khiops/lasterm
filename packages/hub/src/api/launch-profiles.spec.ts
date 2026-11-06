@@ -251,6 +251,54 @@ describe("validateCreateBody", () => {
 			"color must be in hex format #rrggbb",
 		);
 	});
+
+	it("takes report_directory as true or false, or none, and refuses anything else (#839)", () => {
+		const pwsh = { name: "PowerShell", shell: "/usr/bin/pwsh" };
+		for (const report_directory of [true, false, null, undefined]) {
+			expect(validateCreateBody(body({ ...pwsh, report_directory }))).toBeNull();
+		}
+		for (const report_directory of ["yes", 1, 0, "true", {}]) {
+			expect(validateCreateBody(body({ ...pwsh, report_directory }))).toBe(
+				"report_directory must be true or false",
+			);
+		}
+	});
+});
+
+describe("a launch profile's report_directory through the routes (#839)", () => {
+	useHubServer();
+
+	it("is off unless asked, stored as given, and changed by a PUT that names it only", async () => {
+		const plain = await createProfile({ name: "PowerShell", shell: "/usr/bin/pwsh" });
+		expect(plain.report_directory).toBe(false);
+
+		const reporting = await createProfile({
+			name: "PowerShell, reporting",
+			shell: "/usr/bin/pwsh",
+			report_directory: true,
+		});
+		expect(reporting.report_directory).toBe(true);
+		const url = `/api/launch-profiles/${reporting.id}`;
+		const read = (await server.inject({ method: "GET", url })).json<Record<string, unknown>>();
+		expect(read.report_directory).toBe(true);
+
+		const renamed = await server.inject({ method: "PUT", url, payload: { name: "Renamed" } });
+		expect(renamed.json<Record<string, unknown>>().report_directory).toBe(true);
+
+		const off = await server.inject({ method: "PUT", url, payload: { report_directory: false } });
+		expect(off.statusCode).toBe(200);
+		expect(off.json<Record<string, unknown>>().report_directory).toBe(false);
+
+		const payload = { report_directory: "yes" };
+		const refused = await server.inject({ method: "PUT", url, payload });
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: validateUpdateBody(payload as unknown as UpdateLaunchProfileBody),
+			},
+		});
+	});
 });
 
 // ─── validateUpdateBody — the rules PUT /api/launch-profiles/:id applies ──────
@@ -274,9 +322,24 @@ describe("validateUpdateBody", () => {
 	});
 
 	it("refuses null on a field that always holds a value", () => {
-		for (const field of ["mode", "elevated", "supported_os", "icon_type", "sort_order"]) {
+		for (const field of [
+			"mode",
+			"elevated",
+			"supported_os",
+			"icon_type",
+			"sort_order",
+			"report_directory",
+		]) {
 			expect(validateUpdateBody(body({ [field]: null }))).toBe(`${field} cannot be cleared`);
 		}
+	});
+
+	it("takes report_directory as true or false only (#839)", () => {
+		expect(validateUpdateBody(body({ report_directory: true }))).toBeNull();
+		expect(validateUpdateBody(body({ report_directory: false }))).toBeNull();
+		expect(validateUpdateBody(body({ report_directory: "false" }))).toBe(
+			"report_directory must be true or false",
+		);
 	});
 
 	it("refuses an empty or missing name, and a shell POST would refuse", () => {

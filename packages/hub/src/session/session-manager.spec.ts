@@ -2763,6 +2763,126 @@ describe("SessionManager", () => {
 		});
 	});
 
+	// ─── A PowerShell that reports its directory (#839) ──────────────────────
+	//
+	// A launch profile's switch reaches the agent in the SPAWN, which decides
+	// whether it applies to the shell and its arguments. The hub sends it with
+	// the rest of the profile: when the terminal starts, and every time it is
+	// started again.
+
+	describe("a launch profile whose PowerShell reports its directory (#839)", () => {
+		let dal: MetaDAL;
+		const PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+
+		function spawnsTo(send: Mock | undefined): AgentSpawnMessage[] {
+			return (send?.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN");
+		}
+
+		function profile(name: string, reportDirectory: boolean): string {
+			return dal.createLaunchProfile({
+				name,
+				shell: PWSH,
+				args: ["-NoLogo"],
+				mode: "shell",
+				elevated: false,
+				supportedOs: "windows",
+				iconType: "auto",
+				sortOrder: 0,
+				reportDirectory,
+			}).id;
+		}
+
+		/** A terminal of `launchProfileId` on a remote Windows host. */
+		async function terminal(
+			launchProfileId: string,
+		): Promise<{ hostId: string; channelId: string }> {
+			const host = dal.createHost({
+				type: "ssh",
+				label: `win-${launchProfileId}`,
+				sshHost: "me@win.local",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+				os: "windows",
+			});
+			const channelId = await sm.handleSpawn("c-report", {
+				type: "SPAWN",
+				hostId: host.id,
+				launchProfileId,
+			});
+			if (channelId === null) throw new Error("expected a channel");
+			return { hostId: host.id, channelId };
+		}
+
+		beforeEach(() => {
+			dal = new MetaDAL(dbManager.meta);
+			sm.addClient(makeClient("c-report", []));
+		});
+
+		it("is said in the SPAWN of a profile that has it on, and left out of one that has it off", async () => {
+			await terminal(profile("PowerShell, reporting", true));
+			const [reporting] = spawnsTo(mockSshAgentInstance?.send);
+			await terminal(profile("PowerShell", false));
+			const [plain] = spawnsTo(mockSshAgentInstance?.send);
+
+			expect(reporting?.shell).toBe(PWSH);
+			expect(reporting?.args).toEqual(["-NoLogo"]);
+			expect(reporting?.reportDirectory).toBe(true);
+			expect(plain?.shell).toBe(PWSH);
+			expect(plain).not.toHaveProperty("reportDirectory");
+		});
+
+		it("is said again on a restart, on a new agent, and when brought back from the dead", async () => {
+			const { hostId, channelId } = await terminal(profile("PowerShell, reporting", true));
+			const agent = mockSshAgentInstance;
+			const before = spawnsTo(agent?.send).length;
+
+			expect(await sm.restartChannel(channelId)).toBe(true);
+			await sm._spawnChannelsForHost(
+				hostId,
+				agent,
+				() => {},
+				() => {},
+			);
+			// What a window's Restart sends for an ended terminal: its id, its
+			// shell and its arguments, and no profile.
+			const channels = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+			const entry = channels.get(channelId);
+			if (entry) entry.status = "dead";
+			dal.updateChannelStatus(channelId, "dead");
+			expect(
+				await sm.handleSpawn("c-report", {
+					type: "SPAWN",
+					hostId,
+					reuseChannelId: channelId,
+					shell: PWSH,
+					args: ["-NoLogo"],
+				}),
+			).toBe(channelId);
+
+			const again = spawnsTo(agent?.send).slice(before);
+			expect(again).toHaveLength(3);
+			for (const spawn of again) {
+				expect(spawn.channelId).toBe(channelId);
+				expect(spawn.reportDirectory).toBe(true);
+			}
+		});
+
+		it("follows the profile as it is now: turned off, a restart says nothing", async () => {
+			const id = profile("PowerShell, reporting", true);
+			const { channelId } = await terminal(id);
+			dal.updateLaunchProfile(id, { reportDirectory: false });
+			const before = spawnsTo(mockSshAgentInstance?.send).length;
+
+			expect(await sm.restartChannel(channelId)).toBe(true);
+
+			const [restarted] = spawnsTo(mockSshAgentInstance?.send).slice(before);
+			expect(restarted?.channelId).toBe(channelId);
+			expect(restarted).not.toHaveProperty("reportDirectory");
+		});
+	});
+
 	// ─── The environment a SPAWN carries (#576) ──────────────────────────────
 	//
 	// Against a real ConfigResolver, reading a real config.toml and the host and

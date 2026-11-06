@@ -5,8 +5,10 @@ import {
 	TRANSFER_CONFLICT_ACTIONS,
 	TRANSFER_EXPIRY_MS,
 	TRANSFER_ITEM_STATES,
+	TRANSFER_MAX_FILES,
 	TRANSFER_MAX_IDS,
 	TRANSFER_ON_CONFLICT_VALUES,
+	TRANSFER_RESUME_SKIPS,
 	type TransferAcceptedItem,
 	type TransferCancelMessage,
 	type TransferConflictAction,
@@ -22,7 +24,9 @@ import {
 	type TransferOnConflict,
 	type TransferOutcome,
 	type TransferResolveMessage,
+	type TransferResumeFile,
 	type TransferResumeMessage,
+	type TransferResumeSkip,
 	type TransferRetryMessage,
 	type TransferScope,
 	type TransferStartMessage,
@@ -46,7 +50,7 @@ import {
 	VerifyFailed,
 } from "../files/upload-backend.js";
 import type { TransferItemRecord, TransferRecord, TransfersDAL } from "../storage/transfers-dal.js";
-import { buildUploadTree, type TreeItem } from "./upload-tree.js";
+import { buildUploadTree, isWholeNumber, type TreeItem } from "./upload-tree.js";
 
 /** How long the changes of an upload gather before they are said in one TRANSFER_PROGRESS. */
 const PROGRESS_FLUSH_MS = 100;
@@ -152,6 +156,11 @@ export interface TransferDeps {
 	enabled?(): boolean;
 	/** The time, in milliseconds since the epoch; `Date.now` by default. */
 	now?(): number;
+	/**
+	 * A paired device's name, as the hub's credentials list it (`auth_tokens.label`), for the
+	 * windows of another device to say where an upload can be resumed from (#837).
+	 */
+	deviceLabel?(tokenId: string): string | null;
 }
 
 /** An upload dropped whose temporaries wait for their host to be reached, by their recorded paths. */
@@ -309,6 +318,53 @@ const NOT_RESUMED_REASONS: ReadonlySet<string> = new Set<TransferNotResumedReaso
 	"host_key_not_accepted",
 	"host_unreachable",
 ]);
+
+/** What a file a resume leaves out says of itself, by what its window found of it (#837). */
+const SKIPPED_REASONS: Readonly<Record<TransferResumeSkip, string>> = {
+	gone: "no longer on the device that sent it",
+	changed: "changed since it was sent",
+	unreadable: "could not be read on the device that sent it",
+};
+
+/**
+ * The files a TRANSFER_RESUME names to leave out or to send again from their
+ * first byte, by upload; none when it names none, and null when they are not
+ * as PROTOCOL.md § 4.19 says.
+ */
+function resumeFilesOf(value: unknown): Map<string, TransferResumeFile[]> | null {
+	const byUpload = new Map<string, TransferResumeFile[]>();
+	if (value === undefined || value === null) return byUpload;
+	if (!Array.isArray(value) || value.length > TRANSFER_MAX_FILES) return null;
+	for (const raw of value) {
+		if (typeof raw !== "object" || raw === null) return null;
+		const entry = raw as Record<string, unknown>;
+		const { transferId, itemId } = entry;
+		if (typeof transferId !== "string" || !isWholeNumber(itemId)) return null;
+		let file: TransferResumeFile;
+		if (entry.action === "skip") {
+			const why = entry.why;
+			if (!(TRANSFER_RESUME_SKIPS as readonly unknown[]).includes(why)) return null;
+			file = { transferId, itemId, action: "skip", why: why as TransferResumeSkip };
+		} else if (entry.action === "restart") {
+			const { size, mtime } = entry;
+			if (!isWholeNumber(size)) return null;
+			if (mtime !== undefined && mtime !== null && !isWholeNumber(mtime)) return null;
+			file = {
+				transferId,
+				itemId,
+				action: "restart",
+				size,
+				...(isWholeNumber(mtime) ? { mtime } : {}),
+			};
+		} else {
+			return null;
+		}
+		const list = byUpload.get(transferId) ?? [];
+		list.push(file);
+		byUpload.set(transferId, list);
+	}
+	return byUpload;
+}
 
 /** What a file of an upload brought back from meta.db is at: one that was moving is interrupted. */
 function revivedState(state: string): TransferItemState {
@@ -699,9 +755,21 @@ export class TransferService {
 	 * through the interactive Connect, so that the window is asked one
 	 * question at a time; a host whose question is cancelled, or that cannot
 	 * be reached, leaves its uploads interrupted with the reason, and the next
-	 * host goes on. Never rejects.
+	 * host goes on. The files the window found gone or changed (`files`) are
+	 * left out, or sent again from their first byte as they are now. Never
+	 * rejects.
 	 */
 	async resume(requester: TransferRequester, msg: TransferResumeMessage): Promise<void> {
+		const files = resumeFilesOf(msg.files);
+		if (files === null) {
+			this.refuseControl(
+				requester,
+				"",
+				"INVALID_INPUT",
+				`files must list at most ${TRANSFER_MAX_FILES} files, each to skip with why, or to restart with its size`,
+			);
+			return;
+		}
 		const uploads = this.named(requester, msg.transferIds, true);
 		for (const [hostId, group] of this.byHost(uploads)) {
 			const hostType = (group[0] as Upload).hostType;
@@ -716,7 +784,9 @@ export class TransferService {
 				}
 				await this.atConnection(hostId, hostType);
 				for (const upload of group) {
-					if (this.uploads.get(upload.id) === upload) await this.takeUp(upload, requester);
+					if (this.uploads.get(upload.id) === upload) {
+						await this.takeUp(upload, requester, files.get(upload.id) ?? []);
+					}
 				}
 			} finally {
 				this.letGo(hostId, hostType);
@@ -756,12 +826,16 @@ export class TransferService {
 		void this.atConnection(hostId, hostType).then(() => this.resumeDropped(hostId));
 	}
 
-	/** The interrupted uploads, as STATE_SYNC lists them; none while the switch is off. */
-	interruptedUploads(): TransferSyncEntry[] {
+	/**
+	 * The interrupted uploads, as STATE_SYNC lists them to a window of
+	 * `viewerTokenId`; none while the switch is off.
+	 */
+	interruptedUploads(viewerTokenId: string | null = null): TransferSyncEntry[] {
 		if (!this.isEnabled()) return [];
 		const entries: TransferSyncEntry[] = [];
 		for (const upload of this.uploads.values()) {
 			if (this.uploadState(upload) !== "interrupted") continue;
+			const device = this.deviceOf(upload, viewerTokenId);
 			entries.push({
 				transferId: upload.id,
 				channelId: upload.channelId,
@@ -771,9 +845,33 @@ export class TransferService {
 				...(upload.reason !== null ? { reason: upload.reason } : {}),
 				totals: totalsOnWire(upload.totals),
 				updatedAt: new Date(upload.changedAt).toISOString(),
+				fromThisDevice: device.fromThisDevice,
+				...(device.label !== null ? { deviceLabel: device.label } : {}),
 			});
 		}
 		return entries;
+	}
+
+	/**
+	 * Whether a window of `viewerTokenId` is of the device that started the
+	 * upload, which alone holds its files (#837), and otherwise that device's
+	 * name, when it has one. Compared as a resume's check does: without
+	 * credentials, every window is of the same device.
+	 */
+	private deviceOf(
+		upload: Upload,
+		viewerTokenId: string | null,
+	): { fromThisDevice: boolean; label: string | null } {
+		if (upload.tokenId === viewerTokenId) return { fromThisDevice: true, label: null };
+		let label: string | null = null;
+		if (upload.tokenId !== null) {
+			try {
+				label = this.deps.deviceLabel?.(upload.tokenId) ?? null;
+			} catch {
+				label = null;
+			}
+		}
+		return { fromThisDevice: false, label: label === "" ? null : label };
 	}
 
 	/**
@@ -930,19 +1028,26 @@ export class TransferService {
 
 	// ─── Reading them (REST) ─────────────────────────────────────────────────
 
-	/** The uploads from a terminal, as a client that attached late reads them; every one without. */
-	listFor(channelId?: string): Record<string, unknown>[] {
+	/**
+	 * The uploads from a terminal, as a client that attached late reads them;
+	 * every one without. `viewerTokenId`: the credential of the window that
+	 * reads them, which says whether each is from its device (#837).
+	 */
+	listFor(channelId?: string, viewerTokenId: string | null = null): Record<string, unknown>[] {
 		return [...this.uploads.values()]
 			.filter((upload) => channelId === undefined || upload.channelId === channelId)
-			.map((upload) => this.summary(upload));
+			.map((upload) => this.summary(upload, viewerTokenId));
 	}
 
 	/** One upload, every item with it. */
-	describe(transferId: string): Record<string, unknown> | null {
+	describe(
+		transferId: string,
+		viewerTokenId: string | null = null,
+	): Record<string, unknown> | null {
 		const upload = this.uploads.get(transferId);
 		if (upload === undefined) return null;
 		return {
-			...this.summary(upload),
+			...this.summary(upload, viewerTokenId),
 			items: upload.items.map((item) => ({
 				item_id: item.id,
 				rel_path: item.relPath,
@@ -2316,14 +2421,20 @@ export class TransferService {
 	 * that and goes on from there; one missing or short, and the file starts
 	 * again under a new one. A whole one is only placed; a placed file is
 	 * never sent again. Then what failed, was cancelled or interrupted is
-	 * queued, as a retry would.
+	 * queued, as a retry would. The files `files` names are seen to first:
+	 * left out, or started again as they are now (`changedFile`).
 	 */
-	private async takeUp(upload: Upload, requester: TransferRequester): Promise<void> {
+	private async takeUp(
+		upload: Upload,
+		requester: TransferRequester,
+		files: readonly TransferResumeFile[] = [],
+	): Promise<void> {
 		upload.reason = null;
 		upload.linkDropped = false;
 		upload.busy++;
 		try {
 			const backend = await this.backendOf(upload);
+			for (const file of files) this.changedFile(upload, backend, file);
 			const kept = upload.items.filter(
 				(item) =>
 					item.kind === "file" &&
@@ -2360,6 +2471,41 @@ export class TransferService {
 		this.persist(upload);
 		this.settle(upload);
 		this.schedulePump();
+	}
+
+	/**
+	 * A file its window found gone or changed as it resumes (#837): left out,
+	 * saying why, or sent again from its first byte with its size and time now,
+	 * its temporary removed either way. A placed or skipped file stays as it is.
+	 */
+	private changedFile(upload: Upload, backend: UploadBackend, file: TransferResumeFile): void {
+		const item = upload.items[file.itemId];
+		if (item === undefined || item.kind !== "file") return;
+		// Placed or skipped, it stays so; one another window is sending is that window's.
+		if (!["interrupted", "queued", "conflict", "failed", "cancelled"].includes(item.state)) return;
+		if (file.action === "skip") {
+			// `skip` removes its temporary, through the backend just taken.
+			this.skip(upload, item);
+			item.reason = SKIPPED_REASONS[file.why];
+			item.code = null;
+			this.persist(upload, item);
+			return;
+		}
+		const temp = item.temp;
+		this.restartFile(upload, item);
+		// Its own bytes only, whatever their name: a direct write is a file that was not there.
+		if (temp !== null) void backend.remove(temp).catch(() => {});
+		const grown = file.size - item.size;
+		const changing = item as { size: number; mtime: number | null };
+		changing.size = file.size;
+		changing.mtime = file.mtime ?? null;
+		if (grown !== 0) {
+			for (const totals of this.totalsAbove(upload, item)) totals.bytes += grown;
+		}
+		item.verification = null;
+		upload.dirtyItems.add(item.id);
+		this.markFolders(upload, item);
+		this.persist(upload, item);
 	}
 
 	/** What a resume finds of one temporary, and what it does about it (see `takeUp`). */
@@ -2690,7 +2836,8 @@ export class TransferService {
 		};
 	}
 
-	private summary(upload: Upload): Record<string, unknown> {
+	private summary(upload: Upload, viewerTokenId: string | null): Record<string, unknown> {
+		const device = this.deviceOf(upload, viewerTokenId);
 		return {
 			transfer_id: upload.id,
 			channel_id: upload.channelId,
@@ -2702,6 +2849,8 @@ export class TransferService {
 			...(upload.reason !== null ? { reason: upload.reason } : {}),
 			totals: totalsOnWire(upload.totals),
 			updated_at: new Date(upload.changedAt).toISOString(),
+			from_this_device: device.fromThisDevice,
+			...(device.label !== null ? { device_label: device.label } : {}),
 		};
 	}
 

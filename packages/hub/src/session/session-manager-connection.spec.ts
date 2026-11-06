@@ -1025,7 +1025,9 @@ describe("uploads to a host hold its connection (#833)", { timeout: 20_000 }, ()
 			state: "interrupted" as const,
 			totals: { files: 1, bytes: 10, acked: 4, states: { interrupted: 1 } },
 			updatedAt: "2026-11-06T00:00:00.000Z",
+			fromThisDevice: true,
 		};
+		const viewers: (string | null | undefined)[] = [];
 		h.sm.setTransfers({
 			activeOn: () => 0,
 			interruptOn: () => {},
@@ -1033,12 +1035,17 @@ describe("uploads to a host hold its connection (#833)", { timeout: 20_000 }, ()
 			saveNow: () => {
 				saved++;
 			},
-			interruptedUploads: () => [entry],
+			interruptedUploads: (viewerTokenId) => {
+				viewers.push(viewerTokenId);
+				return [entry];
+			},
 		});
 		await connected(h);
 		await until("the uploads are told", () => told.length > 0);
 		expect(told).toEqual([h.host.id]);
-		expect(h.sm.getStateSnapshot().transfers).toEqual([entry]);
+		// Listed for the window that reads them: whether each is from its device (#837).
+		expect(h.sm.getStateSnapshot("tok-a").transfers).toEqual([entry]);
+		expect(viewers).toEqual(["tok-a"]);
 		h.sm.beginQuit();
 		expect(saved).toBe(1);
 	});

@@ -562,6 +562,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			startFolder: (channelId) => startFolderSettings(channelId, metaDal, configResolver),
 		});
 		let routesForTransfers: WsRoutes | null = null;
+		const metaDb = options.dbManager.meta;
 		const fileTransferEnabled = () => isFileTransferEnabled(configResolver.uiConfig);
 		const transfers = new TransferService({
 			files: hostFiles,
@@ -586,6 +587,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			store: new TransfersDAL(options.dbManager.meta),
 			hostType: (hostId) => metaDal.getHost(hostId)?.type ?? null,
 			enabled: fileTransferEnabled,
+			// Where another device's upload can be resumed from, as its credential is named (#837).
+			deviceLabel: (tokenId) =>
+				listTokens(metaDb).find((token) => token.id === tokenId)?.label ?? null,
 		});
 		activeSessionManager.setTransfers(transfers);
 		// What a hub before this one left: interrupted, until a window resumes it.

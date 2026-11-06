@@ -202,7 +202,41 @@ export interface TransferCancelMessage {
 export interface TransferResumeMessage {
 	type: "TRANSFER_RESUME";
 	transferIds: string[];
+	/**
+	 * Files of those uploads the window found changed or gone since it sent their first bytes
+	 * (#837): each left out, or sent again from its first byte as it is now. A file not named
+	 * goes on from what its host acknowledged.
+	 */
+	files?: TransferResumeFile[];
 }
+
+/** Why a resume leaves a file out: what the window found of it. */
+export type TransferResumeSkip =
+	/** It is no longer where it was. */
+	| "gone"
+	/** It changed since its first bytes were sent, and its user chose to leave it out. */
+	| "changed"
+	/** It could not be read. */
+	| "unreadable";
+
+export const TRANSFER_RESUME_SKIPS: readonly TransferResumeSkip[] = [
+	"gone",
+	"changed",
+	"unreadable",
+];
+
+/** One file a resume leaves out (`skip`), or sends again from its first byte (`restart`). */
+export type TransferResumeFile =
+	| { transferId: string; itemId: number; action: "skip"; why: TransferResumeSkip }
+	| {
+			transferId: string;
+			itemId: number;
+			action: "restart";
+			/** Its size now, in bytes. */
+			size: number;
+			/** Its last modification now, in milliseconds since the epoch. */
+			mtime?: number;
+	  };
 
 /**
  * Drop uploads (#860): their temporaries removed, at once or at the next
@@ -337,6 +371,13 @@ export interface TransferSyncEntry {
 	totals: TransferTotals;
 	/** ISO 8601: when it last changed. It is discarded `TRANSFER_EXPIRY_MS` after. */
 	updatedAt: string;
+	/**
+	 * The window it is listed to is of the device that started it (#837): only such a window
+	 * holds its files, and may resume it.
+	 */
+	fromThisDevice: boolean;
+	/** Otherwise, that device's name as the hub's credentials list it, when it has one. */
+	deviceLabel?: string;
 }
 
 /** One name a Windows host would refuse, or a tree that cannot be sent as given. */

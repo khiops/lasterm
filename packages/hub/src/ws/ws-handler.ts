@@ -384,7 +384,7 @@ export async function registerWsRoutes(
 				// SessionManager.handleSpawn): a client that knows it takes an ERROR
 				// without its id as about something else (#777).
 				client.send({ type: "AUTH_OK", clientId, echoesSpawnRequestId: true });
-				client.send(sessionManager.getStateSnapshot());
+				client.send(sessionManager.getStateSnapshot(tokenId));
 				return;
 			}
 

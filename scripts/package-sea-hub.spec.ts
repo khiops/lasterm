@@ -63,6 +63,19 @@ describe("locateBetterSqlite3", () => {
 	});
 });
 
+describe("checkBetterSqlite3Gc", () => {
+	it("accepts the addon the executable embeds", async () => {
+		const { checkBetterSqlite3Gc, locateBetterSqlite3 } = await import("./package-sea-hub.js");
+		await expect(checkBetterSqlite3Gc(locateBetterSqlite3())).resolves.toBeUndefined();
+	});
+
+	it("refuses a file the churn did not load", async () => {
+		const { checkBetterSqlite3Gc } = await import("./package-sea-hub.js");
+		const missing = join(tmpdir(), `lasterm-missing-${process.pid}`, "better_sqlite3.node");
+		await expect(checkBetterSqlite3Gc(missing)).rejects.toThrow(/churn did not load/);
+	});
+});
+
 describe("loadHubLockAddon", () => {
 	let tempDir: string;
 

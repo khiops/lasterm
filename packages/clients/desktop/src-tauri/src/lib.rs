@@ -6,6 +6,10 @@ mod uploads;
 pub mod window_material;
 use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WindowHandle,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
@@ -23,7 +27,7 @@ use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::webview::{PageLoadEvent, PermissionKind, PermissionResponse};
 use tauri::{Emitter, Manager, Url, WindowEvent};
 use tauri_plugin_dialog::{
-    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+    DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use uploads::{Answer, Ending, Start, Step, TrayMenuTop, TrayTextStep};
 
@@ -1083,10 +1087,12 @@ enum RaiseRequestResult {
 /// Dispatch UI work to the Tauri main thread and wait for that work, rather
 /// than merely waiting for it to be queued. This is the acknowledgement P2
 /// needs: success reaches the peer only after both native calls completed.
-fn run_after_main_thread_action<S, A>(schedule: S, action: A) -> Result<(), String>
+/// What the work returns comes back with it.
+fn run_after_main_thread_action<S, A, T>(schedule: S, action: A) -> Result<T, String>
 where
     S: FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), String>,
-    A: FnOnce() -> Result<(), String> + Send + 'static,
+    A: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
 {
     let (completed_tx, completed_rx) = mpsc::sync_channel(1);
     schedule(Box::new(move || {
@@ -4905,13 +4911,217 @@ fn pid_probe_reports_alive(probe: Result<(), Option<i32>>) -> bool {
     !matches!(probe, Err(Some(3)))
 }
 
+// ── Quit-path dialogs over the main window (#874) ────────────────────────────
+//
+// rfd shows a native dialog on a thread it starts for it. With no owner, the
+// dialog is a top-level window of its own, and Windows may leave the main
+// window in the foreground once it was raised: the dialog is on screen, but
+// Enter goes to the window behind it (#874). Owned by the main window, the
+// dialog stays above it, and its thread shares the window's input state, so
+// it takes the activation the raise gave the window. Clicking the window while
+// it is up activates the dialog, as with any modal dialog, and the window
+// cannot be used until it is answered.
+//
+// Being owned, the dialog sends its owner messages, which the main thread must
+// be free to answer: no owned dialog is ever shown from the main thread, which
+// is only asked to place the window first.
+//
+// A dialog owned by a hidden window gets no taskbar button: one that did not
+// reach the foreground could then not be found at all. So only a window on
+// screen owns a dialog. A question the quit waits for shows the window first,
+// from the tray if need be; a notice leaves a window that is in the tray where
+// it is, and appears alone, with a taskbar button of its own, as before.
+
+/// How a quit-path dialog stands to the main window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogPlacement {
+    /// A question the quit or the close waits for: the window is unminimized,
+    /// shown and focused, from the tray if need be, then owns the dialog.
+    OverWindow,
+    /// A notice: owned by the window, focused first, when the window is on
+    /// screen; alone when it is in the tray (hidden, or minimized where there
+    /// is no tray), where it is left.
+    OverWindowIfShown,
+}
+
+/// The main window, as a quit-path dialog needs it.
+trait DialogOwnerWindow: WindowRaiseTarget {
+    /// Visible and not minimized.
+    fn on_screen(&self) -> Result<bool, String>;
+    /// The handle a dialog is owned by.
+    fn dialog_owner(&self) -> Result<DialogOwner, String>;
+}
+
+impl<R: tauri::Runtime> DialogOwnerWindow for tauri::WebviewWindow<R> {
+    fn on_screen(&self) -> Result<bool, String> {
+        let visible = self.is_visible().map_err(|error| error.to_string())?;
+        let minimized = self.is_minimized().map_err(|error| error.to_string())?;
+        Ok(visible && !minimized)
+    }
+
+    fn dialog_owner(&self) -> Result<DialogOwner, String> {
+        DialogOwner::of(self)
+    }
+}
+
+/// The main window's handle, for a dialog to be owned by it.
+///
+/// Read on the main thread, where the window lives. Read from another thread,
+/// Tauri waits for the main thread to answer with no time limit, and a main
+/// thread that no longer runs (#872) would hold the quit for ever.
+struct DialogOwner {
+    window: RawWindowHandle,
+    display: RawDisplayHandle,
+}
+
+// SAFETY: the handles only name the window. rfd hands them to the dialog it
+// creates on a thread of its own, as tauri-plugin-dialog does with the builder
+// that holds them, and the main window lives as long as the app.
+unsafe impl Send for DialogOwner {}
+
+impl DialogOwner {
+    fn of(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Self, String> {
+        let handle = window
+            .window_handle()
+            .map_err(|error| format!("no window handle: {error}"))?;
+        let display = window
+            .display_handle()
+            .map_err(|error| format!("no display handle: {error}"))?;
+        Ok(Self {
+            window: handle.as_raw(),
+            display: display.as_raw(),
+        })
+    }
+}
+
+impl HasWindowHandle for DialogOwner {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        // SAFETY: the main window outlives every dialog it owns.
+        Ok(unsafe { WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl HasDisplayHandle for DialogOwner {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // SAFETY: as for the window handle.
+        Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
+    }
+}
+
+/// A dialog a window can own.
+trait OwnableDialog: Sized {
+    /// Owned by `owner`, or alone without one.
+    fn owned_by(self, owner: Option<&DialogOwner>) -> Self;
+}
+
+impl<R: tauri::Runtime> OwnableDialog for MessageDialogBuilder<R> {
+    fn owned_by(self, owner: Option<&DialogOwner>) -> Self {
+        // tauri-plugin-dialog 2.8 hands the parent to rfd 0.16, which makes it
+        // the task dialog's `hwndParent` on Windows. Its GTK dialog ignores it.
+        match owner {
+            Some(owner) => self.parent(owner),
+            None => self,
+        }
+    }
+}
+
+/// Put the window where `placement` wants it, then say what is to own the
+/// dialog: the window, or nothing. Runs on the main thread.
+///
+/// A window that could not be shown, or whose handle cannot be read, owns
+/// nothing, so that the dialog still appears.
+fn place_window_for_dialog(
+    window: &impl DialogOwnerWindow,
+    placement: DialogPlacement,
+) -> Option<DialogOwner> {
+    let label = window.label();
+    if placement == DialogPlacement::OverWindowIfShown {
+        match window.on_screen() {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => {
+                eprintln!(
+                    "[lasterm] WARN: cannot tell whether window {label} is on screen; the dialog is shown alone: {error}"
+                );
+                return None;
+            }
+        }
+    }
+    if let Err(error) = run_window_raise_actions(window) {
+        eprintln!("[lasterm] WARN: the dialog is shown alone: {error}");
+        return None;
+    }
+    match window.dialog_owner() {
+        Ok(owner) => Some(owner),
+        Err(error) => {
+            eprintln!(
+                "[lasterm] WARN: window {label} cannot own the dialog, which is shown alone: {error}"
+            );
+            None
+        }
+    }
+}
+
+/// Place the window for a dialog on the main thread, and wait until it is
+/// placed: the dialog is made only once the window stands where it should.
+/// `Err` when the main thread did not answer in time.
+fn place_for_dialog<S, F, W>(
+    schedule: S,
+    find_window: F,
+    placement: DialogPlacement,
+) -> Result<Option<DialogOwner>, String>
+where
+    S: FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), String>,
+    F: FnOnce() -> Option<W> + Send + 'static,
+    W: DialogOwnerWindow,
+{
+    run_after_main_thread_action(schedule, move || {
+        Ok(find_window().and_then(|window| place_window_for_dialog(&window, placement)))
+    })
+}
+
+/// [`place_for_dialog`] for the app's main window. Never called on the main
+/// thread, which it waits for.
+fn place_main_window_for_dialog(
+    app: &tauri::AppHandle,
+    placement: DialogPlacement,
+) -> Result<Option<DialogOwner>, String> {
+    let scheduler = app.clone();
+    let main_thread_app = app.clone();
+    place_for_dialog(
+        move |action| {
+            scheduler
+                .run_on_main_thread(action)
+                .map_err(|error| format!("cannot schedule the window for a dialog: {error}"))
+        },
+        move || main_thread_app.get_webview_window("main"),
+        placement,
+    )
+}
+
+/// What owns a quit-path dialog. A main thread that did not answer placed
+/// nothing, and the dialog is shown alone, as it was before #874.
+fn quit_dialog_owner(app: &tauri::AppHandle, placement: DialogPlacement) -> Option<DialogOwner> {
+    place_main_window_for_dialog(app, placement).unwrap_or_else(|error| {
+        eprintln!("[lasterm] WARN: cannot place the window for a dialog, shown alone: {error}");
+        None
+    })
+}
+
 fn show_shutdown_error(app: &tauri::AppHandle, message: String) {
-    app.dialog()
-        .message(message)
-        .title("Quit Failed")
-        .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::Ok)
-        .show(|_| {});
+    let app = app.clone();
+    // Not on the main thread, which places the window first: a failed close
+    // preference is reported from the window's close request, on that thread.
+    std::thread::spawn(move || {
+        let owner = quit_dialog_owner(&app, DialogPlacement::OverWindowIfShown);
+        app.dialog()
+            .message(message)
+            .title("Quit Failed")
+            .kind(MessageDialogKind::Error)
+            .buttons(MessageDialogButtons::Ok)
+            .owned_by(owner.as_ref())
+            .show(|_| {});
+    });
 }
 
 /// Report a startup that cannot continue, then leave.
@@ -4957,31 +5167,26 @@ fn show_unconfirmed_quit_then_exit(app: tauri::AppHandle, message: String) {
 ///
 /// A dialog is made on the main thread, as the exit is carried out there. A
 /// main thread that no longer runs, as in #872, shows neither: the quit would
-/// end in no dialog and no exit. So the main thread is asked first, and one
-/// that does not answer gets no dialog: the reason goes to standard error, and
-/// the app leaves without it.
+/// end in no dialog and no exit. So the main thread is asked first, to place
+/// the window for the dialog (#874), and one that does not answer gets no
+/// dialog: the reason goes to standard error, and the app leaves without it.
 fn say_then_leave(app: tauri::AppHandle, title: &'static str, message: String) {
     std::thread::spawn(move || {
-        let probe = app.clone();
-        let answers = run_after_main_thread_action(
-            move |action| {
-                probe
-                    .run_on_main_thread(action)
-                    .map_err(|error| error.to_string())
-            },
-            || Ok(()),
-        );
-        if let Err(error) = answers {
-            eprintln!("[lasterm] {title}, and no dialog can say it ({error}): {message}");
-            finish_quit(&app);
-            return;
-        }
+        let owner = match place_main_window_for_dialog(&app, DialogPlacement::OverWindowIfShown) {
+            Ok(owner) => owner,
+            Err(error) => {
+                eprintln!("[lasterm] {title}, and no dialog can say it ({error}): {message}");
+                finish_quit(&app);
+                return;
+            }
+        };
         let leaving = app.clone();
         app.dialog()
             .message(message)
             .title(title)
             .kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::Ok)
+            .owned_by(owner.as_ref())
             .show(move |_| finish_quit(&leaving));
     });
 }
@@ -4992,6 +5197,8 @@ fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
         Some(others) => format!("{others} other clients"),
         None => "other connected clients (the hub did not provide a count)".to_string(),
     };
+    // On the thread that read the hub's answer, never the main thread.
+    let owner = quit_dialog_owner(&app, DialogPlacement::OverWindow);
     let confirmed = app
         .dialog()
         .message(format!("{subject} are connected. Quit Lasterm anyway?"))
@@ -5001,6 +5208,7 @@ fn present_native_quit_consent(app: tauri::AppHandle, others: Option<usize>) {
             "Quit anyway".to_string(),
             "Cancel".to_string(),
         ))
+        .owned_by(owner.as_ref())
         .blocking_show();
     if confirmed {
         let action = quit_coordinator()
@@ -5208,20 +5416,29 @@ fn hide_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// The close question, natively, when the page did not ask it.
+///
+/// Asked from a thread of its own: a window whose page cannot be told falls
+/// back to it from its close request, on the main thread, which an owned
+/// dialog must leave free, as it must leave the event loop running (#874).
 fn present_native_window_close_choice(app: tauri::AppHandle) {
-    let confirmed = app
-        .dialog()
-        .message("Quit Lasterm completely?")
-        .title("Quit Lasterm")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Quit completely".to_string(),
-            "Keep running".to_string(),
-        ))
-        .blocking_show();
-    if confirmed {
-        request_app_quit(app);
-    }
+    std::thread::spawn(move || {
+        let owner = quit_dialog_owner(&app, DialogPlacement::OverWindow);
+        let confirmed = app
+            .dialog()
+            .message("Quit Lasterm completely?")
+            .title("Quit Lasterm")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Quit completely".to_string(),
+                "Keep running".to_string(),
+            ))
+            .owned_by(owner.as_ref())
+            .blocking_show();
+        if confirmed {
+            request_app_quit(app);
+        }
+    });
 }
 
 fn expire_window_close_presentation(app: tauri::AppHandle, attempt_id: u64) {
@@ -5412,12 +5629,11 @@ fn carry_out_uploads_step(app: &tauri::AppHandle, step: Step) {
 }
 
 /// "N uploads in progress": quit (or restart) now and resume them later, once
-/// they end, or not. Asked over the window, shown again if it was in the tray.
+/// they end, or not. Asked over the window, shown again if it was in the tray,
+/// and owned by it, so that it is the window Enter goes to (#874).
 fn ask_about_uploads(app: tauri::AppHandle, ending: Ending, in_progress: u32) {
     std::thread::spawn(move || {
-        if let Err(error) = raise_main_window(app.clone()) {
-            eprintln!("[lasterm] WARN: cannot show the window to ask about its uploads: {error}");
-        }
+        let owner = quit_dialog_owner(&app, DialogPlacement::OverWindow);
         let question = uploads::question(ending, in_progress);
         let result = app
             .dialog()
@@ -5429,6 +5645,7 @@ fn ask_about_uploads(app: tauri::AppHandle, ending: Ending, in_progress: u32) {
                 question.when_finished.to_string(),
                 question.cancel.to_string(),
             ))
+            .owned_by(owner.as_ref())
             .blocking_show_with_result();
         let answer = uploads_answer(&question, &result);
         update_uploads(&app, |gate| gate.answer(answer));
@@ -5448,12 +5665,15 @@ fn uploads_answer(question: &uploads::Question, result: &MessageDialogResult) ->
 }
 
 /// While a quit waits, an upload stopped on a conflict cannot end by itself,
-/// and its question is in a window nobody sees: say so, once.
+/// and its question is in a window nobody sees: say so, once. The window stays
+/// in the tray until "Show Lasterm" is chosen: the notice is shown alone while
+/// it is there, and over it, owned by it, when it was shown again (#874).
 fn notify_uploads_waiting(app: tauri::AppHandle, waiting: u32) {
     if UPLOADS_NOTICE_SHOWN.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(move || {
+        let owner = quit_dialog_owner(&app, DialogPlacement::OverWindowIfShown);
         let show = app
             .dialog()
             .message(uploads::waiting_notice(waiting))
@@ -5463,6 +5683,7 @@ fn notify_uploads_waiting(app: tauri::AppHandle, waiting: u32) {
                 "Show Lasterm".to_string(),
                 "Later".to_string(),
             ))
+            .owned_by(owner.as_ref())
             .blocking_show();
         UPLOADS_NOTICE_SHOWN.store(false, Ordering::SeqCst);
         if show {
@@ -7572,6 +7793,223 @@ mod tests {
 
         assert!(error.contains("cannot show window main"));
         assert_eq!(show_failed.attempts(), ["unminimize", "show", "focus"]);
+    }
+
+    /// The handle the test window gives a dialog.
+    const TEST_WINDOW_HWND: isize = 0x0bad_f00d;
+
+    /// The main window as a quit-path dialog sees it (#874). What is done to
+    /// it, and to the dialog, goes in one log, in the order it is done.
+    struct TestDialogWindow {
+        on_screen: Result<bool, String>,
+        show_result: Result<(), String>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestDialogWindow {
+        fn new(on_screen: Result<bool, String>, show_result: Result<(), String>) -> Self {
+            Self {
+                on_screen,
+                show_result,
+                log: Arc::default(),
+            }
+        }
+
+        fn note(&self, entry: &str) {
+            self.log.lock().unwrap().push(entry.to_string());
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    impl WindowRaiseTarget for TestDialogWindow {
+        fn label(&self) -> &str {
+            "main"
+        }
+
+        fn unminimize(&self) -> Result<(), String> {
+            self.note("unminimize");
+            Ok(())
+        }
+
+        fn show(&self) -> Result<(), String> {
+            self.note("show");
+            self.show_result.clone()
+        }
+
+        fn focus(&self) -> Result<(), String> {
+            self.note("focus");
+            Ok(())
+        }
+    }
+
+    impl HasWindowHandle for TestDialogWindow {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let handle = raw_window_handle::Win32WindowHandle::new(
+                std::num::NonZeroIsize::new(TEST_WINDOW_HWND).unwrap(),
+            );
+            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for TestDialogWindow {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            let handle = raw_window_handle::WindowsDisplayHandle::new();
+            Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Windows(handle)) })
+        }
+    }
+
+    impl DialogOwnerWindow for TestDialogWindow {
+        fn on_screen(&self) -> Result<bool, String> {
+            self.note("on screen?");
+            self.on_screen.clone()
+        }
+
+        fn dialog_owner(&self) -> Result<DialogOwner, String> {
+            self.note("handle");
+            DialogOwner::of(self)
+        }
+    }
+
+    /// The window handle a dialog would be given as its owner.
+    fn owner_hwnd(owner: &DialogOwner) -> isize {
+        match owner.window_handle().unwrap().as_raw() {
+            RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+            other => panic!("not a Windows handle: {other:?}"),
+        }
+    }
+
+    /// A dialog that writes what owns it, then that it is shown.
+    struct TestDialog {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl OwnableDialog for TestDialog {
+        fn owned_by(self, owner: Option<&DialogOwner>) -> Self {
+            let entry = match owner {
+                Some(owner) => format!("owned by {:#x}", owner_hwnd(owner)),
+                None => "alone".to_string(),
+            };
+            self.log.lock().unwrap().push(entry);
+            self
+        }
+    }
+
+    impl TestDialog {
+        fn show(self) {
+            self.log.lock().unwrap().push("dialog shown".to_string());
+        }
+    }
+
+    /// #874: a question the quit waits for brings the window back from the
+    /// tray, focused, and is owned by it, so it is the window Enter reaches.
+    #[test]
+    fn a_quit_question_shows_the_window_then_is_owned_by_it() {
+        let in_tray = TestDialogWindow::new(Ok(false), Ok(()));
+
+        let owner = place_window_for_dialog(&in_tray, DialogPlacement::OverWindow)
+            .expect("the window owns the question");
+
+        assert_eq!(owner_hwnd(&owner), TEST_WINDOW_HWND);
+        assert_eq!(in_tray.log(), ["unminimize", "show", "focus", "handle"]);
+    }
+
+    /// #874: a notice is owned by a window on screen, focused first; a window
+    /// in the tray is left there and the notice is shown alone, since a dialog
+    /// owned by a hidden window has no taskbar button to be found by.
+    #[test]
+    fn a_quit_notice_is_owned_only_by_a_window_on_screen() {
+        let on_screen = TestDialogWindow::new(Ok(true), Ok(()));
+        let owner = place_window_for_dialog(&on_screen, DialogPlacement::OverWindowIfShown)
+            .expect("a window on screen owns the notice");
+        assert_eq!(owner_hwnd(&owner), TEST_WINDOW_HWND);
+        assert_eq!(
+            on_screen.log(),
+            ["on screen?", "unminimize", "show", "focus", "handle"]
+        );
+
+        let in_tray = TestDialogWindow::new(Ok(false), Ok(()));
+        assert!(place_window_for_dialog(&in_tray, DialogPlacement::OverWindowIfShown).is_none());
+        assert_eq!(in_tray.log(), ["on screen?"]);
+
+        let unknown = TestDialogWindow::new(Err("no answer".to_string()), Ok(()));
+        assert!(place_window_for_dialog(&unknown, DialogPlacement::OverWindowIfShown).is_none());
+        assert_eq!(unknown.log(), ["on screen?"]);
+    }
+
+    /// A window that could not be shown owns nothing: the dialog still
+    /// appears, alone, rather than owned by a window nobody sees.
+    #[test]
+    fn a_window_that_cannot_be_shown_owns_no_quit_dialog() {
+        let refused = TestDialogWindow::new(Ok(false), Err("show refused".to_string()));
+
+        assert!(place_window_for_dialog(&refused, DialogPlacement::OverWindow).is_none());
+        assert_eq!(refused.log(), ["unminimize", "show", "focus"]);
+    }
+
+    /// #874: the dialog is made, owned and shown only once the main thread
+    /// has shown and focused the window, never before.
+    #[test]
+    fn a_quit_dialog_comes_only_after_the_main_thread_placed_the_window() {
+        let window = TestDialogWindow::new(Ok(false), Ok(()));
+        let log = window.log.clone();
+        let (queued_tx, queued_rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (shown_tx, shown_rx) = mpsc::channel();
+        let dialog_log = log.clone();
+        let asking = std::thread::spawn(move || {
+            let owner = place_for_dialog(
+                move |action| queued_tx.send(action).map_err(|error| error.to_string()),
+                move || Some(window),
+                DialogPlacement::OverWindow,
+            )
+            .expect("the main thread answers");
+            TestDialog { log: dialog_log }
+                .owned_by(owner.as_ref())
+                .show();
+            shown_tx.send(()).unwrap();
+        });
+
+        let action = queued_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(shown_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(log.lock().unwrap().is_empty());
+        action();
+        shown_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        asking.join().unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "unminimize",
+                "show",
+                "focus",
+                "handle",
+                "owned by 0xbadf00d",
+                "dialog shown"
+            ]
+        );
+    }
+
+    /// A main thread that never runs the placement places nothing, and says
+    /// so, rather than leave the quit waiting: the quit diagnostics then leave
+    /// without a dialog (#872), and the other dialogs are shown alone.
+    #[test]
+    fn a_main_thread_that_never_places_the_window_is_reported() {
+        let window = TestDialogWindow::new(Ok(true), Ok(()));
+        let log = window.log.clone();
+
+        let placed = place_for_dialog(
+            |action| {
+                drop(action);
+                Ok(())
+            },
+            move || Some(window),
+            DialogPlacement::OverWindowIfShown,
+        );
+
+        assert!(placed.is_err());
+        assert!(log.lock().unwrap().is_empty());
     }
 
     struct TestWindowStartupTarget {

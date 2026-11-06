@@ -532,6 +532,41 @@ describe("stopLocalAgent", () => {
 			expect.objectContaining({ shell: false }),
 		);
 	});
+
+	// #871. Mutation: report every zero exit as "Local agent stopped", and a quit
+	// with no local agent to stop (none started, or only the stale record of one
+	// that died) claims it stopped one.
+	it.each([
+		["stopped\n", 0, { stopped: true, diagnostic: "Local agent stopped" }],
+		["not running\r\n", 0, { stopped: true, diagnostic: "No local agent was running" }],
+		[
+			"record does not match a live process\n",
+			1,
+			{
+				stopped: false,
+				diagnostic: "Agent stop was not confirmed (exit 1): record does not match a live process\n",
+			},
+		],
+	] as const)("reads the stopper's %j with exit %i", async (said, code, expected) => {
+		const { EventEmitter } = await import("node:events");
+		const child = new EventEmitter() as import("node:child_process").ChildProcess;
+		const stdout = new EventEmitter();
+		Object.assign(child, { stdout, stderr: new EventEmitter(), kill: vi.fn() });
+		const run = vi.fn(() => {
+			setImmediate(() => {
+				stdout.emit("data", Buffer.from(said));
+				child.emit("close", code, null);
+			});
+			return child;
+		});
+
+		const result = await stopLocalAgent("/tmp/lasterm-agent.sock", {
+			agentPath: "/opt/lasterm-agent",
+			spawn: run as unknown as typeof import("node:child_process").spawn,
+		});
+
+		expect(result).toEqual({ ...expected, stdout: said, stderr: "" });
+	});
 });
 
 /**

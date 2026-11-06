@@ -740,7 +740,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		if (result.unavailable) return sendQuitUnavailable(reply);
 		reply.code(result.ok ? 200 : 503).send({
 			ok: result.ok,
-			message: result.ok ? "Local agent stopped; hub is shutting down" : result.message,
+			// "Local agent stopped", or "No local agent was running" (#871).
+			message: result.ok ? `${result.message}; hub is shutting down` : result.message,
 			// This records the request-scoped override, not proof of a human confirmation or an audit.
 			...(force ? { override: true } : {}),
 			...(result.stdout ? { stdout: result.stdout } : {}),

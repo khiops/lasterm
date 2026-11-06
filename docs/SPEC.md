@@ -95,6 +95,12 @@ Universal PTY manager. Runs locally (a detached daemon) or remotely (via SSH). S
 - Daemon mode (`run_daemon` in `daemon.rs`): a standalone process listening on a Unix socket, or a named pipe on Windows. HELLO and AUTH handshake, one connection per hub, channels kept apart by the hub that owns them (#127).
 - Output while a hub is away (`away.rs`): the hub's own queue keeps each of its channels' newest output, up to 1 MiB per channel and 16 MiB for all of them. Past a channel's bound its oldest output goes; past the hub's, the oldest output of whichever channel holds the most. One busy terminal therefore never pushes out another's output, and a channel's last frame, its CHANNEL_EXIT once it ended, is always kept. Nothing is held back meanwhile: an away hub's terminals run on. The screen comes back through the snapshot of the next ATTACH, since the screen model has read everything; what was dropped is the output in between, which the hub's spool and a client's scrollback never receive. Details below.
 - CLI: `lasterm-agent --stdio` (the default), `lasterm-agent --daemon [--socket <path>] [--idle-timeout <seconds>] [--log-files-kept <count>]`, and `lasterm-agent --stop [--socket <path>]`; all take `--log-level` and `--format` (§ 6.2).
+- Stop (`--stop`, `identity.rs`): it goes by the daemon's identity record for that socket, which the daemon publishes once it listens and removes when it exits cleanly. It prints one of these lines, and exits 0 for the first two only:
+  - `stopped`: the recorded daemon was live and matched its record (pid, creation time, executable), and it is gone now; its record goes too. On Unix it is asked to stop (SIGTERM) and tears its terminals down; on Windows it is terminated, which leaves the removal to the stopper.
+  - `not running`: no record names a live process, and nothing listens on the endpoint. A record whose process the system says is gone (after a crash or a kill) is stale, and is removed, so a quit after one succeeds (#871).
+  - `no record`: something listens on the endpoint, but no record names a live process: in practice a daemon between listening and publishing its record. Nothing is done.
+  - `record does not match a live process`: the record is malformed, names another endpoint, or names a live process that is not the recorded one (a reused pid, another executable). Nothing is done and the record stays: only the system's word that the recorded process ended removes one.
+  - `still running at the bound`: asked, and still there 10 s later.
 - Daemon log: one file per UTC day with something logged, `logs/agent-daemon.YYYY-MM-DD.jsonl` in the state directory, never renamed. `--log-files-kept` (7 by default, 0 keeps all) says how many are kept; older ones are deleted when the daemon starts and when a new day's file starts (STORAGE.md § 12.1, #646).
 
 **Process model (local — daemon):**
@@ -1470,7 +1476,8 @@ State dir (0700):
 ├── hub-daemon.log           # what `lasterm start --daemon` printed; moved to hub-daemon.log.old at 10 MB
 ├── agent-daemon.log         # what the local agent daemon printed
 ├── agent.identity-<hash>.json # Windows only (elsewhere beside the socket, 0600): the local agent
-                             #        daemon's record of itself while it runs
+                             #        daemon's record of itself while it runs; one left by a daemon
+                             #        that is gone goes at the next `--stop` (§ 3.2, #871)
 ├── agent.exit-<hash>.json   # the same place: how that daemon ended
 ├── cache/                   # Windows only: the cache directory of Platform Paths above
 ├── runtime.json             # { port, pid, started_at, instanceId, ownerToken, spki } (0600) — written on start, deleted on shutdown

@@ -1988,7 +1988,7 @@ Answers, in the order the hub checks:
 | 403 | `{ error: "LOOPBACK_REQUIRED", message }` | The connection does not come from `127.0.0.0/8`, `::1` or `::ffff:127.0.0.1` |
 | 501 | `{ ok: false, error: "QUIT_UNAVAILABLE", message: "Quit is unavailable" }` | `/api/quit` only: this hub has no quit to run, no quit lifecycle or no session layer and so no agent to stop (#538). Nothing was begun, and no teardown follows |
 | 409 | `/api/shutdown`: `{ others }`. `/api/quit`: `{ others, message }` | `others` WebSocket clients besides the caller are connected, and the request has no `?force=1`. Nothing was stopped. Once a quit has begun, `/api/quit` skips this check: a second request joins that quit and gets its answer |
-| 200 | `/api/shutdown`: `{ ok: true }`. `/api/quit`: `{ ok: true, message, override?, stdout?, stderr? }` | `/api/shutdown`: always, past the checks above. `/api/quit`: the local agent confirmed it stopped |
+| 200 | `/api/shutdown`: `{ ok: true }`. `/api/quit`: `{ ok: true, message, override?, stdout?, stderr? }` | `/api/shutdown`: always, past the checks above. `/api/quit`: the stopper confirmed the local agent stopped (`message`: "Local agent stopped; hub is shutting down"), or found none running ("No local agent was running; hub is shutting down", #871) |
 | 503 | `/api/quit`: `{ ok: false, message, override?, stdout?, stderr? }` | The stopper did not confirm that the local agent stopped; `message` says why. The hub tears down all the same |
 | 500 | Fastify's error | `/api/quit` threw before it scheduled any teardown, for instance on a quit asked before startup finished |
 
@@ -2000,7 +2000,9 @@ joins that quit instead of running a teardown of its own.
 `/api/quit` first latches the hub, so that no session starts or reconnects from then on. It then
 runs the local agent's own stopper, `lasterm-agent --stop` for the agent's socket, bounded at
 12 s. The stopper checks the daemon's identity record before stopping it, and the daemon's
-terminals end with their process trees. Only then does the hub answer, 200 or 503. `stdout` and
+terminals end with their process trees. Its exit status decides (SPEC.md § 3.2): 0 when it stopped
+the agent, or found none running, the record of one that is gone included; anything else is not
+confirmed. Only then does the hub answer, 200 or 503. `stdout` and
 `stderr` carry the stopper's output, its last 8 KiB each, when it printed any. `override: true`
 records that the request carried `?force=1`, not that a person confirmed anything. Once the answer
 is sent, the hub tears down as `/api/shutdown` does, and exits 0 after a 200 and 1 after a 503.
